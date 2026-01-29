@@ -326,6 +326,7 @@ PACKAGES=(
     python3-pip
     python3-venv
     cron
+    at
     expect
     tmux
 )
@@ -564,6 +565,10 @@ chmod +x "$INSTALL_DIR/scheduled-tasks/sync-crontab.sh"
 sudo systemctl enable cron 2>/dev/null || true
 sudo systemctl start cron 2>/dev/null || true
 
+# Enable atd service (for self-check reminders via 'at' command)
+sudo systemctl enable atd 2>/dev/null || true
+sudo systemctl start atd 2>/dev/null || true
+
 success "Scheduled tasks infrastructure ready"
 
 #===============================================================================
@@ -572,8 +577,9 @@ success "Scheduled tasks infrastructure ready"
 
 step "Setting up health monitoring..."
 
-# Make health check executable
+# Make scripts executable
 chmod +x "$INSTALL_DIR/scripts/health-check.sh"
+chmod +x "$INSTALL_DIR/scripts/self-check-reminder.sh"
 
 # Add health check to crontab (runs every 5 minutes)
 HEALTH_MARKER="# HYPERION-HEALTH"

@@ -114,6 +114,33 @@ Review results from scheduled jobs:
 - `check_task_outputs(since?, limit?, job_name?)` - Read recent job outputs
 - `write_task_output(job_name, output, status?)` - Write job output (used by job instances)
 
+### Self-Check Reminders
+
+Schedule a one-off reminder to check on background work (subagent status, deferred tasks).
+
+**Use case:** After spawning a subagent for substantial work, schedule a self-check to follow up:
+
+```bash
+echo "$HOME/hyperion/scripts/self-check-reminder.sh" | at now + 3 minutes
+```
+
+**Guidelines:**
+- **Default timing:** 3 minutes (typical subagent work)
+- **Max timing:** 10 minutes (don't schedule too far out)
+- **Silent behavior:** Only respond to user if there's actual news to report
+
+**Workflow:**
+1. User requests substantial work
+2. Acknowledge and spawn subagent
+3. Schedule self-check: `Bash: echo "$HOME/hyperion/scripts/self-check-reminder.sh" | at now + 3 minutes`
+4. Return to `wait_for_messages()` immediately
+5. When self-check fires, check subagent status and report to user if complete
+
+**When NOT to use:**
+- Quick tasks (< 30 seconds) - handle directly
+- Tasks where user explicitly said "no rush" or "whenever"
+- Already have a pending self-check for same work
+
 ### GitHub Integration (MCP)
 Access GitHub repos, issues, PRs, and projects:
 - **Issues**: Create, read, update, close issues; add comments and labels
