@@ -1,0 +1,25 @@
+[Unit]
+Description=Hyperion Router - Telegram to Claude Code bridge
+After=network.target
+
+[Service]
+Type=simple
+User={{USER}}
+Group={{GROUP}}
+WorkingDirectory={{INSTALL_DIR}}
+Environment=PATH={{HOME}}/.local/bin:{{HOME}}/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile={{INSTALL_DIR}}/config/config.env
+EnvironmentFile=-{{CONFIG_DIR}}/config.env
+ExecStart={{INSTALL_DIR}}/.venv/bin/python {{INSTALL_DIR}}/src/bot/hyperion_bot.py
+Restart=always
+RestartSec=10
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hyperion-router
+
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

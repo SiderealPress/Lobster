@@ -1,0 +1,24 @@
+[Unit]
+Description=Hyperion Claude - Always-on Claude Code session
+After=network.target hyperion-router.service
+Wants=hyperion-router.service
+
+[Service]
+Type=forking
+User={{USER}}
+Group={{GROUP}}
+WorkingDirectory={{WORKSPACE_DIR}}
+Environment=PATH={{HOME}}/.claude/bin:{{HOME}}/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HOME={{HOME}}
+ExecStart=/usr/bin/tmux -L hyperion new-session -d -s hyperion -c {{WORKSPACE_DIR}} {{INSTALL_DIR}}/scripts/claude-wrapper.exp
+ExecStop=/usr/bin/tmux -L hyperion kill-session -t hyperion
+RemainAfterExit=yes
+Restart=on-failure
+RestartSec=30
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hyperion-claude
+
+[Install]
+WantedBy=multi-user.target
