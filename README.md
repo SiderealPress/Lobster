@@ -62,6 +62,65 @@ cd hyperion
 bash install.sh
 ```
 
+## Configuration
+
+### Quick Start (Default Settings)
+
+For most users, no configuration is needed:
+
+```bash
+./install.sh
+```
+
+The installer prompts for required credentials (Telegram bot token, user ID) and uses sensible defaults for everything else.
+
+### Custom Installation
+
+For custom paths or settings:
+
+1. Copy the example configuration:
+   ```bash
+   cp config/hyperion.conf.example config/hyperion.conf
+   ```
+
+2. Edit `config/hyperion.conf` with your settings
+
+3. Run the installer:
+   ```bash
+   ./install.sh
+   ```
+
+### Private Configuration Repository
+
+For advanced users who want to keep customizations in a separate repo:
+
+```bash
+# Set your private config directory
+export HYPERION_CONFIG_DIR=~/hyperion-config
+
+# Run installer
+./install.sh
+```
+
+See [docs/CUSTOMIZATION.md](docs/CUSTOMIZATION.md) for detailed documentation on:
+- Setting up a private config repository
+- Creating custom agents
+- Defining scheduled tasks
+- Writing installation hooks
+
+### Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `HYPERION_CONFIG_DIR` | Private config overlay directory | (none) |
+| `HYPERION_REPO_URL` | Git repository URL | `https://github.com/SiderealPress/hyperion.git` |
+| `HYPERION_BRANCH` | Git branch to install | `main` |
+| `HYPERION_USER` | System user | `$USER` |
+| `HYPERION_HOME` | Home directory | `$HOME` |
+| `HYPERION_INSTALL_DIR` | Installation directory | `$HOME/hyperion` |
+| `HYPERION_WORKSPACE` | Claude workspace directory | `$HOME/hyperion-workspace` |
+| `HYPERION_MESSAGES` | Message queue directory | `$HOME/messages` |
+
 ## CLI Commands
 
 ```bash

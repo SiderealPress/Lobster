@@ -3,7 +3,7 @@
 # Hyperion Health Check
 #
 # Monitors inbox for stale messages and restarts Claude if stuck.
-# Run via cron every 5 minutes: */5 * * * * /home/admin/hyperion/scripts/health-check.sh
+# Run via cron every 5 minutes: */5 * * * * ~/hyperion/scripts/health-check.sh
 #===============================================================================
 
 INBOX_DIR="$HOME/messages/inbox"
