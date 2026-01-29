@@ -7,6 +7,7 @@ Tests the installation process on fresh systems.
 import json
 import os
 import subprocess
+import tempfile
 import pytest
 from pathlib import Path
 
@@ -174,3 +175,121 @@ class TestDockerInstallation:
                 capture_output=True,
             )
             assert result.returncode == 0, f"{cmd} should be installed"
+
+
+@pytest.mark.integration
+class TestTemplateSubstitution:
+    """Tests for template substitution functionality."""
+
+    @pytest.fixture
+    def hyperion_dir(self) -> Path:
+        """Get Hyperion installation directory."""
+        return Path(__file__).parent.parent.parent
+
+    @pytest.fixture
+    def temp_install_dir(self) -> Path:
+        """Create a temporary installation directory."""
+        tmp = tempfile.mkdtemp(prefix="hyperion_install_test_")
+        yield Path(tmp)
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_router_template_exists(self, hyperion_dir: Path):
+        """Test that the router service template exists."""
+        template = hyperion_dir / "services" / "hyperion-router.service.template"
+        assert template.exists(), "Router service template should exist"
+        content = template.read_text()
+        assert "{{USER}}" in content, "Template should contain {{USER}} placeholder"
+        assert "{{INSTALL_DIR}}" in content, "Template should contain {{INSTALL_DIR}} placeholder"
+
+    def test_claude_template_exists(self, hyperion_dir: Path):
+        """Test that the Claude service template exists."""
+        template = hyperion_dir / "services" / "hyperion-claude.service.template"
+        assert template.exists(), "Claude service template should exist"
+        content = template.read_text()
+        assert "{{USER}}" in content, "Template should contain {{USER}} placeholder"
+        assert "{{WORKSPACE_DIR}}" in content, "Template should contain {{WORKSPACE_DIR}} placeholder"
+
+    def test_config_example_exists(self, hyperion_dir: Path):
+        """Test that the configuration example exists."""
+        config_example = hyperion_dir / "config" / "hyperion.conf.example"
+        assert config_example.exists(), "Configuration example should exist"
+        content = config_example.read_text()
+        assert "HYPERION_USER" in content, "Config should define HYPERION_USER"
+        assert "HYPERION_INSTALL_DIR" in content, "Config should define HYPERION_INSTALL_DIR"
+        assert "HYPERION_REPO_URL" in content, "Config should define HYPERION_REPO_URL"
+
+    def test_template_substitution_with_sed(self, hyperion_dir: Path, temp_install_dir: Path):
+        """Test that template substitution works correctly using sed."""
+        # Copy template to temp directory
+        template = hyperion_dir / "services" / "hyperion-router.service.template"
+        output = temp_install_dir / "hyperion-router.service"
+
+        # Define test values
+        test_user = "testuser"
+        test_group = "testgroup"
+        test_home = "/home/testuser"
+        test_install_dir = "/opt/hyperion"
+        test_workspace_dir = "/home/testuser/workspace"
+        test_messages_dir = "/home/testuser/messages"
+        test_config_dir = "/etc/hyperion"
+
+        # Run sed substitution (same as install.sh does)
+        result = subprocess.run(
+            [
+                "sed",
+                "-e", f"s|{{{{USER}}}}|{test_user}|g",
+                "-e", f"s|{{{{GROUP}}}}|{test_group}|g",
+                "-e", f"s|{{{{HOME}}}}|{test_home}|g",
+                "-e", f"s|{{{{INSTALL_DIR}}}}|{test_install_dir}|g",
+                "-e", f"s|{{{{WORKSPACE_DIR}}}}|{test_workspace_dir}|g",
+                "-e", f"s|{{{{MESSAGES_DIR}}}}|{test_messages_dir}|g",
+                "-e", f"s|{{{{CONFIG_DIR}}}}|{test_config_dir}|g",
+                str(template),
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0, f"sed failed: {result.stderr}"
+
+        # Write output
+        output.write_text(result.stdout)
+
+        # Verify substitutions
+        content = output.read_text()
+        assert "{{USER}}" not in content, "{{USER}} should be substituted"
+        assert "{{GROUP}}" not in content, "{{GROUP}} should be substituted"
+        assert "{{HOME}}" not in content, "{{HOME}} should be substituted"
+        assert "{{INSTALL_DIR}}" not in content, "{{INSTALL_DIR}} should be substituted"
+
+        assert f"User={test_user}" in content, "User should be substituted correctly"
+        assert f"Group={test_group}" in content, "Group should be substituted correctly"
+        assert test_install_dir in content, "Install dir should be in output"
+
+    def test_install_script_has_template_function(self, hyperion_dir: Path):
+        """Test that install.sh contains the generate_from_template function."""
+        install_script = hyperion_dir / "install.sh"
+        content = install_script.read_text()
+
+        assert "generate_from_template()" in content, "install.sh should define generate_from_template()"
+        assert "HYPERION_REPO_URL" in content, "install.sh should support HYPERION_REPO_URL"
+        assert "HYPERION_BRANCH" in content, "install.sh should support HYPERION_BRANCH"
+        assert "hyperion.conf" in content, "install.sh should reference hyperion.conf"
+
+    def test_install_script_sources_config(self, hyperion_dir: Path):
+        """Test that install.sh sources the configuration file."""
+        install_script = hyperion_dir / "install.sh"
+        content = install_script.read_text()
+
+        assert "source \"$CONFIG_FILE\"" in content, "install.sh should source config file"
+        assert "Load Configuration" in content, "install.sh should have configuration loading section"
+
+    def test_install_script_uses_templates(self, hyperion_dir: Path):
+        """Test that install.sh uses template files instead of heredocs."""
+        install_script = hyperion_dir / "install.sh"
+        content = install_script.read_text()
+
+        assert "generate_from_template" in content, "install.sh should call generate_from_template"
+        assert "hyperion-router.service.template" in content, "install.sh should reference router template"
+        assert "hyperion-claude.service.template" in content, "install.sh should reference claude template"

@@ -31,11 +31,79 @@ warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; }
 step() { echo -e "\n${CYAN}${BOLD}▶ $1${NC}"; }
 
-# Configuration
-REPO_URL="https://github.com/SiderealPress/hyperion.git"
-INSTALL_DIR="$HOME/hyperion"
-WORKSPACE_DIR="$HOME/hyperion-workspace"
-MESSAGES_DIR="$HOME/messages"
+# Configuration - can be overridden by environment variables or config file
+REPO_URL="${HYPERION_REPO_URL:-https://github.com/SiderealPress/hyperion.git}"
+REPO_BRANCH="${HYPERION_BRANCH:-main}"
+INSTALL_DIR="${HYPERION_INSTALL_DIR:-$HOME/hyperion}"
+WORKSPACE_DIR="${HYPERION_WORKSPACE:-$HOME/hyperion-workspace}"
+MESSAGES_DIR="${HYPERION_MESSAGES:-$HOME/messages}"
+
+#===============================================================================
+# Load Configuration
+#===============================================================================
+
+# Determine script directory for finding config relative to script location
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Configuration file path - check multiple locations
+# Priority: 1) HYPERION_CONFIG_FILE env var, 2) script directory, 3) install directory
+CONFIG_FILE="${HYPERION_CONFIG_FILE:-}"
+
+if [ -z "$CONFIG_FILE" ]; then
+    if [ -f "$SCRIPT_DIR/config/hyperion.conf" ]; then
+        CONFIG_FILE="$SCRIPT_DIR/config/hyperion.conf"
+    elif [ -f "$INSTALL_DIR/config/hyperion.conf" ]; then
+        CONFIG_FILE="$INSTALL_DIR/config/hyperion.conf"
+    fi
+fi
+
+if [ -n "$CONFIG_FILE" ] && [ -f "$CONFIG_FILE" ]; then
+    # Source configuration file
+    # shellcheck source=/dev/null
+    source "$CONFIG_FILE"
+
+    # Re-apply configuration variables (config file may have set HYPERION_* vars)
+    REPO_URL="${HYPERION_REPO_URL:-$REPO_URL}"
+    REPO_BRANCH="${HYPERION_BRANCH:-$REPO_BRANCH}"
+    INSTALL_DIR="${HYPERION_INSTALL_DIR:-$INSTALL_DIR}"
+    WORKSPACE_DIR="${HYPERION_WORKSPACE:-$WORKSPACE_DIR}"
+    MESSAGES_DIR="${HYPERION_MESSAGES:-$MESSAGES_DIR}"
+fi
+
+# User configuration with fallbacks for non-interactive contexts
+HYPERION_USER="${HYPERION_USER:-${USER:-$(whoami)}}"
+HYPERION_GROUP="${HYPERION_GROUP:-${USER:-$(whoami)}}"
+HYPERION_HOME="${HYPERION_HOME:-$HOME}"
+CONFIG_DIR="${HYPERION_CONFIG_DIR:-}"
+
+#===============================================================================
+# Template Processing
+#===============================================================================
+
+# Generate a file from a template by substituting {{VARIABLE}} placeholders
+# Arguments:
+#   $1 - template file path
+#   $2 - output file path
+generate_from_template() {
+    local template="$1"
+    local output="$2"
+
+    if [ ! -f "$template" ]; then
+        error "Template not found: $template"
+        return 1
+    fi
+
+    sed -e "s|{{USER}}|${HYPERION_USER}|g" \
+        -e "s|{{GROUP}}|${HYPERION_GROUP}|g" \
+        -e "s|{{HOME}}|${HYPERION_HOME}|g" \
+        -e "s|{{INSTALL_DIR}}|${INSTALL_DIR}|g" \
+        -e "s|{{WORKSPACE_DIR}}|${WORKSPACE_DIR}|g" \
+        -e "s|{{MESSAGES_DIR}}|${MESSAGES_DIR}|g" \
+        -e "s|{{CONFIG_DIR}}|${CONFIG_DIR}|g" \
+        "$template" > "$output"
+
+    success "Generated: $output"
+}
 
 #===============================================================================
 # Banner
@@ -57,6 +125,11 @@ cat << 'BANNER'
 ╚═══════════════════════════════════════════════════════════════╝
 BANNER
 echo -e "${NC}"
+
+# Show loaded configuration info
+if [ -n "$CONFIG_FILE" ] && [ -f "$CONFIG_FILE" ]; then
+    info "Loaded configuration from: $CONFIG_FILE"
+fi
 
 #===============================================================================
 # Pre-flight Checks
@@ -215,14 +288,16 @@ step "Setting up Hyperion repository..."
 if [ -d "$INSTALL_DIR/.git" ]; then
     info "Repository exists. Updating..."
     cd "$INSTALL_DIR"
-    git pull --quiet
+    git fetch --quiet
+    git checkout --quiet "$REPO_BRANCH"
+    git pull --quiet origin "$REPO_BRANCH"
 else
-    info "Cloning repository..."
-    git clone --quiet "$REPO_URL" "$INSTALL_DIR"
+    info "Cloning repository from $REPO_URL (branch: $REPO_BRANCH)..."
+    git clone --quiet --branch "$REPO_BRANCH" "$REPO_URL" "$INSTALL_DIR"
     cd "$INSTALL_DIR"
 fi
 
-success "Repository ready at $INSTALL_DIR"
+success "Repository ready at $INSTALL_DIR (branch: $REPO_BRANCH)"
 
 #===============================================================================
 # Create Directories
@@ -561,69 +636,35 @@ else
 fi
 
 #===============================================================================
-# Generate Service Files
+# Generate Service Files from Templates
 #===============================================================================
 
-step "Generating systemd service files..."
+step "Generating systemd service files from templates..."
 
-# Get actual paths
-PYTHON_PATH="$INSTALL_DIR/.venv/bin/python"
-CURRENT_USER=$(whoami)
-CURRENT_GROUP=$(id -gn)
+# Check that templates exist
+ROUTER_TEMPLATE="$INSTALL_DIR/services/hyperion-router.service.template"
+CLAUDE_TEMPLATE="$INSTALL_DIR/services/hyperion-claude.service.template"
 
-# Router service
-cat > "$INSTALL_DIR/services/hyperion-router.service" << EOF
-[Unit]
-Description=Hyperion Router - Telegram to Claude Code bridge
-After=network.target
+if [ ! -f "$ROUTER_TEMPLATE" ]; then
+    error "Router service template not found: $ROUTER_TEMPLATE"
+    error "Please ensure you have the latest version of the repository."
+    exit 1
+fi
 
-[Service]
-Type=simple
-User=$CURRENT_USER
-Group=$CURRENT_GROUP
-WorkingDirectory=$INSTALL_DIR
-Environment=PATH=$HOME/.local/bin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin
-EnvironmentFile=$INSTALL_DIR/config/config.env
-ExecStart=$PYTHON_PATH $INSTALL_DIR/src/bot/hyperion_bot.py
-Restart=always
-RestartSec=10
+if [ ! -f "$CLAUDE_TEMPLATE" ]; then
+    error "Claude service template not found: $CLAUDE_TEMPLATE"
+    error "Please ensure you have the latest version of the repository."
+    exit 1
+fi
 
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=hyperion-router
+# Generate service files from templates
+generate_from_template \
+    "$ROUTER_TEMPLATE" \
+    "$INSTALL_DIR/services/hyperion-router.service"
 
-NoNewPrivileges=true
-PrivateTmp=true
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# Claude service (tmux-based always-on model)
-cat > "$INSTALL_DIR/services/hyperion-claude.service" << EOF
-[Unit]
-Description=Hyperion Claude - Always-on Claude Code session
-After=network.target hyperion-router.service
-Wants=hyperion-router.service
-
-[Service]
-Type=forking
-User=$CURRENT_USER
-Group=$CURRENT_GROUP
-WorkingDirectory=$WORKSPACE_DIR
-Environment=PATH=$HOME/.claude/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
-Environment=HOME=$HOME
-ExecStart=/usr/bin/tmux -L hyperion new-session -d -s hyperion -c $WORKSPACE_DIR $INSTALL_DIR/scripts/claude-wrapper.exp
-ExecStop=/usr/bin/tmux -L hyperion kill-session -t hyperion
-RemainAfterExit=yes
-Restart=on-failure
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-success "Service files generated"
+generate_from_template \
+    "$CLAUDE_TEMPLATE" \
+    "$INSTALL_DIR/services/hyperion-claude.service"
 
 #===============================================================================
 # Install Services
