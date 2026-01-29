@@ -1,0 +1,87 @@
+#!/bin/bash
+# Hyperion Installation Configuration
+# Copy to hyperion.conf and customize before running install.sh
+#
+# Usage:
+#   cp config/hyperion.conf.example config/hyperion.conf
+#   # Edit hyperion.conf with your settings
+#   ./install.sh
+
+#===============================================================================
+# User Settings
+#===============================================================================
+
+# System user that will run Hyperion services
+# Defaults to current user if not specified
+# Note: Uses whoami as fallback for non-interactive contexts (systemd, cron)
+HYPERION_USER="${HYPERION_USER:-${USER:-$(whoami)}}"
+
+# System group for Hyperion services
+# Defaults to current user's primary group if not specified
+HYPERION_GROUP="${HYPERION_GROUP:-${USER:-$(whoami)}}"
+
+# User home directory
+# Used as base path for other directories if not explicitly set
+HYPERION_HOME="${HYPERION_HOME:-${HOME}}"
+
+#===============================================================================
+# Installation Paths
+#===============================================================================
+
+# Where Hyperion source code is installed
+# This is the cloned repository location
+HYPERION_INSTALL_DIR="${HYPERION_INSTALL_DIR:-${HYPERION_HOME}/hyperion}"
+
+# Claude's working directory
+# This is where Claude performs work and stores temporary files
+HYPERION_WORKSPACE="${HYPERION_WORKSPACE:-${HYPERION_HOME}/hyperion-workspace}"
+
+# Message queue directories
+# Stores incoming/outgoing messages, audio files, and processed messages
+HYPERION_MESSAGES="${HYPERION_MESSAGES:-${HYPERION_HOME}/messages}"
+
+#===============================================================================
+# Repository Settings (for forks)
+#===============================================================================
+
+# Git repository URL
+# Change this if you're installing from a fork
+HYPERION_REPO_URL="${HYPERION_REPO_URL:-https://github.com/SiderealPress/hyperion.git}"
+
+# Branch to install from
+# Useful for testing or installing from a specific version
+HYPERION_BRANCH="${HYPERION_BRANCH:-main}"
+
+#===============================================================================
+# Private Configuration Overlay (Optional)
+#===============================================================================
+
+# Path to private configuration repository
+# If set, install.sh will overlay files from this directory after installation
+# This allows you to maintain custom configurations separately from the main repo
+#
+# Example structure for your private config repo:
+#   ~/hyperion-config/
+#   ├── config.env          # Your secrets (API keys, tokens)
+#   ├── CLAUDE.md           # Custom Claude context
+#   ├── agents/             # Custom agent definitions
+#   └── hooks/              # Custom installation hooks
+#
+# IMPORTANT: Your config directory should have restricted permissions:
+#   chmod 700 ~/hyperion-config
+#   chmod 600 ~/hyperion-config/config.env
+#
+# HYPERION_CONFIG_DIR="${HYPERION_HOME}/hyperion-config"
+
+#===============================================================================
+# Feature Flags
+#===============================================================================
+
+# Enable scheduled tasks feature
+# When true, the cron-based scheduled jobs system will be configured
+HYPERION_ENABLE_SCHEDULED_TASKS="${HYPERION_ENABLE_SCHEDULED_TASKS:-true}"
+
+# Enable voice message transcription
+# When true, whisper.cpp will be installed for local audio transcription
+# Note: Requires ~400MB disk space and build tools (make, cmake, gcc)
+HYPERION_ENABLE_VOICE="${HYPERION_ENABLE_VOICE:-true}"
