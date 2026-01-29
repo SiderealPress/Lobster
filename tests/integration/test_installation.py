@@ -293,3 +293,100 @@ class TestTemplateSubstitution:
         assert "generate_from_template" in content, "install.sh should call generate_from_template"
         assert "hyperion-router.service.template" in content, "install.sh should reference router template"
         assert "hyperion-claude.service.template" in content, "install.sh should reference claude template"
+
+
+@pytest.mark.integration
+class TestPrivateConfigOverlay:
+    """Tests for private configuration overlay functionality."""
+
+    @pytest.fixture
+    def hyperion_dir(self) -> Path:
+        """Get Hyperion installation directory."""
+        return Path(__file__).parent.parent.parent
+
+    @pytest.fixture
+    def temp_private_config(self) -> Path:
+        """Create a temporary private config directory."""
+        tmp = tempfile.mkdtemp(prefix="hyperion_private_config_")
+        yield Path(tmp)
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_install_script_has_overlay_function(self, hyperion_dir: Path):
+        """Test that install.sh contains the apply_private_overlay function."""
+        install_script = hyperion_dir / "install.sh"
+        content = install_script.read_text()
+
+        assert "apply_private_overlay()" in content, "install.sh should define apply_private_overlay()"
+        assert "HYPERION_CONFIG_DIR" in content, "install.sh should reference HYPERION_CONFIG_DIR"
+
+    def test_install_script_has_hooks_function(self, hyperion_dir: Path):
+        """Test that install.sh contains the run_hook function."""
+        install_script = hyperion_dir / "install.sh"
+        content = install_script.read_text()
+
+        assert "run_hook()" in content, "install.sh should define run_hook()"
+        assert 'run_hook "post-install.sh"' in content, "install.sh should call post-install hook"
+
+    def test_overlay_supports_config_env(self, hyperion_dir: Path):
+        """Test that overlay supports config.env file."""
+        install_script = hyperion_dir / "install.sh"
+        content = install_script.read_text()
+
+        assert 'config_dir/config.env' in content, "Overlay should check for config.env"
+
+    def test_overlay_supports_claude_md(self, hyperion_dir: Path):
+        """Test that overlay supports CLAUDE.md file."""
+        install_script = hyperion_dir / "install.sh"
+        content = install_script.read_text()
+
+        assert 'config_dir/CLAUDE.md' in content, "Overlay should check for CLAUDE.md"
+
+    def test_overlay_supports_agents_directory(self, hyperion_dir: Path):
+        """Test that overlay supports agents directory."""
+        install_script = hyperion_dir / "install.sh"
+        content = install_script.read_text()
+
+        assert 'config_dir/agents' in content, "Overlay should check for agents directory"
+        assert '.claude/agents' in content, "Overlay should copy to .claude/agents"
+
+    def test_overlay_supports_scheduled_tasks(self, hyperion_dir: Path):
+        """Test that overlay supports scheduled-tasks directory."""
+        install_script = hyperion_dir / "install.sh"
+        content = install_script.read_text()
+
+        assert 'config_dir/scheduled-tasks' in content, "Overlay should check for scheduled-tasks directory"
+
+    def test_hooks_export_environment_variables(self, hyperion_dir: Path):
+        """Test that hooks have access to environment variables."""
+        install_script = hyperion_dir / "install.sh"
+        content = install_script.read_text()
+
+        assert 'HYPERION_INSTALL_DIR' in content, "Hook should export HYPERION_INSTALL_DIR"
+        assert 'HYPERION_WORKSPACE_DIR' in content, "Hook should export HYPERION_WORKSPACE_DIR"
+        assert 'HYPERION_MESSAGES_DIR' in content, "Hook should export HYPERION_MESSAGES_DIR"
+
+    def test_overlay_gracefully_handles_missing_dir(self, hyperion_dir: Path):
+        """Test that overlay handles missing config directory gracefully."""
+        install_script = hyperion_dir / "install.sh"
+        content = install_script.read_text()
+
+        # Should check if directory exists and warn if not
+        assert '! -d "$config_dir"' in content, "Should check if config dir exists"
+        assert 'warn "Private config directory not found' in content, "Should warn about missing dir"
+
+    def test_overlay_gracefully_handles_unset_var(self, hyperion_dir: Path):
+        """Test that overlay handles unset HYPERION_CONFIG_DIR gracefully."""
+        install_script = hyperion_dir / "install.sh"
+        content = install_script.read_text()
+
+        # Should check if variable is empty and skip
+        assert '-z "$config_dir"' in content, "Should check if config dir var is empty"
+
+    def test_hooks_check_executable_permission(self, hyperion_dir: Path):
+        """Test that hooks check for executable permission."""
+        install_script = hyperion_dir / "install.sh"
+        content = install_script.read_text()
+
+        assert '! -x "$hook_path"' in content, "Should check if hook is executable"
+        assert 'chmod +x' in content, "Should suggest chmod command"

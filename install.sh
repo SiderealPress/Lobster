@@ -106,6 +106,115 @@ generate_from_template() {
 }
 
 #===============================================================================
+# Private Configuration Overlay
+#===============================================================================
+
+# Apply private configuration overlay from HYPERION_CONFIG_DIR
+# This function overlays customizations from a private config directory
+# onto the public repo installation.
+apply_private_overlay() {
+    local config_dir="${HYPERION_CONFIG_DIR:-}"
+
+    if [ -z "$config_dir" ]; then
+        step "No private config directory specified (HYPERION_CONFIG_DIR)"
+        return 0
+    fi
+
+    if [ ! -d "$config_dir" ]; then
+        warn "Private config directory not found: $config_dir"
+        return 0
+    fi
+
+    step "Applying private configuration overlay from: $config_dir"
+
+    # Copy config.env if exists
+    if [ -f "$config_dir/config.env" ]; then
+        cp "$config_dir/config.env" "$INSTALL_DIR/config/config.env"
+        success "Applied: config.env"
+    fi
+
+    # Overlay CLAUDE.md if exists (replaces default)
+    if [ -f "$config_dir/CLAUDE.md" ]; then
+        cp "$config_dir/CLAUDE.md" "$WORKSPACE_DIR/CLAUDE.md"
+        success "Applied: CLAUDE.md"
+    fi
+
+    # Merge custom agents (additive)
+    if [ -d "$config_dir/agents" ]; then
+        mkdir -p "$INSTALL_DIR/.claude/agents"
+        local agent_count=0
+        for agent in "$config_dir/agents"/*.md; do
+            [ -f "$agent" ] || continue
+            cp "$agent" "$INSTALL_DIR/.claude/agents/"
+            success "Applied agent: $(basename "$agent")"
+            agent_count=$((agent_count + 1))
+        done
+        if [ "$agent_count" -eq 0 ]; then
+            info "No agent files found in $config_dir/agents/"
+        fi
+    fi
+
+    # Copy scheduled tasks (additive)
+    if [ -d "$config_dir/scheduled-tasks" ]; then
+        mkdir -p "$INSTALL_DIR/scheduled-tasks/tasks"
+        local task_count=0
+        for task in "$config_dir/scheduled-tasks"/*; do
+            [ -e "$task" ] || continue
+            cp -r "$task" "$INSTALL_DIR/scheduled-tasks/"
+            success "Applied: scheduled-tasks/$(basename "$task")"
+            task_count=$((task_count + 1))
+        done
+        if [ "$task_count" -eq 0 ]; then
+            info "No scheduled task files found in $config_dir/scheduled-tasks/"
+        fi
+    fi
+
+    success "Private overlay applied successfully"
+}
+
+#===============================================================================
+# Hooks
+#===============================================================================
+
+# Run a hook script from the private config directory
+# Arguments:
+#   $1 - hook name (e.g., "post-install.sh", "post-update.sh")
+run_hook() {
+    local hook_name="$1"
+    local config_dir="${HYPERION_CONFIG_DIR:-}"
+    local hook_path="$config_dir/hooks/$hook_name"
+
+    if [ -z "$config_dir" ]; then
+        return 0
+    fi
+
+    if [ ! -f "$hook_path" ]; then
+        return 0
+    fi
+
+    if [ ! -x "$hook_path" ]; then
+        warn "Hook exists but is not executable: $hook_path"
+        warn "Make it executable with: chmod +x $hook_path"
+        return 0
+    fi
+
+    step "Running hook: $hook_name"
+
+    # Export useful variables for hooks
+    export HYPERION_INSTALL_DIR="$INSTALL_DIR"
+    export HYPERION_WORKSPACE_DIR="$WORKSPACE_DIR"
+    export HYPERION_MESSAGES_DIR="$MESSAGES_DIR"
+
+    "$hook_path"
+    local exit_code=$?
+    if [ $exit_code -eq 0 ]; then
+        success "Hook completed: $hook_name"
+    else
+        warn "Hook failed: $hook_name (exit code: $exit_code)"
+    fi
+}
+
+#===============================================================================
 # Banner
 #===============================================================================
 
@@ -783,6 +892,18 @@ You are a **dispatcher**, not a worker. Stay responsive to incoming messages.
 EOF
 
 success "Workspace context created"
+
+#===============================================================================
+# Apply Private Configuration Overlay
+#===============================================================================
+
+apply_private_overlay
+
+#===============================================================================
+# Run Post-Install Hook
+#===============================================================================
+
+run_hook "post-install.sh"
 
 #===============================================================================
 # Start Services
