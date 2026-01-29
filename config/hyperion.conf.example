@@ -85,3 +85,28 @@ HYPERION_ENABLE_SCHEDULED_TASKS="${HYPERION_ENABLE_SCHEDULED_TASKS:-true}"
 # When true, whisper.cpp will be installed for local audio transcription
 # Note: Requires ~400MB disk space and build tools (make, cmake, gcc)
 HYPERION_ENABLE_VOICE="${HYPERION_ENABLE_VOICE:-true}"
+
+#===============================================================================
+# Brain Dumps Feature
+#===============================================================================
+# The brain-dumps agent processes voice messages that appear to be unstructured
+# thoughts, ideas, or stream-of-consciousness notes, saving them to GitHub Issues.
+#
+# The agent definition lives in .claude/agents/brain-dumps.md and can be
+# customized via the private config overlay by placing your own version at:
+#   ${HYPERION_CONFIG_DIR}/agents/brain-dumps.md
+#
+# See docs/BRAIN-DUMPS.md for full documentation.
+#===============================================================================
+
+# Enable brain dump processing for voice messages
+# When true, voice messages detected as "brain dumps" (stream of consciousness,
+# ideas, thoughts) will be automatically saved to a dedicated GitHub repository
+# Set to false to disable the feature entirely
+HYPERION_BRAIN_DUMPS_ENABLED="${HYPERION_BRAIN_DUMPS_ENABLED:-true}"
+
+# Repository name for storing brain dumps
+# Brain dumps are saved as GitHub issues in this repository
+# The repository will be created as private if it doesn't exist
+# Format: Just the repo name (not full path) - will be created under your GitHub username
+HYPERION_BRAIN_DUMPS_REPO="${HYPERION_BRAIN_DUMPS_REPO:-brain-dumps}"

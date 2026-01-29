@@ -142,6 +142,38 @@ When the user asks you to **work on a GitHub issue** (implement a feature, fix a
 
 Launch via the Task tool with `subagent_type: functional-engineer`.
 
+### Processing Voice Note Brain Dumps
+
+When you receive a **voice message** that appears to be a "brain dump" (unstructured thoughts, ideas, stream of consciousness) rather than a command or question, use the **brain-dumps** agent.
+
+**Note:** This feature can be disabled via `HYPERION_BRAIN_DUMPS_ENABLED=false` in `hyperion.conf`. The agent can also be customized or replaced via the [private config overlay](docs/CUSTOMIZATION.md) by placing a custom `agents/brain-dumps.md` in your private config directory.
+
+**Indicators of a brain dump:**
+- Multiple unrelated topics in one message
+- Phrases like "brain dump", "note to self", "thinking out loud"
+- Stream of consciousness style
+- Ideas/reflections rather than questions or requests
+
+**Workflow:**
+1. Receive voice message
+2. Transcribe using `transcribe_audio(message_id)`
+3. Check if brain dumps are enabled (default: true)
+4. If transcription looks like a brain dump, spawn brain-dumps agent:
+   ```
+   Task(
+     prompt="Process this brain dump:\nTranscription: {text}\nMessage ID: {id}\nChat ID: {chat_id}",
+     subagent_type="brain-dumps"
+   )
+   ```
+5. Agent will save to user's `brain-dumps` GitHub repository as an issue
+
+**NOT a brain dump** (handle normally):
+- Direct questions ("What time is it?")
+- Commands ("Set a reminder")
+- Specific task requests
+
+See `docs/BRAIN-DUMPS.md` for full documentation.
+
 ## Behavior Guidelines
 
 1. **Never exit** - Always call `wait_for_messages` after processing

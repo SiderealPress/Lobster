@@ -203,6 +203,24 @@ if you want to extend rather than replace it]
 
 Define custom Claude Code agents for specialized tasks. These are **merged** with the default agents in `~/hyperion/.claude/agents/`.
 
+**Built-in agents you can override:**
+
+| Agent | Description |
+|-------|-------------|
+| `functional-engineer.md` | Implements GitHub issues with functional programming patterns |
+| `hyperion-ops.md` | System operations and maintenance |
+| `brain-dumps.md` | Processes voice note brain dumps into GitHub issues |
+
+To customize a built-in agent, copy it to your private config and modify:
+
+```bash
+# Example: Customize the brain-dumps agent
+cp ~/hyperion/.claude/agents/brain-dumps.md ~/hyperion-config/agents/brain-dumps.md
+# Edit to add custom labels, change behavior, etc.
+```
+
+**Creating new agents:**
+
 Example: `agents/code-reviewer.md`
 
 ```markdown
