@@ -118,7 +118,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="send_reply",
-            description="Send a reply to a message. The reply will be routed back to the original source (Telegram, SMS, etc.).",
+            description="Send a reply to a message. The reply will be routed back to the original source (Telegram, SMS, etc.). Supports optional inline keyboard buttons for Telegram.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -134,6 +134,27 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "The source to reply via (telegram, sms, signal). Default: telegram.",
                         "default": "telegram",
+                    },
+                    "buttons": {
+                        "type": "array",
+                        "description": "Optional inline keyboard buttons (Telegram only). Format: [[\"Btn1\", \"Btn2\"], [\"Btn3\"]] for simple buttons (text=callback_data), or [[{\"text\": \"Label\", \"callback_data\": \"value\"}]] for explicit callback data.",
+                        "items": {
+                            "type": "array",
+                            "description": "A row of buttons",
+                            "items": {
+                                "oneOf": [
+                                    {"type": "string", "description": "Simple button (text is also callback_data)"},
+                                    {
+                                        "type": "object",
+                                        "properties": {
+                                            "text": {"type": "string", "description": "Button label"},
+                                            "callback_data": {"type": "string", "description": "Data sent when pressed"}
+                                        },
+                                        "required": ["text"]
+                                    }
+                                ]
+                            }
+                        }
                     },
                 },
                 "required": ["chat_id", "text"],
@@ -551,6 +572,7 @@ async def handle_send_reply(args: dict) -> list[TextContent]:
     chat_id = args.get("chat_id")
     text = args.get("text", "")
     source = args.get("source", "telegram").lower()
+    buttons = args.get("buttons")
 
     if not chat_id or not text:
         return [TextContent(type="text", text="Error: chat_id and text are required.")]
@@ -565,11 +587,16 @@ async def handle_send_reply(args: dict) -> list[TextContent]:
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
+    # Include buttons if provided (Telegram only)
+    if buttons and source == "telegram":
+        reply_data["buttons"] = buttons
+
     outbox_file = OUTBOX_DIR / f"{reply_id}.json"
     with open(outbox_file, "w") as f:
         json.dump(reply_data, f, indent=2)
 
-    return [TextContent(type="text", text=f"✅ Reply queued for {source} (chat {chat_id}):\n\n{text[:100]}{'...' if len(text) > 100 else ''}")]
+    button_info = f" with {sum(len(row) for row in buttons)} button(s)" if buttons else ""
+    return [TextContent(type="text", text=f"✅ Reply queued for {source} (chat {chat_id}){button_info}:\n\n{text[:100]}{'...' if len(text) > 100 else ''}")]
 
 
 async def handle_mark_processed(args: dict) -> list[TextContent]:

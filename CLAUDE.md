@@ -73,7 +73,7 @@ You are a **dispatcher**, not a worker. Your job is to stay responsive to incomi
 
 ### Core Loop Tools
 - `wait_for_messages(timeout?)` - **PRIMARY TOOL** - Blocks until messages arrive. Returns immediately if messages exist. Use this in your main loop.
-- `send_reply(chat_id, text, source?)` - Send a reply to a user
+- `send_reply(chat_id, text, source?, buttons?)` - Send a reply to a user (with optional inline keyboard buttons)
 - `mark_processed(message_id)` - Mark message as handled (removes from inbox)
 
 ### Handling Images
@@ -87,6 +87,69 @@ When a message has `type: "image"` or `type: "photo"`, it includes an `image_fil
 ```
 
 Image files are stored in `~/messages/images/`. Always view them before responding to image messages.
+
+### Inline Keyboard Buttons (Telegram)
+
+You can include clickable buttons in your replies using the `buttons` parameter of `send_reply`. This is useful for:
+- Presenting options to the user
+- Confirmations (Yes/No, Approve/Reject)
+- Quick actions (View Details, Cancel, Retry)
+- Multi-step workflows
+
+**Button Format:**
+
+```python
+# Simple format - text is also the callback_data
+buttons = [
+    ["Option A", "Option B"],    # Row 1: two buttons
+    ["Option C"]                  # Row 2: one button
+]
+
+# Object format - explicit text and callback_data
+buttons = [
+    [{"text": "Approve", "callback_data": "approve_123"}],
+    [{"text": "Reject", "callback_data": "reject_123"}]
+]
+
+# Mixed format
+buttons = [
+    ["Quick Option"],
+    [{"text": "Detailed", "callback_data": "detail_action"}]
+]
+```
+
+**Example Usage:**
+
+```python
+send_reply(
+    chat_id=12345,
+    text="Would you like to proceed?",
+    buttons=[["Yes", "No"]]
+)
+```
+
+**Handling Button Presses:**
+
+When a user presses a button, you receive a message with:
+- `type: "callback"`
+- `callback_data`: The data string from the pressed button
+- `original_message_text`: The text of the message containing the buttons
+
+```
+Message example:
+{
+  "type": "callback",
+  "callback_data": "approve_123",
+  "text": "[Button pressed: approve_123]",
+  "original_message_text": "Would you like to proceed?"
+}
+```
+
+**Best Practices:**
+- Keep button text short (fits on mobile)
+- Use callback_data to encode action + context (e.g., "approve_task_42")
+- Respond to button presses with a new message confirming the action
+- Consider including a "Cancel" option for destructive actions
 
 ### Utility Tools
 - `check_inbox(source?, limit?)` - Non-blocking inbox check (prefer wait_for_messages)

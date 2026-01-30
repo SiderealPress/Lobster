@@ -20,8 +20,8 @@ from pathlib import Path
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
 # Configuration from environment
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -84,9 +84,15 @@ class OutboxHandler(FileSystemEventHandler):
 
             chat_id = reply.get('chat_id')
             text = reply.get('text', '')
+            buttons = reply.get('buttons')
 
             if chat_id and text and bot_app:
-                await bot_app.bot.send_message(chat_id=chat_id, text=text)
+                reply_markup = build_inline_keyboard(buttons) if buttons else None
+                await bot_app.bot.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                    reply_markup=reply_markup
+                )
                 log.info(f"Sent reply to {chat_id}: {text[:50]}...")
 
             # Remove processed file
@@ -108,6 +114,82 @@ async def process_existing_outbox():
 
 def is_authorized(user_id: int) -> bool:
     return user_id in ALLOWED_USERS
+
+
+def build_inline_keyboard(buttons: list) -> InlineKeyboardMarkup | None:
+    """
+    Build an InlineKeyboardMarkup from a buttons specification.
+
+    Supported formats:
+    1. Simple row format: [["Button 1", "Button 2"], ["Button 3"]]
+       - Each string becomes a button with text=callback_data
+
+    2. Object format: [[{"text": "Option A", "callback_data": "opt_a"}], ...]
+       - Explicit text and callback_data per button
+
+    3. Mixed format: [["Simple"], [{"text": "Complex", "callback_data": "complex"}]]
+    """
+    if not buttons or not isinstance(buttons, list):
+        return None
+
+    keyboard = []
+    for row in buttons:
+        if not isinstance(row, list):
+            continue
+        keyboard_row = []
+        for button in row:
+            if isinstance(button, str):
+                # Simple format: text is also the callback_data
+                keyboard_row.append(InlineKeyboardButton(text=button, callback_data=button))
+            elif isinstance(button, dict):
+                # Object format: explicit text and callback_data
+                text = button.get('text', '')
+                callback_data = button.get('callback_data', text)
+                if text:
+                    keyboard_row.append(InlineKeyboardButton(text=text, callback_data=callback_data))
+        if keyboard_row:
+            keyboard.append(keyboard_row)
+
+    return InlineKeyboardMarkup(keyboard) if keyboard else None
+
+
+async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle inline keyboard button presses."""
+    query = update.callback_query
+    user = query.from_user
+
+    if not is_authorized(user.id):
+        await query.answer("Unauthorized", show_alert=True)
+        return
+
+    # Acknowledge the button press
+    await query.answer()
+
+    msg_id = f"{int(time.time() * 1000)}_{query.id}"
+    callback_data = query.data
+
+    # Create message file in inbox for the button press
+    msg_data = {
+        "id": msg_id,
+        "source": "telegram",
+        "type": "callback",
+        "chat_id": query.message.chat_id,
+        "user_id": user.id,
+        "username": user.username,
+        "user_name": user.first_name,
+        "text": f"[Button pressed: {callback_data}]",
+        "callback_data": callback_data,
+        "callback_query_id": query.id,
+        "original_message_id": query.message.message_id,
+        "original_message_text": query.message.text,
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+    inbox_file = INBOX_DIR / f"{msg_id}.json"
+    with open(inbox_file, 'w') as f:
+        json.dump(msg_data, f, indent=2)
+
+    log.info(f"Button press from {user.first_name}: {callback_data}")
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -362,6 +444,7 @@ async def run_bot():
     bot_app.add_handler(MessageHandler(filters.VOICE, handle_message))
     bot_app.add_handler(MessageHandler(filters.PHOTO, handle_message))
     bot_app.add_handler(MessageHandler(filters.Document.ALL, handle_message))
+    bot_app.add_handler(CallbackQueryHandler(handle_callback_query))
     bot_app.add_error_handler(error_handler)
 
     # Initialize and start
