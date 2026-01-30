@@ -190,7 +190,13 @@ echo "$HOME/hyperion/scripts/self-check-reminder.sh" | at now + 3 minutes
 **Guidelines:**
 - **Default timing:** 3 minutes (typical subagent work)
 - **Max timing:** 10 minutes (don't schedule too far out)
-- **Silent behavior:** Only respond to user if there's actual news to report
+
+**Self-check behavior** (three states):
+1. **Completed** - Report completion with details to the user
+2. **Still working** - Send brief progress update (e.g., "Still working on X...")
+3. **Nothing running** - Silent (mark processed, no reply needed)
+
+The key insight: users want to know work is ongoing. A brief "still working" update is better than silence.
 
 **Workflow:**
 1. User requests substantial work
