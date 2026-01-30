@@ -416,6 +416,234 @@ Use the `Read` tool to read from `${HYPERION_CONTEXT_DIR}/*.md` paths.
 
 ---
 
+## Deterministic Triage Workflow
+
+After creating the initial brain dump issue, use the **triage tools** to process it through a deterministic workflow. These tools ensure consistent, reliable processing without requiring LLM judgment for each step.
+
+### Workflow Overview
+
+```
+1. Brain Dump Created (label: raw)
+         │
+         ▼
+2. triage_brain_dump() ─── Analyze & list action items
+         │                  (label: raw → triaged)
+         ▼
+3. create_action_item() ─── Create issue per action
+         │                   (linked to parent)
+         ▼
+4. link_action_to_brain_dump() ─── Update parent with links
+         │
+         ▼
+5. close_brain_dump() ─── Summary & close
+                          (label: triaged → actioned, state: closed)
+```
+
+### Triage Tools Reference
+
+#### `triage_brain_dump`
+
+Mark a brain dump as triaged and list extracted action items.
+
+**Inputs:**
+- `owner` (required): Repository owner
+- `repo` (required): Repository name
+- `issue_number` (required): Brain dump issue number
+- `action_items` (required): Array of `{title, description?}` objects
+- `triage_notes` (optional): Additional context/patterns noticed
+
+**Effects:**
+- Adds triage comment with action items list
+- Removes `raw` label
+- Adds `triaged` label
+
+**Example:**
+```python
+triage_brain_dump(
+    owner="myuser",
+    repo="brain-dumps",
+    issue_number=42,
+    action_items=[
+        {"title": "Research OAuth providers", "description": "Compare Auth0, Okta, Firebase Auth"},
+        {"title": "Call Mike about hiking trip"}
+    ],
+    triage_notes="Matches ProjectX from active projects"
+)
+```
+
+#### `create_action_item`
+
+Create a new issue as an action item from a brain dump.
+
+**Inputs:**
+- `owner` (required): Repository owner
+- `repo` (required): Repository name
+- `brain_dump_issue` (required): Parent brain dump issue number
+- `title` (required): Action item title
+- `body` (optional): Detailed description
+- `labels` (optional): Additional labels
+
+**Effects:**
+- Creates new issue with `action-item` label
+- Includes reference to parent brain dump in body
+- Returns the new issue number
+
+**Example:**
+```python
+create_action_item(
+    owner="myuser",
+    repo="brain-dumps",
+    brain_dump_issue=42,
+    title="Research OAuth providers for ProjectX",
+    body="Compare Auth0, Okta, Firebase Auth for the authentication system.",
+    labels=["project:projectx", "tech"]
+)
+```
+
+#### `link_action_to_brain_dump`
+
+Add a linking comment to the brain dump for traceability.
+
+**Inputs:**
+- `owner` (required): Repository owner
+- `repo` (required): Repository name
+- `brain_dump_issue` (required): Brain dump issue number
+- `action_issue` (required): Action item issue number to link
+- `action_title` (required): Title of the action item
+
+**Effects:**
+- Adds comment to brain dump: "Action item created: #N: Title"
+
+**Example:**
+```python
+link_action_to_brain_dump(
+    owner="myuser",
+    repo="brain-dumps",
+    brain_dump_issue=42,
+    action_issue=43,
+    action_title="Research OAuth providers for ProjectX"
+)
+```
+
+#### `close_brain_dump`
+
+Close the brain dump with a summary after all actions are created.
+
+**Inputs:**
+- `owner` (required): Repository owner
+- `repo` (required): Repository name
+- `issue_number` (required): Brain dump issue number
+- `summary` (required): Summary of processing
+- `action_issues` (optional): Array of action issue numbers created
+
+**Effects:**
+- Adds closure comment with summary and action links
+- Removes `triaged` label
+- Adds `actioned` label
+- Closes the issue with reason "completed"
+
+**Example:**
+```python
+close_brain_dump(
+    owner="myuser",
+    repo="brain-dumps",
+    issue_number=42,
+    summary="Processed authentication thoughts. Created 2 action items for OAuth research and hiking coordination.",
+    action_issues=[43, 44]
+)
+```
+
+#### `get_brain_dump_status`
+
+Check the current status of a brain dump.
+
+**Inputs:**
+- `owner` (required): Repository owner
+- `repo` (required): Repository name
+- `issue_number` (required): Brain dump issue number
+
+**Returns:**
+- Title, state, labels
+- Workflow status (raw/triaged/completed)
+- List of linked action items
+
+### Label Workflow Summary
+
+| Stage | Labels | State |
+|-------|--------|-------|
+| New brain dump | `raw` | open |
+| After triage | `triaged` | open |
+| All actions created | `actioned` | closed |
+
+### Full Triage Example
+
+After creating a brain dump issue, process it deterministically:
+
+```python
+# Step 1: Triage the brain dump
+triage_brain_dump(
+    owner="myuser",
+    repo="brain-dumps",
+    issue_number=42,
+    action_items=[
+        {"title": "Research OAuth providers"},
+        {"title": "Call Mike about hiking"}
+    ]
+)
+
+# Step 2: Create action items
+# Returns issue #43
+create_action_item(
+    owner="myuser", repo="brain-dumps",
+    brain_dump_issue=42,
+    title="Research OAuth providers",
+    body="Compare Auth0, Okta, Firebase Auth"
+)
+
+link_action_to_brain_dump(
+    owner="myuser", repo="brain-dumps",
+    brain_dump_issue=42,
+    action_issue=43,
+    action_title="Research OAuth providers"
+)
+
+# Returns issue #44
+create_action_item(
+    owner="myuser", repo="brain-dumps",
+    brain_dump_issue=42,
+    title="Call Mike about hiking"
+)
+
+link_action_to_brain_dump(
+    owner="myuser", repo="brain-dumps",
+    brain_dump_issue=42,
+    action_issue=44,
+    action_title="Call Mike about hiking"
+)
+
+# Step 3: Close the brain dump
+close_brain_dump(
+    owner="myuser", repo="brain-dumps",
+    issue_number=42,
+    summary="Processed: 2 action items created for OAuth research and hiking coordination.",
+    action_issues=[43, 44]
+)
+```
+
+### Why Deterministic?
+
+The triage tools are designed for **determinism**:
+
+1. **Explicit inputs**: Each tool takes exactly what it needs - no LLM interpretation
+2. **Predictable outputs**: Same inputs always produce same effects
+3. **Atomic operations**: Each tool does one thing well
+4. **Clear state transitions**: Labels track workflow progress unambiguously
+5. **Auditable**: Comments provide full audit trail
+
+This allows the brain-dumps agent to reliably process dumps without variance in behavior.
+
+---
+
 ## Error Handling
 
 - **Context files missing**: Skip context matching, proceed with basic processing

@@ -421,6 +421,169 @@ async def list_tools() -> list[Tool]:
                 "required": ["job_name", "output"],
             },
         ),
+        # Brain Dump Triage Tools
+        Tool(
+            name="triage_brain_dump",
+            description="Mark a brain dump issue as triaged. Adds 'triaged' label, removes 'raw' label, and adds a triage comment listing extracted action items. Use this after analyzing a brain dump and identifying action items.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "owner": {
+                        "type": "string",
+                        "description": "Repository owner (GitHub username or org).",
+                    },
+                    "repo": {
+                        "type": "string",
+                        "description": "Repository name (e.g., 'brain-dumps').",
+                    },
+                    "issue_number": {
+                        "type": "integer",
+                        "description": "The brain dump issue number to triage.",
+                    },
+                    "action_items": {
+                        "type": "array",
+                        "description": "List of action items extracted from the brain dump. Each item should have 'title' and optional 'description'.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": {
+                                    "type": "string",
+                                    "description": "Short title for the action item.",
+                                },
+                                "description": {
+                                    "type": "string",
+                                    "description": "Optional longer description.",
+                                },
+                            },
+                            "required": ["title"],
+                        },
+                    },
+                    "triage_notes": {
+                        "type": "string",
+                        "description": "Optional notes about the triage (e.g., context matches, patterns noticed).",
+                    },
+                },
+                "required": ["owner", "repo", "issue_number", "action_items"],
+            },
+        ),
+        Tool(
+            name="create_action_item",
+            description="Create a new GitHub issue as an action item linked to a brain dump. The action item will reference the parent brain dump issue. Returns the created issue number.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "owner": {
+                        "type": "string",
+                        "description": "Repository owner (GitHub username or org).",
+                    },
+                    "repo": {
+                        "type": "string",
+                        "description": "Repository name (e.g., 'brain-dumps').",
+                    },
+                    "brain_dump_issue": {
+                        "type": "integer",
+                        "description": "The parent brain dump issue number this action comes from.",
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Title for the action item issue.",
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "Body/description for the action item. Should include context from brain dump.",
+                    },
+                    "labels": {
+                        "type": "array",
+                        "description": "Optional labels to apply (e.g., ['urgent', 'project:xyz']).",
+                        "items": {"type": "string"},
+                    },
+                },
+                "required": ["owner", "repo", "brain_dump_issue", "title"],
+            },
+        ),
+        Tool(
+            name="link_action_to_brain_dump",
+            description="Add a comment to the brain dump issue linking to an action item issue. Use this after creating action items to maintain traceability.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "owner": {
+                        "type": "string",
+                        "description": "Repository owner (GitHub username or org).",
+                    },
+                    "repo": {
+                        "type": "string",
+                        "description": "Repository name (e.g., 'brain-dumps').",
+                    },
+                    "brain_dump_issue": {
+                        "type": "integer",
+                        "description": "The brain dump issue number.",
+                    },
+                    "action_issue": {
+                        "type": "integer",
+                        "description": "The action item issue number to link.",
+                    },
+                    "action_title": {
+                        "type": "string",
+                        "description": "Title of the action item (for the link comment).",
+                    },
+                },
+                "required": ["owner", "repo", "brain_dump_issue", "action_issue", "action_title"],
+            },
+        ),
+        Tool(
+            name="close_brain_dump",
+            description="Close a brain dump issue after all action items are created. Adds 'actioned' label, removes 'triaged' label, adds a summary comment, and closes the issue.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "owner": {
+                        "type": "string",
+                        "description": "Repository owner (GitHub username or org).",
+                    },
+                    "repo": {
+                        "type": "string",
+                        "description": "Repository name (e.g., 'brain-dumps').",
+                    },
+                    "issue_number": {
+                        "type": "integer",
+                        "description": "The brain dump issue number to close.",
+                    },
+                    "summary": {
+                        "type": "string",
+                        "description": "Summary of what was done with this brain dump.",
+                    },
+                    "action_issues": {
+                        "type": "array",
+                        "description": "List of action item issue numbers created from this brain dump.",
+                        "items": {"type": "integer"},
+                    },
+                },
+                "required": ["owner", "repo", "issue_number", "summary"],
+            },
+        ),
+        Tool(
+            name="get_brain_dump_status",
+            description="Get the current triage status of a brain dump issue. Returns the issue state, labels, and any linked action items found in comments.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "owner": {
+                        "type": "string",
+                        "description": "Repository owner (GitHub username or org).",
+                    },
+                    "repo": {
+                        "type": "string",
+                        "description": "Repository name (e.g., 'brain-dumps').",
+                    },
+                    "issue_number": {
+                        "type": "integer",
+                        "description": "The brain dump issue number to check.",
+                    },
+                },
+                "required": ["owner", "repo", "issue_number"],
+            },
+        ),
     ]
 
 
@@ -467,6 +630,17 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         return await handle_check_task_outputs(arguments)
     elif name == "write_task_output":
         return await handle_write_task_output(arguments)
+    # Brain Dump Triage Tools
+    elif name == "triage_brain_dump":
+        return await handle_triage_brain_dump(arguments)
+    elif name == "create_action_item":
+        return await handle_create_action_item(arguments)
+    elif name == "link_action_to_brain_dump":
+        return await handle_link_action_to_brain_dump(arguments)
+    elif name == "close_brain_dump":
+        return await handle_close_brain_dump(arguments)
+    elif name == "get_brain_dump_status":
+        return await handle_get_brain_dump_status(arguments)
     else:
         return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
@@ -1492,6 +1666,382 @@ async def handle_write_task_output(args: dict) -> list[TextContent]:
         json.dump(output_data, f, indent=2)
 
     return [TextContent(type="text", text=f"Output recorded for job '{job_name}'")]
+
+
+# =============================================================================
+# Brain Dump Triage Handlers
+# =============================================================================
+
+# Brain dump triage workflow labels
+BRAIN_DUMP_LABELS = {
+    "raw": "raw",           # New brain dump, not yet triaged
+    "triaged": "triaged",   # Brain dump has been analyzed and action items identified
+    "actioned": "actioned", # All action items have been created
+    "closed": "closed",     # Brain dump is fully processed
+}
+
+
+async def run_gh_command(args: list[str]) -> tuple[bool, str, str]:
+    """Run a gh CLI command. Returns (success, stdout, stderr)."""
+    cmd = ["gh"] + args
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
+    stdout, stderr = await proc.communicate()
+    return (
+        proc.returncode == 0,
+        stdout.decode().strip() if stdout else "",
+        stderr.decode().strip() if stderr else ""
+    )
+
+
+async def ensure_label_exists(owner: str, repo: str, label: str, color: str = "0e8a16", description: str = "") -> bool:
+    """Ensure a label exists in the repository. Creates it if missing."""
+    # Check if label exists
+    success, _, _ = await run_gh_command([
+        "label", "view", label,
+        "--repo", f"{owner}/{repo}",
+        "--json", "name"
+    ])
+    if success:
+        return True
+
+    # Create label
+    cmd = ["label", "create", label, "--repo", f"{owner}/{repo}", "--color", color]
+    if description:
+        cmd.extend(["--description", description])
+    success, _, stderr = await run_gh_command(cmd)
+    return success
+
+
+async def handle_triage_brain_dump(args: dict) -> list[TextContent]:
+    """Mark a brain dump issue as triaged with action items listed."""
+    owner = args.get("owner", "").strip()
+    repo = args.get("repo", "").strip()
+    issue_number = args.get("issue_number")
+    action_items = args.get("action_items", [])
+    triage_notes = args.get("triage_notes", "").strip()
+
+    if not owner or not repo:
+        return [TextContent(type="text", text="Error: owner and repo are required.")]
+    if not issue_number:
+        return [TextContent(type="text", text="Error: issue_number is required.")]
+
+    # Ensure labels exist
+    await ensure_label_exists(owner, repo, "raw", "d4c5f9", "New brain dump, not yet processed")
+    await ensure_label_exists(owner, repo, "triaged", "0e8a16", "Brain dump has been triaged")
+    await ensure_label_exists(owner, repo, "actioned", "1d76db", "All action items created")
+    await ensure_label_exists(owner, repo, "action-item", "fbca04", "Action item from brain dump")
+
+    # Build triage comment
+    comment_lines = ["## Triage Complete", ""]
+
+    if action_items:
+        comment_lines.append(f"**{len(action_items)} action item(s) identified:**")
+        comment_lines.append("")
+        for i, item in enumerate(action_items, 1):
+            title = item.get("title", "Untitled")
+            desc = item.get("description", "")
+            comment_lines.append(f"{i}. **{title}**")
+            if desc:
+                comment_lines.append(f"   - {desc}")
+        comment_lines.append("")
+        comment_lines.append("Action items will be created as separate issues and linked back here.")
+    else:
+        comment_lines.append("No action items identified - this brain dump is for reference only.")
+
+    if triage_notes:
+        comment_lines.append("")
+        comment_lines.append("### Notes")
+        comment_lines.append(triage_notes)
+
+    comment_lines.append("")
+    comment_lines.append("---")
+    comment_lines.append(f"*Triaged at {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}*")
+
+    comment_body = "\n".join(comment_lines)
+
+    # Add comment
+    success, stdout, stderr = await run_gh_command([
+        "issue", "comment", str(issue_number),
+        "--repo", f"{owner}/{repo}",
+        "--body", comment_body
+    ])
+    if not success:
+        return [TextContent(type="text", text=f"Error adding triage comment: {stderr}")]
+
+    # Remove 'raw' label if present
+    await run_gh_command([
+        "issue", "edit", str(issue_number),
+        "--repo", f"{owner}/{repo}",
+        "--remove-label", "raw"
+    ])
+
+    # Add 'triaged' label
+    success, _, stderr = await run_gh_command([
+        "issue", "edit", str(issue_number),
+        "--repo", f"{owner}/{repo}",
+        "--add-label", "triaged"
+    ])
+    if not success:
+        return [TextContent(type="text", text=f"Error adding triaged label: {stderr}")]
+
+    return [TextContent(
+        type="text",
+        text=f"Brain dump #{issue_number} triaged.\n- {len(action_items)} action item(s) identified\n- Label updated: raw -> triaged\n- Triage comment added"
+    )]
+
+
+async def handle_create_action_item(args: dict) -> list[TextContent]:
+    """Create an action item issue linked to a brain dump."""
+    owner = args.get("owner", "").strip()
+    repo = args.get("repo", "").strip()
+    brain_dump_issue = args.get("brain_dump_issue")
+    title = args.get("title", "").strip()
+    body = args.get("body", "").strip()
+    labels = args.get("labels", [])
+
+    if not owner or not repo:
+        return [TextContent(type="text", text="Error: owner and repo are required.")]
+    if not brain_dump_issue:
+        return [TextContent(type="text", text="Error: brain_dump_issue is required.")]
+    if not title:
+        return [TextContent(type="text", text="Error: title is required.")]
+
+    # Ensure action-item label exists
+    await ensure_label_exists(owner, repo, "action-item", "fbca04", "Action item from brain dump")
+
+    # Build issue body
+    issue_body_lines = []
+    if body:
+        issue_body_lines.append(body)
+        issue_body_lines.append("")
+
+    issue_body_lines.append("---")
+    issue_body_lines.append(f"**Source:** Brain dump #{brain_dump_issue}")
+    issue_body_lines.append("")
+    issue_body_lines.append(f"*Created from brain dump triage*")
+
+    issue_body = "\n".join(issue_body_lines)
+
+    # Create the issue
+    cmd = [
+        "issue", "create",
+        "--repo", f"{owner}/{repo}",
+        "--title", title,
+        "--body", issue_body,
+        "--label", "action-item"
+    ]
+
+    # Add additional labels
+    for label in labels:
+        if label and label != "action-item":
+            cmd.extend(["--label", label])
+
+    success, stdout, stderr = await run_gh_command(cmd)
+    if not success:
+        return [TextContent(type="text", text=f"Error creating action item: {stderr}")]
+
+    # Parse issue number from URL (gh returns URL like https://github.com/owner/repo/issues/123)
+    action_issue_number = None
+    if stdout:
+        # Extract issue number from URL
+        parts = stdout.rstrip("/").split("/")
+        if parts:
+            try:
+                action_issue_number = int(parts[-1])
+            except ValueError:
+                pass
+
+    if not action_issue_number:
+        return [TextContent(
+            type="text",
+            text=f"Action item created but could not parse issue number.\nURL: {stdout}"
+        )]
+
+    return [TextContent(
+        type="text",
+        text=f"Action item created: #{action_issue_number}\n- Title: {title}\n- Linked to brain dump #{brain_dump_issue}\n- URL: {stdout}"
+    )]
+
+
+async def handle_link_action_to_brain_dump(args: dict) -> list[TextContent]:
+    """Add a comment to brain dump linking to an action item."""
+    owner = args.get("owner", "").strip()
+    repo = args.get("repo", "").strip()
+    brain_dump_issue = args.get("brain_dump_issue")
+    action_issue = args.get("action_issue")
+    action_title = args.get("action_title", "").strip()
+
+    if not owner or not repo:
+        return [TextContent(type="text", text="Error: owner and repo are required.")]
+    if not brain_dump_issue:
+        return [TextContent(type="text", text="Error: brain_dump_issue is required.")]
+    if not action_issue:
+        return [TextContent(type="text", text="Error: action_issue is required.")]
+
+    # Build link comment
+    title_part = f": {action_title}" if action_title else ""
+    comment_body = f"Action item created: #{action_issue}{title_part}"
+
+    # Add comment
+    success, _, stderr = await run_gh_command([
+        "issue", "comment", str(brain_dump_issue),
+        "--repo", f"{owner}/{repo}",
+        "--body", comment_body
+    ])
+    if not success:
+        return [TextContent(type="text", text=f"Error adding link comment: {stderr}")]
+
+    return [TextContent(
+        type="text",
+        text=f"Linked action item #{action_issue} to brain dump #{brain_dump_issue}"
+    )]
+
+
+async def handle_close_brain_dump(args: dict) -> list[TextContent]:
+    """Close a brain dump issue with summary."""
+    owner = args.get("owner", "").strip()
+    repo = args.get("repo", "").strip()
+    issue_number = args.get("issue_number")
+    summary = args.get("summary", "").strip()
+    action_issues = args.get("action_issues", [])
+
+    if not owner or not repo:
+        return [TextContent(type="text", text="Error: owner and repo are required.")]
+    if not issue_number:
+        return [TextContent(type="text", text="Error: issue_number is required.")]
+    if not summary:
+        return [TextContent(type="text", text="Error: summary is required.")]
+
+    # Ensure labels exist
+    await ensure_label_exists(owner, repo, "actioned", "1d76db", "All action items created")
+    await ensure_label_exists(owner, repo, "closed", "000000", "Brain dump fully processed")
+
+    # Build closure comment
+    comment_lines = ["## Brain Dump Processed", ""]
+    comment_lines.append(summary)
+    comment_lines.append("")
+
+    if action_issues:
+        comment_lines.append("### Action Items Created")
+        for issue_num in action_issues:
+            comment_lines.append(f"- #{issue_num}")
+        comment_lines.append("")
+
+    comment_lines.append("---")
+    comment_lines.append(f"*Closed at {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}*")
+
+    comment_body = "\n".join(comment_lines)
+
+    # Add closure comment
+    success, _, stderr = await run_gh_command([
+        "issue", "comment", str(issue_number),
+        "--repo", f"{owner}/{repo}",
+        "--body", comment_body
+    ])
+    if not success:
+        return [TextContent(type="text", text=f"Error adding closure comment: {stderr}")]
+
+    # Update labels: remove triaged, add actioned
+    await run_gh_command([
+        "issue", "edit", str(issue_number),
+        "--repo", f"{owner}/{repo}",
+        "--remove-label", "triaged"
+    ])
+
+    await run_gh_command([
+        "issue", "edit", str(issue_number),
+        "--repo", f"{owner}/{repo}",
+        "--add-label", "actioned"
+    ])
+
+    # Close the issue
+    success, _, stderr = await run_gh_command([
+        "issue", "close", str(issue_number),
+        "--repo", f"{owner}/{repo}",
+        "--reason", "completed"
+    ])
+    if not success:
+        return [TextContent(type="text", text=f"Error closing issue: {stderr}")]
+
+    action_count = len(action_issues) if action_issues else 0
+    return [TextContent(
+        type="text",
+        text=f"Brain dump #{issue_number} closed.\n- {action_count} action item(s) created\n- Label: actioned\n- Status: closed (completed)"
+    )]
+
+
+async def handle_get_brain_dump_status(args: dict) -> list[TextContent]:
+    """Get the current status of a brain dump issue."""
+    owner = args.get("owner", "").strip()
+    repo = args.get("repo", "").strip()
+    issue_number = args.get("issue_number")
+
+    if not owner or not repo:
+        return [TextContent(type="text", text="Error: owner and repo are required.")]
+    if not issue_number:
+        return [TextContent(type="text", text="Error: issue_number is required.")]
+
+    # Get issue details
+    success, stdout, stderr = await run_gh_command([
+        "issue", "view", str(issue_number),
+        "--repo", f"{owner}/{repo}",
+        "--json", "title,state,labels,comments"
+    ])
+    if not success:
+        return [TextContent(type="text", text=f"Error fetching issue: {stderr}")]
+
+    try:
+        issue_data = json.loads(stdout)
+    except json.JSONDecodeError:
+        return [TextContent(type="text", text=f"Error parsing issue data: {stdout}")]
+
+    title = issue_data.get("title", "Unknown")
+    state = issue_data.get("state", "unknown")
+    labels = [l.get("name", "") for l in issue_data.get("labels", [])]
+    comments = issue_data.get("comments", [])
+
+    # Determine workflow status
+    workflow_status = "unknown"
+    if "actioned" in labels or state.lower() == "closed":
+        workflow_status = "completed"
+    elif "triaged" in labels:
+        workflow_status = "triaged"
+    elif "raw" in labels:
+        workflow_status = "raw"
+    else:
+        workflow_status = "untagged"
+
+    # Find linked action items from comments
+    action_items = []
+    for comment in comments:
+        body = comment.get("body", "")
+        # Look for patterns like "Action item created: #123" or "#{number}"
+        import re
+        matches = re.findall(r"Action item created: #(\d+)", body)
+        action_items.extend([int(m) for m in matches])
+
+    output_lines = [
+        f"## Brain Dump #{issue_number}",
+        "",
+        f"**Title:** {title}",
+        f"**State:** {state}",
+        f"**Workflow Status:** {workflow_status}",
+        f"**Labels:** {', '.join(labels) if labels else 'none'}",
+        "",
+    ]
+
+    if action_items:
+        output_lines.append(f"**Linked Action Items:** {len(action_items)}")
+        for item in action_items:
+            output_lines.append(f"- #{item}")
+    else:
+        output_lines.append("**Linked Action Items:** none")
+
+    return [TextContent(type="text", text="\n".join(output_lines))]
 
 
 async def main():
