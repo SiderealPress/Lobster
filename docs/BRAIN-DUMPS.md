@@ -1,16 +1,17 @@
 # Brain Dumps Agent
 
-The brain-dumps agent automatically captures voice note "brain dumps" - unstructured streams of consciousness, ideas, and thoughts - and saves them to a dedicated GitHub repository for later review.
+The brain-dumps agent captures voice note "brain dumps" - unstructured streams of consciousness, ideas, and thoughts - and saves them to a dedicated GitHub repository with intelligent context linking.
 
 ## Overview
 
-When you send a voice message to Hyperion that contains random thoughts, ideas, or musings rather than a specific command or question, the brain-dumps agent can:
+When you send a voice message to Hyperion that contains random thoughts, ideas, or musings rather than a specific command or question, the brain-dumps agent:
 
-1. Transcribe the voice message (using local whisper.cpp)
-2. Classify whether it's a "brain dump" vs. a regular message
-3. Auto-detect topics and themes
-4. Save it as a GitHub issue in your private brain-dumps repository
-5. Apply relevant labels for easy categorization
+1. **Transcribes** the voice message (using local whisper.cpp)
+2. **Triages** - Classifies type, extracts entities, assesses priority
+3. **Matches context** - Links to your goals, projects, people, and past brain dumps
+4. **Enriches** - Adds labels, action items, and suggested next steps
+5. **Updates context** - Suggests additions to your personal context files
+6. **Saves** as a GitHub issue with full context linking
 
 ## What is a Brain Dump?
 
@@ -28,38 +29,110 @@ A brain dump is distinguished from regular messages by its unstructured nature:
 - Stream of consciousness style
 - Ideas and reflections rather than questions or commands
 
+---
+
+## Staged Processing Pipeline
+
+The brain-dumps agent processes each dump through four stages:
+
+### Stage 1: Triage
+
+Classifies the brain dump and extracts structure:
+
+- **Type classification**: idea, task, note, question, reflection, desire, serendipity
+- **Entity extraction**: people, projects, topics, dates, locations
+- **Priority assessment**: urgency (urgent/soon/someday) and importance (high/medium/low)
+
+### Stage 2: Context Matching
+
+Connects the brain dump to your persistent context (if configured):
+
+- **Project matching**: Links mentions to your active projects
+- **People matching**: Identifies people from your contacts
+- **Goal alignment**: Notes which goals the brain dump relates to
+- **Related brain dumps**: Finds similar past issues
+
+### Stage 3: Enrichment
+
+Adds value through labels, links, and action items:
+
+- **Labels**: Type, topic, project, and priority labels
+- **Links**: To related issues, project repos, and external resources
+- **Action items**: Extracted todos as checkboxes
+- **Next steps**: AI-suggested follow-up actions
+
+### Stage 4: Context Update
+
+Identifies potential updates to your personal context:
+
+- Detects new projects, people, desires, or goals
+- Suggests additions (doesn't auto-update)
+- Tracks patterns across brain dumps
+
+---
+
 ## Setup
 
-### 1. Enable the Feature
+### Basic Setup (No Context)
 
-The brain-dumps feature is enabled by default. To configure it, edit your `hyperion.conf`:
+The brain-dumps feature works out of the box without personal context:
 
-```bash
-# Enable/disable brain dump processing
-HYPERION_BRAIN_DUMPS_ENABLED=true
+1. **Enable the feature** (enabled by default):
+   ```bash
+   # In config/hyperion.conf
+   HYPERION_BRAIN_DUMPS_ENABLED=true
+   HYPERION_BRAIN_DUMPS_REPO=brain-dumps
+   ```
 
-# Repository name (created under your GitHub username)
-HYPERION_BRAIN_DUMPS_REPO=brain-dumps
-```
+2. **Ensure GitHub authentication** is configured
 
-### 2. GitHub Authentication
+3. **Send a brain dump** - The repository is created automatically on first use
 
-Ensure you have GitHub authentication configured for Hyperion. The agent uses the GitHub MCP tools which require proper authentication.
+### Advanced Setup (With Personal Context)
 
-### 3. Repository Creation (Automatic)
+For full context-aware processing, set up the context directory:
 
-The first time you send a brain dump, the agent will automatically:
-- Create a private repository named `{your-username}/brain-dumps`
-- Initialize it with a README
-- Set up default labels for categorization
+1. **Create context directory in your private config:**
+   ```bash
+   mkdir -p ~/hyperion-config/context
+   ```
+
+2. **Copy context templates:**
+   ```bash
+   cp ~/hyperion/context-templates/*.md ~/hyperion-config/context/
+   ```
+
+3. **Fill in your context files:**
+   - `goals.md` - Your objectives and targets
+   - `projects.md` - Active and past projects
+   - `values.md` - Core principles and priorities
+   - `habits.md` - Routines and preferences
+   - `people.md` - Key relationships
+   - `desires.md` - Wants and aspirations
+   - `serendipity.md` - Random discoveries
+
+4. **Configure context path:**
+   ```bash
+   # In config/hyperion.conf or config.env
+   HYPERION_CONTEXT_DIR="${HYPERION_CONFIG_DIR}/context"
+   ```
+
+5. **Apply the configuration:**
+   ```bash
+   cd ~/hyperion && ./install.sh
+   ```
+
+See [context-templates/README.md](../context-templates/README.md) for detailed setup instructions.
+
+---
 
 ## Usage
 
 ### Sending a Brain Dump
 
-Simply send a voice message to Hyperion with your thoughts. The agent will automatically detect if it's a brain dump.
+Simply send a voice message to Hyperion with your thoughts. The agent automatically detects brain dumps.
 
-**Explicit triggers** (guaranteed to be treated as brain dump):
+**Explicit triggers** (guaranteed detection):
 - Start with "Brain dump:"
 - Include "note to self"
 - Say "thinking out loud"
@@ -69,134 +142,227 @@ Simply send a voice message to Hyperion with your thoughts. The agent will autom
 - Stream of consciousness style
 - No clear question or command
 
-### Example Flow
+### Example Flow (With Context)
 
 1. **You send voice message:**
-   > "Brain dump: Been thinking about the new product launch. We should probably do a soft launch first, maybe to the beta users. Also, the pricing model needs work - maybe freemium? And I need to call the accountant about Q4 taxes."
+   > "Brain dump: Been thinking about the auth system for ProjectX. Maybe we should use OAuth instead of rolling our own. Oh, and need to call Mike about the hiking trip next weekend."
 
-2. **Hyperion responds:**
-   > Brain dump saved! Created issue #12 in your brain-dumps repo.
+2. **Agent processes through all stages:**
+   - Triage: Type=task, Urgency=soon, People=[Mike], Projects=[ProjectX]
+   - Context: Matches ProjectX (active, auth focus), Mike (friend, hiking buddy)
+   - Enrich: Labels, action items, links to related auth discussion (#12)
+   - Update: No new entities detected
+
+3. **Hyperion responds:**
+   > Brain dump captured! Created issue #15 in your brain-dumps repo.
    >
-   > Topics detected: product, business, finance
+   > Context matched:
+   > - Project: ProjectX (auth system)
+   > - Person: Mike (hiking friend)
+   > - Related: #12 (previous auth discussion)
    >
-   > View: https://github.com/yourname/brain-dumps/issues/12
+   > Action items extracted:
+   > - Research OAuth providers
+   > - Call Mike re: hiking trip
 
-3. **GitHub Issue created:**
-   ```markdown
-   # [Brain Dump] Product launch thoughts and Q4 taxes
+4. **GitHub Issue created with full enrichment:**
 
-   ## Transcription
+```markdown
+## Transcription
 
-   Been thinking about the new product launch. We should probably do a
-   soft launch first, maybe to the beta users. Also, the pricing model
-   needs work - maybe freemium? And I need to call the accountant about
-   Q4 taxes.
+Been thinking about the auth system for ProjectX. Maybe we should use
+OAuth instead of rolling our own. Oh, and need to call Mike about the
+hiking trip next weekend.
 
-   ## Metadata
+## Triage
 
-   - **Recorded**: 2024-01-15 10:30:00 UTC
-   - **Duration**: 45 seconds
+- **Type**: task
+- **Urgency**: soon
+- **Importance**: high
 
-   ## Auto-detected Topics
+## Context Matches
 
-   - Product launch strategy
-   - Pricing model considerations
-   - Tax/accounting follow-up
+### Projects
+- **ProjectX** (In Development)
+  - Current focus: Authentication system
+  - Repo: https://github.com/user/projectx
 
-   ---
-   *Captured via Hyperion brain-dumps agent*
-   ```
+### People
+- **Mike** - Friend
+  - Context: Hiking buddy, lives in Austin
+
+### Related Brain Dumps
+- #12 (previous auth discussion)
+
+## Action Items
+
+- [ ] Research OAuth providers (Auth0, Okta, Firebase Auth)
+- [ ] Call Mike about hiking trip
+
+## Suggested Next Steps
+
+- Review OAuth options and compare pricing/features
+- Check calendar for availability next weekend
+- Consider linking this to ProjectX issue tracker
+
+## Metadata
+
+- **Recorded**: 2026-01-30 10:30:00 UTC
+- **Duration**: 45 seconds
+- **Processing**: Staged (triage -> context -> enrich -> update)
+
+---
+*Captured via Hyperion brain-dumps agent v2 (staged processing)*
+```
+
+---
 
 ## Labels
 
-The agent auto-applies labels based on content analysis:
+The agent applies multiple label types:
 
+### Type Labels
 | Label | Applied When |
 |-------|--------------|
-| `idea` | New ideas, concepts, inventions |
-| `project` | Project-related thoughts |
-| `personal` | Personal notes, life stuff |
-| `work` | Work/career related |
-| `creative` | Creative writing, art ideas |
+| `type:idea` | New concepts, inventions |
+| `type:task` | Something to do |
+| `type:note` | Information to remember |
+| `type:question` | Research needed |
+| `type:reflection` | Personal thoughts |
+| `type:desire` | Wants, wishes |
+| `type:serendipity` | Random discoveries |
+
+### Topic Labels
+| Label | Applied When |
+|-------|--------------|
 | `tech` | Technology, programming |
-| `business` | Business strategy, startup ideas |
-| `finance` | Money, taxes, budgets |
-| `review` | Needs follow-up or research |
+| `business` | Business strategy, startups |
+| `personal` | Personal life |
+| `creative` | Art, writing, music |
+| `health` | Fitness, wellness |
+| `finance` | Money, investments |
+| `work` | Career, job |
 
-Labels are created automatically if they don't exist in your repository.
+### Project Labels
+Format: `project:{name}` - Links to specific projects from your context.
 
-## Repository Structure
+### Priority Labels
+| Label | Meaning |
+|-------|---------|
+| `urgent` | Needs attention within 48 hours |
+| `review-soon` | Within a week |
+| `someday` | No time pressure |
 
-Your brain-dumps repository will contain:
+---
 
+## Context Files
+
+Your personal context enables intelligent matching. See [context-templates/](../context-templates/) for templates.
+
+| File | Purpose | When Loaded |
+|------|---------|-------------|
+| `goals.md` | Long/short-term objectives | Ideas, business topics |
+| `projects.md` | Active projects | Project names detected |
+| `values.md` | Core principles | Always (lightweight) |
+| `habits.md` | Routines, preferences | Time-related dumps |
+| `people.md` | Key relationships | Names detected |
+| `desires.md` | Wants, aspirations | Desire-type dumps |
+| `serendipity.md` | Random discoveries | Serendipity-type dumps |
+
+---
+
+## Context Updates
+
+The agent suggests context updates but doesn't auto-apply them. When it detects:
+
+- **New project**: Mentioned but not in `projects.md`
+- **New person**: Named with relationship context
+- **New desire**: Expressed as want/wish
+- **New goal**: Stated as objective
+
+It adds a "Context Updates (Suggested)" section to the issue:
+
+```markdown
+## Context Updates (Suggested)
+
+Based on this brain dump, consider updating your context:
+
+- [ ] Add "NewProject" to projects.md (Status: Planning)
+- [ ] Add "Jamie" to people.md (Contractor - design work)
+
+Reply "update context" to apply these suggestions.
 ```
-brain-dumps/
-├── README.md           # Auto-generated explanation
-└── (issues)            # Each brain dump is an issue
+
+### Patterns
+
+The agent also tracks patterns:
+
+```markdown
+## Patterns Noticed
+
+- This is the 3rd brain dump mentioning "authentication" this week
+- Mike appears in 5 recent dumps - consider updating his entry
 ```
 
-Issues can be:
-- Searched by label
-- Closed when processed
-- Referenced in other projects
-- Exported or archived
+---
 
-## Configuration Options
+## Configuration
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `HYPERION_BRAIN_DUMPS_ENABLED` | `true` | Enable/disable the feature |
+| `HYPERION_BRAIN_DUMPS_ENABLED` | `true` | Enable/disable feature |
 | `HYPERION_BRAIN_DUMPS_REPO` | `brain-dumps` | Repository name |
+| `HYPERION_CONTEXT_DIR` | `${HYPERION_CONFIG_DIR}/context` | Context files location |
 
-These variables are set in `config/hyperion.conf` or `config/hyperion.conf.example`.
+Set these in `config/hyperion.conf` or your private `config.env`.
 
-## Customization via Private Config Overlay
+---
 
-The brain-dumps agent can be customized using Hyperion's [private config overlay system](CUSTOMIZATION.md).
+## Customization
 
-### Overriding the Agent Definition
+### Customizing the Agent
 
-To customize the brain-dumps agent behavior, create your own version in your private config directory:
+Override the agent definition via private config overlay:
 
 ```bash
-# Create custom agent in your private config
+# Copy default agent to your private config
 cp ~/hyperion/.claude/agents/brain-dumps.md ~/hyperion-config/agents/brain-dumps.md
 
-# Edit to your preferences
+# Edit to customize
 nano ~/hyperion-config/agents/brain-dumps.md
 ```
 
-When the installer runs, your custom `agents/brain-dumps.md` will be copied to `~/hyperion/.claude/agents/`, overriding the default.
-
 ### Customization Ideas
 
-You can modify the agent to:
+- **Add custom labels**: Domain-specific labels (`client:acme`, `area:frontend`)
+- **Modify triage criteria**: Adjust what counts as urgent
+- **Change issue template**: Add/remove sections
+- **Custom context matching**: Add domain-specific matching rules
+- **Integration hooks**: Post to Slack, create calendar events
 
-- **Change topic detection labels**: Add labels specific to your work (e.g., `client-a`, `project-x`)
-- **Modify the issue template**: Add custom sections or formatting
-- **Adjust classification criteria**: Be more or less strict about what counts as a brain dump
-- **Add integrations**: Post to Slack, create tasks, etc.
-
-### Disabling Brain Dumps
-
-To disable the feature entirely, set in your `hyperion.conf`:
+### Disabling the Feature
 
 ```bash
+# In hyperion.conf
 HYPERION_BRAIN_DUMPS_ENABLED=false
 ```
 
-Or simply remove/rename the agent file:
-
+Or rename the agent file:
 ```bash
 mv ~/hyperion-config/agents/brain-dumps.md ~/hyperion-config/agents/brain-dumps.md.disabled
 ```
 
+---
+
 ## Privacy
 
 - The brain-dumps repository is created as **private** by default
+- Context files contain personal information - keep in private config repo
 - Audio files are stored locally, not uploaded to GitHub
-- Only the transcription text appears in GitHub issues
-- You maintain full control to delete issues as needed
+- You maintain full control - delete issues/context as needed
+- Context updates require your explicit approval
+
+---
 
 ## Integration with Hyperion
 
@@ -215,38 +381,77 @@ Main agent detects potential brain dump
 brain-dumps agent spawned via Task tool
         │
         ▼
-Agent classifies, processes, saves to GitHub
+┌─────────────────────────────────────┐
+│  STAGE 1: TRIAGE                     │
+│  - Classify type                     │
+│  - Extract entities                  │
+│  - Assess urgency/importance         │
+└─────────────────────────────────────┘
         │
         ▼
-Confirmation sent to user
+┌─────────────────────────────────────┐
+│  STAGE 2: CONTEXT MATCHING           │
+│  - Load relevant context files       │
+│  - Match projects, people, goals     │
+│  - Find related brain dumps          │
+└─────────────────────────────────────┘
+        │
+        ▼
+┌─────────────────────────────────────┐
+│  STAGE 3: ENRICHMENT                 │
+│  - Apply labels                      │
+│  - Extract action items              │
+│  - Suggest next steps                │
+└─────────────────────────────────────┘
+        │
+        ▼
+┌─────────────────────────────────────┐
+│  STAGE 4: CONTEXT UPDATE             │
+│  - Detect new entities               │
+│  - Queue update suggestions          │
+│  - Note patterns                     │
+└─────────────────────────────────────┘
+        │
+        ▼
+GitHub issue created + confirmation sent
 ```
+
+---
 
 ## Troubleshooting
 
 ### Brain dump not detected
 
-If your brain dump is being treated as a regular message:
 - Start explicitly with "Brain dump:" or "Note to self:"
-- The agent may interpret short, focused messages as commands
+- Short, focused messages may be interpreted as commands
+
+### Context not matching
+
+- Verify context files exist at `$HYPERION_CONTEXT_DIR`
+- Check file format matches templates
+- Entity names must be close matches (case-insensitive)
 
 ### Repository not created
 
-Check:
-- GitHub authentication is configured
-- You have permission to create repositories
-- The repository name doesn't conflict with an existing repo
+- Check GitHub authentication: `gh auth status`
+- Verify repo creation permissions
+- Check for name conflicts
 
 ### Labels not applied
 
-The agent creates labels if they don't exist. If label creation fails:
+- Labels are created automatically if they don't exist
 - Check repository permissions
-- Labels may need to be created manually once
+
+---
 
 ## Future Enhancements
 
-Planned improvements include:
-- Audio file upload to GitHub (optional)
-- Custom label definitions per user
-- Brain dump threading (related dumps grouped together)
-- Weekly/monthly summary digests
-- Integration with task management (auto-create tasks from action items)
+Planned improvements:
+
+- **Context auto-update with approval**: Apply suggested updates via button press
+- **Audio file upload**: Optional upload to GitHub releases
+- **Brain dump threading**: Group related dumps automatically
+- **Weekly/monthly digests**: Summary of brain dump patterns
+- **Task extraction**: Auto-create tasks in task management system
+- **Calendar integration**: Add mentioned events to calendar
+- **Semantic search**: Find brain dumps by meaning, not just keywords

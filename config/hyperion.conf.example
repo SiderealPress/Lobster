@@ -65,6 +65,14 @@ HYPERION_BRANCH="${HYPERION_BRANCH:-main}"
 #   ├── config.env          # Your secrets (API keys, tokens)
 #   ├── CLAUDE.md           # Custom Claude context
 #   ├── agents/             # Custom agent definitions
+#   ├── context/            # Personal context for brain dumps
+#   │   ├── goals.md        # Long/short-term objectives
+#   │   ├── projects.md     # Active projects
+#   │   ├── values.md       # Core principles
+#   │   ├── habits.md       # Routines and preferences
+#   │   ├── people.md       # Key relationships
+#   │   ├── desires.md      # Wants and aspirations
+#   │   └── serendipity.md  # Random discoveries
 #   └── hooks/              # Custom installation hooks
 #
 # IMPORTANT: Your config directory should have restricted permissions:
@@ -110,3 +118,23 @@ HYPERION_BRAIN_DUMPS_ENABLED="${HYPERION_BRAIN_DUMPS_ENABLED:-true}"
 # The repository will be created as private if it doesn't exist
 # Format: Just the repo name (not full path) - will be created under your GitHub username
 HYPERION_BRAIN_DUMPS_REPO="${HYPERION_BRAIN_DUMPS_REPO:-brain-dumps}"
+
+#===============================================================================
+# Personal Context (for Brain Dumps)
+#===============================================================================
+# The context directory contains personal information about your goals, projects,
+# people, values, etc. This enables intelligent context matching in brain dumps.
+#
+# Set up context by:
+#   1. Creating context directory: mkdir -p ${HYPERION_CONFIG_DIR}/context
+#   2. Copying templates: cp ~/hyperion/context-templates/*.md ${HYPERION_CONFIG_DIR}/context/
+#   3. Editing files with your personal information
+#
+# See context-templates/README.md and docs/CUSTOMIZATION.md for details.
+#===============================================================================
+
+# Path to personal context files
+# Contains markdown files: goals.md, projects.md, values.md, habits.md, people.md,
+# desires.md, serendipity.md
+# If not set, brain dumps will be processed without context matching
+# HYPERION_CONTEXT_DIR="${HYPERION_CONFIG_DIR}/context"

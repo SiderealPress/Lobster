@@ -8,10 +8,11 @@ This guide explains how to customize Hyperion using a private configuration repo
 2. [Quick Start](#2-quick-start)
 3. [Private Repo Structure](#3-private-repo-structure)
 4. [Configuration Files](#4-configuration-files)
-5. [Hooks](#5-hooks)
-6. [Keeping Your Private Repo Secure](#6-keeping-your-private-repo-secure)
-7. [Upgrading Hyperion](#7-upgrading-hyperion)
-8. [Troubleshooting](#8-troubleshooting)
+5. [Personal Context Directory](#5-personal-context-directory)
+6. [Hooks](#6-hooks)
+7. [Keeping Your Private Repo Secure](#7-keeping-your-private-repo-secure)
+8. [Upgrading Hyperion](#8-upgrading-hyperion)
+9. [Troubleshooting](#9-troubleshooting)
 
 ---
 
@@ -106,6 +107,14 @@ hyperion-config/
 ├── agents/                 # Custom agent definitions (optional)
 │   ├── my-custom-agent.md
 │   └── work-assistant.md
+├── context/                # Personal context for brain dumps (optional)
+│   ├── goals.md            # Long/short-term objectives
+│   ├── projects.md         # Active projects
+│   ├── values.md           # Core principles
+│   ├── habits.md           # Routines and preferences
+│   ├── people.md           # Key relationships
+│   ├── desires.md          # Wants and aspirations
+│   └── serendipity.md      # Random discoveries
 ├── scheduled-tasks/        # Custom scheduled jobs (optional)
 │   ├── jobs.json           # Job registry
 │   └── tasks/
@@ -123,6 +132,7 @@ hyperion-config/
 | `config.env` | **Replaces** default config |
 | `CLAUDE.md` | **Replaces** workspace context |
 | `agents/*.md` | **Merged** with default agents |
+| `context/*.md` | **Read** by brain-dumps agent for context matching |
 | `scheduled-tasks/` | **Merged** with default tasks |
 | `hooks/*.sh` | **Executed** at appropriate times |
 
@@ -300,7 +310,126 @@ Write a brief summary suitable for posting in Slack.
 
 ---
 
-## 5. Hooks
+## 5. Personal Context Directory
+
+The context directory enables the brain-dumps agent to understand your world - your goals, projects, people, and values. This persistent context allows for intelligent matching and enrichment of brain dumps.
+
+### Overview
+
+When you send a brain dump, the agent can:
+- Match mentioned projects to your actual project list
+- Recognize people you mention
+- Link thoughts to your stated goals
+- Check alignment with your values
+- Suggest additions to your context
+
+### Setting Up Context
+
+1. **Copy templates to your private config:**
+
+```bash
+# Create context directory
+mkdir -p ~/hyperion-config/context
+
+# Copy templates
+cp ~/hyperion/context-templates/*.md ~/hyperion-config/context/
+```
+
+2. **Configure the context path** in your `config.env`:
+
+```bash
+HYPERION_CONTEXT_DIR="${HYPERION_CONFIG_DIR}/context"
+```
+
+3. **Fill in your context files** - Edit each file to add your information:
+
+```bash
+nano ~/hyperion-config/context/goals.md
+nano ~/hyperion-config/context/projects.md
+# etc.
+```
+
+### Context Files
+
+| File | Purpose | Update Frequency |
+|------|---------|------------------|
+| `goals.md` | Long-term vision, annual objectives, current sprints | Monthly |
+| `projects.md` | Active, on-hold, and completed projects | Weekly |
+| `values.md` | Core principles, priorities, decision frameworks | Quarterly |
+| `habits.md` | Daily/weekly routines, preferences, time blocks | Monthly |
+| `people.md` | Key relationships, contacts, important dates | As needed |
+| `desires.md` | Wants, bucket list, aspirations not yet goals | Quarterly |
+| `serendipity.md` | Random discoveries, inspirations, interesting finds | Daily |
+
+### Example: projects.md
+
+```markdown
+# Projects
+
+## Active Projects
+
+### MyApp
+- **Status**: In Development
+- **Repository**: https://github.com/me/myapp
+- **Tech Stack**: TypeScript, React, PostgreSQL
+- **Current Focus**: Authentication system
+- **Next Milestone**: Beta launch (Feb 15)
+
+### Side Project
+- **Status**: Planning
+- **Tech Stack**: Python, FastAPI
+- **Current Focus**: Writing PRD
+```
+
+### Example: people.md
+
+```markdown
+# People
+
+## Professional Network
+
+### Alex Chen
+- **Relationship**: Manager
+- **Company**: Acme Corp
+- **Context**: Reports to VP of Engineering
+- **Notes**: Weekly 1:1 on Wednesdays
+
+## Friends
+
+### Mike
+- **Context**: College friend, lives in Austin
+- **Interests**: Hiking, startups
+- **Last Contact**: Coffee last month
+```
+
+### How Context is Used
+
+When processing a brain dump that mentions "the auth system for MyApp" and "call Mike":
+
+1. **Project matching**: Finds "MyApp" in projects.md, notes it's in development with auth focus
+2. **People matching**: Finds "Mike" in people.md, notes he's a hiking friend
+3. **Enrichment**: Adds labels `project:myapp`, links to repo, notes Mike context
+4. **Context update**: If new project or person detected, suggests adding them
+
+### Privacy Notes
+
+- Context files contain personal information
+- Always keep in a **private** repository
+- Set restrictive permissions: `chmod 600 ~/hyperion-config/context/*`
+- Review files before sharing any backups
+
+### Tips
+
+- **Start small**: Fill in essentials first, expand over time
+- **Be honest**: Context works best when it reflects reality
+- **Review regularly**: Outdated context can be misleading
+- **Use templates**: The commented examples show expected format
+
+See [context-templates/README.md](../context-templates/README.md) and [BRAIN-DUMPS.md](BRAIN-DUMPS.md) for more details.
+
+---
+
+## 6. Hooks
 
 Hooks are scripts that run at specific points during installation or updates.
 
@@ -385,7 +514,7 @@ chmod +x ~/hyperion-config/hooks/*.sh
 
 ---
 
-## 6. Keeping Your Private Repo Secure
+## 7. Keeping Your Private Repo Secure
 
 ### Recommended .gitignore
 
@@ -445,7 +574,7 @@ config.local.env
 
 ---
 
-## 7. Upgrading Hyperion
+## 8. Upgrading Hyperion
 
 The overlay pattern makes upgrades straightforward:
 
@@ -508,7 +637,7 @@ HYPERION_CONFIG_DIR=~/hyperion-config ./install.sh
 
 ---
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
 ### Common Issues
 
