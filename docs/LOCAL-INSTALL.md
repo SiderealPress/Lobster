@@ -15,9 +15,12 @@ This guide walks you through setting up Hyperion inside a VM on your local compu
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    Host Machine (Mac/Windows/Linux)          │
+│                 Host Machine (Linux/Mac/Windows)             │
 ├─────────────────────────────────────────────────────────────┤
-│  VM Software (UTM, VirtualBox, VMware, Parallels)           │
+│  VM Software:                                                │
+│    • Linux: KVM/virt-manager, GNOME Boxes, VirtualBox       │
+│    • macOS: UTM, VirtualBox, VMware, Parallels              │
+│    • Windows: VirtualBox, VMware, Hyper-V                   │
 │    │                                                         │
 │    └── Debian 12 VM                                         │
 │          ├── Tailscale (with Funnel enabled)                │
@@ -33,35 +36,86 @@ This guide walks you through setting up Hyperion inside a VM on your local compu
 
 | Requirement | Details |
 |-------------|---------|
-| **VM Software** | UTM (Mac), VirtualBox (any platform), VMware, or Parallels |
-| **Debian 12 ISO** | Download from [debian.org](https://www.debian.org/download) or use UTM gallery |
+| **VM Software** | See platform-specific options below |
+| **Debian 12 ISO** | Download from [debian.org](https://www.debian.org/download) |
 | **Tailscale Account** | Free tier works - [tailscale.com](https://tailscale.com) |
 | **Claude Max** | Authenticated Claude Code subscription |
 | **VM Resources** | 4GB RAM, 2 CPUs, 20GB disk recommended |
 
+### VM Software by Platform
+
+| Platform | Recommended | Alternatives |
+|----------|-------------|--------------|
+| **Linux** | KVM/virt-manager (best performance) | VirtualBox, GNOME Boxes |
+| **macOS** | UTM (free, native) | VirtualBox, VMware Fusion, Parallels |
+| **Windows** | VirtualBox (free) | VMware Workstation, Hyper-V |
+
 ## Step 1: Create the Virtual Machine
 
-### macOS (UTM - Recommended)
+Choose the instructions for your host operating system:
 
-1. Download and install [UTM](https://mac.getutm.app/) (free)
+### Linux (KVM/virt-manager - Recommended)
 
-2. Create a new VM:
-   - Click **Create a New Virtual Machine**
-   - Select **Virtualize** (faster) or **Emulate** (for Apple Silicon compatibility)
-   - Choose **Linux**
-   - Select the Debian 12 ISO or download from the gallery
+KVM provides near-native performance since it's built into the Linux kernel.
 
-3. Configure resources:
-   - Memory: 4096 MB (4 GB)
-   - CPU Cores: 2
-   - Storage: 20 GB
+1. Install KVM and virt-manager:
+   ```bash
+   # Debian/Ubuntu
+   sudo apt install -y qemu-kvm libvirt-daemon-system virt-manager
 
-4. Complete the Debian installation:
+   # Fedora
+   sudo dnf install -y @virtualization
+
+   # Arch
+   sudo pacman -S qemu-full virt-manager libvirt
+   ```
+
+2. Add your user to the libvirt group:
+   ```bash
+   sudo usermod -aG libvirt $USER
+   newgrp libvirt
+   ```
+
+3. Start libvirtd:
+   ```bash
+   sudo systemctl enable --now libvirtd
+   ```
+
+4. Open virt-manager and create a new VM:
+   - Click **Create a new virtual machine**
+   - Select **Local install media (ISO image)**
+   - Browse to your Debian 12 ISO
+   - Allocate 4096 MB RAM and 2 CPUs
+   - Create a 20 GB disk
+   - Name it `hyperion`
+
+5. Complete the Debian installation:
    - Choose minimal/standard installation
    - Set a username and password
    - When prompted for software, select **SSH server** and **standard system utilities**
 
-### Windows/Linux (VirtualBox)
+### Linux (GNOME Boxes - Simpler)
+
+GNOME Boxes is simpler but less configurable than virt-manager.
+
+1. Install GNOME Boxes:
+   ```bash
+   # Debian/Ubuntu
+   sudo apt install -y gnome-boxes
+
+   # Fedora
+   sudo dnf install -y gnome-boxes
+   ```
+
+2. Open Boxes and click **+** → **Create a Virtual Machine**
+
+3. Select the Debian 12 ISO and follow the wizard
+
+4. Adjust resources in VM preferences (4GB RAM recommended)
+
+### Linux/Windows (VirtualBox)
+
+VirtualBox works on any platform but has more overhead than KVM on Linux.
 
 1. Download and install [VirtualBox](https://www.virtualbox.org/)
 
@@ -81,7 +135,29 @@ This guide walks you through setting up Hyperion inside a VM on your local compu
 
 5. Start the VM and complete Debian installation
 
-### VMware / Parallels
+### macOS (UTM - Recommended)
+
+UTM is a free, native macOS app built on QEMU.
+
+1. Download and install [UTM](https://mac.getutm.app/) (free)
+
+2. Create a new VM:
+   - Click **Create a New Virtual Machine**
+   - Select **Virtualize** (faster) or **Emulate** (for Apple Silicon compatibility)
+   - Choose **Linux**
+   - Select the Debian 12 ISO or download from the gallery
+
+3. Configure resources:
+   - Memory: 4096 MB (4 GB)
+   - CPU Cores: 2
+   - Storage: 20 GB
+
+4. Complete the Debian installation:
+   - Choose minimal/standard installation
+   - Set a username and password
+   - When prompted for software, select **SSH server** and **standard system utilities**
+
+### macOS/Windows (VMware, Parallels)
 
 Follow similar steps - create a Debian 12 VM with 4GB RAM, 2 CPUs, and 20GB disk.
 
@@ -208,23 +284,39 @@ This script will:
 
 Most VM software supports running VMs in the background:
 
-- **UTM**: Right-click VM → Run without window
+- **KVM/virsh**: `virsh start hyperion` (runs headless by default)
+- **virt-manager**: Close the console window; VM keeps running
+- **GNOME Boxes**: Minimize the window; VM keeps running
 - **VirtualBox**: `VBoxManage startvm hyperion --type headless`
+- **UTM**: Right-click VM → Run without window
 - **VMware**: Run in background mode
 
 ### Option B: Auto-start on Host Boot
 
 Configure your VM to start automatically when your computer boots:
 
-- **UTM**: Currently requires third-party tools
+- **KVM/libvirt**: `virsh autostart hyperion`
 - **VirtualBox**: `VBoxManage modifyvm hyperion --autostart-enabled on`
+- **UTM**: Currently requires third-party tools
 - **VMware**: Enable in VM settings
+- **systemd (any)**: Create a systemd service to start your VM
 
 ## Troubleshooting
 
 ### VM Won't Start
 
 - Ensure virtualization is enabled in BIOS/UEFI (VT-x/AMD-V)
+- On Linux, verify KVM is available:
+  ```bash
+  # Check for hardware virtualization support
+  grep -E '(vmx|svm)' /proc/cpuinfo
+
+  # Check if KVM module is loaded
+  lsmod | grep kvm
+
+  # If using kvm-ok (from cpu-checker package)
+  sudo apt install -y cpu-checker && kvm-ok
+  ```
 - On Mac with Apple Silicon, use UTM's Virtualize mode for best performance
 
 ### Tailscale Authentication Issues
