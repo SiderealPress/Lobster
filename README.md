@@ -62,6 +62,17 @@ cd hyperion
 bash install.sh
 ```
 
+## Local Installation (VM + Tailscale)
+
+Want to run Hyperion on your local machine instead of a cloud server? You can run it inside a VM with Tailscale Funnel for internet access:
+
+1. Create a Debian 12 VM (UTM, VirtualBox, or VMware)
+2. Install Tailscale and authenticate
+3. Run the standard `install.sh`
+4. Enable Tailscale Funnel
+
+See [docs/LOCAL-INSTALL.md](docs/LOCAL-INSTALL.md) for the full step-by-step guide.
+
 ## Configuration
 
 ### Quick Start (Default Settings)
