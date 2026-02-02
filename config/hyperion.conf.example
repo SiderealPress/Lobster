@@ -138,3 +138,59 @@ HYPERION_BRAIN_DUMPS_REPO="${HYPERION_BRAIN_DUMPS_REPO:-brain-dumps}"
 # desires.md, serendipity.md
 # If not set, brain dumps will be processed without context matching
 # HYPERION_CONTEXT_DIR="${HYPERION_CONFIG_DIR}/context"
+
+#===============================================================================
+# Slack Integration (Optional)
+#===============================================================================
+# Enable Slack as a message source alongside or instead of Telegram.
+# Uses Socket Mode for simplicity (no public webhook URL required).
+#
+# Setup instructions:
+#   1. Create a Slack app at https://api.slack.com/apps
+#   2. Enable Socket Mode in your app settings
+#   3. Add the following OAuth scopes under "OAuth & Permissions":
+#      - app_mentions:read     (to receive @mentions)
+#      - channels:history      (to read channel messages)
+#      - channels:read         (to get channel info)
+#      - chat:write            (to send messages)
+#      - files:read            (to download shared files)
+#      - groups:history        (for private channels)
+#      - groups:read           (for private channel info)
+#      - im:history            (for direct messages)
+#      - im:read               (for DM info)
+#      - reactions:write       (to add emoji reactions)
+#      - users:read            (to get user info)
+#   4. Subscribe to bot events under "Event Subscriptions":
+#      - app_mention           (when someone @mentions the bot)
+#      - message.channels      (messages in public channels)
+#      - message.groups        (messages in private channels)
+#      - message.im            (direct messages)
+#   5. Install the app to your workspace
+#   6. Copy the Bot User OAuth Token (starts with xoxb-)
+#   7. Generate an App-Level Token with connections:write scope (starts with xapp-)
+#
+# See docs/SLACK-SETUP.md for detailed setup instructions.
+#===============================================================================
+
+# Enable the Slack router service
+# When true, hyperion-slack-router.service will be enabled
+# HYPERION_ENABLE_SLACK="${HYPERION_ENABLE_SLACK:-false}"
+
+# Slack Bot User OAuth Token (starts with xoxb-)
+# Get this from: Your App > OAuth & Permissions > Bot User OAuth Token
+# HYPERION_SLACK_BOT_TOKEN=""
+
+# Slack App-Level Token (starts with xapp-)
+# Get this from: Your App > Basic Information > App-Level Tokens
+# Must have connections:write scope for Socket Mode
+# HYPERION_SLACK_APP_TOKEN=""
+
+# Optional: Restrict to specific channels (comma-separated channel IDs)
+# If empty, bot responds in all channels where it's invited
+# Channel IDs look like: C01ABCDEF12
+# HYPERION_SLACK_ALLOWED_CHANNELS=""
+
+# Optional: Restrict to specific users (comma-separated user IDs)
+# If empty, bot responds to all users
+# User IDs look like: U01ABCDEF12
+# HYPERION_SLACK_ALLOWED_USERS=""

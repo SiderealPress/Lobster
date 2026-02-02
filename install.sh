@@ -602,7 +602,7 @@ fi
 
 source .venv/bin/activate
 pip install --quiet --upgrade pip
-pip install --quiet mcp python-telegram-bot watchdog python-dotenv
+pip install --quiet mcp python-telegram-bot watchdog python-dotenv slack-bolt
 deactivate
 
 success "Python environment ready"
@@ -781,6 +781,14 @@ generate_from_template \
     "$CLAUDE_TEMPLATE" \
     "$INSTALL_DIR/services/hyperion-claude.service"
 
+# Generate Slack router service if template exists
+SLACK_ROUTER_TEMPLATE="$INSTALL_DIR/services/hyperion-slack-router.service.template"
+if [ -f "$SLACK_ROUTER_TEMPLATE" ]; then
+    generate_from_template \
+        "$SLACK_ROUTER_TEMPLATE" \
+        "$INSTALL_DIR/services/hyperion-slack-router.service"
+fi
+
 #===============================================================================
 # Install Services
 #===============================================================================
@@ -789,6 +797,13 @@ step "Installing systemd services..."
 
 sudo cp "$INSTALL_DIR/services/hyperion-router.service" /etc/systemd/system/
 sudo cp "$INSTALL_DIR/services/hyperion-claude.service" /etc/systemd/system/
+
+# Install Slack router service if generated
+if [ -f "$INSTALL_DIR/services/hyperion-slack-router.service" ]; then
+    sudo cp "$INSTALL_DIR/services/hyperion-slack-router.service" /etc/systemd/system/
+    info "Slack router service installed (enable manually with: sudo systemctl enable hyperion-slack-router)"
+fi
+
 sudo systemctl daemon-reload
 
 success "Services installed"

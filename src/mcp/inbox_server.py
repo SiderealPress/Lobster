@@ -75,6 +75,10 @@ SOURCES = {
         "name": "Telegram",
         "enabled": True,
     },
+    "slack": {
+        "name": "Slack",
+        "enabled": True,
+    },
 }
 
 server = Server("hyperion-inbox")
@@ -118,13 +122,16 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="send_reply",
-            description="Send a reply to a message. The reply will be routed back to the original source (Telegram, SMS, etc.). Supports optional inline keyboard buttons for Telegram.",
+            description="Send a reply to a message. The reply will be routed back to the original source (Telegram, Slack, SMS, etc.). Supports optional inline keyboard buttons for Telegram and thread replies for Slack.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "chat_id": {
-                        "type": "integer",
-                        "description": "The chat ID to reply to (from the original message).",
+                        "oneOf": [
+                            {"type": "integer"},
+                            {"type": "string"}
+                        ],
+                        "description": "The chat/channel ID to reply to (from the original message). Integer for Telegram, string for Slack.",
                     },
                     "text": {
                         "type": "string",
@@ -132,8 +139,12 @@ async def list_tools() -> list[Tool]:
                     },
                     "source": {
                         "type": "string",
-                        "description": "The source to reply via (telegram, sms, signal). Default: telegram.",
+                        "description": "The source to reply via (telegram, slack, sms, signal). Default: telegram.",
                         "default": "telegram",
+                    },
+                    "thread_ts": {
+                        "type": "string",
+                        "description": "Slack thread timestamp. If provided, reply will be sent as a thread reply. Get this from the original message's thread_ts or slack_ts field.",
                     },
                     "buttons": {
                         "type": "array",
@@ -747,6 +758,7 @@ async def handle_send_reply(args: dict) -> list[TextContent]:
     text = args.get("text", "")
     source = args.get("source", "telegram").lower()
     buttons = args.get("buttons")
+    thread_ts = args.get("thread_ts")
 
     if not chat_id or not text:
         return [TextContent(type="text", text="Error: chat_id and text are required.")]
@@ -765,12 +777,17 @@ async def handle_send_reply(args: dict) -> list[TextContent]:
     if buttons and source == "telegram":
         reply_data["buttons"] = buttons
 
+    # Include thread_ts if provided (Slack only)
+    if thread_ts and source == "slack":
+        reply_data["thread_ts"] = thread_ts
+
     outbox_file = OUTBOX_DIR / f"{reply_id}.json"
     with open(outbox_file, "w") as f:
         json.dump(reply_data, f, indent=2)
 
     button_info = f" with {sum(len(row) for row in buttons)} button(s)" if buttons else ""
-    return [TextContent(type="text", text=f"✅ Reply queued for {source} (chat {chat_id}){button_info}:\n\n{text[:100]}{'...' if len(text) > 100 else ''}")]
+    thread_info = f" (thread reply)" if thread_ts and source == "slack" else ""
+    return [TextContent(type="text", text=f"✅ Reply queued for {source} (chat {chat_id}){button_info}{thread_info}:\n\n{text[:100]}{'...' if len(text) > 100 else ''}")]
 
 
 async def handle_mark_processed(args: dict) -> list[TextContent]:
