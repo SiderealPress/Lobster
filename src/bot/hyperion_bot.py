@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Hyperion Bot v2 - File-based message passing to master Claude session
+Lobster Bot v2 - File-based message passing to master Claude session
 
 Instead of spawning Claude processes, this bot:
 1. Writes incoming messages to ~/messages/inbox/
@@ -44,7 +44,7 @@ AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
 # Logging
-LOG_DIR = Path.home() / "hyperion-workspace" / "logs"
+LOG_DIR = Path.home() / "lobster-workspace" / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(
@@ -55,7 +55,7 @@ logging.basicConfig(
         logging.FileHandler(LOG_DIR / "telegram-bot.log"),
     ],
 )
-log = logging.getLogger("hyperion")
+log = logging.getLogger("lobster")
 
 # Global reference to the bot app and event loop for sending replies
 bot_app = None
@@ -200,7 +200,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         f"👋 Hey {user.first_name}!\n\n"
-        "I'm Hyperion. Messages you send here go to the master Claude session.\n\n"
+        "I'm Lobster. Messages you send here go to the master Claude session.\n\n"
         "The session will process them and reply back here."
     )
 
@@ -422,7 +422,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def run_bot():
     global bot_app, main_loop
 
-    log.info("Starting Hyperion Bot v2 (file-based)...")
+    log.info("Starting Lobster Bot v2 (file-based)...")
     log.info(f"Inbox: {INBOX_DIR}")
     log.info(f"Outbox: {OUTBOX_DIR}")
 

@@ -1,6 +1,6 @@
-# Customizing Hyperion
+# Customizing Lobster
 
-This guide explains how to customize Hyperion using a private configuration repository. The private repo overlay pattern keeps your personal settings separate from the public codebase, enabling clean upgrades and portable configuration.
+This guide explains how to customize Lobster using a private configuration repository. The private repo overlay pattern keeps your personal settings separate from the public codebase, enabling clean upgrades and portable configuration.
 
 ## Table of Contents
 
@@ -44,8 +44,8 @@ Set up a private config repo in minutes:
 
 ```bash
 # Create and initialize the config directory
-mkdir ~/hyperion-config
-cd ~/hyperion-config
+mkdir ~/lobster-config
+cd ~/lobster-config
 git init
 
 # Create the basic structure
@@ -56,7 +56,7 @@ mkdir -p agents scheduled-tasks/tasks hooks
 
 ```bash
 # Copy the existing config.env (contains your credentials)
-cp ~/hyperion/config/config.env ~/hyperion-config/config.env
+cp ~/lobster/config/config.env ~/lobster-config/config.env
 ```
 
 ### Step 3: Set the Overlay Path
@@ -64,7 +64,7 @@ cp ~/hyperion/config/config.env ~/hyperion-config/config.env
 Add this to your shell profile (`~/.bashrc` or `~/.zshrc`):
 
 ```bash
-export HYPERION_CONFIG_DIR=~/hyperion-config
+export LOBSTER_CONFIG_DIR=~/lobster-config
 ```
 
 Reload your shell:
@@ -76,7 +76,7 @@ source ~/.bashrc  # or source ~/.zshrc
 ### Step 4: Apply the Overlay
 
 ```bash
-cd ~/hyperion
+cd ~/lobster
 ./install.sh
 ```
 
@@ -85,12 +85,12 @@ The installer will detect your private config directory and apply the overlay.
 ### Step 5: Push to a Private Remote (Recommended)
 
 ```bash
-cd ~/hyperion-config
+cd ~/lobster-config
 git add .
 git commit -m "Initial configuration"
 
 # Create a private repo on GitHub, then:
-git remote add origin git@github.com:YOUR_USERNAME/hyperion-config.git
+git remote add origin git@github.com:YOUR_USERNAME/lobster-config.git
 git push -u origin main
 ```
 
@@ -101,7 +101,7 @@ git push -u origin main
 Your private config repo can contain any of the following:
 
 ```
-hyperion-config/
+lobster-config/
 ├── config.env              # Credentials and settings (REQUIRED)
 ├── CLAUDE.md               # Custom Claude context (optional)
 ├── agents/                 # Custom agent definitions (optional)
@@ -145,7 +145,7 @@ hyperion-config/
 The main configuration file containing your credentials and settings.
 
 ```bash
-# Hyperion Configuration
+# Lobster Configuration
 # WARNING: This file contains secrets. Never share or commit to public repos.
 # Ensure file permissions are restrictive: chmod 600 config.env
 #
@@ -185,7 +185,7 @@ TELEGRAM_ALLOWED_USERS=123456789
 Custom instructions for Claude. When present in your private repo, this **completely replaces** the default workspace context.
 
 ```markdown
-# My Hyperion Context
+# My Lobster Context
 
 You are my personal assistant with these specializations:
 
@@ -207,25 +207,25 @@ When I say "morning brief", summarize my calendar and tasks.
 if you want to extend rather than replace it]
 ```
 
-**Tip:** To extend rather than replace the default behavior, copy the contents of `~/hyperion/CLAUDE.md` into your custom version and add your modifications.
+**Tip:** To extend rather than replace the default behavior, copy the contents of `~/lobster/CLAUDE.md` into your custom version and add your modifications.
 
 ### agents/*.md (Optional)
 
-Define custom Claude Code agents for specialized tasks. These are **merged** with the default agents in `~/hyperion/.claude/agents/`.
+Define custom Claude Code agents for specialized tasks. These are **merged** with the default agents in `~/lobster/.claude/agents/`.
 
 **Built-in agents you can override:**
 
 | Agent | Description |
 |-------|-------------|
 | `functional-engineer.md` | Implements GitHub issues with functional programming patterns |
-| `hyperion-ops.md` | System operations and maintenance |
+| `lobster-ops.md` | System operations and maintenance |
 | `brain-dumps.md` | Processes voice note brain dumps into GitHub issues |
 
 To customize a built-in agent, copy it to your private config and modify:
 
 ```bash
 # Example: Customize the brain-dumps agent
-cp ~/hyperion/.claude/agents/brain-dumps.md ~/hyperion-config/agents/brain-dumps.md
+cp ~/lobster/.claude/agents/brain-dumps.md ~/lobster-config/agents/brain-dumps.md
 # Edit to add custom labels, change behavior, etc.
 ```
 
@@ -329,23 +329,23 @@ When you send a brain dump, the agent can:
 
 ```bash
 # Create context directory
-mkdir -p ~/hyperion-config/context
+mkdir -p ~/lobster-config/context
 
 # Copy templates
-cp ~/hyperion/context-templates/*.md ~/hyperion-config/context/
+cp ~/lobster/context-templates/*.md ~/lobster-config/context/
 ```
 
 2. **Configure the context path** in your `config.env`:
 
 ```bash
-HYPERION_CONTEXT_DIR="${HYPERION_CONFIG_DIR}/context"
+LOBSTER_CONTEXT_DIR="${LOBSTER_CONFIG_DIR}/context"
 ```
 
 3. **Fill in your context files** - Edit each file to add your information:
 
 ```bash
-nano ~/hyperion-config/context/goals.md
-nano ~/hyperion-config/context/projects.md
+nano ~/lobster-config/context/goals.md
+nano ~/lobster-config/context/projects.md
 # etc.
 ```
 
@@ -415,7 +415,7 @@ When processing a brain dump that mentions "the auth system for MyApp" and "call
 
 - Context files contain personal information
 - Always keep in a **private** repository
-- Set restrictive permissions: `chmod 600 ~/hyperion-config/context/*`
+- Set restrictive permissions: `chmod 600 ~/lobster-config/context/*`
 - Review files before sharing any backups
 
 ### Tips
@@ -444,19 +444,19 @@ Runs after `install.sh` completes. Use for:
 
 ```bash
 #!/bin/bash
-# ~/hyperion-config/hooks/post-install.sh
+# ~/lobster-config/hooks/post-install.sh
 
 set -e
 
 echo "Running post-install customizations..."
 
 # Install additional Python packages
-source ~/hyperion/.venv/bin/activate
+source ~/lobster/.venv/bin/activate
 pip install pandas matplotlib
 deactivate
 
 # Set up custom symlinks
-ln -sf ~/hyperion-config/my-scripts ~/scripts
+ln -sf ~/lobster-config/my-scripts ~/scripts
 
 # Configure external services
 if command -v ngrok &> /dev/null; then
@@ -483,25 +483,25 @@ Runs after `git pull` updates the main repository. Use for:
 
 ```bash
 #!/bin/bash
-# ~/hyperion-config/hooks/post-update.sh
+# ~/lobster-config/hooks/post-update.sh
 
 set -e
 
 echo "Running post-update customizations..."
 
 # Clear any caches
-rm -rf ~/hyperion-workspace/.cache/*
+rm -rf ~/lobster-workspace/.cache/*
 
 # Rebuild whisper.cpp if needed
-if [ -d ~/hyperion-workspace/whisper.cpp ]; then
-    cd ~/hyperion-workspace/whisper.cpp
+if [ -d ~/lobster-workspace/whisper.cpp ]; then
+    cd ~/lobster-workspace/whisper.cpp
     git pull
     make -j$(nproc)
 fi
 
 # Restart services to pick up changes
-sudo systemctl restart hyperion-router
-sudo systemctl restart hyperion-claude
+sudo systemctl restart lobster-router
+sudo systemctl restart lobster-claude
 
 echo "Post-update complete!"
 ```
@@ -509,7 +509,7 @@ echo "Post-update complete!"
 **Important:** Make your hooks executable:
 
 ```bash
-chmod +x ~/hyperion-config/hooks/*.sh
+chmod +x ~/lobster-config/hooks/*.sh
 ```
 
 ---
@@ -574,7 +574,7 @@ config.local.env
 
 ---
 
-## 8. Upgrading Hyperion
+## 8. Upgrading Lobster
 
 The overlay pattern makes upgrades straightforward:
 
@@ -582,14 +582,14 @@ The overlay pattern makes upgrades straightforward:
 
 ```bash
 # 1. Pull latest from upstream
-cd ~/hyperion
+cd ~/lobster
 git pull origin main
 
 # 2. Re-run installer to apply your overlay
-HYPERION_CONFIG_DIR=~/hyperion-config ./install.sh
+LOBSTER_CONFIG_DIR=~/lobster-config ./install.sh
 
 # 3. Restart services
-hyperion restart
+lobster restart
 ```
 
 ### Checking for Breaking Changes
@@ -597,7 +597,7 @@ hyperion restart
 Before upgrading, review the changelog:
 
 ```bash
-cd ~/hyperion
+cd ~/lobster
 
 # See what's new
 git fetch origin
@@ -613,7 +613,7 @@ If the config format changes:
 
 1. Compare your config with the new example:
    ```bash
-   diff ~/hyperion-config/config.env ~/hyperion/config/config.env.example
+   diff ~/lobster-config/config.env ~/lobster/config/config.env.example
    ```
 
 2. Add any new required variables to your config
@@ -623,7 +623,7 @@ If the config format changes:
 ### Rollback (If Needed)
 
 ```bash
-cd ~/hyperion
+cd ~/lobster
 
 # See available versions
 git tag -l
@@ -632,7 +632,7 @@ git tag -l
 git checkout v1.2.3
 
 # Re-apply overlay
-HYPERION_CONFIG_DIR=~/hyperion-config ./install.sh
+LOBSTER_CONFIG_DIR=~/lobster-config ./install.sh
 ```
 
 ---
@@ -648,39 +648,39 @@ HYPERION_CONFIG_DIR=~/hyperion-config ./install.sh
 **Solutions:**
 1. Verify the environment variable is set:
    ```bash
-   echo $HYPERION_CONFIG_DIR
+   echo $LOBSTER_CONFIG_DIR
    ```
 
 2. Re-run the installer:
    ```bash
-   cd ~/hyperion && ./install.sh
+   cd ~/lobster && ./install.sh
    ```
 
 3. Check file permissions:
    ```bash
-   ls -la ~/hyperion-config/
+   ls -la ~/lobster-config/
    ```
 
 #### Services Won't Start
 
-**Symptom:** `hyperion status` shows services as failed.
+**Symptom:** `lobster status` shows services as failed.
 
 **Solutions:**
 1. Check the logs:
    ```bash
-   hyperion logs
-   journalctl -u hyperion-router -n 50
-   journalctl -u hyperion-claude -n 50
+   lobster logs
+   journalctl -u lobster-router -n 50
+   journalctl -u lobster-claude -n 50
    ```
 
 2. Verify config.env syntax:
    ```bash
-   source ~/hyperion-config/config.env && echo "Config OK"
+   source ~/lobster-config/config.env && echo "Config OK"
    ```
 
 3. Check for missing dependencies:
    ```bash
-   ~/hyperion/.venv/bin/python -c "import telegram; print('OK')"
+   ~/lobster/.venv/bin/python -c "import telegram; print('OK')"
    ```
 
 #### Hooks Not Running
@@ -690,18 +690,18 @@ HYPERION_CONFIG_DIR=~/hyperion-config ./install.sh
 **Solutions:**
 1. Check execution permission:
    ```bash
-   ls -la ~/hyperion-config/hooks/
-   chmod +x ~/hyperion-config/hooks/*.sh
+   ls -la ~/lobster-config/hooks/
+   chmod +x ~/lobster-config/hooks/*.sh
    ```
 
 2. Test manually:
    ```bash
-   bash -x ~/hyperion-config/hooks/post-install.sh
+   bash -x ~/lobster-config/hooks/post-install.sh
    ```
 
 3. Check for syntax errors:
    ```bash
-   bash -n ~/hyperion-config/hooks/post-install.sh
+   bash -n ~/lobster-config/hooks/post-install.sh
    ```
 
 #### Scheduled Jobs Not Running
@@ -716,17 +716,17 @@ HYPERION_CONFIG_DIR=~/hyperion-config ./install.sh
 
 2. Check crontab entries:
    ```bash
-   crontab -l | grep HYPERION
+   crontab -l | grep LOBSTER
    ```
 
 3. Sync the crontab:
    ```bash
-   ~/hyperion/scheduled-tasks/sync-crontab.sh
+   ~/lobster/scheduled-tasks/sync-crontab.sh
    ```
 
 4. Check job logs:
    ```bash
-   ls -la ~/hyperion/scheduled-tasks/logs/
+   ls -la ~/lobster/scheduled-tasks/logs/
    ```
 
 #### Custom CLAUDE.md Not Working
@@ -736,17 +736,17 @@ HYPERION_CONFIG_DIR=~/hyperion-config ./install.sh
 **Solutions:**
 1. Verify the file exists in the workspace:
    ```bash
-   cat ~/hyperion-workspace/CLAUDE.md
+   cat ~/lobster-workspace/CLAUDE.md
    ```
 
 2. Re-run installer to copy it:
    ```bash
-   cd ~/hyperion && ./install.sh
+   cd ~/lobster && ./install.sh
    ```
 
 3. Restart the Claude service:
    ```bash
-   hyperion restart
+   lobster restart
    ```
 
 ### Getting Help
@@ -761,9 +761,9 @@ If you're still stuck:
 
 ## Summary
 
-The private repo overlay pattern provides a clean separation between Hyperion's core code and your personal customizations. By maintaining your configuration in a separate repository, you can:
+The private repo overlay pattern provides a clean separation between Lobster's core code and your personal customizations. By maintaining your configuration in a separate repository, you can:
 
-- Upgrade Hyperion without merge conflicts
+- Upgrade Lobster without merge conflicts
 - Version control your personal settings
 - Easily migrate between machines
 - Keep your secrets secure

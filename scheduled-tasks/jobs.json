@@ -8,7 +8,22 @@
       "created_at": "2026-01-24T09:30:05.271780+00:00",
       "updated_at": "2026-01-24T09:30:05.271780+00:00",
       "enabled": true,
-      "last_run": "2026-01-24T17:50:08+00:00",
+      "last_run": "2026-02-06T12:40:09+00:00",
+      "last_status": "success"
+    },
+    "status-ping": {
+      "last_run": "2026-01-29T23:40:16+00:00",
+      "last_status": "success"
+    },
+    "nightly-github-backup": {
+      "name": "nightly-github-backup",
+      "schedule": "0 0 * * *",
+      "schedule_human": "Daily at 0:00",
+      "task_file": "tasks/nightly-github-backup.md",
+      "created_at": "2026-01-30T01:36:44.078634+00:00",
+      "updated_at": "2026-01-30T01:36:44.078634+00:00",
+      "enabled": true,
+      "last_run": "2026-02-06T00:01:23+00:00",
       "last_status": "success"
     }
   }

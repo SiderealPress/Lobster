@@ -1,8 +1,8 @@
 #!/bin/bash
 #===============================================================================
-# Hyperion Update Script
+# Lobster Update Script
 #
-# Safely updates Hyperion: pulls repo changes, restarts services, and updates
+# Safely updates Lobster: pulls repo changes, restarts services, and updates
 # Claude Code CLI - all without data loss or significant downtime.
 #
 # Usage: ./update-hyperion.sh [--force] [--skip-claude] [--dry-run] [--rollback]
@@ -36,25 +36,25 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 # Directories
-HYPERION_DIR="$HOME/hyperion"
-WORKSPACE_DIR="$HOME/hyperion-workspace"
-BACKUP_BASE="$HOME/hyperion-backups"
+LOBSTER_DIR="$HOME/lobster"
+WORKSPACE_DIR="$HOME/lobster-workspace"
+BACKUP_BASE="$HOME/lobster-backups"
 MESSAGES_DIR="$HOME/messages"
-CONFIG_FILE="$HYPERION_DIR/config/config.env"
+CONFIG_FILE="$LOBSTER_DIR/config/config.env"
 
 # Lock file
-LOCK_FILE="/tmp/hyperion-update.lock"
+LOCK_FILE="/tmp/lobster-update.lock"
 
 # Services (in stop order - daemon first, then router)
-SERVICES_STOP=("hyperion-daemon" "hyperion-router")
+SERVICES_STOP=("lobster-daemon" "lobster-router")
 # Start order is reversed
-SERVICES_START=("hyperion-router" "hyperion-daemon")
+SERVICES_START=("lobster-router" "lobster-daemon")
 
 # State files to backup
 STATE_FILES=(
-    "$WORKSPACE_DIR/.hyperion_session_id"
+    "$WORKSPACE_DIR/.lobster_session_id"
     "$MESSAGES_DIR/tasks.json"
-    "$HYPERION_DIR/scheduled-tasks/jobs.json"
+    "$LOBSTER_DIR/scheduled-tasks/jobs.json"
     "$CONFIG_FILE"
 )
 
@@ -130,8 +130,8 @@ preflight_checks() {
     log STEP "Pre-flight checks"
 
     # Check we're in the right directory
-    if [ ! -d "$HYPERION_DIR/.git" ]; then
-        die "Hyperion repo not found at $HYPERION_DIR" 3
+    if [ ! -d "$LOBSTER_DIR/.git" ]; then
+        die "Lobster repo not found at $LOBSTER_DIR" 3
     fi
 
     # Check internet connectivity
@@ -148,7 +148,7 @@ preflight_checks() {
     log OK "Disk space OK ($(( free_kb / 1024 ))MB free)"
 
     # Check git status for uncommitted changes
-    cd "$HYPERION_DIR"
+    cd "$LOBSTER_DIR"
     if [ -n "$(git status --porcelain)" ]; then
         log WARN "Local changes detected in repo"
         if $DRY_RUN; then
@@ -247,7 +247,7 @@ stop_services() {
                 log INFO "Stopping $service..."
 
                 # For daemon, wait for Claude to finish current work
-                if [ "$service" = "hyperion-daemon" ]; then
+                if [ "$service" = "lobster-daemon" ]; then
                     # Send SIGTERM and wait up to 60 seconds
                     sudo systemctl stop "$service" --no-block 2>/dev/null || true
 
@@ -319,7 +319,7 @@ start_services() {
 git_update() {
     log STEP "Updating repository"
 
-    cd "$HYPERION_DIR"
+    cd "$LOBSTER_DIR"
 
     # Stash any local changes
     if [ -n "$(git status --porcelain)" ]; then
@@ -327,7 +327,7 @@ git_update() {
             log INFO "Would stash local changes"
         else
             log INFO "Stashing local changes..."
-            git stash push -m "hyperion-update-$(date +%Y%m%d-%H%M%S)" --quiet
+            git stash push -m "lobster-update-$(date +%Y%m%d-%H%M%S)" --quiet
         fi
     fi
 
@@ -365,7 +365,7 @@ git_update() {
 update_dependencies() {
     log STEP "Checking dependencies"
 
-    cd "$HYPERION_DIR"
+    cd "$LOBSTER_DIR"
 
     # Check if requirements.txt changed
     if git diff --name-only "$PREVIOUS_COMMIT..HEAD" 2>/dev/null | grep -q "requirements.txt"; then
@@ -422,7 +422,7 @@ update_claude_cli() {
 update_systemd() {
     log STEP "Checking systemd services"
 
-    cd "$HYPERION_DIR"
+    cd "$LOBSTER_DIR"
 
     # Check if service files changed
     local changed=false
@@ -459,16 +459,16 @@ update_systemd() {
 update_cli() {
     log STEP "Updating CLI"
 
-    cd "$HYPERION_DIR"
+    cd "$LOBSTER_DIR"
 
     if $DRY_RUN; then
-        log INFO "Would update /usr/local/bin/hyperion"
+        log INFO "Would update /usr/local/bin/lobster"
         return 0
     fi
 
     if [ -f "src/cli" ]; then
-        sudo cp "src/cli" "/usr/local/bin/hyperion"
-        sudo chmod +x "/usr/local/bin/hyperion"
+        sudo cp "src/cli" "/usr/local/bin/lobster"
+        sudo chmod +x "/usr/local/bin/lobster"
         log OK "CLI updated"
     fi
 }
@@ -498,14 +498,14 @@ health_checks() {
     done
 
     # Check MCP server registration
-    if claude mcp list 2>/dev/null | grep -q "hyperion-inbox"; then
+    if claude mcp list 2>/dev/null | grep -q "lobster-inbox"; then
         log OK "MCP server registered"
     else
         log WARN "MCP server may not be registered"
     fi
 
     # Check session ID file
-    if [ -f "$WORKSPACE_DIR/.hyperion_session_id" ]; then
+    if [ -f "$WORKSPACE_DIR/.lobster_session_id" ]; then
         log OK "Session ID file exists"
     else
         log WARN "Session ID file missing (new session will be created)"
@@ -581,7 +581,7 @@ perform_rollback() {
     # Restore git commit
     if [ -f "$latest_backup/git-commit.txt" ]; then
         local old_commit=$(cat "$latest_backup/git-commit.txt")
-        cd "$HYPERION_DIR"
+        cd "$LOBSTER_DIR"
         git checkout "$old_commit" --quiet 2>/dev/null || git reset --hard "$old_commit" --quiet
         log OK "Restored git commit: $old_commit"
     fi
@@ -659,7 +659,7 @@ send_notification() {
 }
 
 notify_success() {
-    local msg="<b>Hyperion updated successfully</b>
+    local msg="<b>Lobster updated successfully</b>
 Previous: <code>$PREVIOUS_COMMIT</code>
 Current:  <code>$CURRENT_COMMIT</code>
 All services running normally."
@@ -669,11 +669,11 @@ All services running normally."
 
 notify_failure() {
     local reason="$1"
-    local msg="<b>Hyperion update failed - rolled back</b>
+    local msg="<b>Lobster update failed - rolled back</b>
 Attempted: <code>${CURRENT_COMMIT:-unknown}</code>
 Restored:  <code>$PREVIOUS_COMMIT</code>
 Reason: $reason
-Check logs: ~/hyperion-backups/update-*.log"
+Check logs: ~/lobster-backups/update-*.log"
 
     send_notification "failure" "$msg"
 }
@@ -712,7 +712,7 @@ main() {
 
     echo -e "${BLUE}${BOLD}"
     echo "═══════════════════════════════════════════════════════════════"
-    echo "                    HYPERION UPDATE"
+    echo "                    LOBSTER UPDATE"
     echo "═══════════════════════════════════════════════════════════════"
     echo -e "${NC}"
 

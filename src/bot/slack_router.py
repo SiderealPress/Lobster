@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Hyperion Slack Router - File-based message passing to master Claude session
+Lobster Slack Router - File-based message passing to master Claude session
 
 Similar to the Telegram bot, this router:
 1. Writes incoming Slack messages to ~/messages/inbox/
@@ -29,17 +29,17 @@ from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
 # Configuration from environment
-SLACK_BOT_TOKEN = os.environ.get("HYPERION_SLACK_BOT_TOKEN", "")
-SLACK_APP_TOKEN = os.environ.get("HYPERION_SLACK_APP_TOKEN", "")
+SLACK_BOT_TOKEN = os.environ.get("LOBSTER_SLACK_BOT_TOKEN", "")
+SLACK_APP_TOKEN = os.environ.get("LOBSTER_SLACK_APP_TOKEN", "")
 
 if not SLACK_BOT_TOKEN:
-    raise ValueError("HYPERION_SLACK_BOT_TOKEN environment variable is required")
+    raise ValueError("LOBSTER_SLACK_BOT_TOKEN environment variable is required")
 if not SLACK_APP_TOKEN:
-    raise ValueError("HYPERION_SLACK_APP_TOKEN environment variable is required (starts with xapp-)")
+    raise ValueError("LOBSTER_SLACK_APP_TOKEN environment variable is required (starts with xapp-)")
 
 # Optional: Restrict to specific channel IDs or user IDs
-ALLOWED_CHANNELS = [x.strip() for x in os.environ.get("HYPERION_SLACK_ALLOWED_CHANNELS", "").split(",") if x.strip()]
-ALLOWED_USERS = [x.strip() for x in os.environ.get("HYPERION_SLACK_ALLOWED_USERS", "").split(",") if x.strip()]
+ALLOWED_CHANNELS = [x.strip() for x in os.environ.get("LOBSTER_SLACK_ALLOWED_CHANNELS", "").split(",") if x.strip()]
+ALLOWED_USERS = [x.strip() for x in os.environ.get("LOBSTER_SLACK_ALLOWED_USERS", "").split(",") if x.strip()]
 
 # Directories
 INBOX_DIR = Path.home() / "messages" / "inbox"
@@ -54,7 +54,7 @@ IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 FILES_DIR.mkdir(parents=True, exist_ok=True)
 
 # Logging
-LOG_DIR = Path.home() / "hyperion-workspace" / "logs"
+LOG_DIR = Path.home() / "lobster-workspace" / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(
@@ -65,7 +65,7 @@ logging.basicConfig(
         logging.FileHandler(LOG_DIR / "slack-router.log"),
     ],
 )
-log = logging.getLogger("hyperion-slack")
+log = logging.getLogger("lobster-slack")
 
 # Initialize Slack app
 app = App(token=SLACK_BOT_TOKEN)
@@ -397,7 +397,7 @@ def process_existing_outbox():
 
 def main():
     """Main entry point."""
-    log.info("Starting Hyperion Slack Router...")
+    log.info("Starting Lobster Slack Router...")
     log.info(f"Inbox: {INBOX_DIR}")
     log.info(f"Outbox: {OUTBOX_DIR}")
 

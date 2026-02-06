@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Hyperion Inbox MCP Server
+Lobster Inbox MCP Server
 
 Provides tools for Claude Code to interact with the message queue:
 - check_inbox: Get new messages from all sources
@@ -39,8 +39,11 @@ AUDIO_DIR = BASE_DIR / "audio"
 TASKS_FILE = BASE_DIR / "tasks.json"
 TASK_OUTPUTS_DIR = BASE_DIR / "task-outputs"
 
+# Heartbeat file for health monitoring
+HEARTBEAT_FILE = Path.home() / "lobster-workspace" / "logs" / "claude-heartbeat"
+
 # Scheduled Tasks Directories
-SCHEDULED_TASKS_DIR = Path.home() / "hyperion" / "scheduled-tasks"
+SCHEDULED_TASKS_DIR = Path.home() / "lobster" / "scheduled-tasks"
 SCHEDULED_JOBS_FILE = SCHEDULED_TASKS_DIR / "jobs.json"
 SCHEDULED_TASKS_TASKS_DIR = SCHEDULED_TASKS_DIR / "tasks"
 SCHEDULED_TASKS_LOGS_DIR = SCHEDULED_TASKS_DIR / "logs"
@@ -54,7 +57,7 @@ for d in [INBOX_DIR, OUTBOX_DIR, PROCESSED_DIR, CONFIG_DIR, AUDIO_DIR, TASK_OUTP
 # Try environment first, then fall back to config file
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 if not OPENAI_API_KEY:
-    config_file = Path.home() / "hyperion" / "config" / "config.env"
+    config_file = Path.home() / "lobster" / "config" / "config.env"
     if config_file.exists():
         for line in config_file.read_text().splitlines():
             if line.strip().startswith("OPENAI_API_KEY="):
@@ -81,7 +84,16 @@ SOURCES = {
     },
 }
 
-server = Server("hyperion-inbox")
+server = Server("lobster-inbox")
+
+
+def touch_heartbeat():
+    """Touch heartbeat file to signal Claude is alive and processing."""
+    try:
+        HEARTBEAT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        HEARTBEAT_FILE.touch()
+    except Exception:
+        pass  # Don't fail on heartbeat errors
 
 
 @server.list_tools()
@@ -204,7 +216,7 @@ async def list_tools() -> list[Tool]:
         # Task Management Tools
         Tool(
             name="list_tasks",
-            description="List all tasks with their status. Tasks are shared across all Hyperion sessions.",
+            description="List all tasks with their status. Tasks are shared across all Lobster sessions.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -660,10 +672,14 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
     """Block until new messages arrive in inbox, or return immediately if messages exist."""
     timeout = args.get("timeout", 300)
 
+    # Touch heartbeat at start - signals Claude is alive and waiting for messages
+    touch_heartbeat()
+
     # Check if messages already exist
     existing = list(INBOX_DIR.glob("*.json"))
     if existing:
         # Messages already waiting - return them immediately
+        touch_heartbeat()
         return await handle_check_inbox({"limit": 10})
 
     # No messages - set up inotify watcher and wait
@@ -680,18 +696,33 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
     observer.start()
 
     try:
-        # Wait in a thread-safe way
-        await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: message_arrived.wait(timeout=timeout)
-        )
+        # Wait with periodic heartbeats (every 60 seconds)
+        heartbeat_interval = 60
+        elapsed = 0
+
+        while elapsed < timeout:
+            wait_time = min(heartbeat_interval, timeout - elapsed)
+
+            arrived = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda wt=wait_time: message_arrived.wait(timeout=wt)
+            )
+
+            if arrived:
+                break
+
+            # Touch heartbeat to show we're still alive
+            touch_heartbeat()
+            elapsed += wait_time
 
         if message_arrived.is_set():
             # Small delay to ensure file is fully written
             await asyncio.sleep(0.1)
+            touch_heartbeat()
             return await handle_check_inbox({"limit": 10})
         else:
             # Timeout - prompt to call again
+            touch_heartbeat()
             return [TextContent(
                 type="text",
                 text=f"⏰ No messages received in the last {timeout} seconds. Call `wait_for_messages` again to continue waiting."
@@ -1039,8 +1070,8 @@ async def handle_delete_task(args: dict) -> list[TextContent]:
 
 # Paths for local whisper.cpp transcription
 FFMPEG_PATH = Path.home() / ".local" / "bin" / "ffmpeg"
-WHISPER_CPP_PATH = Path.home() / "hyperion-workspace" / "whisper.cpp" / "build" / "bin" / "whisper-cli"
-WHISPER_MODEL_PATH = Path.home() / "hyperion-workspace" / "whisper.cpp" / "models" / "ggml-small.bin"
+WHISPER_CPP_PATH = Path.home() / "lobster-workspace" / "whisper.cpp" / "build" / "bin" / "whisper-cli"
+WHISPER_MODEL_PATH = Path.home() / "lobster-workspace" / "whisper.cpp" / "models" / "ggml-small.bin"
 
 
 async def convert_ogg_to_wav(ogg_path: Path, wav_path: Path) -> bool:
@@ -1366,7 +1397,7 @@ async def handle_create_scheduled_job(args: dict) -> list[TextContent]:
 
 ## Context
 
-You are running as a scheduled task. The main Hyperion instance created this job.
+You are running as a scheduled task. The main Lobster instance created this job.
 
 ## Instructions
 
@@ -1379,7 +1410,7 @@ When you complete your task, call `write_task_output` with:
 - output: Your results/summary
 - status: "success" or "failed"
 
-Keep output concise. The main Hyperion instance will review this later.
+Keep output concise. The main Lobster instance will review this later.
 """
 
     task_file.write_text(task_content)
@@ -1515,7 +1546,7 @@ async def handle_update_scheduled_job(args: dict) -> list[TextContent]:
 
 ## Context
 
-You are running as a scheduled task. The main Hyperion instance created this job.
+You are running as a scheduled task. The main Lobster instance created this job.
 
 ## Instructions
 
@@ -1528,7 +1559,7 @@ When you complete your task, call `write_task_output` with:
 - output: Your results/summary
 - status: "success" or "failed"
 
-Keep output concise. The main Hyperion instance will review this later.
+Keep output concise. The main Lobster instance will review this later.
 """
         task_file.write_text(task_content)
         updated.append("context (task file rewritten)")

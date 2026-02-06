@@ -109,6 +109,9 @@ services:
       .venv/bin/python -c 'from telegram import Bot; print(\"Telegram import OK\")' &&
       .venv/bin/python -c 'from watchdog.observers import Observer; print(\"Watchdog import OK\")' &&
 
+      # Verify GitHub MCP configuration exists in setup.sh
+      grep -q 'GitHub MCP Server' setup.sh && echo 'GitHub MCP step found in setup.sh' &&
+
       # Run installation-specific tests
       .venv/bin/pip install pytest pytest-asyncio &&
       .venv/bin/pytest tests/integration/test_installation.py -v 2>/dev/null || echo 'Installation tests passed (basic)' &&
@@ -130,6 +133,47 @@ services:
           memory: 2G
     volumes:
       - test-results:/home/testuser/hyperion/test-results
+    networks:
+      - hyperion-test
+
+  # GitHub MCP installation test
+  github-mcp-test:
+    build:
+      context: ../..
+      dockerfile: tests/docker/Dockerfile.test
+    command: ["bash", "-c", "
+      echo '=== Testing GitHub MCP Installation ===' &&
+      cd /home/testuser/hyperion &&
+
+      # Create basic environment
+      mkdir -p /home/testuser/messages/{inbox,outbox,processed,config,audio,task-outputs} &&
+      mkdir -p /home/testuser/hyperion-workspace/logs &&
+
+      # Set up Python environment
+      python3 -m venv .venv &&
+      .venv/bin/pip install --upgrade pip &&
+      .venv/bin/pip install mcp python-telegram-bot watchdog python-dotenv &&
+
+      # Create config with GitHub PAT (passed via env var)
+      mkdir -p config &&
+      echo 'TELEGRAM_BOT_TOKEN=test_token' > config/config.env &&
+      echo 'TELEGRAM_ALLOWED_USERS=123456' >> config/config.env &&
+      if [ -n \"$GITHUB_PAT\" ]; then
+        echo \"GITHUB_PERSONAL_ACCESS_TOKEN=$GITHUB_PAT\" >> config/config.env &&
+        echo 'GitHub PAT configured in config.env'
+      fi &&
+
+      # Test Claude MCP configuration (mock - Claude CLI may not be available)
+      echo 'Testing MCP configuration commands...' &&
+      echo 'Would run: claude mcp add-json github ...' &&
+
+      # Verify setup.sh contains GitHub MCP step
+      grep -q 'GitHub MCP Server' setup.sh && echo 'setup.sh contains GitHub MCP step' &&
+
+      echo '=== GitHub MCP Installation Test Complete ==='
+    "]
+    environment:
+      - GITHUB_PAT=${GITHUB_PAT:-}
     networks:
       - hyperion-test
 

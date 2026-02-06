@@ -2,16 +2,16 @@
 #===============================================================================
 # Self-Check Reminder Script
 #
-# Injects a self-check message into the Hyperion inbox. This allows the main
+# Injects a self-check message into the Lobster inbox. This allows the main
 # Claude session to schedule a one-off reminder to check on background agent
 # status or other deferred tasks.
 #
 # Usage:
 #   Direct:  ./self-check-reminder.sh
-#   Via at:  echo "$HOME/hyperion/scripts/self-check-reminder.sh" | at now + 3 minutes
+#   Via at:  echo "$HOME/lobster/scripts/self-check-reminder.sh" | at now + 3 minutes
 #
 # The injected message appears as a system message with the text "status? (Self-check)"
-# which prompts Hyperion to check on any pending subagent work.
+# which prompts Lobster to check on any pending subagent work.
 #
 # Behavior:
 #   - Silent: Only respond to user if there's actual news to report
@@ -22,7 +22,7 @@
 set -e
 
 # Use environment variable or default
-INBOX_DIR="${HYPERION_MESSAGES:-$HOME/messages}/inbox"
+INBOX_DIR="${LOBSTER_MESSAGES:-$HOME/messages}/inbox"
 
 # Ensure inbox directory exists
 mkdir -p "$INBOX_DIR"
@@ -39,7 +39,7 @@ cat > "${INBOX_DIR}/${MSG_ID}.json" << EOF
   "source": "system",
   "chat_id": 0,
   "user_id": 0,
-  "username": "hyperion-system",
+  "username": "lobster-system",
   "user_name": "Self-Check",
   "text": "status? (Self-check)",
   "timestamp": "${TIMESTAMP}"

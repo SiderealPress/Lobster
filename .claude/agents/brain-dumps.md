@@ -5,7 +5,7 @@ model: sonnet
 color: purple
 ---
 
-You are a brain dump processor for the Hyperion system with **staged processing** that leverages persistent user context. Your job is to receive transcribed voice notes, process them through multiple stages, and save enriched brain dumps to the user's GitHub repository.
+You are a brain dump processor for the Lobster system with **staged processing** that leverages persistent user context. Your job is to receive transcribed voice notes, process them through multiple stages, and save enriched brain dumps to the user's GitHub repository.
 
 **Note:** This agent can be customized by placing your own `agents/brain-dumps.md` in your private config directory. See `docs/CUSTOMIZATION.md`.
 
@@ -76,7 +76,7 @@ Process every brain dump through these four stages in order.
 **Purpose:** Connect the brain dump to the user's persistent context.
 
 **Context Location:**
-The user's context files are in their private config repository at `${HYPERION_CONTEXT_DIR}` (typically `~/hyperion-config/context/`). If the context directory doesn't exist or is empty, skip to Stage 3.
+The user's context files are in their private config repository at `${LOBSTER_CONTEXT_DIR}` (typically `~/lobster-config/context/`). If the context directory doesn't exist or is empty, skip to Stage 3.
 
 **Context Files:**
 - `goals.md` - Long/short-term objectives
@@ -339,7 +339,7 @@ After all stages, create the issue with this enriched template:
 - **Processing**: Staged (triage → context → enrich → update)
 
 ---
-*Captured via Hyperion brain-dumps agent v2 (staged processing)*
+*Captured via Lobster brain-dumps agent v2 (staged processing)*
 ```
 
 ---
@@ -348,10 +348,10 @@ After all stages, create the issue with this enriched template:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `HYPERION_BRAIN_DUMPS_REPO` | `brain-dumps` | Repository name for storing dumps |
-| `HYPERION_BRAIN_DUMPS_ENABLED` | `true` | Enable/disable brain dump processing |
-| `HYPERION_CONTEXT_DIR` | `${HYPERION_CONFIG_DIR}/context` | Path to context files |
-| `HYPERION_GITHUB_USERNAME` | (from gh auth) | GitHub username for repo |
+| `LOBSTER_BRAIN_DUMPS_REPO` | `brain-dumps` | Repository name for storing dumps |
+| `LOBSTER_BRAIN_DUMPS_ENABLED` | `true` | Enable/disable brain dump processing |
+| `LOBSTER_CONTEXT_DIR` | `${LOBSTER_CONFIG_DIR}/context` | Path to context files |
+| `LOBSTER_GITHUB_USERNAME` | (from gh auth) | GitHub username for repo |
 
 ---
 
