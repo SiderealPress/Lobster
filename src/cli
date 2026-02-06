@@ -14,6 +14,7 @@
 #   inbox       Check inbox for pending messages
 #   outbox      Check outbox for pending replies
 #   stats       Show message statistics
+#   ps          List running Claude instances
 #   test        Send a test message through the system
 #   update      Update Hyperion (pull changes, restart services)
 #   help        Show this help message
@@ -269,6 +270,104 @@ EOF
     echo "Watch with: hyperion attach"
 }
 
+cmd_ps() {
+    print_header "Claude Instances"
+
+    echo ""
+
+    # Collect claude processes (exclude grep itself and this ps command)
+    local pids=()
+    local roles=()
+    local uptimes=()
+    local cmds=()
+    local count=0
+
+    while IFS= read -r line; do
+        local pid=$(echo "$line" | awk '{print $2}')
+        local start_time=$(echo "$line" | awk '{print $9}')
+        local cmd=$(echo "$line" | awk '{for(i=11;i<=NF;i++) printf "%s ", $i; print ""}' | sed 's/ $//')
+
+        # Determine role
+        local role="interactive"
+        if echo "$cmd" | grep -q -- '--dangerously-skip-permissions'; then
+            # Check if running in the lobster tmux session
+            local tmux_check=$(tmux -L lobster list-panes -a -F '#{pane_pid}' 2>/dev/null || true)
+            # Walk up parent pids to see if any ancestor is a tmux pane
+            local check_pid=$pid
+            local is_main=false
+            for _ in 1 2 3 4 5; do
+                if echo "$tmux_check" | grep -qw "$check_pid"; then
+                    is_main=true
+                    break
+                fi
+                check_pid=$(ps -o ppid= -p "$check_pid" 2>/dev/null | tr -d ' ')
+                [ -z "$check_pid" ] && break
+            done
+            if $is_main; then
+                role="main"
+            fi
+        fi
+        if echo "$cmd" | grep -q -- '--max-turns'; then
+            role="scheduled"
+        fi
+        # Check if parent is run-job.sh
+        local ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+        if [ -n "$ppid" ]; then
+            local parent_cmd=$(ps -o args= -p "$ppid" 2>/dev/null || true)
+            if echo "$parent_cmd" | grep -q 'run-job.sh'; then
+                role="scheduled"
+            fi
+        fi
+
+        # Calculate uptime from process elapsed time
+        local elapsed=$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ')
+        local uptime_str=""
+        if [ -n "$elapsed" ] && [ "$elapsed" -gt 0 ] 2>/dev/null; then
+            local days=$((elapsed / 86400))
+            local hours=$(( (elapsed % 86400) / 3600 ))
+            local mins=$(( (elapsed % 3600) / 60 ))
+            if [ "$days" -gt 0 ]; then
+                uptime_str="${days}d ${hours}h ${mins}m"
+            elif [ "$hours" -gt 0 ]; then
+                uptime_str="${hours}h ${mins}m"
+            else
+                uptime_str="${mins}m"
+            fi
+        else
+            uptime_str="?"
+        fi
+
+        # Truncate command for display
+        local cmd_short=$(echo "$cmd" | cut -c1-50)
+        [ ${#cmd} -gt 50 ] && cmd_short="${cmd_short}..."
+
+        pids+=("$pid")
+        roles+=("$role")
+        uptimes+=("$uptime_str")
+        cmds+=("$cmd_short")
+        count=$((count + 1))
+    done < <(ps aux | awk '$11 ~ /(^|\/)claude$/' | grep -v "hyperion ps\|lobster ps")
+
+    if [ "$count" -eq 0 ]; then
+        echo -e "  ${YELLOW}No Claude instances running${NC}"
+    else
+        # Print table header
+        printf "  ${CYAN}%-8s %-13s %-10s %s${NC}\n" "PID" "ROLE" "UPTIME" "COMMAND"
+        for i in $(seq 0 $((count - 1))); do
+            local role_color=""
+            case "${roles[$i]}" in
+                main)        role_color="${GREEN}" ;;
+                scheduled)   role_color="${YELLOW}" ;;
+                interactive) role_color="${BLUE}" ;;
+            esac
+            printf "  %-8s ${role_color}%-13s${NC} %-10s %s\n" "${pids[$i]}" "${roles[$i]}" "${uptimes[$i]}" "${cmds[$i]}"
+        done
+    fi
+
+    echo ""
+    echo "$count Claude instance(s) running"
+}
+
 cmd_update() {
     local args=("$@")
     local script="$HOME/hyperion/scripts/update-hyperion.sh"
@@ -297,6 +396,7 @@ cmd_help() {
     echo "  inbox           Check inbox for pending messages"
     echo "  outbox          Check outbox for pending replies"
     echo "  stats           Show message statistics"
+    echo "  ps              List running Claude instances"
     echo "  test            Create a test message in inbox"
     echo "  update [opts]   Update Hyperion from git"
     echo "  help            Show this help message"
@@ -329,6 +429,7 @@ case "${1:-help}" in
     inbox)   cmd_inbox ;;
     outbox)  cmd_outbox ;;
     stats)   cmd_stats ;;
+    ps)      cmd_ps ;;
     test)    cmd_test ;;
     update)  shift; cmd_update "$@" ;;
     help|--help|-h) cmd_help ;;
