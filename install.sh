@@ -578,15 +578,15 @@ success "Scheduled tasks infrastructure ready"
 step "Setting up health monitoring..."
 
 # Make scripts executable
-chmod +x "$INSTALL_DIR/scripts/health-check.sh"
+chmod +x "$INSTALL_DIR/scripts/health-check-v3.sh"
 chmod +x "$INSTALL_DIR/scripts/self-check-reminder.sh"
 
-# Add health check to crontab (runs every 5 minutes)
+# Add health check to crontab (runs every 2 minutes)
 HEALTH_MARKER="# LOBSTER-HEALTH"
-(crontab -l 2>/dev/null | grep -v "$HEALTH_MARKER" | grep -v "health-check.sh"; \
- echo "*/5 * * * * $INSTALL_DIR/scripts/health-check.sh $HEALTH_MARKER") | crontab -
+(crontab -l 2>/dev/null | grep -v "$HEALTH_MARKER" | grep -v "health-check"; \
+ echo "*/2 * * * * $INSTALL_DIR/scripts/health-check-v3.sh $HEALTH_MARKER") | crontab -
 
-success "Health monitoring configured (checks every 5 minutes)"
+success "Health monitoring configured (checks every 2 minutes)"
 
 #===============================================================================
 # Python Environment
