@@ -24,8 +24,8 @@ node_modules/
 *.log
 
 # Generated service files (created from templates during install)
-services/hyperion-router.service
-services/hyperion-claude.service
+services/lobster-router.service
+services/lobster-claude.service
 
-# Local configuration (use hyperion.conf.example as template)
-config/hyperion.conf
+# Local configuration (use lobster.conf.example as template)
+config/lobster.conf

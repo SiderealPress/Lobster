@@ -1,8 +1,8 @@
-# Hyperion Health Monitoring System
+# Lobster Health Monitoring System
 
 ## Overview
 
-The health monitoring system provides LLM-independent checks to detect and auto-recover from failures in the Hyperion always-on Claude session.
+The health monitoring system provides LLM-independent checks to detect and auto-recover from failures in the Lobster always-on Claude session.
 
 ## Components
 
@@ -22,11 +22,11 @@ Runs every 2 minutes via cron and performs the following checks:
 
 ### 2. Heartbeat System
 
-The MCP inbox server automatically touches a heartbeat file (`~/hyperion-workspace/logs/claude-heartbeat`) every 60 seconds while Claude is in the `wait_for_messages` loop. If the heartbeat becomes stale (>10 minutes old), it indicates Claude is stuck.
+The MCP inbox server automatically touches a heartbeat file (`~/lobster-workspace/logs/claude-heartbeat`) every 60 seconds while Claude is in the `wait_for_messages` loop. If the heartbeat becomes stale (>10 minutes old), it indicates Claude is stuck.
 
 **Heartbeat locations:**
-- `~/hyperion-workspace/logs/claude-heartbeat` - Main heartbeat (updated by MCP server)
-- `~/hyperion-workspace/logs/health-check.heartbeat` - Health check is running
+- `~/lobster-workspace/logs/claude-heartbeat` - Main heartbeat (updated by MCP server)
+- `~/lobster-workspace/logs/health-check.heartbeat` - Health check is running
 
 ### 3. Restart Rate Limiting
 
@@ -38,8 +38,8 @@ To prevent restart loops:
 ### 4. Alerting (`scripts/alert.sh`)
 
 Sends alerts when critical issues occur:
-- Logs to `~/hyperion-workspace/logs/alerts.log`
-- Optionally sends to Telegram (set `HYPERION_ADMIN_CHAT_ID` env var)
+- Logs to `~/lobster-workspace/logs/alerts.log`
+- Optionally sends to Telegram (set `LOBSTER_ADMIN_CHAT_ID` env var)
 
 ## Configuration
 
@@ -58,30 +58,30 @@ MEMORY_THRESHOLD=90             # percentage
 The health check runs every 2 minutes:
 
 ```cron
-*/2 * * * * /home/admin/hyperion/scripts/health-check-v2.sh
+*/2 * * * * /home/admin/lobster/scripts/health-check-v2.sh
 ```
 
 ## Log Files
 
-- `~/hyperion-workspace/logs/health-check.log` - Health check results
-- `~/hyperion-workspace/logs/heartbeat.log` - Heartbeat status messages
-- `~/hyperion-workspace/logs/alerts.log` - Alert history
-- `~/hyperion-workspace/logs/health-restart-state` - Restart rate limiting state
+- `~/lobster-workspace/logs/health-check.log` - Health check results
+- `~/lobster-workspace/logs/heartbeat.log` - Heartbeat status messages
+- `~/lobster-workspace/logs/alerts.log` - Alert history
+- `~/lobster-workspace/logs/health-restart-state` - Restart rate limiting state
 
 ## Manual Commands
 
 ```bash
 # Run health check manually
-~/hyperion/scripts/health-check-v2.sh
+~/lobster/scripts/health-check-v2.sh
 
 # Check current status
-~/hyperion/scripts/hyperion-status.sh
+~/lobster/scripts/lobster-status.sh
 
 # View recent health check logs
-tail -50 ~/hyperion-workspace/logs/health-check.log
+tail -50 ~/lobster-workspace/logs/health-check.log
 
 # Touch heartbeat manually (for testing)
-~/hyperion/scripts/heartbeat.sh "Manual heartbeat"
+~/lobster/scripts/heartbeat.sh "Manual heartbeat"
 ```
 
 ## Failure Scenarios Handled

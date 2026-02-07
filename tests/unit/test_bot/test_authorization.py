@@ -23,7 +23,7 @@ class TestIsAuthorized:
         ):
             # Need to reimport to pick up env change
             import importlib
-            import src.bot.hyperion_bot as bot_module
+            import src.bot.lobster_bot as bot_module
             importlib.reload(bot_module)
 
             assert bot_module.is_authorized(123456) is True
@@ -39,7 +39,7 @@ class TestIsAuthorized:
             },
         ):
             import importlib
-            import src.bot.hyperion_bot as bot_module
+            import src.bot.lobster_bot as bot_module
             importlib.reload(bot_module)
 
             assert bot_module.is_authorized(999999) is False
@@ -54,7 +54,7 @@ class TestIsAuthorized:
             },
         ):
             import importlib
-            import src.bot.hyperion_bot as bot_module
+            import src.bot.lobster_bot as bot_module
             importlib.reload(bot_module)
 
             assert bot_module.is_authorized(123456) is True
@@ -89,14 +89,14 @@ class TestStartCommand:
             },
         ):
             import importlib
-            import src.bot.hyperion_bot as bot_module
+            import src.bot.lobster_bot as bot_module
             importlib.reload(bot_module)
 
             await bot_module.start_command(mock_update, mock_context)
 
             mock_update.message.reply_text.assert_called_once()
             call_args = mock_update.message.reply_text.call_args[0][0]
-            assert "Hey" in call_args or "Hello" in call_args or "Hyperion" in call_args
+            assert "Hey" in call_args or "Hello" in call_args or "Lobster" in call_args
 
     @pytest.mark.asyncio
     async def test_unauthorized_user_gets_rejected(self, mock_update, mock_context):
@@ -111,7 +111,7 @@ class TestStartCommand:
             },
         ):
             import importlib
-            import src.bot.hyperion_bot as bot_module
+            import src.bot.lobster_bot as bot_module
             importlib.reload(bot_module)
 
             await bot_module.start_command(mock_update, mock_context)

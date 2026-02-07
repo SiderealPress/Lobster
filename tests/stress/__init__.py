@@ -1,1 +1,1 @@
-"""Stress tests for Hyperion."""
+"""Stress tests for Lobster."""

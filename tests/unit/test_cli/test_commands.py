@@ -1,5 +1,5 @@
 """
-Tests for Hyperion CLI Commands
+Tests for Lobster CLI Commands
 
 Tests all 10 CLI commands: start, stop, restart, status, logs, inbox, outbox, stats, test, help
 """
@@ -18,7 +18,7 @@ class TestCLIHelpers:
     @pytest.fixture
     def cli_path(self) -> Path:
         """Get path to CLI script."""
-        # tests/unit/test_cli/test_commands.py -> hyperion/src/cli
+        # tests/unit/test_cli/test_commands.py -> lobster/src/cli
         return Path(__file__).parent.parent.parent.parent / "src" / "cli"
 
     def test_cli_exists(self, cli_path: Path):
@@ -36,7 +36,7 @@ class TestHelpCommand:
     @pytest.fixture
     def cli_path(self) -> Path:
         """Get path to CLI script."""
-        # tests/unit/test_cli/test_commands.py -> hyperion/src/cli
+        # tests/unit/test_cli/test_commands.py -> lobster/src/cli
         return Path(__file__).parent.parent.parent.parent / "src" / "cli"
 
     def test_help_shows_usage(self, cli_path: Path):
@@ -48,7 +48,7 @@ class TestHelpCommand:
         )
 
         assert "Usage" in result.stdout or "usage" in result.stdout.lower()
-        assert "hyperion" in result.stdout.lower()
+        assert "lobster" in result.stdout.lower()
 
     def test_help_lists_commands(self, cli_path: Path):
         """Test that help lists all commands."""
@@ -71,7 +71,7 @@ class TestHelpCommand:
         )
 
         # Should show help by default
-        assert "Usage" in result.stdout or "usage" in result.stdout.lower() or "hyperion" in result.stdout.lower()
+        assert "Usage" in result.stdout or "usage" in result.stdout.lower() or "lobster" in result.stdout.lower()
 
 
 class TestInboxCommand:
@@ -80,7 +80,7 @@ class TestInboxCommand:
     @pytest.fixture
     def cli_path(self) -> Path:
         """Get path to CLI script."""
-        # tests/unit/test_cli/test_commands.py -> hyperion/src/cli
+        # tests/unit/test_cli/test_commands.py -> lobster/src/cli
         return Path(__file__).parent.parent.parent.parent / "src" / "cli"
 
     def test_empty_inbox_shows_message(self, cli_path: Path, temp_messages_dir: Path):
@@ -138,7 +138,7 @@ class TestOutboxCommand:
     @pytest.fixture
     def cli_path(self) -> Path:
         """Get path to CLI script."""
-        # tests/unit/test_cli/test_commands.py -> hyperion/src/cli
+        # tests/unit/test_cli/test_commands.py -> lobster/src/cli
         return Path(__file__).parent.parent.parent.parent / "src" / "cli"
 
     def test_empty_outbox_shows_message(self, cli_path: Path, temp_messages_dir: Path):
@@ -165,7 +165,7 @@ class TestStatsCommand:
     @pytest.fixture
     def cli_path(self) -> Path:
         """Get path to CLI script."""
-        # tests/unit/test_cli/test_commands.py -> hyperion/src/cli
+        # tests/unit/test_cli/test_commands.py -> lobster/src/cli
         return Path(__file__).parent.parent.parent.parent / "src" / "cli"
 
     def test_stats_shows_counts(self, cli_path: Path, temp_messages_dir: Path):
@@ -196,7 +196,7 @@ class TestTestCommand:
     @pytest.fixture
     def cli_path(self) -> Path:
         """Get path to CLI script."""
-        # tests/unit/test_cli/test_commands.py -> hyperion/src/cli
+        # tests/unit/test_cli/test_commands.py -> lobster/src/cli
         return Path(__file__).parent.parent.parent.parent / "src" / "cli"
 
     def test_creates_test_message(self, cli_path: Path, temp_messages_dir: Path):
@@ -228,7 +228,7 @@ class TestUnknownCommand:
     @pytest.fixture
     def cli_path(self) -> Path:
         """Get path to CLI script."""
-        # tests/unit/test_cli/test_commands.py -> hyperion/src/cli
+        # tests/unit/test_cli/test_commands.py -> lobster/src/cli
         return Path(__file__).parent.parent.parent.parent / "src" / "cli"
 
     def test_unknown_command_shows_error(self, cli_path: Path):
@@ -248,7 +248,7 @@ class TestStatusCommand:
     @pytest.fixture
     def cli_path(self) -> Path:
         """Get path to CLI script."""
-        # tests/unit/test_cli/test_commands.py -> hyperion/src/cli
+        # tests/unit/test_cli/test_commands.py -> lobster/src/cli
         return Path(__file__).parent.parent.parent.parent / "src" / "cli"
 
     def test_status_shows_services(self, cli_path: Path, temp_messages_dir: Path):

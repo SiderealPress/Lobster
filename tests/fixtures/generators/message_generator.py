@@ -1,5 +1,5 @@
 """
-Hyperion Test Message Generator
+Lobster Test Message Generator
 
 Generates test messages programmatically for unit and stress tests.
 """
@@ -15,7 +15,7 @@ from typing import Optional
 
 
 class MessageGenerator:
-    """Generate test messages for Hyperion testing."""
+    """Generate test messages for Lobster testing."""
 
     # Sample user names for variety
     SAMPLE_USERS = [
@@ -337,7 +337,7 @@ class MessageGenerator:
 
 
 class TaskGenerator:
-    """Generate test tasks for Hyperion testing."""
+    """Generate test tasks for Lobster testing."""
 
     SAMPLE_SUBJECTS = [
         "Review pull request #123",
@@ -392,7 +392,7 @@ class TaskGenerator:
 
 
 class ScheduledJobGenerator:
-    """Generate test scheduled jobs for Hyperion testing."""
+    """Generate test scheduled jobs for Lobster testing."""
 
     SAMPLE_JOBS = [
         ("morning-news", "0 8 * * *", "Fetch and summarize morning news"),

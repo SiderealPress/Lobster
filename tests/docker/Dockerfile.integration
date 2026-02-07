@@ -1,11 +1,11 @@
-# Hyperion Integration Test Environment
+# Lobster Integration Test Environment
 #
 # This Dockerfile creates a complete test environment with all
 # dependencies pre-installed for running integration tests.
 #
 # Usage:
-#   docker build -f Dockerfile.integration -t hyperion-test-integration .
-#   docker run --rm hyperion-test-integration
+#   docker build -f Dockerfile.integration -t lobster-test-integration .
+#   docker run --rm lobster-test-integration
 
 FROM python:3.11-slim-bookworm
 
@@ -38,8 +38,8 @@ ENV PATH="${HOME}/.local/bin:${PATH}"
 
 # Create directory structure
 RUN mkdir -p \
-    /home/testuser/hyperion \
-    /home/testuser/hyperion-workspace/logs \
+    /home/testuser/lobster \
+    /home/testuser/lobster-workspace/logs \
     /home/testuser/messages/inbox \
     /home/testuser/messages/outbox \
     /home/testuser/messages/processed \
@@ -48,10 +48,10 @@ RUN mkdir -p \
     /home/testuser/messages/task-outputs
 
 # Copy source code
-COPY --chown=testuser:testuser . /home/testuser/hyperion
+COPY --chown=testuser:testuser . /home/testuser/lobster
 
 # Install Python dependencies
-RUN cd /home/testuser/hyperion && \
+RUN cd /home/testuser/lobster && \
     python -m venv .venv && \
     .venv/bin/pip install --upgrade pip && \
     .venv/bin/pip install -r requirements.txt 2>/dev/null || true && \
@@ -59,12 +59,12 @@ RUN cd /home/testuser/hyperion && \
 
 # Initialize required files
 RUN echo '{"tasks": [], "next_id": 1}' > /home/testuser/messages/tasks.json && \
-    mkdir -p /home/testuser/hyperion/scheduled-tasks/tasks && \
-    mkdir -p /home/testuser/hyperion/scheduled-tasks/logs && \
-    echo '{"jobs": {}}' > /home/testuser/hyperion/scheduled-tasks/jobs.json
+    mkdir -p /home/testuser/lobster/scheduled-tasks/tasks && \
+    mkdir -p /home/testuser/lobster/scheduled-tasks/logs && \
+    echo '{"jobs": {}}' > /home/testuser/lobster/scheduled-tasks/jobs.json
 
 # Set working directory
-WORKDIR /home/testuser/hyperion
+WORKDIR /home/testuser/lobster
 
 # Default command runs all tests
 CMD [".venv/bin/pytest", "tests/", "-v", "--tb=short"]

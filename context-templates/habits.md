@@ -1,6 +1,6 @@
 # Habits
 
-Your routines, preferences, and behavioral patterns. This file helps Hyperion understand your schedule and make contextually appropriate suggestions.
+Your routines, preferences, and behavioral patterns. This file helps Lobster understand your schedule and make contextually appropriate suggestions.
 
 ## Daily Routines
 

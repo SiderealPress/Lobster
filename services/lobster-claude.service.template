@@ -1,0 +1,24 @@
+[Unit]
+Description=Lobster Claude - Always-on Claude Code session
+After=network.target lobster-router.service
+Wants=lobster-router.service
+
+[Service]
+Type=forking
+User={{USER}}
+Group={{GROUP}}
+WorkingDirectory={{WORKSPACE_DIR}}
+Environment=PATH={{HOME}}/.claude/bin:{{HOME}}/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HOME={{HOME}}
+ExecStart=/usr/bin/tmux -L lobster new-session -d -s lobster -c {{WORKSPACE_DIR}} {{INSTALL_DIR}}/scripts/claude-wrapper.exp
+ExecStop=/usr/bin/tmux -L lobster kill-session -t lobster
+RemainAfterExit=yes
+Restart=on-failure
+RestartSec=30
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lobster-claude
+
+[Install]
+WantedBy=multi-user.target

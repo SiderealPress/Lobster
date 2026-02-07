@@ -4,7 +4,7 @@ The brain-dumps agent captures voice note "brain dumps" - unstructured streams o
 
 ## Overview
 
-When you send a voice message to Hyperion that contains random thoughts, ideas, or musings rather than a specific command or question, the brain-dumps agent:
+When you send a voice message to Lobster that contains random thoughts, ideas, or musings rather than a specific command or question, the brain-dumps agent:
 
 1. **Transcribes** the voice message (using local whisper.cpp)
 2. **Triages** - Classifies type, extracts entities, assesses priority
@@ -79,9 +79,9 @@ The brain-dumps feature works out of the box without personal context:
 
 1. **Enable the feature** (enabled by default):
    ```bash
-   # In config/hyperion.conf
-   HYPERION_BRAIN_DUMPS_ENABLED=true
-   HYPERION_BRAIN_DUMPS_REPO=brain-dumps
+   # In config/lobster.conf
+   LOBSTER_BRAIN_DUMPS_ENABLED=true
+   LOBSTER_BRAIN_DUMPS_REPO=brain-dumps
    ```
 
 2. **Ensure GitHub authentication** is configured
@@ -94,12 +94,12 @@ For full context-aware processing, set up the context directory:
 
 1. **Create context directory in your private config:**
    ```bash
-   mkdir -p ~/hyperion-config/context
+   mkdir -p ~/lobster-config/context
    ```
 
 2. **Copy context templates:**
    ```bash
-   cp ~/hyperion/context-templates/*.md ~/hyperion-config/context/
+   cp ~/lobster/context-templates/*.md ~/lobster-config/context/
    ```
 
 3. **Fill in your context files:**
@@ -113,13 +113,13 @@ For full context-aware processing, set up the context directory:
 
 4. **Configure context path:**
    ```bash
-   # In config/hyperion.conf or config.env
-   HYPERION_CONTEXT_DIR="${HYPERION_CONFIG_DIR}/context"
+   # In config/lobster.conf or config.env
+   LOBSTER_CONTEXT_DIR="${LOBSTER_CONFIG_DIR}/context"
    ```
 
 5. **Apply the configuration:**
    ```bash
-   cd ~/hyperion && ./install.sh
+   cd ~/lobster && ./install.sh
    ```
 
 See [context-templates/README.md](../context-templates/README.md) for detailed setup instructions.
@@ -130,7 +130,7 @@ See [context-templates/README.md](../context-templates/README.md) for detailed s
 
 ### Sending a Brain Dump
 
-Simply send a voice message to Hyperion with your thoughts. The agent automatically detects brain dumps.
+Simply send a voice message to Lobster with your thoughts. The agent automatically detects brain dumps.
 
 **Explicit triggers** (guaranteed detection):
 - Start with "Brain dump:"
@@ -153,7 +153,7 @@ Simply send a voice message to Hyperion with your thoughts. The agent automatica
    - Enrich: Labels, action items, links to related auth discussion (#12)
    - Update: No new entities detected
 
-3. **Hyperion responds:**
+3. **Lobster responds:**
    > Brain dump captured! Created issue #15 in your brain-dumps repo.
    >
    > Context matched:
@@ -212,7 +212,7 @@ hiking trip next weekend.
 - **Processing**: Staged (triage -> context -> enrich -> update)
 
 ---
-*Captured via Hyperion brain-dumps agent v2 (staged processing)*
+*Captured via Lobster brain-dumps agent v2 (staged processing)*
 ```
 
 ---
@@ -310,11 +310,11 @@ The agent also tracks patterns:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `HYPERION_BRAIN_DUMPS_ENABLED` | `true` | Enable/disable feature |
-| `HYPERION_BRAIN_DUMPS_REPO` | `brain-dumps` | Repository name |
-| `HYPERION_CONTEXT_DIR` | `${HYPERION_CONFIG_DIR}/context` | Context files location |
+| `LOBSTER_BRAIN_DUMPS_ENABLED` | `true` | Enable/disable feature |
+| `LOBSTER_BRAIN_DUMPS_REPO` | `brain-dumps` | Repository name |
+| `LOBSTER_CONTEXT_DIR` | `${LOBSTER_CONFIG_DIR}/context` | Context files location |
 
-Set these in `config/hyperion.conf` or your private `config.env`.
+Set these in `config/lobster.conf` or your private `config.env`.
 
 ---
 
@@ -326,10 +326,10 @@ Override the agent definition via private config overlay:
 
 ```bash
 # Copy default agent to your private config
-cp ~/hyperion/.claude/agents/brain-dumps.md ~/hyperion-config/agents/brain-dumps.md
+cp ~/lobster/.claude/agents/brain-dumps.md ~/lobster-config/agents/brain-dumps.md
 
 # Edit to customize
-nano ~/hyperion-config/agents/brain-dumps.md
+nano ~/lobster-config/agents/brain-dumps.md
 ```
 
 ### Customization Ideas
@@ -343,13 +343,13 @@ nano ~/hyperion-config/agents/brain-dumps.md
 ### Disabling the Feature
 
 ```bash
-# In hyperion.conf
-HYPERION_BRAIN_DUMPS_ENABLED=false
+# In lobster.conf
+LOBSTER_BRAIN_DUMPS_ENABLED=false
 ```
 
 Or rename the agent file:
 ```bash
-mv ~/hyperion-config/agents/brain-dumps.md ~/hyperion-config/agents/brain-dumps.md.disabled
+mv ~/lobster-config/agents/brain-dumps.md ~/lobster-config/agents/brain-dumps.md.disabled
 ```
 
 ---
@@ -364,9 +364,9 @@ mv ~/hyperion-config/agents/brain-dumps.md ~/hyperion-config/agents/brain-dumps.
 
 ---
 
-## Integration with Hyperion
+## Integration with Lobster
 
-The brain-dumps agent integrates with Hyperion's main loop:
+The brain-dumps agent integrates with Lobster's main loop:
 
 ```
 Voice message received
@@ -427,7 +427,7 @@ GitHub issue created + confirmation sent
 
 ### Context not matching
 
-- Verify context files exist at `$HYPERION_CONTEXT_DIR`
+- Verify context files exist at `$LOBSTER_CONTEXT_DIR`
 - Check file format matches templates
 - Entity names must be close matches (case-insensitive)
 

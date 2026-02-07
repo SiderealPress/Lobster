@@ -103,7 +103,7 @@ class TestOutboxToTelegram:
             "id": reply_id,
             "source": "telegram",
             "chat_id": 123456,
-            "text": "This is a reply from Hyperion",
+            "text": "This is a reply from Lobster",
             "timestamp": "2024-01-01T00:00:00Z",
         }
 
@@ -149,7 +149,7 @@ class TestOutboxToTelegram:
             },
         ):
             import importlib
-            import src.bot.hyperion_bot as bot_module
+            import src.bot.lobster_bot as bot_module
             importlib.reload(bot_module)
 
             handler = bot_module.OutboxHandler()

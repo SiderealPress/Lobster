@@ -1,6 +1,6 @@
 #!/bin/bash
 #===============================================================================
-# Hyperion Agent Hub Setup Script
+# Lobster Agent Hub Setup Script
 # A secure personal hub server for hosting Claude Code with messaging integrations
 #
 # Optimized for: tmux + zsh power users
@@ -15,7 +15,7 @@
 #
 # Future: Signal, Twilio SMS (see docs/FUTURE.md)
 #
-# Usage: bash hyperion-agent-hub-setup.sh
+# Usage: bash lobster-agent-hub-setup.sh
 #===============================================================================
 
 set -e  # Exit on error
@@ -135,7 +135,7 @@ print_step "Creating optimized .zshrc..."
 
 cat > ~/.zshrc << 'ZSHRC'
 #===============================================================================
-# Hyperion Agent Hub - Zsh Configuration
+# Lobster Agent Hub - Zsh Configuration
 #===============================================================================
 
 # Powerlevel10k instant prompt (keep at top)
@@ -327,7 +327,7 @@ bindkey '^x^e' edit-command-line
 # Welcome message
 if [[ $- == *i* ]]; then
     echo ""
-    echo "🤖 Hyperion Agent Hub"
+    echo "🤖 Lobster Agent Hub"
     echo "   Type 'agent' to start a Claude session"
     echo "   Type 'status' to check system health"
     echo ""
@@ -411,7 +411,7 @@ print_header "Step 3: Creating Advanced Tmux Configuration"
 
 cat > ~/.tmux.conf << 'TMUX'
 #===============================================================================
-# Hyperion Agent Hub - Tmux Configuration
+# Lobster Agent Hub - Tmux Configuration
 # Optimized for Claude Code agent sessions
 #===============================================================================
 
@@ -719,7 +719,7 @@ case "$LAYOUT" in
         tmux split-window -h -t "$SESSION" -p 30
         tmux send-keys -t "$SESSION" 'htop' Enter
         tmux split-window -v -t "$SESSION"
-        tmux send-keys -t "$SESSION" 'journalctl -u hyperion-* -f' Enter
+        tmux send-keys -t "$SESSION" 'journalctl -u lobster-* -f' Enter
         tmux select-pane -t "$SESSION":0.0
         ;;
     *)
@@ -735,14 +735,14 @@ chmod +x ~/start-agent.sh
 print_step "Creating check-status.sh..."
 cat > ~/check-status.sh << 'SCRIPT'
 #!/usr/bin/env zsh
-echo "\n\033[1;34m══ Hyperion Status ══\033[0m\n"
+echo "\n\033[1;34m══ Lobster Status ══\033[0m\n"
 
 echo "Claude Code:"
 command -v claude &>/dev/null && echo "  ✔ $(claude --version 2>/dev/null)" || echo "  ✖ Not found"
 
 echo "\nServices:"
-systemctl is-active hyperion-router &>/dev/null && echo "  ✔ hyperion-router" || echo "  ✖ hyperion-router"
-systemctl is-active hyperion-daemon &>/dev/null && echo "  ✔ hyperion-daemon" || echo "  ✖ hyperion-daemon"
+systemctl is-active lobster-router &>/dev/null && echo "  ✔ lobster-router" || echo "  ✖ lobster-router"
+systemctl is-active lobster-daemon &>/dev/null && echo "  ✔ lobster-daemon" || echo "  ✖ lobster-daemon"
 
 echo "\nTmux Sessions:"
 tmux list-sessions 2>/dev/null || echo "  None"
@@ -754,7 +754,7 @@ chmod +x ~/check-status.sh
 # README
 #-------------------------------------------------------------------------------
 cat > ~/README.md << 'EOF'
-# 🤖 Hyperion Agent Hub
+# 🤖 Lobster Agent Hub
 
 ## Quick Start
 ```zsh
@@ -790,11 +790,11 @@ agent mon monitor  # Monitor layout (htop + logs)
 1. `agent` - Start tmux session
 2. `claude` - Start Claude
 
-## Hyperion Services
+## Lobster Services
 ```zsh
-sudo systemctl start hyperion   # Start all services
-sudo systemctl status hyperion  # Check status
-journalctl -u hyperion-* -f     # View logs
+sudo systemctl start lobster   # Start all services
+sudo systemctl status lobster  # Check status
+journalctl -u lobster-* -f     # View logs
 ```
 
 ## Install Tmux Plugins
@@ -816,13 +816,13 @@ print_success "Default shell set to zsh"
 #-------------------------------------------------------------------------------
 print_header "Step 11: GitHub MCP Server Configuration"
 
-echo -e "${CYAN}The GitHub MCP server allows Hyperion to access your GitHub repos, issues, and PRs.${NC}"
+echo -e "${CYAN}The GitHub MCP server allows Lobster to access your GitHub repos, issues, and PRs.${NC}"
 echo ""
 
 # Check if GITHUB_PAT already exists in config
 GITHUB_PAT=""
-if [ -f "$HOME/hyperion/config/config.env" ]; then
-    GITHUB_PAT=$(grep "^GITHUB_PERSONAL_ACCESS_TOKEN=" "$HOME/hyperion/config/config.env" 2>/dev/null | cut -d'=' -f2 | tr -d '"' | tr -d "'")
+if [ -f "$HOME/lobster/config/config.env" ]; then
+    GITHUB_PAT=$(grep "^GITHUB_PERSONAL_ACCESS_TOKEN=" "$HOME/lobster/config/config.env" 2>/dev/null | cut -d'=' -f2 | tr -d '"' | tr -d "'")
 fi
 
 if [ -n "$GITHUB_PAT" ]; then
@@ -844,13 +844,13 @@ if [[ "$CONFIGURE_GITHUB" =~ ^[Yy]$ ]]; then
 
         if [ -n "$GITHUB_PAT" ]; then
             # Save to config.env
-            mkdir -p "$HOME/hyperion/config"
-            if [ -f "$HOME/hyperion/config/config.env" ]; then
+            mkdir -p "$HOME/lobster/config"
+            if [ -f "$HOME/lobster/config/config.env" ]; then
                 # Remove existing GITHUB_PAT line if present
-                grep -v "^GITHUB_PERSONAL_ACCESS_TOKEN=" "$HOME/hyperion/config/config.env" > "$HOME/hyperion/config/config.env.tmp" || true
-                mv "$HOME/hyperion/config/config.env.tmp" "$HOME/hyperion/config/config.env"
+                grep -v "^GITHUB_PERSONAL_ACCESS_TOKEN=" "$HOME/lobster/config/config.env" > "$HOME/lobster/config/config.env.tmp" || true
+                mv "$HOME/lobster/config/config.env.tmp" "$HOME/lobster/config/config.env"
             fi
-            echo "GITHUB_PERSONAL_ACCESS_TOKEN=\"$GITHUB_PAT\"" >> "$HOME/hyperion/config/config.env"
+            echo "GITHUB_PERSONAL_ACCESS_TOKEN=\"$GITHUB_PAT\"" >> "$HOME/lobster/config/config.env"
             print_success "GitHub PAT saved to config.env"
         fi
     fi
@@ -879,7 +879,7 @@ fi
 #-------------------------------------------------------------------------------
 print_header "Setup Complete!"
 
-echo -e "${GREEN}Hyperion Agent Hub ready!${NC}\n"
+echo -e "${GREEN}Lobster Agent Hub ready!${NC}\n"
 echo "Next:"
 echo "  1. ${YELLOW}exec zsh${NC} (or log out/in)"
 echo "  2. ${CYAN}agent${NC} (start a Claude session)"

@@ -1,10 +1,10 @@
-# Running Hyperion Locally
+# Running Lobster Locally
 
-Run Hyperion on your local machine in a virtual machine for testing, development, or personal use.
+Run Lobster on your local machine in a virtual machine for testing, development, or personal use.
 
 ## Overview
 
-This guide walks you through setting up Hyperion inside a VM on your local computer, using Tailscale Funnel to make it accessible from the internet. This approach:
+This guide walks you through setting up Lobster inside a VM on your local computer, using Tailscale Funnel to make it accessible from the internet. This approach:
 
 - Uses the existing `install.sh` unchanged
 - Provides full OS isolation (like a cloud server)
@@ -24,8 +24,8 @@ This guide walks you through setting up Hyperion inside a VM on your local compu
 │    │                                                         │
 │    └── Debian 12 VM                                         │
 │          ├── Tailscale (with Funnel enabled)                │
-│          ├── hyperion-router.service (systemd)              │
-│          ├── hyperion-claude.service (systemd)              │
+│          ├── lobster-router.service (systemd)              │
+│          ├── lobster-claude.service (systemd)              │
 │          └── Existing install.sh works unchanged            │
 │                                                              │
 │          Accessible at: https://your-vm.tailnet-name.ts.net │
@@ -87,7 +87,7 @@ KVM provides near-native performance since it's built into the Linux kernel.
    - Browse to your Debian 12 ISO
    - Allocate 4096 MB RAM and 2 CPUs
    - Create a 20 GB disk
-   - Name it `hyperion`
+   - Name it `lobster`
 
 5. Complete the Debian installation:
    - Choose minimal/standard installation
@@ -121,7 +121,7 @@ VirtualBox works on any platform but has more overhead than KVM on Linux.
 
 2. Create a new VM:
    - Click **New**
-   - Name: `hyperion`
+   - Name: `lobster`
    - Type: Linux
    - Version: Debian (64-bit)
 
@@ -194,12 +194,12 @@ Verify Tailscale is connected:
 tailscale status
 ```
 
-## Step 4: Install Hyperion
+## Step 4: Install Lobster
 
 Use the standard one-line installer:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/SiderealPress/hyperion/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/SiderealPress/lobster/main/install.sh)
 ```
 
 The installer will:
@@ -254,12 +254,12 @@ tailscale status | grep -i funnel
 # Or check the Tailscale admin console
 ```
 
-## Step 6: Verify Hyperion
+## Step 6: Verify Lobster
 
 Check that services are running:
 
 ```bash
-hyperion status
+lobster status
 ```
 
 Test with a Telegram message to your bot.
@@ -269,12 +269,12 @@ Test with a Telegram message to your bot.
 For convenience, you can use the helper script that automates steps 2-5:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/SiderealPress/hyperion/main/scripts/local-setup-helper.sh | bash
+curl -fsSL https://raw.githubusercontent.com/SiderealPress/lobster/main/scripts/local-setup-helper.sh | bash
 ```
 
 This script will:
 1. Install Tailscale and prompt for authentication
-2. Run the Hyperion installer
+2. Run the Lobster installer
 3. Enable Tailscale Funnel
 4. Display your access URL
 
@@ -284,10 +284,10 @@ This script will:
 
 Most VM software supports running VMs in the background:
 
-- **KVM/virsh**: `virsh start hyperion` (runs headless by default)
+- **KVM/virsh**: `virsh start lobster` (runs headless by default)
 - **virt-manager**: Close the console window; VM keeps running
 - **GNOME Boxes**: Minimize the window; VM keeps running
-- **VirtualBox**: `VBoxManage startvm hyperion --type headless`
+- **VirtualBox**: `VBoxManage startvm lobster --type headless`
 - **UTM**: Right-click VM → Run without window
 - **VMware**: Run in background mode
 
@@ -295,8 +295,8 @@ Most VM software supports running VMs in the background:
 
 Configure your VM to start automatically when your computer boots:
 
-- **KVM/libvirt**: `virsh autostart hyperion`
-- **VirtualBox**: `VBoxManage modifyvm hyperion --autostart-enabled on`
+- **KVM/libvirt**: `virsh autostart lobster`
+- **VirtualBox**: `VBoxManage modifyvm lobster --autostart-enabled on`
 - **UTM**: Currently requires third-party tools
 - **VMware**: Enable in VM settings
 - **systemd (any)**: Create a systemd service to start your VM
@@ -357,11 +357,11 @@ claude auth login --method device-code
 
 ```bash
 # Check service logs
-journalctl -u hyperion-router -n 50
-journalctl -u hyperion-claude -n 50
+journalctl -u lobster-router -n 50
+journalctl -u lobster-claude -n 50
 
 # Restart services
-hyperion restart
+lobster restart
 ```
 
 ### Performance Issues
@@ -389,7 +389,7 @@ If the VM feels slow:
 
 ## Security Considerations
 
-- Tailscale Funnel exposes your VM to the internet - ensure Hyperion's security measures are in place
+- Tailscale Funnel exposes your VM to the internet - ensure Lobster's security measures are in place
 - The Telegram bot is restricted to allowed user IDs only
 - Keep your VM and all software updated
 - Consider disabling Funnel when not in use: `sudo tailscale funnel 443 off`

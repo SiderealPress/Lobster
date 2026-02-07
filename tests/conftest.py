@@ -1,5 +1,5 @@
 """
-Hyperion Test Suite - Shared Fixtures and Configuration
+Lobster Test Suite - Shared Fixtures and Configuration
 
 This module provides pytest fixtures shared across all test modules.
 """
@@ -39,7 +39,7 @@ from tests.fixtures.generators import (
 @pytest.fixture
 def temp_dir() -> Generator[Path, None, None]:
     """Create a temporary directory for test files."""
-    tmp = tempfile.mkdtemp(prefix="hyperion_test_")
+    tmp = tempfile.mkdtemp(prefix="lobster_test_")
     yield Path(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
 
@@ -56,7 +56,7 @@ def temp_messages_dir(temp_dir: Path) -> Path:
 @pytest.fixture
 def temp_scheduled_tasks_dir(temp_dir: Path) -> Path:
     """Create a temporary scheduled tasks directory structure."""
-    tasks_dir = temp_dir / "hyperion" / "scheduled-tasks"
+    tasks_dir = temp_dir / "lobster" / "scheduled-tasks"
     (tasks_dir / "tasks").mkdir(parents=True)
     (tasks_dir / "logs").mkdir(parents=True)
     # Initialize jobs.json
@@ -67,7 +67,7 @@ def temp_scheduled_tasks_dir(temp_dir: Path) -> Path:
 @pytest.fixture
 def temp_workspace(temp_dir: Path) -> Path:
     """Create a temporary workspace directory."""
-    workspace = temp_dir / "hyperion-workspace"
+    workspace = temp_dir / "lobster-workspace"
     workspace.mkdir(parents=True)
     (workspace / "logs").mkdir()
     return workspace
@@ -311,11 +311,11 @@ def event_loop():
 
 @pytest.fixture
 def clean_env():
-    """Provide a clean environment without Hyperion-related vars."""
+    """Provide a clean environment without Lobster-related vars."""
     original_env = os.environ.copy()
-    # Remove any Hyperion-related environment variables
+    # Remove any Lobster-related environment variables
     for key in list(os.environ.keys()):
-        if key.startswith(("TELEGRAM_", "HYPERION_", "OPENAI_")):
+        if key.startswith(("TELEGRAM_", "LOBSTER_", "OPENAI_")):
             del os.environ[key]
     yield
     # Restore original environment

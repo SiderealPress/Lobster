@@ -1,5 +1,5 @@
 #!/bin/bash
-# Hyperion Scheduled Task Executor
+# Lobster Scheduled Task Executor
 # Runs a scheduled job in a fresh Claude instance
 
 set -e
@@ -14,7 +14,7 @@ if [ -z "$JOB_NAME" ]; then
     exit 1
 fi
 
-JOBS_DIR="$HOME/hyperion/scheduled-tasks"
+JOBS_DIR="$HOME/lobster/scheduled-tasks"
 TASK_FILE="$JOBS_DIR/tasks/${JOB_NAME}.md"
 OUTPUT_DIR="$HOME/messages/task-outputs"
 LOG_DIR="$JOBS_DIR/logs"
@@ -50,7 +50,7 @@ claude -p "$TASK_CONTENT
 
 IMPORTANT: You are running as a scheduled task. When you complete your task:
 1. Call write_task_output() with your results summary
-2. Keep output concise - the main Hyperion instance will review this later
+2. Keep output concise - the main Lobster instance will review this later
 3. Exit after writing output - do not start a loop" \
     --dangerously-skip-permissions \
     --max-turns 15 \

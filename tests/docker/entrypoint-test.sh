@@ -1,16 +1,16 @@
 #!/bin/bash
-# Hyperion Test Entrypoint
+# Lobster Test Entrypoint
 #
 # This script initializes the test environment and runs tests.
 
 set -e
 
 echo "=========================================="
-echo "  Hyperion Test Runner"
+echo "  Lobster Test Runner"
 echo "=========================================="
 
-# Navigate to hyperion directory
-cd /home/testuser/hyperion
+# Navigate to lobster directory
+cd /home/testuser/lobster
 
 # Activate virtual environment
 if [ -f ".venv/bin/activate" ]; then
@@ -22,12 +22,12 @@ pip install -q -r tests/requirements-test.txt 2>/dev/null || true
 
 # Initialize test directories
 mkdir -p /home/testuser/messages/{inbox,outbox,processed,config,audio,task-outputs}
-mkdir -p /home/testuser/hyperion-workspace/logs
-mkdir -p /home/testuser/hyperion/scheduled-tasks/{tasks,logs}
+mkdir -p /home/testuser/lobster-workspace/logs
+mkdir -p /home/testuser/lobster/scheduled-tasks/{tasks,logs}
 
 # Initialize required JSON files
 echo '{"tasks": [], "next_id": 1}' > /home/testuser/messages/tasks.json
-echo '{"jobs": {}}' > /home/testuser/hyperion/scheduled-tasks/jobs.json
+echo '{"jobs": {}}' > /home/testuser/lobster/scheduled-tasks/jobs.json
 
 # Parse arguments
 TEST_TYPE="${1:-all}"

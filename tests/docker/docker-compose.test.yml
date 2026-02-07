@@ -1,4 +1,4 @@
-# Hyperion Test Orchestration
+# Lobster Test Orchestration
 #
 # This docker-compose file orchestrates all test environments.
 #
@@ -24,7 +24,7 @@ services:
     command: [".venv/bin/python", "-c", "
       import asyncio
       import sys
-      sys.path.insert(0, '/home/testuser/hyperion')
+      sys.path.insert(0, '/home/testuser/lobster')
       from tests.mocks.mock_telegram import MockTelegramServer
 
       async def run():
@@ -44,7 +44,7 @@ services:
       timeout: 3s
       retries: 3
     networks:
-      - hyperion-test
+      - lobster-test
 
   # Unit tests - no external dependencies
   unit-tests:
@@ -53,9 +53,9 @@ services:
       dockerfile: tests/docker/Dockerfile.integration
     command: [".venv/bin/pytest", "tests/unit", "-v", "--tb=short"]
     volumes:
-      - test-results:/home/testuser/hyperion/test-results
+      - test-results:/home/testuser/lobster/test-results
     networks:
-      - hyperion-test
+      - lobster-test
 
   # Integration tests - requires mock services
   integration-tests:
@@ -71,9 +71,9 @@ services:
       mock-telegram:
         condition: service_healthy
     volumes:
-      - test-results:/home/testuser/hyperion/test-results
+      - test-results:/home/testuser/lobster/test-results
     networks:
-      - hyperion-test
+      - lobster-test
 
   # Fresh installation test
   install-test:
@@ -81,12 +81,12 @@ services:
       context: ../..
       dockerfile: tests/docker/Dockerfile.test
     command: ["bash", "-c", "
-      echo '=== Testing Hyperion Installation ===' &&
-      cd /home/testuser/hyperion &&
+      echo '=== Testing Lobster Installation ===' &&
+      cd /home/testuser/lobster &&
 
       # Test directory creation
       mkdir -p /home/testuser/messages/{inbox,outbox,processed,config,audio,task-outputs} &&
-      mkdir -p /home/testuser/hyperion-workspace/logs &&
+      mkdir -p /home/testuser/lobster-workspace/logs &&
 
       # Test Python environment setup
       python3 -m venv .venv &&
@@ -119,7 +119,7 @@ services:
       echo '=== Installation Test Complete ==='
     "]
     networks:
-      - hyperion-test
+      - lobster-test
 
   # Stress tests - high volume testing
   stress-tests:
@@ -132,9 +132,9 @@ services:
         limits:
           memory: 2G
     volumes:
-      - test-results:/home/testuser/hyperion/test-results
+      - test-results:/home/testuser/lobster/test-results
     networks:
-      - hyperion-test
+      - lobster-test
 
   # GitHub MCP installation test
   github-mcp-test:
@@ -143,11 +143,11 @@ services:
       dockerfile: tests/docker/Dockerfile.test
     command: ["bash", "-c", "
       echo '=== Testing GitHub MCP Installation ===' &&
-      cd /home/testuser/hyperion &&
+      cd /home/testuser/lobster &&
 
       # Create basic environment
       mkdir -p /home/testuser/messages/{inbox,outbox,processed,config,audio,task-outputs} &&
-      mkdir -p /home/testuser/hyperion-workspace/logs &&
+      mkdir -p /home/testuser/lobster-workspace/logs &&
 
       # Set up Python environment
       python3 -m venv .venv &&
@@ -175,7 +175,7 @@ services:
     environment:
       - GITHUB_PAT=${GITHUB_PAT:-}
     networks:
-      - hyperion-test
+      - lobster-test
 
   # Full test suite
   all-tests:
@@ -191,13 +191,13 @@ services:
       mock-telegram:
         condition: service_healthy
     volumes:
-      - test-results:/home/testuser/hyperion/test-results
+      - test-results:/home/testuser/lobster/test-results
     networks:
-      - hyperion-test
+      - lobster-test
 
 volumes:
   test-results:
 
 networks:
-  hyperion-test:
+  lobster-test:
     driver: bridge

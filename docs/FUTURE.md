@@ -89,5 +89,5 @@ pip install telethon python-dotenv mcp
 ```bash
 export TELEGRAM_API_ID="your_api_id"
 export TELEGRAM_API_HASH="your_api_hash"
-export TELEGRAM_SESSION_NAME="hyperion"
+export TELEGRAM_SESSION_NAME="lobster"
 ```

@@ -1,10 +1,10 @@
 # Slack Integration Setup
 
-This guide walks you through setting up Slack as a message source for Hyperion.
+This guide walks you through setting up Slack as a message source for Lobster.
 
 ## Overview
 
-The Slack router allows you to interact with Hyperion through Slack, similar to the Telegram integration. It supports:
+The Slack router allows you to interact with Lobster through Slack, similar to the Telegram integration. It supports:
 
 - Direct messages to the bot
 - @mentions in channels where the bot is invited
@@ -15,14 +15,14 @@ The Slack router allows you to interact with Hyperion through Slack, similar to 
 ## Prerequisites
 
 - A Slack workspace where you have permission to install apps
-- Hyperion already installed and running
+- Lobster already installed and running
 
 ## Step 1: Create a Slack App
 
 1. Go to [https://api.slack.com/apps](https://api.slack.com/apps)
 2. Click **Create New App**
 3. Choose **From scratch**
-4. Enter an app name (e.g., "Hyperion") and select your workspace
+4. Enter an app name (e.g., "Lobster") and select your workspace
 5. Click **Create App**
 
 ## Step 2: Enable Socket Mode
@@ -32,7 +32,7 @@ Socket Mode allows your bot to receive events without exposing a public URL.
 1. In your app settings, go to **Socket Mode** (left sidebar)
 2. Toggle **Enable Socket Mode** to On
 3. You'll be prompted to create an App-Level Token:
-   - Name it something like "hyperion-socket"
+   - Name it something like "lobster-socket"
    - Add the `connections:write` scope
    - Click **Generate**
 4. **Copy the token** (starts with `xapp-`) - you'll need this later
@@ -75,20 +75,20 @@ Socket Mode allows your bot to receive events without exposing a public URL.
 3. Review the permissions and click **Allow**
 4. **Copy the Bot User OAuth Token** (starts with `xoxb-`)
 
-## Step 6: Configure Hyperion
+## Step 6: Configure Lobster
 
 Add the following to your `config/config.env` file:
 
 ```bash
 # Slack Integration
-HYPERION_SLACK_BOT_TOKEN=xoxb-your-bot-token-here
-HYPERION_SLACK_APP_TOKEN=xapp-your-app-token-here
+LOBSTER_SLACK_BOT_TOKEN=xoxb-your-bot-token-here
+LOBSTER_SLACK_APP_TOKEN=xapp-your-app-token-here
 
 # Optional: Restrict to specific channels (comma-separated channel IDs)
-# HYPERION_SLACK_ALLOWED_CHANNELS=C01ABC123,C02DEF456
+# LOBSTER_SLACK_ALLOWED_CHANNELS=C01ABC123,C02DEF456
 
 # Optional: Restrict to specific users (comma-separated user IDs)
-# HYPERION_SLACK_ALLOWED_USERS=U01ABC123,U02DEF456
+# LOBSTER_SLACK_ALLOWED_USERS=U01ABC123,U02DEF456
 ```
 
 ## Step 7: Install Dependencies
@@ -96,7 +96,7 @@ HYPERION_SLACK_APP_TOKEN=xapp-your-app-token-here
 The Slack router requires the `slack-bolt` package. If not already installed:
 
 ```bash
-cd ~/hyperion
+cd ~/lobster
 source .venv/bin/activate
 pip install slack-bolt
 ```
@@ -107,30 +107,30 @@ Create and enable the systemd service:
 
 ```bash
 # Create service file from template
-sudo cp /home/$USER/hyperion/services/hyperion-slack-router.service.template \
-        /etc/systemd/system/hyperion-slack-router.service
+sudo cp /home/$USER/lobster/services/lobster-slack-router.service.template \
+        /etc/systemd/system/lobster-slack-router.service
 
 # Edit the service file to replace placeholders
-sudo sed -i "s|{{USER}}|$USER|g" /etc/systemd/system/hyperion-slack-router.service
-sudo sed -i "s|{{GROUP}}|$USER|g" /etc/systemd/system/hyperion-slack-router.service
-sudo sed -i "s|{{HOME}}|$HOME|g" /etc/systemd/system/hyperion-slack-router.service
-sudo sed -i "s|{{INSTALL_DIR}}|$HOME/hyperion|g" /etc/systemd/system/hyperion-slack-router.service
-sudo sed -i "s|{{CONFIG_DIR}}|$HOME/hyperion-config|g" /etc/systemd/system/hyperion-slack-router.service
+sudo sed -i "s|{{USER}}|$USER|g" /etc/systemd/system/lobster-slack-router.service
+sudo sed -i "s|{{GROUP}}|$USER|g" /etc/systemd/system/lobster-slack-router.service
+sudo sed -i "s|{{HOME}}|$HOME|g" /etc/systemd/system/lobster-slack-router.service
+sudo sed -i "s|{{INSTALL_DIR}}|$HOME/lobster|g" /etc/systemd/system/lobster-slack-router.service
+sudo sed -i "s|{{CONFIG_DIR}}|$HOME/lobster-config|g" /etc/systemd/system/lobster-slack-router.service
 
 # Reload systemd
 sudo systemctl daemon-reload
 
 # Enable and start the service
-sudo systemctl enable hyperion-slack-router
-sudo systemctl start hyperion-slack-router
+sudo systemctl enable lobster-slack-router
+sudo systemctl start lobster-slack-router
 
 # Check status
-sudo systemctl status hyperion-slack-router
+sudo systemctl status lobster-slack-router
 ```
 
 ## Step 9: Invite the Bot
 
-1. In Slack, go to the channel where you want to use Hyperion
+1. In Slack, go to the channel where you want to use Lobster
 2. Type `/invite @YourBotName` or click the channel name and add the bot
 3. The bot will now respond to @mentions in that channel
 4. You can also DM the bot directly
@@ -150,7 +150,7 @@ What's the weather like today?
 @mention the bot in any channel where it's invited:
 
 ```
-@Hyperion what tasks do I have pending?
+@Lobster what tasks do I have pending?
 ```
 
 ### Thread Replies
@@ -161,8 +161,8 @@ If you start a conversation, responses will come in the same thread to keep chan
 
 ### Bot not responding
 
-1. Check service status: `sudo systemctl status hyperion-slack-router`
-2. Check logs: `sudo journalctl -u hyperion-slack-router -f`
+1. Check service status: `sudo systemctl status lobster-slack-router`
+2. Check logs: `sudo journalctl -u lobster-slack-router -f`
 3. Verify tokens are correct in config.env
 4. Ensure the bot is invited to the channel
 
@@ -199,6 +199,6 @@ The bot must be invited to a channel before it can read or post messages there.
 ## Security Considerations
 
 - Store tokens securely - never commit them to version control
-- Use `HYPERION_SLACK_ALLOWED_CHANNELS` and `HYPERION_SLACK_ALLOWED_USERS` to restrict access
+- Use `LOBSTER_SLACK_ALLOWED_CHANNELS` and `LOBSTER_SLACK_ALLOWED_USERS` to restrict access
 - Review the bot's permissions periodically
-- Consider creating a dedicated private channel for Hyperion interactions
+- Consider creating a dedicated private channel for Lobster interactions

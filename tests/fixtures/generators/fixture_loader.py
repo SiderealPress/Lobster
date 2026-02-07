@@ -1,5 +1,5 @@
 """
-Hyperion Test Fixture Loader
+Lobster Test Fixture Loader
 
 Utilities for loading and managing test fixtures.
 """

@@ -1,6 +1,6 @@
 # Projects
 
-Active projects and their current status. This file helps Hyperion understand what you're building, where code lives, and what state each project is in.
+Active projects and their current status. This file helps Lobster understand what you're building, where code lives, and what state each project is in.
 
 ## Active Projects
 

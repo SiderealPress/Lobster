@@ -11,7 +11,7 @@ This guide explains how to customize Lobster using a private configuration repos
 5. [Personal Context Directory](#5-personal-context-directory)
 6. [Hooks](#6-hooks)
 7. [Keeping Your Private Repo Secure](#7-keeping-your-private-repo-secure)
-8. [Upgrading Hyperion](#8-upgrading-hyperion)
+8. [Upgrading Lobster](#8-upgrading-lobster)
 9. [Troubleshooting](#9-troubleshooting)
 
 ---
@@ -203,7 +203,7 @@ When I say "status report", check all my GitHub repos for open PRs.
 When I say "morning brief", summarize my calendar and tasks.
 
 ## Include Default Behavior
-[Include the standard Hyperion behavior from the main CLAUDE.md here
+[Include the standard Lobster behavior from the main CLAUDE.md here
 if you want to extend rather than replace it]
 ```
 
@@ -753,7 +753,7 @@ LOBSTER_CONFIG_DIR=~/lobster-config ./install.sh
 
 If you're still stuck:
 
-1. Check the [GitHub Issues](https://github.com/SiderealPress/hyperion/issues)
+1. Check the [GitHub Issues](https://github.com/SiderealPress/lobster/issues)
 2. Review the main [README](../README.md)
 3. Examine the [install.sh](../install.sh) script for overlay logic
 

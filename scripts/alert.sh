@@ -1,17 +1,17 @@
 #!/bin/bash
 #===============================================================================
-# Hyperion Alert - Send alerts via available channels
+# Lobster Alert - Send alerts via available channels
 #
-# Usage: ~/hyperion/scripts/alert.sh "Alert message"
+# Usage: ~/lobster/scripts/alert.sh "Alert message"
 #
 # Sends alerts to:
 # 1. Telegram (if configured) - via the existing bot
 # 2. Local log file
 #===============================================================================
 
-ALERT_LOG="$HOME/hyperion-workspace/logs/alerts.log"
+ALERT_LOG="$HOME/lobster-workspace/logs/alerts.log"
 OUTBOX_DIR="$HOME/messages/outbox"
-ADMIN_CHAT_ID="${HYPERION_ADMIN_CHAT_ID:-}"
+ADMIN_CHAT_ID="${LOBSTER_ADMIN_CHAT_ID:-}"
 
 # Ensure directories exist
 mkdir -p "$(dirname "$ALERT_LOG")"
@@ -29,7 +29,7 @@ if [[ -n "$ADMIN_CHAT_ID" ]]; then
     cat > "$alert_file" << EOF
 {
     "chat_id": $ADMIN_CHAT_ID,
-    "text": "🚨 **Hyperion Alert**\n\n$message\n\n_$(date)_",
+    "text": "🚨 **Lobster Alert**\n\n$message\n\n_$(date)_",
     "source": "telegram"
 }
 EOF

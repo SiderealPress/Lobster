@@ -1,4 +1,4 @@
-"""Hyperion test mocks."""
+"""Lobster test mocks."""
 
 from .mock_telegram import MockTelegramServer, MockTelegramBot
 from .mock_claude_cli import MockClaudeCLI, install_mock_claude

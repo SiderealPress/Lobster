@@ -1,15 +1,15 @@
 #!/bin/bash
 #===============================================================================
-# Hyperion Heartbeat - Touch the heartbeat file to signal Claude is alive
+# Lobster Heartbeat - Touch the heartbeat file to signal Claude is alive
 #
 # This script should be called periodically by the Claude session to indicate
 # it is actively processing messages. The health check monitors this file.
 #
-# Usage: ~/hyperion/scripts/heartbeat.sh [optional_status_message]
+# Usage: ~/lobster/scripts/heartbeat.sh [optional_status_message]
 #===============================================================================
 
-HEARTBEAT_FILE="$HOME/hyperion-workspace/logs/claude-heartbeat"
-HEARTBEAT_LOG="$HOME/hyperion-workspace/logs/heartbeat.log"
+HEARTBEAT_FILE="$HOME/lobster-workspace/logs/claude-heartbeat"
+HEARTBEAT_LOG="$HOME/lobster-workspace/logs/heartbeat.log"
 
 # Ensure directory exists
 mkdir -p "$(dirname "$HEARTBEAT_FILE")"

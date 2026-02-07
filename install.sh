@@ -1,10 +1,10 @@
 #!/bin/bash
 #===============================================================================
-# Hyperion Bootstrap Installer
+# Lobster Bootstrap Installer
 #
-# Usage: bash <(curl -fsSL https://raw.githubusercontent.com/SiderealPress/hyperion/main/install.sh)
+# Usage: bash <(curl -fsSL https://raw.githubusercontent.com/SiderealPress/lobster/main/install.sh)
 #
-# This script sets up a complete Hyperion installation on a fresh VM:
+# This script sets up a complete Lobster installation on a fresh VM:
 # - Installs system dependencies
 # - Clones the repo (if needed)
 # - Walks through configuration
@@ -32,11 +32,11 @@ error() { echo -e "${RED}[ERROR]${NC} $1"; }
 step() { echo -e "\n${CYAN}${BOLD}▶ $1${NC}"; }
 
 # Configuration - can be overridden by environment variables or config file
-REPO_URL="${HYPERION_REPO_URL:-https://github.com/SiderealPress/hyperion.git}"
-REPO_BRANCH="${HYPERION_BRANCH:-main}"
-INSTALL_DIR="${HYPERION_INSTALL_DIR:-$HOME/hyperion}"
-WORKSPACE_DIR="${HYPERION_WORKSPACE:-$HOME/hyperion-workspace}"
-MESSAGES_DIR="${HYPERION_MESSAGES:-$HOME/messages}"
+REPO_URL="${LOBSTER_REPO_URL:-https://github.com/SiderealPress/lobster.git}"
+REPO_BRANCH="${LOBSTER_BRANCH:-main}"
+INSTALL_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
+WORKSPACE_DIR="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
+MESSAGES_DIR="${LOBSTER_MESSAGES:-$HOME/messages}"
 
 #===============================================================================
 # Load Configuration
@@ -46,14 +46,14 @@ MESSAGES_DIR="${HYPERION_MESSAGES:-$HOME/messages}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Configuration file path - check multiple locations
-# Priority: 1) HYPERION_CONFIG_FILE env var, 2) script directory, 3) install directory
-CONFIG_FILE="${HYPERION_CONFIG_FILE:-}"
+# Priority: 1) LOBSTER_CONFIG_FILE env var, 2) script directory, 3) install directory
+CONFIG_FILE="${LOBSTER_CONFIG_FILE:-}"
 
 if [ -z "$CONFIG_FILE" ]; then
-    if [ -f "$SCRIPT_DIR/config/hyperion.conf" ]; then
-        CONFIG_FILE="$SCRIPT_DIR/config/hyperion.conf"
-    elif [ -f "$INSTALL_DIR/config/hyperion.conf" ]; then
-        CONFIG_FILE="$INSTALL_DIR/config/hyperion.conf"
+    if [ -f "$SCRIPT_DIR/config/lobster.conf" ]; then
+        CONFIG_FILE="$SCRIPT_DIR/config/lobster.conf"
+    elif [ -f "$INSTALL_DIR/config/lobster.conf" ]; then
+        CONFIG_FILE="$INSTALL_DIR/config/lobster.conf"
     fi
 fi
 
@@ -62,19 +62,19 @@ if [ -n "$CONFIG_FILE" ] && [ -f "$CONFIG_FILE" ]; then
     # shellcheck source=/dev/null
     source "$CONFIG_FILE"
 
-    # Re-apply configuration variables (config file may have set HYPERION_* vars)
-    REPO_URL="${HYPERION_REPO_URL:-$REPO_URL}"
-    REPO_BRANCH="${HYPERION_BRANCH:-$REPO_BRANCH}"
-    INSTALL_DIR="${HYPERION_INSTALL_DIR:-$INSTALL_DIR}"
-    WORKSPACE_DIR="${HYPERION_WORKSPACE:-$WORKSPACE_DIR}"
-    MESSAGES_DIR="${HYPERION_MESSAGES:-$MESSAGES_DIR}"
+    # Re-apply configuration variables (config file may have set LOBSTER_* vars)
+    REPO_URL="${LOBSTER_REPO_URL:-$REPO_URL}"
+    REPO_BRANCH="${LOBSTER_BRANCH:-$REPO_BRANCH}"
+    INSTALL_DIR="${LOBSTER_INSTALL_DIR:-$INSTALL_DIR}"
+    WORKSPACE_DIR="${LOBSTER_WORKSPACE:-$WORKSPACE_DIR}"
+    MESSAGES_DIR="${LOBSTER_MESSAGES:-$MESSAGES_DIR}"
 fi
 
 # User configuration with fallbacks for non-interactive contexts
-HYPERION_USER="${HYPERION_USER:-${USER:-$(whoami)}}"
-HYPERION_GROUP="${HYPERION_GROUP:-${USER:-$(whoami)}}"
-HYPERION_HOME="${HYPERION_HOME:-$HOME}"
-CONFIG_DIR="${HYPERION_CONFIG_DIR:-}"
+LOBSTER_USER="${LOBSTER_USER:-${USER:-$(whoami)}}"
+LOBSTER_GROUP="${LOBSTER_GROUP:-${USER:-$(whoami)}}"
+LOBSTER_HOME="${LOBSTER_HOME:-$HOME}"
+CONFIG_DIR="${LOBSTER_CONFIG_DIR:-}"
 
 #===============================================================================
 # Template Processing
@@ -93,9 +93,9 @@ generate_from_template() {
         return 1
     fi
 
-    sed -e "s|{{USER}}|${HYPERION_USER}|g" \
-        -e "s|{{GROUP}}|${HYPERION_GROUP}|g" \
-        -e "s|{{HOME}}|${HYPERION_HOME}|g" \
+    sed -e "s|{{USER}}|${LOBSTER_USER}|g" \
+        -e "s|{{GROUP}}|${LOBSTER_GROUP}|g" \
+        -e "s|{{HOME}}|${LOBSTER_HOME}|g" \
         -e "s|{{INSTALL_DIR}}|${INSTALL_DIR}|g" \
         -e "s|{{WORKSPACE_DIR}}|${WORKSPACE_DIR}|g" \
         -e "s|{{MESSAGES_DIR}}|${MESSAGES_DIR}|g" \
@@ -109,14 +109,14 @@ generate_from_template() {
 # Private Configuration Overlay
 #===============================================================================
 
-# Apply private configuration overlay from HYPERION_CONFIG_DIR
+# Apply private configuration overlay from LOBSTER_CONFIG_DIR
 # This function overlays customizations from a private config directory
 # onto the public repo installation.
 apply_private_overlay() {
-    local config_dir="${HYPERION_CONFIG_DIR:-}"
+    local config_dir="${LOBSTER_CONFIG_DIR:-}"
 
     if [ -z "$config_dir" ]; then
-        step "No private config directory specified (HYPERION_CONFIG_DIR)"
+        step "No private config directory specified (LOBSTER_CONFIG_DIR)"
         return 0
     fi
 
@@ -181,7 +181,7 @@ apply_private_overlay() {
 #   $1 - hook name (e.g., "post-install.sh", "post-update.sh")
 run_hook() {
     local hook_name="$1"
-    local config_dir="${HYPERION_CONFIG_DIR:-}"
+    local config_dir="${LOBSTER_CONFIG_DIR:-}"
     local hook_path="$config_dir/hooks/$hook_name"
 
     if [ -z "$config_dir" ]; then
@@ -201,9 +201,9 @@ run_hook() {
     step "Running hook: $hook_name"
 
     # Export useful variables for hooks
-    export HYPERION_INSTALL_DIR="$INSTALL_DIR"
-    export HYPERION_WORKSPACE_DIR="$WORKSPACE_DIR"
-    export HYPERION_MESSAGES_DIR="$MESSAGES_DIR"
+    export LOBSTER_INSTALL_DIR="$INSTALL_DIR"
+    export LOBSTER_WORKSPACE_DIR="$WORKSPACE_DIR"
+    export LOBSTER_MESSAGES_DIR="$MESSAGES_DIR"
 
     "$hook_path"
     local exit_code=$?
@@ -264,10 +264,10 @@ if [ ! -t 0 ]; then
     error "This script requires interactive input."
     echo ""
     echo "Please run it like this instead:"
-    echo -e "  ${CYAN}bash <(curl -fsSL https://raw.githubusercontent.com/SiderealPress/hyperion/main/install.sh)${NC}"
+    echo -e "  ${CYAN}bash <(curl -fsSL https://raw.githubusercontent.com/SiderealPress/lobster/main/install.sh)${NC}"
     echo ""
     echo "Or download and run:"
-    echo -e "  ${CYAN}curl -fsSL https://raw.githubusercontent.com/SiderealPress/hyperion/main/install.sh -o install.sh${NC}"
+    echo -e "  ${CYAN}curl -fsSL https://raw.githubusercontent.com/SiderealPress/lobster/main/install.sh -o install.sh${NC}"
     echo -e "  ${CYAN}bash install.sh${NC}"
     exit 1
 fi
@@ -393,7 +393,7 @@ fi
 # Clone Repository
 #===============================================================================
 
-step "Setting up Hyperion repository..."
+step "Setting up Lobster repository..."
 
 if [ -d "$INSTALL_DIR/.git" ]; then
     info "Repository exists. Updating..."
@@ -439,7 +439,7 @@ fi
 # Create run-job.sh
 cat > "$INSTALL_DIR/scheduled-tasks/run-job.sh" << 'RUNJOB'
 #!/bin/bash
-# Hyperion Scheduled Task Executor
+# Lobster Scheduled Task Executor
 # Runs a scheduled job in a fresh Claude instance
 
 set -e
@@ -454,7 +454,7 @@ if [ -z "$JOB_NAME" ]; then
     exit 1
 fi
 
-JOBS_DIR="$HOME/hyperion/scheduled-tasks"
+JOBS_DIR="$HOME/lobster/scheduled-tasks"
 TASK_FILE="$JOBS_DIR/tasks/${JOB_NAME}.md"
 OUTPUT_DIR="$HOME/messages/task-outputs"
 LOG_DIR="$JOBS_DIR/logs"
@@ -482,7 +482,7 @@ claude -p "$TASK_CONTENT
 
 IMPORTANT: You are running as a scheduled task. When you complete your task:
 1. Call write_task_output() with your results summary
-2. Keep output concise - the main Hyperion instance will review this later
+2. Keep output concise - the main Lobster instance will review this later
 3. Exit after writing output - do not start a loop" \
     --dangerously-skip-permissions \
     --max-turns 15 \
@@ -517,12 +517,12 @@ chmod +x "$INSTALL_DIR/scheduled-tasks/run-job.sh"
 # Create sync-crontab.sh
 cat > "$INSTALL_DIR/scheduled-tasks/sync-crontab.sh" << 'SYNCCRON'
 #!/bin/bash
-# Hyperion Crontab Synchronizer
+# Lobster Crontab Synchronizer
 
 set -e
 
-JOBS_FILE="$HOME/hyperion/scheduled-tasks/jobs.json"
-RUNNER="$HOME/hyperion/scheduled-tasks/run-job.sh"
+JOBS_FILE="$HOME/lobster/scheduled-tasks/jobs.json"
+RUNNER="$HOME/lobster/scheduled-tasks/run-job.sh"
 
 if ! command -v crontab &> /dev/null; then
     echo "Warning: crontab not found. Install cron to enable scheduled tasks."
@@ -534,7 +534,7 @@ if [ ! -f "$JOBS_FILE" ]; then
     exit 1
 fi
 
-MARKER="# HYPERION-SCHEDULED"
+MARKER="# LOBSTER-SCHEDULED"
 EXISTING=$(crontab -l 2>/dev/null | grep -v "$MARKER" | grep -v "$RUNNER" || true)
 
 if command -v jq &> /dev/null; then
@@ -557,7 +557,7 @@ fi
 } | crontab -
 
 echo "Crontab synchronized:"
-crontab -l 2>/dev/null | grep "$MARKER" || echo "(no hyperion jobs)"
+crontab -l 2>/dev/null | grep "$MARKER" || echo "(no lobster jobs)"
 SYNCCRON
 chmod +x "$INSTALL_DIR/scheduled-tasks/sync-crontab.sh"
 
@@ -582,7 +582,7 @@ chmod +x "$INSTALL_DIR/scripts/health-check.sh"
 chmod +x "$INSTALL_DIR/scripts/self-check-reminder.sh"
 
 # Add health check to crontab (runs every 5 minutes)
-HEALTH_MARKER="# HYPERION-HEALTH"
+HEALTH_MARKER="# LOBSTER-HEALTH"
 (crontab -l 2>/dev/null | grep -v "$HEALTH_MARKER" | grep -v "health-check.sh"; \
  echo "*/5 * * * * $INSTALL_DIR/scripts/health-check.sh $HEALTH_MARKER") | crontab -
 
@@ -611,7 +611,7 @@ success "Python environment ready"
 # Configuration
 #===============================================================================
 
-step "Configuring Hyperion..."
+step "Configuring Lobster..."
 
 CONFIG_FILE="$INSTALL_DIR/config/config.env"
 CONFIG_EXAMPLE="$INSTALL_DIR/config/config.env.example"
@@ -684,7 +684,7 @@ if [ "$NEED_CONFIG" = true ]; then
 
     # Write config
     cat > "$CONFIG_FILE" << EOF
-# Hyperion Configuration
+# Lobster Configuration
 # Generated by installer on $(date)
 
 # Telegram Bot
@@ -704,7 +704,7 @@ step "GitHub Integration (Optional)..."
 echo ""
 echo -e "${BOLD}GitHub MCP Server Setup${NC}"
 echo ""
-echo "The GitHub MCP server lets Hyperion:"
+echo "The GitHub MCP server lets Lobster:"
 echo "  - Read and manage GitHub issues & PRs"
 echo "  - Browse repositories and code"
 echo "  - Access project boards"
@@ -757,8 +757,8 @@ fi
 step "Generating systemd service files from templates..."
 
 # Check that templates exist
-ROUTER_TEMPLATE="$INSTALL_DIR/services/hyperion-router.service.template"
-CLAUDE_TEMPLATE="$INSTALL_DIR/services/hyperion-claude.service.template"
+ROUTER_TEMPLATE="$INSTALL_DIR/services/lobster-router.service.template"
+CLAUDE_TEMPLATE="$INSTALL_DIR/services/lobster-claude.service.template"
 
 if [ ! -f "$ROUTER_TEMPLATE" ]; then
     error "Router service template not found: $ROUTER_TEMPLATE"
@@ -775,18 +775,18 @@ fi
 # Generate service files from templates
 generate_from_template \
     "$ROUTER_TEMPLATE" \
-    "$INSTALL_DIR/services/hyperion-router.service"
+    "$INSTALL_DIR/services/lobster-router.service"
 
 generate_from_template \
     "$CLAUDE_TEMPLATE" \
-    "$INSTALL_DIR/services/hyperion-claude.service"
+    "$INSTALL_DIR/services/lobster-claude.service"
 
 # Generate Slack router service if template exists
-SLACK_ROUTER_TEMPLATE="$INSTALL_DIR/services/hyperion-slack-router.service.template"
+SLACK_ROUTER_TEMPLATE="$INSTALL_DIR/services/lobster-slack-router.service.template"
 if [ -f "$SLACK_ROUTER_TEMPLATE" ]; then
     generate_from_template \
         "$SLACK_ROUTER_TEMPLATE" \
-        "$INSTALL_DIR/services/hyperion-slack-router.service"
+        "$INSTALL_DIR/services/lobster-slack-router.service"
 fi
 
 #===============================================================================
@@ -795,13 +795,13 @@ fi
 
 step "Installing systemd services..."
 
-sudo cp "$INSTALL_DIR/services/hyperion-router.service" /etc/systemd/system/
-sudo cp "$INSTALL_DIR/services/hyperion-claude.service" /etc/systemd/system/
+sudo cp "$INSTALL_DIR/services/lobster-router.service" /etc/systemd/system/
+sudo cp "$INSTALL_DIR/services/lobster-claude.service" /etc/systemd/system/
 
 # Install Slack router service if generated
-if [ -f "$INSTALL_DIR/services/hyperion-slack-router.service" ]; then
-    sudo cp "$INSTALL_DIR/services/hyperion-slack-router.service" /etc/systemd/system/
-    info "Slack router service installed (enable manually with: sudo systemctl enable hyperion-slack-router)"
+if [ -f "$INSTALL_DIR/services/lobster-slack-router.service" ]; then
+    sudo cp "$INSTALL_DIR/services/lobster-slack-router.service" /etc/systemd/system/
+    info "Slack router service installed (enable manually with: sudo systemctl enable lobster-slack-router)"
 fi
 
 sudo systemctl daemon-reload
@@ -815,10 +815,10 @@ success "Services installed"
 step "Registering MCP server with Claude..."
 
 # Remove existing registration if present
-claude mcp remove hyperion-inbox 2>/dev/null || true
+claude mcp remove lobster-inbox 2>/dev/null || true
 
 # Add new registration
-if claude mcp add hyperion-inbox -s user -- "$PYTHON_PATH" "$INSTALL_DIR/src/mcp/inbox_server.py" 2>/dev/null; then
+if claude mcp add lobster-inbox -s user -- "$PYTHON_PATH" "$INSTALL_DIR/src/mcp/inbox_server.py" 2>/dev/null; then
     success "MCP server registered"
 else
     warn "MCP server registration may have failed. Check with: claude mcp list"
@@ -828,12 +828,12 @@ fi
 # Install CLI
 #===============================================================================
 
-step "Installing hyperion CLI..."
+step "Installing lobster CLI..."
 
 # Remove any existing symlink or file
-sudo rm -f /usr/local/bin/hyperion
-sudo cp "$INSTALL_DIR/src/cli" /usr/local/bin/hyperion
-sudo chmod +x /usr/local/bin/hyperion
+sudo rm -f /usr/local/bin/lobster
+sudo cp "$INSTALL_DIR/src/cli" /usr/local/bin/lobster
+sudo chmod +x /usr/local/bin/lobster
 
 success "CLI installed"
 
@@ -844,9 +844,9 @@ success "CLI installed"
 step "Creating workspace context..."
 
 cat > "$WORKSPACE_DIR/CLAUDE.md" << 'EOF'
-# Hyperion System Context
+# Lobster System Context
 
-You are **Hyperion**, an always-on AI assistant. You process messages from Telegram and respond to users.
+You are **Lobster**, an always-on AI assistant. You process messages from Telegram and respond to users.
 
 ## CRITICAL: Dispatcher Pattern
 
@@ -930,34 +930,34 @@ run_hook "post-install.sh"
 # Start Services
 #===============================================================================
 
-step "Starting Hyperion services..."
+step "Starting Lobster services..."
 
 echo ""
-read -p "Start Hyperion services now? [Y/n] " -n 1 -r
+read -p "Start Lobster services now? [Y/n] " -n 1 -r
 echo
 
 if [[ ! $REPLY =~ ^[Nn]$ ]]; then
-    sudo systemctl enable hyperion-router hyperion-claude
-    sudo systemctl start hyperion-router
+    sudo systemctl enable lobster-router lobster-claude
+    sudo systemctl start lobster-router
     sleep 2
-    sudo systemctl start hyperion-claude
+    sudo systemctl start lobster-claude
 
     sleep 3
 
     echo ""
-    if systemctl is-active --quiet hyperion-router; then
+    if systemctl is-active --quiet lobster-router; then
         success "Telegram bot: running"
     else
         warn "Telegram bot: not running (check logs)"
     fi
 
-    if tmux -L hyperion has-session -t hyperion 2>/dev/null; then
+    if tmux -L lobster has-session -t lobster 2>/dev/null; then
         success "Claude session: running in tmux"
     else
-        warn "Claude session: not running (check with: hyperion attach)"
+        warn "Claude session: not running (check with: lobster attach)"
     fi
 else
-    info "Services not started. Start manually with: hyperion start"
+    info "Services not started. Start manually with: lobster start"
 fi
 
 #===============================================================================
@@ -969,7 +969,7 @@ echo -e "${GREEN}"
 cat << 'DONE'
 ╔═══════════════════════════════════════════════════════════════╗
 ║                                                               ║
-║              HYPERION INSTALLATION COMPLETE!                  ║
+║              LOBSTER INSTALLATION COMPLETE!                  ║
 ║                                                               ║
 ╚═══════════════════════════════════════════════════════════════╝
 DONE
@@ -978,12 +978,12 @@ echo -e "${NC}"
 echo "Test it by sending a message to your Telegram bot!"
 echo ""
 echo -e "${BOLD}Commands:${NC}"
-echo "  hyperion status    Check service status"
-echo "  hyperion logs      View logs"
-echo "  hyperion inbox     Check pending messages"
-echo "  hyperion start     Start all services"
-echo "  hyperion stop      Stop all services"
-echo "  hyperion help      Show all commands"
+echo "  lobster status    Check service status"
+echo "  lobster logs      View logs"
+echo "  lobster inbox     Check pending messages"
+echo "  lobster start     Start all services"
+echo "  lobster stop      Stop all services"
+echo "  lobster help      Show all commands"
 echo ""
 echo -e "${BOLD}Directories:${NC}"
 echo "  $INSTALL_DIR        Repository"

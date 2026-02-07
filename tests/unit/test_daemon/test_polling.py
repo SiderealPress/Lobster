@@ -41,8 +41,8 @@ class TestProcessMessages:
     @pytest.mark.asyncio
     async def test_uses_session_id_for_new_session(self, workspace: Path):
         """Test that --session-id is used for new session."""
-        session_file = workspace / ".hyperion_session_id"
-        session_used = workspace / ".hyperion_session_used"
+        session_file = workspace / ".lobster_session_id"
+        session_used = workspace / ".lobster_session_used"
 
         # Ensure no session exists
         if session_file.exists():
@@ -72,8 +72,8 @@ class TestProcessMessages:
     @pytest.mark.asyncio
     async def test_uses_resume_for_existing_session(self, workspace: Path):
         """Test that --resume is used for existing session."""
-        session_file = workspace / ".hyperion_session_id"
-        session_used = workspace / ".hyperion_session_used"
+        session_file = workspace / ".lobster_session_id"
+        session_used = workspace / ".lobster_session_used"
 
         # Create existing session
         session_file.write_text("existing-session-id")
@@ -101,8 +101,8 @@ class TestProcessMessages:
     @pytest.mark.asyncio
     async def test_marks_session_used_after_success(self, workspace: Path):
         """Test that session is marked as used after successful run."""
-        session_file = workspace / ".hyperion_session_id"
-        session_used = workspace / ".hyperion_session_used"
+        session_file = workspace / ".lobster_session_id"
+        session_used = workspace / ".lobster_session_used"
 
         # Fresh session
         if session_used.exists():
@@ -127,7 +127,7 @@ class TestProcessMessages:
     @pytest.mark.asyncio
     async def test_returns_false_on_error(self, workspace: Path):
         """Test that False is returned on Claude error."""
-        session_file = workspace / ".hyperion_session_id"
+        session_file = workspace / ".lobster_session_id"
 
         with patch("src.daemon.daemon.WORKSPACE", workspace):
             with patch("src.daemon.daemon.SESSION_ID_FILE", session_file):
@@ -149,7 +149,7 @@ class TestProcessMessages:
     @pytest.mark.asyncio
     async def test_handles_timeout(self, workspace: Path):
         """Test that timeout is handled."""
-        session_file = workspace / ".hyperion_session_id"
+        session_file = workspace / ".lobster_session_id"
 
         with patch("src.daemon.daemon.WORKSPACE", workspace):
             with patch("src.daemon.daemon.SESSION_ID_FILE", session_file):
@@ -175,7 +175,7 @@ class TestProcessMessages:
     @pytest.mark.asyncio
     async def test_includes_dangerously_skip_permissions(self, workspace: Path):
         """Test that --dangerously-skip-permissions is included."""
-        session_file = workspace / ".hyperion_session_id"
+        session_file = workspace / ".lobster_session_id"
 
         with patch("src.daemon.daemon.WORKSPACE", workspace):
             with patch("src.daemon.daemon.SESSION_ID_FILE", session_file):

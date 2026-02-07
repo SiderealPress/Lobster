@@ -1,4 +1,4 @@
-"""Hyperion test fixture generators."""
+"""Lobster test fixture generators."""
 
 from .message_generator import (
     MessageGenerator,

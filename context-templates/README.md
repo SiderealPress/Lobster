@@ -1,6 +1,6 @@
 # Context Templates
 
-These template files define the structure for your personal context directory. When you set up Hyperion with a private configuration repository, copy these templates to a `context/` directory within your private config.
+These template files define the structure for your personal context directory. When you set up Lobster with a private configuration repository, copy these templates to a `context/` directory within your private config.
 
 ## Purpose
 
@@ -14,7 +14,7 @@ The context directory builds a persistent understanding of you over time:
 - **Desires** - Wants, wishes, bucket list
 - **Serendipity** - Random discoveries and inspirations
 
-This context enables Hyperion to:
+This context enables Lobster to:
 1. Better understand your brain dumps
 2. Link new thoughts to existing goals/projects
 3. Recognize mentions of people you know
@@ -26,11 +26,11 @@ This context enables Hyperion to:
 ### 1. Create Context Directory in Your Private Config
 
 ```bash
-# Assuming your private config is at ~/hyperion-config
-mkdir -p ~/hyperion-config/context
+# Assuming your private config is at ~/lobster-config
+mkdir -p ~/lobster-config/context
 
 # Copy templates
-cp ~/hyperion/context-templates/*.md ~/hyperion-config/context/
+cp ~/lobster/context-templates/*.md ~/lobster-config/context/
 ```
 
 ### 2. Fill in Your Context
@@ -39,8 +39,8 @@ Edit each file to add your actual information. The templates include examples (i
 
 ```bash
 # Edit each context file
-nano ~/hyperion-config/context/goals.md
-nano ~/hyperion-config/context/projects.md
+nano ~/lobster-config/context/goals.md
+nano ~/lobster-config/context/projects.md
 # ... and so on
 ```
 
@@ -50,13 +50,13 @@ Add to your `config.env`:
 
 ```bash
 # Path to your context directory
-HYPERION_CONTEXT_DIR="${HYPERION_CONFIG_DIR}/context"
+LOBSTER_CONTEXT_DIR="${LOBSTER_CONFIG_DIR}/context"
 ```
 
 ### 4. Commit Your Context
 
 ```bash
-cd ~/hyperion-config
+cd ~/lobster-config
 git add context/
 git commit -m "Add personal context files"
 git push
@@ -78,7 +78,7 @@ git push
 
 ### During Brain Dump Processing
 
-When you send a brain dump, Hyperion:
+When you send a brain dump, Lobster:
 
 1. **Loads relevant context** based on keywords detected
 2. **Matches to goals/projects** - Links your thought to existing work
@@ -107,7 +107,7 @@ Issue created with:
 Your context files contain personal information. Always:
 
 1. Store in a **private** repository
-2. Set restrictive permissions: `chmod 600 ~/hyperion-config/context/*`
+2. Set restrictive permissions: `chmod 600 ~/lobster-config/context/*`
 3. Never commit sensitive data (passwords, etc.)
 4. Review before sharing any backups
 

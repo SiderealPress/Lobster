@@ -1,6 +1,6 @@
 # Goals
 
-Your long-term vision and short-term objectives. This file helps Hyperion understand what you're working toward and prioritize accordingly.
+Your long-term vision and short-term objectives. This file helps Lobster understand what you're working toward and prioritize accordingly.
 
 ## Long-Term Goals (1+ years)
 

@@ -1,6 +1,6 @@
 #!/bin/bash
 #===============================================================================
-# Hyperion Health Check v2 - Robust, LLM-Independent Monitoring
+# Lobster Health Check v2 - Robust, LLM-Independent Monitoring
 #
 # Detects and auto-recovers from:
 # 1. Claude process not running
@@ -9,23 +9,23 @@
 # 4. MCP server failures
 # 5. Memory/resource exhaustion
 #
-# Run via cron every 2 minutes: */2 * * * * ~/hyperion/scripts/health-check-v2.sh
+# Run via cron every 2 minutes: */2 * * * * ~/lobster/scripts/health-check-v2.sh
 #===============================================================================
 
 set -o pipefail
 
 # Configuration
-HEARTBEAT_FILE="$HOME/hyperion-workspace/logs/claude-heartbeat"
+HEARTBEAT_FILE="$HOME/lobster-workspace/logs/claude-heartbeat"
 HEARTBEAT_MAX_AGE_SECONDS=600  # 10 minutes - Claude should heartbeat more often
 INBOX_DIR="$HOME/messages/inbox"
 STALE_MESSAGE_THRESHOLD_MINUTES=15
-LOG_FILE="$HOME/hyperion-workspace/logs/health-check.log"
-LOCK_FILE="/tmp/hyperion-health-check.lock"
+LOG_FILE="$HOME/lobster-workspace/logs/health-check.log"
+LOCK_FILE="/tmp/lobster-health-check.lock"
 MAX_RESTART_ATTEMPTS=3
 RESTART_COOLDOWN_SECONDS=300  # 5 minutes between restart attempts
-RESTART_STATE_FILE="$HOME/hyperion-workspace/logs/health-restart-state"
-TMUX_SOCKET="hyperion"
-SESSION_NAME="hyperion"
+RESTART_STATE_FILE="$HOME/lobster-workspace/logs/health-restart-state"
+TMUX_SOCKET="lobster"
+SESSION_NAME="lobster"
 
 # Memory threshold (percentage)
 MEMORY_THRESHOLD=90
@@ -238,12 +238,12 @@ check_claude_active() {
 # Recovery Actions
 #-------------------------------------------------------------------------------
 
-restart_hyperion() {
-    log_warn "Initiating Hyperion restart..."
+restart_lobster() {
+    log_warn "Initiating Lobster restart..."
 
     if ! can_restart; then
         log_error "Cannot restart - rate limit exceeded. Manual intervention required."
-        "$HOME/hyperion/scripts/alert.sh" "Health check: Max restart attempts exceeded. Manual intervention required."
+        "$HOME/lobster/scripts/alert.sh" "Health check: Max restart attempts exceeded. Manual intervention required."
         return 1
     fi
 
@@ -257,22 +257,22 @@ restart_hyperion() {
     sleep 2
 
     # Start new session
-    log_info "Starting new Hyperion session..."
-    tmux -L "$TMUX_SOCKET" new-session -d -s "$SESSION_NAME" -c "$HOME/hyperion-workspace" \
-        "$HOME/hyperion/scripts/claude-wrapper.exp"
+    log_info "Starting new Lobster session..."
+    tmux -L "$TMUX_SOCKET" new-session -d -s "$SESSION_NAME" -c "$HOME/lobster-workspace" \
+        "$HOME/lobster/scripts/claude-wrapper.exp"
 
     sleep 3
 
     # Verify restart
     if check_tmux_session && check_claude_process; then
-        log_info "Hyperion restarted successfully"
+        log_info "Lobster restarted successfully"
 
         # Touch heartbeat to give new session time to establish
         touch "$HEARTBEAT_FILE"
 
         return 0
     else
-        log_error "Hyperion restart failed"
+        log_error "Lobster restart failed"
         return 1
     fi
 }
@@ -321,14 +321,14 @@ main() {
     # Take action based on findings
     if [[ $critical_failure -eq 1 ]]; then
         log_error "Critical failure detected - attempting restart"
-        restart_hyperion
+        restart_lobster
     elif [[ $issues_found -eq 1 ]]; then
         log_warn "Non-critical issues found - monitoring"
         # Update heartbeat to show health check is active
-        touch "$HOME/hyperion-workspace/logs/health-check.heartbeat"
+        touch "$HOME/lobster-workspace/logs/health-check.heartbeat"
     else
         log_info "All checks passed"
-        touch "$HOME/hyperion-workspace/logs/health-check.heartbeat"
+        touch "$HOME/lobster-workspace/logs/health-check.heartbeat"
     fi
 
     log_info "=== Health check complete ==="

@@ -1,11 +1,11 @@
 #!/bin/bash
-# Hyperion Crontab Synchronizer
+# Lobster Crontab Synchronizer
 # Syncs jobs.json to system crontab
 
 set -e
 
-JOBS_FILE="$HOME/hyperion/scheduled-tasks/jobs.json"
-RUNNER="$HOME/hyperion/scheduled-tasks/run-job.sh"
+JOBS_FILE="$HOME/lobster/scheduled-tasks/jobs.json"
+RUNNER="$HOME/lobster/scheduled-tasks/run-job.sh"
 
 # Check if crontab is available
 if ! command -v crontab &> /dev/null; then
@@ -20,10 +20,10 @@ if [ ! -f "$JOBS_FILE" ]; then
     exit 1
 fi
 
-# Marker for hyperion-managed cron entries
-MARKER="# HYPERION-SCHEDULED"
+# Marker for lobster-managed cron entries
+MARKER="# LOBSTER-SCHEDULED"
 
-# Get existing crontab entries (excluding hyperion ones)
+# Get existing crontab entries (excluding lobster ones)
 EXISTING=$(crontab -l 2>/dev/null | grep -v "$MARKER" | grep -v "$RUNNER" || true)
 
 # Generate new crontab entries from jobs.json
@@ -62,4 +62,4 @@ fi
 
 # Show result
 echo "Crontab synchronized:"
-crontab -l 2>/dev/null | grep "$MARKER" || echo "(no hyperion jobs)"
+crontab -l 2>/dev/null | grep "$MARKER" || echo "(no lobster jobs)"

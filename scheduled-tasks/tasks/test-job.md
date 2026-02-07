@@ -6,7 +6,7 @@
 
 ## Context
 
-You are running as a scheduled task. The main Hyperion instance created this job.
+You are running as a scheduled task. The main Lobster instance created this job.
 
 ## Instructions
 
@@ -19,4 +19,4 @@ When you complete your task, call `write_task_output` with:
 - output: Your results/summary
 - status: "success" or "failed"
 
-Keep output concise. The main Hyperion instance will review this later.
+Keep output concise. The main Lobster instance will review this later.

@@ -36,7 +36,7 @@ run_test() {
 #===============================================================================
 
 echo "=========================================="
-echo "  Hyperion Overlay Test Suite"
+echo "  Lobster Overlay Test Suite"
 echo "=========================================="
 
 # Find script directory
@@ -45,7 +45,7 @@ REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 # Create temporary directories
 TEST_DIR=$(mktemp -d)
-INSTALL_DIR="$TEST_DIR/hyperion"
+INSTALL_DIR="$TEST_DIR/lobster"
 WORKSPACE_DIR="$TEST_DIR/workspace"
 MESSAGES_DIR="$TEST_DIR/messages"
 PRIVATE_CONFIG_DIR="$TEST_DIR/private-config"
@@ -82,8 +82,8 @@ extract_functions
 # Test 1: No private config dir set
 #===============================================================================
 
-run_test "No HYPERION_CONFIG_DIR set"
-unset HYPERION_CONFIG_DIR
+run_test "No LOBSTER_CONFIG_DIR set"
+unset LOBSTER_CONFIG_DIR
 output=$(apply_private_overlay 2>&1)
 if echo "$output" | grep -q "No private config directory"; then
     test_pass "Correctly reports no config dir"
@@ -96,7 +96,7 @@ fi
 #===============================================================================
 
 run_test "Non-existent private config dir"
-HYPERION_CONFIG_DIR="/nonexistent/path"
+LOBSTER_CONFIG_DIR="/nonexistent/path"
 output=$(apply_private_overlay 2>&1)
 if echo "$output" | grep -q "not found"; then
     test_pass "Correctly warns about missing dir"
@@ -111,7 +111,7 @@ fi
 run_test "Overlay config.env"
 mkdir -p "$PRIVATE_CONFIG_DIR"
 echo "TEST_VAR=test_value" > "$PRIVATE_CONFIG_DIR/config.env"
-HYPERION_CONFIG_DIR="$PRIVATE_CONFIG_DIR"
+LOBSTER_CONFIG_DIR="$PRIVATE_CONFIG_DIR"
 apply_private_overlay >/dev/null 2>&1
 
 if [ -f "$INSTALL_DIR/config/config.env" ]; then
@@ -130,7 +130,7 @@ fi
 
 run_test "Overlay CLAUDE.md"
 echo "# Custom Claude Instructions" > "$PRIVATE_CONFIG_DIR/CLAUDE.md"
-HYPERION_CONFIG_DIR="$PRIVATE_CONFIG_DIR"
+LOBSTER_CONFIG_DIR="$PRIVATE_CONFIG_DIR"
 apply_private_overlay >/dev/null 2>&1
 
 if [ -f "$WORKSPACE_DIR/CLAUDE.md" ]; then
@@ -150,7 +150,7 @@ fi
 run_test "Overlay agents directory"
 mkdir -p "$PRIVATE_CONFIG_DIR/agents"
 echo "# Custom Agent" > "$PRIVATE_CONFIG_DIR/agents/custom-agent.md"
-HYPERION_CONFIG_DIR="$PRIVATE_CONFIG_DIR"
+LOBSTER_CONFIG_DIR="$PRIVATE_CONFIG_DIR"
 apply_private_overlay >/dev/null 2>&1
 
 if [ -f "$INSTALL_DIR/.claude/agents/custom-agent.md" ]; then
@@ -166,7 +166,7 @@ fi
 run_test "Overlay scheduled-tasks directory"
 mkdir -p "$PRIVATE_CONFIG_DIR/scheduled-tasks"
 echo "# Morning task" > "$PRIVATE_CONFIG_DIR/scheduled-tasks/morning.md"
-HYPERION_CONFIG_DIR="$PRIVATE_CONFIG_DIR"
+LOBSTER_CONFIG_DIR="$PRIVATE_CONFIG_DIR"
 apply_private_overlay >/dev/null 2>&1
 
 if [ -f "$INSTALL_DIR/scheduled-tasks/morning.md" ]; then
@@ -180,7 +180,7 @@ fi
 #===============================================================================
 
 run_test "Run hook with no config dir"
-unset HYPERION_CONFIG_DIR
+unset LOBSTER_CONFIG_DIR
 run_hook "post-install.sh"
 test_pass "Hook silently skipped when no config dir"
 
@@ -190,7 +190,7 @@ test_pass "Hook silently skipped when no config dir"
 
 run_test "Run hook when hook file doesn't exist"
 mkdir -p "$PRIVATE_CONFIG_DIR/hooks"
-HYPERION_CONFIG_DIR="$PRIVATE_CONFIG_DIR"
+LOBSTER_CONFIG_DIR="$PRIVATE_CONFIG_DIR"
 run_hook "nonexistent-hook.sh" 2>&1
 test_pass "Hook silently skipped when file doesn't exist"
 
@@ -202,7 +202,7 @@ run_test "Run hook when hook is not executable"
 echo '#!/bin/bash' > "$PRIVATE_CONFIG_DIR/hooks/post-install.sh"
 echo 'echo "Hook ran"' >> "$PRIVATE_CONFIG_DIR/hooks/post-install.sh"
 # Don't make it executable
-HYPERION_CONFIG_DIR="$PRIVATE_CONFIG_DIR"
+LOBSTER_CONFIG_DIR="$PRIVATE_CONFIG_DIR"
 output=$(run_hook "post-install.sh" 2>&1)
 if echo "$output" | grep -q "not executable"; then
     test_pass "Correctly warns about non-executable hook"
@@ -216,7 +216,7 @@ fi
 
 run_test "Run hook successfully"
 chmod +x "$PRIVATE_CONFIG_DIR/hooks/post-install.sh"
-HYPERION_CONFIG_DIR="$PRIVATE_CONFIG_DIR"
+LOBSTER_CONFIG_DIR="$PRIVATE_CONFIG_DIR"
 output=$(run_hook "post-install.sh" 2>&1)
 if echo "$output" | grep -q "Hook completed"; then
     test_pass "Hook executed successfully"
@@ -231,14 +231,14 @@ fi
 run_test "Hook receives environment variables"
 cat > "$PRIVATE_CONFIG_DIR/hooks/env-test.sh" << 'EOF'
 #!/bin/bash
-if [ -n "$HYPERION_INSTALL_DIR" ] && [ -n "$HYPERION_WORKSPACE_DIR" ] && [ -n "$HYPERION_MESSAGES_DIR" ]; then
+if [ -n "$LOBSTER_INSTALL_DIR" ] && [ -n "$LOBSTER_WORKSPACE_DIR" ] && [ -n "$LOBSTER_MESSAGES_DIR" ]; then
     exit 0
 else
     exit 1
 fi
 EOF
 chmod +x "$PRIVATE_CONFIG_DIR/hooks/env-test.sh"
-HYPERION_CONFIG_DIR="$PRIVATE_CONFIG_DIR"
+LOBSTER_CONFIG_DIR="$PRIVATE_CONFIG_DIR"
 output=$(run_hook "env-test.sh" 2>&1)
 if echo "$output" | grep -q "Hook completed"; then
     test_pass "Hook received environment variables"
@@ -256,7 +256,7 @@ cat > "$PRIVATE_CONFIG_DIR/hooks/failing-hook.sh" << 'EOF'
 exit 42
 EOF
 chmod +x "$PRIVATE_CONFIG_DIR/hooks/failing-hook.sh"
-HYPERION_CONFIG_DIR="$PRIVATE_CONFIG_DIR"
+LOBSTER_CONFIG_DIR="$PRIVATE_CONFIG_DIR"
 output=$(run_hook "failing-hook.sh" 2>&1)
 if echo "$output" | grep -q "exit code: 42"; then
     test_pass "Hook failure reports correct exit code"

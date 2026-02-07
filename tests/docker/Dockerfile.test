@@ -1,11 +1,11 @@
-# Hyperion Test Environment - Fresh Debian Install
+# Lobster Test Environment - Fresh Debian Install
 #
 # This Dockerfile creates a clean Debian environment for testing
-# the Hyperion installation process from scratch.
+# the Lobster installation process from scratch.
 #
 # Usage:
-#   docker build -f Dockerfile.test -t hyperion-test-install .
-#   docker run --rm -it hyperion-test-install
+#   docker build -f Dockerfile.test -t lobster-test-install .
+#   docker run --rm -it lobster-test-install
 
 FROM debian:bookworm-slim
 
@@ -35,12 +35,12 @@ RUN useradd -m -s /bin/bash testuser \
 USER testuser
 WORKDIR /home/testuser
 
-# Copy the Hyperion source code
-COPY --chown=testuser:testuser . /home/testuser/hyperion
+# Copy the Lobster source code
+COPY --chown=testuser:testuser . /home/testuser/lobster
 
 # Set up environment
 ENV HOME=/home/testuser
 ENV PATH="${HOME}/.local/bin:${HOME}/.claude/bin:${PATH}"
 
 # Default command runs install test
-CMD ["bash", "-c", "cd /home/testuser/hyperion && pytest tests/integration/test_installation.py -v"]
+CMD ["bash", "-c", "cd /home/testuser/lobster && pytest tests/integration/test_installation.py -v"]

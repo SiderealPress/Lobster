@@ -1,44 +1,44 @@
 #!/bin/bash
-# Hyperion Installation Configuration
-# Copy to hyperion.conf and customize before running install.sh
+# Lobster Installation Configuration
+# Copy to lobster.conf and customize before running install.sh
 #
 # Usage:
-#   cp config/hyperion.conf.example config/hyperion.conf
-#   # Edit hyperion.conf with your settings
+#   cp config/lobster.conf.example config/lobster.conf
+#   # Edit lobster.conf with your settings
 #   ./install.sh
 
 #===============================================================================
 # User Settings
 #===============================================================================
 
-# System user that will run Hyperion services
+# System user that will run Lobster services
 # Defaults to current user if not specified
 # Note: Uses whoami as fallback for non-interactive contexts (systemd, cron)
-HYPERION_USER="${HYPERION_USER:-${USER:-$(whoami)}}"
+LOBSTER_USER="${LOBSTER_USER:-${USER:-$(whoami)}}"
 
-# System group for Hyperion services
+# System group for Lobster services
 # Defaults to current user's primary group if not specified
-HYPERION_GROUP="${HYPERION_GROUP:-${USER:-$(whoami)}}"
+LOBSTER_GROUP="${LOBSTER_GROUP:-${USER:-$(whoami)}}"
 
 # User home directory
 # Used as base path for other directories if not explicitly set
-HYPERION_HOME="${HYPERION_HOME:-${HOME}}"
+LOBSTER_HOME="${LOBSTER_HOME:-${HOME}}"
 
 #===============================================================================
 # Installation Paths
 #===============================================================================
 
-# Where Hyperion source code is installed
+# Where Lobster source code is installed
 # This is the cloned repository location
-HYPERION_INSTALL_DIR="${HYPERION_INSTALL_DIR:-${HYPERION_HOME}/hyperion}"
+LOBSTER_INSTALL_DIR="${LOBSTER_INSTALL_DIR:-${LOBSTER_HOME}/lobster}"
 
 # Claude's working directory
 # This is where Claude performs work and stores temporary files
-HYPERION_WORKSPACE="${HYPERION_WORKSPACE:-${HYPERION_HOME}/hyperion-workspace}"
+LOBSTER_WORKSPACE="${LOBSTER_WORKSPACE:-${LOBSTER_HOME}/lobster-workspace}"
 
 # Message queue directories
 # Stores incoming/outgoing messages, audio files, and processed messages
-HYPERION_MESSAGES="${HYPERION_MESSAGES:-${HYPERION_HOME}/messages}"
+LOBSTER_MESSAGES="${LOBSTER_MESSAGES:-${LOBSTER_HOME}/messages}"
 
 #===============================================================================
 # Repository Settings (for forks)
@@ -46,11 +46,11 @@ HYPERION_MESSAGES="${HYPERION_MESSAGES:-${HYPERION_HOME}/messages}"
 
 # Git repository URL
 # Change this if you're installing from a fork
-HYPERION_REPO_URL="${HYPERION_REPO_URL:-https://github.com/SiderealPress/hyperion.git}"
+LOBSTER_REPO_URL="${LOBSTER_REPO_URL:-https://github.com/SiderealPress/lobster.git}"
 
 # Branch to install from
 # Useful for testing or installing from a specific version
-HYPERION_BRANCH="${HYPERION_BRANCH:-main}"
+LOBSTER_BRANCH="${LOBSTER_BRANCH:-main}"
 
 #===============================================================================
 # Private Configuration Overlay (Optional)
@@ -61,7 +61,7 @@ HYPERION_BRANCH="${HYPERION_BRANCH:-main}"
 # This allows you to maintain custom configurations separately from the main repo
 #
 # Example structure for your private config repo:
-#   ~/hyperion-config/
+#   ~/lobster-config/
 #   ├── config.env          # Your secrets (API keys, tokens)
 #   ├── CLAUDE.md           # Custom Claude context
 #   ├── agents/             # Custom agent definitions
@@ -76,10 +76,10 @@ HYPERION_BRANCH="${HYPERION_BRANCH:-main}"
 #   └── hooks/              # Custom installation hooks
 #
 # IMPORTANT: Your config directory should have restricted permissions:
-#   chmod 700 ~/hyperion-config
-#   chmod 600 ~/hyperion-config/config.env
+#   chmod 700 ~/lobster-config
+#   chmod 600 ~/lobster-config/config.env
 #
-# HYPERION_CONFIG_DIR="${HYPERION_HOME}/hyperion-config"
+# LOBSTER_CONFIG_DIR="${LOBSTER_HOME}/lobster-config"
 
 #===============================================================================
 # Feature Flags
@@ -87,12 +87,12 @@ HYPERION_BRANCH="${HYPERION_BRANCH:-main}"
 
 # Enable scheduled tasks feature
 # When true, the cron-based scheduled jobs system will be configured
-HYPERION_ENABLE_SCHEDULED_TASKS="${HYPERION_ENABLE_SCHEDULED_TASKS:-true}"
+LOBSTER_ENABLE_SCHEDULED_TASKS="${LOBSTER_ENABLE_SCHEDULED_TASKS:-true}"
 
 # Enable voice message transcription
 # When true, whisper.cpp will be installed for local audio transcription
 # Note: Requires ~400MB disk space and build tools (make, cmake, gcc)
-HYPERION_ENABLE_VOICE="${HYPERION_ENABLE_VOICE:-true}"
+LOBSTER_ENABLE_VOICE="${LOBSTER_ENABLE_VOICE:-true}"
 
 #===============================================================================
 # Brain Dumps Feature
@@ -102,7 +102,7 @@ HYPERION_ENABLE_VOICE="${HYPERION_ENABLE_VOICE:-true}"
 #
 # The agent definition lives in .claude/agents/brain-dumps.md and can be
 # customized via the private config overlay by placing your own version at:
-#   ${HYPERION_CONFIG_DIR}/agents/brain-dumps.md
+#   ${LOBSTER_CONFIG_DIR}/agents/brain-dumps.md
 #
 # See docs/BRAIN-DUMPS.md for full documentation.
 #===============================================================================
@@ -111,13 +111,13 @@ HYPERION_ENABLE_VOICE="${HYPERION_ENABLE_VOICE:-true}"
 # When true, voice messages detected as "brain dumps" (stream of consciousness,
 # ideas, thoughts) will be automatically saved to a dedicated GitHub repository
 # Set to false to disable the feature entirely
-HYPERION_BRAIN_DUMPS_ENABLED="${HYPERION_BRAIN_DUMPS_ENABLED:-true}"
+LOBSTER_BRAIN_DUMPS_ENABLED="${LOBSTER_BRAIN_DUMPS_ENABLED:-true}"
 
 # Repository name for storing brain dumps
 # Brain dumps are saved as GitHub issues in this repository
 # The repository will be created as private if it doesn't exist
 # Format: Just the repo name (not full path) - will be created under your GitHub username
-HYPERION_BRAIN_DUMPS_REPO="${HYPERION_BRAIN_DUMPS_REPO:-brain-dumps}"
+LOBSTER_BRAIN_DUMPS_REPO="${LOBSTER_BRAIN_DUMPS_REPO:-brain-dumps}"
 
 #===============================================================================
 # Personal Context (for Brain Dumps)
@@ -126,8 +126,8 @@ HYPERION_BRAIN_DUMPS_REPO="${HYPERION_BRAIN_DUMPS_REPO:-brain-dumps}"
 # people, values, etc. This enables intelligent context matching in brain dumps.
 #
 # Set up context by:
-#   1. Creating context directory: mkdir -p ${HYPERION_CONFIG_DIR}/context
-#   2. Copying templates: cp ~/hyperion/context-templates/*.md ${HYPERION_CONFIG_DIR}/context/
+#   1. Creating context directory: mkdir -p ${LOBSTER_CONFIG_DIR}/context
+#   2. Copying templates: cp ~/lobster/context-templates/*.md ${LOBSTER_CONFIG_DIR}/context/
 #   3. Editing files with your personal information
 #
 # See context-templates/README.md and docs/CUSTOMIZATION.md for details.
@@ -137,7 +137,7 @@ HYPERION_BRAIN_DUMPS_REPO="${HYPERION_BRAIN_DUMPS_REPO:-brain-dumps}"
 # Contains markdown files: goals.md, projects.md, values.md, habits.md, people.md,
 # desires.md, serendipity.md
 # If not set, brain dumps will be processed without context matching
-# HYPERION_CONTEXT_DIR="${HYPERION_CONFIG_DIR}/context"
+# LOBSTER_CONTEXT_DIR="${LOBSTER_CONFIG_DIR}/context"
 
 #===============================================================================
 # Slack Integration (Optional)
@@ -173,24 +173,24 @@ HYPERION_BRAIN_DUMPS_REPO="${HYPERION_BRAIN_DUMPS_REPO:-brain-dumps}"
 #===============================================================================
 
 # Enable the Slack router service
-# When true, hyperion-slack-router.service will be enabled
-# HYPERION_ENABLE_SLACK="${HYPERION_ENABLE_SLACK:-false}"
+# When true, lobster-slack-router.service will be enabled
+# LOBSTER_ENABLE_SLACK="${LOBSTER_ENABLE_SLACK:-false}"
 
 # Slack Bot User OAuth Token (starts with xoxb-)
 # Get this from: Your App > OAuth & Permissions > Bot User OAuth Token
-# HYPERION_SLACK_BOT_TOKEN=""
+# LOBSTER_SLACK_BOT_TOKEN=""
 
 # Slack App-Level Token (starts with xapp-)
 # Get this from: Your App > Basic Information > App-Level Tokens
 # Must have connections:write scope for Socket Mode
-# HYPERION_SLACK_APP_TOKEN=""
+# LOBSTER_SLACK_APP_TOKEN=""
 
 # Optional: Restrict to specific channels (comma-separated channel IDs)
 # If empty, bot responds in all channels where it's invited
 # Channel IDs look like: C01ABCDEF12
-# HYPERION_SLACK_ALLOWED_CHANNELS=""
+# LOBSTER_SLACK_ALLOWED_CHANNELS=""
 
 # Optional: Restrict to specific users (comma-separated user IDs)
 # If empty, bot responds to all users
 # User IDs look like: U01ABCDEF12
-# HYPERION_SLACK_ALLOWED_USERS=""
+# LOBSTER_SLACK_ALLOWED_USERS=""

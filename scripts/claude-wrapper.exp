@@ -1,7 +1,7 @@
 #!/usr/bin/expect -f
 #
 # Claude wrapper script - Automatically accepts bypass permissions dialog
-# and starts Claude with the Hyperion main loop.
+# and starts Claude with the Lobster main loop.
 #
 
 set timeout 30

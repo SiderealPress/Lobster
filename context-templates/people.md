@@ -1,6 +1,6 @@
 # People
 
-Key relationships in your life. This file helps Hyperion understand who you mention in brain dumps and provide relevant context.
+Key relationships in your life. This file helps Lobster understand who you mention in brain dumps and provide relevant context.
 
 ## Inner Circle
 

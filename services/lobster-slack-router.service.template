@@ -1,5 +1,5 @@
 [Unit]
-Description=Hyperion Slack Router - Slack to Claude Code bridge
+Description=Lobster Slack Router - Slack to Claude Code bridge
 After=network.target
 
 [Service]
@@ -16,7 +16,7 @@ RestartSec=10
 
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=hyperion-slack-router
+SyslogIdentifier=lobster-slack-router
 
 NoNewPrivileges=true
 PrivateTmp=true

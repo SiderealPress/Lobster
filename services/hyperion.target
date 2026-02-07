@@ -1,7 +1,0 @@
-[Unit]
-Description=Hyperion - Always-on Claude Code Message Processor
-After=network.target
-Wants=hyperion-router.service hyperion-claude.service
-
-[Install]
-WantedBy=multi-user.target

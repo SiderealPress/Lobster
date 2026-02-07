@@ -412,7 +412,7 @@ Output: Enriched GitHub Issue + User confirmation
 | Add comment | `mcp__github__add_issue_comment` |
 
 **Reading context files:**
-Use the `Read` tool to read from `${HYPERION_CONTEXT_DIR}/*.md` paths.
+Use the `Read` tool to read from `${LOBSTER_CONTEXT_DIR}/*.md` paths.
 
 ---
 
@@ -665,7 +665,7 @@ This allows the brain-dumps agent to reliably process dumps without variance in 
 
 ## Example Invocation
 
-When Hyperion receives a voice message identified as a brain dump:
+When Lobster receives a voice message identified as a brain dump:
 
 ```
 Task(

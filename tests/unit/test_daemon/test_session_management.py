@@ -20,7 +20,7 @@ class TestSessionManagement:
 
     def test_creates_new_session_id(self, workspace: Path):
         """Test that new session ID is created when none exists."""
-        session_file = workspace / ".hyperion_session_id"
+        session_file = workspace / ".lobster_session_id"
 
         with patch("src.daemon.daemon.SESSION_ID_FILE", session_file):
             with patch("src.daemon.daemon.WORKSPACE", workspace):
@@ -38,7 +38,7 @@ class TestSessionManagement:
 
     def test_returns_existing_session_id(self, workspace: Path):
         """Test that existing session ID is returned."""
-        session_file = workspace / ".hyperion_session_id"
+        session_file = workspace / ".lobster_session_id"
         existing_id = str(uuid.uuid4())
         session_file.write_text(existing_id)
 
@@ -51,7 +51,7 @@ class TestSessionManagement:
 
     def test_regenerates_if_file_empty(self, workspace: Path):
         """Test that new ID is generated if file is empty."""
-        session_file = workspace / ".hyperion_session_id"
+        session_file = workspace / ".lobster_session_id"
         session_file.write_text("")
 
         with patch("src.daemon.daemon.SESSION_ID_FILE", session_file):
@@ -65,7 +65,7 @@ class TestSessionManagement:
 
     def test_session_has_been_used_false_initially(self, workspace: Path):
         """Test that session_has_been_used returns False initially."""
-        marker = workspace / ".hyperion_session_used"
+        marker = workspace / ".lobster_session_used"
 
         with patch("src.daemon.daemon.WORKSPACE", workspace):
             from src.daemon.daemon import session_has_been_used
@@ -74,7 +74,7 @@ class TestSessionManagement:
 
     def test_session_has_been_used_true_after_mark(self, workspace: Path):
         """Test that session_has_been_used returns True after marking."""
-        marker = workspace / ".hyperion_session_used"
+        marker = workspace / ".lobster_session_used"
 
         with patch("src.daemon.daemon.WORKSPACE", workspace):
             from src.daemon.daemon import session_has_been_used, mark_session_used
@@ -86,7 +86,7 @@ class TestSessionManagement:
 
     def test_mark_session_used_writes_timestamp(self, workspace: Path):
         """Test that mark_session_used writes a timestamp."""
-        marker = workspace / ".hyperion_session_used"
+        marker = workspace / ".lobster_session_used"
 
         with patch("src.daemon.daemon.WORKSPACE", workspace):
             from src.daemon.daemon import mark_session_used

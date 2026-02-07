@@ -1,1 +1,1 @@
-"""Hyperion unit tests."""
+"""Lobster unit tests."""

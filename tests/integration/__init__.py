@@ -1,1 +1,1 @@
-"""Integration tests for Hyperion."""
+"""Integration tests for Lobster."""

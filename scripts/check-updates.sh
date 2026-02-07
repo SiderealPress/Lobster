@@ -1,6 +1,6 @@
 #!/bin/bash
 #===============================================================================
-# Hyperion Update Checker
+# Lobster Update Checker
 #
 # Checks for available updates and notifies via Telegram.
 # Designed to be run as a scheduled job - does NOT apply updates automatically.
@@ -14,12 +14,12 @@
 
 set -euo pipefail
 
-HYPERION_DIR="$HOME/hyperion"
-CONFIG_FILE="$HYPERION_DIR/config/config.env"
+LOBSTER_DIR="$HOME/lobster"
+CONFIG_FILE="$LOBSTER_DIR/config/config.env"
 
 # Change to repo directory
-cd "$HYPERION_DIR" || {
-    echo '{"status": "error", "message": "Hyperion directory not found"}'
+cd "$LOBSTER_DIR" || {
+    echo '{"status": "error", "message": "Lobster directory not found"}'
     exit 1
 }
 
@@ -60,7 +60,7 @@ if [ -f "$CONFIG_FILE" ]; then
     source "$CONFIG_FILE"
 
     if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_ALLOWED_USERS:-}" ]; then
-        MESSAGE="<b>Hyperion Update Available</b>
+        MESSAGE="<b>Lobster Update Available</b>
 
 <code>$COMMITS_BEHIND</code> new commit(s) available
 
@@ -70,7 +70,7 @@ Latest:  <code>$REMOTE_COMMIT</code>
 Recent changes:
 <pre>$(echo "$COMMIT_LOG" | head -5)</pre>
 
-Run <code>hyperion update</code> to apply."
+Run <code>lobster update</code> to apply."
 
         for user_id in $(echo "$TELEGRAM_ALLOWED_USERS" | tr ',' ' '); do
             curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \

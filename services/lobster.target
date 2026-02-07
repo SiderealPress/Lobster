@@ -1,0 +1,7 @@
+[Unit]
+Description=Lobster - Always-on Claude Code Message Processor
+After=network.target
+Wants=lobster-router.service lobster-claude.service
+
+[Install]
+WantedBy=multi-user.target

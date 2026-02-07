@@ -159,7 +159,7 @@ class TestMCPToolFlow:
 
         # Create incoming message
         msg = message_generator.generate_text_message(
-            text="Hello Hyperion!",
+            text="Hello Lobster!",
             chat_id=123456,
         )
         msg_id = msg["id"]

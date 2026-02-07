@@ -38,9 +38,9 @@ sudo tailscale up
 - [ ] Can authenticate via browser
 - [ ] `tailscale status` shows connected
 
-### A4: Hyperion Installation (Step 4 in docs)
+### A4: Lobster Installation (Step 4 in docs)
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/SiderealPress/hyperion/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/SiderealPress/lobster/main/install.sh)
 ```
 - [ ] Installer downloads and starts
 - [ ] Prompts for Telegram bot token
@@ -60,10 +60,10 @@ sudo tailscale funnel 443 on
 
 ### A6: Verification (Step 6 in docs)
 ```bash
-hyperion status
+lobster status
 ```
-- [ ] hyperion-router service is running
-- [ ] hyperion-claude service is running
+- [ ] lobster-router service is running
+- [ ] lobster-claude service is running
 - [ ] Send test Telegram message to bot
 - [ ] Bot responds correctly
 
@@ -82,7 +82,7 @@ hyperion status
 
 ### B2: Run Helper Script
 ```bash
-curl -fsSL https://raw.githubusercontent.com/SiderealPress/hyperion/main/scripts/local-setup-helper.sh | bash
+curl -fsSL https://raw.githubusercontent.com/SiderealPress/lobster/main/scripts/local-setup-helper.sh | bash
 ```
 
 - [ ] Script detects Debian/Ubuntu correctly
@@ -101,8 +101,8 @@ curl -fsSL https://raw.githubusercontent.com/SiderealPress/hyperion/main/scripts
 - [ ] Authentication completes
 - [ ] Status displayed
 
-### B5: Step 3/4 - Hyperion
-- [ ] Hyperion installer runs
+### B5: Step 3/4 - Lobster
+- [ ] Lobster installer runs
 - [ ] All prompts work correctly
 - [ ] Installation completes
 
@@ -117,7 +117,7 @@ curl -fsSL https://raw.githubusercontent.com/SiderealPress/hyperion/main/scripts
 - [ ] Platform-specific tips shown (based on hypervisor)
 
 ### B8: Functional Test
-- [ ] `hyperion status` shows services running
+- [ ] `lobster status` shows services running
 - [ ] Telegram bot responds to messages
 
 ---
@@ -127,7 +127,7 @@ curl -fsSL https://raw.githubusercontent.com/SiderealPress/hyperion/main/scripts
 ### C1: Non-Debian System
 ```bash
 # Run on Fedora, Arch, etc.
-curl -fsSL https://raw.githubusercontent.com/SiderealPress/hyperion/main/scripts/local-setup-helper.sh | bash
+curl -fsSL https://raw.githubusercontent.com/SiderealPress/lobster/main/scripts/local-setup-helper.sh | bash
 ```
 - [ ] Warning displayed about unsupported distro
 - [ ] Prompt to continue anyway works
@@ -136,7 +136,7 @@ curl -fsSL https://raw.githubusercontent.com/SiderealPress/hyperion/main/scripts
 ### C2: Running as Root
 ```bash
 sudo su -
-curl -fsSL https://raw.githubusercontent.com/SiderealPress/hyperion/main/scripts/local-setup-helper.sh | bash
+curl -fsSL https://raw.githubusercontent.com/SiderealPress/lobster/main/scripts/local-setup-helper.sh | bash
 ```
 - [ ] Warning displayed about running as root
 - [ ] Prompt to continue works

@@ -23,7 +23,7 @@ class TestHandleMessage:
         update.effective_user.username = "testuser"
         update.message.message_id = 1
         update.message.chat_id = 123456
-        update.message.text = "Hello, Hyperion!"
+        update.message.text = "Hello, Lobster!"
         update.message.voice = None
         update.message.reply_text = AsyncMock()
         return update
@@ -48,7 +48,7 @@ class TestHandleMessage:
             },
         ):
             import importlib
-            import src.bot.hyperion_bot as bot_module
+            import src.bot.lobster_bot as bot_module
             importlib.reload(bot_module)
 
             # Patch the INBOX_DIR
@@ -61,7 +61,7 @@ class TestHandleMessage:
 
                 # Verify content
                 content = json.loads(files[0].read_text())
-                assert content["text"] == "Hello, Hyperion!"
+                assert content["text"] == "Hello, Lobster!"
                 assert content["user_id"] == 123456
                 assert content["source"] == "telegram"
 
@@ -81,7 +81,7 @@ class TestHandleMessage:
             },
         ):
             import importlib
-            import src.bot.hyperion_bot as bot_module
+            import src.bot.lobster_bot as bot_module
             importlib.reload(bot_module)
 
             with patch.object(bot_module, "INBOX_DIR", inbox):
@@ -107,7 +107,7 @@ class TestHandleMessage:
             },
         ):
             import importlib
-            import src.bot.hyperion_bot as bot_module
+            import src.bot.lobster_bot as bot_module
             importlib.reload(bot_module)
 
             with patch.object(bot_module, "INBOX_DIR", inbox):
@@ -131,7 +131,7 @@ class TestHandleMessage:
             },
         ):
             import importlib
-            import src.bot.hyperion_bot as bot_module
+            import src.bot.lobster_bot as bot_module
             importlib.reload(bot_module)
 
             with patch.object(bot_module, "INBOX_DIR", inbox):
@@ -191,7 +191,7 @@ class TestHandleVoiceMessage:
             },
         ):
             import importlib
-            import src.bot.hyperion_bot as bot_module
+            import src.bot.lobster_bot as bot_module
             importlib.reload(bot_module)
 
             with patch.object(bot_module, "INBOX_DIR", inbox):
@@ -226,7 +226,7 @@ class TestHandleVoiceMessage:
             },
         ):
             import importlib
-            import src.bot.hyperion_bot as bot_module
+            import src.bot.lobster_bot as bot_module
             importlib.reload(bot_module)
 
             with patch.object(bot_module, "INBOX_DIR", inbox):

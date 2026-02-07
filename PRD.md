@@ -1,8 +1,8 @@
-# Hyperion - Product Requirements Document
+# Lobster - Product Requirements Document
 
 ## Overview
 
-Hyperion is a secure, self-hosted personal server environment for running an always-on Claude Code session with Telegram integration. Claude maintains persistent context across all messages, running in an infinite loop that blocks until new messages arrive.
+Lobster is a secure, self-hosted personal server environment for running an always-on Claude Code session with Telegram integration. Claude maintains persistent context across all messages, running in an infinite loop that blocks until new messages arrive.
 
 ## Problem Statement
 
@@ -26,7 +26,7 @@ A systemd-managed always-on Claude Code session with:
 | Telegram Bot | Receive/send messages through Telegram Bot API |
 | Blocking inbox | `wait_for_messages` tool blocks until new messages arrive (inotify) |
 | Voice messages | Audio transcription via OpenAI Whisper API |
-| tmux session | Claude runs in `hyperion` tmux session, attachable for debugging |
+| tmux session | Claude runs in `lobster` tmux session, attachable for debugging |
 | Security | Firewall, intrusion prevention, SSH hardening |
 
 > **Future integrations:** See [docs/FUTURE.md](docs/FUTURE.md) for planned Signal and Twilio SMS support.
@@ -48,11 +48,11 @@ A systemd-managed always-on Claude Code session with:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                      Hyperion System                         │
+│                      Lobster System                         │
 ├─────────────────────────────────────────────────────────────┤
-│  systemd target: hyperion.target                            │
-│  ├── hyperion-claude.service (always-on Claude in tmux)    │
-│  └── hyperion-router.service (Telegram bot)                │
+│  systemd target: lobster.target                            │
+│  ├── lobster-claude.service (always-on Claude in tmux)    │
+│  └── lobster-router.service (Telegram bot)                │
 ├─────────────────────────────────────────────────────────────┤
 │  Claude's Main Loop (runs forever)                          │
 │  ┌──────────────────────────────────────────────────────┐  │
@@ -64,7 +64,7 @@ A systemd-managed always-on Claude Code session with:
 │  │          mark_processed(msg.id)                       │  │
 │  └──────────────────────────────────────────────────────┘  │
 ├─────────────────────────────────────────────────────────────┤
-│  MCP Server: hyperion-inbox                                 │
+│  MCP Server: lobster-inbox                                 │
 │  ├── wait_for_messages() - blocks until inbox has messages │
 │  ├── check_inbox() - list pending messages                 │
 │  ├── send_reply() - write to outbox                        │
@@ -86,7 +86,7 @@ A systemd-managed always-on Claude Code session with:
 ## Message Flow
 
 1. User sends Telegram message (text or voice)
-2. `hyperion-router` (Telegram bot) writes JSON to `~/messages/inbox/`
+2. `lobster-router` (Telegram bot) writes JSON to `~/messages/inbox/`
 3. Voice messages: bot downloads audio, transcribes via OpenAI Whisper
 4. Claude's `wait_for_messages()` returns with new messages
 5. Claude processes message, calls `send_reply(chat_id, text)`
@@ -101,22 +101,22 @@ A systemd-managed always-on Claude Code session with:
 bash setup.sh
 
 # Start services
-sudo systemctl start hyperion.target
+sudo systemctl start lobster.target
 
 # Attach to Claude session (for debugging)
-tmux -L hyperion attach -t hyperion
+tmux -L lobster attach -t lobster
 
 # View logs
-journalctl -u hyperion-claude -u hyperion-router -f
+journalctl -u lobster-claude -u lobster-router -f
 ```
 
 ## Key Files
 
 | File | Purpose |
 |------|---------|
-| `services/hyperion-claude.service` | Always-on Claude session |
-| `services/hyperion-router.service` | Telegram bot |
-| `services/hyperion.target` | Systemd target grouping both services |
+| `services/lobster-claude.service` | Always-on Claude session |
+| `services/lobster-router.service` | Telegram bot |
+| `services/lobster.target` | Systemd target grouping both services |
 | `scripts/claude-wrapper.exp` | Expect script to auto-accept permissions dialog |
 | `src/mcp/inbox_server.py` | MCP server with message queue tools |
-| `src/bot/hyperion_bot.py` | Telegram bot with voice transcription |
+| `src/bot/lobster_bot.py` | Telegram bot with voice transcription |

@@ -22,7 +22,7 @@ def get_bot_module():
         },
     ):
         import importlib
-        import src.bot.hyperion_bot as bot_module
+        import src.bot.lobster_bot as bot_module
         importlib.reload(bot_module)
         return bot_module
 
@@ -50,7 +50,7 @@ class TestOutboxHandler:
         # Create reply file
         reply = {
             "chat_id": 123456,
-            "text": "Hello from Hyperion!",
+            "text": "Hello from Lobster!",
             "source": "telegram",
         }
         reply_file = outbox / "reply_1.json"
@@ -68,7 +68,7 @@ class TestOutboxHandler:
             await handler.process_reply(str(reply_file))
 
             mock_bot_app.bot.send_message.assert_called_once_with(
-                chat_id=123456, text="Hello from Hyperion!"
+                chat_id=123456, text="Hello from Lobster!"
             )
 
             assert not reply_file.exists()

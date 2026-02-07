@@ -1,13 +1,13 @@
 #!/bin/bash
 #===============================================================================
-# Hyperion CLI - Unified control for Hyperion message processing system
+# Lobster CLI - Unified control for Lobster message processing system
 #
-# Usage: hyperion <command> [options]
+# Usage: lobster <command> [options]
 #
 # Commands:
-#   start       Start all Hyperion services
-#   stop        Stop all Hyperion services
-#   restart     Restart all Hyperion services
+#   start       Start all Lobster services
+#   stop        Stop all Lobster services
+#   restart     Restart all Lobster services
 #   status      Show status of all components
 #   attach      Attach to Claude tmux session
 #   logs        Show logs (follow mode)
@@ -16,7 +16,7 @@
 #   stats       Show message statistics
 #   ps          List running Claude instances
 #   test        Send a test message through the system
-#   update      Update Hyperion (pull changes, restart services)
+#   update      Update Lobster (pull changes, restart services)
 #   help        Show this help message
 #===============================================================================
 
@@ -36,7 +36,7 @@ OUTBOX_DIR="$HOME/messages/outbox"
 PROCESSED_DIR="$HOME/messages/processed"
 
 # Services
-SERVICES=("hyperion-router" "hyperion-claude")
+SERVICES=("lobster-router" "lobster-claude")
 
 #-------------------------------------------------------------------------------
 # Helper Functions
@@ -69,7 +69,7 @@ count_files() {
 #-------------------------------------------------------------------------------
 
 cmd_start() {
-    print_header "Starting Hyperion"
+    print_header "Starting Lobster"
 
     for service in "${SERVICES[@]}"; do
         echo -n "Starting $service... "
@@ -86,7 +86,7 @@ cmd_start() {
 }
 
 cmd_stop() {
-    print_header "Stopping Hyperion"
+    print_header "Stopping Lobster"
 
     for service in "${SERVICES[@]}"; do
         echo -n "Stopping $service... "
@@ -99,14 +99,14 @@ cmd_stop() {
 }
 
 cmd_restart() {
-    print_header "Restarting Hyperion"
+    print_header "Restarting Lobster"
     cmd_stop
     sleep 1
     cmd_start
 }
 
 cmd_status() {
-    print_header "Hyperion Status"
+    print_header "Lobster Status"
 
     echo ""
     echo -e "${CYAN}Services:${NC}"
@@ -129,11 +129,11 @@ cmd_status() {
 
     echo ""
     echo -e "${CYAN}MCP Servers:${NC}"
-    claude mcp list 2>/dev/null | grep -E "hyperion|telegram" | sed 's/^/  /' || echo "  (run 'claude mcp list' to check)"
+    claude mcp list 2>/dev/null | grep -E "lobster|telegram" | sed 's/^/  /' || echo "  (run 'claude mcp list' to check)"
 
     echo ""
     if $all_running; then
-        echo -e "${GREEN}✓ Hyperion is operational${NC}"
+        echo -e "${GREEN}✓ Lobster is operational${NC}"
     else
         echo -e "${YELLOW}⚠ Some services are not running${NC}"
     fi
@@ -142,36 +142,36 @@ cmd_status() {
 cmd_logs() {
     local service="${1:-all}"
 
-    print_header "Hyperion Logs"
+    print_header "Lobster Logs"
 
     if [ "$service" = "all" ]; then
         echo "Showing logs for all services (Ctrl+C to exit)..."
         echo ""
-        sudo journalctl -u hyperion-router -u hyperion-claude -f --no-pager
+        sudo journalctl -u lobster-router -u lobster-claude -f --no-pager
     elif [ "$service" = "bot" ] || [ "$service" = "router" ]; then
-        sudo journalctl -u hyperion-router -f --no-pager
+        sudo journalctl -u lobster-router -f --no-pager
     elif [ "$service" = "claude" ]; then
-        echo "Claude runs in tmux. Use 'hyperion attach' to view live session."
-        echo "Showing systemd logs for hyperion-claude service..."
+        echo "Claude runs in tmux. Use 'lobster attach' to view live session."
+        echo "Showing systemd logs for lobster-claude service..."
         echo ""
-        sudo journalctl -u hyperion-claude -f --no-pager
+        sudo journalctl -u lobster-claude -f --no-pager
     else
         echo "Unknown service: $service"
-        echo "Usage: hyperion logs [all|bot|claude]"
+        echo "Usage: lobster logs [all|bot|claude]"
     fi
 }
 
 cmd_attach() {
     print_header "Attaching to Claude Session"
 
-    if tmux -L hyperion has-session -t hyperion 2>/dev/null; then
-        echo "Attaching to hyperion tmux session..."
+    if tmux -L lobster has-session -t lobster 2>/dev/null; then
+        echo "Attaching to lobster tmux session..."
         echo "Press Ctrl+B, D to detach without stopping Claude."
         echo ""
-        tmux -L hyperion attach-session -t hyperion
+        tmux -L lobster attach-session -t lobster
     else
         echo -e "${RED}No active Claude session found.${NC}"
-        echo "Start Hyperion with: hyperion start"
+        echo "Start Lobster with: lobster start"
     fi
 }
 
@@ -239,7 +239,7 @@ cmd_stats() {
 
     echo ""
     echo -e "${CYAN}Recent Activity:${NC}"
-    sudo journalctl -u hyperion-claude --since "1 hour ago" --no-pager 2>/dev/null | \
+    sudo journalctl -u lobster-claude --since "1 hour ago" --no-pager 2>/dev/null | \
         grep -E "message|processed|reply" | tail -5 | sed 's/^/  /' || echo "  (no recent activity)"
 }
 
@@ -267,7 +267,7 @@ EOF
     echo -e "${GREEN}✓ Test message created: $msg_file${NC}"
     echo ""
     echo "If Claude is running, it should process this shortly."
-    echo "Watch with: hyperion attach"
+    echo "Watch with: lobster attach"
 }
 
 cmd_ps() {
@@ -346,7 +346,7 @@ cmd_ps() {
         uptimes+=("$uptime_str")
         cmds+=("$cmd_short")
         count=$((count + 1))
-    done < <(ps aux | awk '$11 ~ /(^|\/)claude$/' | grep -v "hyperion ps\|lobster ps")
+    done < <(ps aux | awk '$11 ~ /(^|\/)claude$/' | grep -v "lobster ps\|lobster ps")
 
     if [ "$count" -eq 0 ]; then
         echo -e "  ${YELLOW}No Claude instances running${NC}"
@@ -370,7 +370,7 @@ cmd_ps() {
 
 cmd_update() {
     local args=("$@")
-    local script="$HOME/hyperion/scripts/update-hyperion.sh"
+    local script="$HOME/lobster/scripts/update-lobster.sh"
 
     if [ ! -f "$script" ]; then
         echo -e "${RED}Error: Update script not found at $script${NC}"
@@ -382,14 +382,14 @@ cmd_update() {
 }
 
 cmd_help() {
-    echo -e "${BLUE}Hyperion CLI${NC} - Unified control for Hyperion message processing"
+    echo -e "${BLUE}Lobster CLI${NC} - Unified control for Lobster message processing"
     echo ""
-    echo "Usage: hyperion <command> [options]"
+    echo "Usage: lobster <command> [options]"
     echo ""
     echo "Commands:"
-    echo "  start           Start all Hyperion services"
-    echo "  stop            Stop all Hyperion services"
-    echo "  restart         Restart all Hyperion services"
+    echo "  start           Start all Lobster services"
+    echo "  stop            Stop all Lobster services"
+    echo "  restart         Restart all Lobster services"
     echo "  status          Show status of all components"
     echo "  attach          Attach to Claude tmux session"
     echo "  logs [service]  Show logs (all|bot|claude)"
@@ -398,7 +398,7 @@ cmd_help() {
     echo "  stats           Show message statistics"
     echo "  ps              List running Claude instances"
     echo "  test            Create a test message in inbox"
-    echo "  update [opts]   Update Hyperion from git"
+    echo "  update [opts]   Update Lobster from git"
     echo "  help            Show this help message"
     echo ""
     echo "Update options:"
@@ -409,10 +409,10 @@ cmd_help() {
     echo "  --rollback      Restore from backup"
     echo ""
     echo "Examples:"
-    echo "  hyperion start          # Start everything"
-    echo "  hyperion status         # Check what's running"
-    echo "  hyperion attach         # View Claude live session"
-    echo "  hyperion inbox          # See pending messages"
+    echo "  lobster start          # Start everything"
+    echo "  lobster status         # Check what's running"
+    echo "  lobster attach         # View Claude live session"
+    echo "  lobster inbox          # See pending messages"
 }
 
 #-------------------------------------------------------------------------------
@@ -435,7 +435,7 @@ case "${1:-help}" in
     help|--help|-h) cmd_help ;;
     *)
         echo "Unknown command: $1"
-        echo "Run 'hyperion help' for usage."
+        echo "Run 'lobster help' for usage."
         exit 1
         ;;
 esac

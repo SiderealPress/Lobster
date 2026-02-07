@@ -5,7 +5,7 @@
 # Safely updates Lobster: pulls repo changes, restarts services, and updates
 # Claude Code CLI - all without data loss or significant downtime.
 #
-# Usage: ./update-hyperion.sh [--force] [--skip-claude] [--dry-run] [--rollback]
+# Usage: ./update-lobster.sh [--force] [--skip-claude] [--dry-run] [--rollback]
 #
 # Options:
 #   --force        Continue even if health checks fail

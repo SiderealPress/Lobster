@@ -1,6 +1,6 @@
 # Values
 
-Your core principles, priorities, and decision-making frameworks. This file helps Hyperion understand what matters most to you and make suggestions aligned with your values.
+Your core principles, priorities, and decision-making frameworks. This file helps Lobster understand what matters most to you and make suggestions aligned with your values.
 
 ## Core Values
 

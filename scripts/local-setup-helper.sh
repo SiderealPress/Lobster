@@ -1,11 +1,11 @@
 #!/bin/bash
 #===============================================================================
-# Hyperion Local Setup Helper
+# Lobster Local Setup Helper
 #
-# Convenience script for setting up Hyperion in a local VM with Tailscale Funnel.
+# Convenience script for setting up Lobster in a local VM with Tailscale Funnel.
 # Run this inside a fresh Debian 12 VM.
 #
-# Usage: curl -fsSL https://raw.githubusercontent.com/SiderealPress/hyperion/main/scripts/local-setup-helper.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/SiderealPress/lobster/main/scripts/local-setup-helper.sh | bash
 #===============================================================================
 
 set -e
@@ -27,8 +27,8 @@ step() { echo -e "\n${CYAN}${BOLD}▶ $1${NC}"; }
 
 echo -e "${BOLD}"
 echo "╔═══════════════════════════════════════════════════════════╗"
-echo "║         Hyperion Local Setup Helper                       ║"
-echo "║         Sets up Hyperion + Tailscale Funnel in a VM       ║"
+echo "║         Lobster Local Setup Helper                       ║"
+echo "║         Sets up Lobster + Tailscale Funnel in a VM       ║"
 echo "╚═══════════════════════════════════════════════════════════╝"
 echo -e "${NC}"
 
@@ -124,17 +124,17 @@ success "Tailscale connected"
 tailscale status
 
 #-------------------------------------------------------------------------------
-step "Step 3/4: Installing Hyperion"
+step "Step 3/4: Installing Lobster"
 #-------------------------------------------------------------------------------
-info "Running Hyperion installer..."
-bash <(curl -fsSL https://raw.githubusercontent.com/SiderealPress/hyperion/main/install.sh)
+info "Running Lobster installer..."
+bash <(curl -fsSL https://raw.githubusercontent.com/SiderealPress/lobster/main/install.sh)
 
-success "Hyperion installed"
+success "Lobster installed"
 
 #-------------------------------------------------------------------------------
 step "Step 4/4: Enabling Tailscale Funnel"
 #-------------------------------------------------------------------------------
-info "Enabling Funnel to expose Hyperion to the internet..."
+info "Enabling Funnel to expose Lobster to the internet..."
 sudo tailscale funnel 443 on || {
     warn "Funnel may require enabling in Tailscale admin console"
     info "Visit: https://login.tailscale.com/admin/machines"
@@ -150,15 +150,15 @@ echo ""
 
 HOSTNAME=$(tailscale status --json 2>/dev/null | grep -o '"DNSName":"[^"]*"' | head -1 | cut -d'"' -f4 | sed 's/\.$//')
 if [ -n "$HOSTNAME" ]; then
-    echo -e "Your Hyperion instance is accessible at:"
+    echo -e "Your Lobster instance is accessible at:"
     echo -e "  ${CYAN}${BOLD}https://${HOSTNAME}${NC}"
     echo ""
 fi
 
 echo "Useful commands:"
-echo "  hyperion status    - Check service status"
-echo "  hyperion attach    - Attach to Claude session"
-echo "  hyperion logs      - View logs"
+echo "  lobster status    - Check service status"
+echo "  lobster attach    - Attach to Claude session"
+echo "  lobster logs      - View logs"
 echo "  tailscale status   - Check Tailscale connection"
 echo ""
 
