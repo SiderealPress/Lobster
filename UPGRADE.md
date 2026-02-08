@@ -105,24 +105,10 @@ You can also use the existing update script's rollback feature:
 ~/lobster/scripts/update-lobster.sh --rollback
 ```
 
-## New Features After Upgrade
+## What's New
 
-### Conversation History (`get_conversation_history`)
-Browse past sent and received messages. Both incoming messages (from `processed/`)
-and outgoing replies (from `sent/`) are available with filtering and pagination.
-
-### Headless Browser (`fetch_page`)
-Fetches web pages using Playwright/Chromium with full JavaScript rendering.
-Works with Twitter/X, SPAs, and other JS-heavy sites. Requires the Playwright
-step during upgrade.
-
-### Markdown Rendering
-Bot replies now render Markdown formatting in Telegram, with automatic fallback
-to plain text if parsing fails.
-
-### File Size Pre-check
-Documents over 20MB are rejected before download with a clear error message,
-instead of failing silently.
+The upgrade script automatically shows you what's changed since your last update,
+written in plain language. You can also read the full list in `~/lobster/WHATSNEW`.
 
 ## Troubleshooting
 

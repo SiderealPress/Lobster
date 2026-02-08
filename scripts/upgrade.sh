@@ -344,6 +344,61 @@ git_pull() {
 }
 
 #===============================================================================
+# 2b. Show what's new (human-readable changelog)
+#===============================================================================
+
+show_whats_new() {
+    local whatsnew_file="$LOBSTER_DIR/WHATSNEW"
+
+    # Only show if we actually pulled new commits
+    if [ "$PREVIOUS_COMMIT" = "$CURRENT_COMMIT" ]; then
+        return 0
+    fi
+
+    # Only show if the WHATSNEW file exists in the new version
+    if [ ! -f "$whatsnew_file" ]; then
+        return 0
+    fi
+
+    # Check if WHATSNEW existed before this upgrade
+    if git show "$PREVIOUS_COMMIT:WHATSNEW" &>/dev/null; then
+        # Show only lines added since the user's last version
+        local new_entries
+        new_entries=$(diff --new-line-format='%L' --old-line-format='' --unchanged-line-format='' \
+            <(git show "$PREVIOUS_COMMIT:WHATSNEW" 2>/dev/null) \
+            "$whatsnew_file" 2>/dev/null || true)
+
+        if [ -n "$new_entries" ]; then
+            echo ""
+            echo -e "${YELLOW}${BOLD}  What's new since your last update:${NC}"
+            echo -e "${DIM}  ─────────────────────────────────────${NC}"
+            echo "$new_entries" | grep -E '^### ' | sed 's/^### //' | while read -r entry; do
+                echo -e "  ${GREEN}*${NC} $entry"
+            done
+            echo ""
+            # Show full details
+            echo "$new_entries" | grep -v '^#' | grep -v '^$' | while read -r line; do
+                echo -e "    ${DIM}$line${NC}"
+            done
+            echo ""
+        fi
+    else
+        # First time seeing WHATSNEW — show everything
+        echo ""
+        echo -e "${YELLOW}${BOLD}  Here's what Lobster can do now:${NC}"
+        echo -e "${DIM}  ─────────────────────────────────────${NC}"
+        grep -E '^### ' "$whatsnew_file" | sed 's/^### //' | while read -r entry; do
+            echo -e "  ${GREEN}*${NC} $entry"
+        done
+        echo ""
+        grep -v '^#' "$whatsnew_file" | grep -v '^$' | while read -r line; do
+            echo -e "    ${DIM}$line${NC}"
+        done
+        echo ""
+    fi
+}
+
+#===============================================================================
 # 3. Python dependencies
 #===============================================================================
 
@@ -946,6 +1001,7 @@ main() {
     preflight_checks          # 0. Pre-flight
     backup_config             # 1. Backup
     git_pull                  # 2. Git pull
+    show_whats_new            # 2b. Show what's new
     update_python_deps        # 3. Python deps
     create_new_directories    # 4. New directories
     setup_syncthing           # 5. Syncthing (optional/prompted)

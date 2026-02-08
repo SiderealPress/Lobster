@@ -1,0 +1,34 @@
+# What's New in Lobster
+
+Each entry describes what changed for you as a user — not implementation details.
+
+## February 2026
+
+### Browse past conversations
+You can now scroll back through your message history with Lobster — both what you
+sent and what Lobster replied. Useful for finding links, instructions, or anything
+you discussed earlier.
+
+### Lobster can read web pages
+Send Lobster any URL and it will fetch and read the page, even JavaScript-heavy
+sites like Twitter/X. Great for "summarize this article" or "what does this tweet say?"
+
+### Messages look better
+Lobster now renders bold, italic, and formatted text in Telegram instead of showing
+raw asterisks and underscores.
+
+### Large files get a clear warning
+If you send a file over 20MB (Telegram's limit), you'll get an immediate warning
+instead of a silent failure. Use LobsterDrop for larger files.
+
+### LobsterDrop — sync files with your phone or laptop
+Drop files into a folder on your Mac (or phone) and they appear on Lobster's server
+instantly via Syncthing. No size limits. The upgrade script can set this up for you.
+
+### Welcome guide for new users
+First-time users get a quick overview of everything Lobster can do. Existing users
+can see it anytime with the /onboarding command.
+
+### Better error messages
+When something goes wrong, Lobster now logs exactly what happened with full context,
+making problems easier to diagnose and fix.
