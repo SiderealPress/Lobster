@@ -88,11 +88,20 @@ class OutboxHandler(FileSystemEventHandler):
 
             if chat_id and text and bot_app:
                 reply_markup = build_inline_keyboard(buttons) if buttons else None
-                await bot_app.bot.send_message(
-                    chat_id=chat_id,
-                    text=text,
-                    reply_markup=reply_markup
-                )
+                try:
+                    await bot_app.bot.send_message(
+                        chat_id=chat_id,
+                        text=text,
+                        parse_mode="Markdown",
+                        reply_markup=reply_markup
+                    )
+                except Exception:
+                    # Fallback to plain text if Markdown parsing fails
+                    await bot_app.bot.send_message(
+                        chat_id=chat_id,
+                        text=text,
+                        reply_markup=reply_markup
+                    )
                 log.info(f"Sent reply to {chat_id}: {text[:50]}...")
 
             # Remove processed file
@@ -359,12 +368,20 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
         # Check if it's an image sent as document
         mime_type = document.mime_type or ""
         is_image = mime_type.startswith("image/")
+        original_name = document.file_name or "file"
+        file_size_mb = (document.file_size or 0) / (1024 * 1024)
+
+        log.info(f"Receiving document: name={original_name}, mime={mime_type}, size={file_size_mb:.1f}MB, file_id={document.file_id}")
+
+        if file_size_mb > 20:
+            log.warning(f"File {original_name} is {file_size_mb:.1f}MB — exceeds Telegram Bot API 20MB download limit")
+            await message.reply_text(f"⚠️ File too large ({file_size_mb:.1f}MB). Telegram Bot API limit is 20MB. Please send a smaller file or upload it elsewhere and share a link.")
+            return
 
         # Download file from Telegram
         file = await context.bot.get_file(document.file_id)
 
         # Determine extension and save location
-        original_name = document.file_name or "file"
         ext = Path(original_name).suffix or (".jpg" if is_image else "")
 
         if is_image:
@@ -411,8 +428,10 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
         await message.reply_text(f"{emoji} File received. Processing...")
 
     except Exception as e:
-        log.error(f"Error handling document message: {e}")
-        await message.reply_text("❌ Failed to process file.")
+        file_name = document.file_name or "unknown"
+        file_size_mb = (document.file_size or 0) / (1024 * 1024)
+        log.error(f"Error handling document: name={file_name}, size={file_size_mb:.1f}MB, error={type(e).__name__}: {e}", exc_info=True)
+        await message.reply_text(f"❌ Failed to process file: {type(e).__name__}. Check logs for details.")
 
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):

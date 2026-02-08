@@ -36,6 +36,7 @@ OUTBOX_DIR = BASE_DIR / "outbox"
 PROCESSED_DIR = BASE_DIR / "processed"
 CONFIG_DIR = BASE_DIR / "config"
 AUDIO_DIR = BASE_DIR / "audio"
+SENT_DIR = BASE_DIR / "sent"
 TASKS_FILE = BASE_DIR / "tasks.json"
 TASK_OUTPUTS_DIR = BASE_DIR / "task-outputs"
 
@@ -49,7 +50,7 @@ SCHEDULED_TASKS_TASKS_DIR = SCHEDULED_TASKS_DIR / "tasks"
 SCHEDULED_TASKS_LOGS_DIR = SCHEDULED_TASKS_DIR / "logs"
 
 # Ensure directories exist
-for d in [INBOX_DIR, OUTBOX_DIR, PROCESSED_DIR, CONFIG_DIR, AUDIO_DIR, TASK_OUTPUTS_DIR,
+for d in [INBOX_DIR, OUTBOX_DIR, PROCESSED_DIR, SENT_DIR, CONFIG_DIR, AUDIO_DIR, TASK_OUTPUTS_DIR,
           SCHEDULED_TASKS_DIR, SCHEDULED_TASKS_TASKS_DIR, SCHEDULED_TASKS_LOGS_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
@@ -213,6 +214,46 @@ async def list_tools() -> list[Tool]:
                 "properties": {},
             },
         ),
+        # Conversation History Tool
+        Tool(
+            name="get_conversation_history",
+            description="Retrieve past messages from conversation history - both received messages and sent replies. Supports pagination, filtering by chat_id, and text search. Use this to scroll back through previous conversations.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "chat_id": {
+                        "oneOf": [
+                            {"type": "integer"},
+                            {"type": "string"}
+                        ],
+                        "description": "Filter by chat ID to see conversation with a specific user. Leave empty for all conversations.",
+                    },
+                    "search": {
+                        "type": "string",
+                        "description": "Search text to filter messages (case-insensitive). Searches in message text content.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of messages to return. Default 20, max 100.",
+                        "default": 20,
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Number of messages to skip (for pagination). Default 0. Messages are returned newest-first, so offset=0 gives the most recent messages.",
+                        "default": 0,
+                    },
+                    "direction": {
+                        "type": "string",
+                        "description": "Filter by direction: 'received' for incoming messages only, 'sent' for outgoing replies only, or 'all' for both. Default 'all'.",
+                        "default": "all",
+                    },
+                    "source": {
+                        "type": "string",
+                        "description": "Filter by source (telegram, slack, etc.). Leave empty for all sources.",
+                    },
+                },
+            },
+        ),
         # Task Management Tools
         Tool(
             name="list_tasks",
@@ -312,6 +353,31 @@ async def list_tools() -> list[Tool]:
                     },
                 },
                 "required": ["message_id"],
+            },
+        ),
+        # Headless Browser Fetch Tool
+        Tool(
+            name="fetch_page",
+            description="Fetch a web page using a headless browser (Playwright/Chromium). Renders JavaScript fully before extracting text content. Ideal for Twitter/X links, SPAs, and other JS-heavy pages. Returns cleaned text content, not raw HTML.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The URL to fetch. Will be loaded in a headless Chromium browser.",
+                    },
+                    "wait_seconds": {
+                        "type": "number",
+                        "description": "Extra seconds to wait after page load for JS rendering. Default 3. Increase for slow-loading pages.",
+                        "default": 3,
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": "Maximum seconds before giving up. Default 30.",
+                        "default": 30,
+                    },
+                },
+                "required": ["url"],
             },
         ),
         # Scheduled Jobs Tools
@@ -626,6 +692,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         return await handle_list_sources(arguments)
     elif name == "get_stats":
         return await handle_get_stats(arguments)
+    elif name == "get_conversation_history":
+        return await handle_get_conversation_history(arguments)
     elif name == "list_tasks":
         return await handle_list_tasks(arguments)
     elif name == "create_task":
@@ -638,6 +706,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         return await handle_delete_task(arguments)
     elif name == "transcribe_audio":
         return await handle_transcribe_audio(arguments)
+    # Headless Browser Fetch
+    elif name == "fetch_page":
+        return await handle_fetch_page(arguments)
     # Scheduled Jobs Tools
     elif name == "create_scheduled_job":
         return await handle_create_scheduled_job(arguments)
@@ -816,6 +887,11 @@ async def handle_send_reply(args: dict) -> list[TextContent]:
     with open(outbox_file, "w") as f:
         json.dump(reply_data, f, indent=2)
 
+    # Save a copy to sent directory for conversation history
+    sent_file = SENT_DIR / f"{reply_id}.json"
+    with open(sent_file, "w") as f:
+        json.dump(reply_data, f, indent=2)
+
     button_info = f" with {sum(len(row) for row in buttons)} button(s)" if buttons else ""
     thread_info = f" (thread reply)" if thread_ts and source == "slack" else ""
     return [TextContent(type="text", text=f"✅ Reply queued for {source} (chat {chat_id}){button_info}{thread_info}:\n\n{text[:100]}{'...' if len(text) > 100 else ''}")]
@@ -889,6 +965,134 @@ async def handle_get_stats(args: dict) -> list[TextContent]:
         output += "**By Source:**\n"
         for src, count in source_counts.items():
             output += f"- {src}: {count}\n"
+
+    return [TextContent(type="text", text=output)]
+
+
+# =============================================================================
+# Conversation History Handler
+# =============================================================================
+
+async def handle_get_conversation_history(args: dict) -> list[TextContent]:
+    """Retrieve past messages from conversation history."""
+    chat_id_filter = args.get("chat_id")
+    search_text = args.get("search", "").lower().strip()
+    limit = min(args.get("limit", 20), 100)
+    offset = args.get("offset", 0)
+    direction = args.get("direction", "all").lower()
+    source_filter = args.get("source", "").lower().strip()
+
+    # Collect all messages from processed (received) and sent directories
+    all_messages = []
+
+    # Load received messages (from processed directory)
+    if direction in ("all", "received"):
+        for f in PROCESSED_DIR.glob("*.json"):
+            try:
+                with open(f) as fp:
+                    msg = json.load(fp)
+                msg["_direction"] = "received"
+                msg["_filename"] = f.name
+                all_messages.append(msg)
+            except Exception:
+                continue
+
+    # Load sent messages (from sent directory)
+    if direction in ("all", "sent"):
+        for f in SENT_DIR.glob("*.json"):
+            try:
+                with open(f) as fp:
+                    msg = json.load(fp)
+                msg["_direction"] = "sent"
+                msg["_filename"] = f.name
+                all_messages.append(msg)
+            except Exception:
+                continue
+
+    # Apply filters
+    if chat_id_filter is not None:
+        # Compare as strings to handle both int and string chat_ids
+        chat_id_str = str(chat_id_filter)
+        all_messages = [m for m in all_messages if str(m.get("chat_id", "")) == chat_id_str]
+
+    if source_filter:
+        all_messages = [m for m in all_messages if m.get("source", "").lower() == source_filter]
+
+    if search_text:
+        all_messages = [m for m in all_messages if search_text in m.get("text", "").lower()]
+
+    # Sort by timestamp (newest first)
+    def parse_timestamp(msg):
+        ts = msg.get("timestamp", "")
+        try:
+            # Handle various timestamp formats, always return UTC-aware
+            if "+" in ts or ts.endswith("Z"):
+                return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            else:
+                # Naive timestamp - assume UTC
+                return datetime.fromisoformat(ts).replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            return datetime.min.replace(tzinfo=timezone.utc)
+
+    all_messages.sort(key=parse_timestamp, reverse=True)
+
+    total_count = len(all_messages)
+
+    # Apply pagination
+    paginated = all_messages[offset:offset + limit]
+
+    if not paginated:
+        filter_info = []
+        if chat_id_filter is not None:
+            filter_info.append(f"chat_id={chat_id_filter}")
+        if search_text:
+            filter_info.append(f"search='{search_text}'")
+        if direction != "all":
+            filter_info.append(f"direction={direction}")
+        if source_filter:
+            filter_info.append(f"source={source_filter}")
+        filter_str = f" (filters: {', '.join(filter_info)})" if filter_info else ""
+        return [TextContent(type="text", text=f"No messages found{filter_str}.")]
+
+    # Format output
+    showing_end = min(offset + limit, total_count)
+    output = f"**Conversation History** (showing {offset + 1}-{showing_end} of {total_count}):\n\n"
+
+    for msg in paginated:
+        direction_icon = "\u2b05\ufe0f" if msg["_direction"] == "received" else "\u27a1\ufe0f"
+        direction_label = "RECEIVED" if msg["_direction"] == "received" else "SENT"
+        source = msg.get("source", "unknown").upper()
+        chat_id = msg.get("chat_id", "")
+        ts = msg.get("timestamp", "")
+        text = msg.get("text", "(no text)")
+
+        # Format timestamp nicely
+        try:
+            if "+" in ts or ts.endswith("Z"):
+                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            else:
+                dt = datetime.fromisoformat(ts)
+            ts_display = dt.strftime("%Y-%m-%d %H:%M")
+        except (ValueError, TypeError):
+            ts_display = ts
+
+        # For received messages, show who sent it
+        if msg["_direction"] == "received":
+            user = msg.get("user_name", msg.get("username", "Unknown"))
+            output += f"---\n"
+            output += f"{direction_icon} **{direction_label}** [{source}] from **{user}** | Chat: `{chat_id}`\n"
+            output += f"Time: {ts_display}\n\n"
+            output += f"> {text[:500]}{'...' if len(text) > 500 else ''}\n\n"
+        else:
+            output += f"---\n"
+            output += f"{direction_icon} **{direction_label}** [{source}] to chat `{chat_id}`\n"
+            output += f"Time: {ts_display}\n\n"
+            output += f"> {text[:500]}{'...' if len(text) > 500 else ''}\n\n"
+
+    # Pagination info
+    if total_count > offset + limit:
+        next_offset = offset + limit
+        output += f"---\n*More messages available. Use `offset={next_offset}` to see the next page.*\n"
 
     return [TextContent(type="text", text=output)]
 
@@ -1229,6 +1433,162 @@ async def handle_transcribe_audio(args: dict) -> list[TextContent]:
 
     except Exception as e:
         return [TextContent(type="text", text=f"Error during transcription: {str(e)}")]
+
+
+# =============================================================================
+# Headless Browser Fetch Handler
+# =============================================================================
+
+async def handle_fetch_page(args: dict) -> list[TextContent]:
+    """Fetch a web page using a headless browser, wait for JS to render, return text content."""
+    url = args.get("url", "").strip()
+    wait_seconds = args.get("wait_seconds", 3)
+    timeout_seconds = args.get("timeout", 30)
+
+    if not url:
+        return [TextContent(type="text", text="Error: url is required.")]
+
+    # Ensure URL has a scheme
+    if not url.startswith("http://") and not url.startswith("https://"):
+        url = "https://" + url
+
+    try:
+        from playwright.async_api import async_playwright
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                ]
+            )
+
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                viewport={"width": 1280, "height": 900},
+                java_script_enabled=True,
+            )
+
+            page = await context.new_page()
+
+            # Navigate to the URL
+            timeout_ms = timeout_seconds * 1000
+            try:
+                response = await page.goto(
+                    url,
+                    timeout=timeout_ms,
+                    wait_until="domcontentloaded",
+                )
+            except Exception as nav_err:
+                await browser.close()
+                return [TextContent(type="text", text=f"Error navigating to {url}: {str(nav_err)}")]
+
+            # Wait additional time for JS rendering
+            if wait_seconds > 0:
+                await asyncio.sleep(wait_seconds)
+
+            # Try to wait for network to be idle (best effort)
+            try:
+                await page.wait_for_load_state("networkidle", timeout=min(10000, timeout_ms // 2))
+            except Exception:
+                pass  # Don't fail if networkidle times out
+
+            # Get the final URL (after redirects)
+            final_url = page.url
+
+            # Get page title
+            title = await page.title()
+
+            # Extract text content, trying different strategies
+            text_content = ""
+
+            # Strategy 1: For Twitter/X, look for specific tweet content
+            if "twitter.com" in url or "x.com" in url:
+                try:
+                    # Wait for tweet content to appear
+                    await page.wait_for_selector('[data-testid="tweetText"]', timeout=8000)
+                    # Get all tweet texts
+                    tweet_elements = await page.query_selector_all('[data-testid="tweetText"]')
+                    tweet_texts = []
+                    for el in tweet_elements:
+                        t = await el.inner_text()
+                        if t.strip():
+                            tweet_texts.append(t.strip())
+
+                    # Get tweet author
+                    author_elements = await page.query_selector_all('[data-testid="User-Name"]')
+                    authors = []
+                    for el in author_elements:
+                        a = await el.inner_text()
+                        if a.strip():
+                            authors.append(a.strip())
+
+                    if tweet_texts:
+                        parts = []
+                        for i, tweet in enumerate(tweet_texts[:10]):  # Limit to 10 tweets
+                            author = authors[i] if i < len(authors) else ""
+                            if author:
+                                parts.append(f"{author}\n{tweet}")
+                            else:
+                                parts.append(tweet)
+                        text_content = "\n\n---\n\n".join(parts)
+                except Exception:
+                    pass  # Fall through to generic extraction
+
+            # Strategy 2: For articles, try to find main content
+            if not text_content:
+                try:
+                    # Try common article selectors
+                    for selector in ["article", "main", '[role="main"]', ".post-content", ".article-body", ".entry-content"]:
+                        el = await page.query_selector(selector)
+                        if el:
+                            candidate = await el.inner_text()
+                            if len(candidate.strip()) > len(text_content):
+                                text_content = candidate.strip()
+                except Exception:
+                    pass
+
+            # Strategy 3: Fall back to full body text
+            if not text_content or len(text_content) < 50:
+                try:
+                    text_content = await page.inner_text("body")
+                except Exception:
+                    text_content = ""
+
+            # Get HTTP status
+            status_code = response.status if response else "unknown"
+
+            await browser.close()
+
+            # Clean up the text
+            if text_content:
+                # Remove excessive whitespace/newlines
+                import re as re_mod
+                text_content = re_mod.sub(r'\n{3,}', '\n\n', text_content)
+                text_content = text_content.strip()
+
+                # Truncate if very long
+                max_len = 15000
+                if len(text_content) > max_len:
+                    text_content = text_content[:max_len] + f"\n\n... (truncated, {len(text_content)} total chars)"
+
+            if not text_content:
+                return [TextContent(
+                    type="text",
+                    text=f"Page loaded but no text content extracted.\n\nURL: {final_url}\nStatus: {status_code}\nTitle: {title}"
+                )]
+
+            # Build output
+            header = f"**{title}**\nURL: {final_url}\nStatus: {status_code}\n\n---\n\n"
+            return [TextContent(type="text", text=header + text_content)]
+
+    except ImportError:
+        return [TextContent(type="text", text="Error: Playwright is not installed. Run: pip install playwright && python -m playwright install chromium")]
+    except Exception as e:
+        return [TextContent(type="text", text=f"Error fetching page: {str(e)}")]
 
 
 # =============================================================================
