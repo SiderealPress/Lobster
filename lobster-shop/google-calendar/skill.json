@@ -1,0 +1,58 @@
+{
+  "name": "google-calendar",
+  "version": "0.1.0",
+  "description": "See your schedule, create events, and get reminders — all through chat",
+  "author": "Lobster",
+  "status": "beta",
+  "adds": {
+    "mcp_tools": [
+      "list_events",
+      "create_event",
+      "update_event",
+      "delete_event",
+      "find_free_time"
+    ],
+    "bot_commands": [
+      "/calendar",
+      "/schedule"
+    ],
+    "scheduled_jobs": [
+      {
+        "name": "daily-agenda",
+        "description": "Send your daily agenda every morning",
+        "default_schedule": "0 8 * * *"
+      }
+    ]
+  },
+  "dependencies": {
+    "pip": [
+      "google-auth>=2.0",
+      "google-auth-oauthlib>=1.0",
+      "google-api-python-client>=2.0",
+      "python-dateutil>=2.8"
+    ],
+    "system": [],
+    "api_keys": [
+      {
+        "name": "GOOGLE_CALENDAR_CREDENTIALS",
+        "description": "Google Cloud OAuth credentials file (credentials.json). Create a project at https://console.cloud.google.com, enable the Calendar API, and download OAuth client credentials.",
+        "required": true,
+        "type": "file"
+      }
+    ]
+  },
+  "setup": {
+    "auto": [
+      "Install Python dependencies",
+      "Create config directory at ~/lobster/config/google-calendar/",
+      "Register MCP server with Claude"
+    ],
+    "manual": [
+      "Create a Google Cloud project at https://console.cloud.google.com",
+      "Enable the Google Calendar API",
+      "Create OAuth 2.0 credentials (Desktop application type)",
+      "Download credentials.json and place in ~/lobster/config/google-calendar/",
+      "Run the auth flow to generate your token"
+    ]
+  }
+}
