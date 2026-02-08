@@ -23,7 +23,10 @@ from watchdog.events import FileSystemEventHandler
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
-from onboarding import is_user_onboarded, mark_user_onboarded, get_onboarding_message
+try:
+    from onboarding import is_user_onboarded, mark_user_onboarded, get_onboarding_message
+except ImportError:
+    from src.bot.onboarding import is_user_onboarded, mark_user_onboarded, get_onboarding_message
 
 # Configuration from environment
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
