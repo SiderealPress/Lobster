@@ -23,6 +23,8 @@ from watchdog.events import FileSystemEventHandler
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
+from onboarding import is_user_onboarded, mark_user_onboarded, get_onboarding_message
+
 # Configuration from environment
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 ALLOWED_USERS = [int(x) for x in os.environ.get("TELEGRAM_ALLOWED_USERS", "").split(",") if x.strip()]
@@ -207,11 +209,37 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ Unauthorized.")
         return
 
-    await update.message.reply_text(
-        f"👋 Hey {user.first_name}!\n\n"
-        "I'm Lobster. Messages you send here go to the master Claude session.\n\n"
-        "The session will process them and reply back here."
-    )
+    # /start triggers onboarding for new users, otherwise shows short greeting
+    if not is_user_onboarded(user.id):
+        await send_onboarding(update, user)
+    else:
+        await update.message.reply_text(
+            f"👋 Hey {user.first_name}!\n\n"
+            "I'm Lobster. Messages you send here go to the master Claude session.\n\n"
+            "The session will process them and reply back here."
+        )
+
+
+async def onboarding_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /onboarding command — always shows the full onboarding message."""
+    user = update.effective_user
+    if not is_authorized(user.id):
+        await update.message.reply_text("⛔ Unauthorized.")
+        return
+
+    await send_onboarding(update, user)
+
+
+async def send_onboarding(update: Update, user) -> None:
+    """Send the onboarding message and mark the user as onboarded."""
+    message_text = get_onboarding_message(user.first_name)
+    try:
+        await update.message.reply_text(message_text, parse_mode="Markdown")
+    except Exception:
+        # Fallback to plain text if Markdown fails
+        await update.message.reply_text(message_text)
+    mark_user_onboarded(user.id)
+    log.info(f"Sent onboarding to user {user.id} ({user.first_name})")
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -221,6 +249,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(user.id):
         log.warning(f"Unauthorized: {user.id}")
         return
+
+    # First-message detection: send onboarding to new users
+    if not is_user_onboarded(user.id):
+        await send_onboarding(update, user)
 
     msg_id = f"{int(time.time() * 1000)}_{message.message_id}"
 
@@ -459,6 +491,7 @@ async def run_bot():
 
     # Add handlers
     bot_app.add_handler(CommandHandler("start", start_command))
+    bot_app.add_handler(CommandHandler("onboarding", onboarding_command))
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     bot_app.add_handler(MessageHandler(filters.VOICE, handle_message))
     bot_app.add_handler(MessageHandler(filters.PHOTO, handle_message))
