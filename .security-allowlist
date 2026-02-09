@@ -1,0 +1,17 @@
+# .security-allowlist
+# Lines in this file are used to skip false positives in the pre-push security scan.
+# Add partial strings that appear in flagged lines to allowlist them.
+# Comments (lines starting with #) and blank lines are ignored.
+#
+# Examples:
+#   test_api_key = "sk-test-not-real"
+#   noreply@github.com
+#   192.168.1.1
+#
+# Be specific - broad patterns may mask real issues.
+
+# install.sh: variable assignment from user input, not a hardcoded secret
+export ANTHROPIC_API_KEY="$API_KEY"
+
+# config.env.example: placeholder values for documentation
+config/config.env.example
