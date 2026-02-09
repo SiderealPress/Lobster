@@ -5,7 +5,7 @@
 set -e
 
 # Ensure Claude is in PATH (cron doesn't inherit user PATH)
-export PATH="$HOME/.claude/bin:$HOME/.local/bin:$PATH"
+export PATH="$HOME/.local/bin:$PATH"
 
 JOB_NAME="$1"
 

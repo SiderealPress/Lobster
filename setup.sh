@@ -180,7 +180,6 @@ source $ZSH/oh-my-zsh.sh
 # Path additions
 export PATH="$HOME/.local/bin:$PATH"
 export PATH="$HOME/.npm-global/bin:$PATH"
-export PATH="$HOME/.claude/bin:$PATH"
 
 # Editor
 export EDITOR='nano'

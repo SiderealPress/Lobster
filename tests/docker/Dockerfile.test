@@ -40,7 +40,7 @@ COPY --chown=testuser:testuser . /home/testuser/lobster
 
 # Set up environment
 ENV HOME=/home/testuser
-ENV PATH="${HOME}/.local/bin:${HOME}/.claude/bin:${PATH}"
+ENV PATH="${HOME}/.local/bin:${PATH}"
 
 # Default command runs install test
 CMD ["bash", "-c", "cd /home/testuser/lobster && pytest tests/integration/test_installation.py -v"]

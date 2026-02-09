@@ -24,7 +24,7 @@ That's it. The script is idempotent and safe to run multiple times.
 | 6 | **Playwright** | Installs Playwright + Chromium for the `fetch_page` headless browser tool. |
 | 7 | **Systemd** | Reloads systemd if service templates have changed. |
 | 8 | **Restart** | Restarts `lobster-router` and `lobster-claude` services. |
-| 9 | **Migrations** | Detects and migrates old config formats (`.lobster.env`, Hyperion service names, flat message dirs). |
+| 9 | **Migrations** | Detects and migrates old config formats (`.lobster.env`, legacy service names, flat message dirs). |
 | 10 | **Health check** | Verifies config, Python packages, directories, services, MCP registration, and Telegram API. |
 
 ## Options

@@ -8,9 +8,11 @@ Type=forking
 User={{USER}}
 Group={{GROUP}}
 WorkingDirectory={{WORKSPACE_DIR}}
-Environment=PATH={{HOME}}/.claude/bin:{{HOME}}/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH={{HOME}}/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=HOME={{HOME}}
-ExecStart=/usr/bin/tmux -L lobster new-session -d -s lobster -c {{WORKSPACE_DIR}} {{INSTALL_DIR}}/scripts/claude-wrapper.exp
+EnvironmentFile={{INSTALL_DIR}}/config/config.env
+EnvironmentFile=-{{CONFIG_DIR}}/config.env
+ExecStart=/usr/bin/tmux -L lobster new-session -d -s lobster -c {{WORKSPACE_DIR}} {{CLAUDE_WRAPPER}}
 ExecStop=/usr/bin/tmux -L lobster kill-session -t lobster
 RemainAfterExit=yes
 Restart=on-failure

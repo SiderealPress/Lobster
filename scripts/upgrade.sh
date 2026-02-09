@@ -792,7 +792,7 @@ run_migrations() {
         migrated=$((migrated + 1))
     fi
 
-    # Migration 3: Hyperion -> Lobster rename (old service names)
+    # Migration 3: Lobster rename - detect and disable old service names
     for old_svc in hyperion-router hyperion-daemon hyperion-claude; do
         if systemctl is-enabled --quiet "$old_svc" 2>/dev/null; then
             warn "Old service '$old_svc' found. Disabling in favor of lobster-* services."
