@@ -29,3 +29,11 @@ services/lobster-claude.service
 
 # Local configuration (use lobster.conf.example as template)
 config/lobster.conf
+
+# Runtime state (self-check rate limiting, etc.)
+.state/
+
+# Google Calendar credentials and tokens
+config/google_credentials.json
+config/calendar_tokens/
+config/calendar_pending_flows/
