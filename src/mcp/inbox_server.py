@@ -12,6 +12,8 @@ Provides tools for Claude Code to interact with the message queue:
 
 import asyncio
 import json
+import logging
+from logging.handlers import RotatingFileHandler
 import os
 import sys
 import time
@@ -34,6 +36,8 @@ BASE_DIR = Path.home() / "messages"
 INBOX_DIR = BASE_DIR / "inbox"
 OUTBOX_DIR = BASE_DIR / "outbox"
 PROCESSED_DIR = BASE_DIR / "processed"
+PROCESSING_DIR = BASE_DIR / "processing"
+FAILED_DIR = BASE_DIR / "failed"
 CONFIG_DIR = BASE_DIR / "config"
 AUDIO_DIR = BASE_DIR / "audio"
 SENT_DIR = BASE_DIR / "sent"
@@ -50,9 +54,25 @@ SCHEDULED_TASKS_TASKS_DIR = SCHEDULED_TASKS_DIR / "tasks"
 SCHEDULED_TASKS_LOGS_DIR = SCHEDULED_TASKS_DIR / "logs"
 
 # Ensure directories exist
-for d in [INBOX_DIR, OUTBOX_DIR, PROCESSED_DIR, SENT_DIR, CONFIG_DIR, AUDIO_DIR, TASK_OUTPUTS_DIR,
-          SCHEDULED_TASKS_DIR, SCHEDULED_TASKS_TASKS_DIR, SCHEDULED_TASKS_LOGS_DIR]:
+for d in [INBOX_DIR, OUTBOX_DIR, PROCESSED_DIR, PROCESSING_DIR, FAILED_DIR, SENT_DIR, CONFIG_DIR,
+          AUDIO_DIR, TASK_OUTPUTS_DIR, SCHEDULED_TASKS_DIR, SCHEDULED_TASKS_TASKS_DIR,
+          SCHEDULED_TASKS_LOGS_DIR]:
     d.mkdir(parents=True, exist_ok=True)
+
+# Logging
+LOG_DIR = Path.home() / "lobster-workspace" / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+log = logging.getLogger("lobster-mcp")
+log.setLevel(logging.INFO)
+_file_handler = RotatingFileHandler(
+    LOG_DIR / "mcp-server.log",
+    maxBytes=5 * 1024 * 1024,  # 5MB
+    backupCount=3,
+)
+_file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+log.addHandler(_file_handler)
+log.addHandler(logging.StreamHandler())
 
 # OpenAI configuration for Whisper transcription
 # Try environment first, then fall back to config file
@@ -186,13 +206,50 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="mark_processed",
-            description="Mark a message as processed and move it out of the inbox.",
+            description="Mark a message as processed and move it out of the inbox. Checks processing/ first, then inbox/ as fallback.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "message_id": {
                         "type": "string",
                         "description": "The message ID to mark as processed.",
+                    },
+                },
+                "required": ["message_id"],
+            },
+        ),
+        Tool(
+            name="mark_processing",
+            description="Claim a message for processing by moving it from inbox/ to processing/. Call this before starting work on a message to prevent reprocessing.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "message_id": {
+                        "type": "string",
+                        "description": "The message ID to claim for processing.",
+                    },
+                },
+                "required": ["message_id"],
+            },
+        ),
+        Tool(
+            name="mark_failed",
+            description="Mark a message as failed with optional retry. Messages are retried with exponential backoff (60s, 120s, 240s) up to max_retries times. After max retries, the message is permanently failed.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "message_id": {
+                        "type": "string",
+                        "description": "The message ID to mark as failed.",
+                    },
+                    "error": {
+                        "type": "string",
+                        "description": "Error description. Default: 'Unknown error'.",
+                    },
+                    "max_retries": {
+                        "type": "integer",
+                        "description": "Maximum number of retries before permanent failure. Default: 3.",
+                        "default": 3,
                     },
                 },
                 "required": ["message_id"],
@@ -679,6 +736,7 @@ async def list_tools() -> list[Tool]:
 @server.call_tool()
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     """Handle tool calls."""
+    log.info(f"Tool called: {name}")
 
     if name == "wait_for_messages":
         return await handle_wait_for_messages(arguments)
@@ -688,6 +746,10 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         return await handle_send_reply(arguments)
     elif name == "mark_processed":
         return await handle_mark_processed(arguments)
+    elif name == "mark_processing":
+        return await handle_mark_processing(arguments)
+    elif name == "mark_failed":
+        return await handle_mark_failed(arguments)
     elif name == "list_sources":
         return await handle_list_sources(arguments)
     elif name == "get_stats":
@@ -739,12 +801,62 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
 
+def _find_message_file(directory: Path, message_id: str) -> Path | None:
+    """Find a message file in a directory by ID or filename match."""
+    for f in directory.glob("*.json"):
+        if message_id in f.name:
+            return f
+        try:
+            with open(f) as fp:
+                msg = json.load(fp)
+                if msg.get("id") == message_id:
+                    return f
+        except Exception:
+            continue
+    return None
+
+
+def _recover_stale_processing(max_age_seconds: int = 300):
+    """Move stale messages from processing/ back to inbox/."""
+    now = time.time()
+    for f in PROCESSING_DIR.glob("*.json"):
+        try:
+            age = now - f.stat().st_mtime
+            if age > max_age_seconds:
+                dest = INBOX_DIR / f.name
+                f.rename(dest)
+                log.warning(f"Recovered stale message from processing: {f.name} (age: {int(age)}s)")
+        except Exception:
+            continue
+
+
+def _recover_retryable_messages():
+    """Move retry-eligible messages from failed/ back to inbox/."""
+    now = time.time()
+    for f in FAILED_DIR.glob("*.json"):
+        try:
+            msg = json.loads(f.read_text())
+            if msg.get("_permanently_failed"):
+                continue
+            retry_at = msg.get("_retry_at", 0)
+            if now >= retry_at:
+                dest = INBOX_DIR / f.name
+                f.rename(dest)
+                log.info(f"Retrying message: {f.name} (attempt {msg.get('_retry_count', 0)})")
+        except Exception:
+            continue
+
+
 async def handle_wait_for_messages(args: dict) -> list[TextContent]:
     """Block until new messages arrive in inbox, or return immediately if messages exist."""
     timeout = args.get("timeout", 300)
 
     # Touch heartbeat at start - signals Claude is alive and waiting for messages
     touch_heartbeat()
+
+    # Recover stale processing and retryable failed messages
+    _recover_stale_processing()
+    _recover_retryable_messages()
 
     # Check if messages already exist
     existing = list(INBOX_DIR.glob("*.json"))
@@ -790,10 +902,12 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
             # Small delay to ensure file is fully written
             await asyncio.sleep(0.1)
             touch_heartbeat()
+            log.info("New message(s) arrived in inbox")
             return await handle_check_inbox({"limit": 10})
         else:
             # Timeout - prompt to call again
             touch_heartbeat()
+            log.info(f"wait_for_messages timed out after {timeout}s")
             return [TextContent(
                 type="text",
                 text=f"⏰ No messages received in the last {timeout} seconds. Call `wait_for_messages` again to continue waiting."
@@ -824,6 +938,8 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
 
     if not messages:
         return [TextContent(type="text", text="📭 No new messages in inbox.")]
+
+    log.info(f"check_inbox returning {len(messages)} message(s)")
 
     # Format messages nicely
     output = f"📬 **{len(messages)} new message(s):**\n\n"
@@ -892,6 +1008,8 @@ async def handle_send_reply(args: dict) -> list[TextContent]:
     with open(sent_file, "w") as f:
         json.dump(reply_data, f, indent=2)
 
+    log.info(f"Reply sent to {source} chat {chat_id}")
+
     button_info = f" with {sum(len(row) for row in buttons)} button(s)" if buttons else ""
     thread_info = f" (thread reply)" if thread_ts and source == "slack" else ""
     return [TextContent(type="text", text=f"✅ Reply queued for {source} (chat {chat_id}){button_info}{thread_info}:\n\n{text[:100]}{'...' if len(text) > 100 else ''}")]
@@ -904,20 +1022,10 @@ async def handle_mark_processed(args: dict) -> list[TextContent]:
     if not message_id:
         return [TextContent(type="text", text="Error: message_id is required.")]
 
-    # Find the message file
-    found = None
-    for f in INBOX_DIR.glob("*.json"):
-        if message_id in f.name:
-            found = f
-            break
-        try:
-            with open(f) as fp:
-                msg = json.load(fp)
-                if msg.get("id") == message_id:
-                    found = f
-                    break
-        except:
-            continue
+    # Check processing/ first, then inbox/ as fallback
+    found = _find_message_file(PROCESSING_DIR, message_id)
+    if not found:
+        found = _find_message_file(INBOX_DIR, message_id)
 
     if not found:
         return [TextContent(type="text", text=f"Message not found: {message_id}")]
@@ -926,7 +1034,72 @@ async def handle_mark_processed(args: dict) -> list[TextContent]:
     dest = PROCESSED_DIR / found.name
     found.rename(dest)
 
+    log.info(f"Message processed: {message_id}")
     return [TextContent(type="text", text=f"✅ Message marked as processed: {message_id}")]
+
+
+async def handle_mark_processing(args: dict) -> list[TextContent]:
+    """Move message from inbox to processing to claim it."""
+    message_id = args.get("message_id", "")
+
+    if not message_id:
+        return [TextContent(type="text", text="Error: message_id is required.")]
+
+    found = _find_message_file(INBOX_DIR, message_id)
+    if not found:
+        return [TextContent(type="text", text=f"Message not found in inbox: {message_id}")]
+
+    # Atomic move to processing
+    dest = PROCESSING_DIR / found.name
+    found.rename(dest)
+
+    log.info(f"Message claimed for processing: {message_id}")
+    return [TextContent(type="text", text=f"Message claimed: {message_id}")]
+
+
+async def handle_mark_failed(args: dict) -> list[TextContent]:
+    """Mark a message as failed with optional retry."""
+    message_id = args.get("message_id", "")
+    error = args.get("error", "Unknown error")
+    max_retries = args.get("max_retries", 3)
+
+    if not message_id:
+        return [TextContent(type="text", text="Error: message_id is required.")]
+
+    # Find in processing/ first, then inbox/
+    found = _find_message_file(PROCESSING_DIR, message_id)
+    if not found:
+        found = _find_message_file(INBOX_DIR, message_id)
+    if not found:
+        return [TextContent(type="text", text=f"Message not found: {message_id}")]
+
+    # Read message, inject retry metadata
+    msg = json.loads(found.read_text())
+    retry_count = msg.get("_retry_count", 0) + 1
+    msg["_retry_count"] = retry_count
+    msg["_last_error"] = error
+    msg["_last_failed_at"] = datetime.now(timezone.utc).isoformat()
+    msg["_max_retries"] = max_retries
+
+    if retry_count > max_retries:
+        # Permanently failed
+        msg["_permanently_failed"] = True
+        dest = FAILED_DIR / found.name
+        found.unlink()
+        dest.write_text(json.dumps(msg, indent=2))
+        log.error(f"Message permanently failed after {max_retries} retries: {message_id} - {error}")
+        return [TextContent(type="text", text=f"Message permanently failed after {max_retries} retries: {message_id}")]
+
+    # Schedule retry with exponential backoff: 60s, 120s, 240s
+    backoff = 60 * (2 ** (retry_count - 1))
+    retry_at = datetime.now(timezone.utc).timestamp() + backoff
+    msg["_retry_at"] = retry_at
+
+    dest = FAILED_DIR / found.name
+    found.unlink()
+    dest.write_text(json.dumps(msg, indent=2))
+    log.warning(f"Message failed (retry {retry_count}/{max_retries}, next in {backoff}s): {message_id} - {error}")
+    return [TextContent(type="text", text=f"Message queued for retry ({retry_count}/{max_retries}, backoff {backoff}s): {message_id}")]
 
 
 async def handle_list_sources(args: dict) -> list[TextContent]:
@@ -944,6 +1117,21 @@ async def handle_get_stats(args: dict) -> list[TextContent]:
     inbox_count = len(list(INBOX_DIR.glob("*.json")))
     outbox_count = len(list(OUTBOX_DIR.glob("*.json")))
     processed_count = len(list(PROCESSED_DIR.glob("*.json")))
+    processing_count = len(list(PROCESSING_DIR.glob("*.json")))
+    failed_count = len(list(FAILED_DIR.glob("*.json")))
+
+    # Count retry-pending vs permanently failed
+    retry_pending = 0
+    permanently_failed = 0
+    for f in FAILED_DIR.glob("*.json"):
+        try:
+            msg = json.loads(f.read_text())
+            if msg.get("_permanently_failed"):
+                permanently_failed += 1
+            else:
+                retry_pending += 1
+        except Exception:
+            continue
 
     # Count by source
     source_counts = {}
@@ -958,8 +1146,10 @@ async def handle_get_stats(args: dict) -> list[TextContent]:
 
     output = "📊 **Inbox Statistics:**\n\n"
     output += f"- Inbox: {inbox_count} messages\n"
+    output += f"- Processing: {processing_count} in progress\n"
     output += f"- Outbox: {outbox_count} pending replies\n"
-    output += f"- Processed: {processed_count} total\n\n"
+    output += f"- Processed: {processed_count} total\n"
+    output += f"- Failed: {failed_count} ({retry_pending} retry pending, {permanently_failed} permanent)\n\n"
 
     if source_counts:
         output += "**By Source:**\n"

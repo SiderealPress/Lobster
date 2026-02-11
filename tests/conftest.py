@@ -48,7 +48,7 @@ def temp_dir() -> Generator[Path, None, None]:
 def temp_messages_dir(temp_dir: Path) -> Path:
     """Create a temporary messages directory structure."""
     messages_dir = temp_dir / "messages"
-    for subdir in ["inbox", "outbox", "processed", "config", "audio", "task-outputs"]:
+    for subdir in ["inbox", "outbox", "processed", "processing", "failed", "config", "audio", "task-outputs"]:
         (messages_dir / subdir).mkdir(parents=True)
     return messages_dir
 
@@ -265,6 +265,8 @@ def mcp_directories(temp_messages_dir: Path, temp_scheduled_tasks_dir: Path):
         INBOX_DIR=temp_messages_dir / "inbox",
         OUTBOX_DIR=temp_messages_dir / "outbox",
         PROCESSED_DIR=temp_messages_dir / "processed",
+        PROCESSING_DIR=temp_messages_dir / "processing",
+        FAILED_DIR=temp_messages_dir / "failed",
         CONFIG_DIR=temp_messages_dir / "config",
         AUDIO_DIR=temp_messages_dir / "audio",
         TASKS_FILE=temp_messages_dir / "tasks.json",
@@ -283,6 +285,8 @@ def mcp_directories(temp_messages_dir: Path, temp_scheduled_tasks_dir: Path):
             "inbox": temp_messages_dir / "inbox",
             "outbox": temp_messages_dir / "outbox",
             "processed": temp_messages_dir / "processed",
+            "processing": temp_messages_dir / "processing",
+            "failed": temp_messages_dir / "failed",
             "audio": temp_messages_dir / "audio",
             "tasks_file": temp_messages_dir / "tasks.json",
             "task_outputs": temp_messages_dir / "task-outputs",

@@ -13,6 +13,7 @@ Uses Socket Mode for simplicity (no public webhook URL required).
 import asyncio
 import json
 import logging
+from logging.handlers import RotatingFileHandler
 import os
 import re
 import time
@@ -57,15 +58,16 @@ FILES_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR = Path.home() / "lobster-workspace" / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler(LOG_DIR / "slack-router.log"),
-    ],
-)
 log = logging.getLogger("lobster-slack")
+log.setLevel(logging.INFO)
+_file_handler = RotatingFileHandler(
+    LOG_DIR / "slack-router.log",
+    maxBytes=5 * 1024 * 1024,  # 5MB
+    backupCount=3,
+)
+_file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+log.addHandler(_file_handler)
+log.addHandler(logging.StreamHandler())
 
 # Initialize Slack app
 app = App(token=SLACK_BOT_TOKEN)

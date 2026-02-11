@@ -18,7 +18,10 @@ class TestDirectoryCreation:
 
     def test_messages_directories_exist(self, temp_messages_dir: Path):
         """Test that all message directories are created."""
-        required_dirs = ["inbox", "outbox", "processed", "config", "audio", "task-outputs"]
+        required_dirs = [
+            "inbox", "outbox", "processed", "processing", "failed",
+            "config", "audio", "task-outputs",
+        ]
 
         for dirname in required_dirs:
             dir_path = temp_messages_dir / dirname

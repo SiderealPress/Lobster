@@ -73,9 +73,11 @@ You are a **dispatcher**, not a worker. Your job is to stay responsive to incomi
 ## Available Tools (MCP)
 
 ### Core Loop Tools
-- `wait_for_messages(timeout?)` - **PRIMARY TOOL** - Blocks until messages arrive. Returns immediately if messages exist. Use this in your main loop.
+- `wait_for_messages(timeout?)` - **PRIMARY TOOL** - Blocks until messages arrive. Returns immediately if messages exist. Also recovers stale processing messages and retries failed messages. Use this in your main loop.
 - `send_reply(chat_id, text, source?, thread_ts?, buttons?)` - Send a reply to a user. Supports inline keyboard buttons (Telegram) and thread replies (Slack).
-- `mark_processed(message_id)` - Mark message as handled (removes from inbox)
+- `mark_processing(message_id)` - Claim a message for processing (moves inbox → processing). Call before starting work to prevent reprocessing on crash.
+- `mark_processed(message_id)` - Mark message as handled (moves processing → processed, or inbox → processed as fallback)
+- `mark_failed(message_id, error?, max_retries?)` - Mark message as failed with automatic retry. Messages retry with exponential backoff (60s, 120s, 240s) up to max_retries (default 3). After max retries, message is permanently failed.
 
 ### Source-Specific Notes
 
@@ -299,6 +301,10 @@ User sends Telegram or Slack message
          │
          ▼
 wait_for_messages() returns with message
+  (also recovers stale processing + retries failed)
+         │
+         ▼
+mark_processing(message_id)  ← claim it
          │
          ▼
 Check message["source"] - "telegram" or "slack"
@@ -306,15 +312,21 @@ Check message["source"] - "telegram" or "slack"
          ▼
 You process, think, compose response
          │
-         ▼
-send_reply(chat_id, "your response", source=message["source"])
-         │
-         ▼
+    ┌────┴────┐
+    ▼         ▼
+ Success    Failure
+    │         │
+    ▼         ▼
+send_reply  mark_failed(message_id, error)
+    │         │ (auto-retries with backoff)
+    ▼         │
 mark_processed(message_id)
-         │
-         ▼
+    │
+    ▼
 wait_for_messages() ← loop back
 ```
+
+**State directories:** `inbox/` → `processing/` → `processed/` (or → `failed/` → retried back to `inbox/`)
 
 **Note:** Always pass the correct `source` when replying. Telegram and Slack messages may arrive interleaved.
 
@@ -325,8 +337,10 @@ wait_for_messages() ← loop back
   - `personal/` - Personal projects
   - `business/` - Business/work projects
 - `~/messages/inbox/` - Incoming messages (JSON files)
+- `~/messages/processing/` - Messages currently being processed (claimed)
 - `~/messages/outbox/` - Outgoing replies (JSON files)
 - `~/messages/processed/` - Handled messages archive
+- `~/messages/failed/` - Failed messages (pending retry or permanently failed)
 - `~/messages/audio/` - Voice message audio files
 - `~/messages/task-outputs/` - Outputs from scheduled jobs
 - `~/lobster/scheduled-tasks/` - Scheduled jobs system

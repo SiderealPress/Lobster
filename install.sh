@@ -400,7 +400,7 @@ success "Repository ready at $INSTALL_DIR (branch: $REPO_BRANCH)"
 step "Creating directories..."
 
 mkdir -p "$WORKSPACE_DIR/logs"
-mkdir -p "$MESSAGES_DIR"/{inbox,outbox,processed,config,audio,task-outputs}
+mkdir -p "$MESSAGES_DIR"/{inbox,outbox,processed,processing,failed,config,audio,task-outputs}
 mkdir -p "$INSTALL_DIR/scheduled-tasks"/{tasks,logs}
 mkdir -p "$HOME/projects"/{personal,business}
 

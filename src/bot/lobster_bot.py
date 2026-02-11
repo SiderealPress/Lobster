@@ -13,6 +13,7 @@ The master Claude session processes inbox messages and writes to outbox.
 import asyncio
 import json
 import logging
+from logging.handlers import RotatingFileHandler
 import os
 import time
 from datetime import datetime
@@ -52,15 +53,16 @@ IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR = Path.home() / "lobster-workspace" / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler(LOG_DIR / "telegram-bot.log"),
-    ],
-)
 log = logging.getLogger("lobster")
+log.setLevel(logging.INFO)
+_file_handler = RotatingFileHandler(
+    LOG_DIR / "telegram-bot.log",
+    maxBytes=5 * 1024 * 1024,  # 5MB
+    backupCount=3,
+)
+_file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+log.addHandler(_file_handler)
+log.addHandler(logging.StreamHandler())
 
 # Global reference to the bot app and event loop for sending replies
 bot_app = None

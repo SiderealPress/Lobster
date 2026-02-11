@@ -460,6 +460,8 @@ create_new_directories() {
         "$MESSAGES_DIR/inbox"
         "$MESSAGES_DIR/outbox"
         "$MESSAGES_DIR/processed"
+        "$MESSAGES_DIR/processing"
+        "$MESSAGES_DIR/failed"
         "$MESSAGES_DIR/sent"
         "$MESSAGES_DIR/files"
         "$MESSAGES_DIR/images"
@@ -805,7 +807,7 @@ run_migrations() {
     # Migration 4: Old messages directory structure (flat -> subdirs)
     if [ -d "$MESSAGES_DIR" ] && [ ! -d "$MESSAGES_DIR/inbox" ]; then
         substep "Messages directory missing subdirectories, creating them..."
-        mkdir -p "$MESSAGES_DIR"/{inbox,outbox,processed,sent,files,images,audio,config,task-outputs}
+        mkdir -p "$MESSAGES_DIR"/{inbox,outbox,processed,processing,failed,sent,files,images,audio,config,task-outputs}
         migrated=$((migrated + 1))
     fi
 
