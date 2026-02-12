@@ -1,0 +1,21 @@
+{
+  "_comment": "lobster-sync configuration -- copy to ~/.lobster/sync-config.json",
+
+  "sync_interval_seconds": 300,
+
+  "sync_branch": "lobster-sync",
+
+  "repos": [
+    {
+      "_comment": "Each repo entry specifies a local git repository to back up",
+      "path": "/Users/drew/projects/my-project",
+      "remote": "origin",
+      "enabled": true
+    },
+    {
+      "path": "/Users/drew/projects/another-project",
+      "remote": "origin",
+      "enabled": false
+    }
+  ]
+}
