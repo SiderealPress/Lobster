@@ -26,6 +26,32 @@ from typing import Any
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
+# Reliability utilities (atomic writes, validation, audit logging, circuit breaker)
+from reliability import (
+    atomic_write_json,
+    validate_send_reply_args,
+    validate_message_id,
+    ValidationError,
+    init_audit_log,
+    audit_log,
+    IdempotencyTracker,
+    CircuitBreaker,
+)
+
+# Google Calendar integration (optional — loaded if calendar_integration.py exists)
+_cal_path = Path(__file__).parent / "calendar_integration.py"
+CALENDAR_TOOLS = []
+CALENDAR_HANDLERS = {}
+if _cal_path.exists():
+    import importlib.util as _imp_util
+    _cal_spec = _imp_util.spec_from_file_location(
+        "calendar_integration", str(_cal_path),
+    )
+    _cal_mod = _imp_util.module_from_spec(_cal_spec)
+    _cal_spec.loader.exec_module(_cal_mod)
+    CALENDAR_TOOLS = _cal_mod.CALENDAR_TOOLS
+    CALENDAR_HANDLERS = _cal_mod.CALENDAR_HANDLERS
+
 # MCP SDK
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -73,6 +99,17 @@ _file_handler = RotatingFileHandler(
 _file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
 log.addHandler(_file_handler)
 log.addHandler(logging.StreamHandler())
+
+# Initialize audit log for structured observability
+init_audit_log(LOG_DIR)
+
+# Initialize idempotency tracker to prevent duplicate reply sends
+# TODO: Wire into send_reply and outbox processing paths
+_reply_idempotency = IdempotencyTracker(ttl_seconds=300)
+
+# Circuit breaker for outbox delivery (Telegram/Slack API)
+# TODO: Wire into lobster_bot.py outbox delivery to short-circuit when Telegram is down
+_outbox_breaker = CircuitBreaker("outbox_delivery", failure_threshold=5, cooldown_seconds=120)
 
 # OpenAI configuration for Whisper transcription
 # Try environment first, then fall back to config file
@@ -730,14 +767,43 @@ async def list_tools() -> list[Tool]:
                 "required": ["owner", "repo", "issue_number"],
             },
         ),
+        # Google Calendar Tools (dynamically loaded from calendar_integration.py)
+        *[
+            Tool(
+                name=tool_def["name"],
+                description=tool_def["description"],
+                inputSchema=tool_def["inputSchema"],
+            )
+            for tool_def in CALENDAR_TOOLS
+        ],
     ]
 
 
 @server.call_tool()
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
-    """Handle tool calls."""
+    """Handle tool calls with structured audit logging."""
     log.info(f"Tool called: {name}")
+    start_time = time.time()
+    try:
+        result = await _dispatch_tool(name, arguments)
+        elapsed_ms = int((time.time() - start_time) * 1000)
+        # Audit log all tool calls (except wait_for_messages which is too noisy)
+        if name != "wait_for_messages":
+            audit_log(tool=name, args=arguments, result="ok", duration_ms=elapsed_ms)
+        return result
+    except ValidationError as e:
+        elapsed_ms = int((time.time() - start_time) * 1000)
+        audit_log(tool=name, args=arguments, error=str(e), duration_ms=elapsed_ms)
+        return [TextContent(type="text", text=f"Validation error: {e}")]
+    except Exception as e:
+        elapsed_ms = int((time.time() - start_time) * 1000)
+        audit_log(tool=name, args=arguments, error=str(e), duration_ms=elapsed_ms)
+        log.error(f"Tool {name} failed: {e}", exc_info=True)
+        return [TextContent(type="text", text=f"Error in {name}: {str(e)}")]
 
+
+async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
+    """Dispatch tool calls to handlers."""
     if name == "wait_for_messages":
         return await handle_wait_for_messages(arguments)
     elif name == "check_inbox":
@@ -797,6 +863,11 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         return await handle_close_brain_dump(arguments)
     elif name == "get_brain_dump_status":
         return await handle_get_brain_dump_status(arguments)
+    # Google Calendar Tools
+    elif name in CALENDAR_HANDLERS:
+        handler = CALENDAR_HANDLERS[name]
+        result = handler(arguments)
+        return [TextContent(type="text", text=result)]
     else:
         return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
@@ -971,15 +1042,14 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
 
 
 async def handle_send_reply(args: dict) -> list[TextContent]:
-    """Send a reply to a message."""
-    chat_id = args.get("chat_id")
-    text = args.get("text", "")
-    source = args.get("source", "telegram").lower()
+    """Send a reply to a message with input validation."""
+    # Validate inputs (raises ValidationError on bad data)
+    args = validate_send_reply_args(args)
+    chat_id = args["chat_id"]
+    text = args["text"]
+    source = args["source"]
     buttons = args.get("buttons")
     thread_ts = args.get("thread_ts")
-
-    if not chat_id or not text:
-        return [TextContent(type="text", text="Error: chat_id and text are required.")]
 
     # Create reply file in outbox
     reply_id = f"{int(time.time() * 1000)}_{source}"
@@ -1000,13 +1070,12 @@ async def handle_send_reply(args: dict) -> list[TextContent]:
         reply_data["thread_ts"] = thread_ts
 
     outbox_file = OUTBOX_DIR / f"{reply_id}.json"
-    with open(outbox_file, "w") as f:
-        json.dump(reply_data, f, indent=2)
+    # Atomic write: temp file + fsync + rename to prevent watchdog race condition
+    atomic_write_json(outbox_file, reply_data)
 
     # Save a copy to sent directory for conversation history
     sent_file = SENT_DIR / f"{reply_id}.json"
-    with open(sent_file, "w") as f:
-        json.dump(reply_data, f, indent=2)
+    atomic_write_json(sent_file, reply_data)
 
     log.info(f"Reply sent to {source} chat {chat_id}")
 
@@ -1017,10 +1086,7 @@ async def handle_send_reply(args: dict) -> list[TextContent]:
 
 async def handle_mark_processed(args: dict) -> list[TextContent]:
     """Mark a message as processed."""
-    message_id = args.get("message_id", "")
-
-    if not message_id:
-        return [TextContent(type="text", text="Error: message_id is required.")]
+    message_id = validate_message_id(args.get("message_id", ""))
 
     # Check processing/ first, then inbox/ as fallback
     found = _find_message_file(PROCESSING_DIR, message_id)
@@ -1040,10 +1106,7 @@ async def handle_mark_processed(args: dict) -> list[TextContent]:
 
 async def handle_mark_processing(args: dict) -> list[TextContent]:
     """Move message from inbox to processing to claim it."""
-    message_id = args.get("message_id", "")
-
-    if not message_id:
-        return [TextContent(type="text", text="Error: message_id is required.")]
+    message_id = validate_message_id(args.get("message_id", ""))
 
     found = _find_message_file(INBOX_DIR, message_id)
     if not found:
@@ -1059,12 +1122,9 @@ async def handle_mark_processing(args: dict) -> list[TextContent]:
 
 async def handle_mark_failed(args: dict) -> list[TextContent]:
     """Mark a message as failed with optional retry."""
-    message_id = args.get("message_id", "")
+    message_id = validate_message_id(args.get("message_id", ""))
     error = args.get("error", "Unknown error")
     max_retries = args.get("max_retries", 3)
-
-    if not message_id:
-        return [TextContent(type="text", text="Error: message_id is required.")]
 
     # Find in processing/ first, then inbox/
     found = _find_message_file(PROCESSING_DIR, message_id)
@@ -1085,8 +1145,11 @@ async def handle_mark_failed(args: dict) -> list[TextContent]:
         # Permanently failed
         msg["_permanently_failed"] = True
         dest = FAILED_DIR / found.name
-        found.unlink()
-        dest.write_text(json.dumps(msg, indent=2))
+        # Write destination FIRST, then remove source (crash-safe ordering)
+        # If we crash after write but before unlink, we have a duplicate
+        # which is safe (idempotent). The reverse loses data.
+        atomic_write_json(dest, msg)
+        found.unlink(missing_ok=True)
         log.error(f"Message permanently failed after {max_retries} retries: {message_id} - {error}")
         return [TextContent(type="text", text=f"Message permanently failed after {max_retries} retries: {message_id}")]
 
@@ -1096,8 +1159,9 @@ async def handle_mark_failed(args: dict) -> list[TextContent]:
     msg["_retry_at"] = retry_at
 
     dest = FAILED_DIR / found.name
-    found.unlink()
-    dest.write_text(json.dumps(msg, indent=2))
+    # Write destination FIRST, then remove source (crash-safe ordering)
+    atomic_write_json(dest, msg)
+    found.unlink(missing_ok=True)
     log.warning(f"Message failed (retry {retry_count}/{max_retries}, next in {backoff}s): {message_id} - {error}")
     return [TextContent(type="text", text=f"Message queued for retry ({retry_count}/{max_retries}, backoff {backoff}s): {message_id}")]
 
@@ -1301,9 +1365,8 @@ def load_tasks() -> dict:
 
 
 def save_tasks(data: dict) -> None:
-    """Save tasks to file."""
-    with open(TASKS_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+    """Save tasks to file atomically (crash-safe)."""
+    atomic_write_json(TASKS_FILE, data)
 
 
 async def handle_list_tasks(args: dict) -> list[TextContent]:
@@ -1799,9 +1862,8 @@ def load_scheduled_jobs() -> dict:
 
 
 def save_scheduled_jobs(data: dict) -> None:
-    """Save scheduled jobs to file."""
-    with open(SCHEDULED_JOBS_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+    """Save scheduled jobs to file atomically (crash-safe)."""
+    atomic_write_json(SCHEDULED_JOBS_FILE, data)
 
 
 def validate_cron_schedule(schedule: str) -> tuple[bool, str]:

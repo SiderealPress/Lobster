@@ -15,11 +15,14 @@ import json
 import logging
 from logging.handlers import RotatingFileHandler
 import os
+import shutil
 import time
 from datetime import datetime
 from pathlib import Path
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+
+import tempfile
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
@@ -42,12 +45,14 @@ INBOX_DIR = Path.home() / "messages" / "inbox"
 OUTBOX_DIR = Path.home() / "messages" / "outbox"
 AUDIO_DIR = Path.home() / "messages" / "audio"
 IMAGES_DIR = Path.home() / "messages" / "images"
+DEAD_LETTER_DIR = Path.home() / "messages" / "dead-letter"
 
 # Ensure directories exist
 INBOX_DIR.mkdir(parents=True, exist_ok=True)
 OUTBOX_DIR.mkdir(parents=True, exist_ok=True)
 AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+DEAD_LETTER_DIR.mkdir(parents=True, exist_ok=True)
 
 # Logging
 LOG_DIR = Path.home() / "lobster-workspace" / "logs"
@@ -68,24 +73,58 @@ log.addHandler(logging.StreamHandler())
 bot_app = None
 main_loop = None
 
+# Tracks files currently being processed to prevent duplicate sends
+_processing_files: set[str] = set()
+
+
+def atomic_write_json(path: Path, data: dict, indent: int = 2) -> None:
+    """Atomically write JSON to a file (write-to-temp-then-rename).
+
+    On POSIX systems, rename() within the same filesystem is atomic,
+    so readers never see a partial file.
+    """
+    content = json.dumps(data, indent=indent)
+    fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.rename(tmp_path, str(path))
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
 
 class OutboxHandler(FileSystemEventHandler):
     """Watches outbox for reply files and sends them via Telegram."""
 
+    def _schedule_processing(self, filepath):
+        if filepath.endswith('.json') and not filepath.endswith('.tmp'):
+            if bot_app and main_loop and main_loop.is_running():
+                if filepath not in _processing_files:
+                    _processing_files.add(filepath)
+                    asyncio.run_coroutine_threadsafe(
+                        self.process_reply(filepath),
+                        main_loop
+                    )
+
     def on_created(self, event):
         if event.is_directory:
             return
-        if event.src_path.endswith('.json'):
-            # Schedule on the bot's event loop from watchdog thread
-            if bot_app and main_loop and main_loop.is_running():
-                asyncio.run_coroutine_threadsafe(
-                    self.process_reply(event.src_path),
-                    main_loop
-                )
+        self._schedule_processing(event.src_path)
+
+    def on_modified(self, event):
+        if event.is_directory:
+            return
+        self._schedule_processing(event.src_path)
 
     async def process_reply(self, filepath):
         try:
-            await asyncio.sleep(0.1)  # Brief delay to ensure file is written
+            await asyncio.sleep(0.5)  # Delay to ensure file write is complete
             with open(filepath, 'r') as f:
                 reply = json.load(f)
 
@@ -110,12 +149,12 @@ class OutboxHandler(FileSystemEventHandler):
                         reply_markup=reply_markup
                     )
                 log.info(f"Sent reply to {chat_id}: {text[:50]}...")
-
-            # Remove processed file
-            os.remove(filepath)
-
-        except Exception as e:
-            log.error(f"Error processing reply {filepath}: {e}")
+                os.remove(filepath)
+            else:
+                log.warning(f"Skipping reply {filepath}: missing chat_id={chat_id}, text={bool(text)}, bot={bool(bot_app)}")
+                os.remove(filepath)
+        finally:
+            _processing_files.discard(filepath)
 
 
 async def process_existing_outbox():
@@ -125,7 +164,51 @@ async def process_existing_outbox():
     if existing_files:
         log.info(f"Processing {len(existing_files)} existing outbox file(s)...")
         for filepath in existing_files:
-            await handler.process_reply(str(filepath))
+            try:
+                await handler.process_reply(str(filepath))
+            except Exception as e:
+                log.error(f"Error processing existing outbox file {filepath}: {e}")
+
+
+_outbox_fail_counts: dict[str, int] = {}
+
+
+async def sweep_outbox():
+    """Periodic sweep catches files missed by watchdog or failed on first attempt."""
+    handler = OutboxHandler()
+    while True:
+        await asyncio.sleep(10)
+        try:
+            for filepath in sorted(OUTBOX_DIR.glob("*.json")):
+                # Skip temp files from atomic writes
+                if filepath.suffix == '.tmp':
+                    continue
+                # Only process files older than 2 seconds (ensure write completion)
+                try:
+                    age = time.time() - filepath.stat().st_mtime
+                except FileNotFoundError:
+                    continue
+                if age < 2:
+                    continue
+
+                fname = str(filepath)
+                if fname in _processing_files:
+                    continue
+                _processing_files.add(fname)
+                try:
+                    await handler.process_reply(fname)
+                    _outbox_fail_counts.pop(fname, None)
+                except Exception as e:
+                    _outbox_fail_counts[fname] = _outbox_fail_counts.get(fname, 0) + 1
+                    count = _outbox_fail_counts[fname]
+                    log.error(f"Sweep: failed to process {filepath.name} (attempt {count}/5): {e}")
+                    if count >= 5:
+                        dest = DEAD_LETTER_DIR / filepath.name
+                        shutil.move(fname, str(dest))
+                        _outbox_fail_counts.pop(fname, None)
+                        log.error(f"Moved to dead-letter after 5 failures: {filepath.name}")
+        except Exception as e:
+            log.error(f"Outbox sweep error: {e}")
 
 
 def is_authorized(user_id: int) -> bool:
@@ -202,8 +285,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     }
 
     inbox_file = INBOX_DIR / f"{msg_id}.json"
-    with open(inbox_file, 'w') as f:
-        json.dump(msg_data, f, indent=2)
+    atomic_write_json(inbox_file, msg_data)
 
     log.info(f"Button press from {user.first_name}: {callback_data}")
 
@@ -293,8 +375,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
 
     inbox_file = INBOX_DIR / f"{msg_id}.json"
-    with open(inbox_file, 'w') as f:
-        json.dump(msg_data, f, indent=2)
+    atomic_write_json(inbox_file, msg_data)
 
     log.info(f"Wrote message to inbox: {msg_id}")
 
@@ -335,8 +416,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         }
 
         inbox_file = INBOX_DIR / f"{msg_id}.json"
-        with open(inbox_file, 'w') as f:
-            json.dump(msg_data, f, indent=2)
+        atomic_write_json(inbox_file, msg_data)
 
         log.info(f"Wrote voice message to inbox: {msg_id}")
         await message.reply_text("🎤 Voice message received. Transcribing...")
@@ -384,8 +464,7 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
         }
 
         inbox_file = INBOX_DIR / f"{msg_id}.json"
-        with open(inbox_file, 'w') as f:
-            json.dump(msg_data, f, indent=2)
+        atomic_write_json(inbox_file, msg_data)
 
         log.info(f"Wrote photo message to inbox: {msg_id}")
         await message.reply_text("📷 Image received. Processing...")
@@ -457,8 +536,7 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
             msg_data["image_file"] = str(save_path)
 
         inbox_file = INBOX_DIR / f"{msg_id}.json"
-        with open(inbox_file, 'w') as f:
-            json.dump(msg_data, f, indent=2)
+        atomic_write_json(inbox_file, msg_data)
 
         log.info(f"Wrote document message to inbox: {msg_id}")
         emoji = "📷" if is_image else "📎"
@@ -511,6 +589,10 @@ async def run_bot():
 
     # Process any existing outbox files from before startup
     await process_existing_outbox()
+
+    # Start periodic outbox sweep (catches watchdog misses and retries failures)
+    asyncio.create_task(sweep_outbox())
+    log.info("Outbox sweep task started (every 10s)")
 
     try:
         await bot_app.updater.start_polling(allowed_updates=Update.ALL_TYPES)

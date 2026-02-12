@@ -13,6 +13,7 @@
 #   1. Only fires if a Claude Code process is running
 #   2. Only fires if there isn't already a self-check in the inbox (no spam)
 #   3. Rate-limited: won't inject if last self-check was < 2 minutes ago
+#   4. Max inbox depth: won't inject if inbox already has 20+ messages (backpressure)
 #===============================================================================
 
 set -e
@@ -20,6 +21,7 @@ set -e
 INBOX_DIR="${LOBSTER_MESSAGES:-$HOME/messages}/inbox"
 STATE_DIR="$HOME/lobster/.state"
 LAST_CHECK_FILE="$STATE_DIR/last-self-check"
+MAX_INBOX_DEPTH=20
 
 mkdir -p "$INBOX_DIR" "$STATE_DIR"
 
@@ -41,6 +43,12 @@ if [ -f "$LAST_CHECK_FILE" ]; then
     if [ "$ELAPSED" -lt 120 ]; then
         exit 0
     fi
+fi
+
+# Guard 4: Backpressure — don't add to an already-deep inbox
+INBOX_COUNT=$(find "$INBOX_DIR" -maxdepth 1 -name "*.json" 2>/dev/null | wc -l)
+if [ "$INBOX_COUNT" -ge "$MAX_INBOX_DEPTH" ]; then
+    exit 0
 fi
 
 # All guards passed — inject self-check
