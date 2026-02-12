@@ -21,3 +21,6 @@ config/config.env.example:Hardcoded token
 # Install script uses variable references that look like secrets
 install.sh:Hardcoded token
 install.sh:Hardcoded password
+
+# User-Agent string contains version numbers that look like IP addresses
+src/mcp/inbox_server.py:IP address

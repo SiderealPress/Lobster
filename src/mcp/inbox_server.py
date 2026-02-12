@@ -52,6 +52,10 @@ if _cal_path.exists():
     CALENDAR_TOOLS = _cal_mod.CALENDAR_TOOLS
     CALENDAR_HANDLERS = _cal_mod.CALENDAR_HANDLERS
 
+# Self-update system
+from update_manager import UpdateManager
+_update_manager = UpdateManager()
+
 # Memory system (optional — gracefully degrades to static file search)
 _memory_provider = None
 try:
@@ -875,6 +879,37 @@ async def list_tools() -> list[Tool]:
                 "required": ["event_ids"],
             },
         ),
+        # Self-Update Tools
+        Tool(
+            name="check_updates",
+            description="Check if Lobster updates are available on origin/main. Returns commit count, commit log, and whether updates exist. Lightweight check.",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
+        Tool(
+            name="get_upgrade_plan",
+            description="Generate a full upgrade plan including changelog, compatibility analysis (breaking changes, dependency changes, local conflicts), and recommended steps. Use this before executing an update.",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
+        Tool(
+            name="execute_update",
+            description="Execute a safe auto-update. Only proceeds if compatibility check passes (no breaking changes, no local conflicts). Pulls latest from origin/main, installs deps, and provides rollback command. Returns error if manual intervention is needed.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "confirm": {
+                        "type": "boolean",
+                        "description": "Must be true to proceed with the update. Safety confirmation.",
+                    },
+                },
+                "required": ["confirm"],
+            },
+        ),
         # Google Calendar Tools (dynamically loaded from calendar_integration.py)
         *[
             Tool(
@@ -982,6 +1017,13 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
         return await handle_get_handoff(arguments)
     elif name == "mark_consolidated":
         return await handle_mark_consolidated(arguments)
+    # Self-Update Tools
+    elif name == "check_updates":
+        return await handle_check_updates(arguments)
+    elif name == "get_upgrade_plan":
+        return await handle_get_upgrade_plan(arguments)
+    elif name == "execute_update":
+        return await handle_execute_update(arguments)
     # Google Calendar Tools
     elif name in CALENDAR_HANDLERS:
         handler = CALENDAR_HANDLERS[name]
@@ -2955,6 +2997,99 @@ async def handle_mark_consolidated(arguments: dict[str, Any]) -> list[TextConten
     except Exception as e:
         log.error(f"mark_consolidated failed: {e}", exc_info=True)
         return [TextContent(type="text", text=f"Error marking consolidated: {e}")]
+
+
+async def handle_check_updates(arguments: dict[str, Any]) -> list[TextContent]:
+    """Check if Lobster updates are available."""
+    try:
+        result = _update_manager.check_for_updates()
+        if not result["updates_available"]:
+            return [TextContent(type="text", text=f"Lobster is up to date (SHA: {result['local_sha'][:7]}).")]
+
+        lines = [
+            f"**Updates available!** ({result['commits_behind']} commits behind)",
+            f"Local: `{result['local_sha'][:7]}` | Remote: `{result['remote_sha'][:7]}`",
+            "",
+            "**Recent commits:**",
+        ]
+        for commit in result["commit_log"][:10]:
+            lines.append(f"- {commit}")
+        if len(result["commit_log"]) > 10:
+            lines.append(f"  ... and {len(result['commit_log']) - 10} more")
+
+        lines.append("")
+        lines.append("Use `get_upgrade_plan` for full changelog and compatibility analysis.")
+        return [TextContent(type="text", text="\n".join(lines))]
+    except Exception as e:
+        log.error(f"check_updates failed: {e}", exc_info=True)
+        return [TextContent(type="text", text=f"Error checking for updates: {e}")]
+
+
+async def handle_get_upgrade_plan(arguments: dict[str, Any]) -> list[TextContent]:
+    """Generate a full upgrade plan with changelog and compatibility analysis."""
+    try:
+        plan = _update_manager.create_upgrade_plan()
+        if plan["action"] == "none":
+            return [TextContent(type="text", text=plan["message"])]
+
+        lines = [
+            f"**Upgrade Plan** ({plan['commits_behind']} commits behind)",
+            "",
+            plan["changelog"],
+            "---",
+            f"**Recommendation:** {plan['compatibility']['recommendation']}",
+            f"**Safe to auto-update:** {'Yes' if plan['compatibility']['safe_to_update'] else 'No'}",
+        ]
+
+        if plan["compatibility"]["issues"]:
+            lines.append("")
+            lines.append("**Issues:**")
+            for issue in plan["compatibility"]["issues"]:
+                lines.append(f"- {issue}")
+
+        if plan["compatibility"]["warnings"]:
+            lines.append("")
+            lines.append("**Warnings:**")
+            for warning in plan["compatibility"]["warnings"]:
+                lines.append(f"- {warning}")
+
+        lines.append("")
+        lines.append("**Steps:**")
+        for step in plan["steps"]:
+            lines.append(f"  {step}")
+
+        if plan["action"] == "auto":
+            lines.append("")
+            lines.append("Use `execute_update` with `confirm: true` to apply this update.")
+
+        return [TextContent(type="text", text="\n".join(lines))]
+    except Exception as e:
+        log.error(f"get_upgrade_plan failed: {e}", exc_info=True)
+        return [TextContent(type="text", text=f"Error generating upgrade plan: {e}")]
+
+
+async def handle_execute_update(arguments: dict[str, Any]) -> list[TextContent]:
+    """Execute a safe auto-update."""
+    confirm = arguments.get("confirm", False)
+    if not confirm:
+        return [TextContent(type="text", text="Error: You must pass `confirm: true` to execute an update.")]
+
+    try:
+        result = _update_manager.execute_safe_update()
+        if result["success"]:
+            lines = [
+                f"Update successful! {result['message']}",
+                "",
+                f"**Rollback:** `{result['rollback_command']}`",
+                "",
+                "Note: You may need to restart the MCP server for changes to take effect.",
+            ]
+            return [TextContent(type="text", text="\n".join(lines))]
+        else:
+            return [TextContent(type="text", text=f"Update failed: {result['message']}")]
+    except Exception as e:
+        log.error(f"execute_update failed: {e}", exc_info=True)
+        return [TextContent(type="text", text=f"Error executing update: {e}")]
 
 
 async def main():
