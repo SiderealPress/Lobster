@@ -394,6 +394,18 @@ fi
 success "Repository ready at $INSTALL_DIR (branch: $REPO_BRANCH)"
 
 #===============================================================================
+# Configure Distributed Git Hooks
+#===============================================================================
+
+step "Configuring distributed git hooks..."
+
+cd "$INSTALL_DIR"
+git config --local core.hooksPath .githooks
+chmod +x .githooks/pre-push .githooks/post-checkout 2>/dev/null || true
+
+success "Git hooks configured (core.hooksPath -> .githooks)"
+
+#===============================================================================
 # Create Directories
 #===============================================================================
 

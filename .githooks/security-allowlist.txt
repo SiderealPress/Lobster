@@ -1,0 +1,23 @@
+# Security Scanner Allowlist
+# ==========================
+# Known false positives - one pattern per line
+# Format: filepath:pattern_description
+#
+# The filepath supports glob-style matching.
+# The pattern_description is matched as a substring against the issue description.
+#
+# Examples:
+#   tests/unit/test_auth.py:Hardcoded password
+#   docs/examples/*.md:API secret key
+#   config/config.env.example:Hardcoded token
+
+# Test files with fake/mock credentials
+tests/unit/test_reliability.py:test_credentials
+tests/unit/test_memory.py:test_data
+
+# Example config files (contain placeholder values)
+config/config.env.example:Hardcoded token
+
+# Install script uses variable references that look like secrets
+install.sh:Hardcoded token
+install.sh:Hardcoded password
