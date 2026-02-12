@@ -1019,6 +1019,14 @@ if [ -f "$SLACK_ROUTER_TEMPLATE" ]; then
         "$INSTALL_DIR/services/lobster-slack-router.service"
 fi
 
+# Generate MCP HTTP bridge service if template exists
+MCP_TEMPLATE="$INSTALL_DIR/services/lobster-mcp.service.template"
+if [ -f "$MCP_TEMPLATE" ]; then
+    generate_from_template \
+        "$MCP_TEMPLATE" \
+        "$INSTALL_DIR/services/lobster-mcp.service"
+fi
+
 #===============================================================================
 # Install Services
 #===============================================================================
@@ -1032,6 +1040,12 @@ sudo cp "$INSTALL_DIR/services/lobster-claude.service" /etc/systemd/system/
 if [ -f "$INSTALL_DIR/services/lobster-slack-router.service" ]; then
     sudo cp "$INSTALL_DIR/services/lobster-slack-router.service" /etc/systemd/system/
     info "Slack router service installed (enable manually with: sudo systemctl enable lobster-slack-router)"
+fi
+
+# Install MCP HTTP bridge service if generated
+if [ -f "$INSTALL_DIR/services/lobster-mcp.service" ]; then
+    sudo cp "$INSTALL_DIR/services/lobster-mcp.service" /etc/systemd/system/
+    info "MCP HTTP bridge service installed (enable manually with: sudo systemctl enable lobster-mcp)"
 fi
 
 sudo systemctl daemon-reload
