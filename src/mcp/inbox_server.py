@@ -52,6 +52,16 @@ if _cal_path.exists():
     CALENDAR_TOOLS = _cal_mod.CALENDAR_TOOLS
     CALENDAR_HANDLERS = _cal_mod.CALENDAR_HANDLERS
 
+# Memory system (optional — gracefully degrades to static file search)
+_memory_provider = None
+try:
+    from memory import create_memory_provider, MemoryEvent
+    _memory_provider = create_memory_provider(use_vector=True)
+except Exception as _mem_err:
+    # Memory system is optional; log and continue
+    import traceback as _tb
+    print(f"[WARN] Memory system unavailable: {_mem_err}", file=sys.stderr)
+
 # MCP SDK
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -767,6 +777,104 @@ async def list_tools() -> list[Tool]:
                 "required": ["owner", "repo", "issue_number"],
             },
         ),
+        # Memory System Tools
+        Tool(
+            name="memory_store",
+            description="Store an event in Lobster's memory. Events can be messages, tasks, decisions, notes, or links. Each event is embedded and indexed for fast hybrid search.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "content": {
+                        "type": "string",
+                        "description": "The content/text of the event to remember.",
+                    },
+                    "type": {
+                        "type": "string",
+                        "description": "Event type: message, task, decision, note, or link. Default: note.",
+                        "default": "note",
+                    },
+                    "source": {
+                        "type": "string",
+                        "description": "Where the event came from: telegram, github, internal. Default: internal.",
+                        "default": "internal",
+                    },
+                    "project": {
+                        "type": "string",
+                        "description": "Optional project name this event relates to.",
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional tags for categorization.",
+                    },
+                },
+                "required": ["content"],
+            },
+        ),
+        Tool(
+            name="memory_search",
+            description="Search Lobster's memory using hybrid vector + keyword search. Returns the most relevant events matching the query. Falls back to keyword search if vector search is unavailable.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The search query. Can be natural language.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of results to return. Default: 10.",
+                        "default": 10,
+                    },
+                    "project": {
+                        "type": "string",
+                        "description": "Optional project filter.",
+                    },
+                },
+                "required": ["query"],
+            },
+        ),
+        Tool(
+            name="memory_recent",
+            description="Get recent events from Lobster's memory. Returns events from the last N hours, newest first.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "hours": {
+                        "type": "integer",
+                        "description": "Number of hours to look back. Default: 24.",
+                        "default": 24,
+                    },
+                    "project": {
+                        "type": "string",
+                        "description": "Optional project filter.",
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="get_handoff",
+            description="Read the current handoff document - a complete briefing for a new Lobster session. Contains identity, architecture, current state, and pending items.",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
+        Tool(
+            name="mark_consolidated",
+            description="Mark memory events as consolidated (processed by nightly consolidation). Pass a list of event IDs that have been reviewed and synthesized into canonical files.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "event_ids": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "List of event IDs to mark as consolidated.",
+                    },
+                },
+                "required": ["event_ids"],
+            },
+        ),
         # Google Calendar Tools (dynamically loaded from calendar_integration.py)
         *[
             Tool(
@@ -863,6 +971,17 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
         return await handle_close_brain_dump(arguments)
     elif name == "get_brain_dump_status":
         return await handle_get_brain_dump_status(arguments)
+    # Memory System Tools
+    elif name == "memory_store":
+        return await handle_memory_store(arguments)
+    elif name == "memory_search":
+        return await handle_memory_search(arguments)
+    elif name == "memory_recent":
+        return await handle_memory_recent(arguments)
+    elif name == "get_handoff":
+        return await handle_get_handoff(arguments)
+    elif name == "mark_consolidated":
+        return await handle_mark_consolidated(arguments)
     # Google Calendar Tools
     elif name in CALENDAR_HANDLERS:
         handler = CALENDAR_HANDLERS[name]
@@ -2702,6 +2821,140 @@ async def handle_get_brain_dump_status(args: dict) -> list[TextContent]:
         output_lines.append("**Linked Action Items:** none")
 
     return [TextContent(type="text", text="\n".join(output_lines))]
+
+
+# =============================================================================
+# Memory System Handlers
+# =============================================================================
+
+
+HANDOFF_PATH = Path.home() / "lobster" / "memory" / "canonical" / "handoff.md"
+
+
+async def handle_memory_store(arguments: dict[str, Any]) -> list[TextContent]:
+    """Store an event in memory."""
+    if _memory_provider is None:
+        return [TextContent(type="text", text="Memory system is not available.")]
+
+    content = arguments.get("content", "")
+    if not content:
+        return [TextContent(type="text", text="Error: content is required.")]
+
+    event = MemoryEvent(
+        id=None,
+        timestamp=datetime.now(timezone.utc),
+        type=arguments.get("type", "note"),
+        source=arguments.get("source", "internal"),
+        project=arguments.get("project"),
+        content=content,
+        metadata={"tags": arguments.get("tags", [])},
+    )
+
+    try:
+        event_id = _memory_provider.store(event)
+        return [TextContent(
+            type="text",
+            text=f"Stored memory event #{event_id} (type={event.type}, source={event.source})"
+        )]
+    except Exception as e:
+        log.error(f"memory_store failed: {e}", exc_info=True)
+        return [TextContent(type="text", text=f"Error storing memory: {e}")]
+
+
+async def handle_memory_search(arguments: dict[str, Any]) -> list[TextContent]:
+    """Search memory for events matching a query."""
+    if _memory_provider is None:
+        return [TextContent(type="text", text="Memory system is not available.")]
+
+    query = arguments.get("query", "")
+    if not query:
+        return [TextContent(type="text", text="Error: query is required.")]
+
+    limit = arguments.get("limit", 10)
+    project = arguments.get("project")
+
+    try:
+        results = _memory_provider.search(query, limit=limit, project=project)
+
+        if not results:
+            return [TextContent(type="text", text=f"No memory events found for: {query}")]
+
+        lines = [f"**Memory Search Results** ({len(results)} found for \"{query}\"):"]
+        for i, event in enumerate(results, 1):
+            ts = event.timestamp.strftime("%Y-%m-%d %H:%M") if event.timestamp else "?"
+            proj = f" [{event.project}]" if event.project else ""
+            eid = f"#{event.id}" if event.id else ""
+            # Truncate content for display
+            content_preview = event.content[:200] + "..." if len(event.content) > 200 else event.content
+            lines.append(f"\n{i}. {eid} ({event.type}/{event.source}{proj}) {ts}")
+            lines.append(f"   {content_preview}")
+
+        return [TextContent(type="text", text="\n".join(lines))]
+    except Exception as e:
+        log.error(f"memory_search failed: {e}", exc_info=True)
+        return [TextContent(type="text", text=f"Error searching memory: {e}")]
+
+
+async def handle_memory_recent(arguments: dict[str, Any]) -> list[TextContent]:
+    """Get recent events from memory."""
+    if _memory_provider is None:
+        return [TextContent(type="text", text="Memory system is not available.")]
+
+    hours = arguments.get("hours", 24)
+    project = arguments.get("project")
+
+    try:
+        results = _memory_provider.recent(hours=hours, project=project)
+
+        if not results:
+            return [TextContent(type="text", text=f"No events in the last {hours} hours.")]
+
+        lines = [f"**Recent Events** ({len(results)} in last {hours}h):"]
+        for event in results:
+            ts = event.timestamp.strftime("%Y-%m-%d %H:%M") if event.timestamp else "?"
+            proj = f" [{event.project}]" if event.project else ""
+            eid = f"#{event.id}" if event.id else ""
+            consolidated = " [consolidated]" if event.consolidated else ""
+            content_preview = event.content[:150] + "..." if len(event.content) > 150 else event.content
+            lines.append(f"- {eid} {ts} ({event.type}/{event.source}{proj}){consolidated}: {content_preview}")
+
+        return [TextContent(type="text", text="\n".join(lines))]
+    except Exception as e:
+        log.error(f"memory_recent failed: {e}", exc_info=True)
+        return [TextContent(type="text", text=f"Error getting recent events: {e}")]
+
+
+async def handle_get_handoff(arguments: dict[str, Any]) -> list[TextContent]:
+    """Read and return the current handoff document."""
+    try:
+        if HANDOFF_PATH.exists():
+            content = HANDOFF_PATH.read_text()
+            return [TextContent(type="text", text=content)]
+        else:
+            return [TextContent(type="text", text="Handoff document not found at " + str(HANDOFF_PATH))]
+    except Exception as e:
+        log.error(f"get_handoff failed: {e}", exc_info=True)
+        return [TextContent(type="text", text=f"Error reading handoff: {e}")]
+
+
+async def handle_mark_consolidated(arguments: dict[str, Any]) -> list[TextContent]:
+    """Mark memory events as consolidated."""
+    if _memory_provider is None:
+        return [TextContent(type="text", text="Memory system is not available.")]
+
+    event_ids = arguments.get("event_ids", [])
+    if not event_ids:
+        return [TextContent(type="text", text="Error: event_ids is required and must be non-empty.")]
+
+    try:
+        _memory_provider.mark_consolidated(event_ids)
+        return [TextContent(
+            type="text",
+            text=f"Marked {len(event_ids)} event(s) as consolidated: {event_ids}"
+        )]
+    except Exception as e:
+        log.error(f"mark_consolidated failed: {e}", exc_info=True)
+        return [TextContent(type="text", text=f"Error marking consolidated: {e}")]
 
 
 async def main():

@@ -1,0 +1,7 @@
+# Vector DB is an acceleration layer - deletable without data loss
+memory.db
+memory.db-journal
+memory.db-wal
+
+# JSONL event log (can be rebuilt from canonical files)
+events.jsonl
