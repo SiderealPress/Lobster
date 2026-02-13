@@ -949,6 +949,20 @@ async def list_tools() -> list[Tool]:
                 "properties": {},
             },
         ),
+        # Local Sync Awareness Tools
+        Tool(
+            name="check_local_sync",
+            description="Check lobster-sync branches on registered repos to see the latest local work-in-progress. Returns last commit timestamp, commit message, diff summary vs main.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "repo": {
+                        "type": "string",
+                        "description": "Optional: filter to a specific repo (owner/name format). Leave empty for all.",
+                    },
+                },
+            },
+        ),
         # Google Calendar Tools (dynamically loaded from calendar_integration.py)
         *[
             Tool(
@@ -1072,6 +1086,9 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
         return await handle_get_daily_digest(arguments)
     elif name == "list_projects":
         return await handle_list_projects(arguments)
+    # Local Sync Awareness Tools
+    elif name == "check_local_sync":
+        return await handle_check_local_sync(arguments)
     # Google Calendar Tools
     elif name in CALENDAR_HANDLERS:
         handler = CALENDAR_HANDLERS[name]
@@ -3225,6 +3242,192 @@ async def handle_list_projects(arguments: dict[str, Any]) -> list[TextContent]:
     except Exception as e:
         log.error(f"list_projects failed: {e}", exc_info=True)
         return [TextContent(type="text", text=f"Error listing projects: {e}")]
+
+
+# =============================================================================
+# Local Sync Awareness -- lobster-sync Branch Monitoring
+# =============================================================================
+
+# Path to the sync repos config (lives in the Lobster repo checkout)
+SYNC_REPOS_CONFIG = Path.home() / "lobster" / "config" / "sync-repos.json"
+
+
+def load_sync_repos(repo_filter: str | None = None) -> list[dict]:
+    """Load the sync repos config, optionally filtering to one repo.
+
+    Returns a list of dicts with keys: owner, name.
+    If repo_filter is provided (e.g. 'SiderealPress/Lobster'), only that
+    repo is returned (if it exists in the config and is enabled).
+    """
+    config_path = SYNC_REPOS_CONFIG
+    if not config_path.exists():
+        return []
+
+    try:
+        data = json.loads(config_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return []
+
+    repos = [
+        {"owner": r["owner"], "name": r["name"]}
+        for r in data.get("repos", [])
+        if r.get("enabled", True)
+    ]
+
+    if repo_filter:
+        parts = repo_filter.split("/", 1)
+        if len(parts) == 2:
+            owner, name = parts
+            repos = [
+                r for r in repos
+                if r["owner"].lower() == owner.lower()
+                and r["name"].lower() == name.lower()
+            ]
+        else:
+            repos = [
+                r for r in repos
+                if r["name"].lower() == repo_filter.lower()
+            ]
+
+    return repos
+
+
+def parse_branch_info(api_response: dict, owner: str, name: str) -> dict:
+    """Pure function: extract sync status from a GitHub branch API response."""
+    commit = api_response.get("commit", {})
+    commit_detail = commit.get("commit", {})
+    committer = commit_detail.get("committer", {})
+    author = commit_detail.get("author", {})
+    return {
+        "repo": f"{owner}/{name}",
+        "last_sync": committer.get("date", "unknown"),
+        "message": commit_detail.get("message", ""),
+        "sha": commit.get("sha", "")[:8],
+        "author": author.get("name", "unknown"),
+    }
+
+
+def parse_compare_info(api_response: dict) -> dict:
+    """Pure function: extract divergence summary from a GitHub compare API response."""
+    return {
+        "ahead_by": api_response.get("ahead_by", 0),
+        "behind_by": api_response.get("behind_by", 0),
+        "total_commits": api_response.get("total_commits", 0),
+        "changed_files": len(api_response.get("files", [])),
+    }
+
+
+def format_sync_status(results: list[dict]) -> str:
+    """Pure function: format sync check results into a readable report."""
+    if not results:
+        return "No registered repos found. Configure repos in config/sync-repos.json."
+
+    lines = ["**Local Sync Status**", ""]
+
+    for r in results:
+        if r.get("error"):
+            lines.append(f"**{r['repo']}** -- {r['error']}")
+            lines.append("")
+            continue
+
+        lines.append(f"**{r['repo']}**")
+        lines.append(f"- Last sync: {r.get('last_sync', 'unknown')}")
+        lines.append(f"- Commit: `{r.get('sha', '?')}` {r.get('message', '')}")
+        lines.append(f"- Author: {r.get('author', 'unknown')}")
+
+        div = r.get("divergence")
+        if div:
+            lines.append(
+                f"- Divergence from main: {div['ahead_by']} commits ahead, "
+                f"{div['behind_by']} behind, {div['changed_files']} files changed"
+            )
+        lines.append("")
+
+    return "\n".join(lines).rstrip()
+
+
+async def fetch_sync_branch(
+    owner: str, name: str, sync_branch: str = "lobster-sync",
+) -> dict:
+    """Fetch lobster-sync branch info from GitHub API using gh CLI.
+
+    Returns a result dict suitable for format_sync_status. Side effect boundary.
+    """
+    result: dict = {"repo": f"{owner}/{name}"}
+
+    success, stdout, stderr = await run_gh_command([
+        "api", f"/repos/{owner}/{name}/branches/{sync_branch}",
+        "--jq", ".",
+    ])
+
+    if not success:
+        if "404" in stderr or "Not Found" in stderr:
+            result["error"] = f"No `{sync_branch}` branch found"
+        else:
+            result["error"] = f"API error: {stderr[:200]}"
+        return result
+
+    try:
+        branch_data = json.loads(stdout)
+    except json.JSONDecodeError:
+        result["error"] = "Failed to parse branch API response"
+        return result
+
+    parsed = parse_branch_info(branch_data, owner, name)
+    result.update(parsed)
+
+    cmp_success, cmp_stdout, _ = await run_gh_command([
+        "api", f"/repos/{owner}/{name}/compare/main...{sync_branch}",
+        "--jq", "{ahead_by, behind_by, total_commits, files: [.files[].filename]}",
+    ])
+
+    if cmp_success:
+        try:
+            cmp_data = json.loads(cmp_stdout)
+            result["divergence"] = parse_compare_info(cmp_data)
+        except json.JSONDecodeError:
+            pass
+
+    return result
+
+
+async def handle_check_local_sync(arguments: dict[str, Any]) -> list[TextContent]:
+    """Handle the check_local_sync tool call."""
+    repo_filter = arguments.get("repo")
+
+    try:
+        repos = load_sync_repos(repo_filter)
+        if not repos:
+            if repo_filter:
+                msg = (
+                    f"Repo '{repo_filter}' not found in sync config. "
+                    "Check config/sync-repos.json."
+                )
+            else:
+                msg = (
+                    "No repos configured for sync monitoring. "
+                    "Add repos to config/sync-repos.json."
+                )
+            return [TextContent(type="text", text=msg)]
+
+        sync_branch = "lobster-sync"
+        if SYNC_REPOS_CONFIG.exists():
+            try:
+                cfg = json.loads(SYNC_REPOS_CONFIG.read_text())
+                sync_branch = cfg.get("sync_branch", "lobster-sync")
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        results = await asyncio.gather(*(
+            fetch_sync_branch(r["owner"], r["name"], sync_branch)
+            for r in repos
+        ))
+
+        report = format_sync_status(list(results))
+        return [TextContent(type="text", text=report)]
+    except Exception as e:
+        log.error(f"check_local_sync failed: {e}", exc_info=True)
+        return [TextContent(type="text", text=f"Error checking local sync: {e}")]
 
 
 async def main():

@@ -1,0 +1,11 @@
+{
+  "_comment": "Repos to monitor for lobster-sync branches. Lobster checks these to report on local work-in-progress.",
+  "sync_branch": "lobster-sync",
+  "repos": [
+    {
+      "owner": "SiderealPress",
+      "name": "Lobster",
+      "enabled": true
+    }
+  ]
+}
