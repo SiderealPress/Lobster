@@ -74,6 +74,19 @@ EXIT_CODE=$?
 
 if [ $EXIT_CODE -eq 0 ]; then
     echo "Consolidation completed successfully at $(date -Iseconds)"
+
+    # Post-consolidation: push updated canonical files to GitHub
+    PUSH_SCRIPT="$SCRIPT_DIR/push-canonical.sh"
+    if [ -x "$PUSH_SCRIPT" ]; then
+        echo "Running post-consolidation canonical push..."
+        if "$PUSH_SCRIPT"; then
+            echo "Canonical push completed."
+        else
+            echo "WARNING: Canonical push failed (exit $?). Consolidation data is local only." >&2
+        fi
+    else
+        echo "NOTE: push-canonical.sh not found or not executable. Skipping canonical push."
+    fi
 else
     echo "Consolidation failed with exit code $EXIT_CODE at $(date -Iseconds)" >&2
 fi
