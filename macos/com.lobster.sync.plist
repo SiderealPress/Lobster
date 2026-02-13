@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.lobster.sync.plist - launchd service for the lobster-sync daemon
+
+  This is a TEMPLATE. The installer (install-lobster-local.sh) replaces
+  __USER_HOME__ with the actual home directory at install time.
+
+  launchd does not expand ~ or $HOME in plist files, so absolute paths
+  are required. The installer handles this substitution.
+
+  Manual install (if not using the installer):
+    sed "s|__USER_HOME__|$HOME|g" com.lobster.sync.plist \
+      > ~/Library/LaunchAgents/com.lobster.sync.plist
+    launchctl load ~/Library/LaunchAgents/com.lobster.sync.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.lobster.sync</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__USER_HOME__/.lobster/bin/lobster-sync-daemon.sh</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>__USER_HOME__/.lobster/logs/sync-stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__USER_HOME__/.lobster/logs/sync-stderr.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+
+        <key>LOBSTER_SYNC_CONFIG</key>
+        <string>__USER_HOME__/.lobster/sync-config.json</string>
+
+        <key>LOBSTER_SYNC_HOME</key>
+        <string>__USER_HOME__/.lobster</string>
+
+        <key>HOME</key>
+        <string>__USER_HOME__</string>
+    </dict>
+
+    <key>WorkingDirectory</key>
+    <string>__USER_HOME__/.lobster</string>
+
+    <!-- Throttle restarts: wait 10 seconds between respawns -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <!-- Nice level: run at low priority to avoid impacting foreground work -->
+    <key>Nice</key>
+    <integer>5</integer>
+</dict>
+</plist>
