@@ -910,6 +910,45 @@ async def list_tools() -> list[Tool]:
                 "required": ["confirm"],
             },
         ),
+        # Convenience Tools (canonical memory readers)
+        Tool(
+            name="get_priorities",
+            description="Fetch Lobster's current priority stack. Returns the canonical priorities.md file, updated nightly by the consolidation process. Shows what Lobster considers most important right now, ranked and annotated.",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
+        Tool(
+            name="get_project_context",
+            description="Fetch status and context for a specific project. Returns project status, recent decisions, pending items, and blockers from the canonical project file.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project": {
+                        "type": "string",
+                        "description": "Project name (e.g., 'lobster', 'govscan', 'transformers')",
+                    },
+                },
+                "required": ["project"],
+            },
+        ),
+        Tool(
+            name="get_daily_digest",
+            description="Fetch the latest daily digest. Summarizes recent activity: key conversations, task progress, decisions made, and items needing follow-up.",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
+        Tool(
+            name="list_projects",
+            description="List all projects tracked in Lobster's canonical memory. Returns project names for use with get_project_context().",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
         # Google Calendar Tools (dynamically loaded from calendar_integration.py)
         *[
             Tool(
@@ -1024,6 +1063,15 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
         return await handle_get_upgrade_plan(arguments)
     elif name == "execute_update":
         return await handle_execute_update(arguments)
+    # Convenience Tools (canonical memory readers)
+    elif name == "get_priorities":
+        return await handle_get_priorities(arguments)
+    elif name == "get_project_context":
+        return await handle_get_project_context(arguments)
+    elif name == "get_daily_digest":
+        return await handle_get_daily_digest(arguments)
+    elif name == "list_projects":
+        return await handle_list_projects(arguments)
     # Google Calendar Tools
     elif name in CALENDAR_HANDLERS:
         handler = CALENDAR_HANDLERS[name]
@@ -2870,7 +2918,8 @@ async def handle_get_brain_dump_status(args: dict) -> list[TextContent]:
 # =============================================================================
 
 
-HANDOFF_PATH = Path.home() / "lobster" / "memory" / "canonical" / "handoff.md"
+CANONICAL_DIR = Path.home() / "lobster" / "memory" / "canonical"
+HANDOFF_PATH = CANONICAL_DIR / "handoff.md"
 
 
 async def handle_memory_store(arguments: dict[str, Any]) -> list[TextContent]:
@@ -3090,6 +3139,92 @@ async def handle_execute_update(arguments: dict[str, Any]) -> list[TextContent]:
     except Exception as e:
         log.error(f"execute_update failed: {e}", exc_info=True)
         return [TextContent(type="text", text=f"Error executing update: {e}")]
+
+
+# =============================================================================
+# Convenience Tools — Canonical Memory Readers
+# =============================================================================
+
+
+def _read_canonical_file(relative_path: str, missing_message: str) -> str:
+    """Pure helper: read a file under CANONICAL_DIR or return a fallback message."""
+    path = CANONICAL_DIR / relative_path
+    if path.exists():
+        return path.read_text()
+    return missing_message
+
+
+def _list_project_names() -> list[dict]:
+    """Pure helper: list project markdown files under CANONICAL_DIR/projects/."""
+    projects_dir = CANONICAL_DIR / "projects"
+    if not projects_dir.exists():
+        return []
+    return [
+        {"name": f.stem, "path": str(f)}
+        for f in sorted(projects_dir.glob("*.md"))
+    ]
+
+
+async def handle_get_priorities(arguments: dict[str, Any]) -> list[TextContent]:
+    """Return the canonical priorities.md content."""
+    try:
+        content = _read_canonical_file(
+            "priorities.md",
+            "No priorities file found. Nightly consolidation has not run yet.",
+        )
+        return [TextContent(type="text", text=content)]
+    except Exception as e:
+        log.error(f"get_priorities failed: {e}", exc_info=True)
+        return [TextContent(type="text", text=f"Error reading priorities: {e}")]
+
+
+async def handle_get_project_context(arguments: dict[str, Any]) -> list[TextContent]:
+    """Return a specific project's canonical markdown content."""
+    project = arguments.get("project", "")
+    if not project:
+        return [TextContent(type="text", text="Error: project name is required.")]
+
+    # Sanitize: reject path traversal attempts
+    if "/" in project or "\\" in project or ".." in project:
+        return [TextContent(type="text", text="Error: invalid project name.")]
+
+    try:
+        path = CANONICAL_DIR / "projects" / f"{project}.md"
+        if path.exists():
+            return [TextContent(type="text", text=path.read_text())]
+        available = [f.stem for f in (CANONICAL_DIR / "projects").glob("*.md")] if (CANONICAL_DIR / "projects").exists() else []
+        return [TextContent(
+            type="text",
+            text=f"No project file for '{project}'. Available: {', '.join(available) or 'none'}",
+        )]
+    except Exception as e:
+        log.error(f"get_project_context failed: {e}", exc_info=True)
+        return [TextContent(type="text", text=f"Error reading project context: {e}")]
+
+
+async def handle_get_daily_digest(arguments: dict[str, Any]) -> list[TextContent]:
+    """Return the canonical daily-digest.md content."""
+    try:
+        content = _read_canonical_file(
+            "daily-digest.md",
+            "No daily digest found. Nightly consolidation has not run yet.",
+        )
+        return [TextContent(type="text", text=content)]
+    except Exception as e:
+        log.error(f"get_daily_digest failed: {e}", exc_info=True)
+        return [TextContent(type="text", text=f"Error reading daily digest: {e}")]
+
+
+async def handle_list_projects(arguments: dict[str, Any]) -> list[TextContent]:
+    """List all project files in canonical memory."""
+    try:
+        projects = _list_project_names()
+        if not projects:
+            return [TextContent(type="text", text="No project files found in canonical memory.")]
+        return [TextContent(type="text", text=json.dumps(projects, indent=2))]
+    except Exception as e:
+        log.error(f"list_projects failed: {e}", exc_info=True)
+        return [TextContent(type="text", text=f"Error listing projects: {e}")]
 
 
 async def main():

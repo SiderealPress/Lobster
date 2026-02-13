@@ -88,6 +88,11 @@ READONLY_TOOLS = frozenset({
     # Self-update reading
     "check_updates",
     "get_upgrade_plan",
+    # Convenience tools (canonical memory readers)
+    "get_priorities",
+    "get_project_context",
+    "get_daily_digest",
+    "list_projects",
     # Utilities (read-only)
     "fetch_page",
     "transcribe_audio",
