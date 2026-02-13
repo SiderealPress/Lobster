@@ -1259,6 +1259,14 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
             output += f"**[{source}]** from **{user}**\n"
         output += f"Chat ID: `{chat_id}` | Message ID: `{msg_id}`\n"
         output += f"Time: {ts}\n\n"
+        # Show reply-to context if present
+        reply_to = msg.get("reply_to")
+        if reply_to:
+            reply_text = reply_to.get("text", "(no text)")
+            # Truncate long reply previews
+            if len(reply_text) > 120:
+                reply_text = reply_text[:120] + "..."
+            output += f"↩️ Replying to: {reply_text}\n\n"
         output += f"> {text}\n\n"
 
     output += "---\n"

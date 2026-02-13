@@ -374,6 +374,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "timestamp": datetime.utcnow().isoformat(),
     }
 
+    # Capture reply-to metadata if this message is a reply
+    if message.reply_to_message:
+        reply = message.reply_to_message
+        msg_data["reply_to"] = {
+            "message_id": reply.message_id,
+            "text": reply.text,
+            "from_user": reply.from_user.username if reply.from_user else None,
+        }
+
     inbox_file = INBOX_DIR / f"{msg_id}.json"
     atomic_write_json(inbox_file, msg_data)
 
