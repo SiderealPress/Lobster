@@ -1,0 +1,491 @@
+#!/bin/bash
+#===============================================================================
+# lobster-sync -- CLI wrapper for the lobster-sync daemon
+#
+# Manages the lobster-sync-daemon.sh service on macOS: register and unregister
+# repos, check sync status, trigger immediate syncs, tail logs, and
+# start/stop the launchd service.
+#
+# Usage:
+#   lobster-sync add <path>        Register a repo for continuous sync
+#   lobster-sync remove <path>     Unregister a repo
+#   lobster-sync status            Show sync status for all registered repos
+#   lobster-sync now               Trigger immediate sync of all repos
+#   lobster-sync log               Tail the sync log
+#   lobster-sync start             Load the launchd service
+#   lobster-sync stop              Unload the launchd service
+#   lobster-sync help              Show this help message
+#
+# Configuration: ~/.lobster/sync-config.json
+# Logs:          ~/.lobster/logs/sync.log
+#===============================================================================
+
+set -euo pipefail
+
+#-------------------------------------------------------------------------------
+# Constants
+#-------------------------------------------------------------------------------
+
+readonly LOBSTER_DIR="${LOBSTER_SYNC_HOME:-$HOME/.lobster}"
+readonly CONFIG_FILE="${LOBSTER_SYNC_CONFIG:-$LOBSTER_DIR/sync-config.json}"
+readonly LOG_FILE="$LOBSTER_DIR/logs/sync.log"
+readonly PID_FILE="$LOBSTER_DIR/sync.pid"
+readonly PLIST_LABEL="com.lobster.sync"
+readonly PLIST_PATH="$HOME/Library/LaunchAgents/${PLIST_LABEL}.plist"
+readonly DAEMON_SCRIPT="$LOBSTER_DIR/bin/lobster-sync-daemon.sh"
+readonly KEYCHAIN_SERVICE="lobster-sync"
+readonly KEYCHAIN_ACCOUNT="github-token"
+readonly ENV_FILE="$LOBSTER_DIR/.env"
+
+#-------------------------------------------------------------------------------
+# Terminal colors (only when stdout is a terminal)
+#-------------------------------------------------------------------------------
+
+if [[ -t 1 ]]; then
+    readonly C_GREEN=$'\033[32m'
+    readonly C_RED=$'\033[31m'
+    readonly C_YELLOW=$'\033[33m'
+    readonly C_DIM=$'\033[2m'
+    readonly C_BOLD=$'\033[1m'
+    readonly C_RESET=$'\033[0m'
+else
+    readonly C_GREEN="" C_RED="" C_YELLOW="" C_DIM="" C_BOLD="" C_RESET=""
+fi
+
+#-------------------------------------------------------------------------------
+# Pure helper functions (no side effects)
+#-------------------------------------------------------------------------------
+
+die() {
+    printf '%s%s%s\n' "$C_RED" "$*" "$C_RESET" >&2
+    exit 1
+}
+
+info() {
+    printf '%s%s%s\n' "$C_DIM" "$*" "$C_RESET"
+}
+
+success() {
+    printf '%s%s%s\n' "$C_GREEN" "$*" "$C_RESET"
+}
+
+warn() {
+    printf '%s%s%s\n' "$C_YELLOW" "$*" "$C_RESET" >&2
+}
+
+# Resolve a path to its absolute form, handling ~ and relative paths.
+# Pure function of its argument (reads filesystem but no writes).
+resolve_path() {
+    local raw="$1"
+    # Expand leading ~ manually (not expanded inside quotes)
+    raw="${raw/#\~/$HOME}"
+    # Use cd + pwd to resolve symlinks and relative components
+    if [[ -d "$raw" ]]; then
+        (cd "$raw" && pwd)
+    else
+        echo "$raw"
+    fi
+}
+
+# Read the GitHub token, preferring Keychain, falling back to .env file.
+# Returns empty string if neither source has a token.
+read_github_token() {
+    # Try macOS Keychain first
+    local token
+    token="$(security find-generic-password \
+        -s "$KEYCHAIN_SERVICE" \
+        -a "$KEYCHAIN_ACCOUNT" \
+        -w 2>/dev/null)" && {
+        echo "$token"
+        return
+    }
+    # Fall back to .env file
+    if [[ -f "$ENV_FILE" ]]; then
+        local line
+        line="$(grep -E '^GITHUB_TOKEN=' "$ENV_FILE" 2>/dev/null | head -1)" || true
+        echo "${line#GITHUB_TOKEN=}"
+        return
+    fi
+    echo ""
+}
+
+# Check whether jq is available (needed for config manipulation).
+require_jq() {
+    command -v jq > /dev/null 2>&1 || die "jq is required but not found. Install with: brew install jq"
+}
+
+# Read a field from the config file with a default value.
+config_field() {
+    local field="$1" default="$2"
+    if [[ -f "$CONFIG_FILE" ]]; then
+        local value
+        value="$(jq -r "$field // empty" "$CONFIG_FILE" 2>/dev/null)"
+        echo "${value:-$default}"
+    else
+        echo "$default"
+    fi
+}
+
+# Return the list of repo entries as "path|remote|enabled" lines.
+config_repo_entries() {
+    [[ -f "$CONFIG_FILE" ]] || return
+    jq -r '.repos[]? | "\(.path)|\(.remote // "origin")|\(if .enabled == false then "false" else "true" end)"' \
+        "$CONFIG_FILE" 2>/dev/null
+}
+
+# Check if the daemon process is running (via PID file).
+is_daemon_running() {
+    [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null
+}
+
+# Check if the launchd service is loaded.
+is_service_loaded() {
+    launchctl list "$PLIST_LABEL" > /dev/null 2>&1
+}
+
+# Format a duration in seconds as a human-friendly string.
+format_duration() {
+    local seconds="$1"
+    if [[ "$seconds" -lt 60 ]]; then
+        echo "${seconds}s ago"
+    elif [[ "$seconds" -lt 3600 ]]; then
+        echo "$(( seconds / 60 ))m ago"
+    elif [[ "$seconds" -lt 86400 ]]; then
+        echo "$(( seconds / 3600 ))h ago"
+    else
+        echo "$(( seconds / 86400 ))d ago"
+    fi
+}
+
+# Get the timestamp of the last sync commit on a repo's sync branch.
+# Returns empty string if no sync branch exists.
+last_sync_time() {
+    local repo_path="$1"
+    local sync_branch
+    sync_branch="$(config_field '.sync_branch' 'lobster-sync')"
+
+    if [[ ! -d "$repo_path/.git" ]]; then
+        echo ""
+        return
+    fi
+
+    git -C "$repo_path" log -1 --format='%ct' "refs/heads/$sync_branch" 2>/dev/null || echo ""
+}
+
+# Get the basename of a repo path for display.
+repo_name() {
+    basename "$1"
+}
+
+#-------------------------------------------------------------------------------
+# Subcommand: add <path>
+#-------------------------------------------------------------------------------
+
+cmd_add() {
+    local raw_path="${1:-}"
+    [[ -z "$raw_path" ]] && die "Usage: lobster-sync add <path>"
+    require_jq
+
+    local abs_path
+    abs_path="$(resolve_path "$raw_path")"
+
+    # Validate it is a git repo
+    [[ -d "$abs_path" ]] || die "Directory does not exist: $abs_path"
+    git -C "$abs_path" rev-parse --git-dir > /dev/null 2>&1 || \
+        die "Not a git repository: $abs_path"
+
+    # Ensure config file exists
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        printf '{"sync_interval_seconds": 300, "sync_branch": "lobster-sync", "repos": []}\n' > "$CONFIG_FILE"
+        info "Created config: $CONFIG_FILE"
+    fi
+
+    # Check if repo is already registered
+    local existing
+    existing="$(jq -r --arg p "$abs_path" '.repos[] | select(.path == $p) | .path' "$CONFIG_FILE" 2>/dev/null)" || true
+    if [[ -n "$existing" ]]; then
+        # Re-enable if disabled
+        local tmp
+        tmp="$(jq --arg p "$abs_path" '(.repos[] | select(.path == $p)).enabled = true' "$CONFIG_FILE")"
+        printf '%s\n' "$tmp" > "$CONFIG_FILE"
+        success "Re-enabled: $abs_path"
+        return
+    fi
+
+    # Add new repo entry
+    local tmp
+    tmp="$(jq --arg p "$abs_path" '.repos += [{"path": $p, "remote": "origin", "enabled": true}]' "$CONFIG_FILE")"
+    printf '%s\n' "$tmp" > "$CONFIG_FILE"
+    success "Added: $abs_path"
+
+    # Export GITHUB_TOKEN if available so the daemon can push
+    local token
+    token="$(read_github_token)"
+    if [[ -z "$token" ]]; then
+        warn "No GitHub token found. Run: lobster-sync add-token"
+        warn "Or set GITHUB_TOKEN in $ENV_FILE"
+    fi
+}
+
+#-------------------------------------------------------------------------------
+# Subcommand: remove <path>
+#-------------------------------------------------------------------------------
+
+cmd_remove() {
+    local raw_path="${1:-}"
+    [[ -z "$raw_path" ]] && die "Usage: lobster-sync remove <path>"
+    require_jq
+
+    local abs_path
+    abs_path="$(resolve_path "$raw_path")"
+
+    [[ -f "$CONFIG_FILE" ]] || die "Config not found: $CONFIG_FILE"
+
+    # Check the repo is registered
+    local existing
+    existing="$(jq -r --arg p "$abs_path" '.repos[] | select(.path == $p) | .path' "$CONFIG_FILE" 2>/dev/null)" || true
+    [[ -z "$existing" ]] && die "Repo not registered: $abs_path"
+
+    # Remove from config
+    local tmp
+    tmp="$(jq --arg p "$abs_path" '.repos = [.repos[] | select(.path != $p)]' "$CONFIG_FILE")"
+    printf '%s\n' "$tmp" > "$CONFIG_FILE"
+    success "Removed: $abs_path"
+}
+
+#-------------------------------------------------------------------------------
+# Subcommand: status
+#-------------------------------------------------------------------------------
+
+cmd_status() {
+    require_jq
+
+    # Service status
+    printf '%s--- Service ---%s\n' "$C_BOLD" "$C_RESET"
+    if is_service_loaded; then
+        printf '  launchd:  %sloaded%s\n' "$C_GREEN" "$C_RESET"
+    else
+        printf '  launchd:  %snot loaded%s\n' "$C_RED" "$C_RESET"
+    fi
+
+    if is_daemon_running; then
+        local pid
+        pid="$(cat "$PID_FILE")"
+        printf '  daemon:   %srunning%s (PID %s)\n' "$C_GREEN" "$C_RESET" "$pid"
+    else
+        printf '  daemon:   %sstopped%s\n' "$C_RED" "$C_RESET"
+    fi
+
+    local interval
+    interval="$(config_field '.sync_interval_seconds' '300')"
+    printf '  interval: %ss\n' "$interval"
+    printf '\n'
+
+    # Repo status
+    printf '%s--- Repos ---%s\n' "$C_BOLD" "$C_RESET"
+
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        warn "  No config file found. Run: lobster-sync add <path>"
+        return
+    fi
+
+    local has_repos=false
+    while IFS='|' read -r repo_path remote enabled; do
+        [[ -z "$repo_path" ]] && continue
+        has_repos=true
+
+        local name status_icon last_sync duration_str
+
+        name="$(repo_name "$repo_path")"
+
+        if [[ "$enabled" != "true" ]]; then
+            status_icon="${C_DIM}disabled${C_RESET}"
+            duration_str="-"
+        elif [[ ! -d "$repo_path" ]]; then
+            status_icon="${C_RED}missing${C_RESET}"
+            duration_str="-"
+        else
+            last_sync="$(last_sync_time "$repo_path")"
+            if [[ -n "$last_sync" ]]; then
+                local now
+                now="$(date +%s)"
+                local diff=$(( now - last_sync ))
+                duration_str="$(format_duration "$diff")"
+                # Green if synced within 2x interval, yellow otherwise
+                if [[ "$diff" -lt $(( interval * 2 )) ]]; then
+                    status_icon="${C_GREEN}ok${C_RESET}"
+                else
+                    status_icon="${C_YELLOW}stale${C_RESET}"
+                fi
+            else
+                status_icon="${C_DIM}never synced${C_RESET}"
+                duration_str="-"
+            fi
+        fi
+
+        printf '  %-20s %-40s last sync: %-12s %s\n' \
+            "$name" "$repo_path" "$duration_str" "$status_icon"
+    done <<< "$(config_repo_entries)"
+
+    if ! $has_repos; then
+        info "  No repos registered. Run: lobster-sync add <path>"
+    fi
+}
+
+#-------------------------------------------------------------------------------
+# Subcommand: now
+#-------------------------------------------------------------------------------
+
+cmd_now() {
+    [[ -x "$DAEMON_SCRIPT" ]] || die "Daemon script not found: $DAEMON_SCRIPT"
+    [[ -f "$CONFIG_FILE" ]] || die "Config not found: $CONFIG_FILE"
+
+    # Export GITHUB_TOKEN from Keychain / .env if available
+    local token
+    token="$(read_github_token)"
+    if [[ -n "$token" ]]; then
+        export GITHUB_TOKEN="$token"
+    fi
+
+    info "Running sync cycle..."
+    "$DAEMON_SCRIPT" --once
+    success "Sync complete."
+}
+
+#-------------------------------------------------------------------------------
+# Subcommand: log
+#-------------------------------------------------------------------------------
+
+cmd_log() {
+    local log_target="$LOG_FILE"
+    # Also check stdout/stderr logs from launchd
+    local stdout_log="$LOBSTER_DIR/logs/sync-stdout.log"
+    local stderr_log="$LOBSTER_DIR/logs/sync-stderr.log"
+
+    if [[ -f "$log_target" ]]; then
+        tail -f "$log_target"
+    elif [[ -f "$stderr_log" ]]; then
+        info "Main log not found, tailing stderr log..."
+        tail -f "$stderr_log"
+    else
+        die "No log files found in $LOBSTER_DIR/logs/"
+    fi
+}
+
+#-------------------------------------------------------------------------------
+# Subcommand: start
+#-------------------------------------------------------------------------------
+
+cmd_start() {
+    [[ -f "$PLIST_PATH" ]] || die "Plist not installed: $PLIST_PATH\nRun the installer first: macos/install-lobster-local.sh"
+
+    if is_service_loaded; then
+        warn "Service is already loaded."
+        if is_daemon_running; then
+            info "Daemon is running (PID: $(cat "$PID_FILE"))."
+        fi
+        return
+    fi
+
+    info "Loading launchd service..."
+    launchctl load "$PLIST_PATH"
+    success "Service started."
+
+    # Give it a moment to spin up
+    sleep 1
+    if is_daemon_running; then
+        info "Daemon running (PID: $(cat "$PID_FILE"))."
+    elif is_service_loaded; then
+        info "Service loaded. Daemon starting up..."
+    fi
+}
+
+#-------------------------------------------------------------------------------
+# Subcommand: stop
+#-------------------------------------------------------------------------------
+
+cmd_stop() {
+    if ! is_service_loaded; then
+        warn "Service is not loaded."
+        # Clean up stale PID file if present
+        if [[ -f "$PID_FILE" ]]; then
+            rm -f "$PID_FILE"
+            info "Removed stale PID file."
+        fi
+        return
+    fi
+
+    info "Unloading launchd service..."
+    launchctl unload "$PLIST_PATH"
+
+    # Wait briefly for daemon to stop
+    local i=0
+    while is_daemon_running && [[ $i -lt 5 ]]; do
+        sleep 1
+        i=$((i + 1))
+    done
+
+    if is_daemon_running; then
+        warn "Daemon still running after unload. Force stopping..."
+        local pid
+        pid="$(cat "$PID_FILE")"
+        kill "$pid" 2>/dev/null || true
+        sleep 1
+        kill -9 "$pid" 2>/dev/null || true
+        rm -f "$PID_FILE"
+    fi
+
+    success "Service stopped."
+}
+
+#-------------------------------------------------------------------------------
+# Subcommand: help
+#-------------------------------------------------------------------------------
+
+cmd_help() {
+    cat <<'USAGE'
+lobster-sync -- Manage the Lobster continuous sync daemon
+
+Usage:
+  lobster-sync add <path>        Register a git repo for continuous sync
+  lobster-sync remove <path>     Unregister a repo
+  lobster-sync status            Show sync status for all registered repos
+  lobster-sync now               Trigger immediate sync of all repos
+  lobster-sync log               Tail the sync log
+  lobster-sync start             Load the launchd service
+  lobster-sync stop              Unload the launchd service
+  lobster-sync help              Show this help message
+
+Configuration:
+  ~/.lobster/sync-config.json    Repo list and sync settings
+  ~/.lobster/.env                GitHub token (fallback if not in Keychain)
+
+Logs:
+  ~/.lobster/logs/sync.log       Daemon log (from lobster-sync-daemon.sh)
+  ~/.lobster/logs/sync-stdout.log  launchd stdout capture
+  ~/.lobster/logs/sync-stderr.log  launchd stderr capture
+
+Examples:
+  lobster-sync add ~/projects/my-app
+  lobster-sync status
+  lobster-sync now
+  lobster-sync log
+USAGE
+}
+
+#-------------------------------------------------------------------------------
+# Entry point: dispatch subcommand
+#-------------------------------------------------------------------------------
+
+case "${1:-}" in
+    add)      shift; cmd_add "$@" ;;
+    remove)   shift; cmd_remove "$@" ;;
+    status)   cmd_status ;;
+    now)      cmd_now ;;
+    log)      cmd_log ;;
+    start)    cmd_start ;;
+    stop)     cmd_stop ;;
+    help|-h|--help)  cmd_help ;;
+    "")       cmd_help; exit 1 ;;
+    *)        die "Unknown command: $1 (try: lobster-sync help)" ;;
+esac
