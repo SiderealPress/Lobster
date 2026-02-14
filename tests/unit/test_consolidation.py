@@ -65,7 +65,7 @@ def canonical_dir(temp_dir):
     (cdir / "daily-digest.md").write_text("# Daily Digest\n\nOld digest content.\n")
     (cdir / "pending-decisions.md").write_text("# Pending Decisions\n\nNone.\n")
     (cdir / "projects" / "lobster.md").write_text("# Project: Lobster\n\n## Status\nActive\n")
-    (cdir / "people" / "drew.md").write_text("# Drew\n\n## Role\nOwner\n")
+    (cdir / "people" / "testowner.md").write_text("# Test Owner\n\n## Role\nOwner\n")
 
     return cdir
 
@@ -113,8 +113,8 @@ def sample_events():
             type="message",
             source="telegram",
             project="lobster",
-            content="Drew asked about memory system progress",
-            metadata='{"people": ["drew"]}',
+            content="User asked about memory system progress",
+            metadata='{"people": ["testowner"]}',
             consolidated=0,
         ),
         consolidation.Event(
@@ -142,9 +142,9 @@ def sample_events():
             timestamp="2026-02-12T13:00:00+00:00",
             type="note",
             source="internal",
-            project="arcastro",
-            content="Need to follow up with Edmunds about AI lecture",
-            metadata='{"people": ["edmunds"]}',
+            project="acme-corp",
+            content="Need to follow up with contact about project review",
+            metadata='{"people": ["testcontact"]}',
             consolidated=0,
         ),
         consolidation.Event(
@@ -201,7 +201,7 @@ class TestGroupEvents:
         project_groups = [g for g in groups if g.category == "project"]
         project_names = {g.key for g in project_groups}
         assert "lobster" in project_names
-        assert "arcastro" in project_names
+        assert "acme-corp" in project_names
 
     def test_groups_ungrouped_by_type(self, sample_events):
         groups = consolidation.group_events(sample_events)
@@ -250,7 +250,7 @@ class TestGroupEvents:
         groups = consolidation.group_events(sample_events)
         project_groups = [g for g in groups if g.category == "project"]
         # Projects should be sorted alphabetically
-        assert project_groups[0].key == "arcastro"
+        assert project_groups[0].key == "acme-corp"
         assert project_groups[1].key == "lobster"
 
 
@@ -259,13 +259,13 @@ class TestExtractPeopleMentions:
 
     def test_extracts_from_metadata(self, sample_events):
         people = consolidation.extract_people_mentions(sample_events)
-        assert "drew" in people
-        assert "edmunds" in people
+        assert "testowner" in people
+        assert "testcontact" in people
 
-    def test_drew_has_one_event(self, sample_events):
+    def test_testowner_has_one_event(self, sample_events):
         people = consolidation.extract_people_mentions(sample_events)
-        assert len(people["drew"]) == 1
-        assert people["drew"][0].id == 1
+        assert len(people["testowner"]) == 1
+        assert people["testowner"][0].id == 1
 
     def test_empty_input(self):
         people = consolidation.extract_people_mentions(())
@@ -326,12 +326,12 @@ class TestPromptGeneration:
 
     def test_person_update_prompt_includes_events(self):
         prompt = consolidation.build_person_update_prompt(
-            "drew",
-            "# Drew\n\nOwner.",
-            "- [2026-02-12T10:00:00] (message/telegram) Drew said hello",
+            "testowner",
+            "# Test Owner\n\nOwner.",
+            "- [2026-02-12T10:00:00] (message/telegram) Test Owner said hello",
         )
-        assert "Drew" in prompt
-        assert "Drew said hello" in prompt
+        assert "testowner" in prompt
+        assert "Test Owner said hello" in prompt
 
     def test_daily_digest_prompt_includes_date(self):
         prompt = consolidation.build_daily_digest_prompt(
@@ -360,7 +360,7 @@ class TestPromptGeneration:
 
     def test_format_events_for_prompt(self, sample_events):
         text = consolidation.format_events_for_prompt(sample_events)
-        assert "Drew asked about memory" in text
+        assert "User asked about memory" in text
         assert "message/telegram" in text
         assert len(text.split("\n")) == len(sample_events)
 
@@ -414,7 +414,7 @@ class TestFileOperations:
         assert "handoff.md" in files
         assert "priorities.md" in files
         assert "projects/lobster.md" in files
-        assert "people/drew.md" in files
+        assert "people/testowner.md" in files
 
     def test_collect_canonical_files_empty_dir(self, temp_dir):
         empty = temp_dir / "empty"
@@ -773,7 +773,7 @@ class TestSlugify:
         assert consolidation._slugify("My Project") == "my-project"
 
     def test_apostrophes_removed(self):
-        assert consolidation._slugify("Drew's Thing") == "drews-thing"
+        assert consolidation._slugify("Someone's Thing") == "someones-thing"
 
     def test_special_chars_removed(self):
         assert consolidation._slugify("proj@#$ect!") == "project"

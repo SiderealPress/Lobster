@@ -67,7 +67,7 @@ Brain dumps turn unstructured voice notes into organized GitHub issues with acti
 1. Record a voice note with your thoughts
 2. Lobster transcribes it and detects it's a brain dump
 3. A dedicated agent triages, categorizes, and extracts action items
-4. A GitHub issue is created in your `brain-dumps` repo (e.g., `aeschylus/brain-dumps`)
+4. A GitHub issue is created in your `brain-dumps` repo (e.g., `your-username/brain-dumps`)
 5. You get a summary with action items back in Telegram
 
 **Setup:**

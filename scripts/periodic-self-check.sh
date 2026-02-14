@@ -7,7 +7,7 @@
 # bulletproof fallback that doesn't depend on MCP hooks or tool-call triggers.
 #
 # Install: Add to crontab with:
-#   */3 * * * * /home/admin/lobster/scripts/periodic-self-check.sh
+#   */3 * * * * $HOME/lobster/scripts/periodic-self-check.sh
 #
 # Guards:
 #   1. Only fires if a Claude Code process is running

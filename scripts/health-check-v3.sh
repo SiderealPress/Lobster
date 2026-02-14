@@ -15,7 +15,7 @@
 #   BLACK  - 3 restart failures in cooldown window → alert, stop retrying
 #
 # Run via cron every 2 minutes:
-#   */2 * * * * /home/admin/lobster/scripts/health-check-v3.sh
+#   */2 * * * * $HOME/lobster/scripts/health-check-v3.sh
 #===============================================================================
 
 set -o pipefail
