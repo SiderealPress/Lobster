@@ -41,5 +41,7 @@ config/calendar_tokens/
 config/calendar_pending_flows/
 
 # Auto-generated canonical memory (personal data, regenerated nightly)
-memory/canonical/
-memory/archive/
+memory/canonical/*
+!memory/canonical/.gitkeep
+memory/archive/*
+!memory/archive/.gitkeep

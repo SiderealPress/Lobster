@@ -647,6 +647,10 @@ def consolidate(
     model = config["CONSOLIDATION_MODEL"]
     max_events = int(config["MAX_EVENTS_PER_BATCH"])
 
+    # Ensure output directories exist
+    Path(canonical_dir).mkdir(parents=True, exist_ok=True)
+    Path(archive_dir).mkdir(parents=True, exist_ok=True)
+
     run_id = str(uuid.uuid4())
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 

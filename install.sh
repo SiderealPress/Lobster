@@ -416,6 +416,19 @@ mkdir -p "$MESSAGES_DIR"/{inbox,outbox,processed,processing,failed,config,audio,
 mkdir -p "$INSTALL_DIR/scheduled-tasks"/{tasks,logs}
 mkdir -p "$HOME/projects"/{personal,business}
 
+# Create memory directories and seed canonical from templates
+mkdir -p "$INSTALL_DIR/memory/canonical"
+mkdir -p "$INSTALL_DIR/memory/archive/digests"
+if [ -d "$INSTALL_DIR/memory/canonical-templates" ]; then
+    # Only copy templates if canonical dir is empty (first-time setup)
+    if [ -z "$(ls -A "$INSTALL_DIR/memory/canonical/" 2>/dev/null)" ]; then
+        cp -r "$INSTALL_DIR/memory/canonical-templates/"* "$INSTALL_DIR/memory/canonical/"
+        success "Seeded memory/canonical/ from templates"
+    else
+        info "memory/canonical/ already populated, skipping template seeding"
+    fi
+fi
+
 success "Directories created"
 info "  ~/projects/personal - Personal projects"
 info "  ~/projects/business - Business/work projects"
