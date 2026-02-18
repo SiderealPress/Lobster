@@ -723,8 +723,49 @@ step "Setting up Python environment..."
 
 cd "$INSTALL_DIR"
 
+# Find a Python >= 3.10 (required by mcp package)
+PYTHON_CMD=""
+for candidate in python3.13 python3.12 python3.11 python3.10; do
+    if command -v "$candidate" &>/dev/null; then
+        PYTHON_CMD="$candidate"
+        break
+    fi
+done
+
+if [ -z "$PYTHON_CMD" ]; then
+    # Check if default python3 is >= 3.10
+    PY_MINOR=$(python3 -c 'import sys; print(sys.version_info.minor)' 2>/dev/null || echo "0")
+    if [ "$PY_MINOR" -ge 10 ]; then
+        PYTHON_CMD="python3"
+    else
+        warn "Python 3.10+ is required but only $(python3 --version 2>&1) is available."
+        info "Attempting to install Python 3.11..."
+        if [ "$PKG_MANAGER" = "apt" ]; then
+            pkg_install python3.11 python3.11-venv python3.11-dev || true
+        elif [ "$PKG_MANAGER" = "dnf" ] || [ "$PKG_MANAGER" = "yum" ]; then
+            pkg_install python3.11 python3.11-pip python3.11-devel || true
+        elif [ "$PKG_MANAGER" = "pacman" ]; then
+            pkg_install python  # Arch typically has latest Python
+        elif [ "$PKG_MANAGER" = "zypper" ]; then
+            pkg_install python311 python311-pip python311-devel || true
+        fi
+        for candidate in python3.13 python3.12 python3.11 python3.10; do
+            if command -v "$candidate" &>/dev/null; then
+                PYTHON_CMD="$candidate"
+                break
+            fi
+        done
+        if [ -z "$PYTHON_CMD" ]; then
+            error "Could not find or install Python 3.10+. Please install it manually."
+            exit 1
+        fi
+    fi
+fi
+
+info "Using $PYTHON_CMD ($($PYTHON_CMD --version 2>&1))"
+
 if [ ! -d ".venv" ]; then
-    python3 -m venv .venv
+    "$PYTHON_CMD" -m venv .venv
 fi
 
 source .venv/bin/activate
