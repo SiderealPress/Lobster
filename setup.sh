@@ -20,6 +20,48 @@
 
 set -e  # Exit on error
 
+#-------------------------------------------------------------------------------
+# Distro Detection
+#-------------------------------------------------------------------------------
+detect_distro() {
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        DISTRO_ID="${ID}"
+        DISTRO_LIKE="${ID_LIKE:-}"
+    else
+        DISTRO_ID="unknown"
+        DISTRO_LIKE=""
+    fi
+
+    # Normalize to package manager family
+    case "$DISTRO_ID" in
+        ubuntu|debian|pop|linuxmint)
+            PKG_FAMILY="apt"
+            ;;
+        fedora|rhel|centos|rocky|alma|amzn)
+            PKG_FAMILY="dnf"
+            ;;
+        *)
+            # Check ID_LIKE as fallback
+            case "$DISTRO_LIKE" in
+                *debian*|*ubuntu*)
+                    PKG_FAMILY="apt"
+                    ;;
+                *fedora*|*rhel*)
+                    PKG_FAMILY="dnf"
+                    ;;
+                *)
+                    echo "Unsupported distro: $DISTRO_ID (ID_LIKE: $DISTRO_LIKE)"
+                    echo "This script supports Debian/Ubuntu and Fedora/RHEL/Amazon Linux families."
+                    exit 1
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+detect_distro
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -56,40 +98,52 @@ print_success() {
 print_header "Step 1: System Update and Base Dependencies"
 
 print_step "Updating system packages (this may take a few minutes)..."
-sudo apt update && sudo apt upgrade -y
-print_success "System updated"
+print_step "Detected package manager: $PKG_FAMILY"
 
-print_step "Installing essential packages (20+ packages)..."
-sudo apt install -y \
-    curl \
-    wget \
-    git \
-    build-essential \
-    tmux \
-    zsh \
-    htop \
-    tree \
-    jq \
-    unzip \
-    ripgrep \
-    fd-find \
-    bat \
-    fzf \
-    ca-certificates \
-    gnupg \
-    lsb-release \
-    python3 \
-    python3-pip \
-    python3-venv \
-    ufw \
-    fail2ban \
-    fontconfig \
-    cron
-print_success "Essential packages installed"
+if [ "$PKG_FAMILY" = "apt" ]; then
+    sudo apt update && sudo apt upgrade -y
+    print_success "System updated"
 
-print_step "Enabling cron service..."
-sudo systemctl enable cron 2>/dev/null || true
-sudo systemctl start cron 2>/dev/null || true
+    print_step "Installing essential packages..."
+    sudo apt install -y \
+        curl wget git build-essential tmux zsh htop tree jq unzip \
+        ripgrep fd-find bat fzf \
+        ca-certificates gnupg lsb-release \
+        python3 python3-pip python3-venv \
+        ufw fail2ban fontconfig cron
+    print_success "Essential packages installed"
+
+    print_step "Enabling cron service..."
+    sudo systemctl enable cron 2>/dev/null || true
+    sudo systemctl start cron 2>/dev/null || true
+
+elif [ "$PKG_FAMILY" = "dnf" ]; then
+    sudo dnf upgrade -y
+    print_success "System updated"
+
+    print_step "Installing essential packages..."
+    # Note: package names differ on Fedora/RHEL family
+    sudo dnf install -y \
+        curl wget git gcc gcc-c++ make tmux zsh htop tree jq unzip \
+        ripgrep fd-find bat fzf \
+        ca-certificates gnupg2 \
+        python3 python3-pip python3-devel \
+        fontconfig cronie
+    print_success "Essential packages installed"
+
+    # firewalld is the standard on Fedora/RHEL (not ufw)
+    if ! systemctl is-active --quiet firewalld 2>/dev/null; then
+        sudo dnf install -y firewalld 2>/dev/null || true
+        sudo systemctl enable firewalld 2>/dev/null || true
+        sudo systemctl start firewalld 2>/dev/null || true
+    fi
+    sudo dnf install -y fail2ban 2>/dev/null || true
+
+    print_step "Enabling cron service..."
+    sudo systemctl enable crond 2>/dev/null || sudo systemctl enable cronie 2>/dev/null || true
+    sudo systemctl start crond 2>/dev/null || sudo systemctl start cronie 2>/dev/null || true
+fi
+
 print_success "Cron service enabled"
 
 #-------------------------------------------------------------------------------
@@ -205,13 +259,24 @@ export FZF_DEFAULT_OPTS='
   --color=info:#7aa2f7,prompt:#7dcfff,pointer:#7dcfff
   --color=marker:#9ece6a,spinner:#9ece6a,header:#9ece6a
 '
-export FZF_DEFAULT_COMMAND='fdfind --type f --hidden --follow --exclude .git'
+# fd is called 'fdfind' on Debian/Ubuntu, 'fd' on Fedora/RHEL
+if command -v fdfind &>/dev/null; then
+    export FZF_DEFAULT_COMMAND='fdfind --type f --hidden --follow --exclude .git'
+elif command -v fd &>/dev/null; then
+    export FZF_DEFAULT_COMMAND='fd --type f --hidden --follow --exclude .git'
+fi
 export FZF_CTRL_T_COMMAND="$FZF_DEFAULT_COMMAND"
 
 # Bat (better cat)
 export BAT_THEME="TwoDark"
-alias cat='batcat --paging=never'
-alias catp='batcat'
+# bat is called 'batcat' on Debian/Ubuntu, 'bat' on Fedora/RHEL
+if command -v batcat &>/dev/null; then
+    alias cat='batcat --paging=never'
+    alias catp='batcat'
+elif command -v bat &>/dev/null; then
+    alias cat='bat --paging=never'
+    alias catp='bat'
+fi
 
 #-------------------------------------------------------------------------------
 # Aliases - General
@@ -607,10 +672,18 @@ fi
 #-------------------------------------------------------------------------------
 print_header "Step 4: Installing Node.js (LTS)"
 
-print_step "Adding NodeSource repository..."
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-print_step "Installing Node.js..."
-sudo apt install -y nodejs
+if ! command -v node &> /dev/null; then
+    print_step "Adding NodeSource repository..."
+    if [ "$PKG_FAMILY" = "apt" ]; then
+        curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+        sudo apt install -y nodejs
+    elif [ "$PKG_FAMILY" = "dnf" ]; then
+        curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo -E bash -
+        sudo dnf install -y nodejs
+    fi
+else
+    print_step "Node.js already installed"
+fi
 mkdir -p ~/.npm-global
 npm config set prefix '~/.npm-global'
 print_success "Node.js $(node --version) installed"
@@ -618,11 +691,24 @@ print_success "Node.js $(node --version) installed"
 #-------------------------------------------------------------------------------
 # UV (Python Package Manager)
 #-------------------------------------------------------------------------------
-print_header "Step 5: Installing UV"
+print_header "Step 5: Installing UV and Python Dependencies"
 
-print_step "Downloading and installing UV..."
-curl -LsSf https://astral.sh/uv/install.sh | sh
+if ! command -v uv &> /dev/null; then
+    print_step "Downloading and installing UV..."
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    export PATH="$HOME/.local/bin:$PATH"
+fi
 print_success "UV installed"
+
+print_step "Setting up Lobster Python environment..."
+LOBSTER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$LOBSTER_DIR/pyproject.toml" ]; then
+    cd "$LOBSTER_DIR"
+    uv sync
+    print_success "Python dependencies installed via uv"
+else
+    print_warning "pyproject.toml not found, skipping Python dependency install"
+fi
 
 #-------------------------------------------------------------------------------
 # Claude Code
@@ -643,14 +729,25 @@ print_warning "Note: Run 'claude' manually after setup to authenticate"
 #-------------------------------------------------------------------------------
 print_header "Step 7: Security Hardening"
 
-print_step "Configuring UFW firewall..."
-sudo ufw default deny incoming
-sudo ufw default allow outgoing
-sudo ufw allow ssh
-if sudo ufw --force enable; then
-    print_success "UFW firewall enabled"
-else
-    print_warning "UFW failed to enable (normal in containers/VMs without iptables)"
+print_step "Configuring firewall..."
+if [ "$PKG_FAMILY" = "apt" ]; then
+    sudo ufw default deny incoming
+    sudo ufw default allow outgoing
+    sudo ufw allow ssh
+    if sudo ufw --force enable; then
+        print_success "UFW firewall enabled"
+    else
+        print_warning "UFW failed to enable (normal in containers/VMs without iptables)"
+    fi
+elif [ "$PKG_FAMILY" = "dnf" ]; then
+    if command -v firewall-cmd &> /dev/null; then
+        sudo firewall-cmd --set-default-zone=drop 2>/dev/null || true
+        sudo firewall-cmd --permanent --add-service=ssh 2>/dev/null || true
+        sudo firewall-cmd --reload 2>/dev/null || true
+        print_success "firewalld configured"
+    else
+        print_warning "firewalld not available"
+    fi
 fi
 
 print_step "Enabling fail2ban..."
