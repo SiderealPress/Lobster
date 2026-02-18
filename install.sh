@@ -376,9 +376,13 @@ PACKAGES=(
 )
 
 for pkg in "${PACKAGES[@]}"; do
+    # Check if the command already exists (handles cases like curl-minimal providing curl)
+    if command -v "$pkg" &>/dev/null; then
+        continue
+    fi
     if ! pkg_is_installed "$pkg"; then
         info "Installing $pkg..."
-        pkg_install "$pkg"
+        pkg_install "$pkg" || warn "Failed to install $pkg (may already be provided by another package)"
     fi
 done
 
