@@ -247,15 +247,58 @@ fi
 
 step "Running pre-flight checks..."
 
+# Detect package manager
+if command -v apt-get &>/dev/null; then
+    PKG_MANAGER="apt"
+    pkg_update() { sudo apt-get update -qq; }
+    pkg_install() { sudo apt-get install -y -qq "$@"; }
+    pkg_is_installed() { dpkg -s "$1" &>/dev/null; }
+    # Map package names for apt
+    pkg_name_python3_pip="python3-pip"
+    pkg_name_python3_venv="python3-venv"
+    pkg_name_cron="cron"
+elif command -v dnf &>/dev/null; then
+    PKG_MANAGER="dnf"
+    pkg_update() { true; }  # dnf auto-refreshes metadata
+    pkg_install() { sudo dnf install -y "$@"; }
+    pkg_is_installed() { rpm -q "$1" &>/dev/null; }
+    pkg_name_python3_pip="python3-pip"
+    pkg_name_python3_venv="python3"  # venv is included in python3 on Fedora/RHEL
+    pkg_name_cron="cronie"
+elif command -v yum &>/dev/null; then
+    PKG_MANAGER="yum"
+    pkg_update() { true; }
+    pkg_install() { sudo yum install -y "$@"; }
+    pkg_is_installed() { rpm -q "$1" &>/dev/null; }
+    pkg_name_python3_pip="python3-pip"
+    pkg_name_python3_venv="python3"
+    pkg_name_cron="cronie"
+elif command -v pacman &>/dev/null; then
+    PKG_MANAGER="pacman"
+    pkg_update() { sudo pacman -Sy --noconfirm; }
+    pkg_install() { sudo pacman -S --noconfirm --needed "$@"; }
+    pkg_is_installed() { pacman -Q "$1" &>/dev/null; }
+    pkg_name_python3_pip="python-pip"
+    pkg_name_python3_venv="python"  # venv included in python on Arch
+    pkg_name_cron="cronie"
+elif command -v zypper &>/dev/null; then
+    PKG_MANAGER="zypper"
+    pkg_update() { sudo zypper refresh -q; }
+    pkg_install() { sudo zypper install -y "$@"; }
+    pkg_is_installed() { rpm -q "$1" &>/dev/null; }
+    pkg_name_python3_pip="python3-pip"
+    pkg_name_python3_venv="python3-venv"
+    pkg_name_cron="cron"
+else
+    error "No supported package manager found (apt, dnf, yum, pacman, zypper)"
+    exit 1
+fi
+success "Detected package manager: $PKG_MANAGER"
+
 # Check OS
 if [ -f /etc/os-release ]; then
     . /etc/os-release
-    if [[ "$ID" != "ubuntu" && "$ID" != "debian" ]]; then
-        warn "This script is designed for Ubuntu/Debian. Detected: $ID"
-        read -p "Continue anyway? [y/N] " -n 1 -r
-        echo
-        [[ ! $REPLY =~ ^[Yy]$ ]] && exit 1
-    fi
+    info "Detected OS: $PRETTY_NAME"
 else
     warn "Cannot detect OS. Proceeding anyway..."
 fi
@@ -315,27 +358,27 @@ fi
 
 step "Installing system dependencies..."
 
-sudo apt-get update -qq
+pkg_update
 
-# Essential packages
+# Essential packages (using distro-appropriate names)
 PACKAGES=(
     curl
     wget
     git
     jq
     python3
-    python3-pip
-    python3-venv
-    cron
+    "$pkg_name_python3_pip"
+    "$pkg_name_python3_venv"
+    "$pkg_name_cron"
     at
     expect
     tmux
 )
 
 for pkg in "${PACKAGES[@]}"; do
-    if ! dpkg -s "$pkg" &>/dev/null; then
+    if ! pkg_is_installed "$pkg"; then
         info "Installing $pkg..."
-        sudo apt-get install -y -qq "$pkg"
+        pkg_install "$pkg"
     fi
 done
 
@@ -571,9 +614,9 @@ crontab -l 2>/dev/null | grep "$MARKER" || echo "(no lobster jobs)"
 SYNCCRON
 chmod +x "$INSTALL_DIR/scheduled-tasks/sync-crontab.sh"
 
-# Enable cron service
-sudo systemctl enable cron 2>/dev/null || true
-sudo systemctl start cron 2>/dev/null || true
+# Enable cron service (named 'cron' on Debian/Ubuntu, 'crond' on RHEL/Fedora)
+sudo systemctl enable cron 2>/dev/null || sudo systemctl enable crond 2>/dev/null || true
+sudo systemctl start cron 2>/dev/null || sudo systemctl start crond 2>/dev/null || true
 
 # Enable atd service (for self-check reminders via 'at' command)
 sudo systemctl enable atd 2>/dev/null || true

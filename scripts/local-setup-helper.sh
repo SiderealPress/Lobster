@@ -102,8 +102,20 @@ echo ""
 #-------------------------------------------------------------------------------
 step "Step 1/4: Installing system dependencies"
 #-------------------------------------------------------------------------------
-sudo apt update
-sudo apt install -y curl git
+if command -v apt-get &>/dev/null; then
+    sudo apt-get update && sudo apt-get install -y curl git
+elif command -v dnf &>/dev/null; then
+    sudo dnf install -y curl git
+elif command -v yum &>/dev/null; then
+    sudo yum install -y curl git
+elif command -v pacman &>/dev/null; then
+    sudo pacman -S --noconfirm --needed curl git
+elif command -v zypper &>/dev/null; then
+    sudo zypper install -y curl git
+else
+    error "No supported package manager found"
+    exit 1
+fi
 success "Dependencies installed"
 
 #-------------------------------------------------------------------------------

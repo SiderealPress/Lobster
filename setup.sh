@@ -55,41 +55,74 @@ print_success() {
 #-------------------------------------------------------------------------------
 print_header "Step 1: System Update and Base Dependencies"
 
+# Detect package manager
+if command -v apt-get &>/dev/null; then
+    PKG_MANAGER="apt"
+elif command -v dnf &>/dev/null; then
+    PKG_MANAGER="dnf"
+elif command -v yum &>/dev/null; then
+    PKG_MANAGER="yum"
+elif command -v pacman &>/dev/null; then
+    PKG_MANAGER="pacman"
+elif command -v zypper &>/dev/null; then
+    PKG_MANAGER="zypper"
+else
+    print_error "No supported package manager found (apt, dnf, yum, pacman, zypper)"
+    exit 1
+fi
+print_success "Detected package manager: $PKG_MANAGER"
+
 print_step "Updating system packages (this may take a few minutes)..."
-sudo apt update && sudo apt upgrade -y
+case "$PKG_MANAGER" in
+    apt)    sudo apt update && sudo apt upgrade -y ;;
+    dnf)    sudo dnf upgrade -y ;;
+    yum)    sudo yum update -y ;;
+    pacman) sudo pacman -Syu --noconfirm ;;
+    zypper) sudo zypper update -y ;;
+esac
 print_success "System updated"
 
-print_step "Installing essential packages (20+ packages)..."
-sudo apt install -y \
-    curl \
-    wget \
-    git \
-    build-essential \
-    tmux \
-    zsh \
-    htop \
-    tree \
-    jq \
-    unzip \
-    ripgrep \
-    fd-find \
-    bat \
-    fzf \
-    ca-certificates \
-    gnupg \
-    lsb-release \
-    python3 \
-    python3-pip \
-    python3-venv \
-    ufw \
-    fail2ban \
-    fontconfig \
-    cron
+print_step "Installing essential packages..."
+case "$PKG_MANAGER" in
+    apt)
+        sudo apt install -y \
+            curl wget git build-essential tmux zsh htop tree jq unzip \
+            ripgrep fd-find bat fzf ca-certificates gnupg lsb-release \
+            python3 python3-pip python3-venv ufw fail2ban fontconfig cron
+        ;;
+    dnf)
+        sudo dnf install -y \
+            curl wget git gcc gcc-c++ make tmux zsh htop tree jq unzip \
+            ripgrep fd-find bat fzf ca-certificates gnupg2 \
+            python3 python3-pip firewalld fail2ban fontconfig cronie
+        ;;
+    yum)
+        sudo yum install -y \
+            curl wget git gcc gcc-c++ make tmux zsh htop tree jq unzip \
+            python3 python3-pip ca-certificates gnupg2 \
+            fail2ban fontconfig cronie
+        # ripgrep, fd-find, bat, fzf may need EPEL or manual install on older yum systems
+        sudo yum install -y ripgrep fd-find bat fzf 2>/dev/null || \
+            print_warning "Some optional packages (ripgrep, fd, bat, fzf) not available; install manually if needed"
+        ;;
+    pacman)
+        sudo pacman -S --noconfirm --needed \
+            curl wget git base-devel tmux zsh htop tree jq unzip \
+            ripgrep fd bat fzf ca-certificates gnupg \
+            python python-pip ufw fail2ban fontconfig cronie
+        ;;
+    zypper)
+        sudo zypper install -y \
+            curl wget git gcc gcc-c++ make tmux zsh htop tree jq unzip \
+            ripgrep fd bat fzf ca-certificates \
+            python3 python3-pip firewalld fail2ban fontconfig cron
+        ;;
+esac
 print_success "Essential packages installed"
 
 print_step "Enabling cron service..."
-sudo systemctl enable cron 2>/dev/null || true
-sudo systemctl start cron 2>/dev/null || true
+sudo systemctl enable cron 2>/dev/null || sudo systemctl enable crond 2>/dev/null || true
+sudo systemctl start cron 2>/dev/null || sudo systemctl start crond 2>/dev/null || true
 print_success "Cron service enabled"
 
 #-------------------------------------------------------------------------------
@@ -607,10 +640,24 @@ fi
 #-------------------------------------------------------------------------------
 print_header "Step 4: Installing Node.js (LTS)"
 
-print_step "Adding NodeSource repository..."
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-print_step "Installing Node.js..."
-sudo apt install -y nodejs
+print_step "Adding NodeSource repository and installing Node.js..."
+case "$PKG_MANAGER" in
+    apt)
+        curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+        sudo apt install -y nodejs
+        ;;
+    dnf|yum)
+        curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo -E bash -
+        sudo "$PKG_MANAGER" install -y nodejs
+        ;;
+    pacman)
+        sudo pacman -S --noconfirm --needed nodejs npm
+        ;;
+    zypper)
+        curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo -E bash -
+        sudo zypper install -y nodejs
+        ;;
+esac
 mkdir -p ~/.npm-global
 npm config set prefix '~/.npm-global'
 print_success "Node.js $(node --version) installed"

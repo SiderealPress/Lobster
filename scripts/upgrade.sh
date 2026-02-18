@@ -537,18 +537,28 @@ setup_syncthing() {
     # Install Syncthing
     if ! command -v syncthing &>/dev/null; then
         substep "Installing Syncthing..."
-        # Use the official Syncthing APT repo
-        if [ ! -f /etc/apt/sources.list.d/syncthing.list ]; then
-            sudo mkdir -p /etc/apt/keyrings
-            curl -fsSL https://syncthing.net/release-key.gpg | sudo gpg --dearmor -o /etc/apt/keyrings/syncthing-archive-keyring.gpg 2>/dev/null || {
-                warn "Failed to add Syncthing GPG key, trying apt directly..."
-            }
-            echo "deb [signed-by=/etc/apt/keyrings/syncthing-archive-keyring.gpg] https://apt.syncthing.net/ syncthing stable" | sudo tee /etc/apt/sources.list.d/syncthing.list >/dev/null
-            sudo apt-get update -qq 2>/dev/null || true
-        fi
-        sudo apt-get install -y -qq syncthing 2>/dev/null || {
+        if command -v apt-get &>/dev/null; then
+            # Use the official Syncthing APT repo
+            if [ ! -f /etc/apt/sources.list.d/syncthing.list ]; then
+                sudo mkdir -p /etc/apt/keyrings
+                curl -fsSL https://syncthing.net/release-key.gpg | sudo gpg --dearmor -o /etc/apt/keyrings/syncthing-archive-keyring.gpg 2>/dev/null || {
+                    warn "Failed to add Syncthing GPG key, trying apt directly..."
+                }
+                echo "deb [signed-by=/etc/apt/keyrings/syncthing-archive-keyring.gpg] https://apt.syncthing.net/ syncthing stable" | sudo tee /etc/apt/sources.list.d/syncthing.list >/dev/null
+                sudo apt-get update -qq 2>/dev/null || true
+            fi
+            sudo apt-get install -y -qq syncthing 2>/dev/null
+        elif command -v dnf &>/dev/null; then
+            sudo dnf install -y syncthing 2>/dev/null
+        elif command -v yum &>/dev/null; then
+            sudo yum install -y syncthing 2>/dev/null
+        elif command -v pacman &>/dev/null; then
+            sudo pacman -S --noconfirm --needed syncthing 2>/dev/null
+        elif command -v zypper &>/dev/null; then
+            sudo zypper install -y syncthing 2>/dev/null
+        fi || {
             # Fallback: install from snap or direct download
-            warn "APT install failed, trying snap..."
+            warn "Package manager install failed, trying snap..."
             sudo snap install syncthing 2>/dev/null || {
                 error "Could not install Syncthing. Install manually: https://syncthing.net/"
                 return 0
@@ -654,14 +664,34 @@ install_playwright() {
 
     # Install system dependencies for Chromium
     substep "Installing Chromium system dependencies..."
-    sudo apt-get install -y -qq \
-        libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 \
-        libcups2 libdrm2 libdbus-1-3 libxkbcommon0 \
-        libatspi2.0-0 libxcomposite1 libxdamage1 libxfixes3 \
-        libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2 \
-        libwayland-client0 2>/dev/null || {
-        warn "Some Chromium dependencies may be missing"
-    }
+    if command -v apt-get &>/dev/null; then
+        sudo apt-get install -y -qq \
+            libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 \
+            libcups2 libdrm2 libdbus-1-3 libxkbcommon0 \
+            libatspi2.0-0 libxcomposite1 libxdamage1 libxfixes3 \
+            libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2 \
+            libwayland-client0 2>/dev/null || {
+            warn "Some Chromium dependencies may be missing"
+        }
+    elif command -v dnf &>/dev/null || command -v yum &>/dev/null; then
+        local rpm_cmd="dnf"
+        command -v dnf &>/dev/null || rpm_cmd="yum"
+        sudo "$rpm_cmd" install -y \
+            nss nspr atk at-spi2-atk cups-libs libdrm dbus-libs libxkbcommon \
+            at-spi2-core libXcomposite libXdamage libXfixes libXrandr \
+            mesa-libgbm pango cairo alsa-lib libwayland-client 2>/dev/null || {
+            warn "Some Chromium dependencies may be missing"
+        }
+    elif command -v pacman &>/dev/null; then
+        sudo pacman -S --noconfirm --needed \
+            nss nspr atk at-spi2-atk libcups libdrm dbus libxkbcommon \
+            at-spi2-core libxcomposite libxdamage libxfixes libxrandr \
+            mesa pango cairo alsa-lib wayland 2>/dev/null || {
+            warn "Some Chromium dependencies may be missing"
+        }
+    else
+        warn "Cannot auto-install Chromium dependencies for this package manager. Install manually if needed."
+    fi
 
     # Install Chromium via Playwright
     substep "Installing Chromium browser (this may take a minute)..."
