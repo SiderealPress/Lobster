@@ -55,41 +55,107 @@ print_success() {
 #-------------------------------------------------------------------------------
 print_header "Step 1: System Update and Base Dependencies"
 
-print_step "Updating system packages (this may take a few minutes)..."
-sudo apt update && sudo apt upgrade -y
-print_success "System updated"
+# Detect distro
+detect_distro() {
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        case "$ID" in
+            ubuntu|debian) echo "apt" ;;
+            amzn|fedora|rhel|centos|rocky|alma) echo "dnf" ;;
+            *)
+                # Fallback: check ID_LIKE
+                case "$ID_LIKE" in
+                    *debian*|*ubuntu*) echo "apt" ;;
+                    *fedora*|*rhel*) echo "dnf" ;;
+                    *) echo "unknown" ;;
+                esac
+                ;;
+        esac
+    elif command -v apt-get &>/dev/null; then
+        echo "apt"
+    elif command -v dnf &>/dev/null; then
+        echo "dnf"
+    else
+        echo "unknown"
+    fi
+}
 
-print_step "Installing essential packages (20+ packages)..."
-sudo apt install -y \
-    curl \
-    wget \
-    git \
-    build-essential \
-    tmux \
-    zsh \
-    htop \
-    tree \
-    jq \
-    unzip \
-    ripgrep \
-    fd-find \
-    bat \
-    fzf \
-    ca-certificates \
-    gnupg \
-    lsb-release \
-    python3 \
-    python3-pip \
-    python3-venv \
-    ufw \
-    fail2ban \
-    fontconfig \
-    cron
-print_success "Essential packages installed"
+PKG_MANAGER=$(detect_distro)
+print_step "Detected package manager: $PKG_MANAGER"
+
+if [ "$PKG_MANAGER" = "apt" ]; then
+    print_step "Updating system packages (this may take a few minutes)..."
+    sudo apt update && sudo apt upgrade -y
+    print_success "System updated"
+
+    print_step "Installing essential packages..."
+    sudo apt install -y \
+        curl \
+        wget \
+        git \
+        build-essential \
+        tmux \
+        zsh \
+        htop \
+        tree \
+        jq \
+        unzip \
+        ripgrep \
+        fd-find \
+        bat \
+        fzf \
+        ca-certificates \
+        gnupg \
+        lsb-release \
+        python3 \
+        python3-pip \
+        python3-venv \
+        ufw \
+        fail2ban \
+        fontconfig \
+        cron
+    print_success "Essential packages installed"
+elif [ "$PKG_MANAGER" = "dnf" ]; then
+    print_step "Updating system packages (this may take a few minutes)..."
+    sudo dnf upgrade -y
+    print_success "System updated"
+
+    print_step "Installing essential packages..."
+    sudo dnf install -y \
+        curl \
+        wget \
+        git \
+        gcc-c++ \
+        cmake \
+        tmux \
+        zsh \
+        htop \
+        tree \
+        jq \
+        unzip \
+        ca-certificates \
+        python3 \
+        python3-pip \
+        fontconfig \
+        cronie \
+        fail2ban \
+        firewalld
+    print_success "Essential packages installed"
+
+    # ripgrep, fd, bat, fzf may not be in default dnf repos — handled by install.sh
+    print_step "Note: ripgrep, fd, bat, fzf are installed by install.sh via GitHub releases"
+else
+    print_warning "Unknown package manager. You may need to install dependencies manually."
+fi
 
 print_step "Enabling cron service..."
-sudo systemctl enable cron 2>/dev/null || true
-sudo systemctl start cron 2>/dev/null || true
+if [ "$PKG_MANAGER" = "apt" ]; then
+    sudo systemctl enable cron 2>/dev/null || true
+    sudo systemctl start cron 2>/dev/null || true
+else
+    sudo systemctl enable crond 2>/dev/null || true
+    sudo systemctl start crond 2>/dev/null || true
+fi
 print_success "Cron service enabled"
 
 #-------------------------------------------------------------------------------
@@ -205,13 +271,23 @@ export FZF_DEFAULT_OPTS='
   --color=info:#7aa2f7,prompt:#7dcfff,pointer:#7dcfff
   --color=marker:#9ece6a,spinner:#9ece6a,header:#9ece6a
 '
-export FZF_DEFAULT_COMMAND='fdfind --type f --hidden --follow --exclude .git'
-export FZF_CTRL_T_COMMAND="$FZF_DEFAULT_COMMAND"
+# fd: Debian/Ubuntu installs as 'fdfind', Fedora/AL2023 as 'fd'
+if command -v fdfind &>/dev/null; then
+    export FZF_DEFAULT_COMMAND='fdfind --type f --hidden --follow --exclude .git'
+else
+    export FZF_DEFAULT_COMMAND='fd --type f --hidden --follow --exclude .git'
+fi
+export FZF_CTRL_T_COMMAND="\$FZF_DEFAULT_COMMAND"
 
-# Bat (better cat)
+# Bat (better cat) — Debian/Ubuntu installs as 'batcat', Fedora/AL2023 as 'bat'
 export BAT_THEME="TwoDark"
-alias cat='batcat --paging=never'
-alias catp='batcat'
+if command -v batcat &>/dev/null; then
+    alias cat='batcat --paging=never'
+    alias catp='batcat'
+elif command -v bat &>/dev/null; then
+    alias cat='bat --paging=never'
+    alias catp='bat'
+fi
 
 #-------------------------------------------------------------------------------
 # Aliases - General
@@ -608,9 +684,15 @@ fi
 print_header "Step 4: Installing Node.js (LTS)"
 
 print_step "Adding NodeSource repository..."
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-print_step "Installing Node.js..."
-sudo apt install -y nodejs
+if [ "$PKG_MANAGER" = "apt" ]; then
+    curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+    print_step "Installing Node.js..."
+    sudo apt install -y nodejs
+else
+    curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo -E bash -
+    print_step "Installing Node.js..."
+    sudo dnf install -y nodejs
+fi
 mkdir -p ~/.npm-global
 npm config set prefix '~/.npm-global'
 print_success "Node.js $(node --version) installed"
@@ -620,9 +702,13 @@ print_success "Node.js $(node --version) installed"
 #-------------------------------------------------------------------------------
 print_header "Step 5: Installing UV"
 
-print_step "Downloading and installing UV..."
-curl -LsSf https://astral.sh/uv/install.sh | sh
-print_success "UV installed"
+if command -v uv &>/dev/null; then
+    print_success "UV already installed"
+else
+    print_step "Downloading and installing UV..."
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    print_success "UV installed"
+fi
 
 #-------------------------------------------------------------------------------
 # Claude Code
@@ -643,14 +729,25 @@ print_warning "Note: Run 'claude' manually after setup to authenticate"
 #-------------------------------------------------------------------------------
 print_header "Step 7: Security Hardening"
 
-print_step "Configuring UFW firewall..."
-sudo ufw default deny incoming
-sudo ufw default allow outgoing
-sudo ufw allow ssh
-if sudo ufw --force enable; then
-    print_success "UFW firewall enabled"
+if [ "$PKG_MANAGER" = "apt" ]; then
+    print_step "Configuring UFW firewall..."
+    sudo ufw default deny incoming
+    sudo ufw default allow outgoing
+    sudo ufw allow ssh
+    if sudo ufw --force enable; then
+        print_success "UFW firewall enabled"
+    else
+        print_warning "UFW failed to enable (normal in containers/VMs without iptables)"
+    fi
 else
-    print_warning "UFW failed to enable (normal in containers/VMs without iptables)"
+    print_step "Configuring firewalld..."
+    if sudo systemctl enable firewalld 2>/dev/null && sudo systemctl start firewalld 2>/dev/null; then
+        sudo firewall-cmd --permanent --add-service=ssh 2>/dev/null || true
+        sudo firewall-cmd --reload 2>/dev/null || true
+        print_success "firewalld enabled with SSH allowed"
+    else
+        print_warning "firewalld failed to start (normal in containers/VMs)"
+    fi
 fi
 
 print_step "Enabling fail2ban..."

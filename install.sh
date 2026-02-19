@@ -5,7 +5,7 @@
 # Usage: bash <(curl -fsSL https://raw.githubusercontent.com/SiderealPress/lobster/main/install.sh)
 #
 # This script sets up a complete Lobster installation on a fresh VM:
-# - Installs system dependencies
+# - Installs system dependencies (Ubuntu/Debian or Amazon Linux 2023/Fedora)
 # - Clones the repo (if needed)
 # - Walks through configuration
 # - Sets up Python environment
@@ -37,6 +37,41 @@ REPO_BRANCH="${LOBSTER_BRANCH:-main}"
 INSTALL_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
 WORKSPACE_DIR="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
 MESSAGES_DIR="${LOBSTER_MESSAGES:-$HOME/messages}"
+
+#===============================================================================
+# Package Manager Detection
+#===============================================================================
+
+if command -v apt-get &>/dev/null; then
+    PKG_MANAGER="apt"
+elif command -v dnf &>/dev/null; then
+    PKG_MANAGER="dnf"
+else
+    echo "Unsupported package manager. Install requires apt-get or dnf."
+    exit 1
+fi
+
+# install_pkg <pkg-apt> [pkg-dnf]
+# If only one argument is given, uses the same name for both managers.
+install_pkg() {
+    local pkg_apt="$1"
+    local pkg_dnf="${2:-$1}"
+    if [ "$PKG_MANAGER" = "apt" ]; then
+        sudo apt-get install -y -qq "$pkg_apt"
+    else
+        sudo dnf install -y "$pkg_dnf"
+    fi
+}
+
+# pkg_installed <name>  -- true when dpkg/rpm reports the package installed
+pkg_installed() {
+    local name="$1"
+    if [ "$PKG_MANAGER" = "apt" ]; then
+        dpkg -s "$name" &>/dev/null
+    else
+        rpm -q "$name" &>/dev/null
+    fi
+}
 
 #===============================================================================
 # Load Configuration
@@ -247,17 +282,12 @@ fi
 
 step "Running pre-flight checks..."
 
-# Check OS
-if [ -f /etc/os-release ]; then
-    . /etc/os-release
-    if [[ "$ID" != "ubuntu" && "$ID" != "debian" ]]; then
-        warn "This script is designed for Ubuntu/Debian. Detected: $ID"
-        read -p "Continue anyway? [y/N] " -n 1 -r
-        echo
-        [[ ! $REPLY =~ ^[Yy]$ ]] && exit 1
-    fi
+# Report detected package manager
+info "Detected package manager: $PKG_MANAGER"
+if [ "$PKG_MANAGER" = "apt" ]; then
+    success "Ubuntu/Debian system detected"
 else
-    warn "Cannot detect OS. Proceeding anyway..."
+    success "dnf-based system detected (Amazon Linux 2023 / Fedora)"
 fi
 
 # Check if running interactively
@@ -315,31 +345,164 @@ fi
 
 step "Installing system dependencies..."
 
-sudo apt-get update -qq
+if [ "$PKG_MANAGER" = "apt" ]; then
+    sudo apt-get update -qq
 
-# Essential packages
-PACKAGES=(
-    curl
-    wget
-    git
-    jq
-    python3
-    python3-pip
-    python3-venv
-    cron
-    at
-    expect
-    tmux
-)
+    PACKAGES=(
+        curl
+        wget
+        git
+        jq
+        python3
+        python3-pip
+        python3-venv
+        cron
+        at
+        expect
+        tmux
+        build-essential
+        cmake
+        ripgrep
+        fd-find
+        bat
+        fzf
+    )
 
-for pkg in "${PACKAGES[@]}"; do
-    if ! dpkg -s "$pkg" &>/dev/null; then
-        info "Installing $pkg..."
-        sudo apt-get install -y -qq "$pkg"
+    for pkg in "${PACKAGES[@]}"; do
+        if ! dpkg -s "$pkg" &>/dev/null; then
+            info "Installing $pkg..."
+            sudo apt-get install -y -qq "$pkg"
+        fi
+    done
+else
+    # dnf (Amazon Linux 2023 / Fedora)
+    DNF_PACKAGES=(
+        curl
+        wget
+        git
+        jq
+        python3
+        python3-pip
+        cronie
+        at
+        expect
+        tmux
+        gcc-c++
+        cmake
+    )
+
+    for pkg in "${DNF_PACKAGES[@]}"; do
+        if ! rpm -q "$pkg" &>/dev/null; then
+            info "Installing $pkg..."
+            sudo dnf install -y "$pkg"
+        fi
+    done
+fi
+
+success "Core system dependencies installed"
+
+#===============================================================================
+# Install Modern CLI Tools (ripgrep, fd, bat, fzf) on dnf systems
+#
+# Ubuntu/Debian provides these in apt. On Amazon Linux 2023 / Fedora they are
+# not in the default repos, so we download pre-built binaries from GitHub.
+#===============================================================================
+
+if [ "$PKG_MANAGER" = "dnf" ]; then
+    step "Installing modern CLI tools from GitHub releases (dnf fallback)..."
+
+    ARCH=$(uname -m)
+    TOOLS_BIN_DIR="$HOME/.local/bin"
+    mkdir -p "$TOOLS_BIN_DIR"
+
+    # install_github_binary <owner/repo> <binary-name> <asset-grep-pattern>
+    # Downloads the latest GitHub release asset whose URL matches <asset-grep-pattern>,
+    # extracts the named binary, and places it in TOOLS_BIN_DIR.
+    install_github_binary() {
+        local repo="$1"
+        local binary="$2"
+        local asset_pattern="$3"
+
+        if command -v "$binary" &>/dev/null; then
+            success "$binary already installed"
+            return 0
+        fi
+
+        info "Fetching latest $binary from github.com/$repo ..."
+        local api_url="https://api.github.com/repos/${repo}/releases/latest"
+        local asset_url
+        asset_url=$(curl -fsSL "$api_url" | jq -r ".assets[].browser_download_url" | grep "$asset_pattern" | head -1)
+
+        if [ -z "$asset_url" ]; then
+            warn "Could not find $binary release asset matching '$asset_pattern'. Skipping."
+            return 0
+        fi
+
+        local tmp_dir
+        tmp_dir=$(mktemp -d)
+        local archive="$tmp_dir/$(basename "$asset_url")"
+        curl -fsSL "$asset_url" -o "$archive"
+
+        if [[ "$archive" == *.tar.gz || "$archive" == *.tgz ]]; then
+            tar -xzf "$archive" -C "$tmp_dir"
+        elif [[ "$archive" == *.zip ]]; then
+            unzip -q "$archive" -d "$tmp_dir"
+        fi
+
+        # Find the binary anywhere in the extracted tree
+        local bin_path
+        bin_path=$(find "$tmp_dir" -type f -name "$binary" | head -1)
+        if [ -n "$bin_path" ]; then
+            cp "$bin_path" "$TOOLS_BIN_DIR/$binary"
+            chmod +x "$TOOLS_BIN_DIR/$binary"
+            success "$binary installed to $TOOLS_BIN_DIR/$binary"
+        else
+            warn "$binary binary not found in extracted archive. Skipping."
+        fi
+
+        rm -rf "$tmp_dir"
+    }
+
+    case "$ARCH" in
+        x86_64)  RG_ARCH="x86_64-unknown-linux-musl" ;;
+        aarch64) RG_ARCH="aarch64-unknown-linux-gnu" ;;
+        *)       RG_ARCH="x86_64-unknown-linux-musl" ;;
+    esac
+    install_github_binary "BurntSushi/ripgrep" "rg" "${RG_ARCH}"
+
+    case "$ARCH" in
+        x86_64)  FD_ARCH="x86_64-unknown-linux-musl" ;;
+        aarch64) FD_ARCH="aarch64-unknown-linux-gnu" ;;
+        *)       FD_ARCH="x86_64-unknown-linux-musl" ;;
+    esac
+    install_github_binary "sharkdp/fd" "fd" "${FD_ARCH}"
+
+    case "$ARCH" in
+        x86_64)  BAT_ARCH="x86_64-unknown-linux-musl" ;;
+        aarch64) BAT_ARCH="aarch64-unknown-linux-gnu" ;;
+        *)       BAT_ARCH="x86_64-unknown-linux-musl" ;;
+    esac
+    install_github_binary "sharkdp/bat" "bat" "${BAT_ARCH}"
+
+    case "$ARCH" in
+        x86_64)  FZF_ARCH="linux_amd64" ;;
+        aarch64) FZF_ARCH="linux_arm64" ;;
+        *)       FZF_ARCH="linux_amd64" ;;
+    esac
+    install_github_binary "junegunn/fzf" "fzf" "${FZF_ARCH}"
+
+    # Ensure ~/.local/bin is on PATH for this session and future shells
+    if [[ ":$PATH:" != *":$TOOLS_BIN_DIR:"* ]]; then
+        export PATH="$TOOLS_BIN_DIR:$PATH"
+        for rc in "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile"; do
+            if [ -f "$rc" ] && ! grep -q "$TOOLS_BIN_DIR" "$rc"; then
+                echo "export PATH=\"$TOOLS_BIN_DIR:\$PATH\"" >> "$rc"
+            fi
+        done
     fi
-done
 
-success "System dependencies installed"
+    success "Modern CLI tools installed"
+fi
 
 #===============================================================================
 # Install Claude Code
@@ -571,9 +734,15 @@ crontab -l 2>/dev/null | grep "$MARKER" || echo "(no lobster jobs)"
 SYNCCRON
 chmod +x "$INSTALL_DIR/scheduled-tasks/sync-crontab.sh"
 
-# Enable cron service
-sudo systemctl enable cron 2>/dev/null || true
-sudo systemctl start cron 2>/dev/null || true
+# Enable cron service (name differs by distro)
+if [ "$PKG_MANAGER" = "apt" ]; then
+    sudo systemctl enable cron 2>/dev/null || true
+    sudo systemctl start cron 2>/dev/null || true
+else
+    # Amazon Linux / Fedora uses crond
+    sudo systemctl enable crond 2>/dev/null || true
+    sudo systemctl start crond 2>/dev/null || true
+fi
 
 # Enable atd service (for self-check reminders via 'at' command)
 sudo systemctl enable atd 2>/dev/null || true
@@ -597,6 +766,21 @@ HEALTH_MARKER="# LOBSTER-HEALTH"
  echo "*/2 * * * * $INSTALL_DIR/scripts/health-check-v3.sh $HEALTH_MARKER") | crontab -
 
 success "Health monitoring configured (checks every 2 minutes)"
+
+#===============================================================================
+# Daily Dependency Health Check
+#===============================================================================
+
+step "Setting up daily dependency health check..."
+
+chmod +x "$INSTALL_DIR/scripts/daily-health-check.sh"
+
+# Add daily health check to crontab (runs at 06:00 every day)
+DAILY_MARKER="# LOBSTER-DAILY-HEALTH"
+(crontab -l 2>/dev/null | grep -v "$DAILY_MARKER" | grep -v "daily-health-check"; \
+ echo "0 6 * * * $INSTALL_DIR/scripts/daily-health-check.sh $DAILY_MARKER") | crontab -
+
+success "Daily dependency health check configured (runs at 06:00 daily)"
 
 #===============================================================================
 # Self-Check Reminder System
@@ -683,9 +867,138 @@ fi
 source .venv/bin/activate
 pip install --quiet --upgrade pip
 pip install --quiet mcp python-telegram-bot watchdog python-dotenv slack-bolt psutil
+success "Core Python packages installed"
+
+#-------------------------------------------------------------------------------
+# fastembed
+#-------------------------------------------------------------------------------
+info "Installing fastembed..."
+if pip install --quiet fastembed; then
+    success "fastembed installed"
+else
+    warn "fastembed install failed. Vector embedding features may be unavailable."
+fi
+
+#-------------------------------------------------------------------------------
+# sqlite-vec  (known aarch64 ELFCLASS32 bug in older releases; try alpha first)
+#-------------------------------------------------------------------------------
+info "Installing sqlite-vec..."
+SQLITE_VEC_OK=false
+
+# Try stable release first
+if pip install --quiet sqlite-vec 2>/dev/null; then
+    # Verify it actually loads (aarch64 bug produces an import error)
+    if python3 -c "import sqlite_vec" 2>/dev/null; then
+        success "sqlite-vec installed and loads correctly"
+        SQLITE_VEC_OK=true
+    else
+        warn "sqlite-vec installed but fails to load (likely aarch64 ELFCLASS32 bug). Trying alpha..."
+        pip uninstall -y sqlite-vec 2>/dev/null || true
+    fi
+fi
+
+if [ "$SQLITE_VEC_OK" = false ]; then
+    # Try known-good alpha that contains the aarch64 fix
+    if pip install --quiet "sqlite-vec==0.1.7a2" 2>/dev/null; then
+        if python3 -c "import sqlite_vec" 2>/dev/null; then
+            success "sqlite-vec 0.1.7a2 (alpha) installed and loads correctly"
+            SQLITE_VEC_OK=true
+        else
+            warn "sqlite-vec alpha also fails to load. Will attempt to compile from source."
+            pip uninstall -y sqlite-vec 2>/dev/null || true
+        fi
+    fi
+fi
+
+if [ "$SQLITE_VEC_OK" = false ]; then
+    warn "Attempting to build sqlite-vec from source (last resort)..."
+    _SQLITE_VEC_SRC_DIR="$(mktemp -d)"
+    if git clone --quiet --depth 1 https://github.com/asg017/sqlite-vec.git "$_SQLITE_VEC_SRC_DIR" 2>/dev/null; then
+        cd "$_SQLITE_VEC_SRC_DIR"
+        if make loadable python 2>/dev/null && pip install --quiet -e . 2>/dev/null; then
+            if python3 -c "import sqlite_vec" 2>/dev/null; then
+                success "sqlite-vec built from source and loads correctly"
+                SQLITE_VEC_OK=true
+            else
+                warn "sqlite-vec source build also fails to load. Vector search will be unavailable."
+            fi
+        else
+            warn "sqlite-vec source build failed. Vector search will be unavailable."
+        fi
+        cd "$INSTALL_DIR"
+    fi
+    rm -rf "$_SQLITE_VEC_SRC_DIR"
+fi
+
 deactivate
 
 success "Python environment ready"
+
+#===============================================================================
+# whisper.cpp (core dependency - voice transcription)
+#===============================================================================
+
+step "Installing whisper.cpp..."
+
+WHISPER_DIR="${WORKSPACE_DIR}/whisper.cpp"
+
+if [ ! -f "$WHISPER_DIR/build/bin/whisper-cli" ]; then
+    # Build dependencies are already installed above:
+    #   apt: build-essential cmake
+    #   dnf: gcc-c++ cmake
+    mkdir -p "$(dirname "$WHISPER_DIR")"
+    if [ ! -d "$WHISPER_DIR" ]; then
+        info "Cloning whisper.cpp..."
+        git clone --quiet https://github.com/ggerganov/whisper.cpp.git "$WHISPER_DIR"
+    fi
+    cd "$WHISPER_DIR"
+    info "Building whisper.cpp (this may take a few minutes)..."
+    cmake -B build -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON 2>&1 | tail -5
+    cmake --build build -j"$(nproc)" 2>&1 | tail -10
+    cd "$INSTALL_DIR"
+    if [ -f "$WHISPER_DIR/build/bin/whisper-cli" ]; then
+        success "whisper.cpp built successfully"
+    else
+        warn "whisper.cpp build failed. Voice transcription will be unavailable."
+    fi
+else
+    success "whisper.cpp already built"
+fi
+
+# Download small model if binary is present but model is missing
+if [ -f "$WHISPER_DIR/build/bin/whisper-cli" ] && [ ! -f "$WHISPER_DIR/models/ggml-small.bin" ]; then
+    step "Downloading whisper small model (~465MB)..."
+    if [ -f "$WHISPER_DIR/models/download-ggml-model.sh" ]; then
+        bash "$WHISPER_DIR/models/download-ggml-model.sh" small
+        if [ -f "$WHISPER_DIR/models/ggml-small.bin" ]; then
+            success "Whisper small model downloaded"
+        else
+            warn "Model download failed. Download manually: bash $WHISPER_DIR/models/download-ggml-model.sh small"
+        fi
+    else
+        warn "Model download script not found. Download manually - see README.md"
+    fi
+elif [ -f "$WHISPER_DIR/models/ggml-small.bin" ]; then
+    success "Whisper small model already present"
+fi
+
+# ffmpeg is needed by the MCP transcription tool for audio conversion
+if ! command -v ffmpeg &>/dev/null; then
+    info "Installing ffmpeg..."
+    if [ "$PKG_MANAGER" = "apt" ]; then
+        sudo apt-get install -y -qq ffmpeg
+    else
+        # Amazon Linux 2023 does not ship ffmpeg in standard repos
+        if sudo dnf install -y ffmpeg 2>/dev/null; then
+            success "ffmpeg installed"
+        else
+            warn "ffmpeg not available in dnf repos. Install manually:"
+            warn "  sudo dnf install -y https://download1.rpmfusion.org/free/fedora/rpmfusion-free-release-\$(rpm -E %fedora).noarch.rpm && sudo dnf install -y ffmpeg"
+        fi
+    fi
+else
+    success "ffmpeg already installed"
+fi
 
 #===============================================================================
 # Configuration
