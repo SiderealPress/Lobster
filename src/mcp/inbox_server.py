@@ -1851,6 +1851,22 @@ async def handle_transcribe_audio(args: dict) -> list[TextContent]:
             continue
 
     if not msg_file:
+        # Also check processing directory (messages claimed via mark_processing)
+        for f in PROCESSING_DIR.glob("*.json"):
+            if message_id in f.name:
+                msg_file = f
+                break
+            try:
+                with open(f) as fp:
+                    data = json.load(fp)
+                    if data.get("id") == message_id:
+                        msg_file = f
+                        msg_data = data
+                        break
+            except:
+                continue
+
+    if not msg_file:
         # Also check processed directory
         for f in PROCESSED_DIR.glob("*.json"):
             if message_id in f.name:
