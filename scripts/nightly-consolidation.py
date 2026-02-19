@@ -3,8 +3,8 @@
 Nightly Consolidation Script -- Layer 2 of Lobster's Three-Layer Memory System
 
 Synthesizes raw memory events from the SQLite event store into canonical
-markdown files using Claude API calls. Runs as a standalone script invoked
-by cron (via nightly-consolidation.sh) or directly.
+markdown files using Claude Code CLI calls. Runs as a standalone script
+invoked by cron (via nightly-consolidation.sh) or directly.
 
 Design principles:
   - Pure functions for grouping, prompt building, and file rendering
@@ -22,6 +22,7 @@ import logging
 import os
 import shutil
 import sqlite3
+import subprocess
 import sys
 import traceback
 import uuid
@@ -477,7 +478,7 @@ Generate a complete handoff document in markdown with these exact sections:
 Who/what is Lobster? Brief description.
 
 ## Owner
-Who is Drew? Key details for interacting with him.
+Who is the owner? Key details for interacting with them.
 
 ## Active Projects
 All active projects with brief status.
@@ -539,30 +540,38 @@ Follow these rules:
 
 
 # ---------------------------------------------------------------------------
-# Claude API interaction (side effect boundary)
+# Claude Code CLI interaction (side effect boundary)
 # ---------------------------------------------------------------------------
 
 
 def call_claude_api(prompt: str, model: str) -> str:
-    """Call the Anthropic Claude API with the given prompt.
+    """Call Claude via the Claude Code CLI (claude --print).
+
+    Uses subprocess to invoke the `claude` CLI in non-interactive print mode,
+    avoiding a direct dependency on the Anthropic Python SDK.
 
     Returns the text response from Claude.
-    Raises on API errors so the caller can handle gracefully.
+    Raises on CLI errors so the caller can handle gracefully.
     """
-    import anthropic
-
-    client = anthropic.Anthropic()
-    response = client.messages.create(
-        model=model,
-        max_tokens=4096,
-        messages=[{"role": "user", "content": prompt}],
+    cmd = [
+        "claude",
+        "--print",
+        "--model", model,
+        "--max-turns", "1",
+        "-p", prompt,
+    ]
+    log.debug(f"Invoking Claude CLI: claude --print --model {model} --max-turns 1 ...")
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=300,  # 5-minute timeout per call
     )
-    # Extract text from the response
-    return "".join(
-        block.text
-        for block in response.content
-        if hasattr(block, "text")
-    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Claude CLI exited with code {result.returncode}: {result.stderr.strip()}"
+        )
+    return result.stdout.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -918,7 +927,7 @@ def _slugify(name: str) -> str:
     Examples:
         "Lobster" -> "lobster"
         "My Project" -> "my-project"
-        "Drew's Thing" -> "drews-thing"
+        "Alice's Thing" -> "alices-thing"
     """
     slug = name.lower().strip()
     slug = slug.replace("'", "").replace('"', "")

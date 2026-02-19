@@ -640,7 +640,7 @@ class TestMemoryMCPHandlers:
         # Store diverse events
         events_data = [
             ("The deployment pipeline was updated to use Docker", "decision", "github", "infra"),
-            ("Drew asked about progress on the memory system", "message", "telegram", "lobster"),
+            ("Alice asked about progress on the memory system", "message", "telegram", "lobster"),
             ("Fixed a bug in the nightly consolidation script", "note", "internal", "lobster"),
             ("Meeting notes: discussed Q3 roadmap priorities", "note", "internal", None),
         ]

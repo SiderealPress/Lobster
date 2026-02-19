@@ -7,7 +7,7 @@
 # bulletproof fallback that doesn't depend on MCP hooks or tool-call triggers.
 #
 # Install: Add to crontab with:
-#   */3 * * * * /home/admin/lobster/scripts/periodic-self-check.sh
+#   */3 * * * * $HOME/lobster/scripts/periodic-self-check.sh
 #
 # Guards:
 #   1. Only fires if a Claude Code process is running
@@ -48,6 +48,13 @@ fi
 # Guard 4: Backpressure — don't add to an already-deep inbox
 INBOX_COUNT=$(find "$INBOX_DIR" -maxdepth 1 -name "*.json" 2>/dev/null | wc -l)
 if [ "$INBOX_COUNT" -ge "$MAX_INBOX_DEPTH" ]; then
+    exit 0
+fi
+
+# Guard 5: Subagent check — only self-check when subagents are running
+# If claude count is <= 1, only the main session exists (no subagents to check on)
+CLAUDE_COUNT=$(pgrep -c -f "claude" 2>/dev/null || echo "0")
+if [ "$CLAUDE_COUNT" -le 1 ]; then
     exit 0
 fi
 

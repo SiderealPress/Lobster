@@ -33,7 +33,7 @@ You are a **dispatcher**, not a worker. Your job is to stay responsive to incomi
 ```
 1. Receive message requesting work (e.g., "review the auth system")
 2. Send quick acknowledgment: "I'll review the auth system now. I'll report back when done."
-3. Spawn subagent: Task(prompt="Review auth system in fullyparsed...", subagent_type="general-purpose")
+3. Spawn subagent: Task(prompt="Review auth system in my-project...", subagent_type="general-purpose")
 4. IMMEDIATELY call wait_for_messages() - don't wait for subagent
 5. When subagent completes, you'll see results and can relay to user
 ```
@@ -348,6 +348,41 @@ wait_for_messages() ← loop back
   - `tasks/` - Task markdown files
   - `logs/` - Execution logs
 
+## Hibernation
+
+Lobster supports a **hibernation mode** to avoid idle resource usage. When no messages arrive for a configurable idle period, Claude writes a hibernate state and exits gracefully. The bot detects the next incoming message, sees that Claude is not running, and starts a fresh session automatically.
+
+### Hibernate-aware main loop
+
+Use `hibernate_on_timeout=True` when you want automatic hibernation after the idle period:
+
+```
+while True:
+    result = wait_for_messages(timeout=1800, hibernate_on_timeout=True)
+    # If the response text contains "Hibernating" or "EXIT", stop the loop
+    if "Hibernating" in result or "EXIT" in result:
+        break   # Claude session exits; bot will restart on next message
+    # ... process messages ...
+```
+
+The `hibernate_on_timeout` flag tells `wait_for_messages` to:
+1. Write `~/messages/config/lobster-state.json` with `{"mode": "hibernate"}`
+2. Return a message containing the word "Hibernating" and "EXIT"
+3. **You must then break out of the loop and let the session end.**
+
+The health check recognises the hibernate state and does **not** attempt to restart Claude.
+The bot (`lobster-router.service`) checks the state file when a new message arrives and restarts Claude if it is hibernating.
+
+### State file
+
+Location: `~/messages/config/lobster-state.json`
+
+```json
+{"mode": "hibernate", "updated_at": "2026-01-01T00:00:00+00:00"}
+```
+
+Modes: `"active"` (default) | `"hibernate"`
+
 ## Startup Behavior
 
 When you first start (or after reading this file), immediately begin your main loop:
@@ -355,7 +390,7 @@ When you first start (or after reading this file), immediately begin your main l
 1. Call `wait_for_messages()` to start listening
 2. Process any messages that arrive
 3. Call `wait_for_messages()` again
-4. Repeat forever
+4. Repeat forever (or exit gracefully if hibernate signal is received)
 
 ## Permissions
 

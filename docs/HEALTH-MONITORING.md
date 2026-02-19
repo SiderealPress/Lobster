@@ -62,7 +62,7 @@ DISK_THRESHOLD=95                    # percentage
 The health check runs every 2 minutes:
 
 ```cron
-*/2 * * * * /home/admin/lobster/scripts/health-check-v3.sh
+*/2 * * * * $HOME/lobster/scripts/health-check-v3.sh
 ```
 
 ## Log Files

@@ -161,7 +161,7 @@ lobster-sync stop
   "sync_branch": "lobster-sync",
   "repos": [
     {
-      "path": "/Users/drew/projects/my-app",
+      "path": "/Users/yourname/projects/my-app",
       "remote": "origin",
       "enabled": true
     }

@@ -15,7 +15,7 @@
 #   BLACK  - 3 restart failures in cooldown window → alert, stop retrying
 #
 # Run via cron every 2 minutes:
-#   */2 * * * * /home/admin/lobster/scripts/health-check-v3.sh
+#   */2 * * * * $HOME/lobster/scripts/health-check-v3.sh
 #===============================================================================
 
 set -o pipefail
@@ -29,7 +29,8 @@ SERVICE_CLAUDE="lobster-claude"
 SERVICE_ROUTER="lobster-router"
 
 INBOX_DIR="$HOME/messages/inbox"
-STALE_THRESHOLD_SECONDS=300          # 5 minutes - RED if any message older
+LOBSTER_STATE_FILE="${LOBSTER_STATE_FILE_OVERRIDE:-$HOME/messages/config/lobster-state.json}"
+STALE_THRESHOLD_SECONDS=180          # 3 minutes - RED if any message older (watchdog handles soft recovery at 90s)
 YELLOW_THRESHOLD_SECONDS=120         # 2 minutes - YELLOW warning
 
 LOG_FILE="$HOME/lobster-workspace/logs/health-check.log"
@@ -152,6 +153,33 @@ record_restart() {
 
     restart_count=$((restart_count + 1))
     echo "$now $restart_count" > "$RESTART_STATE_FILE"
+}
+
+#===============================================================================
+# Hibernation State Check
+#===============================================================================
+
+# Read the current Lobster mode from state file.
+# Returns 0 (exit code) if mode is "hibernate", 1 if "active" or unknown.
+read_lobster_mode() {
+    if [[ ! -f "$LOBSTER_STATE_FILE" ]]; then
+        echo "active"
+        return
+    fi
+    python3 -c "
+import json, sys
+try:
+    d = json.load(open('$LOBSTER_STATE_FILE'))
+    print(d.get('mode', 'active'))
+except Exception:
+    print('active')
+" 2>/dev/null || echo "active"
+}
+
+is_hibernating() {
+    local mode
+    mode=$(read_lobster_mode)
+    [[ "$mode" == "hibernate" ]]
 }
 
 #===============================================================================
@@ -342,32 +370,45 @@ main() {
     local level="GREEN"
     local restart_reason=""
 
+    # --- Hibernation guard: skip Claude restart but still check router ---
+    local _is_hibernating=false
+    if is_hibernating; then
+        _is_hibernating=true
+        log_info "HIBERNATE: Lobster is in hibernate mode - will skip Claude restart but still check router"
+    fi
+
     # --- Infrastructure checks (RED if any fail) ---
 
+    # Always check systemd services (includes router/bot) — even when hibernating
     if ! check_services; then
         level="RED"
         restart_reason="systemd service not active"
     fi
 
-    if ! check_tmux; then
-        level="RED"
-        restart_reason="tmux session missing"
-    fi
+    # Skip Claude-specific checks when hibernating (Claude intentionally exited)
+    if [[ "$_is_hibernating" == "true" ]]; then
+        log_info "HIBERNATE: Skipping Claude process, tmux, and inbox drain checks"
+    else
+        if ! check_tmux; then
+            level="RED"
+            restart_reason="tmux session missing"
+        fi
 
-    if ! check_claude_process; then
-        level="RED"
-        restart_reason="no Claude process in lobster tmux"
-    fi
+        if ! check_claude_process; then
+            level="RED"
+            restart_reason="no Claude process in lobster tmux"
+        fi
 
-    # --- Inbox drain check (overrides to RED if stale) ---
+        # --- Inbox drain check (overrides to RED if stale) ---
 
-    check_inbox_drain
-    local inbox_rc=$?
-    if [[ $inbox_rc -eq 2 ]]; then
-        level="RED"
-        restart_reason="${restart_reason:+$restart_reason + }stale inbox (>$((STALE_THRESHOLD_SECONDS/60))m)"
-    elif [[ $inbox_rc -eq 1 && "$level" == "GREEN" ]]; then
-        level="YELLOW"
+        check_inbox_drain
+        local inbox_rc=$?
+        if [[ $inbox_rc -eq 2 ]]; then
+            level="RED"
+            restart_reason="${restart_reason:+$restart_reason + }stale inbox (>$((STALE_THRESHOLD_SECONDS/60))m)"
+        elif [[ $inbox_rc -eq 1 && "$level" == "GREEN" ]]; then
+            level="YELLOW"
+        fi
     fi
 
     # --- Resource checks (RED if critical) ---
