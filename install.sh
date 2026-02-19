@@ -682,7 +682,7 @@ fi
 
 source .venv/bin/activate
 pip install --quiet --upgrade pip
-pip install --quiet mcp python-telegram-bot watchdog python-dotenv slack-bolt
+pip install --quiet mcp python-telegram-bot watchdog python-dotenv slack-bolt psutil
 deactivate
 
 success "Python environment ready"

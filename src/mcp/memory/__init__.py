@@ -18,7 +18,10 @@ Static files are always the source of truth; the vector DB is an acceleration la
 import logging
 
 from .provider import MemoryProvider, MemoryEvent
-from .vector_memory import VectorMemory
+try:
+    from .vector_memory import VectorMemory
+except ImportError:
+    VectorMemory = None
 from .static_memory import StaticMemory
 
 log = logging.getLogger("lobster-memory")
@@ -42,13 +45,15 @@ def create_memory_provider(use_vector: bool = True) -> MemoryProvider:
     Returns:
         A MemoryProvider instance (VectorMemory or StaticMemory).
     """
-    if use_vector:
+    if use_vector and VectorMemory is not None:
         try:
             provider = VectorMemory()
             log.info("Memory provider: VectorMemory (SQLite + sqlite-vec + FTS5)")
             return provider
         except Exception as e:
             log.warning(f"VectorMemory unavailable ({e}), falling back to StaticMemory")
+    elif use_vector and VectorMemory is None:
+        log.warning("VectorMemory not importable (missing dependencies), falling back to StaticMemory")
     provider = StaticMemory()
     log.info("Memory provider: StaticMemory (grep over canonical files)")
     return provider
