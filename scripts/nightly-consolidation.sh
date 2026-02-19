@@ -12,7 +12,7 @@
 #      the Python script dependencies are not available.
 #
 # Crontab entry:
-#   0 3 * * * /home/admin/lobster/scripts/nightly-consolidation.sh
+#   0 3 * * * $HOME/lobster/scripts/nightly-consolidation.sh
 #
 # Environment:
 #   CONSOLIDATION_HOUR - Hour to run (default: 3, used by cron setup)

@@ -132,7 +132,7 @@ def sample_branch_api_response():
                     "date": "2026-02-12T20:30:00Z",
                 },
                 "author": {
-                    "name": "Drew Winget",
+                    "name": "Test User",
                     "date": "2026-02-12T20:30:00Z",
                 },
             },
@@ -251,7 +251,7 @@ class TestParseBranchInfo:
         assert result["last_sync"] == "2026-02-12T20:30:00Z"
         assert "lobster-sync" in result["message"]
         assert result["sha"] == "abc12345"
-        assert result["author"] == "Drew Winget"
+        assert result["author"] == "Test User"
 
     def test_handles_empty_response(self):
         """Graceful handling of an empty/minimal response."""
@@ -319,7 +319,7 @@ class TestFormatSyncStatus:
                 "last_sync": "2026-02-12T20:30:00Z",
                 "message": "lobster-sync: feature/widget @ abc1234",
                 "sha": "abc12345",
-                "author": "Drew Winget",
+                "author": "Test User",
                 "divergence": {
                     "ahead_by": 3,
                     "behind_by": 0,

@@ -33,7 +33,7 @@ You are a **dispatcher**, not a worker. Your job is to stay responsive to incomi
 ```
 1. Receive message requesting work (e.g., "review the auth system")
 2. Send quick acknowledgment: "I'll review the auth system now. I'll report back when done."
-3. Spawn subagent: Task(prompt="Review auth system in fullyparsed...", subagent_type="general-purpose")
+3. Spawn subagent: Task(prompt="Review auth system in my-project...", subagent_type="general-purpose")
 4. IMMEDIATELY call wait_for_messages() - don't wait for subagent
 5. When subagent completes, you'll see results and can relay to user
 ```

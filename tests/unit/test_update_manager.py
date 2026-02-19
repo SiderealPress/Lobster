@@ -99,7 +99,7 @@ class TestGenerateChangelog:
             if "rev-parse" in cmd:
                 result.stdout = "abc123\n"
             elif "log" in cmd:
-                result.stdout = "abc123 feat: add new tool (Drew, 2 hours ago)\ndef456 fix: repair inbox (Drew, 1 hour ago)\n"
+                result.stdout = "abc123 feat: add new tool (Dev, 2 hours ago)\ndef456 fix: repair inbox (Dev, 1 hour ago)\n"
             else:
                 result.stdout = ""
             return result
@@ -147,7 +147,7 @@ class TestGenerateChangelog:
             if "rev-parse" in cmd:
                 result.stdout = "abc123\n"
             elif "log" in cmd:
-                result.stdout = "abc123 chore: update deps (Drew, 1 hour ago)\n"
+                result.stdout = "abc123 chore: update deps (Dev, 1 hour ago)\n"
             else:
                 result.stdout = ""
             return result
@@ -372,7 +372,7 @@ class TestCreateUpgradePlan:
             elif "log" in cmd and "--oneline" in cmd:
                 result.stdout = "ccc333 feat: new feature\nddd444 docs: update readme\n"
             elif "log" in cmd and _has_arg(cmd, "--format"):
-                result.stdout = "ccc333 feat: new feature (Drew, 1h ago)\nddd444 docs: update readme (Drew, 2h ago)\n"
+                result.stdout = "ccc333 feat: new feature (Dev, 1h ago)\nddd444 docs: update readme (Dev, 2h ago)\n"
             elif "diff" in cmd and "--name-only" in cmd:
                 result.stdout = "src/mcp/update_manager.py\nREADME.md\n"
             elif "status" in cmd:
@@ -415,7 +415,7 @@ class TestCreateUpgradePlan:
             elif "log" in cmd and "--oneline" in cmd:
                 result.stdout = "ccc333 feat: add migration\n"
             elif "log" in cmd and _has_arg(cmd, "--format"):
-                result.stdout = "ccc333 feat: add migration (Drew, 1h ago)\n"
+                result.stdout = "ccc333 feat: add migration (Dev, 1h ago)\n"
             elif "diff" in cmd and "--name-only" in cmd:
                 result.stdout = "db/migration_002.sql\n"
             elif "status" in cmd:

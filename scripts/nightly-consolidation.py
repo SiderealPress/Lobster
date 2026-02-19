@@ -478,7 +478,7 @@ Generate a complete handoff document in markdown with these exact sections:
 Who/what is Lobster? Brief description.
 
 ## Owner
-Who is Drew? Key details for interacting with him.
+Who is the owner? Key details for interacting with them.
 
 ## Active Projects
 All active projects with brief status.
@@ -927,7 +927,7 @@ def _slugify(name: str) -> str:
     Examples:
         "Lobster" -> "lobster"
         "My Project" -> "my-project"
-        "Drew's Thing" -> "drews-thing"
+        "Alice's Thing" -> "alices-thing"
     """
     slug = name.lower().strip()
     slug = slug.replace("'", "").replace('"', "")

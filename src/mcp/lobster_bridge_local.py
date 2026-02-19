@@ -9,7 +9,7 @@ with no network dependency.
 
 Configuration:
     LOBSTER_CANONICAL_DIR — Path to the canonical memory directory
-                            (e.g., /Users/drew/projects/lobster/memory/canonical)
+                            (e.g., /Users/yourname/projects/lobster/memory/canonical)
 
 Usage:
     LOBSTER_CANONICAL_DIR=/path/to/canonical python lobster_bridge_local.py
@@ -52,7 +52,7 @@ def _validate_config() -> None:
     if not _raw_dir or not CANONICAL_DIR.is_absolute():
         print(
             "Error: LOBSTER_CANONICAL_DIR must be set to an absolute path.\n"
-            "Example: LOBSTER_CANONICAL_DIR=/Users/drew/projects/lobster/memory/canonical",
+            "Example: LOBSTER_CANONICAL_DIR=/Users/yourname/projects/lobster/memory/canonical",
             file=sys.stderr,
         )
         sys.exit(1)

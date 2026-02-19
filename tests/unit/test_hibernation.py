@@ -4,7 +4,7 @@ Hibernation MVP - Python Unit Tests
 Tests state file management, health check hibernation awareness,
 and bot wake logic.
 
-Run with: cd /home/admin/lobster && uv run pytest tests/unit/test_hibernation.py -v
+Run with: cd $LOBSTER_DIR && uv run pytest tests/unit/test_hibernation.py -v
 """
 
 import asyncio
