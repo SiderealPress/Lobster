@@ -1170,6 +1170,9 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
         def on_created(self, event):
             if not event.is_directory and event.src_path.endswith('.json'):
                 message_arrived.set()
+        def on_moved(self, event):
+            if not event.is_directory and event.dest_path.endswith('.json'):
+                message_arrived.set()
 
     observer = Observer()
     observer.schedule(InboxHandler(), str(INBOX_DIR), recursive=False)
