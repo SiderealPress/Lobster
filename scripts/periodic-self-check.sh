@@ -51,6 +51,13 @@ if [ "$INBOX_COUNT" -ge "$MAX_INBOX_DEPTH" ]; then
     exit 0
 fi
 
+# Guard 5: Subagent check — only self-check when subagents are running
+# If claude count is <= 1, only the main session exists (no subagents to check on)
+CLAUDE_COUNT=$(pgrep -c -f "claude" 2>/dev/null || echo "0")
+if [ "$CLAUDE_COUNT" -le 1 ]; then
+    exit 0
+fi
+
 # All guards passed — inject self-check
 TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%S.%6N)
 EPOCH_MS=$(date +%s%3N)

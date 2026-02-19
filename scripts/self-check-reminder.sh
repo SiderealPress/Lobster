@@ -24,6 +24,13 @@ set -e
 # Use environment variable or default
 INBOX_DIR="${LOBSTER_MESSAGES:-$HOME/messages}/inbox"
 
+# Skip if no subagents are running (claude count <= 1 means only main session)
+CLAUDE_COUNT=$(pgrep -c -f "claude" 2>/dev/null || echo "0")
+if [ "$CLAUDE_COUNT" -le 1 ]; then
+    echo "No subagents running, skipping self-check"
+    exit 0
+fi
+
 # Ensure inbox directory exists
 mkdir -p "$INBOX_DIR"
 
