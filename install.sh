@@ -831,83 +831,74 @@ else
 fi
 
 #===============================================================================
-# Voice Transcription (Optional - whisper.cpp + ffmpeg)
+# Voice Transcription (whisper.cpp + ffmpeg)
 #===============================================================================
 
-step "Voice Transcription (Optional)..."
+step "Voice Transcription Setup..."
 
-echo ""
-echo -e "${BOLD}Voice Message Transcription Setup${NC}"
-echo ""
-echo "Lobster can transcribe voice messages locally using whisper.cpp."
-echo "This requires ~500MB of disk space for the model."
-echo ""
-read -p "Set up voice transcription? [y/N] " -n 1 -r
-echo
-
-if [[ $REPLY =~ ^[Yy]$ ]]; then
-    # Install ffmpeg
-    if ! command -v ffmpeg &> /dev/null; then
-        step "Installing ffmpeg..."
-        if command -v apt-get &> /dev/null; then
-            sudo apt-get install -y ffmpeg
-        elif command -v dnf &> /dev/null; then
-            sudo dnf install -y ffmpeg
-        elif command -v yum &> /dev/null; then
-            sudo yum install -y ffmpeg
-        else
-            warn "Could not install ffmpeg automatically. Please install it manually."
-        fi
+# Install ffmpeg
+if ! command -v ffmpeg &> /dev/null; then
+    step "Installing ffmpeg..."
+    if command -v apt-get &> /dev/null; then
+        sudo apt-get install -y ffmpeg
+    elif command -v dnf &> /dev/null; then
+        sudo dnf install -y ffmpeg
+    elif command -v yum &> /dev/null; then
+        sudo yum install -y ffmpeg
     else
-        success "ffmpeg already installed"
-    fi
-
-    # Build whisper.cpp
-    WHISPER_DIR="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}/whisper.cpp"
-    if [ ! -f "$WHISPER_DIR/build/bin/whisper-cli" ]; then
-        step "Building whisper.cpp..."
-        if ! command -v cmake &> /dev/null; then
-            if command -v apt-get &> /dev/null; then
-                sudo apt-get install -y cmake build-essential
-            elif command -v dnf &> /dev/null; then
-                sudo dnf install -y cmake gcc-c++ make
-            fi
-        fi
-        mkdir -p "$(dirname "$WHISPER_DIR")"
-        if [ ! -d "$WHISPER_DIR" ]; then
-            git clone https://github.com/ggerganov/whisper.cpp.git "$WHISPER_DIR"
-        fi
-        cd "$WHISPER_DIR"
-        cmake -B build
-        cmake --build build -j$(nproc)
-        cd - > /dev/null
-        if [ -f "$WHISPER_DIR/build/bin/whisper-cli" ]; then
-            success "whisper.cpp built successfully"
-        else
-            warn "whisper.cpp build failed. You can build it manually later - see README.md"
-        fi
-    else
-        success "whisper.cpp already built"
-    fi
-
-    # Download model
-    if [ ! -f "$WHISPER_DIR/models/ggml-small.bin" ]; then
-        step "Downloading whisper small model (~465MB)..."
-        if [ -f "$WHISPER_DIR/models/download-ggml-model.sh" ]; then
-            bash "$WHISPER_DIR/models/download-ggml-model.sh" small
-            if [ -f "$WHISPER_DIR/models/ggml-small.bin" ]; then
-                success "Whisper model downloaded"
-            else
-                warn "Model download failed. You can download it manually later - see README.md"
-            fi
-        else
-            warn "Model download script not found. You can download it manually later - see README.md"
-        fi
-    else
-        success "Whisper model already downloaded"
+        error "Could not install ffmpeg. Please install it manually and re-run."
+        exit 1
     fi
 else
-    info "Skipped voice transcription. You can set it up later - see README.md"
+    success "ffmpeg already installed"
+fi
+
+# Build whisper.cpp
+WHISPER_DIR="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}/whisper.cpp"
+if [ ! -f "$WHISPER_DIR/build/bin/whisper-cli" ]; then
+    step "Building whisper.cpp..."
+    if ! command -v cmake &> /dev/null; then
+        if command -v apt-get &> /dev/null; then
+            sudo apt-get install -y cmake build-essential
+        elif command -v dnf &> /dev/null; then
+            sudo dnf install -y cmake gcc-c++ make
+        fi
+    fi
+    mkdir -p "$(dirname "$WHISPER_DIR")"
+    if [ ! -d "$WHISPER_DIR" ]; then
+        git clone https://github.com/ggerganov/whisper.cpp.git "$WHISPER_DIR"
+    fi
+    cd "$WHISPER_DIR"
+    cmake -B build
+    cmake --build build -j$(nproc)
+    cd - > /dev/null
+    if [ -f "$WHISPER_DIR/build/bin/whisper-cli" ]; then
+        success "whisper.cpp built successfully"
+    else
+        error "whisper.cpp build failed. Voice transcription is required."
+        exit 1
+    fi
+else
+    success "whisper.cpp already built"
+fi
+
+# Download model
+if [ ! -f "$WHISPER_DIR/models/ggml-small.bin" ]; then
+    step "Downloading whisper small model (~465MB)..."
+    if [ -f "$WHISPER_DIR/models/download-ggml-model.sh" ]; then
+        bash "$WHISPER_DIR/models/download-ggml-model.sh" small
+        if [ -f "$WHISPER_DIR/models/ggml-small.bin" ]; then
+            success "Whisper model downloaded"
+        else
+            error "Whisper model download failed. Voice transcription is required."
+            exit 1
+        fi
+    else
+        error "Whisper model download script not found at $WHISPER_DIR/models/download-ggml-model.sh"
+        exit 1
+    fi
+else
+    success "Whisper model already downloaded"
 fi
 
 #===============================================================================
