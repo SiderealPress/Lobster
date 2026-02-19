@@ -180,8 +180,8 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "timeout": {
                         "type": "integer",
-                        "description": "Maximum seconds to wait. Default 300 (5 minutes). After timeout, returns with a prompt to call again.",
-                        "default": 300,
+                        "description": "Maximum seconds to wait. Default 72000 (20 hours). After timeout, returns with a prompt to call again.",
+                        "default": 72000,
                     },
                 },
             },
@@ -1146,7 +1146,7 @@ def _recover_retryable_messages():
 
 async def handle_wait_for_messages(args: dict) -> list[TextContent]:
     """Block until new messages arrive in inbox, or return immediately if messages exist."""
-    timeout = args.get("timeout", 300)
+    timeout = args.get("timeout", 72000)
 
     # Touch heartbeat at start - signals Claude is alive and waiting for messages
     touch_heartbeat()
