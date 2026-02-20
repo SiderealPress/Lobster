@@ -1,10 +1,9 @@
 #!/bin/bash
 #
-# Claude wrapper for headless/API-key deployments
+# Claude wrapper for headless deployments
 #
-# Uses claude --print in a polling loop instead of interactive mode,
-# which requires OAuth. This wrapper works with ANTHROPIC_API_KEY set
-# in the environment or in config.env.
+# Uses claude --print in a polling loop to process inbox messages.
+# Requires Claude Code to be authenticated (OAuth via `claude auth login`).
 #
 # For desktop/OAuth setups, use claude-wrapper.exp instead.
 #
@@ -13,14 +12,6 @@ set -euo pipefail
 
 WORKSPACE_DIR="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
 INSTALL_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
-CONFIG_ENV="$INSTALL_DIR/config/config.env"
-
-# Source config.env if it exists (for ANTHROPIC_API_KEY, etc.)
-if [ -f "$CONFIG_ENV" ]; then
-    set -a
-    source "$CONFIG_ENV"
-    set +a
-fi
 
 # Ensure Claude is in PATH
 export PATH="$HOME/.local/bin:$PATH"
@@ -31,10 +22,10 @@ if ! command -v claude &>/dev/null; then
     exit 1
 fi
 
-# Verify API key is set
-if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
-    echo "ERROR: ANTHROPIC_API_KEY not set. Cannot run in headless mode without it."
-    echo "Set it in $CONFIG_ENV or export it in the environment."
+# Verify Claude Code is authenticated
+if ! claude auth status &>/dev/null 2>&1; then
+    echo "ERROR: Claude Code is not authenticated."
+    echo "Run: claude auth login"
     exit 1
 fi
 
