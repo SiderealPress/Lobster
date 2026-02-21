@@ -6,6 +6,11 @@
 # the inbox freezes. This watchdog detects stale messages and sends Ctrl+C to
 # interrupt the session, then injects a resume message.
 #
+# Lifecycle-aware: In the persistent model, Claude spends most time blocked
+# on wait_for_messages() which self-delivers messages. The watchdog is most
+# useful when Claude is stuck in PROCESSING state (e.g., a subagent hang).
+# It skips action during hibernate/backoff/starting states.
+#
 # Designed to complement health-check-v3.sh:
 #   - Watchdog: soft interrupt at 90s (Ctrl+C + resume message)
 #   - Health check: hard restart at 180s (systemd restart)
@@ -28,6 +33,7 @@ MESSAGES_DIR="${LOBSTER_MESSAGES:-$HOME/messages}"
 WORKSPACE_DIR="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
 
 INBOX_DIR="$MESSAGES_DIR/inbox"
+LOBSTER_STATE_FILE="$MESSAGES_DIR/config/lobster-state.json"
 STALE_THRESHOLD_SECONDS=90               # Interrupt if any message older than this
 RATE_LIMIT_SECONDS=120                   # Minimum time between interrupts
 
@@ -198,16 +204,57 @@ EOF
 }
 
 #===============================================================================
+# Lifecycle State Check
+#===============================================================================
+read_lobster_mode() {
+    if [[ ! -f "$LOBSTER_STATE_FILE" ]]; then
+        echo "unknown"
+        return
+    fi
+    python3 -c "
+import json
+try:
+    d = json.load(open('$LOBSTER_STATE_FILE'))
+    print(d.get('mode', 'unknown'))
+except: print('unknown')
+" 2>/dev/null || echo "unknown"
+}
+
+should_skip_watchdog() {
+    local mode
+    mode=$(read_lobster_mode)
+    case "$mode" in
+        hibernate|backoff|starting|restarting|waking|stopped)
+            log_info "Lifecycle mode=$mode — watchdog skipping (wrapper handles this)"
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+#===============================================================================
 # Main
 #===============================================================================
 main() {
     acquire_lock
+
+    # Skip if in a lifecycle state where the watchdog shouldn't interfere
+    if should_skip_watchdog; then
+        exit 0
+    fi
 
     # Pass 0: first check
     do_watchdog_check
 
     # Sleep 30 seconds for second check (gives ~30s effective interval with 1-min cron)
     sleep 30
+
+    # Re-check lifecycle state (may have changed during sleep)
+    if should_skip_watchdog; then
+        exit 0
+    fi
 
     # Pass 1: second check
     do_watchdog_check

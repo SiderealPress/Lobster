@@ -1,16 +1,27 @@
 #!/bin/bash
 #===============================================================================
-# Lobster Health Check v3 - Deterministic, LLM-Independent Monitoring
+# Lobster Health Check v3 - Lifecycle-Aware, Deterministic Monitoring
 #
 # Design principles:
 #   - Zero LLM dependency: no heartbeat, no tmux scraping, no MCP checks
+#   - Lifecycle-aware: reads lobster-state.json to understand current phase
 #   - Single observable truth: is the inbox draining?
 #   - Recovery via systemd: never manually rebuild tmux sessions
 #   - Direct Telegram alerts: curl, not outbox (outbox may be broken too)
+#   - Low noise: only alert on genuine problems, not routine transitions
+#
+# Lifecycle states (from claude-persistent.sh):
+#   active     - Claude is running (WAITING on wait_for_messages or PROCESSING)
+#   starting   - Wrapper is launching Claude (transient, < 30s)
+#   restarting - Wrapper is restarting after an exit (transient, < 60s)
+#   hibernate  - Claude exited cleanly, wrapper watching for inbox messages
+#   backoff    - Wrapper hit rapid-restart limit, cooling down
+#   stopped    - Wrapper received signal, shutting down
+#   waking     - Wrapper detected messages, about to launch Claude
 #
 # Escalation ladder:
-#   GREEN  - All checks pass
-#   YELLOW - Inbox messages exist < STALE threshold
+#   GREEN  - All checks pass (or in expected transient state)
+#   YELLOW - Inbox messages exist < STALE threshold, or transient state
 #   RED    - Stale inbox > threshold OR missing process/tmux/service → restart
 #   BLACK  - 3 restart failures in cooldown window → alert, stop retrying
 #
@@ -171,30 +182,99 @@ record_restart() {
 }
 
 #===============================================================================
-# Hibernation State Check
+# Lifecycle State Check
 #===============================================================================
 
 # Read the current Lobster mode from state file.
-# Returns 0 (exit code) if mode is "hibernate", 1 if "active" or unknown.
+# Returns one of: active, starting, restarting, hibernate, backoff, stopped, waking, unknown
 read_lobster_mode() {
     if [[ ! -f "$LOBSTER_STATE_FILE" ]]; then
-        echo "active"
+        echo "unknown"
         return
     fi
     python3 -c "
 import json, sys
 try:
     d = json.load(open('$LOBSTER_STATE_FILE'))
-    print(d.get('mode', 'active'))
+    print(d.get('mode', 'unknown'))
 except Exception:
-    print('active')
-" 2>/dev/null || echo "active"
+    print('unknown')
+" 2>/dev/null || echo "unknown"
+}
+
+# Read state file age in seconds
+read_state_age() {
+    if [[ ! -f "$LOBSTER_STATE_FILE" ]]; then
+        echo "999999"
+        return
+    fi
+    local file_time
+    file_time=$(stat -c %Y "$LOBSTER_STATE_FILE" 2>/dev/null)
+    if [[ -z "$file_time" ]]; then
+        echo "999999"
+        return
+    fi
+    local now
+    now=$(date +%s)
+    echo $((now - file_time))
 }
 
 is_hibernating() {
     local mode
     mode=$(read_lobster_mode)
     [[ "$mode" == "hibernate" ]]
+}
+
+# Check if the wrapper script (claude-persistent.sh) is running in tmux.
+# The wrapper manages Claude's lifecycle, so if it's running, the system
+# is operational even if Claude is temporarily absent (between restarts,
+# hibernating, etc.)
+check_wrapper_process() {
+    local wrapper_pids
+    wrapper_pids=$(pgrep -f "claude-persistent.sh" 2>/dev/null)
+
+    if [[ -z "$wrapper_pids" ]]; then
+        return 1
+    fi
+
+    # Verify at least one wrapper is in the lobster tmux
+    local tmux_panes
+    tmux_panes=$(tmux -L "$TMUX_SOCKET" list-panes -t "$TMUX_SESSION" -F '#{pane_pid}' 2>/dev/null)
+    [[ -z "$tmux_panes" ]] && return 1
+
+    for pid in $wrapper_pids; do
+        local check_pid="$pid"
+        for _ in 1 2 3 4 5 6; do
+            if echo "$tmux_panes" | grep -qw "$check_pid"; then
+                return 0
+            fi
+            check_pid=$(ps -o ppid= -p "$check_pid" 2>/dev/null | tr -d ' ')
+            [[ -z "$check_pid" || "$check_pid" == "1" ]] && break
+        done
+    done
+
+    return 1
+}
+
+# Transient states where Claude may not be running but everything is fine
+is_transient_state() {
+    local mode="$1"
+    local age="$2"
+    # Starting/restarting/waking are transient - allow up to 120s
+    case "$mode" in
+        starting|restarting|waking)
+            [[ $age -lt 120 ]]
+            return $?
+            ;;
+        backoff)
+            # Backoff is expected - allow up to 300s (5 min)
+            [[ $age -lt 300 ]]
+            return $?
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
 #===============================================================================
@@ -543,49 +623,168 @@ main() {
     local level="GREEN"
     local restart_reason=""
 
-    # --- Hibernation guard: skip Claude restart but still check router ---
-    local _is_hibernating=false
-    if is_hibernating; then
-        _is_hibernating=true
-        log_info "HIBERNATE: Lobster is in hibernate mode - will skip Claude restart but still check router"
-    fi
+    # --- Read lifecycle state ---
+    local lobster_mode
+    lobster_mode=$(read_lobster_mode)
+    local state_age
+    state_age=$(read_state_age)
+    log_info "Lifecycle state: mode=$lobster_mode, state_age=${state_age}s"
 
-    # --- Infrastructure checks (RED if any fail) ---
-
-    # Always check systemd services (includes router/bot) — even when hibernating
+    # --- Always check systemd services (includes router/bot) ---
     if ! check_services; then
         level="RED"
         restart_reason="systemd service not active"
     fi
 
-    # Skip Claude-specific checks when hibernating (Claude intentionally exited)
-    if [[ "$_is_hibernating" == "true" ]]; then
-        log_info "HIBERNATE: Skipping Claude process, tmux, and inbox drain checks"
-    else
-        if ! check_tmux; then
-            level="RED"
-            restart_reason="tmux session missing"
-        fi
+    # --- Lifecycle-aware Claude checks ---
+    #
+    # The persistent wrapper (claude-persistent.sh) manages Claude's lifecycle.
+    # We need to check differently depending on the current phase:
+    #
+    # hibernate:  Claude exited cleanly, wrapper is polling for new messages.
+    #             No Claude process expected. Only alert if stale user messages.
+    # active:     Claude should be running. Full checks apply.
+    # starting/restarting/waking: Transient states. Wrapper is handling it.
+    # backoff:    Wrapper hit rapid-restart limit. Expected pause.
+    # stopped:    Wrapper was stopped. Systemd should restart.
+    # unknown:    No state file. Either first run or old-style wrapper.
+    #
 
-        if ! check_claude_process; then
-            level="RED"
-            restart_reason="no Claude process in lobster tmux"
-        fi
+    case "$lobster_mode" in
+        hibernate)
+            log_info "HIBERNATE: Claude cleanly exited. Wrapper polling for new messages."
 
-        # --- Inbox drain check (overrides to RED if stale) ---
+            # In hibernate mode, check if the wrapper is still running
+            if ! check_tmux; then
+                level="RED"
+                restart_reason="tmux session missing (hibernate mode)"
+            elif ! check_wrapper_process; then
+                # Wrapper died during hibernation — need systemd restart
+                level="RED"
+                restart_reason="wrapper process missing during hibernation"
+            fi
 
-        check_inbox_drain
-        local inbox_rc=$?
-        if [[ $inbox_rc -eq 2 ]]; then
-            level="RED"
-            restart_reason="${restart_reason:+$restart_reason + }stale inbox (>$((STALE_THRESHOLD_SECONDS/60))m)"
-        elif [[ $inbox_rc -eq 1 && "$level" == "GREEN" ]]; then
-            level="YELLOW"
-        elif [[ $inbox_rc -eq 0 ]]; then
-            # Inbox is healthy - clear any circuit breaker markers
-            clear_stale_inbox_markers
-        fi
-    fi
+            # Still check inbox: if user messages are sitting stale, the wrapper
+            # should have woken Claude by now. Give extra time (5 min) since
+            # the wrapper polls every 10s.
+            check_inbox_drain
+            local hibernate_inbox_rc=$?
+            if [[ $hibernate_inbox_rc -eq 2 ]]; then
+                # Stale user messages during hibernation — wrapper may be stuck
+                level="RED"
+                restart_reason="${restart_reason:+$restart_reason + }stale inbox during hibernation"
+            fi
+            ;;
+
+        starting|restarting|waking)
+            # Transient states — allow some time before alarming
+            if is_transient_state "$lobster_mode" "$state_age"; then
+                log_info "TRANSIENT: mode=$lobster_mode for ${state_age}s — within expected window"
+                # Don't check for Claude process during transient states
+            else
+                log_warn "STALE TRANSIENT: mode=$lobster_mode for ${state_age}s — exceeded expected window"
+                if ! check_tmux; then
+                    level="RED"
+                    restart_reason="tmux session missing (stale $lobster_mode state)"
+                elif ! check_wrapper_process; then
+                    level="RED"
+                    restart_reason="wrapper process missing (stale $lobster_mode state)"
+                fi
+            fi
+
+            # Still check inbox drain
+            check_inbox_drain
+            local transient_inbox_rc=$?
+            if [[ $transient_inbox_rc -eq 2 ]]; then
+                level="RED"
+                restart_reason="${restart_reason:+$restart_reason + }stale inbox (>$((STALE_THRESHOLD_SECONDS/60))m)"
+            elif [[ $transient_inbox_rc -eq 1 && "$level" == "GREEN" ]]; then
+                level="YELLOW"
+            elif [[ $transient_inbox_rc -eq 0 ]]; then
+                clear_stale_inbox_markers
+            fi
+            ;;
+
+        backoff)
+            if is_transient_state "$lobster_mode" "$state_age"; then
+                log_info "BACKOFF: Wrapper cooling down (${state_age}s) — expected behavior"
+            else
+                log_warn "EXTENDED BACKOFF: ${state_age}s — may need intervention"
+                if [[ "$level" == "GREEN" ]]; then
+                    level="YELLOW"
+                fi
+            fi
+
+            # Check inbox drain even during backoff
+            check_inbox_drain
+            local backoff_inbox_rc=$?
+            if [[ $backoff_inbox_rc -eq 2 ]]; then
+                level="RED"
+                restart_reason="${restart_reason:+$restart_reason + }stale inbox during backoff"
+            elif [[ $backoff_inbox_rc -eq 0 ]]; then
+                clear_stale_inbox_markers
+            fi
+            ;;
+
+        stopped)
+            # Wrapper was intentionally stopped — systemd should catch this
+            log_warn "STOPPED: Wrapper received shutdown signal"
+            # Let systemd handle restart; don't duplicate
+            ;;
+
+        active|unknown|*)
+            # Standard checks: wrapper + Claude should be running
+            if ! check_tmux; then
+                level="RED"
+                restart_reason="tmux session missing"
+            fi
+
+            # In persistent mode, check for wrapper OR Claude process
+            # The wrapper is always running; Claude may be temporarily absent
+            # during restarts, but the wrapper handles that.
+            local has_wrapper=false
+            local has_claude=false
+
+            if check_wrapper_process; then
+                has_wrapper=true
+            fi
+            if check_claude_process; then
+                has_claude=true
+            fi
+
+            if [[ "$has_wrapper" == "false" && "$has_claude" == "false" ]]; then
+                level="RED"
+                restart_reason="${restart_reason:+$restart_reason + }no wrapper or Claude process in lobster tmux"
+            elif [[ "$has_wrapper" == "false" && "$has_claude" == "true" ]]; then
+                # Claude running without wrapper — old-style or something unexpected
+                # Not critical, but worth noting
+                log_warn "Claude running without persistent wrapper (old-style mode?)"
+            elif [[ "$has_wrapper" == "true" && "$has_claude" == "false" ]]; then
+                # Wrapper running but no Claude — could be between launches
+                # Check state age: if it's been a while, something may be stuck
+                if [[ $state_age -gt 120 && "$lobster_mode" == "active" ]]; then
+                    log_warn "Wrapper running but no Claude for ${state_age}s in active state"
+                    if [[ "$level" == "GREEN" ]]; then
+                        level="YELLOW"
+                    fi
+                else
+                    log_info "Wrapper running, Claude temporarily absent (state: $lobster_mode, age: ${state_age}s)"
+                fi
+            fi
+
+            # Inbox drain check
+            check_inbox_drain
+            local inbox_rc=$?
+            if [[ $inbox_rc -eq 2 ]]; then
+                level="RED"
+                restart_reason="${restart_reason:+$restart_reason + }stale inbox (>$((STALE_THRESHOLD_SECONDS/60))m)"
+            elif [[ $inbox_rc -eq 1 && "$level" == "GREEN" ]]; then
+                level="YELLOW"
+            elif [[ $inbox_rc -eq 0 ]]; then
+                clear_stale_inbox_markers
+            fi
+            ;;
+    esac
 
     # --- Outbox drain check (are replies being delivered?) ---
 
@@ -617,18 +816,18 @@ main() {
 
     case "$level" in
         GREEN)
-            log_info "GREEN: All checks passed"
+            log_info "GREEN: All checks passed (mode=$lobster_mode)"
             ;;
         YELLOW)
-            log_warn "YELLOW: Non-critical issues detected, monitoring"
+            log_warn "YELLOW: Non-critical issues detected (mode=$lobster_mode), monitoring"
             ;;
         RED)
-            log_error "RED: Critical failure - $restart_reason"
+            log_error "RED: Critical failure (mode=$lobster_mode) - $restart_reason"
             do_restart "$restart_reason"
             ;;
     esac
 
-    log_info "=== Health check v3 complete (level=$level) ==="
+    log_info "=== Health check v3 complete (level=$level, mode=$lobster_mode) ==="
 }
 
 main "$@"

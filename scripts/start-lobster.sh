@@ -1,16 +1,20 @@
 #!/bin/bash
 #
-# Start Lobster - Always-on Claude Code session
+# Start Lobster - Persistent Claude Code session with lifecycle management
 #
-# This script starts Claude Code in a tmux session with the lobster-inbox MCP server.
-# Claude will run in an infinite loop, processing Telegram messages as they arrive.
+# This script starts the persistent Claude wrapper in a tmux session.
+# Claude will run in a wait_for_messages() loop, processing Telegram messages
+# as they arrive, and supporting clean hibernation/restart cycles.
+#
+# Prefer using systemd for production: sudo systemctl start lobster-claude
+# This script is for manual/dev use.
 #
 
 set -e
 
 WORKSPACE="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
+INSTALL_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
 SESSION_NAME="lobster"
-TMUX_SOCKET="/tmp/lobster-tmux"
 
 # Colors
 GREEN='\033[0;32m'
@@ -31,27 +35,29 @@ if tmux -L lobster has-session -t "$SESSION_NAME" 2>/dev/null; then
     exit 0
 fi
 
-# Ensure workspace exists
-mkdir -p "$WORKSPACE"
+# Ensure workspace and log dirs exist
+mkdir -p "$WORKSPACE" "$WORKSPACE/logs"
 cd "$WORKSPACE"
 
-info "Starting Lobster (always-on Claude session)..."
+info "Starting Lobster (persistent Claude session)..."
 info "Workspace: $WORKSPACE"
+info "Launcher:  $INSTALL_DIR/scripts/claude-persistent.sh"
 
-# Create tmux session with Claude
+# Create tmux session with persistent wrapper
 tmux -L lobster new-session -d -s "$SESSION_NAME" -c "$WORKSPACE" \
-    "claude --dangerously-skip-permissions 2>&1 | tee -a $WORKSPACE/logs/claude-session.log"
+    "$INSTALL_DIR/scripts/claude-persistent.sh"
 
-sleep 1
+sleep 2
 
 if tmux -L lobster has-session -t "$SESSION_NAME" 2>/dev/null; then
     info "Lobster started successfully!"
     echo ""
     echo "  Attach to session:  tmux -L lobster attach -t $SESSION_NAME"
-    echo "  View logs:          tail -f $WORKSPACE/logs/claude-session.log"
+    echo "  View logs:          tail -f $WORKSPACE/logs/claude-persistent.log"
+    echo "  View Claude log:    tail -f $WORKSPACE/logs/claude-session.log"
     echo "  Stop Lobster:       tmux -L lobster kill-session -t $SESSION_NAME"
     echo ""
-    info "Claude is now waiting for messages. Send a Telegram message to interact."
+    info "Claude will start and call wait_for_messages() to listen for Telegram messages."
 else
     error "Failed to start Lobster tmux session"
     exit 1

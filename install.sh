@@ -1512,19 +1512,13 @@ if [ "$AUTH_METHOD" = "apikey" ] || [ "$AUTH_METHOD" = "apikey_fallback" ]; then
     fi
 fi
 
-# --- Select the correct Claude wrapper based on auth method ---
-if [ "$AUTH_METHOD" = "oauth" ]; then
-    info "OAuth mode: using claude-wrapper.exp (interactive mode)"
-    CLAUDE_WRAPPER="$INSTALL_DIR/scripts/claude-wrapper.exp"
-elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-    info "API key mode: using claude-wrapper.sh (--print polling mode)"
-    CLAUDE_WRAPPER="$INSTALL_DIR/scripts/claude-wrapper.sh"
-    chmod +x "$INSTALL_DIR/scripts/claude-wrapper.sh"
-else
-    # Shouldn't reach here, but default to interactive
-    info "Using claude-wrapper.exp (interactive mode)"
-    CLAUDE_WRAPPER="$INSTALL_DIR/scripts/claude-wrapper.exp"
-fi
+# --- Select the Claude launcher ---
+# The persistent launcher (claude-persistent.sh) replaces the old polling
+# wrappers. It runs Claude in a persistent session with wait_for_messages()
+# and handles lifecycle (restart, hibernate, backoff) internally.
+info "Using persistent lifecycle launcher: claude-persistent.sh"
+CLAUDE_WRAPPER="$INSTALL_DIR/scripts/claude-persistent.sh"
+chmod +x "$CLAUDE_WRAPPER"
 
 success "Claude wrapper: $CLAUDE_WRAPPER"
 

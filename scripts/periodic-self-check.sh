@@ -19,11 +19,29 @@
 set -e
 
 INBOX_DIR="${LOBSTER_MESSAGES:-$HOME/messages}/inbox"
+MESSAGES_DIR="${LOBSTER_MESSAGES:-$HOME/messages}"
 STATE_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}/.state"
 LAST_CHECK_FILE="$STATE_DIR/last-self-check"
+LOBSTER_STATE_FILE="$MESSAGES_DIR/config/lobster-state.json"
 MAX_INBOX_DEPTH=20
 
 mkdir -p "$INBOX_DIR" "$STATE_DIR"
+
+# Guard 0: Lifecycle check — don't inject during hibernate/backoff/starting
+if [ -f "$LOBSTER_STATE_FILE" ]; then
+    LOBSTER_MODE=$(python3 -c "
+import json
+try:
+    d = json.load(open('$LOBSTER_STATE_FILE'))
+    print(d.get('mode', 'unknown'))
+except: print('unknown')
+" 2>/dev/null || echo "unknown")
+    case "$LOBSTER_MODE" in
+        hibernate|backoff|starting|restarting|waking|stopped)
+            exit 0
+            ;;
+    esac
+fi
 
 # Guard 1: Is Claude Code running?
 if ! pgrep -f "claude" > /dev/null 2>&1; then
