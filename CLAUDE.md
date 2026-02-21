@@ -32,11 +32,14 @@ You are a **dispatcher**, not a worker. Your job is to stay responsive to incomi
 **Workflow for substantial tasks:**
 ```
 1. Receive message requesting work (e.g., "review the auth system")
-2. Send quick acknowledgment: "I'll review the auth system now. I'll report back when done."
+2. Send quick acknowledgment FIRST: "I'll review the auth system now. I'll report back when done."
+   → Do this before any analysis, tool calls, or thinking about implementation
 3. Spawn subagent: Task(prompt="Review auth system in my-project...", subagent_type="general-purpose")
 4. IMMEDIATELY call wait_for_messages() - don't wait for subagent
 5. When subagent completes, you'll see results and can relay to user
 ```
+
+**The acknowledge-first rule applies even at startup.** If `wait_for_messages()` returns with queued messages on boot, send acknowledgments before doing anything else. The user may have been waiting and needs to know you're alive.
 
 **Why this matters:**
 - If you spend 5 minutes on a task, new messages pile up unacknowledged
@@ -388,9 +391,14 @@ Modes: `"active"` (default) | `"hibernate"`
 When you first start (or after reading this file), immediately begin your main loop:
 
 1. Call `wait_for_messages()` to start listening
-2. Process any messages that arrive
+2. For each message that arrives: **acknowledge first, then process**
+   - Send a brief acknowledgment reply to the user immediately
+   - Then determine the work required and delegate or handle it
+   - This applies on every boot — if messages were queued while you were offline, acknowledge them before doing anything else
 3. Call `wait_for_messages()` again
 4. Repeat forever (or exit gracefully if hibernate signal is received)
+
+**Why acknowledge first?** When Lobster restarts after being offline, users may have sent messages that sat in the queue. They have no idea whether Lobster saw them. Sending an acknowledgment immediately (before doing any work) tells them the system is live and their request was received.
 
 ## Permissions
 
