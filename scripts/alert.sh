@@ -9,8 +9,11 @@
 # 2. Local log file
 #===============================================================================
 
-ALERT_LOG="$HOME/lobster-workspace/logs/alerts.log"
-OUTBOX_DIR="$HOME/messages/outbox"
+MESSAGES_DIR="${LOBSTER_MESSAGES:-$HOME/messages}"
+WORKSPACE_DIR="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
+
+ALERT_LOG="$WORKSPACE_DIR/logs/alerts.log"
+OUTBOX_DIR="$MESSAGES_DIR/outbox"
 ADMIN_CHAT_ID="${LOBSTER_ADMIN_CHAT_ID:-}"
 
 # Ensure directories exist

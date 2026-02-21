@@ -8,8 +8,10 @@
 # Usage: ~/lobster/scripts/heartbeat.sh [optional_status_message]
 #===============================================================================
 
-HEARTBEAT_FILE="$HOME/lobster-workspace/logs/claude-heartbeat"
-HEARTBEAT_LOG="$HOME/lobster-workspace/logs/heartbeat.log"
+WORKSPACE_DIR="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
+
+HEARTBEAT_FILE="$WORKSPACE_DIR/logs/claude-heartbeat"
+HEARTBEAT_LOG="$WORKSPACE_DIR/logs/heartbeat.log"
 
 # Ensure directory exists
 mkdir -p "$(dirname "$HEARTBEAT_FILE")"

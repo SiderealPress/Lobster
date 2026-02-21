@@ -24,14 +24,17 @@ set -o pipefail
 TMUX_SOCKET="lobster"
 TMUX_SESSION="lobster"
 
-INBOX_DIR="$HOME/messages/inbox"
+MESSAGES_DIR="${LOBSTER_MESSAGES:-$HOME/messages}"
+WORKSPACE_DIR="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
+
+INBOX_DIR="$MESSAGES_DIR/inbox"
 STALE_THRESHOLD_SECONDS=90               # Interrupt if any message older than this
 RATE_LIMIT_SECONDS=120                   # Minimum time between interrupts
 
 STATE_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}/.state"
 STATE_FILE="$STATE_DIR/watchdog-last-interrupt"
 LOCK_FILE="/tmp/lobster-inbox-watchdog.lock"
-LOG_FILE="$HOME/lobster-workspace/logs/watchdog.log"
+LOG_FILE="$WORKSPACE_DIR/logs/watchdog.log"
 
 # Ensure directories exist
 mkdir -p "$STATE_DIR"

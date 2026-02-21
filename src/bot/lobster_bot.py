@@ -42,14 +42,17 @@ if not BOT_TOKEN:
 if not ALLOWED_USERS:
     raise ValueError("TELEGRAM_ALLOWED_USERS environment variable is required")
 
-INBOX_DIR = Path.home() / "messages" / "inbox"
-OUTBOX_DIR = Path.home() / "messages" / "outbox"
-AUDIO_DIR = Path.home() / "messages" / "audio"
-IMAGES_DIR = Path.home() / "messages" / "images"
-DEAD_LETTER_DIR = Path.home() / "messages" / "dead-letter"
+_MESSAGES = Path(os.environ.get("LOBSTER_MESSAGES", Path.home() / "messages"))
+_WORKSPACE = Path(os.environ.get("LOBSTER_WORKSPACE", Path.home() / "lobster-workspace"))
+
+INBOX_DIR = _MESSAGES / "inbox"
+OUTBOX_DIR = _MESSAGES / "outbox"
+AUDIO_DIR = _MESSAGES / "audio"
+IMAGES_DIR = _MESSAGES / "images"
+DEAD_LETTER_DIR = _MESSAGES / "dead-letter"
 
 # Hibernation state file - written by Claude when it hibernates
-LOBSTER_STATE_FILE = Path.home() / "messages" / "config" / "lobster-state.json"
+LOBSTER_STATE_FILE = _MESSAGES / "config" / "lobster-state.json"
 
 # Script used to start a fresh Claude session (same as lobster-claude.service)
 _REPO_DIR = Path(os.environ.get("LOBSTER_INSTALL_DIR", Path.home() / "lobster"))
@@ -64,7 +67,7 @@ DEAD_LETTER_DIR.mkdir(parents=True, exist_ok=True)
 LOBSTER_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
 
 # Logging
-LOG_DIR = Path.home() / "lobster-workspace" / "logs"
+LOG_DIR = _WORKSPACE / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 log = logging.getLogger("lobster")
@@ -695,7 +698,7 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
             save_path = IMAGES_DIR / f"{msg_id}{ext}"
         else:
             # For non-images, save to a general files directory
-            files_dir = Path.home() / "messages" / "files"
+            files_dir = _MESSAGES / "files"
             files_dir.mkdir(parents=True, exist_ok=True)
             save_path = files_dir / f"{msg_id}{ext}"
 

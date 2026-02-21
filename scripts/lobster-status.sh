@@ -35,11 +35,13 @@ fi
 echo ""
 
 # Check inbox
-INBOX_COUNT=$(ls -1 ~/messages/inbox/*.json 2>/dev/null | wc -l)
+MESSAGES_DIR="${LOBSTER_MESSAGES:-$HOME/messages}"
+
+INBOX_COUNT=$(ls -1 "$MESSAGES_DIR/inbox"/*.json 2>/dev/null | wc -l)
 echo "Inbox Messages: $INBOX_COUNT"
 
 # Check outbox
-OUTBOX_COUNT=$(ls -1 ~/messages/outbox/*.json 2>/dev/null | wc -l)
+OUTBOX_COUNT=$(ls -1 "$MESSAGES_DIR/outbox"/*.json 2>/dev/null | wc -l)
 echo "Pending Replies: $OUTBOX_COUNT"
 
 echo ""

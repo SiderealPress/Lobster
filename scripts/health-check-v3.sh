@@ -28,22 +28,25 @@ TMUX_SESSION="lobster"
 SERVICE_CLAUDE="lobster-claude"
 SERVICE_ROUTER="lobster-router"
 
-INBOX_DIR="$HOME/messages/inbox"
-LOBSTER_STATE_FILE="${LOBSTER_STATE_FILE_OVERRIDE:-$HOME/messages/config/lobster-state.json}"
+MESSAGES_DIR="${LOBSTER_MESSAGES:-$HOME/messages}"
+WORKSPACE_DIR="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
+
+INBOX_DIR="$MESSAGES_DIR/inbox"
+LOBSTER_STATE_FILE="${LOBSTER_STATE_FILE_OVERRIDE:-$MESSAGES_DIR/config/lobster-state.json}"
 STALE_THRESHOLD_SECONDS=180          # 3 minutes - RED if any message older (watchdog handles soft recovery at 90s)
 YELLOW_THRESHOLD_SECONDS=120         # 2 minutes - YELLOW warning
 
-OUTBOX_DIR="$HOME/messages/outbox"
+OUTBOX_DIR="$MESSAGES_DIR/outbox"
 OUTBOX_STALE_THRESHOLD_SECONDS=900   # 15 min = RED
 OUTBOX_YELLOW_THRESHOLD_SECONDS=300  # 5 min = YELLOW
 OUTBOX_HISTORICAL_CUTOFF=3600        # Skip files > 1 hour (dead-letter candidates)
 
-LOG_FILE="$HOME/lobster-workspace/logs/health-check.log"
+LOG_FILE="$WORKSPACE_DIR/logs/health-check.log"
 LOCK_FILE="/tmp/lobster-health-check-v3.lock"
 
 MAX_RESTART_ATTEMPTS=3
 RESTART_COOLDOWN_SECONDS=600         # 10 min window for counting attempts
-RESTART_STATE_FILE="$HOME/lobster-workspace/logs/health-restart-state-v3"
+RESTART_STATE_FILE="$WORKSPACE_DIR/logs/health-restart-state-v3"
 
 MEMORY_THRESHOLD=90                  # percentage
 DISK_THRESHOLD=95                    # percentage

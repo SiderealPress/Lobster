@@ -13,7 +13,10 @@ from pathlib import Path
 
 log = logging.getLogger("lobster")
 
-CONFIG_DIR = Path.home() / "messages" / "config"
+import os
+
+_MESSAGES = Path(os.environ.get("LOBSTER_MESSAGES", Path.home() / "messages"))
+CONFIG_DIR = _MESSAGES / "config"
 ONBOARDED_FILE = CONFIG_DIR / "onboarded_users.json"
 
 # Ensure config directory exists

@@ -12,6 +12,8 @@ Environment=PATH={{HOME}}/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=HOME={{HOME}}
 Environment=LOBSTER_CONFIG_DIR={{CONFIG_DIR}}
 Environment=LOBSTER_INSTALL_DIR={{INSTALL_DIR}}
+Environment=LOBSTER_MESSAGES={{MESSAGES_DIR}}
+Environment=LOBSTER_WORKSPACE={{WORKSPACE_DIR}}
 EnvironmentFile=-{{INSTALL_DIR}}/config/config.env
 EnvironmentFile={{CONFIG_DIR}}/config.env
 ExecStart=/usr/bin/tmux -L lobster new-session -d -s lobster -c {{WORKSPACE_DIR}} {{CLAUDE_WRAPPER}}

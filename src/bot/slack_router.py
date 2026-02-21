@@ -43,10 +43,13 @@ ALLOWED_CHANNELS = [x.strip() for x in os.environ.get("LOBSTER_SLACK_ALLOWED_CHA
 ALLOWED_USERS = [x.strip() for x in os.environ.get("LOBSTER_SLACK_ALLOWED_USERS", "").split(",") if x.strip()]
 
 # Directories
-INBOX_DIR = Path.home() / "messages" / "inbox"
-OUTBOX_DIR = Path.home() / "messages" / "outbox"
-IMAGES_DIR = Path.home() / "messages" / "images"
-FILES_DIR = Path.home() / "messages" / "files"
+_MESSAGES = Path(os.environ.get("LOBSTER_MESSAGES", Path.home() / "messages"))
+_WORKSPACE = Path(os.environ.get("LOBSTER_WORKSPACE", Path.home() / "lobster-workspace"))
+
+INBOX_DIR = _MESSAGES / "inbox"
+OUTBOX_DIR = _MESSAGES / "outbox"
+IMAGES_DIR = _MESSAGES / "images"
+FILES_DIR = _MESSAGES / "files"
 
 # Ensure directories exist
 INBOX_DIR.mkdir(parents=True, exist_ok=True)
@@ -55,7 +58,7 @@ IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 FILES_DIR.mkdir(parents=True, exist_ok=True)
 
 # Logging
-LOG_DIR = Path.home() / "lobster-workspace" / "logs"
+LOG_DIR = _WORKSPACE / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 log = logging.getLogger("lobster-slack")

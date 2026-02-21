@@ -23,7 +23,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOBSTER_DIR="$(dirname "$SCRIPT_DIR")"
 VENV="$LOBSTER_DIR/.venv"
-INBOX="$HOME/messages/inbox"
+MESSAGES_DIR="${LOBSTER_MESSAGES:-$HOME/messages}"
+INBOX="$MESSAGES_DIR/inbox"
 CONFIG_DIR="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}"
 CONFIG="$CONFIG_DIR/consolidation.conf"
 TIMESTAMP=$(date +%s%3N)

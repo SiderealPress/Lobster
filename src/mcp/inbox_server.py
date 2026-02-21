@@ -58,7 +58,9 @@ from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
 # Directories
-BASE_DIR = Path.home() / "messages"
+_MESSAGES = Path(os.environ.get("LOBSTER_MESSAGES", Path.home() / "messages"))
+_WORKSPACE = Path(os.environ.get("LOBSTER_WORKSPACE", Path.home() / "lobster-workspace"))
+BASE_DIR = _MESSAGES
 INBOX_DIR = BASE_DIR / "inbox"
 OUTBOX_DIR = BASE_DIR / "outbox"
 PROCESSED_DIR = BASE_DIR / "processed"
@@ -71,7 +73,7 @@ TASKS_FILE = BASE_DIR / "tasks.json"
 TASK_OUTPUTS_DIR = BASE_DIR / "task-outputs"
 
 # Heartbeat file for health monitoring
-HEARTBEAT_FILE = Path.home() / "lobster-workspace" / "logs" / "claude-heartbeat"
+HEARTBEAT_FILE = _WORKSPACE / "logs" / "claude-heartbeat"
 
 # Hibernation state file - tracks whether Lobster is active or hibernating
 LOBSTER_STATE_FILE = CONFIG_DIR / "lobster-state.json"
@@ -94,8 +96,7 @@ def _reset_state_on_startup():
 
 _reset_state_on_startup()
 
-# Workspace and repo directories
-_WORKSPACE = Path(os.environ.get("LOBSTER_WORKSPACE", Path.home() / "lobster-workspace"))
+# Repo and config directories
 _REPO_DIR = Path(os.environ.get("LOBSTER_INSTALL_DIR", Path.home() / "lobster"))
 _CONFIG_DIR = Path(os.environ.get("LOBSTER_CONFIG_DIR", Path.home() / "lobster-config"))
 
@@ -119,7 +120,7 @@ for d in [INBOX_DIR, OUTBOX_DIR, PROCESSED_DIR, PROCESSING_DIR, FAILED_DIR, SENT
     d.mkdir(parents=True, exist_ok=True)
 
 # Logging
-LOG_DIR = Path.home() / "lobster-workspace" / "logs"
+LOG_DIR = _WORKSPACE / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 log = logging.getLogger("lobster-mcp")
@@ -1855,8 +1856,8 @@ async def handle_delete_task(args: dict) -> list[TextContent]:
 
 # Paths for local whisper.cpp transcription
 FFMPEG_PATH = Path.home() / ".local" / "bin" / "ffmpeg"
-WHISPER_CPP_PATH = Path.home() / "lobster-workspace" / "whisper.cpp" / "build" / "bin" / "whisper-cli"
-WHISPER_MODEL_PATH = Path.home() / "lobster-workspace" / "whisper.cpp" / "models" / "ggml-small.bin"
+WHISPER_CPP_PATH = _WORKSPACE / "whisper.cpp" / "build" / "bin" / "whisper-cli"
+WHISPER_MODEL_PATH = _WORKSPACE / "whisper.cpp" / "models" / "ggml-small.bin"
 
 
 async def convert_ogg_to_wav(ogg_path: Path, wav_path: Path) -> bool:

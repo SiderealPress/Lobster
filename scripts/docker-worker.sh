@@ -74,7 +74,7 @@ container_id=$(sudo docker run -d --rm \
     -e WORKER_SOURCE="$SOURCE" \
     -e WORKER_MAX_TURNS="$MAX_TURNS" \
     -e WORKER_PROMPT="$PROMPT" \
-    -v "$HOME/messages/inbox:/home/worker/messages/inbox" \
+    -v "${LOBSTER_MESSAGES:-$HOME/messages}/inbox:/home/worker/messages/inbox" \
     "$IMAGE_NAME" 2>&1)
 
 rc=$?

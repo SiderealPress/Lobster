@@ -8,7 +8,7 @@
 
 set -e
 
-WORKSPACE="$HOME/lobster-workspace"
+WORKSPACE="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
 SESSION_NAME="lobster"
 TMUX_SOCKET="/tmp/lobster-tmux"
 
