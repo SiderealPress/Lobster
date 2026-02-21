@@ -28,6 +28,8 @@ node_modules/
 # Generated service files (created from templates during install)
 services/lobster-router.service
 services/lobster-claude.service
+services/lobster-mcp.service
+services/lobster-slack-router.service
 
 # Local configuration (use lobster.conf.example as template)
 config/lobster.conf
@@ -47,3 +49,19 @@ memory/archive/digests/*.md
 
 # Incident reports (generated at runtime by investigate-incident.sh)
 incidents/*.md
+
+# GSD framework (dev tooling, installed per-user)
+.claude/agents/gsd-*.md
+.claude/commands/
+.claude/get-shit-done/
+.claude/gsd-file-manifest.json
+.claude/hooks/
+.claude/package.json
+.claude/settings.json
+
+# Skill runtime data (PID files, local config)
+config/camofox-browser/
+
+# Planning artifacts
+PLAN-*.md
+.planning/
