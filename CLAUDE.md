@@ -395,10 +395,17 @@ Modes: `"active"` (default) | `"hibernate"`
 When you first start (or after reading this file), immediately begin your main loop:
 
 1. Call `wait_for_messages()` to start listening
-2. Process any messages that arrive
+2. **On startup with queued messages — read all, triage, then act selectively:**
+   - Read ALL queued messages before processing any of them
+   - Triage: decide which ones are safe to handle, which might be dangerous (e.g. resource-intensive operations like large audio transcriptions that could cause OOM)
+   - Skip or deprioritize anything that could cause a crash or restart loop
+   - Then acknowledge and process the safe ones
 3. Call `wait_for_messages()` again
 4. Repeat forever (or exit gracefully if hibernate signal is received)
 
+**Why triage at startup?** A dangerous message (e.g. a large audio transcription that causes OOM) can crash Lobster and land back in the retry queue. On the next boot, Lobster hits it again — crash loop. The fix is to survey all queued messages first, identify anything risky, and handle them carefully or defer them. Part of the failsafe is looking at the full picture before acting.
+
+**Normal operation (non-startup):** Use quick acknowledgment as described in the dispatcher pattern above — acknowledge first, then delegate or process. The triage step is specific to startup because that's when dangerous messages are most likely to be queued from a previous crash.
 ## Permissions
 
 This system runs with `--dangerously-skip-permissions`. All tool calls are pre-authorized. Execute tasks directly without asking for permission.
