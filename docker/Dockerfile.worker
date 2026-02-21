@@ -1,0 +1,18 @@
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl git jq ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN useradd -u 1000 -m -s /bin/bash worker
+USER worker
+WORKDIR /home/worker
+
+RUN curl -fsSL https://cli.anthropic.com/install.sh | sh
+ENV PATH="/home/worker/.local/bin:${PATH}"
+
+RUN mkdir -p /home/worker/messages/inbox /home/worker/workspace
+
+COPY docker/worker-entrypoint.sh /home/worker/worker-entrypoint.sh
+
+ENTRYPOINT ["/home/worker/worker-entrypoint.sh"]
