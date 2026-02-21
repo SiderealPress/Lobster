@@ -72,6 +72,28 @@ SENT_DIR = BASE_DIR / "sent"
 TASKS_FILE = BASE_DIR / "tasks.json"
 TASK_OUTPUTS_DIR = BASE_DIR / "task-outputs"
 
+# Reply tracking — records {chat_id_str: timestamp} when send_reply is called.
+# Used by mark_processed to guard against dropping human messages without reply.
+_recent_replies: dict[str, float] = {}
+_REPLY_TRACK_MAX = 100
+
+def _track_reply(chat_id: Any) -> None:
+    """Record that a reply was sent to chat_id."""
+    global _recent_replies
+    key = str(chat_id)
+    _recent_replies[key] = time.time()
+    # Evict old entries if over limit
+    if len(_recent_replies) > _REPLY_TRACK_MAX:
+        cutoff = time.time() - 3600  # keep last hour
+        _recent_replies = {k: v for k, v in _recent_replies.items() if v > cutoff}
+        # If still over limit after time-based eviction, keep newest entries
+        if len(_recent_replies) > _REPLY_TRACK_MAX:
+            sorted_items = sorted(_recent_replies.items(), key=lambda x: x[1], reverse=True)
+            _recent_replies = dict(sorted_items[:_REPLY_TRACK_MAX])
+
+# Sources that represent human users (not system/automated)
+_HUMAN_SOURCES = {"telegram", "sms", "signal", "slack"}
+
 # Heartbeat file for health monitoring
 HEARTBEAT_FILE = _WORKSPACE / "logs" / "claude-heartbeat"
 
@@ -354,6 +376,11 @@ async def list_tools() -> list[Tool]:
                     "message_id": {
                         "type": "string",
                         "description": "The message ID to mark as processed.",
+                    },
+                    "force": {
+                        "type": "boolean",
+                        "description": "If true, skip the reply-sent check and mark processed even if no reply was sent. Default false.",
+                        "default": False,
                     },
                 },
                 "required": ["message_id"],
@@ -1406,6 +1433,9 @@ async def handle_send_reply(args: dict) -> list[TextContent]:
     sent_file = SENT_DIR / f"{reply_id}.json"
     atomic_write_json(sent_file, reply_data)
 
+    # Track reply for mark_processed guard
+    _track_reply(chat_id)
+
     log.info(f"Reply sent to {source} chat {chat_id}")
 
     button_info = f" with {sum(len(row) for row in buttons)} button(s)" if buttons else ""
@@ -1416,6 +1446,7 @@ async def handle_send_reply(args: dict) -> list[TextContent]:
 async def handle_mark_processed(args: dict) -> list[TextContent]:
     """Mark a message as processed."""
     message_id = validate_message_id(args.get("message_id", ""))
+    force = args.get("force", False)
 
     # Check processing/ first, then inbox/ as fallback
     found = _find_message_file(PROCESSING_DIR, message_id)
@@ -1424,6 +1455,39 @@ async def handle_mark_processed(args: dict) -> list[TextContent]:
 
     if not found:
         return [TextContent(type="text", text=f"Message not found: {message_id}")]
+
+    # Guard: check that a reply was sent for human messages
+    if not force:
+        try:
+            msg = json.loads(found.read_text())
+            source = msg.get("source", "")
+            chat_id = msg.get("chat_id", 0)
+            msg_ts_raw = msg.get("timestamp", "")
+
+            if source in _HUMAN_SOURCES and chat_id != 0:
+                # Parse message timestamp to epoch
+                msg_epoch = 0.0
+                if msg_ts_raw:
+                    try:
+                        dt = datetime.fromisoformat(msg_ts_raw)
+                        msg_epoch = dt.timestamp()
+                    except (ValueError, TypeError):
+                        pass
+
+                chat_key = str(chat_id)
+                reply_ts = _recent_replies.get(chat_key, 0.0)
+                if reply_ts < msg_epoch:
+                    return [TextContent(
+                        type="text",
+                        text=(
+                            f"\u26a0\ufe0f No reply sent for this human message "
+                            f"(from {source}, chat {chat_id}). "
+                            f"Send a reply first, or pass force=true to mark "
+                            f"processed without replying."
+                        ),
+                    )]
+        except (json.JSONDecodeError, OSError):
+            pass  # If we can't read the message, skip the guard
 
     # Move to processed
     dest = PROCESSED_DIR / found.name

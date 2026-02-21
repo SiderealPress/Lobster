@@ -259,7 +259,7 @@ class TestMarkProcessed:
         return inbox, processed
 
     def test_moves_file_to_processed(self, setup_dirs, message_generator):
-        """Test that message file is moved to processed directory."""
+        """Test that message file is moved to processed directory (with force)."""
         inbox, processed = setup_dirs
 
         msg = message_generator.generate_text_message()
@@ -274,7 +274,7 @@ class TestMarkProcessed:
             import asyncio
             from src.mcp.inbox_server import handle_mark_processed
 
-            result = asyncio.run(handle_mark_processed({"message_id": msg_id}))
+            result = asyncio.run(handle_mark_processed({"message_id": msg_id, "force": True}))
 
             assert "processed" in result[0].text.lower()
             assert not (inbox / f"{msg_id}.json").exists()
@@ -299,7 +299,7 @@ class TestMarkProcessed:
             import asyncio
             from src.mcp.inbox_server import handle_mark_processed
 
-            result = asyncio.run(handle_mark_processed({"message_id": partial_id}))
+            result = asyncio.run(handle_mark_processed({"message_id": partial_id, "force": True}))
 
             assert "processed" in result[0].text.lower()
 
@@ -336,6 +336,104 @@ class TestMarkProcessed:
             result = asyncio.run(handle_mark_processed({}))
 
             assert "Error" in result[0].text
+
+
+    def test_blocks_human_message_without_reply(self, setup_dirs, message_generator):
+        """Test that marking a human message without reply returns a warning."""
+        inbox, processed = setup_dirs
+
+        msg = message_generator.generate_text_message(
+            source="telegram", chat_id=123456,
+        )
+        msg_id = msg["id"]
+        (inbox / f"{msg_id}.json").write_text(json.dumps(msg))
+
+        with patch.multiple(
+            "src.mcp.inbox_server",
+            INBOX_DIR=inbox,
+            PROCESSED_DIR=processed,
+        ):
+            import asyncio
+            from src.mcp.inbox_server import handle_mark_processed
+
+            result = asyncio.run(handle_mark_processed({"message_id": msg_id}))
+
+            assert "No reply sent" in result[0].text
+            # File should NOT have been moved
+            assert (inbox / f"{msg_id}.json").exists()
+            assert not (processed / f"{msg_id}.json").exists()
+
+    def test_allows_human_message_with_force(self, setup_dirs, message_generator):
+        """Test that force=True bypasses the reply guard."""
+        inbox, processed = setup_dirs
+
+        msg = message_generator.generate_text_message(
+            source="telegram", chat_id=123456,
+        )
+        msg_id = msg["id"]
+        (inbox / f"{msg_id}.json").write_text(json.dumps(msg))
+
+        with patch.multiple(
+            "src.mcp.inbox_server",
+            INBOX_DIR=inbox,
+            PROCESSED_DIR=processed,
+        ):
+            import asyncio
+            from src.mcp.inbox_server import handle_mark_processed
+
+            result = asyncio.run(handle_mark_processed({"message_id": msg_id, "force": True}))
+
+            assert "processed" in result[0].text.lower()
+            assert not (inbox / f"{msg_id}.json").exists()
+
+    def test_allows_system_message_without_reply(self, setup_dirs, message_generator):
+        """Test that system/internal messages are not guarded."""
+        inbox, processed = setup_dirs
+
+        msg = message_generator.generate_text_message(
+            source="internal", chat_id=0,
+        )
+        msg_id = msg["id"]
+        (inbox / f"{msg_id}.json").write_text(json.dumps(msg))
+
+        with patch.multiple(
+            "src.mcp.inbox_server",
+            INBOX_DIR=inbox,
+            PROCESSED_DIR=processed,
+        ):
+            import asyncio
+            from src.mcp.inbox_server import handle_mark_processed
+
+            result = asyncio.run(handle_mark_processed({"message_id": msg_id}))
+
+            assert "processed" in result[0].text.lower()
+
+    def test_allows_after_reply_sent(self, setup_dirs, message_generator):
+        """Test that mark_processed works after send_reply was called."""
+        inbox, processed = setup_dirs
+        import time as _time
+
+        msg = message_generator.generate_text_message(
+            source="telegram", chat_id=999,
+        )
+        msg_id = msg["id"]
+        (inbox / f"{msg_id}.json").write_text(json.dumps(msg))
+
+        with patch.multiple(
+            "src.mcp.inbox_server",
+            INBOX_DIR=inbox,
+            PROCESSED_DIR=processed,
+        ):
+            import asyncio
+            from src.mcp.inbox_server import handle_mark_processed, _track_reply
+
+            # Simulate that a reply was sent to this chat_id
+            _track_reply(999)
+
+            result = asyncio.run(handle_mark_processed({"message_id": msg_id}))
+
+            assert "processed" in result[0].text.lower()
+            assert not (inbox / f"{msg_id}.json").exists()
 
 
 class TestListSources:
