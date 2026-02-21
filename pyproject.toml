@@ -17,6 +17,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+dashboard = [
+    "websockets>=13.0",
+]
 browser = [
     "playwright>=1.40.0",
 ]
