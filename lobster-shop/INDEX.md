@@ -9,6 +9,7 @@ Browse available skills for your Lobster assistant. Install any skill with one c
 | Skill | What It Does | Status |
 |-------|-------------|--------|
 | [Google Calendar](./google-calendar/) | See your schedule, create events, get reminders — all through chat | Beta |
+| [Camofox Browser](./camofox-browser/) | Browse the real web with anti-detection — search Google, Amazon, LinkedIn without getting blocked | Available |
 
 ## Coming Soon
 
