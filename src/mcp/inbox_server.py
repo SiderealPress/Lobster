@@ -38,20 +38,6 @@ from reliability import (
     CircuitBreaker,
 )
 
-# Google Calendar integration (optional — loaded if calendar_integration.py exists)
-_cal_path = Path(__file__).parent / "calendar_integration.py"
-CALENDAR_TOOLS = []
-CALENDAR_HANDLERS = {}
-if _cal_path.exists():
-    import importlib.util as _imp_util
-    _cal_spec = _imp_util.spec_from_file_location(
-        "calendar_integration", str(_cal_path),
-    )
-    _cal_mod = _imp_util.module_from_spec(_cal_spec)
-    _cal_spec.loader.exec_module(_cal_mod)
-    CALENDAR_TOOLS = _cal_mod.CALENDAR_TOOLS
-    CALENDAR_HANDLERS = _cal_mod.CALENDAR_HANDLERS
-
 # Self-update system
 from update_manager import UpdateManager
 _update_manager = UpdateManager()
@@ -1065,15 +1051,6 @@ async def list_tools() -> list[Tool]:
                 },
             },
         ),
-        # Google Calendar Tools (dynamically loaded from calendar_integration.py)
-        *[
-            Tool(
-                name=tool_def["name"],
-                description=tool_def["description"],
-                inputSchema=tool_def["inputSchema"],
-            )
-            for tool_def in CALENDAR_TOOLS
-        ],
     ]
 
 
@@ -1191,11 +1168,6 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
     # Local Sync Awareness Tools
     elif name == "check_local_sync":
         return await handle_check_local_sync(arguments)
-    # Google Calendar Tools
-    elif name in CALENDAR_HANDLERS:
-        handler = CALENDAR_HANDLERS[name]
-        result = handler(arguments)
-        return [TextContent(type="text", text=result)]
     else:
         return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
