@@ -14,12 +14,13 @@ if [ -z "$JOB_NAME" ]; then
     exit 1
 fi
 
-JOBS_DIR="$HOME/lobster/scheduled-tasks"
-TASK_FILE="$JOBS_DIR/tasks/${JOB_NAME}.md"
+REPO_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
+WORKSPACE="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
+TASK_FILE="$REPO_DIR/scheduled-tasks/tasks/${JOB_NAME}.md"
 OUTPUT_DIR="$HOME/messages/task-outputs"
-LOG_DIR="$JOBS_DIR/logs"
+LOG_DIR="$WORKSPACE/scheduled-jobs/logs"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-JOBS_FILE="$JOBS_DIR/jobs.json"
+JOBS_FILE="$WORKSPACE/scheduled-jobs/jobs.json"
 
 # Ensure directories exist
 mkdir -p "$OUTPUT_DIR" "$LOG_DIR"

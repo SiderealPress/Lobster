@@ -726,7 +726,7 @@ LOBSTER_CONFIG_DIR=~/lobster-config ./install.sh
 
 4. Check job logs:
    ```bash
-   ls -la ~/lobster/scheduled-tasks/logs/
+   ls -la ~/lobster-workspace/scheduled-jobs/logs/
    ```
 
 #### Custom CLAUDE.md Not Working

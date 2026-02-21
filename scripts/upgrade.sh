@@ -232,7 +232,7 @@ backup_config() {
     local files_to_backup=(
         "$LOBSTER_DIR/config/config.env"
         "$LOBSTER_DIR/config/lobster.conf"
-        "$LOBSTER_DIR/scheduled-tasks/jobs.json"
+        "$WORKSPACE_DIR/scheduled-jobs/jobs.json"
         "$MESSAGES_DIR/tasks.json"
         "$WORKSPACE_DIR/.lobster_session_id"
         "$WORKSPACE_DIR/CLAUDE.md"
@@ -469,7 +469,11 @@ create_new_directories() {
         "$MESSAGES_DIR/config"
         "$MESSAGES_DIR/task-outputs"
         "$LOBSTER_DIR/scheduled-tasks/tasks"
-        "$LOBSTER_DIR/scheduled-tasks/logs"
+        "$WORKSPACE_DIR/data"
+        "$WORKSPACE_DIR/memory/canonical/people"
+        "$WORKSPACE_DIR/memory/canonical/projects"
+        "$WORKSPACE_DIR/memory/archive/digests"
+        "$WORKSPACE_DIR/scheduled-jobs/logs"
     )
 
     local created=0

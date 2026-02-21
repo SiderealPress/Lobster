@@ -11,6 +11,7 @@ the system falls back to StaticMemory.
 
 import json
 import logging
+import os
 import sqlite3
 import struct
 import time
@@ -30,8 +31,9 @@ EMBEDDING_DIM = 384
 VECTOR_WEIGHT = 0.70
 KEYWORD_WEIGHT = 0.30
 
-# Default DB location
-DEFAULT_DB_PATH = Path.home() / "lobster" / "data" / "memory.db"
+# Default DB location (runtime data lives in workspace, not the repo)
+_WORKSPACE = Path(os.environ.get("LOBSTER_WORKSPACE", Path.home() / "lobster-workspace"))
+DEFAULT_DB_PATH = _WORKSPACE / "data" / "memory.db"
 
 
 def _serialize_vector(vec: list[float]) -> bytes:

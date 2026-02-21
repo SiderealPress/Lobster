@@ -54,7 +54,7 @@ SERVICES_START=("lobster-router" "lobster-daemon")
 STATE_FILES=(
     "$WORKSPACE_DIR/.lobster_session_id"
     "$MESSAGES_DIR/tasks.json"
-    "$LOBSTER_DIR/scheduled-tasks/jobs.json"
+    "$WORKSPACE_DIR/scheduled-jobs/jobs.json"
     "$CONFIG_FILE"
 )
 

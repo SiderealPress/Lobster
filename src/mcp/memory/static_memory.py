@@ -11,6 +11,7 @@ a slower but always-available search mechanism.
 
 import json
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -19,9 +20,10 @@ from .provider import MemoryEvent
 
 log = logging.getLogger("lobster-memory")
 
-# Default paths
-DEFAULT_CANONICAL_DIR = Path.home() / "lobster" / "memory" / "canonical"
-DEFAULT_EVENT_LOG = Path.home() / "lobster" / "data" / "events.jsonl"
+# Default paths (runtime data lives in workspace, not the repo)
+_WORKSPACE = Path(os.environ.get("LOBSTER_WORKSPACE", Path.home() / "lobster-workspace"))
+DEFAULT_CANONICAL_DIR = _WORKSPACE / "memory" / "canonical"
+DEFAULT_EVENT_LOG = _WORKSPACE / "data" / "events.jsonl"
 
 
 class StaticMemory:

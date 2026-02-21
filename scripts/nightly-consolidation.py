@@ -34,12 +34,14 @@ from typing import Any, NamedTuple
 # Configuration
 # ---------------------------------------------------------------------------
 
+_WORKSPACE = Path(os.environ.get("LOBSTER_WORKSPACE", Path.home() / "lobster-workspace"))
+
 DEFAULT_CONFIG = {
     "CONSOLIDATION_MODEL": "claude-sonnet-4-20250514",
     "MAX_EVENTS_PER_BATCH": "500",
-    "MEMORY_DB": str(Path.home() / "lobster" / "data" / "memory.db"),
-    "CANONICAL_DIR": str(Path.home() / "lobster" / "memory" / "canonical"),
-    "ARCHIVE_DIR": str(Path.home() / "lobster" / "memory" / "archive"),
+    "MEMORY_DB": str(_WORKSPACE / "data" / "memory.db"),
+    "CANONICAL_DIR": str(_WORKSPACE / "memory" / "canonical"),
+    "ARCHIVE_DIR": str(_WORKSPACE / "memory" / "archive"),
     "CONSOLIDATION_LOG_LEVEL": "INFO",
 }
 

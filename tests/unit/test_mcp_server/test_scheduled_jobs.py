@@ -29,7 +29,7 @@ class TestCreateScheduledJob:
         with patch.multiple(
             "src.mcp.inbox_server",
             SCHEDULED_JOBS_FILE=jobs_file,
-            SCHEDULED_TASKS_DIR=base_dir,
+            SCHEDULED_JOBS_DIR=base_dir,
             SCHEDULED_TASKS_TASKS_DIR=tasks_dir,
             sync_crontab=MagicMock(return_value=(True, "")),
         ):
@@ -61,7 +61,7 @@ class TestCreateScheduledJob:
         with patch.multiple(
             "src.mcp.inbox_server",
             SCHEDULED_JOBS_FILE=jobs_file,
-            SCHEDULED_TASKS_DIR=base_dir,
+            SCHEDULED_JOBS_DIR=base_dir,
             SCHEDULED_TASKS_TASKS_DIR=tasks_dir,
             sync_crontab=MagicMock(return_value=(True, "")),
         ):
@@ -94,7 +94,7 @@ class TestCreateScheduledJob:
         with patch.multiple(
             "src.mcp.inbox_server",
             SCHEDULED_JOBS_FILE=jobs_file,
-            SCHEDULED_TASKS_DIR=base_dir,
+            SCHEDULED_JOBS_DIR=base_dir,
             SCHEDULED_TASKS_TASKS_DIR=tasks_dir,
         ):
             from src.mcp.inbox_server import handle_create_scheduled_job
@@ -117,7 +117,7 @@ class TestCreateScheduledJob:
         with patch.multiple(
             "src.mcp.inbox_server",
             SCHEDULED_JOBS_FILE=jobs_file,
-            SCHEDULED_TASKS_DIR=base_dir,
+            SCHEDULED_JOBS_DIR=base_dir,
             SCHEDULED_TASKS_TASKS_DIR=tasks_dir,
         ):
             from src.mcp.inbox_server import handle_create_scheduled_job
@@ -143,7 +143,7 @@ class TestCreateScheduledJob:
         with patch.multiple(
             "src.mcp.inbox_server",
             SCHEDULED_JOBS_FILE=jobs_file,
-            SCHEDULED_TASKS_DIR=base_dir,
+            SCHEDULED_JOBS_DIR=base_dir,
             SCHEDULED_TASKS_TASKS_DIR=tasks_dir,
         ):
             from src.mcp.inbox_server import handle_create_scheduled_job
@@ -265,7 +265,7 @@ class TestUpdateScheduledJob:
         with patch.multiple(
             "src.mcp.inbox_server",
             SCHEDULED_JOBS_FILE=jobs_file,
-            SCHEDULED_TASKS_DIR=base_dir,
+            SCHEDULED_JOBS_DIR=base_dir,
             SCHEDULED_TASKS_TASKS_DIR=tasks_dir,
             sync_crontab=MagicMock(return_value=(True, "")),
         ):
@@ -290,7 +290,7 @@ class TestUpdateScheduledJob:
         with patch.multiple(
             "src.mcp.inbox_server",
             SCHEDULED_JOBS_FILE=jobs_file,
-            SCHEDULED_TASKS_DIR=base_dir,
+            SCHEDULED_JOBS_DIR=base_dir,
             SCHEDULED_TASKS_TASKS_DIR=tasks_dir,
             sync_crontab=MagicMock(return_value=(True, "")),
         ):
@@ -313,7 +313,7 @@ class TestUpdateScheduledJob:
         with patch.multiple(
             "src.mcp.inbox_server",
             SCHEDULED_JOBS_FILE=jobs_file,
-            SCHEDULED_TASKS_DIR=base_dir,
+            SCHEDULED_JOBS_DIR=base_dir,
             SCHEDULED_TASKS_TASKS_DIR=tasks_dir,
             sync_crontab=MagicMock(return_value=(True, "")),
         ):
@@ -336,7 +336,7 @@ class TestUpdateScheduledJob:
         with patch.multiple(
             "src.mcp.inbox_server",
             SCHEDULED_JOBS_FILE=jobs_file,
-            SCHEDULED_TASKS_DIR=base_dir,
+            SCHEDULED_JOBS_DIR=base_dir,
             SCHEDULED_TASKS_TASKS_DIR=tasks_dir,
         ):
             from src.mcp.inbox_server import handle_update_scheduled_job
@@ -370,7 +370,7 @@ class TestDeleteScheduledJob:
         with patch.multiple(
             "src.mcp.inbox_server",
             SCHEDULED_JOBS_FILE=jobs_file,
-            SCHEDULED_TASKS_DIR=base_dir,
+            SCHEDULED_JOBS_DIR=base_dir,
             SCHEDULED_TASKS_TASKS_DIR=tasks_dir,
             sync_crontab=MagicMock(return_value=(True, "")),
         ):

@@ -574,9 +574,10 @@ success "Git hooks configured (core.hooksPath -> .githooks)"
 
 step "Creating directories..."
 
-mkdir -p "$WORKSPACE_DIR/logs"
+mkdir -p "$WORKSPACE_DIR"/{logs,data,scheduled-jobs/logs}
+mkdir -p "$WORKSPACE_DIR/memory"/{canonical/{people,projects},archive/digests}
 mkdir -p "$MESSAGES_DIR"/{inbox,outbox,processed,processing,failed,config,audio,task-outputs}
-mkdir -p "$INSTALL_DIR/scheduled-tasks"/{tasks,logs}
+mkdir -p "$INSTALL_DIR/scheduled-tasks/tasks"
 mkdir -p "$HOME/projects"/{personal,business}
 
 success "Directories created"
@@ -589,8 +590,8 @@ info "  ~/projects/business - Business/work projects"
 
 step "Setting up scheduled tasks infrastructure..."
 
-# Create jobs.json if it doesn't exist
-JOBS_FILE="$INSTALL_DIR/scheduled-tasks/jobs.json"
+# Create jobs.json if it doesn't exist (in workspace, not repo)
+JOBS_FILE="$WORKSPACE_DIR/scheduled-jobs/jobs.json"
 if [ ! -f "$JOBS_FILE" ]; then
     echo '{"jobs": {}}' > "$JOBS_FILE"
 fi
@@ -613,12 +614,13 @@ if [ -z "$JOB_NAME" ]; then
     exit 1
 fi
 
-JOBS_DIR="$HOME/lobster/scheduled-tasks"
-TASK_FILE="$JOBS_DIR/tasks/${JOB_NAME}.md"
+REPO_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
+WORKSPACE="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
+TASK_FILE="$REPO_DIR/scheduled-tasks/tasks/${JOB_NAME}.md"
 OUTPUT_DIR="$HOME/messages/task-outputs"
-LOG_DIR="$JOBS_DIR/logs"
+LOG_DIR="$WORKSPACE/scheduled-jobs/logs"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-JOBS_FILE="$JOBS_DIR/jobs.json"
+JOBS_FILE="$WORKSPACE/scheduled-jobs/jobs.json"
 
 mkdir -p "$OUTPUT_DIR" "$LOG_DIR"
 
@@ -694,8 +696,10 @@ cat > "$INSTALL_DIR/scheduled-tasks/sync-crontab.sh" << 'SYNCCRON'
 
 set -e
 
-JOBS_FILE="$HOME/lobster/scheduled-tasks/jobs.json"
-RUNNER="$HOME/lobster/scheduled-tasks/run-job.sh"
+WORKSPACE="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
+REPO_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
+JOBS_FILE="$WORKSPACE/scheduled-jobs/jobs.json"
+RUNNER="$REPO_DIR/scheduled-tasks/run-job.sh"
 
 if ! command -v crontab &> /dev/null; then
     echo "Warning: crontab not found. Install cron to enable scheduled tasks."

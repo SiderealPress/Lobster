@@ -31,7 +31,7 @@ class TestScheduledJobCreation:
         with patch.multiple(
             "src.mcp.inbox_server",
             SCHEDULED_JOBS_FILE=jobs_setup["jobs_file"],
-            SCHEDULED_TASKS_DIR=jobs_setup["base_dir"],
+            SCHEDULED_JOBS_DIR=jobs_setup["base_dir"],
             SCHEDULED_TASKS_TASKS_DIR=jobs_setup["tasks_dir"],
             sync_crontab=MagicMock(return_value=(True, "")),
         ):
@@ -57,7 +57,7 @@ class TestScheduledJobCreation:
         with patch.multiple(
             "src.mcp.inbox_server",
             SCHEDULED_JOBS_FILE=jobs_setup["jobs_file"],
-            SCHEDULED_TASKS_DIR=jobs_setup["base_dir"],
+            SCHEDULED_JOBS_DIR=jobs_setup["base_dir"],
             SCHEDULED_TASKS_TASKS_DIR=jobs_setup["tasks_dir"],
             sync_crontab=MagicMock(return_value=(True, "")),
         ):
@@ -229,7 +229,7 @@ class TestCrontabSync:
         with patch.multiple(
             "src.mcp.inbox_server",
             SCHEDULED_JOBS_FILE=jobs_file,
-            SCHEDULED_TASKS_DIR=temp_scheduled_tasks_dir,
+            _REPO_DIR=temp_scheduled_tasks_dir.parent.parent,
         ):
             with patch("subprocess.run") as mock_run:
                 mock_run.return_value = MagicMock(

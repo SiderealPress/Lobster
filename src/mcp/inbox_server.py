@@ -108,15 +108,19 @@ def _reset_state_on_startup():
 
 _reset_state_on_startup()
 
+# Workspace and repo directories
+_WORKSPACE = Path(os.environ.get("LOBSTER_WORKSPACE", Path.home() / "lobster-workspace"))
+_REPO_DIR = Path(os.environ.get("LOBSTER_INSTALL_DIR", Path.home() / "lobster"))
+
 # Scheduled Tasks Directories
-SCHEDULED_TASKS_DIR = Path.home() / "lobster" / "scheduled-tasks"
-SCHEDULED_JOBS_FILE = SCHEDULED_TASKS_DIR / "jobs.json"
-SCHEDULED_TASKS_TASKS_DIR = SCHEDULED_TASKS_DIR / "tasks"
-SCHEDULED_TASKS_LOGS_DIR = SCHEDULED_TASKS_DIR / "logs"
+SCHEDULED_TASKS_TASKS_DIR = _REPO_DIR / "scheduled-tasks" / "tasks"
+SCHEDULED_JOBS_DIR = _WORKSPACE / "scheduled-jobs"
+SCHEDULED_JOBS_FILE = SCHEDULED_JOBS_DIR / "jobs.json"
+SCHEDULED_TASKS_LOGS_DIR = SCHEDULED_JOBS_DIR / "logs"
 
 # Ensure directories exist
 for d in [INBOX_DIR, OUTBOX_DIR, PROCESSED_DIR, PROCESSING_DIR, FAILED_DIR, SENT_DIR, CONFIG_DIR,
-          AUDIO_DIR, TASK_OUTPUTS_DIR, SCHEDULED_TASKS_DIR, SCHEDULED_TASKS_TASKS_DIR,
+          AUDIO_DIR, TASK_OUTPUTS_DIR, SCHEDULED_TASKS_TASKS_DIR, SCHEDULED_JOBS_DIR,
           SCHEDULED_TASKS_LOGS_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
@@ -2291,7 +2295,7 @@ def validate_job_name(name: str) -> tuple[bool, str]:
 
 def sync_crontab() -> tuple[bool, str]:
     """Sync jobs.json to crontab. Returns (success, message)."""
-    sync_script = SCHEDULED_TASKS_DIR / "sync-crontab.sh"
+    sync_script = _REPO_DIR / "scheduled-tasks" / "sync-crontab.sh"
     try:
         result = subprocess.run(
             [str(sync_script)],
@@ -3046,7 +3050,7 @@ async def handle_get_brain_dump_status(args: dict) -> list[TextContent]:
 # =============================================================================
 
 
-CANONICAL_DIR = Path.home() / "lobster" / "memory" / "canonical"
+CANONICAL_DIR = _WORKSPACE / "memory" / "canonical"
 HANDOFF_PATH = CANONICAL_DIR / "handoff.md"
 
 
