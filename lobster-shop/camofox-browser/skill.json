@@ -1,0 +1,72 @@
+{
+  "name": "camofox-browser",
+  "version": "1.0.0",
+  "description": "Browse the real web with anti-detection — search Google, Amazon, LinkedIn, and more without getting blocked",
+  "author": "Jo Inc (packaged for Lobster by Drew)",
+  "status": "available",
+  "source": {
+    "github": "https://github.com/jo-inc/camofox-browser",
+    "npm": "@askjo/camofox-browser",
+    "license": "MIT"
+  },
+  "adds": {
+    "mcp_tools": [
+      "camofox_create_tab",
+      "camofox_snapshot",
+      "camofox_click",
+      "camofox_type",
+      "camofox_navigate",
+      "camofox_scroll",
+      "camofox_screenshot",
+      "camofox_close_tab",
+      "camofox_list_tabs"
+    ],
+    "bot_commands": [
+      "/browse",
+      "/search"
+    ],
+    "scheduled_jobs": []
+  },
+  "config": {
+    "camofox_port": {
+      "description": "Port for the camofox-browser server",
+      "default": 9377,
+      "required": false
+    },
+    "camofox_url": {
+      "description": "URL for an existing camofox-browser server (overrides port)",
+      "required": false
+    },
+    "auto_start": {
+      "description": "Auto-start the camofox server on install",
+      "default": true,
+      "required": false
+    }
+  },
+  "dependencies": {
+    "pip": [
+      "httpx>=0.24",
+      "mcp>=1.0"
+    ],
+    "system": [],
+    "npm": [
+      "@askjo/camofox-browser"
+    ],
+    "runtime": {
+      "node": ">=18"
+    },
+    "api_keys": []
+  },
+  "setup": {
+    "auto": [
+      "Install Node.js dependencies (camofox-browser server)",
+      "Install Python dependencies (MCP wrapper)",
+      "Register MCP server with Claude",
+      "Start camofox-browser server"
+    ],
+    "manual": [
+      "Ensure Node.js >= 18 is installed",
+      "First run downloads Camoufox browser engine (~300MB)"
+    ]
+  }
+}
