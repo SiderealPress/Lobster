@@ -41,6 +41,23 @@ mkdir -p "$MESSAGES_DIR/config" "$LOG_DIR"
 export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
 
 #===============================================================================
+# Model Tiering Configuration
+#
+# The dispatcher runs on Sonnet for cost efficiency (~40% cheaper than Opus).
+# Subagents that don't specify an explicit model in their .md frontmatter
+# will inherit Sonnet via CLAUDE_CODE_SUBAGENT_MODEL.
+# Agents needing Opus (functional-engineer, gsd-debugger) override explicitly.
+#
+# To revert dispatcher to Opus: remove --model sonnet from launch_claude()
+# To revert subagents to Opus: unset CLAUDE_CODE_SUBAGENT_MODEL
+#===============================================================================
+export CLAUDE_CODE_SUBAGENT_MODEL=sonnet
+
+# Trigger context compaction at 80% capacity instead of default 95%.
+# Keeps peak context size lower, reducing token costs per turn.
+export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=80
+
+#===============================================================================
 # Logging
 #===============================================================================
 log() {
@@ -144,17 +161,22 @@ launch_claude() {
     local claude_exit_code=0
     if [[ "$attempt" -eq 1 ]]; then
         # First attempt: try to continue the most recent session
+        # --model sonnet: Dispatcher uses Sonnet for cost efficiency (~40% cheaper).
+        # Sonnet handles message routing, tool invocation, and reply composition well.
+        # To revert to Opus: remove the --model sonnet flag below.
         log "Trying to continue most recent session..."
         claude --dangerously-skip-permissions \
+            --model sonnet \
             --continue \
-            --max-turns 200 \
+            --max-turns 150 \
             -p "$init_prompt" \
             2>&1 | tee -a "$LOG_DIR/claude-session.log" || claude_exit_code=$?
     else
         # Subsequent attempts after failure: start fresh
         log "Starting fresh session (previous attempt failed)..."
         claude --dangerously-skip-permissions \
-            --max-turns 200 \
+            --model sonnet \
+            --max-turns 150 \
             -p "$init_prompt" \
             2>&1 | tee -a "$LOG_DIR/claude-session.log" || claude_exit_code=$?
     fi

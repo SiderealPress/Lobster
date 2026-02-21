@@ -72,18 +72,31 @@ fi
 # Guard 5: Subagent check — only self-check when subagents are running
 # If claude count is <= 1, only the main session exists (no subagents to check on)
 CLAUDE_COUNT=$(pgrep -c -f "claude" 2>/dev/null || echo "0")
-if [ "$CLAUDE_COUNT" -le 1 ]; then
-    exit 0
-fi
 
-# All guards passed — build self-check message with agent status
+# Source agent status scanner for both status and completion detection
 AGENT_STATUS_SCRIPT="${LOBSTER_INSTALL_DIR:-$HOME/lobster}/scripts/agent-status.sh"
 source "$AGENT_STATUS_SCRIPT"
-AGENT_SUMMARY=$(scan_agent_status)
 
-SELF_CHECK_TEXT="status? (Self-check)"
-if [ -n "$AGENT_SUMMARY" ]; then
-    SELF_CHECK_TEXT="status? (Self-check) | ${AGENT_SUMMARY}"
+# Check for completed tasks first (works even if subagents already exited)
+COMPLETED_TASKS=$(scan_completed_tasks)
+
+if [ -n "$COMPLETED_TASKS" ]; then
+    # Completed task found — inject structured completion message.
+    # This replaces the generic "status?" prompt with actionable info,
+    # so the dispatcher can relay results directly without LLM reasoning
+    # about what to check.
+    SELF_CHECK_TEXT="[Task Completed] ${COMPLETED_TASKS}"
+else
+    # No completed tasks — only inject status check if subagents are still running
+    if [ "$CLAUDE_COUNT" -le 1 ]; then
+        exit 0
+    fi
+
+    AGENT_SUMMARY=$(scan_agent_status)
+    SELF_CHECK_TEXT="status? (Self-check)"
+    if [ -n "$AGENT_SUMMARY" ]; then
+        SELF_CHECK_TEXT="status? (Self-check) | ${AGENT_SUMMARY}"
+    fi
 fi
 
 TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%S.%6N)
