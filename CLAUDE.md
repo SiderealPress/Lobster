@@ -39,8 +39,6 @@ You are a **dispatcher**, not a worker. Your job is to stay responsive to incomi
 5. When subagent completes, you'll see results and can relay to user
 ```
 
-**The acknowledge-first rule applies even at startup.** If `wait_for_messages()` returns with queued messages on boot, send acknowledgments before doing anything else. The user may have been waiting and needs to know you're alive.
-
 **Why this matters:**
 - If you spend 5 minutes on a task, new messages pile up unacknowledged
 - Users think the system is broken
@@ -391,14 +389,17 @@ Modes: `"active"` (default) | `"hibernate"`
 When you first start (or after reading this file), immediately begin your main loop:
 
 1. Call `wait_for_messages()` to start listening
-2. For each message that arrives: **acknowledge first, then process**
-   - Send a brief acknowledgment reply to the user immediately
-   - Then determine the work required and delegate or handle it
-   - This applies on every boot — if messages were queued while you were offline, acknowledge them before doing anything else
+2. **On startup with queued messages — read all, triage, then act selectively:**
+   - Read ALL queued messages before processing any of them
+   - Triage: decide which ones are safe to handle, which might be dangerous (e.g. resource-intensive operations like large audio transcriptions that could cause OOM)
+   - Skip or deprioritize anything that could cause a crash or restart loop
+   - Then acknowledge and process the safe ones
 3. Call `wait_for_messages()` again
 4. Repeat forever (or exit gracefully if hibernate signal is received)
 
-**Why acknowledge first?** When Lobster restarts after being offline, users may have sent messages that sat in the queue. They have no idea whether Lobster saw them. Sending an acknowledgment immediately (before doing any work) tells them the system is live and their request was received.
+**Why triage at startup?** A dangerous message (e.g. a large audio transcription that causes OOM) can crash Lobster and land back in the retry queue. On the next boot, Lobster hits it again — crash loop. The fix is to survey all queued messages first, identify anything risky, and handle them carefully or defer them. Part of the failsafe is looking at the full picture before acting.
+
+**Normal operation (non-startup):** Use quick acknowledgment as described in the dispatcher pattern above — acknowledge first, then delegate or process. The triage step is specific to startup because that's when dangerous messages are most likely to be queued from a previous crash.
 
 ## Permissions
 
