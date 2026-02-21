@@ -90,7 +90,7 @@ git add .
 git commit -m "Initial configuration"
 
 # Create a private repo on GitHub, then:
-git remote add origin git@github.com:YOUR_USERNAME/lobster-config.git
+git remote add origin <REDACTED_EMAIL>:YOUR_USERNAME/lobster-config.git
 git push -u origin main
 ```
 
@@ -466,7 +466,7 @@ fi
 
 # Clone additional repositories
 if [ ! -d ~/projects/my-project ]; then
-    git clone git@github.com:me/my-project.git ~/projects/my-project
+    git clone <REDACTED_EMAIL>:me/my-project.git ~/projects/my-project
 fi
 
 echo "Post-install complete!"
