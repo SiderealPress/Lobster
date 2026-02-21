@@ -35,6 +35,22 @@ from typing import Any, NamedTuple
 # ---------------------------------------------------------------------------
 
 _WORKSPACE = Path(os.environ.get("LOBSTER_WORKSPACE", Path.home() / "lobster-workspace"))
+_REPO_DIR = Path(os.environ.get("LOBSTER_INSTALL_DIR", Path.home() / "lobster"))
+
+
+def _assert_not_in_git_repo(path: Path) -> None:
+    """Raise RuntimeError if path is inside any git repository."""
+    resolved = path.resolve()
+    current = resolved if resolved.is_dir() else resolved.parent
+    while True:
+        if (current / ".git").exists():
+            raise RuntimeError(
+                f"SAFETY: refusing to write inside git repo: {path}  (repo root: {current})"
+            )
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
 
 DEFAULT_CONFIG = {
     "CONSOLIDATION_MODEL": "claude-sonnet-4-20250514",
@@ -592,6 +608,7 @@ def read_canonical_file(canonical_dir: str, relative_path: str) -> str:
 def write_canonical_file(canonical_dir: str, relative_path: str, content: str) -> None:
     """Write content to a canonical file, creating parent directories as needed."""
     path = Path(canonical_dir) / relative_path
+    _assert_not_in_git_repo(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
     log.info(f"Updated canonical file: {relative_path}")
@@ -635,6 +652,29 @@ def collect_canonical_files(canonical_dir: str) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
+def _seed_templates_if_needed(canonical_dir: str) -> None:
+    """Seed canonical templates if canonical dir has zero .md files.
+
+    Copies from repo templates, skipping example-* files.
+    Only runs when the canonical dir is completely empty.
+    """
+    cdir = Path(canonical_dir)
+    if not cdir.is_dir():
+        return
+    md_files = list(cdir.glob("*.md"))
+    if md_files:
+        return  # already has content
+    templates_dir = _REPO_DIR / "memory" / "canonical-templates"
+    if not templates_dir.is_dir():
+        return
+    for src in templates_dir.glob("*.md"):
+        if src.name.startswith("example-"):
+            continue
+        dest = cdir / src.name
+        shutil.copy2(str(src), str(dest))
+        log.info(f"Seeded canonical template: {src.name}")
+
+
 def consolidate(
     config: dict[str, str],
     dry_run: bool = False,
@@ -657,6 +697,9 @@ def consolidate(
     archive_dir = config["ARCHIVE_DIR"]
     model = config["CONSOLIDATION_MODEL"]
     max_events = int(config["MAX_EVENTS_PER_BATCH"])
+
+    # Seed canonical templates if the directory is empty
+    _seed_templates_if_needed(canonical_dir)
 
     run_id = str(uuid.uuid4())
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")

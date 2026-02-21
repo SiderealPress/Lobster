@@ -16,7 +16,7 @@ fi
 
 REPO_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
 WORKSPACE="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
-TASK_FILE="$REPO_DIR/scheduled-tasks/tasks/${JOB_NAME}.md"
+TASK_FILE="$WORKSPACE/scheduled-jobs/tasks/${JOB_NAME}.md"
 OUTPUT_DIR="$HOME/messages/task-outputs"
 LOG_DIR="$WORKSPACE/scheduled-jobs/logs"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)

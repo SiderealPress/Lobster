@@ -564,7 +564,7 @@ step "Configuring distributed git hooks..."
 
 cd "$INSTALL_DIR"
 git config --local core.hooksPath .githooks
-chmod +x .githooks/pre-push .githooks/post-checkout 2>/dev/null || true
+chmod +x .githooks/pre-push .githooks/post-checkout .githooks/pre-commit 2>/dev/null || true
 
 success "Git hooks configured (core.hooksPath -> .githooks)"
 
@@ -574,11 +574,24 @@ success "Git hooks configured (core.hooksPath -> .githooks)"
 
 step "Creating directories..."
 
-mkdir -p "$WORKSPACE_DIR"/{logs,data,scheduled-jobs/logs}
+mkdir -p "$WORKSPACE_DIR"/{logs,data,scheduled-jobs/{logs,tasks}}
 mkdir -p "$WORKSPACE_DIR/memory"/{canonical/{people,projects},archive/digests}
 mkdir -p "$MESSAGES_DIR"/{inbox,outbox,processed,processing,failed,config,audio,task-outputs}
-mkdir -p "$INSTALL_DIR/scheduled-tasks/tasks"
 mkdir -p "$HOME/projects"/{personal,business}
+
+# Seed canonical templates (only files that don't already exist; skip examples)
+TEMPLATES_DIR="$INSTALL_DIR/memory/canonical-templates"
+if [ -d "$TEMPLATES_DIR" ]; then
+    for tmpl in "$TEMPLATES_DIR"/*.md; do
+        [ -f "$tmpl" ] || continue
+        base=$(basename "$tmpl")
+        dest="$WORKSPACE_DIR/memory/canonical/$base"
+        if [ ! -f "$dest" ]; then
+            cp "$tmpl" "$dest"
+            info "  Seeded canonical template: $base"
+        fi
+    done
+fi
 
 success "Directories created"
 info "  ~/projects/personal - Personal projects"
@@ -616,7 +629,7 @@ fi
 
 REPO_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
 WORKSPACE="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
-TASK_FILE="$REPO_DIR/scheduled-tasks/tasks/${JOB_NAME}.md"
+TASK_FILE="$WORKSPACE/scheduled-jobs/tasks/${JOB_NAME}.md"
 OUTPUT_DIR="$HOME/messages/task-outputs"
 LOG_DIR="$WORKSPACE/scheduled-jobs/logs"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)

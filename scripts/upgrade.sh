@@ -468,7 +468,7 @@ create_new_directories() {
         "$MESSAGES_DIR/audio"
         "$MESSAGES_DIR/config"
         "$MESSAGES_DIR/task-outputs"
-        "$LOBSTER_DIR/scheduled-tasks/tasks"
+        "$WORKSPACE_DIR/scheduled-jobs/tasks"
         "$WORKSPACE_DIR/data"
         "$WORKSPACE_DIR/memory/canonical/people"
         "$WORKSPACE_DIR/memory/canonical/projects"
@@ -828,6 +828,46 @@ run_migrations() {
         mkdir -p "$MESSAGES_DIR/sent"
         substep "Created sent/ directory for conversation history"
         migrated=$((migrated + 1))
+    fi
+
+    # Migration 7: Move scheduled task definition files from repo to workspace
+    local old_tasks_dir="$LOBSTER_DIR/scheduled-tasks/tasks"
+    local new_tasks_dir="$WORKSPACE_DIR/scheduled-jobs/tasks"
+    if [ -d "$old_tasks_dir" ] && ls "$old_tasks_dir"/*.md &>/dev/null 2>&1; then
+        mkdir -p "$new_tasks_dir"
+        local task_moved=0
+        for task_file in "$old_tasks_dir"/*.md; do
+            local base
+            base=$(basename "$task_file")
+            if [ ! -f "$new_tasks_dir/$base" ]; then
+                cp "$task_file" "$new_tasks_dir/$base"
+                substep "Migrated task file: $base"
+                task_moved=$((task_moved + 1))
+            fi
+        done
+        if [ "$task_moved" -gt 0 ]; then
+            success "Migrated $task_moved task file(s) to workspace"
+            migrated=$((migrated + task_moved))
+        fi
+    fi
+
+    # Migration 8: Seed canonical templates if empty
+    local canonical_dir="$WORKSPACE_DIR/memory/canonical"
+    local templates_dir="$LOBSTER_DIR/memory/canonical-templates"
+    if [ -d "$templates_dir" ] && [ -d "$canonical_dir" ]; then
+        local md_count
+        md_count=$(find "$canonical_dir" -maxdepth 1 -name '*.md' 2>/dev/null | wc -l)
+        if [ "$md_count" -eq 0 ]; then
+            for tmpl in "$templates_dir"/*.md; do
+                [ -f "$tmpl" ] || continue
+                local base
+                base=$(basename "$tmpl")
+                [[ "$base" == example-* ]] && continue
+                cp "$tmpl" "$canonical_dir/$base"
+                substep "Seeded canonical template: $base"
+                migrated=$((migrated + 1))
+            done
+        fi
     fi
 
     if [ "$migrated" -eq 0 ]; then

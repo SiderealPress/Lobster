@@ -112,16 +112,23 @@ _reset_state_on_startup()
 _WORKSPACE = Path(os.environ.get("LOBSTER_WORKSPACE", Path.home() / "lobster-workspace"))
 _REPO_DIR = Path(os.environ.get("LOBSTER_INSTALL_DIR", Path.home() / "lobster"))
 
-# Scheduled Tasks Directories
-SCHEDULED_TASKS_TASKS_DIR = _REPO_DIR / "scheduled-tasks" / "tasks"
+# Structural guard: workspace must never be inside a git repo
+from path_guard import assert_not_in_git_repo as _assert_not_in_git_repo
+_assert_not_in_git_repo(_WORKSPACE)
+
+# Scheduled Tasks Directories (task definitions live in workspace, not the repo)
 SCHEDULED_JOBS_DIR = _WORKSPACE / "scheduled-jobs"
+SCHEDULED_TASKS_TASKS_DIR = SCHEDULED_JOBS_DIR / "tasks"
 SCHEDULED_JOBS_FILE = SCHEDULED_JOBS_DIR / "jobs.json"
 SCHEDULED_TASKS_LOGS_DIR = SCHEDULED_JOBS_DIR / "logs"
+
+# Canonical memory directory (workspace)
+CANONICAL_DIR = _WORKSPACE / "memory" / "canonical"
 
 # Ensure directories exist
 for d in [INBOX_DIR, OUTBOX_DIR, PROCESSED_DIR, PROCESSING_DIR, FAILED_DIR, SENT_DIR, CONFIG_DIR,
           AUDIO_DIR, TASK_OUTPUTS_DIR, SCHEDULED_TASKS_TASKS_DIR, SCHEDULED_JOBS_DIR,
-          SCHEDULED_TASKS_LOGS_DIR]:
+          SCHEDULED_TASKS_LOGS_DIR, CANONICAL_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
 # Logging
@@ -138,6 +145,29 @@ _file_handler = RotatingFileHandler(
 _file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
 log.addHandler(_file_handler)
 log.addHandler(logging.StreamHandler())
+
+# Seed canonical templates on startup (idempotent — only copies missing files)
+def _seed_canonical_templates():
+    """Copy missing canonical template files from repo into workspace.
+
+    Skips example-* files (they're reference templates only).
+    Never overwrites existing files.
+    """
+    templates_dir = _REPO_DIR / "memory" / "canonical-templates"
+    if not templates_dir.is_dir():
+        return
+    for src in templates_dir.rglob("*.md"):
+        if src.name.startswith("example-"):
+            continue
+        rel = src.relative_to(templates_dir)
+        dest = CANONICAL_DIR / rel
+        if not dest.exists():
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            import shutil
+            shutil.copy2(str(src), str(dest))
+            log.info(f"Seeded canonical template: {rel}")
+
+_seed_canonical_templates()
 
 # Initialize audit log for structured observability
 init_audit_log(LOG_DIR)

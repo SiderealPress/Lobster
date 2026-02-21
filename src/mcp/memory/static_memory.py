@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Optional
 
 from .provider import MemoryEvent
+from path_guard import assert_not_in_git_repo
 
 log = logging.getLogger("lobster-memory")
 
@@ -41,6 +42,8 @@ class StaticMemory:
     ):
         self._canonical_dir = canonical_dir or DEFAULT_CANONICAL_DIR
         self._event_log = event_log or DEFAULT_EVENT_LOG
+        assert_not_in_git_repo(self._canonical_dir)
+        assert_not_in_git_repo(self._event_log)
         self._canonical_dir.mkdir(parents=True, exist_ok=True)
         self._event_log.parent.mkdir(parents=True, exist_ok=True)
         # Track next ID from event log

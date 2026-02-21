@@ -333,7 +333,7 @@ wait_for_messages() ← loop back
 ## Key Directories
 
 - `~/lobster/` - Repository (code only, no personal data)
-  - `scheduled-tasks/tasks/` - Task definition markdown files (committed)
+  - `scheduled-tasks/` - Job runner scripts (committed, no runtime data)
   - `memory/canonical-templates/` - Seed templates (committed)
 - `~/lobster-workspace/` - Runtime data (never in repo)
   - `memory/canonical/` - Handoff, priorities, people, projects
@@ -341,6 +341,7 @@ wait_for_messages() ← loop back
   - `data/memory.db` - Vector memory SQLite DB
   - `data/events.jsonl` - Event log
   - `scheduled-jobs/jobs.json` - Job registry state
+  - `scheduled-jobs/tasks/` - Task definition markdown files
   - `scheduled-jobs/logs/` - Execution logs
   - `logs/` - MCP server logs
 - `~/projects/` - Projects directory

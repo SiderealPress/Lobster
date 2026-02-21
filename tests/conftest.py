@@ -55,8 +55,8 @@ def temp_messages_dir(temp_dir: Path) -> Path:
 
 @pytest.fixture
 def temp_scheduled_tasks_dir(temp_dir: Path) -> Path:
-    """Create a temporary scheduled tasks directory structure."""
-    tasks_dir = temp_dir / "lobster" / "scheduled-tasks"
+    """Create a temporary scheduled jobs directory structure (workspace layout)."""
+    tasks_dir = temp_dir / "workspace" / "scheduled-jobs"
     (tasks_dir / "tasks").mkdir(parents=True)
     (tasks_dir / "logs").mkdir(parents=True)
     # Initialize jobs.json
