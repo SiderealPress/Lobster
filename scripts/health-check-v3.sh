@@ -33,6 +33,11 @@ LOBSTER_STATE_FILE="${LOBSTER_STATE_FILE_OVERRIDE:-$HOME/messages/config/lobster
 STALE_THRESHOLD_SECONDS=180          # 3 minutes - RED if any message older (watchdog handles soft recovery at 90s)
 YELLOW_THRESHOLD_SECONDS=120         # 2 minutes - YELLOW warning
 
+OUTBOX_DIR="$HOME/messages/outbox"
+OUTBOX_STALE_THRESHOLD_SECONDS=900   # 15 min = RED
+OUTBOX_YELLOW_THRESHOLD_SECONDS=300  # 5 min = YELLOW
+OUTBOX_HISTORICAL_CUTOFF=3600        # Skip files > 1 hour (dead-letter candidates)
+
 LOG_FILE="$HOME/lobster-workspace/logs/health-check.log"
 LOCK_FILE="/tmp/lobster-health-check-v3.lock"
 
@@ -289,7 +294,51 @@ check_inbox_drain() {
     fi
 }
 
-# Check 5: Memory
+# Check 5: Outbox drain - are outgoing messages being delivered?
+# Returns: 0=GREEN, 1=YELLOW, 2=RED
+check_outbox_drain() {
+    local now
+    now=$(date +%s)
+    local oldest_age=0
+    local stale_count=0
+    local yellow_count=0
+    local total_count=0
+
+    while IFS= read -r -d '' f; do
+        local file_time
+        file_time=$(stat -c %Y "$f" 2>/dev/null)
+        [[ -z "$file_time" ]] && continue
+
+        local age=$((now - file_time))
+
+        # Skip historical stuck files (dead-letter candidates)
+        [[ $age -gt $OUTBOX_HISTORICAL_CUTOFF ]] && continue
+
+        total_count=$((total_count + 1))
+        [[ $age -gt $oldest_age ]] && oldest_age=$age
+
+        if [[ $age -gt $OUTBOX_STALE_THRESHOLD_SECONDS ]]; then
+            stale_count=$((stale_count + 1))
+        elif [[ $age -gt $OUTBOX_YELLOW_THRESHOLD_SECONDS ]]; then
+            yellow_count=$((yellow_count + 1))
+        fi
+    done < <(find "$OUTBOX_DIR" -maxdepth 1 -name "*.json" -print0 2>/dev/null)
+
+    if [[ $stale_count -gt 0 ]]; then
+        log_error "RED: $stale_count outbox message(s) older than ${OUTBOX_STALE_THRESHOLD_SECONDS}s (oldest: ${oldest_age}s)"
+        return 2
+    elif [[ $yellow_count -gt 0 ]]; then
+        log_warn "YELLOW: $yellow_count outbox message(s) older than ${OUTBOX_YELLOW_THRESHOLD_SECONDS}s (oldest: ${oldest_age}s)"
+        return 1
+    elif [[ $total_count -gt 0 ]]; then
+        log_info "Outbox has $total_count message(s), all fresh (oldest: ${oldest_age}s)"
+        return 0
+    else
+        return 0
+    fi
+}
+
+# Check 6: Memory
 check_memory() {
     local mem_pct
     mem_pct=$(free | awk '/^Mem:/ {printf "%.0f", $3/$2 * 100}')
@@ -303,7 +352,7 @@ check_memory() {
     return 0
 }
 
-# Check 6: Disk
+# Check 7: Disk
 check_disk() {
     local disk_pct
     disk_pct=$(df "$HOME" | awk 'NR==2 {gsub(/%/,""); print $5}')
@@ -409,6 +458,17 @@ main() {
         elif [[ $inbox_rc -eq 1 && "$level" == "GREEN" ]]; then
             level="YELLOW"
         fi
+    fi
+
+    # --- Outbox drain check (are replies being delivered?) ---
+
+    check_outbox_drain
+    local outbox_rc=$?
+    if [[ $outbox_rc -eq 2 ]]; then
+        level="RED"
+        restart_reason="${restart_reason:+$restart_reason + }stale outbox (>$((OUTBOX_STALE_THRESHOLD_SECONDS/60))m)"
+    elif [[ $outbox_rc -eq 1 && "$level" == "GREEN" ]]; then
+        level="YELLOW"
     fi
 
     # --- Resource checks (RED if critical) ---
