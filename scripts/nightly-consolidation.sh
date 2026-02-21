@@ -1,48 +1,37 @@
 #!/bin/bash
-# Nightly Consolidation - Wrapper script for cron
+# Nightly Consolidation - Cron wrapper script
 #
-# This script runs the Python consolidation process and, if successful,
-# injects a summary message into the inbox for the running Claude session.
+# Injects a consolidation task message into the inbox for the running
+# Claude session to process. Claude handles the actual synthesis using
+# its MCP memory tools (memory_recent, mark_consolidated, etc.).
 #
-# It can operate in two modes:
-#   1. Direct mode (default): Runs the Python script directly (requires
-#      ANTHROPIC_API_KEY in environment). Preferred when running standalone.
-#   2. Inbox mode (--inject-only): Injects a consolidation message into the
-#      inbox queue for the running Claude session to process. Useful when
-#      the Python script dependencies are not available.
+# No direct API calls are made here. Everything goes through Claude Code.
 #
 # Crontab entry:
 #   0 3 * * * $HOME/lobster/scripts/nightly-consolidation.sh
 #
-# Environment:
-#   CONSOLIDATION_HOUR - Hour to run (default: 3, used by cron setup)
-#   ANTHROPIC_API_KEY  - Required for direct mode
+# Dedup guard: if a consolidation message is already pending in the inbox,
+# this script exits without writing a duplicate.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOBSTER_DIR="$(dirname "$SCRIPT_DIR")"
-VENV="$LOBSTER_DIR/.venv"
 MESSAGES_DIR="${LOBSTER_MESSAGES:-$HOME/messages}"
 INBOX="$MESSAGES_DIR/inbox"
-CONFIG_DIR="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}"
-CONFIG="$CONFIG_DIR/consolidation.conf"
 TIMESTAMP=$(date +%s%3N)
 
 # Ensure inbox directory exists
 mkdir -p "$INBOX"
 
-# Parse arguments
-INJECT_ONLY=false
-for arg in "$@"; do
-    case "$arg" in
-        --inject-only) INJECT_ONLY=true ;;
-    esac
-done
+# Dedup guard: skip if a consolidation message is already pending
+if ls "$INBOX"/*_consolidation.json 2>/dev/null | grep -q .; then
+    echo "Consolidation message already pending in inbox. Skipping."
+    exit 0
+fi
 
-if [ "$INJECT_ONLY" = true ]; then
-    # Inject a consolidation message for the running Claude session
-    cat > "$INBOX/${TIMESTAMP}_consolidation.json" << EOF
+# Inject a consolidation message for the running Claude session
+cat > "$INBOX/${TIMESTAMP}_consolidation.json" << EOF
 {
   "id": "${TIMESTAMP}_consolidation",
   "source": "internal",
@@ -52,32 +41,5 @@ if [ "$INJECT_ONLY" = true ]; then
   "timestamp": "$(date -Iseconds)"
 }
 EOF
-    echo "Consolidation message injected at $(date -Iseconds)"
-    exit 0
-fi
 
-# Direct mode: run the Python consolidation script
-echo "Running nightly consolidation at $(date -Iseconds)"
-
-# Activate virtual environment if available
-if [ -f "$VENV/bin/activate" ]; then
-    # shellcheck disable=SC1091
-    source "$VENV/bin/activate"
-fi
-
-# Run the consolidation script
-PYTHON="${VENV}/bin/python3"
-if [ ! -x "$PYTHON" ]; then
-    PYTHON="python3"
-fi
-
-"$PYTHON" "$SCRIPT_DIR/nightly-consolidation.py" --config "$CONFIG"
-EXIT_CODE=$?
-
-if [ $EXIT_CODE -eq 0 ]; then
-    echo "Consolidation completed successfully at $(date -Iseconds)"
-else
-    echo "Consolidation failed with exit code $EXIT_CODE at $(date -Iseconds)" >&2
-fi
-
-exit $EXIT_CODE
+echo "Consolidation message injected at $(date -Iseconds)"
