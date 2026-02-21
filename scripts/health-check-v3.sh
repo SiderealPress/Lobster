@@ -51,6 +51,13 @@ RESTART_STATE_FILE="$WORKSPACE_DIR/logs/health-restart-state-v3"
 MEMORY_THRESHOLD=90                  # percentage
 DISK_THRESHOLD=95                    # percentage
 
+# User-facing message sources (only these count for inbox staleness)
+USER_FACING_SOURCES="telegram sms signal slack"
+
+# Circuit breaker: tracks which stale files already triggered a restart
+# to prevent restart loops when the same message persists after restart
+STALE_INBOX_MARKER_DIR="$WORKSPACE_DIR/logs/stale-inbox-markers"
+
 # Telegram direct alerting (bypasses outbox entirely)
 CONFIG_ENV="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}/config.env"
 
@@ -257,7 +264,24 @@ check_claude_process() {
     return 1
 }
 
+# Check if a source is user-facing (should count toward inbox staleness)
+is_user_facing_source() {
+    local source="$1"
+    local s
+    for s in $USER_FACING_SOURCES; do
+        [[ "$source" == "$s" ]] && return 0
+    done
+    return 1
+}
+
 # Check 4: Inbox drain - THE primary deterministic check
+# Only counts messages from user-facing sources (telegram, sms, signal, slack).
+# System/internal/task-output messages are ignored - they may sit in the inbox
+# legitimately without indicating a stuck system.
+#
+# Circuit breaker: if a stale file already triggered a restart (tracked via
+# marker files), it is skipped to prevent restart loops.
+#
 # Returns: 0=GREEN, 1=YELLOW, 2=RED
 check_inbox_drain() {
     local now
@@ -266,8 +290,34 @@ check_inbox_drain() {
     local stale_count=0
     local yellow_count=0
     local total_count=0
+    local skipped_system=0
+    local skipped_circuit_breaker=0
 
     while IFS= read -r -d '' f; do
+        local basename_f
+        basename_f=$(basename "$f")
+
+        # Parse source from JSON using jq; skip if unparseable or missing
+        local source
+        source=$(jq -r '.source // empty' "$f" 2>/dev/null)
+        if [[ -z "$source" ]]; then
+            log_info "Skipping $basename_f: cannot parse source field"
+            continue
+        fi
+
+        # Only count user-facing sources
+        if ! is_user_facing_source "$source"; then
+            skipped_system=$((skipped_system + 1))
+            continue
+        fi
+
+        # Circuit breaker: skip files that already triggered a restart
+        if [[ -d "$STALE_INBOX_MARKER_DIR" && -f "$STALE_INBOX_MARKER_DIR/$basename_f" ]]; then
+            skipped_circuit_breaker=$((skipped_circuit_breaker + 1))
+            log_info "Circuit breaker: skipping $basename_f (already triggered restart)"
+            continue
+        fi
+
         total_count=$((total_count + 1))
         local file_time
         file_time=$(stat -c %Y "$f" 2>/dev/null)
@@ -283,14 +333,21 @@ check_inbox_drain() {
         fi
     done < <(find "$INBOX_DIR" -maxdepth 1 -name "*.json" -print0 2>/dev/null)
 
+    if [[ $skipped_system -gt 0 ]]; then
+        log_info "Inbox drain: skipped $skipped_system non-user message(s)"
+    fi
+    if [[ $skipped_circuit_breaker -gt 0 ]]; then
+        log_info "Inbox drain: skipped $skipped_circuit_breaker circuit-breaker message(s)"
+    fi
+
     if [[ $stale_count -gt 0 ]]; then
-        log_error "RED: $stale_count message(s) older than ${STALE_THRESHOLD_SECONDS}s (oldest: ${oldest_age}s)"
+        log_error "RED: $stale_count user message(s) older than ${STALE_THRESHOLD_SECONDS}s (oldest: ${oldest_age}s)"
         return 2
     elif [[ $yellow_count -gt 0 ]]; then
-        log_warn "YELLOW: $yellow_count message(s) older than ${YELLOW_THRESHOLD_SECONDS}s (oldest: ${oldest_age}s)"
+        log_warn "YELLOW: $yellow_count user message(s) older than ${YELLOW_THRESHOLD_SECONDS}s (oldest: ${oldest_age}s)"
         return 1
     elif [[ $total_count -gt 0 ]]; then
-        log_info "Inbox has $total_count message(s), all fresh (oldest: ${oldest_age}s)"
+        log_info "Inbox has $total_count user message(s), all fresh (oldest: ${oldest_age}s)"
         return 0
     else
         return 0
@@ -370,6 +427,48 @@ check_disk() {
 }
 
 #===============================================================================
+# Circuit Breaker - prevent restart loops for persistent stale messages
+#===============================================================================
+
+# Record which inbox files triggered a stale-inbox restart.
+# On the next health check, these files will be skipped by check_inbox_drain()
+# so we don't restart again for the same stuck messages.
+record_stale_inbox_markers() {
+    mkdir -p "$STALE_INBOX_MARKER_DIR"
+    # Clear old markers first
+    rm -f "$STALE_INBOX_MARKER_DIR"/*.json 2>/dev/null
+
+    local now
+    now=$(date +%s)
+
+    while IFS= read -r -d '' f; do
+        local basename_f
+        basename_f=$(basename "$f")
+        local source
+        source=$(jq -r '.source // empty' "$f" 2>/dev/null)
+        [[ -z "$source" ]] && continue
+        is_user_facing_source "$source" || continue
+
+        local file_time
+        file_time=$(stat -c %Y "$f" 2>/dev/null)
+        [[ -z "$file_time" ]] && continue
+
+        local age=$((now - file_time))
+        if [[ $age -gt $STALE_THRESHOLD_SECONDS ]]; then
+            touch "$STALE_INBOX_MARKER_DIR/$basename_f"
+            log_info "Circuit breaker: marked $basename_f as restart-triggering"
+        fi
+    done < <(find "$INBOX_DIR" -maxdepth 1 -name "*.json" -print0 2>/dev/null)
+}
+
+# Clear circuit breaker markers (called when inbox is healthy)
+clear_stale_inbox_markers() {
+    if [[ -d "$STALE_INBOX_MARKER_DIR" ]]; then
+        rm -rf "$STALE_INBOX_MARKER_DIR"
+    fi
+}
+
+#===============================================================================
 # Recovery - always via systemd, never manual tmux
 #===============================================================================
 do_restart() {
@@ -387,6 +486,12 @@ Manual intervention required:
         return 1
     fi
 
+    # If restarting for stale inbox, record which files triggered it
+    # so the circuit breaker can skip them on the next check
+    if [[ "$reason" == *"stale inbox"* ]]; then
+        record_stale_inbox_markers
+    fi
+
     record_restart
 
     # Restart via systemd - this handles tmux lifecycle correctly
@@ -397,9 +502,25 @@ Manual intervention required:
     # Wait for startup
     sleep 5
 
-    # Verify recovery
+    # Verify recovery: service and tmux must be running
     if systemctl is-active --quiet "$SERVICE_CLAUDE" 2>/dev/null && \
        tmux -L "$TMUX_SOCKET" has-session -t "$TMUX_SESSION" 2>/dev/null; then
+
+        # For stale-inbox restarts, also re-verify inbox drain
+        if [[ "$reason" == *"stale inbox"* ]]; then
+            # Re-check inbox (circuit breaker markers will skip already-known files)
+            check_inbox_drain
+            local post_rc=$?
+            if [[ $post_rc -eq 2 ]]; then
+                log_warn "Post-restart: inbox still has NEW stale messages (not same as pre-restart)"
+                send_telegram_alert "System restarted but inbox still has stale messages.
+
+Reason: $reason
+Status: Restarted, but new stale messages detected post-restart"
+                return 0
+            fi
+        fi
+
         log_info "Restart successful"
         send_telegram_alert "System recovered automatically.
 
@@ -460,6 +581,9 @@ main() {
             restart_reason="${restart_reason:+$restart_reason + }stale inbox (>$((STALE_THRESHOLD_SECONDS/60))m)"
         elif [[ $inbox_rc -eq 1 && "$level" == "GREEN" ]]; then
             level="YELLOW"
+        elif [[ $inbox_rc -eq 0 ]]; then
+            # Inbox is healthy - clear any circuit breaker markers
+            clear_stale_inbox_markers
         fi
     fi
 
