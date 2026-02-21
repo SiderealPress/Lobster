@@ -960,10 +960,22 @@ if [ -f "$CLAUDE_SETTINGS" ]; then
         info "Self-check hook already configured in Claude Code settings"
     fi
 else
-    # Create settings.json with hook
+    # Create settings.json with both hooks
     cat > "$CLAUDE_SETTINGS" << HOOKEOF
 {
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 $INSTALL_DIR/hooks/no-auto-memory.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "mcp__lobster-inbox__send_reply",
@@ -979,10 +991,30 @@ else
   }
 }
 HOOKEOF
-    success "Claude Code settings created with self-check hook"
+    success "Claude Code settings created with hooks"
 fi
 
 success "Self-check system configured (cron every 3min + PostToolUse hook)"
+
+# Set up Claude Code PreToolUse hook to block writes to .claude/memory/
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '.hooks.PreToolUse[]? | select(.matcher == "Write|Edit")' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+            "matcher": "Write|Edit",
+            "hooks": [{
+                "type": "command",
+                "command": "python3 '"$INSTALL_DIR"'/hooks/no-auto-memory.py",
+                "timeout": 5
+            }]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "No-auto-memory hook added to Claude Code settings"
+    else
+        info "No-auto-memory hook already configured in Claude Code settings"
+    fi
+else
+    info "Skipping no-auto-memory hook (settings.json not yet created)"
+fi
 
 #===============================================================================
 # Python Environment
