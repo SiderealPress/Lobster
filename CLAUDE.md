@@ -286,6 +286,27 @@ When you receive a **voice message** that appears to be a "brain dump" (unstruct
 
 See `docs/BRAIN-DUMPS.md` for full documentation.
 
+## Model Selection for Subagents
+
+Lobster uses a tiered model strategy to balance cost and quality. Each subagent has an explicit model assigned in its `.md` frontmatter. When delegating work, the dispatcher does not need to specify a model -- the agent definition handles it.
+
+**Model tiers:**
+
+| Tier | Model | Use For | Cost |
+|------|-------|---------|------|
+| **High** | `opus` | Complex coding, architecture, debugging | 1x (baseline) |
+| **Standard** | `sonnet` | Planning, research, execution, synthesis | 0.6x |
+| **Light** | `haiku` | Verification, plan-checking, integration checks | 0.2x |
+
+**Agent model assignments:**
+
+- **Opus**: `functional-engineer`, `gsd-debugger` -- tasks requiring deep reasoning
+- **Sonnet**: `gsd-executor`, `gsd-planner`, `gsd-phase-researcher`, `gsd-codebase-mapper`, `gsd-research-synthesizer`, `gsd-roadmapper`, `gsd-project-researcher` -- structured work
+- **Haiku**: `gsd-verifier`, `gsd-plan-checker`, `gsd-integration-checker` -- pass/fail evaluation
+- **Inherit (Sonnet)**: `general-purpose` -- inherits from `CLAUDE_CODE_SUBAGENT_MODEL` env var
+
+**When to override:** If a task normally handled by a Sonnet agent requires unusually deep reasoning (e.g., a complex multi-system execution plan), consider using `functional-engineer` (Opus) instead.
+
 ## Behavior Guidelines
 
 1. **Never exit** - Always call `wait_for_messages` after processing
