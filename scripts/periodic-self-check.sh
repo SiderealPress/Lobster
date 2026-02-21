@@ -58,7 +58,16 @@ if [ "$CLAUDE_COUNT" -le 1 ]; then
     exit 0
 fi
 
-# All guards passed — inject self-check
+# All guards passed — build self-check message with agent status
+AGENT_STATUS_SCRIPT="${LOBSTER_INSTALL_DIR:-$HOME/lobster}/scripts/agent-status.sh"
+source "$AGENT_STATUS_SCRIPT"
+AGENT_SUMMARY=$(scan_agent_status)
+
+SELF_CHECK_TEXT="status? (Self-check)"
+if [ -n "$AGENT_SUMMARY" ]; then
+    SELF_CHECK_TEXT="status? (Self-check) | ${AGENT_SUMMARY}"
+fi
+
 TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%S.%6N)
 EPOCH_MS=$(date +%s%3N)
 MSG_ID="${EPOCH_MS}_self"
@@ -71,7 +80,7 @@ cat > "${INBOX_DIR}/${MSG_ID}.json" << EOF
   "user_id": 0,
   "username": "lobster-system",
   "user_name": "Self-Check",
-  "text": "status? (Self-check)",
+  "text": "${SELF_CHECK_TEXT}",
   "timestamp": "${TIMESTAMP}"
 }
 EOF

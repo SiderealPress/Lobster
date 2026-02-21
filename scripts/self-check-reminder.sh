@@ -34,6 +34,16 @@ fi
 # Ensure inbox directory exists
 mkdir -p "$INBOX_DIR"
 
+# Build self-check message with agent status
+AGENT_STATUS_SCRIPT="${LOBSTER_INSTALL_DIR:-$HOME/lobster}/scripts/agent-status.sh"
+source "$AGENT_STATUS_SCRIPT"
+AGENT_SUMMARY=$(scan_agent_status)
+
+SELF_CHECK_TEXT="status? (Self-check)"
+if [ -n "$AGENT_SUMMARY" ]; then
+    SELF_CHECK_TEXT="status? (Self-check) | ${AGENT_SUMMARY}"
+fi
+
 # Generate unique message ID using epoch milliseconds
 TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%S.%6N)
 EPOCH_MS=$(date +%s%3N)
@@ -48,7 +58,7 @@ cat > "${INBOX_DIR}/${MSG_ID}.json" << EOF
   "user_id": 0,
   "username": "lobster-system",
   "user_name": "Self-Check",
-  "text": "status? (Self-check)",
+  "text": "${SELF_CHECK_TEXT}",
   "timestamp": "${TIMESTAMP}"
 }
 EOF
