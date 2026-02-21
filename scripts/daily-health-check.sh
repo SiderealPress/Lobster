@@ -21,7 +21,7 @@ TIMESTAMP=$(date -Iseconds)
 mkdir -p "$(dirname "$LOG_FILE")" "$INBOX_DIR"
 
 # Ensure PATH includes common tool locations
-export PATH="$HOME/.local/bin:$HOME/.nvm/versions/node/$(ls "$HOME/.nvm/versions/node/" 2>/dev/null | sort -V | tail -1)/bin:$PATH"
+export PATH="$HOME/.local/bin:/usr/local/bin:$HOME/.nvm/versions/node/$(ls "$HOME/.nvm/versions/node/" 2>/dev/null | sort -V | tail -1)/bin:$PATH"
 
 FAILURES=()
 
