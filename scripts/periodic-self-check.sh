@@ -19,7 +19,7 @@
 set -e
 
 INBOX_DIR="${LOBSTER_MESSAGES:-$HOME/messages}/inbox"
-STATE_DIR="$HOME/lobster/.state"
+STATE_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}/.state"
 LAST_CHECK_FILE="$STATE_DIR/last-self-check"
 MAX_INBOX_DEPTH=20
 

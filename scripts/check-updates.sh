@@ -14,8 +14,9 @@
 
 set -euo pipefail
 
-LOBSTER_DIR="$HOME/lobster"
-CONFIG_FILE="$LOBSTER_DIR/config/config.env"
+LOBSTER_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
+CONFIG_DIR="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}"
+CONFIG_FILE="$CONFIG_DIR/config.env"
 
 # Change to repo directory
 cd "$LOBSTER_DIR" || {

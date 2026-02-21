@@ -11,9 +11,9 @@
 
 set -o pipefail
 
-INSTALL_DIR="$HOME/lobster"
-WORKSPACE_DIR="$HOME/lobster-workspace"
-MESSAGES_DIR="$HOME/messages"
+INSTALL_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
+WORKSPACE_DIR="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
+MESSAGES_DIR="${LOBSTER_MESSAGES:-$HOME/messages}"
 INBOX_DIR="$MESSAGES_DIR/inbox"
 LOG_FILE="$WORKSPACE_DIR/logs/daily-health-check.log"
 TIMESTAMP=$(date -Iseconds)

@@ -36,11 +36,12 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 # Directories
-LOBSTER_DIR="$HOME/lobster"
-WORKSPACE_DIR="$HOME/lobster-workspace"
+LOBSTER_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
+WORKSPACE_DIR="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
 BACKUP_BASE="$HOME/lobster-backups"
-MESSAGES_DIR="$HOME/messages"
-CONFIG_FILE="$LOBSTER_DIR/config/config.env"
+MESSAGES_DIR="${LOBSTER_MESSAGES:-$HOME/messages}"
+LOBSTER_CONFIG_DIR="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}"
+CONFIG_FILE="$LOBSTER_CONFIG_DIR/config.env"
 
 # Lock file
 LOCK_FILE="/tmp/lobster-update.lock"

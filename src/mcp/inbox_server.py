@@ -97,6 +97,7 @@ _reset_state_on_startup()
 # Workspace and repo directories
 _WORKSPACE = Path(os.environ.get("LOBSTER_WORKSPACE", Path.home() / "lobster-workspace"))
 _REPO_DIR = Path(os.environ.get("LOBSTER_INSTALL_DIR", Path.home() / "lobster"))
+_CONFIG_DIR = Path(os.environ.get("LOBSTER_CONFIG_DIR", Path.home() / "lobster-config"))
 
 # Structural guard: workspace must never be inside a git repo
 from path_guard import assert_not_in_git_repo as _assert_not_in_git_repo
@@ -170,7 +171,7 @@ _outbox_breaker = CircuitBreaker("outbox_delivery", failure_threshold=5, cooldow
 # Try environment first, then fall back to config file
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 if not OPENAI_API_KEY:
-    config_file = Path.home() / "lobster" / "config" / "config.env"
+    config_file = _CONFIG_DIR / "config.env"
     if config_file.exists():
         for line in config_file.read_text().splitlines():
             if line.strip().startswith("OPENAI_API_KEY="):
@@ -3365,8 +3366,8 @@ async def handle_list_projects(arguments: dict[str, Any]) -> list[TextContent]:
 # Local Sync Awareness -- lobster-sync Branch Monitoring
 # =============================================================================
 
-# Path to the sync repos config (lives in the Lobster repo checkout)
-SYNC_REPOS_CONFIG = Path.home() / "lobster" / "config" / "sync-repos.json"
+# Path to the sync repos config (lives in the config directory)
+SYNC_REPOS_CONFIG = _CONFIG_DIR / "sync-repos.json"
 
 
 def load_sync_repos(repo_filter: str | None = None) -> list[dict]:

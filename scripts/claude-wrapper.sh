@@ -13,7 +13,8 @@ set -euo pipefail
 
 WORKSPACE_DIR="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
 INSTALL_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
-CONFIG_ENV="$INSTALL_DIR/config/config.env"
+CONFIG_DIR="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}"
+CONFIG_ENV="$CONFIG_DIR/config.env"
 
 # Source config.env if it exists (for ANTHROPIC_API_KEY, etc.)
 if [ -f "$CONFIG_ENV" ]; then

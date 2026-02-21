@@ -31,12 +31,22 @@ warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; }
 step() { echo -e "\n${CYAN}${BOLD}▶ $1${NC}"; }
 
+# Parse install mode from arguments
+DEV_MODE=false
+for arg in "$@"; do
+    case "$arg" in
+        --dev) DEV_MODE=true ;;
+    esac
+done
+
 # Configuration - can be overridden by environment variables or config file
 REPO_URL="${LOBSTER_REPO_URL:-https://github.com/SiderealPress/lobster.git}"
 REPO_BRANCH="${LOBSTER_BRANCH:-main}"
 INSTALL_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
 WORKSPACE_DIR="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
 MESSAGES_DIR="${LOBSTER_MESSAGES:-$HOME/messages}"
+GITHUB_REPO="SiderealPress/lobster"
+GITHUB_API="https://api.github.com/repos/$GITHUB_REPO"
 
 #===============================================================================
 # Package Manager Detection
@@ -109,7 +119,7 @@ fi
 LOBSTER_USER="${LOBSTER_USER:-${USER:-$(whoami)}}"
 LOBSTER_GROUP="${LOBSTER_GROUP:-${USER:-$(whoami)}}"
 LOBSTER_HOME="${LOBSTER_HOME:-$HOME}"
-CONFIG_DIR="${LOBSTER_CONFIG_DIR:-}"
+CONFIG_DIR="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}"
 
 #===============================================================================
 # Template Processing
@@ -165,7 +175,7 @@ apply_private_overlay() {
 
     # Copy config.env if exists
     if [ -f "$config_dir/config.env" ]; then
-        cp "$config_dir/config.env" "$INSTALL_DIR/config/config.env"
+        cp "$config_dir/config.env" "$CONFIG_DIR/config.env"
         success "Applied: config.env"
     fi
 
@@ -537,36 +547,140 @@ fi
 # Full auth flow runs later after Telegram config (see "Authentication Method" section)
 
 #===============================================================================
-# Clone Repository
+# Install Lobster Code
 #===============================================================================
 
-step "Setting up Lobster repository..."
-
+# Detect install mode: --dev flag, existing .git, or tarball
 if [ -d "$INSTALL_DIR/.git" ]; then
-    info "Repository exists. Updating..."
-    cd "$INSTALL_DIR"
-    git fetch --quiet
-    git checkout --quiet "$REPO_BRANCH"
-    git pull --quiet origin "$REPO_BRANCH"
+    INSTALL_MODE="git"
+    info "Existing git install detected"
+elif $DEV_MODE; then
+    INSTALL_MODE="git"
+    info "Developer mode requested"
 else
-    info "Cloning repository from $REPO_URL (branch: $REPO_BRANCH)..."
-    git clone --quiet --branch "$REPO_BRANCH" "$REPO_URL" "$INSTALL_DIR"
-    cd "$INSTALL_DIR"
+    INSTALL_MODE="tarball"
+    info "Tarball install mode"
 fi
 
-success "Repository ready at $INSTALL_DIR (branch: $REPO_BRANCH)"
+if [ "$INSTALL_MODE" = "git" ]; then
+    step "Setting up Lobster repository..."
 
-#===============================================================================
-# Configure Distributed Git Hooks
-#===============================================================================
+    if [ -d "$INSTALL_DIR/.git" ]; then
+        info "Repository exists. Updating..."
+        cd "$INSTALL_DIR"
+        git fetch --quiet
+        git checkout --quiet "$REPO_BRANCH"
+        git pull --quiet origin "$REPO_BRANCH"
+    else
+        info "Cloning repository from $REPO_URL (branch: $REPO_BRANCH)..."
+        git clone --quiet --branch "$REPO_BRANCH" "$REPO_URL" "$INSTALL_DIR"
+        cd "$INSTALL_DIR"
+    fi
 
-step "Configuring distributed git hooks..."
+    success "Repository ready at $INSTALL_DIR (branch: $REPO_BRANCH)"
 
-cd "$INSTALL_DIR"
-git config --local core.hooksPath .githooks
-chmod +x .githooks/pre-push .githooks/post-checkout .githooks/pre-commit 2>/dev/null || true
+    step "Configuring distributed git hooks..."
+    cd "$INSTALL_DIR"
+    git config --local core.hooksPath .githooks
+    chmod +x .githooks/pre-push .githooks/post-checkout .githooks/pre-commit 2>/dev/null || true
+    success "Git hooks configured (core.hooksPath -> .githooks)"
 
-success "Git hooks configured (core.hooksPath -> .githooks)"
+else
+    step "Downloading latest Lobster release..."
+
+    if [ -d "$INSTALL_DIR" ] && [ -f "$INSTALL_DIR/VERSION" ]; then
+        info "Existing tarball install found (v$(cat "$INSTALL_DIR/VERSION")). Updating..."
+    fi
+
+    # Fetch latest release from GitHub API
+    RELEASE_JSON=$(curl -fsSL "$GITHUB_API/releases/latest" 2>/dev/null) || {
+        error "Failed to fetch latest release from GitHub"
+        error "Check your internet connection and try again"
+        exit 1
+    }
+
+    LATEST_TAG=$(echo "$RELEASE_JSON" | jq -r '.tag_name // empty')
+    if [ -z "$LATEST_TAG" ]; then
+        error "Could not parse release tag. Falling back to git clone..."
+        INSTALL_MODE="git"
+        git clone --quiet --branch "$REPO_BRANCH" "$REPO_URL" "$INSTALL_DIR"
+        cd "$INSTALL_DIR"
+        success "Repository ready at $INSTALL_DIR (git fallback)"
+    else
+        LATEST_VERSION="${LATEST_TAG#v}"
+        info "Latest release: $LATEST_TAG"
+
+        # Find tarball asset
+        TARBALL_URL=$(echo "$RELEASE_JSON" | jq -r '.assets[] | select(.name | test("lobster.*\\.tar\\.gz")) | .browser_download_url' | head -1)
+        if [ -z "$TARBALL_URL" ]; then
+            TARBALL_URL=$(echo "$RELEASE_JSON" | jq -r '.tarball_url // empty')
+        fi
+
+        if [ -z "$TARBALL_URL" ]; then
+            error "No tarball found in release. Falling back to git clone..."
+            git clone --quiet --branch "$REPO_BRANCH" "$REPO_URL" "$INSTALL_DIR"
+            cd "$INSTALL_DIR"
+        else
+            # Download tarball
+            TMP_DIR=$(mktemp -d)
+            TARBALL_FILE="$TMP_DIR/lobster.tar.gz"
+            info "Downloading $TARBALL_URL..."
+            curl -fsSL -o "$TARBALL_FILE" "$TARBALL_URL" || {
+                error "Failed to download tarball"
+                rm -rf "$TMP_DIR"
+                exit 1
+            }
+            success "Downloaded $(du -h "$TARBALL_FILE" | cut -f1)"
+
+            # Verify checksum if available
+            CHECKSUM_URL=$(echo "$RELEASE_JSON" | jq -r '.assets[] | select(.name | test("checksums|sha256")) | .browser_download_url' | head -1)
+            if [ -n "$CHECKSUM_URL" ]; then
+                info "Verifying checksum..."
+                EXPECTED=$(curl -fsSL "$CHECKSUM_URL" 2>/dev/null | head -1 | awk '{print $1}')
+                ACTUAL=$(sha256sum "$TARBALL_FILE" | awk '{print $1}')
+                if [ -n "$EXPECTED" ] && [ "$EXPECTED" != "$ACTUAL" ]; then
+                    error "Checksum mismatch!"
+                    rm -rf "$TMP_DIR"
+                    exit 1
+                fi
+                success "Checksum verified"
+            fi
+
+            # Extract
+            EXTRACT_DIR="$TMP_DIR/extracted"
+            mkdir -p "$EXTRACT_DIR"
+            tar xzf "$TARBALL_FILE" -C "$EXTRACT_DIR"
+
+            # Find extracted directory
+            NEW_INSTALL=$(find "$EXTRACT_DIR" -maxdepth 1 -mindepth 1 -type d | head -1)
+            [ -z "$NEW_INSTALL" ] && NEW_INSTALL="$EXTRACT_DIR"
+
+            # Preserve .venv if upgrading
+            if [ -d "$INSTALL_DIR/.venv" ]; then
+                mv "$INSTALL_DIR/.venv" "$NEW_INSTALL/.venv"
+            fi
+            if [ -d "$INSTALL_DIR/.state" ]; then
+                mv "$INSTALL_DIR/.state" "$NEW_INSTALL/.state"
+            fi
+
+            # Swap
+            if [ -d "$INSTALL_DIR" ]; then
+                BACKUP="$HOME/lobster.bak"
+                [ -d "$BACKUP" ] && rm -rf "$BACKUP"
+                mv "$INSTALL_DIR" "$BACKUP"
+            fi
+            mv "$NEW_INSTALL" "$INSTALL_DIR"
+
+            # Make scripts executable
+            chmod +x "$INSTALL_DIR/scripts/"*.sh 2>/dev/null || true
+            chmod +x "$INSTALL_DIR/install.sh" 2>/dev/null || true
+
+            rm -rf "$TMP_DIR"
+            cd "$INSTALL_DIR"
+            success "Lobster v$LATEST_VERSION installed at $INSTALL_DIR (no .git/)"
+        fi
+    fi
+fi
 
 #===============================================================================
 # Create Directories
@@ -577,6 +691,7 @@ step "Creating directories..."
 mkdir -p "$WORKSPACE_DIR"/{logs,data,scheduled-jobs/{logs,tasks}}
 mkdir -p "$WORKSPACE_DIR/memory"/{canonical/{people,projects},archive/digests}
 mkdir -p "$MESSAGES_DIR"/{inbox,outbox,processed,processing,failed,config,audio,task-outputs}
+mkdir -p "$CONFIG_DIR"
 mkdir -p "$HOME/projects"/{personal,business}
 
 # Seed canonical templates (only files that don't already exist; skip examples)
@@ -1023,7 +1138,7 @@ fi
 
 step "Configuring Lobster..."
 
-CONFIG_FILE="$INSTALL_DIR/config/config.env"
+CONFIG_FILE="$CONFIG_DIR/config.env"
 CONFIG_EXAMPLE="$INSTALL_DIR/config/config.env.example"
 
 # Check if already configured
@@ -1632,7 +1747,14 @@ echo "  lobster stop      Stop all services"
 echo "  lobster help      Show all commands"
 echo ""
 echo -e "${BOLD}Directories:${NC}"
-echo "  $INSTALL_DIR        Repository"
+echo "  $INSTALL_DIR        Lobster code"
+echo "  $CONFIG_DIR          Configuration"
 echo "  $WORKSPACE_DIR      Claude workspace"
 echo "  $MESSAGES_DIR       Message queues"
+echo ""
+if [ "$INSTALL_MODE" = "tarball" ]; then
+    echo -e "${BOLD}Install mode:${NC} tarball (upgrade with: lobster upgrade)"
+else
+    echo -e "${BOLD}Install mode:${NC} git (upgrade with: git pull or lobster upgrade)"
+fi
 echo ""

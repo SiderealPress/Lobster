@@ -52,7 +52,8 @@ DEAD_LETTER_DIR = Path.home() / "messages" / "dead-letter"
 LOBSTER_STATE_FILE = Path.home() / "messages" / "config" / "lobster-state.json"
 
 # Script used to start a fresh Claude session (same as lobster-claude.service)
-CLAUDE_WAKE_SCRIPT = Path.home() / "lobster" / "scripts" / "start-lobster.sh"
+_REPO_DIR = Path(os.environ.get("LOBSTER_INSTALL_DIR", Path.home() / "lobster"))
+CLAUDE_WAKE_SCRIPT = _REPO_DIR / "scripts" / "start-lobster.sh"
 
 # Ensure directories exist
 INBOX_DIR.mkdir(parents=True, exist_ok=True)

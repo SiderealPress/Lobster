@@ -39,8 +39,9 @@ NC='\033[0m'
 LOBSTER_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
 WORKSPACE_DIR="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
 MESSAGES_DIR="${LOBSTER_MESSAGES:-$HOME/messages}"
+LOBSTER_CONFIG_DIR="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}"
 BACKUP_BASE="$HOME/lobster-backups"
-CONFIG_FILE="$LOBSTER_DIR/config/config.env"
+CONFIG_FILE="$LOBSTER_CONFIG_DIR/config.env"
 LOCK_FILE="/tmp/lobster-upgrade.lock"
 VENV_DIR="$LOBSTER_DIR/.venv"
 
@@ -174,11 +175,20 @@ cleanup_lock() {
 preflight_checks() {
     step "Pre-flight checks"
 
-    # Lobster repo must exist
-    if [ ! -d "$LOBSTER_DIR/.git" ]; then
-        die "Lobster repo not found at $LOBSTER_DIR. Is Lobster installed?" 3
+    # Lobster install must exist
+    if [ ! -d "$LOBSTER_DIR" ]; then
+        die "Lobster not found at $LOBSTER_DIR. Is Lobster installed?" 3
     fi
-    success "Lobster repo found at $LOBSTER_DIR"
+
+    # Detect install mode
+    if [ -d "$LOBSTER_DIR/.git" ]; then
+        INSTALL_MODE="git"
+        success "Lobster repo found at $LOBSTER_DIR (git mode)"
+    else
+        INSTALL_MODE="tarball"
+        INSTALLED_VERSION=$(cat "$LOBSTER_DIR/VERSION" 2>/dev/null || echo "0.0.0")
+        success "Lobster found at $LOBSTER_DIR (tarball mode, v$INSTALLED_VERSION)"
+    fi
 
     # Internet connectivity
     if ! curl -s --connect-timeout 5 https://api.github.com >/dev/null 2>&1; then
@@ -202,10 +212,15 @@ preflight_checks() {
         success "Python venv found"
     fi
 
-    # Record current commit
+    # Record current version/commit
     cd "$LOBSTER_DIR"
-    PREVIOUS_COMMIT=$(git rev-parse --short HEAD)
-    info "Current commit: $PREVIOUS_COMMIT"
+    if [ "$INSTALL_MODE" = "git" ]; then
+        PREVIOUS_COMMIT=$(git rev-parse --short HEAD)
+        info "Current commit: $PREVIOUS_COMMIT"
+    else
+        PREVIOUS_COMMIT="v$INSTALLED_VERSION"
+        info "Current version: $INSTALLED_VERSION"
+    fi
 }
 
 #===============================================================================
@@ -230,6 +245,9 @@ backup_config() {
 
     # Config files
     local files_to_backup=(
+        "$LOBSTER_CONFIG_DIR/config.env"
+        "$LOBSTER_CONFIG_DIR/lobster.conf"
+        "$LOBSTER_CONFIG_DIR/sync-repos.json"
         "$LOBSTER_DIR/config/config.env"
         "$LOBSTER_DIR/config/lobster.conf"
         "$WORKSPACE_DIR/scheduled-jobs/jobs.json"
@@ -282,6 +300,11 @@ backup_config() {
 #===============================================================================
 
 git_pull() {
+    if [ "$INSTALL_MODE" = "tarball" ]; then
+        tarball_update
+        return $?
+    fi
+
     step "Pulling latest code from main"
 
     cd "$LOBSTER_DIR"
@@ -341,6 +364,122 @@ git_pull() {
     fi
 
     log_to_file "Git updated: $PREVIOUS_COMMIT -> $CURRENT_COMMIT"
+}
+
+#===============================================================================
+# 2-alt. Tarball update (for non-git installs)
+#===============================================================================
+
+tarball_update() {
+    step "Checking GitHub Releases for updates"
+
+    local api_url="https://api.github.com/repos/SiderealPress/lobster/releases/latest"
+    local release_json
+    release_json=$(curl -fsSL "$api_url" 2>/dev/null) || die "Failed to fetch latest release" 3
+
+    local latest_tag
+    latest_tag=$(echo "$release_json" | jq -r '.tag_name // empty')
+    if [ -z "$latest_tag" ]; then
+        die "Could not parse latest release tag" 3
+    fi
+
+    local latest_version="${latest_tag#v}"
+    PREVIOUS_COMMIT="v$INSTALLED_VERSION"
+
+    if [ "$latest_version" = "$INSTALLED_VERSION" ]; then
+        success "Already up to date (v$INSTALLED_VERSION)"
+        CURRENT_COMMIT="$PREVIOUS_COMMIT"
+        return 0
+    fi
+
+    info "Update available: v$INSTALLED_VERSION -> v$latest_version"
+
+    # Find tarball asset (prefer our custom one, fall back to GitHub auto-tarball)
+    local tarball_url
+    tarball_url=$(echo "$release_json" | jq -r '.assets[] | select(.name | test("lobster.*\\.tar\\.gz")) | .browser_download_url' | head -1)
+    if [ -z "$tarball_url" ]; then
+        tarball_url=$(echo "$release_json" | jq -r '.tarball_url // empty')
+    fi
+
+    if [ -z "$tarball_url" ]; then
+        die "No tarball URL found in release" 3
+    fi
+
+    if $DRY_RUN; then
+        info "[dry-run] Would download: $tarball_url"
+        info "[dry-run] Would swap $LOBSTER_DIR with new version"
+        CURRENT_COMMIT="v$latest_version"
+        return 0
+    fi
+
+    # Download tarball
+    local tmp_dir
+    tmp_dir=$(mktemp -d -t lobster-upgrade-XXXXXX)
+    local tarball_file="$tmp_dir/lobster.tar.gz"
+
+    substep "Downloading v$latest_version..."
+    curl -fsSL -o "$tarball_file" "$tarball_url" || die "Failed to download tarball" 3
+    success "Downloaded $(du -h "$tarball_file" | cut -f1)"
+
+    # Verify checksum if available
+    local checksum_url
+    checksum_url=$(echo "$release_json" | jq -r '.assets[] | select(.name | test("checksums|sha256")) | .browser_download_url' | head -1)
+    if [ -n "$checksum_url" ]; then
+        substep "Verifying checksum..."
+        local expected_checksum
+        expected_checksum=$(curl -fsSL "$checksum_url" 2>/dev/null | head -1 | awk '{print $1}')
+        local actual_checksum
+        actual_checksum=$(sha256sum "$tarball_file" | awk '{print $1}')
+        if [ -n "$expected_checksum" ] && [ "$expected_checksum" != "$actual_checksum" ]; then
+            rm -rf "$tmp_dir"
+            die "Checksum mismatch: expected $expected_checksum, got $actual_checksum" 3
+        fi
+        success "Checksum verified"
+    fi
+
+    # Extract tarball
+    substep "Extracting..."
+    local extract_dir="$tmp_dir/extracted"
+    mkdir -p "$extract_dir"
+    tar xzf "$tarball_file" -C "$extract_dir"
+
+    # Find the extracted directory (GitHub wraps in owner-repo-sha/)
+    local new_install
+    new_install=$(find "$extract_dir" -maxdepth 1 -mindepth 1 -type d | head -1)
+    if [ -z "$new_install" ]; then
+        new_install="$extract_dir"
+    fi
+
+    # Preserve .venv from current install
+    if [ -d "$LOBSTER_DIR/.venv" ]; then
+        substep "Preserving Python venv..."
+        mv "$LOBSTER_DIR/.venv" "$new_install/.venv"
+    fi
+
+    # Preserve .state directory
+    if [ -d "$LOBSTER_DIR/.state" ]; then
+        mv "$LOBSTER_DIR/.state" "$new_install/.state"
+    fi
+
+    # Swap directories
+    local backup_dir="$HOME/lobster.bak"
+    [ -d "$backup_dir" ] && rm -rf "$backup_dir"
+
+    substep "Swapping install directory..."
+    mv "$LOBSTER_DIR" "$backup_dir"
+    mv "$new_install" "$LOBSTER_DIR"
+
+    # Make scripts executable
+    chmod +x "$LOBSTER_DIR/scripts/"*.sh 2>/dev/null || true
+    chmod +x "$LOBSTER_DIR/install.sh" 2>/dev/null || true
+
+    CURRENT_COMMIT="v$latest_version"
+    success "Updated: v$INSTALLED_VERSION -> v$latest_version"
+
+    # Cleanup
+    rm -rf "$tmp_dir"
+
+    log_to_file "Tarball updated: v$INSTALLED_VERSION -> v$latest_version"
 }
 
 #===============================================================================
@@ -780,19 +919,43 @@ run_migrations() {
         return 0
     fi
 
-    # Migration 1: Old config location (~/.lobster.env -> config/config.env)
+    # Migration 0: Config from repo to ~/lobster-config/ (tarball-readiness)
+    mkdir -p "$LOBSTER_CONFIG_DIR"
+    if [ -f "$LOBSTER_DIR/config/config.env" ] && [ ! -f "$LOBSTER_CONFIG_DIR/config.env" ]; then
+        substep "Migrating config.env to $LOBSTER_CONFIG_DIR/ ..."
+        cp "$LOBSTER_DIR/config/config.env" "$LOBSTER_CONFIG_DIR/config.env"
+        success "Config migrated to $LOBSTER_CONFIG_DIR/config.env"
+        migrated=$((migrated + 1))
+    fi
+    if [ -f "$LOBSTER_DIR/config/lobster.conf" ] && [ ! -f "$LOBSTER_CONFIG_DIR/lobster.conf" ]; then
+        cp "$LOBSTER_DIR/config/lobster.conf" "$LOBSTER_CONFIG_DIR/lobster.conf"
+        substep "Migrated lobster.conf to $LOBSTER_CONFIG_DIR/"
+        migrated=$((migrated + 1))
+    fi
+    if [ -f "$LOBSTER_DIR/config/consolidation.conf" ] && [ ! -f "$LOBSTER_CONFIG_DIR/consolidation.conf" ]; then
+        cp "$LOBSTER_DIR/config/consolidation.conf" "$LOBSTER_CONFIG_DIR/consolidation.conf"
+        substep "Migrated consolidation.conf to $LOBSTER_CONFIG_DIR/"
+        migrated=$((migrated + 1))
+    fi
+    if [ -f "$LOBSTER_DIR/config/sync-repos.json" ] && [ ! -f "$LOBSTER_CONFIG_DIR/sync-repos.json" ]; then
+        cp "$LOBSTER_DIR/config/sync-repos.json" "$LOBSTER_CONFIG_DIR/sync-repos.json"
+        substep "Migrated sync-repos.json to $LOBSTER_CONFIG_DIR/"
+        migrated=$((migrated + 1))
+    fi
+
+    # Migration 1: Old config location (~/.lobster.env -> lobster-config/config.env)
     if [ -f "$HOME/.lobster.env" ] && [ ! -f "$CONFIG_FILE" ]; then
-        substep "Migrating .lobster.env to config/config.env..."
-        mkdir -p "$(dirname "$CONFIG_FILE")"
+        substep "Migrating .lobster.env to $LOBSTER_CONFIG_DIR/config.env..."
+        mkdir -p "$LOBSTER_CONFIG_DIR"
         cp "$HOME/.lobster.env" "$CONFIG_FILE"
         success "Config migrated from ~/.lobster.env"
         migrated=$((migrated + 1))
     fi
 
-    # Migration 2: Old .env in repo root -> config/config.env
+    # Migration 2: Old .env in repo root -> lobster-config/config.env
     if [ -f "$LOBSTER_DIR/.env" ] && [ ! -f "$CONFIG_FILE" ]; then
-        substep "Migrating .env to config/config.env..."
-        mkdir -p "$(dirname "$CONFIG_FILE")"
+        substep "Migrating .env to $LOBSTER_CONFIG_DIR/config.env..."
+        mkdir -p "$LOBSTER_CONFIG_DIR"
         cp "$LOBSTER_DIR/.env" "$CONFIG_FILE"
         success "Config migrated from .env"
         migrated=$((migrated + 1))
@@ -894,16 +1057,28 @@ health_check() {
     local checks_passed=0
     local checks_failed=0
 
-    # Check 1: Git repo is clean and on main
+    # Check 1: Install integrity
     cd "$LOBSTER_DIR"
-    local branch
-    branch=$(git branch --show-current 2>/dev/null || echo "unknown")
-    if [ "$branch" = "main" ]; then
-        success "On branch: main"
-        checks_passed=$((checks_passed + 1))
+    if [ "$INSTALL_MODE" = "git" ]; then
+        local branch
+        branch=$(git branch --show-current 2>/dev/null || echo "unknown")
+        if [ "$branch" = "main" ]; then
+            success "On branch: main"
+            checks_passed=$((checks_passed + 1))
+        else
+            warn "Not on main branch (on: $branch)"
+            checks_failed=$((checks_failed + 1))
+        fi
     else
-        warn "Not on main branch (on: $branch)"
-        checks_failed=$((checks_failed + 1))
+        if [ -f "$LOBSTER_DIR/VERSION" ]; then
+            local ver
+            ver=$(cat "$LOBSTER_DIR/VERSION")
+            success "Tarball install: v$ver"
+            checks_passed=$((checks_passed + 1))
+        else
+            warn "VERSION file missing"
+            checks_failed=$((checks_failed + 1))
+        fi
     fi
 
     # Check 2: Config file exists and has token

@@ -44,7 +44,7 @@ MEMORY_THRESHOLD=90                  # percentage
 DISK_THRESHOLD=95                    # percentage
 
 # Telegram direct alerting (bypasses outbox entirely)
-CONFIG_ENV="$HOME/lobster/config/config.env"
+CONFIG_ENV="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}/config.env"
 
 # Ensure log directory exists
 mkdir -p "$(dirname "$LOG_FILE")"

@@ -24,7 +24,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOBSTER_DIR="$(dirname "$SCRIPT_DIR")"
 VENV="$LOBSTER_DIR/.venv"
 INBOX="$HOME/messages/inbox"
-CONFIG="$LOBSTER_DIR/config/consolidation.conf"
+CONFIG_DIR="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}"
+CONFIG="$CONFIG_DIR/consolidation.conf"
 TIMESTAMP=$(date +%s%3N)
 
 # Ensure inbox directory exists
