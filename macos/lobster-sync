@@ -466,7 +466,7 @@ Logs:
   ~/.lobster/logs/sync-stderr.log  launchd stderr capture
 
 Examples:
-  lobster-sync add ~/projects/my-app
+  lobster-sync add ~/lobster-workspace/projects/my-app
   lobster-sync status
   lobster-sync now
   lobster-sync log

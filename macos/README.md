@@ -44,9 +44,9 @@ cd Lobster
 # Run the installer
 ./macos/install-lobster-local.sh
 
-# Register repos for sync
-lobster-sync add ~/projects/my-app
-lobster-sync add ~/projects/another-project
+# Register repos for sync (use your actual project paths)
+lobster-sync add ~/lobster-workspace/projects/my-app
+lobster-sync add ~/lobster-workspace/projects/another-project
 
 # Check everything is working
 lobster-sync status
@@ -79,8 +79,8 @@ The installer is **idempotent** -- running it again updates scripts and the plis
 Register a git repository for continuous sync.
 
 ```bash
-lobster-sync add ~/projects/my-app
-lobster-sync add ~/projects/govscan
+lobster-sync add ~/lobster-workspace/projects/my-app
+lobster-sync add ~/lobster-workspace/projects/govscan
 ```
 
 The repo is added to `~/.lobster/sync-config.json`. If the repo was previously removed, it is re-enabled.
@@ -90,7 +90,7 @@ The repo is added to `~/.lobster/sync-config.json`. If the repo was previously r
 Unregister a repository. The repo itself and its sync branch are not deleted.
 
 ```bash
-lobster-sync remove ~/projects/old-project
+lobster-sync remove ~/lobster-workspace/projects/old-project
 ```
 
 ### `lobster-sync status`
@@ -105,9 +105,9 @@ $ lobster-sync status
   interval: 300s
 
 --- Repos ---
-  my-app               ~/projects/my-app              last sync: 2m ago     ok
-  govscan              ~/projects/govscan              last sync: 2m ago     ok
-  old-project          ~/projects/old-project          last sync: 15m ago    stale
+  my-app               ~/lobster-workspace/projects/my-app      last sync: 2m ago     ok
+  govscan              ~/lobster-workspace/projects/govscan      last sync: 2m ago     ok
+  old-project          ~/lobster-workspace/projects/old-project  last sync: 15m ago    stale
 ```
 
 Status indicators:

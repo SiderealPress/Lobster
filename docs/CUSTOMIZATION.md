@@ -195,8 +195,8 @@ You are my personal assistant with these specializations:
 - My timezone is America/Los_Angeles
 
 ## My Projects
-- **Project Alpha**: React frontend at ~/projects/alpha
-- **Project Beta**: Python backend at ~/projects/beta
+- **Project Alpha**: React frontend at ~/lobster-workspace/projects/alpha
+- **Project Beta**: Python backend at ~/lobster-workspace/projects/beta
 
 ## Custom Commands
 When I say "status report", check all my GitHub repos for open PRs.
@@ -465,8 +465,9 @@ if command -v ngrok &> /dev/null; then
 fi
 
 # Clone additional repositories
-if [ ! -d ~/projects/my-project ]; then
-    git clone <REDACTED_EMAIL>:me/my-project.git ~/projects/my-project
+PROJECTS_DIR="${LOBSTER_PROJECTS:-${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}/projects}"
+if [ ! -d "$PROJECTS_DIR/my-project" ]; then
+    git clone <REDACTED_EMAIL>:me/my-project.git "$PROJECTS_DIR/my-project"
 fi
 
 echo "Post-install complete!"

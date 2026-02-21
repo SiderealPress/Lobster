@@ -60,7 +60,7 @@ RUN cd /home/testuser/lobster && \
 # Initialize required files
 RUN echo '{"tasks": [], "next_id": 1}' > /home/testuser/messages/tasks.json && \
     mkdir -p /home/testuser/lobster/scheduled-tasks/tasks && \
-    mkdir -p /home/testuser/lobster-workspace/{data,scheduled-jobs/logs} && \
+    mkdir -p /home/testuser/lobster-workspace/{data,scheduled-jobs/logs,projects} && \
     mkdir -p /home/testuser/lobster-workspace/memory/{canonical/{people,projects},archive/digests} && \
     echo '{"jobs": {}}' > /home/testuser/lobster-workspace/scheduled-jobs/jobs.json
 

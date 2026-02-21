@@ -138,6 +138,7 @@ See [docs/CUSTOMIZATION.md](docs/CUSTOMIZATION.md) for detailed documentation on
 | `LOBSTER_HOME` | Home directory | `$HOME` |
 | `LOBSTER_INSTALL_DIR` | Installation directory | `$HOME/lobster` |
 | `LOBSTER_WORKSPACE` | Claude workspace directory | `$HOME/lobster-workspace` |
+| `LOBSTER_PROJECTS` | Projects directory | `$LOBSTER_WORKSPACE/projects` |
 | `LOBSTER_MESSAGES` | Message queue directory | `$HOME/messages` |
 
 ## CLI Commands
@@ -185,8 +186,14 @@ lobster help       # Show help
 
 ~/lobster-workspace/           # Claude workspace (the brain)
 ├── CLAUDE.md                  # System context
+├── projects/                  # All Lobster-managed projects
+│   └── [project-name]/        # Each project in its own directory
 └── logs/                      # Log files
 ```
+
+### Project Directory Convention
+
+All projects cloned or created by Lobster live in `~/lobster-workspace/projects/[project-name]/`. This is a system convention, not optional. The directory is created automatically by the installer. The `$LOBSTER_PROJECTS` environment variable points here.
 
 ## MCP Tools
 

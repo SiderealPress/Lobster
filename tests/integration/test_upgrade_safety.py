@@ -29,7 +29,7 @@ class TestUpgradePreservesDataDirectories:
         messages = tmp_path / "messages"
         workspace = tmp_path / "lobster-workspace"
         lobster = tmp_path / "lobster"
-        projects = tmp_path / "projects"
+        projects = workspace / "projects"
 
         # Create all directories a running install would have
         for d in [
@@ -48,8 +48,7 @@ class TestUpgradePreservesDataDirectories:
             lobster / "scheduled-tasks" / "tasks",
             lobster / "scheduled-tasks" / "logs",
             lobster / ".state",
-            projects / "personal",
-            projects / "business",
+            projects,
         ]:
             d.mkdir(parents=True, exist_ok=True)
 
@@ -165,20 +164,18 @@ class TestUpgradePreservesDataDirectories:
         assert "morning-check" in after["jobs"]
 
     def test_projects_directory_preserved(self, simulated_install):
-        """Verify ~/projects/ and its contents are never touched."""
+        """Verify lobster-workspace/projects/ and its contents are never touched."""
         projects = simulated_install["projects"]
-        (projects / "personal" / "my-app").mkdir(parents=True)
-        (projects / "personal" / "my-app" / "main.py").write_text("print('hello')")
-        (projects / "business" / "client-work").mkdir(parents=True)
-        (projects / "business" / "client-work" / "report.md").write_text("# Report")
+        (projects / "my-app").mkdir(parents=True)
+        (projects / "my-app" / "main.py").write_text("print('hello')")
+        (projects / "client-work").mkdir(parents=True)
+        (projects / "client-work" / "report.md").write_text("# Report")
 
         # mkdir -p is safe
         projects.mkdir(parents=True, exist_ok=True)
-        (projects / "personal").mkdir(parents=True, exist_ok=True)
-        (projects / "business").mkdir(parents=True, exist_ok=True)
 
-        assert (projects / "personal" / "my-app" / "main.py").read_text() == "print('hello')"
-        assert (projects / "business" / "client-work" / "report.md").read_text() == "# Report"
+        assert (projects / "my-app" / "main.py").read_text() == "print('hello')"
+        assert (projects / "client-work" / "report.md").read_text() == "# Report"
 
     def test_workspace_logs_preserved(self, simulated_install):
         """Verify workspace logs are preserved."""

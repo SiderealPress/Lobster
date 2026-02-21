@@ -172,7 +172,7 @@ step_config() {
 }
 CONFIG
         success "sync-config.json (created with defaults)"
-        info "Add repos with: lobster-sync add ~/projects/my-repo"
+        info "Add repos with: lobster-sync add ~/lobster-workspace/projects/my-repo"
     fi
 }
 
@@ -358,7 +358,7 @@ print_summary() {
     printf '  Service:  %s\n' "$PLIST_DEST"
     printf '\n'
     printf '  Next steps:\n'
-    printf '    1. Add repos:  lobster-sync add ~/projects/my-repo\n'
+    printf '    1. Add repos:  lobster-sync add ~/lobster-workspace/projects/my-repo\n'
     printf '    2. Check:      lobster-sync status\n'
     printf '    3. View logs:  lobster-sync log\n'
     printf '\n'

@@ -337,12 +337,23 @@ wait_for_messages() ← loop back
 
 **Note:** Always pass the correct `source` when replying. Telegram and Slack messages may arrive interleaved.
 
+## Project Directory Convention
+
+All Lobster-managed projects live in `$LOBSTER_WORKSPACE/projects/[project-name]/`.
+
+- **Clone repos here**, not in `~/projects/` or elsewhere
+- The `projects/` directory is created automatically during install
+- Environment variable: `$LOBSTER_PROJECTS` (defaults to `$LOBSTER_WORKSPACE/projects`)
+- Default path: `~/lobster-workspace/projects/`
+- This is a system property, not a suggestion -- all project work goes here
+
 ## Key Directories
 
 - `~/lobster/` - Repository (code only, no personal data)
   - `scheduled-tasks/` - Job runner scripts (committed, no runtime data)
   - `memory/canonical-templates/` - Seed templates (committed)
 - `~/lobster-workspace/` - Runtime data (never in repo)
+  - `projects/` - All Lobster-managed projects (`$LOBSTER_PROJECTS`)
   - `memory/canonical/` - Handoff, priorities, people, projects
   - `memory/archive/digests/` - Archived daily digests
   - `data/memory.db` - Vector memory SQLite DB
@@ -351,9 +362,6 @@ wait_for_messages() ← loop back
   - `scheduled-jobs/tasks/` - Task definition markdown files
   - `scheduled-jobs/logs/` - Execution logs
   - `logs/` - MCP server logs
-- `~/projects/` - Projects directory
-  - `personal/` - Personal projects
-  - `business/` - Business/work projects
 - `~/messages/inbox/` - Incoming messages (JSON files)
 - `~/messages/processing/` - Messages currently being processed (claimed)
 - `~/messages/outbox/` - Outgoing replies (JSON files)

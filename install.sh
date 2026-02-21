@@ -44,6 +44,7 @@ REPO_URL="${LOBSTER_REPO_URL:-https://github.com/SiderealPress/lobster.git}"
 REPO_BRANCH="${LOBSTER_BRANCH:-main}"
 INSTALL_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
 WORKSPACE_DIR="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
+PROJECTS_DIR="${LOBSTER_PROJECTS:-$WORKSPACE_DIR/projects}"
 MESSAGES_DIR="${LOBSTER_MESSAGES:-$HOME/messages}"
 GITHUB_REPO="SiderealPress/lobster"
 GITHUB_API="https://api.github.com/repos/$GITHUB_REPO"
@@ -112,6 +113,7 @@ if [ -n "$CONFIG_FILE" ] && [ -f "$CONFIG_FILE" ]; then
     REPO_BRANCH="${LOBSTER_BRANCH:-$REPO_BRANCH}"
     INSTALL_DIR="${LOBSTER_INSTALL_DIR:-$INSTALL_DIR}"
     WORKSPACE_DIR="${LOBSTER_WORKSPACE:-$WORKSPACE_DIR}"
+    PROJECTS_DIR="${LOBSTER_PROJECTS:-$WORKSPACE_DIR/projects}"
     MESSAGES_DIR="${LOBSTER_MESSAGES:-$MESSAGES_DIR}"
 fi
 
@@ -249,6 +251,7 @@ run_hook() {
     # Export useful variables for hooks
     export LOBSTER_INSTALL_DIR="$INSTALL_DIR"
     export LOBSTER_WORKSPACE_DIR="$WORKSPACE_DIR"
+    export LOBSTER_PROJECTS_DIR="$PROJECTS_DIR"
     export LOBSTER_MESSAGES_DIR="$MESSAGES_DIR"
 
     "$hook_path"
@@ -692,6 +695,9 @@ mkdir -p "$WORKSPACE_DIR"/{logs,data,scheduled-jobs/{logs,tasks}}
 mkdir -p "$WORKSPACE_DIR/memory"/{canonical/{people,projects},archive/digests}
 mkdir -p "$MESSAGES_DIR"/{inbox,outbox,processed,processing,failed,config,audio,task-outputs}
 mkdir -p "$CONFIG_DIR"
+mkdir -p "$PROJECTS_DIR"
+
+# Legacy: also create ~/projects/ for backward compatibility
 mkdir -p "$HOME/projects"/{personal,business}
 
 # Seed canonical templates (only files that don't already exist; skip examples)
@@ -709,8 +715,7 @@ if [ -d "$TEMPLATES_DIR" ]; then
 fi
 
 success "Directories created"
-info "  ~/projects/personal - Personal projects"
-info "  ~/projects/business - Business/work projects"
+info "  $PROJECTS_DIR - All Lobster-managed projects"
 
 #===============================================================================
 # Scheduled Tasks Setup
@@ -1690,6 +1695,15 @@ You are a **dispatcher**, not a worker. Stay responsive to incoming messages.
 - `check_task_outputs(since?, limit?, job_name?)` - Check job outputs
 - `write_task_output(job_name, output, status?)` - Write job output
 
+## Project Directory Convention
+
+All Lobster-managed projects live in \`\$LOBSTER_WORKSPACE/projects/[project-name]/\`.
+
+- **Clone repos here**, not in \`~/projects/\` or elsewhere
+- The \`projects/\` directory is created automatically during install
+- Environment variable: \`\$LOBSTER_PROJECTS\` (defaults to \`\$LOBSTER_WORKSPACE/projects\`)
+- This is a system property, not a suggestion -- all project work goes here
+
 ## Behavior Guidelines
 
 - Be concise (users are on mobile)
@@ -1776,6 +1790,7 @@ echo -e "${BOLD}Directories:${NC}"
 echo "  $INSTALL_DIR        Lobster code"
 echo "  $CONFIG_DIR          Configuration"
 echo "  $WORKSPACE_DIR      Claude workspace"
+echo "  $PROJECTS_DIR  Projects"
 echo "  $MESSAGES_DIR       Message queues"
 echo ""
 if [ "$INSTALL_MODE" = "tarball" ]; then

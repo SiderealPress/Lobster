@@ -776,12 +776,17 @@ print_success "Security hardening complete"
 #-------------------------------------------------------------------------------
 print_header "Step 8: Creating Projects Directory Structure"
 
-print_step "Creating ~/projects directory tree..."
+WORKSPACE_DIR="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
+PROJECTS_DIR="${LOBSTER_PROJECTS:-$WORKSPACE_DIR/projects}"
+
+print_step "Creating projects directory at $PROJECTS_DIR..."
+mkdir -p "$PROJECTS_DIR"
+print_success "Projects directory created:"
+echo "  $PROJECTS_DIR - All Lobster-managed projects"
+
+# Legacy: also create ~/projects/ for backward compatibility
 mkdir -p ~/projects/personal
 mkdir -p ~/projects/business
-print_success "Projects directories created:"
-echo "  ~/projects/personal - Personal projects"
-echo "  ~/projects/business - Business/work projects"
 
 #-------------------------------------------------------------------------------
 # Helper Scripts

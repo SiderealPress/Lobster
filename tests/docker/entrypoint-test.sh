@@ -22,7 +22,7 @@ pip install -q -r tests/requirements-test.txt 2>/dev/null || true
 
 # Initialize test directories
 mkdir -p /home/testuser/messages/{inbox,outbox,processed,config,audio,task-outputs}
-mkdir -p /home/testuser/lobster-workspace/{logs,data,scheduled-jobs/logs}
+mkdir -p /home/testuser/lobster-workspace/{logs,data,scheduled-jobs/logs,projects}
 mkdir -p /home/testuser/lobster-workspace/memory/{canonical/{people,projects},archive/digests}
 mkdir -p /home/testuser/lobster/scheduled-tasks/tasks
 
