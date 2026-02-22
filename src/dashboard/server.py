@@ -19,10 +19,14 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import signal
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 import websockets
 from websockets.asyncio.server import serve
@@ -33,6 +37,42 @@ log = logging.getLogger("lobster-dashboard")
 
 # Protocol version
 PROTOCOL_VERSION = "1.0.0"
+
+# Token storage
+_HOME = Path.home()
+_MESSAGES = Path(os.environ.get("LOBSTER_MESSAGES", _HOME / "messages"))
+_TOKEN_FILE = _MESSAGES / "config" / "dashboard-token"
+
+
+def _load_or_create_token() -> str:
+    """Load the dashboard token from disk, creating it if absent.
+
+    The token is a UUID4 generated once and persisted so that bisque-computer
+    clients can reconnect across server restarts without re-pairing.
+    """
+    _TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    if _TOKEN_FILE.exists():
+        token = _TOKEN_FILE.read_text().strip()
+        if token:
+            log.info("Loaded existing dashboard token from %s", _TOKEN_FILE)
+            return token
+    token = str(uuid.uuid4())
+    _TOKEN_FILE.write_text(token)
+    log.info("Generated new dashboard token, saved to %s", _TOKEN_FILE)
+    return token
+
+
+def _extract_token_from_path(path: str) -> str | None:
+    """Parse the ?token=<UUID> query parameter from a WebSocket request path."""
+    try:
+        parsed = urlparse(path)
+        params = parse_qs(parsed.query)
+        tokens = params.get("token")
+        if tokens:
+            return tokens[0]
+    except Exception:
+        pass
+    return None
 
 
 def _make_frame(msg_type: str, data: dict | None = None) -> str:
@@ -85,12 +125,28 @@ class DashboardServer:
         self.interval = interval
         self.clients: set = set()
         self._running = True
+        self._token: str = _load_or_create_token()
 
     async def handler(self, websocket) -> None:
         """Handle a single client connection."""
-        self.clients.add(websocket)
         remote = websocket.remote_address
-        log.info("Client connected: %s", remote)
+
+        # --- Token authentication ---
+        request_path = getattr(websocket.request, "path", "") if websocket.request else ""
+        client_token = _extract_token_from_path(request_path)
+
+        if client_token != self._token:
+            log.warning(
+                "Client %s rejected: invalid or missing token (path=%r)",
+                remote, request_path,
+            )
+            await websocket.send(_make_error("Unauthorized: invalid or missing token"))
+            await websocket.close(code=4401, reason="Unauthorized")
+            return
+
+        log.info("Client authenticated: %s", remote)
+
+        self.clients.add(websocket)
 
         try:
             # Send hello + initial snapshot

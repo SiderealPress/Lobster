@@ -1080,6 +1080,15 @@ async def list_tools() -> list[Tool]:
                 },
             },
         ),
+        # bisque-computer Connection Tools
+        Tool(
+            name="get_bisque_connection_url",
+            description="Get the WebSocket connection URL for bisque-computer to connect to this Lobster dashboard server. Returns the full URL including the auth token, e.g. ws://IP:9100?token=UUID. Use this when the user asks to 'connect bisque-computer' or 'give me the bisque connection URL'.",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
     ]
 
 
@@ -1197,6 +1206,9 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
     # Local Sync Awareness Tools
     elif name == "check_local_sync":
         return await handle_check_local_sync(arguments)
+    # bisque-computer Connection Tools
+    elif name == "get_bisque_connection_url":
+        return await handle_get_bisque_connection_url(arguments)
     else:
         return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
@@ -3611,6 +3623,54 @@ async def handle_check_local_sync(arguments: dict[str, Any]) -> list[TextContent
     except Exception as e:
         log.error(f"check_local_sync failed: {e}", exc_info=True)
         return [TextContent(type="text", text=f"Error checking local sync: {e}")]
+
+
+async def handle_get_bisque_connection_url(arguments: dict[str, Any]) -> list[TextContent]:
+    """Return the WebSocket connection URL for bisque-computer.
+
+    Reads the dashboard token from ~/messages/config/dashboard-token and the
+    public IP from ~/lobster-config/config.env (LOBSTER_PUBLIC_IP). Falls back
+    to ``curl -s ifconfig.me`` when the config entry is absent.
+    """
+    # Read token
+    token_file = _MESSAGES / "config" / "dashboard-token"
+    if not token_file.exists():
+        return [TextContent(type="text", text=(
+            "Dashboard token not found. Start the dashboard server first:\n"
+            "nohup /home/admin/lobster/.venv/bin/python3 "
+            "/home/admin/lobster/src/dashboard/server.py --host 0.0.0.0 --port 9100 &"
+        ))]
+    token = token_file.read_text().strip()
+    if not token:
+        return [TextContent(type="text", text="Dashboard token file is empty. Restart the dashboard server to regenerate it.")]
+
+    # Read public IP from config, with ifconfig.me fallback
+    public_ip: str = ""
+    config_file = _CONFIG_DIR / "config.env"
+    if config_file.exists():
+        for line in config_file.read_text().splitlines():
+            stripped = line.strip()
+            if stripped.startswith("LOBSTER_PUBLIC_IP="):
+                public_ip = stripped.split("=", 1)[1].strip().strip('"').strip("'")
+                break
+
+    if not public_ip:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "curl", "-s", "--max-time", "5", "ifconfig.me",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await proc.communicate()
+            public_ip = stdout.decode().strip()
+        except Exception:
+            pass
+
+    if not public_ip:
+        return [TextContent(type="text", text="Could not determine public IP. Add LOBSTER_PUBLIC_IP=<IP> to ~/lobster-config/config.env.")]
+
+    url = f"ws://{public_ip}:9100?token={token}"
+    return [TextContent(type="text", text=url)]
 
 
 async def main():
