@@ -375,6 +375,7 @@ if [ "$PKG_MANAGER" = "apt" ]; then
         tmux
         build-essential
         cmake
+        ffmpeg
         ripgrep
         fd-find
         bat
@@ -402,6 +403,7 @@ else
         tmux
         gcc-c++
         cmake
+        make
     )
 
     for pkg in "${DNF_PACKAGES[@]}"; do
@@ -1104,72 +1106,6 @@ deactivate
 success "Python environment ready"
 
 #===============================================================================
-# whisper.cpp (core dependency - voice transcription)
-#===============================================================================
-
-step "Installing whisper.cpp..."
-
-WHISPER_DIR="${WORKSPACE_DIR}/whisper.cpp"
-
-if [ ! -f "$WHISPER_DIR/build/bin/whisper-cli" ]; then
-    # Build dependencies are already installed above:
-    #   apt: build-essential cmake
-    #   dnf: gcc-c++ cmake
-    mkdir -p "$(dirname "$WHISPER_DIR")"
-    if [ ! -d "$WHISPER_DIR" ]; then
-        info "Cloning whisper.cpp..."
-        git clone --quiet https://github.com/ggerganov/whisper.cpp.git "$WHISPER_DIR"
-    fi
-    cd "$WHISPER_DIR"
-    info "Building whisper.cpp (this may take a few minutes)..."
-    cmake -B build -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON 2>&1 | tail -5
-    cmake --build build -j"$(nproc)" 2>&1 | tail -10
-    cd "$INSTALL_DIR"
-    if [ -f "$WHISPER_DIR/build/bin/whisper-cli" ]; then
-        success "whisper.cpp built successfully"
-    else
-        warn "whisper.cpp build failed. Voice transcription will be unavailable."
-    fi
-else
-    success "whisper.cpp already built"
-fi
-
-# Download small model if binary is present but model is missing
-if [ -f "$WHISPER_DIR/build/bin/whisper-cli" ] && [ ! -f "$WHISPER_DIR/models/ggml-small.bin" ]; then
-    step "Downloading whisper small model (~465MB)..."
-    if [ -f "$WHISPER_DIR/models/download-ggml-model.sh" ]; then
-        bash "$WHISPER_DIR/models/download-ggml-model.sh" small
-        if [ -f "$WHISPER_DIR/models/ggml-small.bin" ]; then
-            success "Whisper small model downloaded"
-        else
-            warn "Model download failed. Download manually: bash $WHISPER_DIR/models/download-ggml-model.sh small"
-        fi
-    else
-        warn "Model download script not found. Download manually - see README.md"
-    fi
-elif [ -f "$WHISPER_DIR/models/ggml-small.bin" ]; then
-    success "Whisper small model already present"
-fi
-
-# ffmpeg is needed by the MCP transcription tool for audio conversion
-if ! command -v ffmpeg &>/dev/null; then
-    info "Installing ffmpeg..."
-    if [ "$PKG_MANAGER" = "apt" ]; then
-        sudo apt-get install -y -qq ffmpeg
-    else
-        # Amazon Linux 2023 does not ship ffmpeg in standard repos
-        if sudo dnf install -y ffmpeg 2>/dev/null; then
-            success "ffmpeg installed"
-        else
-            warn "ffmpeg not available in dnf repos. Install manually:"
-            warn "  sudo dnf install -y https://download1.rpmfusion.org/free/fedora/rpmfusion-free-release-\$(rpm -E %fedora).noarch.rpm && sudo dnf install -y ffmpeg"
-        fi
-    fi
-else
-    success "ffmpeg already installed"
-fi
-
-#===============================================================================
 # Configuration
 #===============================================================================
 
@@ -1314,73 +1250,95 @@ fi
 
 #===============================================================================
 # Voice Transcription (whisper.cpp + ffmpeg)
+#
+# This is a HARD REQUIREMENT. If whisper.cpp fails to build or the model
+# fails to download, the installer will exit with an error.
 #===============================================================================
 
-step "Voice Transcription Setup..."
+step "Voice Transcription Setup (whisper.cpp)..."
 
-# Install ffmpeg
-if ! command -v ffmpeg &> /dev/null; then
-    step "Installing ffmpeg..."
-    if command -v apt-get &> /dev/null; then
-        sudo apt-get install -y ffmpeg
-    elif command -v dnf &> /dev/null; then
-        sudo dnf install -y ffmpeg
-    elif command -v yum &> /dev/null; then
-        sudo yum install -y ffmpeg
+# Check ffmpeg - should already be installed by the system deps section above.
+# For dnf systems, ffmpeg may not be in standard repos; try to install if missing.
+if ! command -v ffmpeg &>/dev/null; then
+    warn "ffmpeg not found. Attempting to install..."
+    if [ "$PKG_MANAGER" = "apt" ]; then
+        sudo apt-get install -y -qq ffmpeg
     else
-        error "Could not install ffmpeg. Please install it manually and re-run."
-        exit 1
+        # Amazon Linux 2023 does not ship ffmpeg in standard repos; try RPM Fusion
+        if ! sudo dnf install -y ffmpeg 2>/dev/null; then
+            error "ffmpeg installation failed."
+            error "On Amazon Linux 2023, install via RPM Fusion:"
+            error "  sudo dnf install -y https://download1.rpmfusion.org/free/fedora/rpmfusion-free-release-\$(rpm -E %fedora).noarch.rpm"
+            error "  sudo dnf install -y ffmpeg"
+            exit 1
+        fi
     fi
+fi
+if command -v ffmpeg &>/dev/null; then
+    success "ffmpeg is available"
 else
-    success "ffmpeg already installed"
+    error "ffmpeg is required for voice message transcription but could not be installed."
+    exit 1
 fi
 
 # Build whisper.cpp
-WHISPER_DIR="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}/whisper.cpp"
+WHISPER_DIR="${WORKSPACE_DIR}/whisper.cpp"
 if [ ! -f "$WHISPER_DIR/build/bin/whisper-cli" ]; then
-    step "Building whisper.cpp..."
-    if ! command -v cmake &> /dev/null; then
-        if command -v apt-get &> /dev/null; then
-            sudo apt-get install -y cmake build-essential
-        elif command -v dnf &> /dev/null; then
-            sudo dnf install -y cmake gcc-c++ make
-        fi
+    step "Building whisper.cpp (this may take a few minutes)..."
+    # Ensure build tools are present (already installed via system deps, but be safe)
+    if ! command -v cmake &>/dev/null; then
+        error "cmake is required to build whisper.cpp but is not installed."
+        error "Install it with: sudo apt-get install -y cmake build-essential"
+        exit 1
     fi
     mkdir -p "$(dirname "$WHISPER_DIR")"
     if [ ! -d "$WHISPER_DIR" ]; then
-        git clone https://github.com/ggerganov/whisper.cpp.git "$WHISPER_DIR"
+        info "Cloning whisper.cpp..."
+        git clone --quiet https://github.com/ggerganov/whisper.cpp.git "$WHISPER_DIR"
     fi
     cd "$WHISPER_DIR"
-    cmake -B build
-    cmake --build build -j$(nproc)
-    cd - > /dev/null
+    cmake -B build -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON 2>&1 | tail -5
+    cmake --build build -j"$(nproc)" 2>&1 | tail -10
+    cd "$INSTALL_DIR"
     if [ -f "$WHISPER_DIR/build/bin/whisper-cli" ]; then
         success "whisper.cpp built successfully"
     else
-        error "whisper.cpp build failed. Voice transcription is required."
+        error "whisper.cpp build failed. Voice transcription is a hard requirement."
+        error "Check build output above and ensure build-essential/cmake/gcc are installed."
         exit 1
     fi
 else
     success "whisper.cpp already built"
 fi
 
-# Download model
+# Download whisper small model (~465MB)
 if [ ! -f "$WHISPER_DIR/models/ggml-small.bin" ]; then
     step "Downloading whisper small model (~465MB)..."
     if [ -f "$WHISPER_DIR/models/download-ggml-model.sh" ]; then
         bash "$WHISPER_DIR/models/download-ggml-model.sh" small
         if [ -f "$WHISPER_DIR/models/ggml-small.bin" ]; then
-            success "Whisper model downloaded"
+            success "Whisper small model downloaded"
         else
-            error "Whisper model download failed. Voice transcription is required."
+            error "Whisper model download failed."
+            error "Try manually: bash $WHISPER_DIR/models/download-ggml-model.sh small"
             exit 1
         fi
     else
         error "Whisper model download script not found at $WHISPER_DIR/models/download-ggml-model.sh"
+        error "Ensure whisper.cpp was cloned correctly."
         exit 1
     fi
 else
-    success "Whisper model already downloaded"
+    success "Whisper small model already present"
+fi
+
+# Verify the full pipeline works
+info "Verifying whisper.cpp transcription pipeline..."
+if "$WHISPER_DIR/build/bin/whisper-cli" --help &>/dev/null 2>&1; then
+    success "whisper-cli binary verified"
+else
+    error "whisper-cli binary does not execute correctly."
+    exit 1
 fi
 
 #===============================================================================
