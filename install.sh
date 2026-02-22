@@ -1023,6 +1023,27 @@ else
     info "Skipping no-auto-memory hook (settings.json not yet created)"
 fi
 
+# Set up Claude Code PreToolUse hook to enforce clickable links for completed work
+chmod +x "$INSTALL_DIR/hooks/link-checker.py"
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '.hooks.PreToolUse[]? | select(.matcher == "mcp__lobster-inbox__send_reply")' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+            "matcher": "mcp__lobster-inbox__send_reply",
+            "hooks": [{
+                "type": "command",
+                "command": "python3 '"$INSTALL_DIR"'/hooks/link-checker.py",
+                "timeout": 5
+            }]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "Link enforcement hook installed"
+    else
+        info "Link enforcement hook already configured in Claude Code settings"
+    fi
+else
+    info "Skipping link enforcement hook (settings.json not yet created)"
+fi
+
 #===============================================================================
 # Python Environment
 #===============================================================================
