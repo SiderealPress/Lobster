@@ -698,14 +698,11 @@ main() {
                 log_info "TRANSIENT: mode=$lobster_mode for ${state_age}s — within expected window"
                 # Don't check for Claude process during transient states
             else
-                log_warn "STALE TRANSIENT: mode=$lobster_mode for ${state_age}s — exceeded expected window"
-                if ! check_tmux; then
-                    level="RED"
-                    restart_reason="tmux session missing (stale $lobster_mode state)"
-                elif ! check_wrapper_process; then
-                    level="RED"
-                    restart_reason="wrapper process missing (stale $lobster_mode state)"
-                fi
+                # Stale transient state is itself RED — something is stuck.
+                # Don't wait for inbox to pile up; the state being stale IS the signal.
+                log_error "STALE TRANSIENT: mode=$lobster_mode for ${state_age}s — exceeded expected window"
+                level="RED"
+                restart_reason="stale $lobster_mode state (${state_age}s)"
             fi
 
             # Still check inbox drain

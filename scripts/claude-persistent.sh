@@ -157,29 +157,20 @@ launch_claude() {
     # Build the initial prompt for Claude
     local init_prompt="Read CLAUDE.md and begin your main loop. Call wait_for_messages(hibernate_on_timeout=true) to start listening for Telegram messages. Process each message as it arrives, then return to wait_for_messages(). Never exit unless hibernating."
 
-    # Determine launch mode: resume or fresh
+    # Always start fresh. Never use --continue.
+    #
+    # Why: --continue resumes the previous session's context. If that session
+    # was mid-task (e.g. deep in a subagent chain), Claude resumes the old
+    # work instead of re-entering the message loop. The dispatcher is stateless
+    # by design — it reads CLAUDE.md, enters the loop, and processes messages.
+    # Any persistent state lives in canonical memory files, not conversation history.
     local claude_exit_code=0
-    if [[ "$attempt" -eq 1 ]]; then
-        # First attempt: try to continue the most recent session
-        # --model sonnet: Dispatcher uses Sonnet for cost efficiency (~40% cheaper).
-        # Sonnet handles message routing, tool invocation, and reply composition well.
-        # To revert to Opus: remove the --model sonnet flag below.
-        log "Trying to continue most recent session..."
-        claude --dangerously-skip-permissions \
-            --model sonnet \
-            --continue \
-            --max-turns 150 \
-            -p "$init_prompt" \
-            2>&1 | tee -a "$LOG_DIR/claude-session.log" || claude_exit_code=$?
-    else
-        # Subsequent attempts after failure: start fresh
-        log "Starting fresh session (previous attempt failed)..."
-        claude --dangerously-skip-permissions \
-            --model sonnet \
-            --max-turns 150 \
-            -p "$init_prompt" \
-            2>&1 | tee -a "$LOG_DIR/claude-session.log" || claude_exit_code=$?
-    fi
+    log "Starting fresh session (attempt $attempt)..."
+    claude --dangerously-skip-permissions \
+        --model sonnet \
+        --max-turns 150 \
+        -p "$init_prompt" \
+        2>&1 | tee -a "$LOG_DIR/claude-session.log" || claude_exit_code=$?
 
     return $claude_exit_code
 }
