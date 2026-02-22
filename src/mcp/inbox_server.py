@@ -1393,14 +1393,26 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
             output += f"**[{source}]** from **{user}**\n"
         output += f"Chat ID: `{chat_id}` | Message ID: `{msg_id}`\n"
         output += f"Time: {ts}\n\n"
-        # Show reply-to context if present
+        # Show full reply-to context if present
         reply_to = msg.get("reply_to")
         if reply_to:
-            reply_text = reply_to.get("text", "(no text)")
-            # Truncate long reply previews
-            if len(reply_text) > 120:
-                reply_text = reply_text[:120] + "..."
-            output += f"↩️ Replying to: {reply_text}\n\n"
+            reply_text = reply_to.get("reply_to_text") or reply_to.get("text")
+            reply_type = reply_to.get("reply_to_type", "text")
+            reply_msg_id = reply_to.get("reply_to_message_id") or reply_to.get("message_id")
+            reply_from = reply_to.get("reply_to_from_user") or reply_to.get("from_user")
+
+            # Build the reply header line
+            type_label = f" [{reply_type}]" if reply_type and reply_type != "text" else ""
+            from_label = f" from @{reply_from}" if reply_from else ""
+            id_label = f" (msg_id={reply_msg_id})" if reply_msg_id else ""
+            output += f"↩️ Replying to{type_label}{from_label}{id_label}:\n"
+
+            if reply_text:
+                # Display the full text, indented for visual clarity
+                indented = "\n".join(f"  {line}" for line in reply_text.splitlines())
+                output += f"{indented}\n\n"
+            else:
+                output += f"  (no text content)\n\n"
         output += f"> {text}\n\n"
 
     output += "---\n"
