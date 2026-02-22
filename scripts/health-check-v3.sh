@@ -506,6 +506,22 @@ check_disk() {
     return 0
 }
 
+# Check 8: Dashboard server - silently restart if not listening on port 9100
+check_dashboard_server() {
+    local install_dir="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
+    local dashboard_cmd="$install_dir/.venv/bin/python3 $install_dir/src/dashboard/server.py --host 0.0.0.0 --port 9100"
+
+    if ss -tlnp | grep -q 9100; then
+        log_info "Dashboard server OK: listening on port 9100"
+        return 0
+    fi
+
+    log_warn "Dashboard server not running on port 9100 - restarting"
+    nohup $dashboard_cmd >> "$WORKSPACE_DIR/logs/dashboard-server.log" 2>&1 &
+    log_info "Dashboard server restarted (PID $!)"
+    return 0
+}
+
 #===============================================================================
 # Circuit Breaker - prevent restart loops for persistent stale messages
 #===============================================================================
@@ -796,6 +812,10 @@ main() {
     elif [[ $outbox_rc -eq 1 && "$level" == "GREEN" ]]; then
         level="YELLOW"
     fi
+
+    # --- Dashboard server check (soft restart, never RED) ---
+
+    check_dashboard_server
 
     # --- Resource checks (RED if critical) ---
 

@@ -1736,6 +1736,22 @@ if [[ ! $REPLY =~ ^[Nn]$ ]]; then
     else
         warn "Claude session: not running (check with: lobster attach)"
     fi
+
+    # Start dashboard server if not already running
+    DASHBOARD_CMD="$INSTALL_DIR/.venv/bin/python3 $INSTALL_DIR/src/dashboard/server.py --host 0.0.0.0 --port 9100"
+    if ss -tlnp | grep -q 9100; then
+        success "Dashboard server: already running on port 9100"
+    else
+        info "Starting dashboard server..."
+        mkdir -p "$WORKSPACE_DIR/logs"
+        nohup $DASHBOARD_CMD >> "$WORKSPACE_DIR/logs/dashboard-server.log" 2>&1 &
+        sleep 2
+        if ss -tlnp | grep -q 9100; then
+            success "Dashboard server: running on port 9100"
+        else
+            warn "Dashboard server: failed to start (check $WORKSPACE_DIR/logs/dashboard-server.log)"
+        fi
+    fi
 else
     info "Services not started. Start manually with: lobster start"
 fi

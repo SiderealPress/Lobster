@@ -51,6 +51,17 @@ sleep 2
 
 if tmux -L lobster has-session -t "$SESSION_NAME" 2>/dev/null; then
     info "Lobster started successfully!"
+
+    # Start dashboard server in a second tmux window if not already running
+    DASHBOARD_CMD="$INSTALL_DIR/.venv/bin/python3 $INSTALL_DIR/src/dashboard/server.py --host 0.0.0.0 --port 9100"
+    if ss -tlnp | grep -q 9100; then
+        info "Dashboard server already running on port 9100"
+    else
+        info "Starting dashboard server..."
+        tmux -L lobster new-window -t "$SESSION_NAME" -n "dashboard" "$DASHBOARD_CMD"
+        info "Dashboard server started on port 9100"
+    fi
+
     echo ""
     echo "  Attach to session:  tmux -L lobster attach -t $SESSION_NAME"
     echo "  View logs:          tail -f $WORKSPACE/logs/claude-persistent.log"
