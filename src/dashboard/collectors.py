@@ -357,7 +357,7 @@ def collect_health() -> dict:
     for proc in psutil.process_iter(["cmdline"]):
         try:
             cmdline = " ".join(proc.info.get("cmdline") or [])
-            if "telegram" in cmdline.lower() and "bot" in cmdline.lower():
+            if "lobster_bot" in cmdline or ("telegram" in cmdline.lower() and "bot" in cmdline.lower()):
                 telegram_bot_running = True
                 break
         except (psutil.NoSuchProcess, psutil.AccessDenied):
