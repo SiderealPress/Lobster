@@ -87,15 +87,33 @@ if [ -n "$COMPLETED_TASKS" ]; then
     # about what to check.
     SELF_CHECK_TEXT="[Task Completed] ${COMPLETED_TASKS}"
 else
-    # No completed tasks — only inject status check if subagents are still running
-    if [ "$CLAUDE_COUNT" -le 1 ]; then
+    # Check pending-agents.json tracker — subagents may have already exited
+    # but still need relay to Drew (processes gone, record still in file).
+    PENDING_AGENTS_FILE="${MESSAGES_DIR}/config/pending-agents.json"
+    PENDING_COUNT=$(python3 -c "
+import json, sys
+try:
+    with open('$PENDING_AGENTS_FILE') as f:
+        data = json.load(f)
+    print(len(data.get('agents', [])))
+except Exception:
+    print(0)
+" 2>/dev/null || echo "0")
+
+    # No completed tasks — only inject status check if subagents are still
+    # running OR there are pending agents in the tracker.
+    if [ "$CLAUDE_COUNT" -le 1 ] && [ "$PENDING_COUNT" -eq 0 ] 2>/dev/null; then
         exit 0
     fi
 
     AGENT_SUMMARY=$(scan_agent_status)
+
     SELF_CHECK_TEXT="status? (Self-check)"
     if [ -n "$AGENT_SUMMARY" ]; then
         SELF_CHECK_TEXT="status? (Self-check) | ${AGENT_SUMMARY}"
+    fi
+    if [ "$PENDING_COUNT" -gt 0 ] 2>/dev/null; then
+        SELF_CHECK_TEXT="${SELF_CHECK_TEXT} [${PENDING_COUNT} agents pending]"
     fi
 fi
 
