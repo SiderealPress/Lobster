@@ -393,6 +393,75 @@ def is_authorized(user_id: int) -> bool:
     return user_id in ALLOWED_USERS
 
 
+def extract_reply_to_context(message) -> dict | None:
+    """Extract full reply-to context from a Telegram message, if it is a reply.
+
+    Returns a dict with:
+      - reply_to_message_id: int — the Telegram message ID of the replied-to message
+      - reply_to_type: str — "text", "photo", "voice", "document", "sticker", etc.
+      - reply_to_text: str | None — full text or caption of the replied-to message
+      - reply_to_from_user: str | None — username of the sender of the replied-to message
+
+    Returns None if the message is not a reply.
+    """
+    if not message.reply_to_message:
+        return None
+
+    reply = message.reply_to_message
+
+    # Determine the type of the replied-to message
+    if reply.text:
+        reply_type = "text"
+        reply_text = reply.text
+    elif reply.caption:
+        # Photos, documents, videos, etc. with a caption
+        if reply.photo:
+            reply_type = "photo"
+        elif reply.document:
+            reply_type = "document"
+        elif reply.video:
+            reply_type = "video"
+        elif reply.audio:
+            reply_type = "audio"
+        else:
+            reply_type = "media"
+        reply_text = reply.caption
+    elif reply.voice:
+        reply_type = "voice"
+        reply_text = None
+    elif reply.photo:
+        reply_type = "photo"
+        reply_text = None
+    elif reply.document:
+        reply_type = "document"
+        reply_text = None
+    elif reply.video:
+        reply_type = "video"
+        reply_text = None
+    elif reply.audio:
+        reply_type = "audio"
+        reply_text = None
+    elif reply.sticker:
+        reply_type = "sticker"
+        reply_text = reply.sticker.emoji if reply.sticker.emoji else None
+    else:
+        reply_type = "unknown"
+        reply_text = None
+
+    from_user = reply.from_user.username if reply.from_user else None
+
+    return {
+        "message_id": reply.message_id,
+        "reply_to_message_id": reply.message_id,
+        "reply_to_type": reply_type,
+        "reply_to_text": reply_text,
+        "reply_to_from_user": from_user,
+        # Keep legacy "text" field for backwards compatibility
+        "text": reply_text,
+        "from_user": from_user,
+    }
+
+
 def build_inline_keyboard(buttons: list) -> InlineKeyboardMarkup | None:
     """
     Build an InlineKeyboardMarkup from a buttons specification.
@@ -559,14 +628,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "timestamp": datetime.utcnow().isoformat(),
     }
 
-    # Capture reply-to metadata if this message is a reply
-    if message.reply_to_message:
-        reply = message.reply_to_message
-        msg_data["reply_to"] = {
-            "message_id": reply.message_id,
-            "text": reply.text,
-            "from_user": reply.from_user.username if reply.from_user else None,
-        }
+    # Capture full reply-to context if this message is a reply
+    reply_ctx = extract_reply_to_context(message)
+    if reply_ctx:
+        msg_data["reply_to"] = reply_ctx
 
     inbox_file = INBOX_DIR / f"{msg_id}.json"
     atomic_write_json(inbox_file, msg_data)
@@ -608,6 +673,11 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
             "file_id": voice.file_id,
             "timestamp": datetime.utcnow().isoformat(),
         }
+
+        # Capture full reply-to context if this message is a reply
+        reply_ctx = extract_reply_to_context(message)
+        if reply_ctx:
+            msg_data["reply_to"] = reply_ctx
 
         inbox_file = INBOX_DIR / f"{msg_id}.json"
         atomic_write_json(inbox_file, msg_data)
@@ -656,6 +726,11 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
             "file_id": photo.file_id,
             "timestamp": datetime.utcnow().isoformat(),
         }
+
+        # Capture full reply-to context if this message is a reply
+        reply_ctx = extract_reply_to_context(message)
+        if reply_ctx:
+            msg_data["reply_to"] = reply_ctx
 
         inbox_file = INBOX_DIR / f"{msg_id}.json"
         atomic_write_json(inbox_file, msg_data)
@@ -728,6 +803,11 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
 
         if is_image:
             msg_data["image_file"] = str(save_path)
+
+        # Capture full reply-to context if this message is a reply
+        reply_ctx = extract_reply_to_context(message)
+        if reply_ctx:
+            msg_data["reply_to"] = reply_ctx
 
         inbox_file = INBOX_DIR / f"{msg_id}.json"
         atomic_write_json(inbox_file, msg_data)
