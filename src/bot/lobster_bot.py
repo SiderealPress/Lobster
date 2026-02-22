@@ -58,6 +58,50 @@ LOBSTER_STATE_FILE = _MESSAGES / "config" / "lobster-state.json"
 _REPO_DIR = Path(os.environ.get("LOBSTER_INSTALL_DIR", Path.home() / "lobster"))
 CLAUDE_WAKE_SCRIPT = _REPO_DIR / "scripts" / "start-lobster.sh"
 
+# Telegram message length limit (API max is 4096, we use 4000 for safety margin)
+TELEGRAM_MAX_LENGTH = 4000
+
+
+def split_message(text: str, max_length: int = TELEGRAM_MAX_LENGTH) -> list[str]:
+    """Split a message into chunks that fit within Telegram's character limit.
+
+    Splitting strategy (in priority order):
+    1. Paragraph boundaries (double newline)
+    2. Single newline boundaries
+    3. Hard split at max_length
+    """
+    if len(text) <= max_length:
+        return [text]
+
+    chunks = []
+    remaining = text
+
+    while remaining:
+        if len(remaining) <= max_length:
+            chunks.append(remaining)
+            break
+
+        # Try splitting at paragraph boundary (double newline)
+        split_pos = remaining.rfind("\n\n", 0, max_length)
+        if split_pos > 0:
+            chunks.append(remaining[:split_pos])
+            remaining = remaining[split_pos + 2:]  # skip the double newline
+            continue
+
+        # Try splitting at single newline
+        split_pos = remaining.rfind("\n", 0, max_length)
+        if split_pos > 0:
+            chunks.append(remaining[:split_pos])
+            remaining = remaining[split_pos + 1:]  # skip the newline
+            continue
+
+        # Hard split at max_length
+        chunks.append(remaining[:max_length])
+        remaining = remaining[max_length:]
+
+    return chunks
+
+
 # Ensure directories exist
 INBOX_DIR.mkdir(parents=True, exist_ok=True)
 OUTBOX_DIR.mkdir(parents=True, exist_ok=True)
@@ -312,21 +356,28 @@ class OutboxHandler(FileSystemEventHandler):
 
             if chat_id and text and bot_app:
                 reply_markup = build_inline_keyboard(buttons) if buttons else None
-                try:
-                    await bot_app.bot.send_message(
-                        chat_id=chat_id,
-                        text=text,
-                        parse_mode="Markdown",
-                        reply_markup=reply_markup
-                    )
-                except Exception:
-                    # Fallback to plain text if Markdown parsing fails
-                    await bot_app.bot.send_message(
-                        chat_id=chat_id,
-                        text=text,
-                        reply_markup=reply_markup
-                    )
-                log.info(f"Sent reply to {chat_id}: {text[:50]}...")
+                chunks = split_message(text)
+                for i, chunk in enumerate(chunks):
+                    # Only attach buttons to the last chunk
+                    chunk_markup = reply_markup if (i == len(chunks) - 1) else None
+                    try:
+                        await bot_app.bot.send_message(
+                            chat_id=chat_id,
+                            text=chunk,
+                            parse_mode="Markdown",
+                            reply_markup=chunk_markup
+                        )
+                    except Exception:
+                        # Fallback to plain text if Markdown parsing fails
+                        await bot_app.bot.send_message(
+                            chat_id=chat_id,
+                            text=chunk,
+                            reply_markup=chunk_markup
+                        )
+                if len(chunks) > 1:
+                    log.info(f"Sent reply to {chat_id} in {len(chunks)} chunks: {text[:50]}...")
+                else:
+                    log.info(f"Sent reply to {chat_id}: {text[:50]}...")
                 os.remove(filepath)
             else:
                 log.warning(f"Skipping reply {filepath}: missing chat_id={chat_id}, text={bool(text)}, bot={bool(bot_app)}")
