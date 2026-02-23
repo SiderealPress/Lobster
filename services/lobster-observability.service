@@ -1,0 +1,29 @@
+[Unit]
+Description=Lobster Observability HTTP Server (port 8742)
+After=network.target
+
+[Service]
+Type=simple
+User=admin
+Group=admin
+WorkingDirectory=/home/admin/lobster
+Environment=PATH=/home/admin/.local/bin:/home/admin/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+Environment=LOBSTER_CONFIG_DIR=/home/admin/lobster-config
+Environment=LOBSTER_INSTALL_DIR=/home/admin/lobster
+Environment=LOBSTER_MESSAGES=/home/admin/messages
+Environment=LOBSTER_WORKSPACE=/home/admin/lobster-workspace
+EnvironmentFile=-/home/admin/lobster/config/config.env
+EnvironmentFile=/home/admin/lobster-config/config.env
+ExecStart=/home/admin/lobster/.venv/bin/python /home/admin/lobster/src/observability/server.py --port 8742
+Restart=always
+RestartSec=10
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lobster-observability
+
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
