@@ -14,6 +14,7 @@ dependencies = [
     "uvicorn>=0.29.0",
     "sqlite-vec>=0.1.1",
     "fastembed>=0.3.0",
+    "lobster-observability @ git+https://github.com/SiderealPress/lobster-observability.git",
 ]
 
 [project.optional-dependencies]
