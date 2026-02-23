@@ -1553,6 +1553,14 @@ if [ -f "$MCP_TEMPLATE" ]; then
         "$INSTALL_DIR/services/lobster-mcp.service"
 fi
 
+# Generate observability server service if template exists
+OBSERVABILITY_TEMPLATE="$INSTALL_DIR/services/lobster-observability.service.template"
+if [ -f "$OBSERVABILITY_TEMPLATE" ]; then
+    generate_from_template \
+        "$OBSERVABILITY_TEMPLATE" \
+        "$INSTALL_DIR/services/lobster-observability.service"
+fi
+
 #===============================================================================
 # Install Services
 #===============================================================================
@@ -1572,6 +1580,12 @@ fi
 if [ -f "$INSTALL_DIR/services/lobster-mcp.service" ]; then
     sudo cp "$INSTALL_DIR/services/lobster-mcp.service" /etc/systemd/system/
     info "MCP HTTP bridge service installed (enable manually with: sudo systemctl enable lobster-mcp)"
+fi
+
+# Install observability service if generated
+if [ -f "$INSTALL_DIR/services/lobster-observability.service" ]; then
+    sudo cp "$INSTALL_DIR/services/lobster-observability.service" /etc/systemd/system/
+    info "Observability server service installed (enable manually with: sudo systemctl enable lobster-observability)"
 fi
 
 sudo systemctl daemon-reload

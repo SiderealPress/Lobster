@@ -62,11 +62,25 @@ if tmux -L lobster has-session -t "$SESSION_NAME" 2>/dev/null; then
         info "Dashboard server started on port 9100"
     fi
 
+    # Start observability server on port 8742 if not already running
+    OBSERVABILITY_CMD="$INSTALL_DIR/.venv/bin/python3 $INSTALL_DIR/src/observability/server.py --host 0.0.0.0 --port 8742"
+    if ss -tlnp | grep -q 8742; then
+        info "Observability server already running on port 8742"
+    else
+        info "Starting observability server..."
+        tmux -L lobster new-window -t "$SESSION_NAME" -n "observability" "$OBSERVABILITY_CMD"
+        info "Observability server started on port 8742"
+    fi
+
     echo ""
     echo "  Attach to session:  tmux -L lobster attach -t $SESSION_NAME"
     echo "  View logs:          tail -f $WORKSPACE/logs/claude-persistent.log"
     echo "  View Claude log:    tail -f $WORKSPACE/logs/claude-session.log"
     echo "  Stop Lobster:       tmux -L lobster kill-session -t $SESSION_NAME"
+    echo ""
+    echo "  Endpoints:"
+    echo "    Dashboard WS:      ws://localhost:9100"
+    echo "    Observability API: http://localhost:8742/observability"
     echo ""
     info "Claude will start and call wait_for_messages() to listen for Telegram messages."
 else
