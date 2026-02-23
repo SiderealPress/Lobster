@@ -63,7 +63,7 @@ if tmux -L lobster has-session -t "$SESSION_NAME" 2>/dev/null; then
     fi
 
     # Start observability server on port 8742 if not already running
-    OBSERVABILITY_CMD="$INSTALL_DIR/.venv/bin/python3 $INSTALL_DIR/src/observability/server.py --host 0.0.0.0 --port 8742"
+    OBSERVABILITY_CMD="$INSTALL_DIR/.venv/bin/lobster-observability-server --host 0.0.0.0 --port 8742"
     if ss -tlnp | grep -q 8742; then
         info "Observability server already running on port 8742"
     else
