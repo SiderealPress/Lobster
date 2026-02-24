@@ -1,0 +1,11 @@
+.venv/
+.git/
+__pycache__/
+*.pyc
+.DS_Store
+.planning/
+.claude/
+data/
+incidents/
+node_modules/
+*.log
