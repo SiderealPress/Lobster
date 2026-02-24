@@ -72,6 +72,8 @@ bash install.sh
 
 ## Local Installation (VM + Tailscale)
 
+> **Deploying** Lobster, not developing it. To work on the code, see [Development](#development).
+
 Want to run Lobster on your local machine instead of a cloud server? You can run it inside a VM with Tailscale Funnel for internet access:
 
 1. Create a Debian 12 VM (UTM, VirtualBox, or VMware)
@@ -140,6 +142,44 @@ See [docs/CUSTOMIZATION.md](docs/CUSTOMIZATION.md) for detailed documentation on
 | `LOBSTER_WORKSPACE` | Claude workspace directory | `$HOME/lobster-workspace` |
 | `LOBSTER_PROJECTS` | Projects directory | `$LOBSTER_WORKSPACE/projects` |
 | `LOBSTER_MESSAGES` | Message queue directory | `$HOME/messages` |
+
+## Development
+
+For working on Lobster's code, not deploying it. The install sections above set up the full always-on assistant (systemd, bots, MCP servers). This section just runs the test suite in Docker — no deployment needed.
+
+### Prerequisites
+
+- [Docker](https://docs.docker.com/get-docker/) (with Docker Compose v2)
+
+### Quick Start
+
+```bash
+make test
+```
+
+This builds the dev image (Python 3.13 + all deps from `uv.lock`) and runs the full test suite.
+
+### Make Targets
+
+| Command | Description |
+|---------|-------------|
+| `make test` | Run full test suite |
+| `make test-unit` | Run `tests/unit/` only |
+| `make test-integration` | Run `tests/integration/` only |
+| `make test-file FILE=tests/unit/test_skill_manager.py` | Run a specific test file |
+| `make shell` | Open interactive shell in dev container |
+| `make build` | Build the dev image only |
+| `make clean` | Remove dev containers and images |
+
+### Workflow
+
+Source and test files are bind-mounted into the container, so you can edit locally and re-run `make test` without rebuilding. A rebuild is only needed when dependencies change.
+
+**Adding a dependency:**
+
+1. Edit `pyproject.toml`
+2. Run `uv lock` to update the lockfile
+3. Run `make build` to rebuild the image with the new dependency
 
 ## CLI Commands
 

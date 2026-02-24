@@ -1,0 +1,24 @@
+services:
+  test:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.dev
+    volumes:
+      - ./src:/app/src
+      - ./tests:/app/tests
+    environment:
+      - PYTHONPATH=/app/src/mcp:/app/src
+    command: ["pytest"]
+
+  shell:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.dev
+    volumes:
+      - ./src:/app/src
+      - ./tests:/app/tests
+    environment:
+      - PYTHONPATH=/app/src/mcp:/app/src
+    command: ["bash"]
+    stdin_open: true
+    tty: true

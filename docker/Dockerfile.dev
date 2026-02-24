@@ -1,0 +1,24 @@
+FROM python:3.13-slim-bookworm
+
+# Install system deps needed by tests
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
+
+# Install uv
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+WORKDIR /app
+
+# Cache layer: install deps first
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --all-extras --no-install-project
+
+# Copy full project (tests reference install.sh, services/, CLAUDE.md, etc.)
+COPY . .
+
+# Init a git repo so tests that use git don't fail
+RUN git init && git config user.email "test@test" && git config user.name "test" && git add -A && git commit -m "init"
+
+ENV PYTHONPATH=/app/src/mcp:/app/src
+ENV PATH="/app/.venv/bin:$PATH"
+
+CMD ["pytest"]
