@@ -1062,16 +1062,6 @@ pip install --quiet mcp python-telegram-bot watchdog python-dotenv slack-bolt ps
 success "Core Python packages installed"
 
 #-------------------------------------------------------------------------------
-# lobster-observability
-#-------------------------------------------------------------------------------
-info "Installing lobster-observability..."
-if pip install --quiet "git+https://github.com/SiderealPress/lobster-observability.git"; then
-    success "lobster-observability installed"
-else
-    warn "lobster-observability install failed. Observability server will be unavailable."
-fi
-
-#-------------------------------------------------------------------------------
 # fastembed
 #-------------------------------------------------------------------------------
 info "Installing fastembed..."
