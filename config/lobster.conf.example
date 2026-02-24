@@ -140,6 +140,20 @@ LOBSTER_BRAIN_DUMPS_REPO="${LOBSTER_BRAIN_DUMPS_REPO:-brain-dumps}"
 # LOBSTER_CONTEXT_DIR="${LOBSTER_CONFIG_DIR}/context"
 
 #===============================================================================
+# Skill System
+#===============================================================================
+# The composable skill system allows skills to inject behavior, context, and
+# preferences into Lobster's runtime. Skills are four-dimensional units that
+# compose and layer based on priority.
+#
+# When enabled, Lobster can call get_skill_context to load active skill context,
+# and users can manage skills via /shop, /skill, or the MCP tools directly.
+#===============================================================================
+
+# Enable the composable skill system
+LOBSTER_ENABLE_SKILLS="${LOBSTER_ENABLE_SKILLS:-true}"
+
+#===============================================================================
 # Slack Integration (Optional)
 #===============================================================================
 # Enable Slack as a message source alongside or instead of Telegram.

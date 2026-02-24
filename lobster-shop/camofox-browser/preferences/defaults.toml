@@ -1,0 +1,3 @@
+camofox_port = 9377
+auto_close_tabs = false
+default_search_engine = "@google_search"
