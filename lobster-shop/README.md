@@ -8,31 +8,65 @@ The Lobster Shop is a collection of add-ons that extend what Lobster can do. Eac
 
 1. **Browse** — Look through `INDEX.md` or ask Lobster `/shop` to see what's available
 2. **Install** — Run the skill's install script: `bash lobster-shop/<skill>/install.sh`
-3. **Use** — The skill registers its tools with Lobster automatically. Just ask Lobster to do the thing.
+3. **Activate** — Use `activate_skill` to enable the skill at runtime
+4. **Use** — The skill injects its behavior and context into Lobster automatically
 
 ## What's a Skill?
 
-A skill is a directory inside `lobster-shop/` that contains everything needed to add a new capability to Lobster:
+Skills are **four-dimensional units** that compose at runtime:
+
+| Layer | Directory | Purpose |
+|-------|-----------|---------|
+| **Behavior** | `behavior/` | Instructions for how/when to use the skill |
+| **Context** | `context/` | Domain knowledge and background info |
+| **Preferences** | `preferences/` | User-configurable settings with defaults |
+| **Tooling** | `tools/` or `src/` | MCP servers and code |
 
 ```
 lobster-shop/
 ├── README.md              # This file
 ├── INDEX.md               # Browse all available skills
-└── google-calendar/       # Example skill
-    ├── skill.json         # Manifest: what it does, what it needs
+├── skill-template/        # Reference template for creating skills
+│   └── skill.toml         # Annotated manifest template
+└── camofox-browser/       # Example skill
+    ├── skill.toml         # Manifest (TOML preferred, JSON compat)
+    ├── skill.json         # Legacy manifest (deprecated)
     ├── README.md          # User-facing description
     ├── install.sh         # One-command installer
+    ├── behavior/          # Behavioral instructions
+    │   └── system.md      # Core behavior
+    ├── context/           # Domain context
+    │   └── domain.md      # Background knowledge
+    ├── preferences/       # Configurable settings
+    │   ├── schema.toml    # Valid preference keys + types
+    │   └── defaults.toml  # Default values
     └── src/               # The actual code
 ```
 
-### The Manifest (`skill.json`)
+### The Manifest (`skill.toml`)
 
-Every skill has a `skill.json` that describes:
+Every skill has a `skill.toml` (or legacy `skill.json`) that describes:
 
-- **What it is** — Name, description, author
-- **What it adds** — MCP tools, bot commands, scheduled jobs
-- **What it needs** — Python packages, system packages, API keys, config
-- **How to set it up** — Automated install steps and any manual steps
+- **What it is** — Name, description, author, category
+- **Activation** — Always-on, triggered by commands, or contextual
+- **Layering** — Priority for composition ordering (0-100)
+- **What it provides** — MCP tools, bot commands
+- **Compatibility** — Skills it enhances or conflicts with
+- **Dependencies** — Python/Node/system packages, API keys
+
+See `skill-template/skill.toml` for the full annotated schema.
+
+### Conditional Composition
+
+Skills can include behavior files that activate only when another skill is co-active:
+
+```
+behavior/
+├── system.md              # Always included
+└── with-calendar.md       # Only included when "calendar" skill is also active
+```
+
+This enables rich cross-skill interactions without tight coupling.
 
 ### Installation
 
@@ -43,53 +77,18 @@ Each skill includes an `install.sh` that handles:
 - Registering MCP tools with Claude
 - Guiding you through any manual setup (API keys, OAuth, etc.)
 
+After installation, activate the skill via the `activate_skill` MCP tool.
+
 ## Creating a Skill
 
-Want to create a skill? Here's the minimum you need:
-
-1. Create a directory: `lobster-shop/my-skill/`
-2. Add a `skill.json` manifest (see `google-calendar/skill.json` for the format)
-3. Add a `README.md` explaining what it lets users DO
-4. Add an `install.sh` that sets everything up
-5. Put your code in `src/`
-
-### Manifest Format
-
-```json
-{
-  "name": "my-skill",
-  "version": "1.0.0",
-  "description": "One sentence: what this lets you do",
-  "author": "Your Name",
-  "status": "available",
-  "adds": {
-    "mcp_tools": ["tool_name_1", "tool_name_2"],
-    "bot_commands": ["/mycommand"],
-    "scheduled_jobs": []
-  },
-  "dependencies": {
-    "pip": ["some-package>=1.0"],
-    "system": ["some-system-package"],
-    "api_keys": [
-      {
-        "name": "MY_API_KEY",
-        "description": "Get this from https://example.com/api",
-        "required": true
-      }
-    ]
-  },
-  "setup": {
-    "auto": [
-      "pip install -r requirements.txt",
-      "claude mcp add my-skill-server"
-    ],
-    "manual": [
-      "Create an account at https://example.com",
-      "Generate an API key"
-    ]
-  }
-}
-```
+1. Copy `skill-template/skill.toml` to `lobster-shop/my-skill/skill.toml`
+2. Fill in the manifest fields
+3. Add `behavior/system.md` with usage instructions
+4. Add `context/domain.md` with domain knowledge (optional)
+5. Add `preferences/schema.toml` and `preferences/defaults.toml` (optional)
+6. Add a `README.md` explaining what it lets users DO
+7. Add an `install.sh` that sets everything up
+8. Put your code in `src/` or `tools/`
 
 ### Design Guidelines
 
@@ -98,6 +97,20 @@ Want to create a skill? Here's the minimum you need:
 - **Self-contained** — Don't modify core Lobster files; add alongside them
 - **Graceful failures** — Check for dependencies before assuming they exist
 - **Clear manual steps** — If something can't be automated, explain it plainly
+- **Priority-aware** — Set `[layering] priority` appropriately (50 is default)
+
+## MCP Tools
+
+The skill system exposes these tools:
+
+| Tool | Description |
+|------|-------------|
+| `list_skills` | Browse available skills with install/active status |
+| `activate_skill` | Activate a skill (mode: always/triggered/contextual) |
+| `deactivate_skill` | Deactivate a skill |
+| `get_skill_context` | Get assembled context from all active skills |
+| `get_skill_preferences` | Get merged preferences for a skill |
+| `set_skill_preference` | Set a preference value |
 
 ## Directory
 

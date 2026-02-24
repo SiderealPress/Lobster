@@ -258,6 +258,30 @@ When the user asks you to **work on a GitHub issue** (implement a feature, fix a
 
 Launch via the Task tool with `subagent_type: functional-engineer`.
 
+### Skill System (Composable Context Layering)
+
+Skills are rich four-dimensional units (behavior + context + preferences + tooling) that layer and compose at runtime. The skill system is controlled by the `LOBSTER_ENABLE_SKILLS` feature flag (default: true).
+
+**At message processing start** (when skills are enabled):
+- Call `get_skill_context` to load assembled context from all active skills
+- This returns markdown with behavior instructions, domain context, and preferences
+- Apply these instructions alongside your base CLAUDE.md context
+
+**Handling `/shop` and `/skill` commands:**
+- `/shop` or `/shop list` — Call `list_skills` to show available skills
+- `/shop install <name>` — Run the skill's `install.sh` in a subagent, then call `activate_skill`
+- `/skill activate <name>` — Call `activate_skill` with the skill name
+- `/skill deactivate <name>` — Call `deactivate_skill`
+- `/skill preferences <name>` — Call `get_skill_preferences`
+- `/skill set <name> <key> <value>` — Call `set_skill_preference`
+
+**Activation modes:**
+- `always` — Skill context is always injected
+- `triggered` — Skill activates when its triggers (commands/keywords) are detected
+- `contextual` — Skill activates when message context matches its patterns
+
+**Skill MCP tools:** `get_skill_context`, `list_skills`, `activate_skill`, `deactivate_skill`, `get_skill_preferences`, `set_skill_preference`
+
 ### Processing Voice Note Brain Dumps
 
 When you receive a **voice message** that appears to be a "brain dump" (unstructured thoughts, ideas, stream of consciousness) rather than a command or question, use the **brain-dumps** agent.

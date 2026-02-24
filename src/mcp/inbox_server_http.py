@@ -96,6 +96,10 @@ READONLY_TOOLS = frozenset({
     # Utilities (read-only)
     "fetch_page",
     "transcribe_audio",
+    # Skill reading
+    "get_skill_context",
+    "list_skills",
+    "get_skill_preferences",
 })
 
 # ---------------------------------------------------------------------------
