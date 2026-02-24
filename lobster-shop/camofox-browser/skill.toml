@@ -1,0 +1,42 @@
+[skill]
+name = "camofox-browser"
+version = "1.0.0"
+description = "Browse the real web with anti-detection — search Google, Amazon, LinkedIn, and more without getting blocked"
+author = "Jo Inc (packaged for Lobster by Drew)"
+category = "tool"
+
+[activation]
+mode = "always"
+triggers = ["/browse", "/search"]
+context_patterns = ["when user asks to browse", "when user asks to search the web"]
+
+[layering]
+priority = 50
+merge_strategy = "append"
+
+[provides]
+mcp_tools = [
+    "camofox_create_tab",
+    "camofox_snapshot",
+    "camofox_click",
+    "camofox_type",
+    "camofox_navigate",
+    "camofox_scroll",
+    "camofox_screenshot",
+    "camofox_close_tab",
+    "camofox_list_tabs",
+]
+bot_commands = ["/browse", "/search"]
+
+[compatibility]
+enhances = []
+conflicts = []
+
+[dependencies]
+pip = ["httpx>=0.24", "mcp>=1.0"]
+npm = ["@askjo/camofox-browser"]
+system = []
+api_keys = []
+
+[dependencies.runtime]
+node = ">=18"

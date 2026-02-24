@@ -1,0 +1,39 @@
+# =============================================================================
+# Lobster Skill Manifest — Reference Template
+# =============================================================================
+# Copy this file into your skill directory and fill in the values.
+# See lobster-shop/README.md for full documentation.
+
+[skill]
+name = "skill-name"           # Unique identifier (kebab-case)
+version = "1.0.0"             # Semver
+description = "What this skill does — one sentence, user-facing"
+author = "Author Name"
+category = "workflow"          # behavioral | tool | context | workflow | integration
+
+[activation]
+mode = "triggered"             # always | triggered | contextual
+triggers = ["/command", "keyword"]         # Commands or keywords that activate this skill
+context_patterns = ["when user asks about X"]  # Patterns for contextual activation
+
+[layering]
+priority = 50                  # 0-100, higher = applied later = wins conflicts
+merge_strategy = "append"      # append | replace (how behavior merges with others)
+
+[provides]
+mcp_tools = ["tool1", "tool2"]  # MCP tools this skill registers
+bot_commands = ["/cmd"]         # Bot commands this skill handles
+
+[compatibility]
+enhances = []                  # Works better with these skills (names)
+conflicts = []                 # Cannot co-activate with these skills
+
+[dependencies]
+pip = []                       # Python packages
+npm = []                       # Node packages
+system = []                    # System packages (apt/brew)
+api_keys = []                  # Required API keys (names only)
+
+[dependencies.runtime]
+python = ">=3.11"              # Minimum Python version
+# node = ">=18"               # Minimum Node version (if needed)

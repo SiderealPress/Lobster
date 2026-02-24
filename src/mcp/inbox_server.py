@@ -40,6 +40,17 @@ from reliability import (
 
 # Self-update system
 from update_manager import UpdateManager
+
+# Skill management system
+from skill_manager import (
+    list_available_skills as _list_available_skills,
+    get_skill_context as _get_skill_context,
+    get_active_skills as _get_active_skills,
+    activate_skill as _activate_skill,
+    deactivate_skill as _deactivate_skill,
+    get_skill_preferences as _get_skill_preferences,
+    set_skill_preference as _set_skill_preference,
+)
 _update_manager = UpdateManager()
 
 # Memory system (optional — gracefully degrades to static file search)
@@ -1089,6 +1100,97 @@ async def list_tools() -> list[Tool]:
                 "properties": {},
             },
         ),
+        # Skill Management Tools
+        Tool(
+            name="get_skill_context",
+            description="Get assembled context from all active skills. Returns markdown with behavior instructions, domain context, and preferences for each active skill. Call this at message processing start when skills are enabled.",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
+        Tool(
+            name="list_skills",
+            description="List available skills in the Lobster Shop. Shows install/active status for each skill.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "description": "Filter by status: all, installed, active, available. Default: all.",
+                        "default": "all",
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="activate_skill",
+            description="Activate an installed skill. Active skills inject their behavior, context, and preferences into Lobster's runtime.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "skill_name": {
+                        "type": "string",
+                        "description": "Name of the skill to activate.",
+                    },
+                    "mode": {
+                        "type": "string",
+                        "description": "Activation mode: always (always active), triggered (activated by /commands or keywords), contextual (activated when context matches). Default: always.",
+                        "default": "always",
+                    },
+                },
+                "required": ["skill_name"],
+            },
+        ),
+        Tool(
+            name="deactivate_skill",
+            description="Deactivate a skill. Its context will no longer be injected at runtime.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "skill_name": {
+                        "type": "string",
+                        "description": "Name of the skill to deactivate.",
+                    },
+                },
+                "required": ["skill_name"],
+            },
+        ),
+        Tool(
+            name="get_skill_preferences",
+            description="Get merged preferences (defaults + user overrides) for a skill.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "skill_name": {
+                        "type": "string",
+                        "description": "Name of the skill.",
+                    },
+                },
+                "required": ["skill_name"],
+            },
+        ),
+        Tool(
+            name="set_skill_preference",
+            description="Set a preference value for a skill. Validates against the skill's schema if available.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "skill_name": {
+                        "type": "string",
+                        "description": "Name of the skill.",
+                    },
+                    "key": {
+                        "type": "string",
+                        "description": "Preference key to set.",
+                    },
+                    "value": {
+                        "description": "Value to set (string, number, or boolean).",
+                    },
+                },
+                "required": ["skill_name", "key", "value"],
+            },
+        ),
     ]
 
 
@@ -1209,6 +1311,19 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
     # bisque-computer Connection Tools
     elif name == "get_bisque_connection_url":
         return await handle_get_bisque_connection_url(arguments)
+    # Skill Management Tools
+    elif name == "get_skill_context":
+        return await handle_get_skill_context(arguments)
+    elif name == "list_skills":
+        return await handle_list_skills(arguments)
+    elif name == "activate_skill":
+        return await handle_activate_skill(arguments)
+    elif name == "deactivate_skill":
+        return await handle_deactivate_skill(arguments)
+    elif name == "get_skill_preferences":
+        return await handle_get_skill_preferences(arguments)
+    elif name == "set_skill_preference":
+        return await handle_set_skill_preference(arguments)
     else:
         return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
@@ -3683,6 +3798,106 @@ async def handle_get_bisque_connection_url(arguments: dict[str, Any]) -> list[Te
 
     url = f"ws://{public_ip}:9100?token={token}"
     return [TextContent(type="text", text=url)]
+
+
+# =============================================================================
+# Skill Management Handlers
+# =============================================================================
+
+async def handle_get_skill_context(args: dict) -> list[TextContent]:
+    """Return assembled context from all active skills."""
+    try:
+        context = _get_skill_context()
+        if not context:
+            return [TextContent(type="text", text="No active skills.")]
+        return [TextContent(type="text", text=context)]
+    except Exception as e:
+        log.error(f"get_skill_context failed: {e}", exc_info=True)
+        return [TextContent(type="text", text=f"Error: {e}")]
+
+
+async def handle_list_skills(args: dict) -> list[TextContent]:
+    """List available skills with install/active status."""
+    try:
+        status_filter = args.get("status", "all").lower()
+        skills = _list_available_skills()
+
+        if status_filter == "installed":
+            skills = [s for s in skills if s["installed"]]
+        elif status_filter == "active":
+            skills = [s for s in skills if s["active"]]
+        elif status_filter == "available":
+            skills = [s for s in skills if not s["installed"]]
+
+        if not skills:
+            return [TextContent(type="text", text=f"No skills found (filter: {status_filter}).")]
+
+        lines = [f"**Lobster Skills** ({len(skills)} found)\n"]
+        for s in skills:
+            status_parts = []
+            if s["active"]:
+                status_parts.append("active")
+            elif s["installed"]:
+                status_parts.append("installed")
+            else:
+                status_parts.append("available")
+            status_str = ", ".join(status_parts)
+            lines.append(f"- **{s['name']}** v{s['version']} [{status_str}] — {s['description']}")
+
+        return [TextContent(type="text", text="\n".join(lines))]
+    except Exception as e:
+        log.error(f"list_skills failed: {e}", exc_info=True)
+        return [TextContent(type="text", text=f"Error: {e}")]
+
+
+async def handle_activate_skill(args: dict) -> list[TextContent]:
+    """Activate a skill."""
+    skill_name = args.get("skill_name", "").strip()
+    if not skill_name:
+        return [TextContent(type="text", text="Error: skill_name is required.")]
+    mode = args.get("mode", "always")
+    result = _activate_skill(skill_name, mode=mode)
+    return [TextContent(type="text", text=result)]
+
+
+async def handle_deactivate_skill(args: dict) -> list[TextContent]:
+    """Deactivate a skill."""
+    skill_name = args.get("skill_name", "").strip()
+    if not skill_name:
+        return [TextContent(type="text", text="Error: skill_name is required.")]
+    result = _deactivate_skill(skill_name)
+    return [TextContent(type="text", text=result)]
+
+
+async def handle_get_skill_preferences(args: dict) -> list[TextContent]:
+    """Get merged preferences for a skill."""
+    skill_name = args.get("skill_name", "").strip()
+    if not skill_name:
+        return [TextContent(type="text", text="Error: skill_name is required.")]
+    try:
+        prefs = _get_skill_preferences(skill_name)
+        if not prefs:
+            return [TextContent(type="text", text=f"No preferences for '{skill_name}'.")]
+        lines = [f"**Preferences for {skill_name}:**\n"]
+        for k, v in sorted(prefs.items()):
+            lines.append(f"- `{k}`: {v}")
+        return [TextContent(type="text", text="\n".join(lines))]
+    except Exception as e:
+        log.error(f"get_skill_preferences failed: {e}", exc_info=True)
+        return [TextContent(type="text", text=f"Error: {e}")]
+
+
+async def handle_set_skill_preference(args: dict) -> list[TextContent]:
+    """Set a preference value for a skill."""
+    skill_name = args.get("skill_name", "").strip()
+    key = args.get("key", "").strip()
+    value = args.get("value")
+    if not skill_name or not key:
+        return [TextContent(type="text", text="Error: skill_name and key are required.")]
+    if value is None:
+        return [TextContent(type="text", text="Error: value is required.")]
+    result = _set_skill_preference(skill_name, key, value)
+    return [TextContent(type="text", text=result)]
 
 
 async def main():

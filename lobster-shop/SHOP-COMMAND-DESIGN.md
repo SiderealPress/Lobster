@@ -72,28 +72,37 @@ Lobster:
   - Config files kept at ~/lobster/config/google-calendar/ (delete manually if wanted)
 ```
 
-## Implementation Notes
+## Implementation
 
-The `/shop` command would be handled by the main Lobster agent (not a separate bot command handler). When Lobster sees `/shop`, it:
+The `/shop` command is handled by the main Lobster agent using the skill management MCP tools. When Lobster sees `/shop`, it:
 
-1. Reads `lobster-shop/INDEX.md` and skill manifests
-2. Checks which skills are installed (look for MCP registrations, config dirs)
-3. Formats a response for Telegram (concise, mobile-friendly)
+1. Calls `list_skills` to get all available skills with install/active status
+2. Formats a response for Telegram (concise, mobile-friendly)
+3. For installation: runs the skill's `install.sh` in a subagent, then calls `activate_skill`
 
-For installation, Lobster would:
-1. Run the skill's `install.sh` in a subagent
-2. Report progress back to the user
-3. Guide through any manual steps interactively
+### Skill Management Tools
+
+| Tool | Purpose |
+|------|---------|
+| `list_skills` | Browse skills with status filter (all/installed/active/available) |
+| `activate_skill` | Activate a skill (mode: always/triggered/contextual) |
+| `deactivate_skill` | Deactivate a skill |
+| `get_skill_context` | Get assembled context from all active skills |
+| `get_skill_preferences` | Get merged preferences for a skill |
+| `set_skill_preference` | Set a preference value |
 
 ### Status Detection
 
 A skill is considered "installed" if:
-- Its MCP server is registered with Claude (`claude mcp list`)
-- Its config directory exists
+- Its entry exists in `~/messages/config/skills-state.json` with `installed: true`
+- (Legacy check: its MCP server is registered with Claude)
+
+A skill is "active" if:
+- It is installed AND has `active: true` in the skills state
 
 A skill is "needs setup" if:
 - Installed but missing required API keys/credentials
 
-### Not Yet Implemented
+### Composable Context
 
-This is a design document. The actual `/shop` command handler will be built once the first skill (Google Calendar) is fully functional and the pattern is validated.
+Active skills inject their behavior, context, and preferences into Lobster's runtime via `get_skill_context`. Skills compose based on priority (0-100), with higher priority skills applied later. Conditional `with-<other>.md` behavior files enable cross-skill interactions.

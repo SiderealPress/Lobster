@@ -1,0 +1,11 @@
+[camofox_port]
+type = "integer"
+description = "Port for the camofox-browser server"
+
+[auto_close_tabs]
+type = "boolean"
+description = "Automatically close tabs after extracting content"
+
+[default_search_engine]
+type = "string"
+description = "Default search macro to use (e.g. @google_search, @yelp_search)"
