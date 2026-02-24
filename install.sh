@@ -1561,6 +1561,14 @@ if [ -f "$OBSERVABILITY_TEMPLATE" ]; then
         "$INSTALL_DIR/services/lobster-observability.service"
 fi
 
+# Generate context bridge service if template exists
+CONTEXT_BRIDGE_TEMPLATE="$INSTALL_DIR/services/lobster-context-bridge.service.template"
+if [ -f "$CONTEXT_BRIDGE_TEMPLATE" ]; then
+    generate_from_template \
+        "$CONTEXT_BRIDGE_TEMPLATE" \
+        "$INSTALL_DIR/services/lobster-context-bridge.service"
+fi
+
 #===============================================================================
 # Install Services
 #===============================================================================
@@ -1586,6 +1594,12 @@ fi
 if [ -f "$INSTALL_DIR/services/lobster-observability.service" ]; then
     sudo cp "$INSTALL_DIR/services/lobster-observability.service" /etc/systemd/system/
     info "Observability server service installed (enable manually with: sudo systemctl enable lobster-observability)"
+fi
+
+# Install context bridge service if generated
+if [ -f "$INSTALL_DIR/services/lobster-context-bridge.service" ]; then
+    sudo cp "$INSTALL_DIR/services/lobster-context-bridge.service" /etc/systemd/system/
+    info "Context Bridge service installed (enable manually with: sudo systemctl enable lobster-context-bridge)"
 fi
 
 sudo systemctl daemon-reload
