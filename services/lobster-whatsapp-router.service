@@ -1,0 +1,30 @@
+[Unit]
+Description=Lobster WhatsApp Router - Twilio webhook to Claude Code bridge
+After=network.target
+
+[Service]
+Type=simple
+User=admin
+Group=admin
+WorkingDirectory=/home/admin/lobster
+Environment=PATH=/home/admin/.local/bin:/home/admin/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+Environment=LOBSTER_CONFIG_DIR=/home/admin/lobster-config
+Environment=LOBSTER_INSTALL_DIR=/home/admin/lobster
+Environment=LOBSTER_MESSAGES=/home/admin/messages
+Environment=LOBSTER_WORKSPACE=/home/admin/lobster-workspace
+Environment=WHATSAPP_ROUTER_PORT=8743
+EnvironmentFile=-/home/admin/lobster/config/config.env
+EnvironmentFile=/home/admin/lobster-config/config.env
+ExecStart=/home/admin/lobster/.venv/bin/python /home/admin/lobster/src/bot/whatsapp_router.py
+Restart=always
+RestartSec=10
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lobster-whatsapp
+
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
