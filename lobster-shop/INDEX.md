@@ -9,6 +9,7 @@ Browse available skills for your Lobster assistant. Install any skill with one c
 | Skill | What It Does | Category | Status |
 |-------|-------------|----------|--------|
 | [Camofox Browser](./camofox-browser/) | Browse the real web with anti-detection — search Google, Amazon, LinkedIn without getting blocked | Tool | Available |
+| [GCal Links](./gcal-links/) | Google Calendar integration: read/create events via API when authenticated, or fall back to deep links — all via natural language | Behavioral | Available |
 
 ## Templates
 
@@ -20,7 +21,7 @@ Browse available skills for your Lobster assistant. Install any skill with one c
 
 | Skill | What It Does | Status |
 |-------|-------------|--------|
-| Google Calendar | See your schedule, create events, get reminders — all through chat | Coming Soon |
+| Google Calendar (full) | See your schedule, create events, get reminders — all through chat | Available (in gcal-links v2) |
 | Notion | Search your notes, create pages, manage databases from chat | Coming Soon |
 | Spotify | Control your music — play, pause, skip, queue songs by asking | Coming Soon |
 | Home Automation | Control lights, thermostats, and devices via HomeKit or Home Assistant | Coming Soon |

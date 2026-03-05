@@ -1,0 +1,40 @@
+[skill]
+name = "gcal-links"
+version = "2.0.0"
+description = "Google Calendar integration: read events and create them via API when authenticated, or fall back to deep links — all via natural language"
+author = "Lobster"
+category = "behavioral"
+
+[activation]
+mode = "always"
+triggers = ["/cal", "/calendar", "/gcal"]
+context_patterns = [
+    "when user mentions an event, appointment, meeting, or reminder with a date and time",
+    "when Lobster confirms scheduling something",
+    "when discussing a future event with a specific datetime",
+    "when user asks what is on their calendar",
+    "when user asks about their schedule",
+    "when user wants to add or create an event",
+    "when user wants to connect or authenticate Google Calendar",
+]
+
+[layering]
+priority = 40
+merge_strategy = "append"
+
+[provides]
+mcp_tools = []
+bot_commands = ["/cal", "/calendar", "/gcal"]
+
+[compatibility]
+enhances = []
+conflicts = []
+
+[dependencies]
+pip = []
+npm = []
+system = []
+api_keys = []
+
+[dependencies.runtime]
+python = ">=3.11"
