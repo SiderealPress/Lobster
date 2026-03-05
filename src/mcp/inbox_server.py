@@ -82,6 +82,7 @@ AUDIO_DIR = BASE_DIR / "audio"
 SENT_DIR = BASE_DIR / "sent"
 TASKS_FILE = BASE_DIR / "tasks.json"
 TASK_OUTPUTS_DIR = BASE_DIR / "task-outputs"
+BISQUE_OUTBOX_DIR = BASE_DIR / "bisque-outbox"
 
 # Reply tracking — records {chat_id_str: timestamp} when send_reply is called.
 # Used by mark_processed to guard against dropping human messages without reply.
@@ -103,7 +104,7 @@ def _track_reply(chat_id: Any) -> None:
             _recent_replies = dict(sorted_items[:_REPLY_TRACK_MAX])
 
 # Sources that represent human users (not system/automated)
-_HUMAN_SOURCES = {"telegram", "sms", "signal", "slack", "whatsapp"}
+_HUMAN_SOURCES = {"telegram", "sms", "signal", "slack", "whatsapp", "bisque"}
 
 # Heartbeat file for health monitoring
 HEARTBEAT_FILE = _WORKSPACE / "logs" / "claude-heartbeat"
@@ -148,7 +149,7 @@ CANONICAL_DIR = _WORKSPACE / "memory" / "canonical"
 
 # Ensure directories exist
 for d in [INBOX_DIR, OUTBOX_DIR, PROCESSED_DIR, PROCESSING_DIR, FAILED_DIR, SENT_DIR, CONFIG_DIR,
-          AUDIO_DIR, TASK_OUTPUTS_DIR, SCHEDULED_TASKS_TASKS_DIR, SCHEDULED_JOBS_DIR,
+          AUDIO_DIR, TASK_OUTPUTS_DIR, BISQUE_OUTBOX_DIR, SCHEDULED_TASKS_TASKS_DIR, SCHEDULED_JOBS_DIR,
           SCHEDULED_TASKS_LOGS_DIR, CANONICAL_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
@@ -232,6 +233,10 @@ SOURCES = {
     },
     "whatsapp": {
         "name": "WhatsApp",
+        "enabled": True,
+    },
+    "bisque": {
+        "name": "Bisque",
         "enabled": True,
     },
 }
@@ -350,7 +355,7 @@ async def list_tools() -> list[Tool]:
                     },
                     "source": {
                         "type": "string",
-                        "description": "The source to reply via (telegram, slack, sms, signal). Default: telegram.",
+                        "description": "The source to reply via (telegram, slack, sms, signal, whatsapp, bisque). Default: telegram.",
                         "default": "telegram",
                     },
                     "thread_ts": {
@@ -1588,7 +1593,13 @@ async def handle_send_reply(args: dict) -> list[TextContent]:
     if thread_ts and source == "slack":
         reply_data["thread_ts"] = thread_ts
 
-    outbox_file = OUTBOX_DIR / f"{reply_id}.json"
+    # Route bisque replies to the bisque-outbox so the relay server picks them up.
+    # All other sources go to the standard outbox for the bot process.
+    if source == "bisque":
+        outbox_file = BISQUE_OUTBOX_DIR / f"{reply_id}.json"
+    else:
+        outbox_file = OUTBOX_DIR / f"{reply_id}.json"
+
     # Atomic write: temp file + fsync + rename to prevent watchdog race condition
     atomic_write_json(outbox_file, reply_data)
 
