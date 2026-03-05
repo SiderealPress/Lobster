@@ -7,7 +7,7 @@ import sys
 sys.path.insert(0, "/home/admin/lobster/src")
 from integrations.google_calendar.token_store import load_token
 
-token = load_token("OWNER_CHAT_ID_PLACEHOLDER")   # Drew's user_id = str(chat_id)
+token = load_token("1234567890")   # owner's user_id = str(chat_id)
 is_authenticated = token is not None
 ```
 
@@ -40,7 +40,7 @@ link = gcal_add_link_md(title="Doctor appointment", start=start, end=end)
 ```python
 from integrations.google_calendar.client import get_upcoming_events
 
-events = get_upcoming_events(user_id="OWNER_CHAT_ID_PLACEHOLDER", days=7)
+events = get_upcoming_events(user_id="1234567890", days=7)
 # Returns List[CalendarEvent] — empty list on auth failure or API error
 
 # CalendarEvent fields:
@@ -57,7 +57,7 @@ from integrations.google_calendar.client import create_event
 from datetime import datetime, timezone
 
 event = create_event(
-    user_id="OWNER_CHAT_ID_PLACEHOLDER",
+    user_id="1234567890",
     title="Meeting with Sarah",
     start=datetime(2026, 3, 7, 14, 0, tzinfo=timezone.utc),
     end=datetime(2026, 3, 7, 15, 0, tzinfo=timezone.utc),   # optional
@@ -86,5 +86,5 @@ if is_enabled():
 
 ### User ID convention
 
-Drew's `user_id` = `"OWNER_CHAT_ID_PLACEHOLDER"` (Telegram chat_id as string).
+The owner's `user_id` is their Telegram chat_id as a string (e.g. `"1234567890"`).
 All token files live in `~/messages/config/gcal-tokens/{user_id}.json`.

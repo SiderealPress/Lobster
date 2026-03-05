@@ -11,8 +11,8 @@ import sys
 sys.path.insert(0, "/home/admin/lobster/src")
 from integrations.google_calendar.token_store import load_token
 
-DREW_USER_ID = "OWNER_CHAT_ID_PLACEHOLDER"
-token = load_token(DREW_USER_ID)
+OWNER_USER_ID = "1234567890"  # Replace with owner's Telegram chat_id
+token = load_token(OWNER_USER_ID)
 is_authenticated = token is not None
 ```
 
@@ -57,7 +57,7 @@ sys.path.insert(0, "/home/admin/lobster/src")
 from integrations.google_calendar.client import get_upcoming_events
 from utils.calendar import gcal_add_link_md
 
-events = get_upcoming_events(user_id="OWNER_CHAT_ID_PLACEHOLDER", days=7)
+events = get_upcoming_events(user_id="1234567890", days=7)
 if not events:
     reply = "No upcoming events in the next 7 days."
 else:
@@ -81,7 +81,7 @@ from utils.calendar import gcal_add_link_md
 from datetime import datetime, timezone
 
 event = create_event(
-    user_id="OWNER_CHAT_ID_PLACEHOLDER",
+    user_id="1234567890",
     title="Meeting with Sarah",
     start=datetime(2026, 3, 7, 14, 0, tzinfo=timezone.utc),
     end=datetime(2026, 3, 7, 15, 0, tzinfo=timezone.utc),

@@ -11,7 +11,7 @@ Format:
         {
           "id": "abc123",
           "description": "Implement feature X on issue #42",
-          "chat_id": OWNER_CHAT_ID_PLACEHOLDER,
+          "chat_id": 1234567890,
           "started_at": "2026-02-22T10:30:00.000000Z"
         }
       ]

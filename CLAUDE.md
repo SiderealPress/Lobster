@@ -342,7 +342,7 @@ Calendar commands work in two modes. Check auth status first (no network call ne
 ```python
 import sys; sys.path.insert(0, "/home/admin/lobster/src")
 from integrations.google_calendar.token_store import load_token
-is_authenticated = load_token("OWNER_CHAT_ID_PLACEHOLDER") is not None
+is_authenticated = load_token("1234567890") is not None
 ```
 
 ### Unauthenticated mode (default)
@@ -368,14 +368,14 @@ Delegate to a background subagent — API calls exceed the 7-second rule.
 **Reading events** ("what's on my calendar", "what do I have this week/today"):
 ```python
 from integrations.google_calendar.client import get_upcoming_events
-events = get_upcoming_events(user_id="OWNER_CHAT_ID_PLACEHOLDER", days=7)
+events = get_upcoming_events(user_id="1234567890", days=7)
 # Returns List[CalendarEvent] or [] on failure — always falls back gracefully
 ```
 
 **Creating events** ("add X to my calendar", "schedule X for [time]"):
 ```python
 from integrations.google_calendar.client import create_event
-event = create_event(user_id="OWNER_CHAT_ID_PLACEHOLDER", title="...", start=start, end=end)
+event = create_event(user_id="1234567890", title="...", start=start, end=end)
 # Returns CalendarEvent with .url, or None on failure
 # On failure, fall back to gcal_add_link_md()
 ```
@@ -401,7 +401,7 @@ else:
 
 - Never expose tokens, credentials, or raw error messages in Telegram replies
 - If API fails, always fall back to a deep link — never return an empty reply
-- user_id for Drew = `"OWNER_CHAT_ID_PLACEHOLDER"` (Telegram chat_id as string)
+- user_id = owner's Telegram chat_id as string (set via config, do NOT hardcode)
 - When a subagent handles events, pass event title/start/end to `gcal_add_link_md()` for the link
 
 ## Behavior Guidelines

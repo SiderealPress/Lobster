@@ -174,7 +174,7 @@ class TestAuthStatusDetection:
 
     def test_no_token_file_means_unauthenticated(self, temp_token_dir: Path):
         """load_token returns None when no file exists — unauthenticated mode."""
-        token = load_token("OWNER_CHAT_ID_PLACEHOLDER", token_dir=temp_token_dir)
+        token = load_token("1234567890", token_dir=temp_token_dir)
         assert token is None
         assert (token is None) is True  # explicit: is_authenticated = token is not None => False
 
@@ -182,8 +182,8 @@ class TestAuthStatusDetection:
         self, temp_token_dir: Path, valid_token: TokenData
     ):
         """load_token returns TokenData when file exists — authenticated mode."""
-        save_token("OWNER_CHAT_ID_PLACEHOLDER", valid_token, token_dir=temp_token_dir)
-        token = load_token("OWNER_CHAT_ID_PLACEHOLDER", token_dir=temp_token_dir)
+        save_token("1234567890", valid_token, token_dir=temp_token_dir)
+        token = load_token("1234567890", token_dir=temp_token_dir)
         assert token is not None
         assert isinstance(token, TokenData)
 
@@ -200,10 +200,10 @@ class TestAuthStatusDetection:
         token = load_token("drew", token_dir=temp_token_dir)
         assert (token is not None) is True
 
-    def test_drew_user_id_as_string(self, temp_token_dir: Path, valid_token: TokenData):
-        """Drew's user_id must be the string 'OWNER_CHAT_ID_PLACEHOLDER' (chat_id as str)."""
-        user_id = str(OWNER_CHAT_ID_PLACEHOLDER)
-        assert user_id == "OWNER_CHAT_ID_PLACEHOLDER"
+    def test_user_id_as_string(self, temp_token_dir: Path, valid_token: TokenData):
+        """user_id must be a string representation of the Telegram chat_id."""
+        user_id = str(1234567890)
+        assert user_id == "1234567890"
         save_token(user_id, valid_token, token_dir=temp_token_dir)
         token = load_token(user_id, token_dir=temp_token_dir)
         assert token is not None
