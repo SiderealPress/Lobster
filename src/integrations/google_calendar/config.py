@@ -41,11 +41,9 @@ SCOPE_READONLY: str = "https://www.googleapis.com/auth/calendar.readonly"
 SCOPE_EVENTS: str = "https://www.googleapis.com/auth/calendar.events"
 
 #: Default scopes requested during the OAuth flow.
-#: Restricted to readonly — avoids Google's sensitive-scope OAuth verification
-#: requirement, which blocks publishing the consent screen.  Lobster only reads
-#: calendar events to understand the user's schedule; it never creates or
-#: modifies events directly.
-DEFAULT_SCOPES: tuple[str, ...] = (SCOPE_READONLY,)
+#: Includes both read and write access so Lobster can read and create/modify
+#: calendar events on the user's behalf.
+DEFAULT_SCOPES: tuple[str, ...] = (SCOPE_READONLY, SCOPE_EVENTS)
 
 
 # ---------------------------------------------------------------------------
