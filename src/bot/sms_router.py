@@ -1,20 +1,17 @@
 #!/usr/bin/env python3
 """
-Lobster WhatsApp Router - Twilio webhook to Claude Code bridge
+Lobster SMS Router - Twilio SMS webhook to Claude Code bridge
 
-Mirrors the Telegram/Slack router pattern:
-1. Receives incoming WhatsApp messages via Twilio webhook POST /webhook/whatsapp
+Mirrors the WhatsApp router pattern:
+1. Receives incoming SMS messages via Twilio webhook POST /webhook/sms
 2. Writes messages to ~/messages/inbox/ in standard Lobster format
-3. Watches ~/messages/outbox/ for replies with source="whatsapp"
-4. Sends replies back via Twilio WhatsApp API
+3. Watches ~/messages/outbox/ for replies with source="sms"
+4. Sends replies back via Twilio SMS API
 
 Environment variables required:
-    TWILIO_ACCOUNT_SID       - Twilio account SID
-    TWILIO_AUTH_TOKEN        - Twilio auth token (used to validate signatures)
-    TWILIO_WHATSAPP_NUMBER   - Sending number, e.g. whatsapp:+14155238886
-
-The webhook must be registered in the Twilio console at:
-    {TWILIO_WEBHOOK_BASE_URL}/webhook/whatsapp
+    TWILIO_ACCOUNT_SID    - Twilio account SID
+    TWILIO_AUTH_TOKEN     - Twilio auth token (used to validate signatures)
+    TWILIO_SMS_NUMBER     - Sending number in E.164 format, e.g. +1XXXXXXXXXX
 """
 
 import json
@@ -44,19 +41,16 @@ import uvicorn
 
 TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN", "")
-TWILIO_WHATSAPP_NUMBER = os.environ.get("TWILIO_WHATSAPP_NUMBER", "")
+TWILIO_SMS_NUMBER = os.environ.get("TWILIO_SMS_NUMBER", "")
 
-# The public base URL of this server — used to validate Twilio's X-Twilio-Signature.
-# Must match exactly the URL Twilio will POST to (including scheme).
-# If behind nginx with no SSL yet, use http://; update when HTTPS is configured.
 WEBHOOK_BASE_URL = os.environ.get("TWILIO_WEBHOOK_BASE_URL", "")
-WEBHOOK_PATH = "/webhook/whatsapp"
+WEBHOOK_PATH = "/webhook/sms"
 WEBHOOK_URL = WEBHOOK_BASE_URL.rstrip("/") + WEBHOOK_PATH
 
-# Optional: restrict to specific WhatsApp numbers (E.164, e.g. "whatsapp:+1234567890")
+# Optional: restrict to specific phone numbers (E.164, e.g. "+12025551234")
 ALLOWED_NUMBERS = [
     x.strip()
-    for x in os.environ.get("WHATSAPP_ALLOWED_NUMBERS", "").split(",")
+    for x in os.environ.get("SMS_ALLOWED_NUMBERS", "").split(",")
     if x.strip()
 ]
 
@@ -67,21 +61,20 @@ _WORKSPACE = Path(os.environ.get("LOBSTER_WORKSPACE", Path.home() / "lobster-wor
 INBOX_DIR = _MESSAGES / "inbox"
 OUTBOX_DIR = _MESSAGES / "outbox"
 IMAGES_DIR = _MESSAGES / "images"
-AUDIO_DIR = _MESSAGES / "audio"
 FILES_DIR = _MESSAGES / "files"
 
-for _d in [INBOX_DIR, OUTBOX_DIR, IMAGES_DIR, AUDIO_DIR, FILES_DIR]:
+for _d in [INBOX_DIR, OUTBOX_DIR, IMAGES_DIR, FILES_DIR]:
     _d.mkdir(parents=True, exist_ok=True)
 
 # Logging
 LOG_DIR = _WORKSPACE / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-log = logging.getLogger("lobster-whatsapp")
+log = logging.getLogger("lobster-sms")
 log.setLevel(logging.INFO)
 from logging.handlers import RotatingFileHandler
 _fh = RotatingFileHandler(
-    LOG_DIR / "whatsapp-router.log",
+    LOG_DIR / "sms-router.log",
     maxBytes=5 * 1024 * 1024,
     backupCount=3,
 )
@@ -90,7 +83,7 @@ log.addHandler(_fh)
 log.addHandler(logging.StreamHandler())
 
 # ---------------------------------------------------------------------------
-# Twilio clients (lazy — may not be configured yet at import time)
+# Twilio clients (lazy)
 # ---------------------------------------------------------------------------
 
 _twilio_client: TwilioClient | None = None
@@ -139,13 +132,8 @@ def atomic_write_json(path: Path, data: dict, indent: int = 2) -> None:
         raise
 
 
-def _normalize_whatsapp_number(raw: str) -> str:
-    """Strip the 'whatsapp:' prefix to get the bare E.164 phone number."""
-    return raw.replace("whatsapp:", "").strip()
-
-
 def _make_msg_id() -> str:
-    return f"{int(time.time() * 1000)}_wa"
+    return f"{int(time.time() * 1000)}_sms"
 
 
 def _twiml_ok() -> Response:
@@ -166,13 +154,8 @@ def _twiml_error(status: int = 403) -> Response:
 # ---------------------------------------------------------------------------
 
 def _is_valid_twilio_request(request: Request, body: bytes) -> bool:
-    """Validate X-Twilio-Signature using the Twilio SDK helper.
-
-    Twilio signs requests with HMAC-SHA1 over the URL + sorted POST params.
-    We reconstruct the param dict from the form body for validation.
-    """
+    """Validate X-Twilio-Signature using the Twilio SDK helper."""
     if not TWILIO_AUTH_TOKEN:
-        # Auth token not configured — skip validation (dev mode)
         log.warning("TWILIO_AUTH_TOKEN not set; skipping signature validation")
         return True
 
@@ -182,7 +165,6 @@ def _is_valid_twilio_request(request: Request, body: bytes) -> bool:
         return False
 
     try:
-        # Parse application/x-www-form-urlencoded body
         from urllib.parse import parse_qs
         params = {
             k: v[0]
@@ -204,24 +186,23 @@ def write_to_inbox(msg_data: dict) -> None:
     msg_id = msg_data["id"]
     inbox_file = INBOX_DIR / f"{msg_id}.json"
     atomic_write_json(inbox_file, msg_data)
-    log.info(f"Wrote WhatsApp message to inbox: {msg_id}")
+    log.info(f"Wrote SMS message to inbox: {msg_id}")
 
 
 def build_text_message(form: dict) -> dict:
-    """Build a standard text message from Twilio form fields."""
-    from_number = _normalize_whatsapp_number(form.get("From", ""))
+    """Build a standard text message from Twilio SMS form fields."""
+    from_number = form.get("From", "").strip()
     body = form.get("Body", "").strip()
     msg_sid = form.get("MessageSid", "")
-    profile_name = form.get("ProfileName", "")
     msg_id = _make_msg_id()
 
     return {
         "id": msg_id,
-        "source": "whatsapp",
+        "source": "sms",
         "chat_id": from_number,
         "user_id": from_number,
         "username": from_number,
-        "user_name": profile_name or from_number,
+        "user_name": from_number,
         "text": body,
         "twilio_message_sid": msg_sid,
         "timestamp": datetime.utcnow().isoformat(),
@@ -229,7 +210,7 @@ def build_text_message(form: dict) -> dict:
 
 
 def build_media_message(form: dict) -> dict:
-    """Build a message that includes media (image/audio/video/document)."""
+    """Build a message that includes MMS media (image/document)."""
     msg = build_text_message(form)
     num_media = int(form.get("NumMedia", "0"))
     if num_media == 0:
@@ -244,7 +225,6 @@ def build_media_message(form: dict) -> dict:
         if not media_url:
             continue
 
-        # Download media from Twilio
         try:
             saved_path = _download_media(media_url, msg_id, i, media_type)
             item = {
@@ -254,16 +234,11 @@ def build_media_message(form: dict) -> dict:
             }
             media_items.append(item)
 
-            # Annotate message type for the first media item
             if i == 0:
                 if media_type.startswith("image/"):
                     msg["type"] = "photo"
                     msg["image_file"] = str(saved_path)
                     msg["text"] = msg.get("text") or "[Image]"
-                elif media_type.startswith("audio/"):
-                    msg["type"] = "voice"
-                    msg["audio_file"] = str(saved_path)
-                    msg["text"] = msg.get("text") or "[Voice message - pending transcription]"
                 else:
                     msg["type"] = "document"
                     msg["file_path"] = str(saved_path)
@@ -278,10 +253,7 @@ def build_media_message(form: dict) -> dict:
 
 
 def _download_media(url: str, msg_id: str, index: int, content_type: str) -> Path:
-    """Download a Twilio media URL to local storage.
-
-    Twilio media URLs require HTTP Basic Auth (account_sid:auth_token).
-    """
+    """Download a Twilio media URL to local storage."""
     import urllib.request
     import base64
 
@@ -292,27 +264,19 @@ def _download_media(url: str, msg_id: str, index: int, content_type: str) -> Pat
     req = urllib.request.Request(url)
     req.add_header("Authorization", f"Basic {creds}")
 
-    # Determine file extension from content type
     ext_map = {
         "image/jpeg": ".jpg",
         "image/png": ".png",
         "image/gif": ".gif",
         "image/webp": ".webp",
-        "audio/ogg": ".ogg",
-        "audio/mpeg": ".mp3",
-        "audio/amr": ".amr",
-        "video/mp4": ".mp4",
         "application/pdf": ".pdf",
     }
     ext = ext_map.get(content_type, "")
     if not ext and "/" in content_type:
         ext = "." + content_type.split("/")[-1].split(";")[0]
 
-    # Choose directory based on type
     if content_type.startswith("image/"):
         save_dir = IMAGES_DIR
-    elif content_type.startswith("audio/"):
-        save_dir = AUDIO_DIR
     else:
         save_dir = FILES_DIR
 
@@ -323,56 +287,55 @@ def _download_media(url: str, msg_id: str, index: int, content_type: str) -> Pat
         with open(save_path, "wb") as f:
             f.write(response.read())
 
-    log.info(f"Downloaded WhatsApp media to: {save_path}")
+    log.info(f"Downloaded SMS media to: {save_path}")
     return save_path
 
 
 # ---------------------------------------------------------------------------
-# Outbox watcher — sends WhatsApp replies
+# Outbox watcher — sends SMS replies
 # ---------------------------------------------------------------------------
 
-def send_whatsapp_message(to: str, text: str) -> bool:
-    """Send a WhatsApp message via Twilio REST API.
+def send_sms_message(to: str, text: str) -> bool:
+    """Send an SMS message via Twilio REST API.
 
     Args:
-        to: Recipient phone number in E.164 format (without 'whatsapp:' prefix)
+        to: Recipient phone number in E.164 format
         text: Message body
 
     Returns:
         True on success, False on failure.
     """
-    if not TWILIO_WHATSAPP_NUMBER:
-        log.error("TWILIO_WHATSAPP_NUMBER not configured — cannot send WhatsApp reply")
+    if not TWILIO_SMS_NUMBER:
+        log.error("TWILIO_SMS_NUMBER not configured — cannot send SMS reply")
         return False
 
     try:
         client = _get_twilio_client()
-        from_number = (
-            TWILIO_WHATSAPP_NUMBER
-            if TWILIO_WHATSAPP_NUMBER.startswith("whatsapp:")
-            else f"whatsapp:{TWILIO_WHATSAPP_NUMBER}"
-        )
-        to_number = f"whatsapp:{to}" if not to.startswith("whatsapp:") else to
-
         message = client.messages.create(
-            from_=from_number,
-            to=to_number,
+            from_=TWILIO_SMS_NUMBER,
+            to=to,
             body=text,
         )
-        log.info(f"Sent WhatsApp reply to {to}: sid={message.sid}")
+        log.info(f"Sent SMS reply to {to}: sid={message.sid}")
         return True
     except Exception as e:
-        log.error(f"Failed to send WhatsApp message to {to}: {e}")
+        log.error(f"Failed to send SMS to {to}: {e}")
         return False
 
 
 class OutboxHandler(FileSystemEventHandler):
-    """Watches outbox dir and delivers files with source='whatsapp' via Twilio."""
+    """Watches outbox dir and delivers files with source='sms' via Twilio."""
 
     def on_created(self, event):
         if event.is_directory or not event.src_path.endswith(".json"):
             return
         Thread(target=self._process, args=(event.src_path,), daemon=True).start()
+
+    def on_moved(self, event):
+        """Handle atomic writes (temp file renamed to .json)."""
+        if event.is_directory or not event.dest_path.endswith(".json"):
+            return
+        Thread(target=self._process, args=(event.dest_path,), daemon=True).start()
 
     def _process(self, filepath: str) -> None:
         try:
@@ -380,34 +343,34 @@ class OutboxHandler(FileSystemEventHandler):
             with open(filepath, "r") as f:
                 reply = json.load(f)
 
-            if reply.get("source", "").lower() != "whatsapp":
+            if reply.get("source", "").lower() != "sms":
                 return
 
             to = reply.get("chat_id", "")
             text = reply.get("text", "")
 
             if not to or not text:
-                log.warning(f"Invalid WhatsApp reply {filepath}: missing chat_id or text")
+                log.warning(f"Invalid SMS reply {filepath}: missing chat_id or text")
                 os.remove(filepath)
                 return
 
-            if send_whatsapp_message(to, text):
+            if send_sms_message(to, text):
                 os.remove(filepath)
             else:
-                log.error(f"Failed to send WhatsApp reply from {filepath}")
+                log.error(f"Failed to send SMS reply from {filepath}")
 
         except Exception as e:
             log.error(f"Error processing outbox file {filepath}: {e}")
 
 
 def process_existing_outbox() -> None:
-    """Deliver any WhatsApp outbox files that piled up before startup."""
+    """Deliver any SMS outbox files that piled up before startup."""
     handler = OutboxHandler()
     for filepath in sorted(OUTBOX_DIR.glob("*.json")):
         try:
             with open(filepath, "r") as f:
                 reply = json.load(f)
-            if reply.get("source", "").lower() == "whatsapp":
+            if reply.get("source", "").lower() == "sms":
                 handler._process(str(filepath))
         except Exception as e:
             log.error(f"Error draining outbox file {filepath}: {e}")
@@ -417,34 +380,31 @@ def process_existing_outbox() -> None:
 # Starlette webhook endpoint
 # ---------------------------------------------------------------------------
 
-async def whatsapp_webhook(request: Request) -> Response:
-    """POST /webhook/whatsapp — receives inbound WhatsApp messages from Twilio."""
+async def sms_webhook(request: Request) -> Response:
+    """POST /webhook/sms — receives inbound SMS messages from Twilio."""
 
     body = await request.body()
 
-    # Validate Twilio signature (skip if auth token not configured)
     if TWILIO_AUTH_TOKEN and not _is_valid_twilio_request(request, body):
         log.warning(f"Invalid Twilio signature from {request.client.host}")
         return _twiml_error(403)
 
-    # Parse form fields
     from urllib.parse import parse_qs
     form = {
         k: v[0]
         for k, v in parse_qs(body.decode("utf-8"), keep_blank_values=True).items()
     }
 
-    from_number = _normalize_whatsapp_number(form.get("From", ""))
+    from_number = form.get("From", "").strip()
 
     if not from_number:
         log.warning("Received webhook with no From field — ignoring")
         return _twiml_ok()
 
     # Optional allow-list check
-    whatsapp_from = f"whatsapp:{from_number}"
-    if ALLOWED_NUMBERS and whatsapp_from not in ALLOWED_NUMBERS and from_number not in ALLOWED_NUMBERS:
+    if ALLOWED_NUMBERS and from_number not in ALLOWED_NUMBERS:
         log.warning(f"Rejected message from unlisted number: {from_number}")
-        return _twiml_ok()  # Silently accept but don't process
+        return _twiml_ok()
 
     # Build and write message
     num_media = int(form.get("NumMedia", "0"))
@@ -455,16 +415,15 @@ async def whatsapp_webhook(request: Request) -> Response:
 
     write_to_inbox(msg_data)
 
-    # Respond with empty TwiML (Lobster handles reply asynchronously via outbox)
     return _twiml_ok()
 
 
 async def health_check(request: Request) -> Response:
-    """GET /webhook/whatsapp/health — basic liveness probe."""
-    configured = bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_WHATSAPP_NUMBER)
+    """GET /webhook/sms/health — basic liveness probe."""
+    configured = bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_SMS_NUMBER)
     status = "ok" if configured else "unconfigured"
     return Response(
-        content=json.dumps({"status": status, "source": "whatsapp"}),
+        content=json.dumps({"status": status, "source": "sms"}),
         media_type="application/json",
         status_code=200,
     )
@@ -477,7 +436,7 @@ async def health_check(request: Request) -> Response:
 def create_app() -> Starlette:
     return Starlette(
         routes=[
-            Route(WEBHOOK_PATH, whatsapp_webhook, methods=["POST"]),
+            Route(WEBHOOK_PATH, sms_webhook, methods=["POST"]),
             Route(WEBHOOK_PATH + "/health", health_check, methods=["GET"]),
         ]
     )
@@ -488,29 +447,30 @@ def create_app() -> Starlette:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    port = int(os.environ.get("WHATSAPP_ROUTER_PORT", "8743"))
+    port = int(os.environ.get("SMS_ROUTER_PORT", "8744"))
 
-    log.info("Starting Lobster WhatsApp Router...")
+    log.info("Starting Lobster SMS Router...")
     log.info(f"Inbox: {INBOX_DIR}")
     log.info(f"Outbox: {OUTBOX_DIR}")
     log.info(f"Webhook URL: {WEBHOOK_URL}")
+    log.info(f"SMS Number: {TWILIO_SMS_NUMBER}")
     log.info(f"Listening on port: {port}")
 
     if not TWILIO_ACCOUNT_SID:
         log.warning("TWILIO_ACCOUNT_SID not set — outbound messages will fail")
     if not TWILIO_AUTH_TOKEN:
         log.warning("TWILIO_AUTH_TOKEN not set — signature validation disabled")
-    if not TWILIO_WHATSAPP_NUMBER:
-        log.warning("TWILIO_WHATSAPP_NUMBER not set — outbound messages will fail")
+    if not TWILIO_SMS_NUMBER:
+        log.warning("TWILIO_SMS_NUMBER not set — outbound messages will fail")
     if ALLOWED_NUMBERS:
-        log.info(f"Allowed WhatsApp numbers: {ALLOWED_NUMBERS}")
+        log.info(f"Allowed SMS numbers: {ALLOWED_NUMBERS}")
 
     # Start outbox watcher thread
     observer = Observer()
     observer.schedule(OutboxHandler(), str(OUTBOX_DIR), recursive=False)
     observer.daemon = True
     observer.start()
-    log.info("Watching outbox for WhatsApp replies...")
+    log.info("Watching outbox for SMS replies...")
 
     # Drain any replies that queued up before we started
     process_existing_outbox()

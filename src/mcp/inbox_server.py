@@ -231,6 +231,10 @@ SOURCES = {
         "name": "Slack",
         "enabled": True,
     },
+    "sms": {
+        "name": "SMS",
+        "enabled": True,
+    },
     "whatsapp": {
         "name": "WhatsApp",
         "enabled": True,
@@ -396,6 +400,24 @@ async def list_tools() -> list[Tool]:
                     "to": {
                         "type": "string",
                         "description": "Recipient phone number in E.164 format (e.g. +14155551234). The 'whatsapp:' prefix will be added automatically.",
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "The message text to send.",
+                    },
+                },
+                "required": ["to", "text"],
+            },
+        ),
+        Tool(
+            name="send_sms_reply",
+            description="Send an SMS message via Twilio. Use this to reply to SMS messages (source='sms'). Requires TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and TWILIO_SMS_NUMBER to be configured.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "to": {
+                        "type": "string",
+                        "description": "Recipient phone number in E.164 format (e.g. +14155551234).",
                     },
                     "text": {
                         "type": "string",
@@ -1268,6 +1290,8 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
         return await handle_send_reply(arguments)
     elif name == "send_whatsapp_reply":
         return await handle_send_whatsapp_reply(arguments)
+    elif name == "send_sms_reply":
+        return await handle_send_sms_reply(arguments)
     elif name == "mark_processed":
         return await handle_mark_processed(arguments)
     elif name == "mark_processing":
@@ -1672,6 +1696,39 @@ async def handle_send_whatsapp_reply(args: dict) -> list[TextContent]:
 
     log.info(f"WhatsApp reply queued for {chat_id}")
     return [TextContent(type="text", text=f"✅ WhatsApp message queued for {chat_id}:\n\n{text[:100]}{'...' if len(text) > 100 else ''}")]
+
+
+async def handle_send_sms_reply(args: dict) -> list[TextContent]:
+    """Send an SMS message via the outbox mechanism (sms_router picks it up)."""
+    to = str(args.get("to", "")).strip()
+    text = str(args.get("text", "")).strip()
+
+    if not to:
+        return [TextContent(type="text", text="Error: 'to' phone number is required")]
+    if not text:
+        return [TextContent(type="text", text="Error: 'text' message body is required")]
+
+    reply_id = f"{int(time.time() * 1000)}_sms"
+    chat_id = to.strip()
+
+    reply_data = {
+        "id": reply_id,
+        "source": "sms",
+        "chat_id": chat_id,
+        "text": text,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+    outbox_file = OUTBOX_DIR / f"{reply_id}.json"
+    atomic_write_json(outbox_file, reply_data)
+
+    sent_file = SENT_DIR / f"{reply_id}.json"
+    atomic_write_json(sent_file, reply_data)
+
+    _track_reply(chat_id)
+
+    log.info(f"SMS reply queued for {chat_id}")
+    return [TextContent(type="text", text=f"SMS message queued for {chat_id}:\n\n{text[:100]}{'...' if len(text) > 100 else ''}")]
 
 
 async def handle_mark_processed(args: dict) -> list[TextContent]:
