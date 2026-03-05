@@ -232,7 +232,7 @@ def generate_auth_url(
                      CSRF attacks.  The caller is responsible for generating
                      this (e.g. via ``secrets.token_urlsafe(32)``).
         scopes:      OAuth scopes to request.  Defaults to DEFAULT_SCOPES
-                     (calendar.readonly + calendar.events).
+                     (calendar.readonly).
         credentials: Optional pre-loaded credentials.  If None, credentials
                      are loaded from environment variables via
                      ``load_credentials()``.

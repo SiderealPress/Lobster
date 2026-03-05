@@ -41,7 +41,11 @@ SCOPE_READONLY: str = "https://www.googleapis.com/auth/calendar.readonly"
 SCOPE_EVENTS: str = "https://www.googleapis.com/auth/calendar.events"
 
 #: Default scopes requested during the OAuth flow.
-DEFAULT_SCOPES: tuple[str, ...] = (SCOPE_READONLY, SCOPE_EVENTS)
+#: Restricted to readonly — avoids Google's sensitive-scope OAuth verification
+#: requirement, which blocks publishing the consent screen.  Lobster only reads
+#: calendar events to understand the user's schedule; it never creates or
+#: modifies events directly.
+DEFAULT_SCOPES: tuple[str, ...] = (SCOPE_READONLY,)
 
 
 # ---------------------------------------------------------------------------
@@ -72,6 +76,7 @@ class GoogleOAuthCredentials:
 
 _ENV_CLIENT_ID = "GOOGLE_CLIENT_ID"
 _ENV_CLIENT_SECRET = "GOOGLE_CLIENT_SECRET"
+_ENV_REDIRECT_URI = "GCAL_REDIRECT_URI"
 _DEFAULT_REDIRECT_URI = "https://myownlobster.ai/auth/google/callback"
 
 
@@ -129,7 +134,7 @@ def load_credentials(
 
     Args:
         scopes:       OAuth scopes to include in the credentials object.
-                      Defaults to DEFAULT_SCOPES (readonly + events).
+                      Defaults to DEFAULT_SCOPES (calendar.readonly).
         redirect_uri: OAuth redirect URI.  Defaults to the production
                       myownlobster.ai callback URL.
 
@@ -142,6 +147,9 @@ def load_credentials(
     """
     client_id = _read_env(_ENV_CLIENT_ID)
     client_secret = _read_env(_ENV_CLIENT_SECRET)
+    env_redirect = _read_env(_ENV_REDIRECT_URI)
+    if env_redirect is not None:
+        redirect_uri = env_redirect
 
     missing: list[str] = []
     if client_id is None:
