@@ -1127,6 +1127,20 @@ async def list_tools() -> list[Tool]:
                 "properties": {},
             },
         ),
+        Tool(
+            name="generate_bisque_login_token",
+            description="Generate a login token for the bisque-chat PWA. The token encodes the relay WebSocket URL and a one-time bootstrap token. Users paste this token into the bisque app login screen to authenticate. Use this when the user asks for a 'login token', 'bisque token', or 'connect to bisque'.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "email": {
+                        "type": "string",
+                        "description": "Email address to associate with the token. Used to identify the user in the chat session.",
+                    },
+                },
+                "required": ["email"],
+            },
+        ),
         # Skill Management Tools
         Tool(
             name="get_skill_context",
@@ -1340,6 +1354,8 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
     # bisque-computer Connection Tools
     elif name == "get_bisque_connection_url":
         return await handle_get_bisque_connection_url(arguments)
+    elif name == "generate_bisque_login_token":
+        return await handle_generate_bisque_login_token(arguments)
     # Skill Management Tools
     elif name == "get_skill_context":
         return await handle_get_skill_context(arguments)
@@ -3874,6 +3890,90 @@ async def handle_get_bisque_connection_url(arguments: dict[str, Any]) -> list[Te
 
     url = f"ws://{public_ip}:9100?token={token}"
     return [TextContent(type="text", text=url)]
+
+
+async def handle_generate_bisque_login_token(arguments: dict[str, Any]) -> list[TextContent]:
+    """Generate a bisque-chat login token for the given email.
+
+    Calls the bisque-chat Next.js app's /api/auth/generate-login-token endpoint
+    (running locally on port 3000 by default, or the URL configured in
+    BISQUE_CHAT_URL env var).
+
+    The token is a base64url-encoded JSON: { url: <relay_ws_url>, token: <bootstrap> }.
+    Users paste this into the bisque app login screen.
+    """
+    email = arguments.get("email", "").strip()
+    if not email or "@" not in email:
+        return [TextContent(type="text", text="Error: a valid email address is required.")]
+
+    # Read config
+    config_file = _CONFIG_DIR / "config.env"
+    bisque_chat_url = "http://localhost:3000"
+    relay_url_override = ""
+    admin_secret = ""
+
+    if config_file.exists():
+        for line in config_file.read_text().splitlines():
+            stripped = line.strip()
+            if stripped.startswith("BISQUE_CHAT_URL="):
+                bisque_chat_url = stripped.split("=", 1)[1].strip().strip('"').strip("'")
+            elif stripped.startswith("NEXT_PUBLIC_LOBSTER_RELAY_URL="):
+                relay_url_override = stripped.split("=", 1)[1].strip().strip('"').strip("'")
+            elif stripped.startswith("ADMIN_SECRET="):
+                admin_secret = stripped.split("=", 1)[1].strip().strip('"').strip("'")
+
+    # Also check environment variables directly
+    if not admin_secret:
+        admin_secret = os.environ.get("ADMIN_SECRET", "")
+    if not relay_url_override:
+        relay_url_override = os.environ.get("NEXT_PUBLIC_LOBSTER_RELAY_URL", "")
+
+    if not admin_secret:
+        return [TextContent(type="text", text=(
+            "ADMIN_SECRET is not configured. Add it to ~/lobster-config/config.env:\n"
+            "  ADMIN_SECRET=<your-secret>\n\n"
+            "This secret must match the ADMIN_SECRET set when running bisque-chat."
+        ))]
+
+    endpoint = f"{bisque_chat_url.rstrip('/')}/api/auth/generate-login-token"
+
+    payload: dict[str, str] = {"email": email}
+    if relay_url_override:
+        payload["relayUrl"] = relay_url_override
+
+    try:
+        import urllib.request
+        import urllib.error
+
+        req_body = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            endpoint,
+            data=req_body,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {admin_secret}",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            resp_body = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        try:
+            err_body = json.loads(exc.read().decode("utf-8"))
+            err_msg = err_body.get("error", str(exc))
+        except Exception:
+            err_msg = str(exc)
+        return [TextContent(type="text", text=f"Failed to generate token: {err_msg}")]
+    except Exception as exc:
+        return [TextContent(type="text", text=(
+            f"Could not reach bisque-chat at {bisque_chat_url}: {exc}\n\n"
+            "Make sure bisque-chat is running and BISQUE_CHAT_URL is set correctly in ~/lobster-config/config.env."
+        ))]
+
+    login_token = resp_body.get("loginToken", "")
+    instructions = resp_body.get("instructions", f"Login token: {login_token}")
+
+    return [TextContent(type="text", text=instructions)]
 
 
 # =============================================================================
