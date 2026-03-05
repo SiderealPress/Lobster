@@ -124,7 +124,7 @@ def validate_send_reply_args(args: dict) -> dict:
         text = text[:4093] + "..."
 
     # source: must be a known source
-    valid_sources = {"telegram", "slack", "sms", "signal"}
+    valid_sources = {"telegram", "slack", "sms", "signal", "whatsapp", "bisque"}
     if source not in valid_sources:
         raise ValidationError(
             f"Invalid source '{source}'. Must be one of: {', '.join(sorted(valid_sources))}"
