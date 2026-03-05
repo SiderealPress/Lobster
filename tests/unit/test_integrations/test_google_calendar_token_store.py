@@ -268,8 +268,8 @@ class TestTokenPath:
 
     def test_telegram_chat_id_is_valid(self, tmp_path: Path) -> None:
         # Telegram chat IDs are integers; when cast to str they pass cleanly
-        result = _token_path("1000000001", tmp_path)
-        assert result.name == "1000000001.json"
+        result = _token_path("1234567890", tmp_path)
+        assert result.name == "1234567890.json"
 
 
 # ---------------------------------------------------------------------------
