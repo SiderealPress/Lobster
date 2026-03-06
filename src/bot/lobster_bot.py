@@ -25,8 +25,48 @@ from pathlib import Path
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
+import re
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
+
+
+def md_to_html(text: str) -> str:
+    """Convert Telegram-flavored Markdown to HTML for reliable rendering.
+
+    Handles: [text](url) links, `code`, ```code blocks```, **bold**, *bold*, _italic_
+    Escapes &, <, > in non-HTML portions.
+    """
+    # Split on code blocks first to avoid formatting inside them
+    parts = re.split(r'(```[\s\S]*?```|`[^`\n]+`)', text)
+    result = []
+    for i, part in enumerate(parts):
+        if i % 2 == 1:
+            # Code span or block
+            if part.startswith('```'):
+                inner = part[3:]
+                if inner.endswith('```'):
+                    inner = inner[:-3]
+                # Strip optional language tag on first line
+                inner = re.sub(r'^\w+\n', '', inner)
+                escaped = inner.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                result.append(f'<pre><code>{escaped}</code></pre>')
+            else:
+                inner = part[1:-1]
+                escaped = inner.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                result.append(f'<code>{escaped}</code>')
+        else:
+            # Regular text — escape HTML entities first, then apply inline formatting
+            p = part.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            # Links: [text](url)
+            p = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2">\1</a>', p)
+            # Bold: **text** or __text__
+            p = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', p)
+            p = re.sub(r'__(.+?)__', r'<b>\1</b>', p)
+            # Italic: _text_ (single, not double)
+            p = re.sub(r'(?<![_*])_([^_\n]+)_(?![_*])', r'<i>\1</i>', p)
+            result.append(p)
+    return ''.join(result)
 
 try:
     from onboarding import is_user_onboarded, mark_user_onboarded, get_onboarding_message
@@ -91,6 +131,53 @@ _processing_files: set[str] = set()
 # Lock to prevent concurrent wake attempts (race condition: two simultaneous
 # incoming messages while hibernating should only trigger one Claude spawn)
 _wake_lock = threading.Lock()
+
+# Directory where MCP mark_processing moves messages
+_MESSAGES_DIR = Path(os.environ.get("LOBSTER_MESSAGES", Path.home() / "messages"))
+_PROCESSING_DIR = _MESSAGES_DIR / "processing"
+
+
+async def send_typing_indicator(chat_id: int) -> None:
+    """Send a Telegram 'typing...' indicator to chat_id.
+
+    The indicator lasts ~5 seconds on the Telegram client side.
+    Silently ignores failures (typing is best-effort).
+    """
+    if not bot_app:
+        return
+    try:
+        await bot_app.bot.send_chat_action(chat_id=chat_id, action="typing")
+        log.debug(f"Sent typing indicator to chat_id={chat_id}")
+    except Exception as e:
+        log.debug(f"Typing indicator failed for chat_id={chat_id}: {e}")
+
+
+async def typing_refresh_loop() -> None:
+    """Background task: refresh typing indicator every 4s for messages in processing/.
+
+    Telegram's typing indicator expires after ~5 seconds, so we refresh at 4s
+    to keep it visible while Lobster works on a long task.
+    """
+    log.info("Typing refresh loop started")
+    while True:
+        await asyncio.sleep(4)
+        try:
+            if not bot_app:
+                continue
+            # Scan all files in the processing directory
+            if not _PROCESSING_DIR.exists():
+                continue
+            for msg_file in _PROCESSING_DIR.glob("*.json"):
+                try:
+                    data = json.loads(msg_file.read_text())
+                    source = data.get("source", "")
+                    chat_id = data.get("chat_id")
+                    if source == "telegram" and chat_id:
+                        await send_typing_indicator(int(chat_id))
+                except Exception:
+                    pass  # Skip corrupt/unreadable files silently
+        except Exception as e:
+            log.debug(f"Typing refresh loop error: {e}")
 
 
 def _read_lobster_state() -> str:
@@ -312,15 +399,16 @@ class OutboxHandler(FileSystemEventHandler):
 
             if chat_id and text and bot_app:
                 reply_markup = build_inline_keyboard(buttons) if buttons else None
+                html_text = md_to_html(text)
                 try:
                     await bot_app.bot.send_message(
                         chat_id=chat_id,
-                        text=text,
-                        parse_mode="Markdown",
+                        text=html_text,
+                        parse_mode="HTML",
                         reply_markup=reply_markup
                     )
                 except Exception:
-                    # Fallback to plain text if Markdown parsing fails
+                    # Fallback to plain text if HTML parsing fails
                     await bot_app.bot.send_message(
                         chat_id=chat_id,
                         text=text,
@@ -571,9 +659,8 @@ async def send_onboarding(update: Update, user) -> None:
     """Send the onboarding message and mark the user as onboarded."""
     message_text = get_onboarding_message(user.first_name)
     try:
-        await update.message.reply_text(message_text, parse_mode="Markdown")
+        await update.message.reply_text(md_to_html(message_text), parse_mode="HTML")
     except Exception:
-        # Fallback to plain text if Markdown fails
         await update.message.reply_text(message_text)
     mark_user_onboarded(user.id)
     log.info(f"Sent onboarding to user {user.id} ({user.first_name})")
@@ -590,6 +677,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Wake Claude if it hibernated — do this before writing to inbox so Claude
     # is starting up while the message file is being written
     wake_claude_if_hibernating()
+
+    # Send typing indicator immediately so the user sees Lobster is working
+    await send_typing_indicator(message.chat_id)
 
     # First-message detection: send onboarding to new users
     if not is_user_onboarded(user.id):
@@ -648,6 +738,9 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
     message = update.message
     voice = message.voice
 
+    # Send typing indicator immediately (wake already called in handle_message)
+    await send_typing_indicator(message.chat_id)
+
     try:
         # Download voice file from Telegram
         file = await context.bot.get_file(voice.file_id)
@@ -694,6 +787,9 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
     """Handle photo messages: download image and save to inbox with metadata."""
     user = update.effective_user
     message = update.message
+
+    # Send typing indicator immediately (wake already called in handle_message)
+    await send_typing_indicator(message.chat_id)
 
     try:
         # Get the largest photo (last in the array)
@@ -748,6 +844,9 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
     user = update.effective_user
     message = update.message
     document = message.document
+
+    # Send typing indicator immediately (wake already called in handle_message)
+    await send_typing_indicator(message.chat_id)
 
     try:
         # Check if it's an image sent as document
@@ -867,6 +966,10 @@ async def run_bot():
     # Start periodic outbox sweep (catches watchdog misses and retries failures)
     asyncio.create_task(sweep_outbox())
     log.info("Outbox sweep task started (every 10s)")
+
+    # Start typing indicator refresh loop (keeps "typing..." visible during long tasks)
+    asyncio.create_task(typing_refresh_loop())
+    log.info("Typing indicator refresh loop started (every 4s)")
 
     try:
         await bot_app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
