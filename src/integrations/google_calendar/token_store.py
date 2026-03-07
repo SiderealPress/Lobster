@@ -1,11 +1,34 @@
 """
-Per-user Google OAuth token persistence.
+Per-user Google OAuth token persistence — multi-backend edition.
 
-Stores and retrieves TokenData to/from JSON files in
-``~/messages/config/gcal-tokens/{user_id}.json``.  Each file is mode 600
-(owner read/write only) so that token values are never world-readable.
+Supports two OAuth backends:
 
-Token schema on disk::
+1. **myownlobster** (default for hosted instances): fetches tokens from the
+   myownlobster.ai internal API (``GET /api/internal/calendar-tokens``).
+   Refreshed tokens are written back to the API (``PUT``) and cached locally
+   so repeated calls are fast.
+
+2. **local** (for self-hosted Lobster instances): reads from JSON files in
+   ``~/messages/config/gcal-tokens/{user_id}.json``, exactly as before.
+
+Backend selection is driven by ``~/messages/config/calendar-config.json``::
+
+    {
+      "oauth_backend": "myownlobster",   // or "local"
+      "myownlobster": {
+        "api_base": "https://myownlobster.ai",
+        "token_endpoint": "/api/internal/calendar-tokens"
+      },
+      "local": {
+        "token_dir": "~/messages/config/gcal-tokens/"
+      }
+    }
+
+The ``LOBSTER_INTERNAL_SECRET`` environment variable must be set for the
+myownlobster backend. This secret is also configured on the myownlobster.ai
+server and authenticates inter-service calls.
+
+Token schema on disk (local cache and local backend)::
 
     {
         "access_token":  "<string>",
@@ -15,9 +38,9 @@ Token schema on disk::
     }
 
 Design principles:
-- Side effects (file I/O) are isolated to ``save_token`` and ``load_token``.
+- Side effects (file I/O, HTTP) are isolated to dedicated functions.
 - ``is_token_valid`` is a pure function (delegates to oauth.is_token_valid).
-- ``get_valid_token`` composes the above: load → check → maybe refresh → save.
+- ``get_valid_token`` composes load → check → maybe refresh → persist.
 - No token values are written to logs.
 """
 
@@ -31,6 +54,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import requests
+
 from integrations.google_calendar.config import GoogleOAuthCredentials
 from integrations.google_calendar.oauth import (
     OAuthError,
@@ -42,15 +67,39 @@ from integrations.google_calendar.oauth import (
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Storage location
+# Storage locations
 # ---------------------------------------------------------------------------
 
 _HOME: Path = Path.home()
-_MESSAGES_DIR: Path = Path(os.environ.get("LOBSTER_MESSAGES", _HOME / "messages"))
+_MESSAGES_DIR: Path = Path(os.environ.get("LOBSTER_MESSAGES", str(_HOME / "messages")))
 _TOKEN_DIR: Path = _MESSAGES_DIR / "config" / "gcal-tokens"
+_CALENDAR_CONFIG_PATH: Path = _MESSAGES_DIR / "config" / "calendar-config.json"
 
 # File permissions: owner read+write only (octal 0o600)
 _TOKEN_FILE_MODE: int = stat.S_IRUSR | stat.S_IWUSR
+
+# HTTP timeout for internal API calls (seconds)
+_HTTP_TIMEOUT: int = 10
+
+
+# ---------------------------------------------------------------------------
+# Calendar config loader (pure function once file is read)
+# ---------------------------------------------------------------------------
+
+
+def _load_calendar_config() -> dict:
+    """Load the calendar config file.
+
+    Returns the parsed dict, or a default ``local`` config if the file is
+    absent or malformed.
+    """
+    if not _CALENDAR_CONFIG_PATH.exists():
+        return {"oauth_backend": "local"}
+    try:
+        return json.loads(_CALENDAR_CONFIG_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        log.warning("Failed to parse calendar-config.json: %s — defaulting to local backend", exc)
+        return {"oauth_backend": "local"}
 
 
 # ---------------------------------------------------------------------------
@@ -59,17 +108,7 @@ _TOKEN_FILE_MODE: int = stat.S_IRUSR | stat.S_IWUSR
 
 
 def _token_to_dict(token: TokenData) -> dict:
-    """Convert a TokenData to a JSON-serialisable dict.
-
-    Uses ISO 8601 UTC format for ``expires_at`` so the stored representation
-    is unambiguous and human-readable.
-
-    Args:
-        token: Immutable TokenData to serialise.
-
-    Returns:
-        Dict ready for ``json.dumps``.
-    """
+    """Convert a TokenData to a JSON-serialisable dict."""
     return {
         "access_token": token.access_token,
         "expires_at": token.expires_at.isoformat(),
@@ -79,23 +118,10 @@ def _token_to_dict(token: TokenData) -> dict:
 
 
 def _dict_to_token(data: dict) -> TokenData:
-    """Reconstruct a TokenData from a deserialised JSON dict.
-
-    Args:
-        data: Dict from ``json.loads`` matching the token schema.
-
-    Returns:
-        Frozen TokenData instance.
-
-    Raises:
-        KeyError:  If mandatory fields are absent.
-        ValueError: If ``expires_at`` is not a valid ISO datetime string.
-    """
+    """Reconstruct a TokenData from a deserialised JSON dict."""
     expires_at = datetime.fromisoformat(data["expires_at"])
-    # Ensure the datetime is timezone-aware (legacy files may lack tzinfo)
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=timezone.utc)
-
     return TokenData(
         access_token=data["access_token"],
         expires_at=expires_at,
@@ -105,23 +131,174 @@ def _dict_to_token(data: dict) -> TokenData:
 
 
 def _token_path(user_id: str, token_dir: Path = _TOKEN_DIR) -> Path:
-    """Return the absolute path to a user's token file.
+    """Return the absolute path to a user's local token cache file.
 
-    This is a pure function: given the same inputs it always returns the
-    same path without touching the filesystem.
-
-    Args:
-        user_id:   Identifier for the user (e.g. Telegram chat_id as str).
-        token_dir: Directory that holds per-user token files.
-
-    Returns:
-        Path object for ``{token_dir}/{user_id}.json``.
+    Pure function: no filesystem access.
     """
-    # Sanitise user_id to prevent directory traversal: keep only safe chars
     safe_id = "".join(c for c in user_id if c.isalnum() or c in ("-", "_"))
     if not safe_id:
         raise ValueError(f"user_id {user_id!r} produces an empty filename after sanitisation")
     return token_dir / f"{safe_id}.json"
+
+
+# ---------------------------------------------------------------------------
+# Local file backend (side-effecting)
+# ---------------------------------------------------------------------------
+
+
+def _save_token_local(
+    user_id: str,
+    token: TokenData,
+    token_dir: Path = _TOKEN_DIR,
+) -> None:
+    """Persist a user's OAuth token to a local JSON file (mode 600)."""
+    token_dir.mkdir(parents=True, exist_ok=True)
+    path = _token_path(user_id, token_dir)
+    payload = json.dumps(_token_to_dict(token), indent=2)
+    tmp_path = path.with_suffix(".json.tmp")
+    try:
+        fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _TOKEN_FILE_MODE)
+        with os.fdopen(fd, "w") as f:
+            f.write(payload)
+        os.rename(str(tmp_path), str(path))
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+    log.info("Token cached locally for user_id=%r at %s", user_id, path)
+
+
+def _load_token_local(
+    user_id: str,
+    token_dir: Path = _TOKEN_DIR,
+) -> Optional[TokenData]:
+    """Load a user's token from the local cache file."""
+    path = _token_path(user_id, token_dir)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return _dict_to_token(data)
+    except (json.JSONDecodeError, KeyError, ValueError) as exc:
+        log.warning("Failed to parse local token file for user_id=%r: %s", user_id, exc)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# myownlobster backend (side-effecting)
+# ---------------------------------------------------------------------------
+
+
+def _internal_auth_header() -> dict[str, str]:
+    """Return the Authorization header for the internal API call.
+
+    Reads LOBSTER_INTERNAL_SECRET from the environment.
+    """
+    secret = os.environ.get("LOBSTER_INTERNAL_SECRET", "").strip()
+    if not secret:
+        raise RuntimeError(
+            "LOBSTER_INTERNAL_SECRET is not set in the environment. "
+            "Add it to config.env to enable the myownlobster calendar backend."
+        )
+    return {"Authorization": f"Bearer {secret}"}
+
+
+def _fetch_token_from_api(
+    user_id: str,
+    api_base: str,
+    token_endpoint: str,
+) -> Optional[TokenData]:
+    """Fetch a Google Calendar token from the myownlobster internal API.
+
+    Args:
+        user_id:        Telegram chat_id as a string.
+        api_base:       Base URL, e.g. ``https://myownlobster.ai``.
+        token_endpoint: Path, e.g. ``/api/internal/calendar-tokens``.
+
+    Returns:
+        TokenData if found, None if 404 or on any error.
+    """
+    url = f"{api_base.rstrip('/')}{token_endpoint}"
+    try:
+        headers = _internal_auth_header()
+    except RuntimeError as exc:
+        log.error("myownlobster backend: %s", exc)
+        return None
+
+    try:
+        resp = requests.get(
+            url,
+            params={"telegram_chat_id": user_id},
+            headers=headers,
+            timeout=_HTTP_TIMEOUT,
+        )
+    except requests.exceptions.RequestException as exc:
+        log.warning("myownlobster API unreachable: %s", exc)
+        return None
+
+    if resp.status_code == 404:
+        log.info("No token in myownlobster DB for user_id=%r", user_id)
+        return None
+
+    if not resp.ok:
+        log.warning(
+            "myownlobster API returned %d for user_id=%r",
+            resp.status_code, user_id,
+        )
+        return None
+
+    try:
+        data = resp.json()
+        return _dict_to_token(data)
+    except (json.JSONDecodeError, KeyError, ValueError) as exc:
+        log.warning("Failed to parse myownlobster API response: %s", exc)
+        return None
+
+
+def _write_token_to_api(
+    user_id: str,
+    token: TokenData,
+    api_base: str,
+    token_endpoint: str,
+) -> None:
+    """Write a refreshed access token back to the myownlobster internal API.
+
+    Only updates access_token and expires_at — the refresh_token is managed
+    by the OAuth flow and not overwritten here.
+
+    Failures are logged but not raised so callers are not blocked.
+    """
+    url = f"{api_base.rstrip('/')}{token_endpoint}"
+    try:
+        headers = _internal_auth_header()
+    except RuntimeError as exc:
+        log.error("myownlobster backend write: %s", exc)
+        return
+
+    payload = {
+        "telegram_chat_id": user_id,
+        "access_token": token.access_token,
+        "expires_at": token.expires_at.isoformat(),
+    }
+
+    try:
+        resp = requests.put(
+            url,
+            json=payload,
+            headers=headers,
+            timeout=_HTTP_TIMEOUT,
+        )
+        if resp.ok:
+            log.info("Refreshed token written back to myownlobster for user_id=%r", user_id)
+        else:
+            log.warning(
+                "myownlobster token write-back returned %d for user_id=%r",
+                resp.status_code, user_id,
+            )
+    except requests.exceptions.RequestException as exc:
+        log.warning("myownlobster token write-back failed for user_id=%r: %s", user_id, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -134,82 +311,74 @@ def save_token(
     token: TokenData,
     token_dir: Path = _TOKEN_DIR,
 ) -> None:
-    """Persist a user's OAuth token to disk.
+    """Persist a user's OAuth token.
 
-    The token file is written atomically (write to a temp file then rename)
-    and set to mode 600 immediately after creation, before any data is written.
+    Saves to local file regardless of backend (the local file is always used
+    as a fast cache).  When the myownlobster backend is active, also writes
+    back to the API.
 
     Args:
-        user_id:   Unique identifier for the user.
+        user_id:   Unique identifier for the user (Telegram chat_id as str).
         token:     TokenData to persist.
-        token_dir: Directory in which to store the token file.  Defaults to
-                   ``~/messages/config/gcal-tokens/``.
-
-    Side effects:
-        Creates ``token_dir`` if it does not exist.
-        Writes (or overwrites) ``{token_dir}/{user_id}.json``.
-        Sets file permissions to 0o600.
+        token_dir: Local token cache directory.
     """
-    token_dir.mkdir(parents=True, exist_ok=True)
-    path = _token_path(user_id, token_dir)
+    _save_token_local(user_id, token, token_dir)
 
-    payload = json.dumps(_token_to_dict(token), indent=2)
-
-    # Write to a sibling temp file, set permissions, then rename atomically.
-    tmp_path = path.with_suffix(".json.tmp")
-    try:
-        # Open with restrictive permissions from the start
-        fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _TOKEN_FILE_MODE)
-        with os.fdopen(fd, "w") as f:
-            f.write(payload)
-        os.rename(str(tmp_path), str(path))
-    except Exception:
-        # Clean up temp file if anything goes wrong
-        try:
-            tmp_path.unlink(missing_ok=True)
-        except Exception:
-            pass
-        raise
-
-    log.info("Token saved for user_id=%r at %s", user_id, path)
+    config = _load_calendar_config()
+    if config.get("oauth_backend") == "myownlobster":
+        mol_cfg = config.get("myownlobster", {})
+        api_base = mol_cfg.get("api_base", "https://myownlobster.ai")
+        token_endpoint = mol_cfg.get("token_endpoint", "/api/internal/calendar-tokens")
+        _write_token_to_api(user_id, token, api_base, token_endpoint)
 
 
 def load_token(
     user_id: str,
     token_dir: Path = _TOKEN_DIR,
 ) -> Optional[TokenData]:
-    """Load a user's OAuth token from disk.
+    """Load a user's OAuth token from the configured backend.
+
+    Strategy:
+    1. Check local cache first (avoids unnecessary API round-trips).
+    2. If cache miss or token is expired, fetch from the configured backend.
+    3. If backend returns a valid token, cache it locally and return it.
 
     Args:
         user_id:   Unique identifier for the user.
-        token_dir: Directory containing token files.
+        token_dir: Local token cache directory.
 
     Returns:
-        TokenData if a valid token file exists, or None if:
-        - No token file exists for this user.
-        - The file is malformed or cannot be parsed.
-
-    Side effects:
-        Reads ``{token_dir}/{user_id}.json`` if it exists.
+        TokenData if a valid token exists, else None.
     """
-    path = _token_path(user_id, token_dir)
+    config = _load_calendar_config()
+    backend = config.get("oauth_backend", "local")
 
-    if not path.exists():
-        log.debug("No token file found for user_id=%r", user_id)
-        return None
+    # --- Local backend: just read the file ---
+    if backend == "local":
+        local_cfg = config.get("local", {})
+        raw_dir = local_cfg.get("token_dir", str(_TOKEN_DIR))
+        resolved_dir = Path(os.path.expanduser(raw_dir))
+        return _load_token_local(user_id, resolved_dir)
 
-    try:
-        raw = path.read_text(encoding="utf-8")
-        data = json.loads(raw)
-        token = _dict_to_token(data)
-        log.debug("Token loaded for user_id=%r", user_id)
-        return token
-    except (json.JSONDecodeError, KeyError, ValueError) as exc:
-        log.warning(
-            "Failed to parse token file for user_id=%r (%s): %s",
-            user_id, path, exc,
-        )
-        return None
+    # --- myownlobster backend ---
+    # Check local cache first to avoid an API round-trip on every call.
+    cached = _load_token_local(user_id, token_dir)
+    if cached is not None and is_token_valid(cached):
+        log.debug("Token for user_id=%r served from local cache", user_id)
+        return cached
+
+    mol_cfg = config.get("myownlobster", {})
+    api_base = mol_cfg.get("api_base", "https://myownlobster.ai")
+    token_endpoint = mol_cfg.get("token_endpoint", "/api/internal/calendar-tokens")
+
+    log.info("Fetching token from myownlobster API for user_id=%r", user_id)
+    token = _fetch_token_from_api(user_id, api_base, token_endpoint)
+
+    if token is not None:
+        # Cache it locally so the next call is fast
+        _save_token_local(user_id, token, token_dir)
+
+    return token
 
 
 def get_valid_token(
@@ -219,27 +388,22 @@ def get_valid_token(
 ) -> Optional[TokenData]:
     """Return a valid access token for the user, refreshing if necessary.
 
-    Composes ``load_token``, ``is_token_valid``, ``refresh_access_token``,
-    and ``save_token`` into a single convenience function:
-
-    1. Load token from disk.
+    Workflow:
+    1. Load token via the configured backend (with local cache).
     2. If no token → return None.
     3. If token is still valid → return it.
     4. If token is expired → attempt refresh using the stored refresh_token.
-    5. Save the refreshed token and return it.
-    6. If refresh fails (revoked, network error) → log the error, return None.
+    5. Persist the refreshed token (local cache + backend write-back).
+    6. If refresh fails → log and return None.
 
     Args:
-        user_id:     Unique identifier for the user.
-        token_dir:   Directory containing token files.
-        credentials: Optional pre-loaded Google credentials.  Passed through
-                     to ``refresh_access_token`` if a refresh is needed.
+        user_id:     Unique identifier for the user (Telegram chat_id as str).
+        token_dir:   Local token cache directory.
+        credentials: Optional pre-loaded Google credentials.  Passed to
+                     ``refresh_access_token`` when a refresh is needed.
 
     Returns:
         A valid TokenData, or None if no valid token is available.
-
-    Side effects:
-        May write a refreshed token back to disk via ``save_token``.
     """
     token = load_token(user_id, token_dir)
     if token is None:
@@ -272,7 +436,6 @@ def get_valid_token(
         return None
 
     # Google may not return a new refresh_token on every refresh.
-    # If it's absent in the refreshed response, carry forward the original.
     if refreshed.refresh_token is None:
         refreshed = TokenData(
             access_token=refreshed.access_token,
@@ -281,5 +444,6 @@ def get_valid_token(
             refresh_token=token.refresh_token,
         )
 
+    # Persist: local cache + backend write-back
     save_token(user_id, refreshed, token_dir)
     return refreshed

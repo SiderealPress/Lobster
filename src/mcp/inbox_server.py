@@ -1271,6 +1271,73 @@ async def list_tools() -> list[Tool]:
                 "required": ["skill_name", "key", "value"],
             },
         ),
+        # Google Calendar Tools
+        Tool(
+            name="create_calendar_event",
+            description="Create a new event on a user's primary Google Calendar.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "telegram_chat_id": {
+                        "oneOf": [{"type": "integer"}, {"type": "string"}],
+                        "description": "The Telegram chat_id of the user whose calendar to write to.",
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Event title / summary.",
+                    },
+                    "start_datetime": {
+                        "type": "string",
+                        "description": "Event start time in ISO 8601 format (e.g. 2026-03-07T19:00:00).",
+                    },
+                    "end_datetime": {
+                        "type": "string",
+                        "description": "Event end time in ISO 8601 format.",
+                    },
+                    "timezone": {
+                        "type": "string",
+                        "description": "IANA timezone name for the event (e.g. America/Los_Angeles). Default: America/Los_Angeles.",
+                        "default": "America/Los_Angeles",
+                    },
+                    "location": {
+                        "type": "string",
+                        "description": "Optional event location.",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Optional event description / notes.",
+                    },
+                },
+                "required": ["telegram_chat_id", "title", "start_datetime", "end_datetime"],
+            },
+        ),
+        Tool(
+            name="list_calendar_events",
+            description="List upcoming events from a user's primary Google Calendar.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "telegram_chat_id": {
+                        "oneOf": [{"type": "integer"}, {"type": "string"}],
+                        "description": "The Telegram chat_id of the user.",
+                    },
+                    "time_min": {
+                        "type": "string",
+                        "description": "Start of time range (ISO 8601). Defaults to now.",
+                    },
+                    "time_max": {
+                        "type": "string",
+                        "description": "End of time range (ISO 8601). Defaults to 7 days from now.",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Maximum number of events to return. Default 10.",
+                        "default": 10,
+                    },
+                },
+                "required": ["telegram_chat_id"],
+            },
+        ),
     ] + (
         # User Model Tools (only registered when feature flag is enabled)
         [
@@ -1422,6 +1489,11 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
         return await handle_get_skill_preferences(arguments)
     elif name == "set_skill_preference":
         return await handle_set_skill_preference(arguments)
+    # Google Calendar Tools
+    elif name == "create_calendar_event":
+        return await handle_create_calendar_event(arguments)
+    elif name == "list_calendar_events":
+        return await handle_list_calendar_events(arguments)
     # User Model Tools (dispatched to user_model subsystem)
     elif name in _user_model_tool_names and _user_model is not None:
         result_json = _user_model.dispatch(name, arguments)
@@ -4184,6 +4256,164 @@ async def handle_set_skill_preference(args: dict) -> list[TextContent]:
         return [TextContent(type="text", text="Error: value is required.")]
     result = _set_skill_preference(skill_name, key, value)
     return [TextContent(type="text", text=result)]
+
+
+async def handle_create_calendar_event(args: dict) -> list[TextContent]:
+    """Create an event on a user's primary Google Calendar.
+
+    Resolves the user's token via the configured backend (myownlobster or
+    local), then calls the Google Calendar API to create the event.
+
+    Required args:
+        telegram_chat_id  — int or str Telegram chat_id
+        title             — event summary
+        start_datetime    — ISO 8601 datetime string
+        end_datetime      — ISO 8601 datetime string
+
+    Optional args:
+        timezone    — IANA timezone name (default: America/Los_Angeles)
+        location    — event location string
+        description — event description / notes
+    """
+    import zoneinfo
+    from datetime import datetime, timezone as dt_timezone
+    from integrations.google_calendar.client import create_event, CalendarAPIError
+
+    chat_id = str(args.get("telegram_chat_id", "")).strip()
+    title = args.get("title", "").strip()
+    start_str = args.get("start_datetime", "").strip()
+    end_str = args.get("end_datetime", "").strip()
+    tz_name = args.get("timezone", "America/Los_Angeles").strip() or "America/Los_Angeles"
+    location = args.get("location", "")
+    description = args.get("description", "")
+
+    if not chat_id:
+        return [TextContent(type="text", text="Error: telegram_chat_id is required.")]
+    if not title:
+        return [TextContent(type="text", text="Error: title is required.")]
+    if not start_str or not end_str:
+        return [TextContent(type="text", text="Error: start_datetime and end_datetime are required.")]
+
+    # Parse datetimes — apply the requested timezone if they are naive
+    try:
+        tz = zoneinfo.ZoneInfo(tz_name)
+    except (zoneinfo.ZoneInfoNotFoundError, KeyError):
+        return [TextContent(type="text", text=f"Error: unknown timezone '{tz_name}'.")]
+
+    def _parse_dt(s: str, tz) -> datetime:
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=tz)
+        return dt
+
+    try:
+        start_dt = _parse_dt(start_str, tz)
+        end_dt = _parse_dt(end_str, tz)
+    except ValueError as exc:
+        return [TextContent(type="text", text=f"Error parsing datetime: {exc}")]
+
+    event = create_event(
+        user_id=chat_id,
+        title=title,
+        start=start_dt,
+        end=end_dt,
+        description=description,
+        location=location,
+    )
+
+    if event is None:
+        return [TextContent(type="text", text=(
+            f"Failed to create calendar event for telegram_chat_id={chat_id}. "
+            "The user may not have a valid Google Calendar token — "
+            "they need to connect their Google account via myownlobster.ai."
+        ))]
+
+    result = {
+        "id": event.id,
+        "title": event.title,
+        "start": event.start.isoformat(),
+        "end": event.end.isoformat(),
+        "location": event.location,
+        "url": event.url,
+    }
+    return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+
+async def handle_list_calendar_events(args: dict) -> list[TextContent]:
+    """List events from a user's primary Google Calendar.
+
+    Required args:
+        telegram_chat_id  — int or str Telegram chat_id
+
+    Optional args:
+        time_min    — ISO 8601 start of range (default: now)
+        time_max    — ISO 8601 end of range (default: 7 days from now)
+        max_results — max events to return (default: 10)
+    """
+    from datetime import datetime, timedelta, timezone as dt_timezone
+    from integrations.google_calendar.token_store import get_valid_token
+    from integrations.google_calendar.client import _call_calendar_api, _parse_event, CalendarAPIError
+
+    chat_id = str(args.get("telegram_chat_id", "")).strip()
+    max_results = int(args.get("max_results", 10))
+
+    if not chat_id:
+        return [TextContent(type="text", text="Error: telegram_chat_id is required.")]
+
+    now = datetime.now(tz=dt_timezone.utc)
+    default_max = now + timedelta(days=7)
+
+    def _parse_opt_dt(s: str | None) -> datetime | None:
+        if not s:
+            return None
+        try:
+            dt = datetime.fromisoformat(s)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=dt_timezone.utc)
+            return dt
+        except ValueError:
+            return None
+
+    time_min = _parse_opt_dt(args.get("time_min")) or now
+    time_max = _parse_opt_dt(args.get("time_max")) or default_max
+
+    token = get_valid_token(chat_id)
+    if token is None:
+        return [TextContent(type="text", text=(
+            f"No valid Google Calendar token for telegram_chat_id={chat_id}. "
+            "The user needs to connect their Google account via myownlobster.ai."
+        ))]
+
+    url = "https://www.googleapis.com/calendar/v3/calendars/primary/events"
+    params = {
+        "timeMin": time_min.isoformat(),
+        "timeMax": time_max.isoformat(),
+        "singleEvents": "true",
+        "orderBy": "startTime",
+        "maxResults": max_results,
+    }
+
+    try:
+        data = _call_calendar_api("GET", url, token.access_token, params=params)
+    except (CalendarAPIError, Exception) as exc:
+        return [TextContent(type="text", text=f"Google Calendar API error: {type(exc).__name__}: {exc}")]
+
+    items = data.get("items", [])
+    events = [_parse_event(item) for item in items]
+
+    result = [
+        {
+            "id": e.id,
+            "title": e.title,
+            "start": e.start.isoformat(),
+            "end": e.end.isoformat(),
+            "location": e.location,
+            "description": e.description,
+            "url": e.url,
+        }
+        for e in events
+    ]
+    return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
 
 async def main():
