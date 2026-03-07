@@ -1603,15 +1603,33 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
         msg_type = msg.get("type", "text")
 
         output += f"---\n"
-        # Add voice indicator if it's a voice message
+        # Add type-specific indicators
         if msg_type == "voice":
             output += f"**[{source}]** 🎤 from **{user}**\n"
             if not msg.get("transcription"):
                 output += f"⚠️ Voice message needs transcription - use `transcribe_audio`\n"
+        elif msg_type == "photo":
+            _image_files_hdr = msg.get("image_files")
+            if _image_files_hdr:
+                count = len(_image_files_hdr)
+                output += f"**[{source}]** 📷 from **{user}** ({count} photos)\n"
+            else:
+                output += f"**[{source}]** 📷 from **{user}**\n"
         else:
             output += f"**[{source}]** from **{user}**\n"
         output += f"Chat ID: `{chat_id}` | Message ID: `{msg_id}`\n"
         output += f"Time: {ts}\n\n"
+        # Surface image file paths for photo messages so Claude can read them
+        if msg_type == "photo":
+            image_files = msg.get("image_files")
+            image_file = msg.get("image_file")
+            if image_files:
+                output += f"**Image files** (read each to view):\n"
+                for img_path in image_files:
+                    output += f"  - `{img_path}`\n"
+                output += "\n"
+            elif image_file:
+                output += f"**Image file** (read to view): `{image_file}`\n\n"
         # Show full reply-to context if present
         reply_to = msg.get("reply_to")
         if reply_to:

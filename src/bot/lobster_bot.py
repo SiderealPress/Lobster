@@ -26,6 +26,8 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 import re
+from dataclasses import dataclass, field
+from typing import Optional
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
@@ -135,6 +137,28 @@ _wake_lock = threading.Lock()
 # Directory where MCP mark_processing moves messages
 _MESSAGES_DIR = Path(os.environ.get("LOBSTER_MESSAGES", Path.home() / "messages"))
 _PROCESSING_DIR = _MESSAGES_DIR / "processing"
+
+# Media group buffering — Telegram sends each photo in a media group as a
+# separate update with the same media_group_id. We buffer them and emit a
+# single grouped inbox message after MEDIA_GROUP_FLUSH_DELAY seconds.
+MEDIA_GROUP_FLUSH_DELAY = 2.0  # seconds to wait for all photos in a group
+
+@dataclass
+class _MediaGroupBuffer:
+    """Accumulates photo updates for a single Telegram media group."""
+    media_group_id: str
+    chat_id: int
+    user_id: int
+    username: Optional[str]
+    user_name: str
+    caption: str = ""
+    image_paths: list = field(default_factory=list)
+    reply_ctx: Optional[dict] = None
+    created_at: float = field(default_factory=time.time)
+    flush_task: Optional[asyncio.Task] = None
+
+# media_group_id -> _MediaGroupBuffer
+_media_group_buffers: dict[str, _MediaGroupBuffer] = {}
 
 
 async def send_typing_indicator(chat_id: int) -> None:
@@ -783,8 +807,79 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await message.reply_text("❌ Failed to process voice message.")
 
 
+async def _flush_media_group(media_group_id: str, chat_id: int) -> None:
+    """Flush a buffered media group to the inbox as a single grouped message.
+
+    Called after MEDIA_GROUP_FLUSH_DELAY seconds, at which point all photos
+    in the group should have arrived and been downloaded.
+    """
+    await asyncio.sleep(MEDIA_GROUP_FLUSH_DELAY)
+
+    buf = _media_group_buffers.pop(media_group_id, None)
+    if buf is None:
+        return  # Already flushed or never existed
+
+    if not buf.image_paths:
+        log.warning(f"Media group {media_group_id} flushed with no images — skipping")
+        return
+
+    # Stable ID based on group id (reproducible, not time-dependent)
+    group_msg_id = f"grp_{media_group_id}"
+
+    image_count = len(buf.image_paths)
+    caption = buf.caption
+    text_field = caption if caption else f"[{image_count} photos - see image_files]"
+
+    if image_count == 1:
+        # Degenerate group — treat as single photo
+        msg_data = {
+            "id": group_msg_id,
+            "source": "telegram",
+            "type": "photo",
+            "chat_id": buf.chat_id,
+            "user_id": buf.user_id,
+            "username": buf.username,
+            "user_name": buf.user_name,
+            "text": caption if caption else "[Photo - see image_file]",
+            "image_file": buf.image_paths[0],
+            "media_group_id": media_group_id,
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+    else:
+        msg_data = {
+            "id": group_msg_id,
+            "source": "telegram",
+            "type": "photo",
+            "chat_id": buf.chat_id,
+            "user_id": buf.user_id,
+            "username": buf.username,
+            "user_name": buf.user_name,
+            "text": text_field,
+            "image_files": buf.image_paths,
+            "image_count": image_count,
+            "media_group_id": media_group_id,
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+
+    if buf.reply_ctx:
+        msg_data["reply_to"] = buf.reply_ctx
+
+    inbox_file = INBOX_DIR / f"{group_msg_id}.json"
+    atomic_write_json(inbox_file, msg_data)
+
+    log.info(
+        f"Flushed media group {media_group_id} to inbox: "
+        f"{image_count} photo(s), id={group_msg_id}"
+    )
+
+
 async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE, msg_id: str):
-    """Handle photo messages: download image and save to inbox with metadata."""
+    """Handle photo messages: download image and save to inbox with metadata.
+
+    Single photos are written immediately. Photos that belong to a media group
+    (identified by message.media_group_id) are buffered for MEDIA_GROUP_FLUSH_DELAY
+    seconds, then emitted as a single inbox message with an image_files array.
+    """
     user = update.effective_user
     message = update.message
 
@@ -792,7 +887,7 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
     await send_typing_indicator(message.chat_id)
 
     try:
-        # Get the largest photo (last in the array)
+        # Get the largest photo (last in the array — Telegram orders by resolution)
         photo = message.photo[-1]
 
         # Download photo file from Telegram
@@ -803,36 +898,81 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await file.download_to_drive(image_path)
         log.info(f"Downloaded photo to: {image_path}")
 
-        # Get caption if any
         caption = message.caption or ""
-
-        # Create message file in inbox with photo metadata
-        msg_data = {
-            "id": msg_id,
-            "source": "telegram",
-            "type": "photo",
-            "chat_id": message.chat_id,
-            "user_id": user.id,
-            "username": user.username,
-            "user_name": user.first_name,
-            "text": caption if caption else "[Photo - see image_file]",
-            "image_file": str(image_path),
-            "image_width": photo.width,
-            "image_height": photo.height,
-            "file_id": photo.file_id,
-            "timestamp": datetime.utcnow().isoformat(),
-        }
-
-        # Capture full reply-to context if this message is a reply
         reply_ctx = extract_reply_to_context(message)
-        if reply_ctx:
-            msg_data["reply_to"] = reply_ctx
+        media_group_id = message.media_group_id  # None for single photos
 
-        inbox_file = INBOX_DIR / f"{msg_id}.json"
-        atomic_write_json(inbox_file, msg_data)
+        if media_group_id:
+            # --- Media group path ---
+            # Add this photo to (or create) the buffer for this group
+            if media_group_id not in _media_group_buffers:
+                buf = _MediaGroupBuffer(
+                    media_group_id=media_group_id,
+                    chat_id=message.chat_id,
+                    user_id=user.id,
+                    username=user.username,
+                    user_name=user.first_name,
+                    reply_ctx=reply_ctx,
+                )
+                _media_group_buffers[media_group_id] = buf
 
-        log.info(f"Wrote photo message to inbox: {msg_id}")
-        await message.reply_text("📷 Image received. Processing...")
+                # Schedule a flush after the delay. We cancel and reschedule
+                # on each new photo so the timer resets if photos trickle in.
+                buf.flush_task = asyncio.create_task(
+                    _flush_media_group(media_group_id, message.chat_id)
+                )
+                log.info(f"Started media group buffer for group_id={media_group_id}")
+                # Send a single acknowledgment for the whole group
+                await message.reply_text("📷 Media group received. Processing...")
+            else:
+                buf = _media_group_buffers[media_group_id]
+                # Cancel the existing flush task and reschedule so we wait
+                # for any remaining photos before flushing
+                if buf.flush_task and not buf.flush_task.done():
+                    buf.flush_task.cancel()
+                buf.flush_task = asyncio.create_task(
+                    _flush_media_group(media_group_id, message.chat_id)
+                )
+
+            # Capture caption from whichever photo has it (only one does)
+            if caption and not buf.caption:
+                buf.caption = caption
+            # Capture reply context from first photo
+            if reply_ctx and not buf.reply_ctx:
+                buf.reply_ctx = reply_ctx
+
+            buf.image_paths.append(str(image_path))
+            log.info(
+                f"Added photo to media group {media_group_id}: "
+                f"{len(buf.image_paths)} photo(s) so far"
+            )
+
+        else:
+            # --- Single photo path ---
+            msg_data = {
+                "id": msg_id,
+                "source": "telegram",
+                "type": "photo",
+                "chat_id": message.chat_id,
+                "user_id": user.id,
+                "username": user.username,
+                "user_name": user.first_name,
+                "text": caption if caption else "[Photo - see image_file]",
+                "image_file": str(image_path),
+                "image_width": photo.width,
+                "image_height": photo.height,
+                "file_id": photo.file_id,
+                "timestamp": datetime.utcnow().isoformat(),
+            }
+
+            if reply_ctx:
+                msg_data["reply_to"] = reply_ctx
+
+            inbox_file = INBOX_DIR / f"{msg_id}.json"
+            atomic_write_json(inbox_file, msg_data)
+
+            log.info(f"Wrote photo message to inbox: {msg_id}")
+            await message.reply_text("📷 Image received. Processing...")
 
     except Exception as e:
         log.error(f"Error handling photo message: {e}")
