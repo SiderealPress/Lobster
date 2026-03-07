@@ -31,12 +31,15 @@ Remote Claude Code config (claude_desktop_config.json):
 """
 
 import contextlib
+import json
 import logging
 import os
+import stat
 import subprocess
 import sys
 import time
 from collections.abc import AsyncIterator
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -195,6 +198,120 @@ async def health_endpoint(scope, receive, send):
     await response(scope, receive, send)
 
 
+# ---------------------------------------------------------------------------
+# Calendar token push endpoint
+# ---------------------------------------------------------------------------
+
+_MESSAGES_DIR: Path = Path(os.environ.get("LOBSTER_MESSAGES", Path.home() / "messages"))
+_GCAL_TOKEN_DIR: Path = _MESSAGES_DIR / "config" / "gcal-tokens"
+_TOKEN_FILE_MODE: int = stat.S_IRUSR | stat.S_IWUSR
+
+_INTERNAL_SECRET: str = os.environ.get("LOBSTER_INTERNAL_SECRET", "").strip()
+
+
+def _is_authorized_internal(request: Request) -> bool:
+    """Return True if the request carries a valid LOBSTER_INTERNAL_SECRET."""
+    if not _INTERNAL_SECRET:
+        logger.error("LOBSTER_INTERNAL_SECRET not configured — push-calendar-token endpoint disabled")
+        return False
+    auth_header = request.headers.get("authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return False
+    return auth_header[7:].strip() == _INTERNAL_SECRET
+
+
+async def push_calendar_token_endpoint(scope, receive, send):
+    """POST /api/push-calendar-token — receive a token pushed by myownlobster.ai.
+
+    Expected JSON body::
+
+        {
+          "chat_id":       "<telegram chat_id as string>",
+          "access_token":  "<string>",
+          "refresh_token": "<string>",
+          "expires_at":    "<ISO 8601 UTC string>",
+          "scope":         "<space-separated scopes>"
+        }
+
+    Authentication: ``Authorization: Bearer <LOBSTER_INTERNAL_SECRET>``
+
+    Writes the token to ``~/messages/config/gcal-tokens/{chat_id}.json``
+    with mode 0o600.
+    """
+    request = Request(scope, receive)
+
+    if not _is_authorized_internal(request):
+        response = JSONResponse({"error": "Unauthorized"}, status_code=401)
+        await response(scope, receive, send)
+        return
+
+    try:
+        body = await request.json()
+    except Exception:
+        response = JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+        await response(scope, receive, send)
+        return
+
+    chat_id = body.get("chat_id", "").strip()
+    access_token = body.get("access_token", "").strip()
+    refresh_token = body.get("refresh_token")
+    expires_at_raw = body.get("expires_at", "").strip()
+    scope_str = body.get("scope", "")
+
+    if not chat_id or not access_token or not expires_at_raw:
+        response = JSONResponse(
+            {"error": "Missing required fields: chat_id, access_token, expires_at"},
+            status_code=400,
+        )
+        await response(scope, receive, send)
+        return
+
+    # Sanitise chat_id to prevent path traversal
+    safe_chat_id = "".join(c for c in chat_id if c.isalnum() or c in ("-", "_"))
+    if not safe_chat_id:
+        response = JSONResponse({"error": "Invalid chat_id"}, status_code=400)
+        await response(scope, receive, send)
+        return
+
+    try:
+        expires_at = datetime.fromisoformat(expires_at_raw)
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+    except ValueError:
+        response = JSONResponse(
+            {"error": "Invalid expires_at: must be ISO 8601"},
+            status_code=400,
+        )
+        await response(scope, receive, send)
+        return
+
+    token_data = {
+        "access_token": access_token,
+        "expires_at": expires_at.isoformat(),
+        "scope": scope_str,
+        "refresh_token": refresh_token,
+    }
+
+    try:
+        _GCAL_TOKEN_DIR.mkdir(parents=True, exist_ok=True)
+        token_path = _GCAL_TOKEN_DIR / f"{safe_chat_id}.json"
+        tmp_path = token_path.with_suffix(".json.tmp")
+        payload = json.dumps(token_data, indent=2)
+        fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _TOKEN_FILE_MODE)
+        with os.fdopen(fd, "w") as f:
+            f.write(payload)
+        os.rename(str(tmp_path), str(token_path))
+        logger.info("Calendar token pushed and saved for chat_id=%r", safe_chat_id)
+    except Exception as exc:
+        logger.error("Failed to write calendar token for chat_id=%r: %s", safe_chat_id, exc)
+        response = JSONResponse({"error": "Failed to write token"}, status_code=500)
+        await response(scope, receive, send)
+        return
+
+    response = JSONResponse({"ok": True})
+    await response(scope, receive, send)
+
+
 async def mcp_endpoint(scope, receive, send):
     """Handle all requests: auth check then delegate to MCP."""
     request = Request(scope, receive)
@@ -203,6 +320,11 @@ async def mcp_endpoint(scope, receive, send):
     # Health endpoint — no auth required
     if path == "/health":
         await health_endpoint(scope, receive, send)
+        return
+
+    # Calendar token push — authenticated by LOBSTER_INTERNAL_SECRET
+    if path == "/api/push-calendar-token":
+        await push_calendar_token_endpoint(scope, receive, send)
         return
 
     # Only handle /mcp
