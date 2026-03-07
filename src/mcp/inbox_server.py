@@ -63,6 +63,23 @@ except Exception as _mem_err:
     import traceback as _tb
     print(f"[WARN] Memory system unavailable: {_mem_err}", file=sys.stderr)
 
+# User Model subsystem (optional — feature-flagged via LOBSTER_USER_MODEL=true)
+_user_model = None
+_user_model_tool_names: set[str] = set()
+USER_MODEL_ENABLED = False
+USER_MODEL_TOOL_DEFINITIONS: list = []
+try:
+    from user_model import create_user_model, USER_MODEL_ENABLED, USER_MODEL_TOOL_DEFINITIONS
+    if USER_MODEL_ENABLED:
+        _user_model = create_user_model()
+        _user_model_tool_names = _user_model.tool_names
+        print("[INFO] User Model subsystem initialized.", file=sys.stderr)
+    else:
+        print("[INFO] User Model subsystem disabled (LOBSTER_USER_MODEL != true).", file=sys.stderr)
+except Exception as _um_err:
+    import traceback as _um_tb
+    print(f"[WARN] User Model subsystem unavailable: {_um_err}", file=sys.stderr)
+
 # MCP SDK
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -1254,7 +1271,19 @@ async def list_tools() -> list[Tool]:
                 "required": ["skill_name", "key", "value"],
             },
         ),
-    ]
+    ] + (
+        # User Model Tools (only registered when feature flag is enabled)
+        [
+            Tool(
+                name=t["name"],
+                description=t["description"],
+                inputSchema=t["inputSchema"],
+            )
+            for t in USER_MODEL_TOOL_DEFINITIONS
+        ]
+        if USER_MODEL_ENABLED
+        else []
+    )
 
 
 @server.call_tool()
@@ -1393,6 +1422,12 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
         return await handle_get_skill_preferences(arguments)
     elif name == "set_skill_preference":
         return await handle_set_skill_preference(arguments)
+    # User Model Tools (dispatched to user_model subsystem)
+    elif name in _user_model_tool_names and _user_model is not None:
+        result_json = _user_model.dispatch(name, arguments)
+        return [TextContent(type="text", text=result_json)]
+    elif name in _user_model_tool_names and _user_model is None:
+        return [TextContent(type="text", text='{"error": "User model subsystem not initialized. Set LOBSTER_USER_MODEL=true in config.env."}')]
     else:
         return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
