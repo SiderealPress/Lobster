@@ -303,6 +303,32 @@ else
     success "dnf-based system detected (Amazon Linux 2023 / Fedora)"
 fi
 
+# Smart root handling: create a lobster user and re-exec as them
+if [ "$(id -u)" = "0" ]; then
+    warn "Running as root — will create a 'lobster' user and re-exec as them."
+    if ! id lobster &>/dev/null; then
+        info "Creating 'lobster' user with passwordless sudo..."
+        useradd -m -s /bin/bash lobster
+        echo "lobster ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/lobster
+        chmod 0440 /etc/sudoers.d/lobster
+        # Copy SSH authorized_keys so user can SSH in directly next time
+        if [ -f /root/.ssh/authorized_keys ]; then
+            mkdir -p /home/lobster/.ssh
+            cp /root/.ssh/authorized_keys /home/lobster/.ssh/authorized_keys
+            chown -R lobster:lobster /home/lobster/.ssh
+            chmod 700 /home/lobster/.ssh
+            chmod 600 /home/lobster/.ssh/authorized_keys
+        fi
+        success "User 'lobster' created."
+    else
+        success "User 'lobster' already exists."
+    fi
+    echo ""
+    info "Next time, SSH directly as: lobster@$(hostname)"
+    echo ""
+    exec sudo -u lobster bash "$0" "$@"
+fi
+
 # Check if running interactively
 if [ ! -t 0 ]; then
     error "This script requires interactive input."
@@ -313,13 +339,6 @@ if [ ! -t 0 ]; then
     echo "Or download and run:"
     echo -e "  ${CYAN}curl -fsSL https://raw.githubusercontent.com/SiderealPress/lobster/main/install.sh -o install.sh${NC}"
     echo -e "  ${CYAN}bash install.sh${NC}"
-    exit 1
-fi
-
-# Refuse to run as root (the root-handling block above should have re-exec'd
-# as a non-root user; if we're still root something went wrong)
-if [ "$(id -u)" = "0" ]; then
-    error "Do not run this script as root. Run as a regular user with sudo access."
     exit 1
 fi
 
