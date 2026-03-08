@@ -531,6 +531,17 @@ if [ "$CLAUDE_INSTALLED" = false ]; then
     # Add to PATH for current session
     export PATH="$HOME/.local/bin:$PATH"
 
+    # Persist ~/.local/bin to PATH in shell config files
+    PATH_LINE="export PATH=\"\$HOME/.local/bin:\$PATH\""
+    for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
+        if [ -f "$rc" ] && ! grep -q '\.local/bin' "$rc"; then
+            echo "" >> "$rc"
+            echo "# Added by Lobster installer" >> "$rc"
+            echo "$PATH_LINE" >> "$rc"
+            info "Added ~/.local/bin to PATH in $rc"
+        fi
+    done
+
     if command -v claude &>/dev/null; then
         success "Claude Code installed"
     else
@@ -597,17 +608,12 @@ else
         info "Existing tarball install found (v$(cat "$INSTALL_DIR/VERSION")). Updating..."
     fi
 
-    # Fetch latest release from GitHub API
-    RELEASE_JSON=$(curl -fsSL "$GITHUB_API/releases/latest" 2>/dev/null) || {
-        error "Failed to fetch latest release from GitHub"
-        error "Check your internet connection and try again"
-        exit 1
-    }
+    # Fetch latest release from GitHub API; fall back to git clone on any error
+    RELEASE_JSON=$(curl -fsSL "$GITHUB_API/releases/latest" 2>/dev/null) || true
+    LATEST_TAG=$(echo "$RELEASE_JSON" | jq -r '.tag_name // empty' 2>/dev/null || true)
 
-    LATEST_TAG=$(echo "$RELEASE_JSON" | jq -r '.tag_name // empty')
     if [ -z "$LATEST_TAG" ]; then
-        error "Could not parse release tag. Falling back to git clone..."
-        INSTALL_MODE="git"
+        info "No release found, falling back to git clone..."
         git clone --quiet --branch "$REPO_BRANCH" "$REPO_URL" "$INSTALL_DIR"
         cd "$INSTALL_DIR"
         success "Repository ready at $INSTALL_DIR (git fallback)"
