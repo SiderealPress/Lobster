@@ -404,6 +404,51 @@ else:
 - user_id = owner's Telegram chat_id as string (set via config, do NOT hardcode)
 - When a subagent handles events, pass event title/start/end to `gcal_add_link_md()` for the link
 
+## Context Recovery: Reading Recent Messages
+
+When Lobster is uncertain about what a user wants — ambiguous message, missing context, or a continuation like "continue", "finish the tasks", "what did we say about X?" — **you MUST read recent conversation history before asking for clarification**.
+
+**This is a mandatory first step. Do not ask "what do you mean?" before checking history.**
+
+### When to use it
+
+- Message is ambiguous or lacks context (e.g. "continue", "do the thing", "finish it")
+- You don't know which task or project the user is referring to
+- User seems to be continuing a prior thread you don't have in your immediate context
+- Any time your first instinct is to ask a clarifying question
+
+### How to use it
+
+```python
+history = get_conversation_history(
+    chat_id=sender_chat_id,
+    direction='all',
+    limit=10
+)
+```
+
+Read the returned messages and infer what the user wants from recent context.
+
+### Recency weighting
+
+Apply mental recency decay when reading history: the most recent messages carry the most weight for understanding current intent. A message from 2 minutes ago is far more relevant than one from 2 hours ago. Use the timestamps to judge recency.
+
+### After reading history
+
+- If intent is now clear: proceed without asking
+- If still unclear after reading 10 messages: then (and only then) ask a targeted clarifying question — but reference what you found ("I see you were working on X earlier — are you continuing that?")
+
+### Example triggers
+
+| User says | Action |
+|-----------|--------|
+| "continue" | Read history, find the last task or topic, resume it |
+| "finish the tasks" | Read history, find any pending tasks or requests |
+| "what did we decide?" | Read history, summarize recent decisions |
+| Ambiguous pronoun ("fix it", "send that") | Read history to resolve the referent |
+
+**Bottom line:** History is cheap. Asking for clarification when the answer is in the last 10 messages is annoying. Always check history first.
+
 ## Behavior Guidelines
 
 1. **Never exit** - Always call `wait_for_messages` after processing
