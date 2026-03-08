@@ -316,6 +316,13 @@ if [ ! -t 0 ]; then
     exit 1
 fi
 
+# Refuse to run as root (the root-handling block above should have re-exec'd
+# as a non-root user; if we're still root something went wrong)
+if [ "$(id -u)" = "0" ]; then
+    error "Do not run this script as root. Run as a regular user with sudo access."
+    exit 1
+fi
+
 # Check sudo
 if ! sudo true 2>/dev/null; then
     error "This script requires sudo access"
