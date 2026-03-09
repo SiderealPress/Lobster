@@ -23,6 +23,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+# Ensure the parent src/ directory is on sys.path so that sibling packages
+# (e.g. integrations, utils, bot) can be imported when this script is run
+# directly via `python inbox_server.py` (which only adds src/mcp/ to sys.path).
+_SRC_DIR = str(Path(__file__).resolve().parent.parent)
+if _SRC_DIR not in sys.path:
+    sys.path.insert(0, _SRC_DIR)
+
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
@@ -274,6 +281,67 @@ def touch_heartbeat():
         pass  # Don't fail on heartbeat errors
 
 
+# ---------------------------------------------------------------------------
+# Session Guard
+#
+# Only the designated tmux "lobster" session is permitted to monitor the inbox
+# or write to the outbox. Interactive SSH Claude sessions must be blocked from
+# calling these tools to prevent dual-processing of messages.
+#
+# Detection strategy: the claude-persistent.sh startup script sets the env var
+#   LOBSTER_MAIN_SESSION=1
+# before launching Claude. Because the MCP server is started as a stdio child
+# of Claude, it inherits this variable. Any other Claude process launched from
+# a plain SSH shell will not have this variable set.
+#
+# Tools that are BLOCKED for non-main sessions:
+#   wait_for_messages, check_inbox, send_reply, send_whatsapp_reply,
+#   send_sms_reply, mark_processed, mark_processing, mark_failed
+#
+# Read-only / utility tools (get_stats, list_sources, etc.) are always allowed.
+# ---------------------------------------------------------------------------
+
+_SESSION_GUARDED_TOOLS = frozenset({
+    "wait_for_messages",
+    "check_inbox",
+    "send_reply",
+    "send_whatsapp_reply",
+    "send_sms_reply",
+    "mark_processed",
+    "mark_processing",
+    "mark_failed",
+})
+
+
+def _is_main_session() -> bool:
+    """Return True if this MCP server instance is running inside the designated
+    main Lobster tmux session.
+
+    Checks the LOBSTER_MAIN_SESSION environment variable, which is set
+    exclusively by claude-persistent.sh before launching Claude. A plain SSH
+    Claude session will not have this variable, so it will be blocked from
+    inbox monitoring and outbox writes.
+    """
+    return os.environ.get("LOBSTER_MAIN_SESSION", "").strip() == "1"
+
+
+def _session_guard_error(tool_name: str) -> list[TextContent]:
+    """Return a clear error message when a guarded tool is called from a
+    non-main session."""
+    return [TextContent(
+        type="text",
+        text=(
+            f"SESSION GUARD: '{tool_name}' is blocked in this session.\n\n"
+            "Inbox monitoring and outbox writes are restricted to the main "
+            "Lobster tmux session (started by claude-persistent.sh).\n\n"
+            "This session does not have LOBSTER_MAIN_SESSION=1 set, which "
+            "means it is an interactive SSH/ad-hoc Claude session.\n\n"
+            "Read-only tools (get_stats, list_sources, memory_search, etc.) "
+            "are still available."
+        ),
+    )]
+
+
 def _read_lobster_state(state_file: Path = None) -> str:
     """Read the current Lobster state from state file.
 
@@ -403,6 +471,10 @@ async def list_tools() -> list[Tool]:
                                 ]
                             }
                         }
+                    },
+                    "message_id": {
+                        "type": "string",
+                        "description": "If provided, atomically marks this message as processed after sending the reply. Combines send_reply + mark_processed into one call.",
                     },
                 },
                 "required": ["chat_id", "text"],
@@ -1378,6 +1450,13 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
 async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     """Dispatch tool calls to handlers."""
+    # Session guard: block inbox-monitoring and outbox-write tools for any
+    # Claude process that was NOT started by claude-persistent.sh (i.e. does
+    # not have LOBSTER_MAIN_SESSION=1 in its environment).
+    if name in _SESSION_GUARDED_TOOLS and not _is_main_session():
+        log.warning(f"Session guard blocked '{name}' — LOBSTER_MAIN_SESSION not set")
+        return _session_guard_error(name)
+
     if name == "wait_for_messages":
         return await handle_wait_for_messages(arguments)
     elif name == "check_inbox":
@@ -1777,9 +1856,30 @@ async def handle_send_reply(args: dict) -> list[TextContent]:
 
     log.info(f"Reply sent to {source} chat {chat_id}")
 
+    # Atomic mark_processed: if message_id provided, move message to processed/ in same call
+    mark_info = ""
+    message_id = args.get("message_id")
+    if message_id:
+        try:
+            mid = validate_message_id(message_id)
+            found = _find_message_file(PROCESSING_DIR, mid)
+            if not found:
+                found = _find_message_file(INBOX_DIR, mid)
+            if found:
+                dest = PROCESSED_DIR / found.name
+                found.rename(dest)
+                mark_info = f" | message {mid} marked processed"
+                log.info(f"Atomic mark_processed via send_reply: {mid}")
+            else:
+                mark_info = f" | ⚠️ message {mid} not found for mark_processed"
+                log.warning(f"Atomic mark_processed: message not found: {mid}")
+        except Exception as e:
+            mark_info = f" | ⚠️ mark_processed failed: {e}"
+            log.warning(f"Atomic mark_processed failed for {message_id}: {e}")
+
     button_info = f" with {sum(len(row) for row in buttons)} button(s)" if buttons else ""
     thread_info = f" (thread reply)" if thread_ts and source == "slack" else ""
-    return [TextContent(type="text", text=f"✅ Reply queued for {source} (chat {chat_id}){button_info}{thread_info}:\n\n{text[:100]}{'...' if len(text) > 100 else ''}")]
+    return [TextContent(type="text", text=f"✅ Reply queued for {source} (chat {chat_id}){button_info}{thread_info}{mark_info}:\n\n{text[:100]}{'...' if len(text) > 100 else ''}")]
 
 
 async def handle_send_whatsapp_reply(args: dict) -> list[TextContent]:
@@ -1869,11 +1969,14 @@ async def handle_mark_processed(args: dict) -> list[TextContent]:
     if not found:
         return [TextContent(type="text", text=f"Message not found: {message_id}")]
 
-    # Guard: check that a reply was sent for human messages
+    # Guard: check that a reply was sent for human messages.
+    # If no reply was sent, auto-send a fallback reply instead of returning a
+    # soft warning (which the LLM ignores, causing silent message drops).
     if not force:
         try:
             msg = json.loads(found.read_text())
             source = msg.get("source", "")
+            msg_type = msg.get("type", "")
             chat_id = msg.get("chat_id", 0)
             msg_ts_raw = msg.get("timestamp", "")
 
@@ -1890,15 +1993,34 @@ async def handle_mark_processed(args: dict) -> list[TextContent]:
                 chat_key = str(chat_id)
                 reply_ts = _recent_replies.get(chat_key, 0.0)
                 if reply_ts < msg_epoch:
-                    return [TextContent(
-                        type="text",
-                        text=(
-                            f"\u26a0\ufe0f No reply sent for this human message "
-                            f"(from {source}, chat {chat_id}). "
-                            f"Send a reply first, or pass force=true to mark "
-                            f"processed without replying."
-                        ),
-                    )]
+                    # No reply was sent for this human message.
+                    # Skip auto-reply for callback (button press) messages —
+                    # the bot already answered the callback query inline.
+                    if msg_type == "callback":
+                        log.info(f"Skipping auto-reply fallback for callback message {message_id}")
+                    else:
+                        # Auto-send a fallback reply so the user isn't silently ignored
+                        fallback_text = "Noted."
+                        fallback_id = f"{int(time.time() * 1000)}_{source}"
+                        fallback_data = {
+                            "id": fallback_id,
+                            "source": source,
+                            "chat_id": chat_id,
+                            "text": fallback_text,
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "_fallback": True,
+                        }
+                        if source == "bisque":
+                            outbox_file = BISQUE_OUTBOX_DIR / f"{fallback_id}.json"
+                        else:
+                            outbox_file = OUTBOX_DIR / f"{fallback_id}.json"
+                        atomic_write_json(outbox_file, fallback_data)
+
+                        sent_file = SENT_DIR / f"{fallback_id}.json"
+                        atomic_write_json(sent_file, fallback_data)
+
+                        _track_reply(chat_id)
+                        log.warning(f"Auto-reply fallback triggered for message {message_id} (chat {chat_id})")
         except (json.JSONDecodeError, OSError):
             pass  # If we can't read the message, skip the guard
 
@@ -4277,6 +4399,10 @@ async def handle_create_calendar_event(args: dict) -> list[TextContent]:
     """
     import zoneinfo
     from datetime import datetime, timezone as dt_timezone
+    # Ensure src/ is on sys.path (needed when running as a script without src/ in path)
+    _src = str(Path(__file__).resolve().parent.parent)
+    if _src not in sys.path:
+        sys.path.insert(0, _src)
     from integrations.google_calendar.client import create_event, CalendarAPIError
 
     chat_id = str(args.get("telegram_chat_id", "")).strip()
@@ -4351,6 +4477,10 @@ async def handle_list_calendar_events(args: dict) -> list[TextContent]:
         max_results — max events to return (default: 10)
     """
     from datetime import datetime, timedelta, timezone as dt_timezone
+    # Ensure src/ is on sys.path (needed when running as a script without src/ in path)
+    _src = str(Path(__file__).resolve().parent.parent)
+    if _src not in sys.path:
+        sys.path.insert(0, _src)
     from integrations.google_calendar.token_store import get_valid_token
     from integrations.google_calendar.client import _call_calendar_api, _parse_event, CalendarAPIError
 
