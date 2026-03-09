@@ -82,26 +82,64 @@ cmd_set() {
 
     _ensure_file
 
-    local tmp
-    tmp=$(mktemp)
+    # Use Python for in-place replacement so special characters in values
+    # (|, &, \, etc.) are handled correctly without sed delimiter collisions.
+    local action
+    action=$(python3 - "$GLOBAL_ENV" "$key" "$value" << 'PYEOF'
+import re, sys, os, tempfile
 
-    if grep -q "^${key}=" "$GLOBAL_ENV" 2>/dev/null; then
-        # Key exists — replace the line
-        sed "s|^${key}=.*|${key}=${value}|" "$GLOBAL_ENV" > "$tmp"
-        mv "$tmp" "$GLOBAL_ENV"
-        echo -e "${GREEN}Updated${NC} $key"
-    elif grep -q "^#\s*${key}=" "$GLOBAL_ENV" 2>/dev/null; then
-        # Key exists as a comment placeholder — replace the comment line
-        sed "s|^#\s*${key}=.*|${key}=${value}|" "$GLOBAL_ENV" > "$tmp"
-        mv "$tmp" "$GLOBAL_ENV"
-        echo -e "${GREEN}Set${NC} $key (was commented out)"
-    else
-        # Key does not exist — append it
-        echo "${key}=${value}" >> "$GLOBAL_ENV"
-        echo -e "${GREEN}Set${NC} $key"
+env_file, key, value = sys.argv[1], sys.argv[2], sys.argv[3]
+
+with open(env_file, 'r') as f:
+    content = f.read()
+
+# Use a lambda repl to prevent backslash and ampersand interpretation
+def make_repl(k, v):
+    line = k + '=' + v
+    return lambda m: line
+
+active_pattern  = r'^' + re.escape(key) + r'=.*'
+comment_pattern = r'^#[ \t]*' + re.escape(key) + r'=.*'
+
+if re.search(active_pattern, content, re.MULTILINE):
+    new_content = re.sub(active_pattern, make_repl(key, value), content, flags=re.MULTILINE)
+    action = 'updated'
+elif re.search(comment_pattern, content, re.MULTILINE):
+    new_content = re.sub(comment_pattern, make_repl(key, value), content, flags=re.MULTILINE)
+    action = 'uncommented'
+else:
+    new_content = content.rstrip('\n') + '\n' + key + '=' + value + '\n'
+    action = 'appended'
+
+# Write atomically: temp file in same dir, then rename
+dir_path = os.path.dirname(os.path.abspath(env_file))
+fd, tmp_path = tempfile.mkstemp(dir=dir_path)
+try:
+    with os.fdopen(fd, 'w') as f:
+        f.write(new_content)
+    os.chmod(tmp_path, 0o600)
+    os.replace(tmp_path, env_file)
+except Exception as e:
+    try:
+        os.unlink(tmp_path)
+    except OSError:
+        pass
+    raise
+
+print(action)
+PYEOF
+    )
+
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}Error:${NC} Failed to write to $GLOBAL_ENV" >&2
+        exit 1
     fi
 
-    chmod 600 "$GLOBAL_ENV"
+    case "$action" in
+        updated)     echo -e "${GREEN}Updated${NC} $key" ;;
+        uncommented) echo -e "${GREEN}Set${NC} $key (was commented out)" ;;
+        *)           echo -e "${GREEN}Set${NC} $key" ;;
+    esac
 }
 
 cmd_get() {

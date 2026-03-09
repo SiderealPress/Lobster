@@ -14,6 +14,7 @@ Environment=LOBSTER_MESSAGES=/home/admin/messages
 Environment=LOBSTER_WORKSPACE=/home/admin/lobster-workspace
 EnvironmentFile=-/home/admin/lobster/config/config.env
 EnvironmentFile=/home/admin/lobster-config/config.env
+EnvironmentFile=-/home/admin/lobster-config/global.env
 ExecStart=/home/admin/lobster/.venv/bin/lobster-observability-server --port 8742
 Restart=always
 RestartSec=10
