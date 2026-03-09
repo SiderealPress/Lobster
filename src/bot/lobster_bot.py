@@ -100,6 +100,158 @@ LOBSTER_STATE_FILE = _MESSAGES / "config" / "lobster-state.json"
 _REPO_DIR = Path(os.environ.get("LOBSTER_INSTALL_DIR", Path.home() / "lobster"))
 CLAUDE_WAKE_SCRIPT = _REPO_DIR / "scripts" / "start-lobster.sh"
 
+# Telegram message length limit. The API hard-cap is 4096; we use 4000 to
+# leave headroom for "(continued)" labels and any encoding overhead.
+TELEGRAM_MAX_LENGTH = 4000
+
+
+def _is_inside_code_block(text: str, pos: int) -> bool:
+    """Return True if character position `pos` falls inside a triple-backtick block.
+
+    We count the number of triple-backtick openers that precede `pos` in the
+    text slice [0:pos]. An odd count means we are inside a code block.
+
+    This is intentionally simple: it does not handle escaped backticks or
+    nested backtick spans, which is consistent with how md_to_html works.
+    """
+    segment = text[:pos]
+    # Count non-overlapping occurrences of ```
+    count = len(re.findall(r'```', segment))
+    return count % 2 == 1
+
+
+def _find_code_block_end(text: str, start: int) -> int:
+    """Return the position just after the closing ``` that closes the block
+    opened before `start`, or -1 if not found."""
+    close = text.find('```', start)
+    if close == -1:
+        return -1
+    return close + 3  # position after the closing ```
+
+
+def split_message(text: str, max_length: int = TELEGRAM_MAX_LENGTH) -> list[str]:
+    """Split a message into chunks that each fit within Telegram's character limit.
+
+    Splitting strategy (highest priority first):
+    1. Never split inside a triple-backtick code block. If the natural break
+       point falls inside a code block, push the split to after the block ends
+       (or before the block starts, whichever keeps chunks under the limit).
+    2. Paragraph boundary (double newline).
+    3. Single-newline boundary.
+    4. Sentence boundary (". ", "! ", "? " followed by a capital or digit).
+    5. Word boundary (last space before the limit).
+    6. Hard split at max_length (last resort).
+
+    Continuation labels: if the message is split, each chunk after the first
+    is prefixed with "_(continued)_\\n\\n" so the reader knows it is a
+    follow-on message.
+
+    The function operates on raw markdown text. Callers are responsible for
+    converting each returned chunk to HTML (via md_to_html) before sending.
+    """
+    if len(text) <= max_length:
+        return [text]
+
+    continuation_prefix = "_(continued)_\n\n"
+    # Effective limit for continuation chunks (prefix eats some space)
+    cont_max = max_length - len(continuation_prefix)
+
+    chunks: list[str] = []
+    remaining = text
+    first_chunk = True
+
+    while remaining:
+        limit = max_length if first_chunk else cont_max
+
+        if len(remaining) <= limit:
+            chunk = remaining if first_chunk else continuation_prefix + remaining
+            chunks.append(chunk)
+            break
+
+        # Determine candidate split position within [0, limit]
+        split_pos = _find_clean_split(remaining, limit)
+
+        raw_chunk = remaining[:split_pos].rstrip()
+        chunk = raw_chunk if first_chunk else continuation_prefix + raw_chunk
+        chunks.append(chunk)
+
+        remaining = remaining[split_pos:].lstrip('\n')
+        first_chunk = False
+
+    return chunks
+
+
+def _find_clean_split(text: str, limit: int) -> int:
+    """Find the best position to split `text` at or before `limit` characters.
+
+    Priority: avoid code blocks > paragraph break > newline > sentence > word > hard.
+    Returns the index at which to cut (exclusive end of chunk).
+    """
+    # If the split point lands inside a code block, we need special handling.
+    # Strategy: look for a split point just before the code block opens, or
+    # after the code block closes — whichever is closer to `limit`.
+    candidate = _best_text_split(text, limit)
+
+    # Check if candidate splits inside a code block
+    if _is_inside_code_block(text, candidate):
+        # Find where the code block started
+        block_start = text.rfind('```', 0, candidate)
+        # Option A: split just before the code block (if block_start > 0)
+        before_block = block_start if block_start > 0 else None
+
+        # Option B: split after the code block closes
+        block_end = _find_code_block_end(text, candidate)
+        after_block = block_end if block_end != -1 and block_end <= len(text) else None
+
+        if before_block is not None and before_block > 0:
+            # Prefer splitting before the block; it keeps the block together
+            return before_block
+        elif after_block is not None:
+            # Block end may exceed limit — that is acceptable to keep block intact
+            return after_block
+        # Fallback: hard split (block is pathologically large — just cut)
+
+    return candidate
+
+
+def _best_text_split(text: str, limit: int) -> int:
+    """Find the best plain-text split point at or before `limit`.
+
+    Does not check for code blocks — that is handled by the caller.
+    Priority: paragraph > newline > sentence > word > hard.
+    """
+    # 1. Paragraph boundary
+    pos = text.rfind('\n\n', 0, limit)
+    if pos > 0:
+        return pos + 2  # include the double newline in the consumed part
+
+    # 2. Single newline
+    pos = text.rfind('\n', 0, limit)
+    if pos > 0:
+        return pos + 1
+
+    # 3. Sentence boundary: ". ", "! ", "? " where next char is upper or digit
+    sentence_end = re.search(
+        r'[.!?][ ]+(?=[A-Z0-9])',
+        text[:limit]
+    )
+    # rfind the last sentence boundary in the window
+    for match in re.finditer(r'[.!?][ ]+(?=[A-Z0-9])', text[:limit]):
+        sentence_end = match
+    if sentence_end:  # type: ignore[possibly-undefined]
+        pos = sentence_end.end()
+        if pos > 0:
+            return pos
+
+    # 4. Word boundary
+    pos = text.rfind(' ', 0, limit)
+    if pos > 0:
+        return pos + 1
+
+    # 5. Hard split
+    return limit
+
+
 # Ensure directories exist
 INBOX_DIR.mkdir(parents=True, exist_ok=True)
 OUTBOX_DIR.mkdir(parents=True, exist_ok=True)
@@ -423,22 +575,30 @@ class OutboxHandler(FileSystemEventHandler):
 
             if chat_id and text and bot_app:
                 reply_markup = build_inline_keyboard(buttons) if buttons else None
-                html_text = md_to_html(text)
-                try:
-                    await bot_app.bot.send_message(
-                        chat_id=chat_id,
-                        text=html_text,
-                        parse_mode="HTML",
-                        reply_markup=reply_markup
-                    )
-                except Exception:
-                    # Fallback to plain text if HTML parsing fails
-                    await bot_app.bot.send_message(
-                        chat_id=chat_id,
-                        text=text,
-                        reply_markup=reply_markup
-                    )
-                log.info(f"Sent reply to {chat_id}: {text[:50]}...")
+                chunks = split_message(text)
+                for i, chunk in enumerate(chunks):
+                    # Only attach inline keyboard to the final chunk
+                    chunk_markup = reply_markup if i == len(chunks) - 1 else None
+                    html_chunk = md_to_html(chunk)
+                    try:
+                        await bot_app.bot.send_message(
+                            chat_id=chat_id,
+                            text=html_chunk,
+                            parse_mode="HTML",
+                            reply_markup=chunk_markup
+                        )
+                    except Exception:
+                        # Fallback to plain text if HTML parsing fails
+                        await bot_app.bot.send_message(
+                            chat_id=chat_id,
+                            text=chunk,
+                            reply_markup=chunk_markup
+                        )
+                n = len(chunks)
+                if n > 1:
+                    log.info(f"Sent reply to {chat_id} in {n} chunks: {text[:50]}...")
+                else:
+                    log.info(f"Sent reply to {chat_id}: {text[:50]}...")
                 os.remove(filepath)
             else:
                 log.warning(f"Skipping reply {filepath}: missing chat_id={chat_id}, text={bool(text)}, bot={bool(bot_app)}")
