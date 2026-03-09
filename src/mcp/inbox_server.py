@@ -1766,6 +1766,9 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
                 output += f"**[{source}]** 📷 from **{user}** ({count} photos)\n"
             else:
                 output += f"**[{source}]** 📷 from **{user}**\n"
+        elif msg_type == "document":
+            file_name = msg.get("file_name", "file")
+            output += f"**[{source}]** 📎 from **{user}** ({file_name})\n"
         else:
             output += f"**[{source}]** from **{user}**\n"
         output += f"Chat ID: `{chat_id}` | Message ID: `{msg_id}`\n"
@@ -1781,6 +1784,15 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
                 output += "\n"
             elif image_file:
                 output += f"**Image file** (read to view): `{image_file}`\n\n"
+        # Surface file path for document messages so Claude can read them
+        if msg_type == "document":
+            doc_file_path = msg.get("file_path")
+            doc_file_name = msg.get("file_name", "file")
+            if doc_file_path:
+                output += f"**Attached file** (read to view): `{doc_file_path}`\n"
+                output += f"Original name: {doc_file_name}\n\n"
+            else:
+                output += f"**Attached file**: {doc_file_name} (file not downloaded)\n\n"
         # Show full reply-to context if present
         reply_to = msg.get("reply_to")
         if reply_to:
