@@ -13,7 +13,7 @@
 # - Installs and starts systemd services
 #===============================================================================
 
-set -e
+set -euo pipefail
 
 # Colors
 RED='\033[0;31m'
@@ -398,6 +398,7 @@ if [ "$PKG_MANAGER" = "apt" ]; then
         cron
         at
         expect
+        bsdutils
         tmux
         build-essential
         cmake
@@ -1494,6 +1495,8 @@ if [ "$AUTH_METHOD" = "oauth" ] && [ "$EXISTING_OAUTH" != true ]; then
             #    Fix: Capture the token and persist it to config.env.
 
             SETUP_TMPFILE=$(mktemp)
+            # Clean up temp file if the script is killed mid-auth
+            trap 'rm -f "$SETUP_TMPFILE"' EXIT INT TERM
             info "Running 'claude setup-token' with pseudo-TTY (via 'script')..."
             echo ""
 
@@ -1757,6 +1760,34 @@ fi
 sudo systemctl daemon-reload
 
 success "Services installed"
+
+#===============================================================================
+# Pre-seed ~/.claude.json
+#
+# Claude Code v2.1.45+ shows an interactive TUI on first launch (theme picker
+# + security notice) that blocks forever on headless instances. Setting
+# hasCompletedOnboarding: true bypasses this entirely.
+#===============================================================================
+
+step "Pre-seeding ~/.claude.json to skip first-launch TUI..."
+
+CLAUDE_JSON="$HOME/.claude.json"
+CLAUDE_VERSION=$(claude --version 2>/dev/null | head -1 | grep -oP '^[\d.]+' || echo "2.1.45")
+
+if [ -f "$CLAUDE_JSON" ] && grep -q '"hasCompletedOnboarding": true' "$CLAUDE_JSON"; then
+    info "~/.claude.json already has hasCompletedOnboarding: true — skipping"
+else
+    cat > "$CLAUDE_JSON" << CLAUDEJSON
+{
+  "numStartups": 1,
+  "installMethod": "native",
+  "hasCompletedOnboarding": true,
+  "lastOnboardingVersion": "$CLAUDE_VERSION",
+  "hasSeenTasksHint": true
+}
+CLAUDEJSON
+    success "~/.claude.json pre-seeded (version $CLAUDE_VERSION) — first-launch TUI will be skipped"
+fi
 
 #===============================================================================
 # Register MCP Server
