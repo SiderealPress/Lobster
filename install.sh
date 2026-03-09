@@ -1520,7 +1520,7 @@ if [ "$AUTH_METHOD" = "oauth" ] && [ "$EXISTING_OAUTH" != true ]; then
                 if [ -f "$CONFIG_FILE" ]; then
                     echo "" >> "$CONFIG_FILE"
                     echo "# OAuth token from claude setup-token (long-lived)" >> "$CONFIG_FILE"
-                    echo "CLAUDE_CODE_OAUTH_TOKEN=$CAPTURED_TOKEN" >> "$CONFIG_FILE"
+                    echo "export CLAUDE_CODE_OAUTH_TOKEN=$CAPTURED_TOKEN" >> "$CONFIG_FILE"
                 fi
 
                 success "OAuth token captured and saved to config.env!"
@@ -1539,7 +1539,7 @@ if [ "$AUTH_METHOD" = "oauth" ] && [ "$EXISTING_OAUTH" != true ]; then
                     if [ -f "$CONFIG_FILE" ]; then
                         echo "" >> "$CONFIG_FILE"
                         echo "# OAuth token from claude setup-token (long-lived, manually pasted)" >> "$CONFIG_FILE"
-                        echo "CLAUDE_CODE_OAUTH_TOKEN=$CAPTURED_TOKEN" >> "$CONFIG_FILE"
+                        echo "export CLAUDE_CODE_OAUTH_TOKEN=$CAPTURED_TOKEN" >> "$CONFIG_FILE"
                     fi
                     success "OAuth token saved to config.env!"
                 else
