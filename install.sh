@@ -803,8 +803,6 @@ fi
 
 # Add shell integration: source global.env on login so tokens are available
 # to any script or CLI tool in the user's shell sessions.
-_GLOBALENV_SNIPPET="# Lobster global env store"$'\n'"[ -f \"$GLOBAL_ENV_FILE\" ] && set -a && . \"$GLOBAL_ENV_FILE\" && set +a"
-
 for _rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
     if [ -f "$_rc" ] && ! grep -q "Lobster global env store" "$_rc"; then
         {
