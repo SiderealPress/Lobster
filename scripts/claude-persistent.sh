@@ -53,6 +53,13 @@ export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
 #===============================================================================
 export CLAUDE_CODE_SUBAGENT_MODEL=sonnet
 
+# Session isolation guard: mark this as the designated main Lobster session.
+# The MCP inbox_server.py checks for this before allowing inbox monitoring and
+# outbox writes (check_inbox, wait_for_messages, send_reply, mark_processed,
+# etc.). Any Claude session launched without this script will be blocked from
+# those tools, preventing dual-processing when an SSH user also runs Claude.
+export LOBSTER_MAIN_SESSION=1
+
 # Trigger context compaction at 80% capacity instead of default 95%.
 # Keeps peak context size lower, reducing token costs per turn.
 export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=80
@@ -153,6 +160,27 @@ launch_claude() {
     log "STARTING: Launching Claude (attempt $attempt)"
 
     cd "$WORKSPACE_DIR"
+
+    # -------------------------------------------------------------------------
+    # Clean leaked Claude Code env vars before launching.
+    #
+    # Claude Code sets CLAUDECODE=1 and CLAUDE_CODE_ENTRYPOINT in its own
+    # process environment at startup. These can leak into tmux's global
+    # environment (via shell snapshot creation or subprocesses). On the next
+    # restart cycle, the new claude binary sees CLAUDECODE=1 and refuses to
+    # launch ("cannot be launched inside another Claude Code session"),
+    # causing an unrecoverable crash loop.
+    #
+    # Fix: strip these from both the shell environment AND tmux's global
+    # environment before every launch attempt. LOBSTER_MAIN_SESSION (our own
+    # session isolation guard) is unaffected — it lives in the MCP server and
+    # checks a different variable.
+    # -------------------------------------------------------------------------
+    unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT 2>/dev/null || true
+    if command -v tmux &>/dev/null; then
+        tmux -L lobster set-environment -g -u CLAUDECODE 2>/dev/null || true
+        tmux -L lobster set-environment -g -u CLAUDE_CODE_ENTRYPOINT 2>/dev/null || true
+    fi
 
     # Build the initial prompt for Claude
     local init_prompt="Read CLAUDE.md and begin your main loop. Call wait_for_messages(hibernate_on_timeout=true) to start listening for Telegram messages. Process each message as it arrives, then return to wait_for_messages(). Never exit unless hibernating."
