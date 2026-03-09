@@ -12,7 +12,8 @@ users:
     shell: /bin/bash
     sudo: ALL=(ALL) NOPASSWD:ALL
     ssh_authorized_keys:
-      - ssh-ed25519 AAAA... user@machine
+      # REPLACE THIS LINE with your actual public key, e.g.:
+      # - ssh-ed25519 AAAAC3Nza... you@yourmachine
 
 # Disable root SSH login
 ssh_pwauth: false
