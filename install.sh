@@ -13,7 +13,7 @@
 # - Installs and starts systemd services
 #===============================================================================
 
-set -e
+set -euo pipefail
 
 # Colors
 RED='\033[0;31m'
@@ -303,6 +303,32 @@ else
     success "dnf-based system detected (Amazon Linux 2023 / Fedora)"
 fi
 
+# Smart root handling: create a lobster user and re-exec as them
+if [ "$(id -u)" = "0" ]; then
+    warn "Running as root — will create a 'lobster' user and re-exec as them."
+    if ! id lobster &>/dev/null; then
+        info "Creating 'lobster' user with passwordless sudo..."
+        useradd -m -s /bin/bash lobster
+        echo "lobster ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/lobster
+        chmod 0440 /etc/sudoers.d/lobster
+        # Copy SSH authorized_keys so user can SSH in directly next time
+        if [ -f /root/.ssh/authorized_keys ]; then
+            mkdir -p /home/lobster/.ssh
+            cp /root/.ssh/authorized_keys /home/lobster/.ssh/authorized_keys
+            chown -R lobster:lobster /home/lobster/.ssh
+            chmod 700 /home/lobster/.ssh
+            chmod 600 /home/lobster/.ssh/authorized_keys
+        fi
+        success "User 'lobster' created."
+    else
+        success "User 'lobster' already exists."
+    fi
+    echo ""
+    info "Next time, SSH directly as: lobster@$(hostname)"
+    echo ""
+    exec sudo -u lobster bash "$0" "$@"
+fi
+
 # Check if running interactively
 if [ ! -t 0 ]; then
     error "This script requires interactive input."
@@ -372,6 +398,7 @@ if [ "$PKG_MANAGER" = "apt" ]; then
         cron
         at
         expect
+        bsdutils
         tmux
         build-essential
         cmake
@@ -732,6 +759,66 @@ fi
 
 success "Directories created"
 info "  $PROJECTS_DIR - All Lobster-managed projects"
+
+#===============================================================================
+# Global Environment Store
+#===============================================================================
+
+step "Setting up global environment store..."
+
+GLOBAL_ENV_FILE="$CONFIG_DIR/global.env"
+
+if [ ! -f "$GLOBAL_ENV_FILE" ]; then
+    cat > "$GLOBAL_ENV_FILE" << 'GLOBALENV'
+# Lobster Global Environment Store
+# Machine-wide API tokens and credentials shared across services and tools.
+# Format: KEY=value  (no export keyword needed)
+# Use: lobster env set KEY VALUE   to add or update entries
+# Use: lobster env list             to see all stored keys
+
+# === Cloud Providers ===
+# HETZNER_API_TOKEN=
+# DO_TOKEN=
+# CLOUDFLARE_API_TOKEN=
+
+# === AI / LLM Services ===
+# ANTHROPIC_API_KEY=
+# OPENAI_API_KEY=
+
+# === Code / DevOps ===
+# GITHUB_TOKEN=
+# VERCEL_TOKEN=
+
+# === Communication Services ===
+# TWILIO_ACCOUNT_SID=
+# TWILIO_AUTH_TOKEN=
+
+# === Add your own below ===
+GLOBALENV
+    chmod 600 "$GLOBAL_ENV_FILE"
+    success "Global env store created: $GLOBAL_ENV_FILE"
+else
+    info "Global env store already exists: $GLOBAL_ENV_FILE"
+fi
+
+# Add shell integration: source global.env on login so tokens are available
+# to any script or CLI tool in the user's shell sessions.
+for _rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+    if [ -f "$_rc" ] && ! grep -q "Lobster global env store" "$_rc"; then
+        {
+            echo ""
+            echo "# Lobster global env store"
+            echo "[ -f \"$GLOBAL_ENV_FILE\" ] && set -a && . \"$GLOBAL_ENV_FILE\" && set +a"
+        } >> "$_rc"
+        info "  Shell integration added to $_rc"
+    fi
+done
+
+success "Global env store configured"
+info "  File: $GLOBAL_ENV_FILE"
+info "  Use 'lobster env set KEY VALUE' to store API tokens"
+info "  Use 'lobster env list' to see stored keys"
+info "  See docs/GLOBAL-ENV.md for full documentation"
 
 #===============================================================================
 # Scheduled Tasks Setup
@@ -1457,28 +1544,106 @@ if [ "$AUTH_METHOD" = "oauth" ] && [ "$EXISTING_OAUTH" != true ]; then
         read -p "Press Enter to continue..."
         echo ""
 
-        # Use setup-token on headless, auth login otherwise
-        AUTH_CMD="claude auth login"
         if [ "$IS_HEADLESS" = true ]; then
-            AUTH_CMD="claude setup-token"
-        fi
+            # --- Headless path: setup-token ---
+            # Two issues with setup-token inside a bash script:
+            # 1. It needs a pseudo-TTY (uses Ink/React-for-CLI which requires raw mode).
+            #    Fix: `script -qc` provides a pseudo-TTY.
+            # 2. It does NOT save credentials to ~/.claude/.credentials.json by design.
+            #    It only outputs a long-lived OAuth token to stdout.
+            #    See: https://github.com/anthropics/claude-code/issues/19274
+            #    Fix: Capture the token and persist it to config.env.
 
-        if $AUTH_CMD; then
-            # Verify the auth actually works (not just that credentials exist)
-            if claude --print -p "ping" --max-turns 1 &>/dev/null 2>&1; then
-                success "OAuth authentication successful (verified)!"
+            SETUP_TMPFILE=$(mktemp)
+            # Clean up temp file if the script is killed mid-auth
+            trap 'rm -f "$SETUP_TMPFILE"' EXIT INT TERM
+            info "Running 'claude setup-token' with pseudo-TTY (via 'script')..."
+            echo ""
+
+            # Run setup-token inside a pseudo-TTY so Ink's raw mode works.
+            # The 'script' command records all terminal output to SETUP_TMPFILE.
+            script -qc "claude setup-token" "$SETUP_TMPFILE"
+            SETUP_EXIT=$?
+
+            # Extract the OAuth token from setup-token output.
+            # Token format: sk-ant-oat01-<base64-chars>
+            # Strip ANSI escape codes first, then grep for the token.
+            CAPTURED_TOKEN=""
+            if [ -f "$SETUP_TMPFILE" ]; then
+                CAPTURED_TOKEN=$(sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' "$SETUP_TMPFILE" \
+                    | grep -oP 'sk-ant-oat01-[A-Za-z0-9_-]+' | head -1)
+                rm -f "$SETUP_TMPFILE"
+            fi
+
+            if [ -n "$CAPTURED_TOKEN" ]; then
+                # Save the token so Claude Code can use it at runtime
+                export CLAUDE_CODE_OAUTH_TOKEN="$CAPTURED_TOKEN"
+
+                # Persist to config.env so systemd service picks it up
+                if [ -f "$CONFIG_FILE" ]; then
+                    echo "" >> "$CONFIG_FILE"
+                    echo "# OAuth token from claude setup-token (long-lived)" >> "$CONFIG_FILE"
+                    echo "export CLAUDE_CODE_OAUTH_TOKEN=$CAPTURED_TOKEN" >> "$CONFIG_FILE"
+                fi
+
+                success "OAuth token captured and saved to config.env!"
             else
-                warn "Auth command completed but API verification failed."
-                warn "The token may have expired or the code exchange didn't complete."
+                # Token extraction failed — fall back to manual paste
+                warn "Could not automatically extract the OAuth token from setup-token output."
+                echo ""
+                echo "If setup-token displayed a token (starts with sk-ant-oat01-...), paste it now."
+                echo "If it failed entirely, press Enter to fall back to API key."
+                echo ""
+                read -p "Paste token (or Enter to skip): " MANUAL_TOKEN
+
+                if [[ "$MANUAL_TOKEN" == sk-ant-* ]]; then
+                    CAPTURED_TOKEN="$MANUAL_TOKEN"
+                    export CLAUDE_CODE_OAUTH_TOKEN="$CAPTURED_TOKEN"
+                    if [ -f "$CONFIG_FILE" ]; then
+                        echo "" >> "$CONFIG_FILE"
+                        echo "# OAuth token from claude setup-token (long-lived, manually pasted)" >> "$CONFIG_FILE"
+                        echo "export CLAUDE_CODE_OAUTH_TOKEN=$CAPTURED_TOKEN" >> "$CONFIG_FILE"
+                    fi
+                    success "OAuth token saved to config.env!"
+                else
+                    warn "No valid token provided."
+                    echo "Falling back to API key..."
+                    AUTH_METHOD="apikey_fallback"
+                fi
+            fi
+
+            # Verify auth works if we got a token
+            if [ "$AUTH_METHOD" = "oauth" ] && [ -n "${CAPTURED_TOKEN:-}" ]; then
+                if claude --print -p "ping" --max-turns 1 &>/dev/null 2>&1; then
+                    success "OAuth authentication verified!"
+                else
+                    warn "Token was saved but API verification failed."
+                    warn "The token may need a moment to activate, or the OAuth flow didn't complete."
+                    echo ""
+                    echo "Falling back to API key..."
+                    AUTH_METHOD="apikey_fallback"
+                fi
+            fi
+        else
+            # --- Non-headless path: auth login ---
+            # auth login saves credentials to ~/.claude/.credentials.json automatically,
+            # but still needs a pseudo-TTY when run inside a script (Ink/raw mode).
+            if script -qc "claude auth login" /dev/null; then
+                if claude --print -p "ping" --max-turns 1 &>/dev/null 2>&1; then
+                    success "OAuth authentication successful (verified)!"
+                else
+                    warn "Auth command completed but API verification failed."
+                    warn "The token may have expired or the code exchange didn't complete."
+                    echo ""
+                    echo "Falling back to API key..."
+                    AUTH_METHOD="apikey_fallback"
+                fi
+            else
+                warn "OAuth authentication failed or was cancelled."
                 echo ""
                 echo "Falling back to API key..."
                 AUTH_METHOD="apikey_fallback"
             fi
-        else
-            warn "OAuth authentication failed or was cancelled."
-            echo ""
-            echo "Falling back to API key..."
-            AUTH_METHOD="apikey_fallback"
         fi
     fi
 fi
@@ -1516,7 +1681,7 @@ if [ "$AUTH_METHOD" = "apikey" ] || [ "$AUTH_METHOD" = "apikey_fallback" ]; then
                     echo ""
                     read -p "Press Enter to continue..."
                     echo ""
-                    if claude auth login && claude auth status &>/dev/null 2>&1; then
+                    if script -qc "claude auth login" /dev/null && claude auth status &>/dev/null 2>&1; then
                         success "OAuth authentication successful!"
                     else
                         error "OAuth also failed. Cannot proceed without authentication."
@@ -1655,6 +1820,34 @@ fi
 sudo systemctl daemon-reload
 
 success "Services installed"
+
+#===============================================================================
+# Pre-seed ~/.claude.json
+#
+# Claude Code v2.1.45+ shows an interactive TUI on first launch (theme picker
+# + security notice) that blocks forever on headless instances. Setting
+# hasCompletedOnboarding: true bypasses this entirely.
+#===============================================================================
+
+step "Pre-seeding ~/.claude.json to skip first-launch TUI..."
+
+CLAUDE_JSON="$HOME/.claude.json"
+CLAUDE_VERSION=$(claude --version 2>/dev/null | head -1 | grep -oP '^[\d.]+' || echo "2.1.45")
+
+if [ -f "$CLAUDE_JSON" ] && grep -q '"hasCompletedOnboarding": true' "$CLAUDE_JSON"; then
+    info "~/.claude.json already has hasCompletedOnboarding: true — skipping"
+else
+    cat > "$CLAUDE_JSON" << CLAUDEJSON
+{
+  "numStartups": 1,
+  "installMethod": "native",
+  "hasCompletedOnboarding": true,
+  "lastOnboardingVersion": "$CLAUDE_VERSION",
+  "hasSeenTasksHint": true
+}
+CLAUDEJSON
+    success "~/.claude.json pre-seeded (version $CLAUDE_VERSION) — first-launch TUI will be skipped"
+fi
 
 #===============================================================================
 # Register MCP Server
@@ -1857,11 +2050,13 @@ echo "  lobster logs      View logs"
 echo "  lobster inbox     Check pending messages"
 echo "  lobster start     Start all services"
 echo "  lobster stop      Stop all services"
+echo "  lobster env list  List stored API tokens"
 echo "  lobster help      Show all commands"
 echo ""
 echo -e "${BOLD}Directories:${NC}"
 echo "  $INSTALL_DIR        Lobster code"
 echo "  $CONFIG_DIR          Configuration"
+echo "  $CONFIG_DIR/global.env  Global API token store"
 echo "  $WORKSPACE_DIR      Claude workspace"
 echo "  $PROJECTS_DIR  Projects"
 echo "  $MESSAGES_DIR       Message queues"

@@ -1,0 +1,20 @@
+#cloud-config
+# Cloud-init user-data for provisioning a Lobster server.
+# Usage with Hetzner Cloud:
+#   hcloud server create --name lobster --type cx22 --image ubuntu-24.04 \
+#     --user-data-from-file deploy/cloud-init.yaml
+#
+# After the server boots, SSH in as the lobster user and run install.sh.
+
+users:
+  - name: lobster
+    groups: sudo
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    ssh_authorized_keys:
+      # REPLACE THIS LINE with your actual public key, e.g.:
+      # - ssh-ed25519 AAAAC3Nza... you@yourmachine
+
+# Disable root SSH login
+ssh_pwauth: false
+disable_root: true
