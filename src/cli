@@ -16,6 +16,7 @@
 #   stats       Show message statistics
 #   ps          List running Claude instances
 #   test        Send a test message through the system
+#   env         Manage the global environment variable store
 #   update      Update Lobster (pull changes, restart services)
 #   help        Show this help message
 #===============================================================================
@@ -368,6 +369,18 @@ cmd_ps() {
     echo "$count Claude instance(s) running"
 }
 
+cmd_env() {
+    local install_dir="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
+    local env_script="$install_dir/scripts/lobster-env.sh"
+
+    if [ ! -f "$env_script" ]; then
+        echo -e "${RED}Error: lobster-env script not found at $env_script${NC}"
+        exit 1
+    fi
+
+    exec "$env_script" "$@"
+}
+
 cmd_update() {
     local args=("$@")
     local script="$HOME/lobster/scripts/update-lobster.sh"
@@ -398,8 +411,16 @@ cmd_help() {
     echo "  stats           Show message statistics"
     echo "  ps              List running Claude instances"
     echo "  test            Create a test message in inbox"
+    echo "  env <cmd>       Manage global API token store"
     echo "  update [opts]   Update Lobster from git"
     echo "  help            Show this help message"
+    echo ""
+    echo "Env commands:"
+    echo "  env set KEY VALUE   Store an API token or credential"
+    echo "  env get KEY         Retrieve a stored value"
+    echo "  env list            List all stored key names"
+    echo "  env edit            Open the global env file in \$EDITOR"
+    echo "  env path            Print path to the global env file"
     echo ""
     echo "Update options:"
     echo "  --check         Check for updates without applying"
@@ -409,10 +430,12 @@ cmd_help() {
     echo "  --rollback      Restore from backup"
     echo ""
     echo "Examples:"
-    echo "  lobster start          # Start everything"
-    echo "  lobster status         # Check what's running"
-    echo "  lobster attach         # View Claude live session"
-    echo "  lobster inbox          # See pending messages"
+    echo "  lobster start                          # Start everything"
+    echo "  lobster status                         # Check what's running"
+    echo "  lobster attach                         # View Claude live session"
+    echo "  lobster inbox                          # See pending messages"
+    echo "  lobster env set HETZNER_API_TOKEN xyz  # Store a token"
+    echo "  lobster env list                       # Show all stored keys"
 }
 
 #-------------------------------------------------------------------------------
@@ -431,6 +454,7 @@ case "${1:-help}" in
     stats)   cmd_stats ;;
     ps)      cmd_ps ;;
     test)    cmd_test ;;
+    env)     shift; cmd_env "$@" ;;
     update)  shift; cmd_update "$@" ;;
     help|--help|-h) cmd_help ;;
     *)

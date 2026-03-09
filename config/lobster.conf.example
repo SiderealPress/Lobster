@@ -62,7 +62,8 @@ LOBSTER_BRANCH="${LOBSTER_BRANCH:-main}"
 #
 # Example structure for your private config repo:
 #   ~/lobster-config/
-#   ├── config.env          # Your secrets (API keys, tokens)
+#   ├── config.env          # Lobster-specific secrets (Telegram token, feature flags)
+#   ├── global.env          # Machine-wide API tokens (Hetzner, GitHub, Anthropic, etc.)
 #   ├── CLAUDE.md           # Custom Claude context
 #   ├── agents/             # Custom agent definitions
 #   ├── context/            # Personal context for brain dumps
@@ -75,9 +76,15 @@ LOBSTER_BRANCH="${LOBSTER_BRANCH:-main}"
 #   │   └── serendipity.md  # Random discoveries
 #   └── hooks/              # Custom installation hooks
 #
+# global.env is the canonical place for machine-wide API credentials.
+# Use: lobster env set KEY VALUE   to add tokens
+# Use: lobster env list             to see stored keys
+# See: docs/GLOBAL-ENV.md for full documentation
+#
 # IMPORTANT: Your config directory should have restricted permissions:
 #   chmod 700 ~/lobster-config
 #   chmod 600 ~/lobster-config/config.env
+#   chmod 600 ~/lobster-config/global.env
 #
 # LOBSTER_CONFIG_DIR="${LOBSTER_HOME}/lobster-config"
 
