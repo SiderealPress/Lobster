@@ -15,6 +15,7 @@ Environment=LOBSTER_WORKSPACE=/home/admin/lobster-workspace
 Environment=WHATSAPP_ROUTER_PORT=8743
 EnvironmentFile=-/home/admin/lobster/config/config.env
 EnvironmentFile=/home/admin/lobster-config/config.env
+EnvironmentFile=-/home/admin/lobster-config/global.env
 ExecStart=/home/admin/lobster/.venv/bin/python /home/admin/lobster/src/bot/whatsapp_router.py
 Restart=always
 RestartSec=10

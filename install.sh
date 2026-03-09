@@ -761,6 +761,66 @@ success "Directories created"
 info "  $PROJECTS_DIR - All Lobster-managed projects"
 
 #===============================================================================
+# Global Environment Store
+#===============================================================================
+
+step "Setting up global environment store..."
+
+GLOBAL_ENV_FILE="$CONFIG_DIR/global.env"
+
+if [ ! -f "$GLOBAL_ENV_FILE" ]; then
+    cat > "$GLOBAL_ENV_FILE" << 'GLOBALENV'
+# Lobster Global Environment Store
+# Machine-wide API tokens and credentials shared across services and tools.
+# Format: KEY=value  (no export keyword needed)
+# Use: lobster env set KEY VALUE   to add or update entries
+# Use: lobster env list             to see all stored keys
+
+# === Cloud Providers ===
+# HETZNER_API_TOKEN=
+# DO_TOKEN=
+# CLOUDFLARE_API_TOKEN=
+
+# === AI / LLM Services ===
+# ANTHROPIC_API_KEY=
+# OPENAI_API_KEY=
+
+# === Code / DevOps ===
+# GITHUB_TOKEN=
+# VERCEL_TOKEN=
+
+# === Communication Services ===
+# TWILIO_ACCOUNT_SID=
+# TWILIO_AUTH_TOKEN=
+
+# === Add your own below ===
+GLOBALENV
+    chmod 600 "$GLOBAL_ENV_FILE"
+    success "Global env store created: $GLOBAL_ENV_FILE"
+else
+    info "Global env store already exists: $GLOBAL_ENV_FILE"
+fi
+
+# Add shell integration: source global.env on login so tokens are available
+# to any script or CLI tool in the user's shell sessions.
+for _rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+    if [ -f "$_rc" ] && ! grep -q "Lobster global env store" "$_rc"; then
+        {
+            echo ""
+            echo "# Lobster global env store"
+            echo "[ -f \"$GLOBAL_ENV_FILE\" ] && set -a && . \"$GLOBAL_ENV_FILE\" && set +a"
+        } >> "$_rc"
+        info "  Shell integration added to $_rc"
+    fi
+done
+
+success "Global env store configured"
+info "  File: $GLOBAL_ENV_FILE"
+info "  Use 'lobster env set KEY VALUE' to store API tokens"
+info "  Use 'lobster env list' to see stored keys"
+info "  See docs/GLOBAL-ENV.md for full documentation"
+
+#===============================================================================
 # Scheduled Tasks Setup
 #===============================================================================
 
@@ -1990,11 +2050,13 @@ echo "  lobster logs      View logs"
 echo "  lobster inbox     Check pending messages"
 echo "  lobster start     Start all services"
 echo "  lobster stop      Stop all services"
+echo "  lobster env list  List stored API tokens"
 echo "  lobster help      Show all commands"
 echo ""
 echo -e "${BOLD}Directories:${NC}"
 echo "  $INSTALL_DIR        Lobster code"
 echo "  $CONFIG_DIR          Configuration"
+echo "  $CONFIG_DIR/global.env  Global API token store"
 echo "  $WORKSPACE_DIR      Claude workspace"
 echo "  $PROJECTS_DIR  Projects"
 echo "  $MESSAGES_DIR       Message queues"
