@@ -1002,7 +1002,7 @@ chmod +x "$INSTALL_DIR/scripts/self-check-reminder.sh"
 
 # Add health check to crontab (runs every 2 minutes)
 HEALTH_MARKER="# LOBSTER-HEALTH"
-(crontab -l 2>/dev/null | grep -v "$HEALTH_MARKER" | grep -v "health-check"; \
+({ crontab -l 2>/dev/null | grep -v "$HEALTH_MARKER" | grep -v "health-check" || true; }; \
  echo "*/2 * * * * $INSTALL_DIR/scripts/health-check-v3.sh $HEALTH_MARKER") | crontab -
 
 success "Health monitoring configured (checks every 2 minutes)"
@@ -1017,7 +1017,7 @@ chmod +x "$INSTALL_DIR/scripts/daily-health-check.sh"
 
 # Add daily health check to crontab (runs at 06:00 every day)
 DAILY_MARKER="# LOBSTER-DAILY-HEALTH"
-(crontab -l 2>/dev/null | grep -v "$DAILY_MARKER" | grep -v "daily-health-check"; \
+({ crontab -l 2>/dev/null | grep -v "$DAILY_MARKER" | grep -v "daily-health-check" || true; }; \
  echo "0 6 * * * $INSTALL_DIR/scripts/daily-health-check.sh $DAILY_MARKER") | crontab -
 
 success "Daily dependency health check configured (runs at 06:00 daily)"
@@ -1042,7 +1042,7 @@ mkdir -p "$INSTALL_DIR/.state"
 
 # Add periodic self-check to crontab (runs every 3 minutes)
 SELFCHECK_MARKER="# LOBSTER-SELF-CHECK"
-(crontab -l 2>/dev/null | grep -v "$SELFCHECK_MARKER" | grep -v "periodic-self-check"; \
+({ crontab -l 2>/dev/null | grep -v "$SELFCHECK_MARKER" | grep -v "periodic-self-check" || true; }; \
  echo "*/3 * * * * $INSTALL_DIR/scripts/periodic-self-check.sh $SELFCHECK_MARKER") | crontab -
 
 # Set up Claude Code PostToolUse hook for faster self-checks
