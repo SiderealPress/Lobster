@@ -498,7 +498,7 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "to": {
                         "type": "string",
-                        "description": "Recipient phone number in E.164 format (e.g. +14155551234). The 'whatsapp:' prefix will be added automatically.",
+                        "description": "Recipient phone number in E.164 format (e.g. <REDACTED_PHONE>). The 'whatsapp:' prefix will be added automatically.",
                     },
                     "text": {
                         "type": "string",
@@ -516,7 +516,7 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "to": {
                         "type": "string",
-                        "description": "Recipient phone number in E.164 format (e.g. +14155551234).",
+                        "description": "Recipient phone number in E.164 format (e.g. <REDACTED_PHONE>).",
                     },
                     "text": {
                         "type": "string",
