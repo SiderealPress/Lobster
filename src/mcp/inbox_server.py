@@ -139,11 +139,21 @@ LOBSTER_STATE_FILE = CONFIG_DIR / "lobster-state.json"
 # Reset state to "active" on startup — this is the fix for the critical bug where
 # state was never reset after waking from hibernation.
 # The bot issues systemctl restart → Claude starts → this module loads → state resets.
+#
+# Also resets transient states (starting, restarting, waking) to "active" because:
+# - The MCP server is a subprocess of Claude; if we are loading, Claude is running.
+# - A "starting" state from claude-persistent.sh's launch_claude() is superseded
+#   once Claude is up and the MCP server has initialised.
+# - This prevents the health-check from triggering a restart loop when the state
+#   file is left in a transient mode (e.g. when using claude-wrapper.exp which
+#   does not itself write the state file).
+_TRANSIENT_MODES = {"hibernate", "starting", "restarting", "waking"}
+
 def _reset_state_on_startup():
     try:
         if LOBSTER_STATE_FILE.exists():
             data = json.loads(LOBSTER_STATE_FILE.read_text())
-            if data.get("mode") == "hibernate":
+            if data.get("mode") in _TRANSIENT_MODES:
                 data["mode"] = "active"
                 data["woke_at"] = datetime.now(timezone.utc).isoformat()
                 tmp = LOBSTER_STATE_FILE.parent / f".lobster-state-{os.getpid()}.tmp"
