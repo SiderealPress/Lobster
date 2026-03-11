@@ -15,6 +15,12 @@
 
 set -euo pipefail
 
+# Suppress needrestart interactive prompts on Ubuntu/Debian
+# Without this, apt operations can hang waiting for user input
+# when libraries used by running services are upgraded.
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
