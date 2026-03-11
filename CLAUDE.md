@@ -106,7 +106,7 @@ When a message has `type: "image"` or `type: "photo"`, it includes an `image_fil
 4. Respond based on BOTH the image content AND any caption text
 ```
 
-Image files are stored in `~/messages/images/`. Always view them before responding to image messages.
+Image files are stored in `~/messages/images/` (or `~/messages/audio/` for voice). Always view them before responding to image messages.
 
 ### Inline Keyboard Buttons (Telegram)
 
@@ -286,7 +286,7 @@ Skills are rich four-dimensional units (behavior + context + preferences + tooli
 
 When you receive a **voice message** that appears to be a "brain dump" (unstructured thoughts, ideas, stream of consciousness) rather than a command or question, use the **brain-dumps** agent.
 
-**Note:** This feature can be disabled via `LOBSTER_BRAIN_DUMPS_ENABLED=false` in `lobster.conf`. The agent can also be customized or replaced via the [private config overlay](docs/CUSTOMIZATION.md) by placing a custom `agents/brain-dumps.md` in your private config directory.
+**Note:** This feature can be disabled via `LOBSTER_BRAIN_DUMPS_ENABLED=false` in `lobster.conf`. The agent can also be customized by placing a custom `brain-dumps.agent.md` in your `user/agents/` directory.
 
 **Indicators of a brain dump:**
 - Multiple unrelated topics in one message
@@ -342,7 +342,7 @@ Calendar commands work in two modes. Check auth status first (no network call ne
 ```python
 import sys; sys.path.insert(0, "/home/admin/lobster/src")
 from integrations.google_calendar.token_store import load_token
-is_authenticated = load_token("1234567890") is not None
+is_authenticated = load_token("<REDACTED_PHONE>") is not None
 ```
 
 ### Unauthenticated mode (default)
@@ -368,14 +368,14 @@ Delegate to a background subagent — API calls exceed the 7-second rule.
 **Reading events** ("what's on my calendar", "what do I have this week/today"):
 ```python
 from integrations.google_calendar.client import get_upcoming_events
-events = get_upcoming_events(user_id="1234567890", days=7)
+events = get_upcoming_events(user_id="<REDACTED_PHONE>", days=7)
 # Returns List[CalendarEvent] or [] on failure — always falls back gracefully
 ```
 
 **Creating events** ("add X to my calendar", "schedule X for [time]"):
 ```python
 from integrations.google_calendar.client import create_event
-event = create_event(user_id="1234567890", title="...", start=start, end=end)
+event = create_event(user_id="<REDACTED_PHONE>", title="...", start=start, end=end)
 # Returns CalendarEvent with .url, or None on failure
 # On failure, fall back to gcal_add_link_md()
 ```
@@ -502,20 +502,52 @@ wait_for_messages() ← loop back
 
 ## Project Directory Convention
 
-All Lobster-managed projects live in `$LOBSTER_WORKSPACE/projects/[project-name]/`.
+All Lobster-managed projects live in `workspace/projects/[project-name]/` (relative to the repo root).
 
 - **Clone repos here**, not in `~/projects/` or elsewhere
 - The `projects/` directory is created automatically during install
 - Environment variable: `$LOBSTER_PROJECTS` (defaults to `$LOBSTER_WORKSPACE/projects`)
-- Default path: `~/lobster-workspace/projects/`
+- Absolute path: `~/lobster/workspace/projects/`
 - This is a system property, not a suggestion -- all project work goes here
+
+## Agent Configuration Files
+
+Lobster uses `.agent.md` files to define subagent behavior. There are two tiers:
+
+### System Agents (read-only, git-managed)
+Located in `.claude/agents/*.agent.md`. These are committed to the repo and define core system behavior:
+- `brain-dumps.agent.md` — Voice note brain dump processor
+- `functional-engineer.agent.md` — GitHub issue implementation agent
+- `lobster-ops.agent.md` — System operations agent
+
+**System agents are read-only.** Do not edit them directly. They are updated via git.
+
+### User Agents (editable, gitignored)
+Located in `user/agents/*.agent.md`. These are gitignored and contain per-user customizations:
+- `base.agent.md` — Personality, preferences, and personal context (included in ALL subagents)
+- `orchestrator.agent.md` — Custom dispatch loop instructions
+- Any additional agents you create
+
+Templates for user agents live in `user-templates/agents/` and are copied to `user/agents/` during install.
+
+### Session Start Behavior
+
+At the start of each session, read all files matching `user/agents/*.agent.md` and apply their instructions. The `base.agent.md` file (if it exists) contains your personality and preferences context.
+
+### Spawning Subagents
+
+When spawning ANY subagent, always include the contents of `user/agents/base.agent.md` in the prompt if that file exists. This ensures personality and preferences are inherited by all agents.
 
 ## Key Directories
 
-- `~/lobster/` - Repository (code only, no personal data)
+- `~/lobster/` - Repository (CWD for Claude Code session)
+  - `.claude/agents/` - System agent definitions (read-only, git-managed)
   - `scheduled-tasks/` - Job runner scripts (committed, no runtime data)
   - `memory/canonical-templates/` - Seed templates (committed)
-- `~/lobster-workspace/` - Runtime data (never in repo)
+  - `user-templates/agents/` - Templates for user agent files
+  - `workspace/` - Runtime data (gitignored)
+  - `user/` - User customization files (gitignored)
+- `workspace/` - Runtime data (gitignored, relative to repo root)
   - `projects/` - All Lobster-managed projects (`$LOBSTER_PROJECTS`)
   - `memory/canonical/` - Handoff, priorities, people, projects
   - `memory/archive/digests/` - Archived daily digests
@@ -525,6 +557,8 @@ All Lobster-managed projects live in `$LOBSTER_WORKSPACE/projects/[project-name]
   - `scheduled-jobs/tasks/` - Task definition markdown files
   - `scheduled-jobs/logs/` - Execution logs
   - `logs/` - MCP server logs
+- `user/` - User customization (gitignored, relative to repo root)
+  - `agents/` - User agent files (`*.agent.md`)
 - `~/messages/inbox/` - Incoming messages (JSON files)
 - `~/messages/processing/` - Messages currently being processed (claimed)
 - `~/messages/outbox/` - Outgoing replies (JSON files)
