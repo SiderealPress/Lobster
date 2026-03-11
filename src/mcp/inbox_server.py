@@ -139,11 +139,21 @@ LOBSTER_STATE_FILE = CONFIG_DIR / "lobster-state.json"
 # Reset state to "active" on startup — this is the fix for the critical bug where
 # state was never reset after waking from hibernation.
 # The bot issues systemctl restart → Claude starts → this module loads → state resets.
+#
+# Also resets transient states (starting, restarting, waking) to "active" because:
+# - The MCP server is a subprocess of Claude; if we are loading, Claude is running.
+# - A "starting" state from claude-persistent.sh's launch_claude() is superseded
+#   once Claude is up and the MCP server has initialised.
+# - This prevents the health-check from triggering a restart loop when the state
+#   file is left in a transient mode (e.g. when using claude-wrapper.exp which
+#   does not itself write the state file).
+_TRANSIENT_MODES = {"hibernate", "starting", "restarting", "waking"}
+
 def _reset_state_on_startup():
     try:
         if LOBSTER_STATE_FILE.exists():
             data = json.loads(LOBSTER_STATE_FILE.read_text())
-            if data.get("mode") == "hibernate":
+            if data.get("mode") in _TRANSIENT_MODES:
                 data["mode"] = "active"
                 data["woke_at"] = datetime.now(timezone.utc).isoformat()
                 tmp = LOBSTER_STATE_FILE.parent / f".lobster-state-{os.getpid()}.tmp"
@@ -488,7 +498,7 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "to": {
                         "type": "string",
-                        "description": "Recipient phone number in E.164 format (e.g. +14155551234). The 'whatsapp:' prefix will be added automatically.",
+                        "description": "Recipient phone number in E.164 format (e.g. <REDACTED_PHONE>). The 'whatsapp:' prefix will be added automatically.",
                     },
                     "text": {
                         "type": "string",
@@ -506,7 +516,7 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "to": {
                         "type": "string",
-                        "description": "Recipient phone number in E.164 format (e.g. +14155551234).",
+                        "description": "Recipient phone number in E.164 format (e.g. <REDACTED_PHONE>).",
                     },
                     "text": {
                         "type": "string",
@@ -1766,6 +1776,9 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
                 output += f"**[{source}]** 📷 from **{user}** ({count} photos)\n"
             else:
                 output += f"**[{source}]** 📷 from **{user}**\n"
+        elif msg_type == "document":
+            file_name = msg.get("file_name", "file")
+            output += f"**[{source}]** 📎 from **{user}** ({file_name})\n"
         else:
             output += f"**[{source}]** from **{user}**\n"
         output += f"Chat ID: `{chat_id}` | Message ID: `{msg_id}`\n"
@@ -1781,6 +1794,15 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
                 output += "\n"
             elif image_file:
                 output += f"**Image file** (read to view): `{image_file}`\n\n"
+        # Surface file path for document messages so Claude can read them
+        if msg_type == "document":
+            doc_file_path = msg.get("file_path")
+            doc_file_name = msg.get("file_name", "file")
+            if doc_file_path:
+                output += f"**Attached file** (read to view): `{doc_file_path}`\n"
+                output += f"Original name: {doc_file_name}\n\n"
+            else:
+                output += f"**Attached file**: {doc_file_name} (file not downloaded)\n\n"
         # Show full reply-to context if present
         reply_to = msg.get("reply_to")
         if reply_to:
