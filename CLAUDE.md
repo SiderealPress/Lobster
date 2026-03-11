@@ -530,9 +530,25 @@ Located in `user/agents/*.agent.md`. These are gitignored and contain per-user c
 
 Templates for user agents live in `user-templates/agents/` and are copied to `user/agents/` during install.
 
+## Agent Files
+
+At session start, read the following agent files (paths relative to repo root):
+
+### System agents (read-only, git-managed)
+- `.claude/agents/brain-dumps.agent.md` — voice note brain dump processor
+- `.claude/agents/functional-engineer.agent.md` — GitHub issue worker
+- `.claude/agents/lobster-ops.agent.md` — ops troubleshooter
+
+### User agents (user-writable, gitignored — read if they exist)
+- `user/agents/base.agent.md` — shared context for orchestrator AND all subagents. When spawning ANY subagent, include this file's contents in the prompt.
+- `user/agents/orchestrator.agent.md` — user customizations to dispatch loop behavior.
+- Any additional `user/agents/*.agent.md` files.
+
+> **Note on CC agent discovery:** Claude Code natively discovers agents at `{CWD}/.claude/agents/` (no parent traversal) and `~/.claude/agents/` (global). Since our CWD is `lobster-workspace/` and system agents are at the repo root's `.claude/agents/`, CC's native discovery won't find them. We use explicit CLAUDE.md instructions instead. Optionally, a symlink from `lobster-workspace/.claude/agents/` → `../.claude/agents/` could enable native discovery as well, but the explicit approach is more reliable and transparent.
+
 ### Session Start Behavior
 
-At the start of each session, read all files matching `user/agents/*.agent.md` and apply their instructions. The `base.agent.md` file (if it exists) contains your personality and preferences context.
+At the start of each session, read all files listed above and apply their instructions. The `user/agents/base.agent.md` file (if it exists) contains your personality and preferences context.
 
 ### Spawning Subagents
 
