@@ -400,11 +400,20 @@ step "Installing system dependencies..."
 if [ "$PKG_MANAGER" = "apt" ]; then
     sudo apt-get update -qq
 
+    # Install GitHub CLI (gh) repository if not already present
+    if ! dpkg -s gh &>/dev/null; then
+        info "Adding GitHub CLI apt repository..."
+        curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg 2>/dev/null
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
+        sudo apt-get update -qq
+    fi
+
     PACKAGES=(
         curl
         wget
         git
         jq
+        gh
         python3
         python3-pip
         python3-venv
@@ -436,6 +445,7 @@ else
         wget
         git
         jq
+        gh
         python3
         python3-pip
         cronie
@@ -1430,6 +1440,37 @@ else
     info "Skipped GitHub integration. You can set it up later - see README.md"
 fi
 fi  # end non-interactive guard for GitHub integration
+
+#===============================================================================
+# GitHub CLI Authentication
+#===============================================================================
+
+step "Checking GitHub CLI authentication..."
+
+if gh auth status &>/dev/null 2>&1; then
+    success "GitHub CLI already authenticated"
+elif [ -n "${GITHUB_PAT:-}" ]; then
+    info "Authenticating gh with GITHUB_PAT from environment..."
+    echo "$GITHUB_PAT" | gh auth login --with-token 2>/dev/null && \
+        success "GitHub CLI authenticated via PAT" || \
+        warn "GitHub CLI auth via PAT failed. Authenticate later with: gh auth login"
+else
+    echo ""
+    echo "GitHub CLI (gh) is not authenticated."
+    echo "This is needed for creating PRs, managing issues, etc."
+    echo ""
+    read -p "Authenticate GitHub CLI now? [y/N] " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        if gh auth login; then
+            success "GitHub CLI authenticated"
+        else
+            warn "GitHub CLI auth failed. Authenticate later with: gh auth login"
+        fi
+    else
+        info "Skipped. Authenticate later with: gh auth login"
+    fi
+fi
 
 #===============================================================================
 # Voice Transcription (whisper.cpp + ffmpeg)
