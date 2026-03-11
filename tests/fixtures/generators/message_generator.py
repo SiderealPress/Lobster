@@ -164,6 +164,65 @@ class MessageGenerator:
 
         return msg
 
+    def generate_document_message(
+        self,
+        file_name: str = "document.pdf",
+        mime_type: str = "application/pdf",
+        file_path: Optional[str] = None,
+        file_size: int = 1024000,
+        caption: Optional[str] = None,
+        source: str = "telegram",
+        user_name: Optional[str] = None,
+        username: Optional[str] = None,
+        user_id: Optional[int] = None,
+        chat_id: Optional[int] = None,
+        message_id: Optional[str] = None,
+        timestamp: Optional[str] = None,
+    ) -> dict:
+        """
+        Generate a document message (PDF, spreadsheet, etc.).
+
+        Args:
+            file_name: Original file name
+            mime_type: MIME type of the document
+            file_path: Local path where file was saved
+            file_size: File size in bytes
+            caption: Optional caption text
+            source: Message source
+            user_name: Display name
+            username: @username
+            user_id: Numeric user ID
+            chat_id: Chat ID for replies
+            message_id: Unique message ID
+            timestamp: ISO timestamp
+
+        Returns:
+            Document message dict
+        """
+        text = caption if caption else f"[Document: {file_name}]"
+        msg = self.generate_text_message(
+            text=text,
+            source=source,
+            user_name=user_name,
+            username=username,
+            user_id=user_id,
+            chat_id=chat_id,
+            message_id=message_id,
+            timestamp=timestamp,
+        )
+
+        msg["type"] = "document"
+        if file_path is None:
+            ext = "." + file_name.rsplit(".", 1)[-1] if "." in file_name else ""
+            file_path = f"/tmp/lobster-files/{msg['id']}{ext}"
+        msg["file_path"] = file_path
+        msg["file_name"] = file_name
+        msg["mime_type"] = mime_type
+        msg["file_size"] = file_size
+        msg["file_id"] = f"doc_{uuid.uuid4().hex[:16]}"
+
+        return msg
+
     def generate_batch(
         self,
         count: int,
