@@ -194,6 +194,12 @@ launch_claude() {
     # Any persistent state lives in canonical memory files, not conversation history.
     local claude_exit_code=0
     log "Starting fresh session (attempt $attempt)..."
+
+    # Transition to active BEFORE the blocking claude call.
+    # The "starting" state above covers env cleanup and preflight.
+    # Once we hand off to claude, we're active.
+    write_state "active" "claude running, attempt=$attempt"
+
     claude --dangerously-skip-permissions \
         --model sonnet \
         --max-turns 150 \
