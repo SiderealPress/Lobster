@@ -65,3 +65,12 @@ config/camofox-browser/
 # Planning artifacts
 PLAN-*.md
 .planning/
+
+# Runtime workspace (user data, not committed)
+# Directory is tracked (via .gitkeep) but contents are ignored
+workspace/*
+!workspace/.gitkeep
+
+# User customization files (directory tracked, contents ignored)
+user/*
+!user/.gitkeep

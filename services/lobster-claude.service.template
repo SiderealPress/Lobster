@@ -7,7 +7,7 @@ Wants=lobster-router.service
 Type=forking
 User={{USER}}
 Group={{GROUP}}
-WorkingDirectory={{WORKSPACE_DIR}}
+WorkingDirectory={{INSTALL_DIR}}
 Environment=PATH={{HOME}}/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=HOME={{HOME}}
 Environment=LOBSTER_CONFIG_DIR={{CONFIG_DIR}}
@@ -17,7 +17,7 @@ Environment=LOBSTER_WORKSPACE={{WORKSPACE_DIR}}
 EnvironmentFile=-{{INSTALL_DIR}}/config/config.env
 EnvironmentFile={{CONFIG_DIR}}/config.env
 EnvironmentFile=-{{CONFIG_DIR}}/global.env
-ExecStart=/usr/bin/tmux -L lobster new-session -d -s lobster -c {{WORKSPACE_DIR}} {{CLAUDE_WRAPPER}}
+ExecStart=/usr/bin/tmux -L lobster new-session -d -s lobster -c {{INSTALL_DIR}} {{CLAUDE_WRAPPER}}
 ExecStop=/usr/bin/tmux -L lobster kill-session -t lobster
 RemainAfterExit=yes
 Restart=on-failure
