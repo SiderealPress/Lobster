@@ -517,7 +517,7 @@ check_dashboard_server() {
     fi
 
     log_warn "Dashboard server not running on port 9100 - restarting"
-    nohup $dashboard_cmd >> "$WORKSPACE_DIR/logs/dashboard-server.log" 2>&1 &
+    nohup $dashboard_cmd >> "$WORKSPACE_DIR/logs/dashboard-server.log" 2>&1 200>&- &
     log_info "Dashboard server restarted (PID $!)"
     return 0
 }
