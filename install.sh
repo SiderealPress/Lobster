@@ -1168,20 +1168,41 @@ step "Setting up Python environment..."
 
 cd "$INSTALL_DIR"
 
-if [ ! -d ".venv" ]; then
-    python3 -m venv .venv
+# Install uv if not present (faster, more reliable Python package manager)
+if ! command -v uv &>/dev/null; then
+    info "Installing uv (Python package manager)..."
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    export PATH="$HOME/.local/bin:$PATH"
+    if command -v uv &>/dev/null; then
+        success "uv installed"
+    else
+        error "uv installation failed"
+        exit 1
+    fi
+else
+    success "uv already installed"
 fi
 
-source .venv/bin/activate
-pip install --quiet --upgrade pip
-pip install --quiet mcp python-telegram-bot watchdog python-dotenv slack-bolt psutil
+if [ ! -d ".venv" ] || [ ! -f ".venv/bin/python" ]; then
+    info "Creating Python virtual environment..."
+    uv venv .venv
+else
+    success "Python venv already exists"
+fi
+
+# Activate venv for uv pip commands
+export VIRTUAL_ENV="$INSTALL_DIR/.venv"
+export PATH="$INSTALL_DIR/.venv/bin:$PATH"
+
+uv pip install --quiet --upgrade pip
+uv pip install --quiet mcp python-telegram-bot watchdog python-dotenv slack-bolt psutil
 success "Core Python packages installed"
 
 #-------------------------------------------------------------------------------
 # fastembed
 #-------------------------------------------------------------------------------
 info "Installing fastembed..."
-if pip install --quiet fastembed; then
+if uv pip install --quiet fastembed; then
     success "fastembed installed"
 else
     warn "fastembed install failed. Vector embedding features may be unavailable."
@@ -1194,26 +1215,26 @@ info "Installing sqlite-vec..."
 SQLITE_VEC_OK=false
 
 # Try stable release first
-if pip install --quiet sqlite-vec 2>/dev/null; then
+if uv pip install --quiet sqlite-vec 2>/dev/null; then
     # Verify it actually loads (aarch64 bug produces an import error)
-    if python3 -c "import sqlite_vec" 2>/dev/null; then
+    if "$INSTALL_DIR/.venv/bin/python" -c "import sqlite_vec" 2>/dev/null; then
         success "sqlite-vec installed and loads correctly"
         SQLITE_VEC_OK=true
     else
         warn "sqlite-vec installed but fails to load (likely aarch64 ELFCLASS32 bug). Trying alpha..."
-        pip uninstall -y sqlite-vec 2>/dev/null || true
+        uv pip uninstall sqlite-vec 2>/dev/null || true
     fi
 fi
 
 if [ "$SQLITE_VEC_OK" = false ]; then
     # Try known-good alpha that contains the aarch64 fix
-    if pip install --quiet "sqlite-vec==0.1.7a2" 2>/dev/null; then
-        if python3 -c "import sqlite_vec" 2>/dev/null; then
+    if uv pip install --quiet "sqlite-vec==0.1.7a2" 2>/dev/null; then
+        if "$INSTALL_DIR/.venv/bin/python" -c "import sqlite_vec" 2>/dev/null; then
             success "sqlite-vec 0.1.7a2 (alpha) installed and loads correctly"
             SQLITE_VEC_OK=true
         else
             warn "sqlite-vec alpha also fails to load. Will attempt to compile from source."
-            pip uninstall -y sqlite-vec 2>/dev/null || true
+            uv pip uninstall sqlite-vec 2>/dev/null || true
         fi
     fi
 fi
@@ -1223,8 +1244,8 @@ if [ "$SQLITE_VEC_OK" = false ]; then
     _SQLITE_VEC_SRC_DIR="$(mktemp -d)"
     if git clone --quiet --depth 1 https://github.com/asg017/sqlite-vec.git "$_SQLITE_VEC_SRC_DIR" 2>/dev/null; then
         cd "$_SQLITE_VEC_SRC_DIR"
-        if make loadable python 2>/dev/null && pip install --quiet -e . 2>/dev/null; then
-            if python3 -c "import sqlite_vec" 2>/dev/null; then
+        if make loadable python 2>/dev/null && uv pip install --quiet -e . 2>/dev/null; then
+            if "$INSTALL_DIR/.venv/bin/python" -c "import sqlite_vec" 2>/dev/null; then
                 success "sqlite-vec built from source and loads correctly"
                 SQLITE_VEC_OK=true
             else
@@ -1238,7 +1259,8 @@ if [ "$SQLITE_VEC_OK" = false ]; then
     rm -rf "$_SQLITE_VEC_SRC_DIR"
 fi
 
-deactivate
+# Unset VIRTUAL_ENV — we don't need the venv active for the rest of the script
+unset VIRTUAL_ENV
 
 success "Python environment ready"
 
