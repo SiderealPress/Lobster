@@ -73,6 +73,12 @@ STALE_INBOX_MARKER_DIR="$WORKSPACE_DIR/logs/stale-inbox-markers"
 # Telegram direct alerting (bypasses outbox entirely)
 CONFIG_ENV="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}/config.env"
 
+# Read LOBSTER_DEBUG from config.env (if not already in environment)
+if [[ -z "${LOBSTER_DEBUG:-}" && -f "$CONFIG_ENV" ]]; then
+    LOBSTER_DEBUG=$(grep '^LOBSTER_DEBUG=' "$CONFIG_ENV" 2>/dev/null | cut -d'=' -f2- | tr -d '[:space:]"' || echo "false")
+fi
+LOBSTER_DEBUG="${LOBSTER_DEBUG:-false}"
+
 # Ensure log directory exists
 mkdir -p "$(dirname "$LOG_FILE")"
 mkdir -p "$(dirname "$RESTART_STATE_FILE")"
@@ -777,9 +783,15 @@ main() {
                 level="RED"
                 restart_reason="${restart_reason:+$restart_reason + }no wrapper or Claude process in lobster tmux"
             elif [[ "$has_wrapper" == "false" && "$has_claude" == "true" ]]; then
-                # Claude running without wrapper — old-style or something unexpected
-                # Not critical, but worth noting
-                log_warn "Claude running without persistent wrapper (old-style mode?)"
+                # Claude running without persistent wrapper.
+                # In debug mode (LOBSTER_DEBUG=true) this is expected: claude-wrapper.exp
+                # runs Claude interactively without the persistent wrapper lifecycle.
+                # Suppress the warning to avoid noise.
+                if [[ "$LOBSTER_DEBUG" == "true" ]]; then
+                    log_info "Claude running without persistent wrapper (debug mode — expected)"
+                else
+                    log_warn "Claude running without persistent wrapper (old-style mode?)"
+                fi
             elif [[ "$has_wrapper" == "true" && "$has_claude" == "false" ]]; then
                 # Wrapper running but no Claude — could be between launches
                 # Check state age: if it's been a while, something may be stuck
