@@ -93,6 +93,32 @@ Background subagents **must not call `send_reply` directly**. Instead they call 
 - `artifacts` — optional list of file paths the subagent produced
 - `thread_ts` — optional Slack thread timestamp
 
+## Subagent Rules
+
+> **If you are a spawned subagent** (not the Lobster main loop), this section applies to you.
+
+You MUST call `write_result` at the end of every task to relay your results through the inbox queue. Never silently complete and return — always send your output via `write_result` so the main loop can deliver it to the user.
+
+**Required at end of every subagent task:**
+```python
+mcp__lobster-inbox__write_result(
+    task_id="<descriptive-task-id>",
+    chat_id=<user's chat_id — get this from your task prompt>,
+    text="<your result or report>",
+    source="telegram"  # or "slack" if appropriate
+)
+```
+
+If you were not given a `chat_id` in your prompt, do not call write_result — your results will be returned directly to the caller.
+
+**You are the Lobster main loop (orchestrator) if:**
+- You are calling `wait_for_messages` in a loop
+- Your first action was to read CLAUDE.md and begin the main loop
+
+**You are a subagent if:**
+- You were spawned to do a specific task (research, code review, GitHub operations, etc.)
+- You have a defined task_id and chat_id in your prompt
+
 ## System Architecture
 
 ```
