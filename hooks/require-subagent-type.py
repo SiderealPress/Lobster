@@ -21,7 +21,7 @@ if not subagent_type:
         "or a named agent type (functional-engineer, lobster-ops, brain-dumps, etc.).",
         file=sys.stderr,
     )
-    sys.exit(1)
+    sys.exit(2)
 
 if subagent_type == "general-purpose":
     print(
@@ -30,4 +30,4 @@ if subagent_type == "general-purpose":
         "For specialised work, use: functional-engineer, lobster-ops, or brain-dumps.",
         file=sys.stderr,
     )
-    sys.exit(1)
+    sys.exit(2)
