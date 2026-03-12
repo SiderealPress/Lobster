@@ -1055,13 +1055,12 @@ success "Daily dependency health check configured (runs at 06:00 daily)"
 step "Setting up self-check reminder system..."
 
 # The self-check system ensures Lobster checks on background agent completion.
-# Dual mechanism:
-#   1. Cron-based (primary): periodic-self-check.sh runs every 3 min
-#   2. Hook-based (secondary): PostToolUse hook schedules one-shot via 'at'
+# Uses cron-based periodic-self-check.sh (runs every 3 min).
+# The PostToolUse hook (schedule-self-check.sh) has been retired; subagent
+# results are now delivered directly to the inbox via write_result.
 
 # Make self-check scripts executable
 chmod +x "$INSTALL_DIR/scripts/periodic-self-check.sh"
-chmod +x "$INSTALL_DIR/scripts/schedule-self-check.sh"
 
 # Create state directory for rate limiting
 mkdir -p "$INSTALL_DIR/.state"
@@ -1071,30 +1070,12 @@ SELFCHECK_MARKER="# LOBSTER-SELF-CHECK"
 ({ crontab -l 2>/dev/null | grep -v "$SELFCHECK_MARKER" | grep -v "periodic-self-check" || true; }; \
  echo "*/3 * * * * $INSTALL_DIR/scripts/periodic-self-check.sh $SELFCHECK_MARKER") | crontab -
 
-# Set up Claude Code PostToolUse hook for faster self-checks
 CLAUDE_SETTINGS_DIR="$HOME/.claude"
 CLAUDE_SETTINGS="$CLAUDE_SETTINGS_DIR/settings.json"
 mkdir -p "$CLAUDE_SETTINGS_DIR"
 
-if [ -f "$CLAUDE_SETTINGS" ]; then
-    # Check if hook already exists
-    if ! jq -e '.hooks.PostToolUse[]? | select(.matcher == "mcp__lobster-inbox__send_reply")' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
-        # Add the hook to existing settings
-        TMP_SETTINGS=$(mktemp)
-        jq '.hooks.PostToolUse = (.hooks.PostToolUse // []) + [{
-            "matcher": "mcp__lobster-inbox__send_reply",
-            "hooks": [{
-                "type": "command",
-                "command": "'"$INSTALL_DIR"'/scripts/schedule-self-check.sh",
-                "timeout": 10
-            }]
-        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
-        success "Self-check hook added to Claude Code settings"
-    else
-        info "Self-check hook already configured in Claude Code settings"
-    fi
-else
-    # Create settings.json with both hooks
+if [ ! -f "$CLAUDE_SETTINGS" ]; then
+    # Create settings.json with PreToolUse hooks
     cat > "$CLAUDE_SETTINGS" << HOOKEOF
 {
   "hooks": {
@@ -1109,18 +1090,6 @@ else
           }
         ]
       }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "mcp__lobster-inbox__send_reply",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "$INSTALL_DIR/scripts/schedule-self-check.sh",
-            "timeout": 10
-          }
-        ]
-      }
     ]
   }
 }
@@ -1128,7 +1097,7 @@ HOOKEOF
     success "Claude Code settings created with hooks"
 fi
 
-success "Self-check system configured (cron every 3min + PostToolUse hook)"
+success "Self-check cron configured (every 3min)"
 
 # Set up Claude Code PreToolUse hook to block writes to .claude/memory/
 if [ -f "$CLAUDE_SETTINGS" ]; then
