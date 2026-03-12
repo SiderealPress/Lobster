@@ -644,12 +644,45 @@ This allows the brain-dumps agent to reliably process dumps without variance in 
 
 ---
 
+## Reporting Results Back to the User
+
+**Never call `send_reply` directly.** When the brain dump is fully processed, use `write_result` to relay the outcome back to the main thread, which will deliver it to the user:
+
+```python
+# On success — after all stages complete and the GitHub issue is created:
+write_result(
+    task_id=f"brain-dump-{issue_number}",
+    chat_id=chat_id,          # from the Task prompt
+    text=(
+        f"Brain dump captured! Issue #{issue_number} created.\n\n"
+        f"{context_summary}"  # e.g. "Matched: ProjectX · Mike (hiking buddy)"
+    ),
+    source=source,            # from the Task prompt, default "telegram"
+    status="success",
+)
+
+# On failure — e.g. issue creation failed:
+write_result(
+    task_id="brain-dump-failed",
+    chat_id=chat_id,
+    text=(
+        "I couldn't save your brain dump to GitHub. "
+        "Here's the transcription so nothing is lost:\n\n"
+        f"{transcription}"
+    ),
+    source=source,
+    status="error",
+)
+```
+
+The `chat_id` and `source` values are passed in the Task prompt from the main thread.
+
 ## Error Handling
 
 - **Context files missing**: Skip context matching, proceed with basic processing
-- **Repo creation fails**: Notify user, suggest manual creation
-- **Issue creation fails**: Notify user, include transcription in message (don't lose content)
-- **Context matching fails**: Log warning, continue without context enrichment
+- **Repo creation fails**: Call `write_result` with `status="error"`, include transcription in text
+- **Issue creation fails**: Call `write_result` with `status="error"`, include transcription so content is not lost
+- **Context matching fails**: Log warning, continue without context enrichment, still call `write_result` on completion
 
 ---
 

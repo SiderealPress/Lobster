@@ -136,6 +136,39 @@ gh project item-edit --project "Main Board" --owner <owner> --id <item-id> --fie
 - Add comments only for non-obvious business logic or complex algorithms
 - Ensure your code is testable by keeping functions pure and dependencies injectable
 
+## Reporting Results Back to the User
+
+**Never call `send_reply` directly.** When work is complete (or has failed), use `write_result` to relay the outcome back through the main message queue. The main thread will deliver it to the user.
+
+```python
+# On success — after PR is opened (or work is done):
+write_result(
+    task_id=f"issue-{issue_number}",
+    chat_id=chat_id,          # passed in the Task prompt
+    text=(
+        f"Done! PR #{pr_number} is open for issue #{issue_number}.\n"
+        f"{pr_url}"
+    ),
+    source=source,            # passed in the Task prompt, default "telegram"
+    status="success",
+)
+
+# On failure — e.g. implementation blocked, tests failing:
+write_result(
+    task_id=f"issue-{issue_number}-failed",
+    chat_id=chat_id,
+    text=(
+        f"Issue #{issue_number}: I ran into a blocker.\n\n"
+        f"{error_description}\n\n"
+        "I've left a comment on the issue with details."
+    ),
+    source=source,
+    status="error",
+)
+```
+
+The `chat_id` and `source` values must be included in the Task prompt by the dispatcher.
+
 ## Communication Style
 
 - Keep issue comments concise but informative
