@@ -15,11 +15,12 @@ dependencies = [
     "sqlite-vec>=0.1.1",
     "fastembed>=0.3.0",
     "twilio>=9.0.0",
+    "websockets>=13.0",
 ]
 
 [project.optional-dependencies]
 dashboard = [
-    "websockets>=13.0",
+    # websockets moved to core deps (required by python-telegram-bot)
 ]
 browser = [
     "playwright>=1.40.0",
