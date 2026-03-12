@@ -94,6 +94,29 @@ are available to background services without any extra steps.
 | `VERCEL_TOKEN` | Vercel | https://vercel.com/account/tokens |
 | `DO_TOKEN` | DigitalOcean | https://cloud.digitalocean.com/account/api/tokens |
 
+## Lobster Behavior Keys
+
+| Key | Values | Default | Description |
+|-----|--------|---------|-------------|
+| `LOBSTER_TOOL_PREFERENCE` | `cli_first` | `cli_first` | Controls how Lobster and its subagents interact with external services. When set to `cli_first`, Lobster will always prefer an installed CLI (`gh`, `vercel`, `docker`, etc.) over raw API calls (curl/fetch). Only falls back to raw API calls if the CLI cannot accomplish the task. |
+
+### `LOBSTER_TOOL_PREFERENCE=cli_first`
+
+This is the default and recommended setting. With this setting active:
+
+- `gh` is used for all GitHub operations instead of raw API calls
+- `vercel` is used for Vercel deployments and configuration instead of the Vercel REST API
+- `docker` is used for container management instead of the Docker daemon API
+- `git` is used for version control instead of raw file manipulation
+- Any other installed CLI is preferred over its corresponding API
+
+**Why this matters:** CLIs handle authentication automatically using pre-configured credentials,
+produce human-readable error messages, and provide stable interfaces designed for scripting.
+Raw API calls require manual credential management, request construction, and pagination handling.
+
+**Future:** On startup, Lobster will scan `$PATH` for known CLIs and log which ones are available.
+This allows subagents to know at boot time which CLIs they can rely on.
+
 ## Migration
 
 If you have tokens currently in `config.env` that are not Lobster-specific (e.g.,
