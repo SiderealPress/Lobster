@@ -46,18 +46,18 @@ SERVICES=("lobster-router" "lobster-claude")
 #-------------------------------------------------------------------------------
 
 print_header() {
-    echo -e "${BLUE}╔═══════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${BLUE}║  $1$(printf '%*s' $((53 - ${#1})) '')║${NC}"
-    echo -e "${BLUE}╚═══════════════════════════════════════════════════════════════╝${NC}"
+    echo -e "${BLUE}\u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557${NC}"
+    echo -e "${BLUE}\u2551  $1$(printf '%*s' $((53 - ${#1})) '')\u2551${NC}"
+    echo -e "${BLUE}\u255a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255d${NC}"
 }
 
 service_status() {
     local service=$1
     if systemctl is-active --quiet "$service" 2>/dev/null; then
-        echo -e "${GREEN}●${NC} $service: ${GREEN}running${NC}"
+        echo -e "${GREEN}\u25cf${NC} $service: ${GREEN}running${NC}"
         return 0
     else
-        echo -e "${RED}○${NC} $service: ${RED}stopped${NC}"
+        echo -e "${RED}\u25cb${NC} $service: ${RED}stopped${NC}"
         return 1
     fi
 }
@@ -124,7 +124,7 @@ cmd_status() {
 
     if [[ -f "$MAINTENANCE_FLAG" ]]; then
         echo ""
-        echo -e "${YELLOW}🚧 MAINTENANCE MODE - health check auto-restart disabled${NC}"
+        echo -e "${YELLOW}[!!] MAINTENANCE MODE - health check auto-restart disabled${NC}"
     fi
 
     echo ""
@@ -152,9 +152,9 @@ cmd_status() {
 
     echo ""
     if $all_running; then
-        echo -e "${GREEN}✓ Lobster is operational${NC}"
+        echo -e "${GREEN}\u2713 Lobster is operational${NC}"
     else
-        echo -e "${YELLOW}⚠ Some services are not running${NC}"
+        echo -e "${YELLOW}\u26a0 Some services are not running${NC}"
     fi
 }
 
@@ -200,9 +200,9 @@ cmd_inbox() {
     local count=$(count_files "$INBOX_DIR")
 
     if [ "$count" -eq 0 ]; then
-        echo -e "${GREEN}📭 Inbox is empty${NC}"
+        echo -e "${GREEN}[empty] Inbox is empty${NC}"
     else
-        echo -e "${YELLOW}📬 $count message(s) pending:${NC}"
+        echo -e "${YELLOW}[mail] $count message(s) pending:${NC}"
         echo ""
         for f in "$INBOX_DIR"/*.json; do
             if [ -f "$f" ]; then
@@ -222,16 +222,16 @@ cmd_outbox() {
     local count=$(count_files "$OUTBOX_DIR")
 
     if [ "$count" -eq 0 ]; then
-        echo -e "${GREEN}📤 Outbox is empty${NC}"
+        echo -e "${GREEN}[sent] Outbox is empty${NC}"
     else
-        echo -e "${YELLOW}📤 $count reply(s) queued:${NC}"
+        echo -e "${YELLOW}[send] $count reply(s) queued:${NC}"
         echo ""
         for f in "$OUTBOX_DIR"/*.json; do
             if [ -f "$f" ]; then
                 local source=$(jq -r '.source // "unknown"' "$f" 2>/dev/null)
                 local chat_id=$(jq -r '.chat_id // "?"' "$f" 2>/dev/null)
                 local text=$(jq -r '.text // "(no text)"' "$f" 2>/dev/null | head -c 60)
-                echo -e "  ${CYAN}[$source]${NC} → $chat_id: $text"
+                echo -e "  ${CYAN}[$source]${NC} -> $chat_id: $text"
             fi
         done
     fi
@@ -283,7 +283,7 @@ cmd_test() {
 }
 EOF
 
-    echo -e "${GREEN}✓ Test message created: $msg_file${NC}"
+    echo -e "${GREEN}[ok] Test message created: $msg_file${NC}"
     echo ""
     echo "If Claude is running, it should process this shortly."
     echo "Watch with: lobster attach"
@@ -365,7 +365,7 @@ cmd_ps() {
         uptimes+=("$uptime_str")
         cmds+=("$cmd_short")
         count=$((count + 1))
-    done < <(ps aux | awk '$11 ~ /(^|\/)claude$/' | grep -v "lobster ps\|lobster ps")
+    done < <(ps aux | awk '$11 ~ /(^\/\/)claude$/' | grep -v "lobster ps\|lobster ps")
 
     if [ "$count" -eq 0 ]; then
         echo -e "  ${YELLOW}No Claude instances running${NC}"
