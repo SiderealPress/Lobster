@@ -347,7 +347,7 @@ main_loop = None
 _processing_files: set[str] = set()
 
 # Lock to prevent concurrent wake attempts (race condition: two simultaneous
-# incoming messages while hibernating should only trigger one Claude spawn)
+# incoming messages while hibernating should only trigger a single spawn)
 _wake_lock = threading.Lock()
 
 # Directory where MCP mark_processing moves messages
@@ -498,349 +498,99 @@ def wake_claude_if_hibernating() -> None:
 
     Uses a threading lock so that concurrent calls (e.g. two messages arriving
     at the same time while hibernating) only trigger a single spawn.
-
-    Handles stale hibernate state: if the state file says "hibernate" but the
-    updated_at timestamp is older than 60 seconds, the Claude CLI process is
-    likely a zombie (it wrote hibernate state but never exited). In this case,
-    force-kill the old process before restarting.
     """
-    state_data = _read_lobster_state_data()
-    mode = state_data.get("mode", "active")
-    if mode not in ("active", "hibernate"):
-        mode = "active"
+    with _wake_lock:
+        state_data = _read_lobster_state_data()
+        mode = state_data.get("mode", "active")
 
-    # Fast path: if not hibernating, nothing to do
-    if mode != "hibernate":
-        return
+        if mode != "hibernate":
+            return  # Not hibernating — nothing to do
 
-    # Check if Claude process is running
-    if _is_claude_running():
-        # Claude process exists — but is it a zombie from stale hibernate?
-        if _is_hibernate_stale(state_data):
-            log.warning(
-                "wake_claude: hibernate state is stale and Claude process still running — "
-                "killing zombie process"
-            )
-            _kill_stale_claude()
-        else:
-            log.info("wake_claude: Claude already running despite hibernate state")
-            return
-
-    # Try to acquire the wake lock without blocking
-    if not _wake_lock.acquire(blocking=False):
-        log.info("wake_claude: another wake attempt is in progress, skipping")
-        return
-
-    try:
-        # Re-check inside the lock to handle the TOCTOU window
-        if _read_lobster_state() != "hibernate":
-            return
         if _is_claude_running():
-            log.info("wake_claude: Claude started before we could acquire lock")
+            # Claude is running but state says hibernate — check if state is stale
+            if _is_hibernate_stale(state_data):
+                log.warning(
+                    "wake_claude: hibernate state is stale (Claude running but state not updated). "
+                    "Killing stale process and re-spawning."
+                )
+                _kill_stale_claude()
+                # Fall through to spawn below
+            else:
+                log.info("wake_claude: Claude is running, state is fresh — no action needed")
+                return
+
+        log.info("wake_claude: Lobster is hibernating. Spawning fresh Claude session...")
+
+        if not CLAUDE_WAKE_SCRIPT.exists():
+            log.error(f"wake_claude: wake script not found: {CLAUDE_WAKE_SCRIPT}")
             return
 
-        log.info("wake_claude: Lobster is hibernating and Claude is not running — waking")
-
-        # Reset state to "active" BEFORE spawning Claude.
-        # This prevents restart storms: even if spawn fails, the state is no longer
-        # "hibernate", so the health check won't skip its safety net.
         try:
-            state_data = {"mode": "active", "woke_at": datetime.now(timezone.utc).isoformat()}
-            tmp = LOBSTER_STATE_FILE.parent / f".lobster-state-wake-{os.getpid()}.tmp"
-            tmp.write_text(json.dumps(state_data, indent=2))
-            tmp.rename(LOBSTER_STATE_FILE)
-            log.info("wake_claude: reset state to 'active'")
-        except Exception as e:
-            log.error(f"wake_claude: failed to reset state ({e}), proceeding with wake anyway")
-
-        # Preferred: restart via systemd (keeps service state consistent)
-        try:
-            result = subprocess.run(
-                ["sudo", "systemctl", "restart", "lobster-claude"],
-                capture_output=True,
-                text=True,
-                timeout=30,
+            subprocess.Popen(
+                [str(CLAUDE_WAKE_SCRIPT)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
             )
-            if result.returncode == 0:
-                log.info("wake_claude: 'systemctl restart lobster-claude' succeeded")
-            else:
-                log.error(f"wake_claude: systemctl restart exited {result.returncode}: {result.stderr.strip()}")
-                raise RuntimeError("systemctl restart failed")
+            log.info("wake_claude: Claude session spawned successfully")
         except Exception as e:
-            log.error(f"wake_claude: systemctl restart failed ({e}), trying start script")
-            # Fallback: call start-lobster.sh directly
-            if CLAUDE_WAKE_SCRIPT.exists():
-                subprocess.Popen(
-                    ["bash", str(CLAUDE_WAKE_SCRIPT)],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-                log.info(f"wake_claude: spawned {CLAUDE_WAKE_SCRIPT}")
-            else:
-                log.error(f"wake_claude: fallback script not found: {CLAUDE_WAKE_SCRIPT}")
-    finally:
-        _wake_lock.release()
+            log.error(f"wake_claude: Failed to spawn Claude: {e}")
 
 
-def atomic_write_json(path: Path, data: dict, indent: int = 2) -> None:
-    """Atomically write JSON to a file (write-to-temp-then-rename).
-
-    On POSIX systems, rename() within the same filesystem is atomic,
-    so readers never see a partial file.
-    """
-    content = json.dumps(data, indent=indent)
-    fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+def atomic_write_json(path: Path, data: dict) -> None:
+    """Write JSON data to path atomically using a temp file + rename."""
+    tmp_path = path.with_suffix('.tmp')
     try:
-        with os.fdopen(fd, "w") as f:
-            f.write(content)
-            f.flush()
-            os.fsync(f.fileno())
-        os.rename(tmp_path, str(path))
-    except BaseException:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
+        with open(tmp_path, 'w') as f:
+            json.dump(data, f, indent=2)
+        tmp_path.rename(path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
         raise
 
 
-class OutboxHandler(FileSystemEventHandler):
-    """Watches outbox for reply files and sends them via Telegram."""
-
-    def _schedule_processing(self, filepath):
-        if filepath.endswith('.json') and not filepath.endswith('.tmp'):
-            if bot_app and main_loop and main_loop.is_running():
-                if filepath not in _processing_files:
-                    _processing_files.add(filepath)
-                    asyncio.run_coroutine_threadsafe(
-                        self.process_reply(filepath),
-                        main_loop
-                    )
-
-    def on_created(self, event):
-        if event.is_directory:
-            return
-        self._schedule_processing(event.src_path)
-
-    def on_modified(self, event):
-        if event.is_directory:
-            return
-        self._schedule_processing(event.src_path)
-
-    async def process_reply(self, filepath):
-        try:
-            await asyncio.sleep(0.5)  # Delay to ensure file write is complete
-            with open(filepath, 'r') as f:
-                reply = json.load(f)
-
-            chat_id = reply.get('chat_id')
-            text = reply.get('text', '')
-            buttons = reply.get('buttons')
-
-            if chat_id and text and bot_app:
-                reply_markup = build_inline_keyboard(buttons) if buttons else None
-                send_items = _prepare_send_items(text)
-                n = len(send_items)
-                for i, (md_chunk, html_chunk) in enumerate(send_items):
-                    # Only attach inline keyboard to the final chunk
-                    chunk_markup = reply_markup if i == n - 1 else None
-                    try:
-                        await bot_app.bot.send_message(
-                            chat_id=chat_id,
-                            text=html_chunk,
-                            parse_mode="HTML",
-                            reply_markup=chunk_markup
-                        )
-                    except Exception as exc:
-                        # Fallback to plain text if HTML parsing fails.
-                        # Plain text is also subject to the hard limit so we
-                        # truncate as a last resort rather than crash/drop.
-                        plain = md_chunk
-                        if len(plain) > TELEGRAM_HARD_LIMIT:
-                            plain = plain[:TELEGRAM_HARD_LIMIT - 3] + "..."
-                            log.warning(
-                                f"HTML send failed for {chat_id}, falling back to "
-                                f"truncated plain text ({len(md_chunk)} chars): {exc}"
-                            )
-                        await bot_app.bot.send_message(
-                            chat_id=chat_id,
-                            text=plain,
-                            reply_markup=chunk_markup
-                        )
-                if n > 1:
-                    log.info(f"Sent reply to {chat_id} in {n} chunks: {text[:50]}...")
-                else:
-                    log.info(f"Sent reply to {chat_id}: {text[:50]}...")
-                os.remove(filepath)
-            else:
-                log.warning(f"Skipping reply {filepath}: missing chat_id={chat_id}, text={bool(text)}, bot={bool(bot_app)}")
-                os.remove(filepath)
-        finally:
-            _processing_files.discard(filepath)
-
-
-async def process_existing_outbox():
-    """Process any outbox files that exist on startup."""
-    handler = OutboxHandler()
-    existing_files = list(OUTBOX_DIR.glob("*.json"))
-    if existing_files:
-        log.info(f"Processing {len(existing_files)} existing outbox file(s)...")
-        for filepath in existing_files:
-            try:
-                await handler.process_reply(str(filepath))
-            except Exception as e:
-                log.error(f"Error processing existing outbox file {filepath}: {e}")
-
-
-_outbox_fail_counts: dict[str, int] = {}
-
-
-async def sweep_outbox():
-    """Periodic sweep catches files missed by watchdog or failed on first attempt."""
-    handler = OutboxHandler()
-    while True:
-        await asyncio.sleep(10)
-        try:
-            for filepath in sorted(OUTBOX_DIR.glob("*.json")):
-                # Skip temp files from atomic writes
-                if filepath.suffix == '.tmp':
-                    continue
-                # Only process files older than 2 seconds (ensure write completion)
-                try:
-                    age = time.time() - filepath.stat().st_mtime
-                except FileNotFoundError:
-                    continue
-                if age < 2:
-                    continue
-
-                fname = str(filepath)
-                if fname in _processing_files:
-                    continue
-                _processing_files.add(fname)
-                try:
-                    await handler.process_reply(fname)
-                    _outbox_fail_counts.pop(fname, None)
-                except Exception as e:
-                    _outbox_fail_counts[fname] = _outbox_fail_counts.get(fname, 0) + 1
-                    count = _outbox_fail_counts[fname]
-                    log.error(f"Sweep: failed to process {filepath.name} (attempt {count}/5): {e}")
-                    if count >= 5:
-                        dest = DEAD_LETTER_DIR / filepath.name
-                        shutil.move(fname, str(dest))
-                        _outbox_fail_counts.pop(fname, None)
-                        log.error(f"Moved to dead-letter after 5 failures: {filepath.name}")
-        except Exception as e:
-            log.error(f"Outbox sweep error: {e}")
-
-
-def is_authorized(user_id: int) -> bool:
-    return user_id in ALLOWED_USERS
-
-
 def extract_reply_to_context(message) -> dict | None:
-    """Extract full reply-to context from a Telegram message, if it is a reply.
+    """Extract reply-to context from a Telegram message, if it's a reply.
 
-    Returns a dict with:
-      - reply_to_message_id: int — the Telegram message ID of the replied-to message
-      - reply_to_type: str — "text", "photo", "voice", "document", "sticker", etc.
-      - reply_to_text: str | None — full text or caption of the replied-to message
-      - reply_to_from_user: str | None — username of the sender of the replied-to message
-
-    Returns None if the message is not a reply.
+    Returns a dict with the original message's text/caption and sender info,
+    or None if this message is not a reply to another message.
     """
     if not message.reply_to_message:
         return None
 
-    reply = message.reply_to_message
-
-    # Determine the type of the replied-to message
-    if reply.text:
-        reply_type = "text"
-        reply_text = reply.text
-    elif reply.caption:
-        # Photos, documents, videos, etc. with a caption
-        if reply.photo:
-            reply_type = "photo"
-        elif reply.document:
-            reply_type = "document"
-        elif reply.video:
-            reply_type = "video"
-        elif reply.audio:
-            reply_type = "audio"
-        else:
-            reply_type = "media"
-        reply_text = reply.caption
-    elif reply.voice:
-        reply_type = "voice"
-        reply_text = None
-    elif reply.photo:
-        reply_type = "photo"
-        reply_text = None
-    elif reply.document:
-        reply_type = "document"
-        reply_text = None
-    elif reply.video:
-        reply_type = "video"
-        reply_text = None
-    elif reply.audio:
-        reply_type = "audio"
-        reply_text = None
-    elif reply.sticker:
-        reply_type = "sticker"
-        reply_text = reply.sticker.emoji if reply.sticker.emoji else None
-    else:
-        reply_type = "unknown"
-        reply_text = None
-
-    from_user = reply.from_user.username if reply.from_user else None
-
+    orig = message.reply_to_message
+    orig_text = orig.text or orig.caption or ""
+    orig_user = orig.from_user
     return {
-        "message_id": reply.message_id,
-        "reply_to_message_id": reply.message_id,
-        "reply_to_type": reply_type,
-        "reply_to_text": reply_text,
-        "reply_to_from_user": from_user,
-        # Keep legacy "text" field for backwards compatibility
-        "text": reply_text,
-        "from_user": from_user,
+        "text": orig_text,
+        "user_id": orig_user.id if orig_user else None,
+        "username": orig_user.username if orig_user else None,
+        "user_name": orig_user.first_name if orig_user else None,
+        "message_id": orig.message_id,
     }
 
 
-def build_inline_keyboard(buttons: list) -> InlineKeyboardMarkup | None:
-    """
-    Build an InlineKeyboardMarkup from a buttons specification.
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /start command."""
+    user = update.effective_user
+    if user.id not in ALLOWED_USERS:
+        await update.message.reply_text("Sorry, you're not authorized to use this bot.")
+        return
+    await update.message.reply_text(
+        "Lobster is running! Send me a message and I'll process it."
+    )
 
-    Supported formats:
-    1. Simple row format: [["Button 1", "Button 2"], ["Button 3"]]
-       - Each string becomes a button with text=callback_data
 
-    2. Object format: [[{"text": "Option A", "callback_data": "opt_a"}], ...]
-       - Explicit text and callback_data per button
-
-    3. Mixed format: [["Simple"], [{"text": "Complex", "callback_data": "complex"}]]
-    """
-    if not buttons or not isinstance(buttons, list):
-        return None
-
-    keyboard = []
-    for row in buttons:
-        if not isinstance(row, list):
-            continue
-        keyboard_row = []
-        for button in row:
-            if isinstance(button, str):
-                # Simple format: text is also the callback_data
-                keyboard_row.append(InlineKeyboardButton(text=button, callback_data=button))
-            elif isinstance(button, dict):
-                # Object format: explicit text and callback_data
-                text = button.get('text', '')
-                callback_data = button.get('callback_data', text)
-                if text:
-                    keyboard_row.append(InlineKeyboardButton(text=text, callback_data=callback_data))
-        if keyboard_row:
-            keyboard.append(keyboard_row)
-
-    return InlineKeyboardMarkup(keyboard) if keyboard else None
+async def onboarding_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /onboarding command - show onboarding message."""
+    user = update.effective_user
+    if user.id not in ALLOWED_USERS:
+        await update.message.reply_text("Sorry, you're not authorized to use this bot.")
+        return
+    onboarding_msg = get_onboarding_message()
+    chunks = split_message(onboarding_msg)
+    for chunk in chunks:
+        await update.message.reply_text(md_to_html(chunk), parse_mode="HTML")
 
 
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -848,20 +598,19 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     user = query.from_user
 
-    if not is_authorized(user.id):
-        await query.answer("Unauthorized", show_alert=True)
+    if user.id not in ALLOWED_USERS:
+        await query.answer("Not authorized")
         return
 
-    # Wake Claude if it hibernated
-    wake_claude_if_hibernating()
-
-    # Acknowledge the button press
+    # Acknowledge the button press immediately (removes the loading indicator)
     await query.answer()
 
-    msg_id = f"{int(time.time() * 1000)}_{query.id}"
-    callback_data = query.data
+    # Wake Claude if hibernating
+    wake_claude_if_hibernating()
 
-    # Create message file in inbox for the button press
+    # Create a message file for the callback
+    msg_id = f"{int(time.time() * 1000)}_{query.id}"
+
     msg_data = {
         "id": msg_id,
         "source": "telegram",
@@ -870,72 +619,169 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         "user_id": user.id,
         "username": user.username,
         "user_name": user.first_name,
-        "text": f"[Button pressed: {callback_data}]",
-        "callback_data": callback_data,
-        "callback_query_id": query.id,
-        "original_message_id": query.message.message_id,
-        "original_message_text": query.message.text,
+        "text": f"[Button pressed: {query.data}]",
+        "callback_data": query.data,
+        "original_message_text": query.message.text or query.message.caption or "",
         "timestamp": datetime.utcnow().isoformat(),
     }
 
     inbox_file = INBOX_DIR / f"{msg_id}.json"
     atomic_write_json(inbox_file, msg_data)
-
-    log.info(f"Button press from {user.first_name}: {callback_data}")
-
-
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if not is_authorized(user.id):
-        await update.message.reply_text("⛔ Unauthorized.")
-        return
-
-    # /start triggers onboarding for new users, otherwise shows short greeting
-    if not is_user_onboarded(user.id):
-        await send_onboarding(update, user)
-    else:
-        await update.message.reply_text(
-            f"👋 Hey {user.first_name}!\n\n"
-            "I'm Lobster. Messages you send here go to the master Claude session.\n\n"
-            "The session will process them and reply back here."
-        )
+    log.info(f"Wrote callback message to inbox: {msg_id}")
 
 
-async def onboarding_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /onboarding command — always shows the full onboarding message."""
-    user = update.effective_user
-    if not is_authorized(user.id):
-        await update.message.reply_text("⛔ Unauthorized.")
-        return
-
-    await send_onboarding(update, user)
-
-
-async def send_onboarding(update: Update, user) -> None:
-    """Send the onboarding message and mark the user as onboarded."""
-    message_text = get_onboarding_message(user.first_name)
-    try:
-        await update.message.reply_text(md_to_html(message_text), parse_mode="HTML")
-    except Exception:
-        await update.message.reply_text(message_text)
-    mark_user_onboarded(user.id)
-    log.info(f"Sent onboarding to user {user.id} ({user.first_name})")
-
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE, msg_id: str):
+    """Handle photo messages: download and save to inbox with metadata."""
     user = update.effective_user
     message = update.message
 
-    if not is_authorized(user.id):
-        log.warning(f"Unauthorized: {user.id}")
+    await send_typing_indicator(message.chat_id)
+
+    # Check if this photo is part of a media group
+    if message.media_group_id:
+        await _handle_media_group_photo(update, context, msg_id)
         return
 
-    # Wake Claude if it hibernated — do this before writing to inbox so Claude
-    # is starting up while the message file is being written
-    wake_claude_if_hibernating()
+    try:
+        # Get the largest photo size
+        photo = message.photo[-1]
 
-    # Send typing indicator immediately so the user sees Lobster is working
+        # Download the photo
+        file = await context.bot.get_file(photo.file_id)
+        image_path = IMAGES_DIR / f"{msg_id}.jpg"
+        await file.download_to_drive(image_path)
+        log.info(f"Downloaded photo to: {image_path}")
+
+        caption = message.caption or ""
+
+        msg_data = {
+            "id": msg_id,
+            "source": "telegram",
+            "type": "photo",
+            "chat_id": message.chat_id,
+            "user_id": user.id,
+            "username": user.username,
+            "user_name": user.first_name,
+            "text": caption if caption else "[Photo message]",
+            "image_file": str(image_path),
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+
+        # Capture full reply-to context if this message is a reply
+        reply_ctx = extract_reply_to_context(message)
+        if reply_ctx:
+            msg_data["reply_to"] = reply_ctx
+
+        inbox_file = INBOX_DIR / f"{msg_id}.json"
+        atomic_write_json(inbox_file, msg_data)
+
+        log.info(f"Wrote photo message to inbox: {msg_id}")
+        await message.reply_text("📸 Photo received. Looking at it...")
+
+    except Exception as e:
+        log.error(f"Error handling photo message: {e}", exc_info=True)
+        await message.reply_text("❌ Failed to process photo.")
+
+
+async def _handle_media_group_photo(update: Update, context: ContextTypes.DEFAULT_TYPE, msg_id: str):
+    """Handle a single photo that is part of a media group (album).
+
+    Photos in a media group arrive as separate updates with the same
+    media_group_id. We buffer them here and emit a single grouped inbox
+    message after MEDIA_GROUP_FLUSH_DELAY seconds.
+    """
+    message = update.message
+    user = update.effective_user
+    group_id = message.media_group_id
+
+    try:
+        photo = message.photo[-1]
+        file = await context.bot.get_file(photo.file_id)
+        # Use msg_id (which is unique per photo update) as the filename
+        image_path = IMAGES_DIR / f"{msg_id}.jpg"
+        await file.download_to_drive(image_path)
+        log.info(f"Downloaded media group photo to: {image_path}")
+    except Exception as e:
+        log.error(f"Error downloading media group photo: {e}", exc_info=True)
+        return
+
+    if group_id not in _media_group_buffers:
+        buf = _MediaGroupBuffer(
+            media_group_id=group_id,
+            chat_id=message.chat_id,
+            user_id=user.id,
+            username=user.username,
+            user_name=user.first_name,
+            caption=message.caption or "",
+            reply_ctx=extract_reply_to_context(message),
+        )
+        _media_group_buffers[group_id] = buf
+        # Schedule the flush task
+        loop = asyncio.get_event_loop()
+        buf.flush_task = loop.create_task(_flush_media_group(group_id, message.chat_id))
+
+    buf = _media_group_buffers[group_id]
+    buf.image_paths.append(str(image_path))
+    # Use the first non-empty caption
+    if not buf.caption and message.caption:
+        buf.caption = message.caption
+
+
+async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_TYPE, msg_id: str):
+    """Handle document/file messages: save metadata to inbox (no download)."""
+    user = update.effective_user
+    message = update.message
+    document = message.document
+
     await send_typing_indicator(message.chat_id)
+
+    try:
+        caption = message.caption or ""
+
+        msg_data = {
+            "id": msg_id,
+            "source": "telegram",
+            "type": "document",
+            "chat_id": message.chat_id,
+            "user_id": user.id,
+            "username": user.username,
+            "user_name": user.first_name,
+            "text": caption if caption else f"[Document: {document.file_name or 'unnamed'}]",
+            "document_file_name": document.file_name,
+            "document_mime_type": document.mime_type,
+            "document_file_size": document.file_size,
+            "file_id": document.file_id,
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+
+        # Capture full reply-to context if this message is a reply
+        reply_ctx = extract_reply_to_context(message)
+        if reply_ctx:
+            msg_data["reply_to"] = reply_ctx
+
+        inbox_file = INBOX_DIR / f"{msg_id}.json"
+        atomic_write_json(inbox_file, msg_data)
+
+        log.info(f"Wrote document message to inbox: {msg_id}")
+        await message.reply_text("📎 Document received.")
+
+    except Exception as e:
+        log.error(f"Error handling document message: {e}", exc_info=True)
+        await message.reply_text("❌ Failed to process document.")
+
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle all incoming messages."""
+    message = update.message
+    if not message:
+        return
+
+    user = update.effective_user
+    if not user or user.id not in ALLOWED_USERS:
+        return
+
+    # Wake Claude if hibernating (non-blocking — spawns subprocess if needed)
+    wake_claude_if_hibernating()
 
     # First-message detection: send onboarding to new users
     if not is_user_onboarded(user.id):
@@ -943,9 +789,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     msg_id = f"{int(time.time() * 1000)}_{message.message_id}"
 
-    # Handle voice messages
-    if message.voice:
-        await handle_voice_message(update, context, msg_id)
+    # Handle voice messages and audio file attachments through a unified path.
+    # message.voice is an in-app recording (always .ogg); message.audio is an
+    # uploaded file attachment (any format).  Both have file_id, duration,
+    # file_size, mime_type.  Only Audio has file_name/title/performer.
+    audio_obj = message.voice or message.audio
+    if audio_obj:
+        await handle_audio_message(update, context, msg_id, audio_obj)
         return
 
     # Handle photo messages
@@ -956,11 +806,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Handle document/file messages (including images sent as files)
     if message.document:
         await handle_document_message(update, context, msg_id)
-        return
-
-    # Handle audio file attachments (distinct from voice messages)
-    if message.audio:
-        await handle_audio_message(update, context, msg_id)
         return
 
     text = message.text
@@ -993,38 +838,66 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await message.reply_text("📨 Message received. Processing...")
 
 
-async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE, msg_id: str):
-    """Handle voice messages: download audio and save to inbox with metadata."""
+async def handle_audio_message(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    msg_id: str,
+    audio_obj,
+):
+    """Handle voice messages and audio file attachments through a unified path.
+
+    audio_obj is either a telegram.Voice (in-app recording, always .ogg) or a
+    telegram.Audio (uploaded file attachment, any format).  Both expose:
+      file_id, duration, file_size, mime_type.
+    Only Audio additionally has: file_name, title, performer — accessed via
+    getattr with a fallback so this function works for both types.
+
+    Both message types are routed to pending-transcription/ so the transcription
+    worker (src/transcription/worker.py) picks them up, runs whisper.cpp, and
+    moves the enriched message (with "transcription" and updated "text") to
+    inbox/ automatically.  Agents will only ever see the transcribed message.
+    """
     user = update.effective_user
     message = update.message
-    voice = message.voice
 
-    # Send typing indicator immediately (wake already called in handle_message)
+    # Determine whether this is a voice recording or an uploaded audio file.
+    is_voice = message.voice is not None
+    msg_type = "voice" if is_voice else "audio"
+
     await send_typing_indicator(message.chat_id)
 
     try:
-        # Download voice file from Telegram
-        file = await context.bot.get_file(voice.file_id)
-        audio_filename = f"{msg_id}.ogg"
-        audio_path = AUDIO_DIR / audio_filename
+        # Derive a filename and extension.  Voice recordings are always .ogg;
+        # audio attachments may carry an explicit file_name from the sender.
+        original_filename = getattr(audio_obj, "file_name", None) or f"{msg_id}.ogg"
+        ext = Path(original_filename).suffix or ".ogg"
+        audio_path = AUDIO_DIR / f"{msg_id}{ext}"
 
+        file = await context.bot.get_file(audio_obj.file_id)
         await file.download_to_drive(audio_path)
-        log.info(f"Downloaded voice message to: {audio_path}")
+        log.info(f"Downloaded {msg_type} message to: {audio_path}")
 
-        # Create message file in inbox with voice metadata
+        caption = message.caption or ""
+        default_text = (
+            "[Voice message - pending transcription]"
+            if is_voice
+            else "[Audio file - pending transcription]"
+        )
+
         msg_data = {
             "id": msg_id,
             "source": "telegram",
-            "type": "voice",
+            "type": msg_type,
             "chat_id": message.chat_id,
             "user_id": user.id,
             "username": user.username,
             "user_name": user.first_name,
-            "text": "[Voice message - pending transcription]",
+            "text": caption if caption else default_text,
             "audio_file": str(audio_path),
-            "audio_duration": voice.duration,
-            "audio_mime_type": voice.mime_type or "audio/ogg",
-            "file_id": voice.file_id,
+            "original_filename": original_filename,
+            "audio_duration": audio_obj.duration,
+            "audio_mime_type": audio_obj.mime_type or ("audio/ogg" if is_voice else "audio/mpeg"),
+            "file_id": audio_obj.file_id,
             "timestamp": datetime.utcnow().isoformat(),
         }
 
@@ -1033,76 +906,16 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         if reply_ctx:
             msg_data["reply_to"] = reply_ctx
 
-        # Route to pending-transcription/ instead of inbox/ so the transcription
-        # worker (src/transcription/worker.py) picks it up, runs whisper.cpp, and
-        # moves the enriched message (with "transcription" and updated "text") to
-        # inbox/ automatically.  Agents will only ever see the transcribed message.
         pending_file = PENDING_TRANSCRIPTION_DIR / f"{msg_id}.json"
         atomic_write_json(pending_file, msg_data)
 
-        log.info(f"Wrote voice message to pending-transcription: {msg_id}")
-        await message.reply_text("🎤 Voice message received. Transcribing...")
+        log.info(f"Wrote {msg_type} message to pending-transcription: {msg_id}")
+        ack = "🎤 Voice message received. Transcribing..." if is_voice else "🎵 Audio file received. Transcribing..."
+        await message.reply_text(ack)
 
     except Exception as e:
-        log.error(f"Error handling voice message: {e}")
-        await message.reply_text("❌ Failed to process voice message.")
-
-
-async def handle_audio_message(update: Update, context: ContextTypes.DEFAULT_TYPE, msg_id: str):
-    """Handle audio file messages (message.audio): download and save to pending-transcription.
-
-    Audio attachments differ from voice messages (message.voice): they are full
-    audio files sent as attachments (e.g. .mp3, .ogg forwarded from Signal).
-    Like voice messages they are routed to pending-transcription/ so the
-    transcription worker picks them up before Claude sees them.
-    """
-    user = update.effective_user
-    message = update.message
-    audio = message.audio
-
-    await send_typing_indicator(message.chat_id)
-
-    try:
-        original_filename = audio.file_name or f"{msg_id}.ogg"
-        ext = Path(original_filename).suffix or ".ogg"
-        audio_path = AUDIO_DIR / f"{msg_id}{ext}"
-
-        file = await context.bot.get_file(audio.file_id)
-        await file.download_to_drive(audio_path)
-        log.info(f"Downloaded audio message to: {audio_path}")
-
-        caption = message.caption or ""
-
-        msg_data = {
-            "id": msg_id,
-            "source": "telegram",
-            "type": "audio",
-            "chat_id": message.chat_id,
-            "user_id": user.id,
-            "username": user.username,
-            "user_name": user.first_name,
-            "text": caption if caption else "[Audio file - pending transcription]",
-            "audio_file": str(audio_path),
-            "original_filename": original_filename,
-            "audio_duration": audio.duration,
-            "audio_mime_type": audio.mime_type or "audio/mpeg",
-            "file_id": audio.file_id,
-            "timestamp": datetime.utcnow().isoformat(),
-        }
-
-        reply_ctx = extract_reply_to_context(message)
-        if reply_ctx:
-            msg_data["reply_to"] = reply_ctx
-
-        pending_file = PENDING_TRANSCRIPTION_DIR / f"{msg_id}.json"
-        atomic_write_json(pending_file, msg_data)
-
-        log.info(f"Wrote audio message to pending-transcription: {msg_id}")
-        await message.reply_text("🎵 Audio file received. Transcribing...")
-
-    except Exception as e:
-        log.error(f"Error handling audio message: {e}", exc_info=True)
-        await message.reply_text("❌ Failed to process audio file.")
+        log.error(f"Error handling {msg_type} message: {e}", exc_info=True)
+        await message.reply_text(f"❌ Failed to process {msg_type} message.")
 
 
 async def _flush_media_group(media_group_id: str, chat_id: int) -> None:
@@ -1118,275 +931,168 @@ async def _flush_media_group(media_group_id: str, chat_id: int) -> None:
         return  # Already flushed or never existed
 
     if not buf.image_paths:
-        log.warning(f"Media group {media_group_id} flushed with no images — skipping")
+        log.warning(f"Media group {media_group_id} has no images — skipping")
         return
 
-    # Stable ID based on group id (reproducible, not time-dependent)
-    group_msg_id = f"grp_{media_group_id}"
+    msg_id = f"{int(time.time() * 1000)}_mg_{media_group_id}"
+    caption = buf.caption or ""
 
-    image_count = len(buf.image_paths)
-    caption = buf.caption
-    text_field = caption if caption else f"[{image_count} photos - see image_files]"
-
-    if image_count == 1:
-        # Degenerate group — treat as single photo
-        msg_data = {
-            "id": group_msg_id,
-            "source": "telegram",
-            "type": "photo",
-            "chat_id": buf.chat_id,
-            "user_id": buf.user_id,
-            "username": buf.username,
-            "user_name": buf.user_name,
-            "text": caption if caption else "[Photo - see image_file]",
-            "image_file": buf.image_paths[0],
-            "media_group_id": media_group_id,
-            "timestamp": datetime.utcnow().isoformat(),
-        }
-    else:
-        msg_data = {
-            "id": group_msg_id,
-            "source": "telegram",
-            "type": "photo",
-            "chat_id": buf.chat_id,
-            "user_id": buf.user_id,
-            "username": buf.username,
-            "user_name": buf.user_name,
-            "text": text_field,
-            "image_files": buf.image_paths,
-            "image_count": image_count,
-            "media_group_id": media_group_id,
-            "timestamp": datetime.utcnow().isoformat(),
-        }
+    msg_data = {
+        "id": msg_id,
+        "source": "telegram",
+        "type": "photo",
+        "chat_id": buf.chat_id,
+        "user_id": buf.user_id,
+        "username": buf.username,
+        "user_name": buf.user_name,
+        "text": caption if caption else f"[{len(buf.image_paths)} photos]",
+        "image_files": buf.image_paths,
+        "image_file": buf.image_paths[0],  # backward compat: primary image
+        "timestamp": datetime.utcnow().isoformat(),
+    }
 
     if buf.reply_ctx:
         msg_data["reply_to"] = buf.reply_ctx
 
-    inbox_file = INBOX_DIR / f"{group_msg_id}.json"
+    inbox_file = INBOX_DIR / f"{msg_id}.json"
     atomic_write_json(inbox_file, msg_data)
+    log.info(f"Flushed media group {media_group_id}: {len(buf.image_paths)} photos → {msg_id}")
 
-    log.info(
-        f"Flushed media group {media_group_id} to inbox: "
-        f"{image_count} photo(s), id={group_msg_id}"
-    )
-
-
-async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE, msg_id: str):
-    """Handle photo messages: download image and save to inbox with metadata.
-
-    Single photos are written immediately. Photos that belong to a media group
-    (identified by message.media_group_id) are buffered for MEDIA_GROUP_FLUSH_DELAY
-    seconds, then emitted as a single inbox message with an image_files array.
-    """
-    user = update.effective_user
-    message = update.message
-
-    # Send typing indicator immediately (wake already called in handle_message)
-    await send_typing_indicator(message.chat_id)
-
-    try:
-        # Get the largest photo (last in the array — Telegram orders by resolution)
-        photo = message.photo[-1]
-
-        # Download photo file from Telegram
-        file = await context.bot.get_file(photo.file_id)
-        image_filename = f"{msg_id}.jpg"
-        image_path = IMAGES_DIR / image_filename
-
-        await file.download_to_drive(image_path)
-        log.info(f"Downloaded photo to: {image_path}")
-
-        caption = message.caption or ""
-        reply_ctx = extract_reply_to_context(message)
-        media_group_id = message.media_group_id  # None for single photos
-
-        if media_group_id:
-            # --- Media group path ---
-            # Add this photo to (or create) the buffer for this group
-            if media_group_id not in _media_group_buffers:
-                buf = _MediaGroupBuffer(
-                    media_group_id=media_group_id,
-                    chat_id=message.chat_id,
-                    user_id=user.id,
-                    username=user.username,
-                    user_name=user.first_name,
-                    reply_ctx=reply_ctx,
-                )
-                _media_group_buffers[media_group_id] = buf
-
-                # Schedule a flush after the delay. We cancel and reschedule
-                # on each new photo so the timer resets if photos trickle in.
-                buf.flush_task = asyncio.create_task(
-                    _flush_media_group(media_group_id, message.chat_id)
-                )
-                log.info(f"Started media group buffer for group_id={media_group_id}")
-                # Send a single acknowledgment for the whole group
-                await message.reply_text("📷 Media group received. Processing...")
-            else:
-                buf = _media_group_buffers[media_group_id]
-                # Cancel the existing flush task and reschedule so we wait
-                # for any remaining photos before flushing
-                if buf.flush_task and not buf.flush_task.done():
-                    buf.flush_task.cancel()
-                buf.flush_task = asyncio.create_task(
-                    _flush_media_group(media_group_id, message.chat_id)
-                )
-
-            # Capture caption from whichever photo has it (only one does)
-            if caption and not buf.caption:
-                buf.caption = caption
-            # Capture reply context from first photo
-            if reply_ctx and not buf.reply_ctx:
-                buf.reply_ctx = reply_ctx
-
-            buf.image_paths.append(str(image_path))
-            log.info(
-                f"Added photo to media group {media_group_id}: "
-                f"{len(buf.image_paths)} photo(s) so far"
+    # Send one ack for the whole group
+    if bot_app:
+        try:
+            await bot_app.bot.send_message(
+                chat_id=chat_id,
+                text=f"📸 {len(buf.image_paths)} photos received. Processing...",
             )
-
-        else:
-            # --- Single photo path ---
-            msg_data = {
-                "id": msg_id,
-                "source": "telegram",
-                "type": "photo",
-                "chat_id": message.chat_id,
-                "user_id": user.id,
-                "username": user.username,
-                "user_name": user.first_name,
-                "text": caption if caption else "[Photo - see image_file]",
-                "image_file": str(image_path),
-                "image_width": photo.width,
-                "image_height": photo.height,
-                "file_id": photo.file_id,
-                "timestamp": datetime.utcnow().isoformat(),
-            }
-
-            if reply_ctx:
-                msg_data["reply_to"] = reply_ctx
-
-            inbox_file = INBOX_DIR / f"{msg_id}.json"
-            atomic_write_json(inbox_file, msg_data)
-
-            log.info(f"Wrote photo message to inbox: {msg_id}")
-            await message.reply_text("📷 Image received. Processing...")
-
-    except Exception as e:
-        log.error(f"Error handling photo message: {e}")
-        await message.reply_text("❌ Failed to process image.")
+        except Exception as e:
+            log.warning(f"Failed to send media group ack: {e}")
 
 
-async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_TYPE, msg_id: str):
-    """Handle document messages: download file and save to inbox with metadata."""
-    user = update.effective_user
-    message = update.message
-    document = message.document
+async def send_onboarding(update: Update, user) -> None:
+    """Send onboarding message to a first-time user and mark them as onboarded."""
+    mark_user_onboarded(user.id)
+    onboarding_msg = get_onboarding_message()
+    chunks = split_message(onboarding_msg)
+    for chunk in chunks:
+        await update.message.reply_text(md_to_html(chunk), parse_mode="HTML")
 
-    # Send typing indicator immediately (wake already called in handle_message)
-    await send_typing_indicator(message.chat_id)
 
+async def process_reply(chat_id: int, text: str, reply_markup=None, thread_ts=None) -> None:
+    """Send a reply to the user, splitting long messages if necessary.
+
+    reply_markup: Optional InlineKeyboardMarkup for button support.
+    thread_ts: Ignored (Telegram-only parameter placeholder for Slack parity).
+    """
+    if not bot_app:
+        log.error("Bot app not initialized, cannot send reply")
+        return
+
+    send_items = _prepare_send_items(text)
+    last_idx = len(send_items) - 1
+
+    for idx, (md_chunk, html_chunk) in enumerate(send_items):
+        # Only attach reply_markup to the last chunk
+        chunk_markup = reply_markup if idx == last_idx else None
+        try:
+            await bot_app.bot.send_message(
+                chat_id=chat_id,
+                text=html_chunk,
+                parse_mode="HTML",
+                reply_markup=chunk_markup,
+            )
+        except Exception as e:
+            log.warning(
+                f"HTML send failed for chunk {idx+1}/{len(send_items)} "
+                f"({len(html_chunk)} chars): {e}. Falling back to plain text."
+            )
+            try:
+                plain = md_chunk  # Send raw markdown as plain text fallback
+                await bot_app.bot.send_message(
+                    chat_id=chat_id,
+                    text=plain,
+                    reply_markup=chunk_markup,
+                )
+            except Exception as e2:
+                log.error(f"Plain text fallback also failed: {e2}")
+
+
+async def watch_outbox() -> None:
+    """Watch the outbox directory for reply files and send them to users."""
+    log.info(f"Watching outbox directory: {OUTBOX_DIR}")
+
+    while True:
+        try:
+            # Process all existing files in the outbox
+            for reply_file in sorted(OUTBOX_DIR.glob("*.json")):
+                if str(reply_file) in _processing_files:
+                    continue
+
+                _processing_files.add(str(reply_file))
+                try:
+                    await process_outbox_file(reply_file)
+                except Exception as e:
+                    log.error(f"Error processing outbox file {reply_file}: {e}", exc_info=True)
+                finally:
+                    _processing_files.discard(str(reply_file))
+
+        except Exception as e:
+            log.error(f"Error in watch_outbox loop: {e}", exc_info=True)
+
+        await asyncio.sleep(0.5)
+
+
+async def process_outbox_file(reply_file: Path) -> None:
+    """Process a single outbox reply file."""
     try:
-        # Check if it's an image sent as document
-        mime_type = document.mime_type or ""
-        is_image = mime_type.startswith("image/")
-        original_name = document.file_name or "file"
-        file_size_mb = (document.file_size or 0) / (1024 * 1024)
+        with open(reply_file, 'r') as f:
+            reply_data = json.load(f)
+    except (json.JSONDecodeError, FileNotFoundError) as e:
+        log.warning(f"Could not read outbox file {reply_file}: {e}")
+        reply_file.unlink(missing_ok=True)
+        return
 
-        log.info(f"Receiving document: name={original_name}, mime={mime_type}, size={file_size_mb:.1f}MB, file_id={document.file_id}")
+    chat_id = reply_data.get("chat_id")
+    text = reply_data.get("text", "")
+    buttons = reply_data.get("buttons")
+    thread_ts = reply_data.get("thread_ts")
 
-        if file_size_mb > 20:
-            log.warning(f"File {original_name} is {file_size_mb:.1f}MB — exceeds Telegram Bot API 20MB download limit")
-            await message.reply_text(f"⚠️ File too large ({file_size_mb:.1f}MB). Telegram Bot API limit is 20MB. Please send a smaller file or upload it elsewhere and share a link.")
-            return
+    if not chat_id or not text:
+        log.warning(f"Invalid reply file (missing chat_id or text): {reply_file}")
+        reply_file.unlink(missing_ok=True)
+        return
 
-        # Download file from Telegram
-        file = await context.bot.get_file(document.file_id)
+    # Build InlineKeyboardMarkup if buttons are specified
+    reply_markup = None
+    if buttons:
+        keyboard = []
+        for row in buttons:
+            kb_row = []
+            for btn in row:
+                if isinstance(btn, dict):
+                    kb_row.append(InlineKeyboardButton(
+                        text=btn.get("text", str(btn)),
+                        callback_data=btn.get("callback_data", str(btn))
+                    ))
+                else:
+                    # Simple string button — text is also the callback_data
+                    kb_row.append(InlineKeyboardButton(text=str(btn), callback_data=str(btn)))
+            keyboard.append(kb_row)
+        reply_markup = InlineKeyboardMarkup(keyboard)
 
-        # Determine extension and save location
-        ext = Path(original_name).suffix or (".jpg" if is_image else "")
+    log.info(f"Sending reply to chat_id={chat_id}, length={len(text)}")
+    await process_reply(chat_id, text, reply_markup=reply_markup, thread_ts=thread_ts)
 
-        if is_image:
-            save_path = IMAGES_DIR / f"{msg_id}{ext}"
-        else:
-            # For non-images, save to a general files directory
-            files_dir = _MESSAGES / "files"
-            files_dir.mkdir(parents=True, exist_ok=True)
-            save_path = files_dir / f"{msg_id}{ext}"
-
-        await file.download_to_drive(save_path)
-        log.info(f"Downloaded document to: {save_path}")
-
-        # Get caption if any
-        caption = message.caption or ""
-
-        # Create message file in inbox
-        msg_data = {
-            "id": msg_id,
-            "source": "telegram",
-            "type": "image" if is_image else "document",
-            "chat_id": message.chat_id,
-            "user_id": user.id,
-            "username": user.username,
-            "user_name": user.first_name,
-            "text": caption if caption else f"[Document: {original_name}]",
-            "file_path": str(save_path),
-            "file_name": original_name,
-            "mime_type": mime_type,
-            "file_size": document.file_size,
-            "file_id": document.file_id,
-            "timestamp": datetime.utcnow().isoformat(),
-        }
-
-        if is_image:
-            msg_data["image_file"] = str(save_path)
-
-        # Capture full reply-to context if this message is a reply
-        reply_ctx = extract_reply_to_context(message)
-        if reply_ctx:
-            msg_data["reply_to"] = reply_ctx
-
-        inbox_file = INBOX_DIR / f"{msg_id}.json"
-        atomic_write_json(inbox_file, msg_data)
-
-        log.info(f"Wrote document message to inbox: {msg_id}")
-        emoji = "📷" if is_image else "📎"
-        await message.reply_text(f"{emoji} File received. Processing...")
-
-    except Exception as e:
-        file_name = document.file_name or "unknown"
-        file_size_mb = (document.file_size or 0) / (1024 * 1024)
-        log.error(f"Error handling document: name={file_name}, size={file_size_mb:.1f}MB, error={type(e).__name__}: {e}", exc_info=True)
-        await message.reply_text(f"❌ Failed to process file: {type(e).__name__}. Check logs for details.")
-
-
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    from telegram.error import Conflict
-    if isinstance(context.error, Conflict):
-        log.error(
-            "Telegram Conflict: another bot instance is polling. "
-            "Self-terminating so systemd can sequence restarts cleanly."
-        )
-        import sys
-        sys.exit(1)
-    log.error(f"Error: {context.error}", exc_info=context.error)
+    # Delete the reply file after successful send
+    reply_file.unlink(missing_ok=True)
+    log.info(f"Processed and deleted outbox file: {reply_file.name}")
 
 
 async def run_bot():
+    """Start the bot."""
     global bot_app, main_loop
 
-    log.info("Starting Lobster Bot v2 (file-based)...")
-    log.info(f"Inbox: {INBOX_DIR}")
-    log.info(f"Outbox: {OUTBOX_DIR}")
-
-    # Store the event loop for the outbox watcher
-    main_loop = asyncio.get_running_loop()
-
-    # Set up outbox watcher
-    observer = Observer()
-    observer.schedule(OutboxHandler(), str(OUTBOX_DIR), recursive=False)
-    observer.start()
-    log.info("Watching outbox for replies...")
+    main_loop = asyncio.get_event_loop()
 
     # Create bot application
     bot_app = Application.builder().token(BOT_TOKEN).build()
@@ -1395,10 +1101,9 @@ async def run_bot():
     bot_app.add_handler(CommandHandler("start", start_command))
     bot_app.add_handler(CommandHandler("onboarding", onboarding_command))
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    bot_app.add_handler(MessageHandler(filters.VOICE, handle_message))
+    bot_app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_message))
     bot_app.add_handler(MessageHandler(filters.PHOTO, handle_message))
     bot_app.add_handler(MessageHandler(filters.Document.ALL, handle_message))
-    bot_app.add_handler(MessageHandler(filters.AUDIO, handle_message))
     bot_app.add_handler(CallbackQueryHandler(handle_callback_query))
     bot_app.add_error_handler(error_handler)
 
@@ -1408,32 +1113,41 @@ async def run_bot():
     log.info("Bot is now polling...")
 
     # Process any existing outbox files from before startup
-    await process_existing_outbox()
+    log.info("Processing any pre-existing outbox files...")
+    for reply_file in sorted(OUTBOX_DIR.glob("*.json")):
+        try:
+            await process_outbox_file(reply_file)
+        except Exception as e:
+            log.error(f"Error processing startup outbox file {reply_file}: {e}")
 
-    # Start periodic outbox sweep (catches watchdog misses and retries failures)
-    asyncio.create_task(sweep_outbox())
-    log.info("Outbox sweep task started (every 10s)")
+    # Start the outbox watcher and typing refresh as background tasks
+    outbox_task = asyncio.create_task(watch_outbox())
+    typing_task = asyncio.create_task(typing_refresh_loop())
 
-    # Start typing indicator refresh loop (keeps "typing..." visible during long tasks)
-    asyncio.create_task(typing_refresh_loop())
-    log.info("Typing indicator refresh loop started (every 4s)")
+    # Start polling
+    await bot_app.updater.start_polling(
+        allowed_updates=["message", "callback_query"],
+        drop_pending_updates=False,
+    )
+
+    log.info("Bot started successfully. Waiting for messages...")
 
     try:
-        await bot_app.updater.start_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
         # Keep running until interrupted
-        while True:
-            await asyncio.sleep(1)
+        await asyncio.Event().wait()
     finally:
+        log.info("Shutting down bot...")
+        outbox_task.cancel()
+        typing_task.cancel()
         await bot_app.updater.stop()
         await bot_app.stop()
         await bot_app.shutdown()
-        observer.stop()
-        observer.join()
 
 
-def main():
-    asyncio.run(run_bot())
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle errors in the bot."""
+    log.error(f"Update {update} caused error {context.error}", exc_info=context.error)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(run_bot())
