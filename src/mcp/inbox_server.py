@@ -944,6 +944,58 @@ async def list_tools() -> list[Tool]:
                 "required": ["job_name", "output"],
             },
         ),
+        # Subagent Result Relay
+        Tool(
+            name="write_result",
+            description=(
+                "Write a result from a background subagent back to the main message queue. "
+                "The main thread will pick this up during its normal wait_for_messages loop, "
+                "send the text to the user, and mark it processed. "
+                "Use this instead of send_reply — subagents must not call send_reply directly. "
+                "On failure, call this with status='error' so the main thread can notify the user gracefully."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "Identifier for the task that produced this result (e.g. 'brain-dump-42', 'pr-review-7'). Used for deduplication and logging.",
+                    },
+                    "chat_id": {
+                        "oneOf": [
+                            {"type": "integer"},
+                            {"type": "string"},
+                        ],
+                        "description": "The chat/channel ID to deliver the result to. Pass the same chat_id received in the original message.",
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "The result text to deliver to the user.",
+                    },
+                    "source": {
+                        "type": "string",
+                        "description": "The messaging source to reply via (telegram, slack, etc.). Default: telegram.",
+                        "default": "telegram",
+                    },
+                    "status": {
+                        "type": "string",
+                        "description": "Result status: 'success' (default) or 'error'. Use 'error' when the subagent failed so the main thread can signal failure to the user.",
+                        "default": "success",
+                        "enum": ["success", "error"],
+                    },
+                    "artifacts": {
+                        "type": "array",
+                        "description": "Optional list of file paths produced by the subagent that the main thread may reference or include in its reply.",
+                        "items": {"type": "string"},
+                    },
+                    "thread_ts": {
+                        "type": "string",
+                        "description": "Slack thread timestamp. If provided, the reply will be sent as a thread reply.",
+                    },
+                },
+                "required": ["task_id", "chat_id", "text"],
+            },
+        ),
         # Brain Dump Triage Tools
         Tool(
             name="triage_brain_dump",
@@ -1569,6 +1621,8 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
         return await handle_check_task_outputs(arguments)
     elif name == "write_task_output":
         return await handle_write_task_output(arguments)
+    elif name == "write_result":
+        return await handle_write_result(arguments)
     # Brain Dump Triage Tools
     elif name == "triage_brain_dump":
         return await handle_triage_brain_dump(arguments)
@@ -3342,6 +3396,69 @@ async def handle_write_task_output(args: dict) -> list[TextContent]:
         json.dump(output_data, f, indent=2)
 
     return [TextContent(type="text", text=f"Output recorded for job '{job_name}'")]
+
+
+# =============================================================================
+# Subagent Result Relay Handler
+# =============================================================================
+
+async def handle_write_result(args: dict) -> list[TextContent]:
+    """Write a subagent result into the inbox so the main thread can relay it to the user.
+
+    The message written has type 'subagent_result' (or 'subagent_error' on failure).
+    The main thread's wait_for_messages / check_inbox loop will pick it up, call
+    send_reply to deliver the text to the user, and mark it processed — keeping the
+    main thread as the single point of user communication.
+    """
+    task_id = args.get("task_id", "").strip()
+    chat_id = args.get("chat_id")
+    text = args.get("text", "").strip()
+    source = args.get("source", "telegram").strip() or "telegram"
+    status = args.get("status", "success")
+    artifacts = args.get("artifacts") or []
+    thread_ts = args.get("thread_ts")
+
+    if not task_id:
+        return [TextContent(type="text", text="Error: task_id is required")]
+    if chat_id is None:
+        return [TextContent(type="text", text="Error: chat_id is required")]
+    if not text:
+        return [TextContent(type="text", text="Error: text is required")]
+
+    if status not in ("success", "error"):
+        status = "success"
+
+    msg_type = "subagent_result" if status == "success" else "subagent_error"
+
+    now = datetime.now(timezone.utc)
+    # Use millisecond timestamp + task_id fragment for a unique, sortable filename
+    ts_ms = int(now.timestamp() * 1000)
+    safe_task_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in task_id)[:40]
+    message_id = f"{ts_ms}_{safe_task_id}"
+
+    message = {
+        "id": message_id,
+        "type": msg_type,
+        "source": source,
+        "chat_id": chat_id,
+        "text": text,
+        "task_id": task_id,
+        "status": status,
+        "timestamp": now.isoformat(),
+    }
+    if artifacts:
+        message["artifacts"] = artifacts
+    if thread_ts:
+        message["thread_ts"] = thread_ts
+
+    inbox_file = INBOX_DIR / f"{message_id}.json"
+    atomic_write_json(inbox_file, message)
+
+    log.info(f"Subagent result queued in inbox: task_id={task_id} status={status} chat_id={chat_id}")
+    return [TextContent(
+        type="text",
+        text=f"Result queued in inbox as {msg_type} (id={message_id}). The main thread will deliver it to chat {chat_id}.",
+    )]
 
 
 # =============================================================================
