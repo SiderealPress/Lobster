@@ -262,8 +262,8 @@ async def transcribe_pending_file(pending_file: Path) -> None:
         log.error(f"Cannot read {pending_file}: {e}")
         return  # leave file in place — it may still be mid-write
 
-    # Validate it's a voice message
-    if msg_data.get("type") != "voice":
+    # Validate it's a voice or audio message
+    if msg_data.get("type") not in ("voice", "audio"):
         move_to_dead_letter(
             pending_file, msg_data,
             f"Unexpected type in pending-transcription: {msg_data.get('type')!r}"
