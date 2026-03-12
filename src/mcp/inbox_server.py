@@ -1883,6 +1883,11 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
         elif msg_type == "document":
             file_name = msg.get("file_name", "file")
             output += f"**[{source}]** 📎 from **{user}** ({file_name})\n"
+        elif msg_type in ("subagent_result", "subagent_error"):
+            status_icon = "✅" if msg_type == "subagent_result" else "❌"
+            label = "RESULT" if msg_type == "subagent_result" else "ERROR"
+            task_id = msg.get("task_id", "?")
+            output += f"{status_icon} **[SUBAGENT {label}]** for task `{task_id}`\n"
         else:
             output += f"**[{source}]** from **{user}**\n"
         output += f"Chat ID: `{chat_id}` | Message ID: `{msg_id}`\n"
@@ -1892,12 +1897,12 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
             image_files = msg.get("image_files")
             image_file = msg.get("image_file")
             if image_files:
-                output += f"**Image files** (read each to view):\n"
+                output += f"**Image files**:\n"
                 for img_path in image_files:
                     output += f"  - `{img_path}`\n"
                 output += "\n"
             elif image_file:
-                output += f"**Image file** (read to view): `{image_file}`\n\n"
+                output += f"**Image file**: `{image_file}`\n\n"
         # Surface file path for document messages so Claude can read them
         if msg_type == "document":
             doc_file_path = msg.get("file_path")
