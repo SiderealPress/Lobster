@@ -124,7 +124,7 @@ cmd_status() {
 
     if [[ -f "$MAINTENANCE_FLAG" ]]; then
         echo ""
-        echo -e "${YELLOW}⚠ MAINTENANCE MODE - health check auto-restart disabled${NC}"
+        echo -e "${YELLOW}🚧 MAINTENANCE MODE - health check auto-restart disabled${NC}"
     fi
 
     echo ""
