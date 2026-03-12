@@ -149,8 +149,8 @@ BLOCKED_FILES=(
     'service-account*.json'
 )
 
-# File extensions to skip (binary, media, etc.)
-SKIP_EXTENSIONS='png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot|mp3|mp4|zip|tar|gz|bz2|xz|pdf|pyc|whl|egg|so|dylib|dll'
+# File extensions to skip (binary, media, generated lock files, etc.)
+SKIP_EXTENSIONS='png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot|mp3|mp4|zip|tar|gz|bz2|xz|pdf|pyc|whl|egg|so|dylib|dll|lock'
 
 # Known false-positive email patterns to ignore
 EMAIL_ALLOWLIST='noreply@anthropic\.com|noreply@github\.com|example\.com|example\.org|test\.com|localhost'

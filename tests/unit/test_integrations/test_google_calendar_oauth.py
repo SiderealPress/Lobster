@@ -53,7 +53,7 @@ from integrations.google_calendar.oauth import (
 # ---------------------------------------------------------------------------
 
 _FAKE_CLIENT_ID = "fake-client-id.apps.googleusercontent.com"
-_FAKE_CLIENT_SECRET = "fake-client-secret"
+_FAKE_CLIENT_SECRET = "<REDACTED_SECRET>"
 _FAKE_REDIRECT_URI = "https://myownlobster.ai/auth/google/callback"
 
 _FAKE_CREDENTIALS = GoogleOAuthCredentials(
@@ -65,8 +65,8 @@ _FAKE_CREDENTIALS = GoogleOAuthCredentials(
 
 _FAKE_STATE = "random-csrf-state-abc123"
 _FAKE_CODE = "4/fake-auth-code-from-google"
-_FAKE_ACCESS_TOKEN = "ya29.fake-access-token"
-_FAKE_REFRESH_TOKEN = "1//fake-refresh-token"
+_FAKE_ACCESS_TOKEN = "<REDACTED_SECRET>"
+_FAKE_REFRESH_TOKEN = "<REDACTED_SECRET>"
 
 _FUTURE_EXPIRES_AT = datetime.now(tz=timezone.utc) + timedelta(hours=1)
 _EXPIRED_EXPIRES_AT = datetime.now(tz=timezone.utc) - timedelta(minutes=10)
