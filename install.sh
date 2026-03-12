@@ -1389,7 +1389,25 @@ fi
 
 step "GitHub Integration (Optional)..."
 
-if [ "$NON_INTERACTIVE" = true ]; then
+# Check if GitHub MCP is already configured
+GITHUB_MCP_CONFIGURED=false
+if command -v claude &>/dev/null && claude mcp list 2>/dev/null | grep -q "github"; then
+    GITHUB_MCP_CONFIGURED=true
+    success "GitHub MCP server already configured"
+fi
+
+if [ "$GITHUB_MCP_CONFIGURED" = true ]; then
+    : # Already configured, skip
+elif [ -n "${GITHUB_PAT:-}" ]; then
+    # PAT available from config.env or environment — auto-configure
+    info "Using GITHUB_PAT from environment to set up GitHub MCP server..."
+    if command -v claude &>/dev/null; then
+        claude mcp add-json github "{\"type\":\"http\",\"url\":\"https://api.githubcopilot.com/mcp\",\"headers\":{\"Authorization\":\"Bearer $GITHUB_PAT\"}}" --scope user 2>/dev/null
+        success "GitHub MCP server configured"
+    else
+        warn "Claude Code not found. Configure GitHub MCP manually after install."
+    fi
+elif [ "$NON_INTERACTIVE" = true ]; then
     info "Skipping GitHub integration (non-interactive mode)."
 elif true; then
 
