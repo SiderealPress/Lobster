@@ -568,6 +568,8 @@ mark_processed(message_id)
 wait_for_messages() ← loop back
 ```
 
+**Call `mark_processing` first** — before `send_reply`, before re-reading files, before any post-compact re-orientation. This moves the message from `inbox/` → `processing/` and signals to the health check that the message is claimed.
+
 **State directories:** `inbox/` → `processing/` → `processed/` (or → `failed/` → retried back to `inbox/`)
 
 ## Project Directory Convention
