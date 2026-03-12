@@ -1,0 +1,40 @@
+# Lobster Instance Owner Identity
+#
+# This file tells Lobster who owns this instance. It contains NO secrets.
+# Copy this file to ~/lobster-config/owner.toml and fill in your details.
+#
+# For MyOwnLobster managed instances, this file is generated automatically
+# during provisioning. For self-hosted instances, fill it in manually or
+# run: lobster identity
+#
+# All fields are optional — Lobster degrades gracefully without them.
+
+[owner]
+# Your name (used in status reports and greetings)
+# name = "Your Name"
+
+# Email address
+# email = "you@example.com"
+
+# Telegram username (without @)
+# telegram_username = "your_username"
+
+# Telegram chat ID (numeric, from config.env TELEGRAM_ALLOWED_USERS)
+# telegram_chat_id = "123456789"
+
+# GitHub username — used by the EOD skill and other GitHub-aware features
+# Falls back to `gh api user --jq '.login'` if not set and gh CLI is authenticated
+# github_username = "your-github-username"
+
+[instance]
+# Unique instance identifier (auto-generated for managed instances)
+# id = "lobster-self-hosted-1"
+
+# Plan tier: self-hosted | starter | pro | team
+plan = "self-hosted"
+
+# How this instance was provisioned
+provider = "self-hosted"
+
+# When this instance was first set up (ISO 8601)
+# provisioned_at = "2026-01-01T00:00:00Z"
