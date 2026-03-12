@@ -1,0 +1,19 @@
+[registration_message]
+type = "string"
+description = "Message sent to unregistered users in enabled groups. Use {group_name} as placeholder."
+default = "Hi! To use Lobster in this group, please send /register to this bot directly."
+
+[silent_drop_unknown_groups]
+type = "boolean"
+description = "If true, messages from groups not in the whitelist are silently dropped. If false, Lobster responds with an 'unauthorized' message."
+default = true
+
+[group_source_name]
+type = "string"
+description = "The source name to use for group messages in the inbox."
+default = "lobster-group"
+
+[enable_registration_flow]
+type = "boolean"
+description = "If true, users not on the whitelist receive a DM with registration instructions. If false, they are silently dropped."
+default = true

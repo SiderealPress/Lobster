@@ -1,0 +1,38 @@
+[skill]
+name = "image-generation"
+version = "2.0.0"
+description = "Generate images from text prompts using Google AI Studio (Nano Banana 2 or Imagen 4) — respond to image requests via Telegram"
+author = "Lobster"
+category = "tool"
+
+[activation]
+mode = "triggered"
+triggers = ["/image", "/imagine", "/generate", "/img"]
+context_patterns = [
+    "when user asks to generate an image",
+    "when user asks to create an image",
+    "when user asks to draw something",
+    "when user asks to make a picture",
+    "when user asks for an image of",
+]
+
+[layering]
+priority = 50
+merge_strategy = "append"
+
+[provides]
+mcp_tools = ["generate_image", "send_image"]
+bot_commands = ["/image", "/imagine", "/img"]
+
+[compatibility]
+enhances = []
+conflicts = []
+
+[dependencies]
+pip = ["httpx>=0.24", "mcp>=1.0"]
+npm = []
+system = []
+api_keys = ["GOOGLE_AI_STUDIO_KEY"]
+
+[dependencies.runtime]
+python = ">=3.11"

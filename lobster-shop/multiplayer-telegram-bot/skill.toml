@@ -1,0 +1,38 @@
+[skill]
+name = "multiplayer-telegram-bot"
+version = "0.1.0"
+description = "Group messaging support — add Lobster to Telegram groups with per-group whitelists, user registration, and isolated group inboxes"
+author = "Lobster"
+category = "integration"
+
+[activation]
+mode = "triggered"
+triggers = ["/enable-group-bot", "/group-bot", "/whitelist"]
+context_patterns = [
+    "when user wants to add Lobster to a group",
+    "when user asks about group messaging",
+    "when user wants to whitelist someone for group access",
+    "when user wants to configure group bot settings",
+    "when user asks who has group access",
+]
+
+[layering]
+priority = 55
+merge_strategy = "append"
+
+[provides]
+mcp_tools = []
+bot_commands = ["/enable-group-bot", "/group-bot", "/whitelist"]
+
+[compatibility]
+enhances = []
+conflicts = []
+
+[dependencies]
+pip = []
+npm = []
+system = []
+api_keys = []
+
+[dependencies.runtime]
+python = ">=3.11"

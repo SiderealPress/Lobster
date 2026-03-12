@@ -1,0 +1,6 @@
+send_time = "08:00"
+timezone = "America/Los_Angeles"
+include_calendar = true
+include_tasks = true
+include_memory = true
+tone = "concise"

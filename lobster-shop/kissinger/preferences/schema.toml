@@ -1,0 +1,14 @@
+[stale_contact_days]
+type = "integer"
+description = "Days without interaction before a contact is considered stale (used in /kissinger stale)"
+default = 30
+
+[briefing_stale_days]
+type = "integer"
+description = "Days threshold for stale contacts included in morning briefing"
+default = 14
+
+[db_path]
+type = "string"
+description = "Path to the Kissinger SQLite database (supports ~ expansion). Override with KISSINGER_DB env var."
+default = "~/.kissinger/graph.db"

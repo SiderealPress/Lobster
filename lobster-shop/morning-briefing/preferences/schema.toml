@@ -1,0 +1,31 @@
+[send_time]
+type = "string"
+description = "Time to send the daily briefing (HH:MM, 24-hour). Informational — update the scheduled job separately to change actual delivery time."
+required = false
+pattern = "^([01]\\d|2[0-3]):[0-5]\\d$"
+
+[timezone]
+type = "string"
+description = "IANA timezone name for displaying all times in the briefing."
+required = false
+
+[include_calendar]
+type = "boolean"
+description = "Include the Today's Calendar section in the briefing."
+required = false
+
+[include_tasks]
+type = "boolean"
+description = "Include the Open Work section (pending/in-progress tasks) in the briefing."
+required = false
+
+[include_memory]
+type = "boolean"
+description = "Include the Yesterday's Activity section (from memory + conversation history) in the briefing."
+required = false
+
+[tone]
+type = "string"
+description = "Briefing tone. 'concise' = tight bullet points (default). 'detailed' = prose with context. 'casual' = warm, first-person voice."
+required = false
+options = ["concise", "detailed", "casual"]

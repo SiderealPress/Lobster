@@ -1,0 +1,36 @@
+[skill]
+name = "eod"
+version = "2.0.0"
+description = "End-of-day dispatch — pulls 18h of GitHub and inbox activity into a structured summary, with optional voice note commentary on top"
+author = "Lobster"
+category = "workflow"
+
+[activation]
+mode = "triggered"
+triggers = ["/eod", "/end-of-day"]
+context_patterns = [
+    "when user says /eod",
+    "when user wants an end of day summary",
+    "when user sends a voice note after /eod",
+]
+
+[layering]
+priority = 60
+merge_strategy = "append"
+
+[provides]
+mcp_tools = []
+bot_commands = ["/eod", "/end-of-day"]
+
+[compatibility]
+enhances = ["morning-briefing"]
+conflicts = []
+
+[dependencies]
+pip = []
+npm = []
+system = ["gh"]
+api_keys = []
+
+[dependencies.runtime]
+python = ">=3.11"

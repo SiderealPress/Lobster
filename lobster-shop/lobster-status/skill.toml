@@ -1,0 +1,40 @@
+[skill]
+name = "lobster-status"
+version = "1.0.0"
+description = "Telegram /status command and system health reporting — surfaces uptime, message throughput, resource usage, agent activity, and health check state"
+author = "Lobster"
+category = "tool"
+
+[activation]
+mode = "triggered"
+triggers = ["/status", "/health", "/stats"]
+context_patterns = [
+    "when user asks how Lobster is doing",
+    "when user asks if Lobster is alive or running",
+    "when user asks about system health or uptime",
+    "when user asks about message throughput or activity",
+    "when user asks about resource usage or disk space",
+    "when user asks about cost or spending",
+    "when user asks what Lobster has been doing",
+]
+
+[layering]
+priority = 50
+merge_strategy = "append"
+
+[provides]
+mcp_tools = []
+bot_commands = ["/status", "/health", "/stats"]
+
+[compatibility]
+enhances = []
+conflicts = []
+
+[dependencies]
+pip = ["psutil"]
+npm = []
+system = []
+api_keys = []
+
+[dependencies.runtime]
+python = ">=3.11"

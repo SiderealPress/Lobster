@@ -1,0 +1,3 @@
+stale_contact_days = 30
+briefing_stale_days = 14
+db_path = "~/.kissinger/graph.db"

@@ -1,0 +1,10 @@
+# Image Generation Skill — Default Preferences
+
+# Provider: "nano-banana-2" (Gemini 3.1 Flash Image) or "imagen-4" (Imagen 4)
+provider = "nano-banana-2"
+
+# Default aspect ratio (imagen-4 only): "1:1", "3:4", "4:3", "9:16", "16:9"
+aspect_ratio = "1:1"
+
+# Save generated images locally (in ~/messages/images/generated/)
+save_locally = true

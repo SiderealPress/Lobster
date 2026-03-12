@@ -2,7 +2,7 @@
   "name": "camofox-browser",
   "version": "1.0.0",
   "description": "Browse the real web with anti-detection — search Google, Amazon, LinkedIn, and more without getting blocked",
-  "author": "Jo Inc (packaged for Lobster by Drew)",
+  "author": "Jo Inc (packaged for Lobster)",
   "status": "available",
   "source": {
     "github": "https://github.com/jo-inc/camofox-browser",

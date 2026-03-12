@@ -1,0 +1,7 @@
+Metadata-Version: 2.4
+Name: multiplayer-telegram-bot
+Version: 0.1.0
+Summary: Lobster skill for group Telegram messaging with per-group whitelists
+Requires-Python: >=3.11
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0; extra == "dev"
