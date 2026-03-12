@@ -24,7 +24,7 @@ cat > "$MSG_FILE" << EOF
   "source": "system",
   "chat_id": "system",
   "type": "system",
-  "text": "System upgrade: dependencies may have changed after git pull. Run: cd ~/lobster && .venv/bin/uv pip install -e . — or for a full upgrade: .venv/bin/uv pip install -e '.[slack]'",
+  "text": "System upgrade: dependencies may have changed after git pull. Run: cd ~/lobster && uv pip install -e . — or for a full upgrade: uv pip install -e '.[slack]'",
   "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%S.%6N)"
 }
 EOF
