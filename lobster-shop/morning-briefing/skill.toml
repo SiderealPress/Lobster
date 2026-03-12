@@ -1,0 +1,39 @@
+[skill]
+name = "morning-briefing"
+version = "1.0.0"
+description = "Polsia-style structured daily briefing — pulls from calendar, tasks, memory, priorities, and conversation history into one focused morning digest"
+author = "Lobster"
+category = "productivity"
+
+[activation]
+mode = "triggered"
+triggers = ["/briefing", "/morning", "/digest", "/standup"]
+context_patterns = [
+    "when user asks for a morning briefing",
+    "when user asks what they should focus on today",
+    "when user asks for a daily digest",
+    "when user asks for a standup summary",
+    "when user asks what happened yesterday",
+    "when user wants a summary of open tasks and priorities",
+]
+
+[layering]
+priority = 60
+merge_strategy = "append"
+
+[provides]
+mcp_tools = []
+bot_commands = ["/briefing", "/morning", "/digest", "/standup"]
+
+[compatibility]
+enhances = ["gcal-links", "lobster-status"]
+conflicts = []
+
+[dependencies]
+pip = []
+npm = []
+system = []
+api_keys = []
+
+[dependencies.runtime]
+python = ">=3.11"

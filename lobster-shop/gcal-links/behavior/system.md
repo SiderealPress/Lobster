@@ -8,10 +8,13 @@ Run this check (takes < 1 second, no network call):
 
 ```python
 import sys
-sys.path.insert(0, "/home/admin/lobster/src")
+import os
+sys.path.insert(0, os.path.expanduser("~/lobster/src"))
 from integrations.google_calendar.token_store import load_token
+from mcp.user_model.owner import read_owner
 
-OWNER_USER_ID = "1234567890"  # Replace with owner's Telegram chat_id
+owner = read_owner()
+OWNER_USER_ID = owner.get("owner", {}).get("telegram_chat_id", "")
 token = load_token(OWNER_USER_ID)
 is_authenticated = token is not None
 ```
@@ -53,11 +56,12 @@ Subagent code pattern:
 
 ```python
 import sys
-sys.path.insert(0, "/home/admin/lobster/src")
+import os
+sys.path.insert(0, os.path.expanduser("~/lobster/src"))
 from integrations.google_calendar.client import get_upcoming_events
 from utils.calendar import gcal_add_link_md
 
-events = get_upcoming_events(user_id="1234567890", days=7)
+events = get_upcoming_events(user_id=OWNER_USER_ID, days=7)
 if not events:
     reply = "No upcoming events in the next 7 days."
 else:
@@ -75,13 +79,14 @@ Delegate to a background subagent. After creating via API, always include a deep
 
 ```python
 import sys
-sys.path.insert(0, "/home/admin/lobster/src")
+import os
+sys.path.insert(0, os.path.expanduser("~/lobster/src"))
 from integrations.google_calendar.client import create_event
 from utils.calendar import gcal_add_link_md
 from datetime import datetime, timezone
 
 event = create_event(
-    user_id="1234567890",
+    user_id=OWNER_USER_ID,
     title="Meeting with Sarah",
     start=datetime(2026, 3, 7, 14, 0, tzinfo=timezone.utc),
     end=datetime(2026, 3, 7, 15, 0, tzinfo=timezone.utc),
@@ -109,7 +114,8 @@ Respond immediately on the main thread — no subagent needed:
 
 ```python
 import sys, secrets
-sys.path.insert(0, "/home/admin/lobster/src")
+import os
+sys.path.insert(0, os.path.expanduser("~/lobster/src"))
 from integrations.google_calendar.config import is_enabled
 from integrations.google_calendar.oauth import generate_auth_url
 
