@@ -108,9 +108,25 @@ gh project item-edit --project "Main Board" --owner <owner> --id <item-id> --fie
 - When PR is merged → Set status to "Done"
 - If blocked → Set status to "Blocked" and add comment explaining why
 
-## GitHub MCP Usage
+## Tool Preference: CLI First
 
-**Always prefer MCP tools over CLI when available:**
+Lobster operates on a **CLI-first** principle: always prefer an installed CLI over raw API calls or MCP HTTP tools. This applies to all external services.
+
+**For GitHub specifically**, prefer `gh` CLI for most operations. Use MCP tools when the `gh` CLI cannot accomplish the task (e.g., some structured data reads where MCP is more convenient).
+
+**Common GitHub tasks — prefer `gh` CLI:**
+
+```bash
+gh issue view <number> --repo <owner/repo>
+gh issue edit <number> --repo <owner/repo> --add-assignee @me
+gh issue comment <number> --repo <owner/repo> --body "..."
+gh pr create --repo <owner/repo> --title "..." --body "..."
+gh pr view <number> --repo <owner/repo>
+gh pr merge <number> --repo <owner/repo>
+gh api repos/<owner>/<repo>/issues/<number>   # raw API if gh subcommand insufficient
+```
+
+**MCP tools as fallback** (when `gh` CLI cannot accomplish the task):
 
 | Task | MCP Tool |
 |------|----------|
@@ -126,9 +142,11 @@ gh project item-edit --project "Main Board" --owner <owner> --id <item-id> --fie
 | Get PR details | `mcp__github__pull_request_read` |
 | Search issues | `mcp__github__search_issues` |
 
-**Use `gh` CLI via Bash only for:**
-- Project board status updates (MCP doesn't support this yet)
-- Operations not available in MCP
+**Always use `gh` CLI for:**
+- Project board status updates (`gh project item-edit ...`)
+- Any operation where `gh` has a first-class subcommand
+
+**Rationale:** CLIs handle auth automatically, produce better error messages, and are more scriptable than raw API calls or MCP HTTP tools.
 
 ## Quality Standards
 
