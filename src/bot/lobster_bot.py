@@ -604,6 +604,474 @@ def atomic_write_json(path: Path, data: dict, indent: int = 2) -> None:
         raise
 
 
+def extract_reply_to_context(message) -> dict | None:
+    """Extract reply-to context from a Telegram message, if it's a reply.
+
+    Returns a dict with the original message's text/caption and sender info,
+    or None if this message is not a reply to another message.
+    """
+    if not message.reply_to_message:
+        return None
+
+    orig = message.reply_to_message
+    orig_text = orig.text or orig.caption or ""
+    orig_user = orig.from_user
+    return {
+        "text": orig_text,
+        "user_id": orig_user.id if orig_user else None,
+        "username": orig_user.username if orig_user else None,
+        "user_name": orig_user.first_name if orig_user else None,
+        "message_id": orig.message_id,
+    }
+
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /start command."""
+    user = update.effective_user
+    if user.id not in ALLOWED_USERS:
+        await update.message.reply_text("Sorry, you're not authorized to use this bot.")
+        return
+    await update.message.reply_text(
+        "Lobster is running! Send me a message and I'll process it."
+    )
+
+
+async def onboarding_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /onboarding command - show onboarding message."""
+    user = update.effective_user
+    if user.id not in ALLOWED_USERS:
+        await update.message.reply_text("Sorry, you're not authorized to use this bot.")
+        return
+    onboarding_msg = get_onboarding_message()
+    chunks = split_message(onboarding_msg)
+    for chunk in chunks:
+        await update.message.reply_text(md_to_html(chunk), parse_mode="HTML")
+
+
+async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle inline keyboard button presses."""
+    query = update.callback_query
+    user = query.from_user
+
+    if user.id not in ALLOWED_USERS:
+        await query.answer("Not authorized")
+        return
+
+    # Acknowledge the button press immediately (removes the loading indicator)
+    await query.answer()
+
+    # Wake Claude if hibernating
+    wake_claude_if_hibernating()
+
+    # Create a message file for the callback
+    msg_id = f"{int(time.time() * 1000)}_{query.id}"
+
+    msg_data = {
+        "id": msg_id,
+        "source": "telegram",
+        "type": "callback",
+        "chat_id": query.message.chat_id,
+        "user_id": user.id,
+        "username": user.username,
+        "user_name": user.first_name,
+        "text": f"[Button pressed: {query.data}]",
+        "callback_data": query.data,
+        "original_message_text": query.message.text or query.message.caption or "",
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+    inbox_file = INBOX_DIR / f"{msg_id}.json"
+    atomic_write_json(inbox_file, msg_data)
+    log.info(f"Wrote callback message to inbox: {msg_id}")
+
+
+async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE, msg_id: str):
+    """Handle photo messages: download and save to inbox with metadata."""
+    user = update.effective_user
+    message = update.message
+
+    await send_typing_indicator(message.chat_id)
+
+    # Check if this photo is part of a media group
+    if message.media_group_id:
+        await _handle_media_group_photo(update, context, msg_id)
+        return
+
+    try:
+        # Get the largest photo size
+        photo = message.photo[-1]
+
+        # Download the photo
+        file = await context.bot.get_file(photo.file_id)
+        image_path = IMAGES_DIR / f"{msg_id}.jpg"
+        await file.download_to_drive(image_path)
+        log.info(f"Downloaded photo to: {image_path}")
+
+        caption = message.caption or ""
+
+        msg_data = {
+            "id": msg_id,
+            "source": "telegram",
+            "type": "photo",
+            "chat_id": message.chat_id,
+            "user_id": user.id,
+            "username": user.username,
+            "user_name": user.first_name,
+            "text": caption if caption else "[Photo message]",
+            "image_file": str(image_path),
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+
+        # Capture full reply-to context if this message is a reply
+        reply_ctx = extract_reply_to_context(message)
+        if reply_ctx:
+            msg_data["reply_to"] = reply_ctx
+
+        inbox_file = INBOX_DIR / f"{msg_id}.json"
+        atomic_write_json(inbox_file, msg_data)
+
+        log.info(f"Wrote photo message to inbox: {msg_id}")
+        await message.reply_text("📸 Photo received. Looking at it...")
+
+    except Exception as e:
+        log.error(f"Error handling photo message: {e}", exc_info=True)
+        await message.reply_text("❌ Failed to process photo.")
+
+
+async def _handle_media_group_photo(update: Update, context: ContextTypes.DEFAULT_TYPE, msg_id: str):
+    """Handle a single photo that is part of a media group (album).
+
+    Photos in a media group arrive as separate updates with the same
+    media_group_id. We buffer them here and emit a single grouped inbox
+    message after MEDIA_GROUP_FLUSH_DELAY seconds.
+    """
+    message = update.message
+    user = update.effective_user
+    group_id = message.media_group_id
+
+    try:
+        photo = message.photo[-1]
+        file = await context.bot.get_file(photo.file_id)
+        # Use msg_id (which is unique per photo update) as the filename
+        image_path = IMAGES_DIR / f"{msg_id}.jpg"
+        await file.download_to_drive(image_path)
+        log.info(f"Downloaded media group photo to: {image_path}")
+    except Exception as e:
+        log.error(f"Error downloading media group photo: {e}", exc_info=True)
+        return
+
+    if group_id not in _media_group_buffers:
+        buf = _MediaGroupBuffer(
+            media_group_id=group_id,
+            chat_id=message.chat_id,
+            user_id=user.id,
+            username=user.username,
+            user_name=user.first_name,
+            caption=message.caption or "",
+            reply_ctx=extract_reply_to_context(message),
+        )
+        _media_group_buffers[group_id] = buf
+        # Schedule the flush task
+        loop = asyncio.get_event_loop()
+        buf.flush_task = loop.create_task(_flush_media_group(group_id, message.chat_id))
+
+    buf = _media_group_buffers[group_id]
+    buf.image_paths.append(str(image_path))
+    # Use the first non-empty caption
+    if not buf.caption and message.caption:
+        buf.caption = message.caption
+
+
+async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_TYPE, msg_id: str):
+    """Handle document/file messages: save metadata to inbox (no download)."""
+    user = update.effective_user
+    message = update.message
+    document = message.document
+
+    await send_typing_indicator(message.chat_id)
+
+    try:
+        caption = message.caption or ""
+
+        msg_data = {
+            "id": msg_id,
+            "source": "telegram",
+            "type": "document",
+            "chat_id": message.chat_id,
+            "user_id": user.id,
+            "username": user.username,
+            "user_name": user.first_name,
+            "text": caption if caption else f"[Document: {document.file_name or 'unnamed'}]",
+            "document_file_name": document.file_name,
+            "document_mime_type": document.mime_type,
+            "document_file_size": document.file_size,
+            "file_id": document.file_id,
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+
+        # Capture full reply-to context if this message is a reply
+        reply_ctx = extract_reply_to_context(message)
+        if reply_ctx:
+            msg_data["reply_to"] = reply_ctx
+
+        inbox_file = INBOX_DIR / f"{msg_id}.json"
+        atomic_write_json(inbox_file, msg_data)
+
+        log.info(f"Wrote document message to inbox: {msg_id}")
+        await message.reply_text("📎 Document received.")
+
+    except Exception as e:
+        log.error(f"Error handling document message: {e}", exc_info=True)
+        await message.reply_text("❌ Failed to process document.")
+
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle all incoming messages."""
+    message = update.message
+    if not message:
+        return
+
+    user = update.effective_user
+    if not user or user.id not in ALLOWED_USERS:
+        return
+
+    # Wake Claude if hibernating (non-blocking — spawns subprocess if needed)
+    wake_claude_if_hibernating()
+
+    # First-message detection: send onboarding to new users
+    if not is_user_onboarded(user.id):
+        await send_onboarding(update, user)
+
+    msg_id = f"{int(time.time() * 1000)}_{message.message_id}"
+
+    # Handle voice messages and audio file attachments through a unified path.
+    # message.voice is an in-app recording (always .ogg); message.audio is an
+    # uploaded file attachment (any format).  Both have file_id, duration,
+    # file_size, mime_type.  Only Audio has file_name/title/performer.
+    audio_obj = message.voice or message.audio
+    if audio_obj:
+        await handle_audio_message(update, context, msg_id, audio_obj)
+        return
+
+    # Handle photo messages
+    if message.photo:
+        await handle_photo_message(update, context, msg_id)
+        return
+
+    # Handle document/file messages (including images sent as files)
+    if message.document:
+        await handle_document_message(update, context, msg_id)
+        return
+
+    text = message.text
+    if not text:
+        return
+
+    # Create message file in inbox
+    msg_data = {
+        "id": msg_id,
+        "source": "telegram",
+        "chat_id": message.chat_id,
+        "user_id": user.id,
+        "username": user.username,
+        "user_name": user.first_name,
+        "text": text,
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+    # Capture full reply-to context if this message is a reply
+    reply_ctx = extract_reply_to_context(message)
+    if reply_ctx:
+        msg_data["reply_to"] = reply_ctx
+
+    inbox_file = INBOX_DIR / f"{msg_id}.json"
+    atomic_write_json(inbox_file, msg_data)
+
+    log.info(f"Wrote message to inbox: {msg_id}")
+
+    # Send acknowledgment
+    await message.reply_text("📨 Message received. Processing...")
+
+
+async def handle_audio_message(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    msg_id: str,
+    audio_obj,
+):
+    """Handle voice messages and audio file attachments through a unified path.
+
+    audio_obj is either a telegram.Voice (in-app recording, always .ogg) or a
+    telegram.Audio (uploaded file attachment, any format).  Both expose:
+      file_id, duration, file_size, mime_type.
+    Only Audio additionally has: file_name, title, performer — accessed via
+    getattr with a fallback so this function works for both types.
+
+    Both message types are routed to pending-transcription/ so the transcription
+    worker (src/transcription/worker.py) picks them up, runs whisper.cpp, and
+    moves the enriched message (with "transcription" and updated "text") to
+    inbox/ automatically.  Agents will only ever see the transcribed message.
+    """
+    user = update.effective_user
+    message = update.message
+
+    # Determine whether this is a voice recording or an uploaded audio file.
+    is_voice = message.voice is not None
+    msg_type = "voice" if is_voice else "audio"
+
+    await send_typing_indicator(message.chat_id)
+
+    try:
+        # Derive a filename and extension.  Voice recordings are always .ogg;
+        # audio attachments may carry an explicit file_name from the sender.
+        original_filename = getattr(audio_obj, "file_name", None) or f"{msg_id}.ogg"
+        ext = Path(original_filename).suffix or ".ogg"
+        audio_path = AUDIO_DIR / f"{msg_id}{ext}"
+
+        file = await context.bot.get_file(audio_obj.file_id)
+        await file.download_to_drive(audio_path)
+        log.info(f"Downloaded {msg_type} message to: {audio_path}")
+
+        caption = message.caption or ""
+        default_text = (
+            "[Voice message - pending transcription]"
+            if is_voice
+            else "[Audio file - pending transcription]"
+        )
+
+        msg_data = {
+            "id": msg_id,
+            "source": "telegram",
+            "type": msg_type,
+            "chat_id": message.chat_id,
+            "user_id": user.id,
+            "username": user.username,
+            "user_name": user.first_name,
+            "text": caption if caption else default_text,
+            "audio_file": str(audio_path),
+            "original_filename": original_filename,
+            "audio_duration": audio_obj.duration,
+            "audio_mime_type": audio_obj.mime_type or ("audio/ogg" if is_voice else "audio/mpeg"),
+            "file_id": audio_obj.file_id,
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+
+        # Capture full reply-to context if this message is a reply
+        reply_ctx = extract_reply_to_context(message)
+        if reply_ctx:
+            msg_data["reply_to"] = reply_ctx
+
+        pending_file = PENDING_TRANSCRIPTION_DIR / f"{msg_id}.json"
+        atomic_write_json(pending_file, msg_data)
+
+        log.info(f"Wrote {msg_type} message to pending-transcription: {msg_id}")
+        ack = "🎤 Voice message received. Transcribing..." if is_voice else "🎵 Audio file received. Transcribing..."
+        await message.reply_text(ack)
+
+    except Exception as e:
+        log.error(f"Error handling {msg_type} message: {e}", exc_info=True)
+        await message.reply_text(f"❌ Failed to process {msg_type} message.")
+
+
+async def _flush_media_group(media_group_id: str, chat_id: int) -> None:
+    """Flush a buffered media group to the inbox as a single grouped message.
+
+    Called after MEDIA_GROUP_FLUSH_DELAY seconds, at which point all photos
+    in the group should have arrived and been downloaded.
+    """
+    await asyncio.sleep(MEDIA_GROUP_FLUSH_DELAY)
+
+    buf = _media_group_buffers.pop(media_group_id, None)
+    if buf is None:
+        return  # Already flushed or never existed
+
+    if not buf.image_paths:
+        log.warning(f"Media group {media_group_id} has no images — skipping")
+        return
+
+    msg_id = f"{int(time.time() * 1000)}_mg_{media_group_id}"
+    caption = buf.caption or ""
+
+    msg_data = {
+        "id": msg_id,
+        "source": "telegram",
+        "type": "photo",
+        "chat_id": buf.chat_id,
+        "user_id": buf.user_id,
+        "username": buf.username,
+        "user_name": buf.user_name,
+        "text": caption if caption else f"[{len(buf.image_paths)} photos]",
+        "image_files": buf.image_paths,
+        "image_file": buf.image_paths[0],  # backward compat: primary image
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+    if buf.reply_ctx:
+        msg_data["reply_to"] = buf.reply_ctx
+
+    inbox_file = INBOX_DIR / f"{msg_id}.json"
+    atomic_write_json(inbox_file, msg_data)
+    log.info(f"Flushed media group {media_group_id}: {len(buf.image_paths)} photos → {msg_id}")
+
+    # Send one ack for the whole group
+    if bot_app:
+        try:
+            await bot_app.bot.send_message(
+                chat_id=chat_id,
+                text=f"📸 {len(buf.image_paths)} photos received. Processing...",
+            )
+        except Exception as e:
+            log.warning(f"Failed to send media group ack: {e}")
+
+
+async def send_onboarding(update: Update, user) -> None:
+    """Send onboarding message to a first-time user and mark them as onboarded."""
+    mark_user_onboarded(user.id)
+    onboarding_msg = get_onboarding_message()
+    chunks = split_message(onboarding_msg)
+    for chunk in chunks:
+        await update.message.reply_text(md_to_html(chunk), parse_mode="HTML")
+
+
+async def process_reply(chat_id: int, text: str, reply_markup=None, thread_ts=None) -> None:
+    """Send a reply to the user, splitting long messages if necessary.
+
+    reply_markup: Optional InlineKeyboardMarkup for button support.
+    thread_ts: Ignored (Telegram-only parameter placeholder for Slack parity).
+    """
+    if not bot_app:
+        log.error("Bot app not initialized, cannot send reply")
+        return
+
+    send_items = _prepare_send_items(text)
+    last_idx = len(send_items) - 1
+
+    for idx, (md_chunk, html_chunk) in enumerate(send_items):
+        # Only attach reply_markup to the last chunk
+        chunk_markup = reply_markup if idx == last_idx else None
+        try:
+            await bot_app.bot.send_message(
+                chat_id=chat_id,
+                text=html_chunk,
+                parse_mode="HTML",
+                reply_markup=chunk_markup,
+            )
+        except Exception as e:
+            log.warning(
+                f"HTML send failed for chunk {idx+1}/{len(send_items)} "
+                f"({len(html_chunk)} chars): {e}. Falling back to plain text."
+            )
+            try:
+                plain = md_chunk  # Send raw markdown as plain text fallback
+                await bot_app.bot.send_message(
+                    chat_id=chat_id,
+                    text=plain,
+                    reply_markup=chunk_markup,
+                )
+            except Exception as e2:
+                log.error(f"Plain text fallback also failed: {e2}")
+
+
 class OutboxHandler(FileSystemEventHandler):
     """Watches outbox for reply files and sends them via Telegram."""
 
@@ -733,571 +1201,6 @@ async def sweep_outbox():
             log.error(f"Outbox sweep error: {e}")
 
 
-def is_authorized(user_id: int) -> bool:
-    return user_id in ALLOWED_USERS
-
-
-def extract_reply_to_context(message) -> dict | None:
-    """Extract full reply-to context from a Telegram message, if it is a reply.
-
-    Returns a dict with:
-      - reply_to_message_id: int — the Telegram message ID of the replied-to message
-      - reply_to_type: str — "text", "photo", "voice", "document", "sticker", etc.
-      - reply_to_text: str | None — full text or caption of the replied-to message
-      - reply_to_from_user: str | None — username of the sender of the replied-to message
-
-    Returns None if the message is not a reply.
-    """
-    if not message.reply_to_message:
-        return None
-
-    reply = message.reply_to_message
-
-    # Determine the type of the replied-to message
-    if reply.text:
-        reply_type = "text"
-        reply_text = reply.text
-    elif reply.caption:
-        # Photos, documents, videos, etc. with a caption
-        if reply.photo:
-            reply_type = "photo"
-        elif reply.document:
-            reply_type = "document"
-        elif reply.video:
-            reply_type = "video"
-        elif reply.audio:
-            reply_type = "audio"
-        else:
-            reply_type = "media"
-        reply_text = reply.caption
-    elif reply.voice:
-        reply_type = "voice"
-        reply_text = None
-    elif reply.photo:
-        reply_type = "photo"
-        reply_text = None
-    elif reply.document:
-        reply_type = "document"
-        reply_text = None
-    elif reply.video:
-        reply_type = "video"
-        reply_text = None
-    elif reply.audio:
-        reply_type = "audio"
-        reply_text = None
-    elif reply.sticker:
-        reply_type = "sticker"
-        reply_text = reply.sticker.emoji if reply.sticker.emoji else None
-    else:
-        reply_type = "unknown"
-        reply_text = None
-
-    from_user = reply.from_user.username if reply.from_user else None
-
-    return {
-        "message_id": reply.message_id,
-        "reply_to_message_id": reply.message_id,
-        "reply_to_type": reply_type,
-        "reply_to_text": reply_text,
-        "reply_to_from_user": from_user,
-        # Keep legacy "text" field for backwards compatibility
-        "text": reply_text,
-        "from_user": from_user,
-    }
-
-
-def build_inline_keyboard(buttons: list) -> InlineKeyboardMarkup | None:
-    """
-    Build an InlineKeyboardMarkup from a buttons specification.
-
-    Supported formats:
-    1. Simple row format: [["Button 1", "Button 2"], ["Button 3"]]
-       - Each string becomes a button with text=callback_data
-
-    2. Object format: [[{"text": "Option A", "callback_data": "opt_a"}], ...]
-       - Explicit text and callback_data per button
-
-    3. Mixed format: [["Simple"], [{"text": "Complex", "callback_data": "complex"}]]
-    """
-    if not buttons or not isinstance(buttons, list):
-        return None
-
-    keyboard = []
-    for row in buttons:
-        if not isinstance(row, list):
-            continue
-        keyboard_row = []
-        for button in row:
-            if isinstance(button, str):
-                # Simple format: text is also the callback_data
-                keyboard_row.append(InlineKeyboardButton(text=button, callback_data=button))
-            elif isinstance(button, dict):
-                # Object format: explicit text and callback_data
-                text = button.get('text', '')
-                callback_data = button.get('callback_data', text)
-                if text:
-                    keyboard_row.append(InlineKeyboardButton(text=text, callback_data=callback_data))
-        if keyboard_row:
-            keyboard.append(keyboard_row)
-
-    return InlineKeyboardMarkup(keyboard) if keyboard else None
-
-
-async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle inline keyboard button presses."""
-    query = update.callback_query
-    user = query.from_user
-
-    if not is_authorized(user.id):
-        await query.answer("Unauthorized", show_alert=True)
-        return
-
-    # Wake Claude if it hibernated
-    wake_claude_if_hibernating()
-
-    # Acknowledge the button press
-    await query.answer()
-
-    msg_id = f"{int(time.time() * 1000)}_{query.id}"
-    callback_data = query.data
-
-    # Create message file in inbox for the button press
-    msg_data = {
-        "id": msg_id,
-        "source": "telegram",
-        "type": "callback",
-        "chat_id": query.message.chat_id,
-        "user_id": user.id,
-        "username": user.username,
-        "user_name": user.first_name,
-        "text": f"[Button pressed: {callback_data}]",
-        "callback_data": callback_data,
-        "callback_query_id": query.id,
-        "original_message_id": query.message.message_id,
-        "original_message_text": query.message.text,
-        "timestamp": datetime.utcnow().isoformat(),
-    }
-
-    inbox_file = INBOX_DIR / f"{msg_id}.json"
-    atomic_write_json(inbox_file, msg_data)
-
-    log.info(f"Button press from {user.first_name}: {callback_data}")
-
-
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if not is_authorized(user.id):
-        await update.message.reply_text("⛔ Unauthorized.")
-        return
-
-    # /start triggers onboarding for new users, otherwise shows short greeting
-    if not is_user_onboarded(user.id):
-        await send_onboarding(update, user)
-    else:
-        await update.message.reply_text(
-            f"👋 Hey {user.first_name}!\n\n"
-            "I'm Lobster. Messages you send here go to the master Claude session.\n\n"
-            "The session will process them and reply back here."
-        )
-
-
-async def onboarding_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /onboarding command — always shows the full onboarding message."""
-    user = update.effective_user
-    if not is_authorized(user.id):
-        await update.message.reply_text("⛔ Unauthorized.")
-        return
-
-    await send_onboarding(update, user)
-
-
-async def send_onboarding(update: Update, user) -> None:
-    """Send the onboarding message and mark the user as onboarded."""
-    message_text = get_onboarding_message(user.first_name)
-    try:
-        await update.message.reply_text(md_to_html(message_text), parse_mode="HTML")
-    except Exception:
-        await update.message.reply_text(message_text)
-    mark_user_onboarded(user.id)
-    log.info(f"Sent onboarding to user {user.id} ({user.first_name})")
-
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    message = update.message
-
-    if not is_authorized(user.id):
-        log.warning(f"Unauthorized: {user.id}")
-        return
-
-    # Wake Claude if it hibernated — do this before writing to inbox so Claude
-    # is starting up while the message file is being written
-    wake_claude_if_hibernating()
-
-    # Send typing indicator immediately so the user sees Lobster is working
-    await send_typing_indicator(message.chat_id)
-
-    # First-message detection: send onboarding to new users
-    if not is_user_onboarded(user.id):
-        await send_onboarding(update, user)
-
-    msg_id = f"{int(time.time() * 1000)}_{message.message_id}"
-
-    # Handle voice messages
-    if message.voice:
-        await handle_voice_message(update, context, msg_id)
-        return
-
-    # Handle photo messages
-    if message.photo:
-        await handle_photo_message(update, context, msg_id)
-        return
-
-    # Handle document/file messages (including images sent as files)
-    if message.document:
-        await handle_document_message(update, context, msg_id)
-        return
-
-    text = message.text
-    if not text:
-        return
-
-    # Create message file in inbox
-    msg_data = {
-        "id": msg_id,
-        "source": "telegram",
-        "chat_id": message.chat_id,
-        "user_id": user.id,
-        "username": user.username,
-        "user_name": user.first_name,
-        "text": text,
-        "timestamp": datetime.utcnow().isoformat(),
-    }
-
-    # Capture full reply-to context if this message is a reply
-    reply_ctx = extract_reply_to_context(message)
-    if reply_ctx:
-        msg_data["reply_to"] = reply_ctx
-
-    inbox_file = INBOX_DIR / f"{msg_id}.json"
-    atomic_write_json(inbox_file, msg_data)
-
-    log.info(f"Wrote message to inbox: {msg_id}")
-
-    # Send acknowledgment
-    await message.reply_text("📨 Message received. Processing...")
-
-
-async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE, msg_id: str):
-    """Handle voice messages: download audio and save to inbox with metadata."""
-    user = update.effective_user
-    message = update.message
-    voice = message.voice
-
-    # Send typing indicator immediately (wake already called in handle_message)
-    await send_typing_indicator(message.chat_id)
-
-    try:
-        # Download voice file from Telegram
-        file = await context.bot.get_file(voice.file_id)
-        audio_filename = f"{msg_id}.ogg"
-        audio_path = AUDIO_DIR / audio_filename
-
-        await file.download_to_drive(audio_path)
-        log.info(f"Downloaded voice message to: {audio_path}")
-
-        # Create message file in inbox with voice metadata
-        msg_data = {
-            "id": msg_id,
-            "source": "telegram",
-            "type": "voice",
-            "chat_id": message.chat_id,
-            "user_id": user.id,
-            "username": user.username,
-            "user_name": user.first_name,
-            "text": "[Voice message - pending transcription]",
-            "audio_file": str(audio_path),
-            "audio_duration": voice.duration,
-            "audio_mime_type": voice.mime_type or "audio/ogg",
-            "file_id": voice.file_id,
-            "timestamp": datetime.utcnow().isoformat(),
-        }
-
-        # Capture full reply-to context if this message is a reply
-        reply_ctx = extract_reply_to_context(message)
-        if reply_ctx:
-            msg_data["reply_to"] = reply_ctx
-
-        # Route to pending-transcription/ instead of inbox/ so the transcription
-        # worker (src/transcription/worker.py) picks it up, runs whisper.cpp, and
-        # moves the enriched message (with "transcription" and updated "text") to
-        # inbox/ automatically.  Agents will only ever see the transcribed message.
-        pending_file = PENDING_TRANSCRIPTION_DIR / f"{msg_id}.json"
-        atomic_write_json(pending_file, msg_data)
-
-        log.info(f"Wrote voice message to pending-transcription: {msg_id}")
-        await message.reply_text("🎤 Voice message received. Transcribing...")
-
-    except Exception as e:
-        log.error(f"Error handling voice message: {e}")
-        await message.reply_text("❌ Failed to process voice message.")
-
-
-async def _flush_media_group(media_group_id: str, chat_id: int) -> None:
-    """Flush a buffered media group to the inbox as a single grouped message.
-
-    Called after MEDIA_GROUP_FLUSH_DELAY seconds, at which point all photos
-    in the group should have arrived and been downloaded.
-    """
-    await asyncio.sleep(MEDIA_GROUP_FLUSH_DELAY)
-
-    buf = _media_group_buffers.pop(media_group_id, None)
-    if buf is None:
-        return  # Already flushed or never existed
-
-    if not buf.image_paths:
-        log.warning(f"Media group {media_group_id} flushed with no images — skipping")
-        return
-
-    # Stable ID based on group id (reproducible, not time-dependent)
-    group_msg_id = f"grp_{media_group_id}"
-
-    image_count = len(buf.image_paths)
-    caption = buf.caption
-    text_field = caption if caption else f"[{image_count} photos - see image_files]"
-
-    if image_count == 1:
-        # Degenerate group — treat as single photo
-        msg_data = {
-            "id": group_msg_id,
-            "source": "telegram",
-            "type": "photo",
-            "chat_id": buf.chat_id,
-            "user_id": buf.user_id,
-            "username": buf.username,
-            "user_name": buf.user_name,
-            "text": caption if caption else "[Photo - see image_file]",
-            "image_file": buf.image_paths[0],
-            "media_group_id": media_group_id,
-            "timestamp": datetime.utcnow().isoformat(),
-        }
-    else:
-        msg_data = {
-            "id": group_msg_id,
-            "source": "telegram",
-            "type": "photo",
-            "chat_id": buf.chat_id,
-            "user_id": buf.user_id,
-            "username": buf.username,
-            "user_name": buf.user_name,
-            "text": text_field,
-            "image_files": buf.image_paths,
-            "image_count": image_count,
-            "media_group_id": media_group_id,
-            "timestamp": datetime.utcnow().isoformat(),
-        }
-
-    if buf.reply_ctx:
-        msg_data["reply_to"] = buf.reply_ctx
-
-    inbox_file = INBOX_DIR / f"{group_msg_id}.json"
-    atomic_write_json(inbox_file, msg_data)
-
-    log.info(
-        f"Flushed media group {media_group_id} to inbox: "
-        f"{image_count} photo(s), id={group_msg_id}"
-    )
-
-
-async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE, msg_id: str):
-    """Handle photo messages: download image and save to inbox with metadata.
-
-    Single photos are written immediately. Photos that belong to a media group
-    (identified by message.media_group_id) are buffered for MEDIA_GROUP_FLUSH_DELAY
-    seconds, then emitted as a single inbox message with an image_files array.
-    """
-    user = update.effective_user
-    message = update.message
-
-    # Send typing indicator immediately (wake already called in handle_message)
-    await send_typing_indicator(message.chat_id)
-
-    try:
-        # Get the largest photo (last in the array — Telegram orders by resolution)
-        photo = message.photo[-1]
-
-        # Download photo file from Telegram
-        file = await context.bot.get_file(photo.file_id)
-        image_filename = f"{msg_id}.jpg"
-        image_path = IMAGES_DIR / image_filename
-
-        await file.download_to_drive(image_path)
-        log.info(f"Downloaded photo to: {image_path}")
-
-        caption = message.caption or ""
-        reply_ctx = extract_reply_to_context(message)
-        media_group_id = message.media_group_id  # None for single photos
-
-        if media_group_id:
-            # --- Media group path ---
-            # Add this photo to (or create) the buffer for this group
-            if media_group_id not in _media_group_buffers:
-                buf = _MediaGroupBuffer(
-                    media_group_id=media_group_id,
-                    chat_id=message.chat_id,
-                    user_id=user.id,
-                    username=user.username,
-                    user_name=user.first_name,
-                    reply_ctx=reply_ctx,
-                )
-                _media_group_buffers[media_group_id] = buf
-
-                # Schedule a flush after the delay. We cancel and reschedule
-                # on each new photo so the timer resets if photos trickle in.
-                buf.flush_task = asyncio.create_task(
-                    _flush_media_group(media_group_id, message.chat_id)
-                )
-                log.info(f"Started media group buffer for group_id={media_group_id}")
-                # Send a single acknowledgment for the whole group
-                await message.reply_text("📷 Media group received. Processing...")
-            else:
-                buf = _media_group_buffers[media_group_id]
-                # Cancel the existing flush task and reschedule so we wait
-                # for any remaining photos before flushing
-                if buf.flush_task and not buf.flush_task.done():
-                    buf.flush_task.cancel()
-                buf.flush_task = asyncio.create_task(
-                    _flush_media_group(media_group_id, message.chat_id)
-                )
-
-            # Capture caption from whichever photo has it (only one does)
-            if caption and not buf.caption:
-                buf.caption = caption
-            # Capture reply context from first photo
-            if reply_ctx and not buf.reply_ctx:
-                buf.reply_ctx = reply_ctx
-
-            buf.image_paths.append(str(image_path))
-            log.info(
-                f"Added photo to media group {media_group_id}: "
-                f"{len(buf.image_paths)} photo(s) so far"
-            )
-
-        else:
-            # --- Single photo path ---
-            msg_data = {
-                "id": msg_id,
-                "source": "telegram",
-                "type": "photo",
-                "chat_id": message.chat_id,
-                "user_id": user.id,
-                "username": user.username,
-                "user_name": user.first_name,
-                "text": caption if caption else "[Photo - see image_file]",
-                "image_file": str(image_path),
-                "image_width": photo.width,
-                "image_height": photo.height,
-                "file_id": photo.file_id,
-                "timestamp": datetime.utcnow().isoformat(),
-            }
-
-            if reply_ctx:
-                msg_data["reply_to"] = reply_ctx
-
-            inbox_file = INBOX_DIR / f"{msg_id}.json"
-            atomic_write_json(inbox_file, msg_data)
-
-            log.info(f"Wrote photo message to inbox: {msg_id}")
-            await message.reply_text("📷 Image received. Processing...")
-
-    except Exception as e:
-        log.error(f"Error handling photo message: {e}")
-        await message.reply_text("❌ Failed to process image.")
-
-
-async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_TYPE, msg_id: str):
-    """Handle document messages: download file and save to inbox with metadata."""
-    user = update.effective_user
-    message = update.message
-    document = message.document
-
-    # Send typing indicator immediately (wake already called in handle_message)
-    await send_typing_indicator(message.chat_id)
-
-    try:
-        # Check if it's an image sent as document
-        mime_type = document.mime_type or ""
-        is_image = mime_type.startswith("image/")
-        original_name = document.file_name or "file"
-        file_size_mb = (document.file_size or 0) / (1024 * 1024)
-
-        log.info(f"Receiving document: name={original_name}, mime={mime_type}, size={file_size_mb:.1f}MB, file_id={document.file_id}")
-
-        if file_size_mb > 20:
-            log.warning(f"File {original_name} is {file_size_mb:.1f}MB — exceeds Telegram Bot API 20MB download limit")
-            await message.reply_text(f"⚠️ File too large ({file_size_mb:.1f}MB). Telegram Bot API limit is 20MB. Please send a smaller file or upload it elsewhere and share a link.")
-            return
-
-        # Download file from Telegram
-        file = await context.bot.get_file(document.file_id)
-
-        # Determine extension and save location
-        ext = Path(original_name).suffix or (".jpg" if is_image else "")
-
-        if is_image:
-            save_path = IMAGES_DIR / f"{msg_id}{ext}"
-        else:
-            # For non-images, save to a general files directory
-            files_dir = _MESSAGES / "files"
-            files_dir.mkdir(parents=True, exist_ok=True)
-            save_path = files_dir / f"{msg_id}{ext}"
-
-        await file.download_to_drive(save_path)
-        log.info(f"Downloaded document to: {save_path}")
-
-        # Get caption if any
-        caption = message.caption or ""
-
-        # Create message file in inbox
-        msg_data = {
-            "id": msg_id,
-            "source": "telegram",
-            "type": "image" if is_image else "document",
-            "chat_id": message.chat_id,
-            "user_id": user.id,
-            "username": user.username,
-            "user_name": user.first_name,
-            "text": caption if caption else f"[Document: {original_name}]",
-            "file_path": str(save_path),
-            "file_name": original_name,
-            "mime_type": mime_type,
-            "file_size": document.file_size,
-            "file_id": document.file_id,
-            "timestamp": datetime.utcnow().isoformat(),
-        }
-
-        if is_image:
-            msg_data["image_file"] = str(save_path)
-
-        # Capture full reply-to context if this message is a reply
-        reply_ctx = extract_reply_to_context(message)
-        if reply_ctx:
-            msg_data["reply_to"] = reply_ctx
-
-        inbox_file = INBOX_DIR / f"{msg_id}.json"
-        atomic_write_json(inbox_file, msg_data)
-
-        log.info(f"Wrote document message to inbox: {msg_id}")
-        emoji = "📷" if is_image else "📎"
-        await message.reply_text(f"{emoji} File received. Processing...")
-
-    except Exception as e:
-        file_name = document.file_name or "unknown"
-        file_size_mb = (document.file_size or 0) / (1024 * 1024)
-        log.error(f"Error handling document: name={file_name}, size={file_size_mb:.1f}MB, error={type(e).__name__}: {e}", exc_info=True)
-        await message.reply_text(f"❌ Failed to process file: {type(e).__name__}. Check logs for details.")
-
-
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from telegram.error import Conflict
     if isinstance(context.error, Conflict):
@@ -1333,7 +1236,7 @@ async def run_bot():
     bot_app.add_handler(CommandHandler("start", start_command))
     bot_app.add_handler(CommandHandler("onboarding", onboarding_command))
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    bot_app.add_handler(MessageHandler(filters.VOICE, handle_message))
+    bot_app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_message))
     bot_app.add_handler(MessageHandler(filters.PHOTO, handle_message))
     bot_app.add_handler(MessageHandler(filters.Document.ALL, handle_message))
     bot_app.add_handler(CallbackQueryHandler(handle_callback_query))
