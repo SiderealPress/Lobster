@@ -297,10 +297,25 @@ check_services() {
         failed=1
     fi
 
-    if ! systemctl is-active --quiet "$SERVICE_ROUTER" 2>/dev/null; then
-        log_error "Service $SERVICE_ROUTER is not active"
-        failed=1
-    fi
+    local router_state
+    router_state=$(systemctl is-active "$SERVICE_ROUTER" 2>/dev/null || true)
+    case "$router_state" in
+        active)
+            # OK — router is running normally
+            ;;
+        activating|reloading|deactivating)
+            # Transient state during router restart — not alarming
+            log_info "Service $SERVICE_ROUTER is in transient state: $router_state"
+            ;;
+        failed)
+            log_error "Service $SERVICE_ROUTER has failed"
+            failed=1
+            ;;
+        *)
+            # inactive, unknown, etc. — warn but don't trigger claude restart
+            log_warn "Service $SERVICE_ROUTER is in unexpected state: $router_state"
+            ;;
+    esac
 
     return $failed
 }
