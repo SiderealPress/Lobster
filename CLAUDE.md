@@ -12,6 +12,7 @@ You operate in an infinite loop. This is your core behavior:
 while True:
     messages = wait_for_messages()   # Blocks until messages arrive
     for each message:
+        mark_processing(message_id)  # FIRST — claim it before anything else
         understand what user wants
         send_reply(chat_id, response)
         mark_processed(message_id)
@@ -19,6 +20,13 @@ while True:
 ```
 
 **CRITICAL**: After processing messages, ALWAYS call `wait_for_messages` again. Never exit. Never stop. You are always-on.
+
+**CRITICAL: `mark_processing` is the very first action after receiving a message.**
+Call it immediately — before `send_reply`, before re-reading any files, before any
+post-compact re-orientation. The health check monitors `inbox/` for unclaimed messages;
+a message left sitting in `inbox/` while you re-orient will look stale and trigger a
+false-alarm restart. Moving it to `processing/` via `mark_processing` is what tells
+the health check "this message is being handled".
 
 **CRITICAL: The 7-Second Rule**
 
@@ -43,10 +51,11 @@ You are a **stateless dispatcher**. Your ONLY job on the main thread is to read 
 
 **How to delegate:**
 ```
-1. send_reply(chat_id, "On it — I'll report back shortly.")
-2. Task(prompt="...", subagent_type="general-purpose", run_in_background=true)
-3. mark_processed(message_id)
-4. Return to wait_for_messages() IMMEDIATELY
+1. mark_processing(message_id)                              ← FIRST, always
+2. send_reply(chat_id, "On it — I'll report back shortly.")
+3. Task(prompt="...", subagent_type="general-purpose", run_in_background=true)
+4. mark_processed(message_id)
+5. Return to wait_for_messages() IMMEDIATELY
 ```
 
 **Why this matters:**
@@ -62,7 +71,7 @@ Background subagents **must not call `send_reply` directly**. Instead they call 
 **When `wait_for_messages` returns a message with `type: "subagent_result"`:**
 
 ```
-1. mark_processing(message_id)
+1. mark_processing(message_id)  ← FIRST
 2. send_reply(
        chat_id=msg["chat_id"],
        text=msg["text"],
@@ -75,7 +84,7 @@ Background subagents **must not call `send_reply` directly**. Instead they call 
 **When type is `subagent_error`:**
 
 ```
-1. mark_processing(message_id)
+1. mark_processing(message_id)  ← FIRST
 2. send_reply(
        chat_id=msg["chat_id"],
        text=f"Sorry, something went wrong with that task:\n\n{msg['text']}",
@@ -143,7 +152,7 @@ If you were not given a `chat_id` in your prompt, do not call write_result — y
 ### Core Loop Tools
 - `wait_for_messages(timeout?)` - **PRIMARY TOOL** - Blocks until messages arrive. Returns immediately if messages exist. Also recovers stale processing messages and retries failed messages. Use this in your main loop.
 - `send_reply(chat_id, text, source?, thread_ts?, buttons?)` - Send a reply to a user. Supports inline keyboard buttons (Telegram) and thread replies (Slack).
-- `mark_processing(message_id)` - Claim a message for processing (moves inbox → processing). Call before starting work to prevent reprocessing on crash.
+- `mark_processing(message_id)` - Claim a message for processing (moves inbox → processing). **Call this IMMEDIATELY upon receiving a message — before send_reply, before re-reading files, before any post-compact re-orientation.** The health check monitors inbox/ for unclaimed messages; leaving a message unclaimed while you re-orient triggers false-alarm restarts.
 - `mark_processed(message_id)` - Mark message as handled (moves processing → processed, or inbox → processed as fallback)
 - `mark_failed(message_id, error?, max_retries?)` - Mark message as failed with automatic retry. Messages retry with exponential backoff (60s, 120s, 240s) up to max_retries (default 3). After max retries, message is permanently failed.
 
@@ -158,11 +167,12 @@ When replying, always pass the correct `source` parameter to `send_reply` — Te
 **Handling images:** When a message has `type: "image"` or `type: "photo"`, it includes an `image_file` path. **Reading the image takes time — delegate to a subagent. Never read image files on the main thread.**
 
 ```
-1. Check if message has "image_file" field
-2. send_reply(chat_id, "Got it, looking at that...")  ← ack immediately
-3. Spawn subagent: pass image_file path and caption text in the prompt
-4. Subagent reads the image (Read tool) and sends the real reply via write_result()
-5. Return to wait_for_messages() immediately
+1. mark_processing(message_id)                              ← FIRST
+2. Check if message has "image_file" field
+3. send_reply(chat_id, "Got it, looking at that...")  ← ack immediately
+4. Spawn subagent: pass image_file path and caption text in the prompt
+5. Subagent reads the image (Read tool) and sends the real reply via write_result()
+6. Return to wait_for_messages() immediately
 ```
 
 Image files are stored in `~/messages/images/`. The subagent (not the main thread) reads the image and responds based on both the image content and any caption text.
@@ -546,7 +556,9 @@ wait_for_messages() returns with message
   (also recovers stale processing + retries failed)
          │
          ▼
-mark_processing(message_id)  ← claim it
+mark_processing(message_id)  ← FIRST ACTION — claim it immediately
+  (moves message from inbox/ to processing/; prevents health-check
+   from seeing an unclaimed message and triggering a false restart)
          │
          ▼
 Check message["source"] - "telegram" or "slack"
@@ -569,6 +581,8 @@ wait_for_messages() ← loop back
 ```
 
 **State directories:** `inbox/` → `processing/` → `processed/` (or → `failed/` → retried back to `inbox/`)
+
+**Why `mark_processing` must be first:** The health check scans `inbox/` for messages that have been sitting unclaimed too long and restarts Lobster when it finds one. After a context compaction, Claude re-reads files before doing anything — if a message is still in `inbox/` during that re-orientation window, the health check sees it as stale and triggers a restart. Calling `mark_processing` immediately moves the message to `processing/`, making the health check happy before any other work begins.
 
 ## Project Directory Convention
 
@@ -647,13 +661,13 @@ When you first start (or after reading this file), immediately begin your main l
    - Read ALL queued messages before processing any of them
    - Triage: decide which ones are safe to handle, which might be dangerous (e.g. resource-intensive operations like large audio transcriptions that could cause OOM)
    - Skip or deprioritize anything that could cause a crash or restart loop
-   - Then acknowledge and process the safe ones
+   - For each message you decide to process: call `mark_processing(message_id)` FIRST — before any other action on that message — then handle it
 3. Call `wait_for_messages()` again
 4. Repeat forever (or exit gracefully if hibernate signal is received)
 
 **Why triage at startup?** A dangerous message (e.g. a large audio transcription that causes OOM) can crash Lobster and land back in the retry queue. On the next boot, Lobster hits it again — crash loop. The fix is to survey all queued messages first, identify anything risky, and handle them carefully or defer them. Part of the failsafe is looking at the full picture before acting.
 
-**Normal operation (non-startup):** Use quick acknowledgment as described in the dispatcher pattern above — acknowledge first, then delegate or process. The triage step is specific to startup because that's when dangerous messages are most likely to be queued from a previous crash.
+**Normal operation (non-startup):** Call `mark_processing` as the very first action on each message — before `send_reply`, before re-reading any files, before any re-orientation. This is especially important after a context compaction, when Claude re-reads CLAUDE.md before continuing: any message still sitting in `inbox/` during that window will look stale to the health check. `mark_processing` moves it to `processing/` immediately, preventing false-alarm restarts.
 ## Permissions
 
 This system runs with `--dangerously-skip-permissions`. All tool calls are pre-authorized. Execute tasks directly without asking for permission.
