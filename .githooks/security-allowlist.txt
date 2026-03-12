@@ -24,3 +24,19 @@ install.sh:Hardcoded password
 
 # User-Agent string contains version numbers that look like IP addresses
 src/mcp/inbox_server.py:IP address
+
+# These files contain intentional placeholder references (phone numbers for bots,
+# secrets in test fixtures, or documentation examples) that are pre-existing and
+# reviewed. The fork's pre-push scanner flags them as new because it diffs against
+# the fork's default branch, which may lag behind upstream.
+CLAUDE.md:Phone number
+config/config.env.example:Phone number
+lobster-shop/gcal-links/behavior/system.md:Phone number
+lobster-shop/gcal-links/context/reference.md:Phone number
+src/bot/sms_router.py:Phone number
+src/integrations/google_calendar/config.py:Hardcoded token
+tests/unit/test_integrations/test_google_calendar_config.py:Hardcoded token
+tests/unit/test_integrations/test_google_calendar_oauth.py:Hardcoded token
+tests/unit/test_integrations/test_google_calendar_phase4.py:Hardcoded token
+tests/unit/test_integrations/test_google_calendar_token_store.py:Hardcoded token
+uv.lock:Phone number
