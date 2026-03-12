@@ -124,7 +124,7 @@ cmd_status() {
 
     if [[ -f "$MAINTENANCE_FLAG" ]]; then
         echo ""
-        echo -e "${YELLOW}⚠ MAINTENANCE MODE - health check auto-restart disabled${NC}"
+        echo -e "${YELLOW}🚧 MAINTENANCE MODE - health check auto-restart disabled${NC}"
     fi
 
     echo ""
@@ -365,7 +365,7 @@ cmd_ps() {
         uptimes+=("$uptime_str")
         cmds+=("$cmd_short")
         count=$((count + 1))
-    done < <(ps aux | awk '$11 ~ /(^|\/)claude$/' | grep -v "lobster ps\|lobster ps")
+    done < <(ps aux | awk '$11 ~ /(^\/|\/)claude$/' | grep -v "lobster ps\|lobster ps")
 
     if [ "$count" -eq 0 ]; then
         echo -e "  ${YELLOW}No Claude instances running${NC}"
