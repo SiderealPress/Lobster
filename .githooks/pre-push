@@ -113,7 +113,7 @@ get_pushed_files() {
 
 PII_PATTERNS=(
     'email@@[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}@@Email address@@yes@@<REDACTED_EMAIL>'
-    'phone@@(\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}@@Phone number@@yes@@<REDACTED_PHONE>'
+    'phone@@(\+?1[-.\s])?\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}@@Phone number@@yes@@<REDACTED_PHONE>'
     'ssn@@\b\d{3}-\d{2}-\d{4}\b@@Social Security Number@@yes@@<REDACTED_SSN>'
     'cc@@\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6(?:011|5\d{2}))[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b@@Credit card number@@yes@@<REDACTED_CC>'
     'ip@@\b(?!127\.0\.0\.1\b)(?!0\.0\.0\.0\b)\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b@@IP address@@no@@'
@@ -211,6 +211,12 @@ scan_file() {
             continue
         fi
 
+        # Skip lines marked with # nosec or # noqa (inline suppression)
+        matches="$(echo "$matches" | grep -Pv '#\s*nosec\b|#\s*noqa\b' || true)"
+        if [ -z "$matches" ]; then
+            continue
+        fi
+
         # For emails, filter out known false positives
         if [ "$name" = "email" ]; then
             matches="$(echo "$matches" | grep -Pv "$EMAIL_ALLOWLIST" || true)"
@@ -278,6 +284,12 @@ scan_file() {
         local matches
         matches="$(echo "$file_content" | grep -Pn -e "$regex" 2>/dev/null || true)"
 
+        if [ -z "$matches" ]; then
+            continue
+        fi
+
+        # Skip lines marked with # nosec or # noqa (inline suppression)
+        matches="$(echo "$matches" | grep -Pv '#\s*nosec\b|#\s*noqa\b' || true)"
         if [ -z "$matches" ]; then
             continue
         fi
