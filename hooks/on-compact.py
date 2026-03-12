@@ -19,8 +19,10 @@ from pathlib import Path
 INBOX_DIR = Path(os.path.expanduser("~/messages/inbox"))
 
 REMINDER_TEXT = (
-    "Your context was just compacted. Re-read CLAUDE.md \u2014 it will guide you "
-    "to the handoff, memory, and all other bootup context you need to re-orient."
+    "Your context was just compacted. **DO NOT call mark_processed or "
+    "wait_for_messages until you have re-read CLAUDE.md and the handoff "
+    "document** at ~/lobster-workspace/memory/canonical/handoff.md. "
+    "These files contain critical context about pending work, PRs, and user preferences."
 )
 
 
