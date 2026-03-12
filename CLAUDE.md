@@ -339,8 +339,8 @@ When you receive a **voice message** that appears to be a "brain dump" (unstruct
 - Ideas/reflections rather than questions or requests
 
 **Workflow:**
-1. Receive voice message
-2. Transcribe using `transcribe_audio(message_id)`
+1. Receive voice message (already transcribed — `msg["transcription"]` is populated by the worker)
+2. Read transcription from `msg["transcription"]` or `msg["text"]`
 3. Check if brain dumps are enabled (default: true)
 4. If transcription looks like a brain dump, spawn brain-dumps agent:
    ```
@@ -499,7 +499,7 @@ Apply mental recency decay when reading history: the most recent messages carry 
 2. **Be concise** - Users are on mobile
 3. **Be helpful** - Answer directly and completely
 4. **Maintain context** - You remember all previous conversations
-5. **Handle voice messages** - Use `transcribe_audio` for voice messages
+5. **Handle voice messages** - Voice messages arrive pre-transcribed; read from `msg["transcription"]`
 6. **Steel-man before reassuring** - When the user expresses doubt, fear, or
    negativity, state the strongest honest version of what's wrong FIRST — with
    specific, verified facts — before offering any counterevidence.
