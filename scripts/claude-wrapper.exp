@@ -1,7 +1,19 @@
 #!/usr/bin/expect -f
 #
-# Claude wrapper script - Automatically accepts bypass permissions dialog
-# and starts Claude with the Lobster main loop.
+# Claude wrapper script (debug/interactive mode) - Automatically accepts the
+# bypass permissions dialog and starts Claude with the Lobster main loop,
+# then hands over terminal control for interactive use.
+#
+# This script is used when LOBSTER_DEBUG=true. It provides a full interactive
+# Claude REPL so that `lobster attach` gives a real interactive session where
+# you can type commands directly to Claude.
+#
+# Environment: the lobster-claude systemd service loads config.env via
+# EnvironmentFile directives before launching this script, so all config
+# variables (TELEGRAM_BOT_TOKEN, etc.) are already in the environment.
+# The variables below (LOBSTER_MAIN_SESSION, etc.) are set explicitly here
+# to match what claude-persistent.sh sets, ensuring the same MCP tools and
+# CLAUDE.md behaviour from the Telegram side.
 #
 # Robustness notes:
 # - Claude's interactive UI renders with ANSI escape codes. The ❯ prompt
