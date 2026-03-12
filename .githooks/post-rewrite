@@ -1,0 +1,3 @@
+#!/bin/bash
+# Fire post-merge hook after rebase-style pulls too
+[ "$1" = "rebase" ] && exec "$(dirname "$0")/post-merge" 0
