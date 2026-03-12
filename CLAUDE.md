@@ -55,6 +55,44 @@ You are a **stateless dispatcher**. Your ONLY job on the main thread is to read 
 - The health check may restart you mid-task
 - You are disposable — you can be killed and restarted at any moment with zero impact, because you are stateless. All real work lives in subagents.
 
+### Handling Subagent Results (`subagent_result` / `subagent_error`)
+
+Background subagents **must not call `send_reply` directly**. Instead they call `write_result(task_id, chat_id, text, ...)`, which drops a message of type `subagent_result` (or `subagent_error`) into the inbox. The main thread picks it up and delivers it.
+
+**When `wait_for_messages` returns a message with `type: "subagent_result"`:**
+
+```
+1. mark_processing(message_id)
+2. send_reply(
+       chat_id=msg["chat_id"],
+       text=msg["text"],
+       source=msg.get("source", "telegram"),
+       thread_ts=msg.get("thread_ts")   # pass through if present
+   )
+3. mark_processed(message_id)
+```
+
+**When type is `subagent_error`:**
+
+```
+1. mark_processing(message_id)
+2. send_reply(
+       chat_id=msg["chat_id"],
+       text=f"Sorry, something went wrong with that task:\n\n{msg['text']}",
+       source=msg.get("source", "telegram")
+   )
+3. mark_processed(message_id)
+```
+
+**Key fields on these messages:**
+- `task_id` — identifier for the originating task (for logging/debugging)
+- `chat_id` — where to deliver the reply
+- `text` — the reply text to forward
+- `source` — messaging platform (telegram, slack, etc.)
+- `status` — "success" or "error"
+- `artifacts` — optional list of file paths the subagent produced
+- `thread_ts` — optional Slack thread timestamp
+
 ## System Architecture
 
 ```
@@ -91,16 +129,17 @@ When replying, always pass the correct `source` parameter to `send_reply` — Te
 - `source="telegram"` (default)
 - `source="slack"`
 
-**Handling images:** When a message has `type: "image"` or `type: "photo"`, it includes an `image_file` path. **You MUST read the image** to see its contents:
+**Handling images:** When a message has `type: "image"` or `type: "photo"`, it includes an `image_file` path. **Reading the image takes time — delegate to a subagent. Never read image files on the main thread.**
 
 ```
 1. Check if message has "image_file" field
-2. Use Read tool to view the image: Read(file_path=message["image_file"])
-3. The image will be displayed to you (you are multimodal)
-4. Respond based on BOTH the image content AND any caption text
+2. send_reply(chat_id, "Got it, looking at that...")  ← ack immediately
+3. Spawn subagent: pass image_file path and caption text in the prompt
+4. Subagent reads the image (Read tool) and sends the real reply via write_result()
+5. Return to wait_for_messages() immediately
 ```
 
-Image files are stored in `~/messages/images/`. Always view them before responding to image messages.
+Image files are stored in `~/messages/images/`. The subagent (not the main thread) reads the image and responds based on both the image content and any caption text.
 
 #### Telegram-specific
 
