@@ -660,7 +660,7 @@ if [ "$INSTALL_MODE" = "git" ]; then
     step "Configuring distributed git hooks..."
     cd "$INSTALL_DIR"
     git config --local core.hooksPath .githooks
-    chmod +x .githooks/pre-push .githooks/post-checkout .githooks/pre-commit 2>/dev/null || true
+    chmod +x .githooks/pre-push .githooks/post-checkout .githooks/pre-commit .githooks/post-merge .githooks/post-rewrite 2>/dev/null || true
     success "Git hooks configured (core.hooksPath -> .githooks)"
 
 else
@@ -1207,7 +1207,7 @@ export VIRTUAL_ENV="$INSTALL_DIR/.venv"
 export PATH="$INSTALL_DIR/.venv/bin:$PATH"
 
 uv pip install --quiet --upgrade pip
-uv pip install --quiet mcp python-telegram-bot watchdog python-dotenv slack-bolt psutil
+uv pip install --quiet mcp python-telegram-bot watchdog python-dotenv slack-bolt psutil websockets
 success "Core Python packages installed"
 
 #-------------------------------------------------------------------------------

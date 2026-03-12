@@ -1,0 +1,32 @@
+#!/bin/bash
+#===============================================================================
+# Post-Merge Hook: Queue upgrade instructions to Lobster inbox
+#
+# After `git pull` (which triggers post-merge), this hook writes a system
+# message to ~/messages/inbox/ so that the running Claude Code session sees
+# it on the next wait_for_messages() poll and knows to run the upgrade.
+#===============================================================================
+
+MESSAGES_DIR="${LOBSTER_MESSAGES:-$HOME/messages}"
+INBOX_DIR="$MESSAGES_DIR/inbox"
+
+# Only proceed if the inbox directory exists (i.e. Lobster is installed)
+if [ ! -d "$INBOX_DIR" ]; then
+    exit 0
+fi
+
+TIMESTAMP=$(date +%s%3N)
+MSG_FILE="$INBOX_DIR/${TIMESTAMP}_upgrade.json"
+
+cat > "$MSG_FILE" << EOF
+{
+  "id": "${TIMESTAMP}_upgrade",
+  "source": "system",
+  "chat_id": "system",
+  "type": "system",
+  "text": "System upgrade: dependencies may have changed after git pull. Run: cd ~/lobster && .venv/bin/uv pip install -e . — or for a full upgrade: .venv/bin/uv pip install -e '.[slack]'",
+  "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%S.%6N)"
+}
+EOF
+
+echo "[post-merge] Queued dependency upgrade reminder to Lobster inbox."
