@@ -1755,15 +1755,9 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
     _recover_stale_processing()
     _recover_retryable_messages()
 
-    # Check if messages already exist
-    existing = list(INBOX_DIR.glob("*.json"))
-    if existing:
-        # Messages already waiting - return them immediately
-        touch_heartbeat()
-        return await handle_check_inbox({"limit": 10})
-
-    # No messages - set up inotify watcher and wait
-    loop = asyncio.get_event_loop()
+    # Start the observer BEFORE the initial glob check to eliminate the TOCTOU
+    # race window: a message that arrives between the glob and observer.start()
+    # would previously be missed until the next timeout/self-check.
     message_arrived = threading.Event()
 
     class InboxHandler(FileSystemEventHandler):
@@ -1779,6 +1773,15 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
     observer.start()
 
     try:
+        # Now that the observer is running, check for messages that already
+        # existed before we started watching.  Any message that arrives from
+        # this point onward will set message_arrived, so nothing can slip
+        # through the gap.
+        existing = list(INBOX_DIR.glob("*.json"))
+        if existing:
+            # Messages already waiting - return them immediately
+            touch_heartbeat()
+            return await handle_check_inbox({"limit": 10})
         # Wait with periodic heartbeats (every 60 seconds)
         heartbeat_interval = 60
         elapsed = 0
