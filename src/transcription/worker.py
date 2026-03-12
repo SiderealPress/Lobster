@@ -137,6 +137,7 @@ async def convert_ogg_to_wav(ogg_path: Path, wav_path: Path, timeout_s: int = TR
         "-ar", "16000",   # 16 kHz
         "-ac", "1",       # mono
         "-y",             # overwrite
+        "-f", "wav",      # explicit output format (file has .wav.tmp extension)
         str(tmp_wav_path),
     ]
     proc: asyncio.subprocess.Process | None = None
@@ -262,8 +263,8 @@ async def transcribe_pending_file(pending_file: Path) -> None:
         log.error(f"Cannot read {pending_file}: {e}")
         return  # leave file in place — it may still be mid-write
 
-    # Validate it's a voice message
-    if msg_data.get("type") != "voice":
+    # Validate it's a voice or audio message
+    if msg_data.get("type") not in ("voice", "audio"):
         move_to_dead_letter(
             pending_file, msg_data,
             f"Unexpected type in pending-transcription: {msg_data.get('type')!r}"
