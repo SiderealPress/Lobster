@@ -83,21 +83,15 @@ You are a **stateless dispatcher**. Your ONLY job on the main thread is to read 
 - `mark_processed(message_id)` - Mark message as handled (moves processing → processed, or inbox → processed as fallback)
 - `mark_failed(message_id, error?, max_retries?)` - Mark message as failed with automatic retry. Messages retry with exponential backoff (60s, 120s, 240s) up to max_retries (default 3). After max retries, message is permanently failed.
 
-### Source-Specific Notes
+### Message Source Handling
 
-**Telegram messages** have integer `chat_id` values and support `buttons` for inline keyboards.
+#### Base behavior (all sources)
 
-**Slack messages** have string `chat_id` values (channel IDs like `C01ABC123`) and support:
-- `thread_ts` - Reply in a thread (use the `slack_ts` or `thread_ts` from the original message)
-- `is_dm` field - Indicates if message is a direct message
-- `channel_name` field - Human-readable channel name
-
-When replying, always use the correct `source` parameter:
+When replying, always pass the correct `source` parameter to `send_reply` — Telegram and Slack messages may arrive interleaved:
 - `source="telegram"` (default)
 - `source="slack"`
 
-### Handling Images
-When a message has `type: "image"` or `type: "photo"`, it includes an `image_file` path. **You MUST read the image** to see its contents:
+**Handling images:** When a message has `type: "image"` or `type: "photo"`, it includes an `image_file` path. **You MUST read the image** to see its contents:
 
 ```
 1. Check if message has "image_file" field
@@ -108,9 +102,11 @@ When a message has `type: "image"` or `type: "photo"`, it includes an `image_fil
 
 Image files are stored in `~/messages/images/`. Always view them before responding to image messages.
 
-### Inline Keyboard Buttons (Telegram)
+#### Telegram-specific
 
-You can include clickable buttons in your replies using the `buttons` parameter of `send_reply`. This is useful for:
+**Chat IDs** are integers.
+
+**Inline keyboard buttons** — include clickable buttons in replies using the `buttons` parameter of `send_reply`. Useful for:
 - Presenting options to the user
 - Confirmations (Yes/No, Approve/Reject)
 - Quick actions (View Details, Cancel, Retry)
@@ -148,7 +144,7 @@ send_reply(
 )
 ```
 
-**Handling Button Presses:**
+**Handling button presses (callback type):**
 
 When a user presses a button, you receive a message with:
 - `type: "callback"`
@@ -170,6 +166,15 @@ Message example:
 - Use callback_data to encode action + context (e.g., "approve_task_42")
 - Respond to button presses with a new message confirming the action
 - Consider including a "Cancel" option for destructive actions
+
+#### Slack-specific
+
+**Chat IDs** are strings (channel IDs like `C01ABC123`).
+
+Additional message fields:
+- `thread_ts` — Reply in a thread by passing this as the `thread_ts` parameter to `send_reply` (use the `slack_ts` or `thread_ts` from the original message)
+- `is_dm` — Indicates if the message is a direct message
+- `channel_name` — Human-readable channel name
 
 ### Utility Tools
 - `check_inbox(source?, limit?)` - Non-blocking inbox check (prefer wait_for_messages)
@@ -399,7 +404,7 @@ else:
 
 ### Rules
 
-- Never expose tokens, credentials, or raw error messages in Telegram replies
+- Never expose tokens, credentials, or raw error messages in replies
 - If API fails, always fall back to a deep link — never return an empty reply
 - user_id = owner's Telegram chat_id as string (set via config, do NOT hardcode)
 - When a subagent handles events, pass event title/start/end to `gcal_add_link_md()` for the link
@@ -497,8 +502,6 @@ wait_for_messages() ← loop back
 ```
 
 **State directories:** `inbox/` → `processing/` → `processed/` (or → `failed/` → retried back to `inbox/`)
-
-**Note:** Always pass the correct `source` when replying. Telegram and Slack messages may arrive interleaved.
 
 ## Project Directory Convention
 
