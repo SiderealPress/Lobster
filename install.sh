@@ -190,8 +190,10 @@ apply_private_overlay() {
     fi
 
     # Overlay CLAUDE.md if exists (replaces default)
+    # Note: $WORKSPACE_DIR/CLAUDE.md is a symlink to $INSTALL_DIR/CLAUDE.md;
+    # write to the symlink target so the repo file is updated, not the symlink.
     if [ -f "$config_dir/CLAUDE.md" ]; then
-        cp "$config_dir/CLAUDE.md" "$WORKSPACE_DIR/CLAUDE.md"
+        cp "$config_dir/CLAUDE.md" "$INSTALL_DIR/CLAUDE.md"
         success "Applied: CLAUDE.md"
     fi
 
@@ -1986,90 +1988,60 @@ sudo chmod +x /usr/local/bin/lobster
 success "CLI installed"
 
 #===============================================================================
-# Create Workspace Context
+# Claude Code Discovery Symlinks
+#
+# Claude Code (CC) discovers files relative to its CWD. Since CC runs with
+# CWD=$WORKSPACE_DIR, we create symlinks there pointing into the repo so CC
+# finds the real CLAUDE.md and agent definitions without moving the workspace
+# or requiring a migration.
+#
+# Discovery paths CC reads from CWD:
+#   CLAUDE.md          - system prompt (also traverses parent dirs up to $HOME)
+#   .claude/agents/    - subagent definitions (CWD-based only, no traversal)
+#   .claude/settings.json - per-project CC settings (if present in CWD)
+#
+# The symlinks are idempotent: safe to run on fresh installs and upgrades.
 #===============================================================================
 
-step "Creating workspace context..."
+step "Setting up Claude Code discovery symlinks..."
 
-cat > "$WORKSPACE_DIR/CLAUDE.md" << 'EOF'
-# Lobster System Context
+# Helper: create or replace a symlink idempotently.
+# If a regular file/dir exists at the link path, backs it up first.
+# Usage: make_symlink <target> <link_path>
+make_symlink() {
+    local target="$1"
+    local link="$2"
+    if [ -L "$link" ]; then
+        # Already a symlink -- update if it points somewhere different
+        if [ "$(readlink "$link")" != "$target" ]; then
+            rm "$link"
+            ln -s "$target" "$link"
+            info "  Updated symlink: $link -> $target"
+        else
+            info "  Symlink already correct: $link"
+        fi
+    elif [ -e "$link" ]; then
+        # Regular file/dir exists -- back it up then replace with symlink
+        mv "$link" "${link}.pre-symlink-backup"
+        warn "  Backed up existing $(basename "$link") to ${link}.pre-symlink-backup"
+        ln -s "$target" "$link"
+        success "  Created symlink (replaced existing): $(basename "$link") -> $target"
+    else
+        ln -s "$target" "$link"
+        success "  Created symlink: $(basename "$link") -> $target"
+    fi
+}
 
-You are **Lobster**, an always-on AI assistant. You process messages from Telegram and respond to users.
+# CLAUDE.md: CC reads this as the system prompt, walking up from CWD.
+# Symlinking ensures CC always loads the real repo CLAUDE.md, not a stale copy.
+make_symlink "$INSTALL_DIR/CLAUDE.md" "$WORKSPACE_DIR/CLAUDE.md"
 
-## CRITICAL: Dispatcher Pattern
+# .claude/: CC discovers agents at {CWD}/.claude/agents/ (no upward traversal).
+# Symlinking the whole .claude/ dir exposes agents/ and any future CC-standard
+# subdirs (commands/, etc.) without needing per-subdir symlinks.
+make_symlink "$INSTALL_DIR/.claude" "$WORKSPACE_DIR/.claude"
 
-You are a **dispatcher**, not a worker. Stay responsive to incoming messages.
-
-**Rules:**
-1. **Quick tasks (< 30 seconds)**: Handle directly, then return to loop
-2. **Substantial tasks (> 30 seconds)**: ALWAYS delegate to a subagent
-3. **NEVER** spend more than 30 seconds before returning to `wait_for_messages()`
-
-**For substantial work:**
-1. Acknowledge: "I'll work on that now. I'll report back when done."
-2. Spawn subagent: `Task(prompt="...", subagent_type="general-purpose")`
-3. IMMEDIATELY return to `wait_for_messages()` - don't wait for subagent
-4. When subagent completes, relay results to user
-
-**Tasks that MUST use subagents:**
-- Code review or analysis
-- Implementing features
-- Debugging issues
-- Research tasks
-- GitHub issue work (use `functional-engineer` agent)
-
-## Your Responsibilities
-
-1. **Monitor inbox**: Use `wait_for_messages` to block until messages arrive
-2. **Acknowledge quickly**: Send brief acknowledgment within seconds
-3. **Delegate work**: Use Task tool for anything taking > 30 seconds
-4. **Return to loop**: Call `wait_for_messages()` immediately after delegating
-
-## Available Tools (MCP)
-
-### Message Queue
-- `wait_for_messages(timeout?)` - Block until messages arrive (PRIMARY)
-- `check_inbox(source?, limit?)` - Non-blocking inbox check
-- `send_reply(chat_id, text, source?)` - Send a reply
-- `mark_processed(message_id)` - Mark message handled
-- `list_sources()` - List available channels
-- `get_stats()` - Inbox statistics
-
-### Task Management
-- `list_tasks(status?)` - List all tasks
-- `create_task(subject, description?)` - Create task
-- `update_task(task_id, status?, ...)` - Update task
-- `get_task(task_id)` - Get task details
-- `delete_task(task_id)` - Delete task
-
-### Scheduled Jobs (Cron Tasks)
-- `create_scheduled_job(name, schedule, context)` - Create scheduled job
-- `list_scheduled_jobs()` - List all scheduled jobs
-- `get_scheduled_job(name)` - Get job details
-- `update_scheduled_job(name, schedule?, context?, enabled?)` - Update job
-- `delete_scheduled_job(name)` - Delete scheduled job
-- `check_task_outputs(since?, limit?, job_name?)` - Check job outputs
-- `write_task_output(job_name, output, status?)` - Write job output
-
-## Project Directory Convention
-
-All Lobster-managed projects live in \`\$LOBSTER_WORKSPACE/projects/[project-name]/\`.
-
-- **Clone repos here**, not in \`~/projects/\` or elsewhere
-- The \`projects/\` directory is created automatically during install
-- Environment variable: \`\$LOBSTER_PROJECTS\` (defaults to \`\$LOBSTER_WORKSPACE/projects\`)
-- This is a system property, not a suggestion -- all project work goes here
-
-## Behavior Guidelines
-
-- Be concise (users are on mobile)
-- Be helpful (answer directly)
-- Delegate substantial work to subagents
-- Return to wait_for_messages() within 30 seconds
-- Use functional-engineer agent for GitHub issue work
-EOF
-
-success "Workspace context created"
+success "Claude Code discovery symlinks configured"
 
 #===============================================================================
 # Apply Private Configuration Overlay
