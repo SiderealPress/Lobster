@@ -289,11 +289,11 @@ async def transcribe_pending_file(pending_file: Path) -> None:
     timeout_s = compute_timeout(audio_duration)
     log.info(f"  Audio duration: {audio_duration:.0f}s → timeout: {timeout_s}s")
 
-    # OGG → WAV conversion (once; reuse on retries).
+    # Audio → WAV conversion for any non-WAV format (once; reuse on retries).
     # convert_ogg_to_wav writes atomically (temp-then-rename), so any existing
     # file at wav_path is guaranteed to be a complete, valid conversion.
     wav_path: Path | None = None
-    if audio_path.suffix.lower() in (".ogg", ".oga", ".opus"):
+    if audio_path.suffix.lower() not in (".wav",):
         wav_path = audio_path.with_suffix(".wav")
         if not wav_path.exists():
             ok = await convert_ogg_to_wav(audio_path, wav_path, timeout_s=timeout_s)
@@ -301,7 +301,7 @@ async def transcribe_pending_file(pending_file: Path) -> None:
                 # ffmpeg failure is generally permanent (bad file or binary missing)
                 move_to_dead_letter(
                     pending_file, msg_data,
-                    "ffmpeg OGG→WAV conversion failed"
+                    f"ffmpeg audio→WAV conversion failed ({audio_path.suffix})"
                 )
                 return
     transcribe_path = wav_path if wav_path else audio_path
