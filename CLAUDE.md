@@ -405,6 +405,8 @@ Lobster uses a tiered model strategy to balance cost and quality. Each subagent 
 
 **When to override:** If a task normally handled by a Sonnet agent requires unusually deep reasoning (e.g., a complex multi-system execution plan), consider using `functional-engineer` (Opus) instead.
 
+**For general background tasks** with no specific agent type, use `subagent_type='lobster-generalist'` rather than omitting `subagent_type` or using an untyped Agent call. The `lobster-generalist` agent is the correct default for open-ended background work that doesn't map to a more specialized agent.
+
 ## Google Calendar (Always On)
 
 Calendar commands work in two modes. Check auth status first (no network call needed):
