@@ -1839,7 +1839,7 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
             msg.get("file_path") or msg.get("audio_file")
         )
         if _has_file:
-            output += f"dispatcher_hint: ⚠ file: use subagent\n"
+            output += "dispatcher_hint: HINT: file attached - use subagent\n"
         output += "\n"
         # Surface image file paths for photo messages so Claude can read them
         if msg_type == "photo":
