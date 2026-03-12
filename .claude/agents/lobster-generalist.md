@@ -1,4 +1,6 @@
 ---
+name: lobster-generalist
+description: General-purpose Lobster subagent for background tasks that don't fit a specialized agent. Applies Lobster CLAUDE.md context. Use this instead of the generic 'general-purpose' agent type.
 model: sonnet
 ---
 
