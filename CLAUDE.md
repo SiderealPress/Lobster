@@ -347,7 +347,7 @@ Calendar commands work in two modes. Check auth status first (no network call ne
 ```python
 import sys; sys.path.insert(0, "/home/admin/lobster/src")
 from integrations.google_calendar.token_store import load_token
-is_authenticated = load_token("1234567890") is not None
+is_authenticated = load_token("<REDACTED_PHONE>") is not None
 ```
 
 ### Unauthenticated mode (default)
@@ -373,14 +373,14 @@ Delegate to a background subagent — API calls exceed the 7-second rule.
 **Reading events** ("what's on my calendar", "what do I have this week/today"):
 ```python
 from integrations.google_calendar.client import get_upcoming_events
-events = get_upcoming_events(user_id="1234567890", days=7)
+events = get_upcoming_events(user_id="<REDACTED_PHONE>", days=7)
 # Returns List[CalendarEvent] or [] on failure — always falls back gracefully
 ```
 
 **Creating events** ("add X to my calendar", "schedule X for [time]"):
 ```python
 from integrations.google_calendar.client import create_event
-event = create_event(user_id="1234567890", title="...", start=start, end=end)
+event = create_event(user_id="<REDACTED_PHONE>", title="...", start=start, end=end)
 # Returns CalendarEvent with .url, or None on failure
 # On failure, fall back to gcal_add_link_md()
 ```
