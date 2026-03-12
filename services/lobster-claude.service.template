@@ -17,7 +17,7 @@ Environment=LOBSTER_WORKSPACE={{WORKSPACE_DIR}}
 EnvironmentFile=-{{INSTALL_DIR}}/config/config.env
 EnvironmentFile={{CONFIG_DIR}}/config.env
 EnvironmentFile=-{{CONFIG_DIR}}/global.env
-ExecStart=/usr/bin/tmux -L lobster new-session -d -s lobster -c {{WORKSPACE_DIR}} {{CLAUDE_WRAPPER}}
+ExecStart=/usr/bin/tmux -L lobster new-session -d -s lobster -c {{WORKSPACE_DIR}} {{INSTALL_DIR}}/scripts/start-claude.sh
 ExecStop=/usr/bin/tmux -L lobster kill-session -t lobster
 RemainAfterExit=yes
 Restart=on-failure
