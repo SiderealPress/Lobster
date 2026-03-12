@@ -15,18 +15,12 @@ import re
 import sys
 
 
-# Patterns indicating completed work
+# Patterns indicating completed work that references a specific GitHub artifact
+# Keep this tight: only explicit PR/issue number references, not generic words
 COMPLETION_PATTERNS = [
-    r"\bdone\b",
-    r"\bmerged\b",
-    r"\bcreated\b",
-    r"\bcommitted\b",
-    r"\bdeployed\b",
-    r"\bpushed\b",
     r"\bissue\s*#\d+",
     r"\bpr\s*#\d+",
-    r"\bpull\s+request\b",
-    r"\bcommit\b",
+    r"\bpull\s+request\s*#\d+",
 ]
 
 # Pattern for markdown links: [text](url)
@@ -92,8 +86,8 @@ def main():
     has_links = has_markdown_links(text)
     bare_urls = find_bare_urls(text)
 
-    # BLOCKING: completion language present but zero markdown links
-    if has_completion and not has_links:
+    # BLOCKING: references a specific PR/issue but has no links at all (not even bare URLs)
+    if has_completion and not has_links and not bare_urls:
         print(
             "BLOCKED: Message references completed work but contains no clickable links. "
             "Add markdown links [text](url) before sending.",
