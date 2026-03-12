@@ -92,6 +92,9 @@ OUTBOX_DIR = _MESSAGES / "outbox"
 AUDIO_DIR = _MESSAGES / "audio"
 IMAGES_DIR = _MESSAGES / "images"
 DEAD_LETTER_DIR = _MESSAGES / "dead-letter"
+# Voice messages are written here first; the transcription worker picks them up,
+# runs whisper.cpp, and moves the enriched message to INBOX_DIR automatically.
+PENDING_TRANSCRIPTION_DIR = _MESSAGES / "pending-transcription"
 
 # Hibernation state file - written by Claude when it hibernates
 LOBSTER_STATE_FILE = _MESSAGES / "config" / "lobster-state.json"
@@ -319,6 +322,7 @@ OUTBOX_DIR.mkdir(parents=True, exist_ok=True)
 AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 DEAD_LETTER_DIR.mkdir(parents=True, exist_ok=True)
+PENDING_TRANSCRIPTION_DIR.mkdir(parents=True, exist_ok=True)
 LOBSTER_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
 
 # Logging
@@ -1025,10 +1029,14 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         if reply_ctx:
             msg_data["reply_to"] = reply_ctx
 
-        inbox_file = INBOX_DIR / f"{msg_id}.json"
-        atomic_write_json(inbox_file, msg_data)
+        # Route to pending-transcription/ instead of inbox/ so the transcription
+        # worker (src/transcription/worker.py) picks it up, runs whisper.cpp, and
+        # moves the enriched message (with "transcription" and updated "text") to
+        # inbox/ automatically.  Agents will only ever see the transcribed message.
+        pending_file = PENDING_TRANSCRIPTION_DIR / f"{msg_id}.json"
+        atomic_write_json(pending_file, msg_data)
 
-        log.info(f"Wrote voice message to inbox: {msg_id}")
+        log.info(f"Wrote voice message to pending-transcription: {msg_id}")
         await message.reply_text("🎤 Voice message received. Transcribing...")
 
     except Exception as e:
