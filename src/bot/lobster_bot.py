@@ -958,6 +958,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_document_message(update, context, msg_id)
         return
 
+    # Handle audio file attachments (distinct from voice messages)
+    if message.audio:
+        await handle_audio_message(update, context, msg_id)
+        return
+
     text = message.text
     if not text:
         return
@@ -1041,6 +1046,63 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
     except Exception as e:
         log.error(f"Error handling voice message: {e}")
         await message.reply_text("❌ Failed to process voice message.")
+
+
+async def handle_audio_message(update: Update, context: ContextTypes.DEFAULT_TYPE, msg_id: str):
+    """Handle audio file messages (message.audio): download and save to pending-transcription.
+
+    Audio attachments differ from voice messages (message.voice): they are full
+    audio files sent as attachments (e.g. .mp3, .ogg forwarded from Signal).
+    Like voice messages they are routed to pending-transcription/ so the
+    transcription worker picks them up before Claude sees them.
+    """
+    user = update.effective_user
+    message = update.message
+    audio = message.audio
+
+    await send_typing_indicator(message.chat_id)
+
+    try:
+        original_filename = audio.file_name or f"{msg_id}.ogg"
+        ext = Path(original_filename).suffix or ".ogg"
+        audio_path = AUDIO_DIR / f"{msg_id}{ext}"
+
+        file = await context.bot.get_file(audio.file_id)
+        await file.download_to_drive(audio_path)
+        log.info(f"Downloaded audio message to: {audio_path}")
+
+        caption = message.caption or ""
+
+        msg_data = {
+            "id": msg_id,
+            "source": "telegram",
+            "type": "audio",
+            "chat_id": message.chat_id,
+            "user_id": user.id,
+            "username": user.username,
+            "user_name": user.first_name,
+            "text": caption if caption else "[Audio file - pending transcription]",
+            "audio_file": str(audio_path),
+            "original_filename": original_filename,
+            "audio_duration": audio.duration,
+            "audio_mime_type": audio.mime_type or "audio/mpeg",
+            "file_id": audio.file_id,
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+
+        reply_ctx = extract_reply_to_context(message)
+        if reply_ctx:
+            msg_data["reply_to"] = reply_ctx
+
+        pending_file = PENDING_TRANSCRIPTION_DIR / f"{msg_id}.json"
+        atomic_write_json(pending_file, msg_data)
+
+        log.info(f"Wrote audio message to pending-transcription: {msg_id}")
+        await message.reply_text("🎵 Audio file received. Transcribing...")
+
+    except Exception as e:
+        log.error(f"Error handling audio message: {e}", exc_info=True)
+        await message.reply_text("❌ Failed to process audio file.")
 
 
 async def _flush_media_group(media_group_id: str, chat_id: int) -> None:
@@ -1336,6 +1398,7 @@ async def run_bot():
     bot_app.add_handler(MessageHandler(filters.VOICE, handle_message))
     bot_app.add_handler(MessageHandler(filters.PHOTO, handle_message))
     bot_app.add_handler(MessageHandler(filters.Document.ALL, handle_message))
+    bot_app.add_handler(MessageHandler(filters.AUDIO, handle_message))
     bot_app.add_handler(CallbackQueryHandler(handle_callback_query))
     bot_app.add_error_handler(error_handler)
 
