@@ -1223,6 +1223,14 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
 
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from telegram.error import Conflict
+    if isinstance(context.error, Conflict):
+        log.error(
+            "Telegram Conflict: another bot instance is polling. "
+            "Self-terminating so systemd can sequence restarts cleanly."
+        )
+        import sys
+        sys.exit(1)
     log.error(f"Error: {context.error}", exc_info=context.error)
 
 
@@ -1272,7 +1280,7 @@ async def run_bot():
     log.info("Typing indicator refresh loop started (every 4s)")
 
     try:
-        await bot_app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        await bot_app.updater.start_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
         # Keep running until interrupted
         while True:
             await asyncio.sleep(1)
