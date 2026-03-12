@@ -39,7 +39,7 @@ from integrations.google_calendar.config import (
 # ---------------------------------------------------------------------------
 
 _FAKE_CLIENT_ID = "fake-client-id.apps.googleusercontent.com"
-_FAKE_CLIENT_SECRET = "fake-client-secret"
+_FAKE_CLIENT_SECRET = "<REDACTED_SECRET>"
 _BOTH_VARS = {
     "GOOGLE_CLIENT_ID": _FAKE_CLIENT_ID,
     "GOOGLE_CLIENT_SECRET": _FAKE_CLIENT_SECRET,

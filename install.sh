@@ -155,7 +155,6 @@ generate_from_template() {
         -e "s|{{WORKSPACE_DIR}}|${WORKSPACE_DIR}|g" \
         -e "s|{{MESSAGES_DIR}}|${MESSAGES_DIR}|g" \
         -e "s|{{CONFIG_DIR}}|${CONFIG_DIR}|g" \
-        -e "s|{{CLAUDE_WRAPPER}}|${CLAUDE_WRAPPER}|g" \
         "$template" > "$output"
 
     success "Generated: $output"
@@ -1832,34 +1831,18 @@ if [ "$AUTH_METHOD" = "apikey" ] || [ "$AUTH_METHOD" = "apikey_fallback" ]; then
     fi
 fi
 
-# --- Select the Claude launcher ---
-# Choose the appropriate wrapper based on auth method and environment.
-# - claude-persistent.sh: Persistent interactive session (OAuth, has TTY)
-# - claude-wrapper.sh: Headless polling mode (API key, or no TTY)
-# - claude-wrapper.exp: Expect-based interactive (legacy, needs TTY + OAuth)
+# --- Make launchers executable ---
+# start-claude.sh dispatches to claude-persistent.sh (normal) or
+# claude-wrapper.exp (debug) at runtime based on LOBSTER_DEBUG.
+# No selection needed here; just ensure all scripts are executable.
 
-if [ "$AUTH_METHOD" = "apikey" ] || [ "$AUTH_METHOD" = "apikey_fallback" ]; then
-    # API key mode: use headless polling wrapper (no interactive session needed)
-    info "API key auth: using headless polling launcher (claude-wrapper.sh)"
-    CLAUDE_WRAPPER="$INSTALL_DIR/scripts/claude-wrapper.sh"
-elif [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ] && ! command -v open &>/dev/null; then
-    # Headless server with OAuth: use persistent launcher if available,
-    # fall back to headless wrapper
-    if [ -f "$INSTALL_DIR/scripts/claude-persistent.sh" ]; then
-        info "Headless + OAuth: using persistent lifecycle launcher"
-        CLAUDE_WRAPPER="$INSTALL_DIR/scripts/claude-persistent.sh"
-    else
-        info "Headless + OAuth: using headless polling launcher (claude-wrapper.sh)"
-        CLAUDE_WRAPPER="$INSTALL_DIR/scripts/claude-wrapper.sh"
-    fi
-else
-    # Desktop/TTY environment with OAuth: use persistent launcher
-    info "Using persistent lifecycle launcher: claude-persistent.sh"
-    CLAUDE_WRAPPER="$INSTALL_DIR/scripts/claude-persistent.sh"
-fi
-
-chmod +x "$CLAUDE_WRAPPER"
-success "Claude wrapper: $CLAUDE_WRAPPER"
+for script in \
+    "$INSTALL_DIR/scripts/start-claude.sh" \
+    "$INSTALL_DIR/scripts/claude-persistent.sh" \
+    "$INSTALL_DIR/scripts/claude-wrapper.exp"; do
+    [ -f "$script" ] && chmod +x "$script"
+done
+success "Claude launchers ready (start-claude.sh, claude-persistent.sh, claude-wrapper.exp)"
 
 #===============================================================================
 # Generate Service Files from Templates

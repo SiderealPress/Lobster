@@ -54,7 +54,7 @@ from utils.calendar import gcal_add_link_md
 def sample_credentials() -> GoogleOAuthCredentials:
     return GoogleOAuthCredentials(
         client_id="test-client-id",
-        client_secret="test-client-secret",
+        client_secret="<REDACTED_SECRET>",
         scopes=DEFAULT_SCOPES,
         redirect_uri="https://myownlobster.ai/auth/google/callback",
     )
@@ -63,10 +63,10 @@ def sample_credentials() -> GoogleOAuthCredentials:
 @pytest.fixture
 def valid_token() -> TokenData:
     return TokenData(
-        access_token="ya29.test-access-token",
+        access_token="<REDACTED_SECRET>",
         expires_at=datetime.now(tz=timezone.utc) + timedelta(hours=1),
         scope=" ".join(DEFAULT_SCOPES),
-        refresh_token="1//test-refresh-token",
+        refresh_token="<REDACTED_SECRET>",
     )
 
 

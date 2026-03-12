@@ -287,8 +287,7 @@ def _prepare_send_items(text: str) -> list[tuple[str, str]]:
 
         # HTML exceeds the hard limit — re-split this markdown chunk at a
         # progressively tighter limit until the HTML fits.
-        import logging as _logging
-        _log = _logging.getLogger("lobster")
+        _log = logging.getLogger("lobster")
         tighter_limit = int(TELEGRAM_MAX_LENGTH * 0.9)
         floor = 1000
         sub_chunks: list[str] | None = None
