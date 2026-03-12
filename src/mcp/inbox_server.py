@@ -107,6 +107,7 @@ SENT_DIR = BASE_DIR / "sent"
 TASKS_FILE = BASE_DIR / "tasks.json"
 TASK_OUTPUTS_DIR = BASE_DIR / "task-outputs"
 BISQUE_OUTBOX_DIR = BASE_DIR / "bisque-outbox"
+LOBSTER_TMUX_SESSION = os.environ.get("LOBSTER_TMUX_SESSION", "lobster")
 
 # Reply tracking — records {chat_id_str: timestamp} when send_reply is called.
 # Used by mark_processed to guard against dropping human messages without reply.
@@ -323,16 +324,65 @@ _SESSION_GUARDED_TOOLS = frozenset({
 })
 
 
+_main_session_cache: bool | None = None
+
+
+def _check_tmux_ancestry() -> bool:
+    """Walk the process tree to check if this MCP server is a descendant of
+    a pane in the 'lobster' tmux session. This is unforgeable — unlike env
+    vars, process ancestry cannot leak across sessions."""
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["tmux", "-L", LOBSTER_TMUX_SESSION, "list-panes", "-t", LOBSTER_TMUX_SESSION,
+             "-F", "#{pane_pid}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return False
+        tmux_pids = set(result.stdout.strip().split("\n"))
+        pid = os.getpid()
+        for _ in range(10):
+            if str(pid) in tmux_pids:
+                return True
+            try:
+                with open(f"/proc/{pid}/stat") as f:
+                    ppid = int(f.read().rsplit(")", 1)[1].split()[1])
+            except (FileNotFoundError, ValueError, IndexError):
+                break
+            if ppid <= 1:
+                break
+            pid = ppid
+    except Exception:
+        pass
+    return False  # Fail closed — not the main session
+
+
 def _is_main_session() -> bool:
     """Return True if this MCP server instance is running inside the designated
     main Lobster tmux session.
 
-    Checks the LOBSTER_MAIN_SESSION environment variable, which is set
-    exclusively by claude-persistent.sh before launching Claude. A plain SSH
-    Claude session will not have this variable, so it will be blocked from
-    inbox monitoring and outbox writes.
+    Primary check: walks the process tree to verify ancestry in the lobster
+    tmux session. The result is cached — process ancestry never changes.
+
+    Fails closed: if the tmux check fails for any reason, returns False.
     """
-    return os.environ.get("LOBSTER_MAIN_SESSION", "").strip() == "1"
+    global _main_session_cache
+    if _main_session_cache is not None:
+        return _main_session_cache
+    # Primary: tmux ancestry (unforgeable)
+    if _check_tmux_ancestry():
+        _main_session_cache = True
+        log.info("Session guard: confirmed main session via tmux ancestry")
+        return True
+    # Fallback: env var (set by claude-wrapper.exp)
+    result = os.environ.get("LOBSTER_MAIN_SESSION") == "1"
+    _main_session_cache = result
+    if result:
+        log.info("Session guard: confirmed main session via LOBSTER_MAIN_SESSION env var")
+    else:
+        log.info("Session guard: NOT main session (tmux ancestry check failed, env var not set)")
+    return result
 
 
 def _session_guard_error(tool_name: str) -> list[TextContent]:
@@ -344,8 +394,8 @@ def _session_guard_error(tool_name: str) -> list[TextContent]:
             f"SESSION GUARD: '{tool_name}' is blocked in this session.\n\n"
             "Inbox monitoring and outbox writes are restricted to the main "
             "Lobster tmux session (started by claude-persistent.sh).\n\n"
-            "This session does not have LOBSTER_MAIN_SESSION=1 set, which "
-            "means it is an interactive SSH/ad-hoc Claude session.\n\n"
+            "This Claude process is not a descendant of the lobster tmux "
+            "session, so it is treated as an interactive/ad-hoc session.\n\n"
             "Read-only tools (get_stats, list_sources, memory_search, etc.) "
             "are still available."
         ),
