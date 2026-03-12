@@ -16,7 +16,7 @@
 # This script is called by the lobster-claude systemd service via tmux.
 #===============================================================================
 
-set -uo pipefail
+set -euo pipefail
 
 INSTALL_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
 CONFIG_DIR="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}"

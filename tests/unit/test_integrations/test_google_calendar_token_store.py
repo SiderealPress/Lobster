@@ -52,7 +52,7 @@ from integrations.google_calendar.token_store import (
 # ---------------------------------------------------------------------------
 
 _FAKE_CLIENT_ID = "fake-client-id.apps.googleusercontent.com"
-_FAKE_CLIENT_SECRET = "fake-client-secret"
+_FAKE_CLIENT_SECRET = "<REDACTED_SECRET>"
 _FAKE_REDIRECT_URI = "https://myownlobster.ai/auth/google/callback"
 _FAKE_CREDENTIALS = GoogleOAuthCredentials(
     client_id=_FAKE_CLIENT_ID,
@@ -61,8 +61,8 @@ _FAKE_CREDENTIALS = GoogleOAuthCredentials(
     redirect_uri=_FAKE_REDIRECT_URI,
 )
 
-_FAKE_ACCESS_TOKEN = "ya29.fake-access-token"
-_FAKE_REFRESH_TOKEN = "1//fake-refresh-token"
+_FAKE_ACCESS_TOKEN = "<REDACTED_SECRET>"
+_FAKE_REFRESH_TOKEN = "<REDACTED_SECRET>"
 _FAKE_SCOPE = f"{SCOPE_READONLY} {SCOPE_EVENTS}"
 
 _FUTURE_EXPIRES = datetime(2099, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
@@ -304,14 +304,14 @@ class TestSaveToken:
         save_token("user1", token_a, token_dir=tmp_path)
         # Save a different token — access_token differs
         token_b = TokenData(
-            access_token="ya29.different-token",
+            access_token="<REDACTED_SECRET>",
             expires_at=_FUTURE_EXPIRES,
             scope=_FAKE_SCOPE,
             refresh_token=_FAKE_REFRESH_TOKEN,
         )
         save_token("user1", token_b, token_dir=tmp_path)
         data = json.loads((tmp_path / "user1.json").read_text())
-        assert data["access_token"] == "ya29.different-token"
+        assert data["access_token"] == "<REDACTED_SECRET>"
 
     def test_creates_token_dir_if_absent(self, tmp_path: Path) -> None:
         nested = tmp_path / "a" / "b" / "c"
@@ -465,7 +465,7 @@ class TestGetValidToken:
         save_token("user1", expired, token_dir=tmp_path)
         # Refreshed response has no refresh_token
         refreshed_token = TokenData(
-            access_token="ya29.new-access",
+            access_token="<REDACTED_SECRET>",
             expires_at=_FUTURE_EXPIRES,
             scope=_FAKE_SCOPE,
             refresh_token=None,
@@ -525,7 +525,7 @@ class TestGetValidToken:
         expired = _make_expired_token()
         save_token("user1", expired, token_dir=tmp_path)
         refreshed = TokenData(
-            access_token="ya29.new",
+            access_token="<REDACTED_SECRET>",
             expires_at=_FUTURE_EXPIRES,
             scope=_FAKE_SCOPE,
         )

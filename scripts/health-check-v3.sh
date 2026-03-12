@@ -774,6 +774,33 @@ main() {
             # Let systemd handle restart; don't duplicate
             ;;
 
+        active-debug)
+            # Debug mode: claude-wrapper.exp runs Claude interactively.
+            # No persistent wrapper process expected — only check tmux and Claude.
+            log_info "ACTIVE-DEBUG: Debug mode active, checking tmux and Claude process"
+            if ! check_tmux; then
+                level="RED"
+                restart_reason="tmux session missing (debug mode)"
+            fi
+
+            if ! check_claude_process; then
+                level="RED"
+                restart_reason="${restart_reason:+$restart_reason + }no Claude process in lobster tmux (debug mode)"
+            fi
+
+            # Inbox drain check
+            check_inbox_drain
+            local debug_inbox_rc=$?
+            if [[ $debug_inbox_rc -eq 2 ]]; then
+                level="RED"
+                restart_reason="${restart_reason:+$restart_reason + }stale inbox (>$((STALE_THRESHOLD_SECONDS/60))m)"
+            elif [[ $debug_inbox_rc -eq 1 && "$level" == "GREEN" ]]; then
+                level="YELLOW"
+            elif [[ $debug_inbox_rc -eq 0 ]]; then
+                clear_stale_inbox_markers
+            fi
+            ;;
+
         active|unknown|*)
             # Standard checks: wrapper + Claude should be running
             if ! check_tmux; then
