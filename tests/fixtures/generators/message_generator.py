@@ -164,6 +164,34 @@ class MessageGenerator:
 
         return msg
 
+
+    def generate_photo_message(
+        self,
+        image_file=None,
+        image_files=None,
+        caption=None,
+        source='telegram',
+        user_name=None,
+        username=None,
+        user_id=None,
+        chat_id=None,
+        message_id=None,
+        timestamp=None,
+    ):
+        """Generate a photo message for test fixtures."""
+        text = caption if caption else '[Photo]'
+        msg = self.generate_text_message(
+            text=text, source=source, user_name=user_name, username=username,
+            user_id=user_id, chat_id=chat_id, message_id=message_id, timestamp=timestamp,
+        )
+        msg['type'] = 'photo'
+        if image_files is not None:
+            msg['image_files'] = image_files
+        else:
+            msg['image_file'] = image_file or f"/tmp/photo_{msg['id']}.jpg"
+        msg['file_id'] = f"photo_{uuid.uuid4().hex[:16]}"
+        return msg
+
     def generate_document_message(
         self,
         file_name: str = "document.pdf",
