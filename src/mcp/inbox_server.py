@@ -1832,7 +1832,15 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
         else:
             output += f"**[{source}]** from **{user}**\n"
         output += f"Chat ID: `{chat_id}` | Message ID: `{msg_id}`\n"
-        output += f"Time: {ts}\n\n"
+        output += f"Time: {ts}\n"
+        # dispatcher_hint: flag messages with file attachments so dispatcher knows to use a subagent
+        _has_file = msg_type in ("voice", "photo", "document") or bool(
+            msg.get("image_file") or msg.get("image_files") or
+            msg.get("file_path") or msg.get("audio_file")
+        )
+        if _has_file:
+            output += f"dispatcher_hint: ⚠ file: use subagent\n"
+        output += "\n"
         # Surface image file paths for photo messages so Claude can read them
         if msg_type == "photo":
             image_files = msg.get("image_files")
