@@ -43,6 +43,7 @@ MESSAGES_DIR="${LOBSTER_MESSAGES:-$HOME/messages}"
 WORKSPACE_DIR="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
 
 INBOX_DIR="$MESSAGES_DIR/inbox"
+MAINTENANCE_FLAG="$MESSAGES_DIR/config/lobster-maintenance"
 LOBSTER_STATE_FILE="${LOBSTER_STATE_FILE_OVERRIDE:-$MESSAGES_DIR/config/lobster-state.json}"
 STALE_THRESHOLD_SECONDS=180          # 3 minutes - RED if any message older (watchdog handles soft recovery at 90s)
 YELLOW_THRESHOLD_SECONDS=120         # 2 minutes - YELLOW warning
@@ -634,6 +635,13 @@ Status: Restarted successfully"
 #===============================================================================
 main() {
     acquire_lock
+
+    # Maintenance mode: lobster stop sets this flag to prevent auto-restart
+    if [[ -f "$MAINTENANCE_FLAG" ]]; then
+        log_info "=== Maintenance mode active, skipping all checks ==="
+        exit 0
+    fi
+
     log_info "=== Health check v3 starting ==="
 
     local level="GREEN"

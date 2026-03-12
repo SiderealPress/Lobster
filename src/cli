@@ -32,9 +32,11 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 # Directories
-INBOX_DIR="$HOME/messages/inbox"
-OUTBOX_DIR="$HOME/messages/outbox"
-PROCESSED_DIR="$HOME/messages/processed"
+MESSAGES_DIR="${LOBSTER_MESSAGES:-$HOME/messages}"
+INBOX_DIR="$MESSAGES_DIR/inbox"
+OUTBOX_DIR="$MESSAGES_DIR/outbox"
+PROCESSED_DIR="$MESSAGES_DIR/processed"
+MAINTENANCE_FLAG="$MESSAGES_DIR/config/lobster-maintenance"
 
 # Services
 SERVICES=("lobster-router" "lobster-claude")
@@ -72,6 +74,12 @@ count_files() {
 cmd_start() {
     print_header "Starting Lobster"
 
+    # Clear maintenance mode flag if present
+    if [[ -f "$MAINTENANCE_FLAG" ]]; then
+        rm -f "$MAINTENANCE_FLAG"
+        echo -e "Maintenance mode cleared"
+    fi
+
     for service in "${SERVICES[@]}"; do
         echo -n "Starting $service... "
         if sudo systemctl start "$service" 2>/dev/null; then
@@ -97,6 +105,11 @@ cmd_stop() {
             echo -e "${YELLOW}not running${NC}"
         fi
     done
+
+    # Set maintenance flag so health check doesn't restart services
+    mkdir -p "$(dirname "$MAINTENANCE_FLAG")"
+    echo "stopped_at=$(date -Iseconds) stopped_by=$(whoami)" > "$MAINTENANCE_FLAG"
+    echo -e "${GREEN}Maintenance mode enabled${NC} (health check will not restart services)"
 }
 
 cmd_restart() {
@@ -108,6 +121,11 @@ cmd_restart() {
 
 cmd_status() {
     print_header "Lobster Status"
+
+    if [[ -f "$MAINTENANCE_FLAG" ]]; then
+        echo ""
+        echo -e "${YELLOW}⚠ MAINTENANCE MODE - health check auto-restart disabled${NC}"
+    fi
 
     echo ""
     echo -e "${CYAN}Services:${NC}"

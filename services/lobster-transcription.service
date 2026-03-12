@@ -1,0 +1,42 @@
+[Unit]
+Description=Lobster Transcription Worker - whisper.cpp voice-to-text pipeline
+After=network.target lobster-router.service
+# The worker only needs the router up so AUDIO_DIR exists; it doesn't call the bot
+Wants=lobster-router.service
+
+[Service]
+Type=simple
+User=lobster
+Group=lobster
+WorkingDirectory=/home/lobster/lobster
+
+# Inherit the same PATH / environment as the router so ffmpeg and whisper-cli resolve
+Environment=PATH=/home/lobster/.local/bin:/home/lobster/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HOME=/home/lobster
+Environment=LOBSTER_CONFIG_DIR=/home/lobster/lobster-config
+Environment=LOBSTER_INSTALL_DIR=/home/lobster/lobster
+Environment=LOBSTER_MESSAGES=/home/lobster/messages
+Environment=LOBSTER_WORKSPACE=/home/lobster/lobster-workspace
+EnvironmentFile=-/home/lobster/lobster/config/config.env
+EnvironmentFile=/home/lobster/lobster-config/config.env
+EnvironmentFile=-/home/lobster/lobster-config/global.env
+
+ExecStart=/home/lobster/lobster/.venv/bin/python /home/lobster/lobster/src/transcription/worker.py
+
+# Restart on any failure; voice messages accumulate safely in pending-transcription/
+Restart=always
+RestartSec=10
+
+# Limit whisper.cpp memory in case a corrupt audio file causes a runaway
+MemoryMax=2G
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lobster-transcription
+
+# Security hardening (mirror of lobster-router.service)
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
