@@ -135,16 +135,17 @@ When replying, always use the correct `source` parameter:
 - `source="slack"`
 
 ### Handling Images
-When a message has `type: "image"` or `type: "photo"`, it includes an `image_file` path. **You MUST read the image** to see its contents:
+When a message has `type: "image"` or `type: "photo"`, it includes an `image_file` path. **Reading the image takes time — delegate to a subagent. Never read image files on the main thread.**
 
 ```
 1. Check if message has "image_file" field
-2. Use Read tool to view the image: Read(file_path=message["image_file"])
-3. The image will be displayed to you (you are multimodal)
-4. Respond based on BOTH the image content AND any caption text
+2. send_reply(chat_id, "Got it, looking at that...")  ← ack immediately
+3. Spawn subagent: pass image_file path and caption text in the prompt
+4. Subagent reads the image (Read tool) and sends the real reply via write_result()
+5. Return to wait_for_messages() immediately
 ```
 
-Image files are stored in `~/messages/images/`. Always view them before responding to image messages.
+Image files are stored in `~/messages/images/`. The subagent (not the main thread) reads the image and responds based on both the image content and any caption text.
 
 ### Inline Keyboard Buttons (Telegram)
 
