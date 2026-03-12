@@ -347,7 +347,7 @@ main_loop = None
 _processing_files: set[str] = set()
 
 # Lock to prevent concurrent wake attempts (race condition: two simultaneous
-# incoming messages while hibernating should only trigger a single spawn)
+# incoming messages while hibernating should only trigger one Claude spawn)
 _wake_lock = threading.Lock()
 
 # Directory where MCP mark_processing moves messages
@@ -498,54 +498,109 @@ def wake_claude_if_hibernating() -> None:
 
     Uses a threading lock so that concurrent calls (e.g. two messages arriving
     at the same time while hibernating) only trigger a single spawn.
+
+    Handles stale hibernate state: if the state file says "hibernate" but the
+    updated_at timestamp is older than 60 seconds, the Claude CLI process is
+    likely a zombie (it wrote hibernate state but never exited). In this case,
+    force-kill the old process before restarting.
     """
-    with _wake_lock:
-        state_data = _read_lobster_state_data()
-        mode = state_data.get("mode", "active")
+    state_data = _read_lobster_state_data()
+    mode = state_data.get("mode", "active")
+    if mode not in ("active", "hibernate"):
+        mode = "active"
 
-        if mode != "hibernate":
-            return  # Not hibernating — nothing to do
+    # Fast path: if not hibernating, nothing to do
+    if mode != "hibernate":
+        return
 
-        if _is_claude_running():
-            # Claude is running but state says hibernate — check if state is stale
-            if _is_hibernate_stale(state_data):
-                log.warning(
-                    "wake_claude: hibernate state is stale (Claude running but state not updated). "
-                    "Killing stale process and re-spawning."
-                )
-                _kill_stale_claude()
-                # Fall through to spawn below
-            else:
-                log.info("wake_claude: Claude is running, state is fresh — no action needed")
-                return
-
-        log.info("wake_claude: Lobster is hibernating. Spawning fresh Claude session...")
-
-        if not CLAUDE_WAKE_SCRIPT.exists():
-            log.error(f"wake_claude: wake script not found: {CLAUDE_WAKE_SCRIPT}")
+    # Check if Claude process is running
+    if _is_claude_running():
+        # Claude process exists — but is it a zombie from stale hibernate?
+        if _is_hibernate_stale(state_data):
+            log.warning(
+                "wake_claude: hibernate state is stale and Claude process still running — "
+                "killing zombie process"
+            )
+            _kill_stale_claude()
+        else:
+            log.info("wake_claude: Claude already running despite hibernate state")
             return
 
-        try:
-            subprocess.Popen(
-                [str(CLAUDE_WAKE_SCRIPT)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-            log.info("wake_claude: Claude session spawned successfully")
-        except Exception as e:
-            log.error(f"wake_claude: Failed to spawn Claude: {e}")
+    # Try to acquire the wake lock without blocking
+    if not _wake_lock.acquire(blocking=False):
+        log.info("wake_claude: another wake attempt is in progress, skipping")
+        return
 
-
-def atomic_write_json(path: Path, data: dict) -> None:
-    """Write JSON data to path atomically using a temp file + rename."""
-    tmp_path = path.with_suffix('.tmp')
     try:
-        with open(tmp_path, 'w') as f:
-            json.dump(data, f, indent=2)
-        tmp_path.rename(path)
-    except Exception:
-        tmp_path.unlink(missing_ok=True)
+        # Re-check inside the lock to handle the TOCTOU window
+        if _read_lobster_state() != "hibernate":
+            return
+        if _is_claude_running():
+            log.info("wake_claude: Claude started before we could acquire lock")
+            return
+
+        log.info("wake_claude: Lobster is hibernating and Claude is not running — waking")
+
+        # Reset state to "active" BEFORE spawning Claude.
+        # This prevents restart storms: even if spawn fails, the state is no longer
+        # "hibernate", so the health check won't skip its safety net.
+        try:
+            state_data = {"mode": "active", "woke_at": datetime.now(timezone.utc).isoformat()}
+            tmp = LOBSTER_STATE_FILE.parent / f".lobster-state-wake-{os.getpid()}.tmp"
+            tmp.write_text(json.dumps(state_data, indent=2))
+            tmp.rename(LOBSTER_STATE_FILE)
+            log.info("wake_claude: reset state to 'active'")
+        except Exception as e:
+            log.error(f"wake_claude: failed to reset state ({e}), proceeding with wake anyway")
+
+        # Preferred: restart via systemd (keeps service state consistent)
+        try:
+            result = subprocess.run(
+                ["sudo", "systemctl", "restart", "lobster-claude"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if result.returncode == 0:
+                log.info("wake_claude: 'systemctl restart lobster-claude' succeeded")
+            else:
+                log.error(f"wake_claude: systemctl restart exited {result.returncode}: {result.stderr.strip()}")
+                raise RuntimeError("systemctl restart failed")
+        except Exception as e:
+            log.error(f"wake_claude: systemctl restart failed ({e}), trying start script")
+            # Fallback: call start-lobster.sh directly
+            if CLAUDE_WAKE_SCRIPT.exists():
+                subprocess.Popen(
+                    ["bash", str(CLAUDE_WAKE_SCRIPT)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                log.info(f"wake_claude: spawned {CLAUDE_WAKE_SCRIPT}")
+            else:
+                log.error(f"wake_claude: fallback script not found: {CLAUDE_WAKE_SCRIPT}")
+    finally:
+        _wake_lock.release()
+
+
+def atomic_write_json(path: Path, data: dict, indent: int = 2) -> None:
+    """Atomically write JSON to a file (write-to-temp-then-rename).
+
+    On POSIX systems, rename() within the same filesystem is atomic,
+    so readers never see a partial file.
+    """
+    content = json.dumps(data, indent=indent)
+    fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.rename(tmp_path, str(path))
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
         raise
 
 
@@ -1017,82 +1072,162 @@ async def process_reply(chat_id: int, text: str, reply_markup=None, thread_ts=No
                 log.error(f"Plain text fallback also failed: {e2}")
 
 
-async def watch_outbox() -> None:
-    """Watch the outbox directory for reply files and send them to users."""
-    log.info(f"Watching outbox directory: {OUTBOX_DIR}")
+class OutboxHandler(FileSystemEventHandler):
+    """Watches outbox for reply files and sends them via Telegram."""
 
-    while True:
+    def _schedule_processing(self, filepath):
+        if filepath.endswith('.json') and not filepath.endswith('.tmp'):
+            if bot_app and main_loop and main_loop.is_running():
+                if filepath not in _processing_files:
+                    _processing_files.add(filepath)
+                    asyncio.run_coroutine_threadsafe(
+                        self.process_reply(filepath),
+                        main_loop
+                    )
+
+    def on_created(self, event):
+        if event.is_directory:
+            return
+        self._schedule_processing(event.src_path)
+
+    def on_modified(self, event):
+        if event.is_directory:
+            return
+        self._schedule_processing(event.src_path)
+
+    async def process_reply(self, filepath):
         try:
-            # Process all existing files in the outbox
-            for reply_file in sorted(OUTBOX_DIR.glob("*.json")):
-                if str(reply_file) in _processing_files:
+            await asyncio.sleep(0.5)  # Delay to ensure file write is complete
+            with open(filepath, 'r') as f:
+                reply = json.load(f)
+
+            chat_id = reply.get('chat_id')
+            text = reply.get('text', '')
+            buttons = reply.get('buttons')
+
+            if chat_id and text and bot_app:
+                reply_markup = build_inline_keyboard(buttons) if buttons else None
+                send_items = _prepare_send_items(text)
+                n = len(send_items)
+                for i, (md_chunk, html_chunk) in enumerate(send_items):
+                    # Only attach inline keyboard to the final chunk
+                    chunk_markup = reply_markup if i == n - 1 else None
+                    try:
+                        await bot_app.bot.send_message(
+                            chat_id=chat_id,
+                            text=html_chunk,
+                            parse_mode="HTML",
+                            reply_markup=chunk_markup
+                        )
+                    except Exception as exc:
+                        # Fallback to plain text if HTML parsing fails.
+                        # Plain text is also subject to the hard limit so we
+                        # truncate as a last resort rather than crash/drop.
+                        plain = md_chunk
+                        if len(plain) > TELEGRAM_HARD_LIMIT:
+                            plain = plain[:TELEGRAM_HARD_LIMIT - 3] + "..."
+                            log.warning(
+                                f"HTML send failed for {chat_id}, falling back to "
+                                f"truncated plain text ({len(md_chunk)} chars): {exc}"
+                            )
+                        await bot_app.bot.send_message(
+                            chat_id=chat_id,
+                            text=plain,
+                            reply_markup=chunk_markup
+                        )
+                if n > 1:
+                    log.info(f"Sent reply to {chat_id} in {n} chunks: {text[:50]}...")
+                else:
+                    log.info(f"Sent reply to {chat_id}: {text[:50]}...")
+                os.remove(filepath)
+            else:
+                log.warning(f"Skipping reply {filepath}: missing chat_id={chat_id}, text={bool(text)}, bot={bool(bot_app)}")
+                os.remove(filepath)
+        finally:
+            _processing_files.discard(filepath)
+
+
+async def process_existing_outbox():
+    """Process any outbox files that exist on startup."""
+    handler = OutboxHandler()
+    existing_files = list(OUTBOX_DIR.glob("*.json"))
+    if existing_files:
+        log.info(f"Processing {len(existing_files)} existing outbox file(s)...")
+        for filepath in existing_files:
+            try:
+                await handler.process_reply(str(filepath))
+            except Exception as e:
+                log.error(f"Error processing existing outbox file {filepath}: {e}")
+
+
+_outbox_fail_counts: dict[str, int] = {}
+
+
+async def sweep_outbox():
+    """Periodic sweep catches files missed by watchdog or failed on first attempt."""
+    handler = OutboxHandler()
+    while True:
+        await asyncio.sleep(10)
+        try:
+            for filepath in sorted(OUTBOX_DIR.glob("*.json")):
+                # Skip temp files from atomic writes
+                if filepath.suffix == '.tmp':
+                    continue
+                # Only process files older than 2 seconds (ensure write completion)
+                try:
+                    age = time.time() - filepath.stat().st_mtime
+                except FileNotFoundError:
+                    continue
+                if age < 2:
                     continue
 
-                _processing_files.add(str(reply_file))
+                fname = str(filepath)
+                if fname in _processing_files:
+                    continue
+                _processing_files.add(fname)
                 try:
-                    await process_outbox_file(reply_file)
+                    await handler.process_reply(fname)
+                    _outbox_fail_counts.pop(fname, None)
                 except Exception as e:
-                    log.error(f"Error processing outbox file {reply_file}: {e}", exc_info=True)
-                finally:
-                    _processing_files.discard(str(reply_file))
-
+                    _outbox_fail_counts[fname] = _outbox_fail_counts.get(fname, 0) + 1
+                    count = _outbox_fail_counts[fname]
+                    log.error(f"Sweep: failed to process {filepath.name} (attempt {count}/5): {e}")
+                    if count >= 5:
+                        dest = DEAD_LETTER_DIR / filepath.name
+                        shutil.move(fname, str(dest))
+                        _outbox_fail_counts.pop(fname, None)
+                        log.error(f"Moved to dead-letter after 5 failures: {filepath.name}")
         except Exception as e:
-            log.error(f"Error in watch_outbox loop: {e}", exc_info=True)
-
-        await asyncio.sleep(0.5)
+            log.error(f"Outbox sweep error: {e}")
 
 
-async def process_outbox_file(reply_file: Path) -> None:
-    """Process a single outbox reply file."""
-    try:
-        with open(reply_file, 'r') as f:
-            reply_data = json.load(f)
-    except (json.JSONDecodeError, FileNotFoundError) as e:
-        log.warning(f"Could not read outbox file {reply_file}: {e}")
-        reply_file.unlink(missing_ok=True)
-        return
-
-    chat_id = reply_data.get("chat_id")
-    text = reply_data.get("text", "")
-    buttons = reply_data.get("buttons")
-    thread_ts = reply_data.get("thread_ts")
-
-    if not chat_id or not text:
-        log.warning(f"Invalid reply file (missing chat_id or text): {reply_file}")
-        reply_file.unlink(missing_ok=True)
-        return
-
-    # Build InlineKeyboardMarkup if buttons are specified
-    reply_markup = None
-    if buttons:
-        keyboard = []
-        for row in buttons:
-            kb_row = []
-            for btn in row:
-                if isinstance(btn, dict):
-                    kb_row.append(InlineKeyboardButton(
-                        text=btn.get("text", str(btn)),
-                        callback_data=btn.get("callback_data", str(btn))
-                    ))
-                else:
-                    # Simple string button — text is also the callback_data
-                    kb_row.append(InlineKeyboardButton(text=str(btn), callback_data=str(btn)))
-            keyboard.append(kb_row)
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-    log.info(f"Sending reply to chat_id={chat_id}, length={len(text)}")
-    await process_reply(chat_id, text, reply_markup=reply_markup, thread_ts=thread_ts)
-
-    # Delete the reply file after successful send
-    reply_file.unlink(missing_ok=True)
-    log.info(f"Processed and deleted outbox file: {reply_file.name}")
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from telegram.error import Conflict
+    if isinstance(context.error, Conflict):
+        log.error(
+            "Telegram Conflict: another bot instance is polling. "
+            "Self-terminating so systemd can sequence restarts cleanly."
+        )
+        import sys
+        sys.exit(1)
+    log.error(f"Error: {context.error}", exc_info=context.error)
 
 
 async def run_bot():
-    """Start the bot."""
     global bot_app, main_loop
 
-    main_loop = asyncio.get_event_loop()
+    log.info("Starting Lobster Bot v2 (file-based)...")
+    log.info(f"Inbox: {INBOX_DIR}")
+    log.info(f"Outbox: {OUTBOX_DIR}")
+
+    # Store the event loop for the outbox watcher
+    main_loop = asyncio.get_running_loop()
+
+    # Set up outbox watcher
+    observer = Observer()
+    observer.schedule(OutboxHandler(), str(OUTBOX_DIR), recursive=False)
+    observer.start()
+    log.info("Watching outbox for replies...")
 
     # Create bot application
     bot_app = Application.builder().token(BOT_TOKEN).build()
@@ -1113,41 +1248,32 @@ async def run_bot():
     log.info("Bot is now polling...")
 
     # Process any existing outbox files from before startup
-    log.info("Processing any pre-existing outbox files...")
-    for reply_file in sorted(OUTBOX_DIR.glob("*.json")):
-        try:
-            await process_outbox_file(reply_file)
-        except Exception as e:
-            log.error(f"Error processing startup outbox file {reply_file}: {e}")
+    await process_existing_outbox()
 
-    # Start the outbox watcher and typing refresh as background tasks
-    outbox_task = asyncio.create_task(watch_outbox())
-    typing_task = asyncio.create_task(typing_refresh_loop())
+    # Start periodic outbox sweep (catches watchdog misses and retries failures)
+    asyncio.create_task(sweep_outbox())
+    log.info("Outbox sweep task started (every 10s)")
 
-    # Start polling
-    await bot_app.updater.start_polling(
-        allowed_updates=["message", "callback_query"],
-        drop_pending_updates=False,
-    )
-
-    log.info("Bot started successfully. Waiting for messages...")
+    # Start typing indicator refresh loop (keeps "typing..." visible during long tasks)
+    asyncio.create_task(typing_refresh_loop())
+    log.info("Typing indicator refresh loop started (every 4s)")
 
     try:
+        await bot_app.updater.start_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
         # Keep running until interrupted
-        await asyncio.Event().wait()
+        while True:
+            await asyncio.sleep(1)
     finally:
-        log.info("Shutting down bot...")
-        outbox_task.cancel()
-        typing_task.cancel()
         await bot_app.updater.stop()
         await bot_app.stop()
         await bot_app.shutdown()
+        observer.stop()
+        observer.join()
 
 
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle errors in the bot."""
-    log.error(f"Update {update} caused error {context.error}", exc_info=context.error)
+def main():
+    asyncio.run(run_bot())
 
 
 if __name__ == "__main__":
-    asyncio.run(run_bot())
+    main()
