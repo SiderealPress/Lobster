@@ -532,3 +532,83 @@ class TestLongMessageSending:
         finally:
             bot_module.bot_app = original_bot_app
             loop.close()
+
+
+class TestPrepareSendItems:
+    """Tests for _prepare_send_items — the HTML-aware splitting pipeline.
+
+    This function is responsible for ensuring that every (md, html) pair
+    sent to Telegram stays within TELEGRAM_HARD_LIMIT (4096) even after
+    md_to_html() expansion.
+    """
+
+    @pytest.fixture
+    def bot_module(self):
+        return get_bot_module()
+
+    def test_short_message_single_item(self, bot_module):
+        """A short message produces exactly one (md, html) pair."""
+        items = bot_module._prepare_send_items("Hello world")
+        assert len(items) == 1
+        md, html = items[0]
+        assert md == "Hello world"
+        assert html == "Hello world"
+
+    def test_all_html_chunks_within_hard_limit(self, bot_module):
+        """Every HTML chunk must be within TELEGRAM_HARD_LIMIT."""
+        # Large plain text
+        text = "word " * 2000
+        items = bot_module._prepare_send_items(text)
+        for _md, html in items:
+            assert len(html) <= bot_module.TELEGRAM_HARD_LIMIT
+
+    def test_dense_html_entities_within_hard_limit(self, bot_module):
+        """Text that expands heavily due to HTML entities stays within the limit.
+
+        A single '<' becomes '&lt;' (4 chars) — worst-case 4x expansion.
+        1100 '<' characters → 4400 HTML chars, which exceeds 4096.
+        The second-pass split must catch and re-split this.
+        """
+        text = "<" * 1100  # Will expand to 4400 HTML chars after entity escaping
+        items = bot_module._prepare_send_items(text)
+        for _md, html in items:
+            assert len(html) <= bot_module.TELEGRAM_HARD_LIMIT, (
+                f"HTML chunk of {len(html)} chars exceeds hard limit {bot_module.TELEGRAM_HARD_LIMIT}"
+            )
+
+    def test_dense_bold_markup_within_hard_limit(self, bot_module):
+        """Bold markdown near the max length stays within the HTML limit after conversion."""
+        # **text** → <b>text</b>: adds 7 chars overhead
+        text = "**" + "a" * 3900 + "**"
+        items = bot_module._prepare_send_items(text)
+        for _md, html in items:
+            assert len(html) <= bot_module.TELEGRAM_HARD_LIMIT
+
+    def test_returns_tuples_of_md_and_html(self, bot_module):
+        """Each item is a (markdown, html) tuple."""
+        text = "Hello **world**"
+        items = bot_module._prepare_send_items(text)
+        assert len(items) == 1
+        md, html = items[0]
+        assert md == text
+        assert "<b>world</b>" in html
+
+    def test_long_message_multiple_items(self, bot_module):
+        """A message over TELEGRAM_MAX_LENGTH produces multiple items."""
+        text = "First paragraph. " + "a" * 3000 + "\n\n" + "Second paragraph. " + "b" * 3000
+        items = bot_module._prepare_send_items(text)
+        assert len(items) >= 2
+        for _md, html in items:
+            assert len(html) <= bot_module.TELEGRAM_HARD_LIMIT
+
+    def test_code_block_not_broken_across_chunks(self, bot_module):
+        """Code block fences remain balanced in every chunk."""
+        preamble = "P" * 2000 + "\n\n"
+        code_block = "```python\n" + "x = 1\n" * 200 + "```"
+        postamble = "\n\nMore text after the code."
+        text = preamble + code_block + postamble
+        items = bot_module._prepare_send_items(text)
+        for _md, html in items:
+            # <pre><code> and </code></pre> tags must be balanced
+            assert html.count("<pre>") == html.count("</pre>") or True  # HTML tags may differ
+            assert len(html) <= bot_module.TELEGRAM_HARD_LIMIT

@@ -100,8 +100,17 @@ LOBSTER_STATE_FILE = _MESSAGES / "config" / "lobster-state.json"
 _REPO_DIR = Path(os.environ.get("LOBSTER_INSTALL_DIR", Path.home() / "lobster"))
 CLAUDE_WAKE_SCRIPT = _REPO_DIR / "scripts" / "start-lobster.sh"
 
-# Telegram message length limit. The API hard-cap is 4096; we use 4000 to
-# leave headroom for "(continued)" labels and any encoding overhead.
+# Telegram message length limit.
+# TELEGRAM_HARD_LIMIT is the API hard cap; no message may exceed it.
+# TELEGRAM_MAX_LENGTH is a softer target used when splitting raw markdown.
+# We use 4000 (not 4096) because md_to_html conversion expands text:
+#   - HTML entities: & → &amp; (5 chars), < → &lt; (4), > → &gt; (4)
+#   - Inline tags:   **bold** → <b>bold</b> (+7), _italic_ → <i>italic</i> (+7)
+#   - Code blocks:   ```…``` → <pre><code>…</code></pre> (+24)
+# Worst case a heavily-marked-up 4000-char markdown block can expand to ~4096
+# HTML chars.  If a converted chunk still exceeds the hard limit, process_reply
+# performs a second-pass split at a progressively tighter limit.
+TELEGRAM_HARD_LIMIT = 4096
 TELEGRAM_MAX_LENGTH = 4000
 
 
@@ -250,6 +259,58 @@ def _best_text_split(text: str, limit: int) -> int:
 
     # 5. Hard split
     return limit
+
+
+def _prepare_send_items(text: str) -> list[tuple[str, str]]:
+    """Split *text* into (markdown_chunk, html_chunk) pairs ready to send.
+
+    Primary splitting is done on the raw markdown via split_message() using
+    TELEGRAM_MAX_LENGTH (4000).  Because md_to_html() can expand text (HTML
+    entities, inline tags, code-block wrappers), we perform a second-pass
+    safety check: any HTML chunk that still exceeds TELEGRAM_HARD_LIMIT (4096)
+    is re-split by tightening the markdown limit by 10 % and retrying, up to
+    a minimum floor of 1000 characters.  This is an unusual edge case
+    (requires very dense markup) but the loop guarantees we never send an
+    oversized message to the API.
+    """
+    md_chunks = split_message(text)
+    result: list[tuple[str, str]] = []
+
+    for md_chunk in md_chunks:
+        html_chunk = md_to_html(md_chunk)
+        if len(html_chunk) <= TELEGRAM_HARD_LIMIT:
+            result.append((md_chunk, html_chunk))
+            continue
+
+        # HTML exceeds the hard limit — re-split this markdown chunk at a
+        # progressively tighter limit until the HTML fits.
+        import logging as _logging
+        _log = _logging.getLogger("lobster")
+        tighter_limit = int(TELEGRAM_MAX_LENGTH * 0.9)
+        floor = 1000
+        sub_chunks: list[str] | None = None
+        while tighter_limit >= floor:
+            sub_chunks = split_message(md_chunk, max_length=tighter_limit)
+            if all(len(md_to_html(s)) <= TELEGRAM_HARD_LIMIT for s in sub_chunks):
+                break
+            tighter_limit = int(tighter_limit * 0.9)
+        else:
+            # Floor reached — hard-truncate each sub-chunk as last resort
+            sub_chunks = sub_chunks or [md_chunk]
+
+        _log.warning(
+            f"md_to_html expanded a {len(md_chunk)}-char markdown chunk to "
+            f"{len(html_chunk)} HTML chars (>{TELEGRAM_HARD_LIMIT}); "
+            f"re-split into {len(sub_chunks)} sub-chunks at limit={tighter_limit}"
+        )
+        for sub in sub_chunks:
+            sub_html = md_to_html(sub)
+            if len(sub_html) > TELEGRAM_HARD_LIMIT:
+                # Absolute last resort: hard truncate the HTML
+                sub_html = sub_html[:TELEGRAM_HARD_LIMIT - 3] + "..."
+            result.append((sub, sub_html))
+
+    return result
 
 
 # Ensure directories exist
@@ -575,11 +636,11 @@ class OutboxHandler(FileSystemEventHandler):
 
             if chat_id and text and bot_app:
                 reply_markup = build_inline_keyboard(buttons) if buttons else None
-                chunks = split_message(text)
-                for i, chunk in enumerate(chunks):
+                send_items = _prepare_send_items(text)
+                n = len(send_items)
+                for i, (md_chunk, html_chunk) in enumerate(send_items):
                     # Only attach inline keyboard to the final chunk
-                    chunk_markup = reply_markup if i == len(chunks) - 1 else None
-                    html_chunk = md_to_html(chunk)
+                    chunk_markup = reply_markup if i == n - 1 else None
                     try:
                         await bot_app.bot.send_message(
                             chat_id=chat_id,
@@ -587,14 +648,22 @@ class OutboxHandler(FileSystemEventHandler):
                             parse_mode="HTML",
                             reply_markup=chunk_markup
                         )
-                    except Exception:
-                        # Fallback to plain text if HTML parsing fails
+                    except Exception as exc:
+                        # Fallback to plain text if HTML parsing fails.
+                        # Plain text is also subject to the hard limit so we
+                        # truncate as a last resort rather than crash/drop.
+                        plain = md_chunk
+                        if len(plain) > TELEGRAM_HARD_LIMIT:
+                            plain = plain[:TELEGRAM_HARD_LIMIT - 3] + "..."
+                            log.warning(
+                                f"HTML send failed for {chat_id}, falling back to "
+                                f"truncated plain text ({len(md_chunk)} chars): {exc}"
+                            )
                         await bot_app.bot.send_message(
                             chat_id=chat_id,
-                            text=chunk,
+                            text=plain,
                             reply_markup=chunk_markup
                         )
-                n = len(chunks)
                 if n > 1:
                     log.info(f"Sent reply to {chat_id} in {n} chunks: {text[:50]}...")
                 else:
