@@ -1,0 +1,4 @@
+registration_message = "Hi! To use Lobster in this group, please send /register to this bot directly."
+silent_drop_unknown_groups = true
+group_source_name = "lobster-group"
+enable_registration_flow = true

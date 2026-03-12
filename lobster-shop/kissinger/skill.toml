@@ -1,0 +1,53 @@
+[skill]
+name = "kissinger"
+version = "1.0.0"
+description = "Relationship graph CRM — manage contacts, orgs, and projects; log interactions; traverse connections; detect opportunity vortices"
+author = "Lobster"
+category = "integration"
+
+[activation]
+mode = "triggered"
+triggers = ["/kissinger", "/crm", "/contacts"]
+context_patterns = [
+    "when user asks about contacts",
+    "when user asks about relationships",
+    "when user asks about people in their network",
+    "when user mentions CRM",
+    "when user asks who knows whom",
+    "when user wants to log a meeting or interaction",
+    "when user wants to find a connection between people",
+]
+
+[layering]
+priority = 60
+merge_strategy = "append"
+
+[provides]
+mcp_tools = [
+    "kissinger_add_entity",
+    "kissinger_show_entity",
+    "kissinger_list_entities",
+    "kissinger_connect",
+    "kissinger_search",
+    "kissinger_log_interaction",
+    "kissinger_vortex_scan",
+    "kissinger_contacts_stale",
+    "kissinger_find_path",
+    "kissinger_add_offer",
+    "kissinger_add_need",
+    "kissinger_graph_stats",
+]
+bot_commands = ["/kissinger", "/crm", "/contacts"]
+
+[compatibility]
+enhances = ["morning-briefing"]
+conflicts = []
+
+[dependencies]
+pip = []
+npm = []
+system = []
+api_keys = []
+
+[dependencies.runtime]
+# Rust binary — no runtime dependencies beyond the binary itself

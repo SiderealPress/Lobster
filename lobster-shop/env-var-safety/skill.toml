@@ -1,0 +1,37 @@
+[skill]
+name = "env-var-safety"
+version = "1.0.0"
+description = "Validates env vars before editing; prevents whitespace/newline corruption that causes silent OAuth and API failures"
+author = "Lobster"
+category = "behavioral"
+
+[activation]
+mode = "always"
+triggers = []
+context_patterns = [
+    "when working with environment variables",
+    "when setting or reading env vars in shell, .env files, or Vercel",
+    "when debugging OAuth or API authentication failures",
+    "when writing code that reads process.env or os.environ",
+]
+
+[layering]
+priority = 60
+merge_strategy = "append"
+
+[provides]
+mcp_tools = []
+bot_commands = []
+
+[compatibility]
+enhances = []
+conflicts = []
+
+[dependencies]
+pip = []
+npm = []
+system = []
+api_keys = []
+
+[dependencies.runtime]
+python = ">=3.11"
