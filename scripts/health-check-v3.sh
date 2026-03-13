@@ -66,6 +66,12 @@ DISK_THRESHOLD=95                    # percentage
 # User-facing message sources (only these count for inbox staleness)
 USER_FACING_SOURCES="telegram sms signal slack"
 
+# Genuine user-originated message types (only these count for inbox staleness).
+# Internal queue messages like subagent_result/subagent_error may carry
+# source="telegram" for routing purposes but are NOT user messages and must
+# not trigger stale-inbox alerts or restarts.
+USER_FACING_TYPES="message photo image voice audio callback text document"
+
 # Circuit breaker: tracks which stale files already triggered a restart
 # to prevent restart loops when the same message persists after restart
 STALE_INBOX_MARKER_DIR="$WORKSPACE_DIR/logs/stale-inbox-markers"
@@ -418,8 +424,25 @@ is_user_facing_source() {
     return 1
 }
 
+# Check if a type is a genuine user-originated message type.
+# Internal types (subagent_result, subagent_error, system, compact, etc.)
+# must not count toward inbox staleness even when they carry source="telegram".
+is_user_facing_type() {
+    local type="$1"
+    local t
+    for t in $USER_FACING_TYPES; do
+        [[ "$type" == "$t" ]] && return 0
+    done
+    return 1
+}
+
 # Check 4: Inbox drain - THE primary deterministic check
-# Only counts messages from user-facing sources (telegram, sms, signal, slack).
+# Only counts genuine user-originated messages. Two filters are applied:
+#   1. source must be user-facing (telegram, sms, signal, slack)
+#   2. type must be a genuine user type (message, photo, image, voice, audio,
+#      callback, text, document) — this excludes internal queue messages such as
+#      subagent_result and subagent_error which carry source="telegram" for
+#      routing but are not real user messages.
 # System/internal/task-output messages are ignored - they may sit in the inbox
 # legitimately without indicating a stuck system.
 #
@@ -441,9 +464,10 @@ check_inbox_drain() {
         local basename_f
         basename_f=$(basename "$f")
 
-        # Parse source from JSON using jq; skip if unparseable or missing
-        local source
+        # Parse source and type from JSON using jq; skip if unparseable or missing
+        local source type
         source=$(jq -r '.source // empty' "$f" 2>/dev/null)
+        type=$(jq -r '.type // empty' "$f" 2>/dev/null)
         if [[ -z "$source" ]]; then
             log_info "Skipping $basename_f: cannot parse source field"
             continue
@@ -452,6 +476,15 @@ check_inbox_drain() {
         # Only count user-facing sources
         if ! is_user_facing_source "$source"; then
             skipped_system=$((skipped_system + 1))
+            continue
+        fi
+
+        # Exclude internal queue messages that carry a user-facing source for
+        # routing purposes but are not genuine user messages (e.g. subagent_result
+        # messages have source="telegram" but type="subagent_result").
+        if [[ -n "$type" ]] && ! is_user_facing_type "$type"; then
+            skipped_system=$((skipped_system + 1))
+            log_info "Skipping $basename_f: internal message type '$type' (source=$source)"
             continue
         fi
 
@@ -604,10 +637,15 @@ record_stale_inbox_markers() {
     while IFS= read -r -d '' f; do
         local basename_f
         basename_f=$(basename "$f")
-        local source
+        local source type
         source=$(jq -r '.source // empty' "$f" 2>/dev/null)
+        type=$(jq -r '.type // empty' "$f" 2>/dev/null)
         [[ -z "$source" ]] && continue
         is_user_facing_source "$source" || continue
+        # Mirror the type filter from check_inbox_drain: skip internal messages
+        if [[ -n "$type" ]] && ! is_user_facing_type "$type"; then
+            continue
+        fi
 
         local file_time
         file_time=$(stat -c %Y "$f" 2>/dev/null)
