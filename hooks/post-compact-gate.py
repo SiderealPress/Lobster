@@ -70,7 +70,7 @@ LOG_FILE = Path(os.path.expanduser("~/lobster-workspace/logs/compact-gate.log"))
 
 WAIT_FOR_MESSAGES_TOOL = "mcp__lobster-inbox__wait_for_messages"
 
-CONFIRMATION_TOKEN = "LOBSTER_COMPACTED_REORIENTED"
+CONFIRMATION_TOKEN = "LOBSTER_COMPACTED_REORIENTED"  # noqa: S105 — not a secret, intentional safe word
 
 DENY_REASON_NEEDS_TOKEN = (
     "GATE BLOCKED: Context compaction was just detected. "
