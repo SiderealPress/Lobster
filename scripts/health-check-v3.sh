@@ -57,6 +57,9 @@ YELLOW_THRESHOLD_SECONDS=120         # 2 minutes - YELLOW warning
 
 COMPACTION_SUPPRESS_SECONDS=300      # 5 minutes - skip stale-inbox check after a compaction event
 
+WFM_STALE_SECONDS=600                # 10 minutes - RED if wait_for_messages not called since this long ago
+HEARTBEAT_FILE="$WORKSPACE_DIR/logs/claude-heartbeat"
+
 OUTBOX_DIR="$MESSAGES_DIR/outbox"
 OUTBOX_STALE_THRESHOLD_SECONDS=900   # 15 min = RED
 OUTBOX_YELLOW_THRESHOLD_SECONDS=300  # 5 min = YELLOW
@@ -615,7 +618,43 @@ check_outbox_drain() {
     fi
 }
 
-# Check 6: Memory
+# Check 6: wait_for_messages freshness
+# Checks the mtime of the claude-heartbeat file, which inbox_server.py touches
+# at the start of every wait_for_messages call. If the file hasn't been updated
+# within WFM_STALE_SECONDS, the main loop is presumed stuck (e.g. infinite
+# loop, hung tool call, or Claude exit without wrapper noticing). Suppressed
+# during hibernation and the compaction window.
+#
+# Gracefully skips the check if the heartbeat file does not exist (fresh install).
+#
+# Returns: 0=GREEN (fresh or skipped), 2=RED (stale)
+check_wfm_freshness() {
+    if [[ ! -f "$HEARTBEAT_FILE" ]]; then
+        log_info "WFM freshness: heartbeat file not found — skipping check (fresh install?)"
+        return 0
+    fi
+
+    local last_heartbeat
+    last_heartbeat=$(stat -c %Y "$HEARTBEAT_FILE" 2>/dev/null)
+    if [[ -z "$last_heartbeat" ]]; then
+        log_info "WFM freshness: cannot stat heartbeat file — skipping check"
+        return 0
+    fi
+
+    local now age
+    now=$(date +%s)
+    age=$(( now - last_heartbeat ))
+
+    if [[ $age -gt $WFM_STALE_SECONDS ]]; then
+        log_error "RED: wait_for_messages stale — heartbeat last updated ${age}s ago (threshold: ${WFM_STALE_SECONDS}s)"
+        return 2
+    fi
+
+    log_info "WFM freshness OK: last wait_for_messages ${age}s ago"
+    return 0
+}
+
+# Check 7: Memory
 check_memory() {
     local mem_pct
     mem_pct=$(free | awk '/^Mem:/ {printf "%.0f", $3/$2 * 100}')
@@ -629,7 +668,7 @@ check_memory() {
     return 0
 }
 
-# Check 7: Disk
+# Check 8: Disk
 check_disk() {
     local disk_pct
     disk_pct=$(df "$HOME" | awk 'NR==2 {gsub(/%/,""); print $5}')
@@ -643,7 +682,7 @@ check_disk() {
     return 0
 }
 
-# Check 8: Dashboard server - silently restart if not listening on port 9100
+# Check 9: Dashboard server - silently restart if not listening on port 9100
 check_dashboard_server() {
     local install_dir="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
     local dashboard_cmd="$install_dir/.venv/bin/python3 $install_dir/src/dashboard/server.py --host 0.0.0.0 --port 9100"
@@ -1047,6 +1086,29 @@ main() {
         restart_reason="${restart_reason:+$restart_reason + }stale outbox (>$((OUTBOX_STALE_THRESHOLD_SECONDS/60))m)"
     elif [[ $outbox_rc -eq 1 && "$level" == "GREEN" ]]; then
         level="YELLOW"
+    fi
+
+    # --- wait_for_messages freshness check ---
+    # Suppressed during hibernation (dispatcher isn't running), transient
+    # lifecycle states where Claude hasn't started yet (starting, restarting,
+    # waking, backoff, stopped), and during the compaction grace period (tool
+    # calls pause while Claude compacts context).
+
+    if is_hibernating; then
+        log_info "WFM freshness suppressed (hibernating)"
+    elif [[ "$lobster_mode" == "starting" || "$lobster_mode" == "restarting" || \
+            "$lobster_mode" == "waking"    || "$lobster_mode" == "backoff"    || \
+            "$lobster_mode" == "stopped" ]]; then
+        log_info "WFM freshness suppressed (transient lifecycle state: $lobster_mode)"
+    elif [[ "$compaction_recent" == "true" ]]; then
+        log_info "WFM freshness suppressed (recent compaction)"
+    else
+        check_wfm_freshness
+        local wfm_rc=$?
+        if [[ $wfm_rc -eq 2 ]]; then
+            level="RED"
+            restart_reason="${restart_reason:+$restart_reason + }wait_for_messages stale (>${WFM_STALE_SECONDS}s)"
+        fi
     fi
 
     # --- Dashboard server check (soft restart, never RED) ---
