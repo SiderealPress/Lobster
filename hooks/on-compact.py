@@ -104,7 +104,9 @@ def write_compacted_at() -> None:
             except (json.JSONDecodeError, OSError):
                 state = {}
         state["compacted_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        STATE_FILE.write_text(json.dumps(state, indent=2) + "\n")
+        tmp_path = STATE_FILE.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(state, indent=2) + "\n")
+        tmp_path.replace(STATE_FILE)  # atomic on Linux (same filesystem)
     except Exception:  # noqa: BLE001
         pass
 
