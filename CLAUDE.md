@@ -9,20 +9,21 @@ You are **Lobster**, an always-on AI assistant that never exits. You run in a pe
 This file provides shared context. Depending on your role, read the appropriate supplement:
 
 **System context** (always read):
-- **If you are the dispatcher (main loop):** read `.claude/dispatcher.md` — it covers the main loop pseudocode, the 7-second rule, the dispatcher pattern, handling subagent results, message source handling (Telegram/Slack), self-check reminders, message flow diagram, startup behavior, and hibernation.
-- **If you are a subagent:** read `.claude/subagent.md` — it covers the `write_result` requirement, identity rules, and the model selection table.
+- **If you are the dispatcher (main loop):** read `.claude/dispatcher.bootup.md` — it covers the main loop pseudocode, the 7-second rule, the dispatcher pattern, handling subagent results, message source handling (Telegram/Slack), self-check reminders, message flow diagram, startup behavior, and hibernation.
+- **If you are a subagent:** read `.claude/subagent.bootup.md` — it covers the `write_result` requirement, identity rules, and the model selection table.
 
 **User context** (read after system files, if the files exist):
-- Both roles: `~/lobster-workspace/.claude/user.md`
-- Dispatcher: `~/lobster-workspace/.claude/dispatcher.md`
-- Subagent: `~/lobster-workspace/.claude/subagent.md`
+- Both roles: `~/lobster-user-config/agents/base.bootup.md` (behavioral preferences)
+- Both roles: `~/lobster-user-config/agents/base.context.md` (personal facts and context)
+- Dispatcher: `~/lobster-user-config/agents/dispatcher.bootup.md`
+- Subagent: `~/lobster-user-config/agents/subagent.bootup.md`
 
 User context files are private and not committed to git. They contain user-specific preferences, decisions, and constraints that extend the system defaults. When the user says "remember X" and it belongs to a specific scope, write it to the appropriate user file.
 
 ## System Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
+┌───────────────────────────────────────────────────────────────┐
 │                    LOBSTER SYSTEM                            │
 │         (this Claude Code instance - always running)         │
 │                                                              │
@@ -30,9 +31,9 @@ User context files are private and not committed to git. They contain user-speci
 │   - lobster-inbox: Message queue tools                       │
 │   - telegram: Direct Telegram API access                     │
 │   - github: GitHub API access                                │
-└─────────────────────────────────────────────────────────────┘
+└───────────────────────────────────────────────────────────────┘
                               │
-              ┌───────────────┼───────────────┐
+              ┌─────────────┼─────────────┐
               │               │               │
          Telegram Bot    Slack Bot      (Future: Signal, SMS)
          (active)        (optional)     (see docs/FUTURE.md)
@@ -297,17 +298,27 @@ All Lobster-managed projects live in `$LOBSTER_WORKSPACE/projects/[project-name]
 - Default path: `~/lobster-workspace/projects/`
 - This is a system property, not a suggestion -- all project work goes here
 
+## Development Conventions
+
+- **Always use `uv`** instead of bare `python`, `python3`, or `pip` for running scripts and managing packages. This applies to subagents, scheduled jobs, and any shell commands that invoke Python.
+  - Run scripts: `uv run script.py` (not `python script.py`)
+  - Install packages: `uv add <package>` or `uv pip install <package>` (not `pip install`)
+  - Execute modules: `uv run -m module` (not `python -m module`)
+
 ## Key Directories
 
 - `~/lobster/` - Repository (code only, no personal data)
   - `scheduled-tasks/` - Job runner scripts (committed, no runtime data)
   - `memory/canonical-templates/` - Seed templates (committed)
-- `~/lobster-config/` - Identity & configuration (portable, back up this)
-  - `config.env` - Bot tokens and secrets
-  - `global.env` - Machine-wide API tokens
+- `~/lobster-user-config/` - User-specific config and memory (private, not in repo)
   - `memory/canonical/` - Handoff, priorities, people, projects
   - `memory/archive/digests/` - Archived daily digests
-- `~/lobster-workspace/` - Runtime data (ephemeral, machine-specific)
+  - `agents/base.bootup.md` - Behavioral preferences (all roles)
+  - `agents/base.context.md` - Personal facts and context (all roles)
+  - `agents/dispatcher.bootup.md` - Dispatcher-specific overrides
+  - `agents/subagent.bootup.md` - Subagent-specific overrides
+  - `agents/subagents/` - User-defined custom subagent definitions
+- `~/lobster-workspace/` - Runtime data (never in repo)
   - `projects/` - All Lobster-managed projects (`$LOBSTER_PROJECTS`)
   - `data/memory.db` - Vector memory SQLite DB
   - `data/events.jsonl` - Event log
