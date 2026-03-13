@@ -1221,6 +1221,48 @@ else
     info "Skipping restore-exec-bit hook (settings.json not yet created)"
 fi
 
+# Set up Claude Code PreToolUse hook to block tool use after compaction without context reload
+chmod +x "$INSTALL_DIR/hooks/post-compact-gate.py" || true
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '.hooks.PreToolUse[]? | select(.matcher == "")' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+            "matcher": "",
+            "hooks": [{
+                "type": "command",
+                "command": "python3 '"$INSTALL_DIR"'/hooks/post-compact-gate.py",
+                "timeout": 5
+            }]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "post-compact-gate hook installed"
+    else
+        info "post-compact-gate hook already configured in Claude Code settings"
+    fi
+else
+    info "Skipping post-compact-gate hook (settings.json not yet created)"
+fi
+
+# Set up Claude Code SessionStart hook to set compact flag on context compaction
+chmod +x "$INSTALL_DIR/hooks/on-compact.py" || true
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '.hooks.SessionStart[]? | select(.matcher == "compact")' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq '.hooks.SessionStart = (.hooks.SessionStart // []) + [{
+            "matcher": "compact",
+            "hooks": [{
+                "type": "command",
+                "command": "python3 '"$INSTALL_DIR"'/hooks/on-compact.py",
+                "timeout": 5
+            }]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "on-compact hook installed"
+    else
+        info "on-compact hook already configured in Claude Code settings"
+    fi
+else
+    info "Skipping on-compact hook (settings.json not yet created)"
+fi
+
 #===============================================================================
 # Python Environment
 #===============================================================================
