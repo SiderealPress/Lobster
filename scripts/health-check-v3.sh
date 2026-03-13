@@ -148,12 +148,52 @@ _$(date '+%Y-%m-%d %H:%M:%S %Z')_"
 #===============================================================================
 # Restart Rate Limiting
 #===============================================================================
+
+# Check if manual intervention flag is set (BLACK state was reached).
+# Returns 0 if flag is set, 1 if not.
+is_manual_intervention_required() {
+    [[ ! -f "$RESTART_STATE_FILE" ]] && return 1
+    local line
+    line=$(cat "$RESTART_STATE_FILE" 2>/dev/null || true)
+    [[ "$line" == *"MANUAL_INTERVENTION"* ]]
+}
+
+# Write manual intervention flag into the state file.
+# Preserves existing timestamp/count so the record is self-documenting.
+set_manual_intervention() {
+    local now
+    now=$(date +%s)
+    local existing=""
+    [[ -f "$RESTART_STATE_FILE" ]] && existing=$(cat "$RESTART_STATE_FILE" 2>/dev/null || true)
+    # Strip any previous MANUAL_INTERVENTION token, then append it
+    existing=$(echo "$existing" | sed 's/ MANUAL_INTERVENTION//')
+    echo "${existing:-$now 0} MANUAL_INTERVENTION" > "$RESTART_STATE_FILE"
+    log_warn "Manual intervention flag set in $RESTART_STATE_FILE"
+}
+
+# Clear the manual intervention flag when the system is healthy again.
+clear_manual_intervention() {
+    if is_manual_intervention_required; then
+        # Strip the sentinel token, keeping the timestamp/count intact
+        local line
+        line=$(cat "$RESTART_STATE_FILE" 2>/dev/null || true)
+        echo "${line/ MANUAL_INTERVENTION/}" > "$RESTART_STATE_FILE"
+        log_info "Manual intervention flag cleared (system healthy)"
+    fi
+}
+
 can_restart() {
     if [[ ! -f "$RESTART_STATE_FILE" ]]; then
         return 0
     fi
 
-    read -r last_restart_time restart_count < "$RESTART_STATE_FILE" 2>/dev/null || return 0
+    # If BLACK state was previously reached, refuse all auto-restarts until
+    # the system recovers healthy and clears the flag.
+    if is_manual_intervention_required; then
+        return 1
+    fi
+
+    read -r last_restart_time restart_count _ < "$RESTART_STATE_FILE" 2>/dev/null || return 0
     local now
     now=$(date +%s)
     local elapsed=$((now - last_restart_time))
@@ -177,7 +217,7 @@ record_restart() {
     local restart_count=0
 
     if [[ -f "$RESTART_STATE_FILE" ]]; then
-        read -r last_restart_time restart_count < "$RESTART_STATE_FILE" 2>/dev/null
+        read -r last_restart_time restart_count _ < "$RESTART_STATE_FILE" 2>/dev/null
         local elapsed=$((now - last_restart_time))
         if [[ $elapsed -gt $RESTART_COOLDOWN_SECONDS ]]; then
             restart_count=0
@@ -594,13 +634,20 @@ do_restart() {
     log_warn "Restarting $SERVICE_CLAUDE (reason: $reason)"
 
     if ! can_restart; then
-        log_error "BLACK: Max restart attempts ($MAX_RESTART_ATTEMPTS) in ${RESTART_COOLDOWN_SECONDS}s window"
-        send_telegram_alert "System unrecoverable after $MAX_RESTART_ATTEMPTS restart attempts.
+        if is_manual_intervention_required; then
+            # Already in BLACK/manual-intervention state — log only, no Telegram spam
+            log_error "BLACK: Manual intervention required (flag already set) — skipping restart and alert"
+        else
+            # First time hitting BLACK — set flag and send a single alert
+            log_error "BLACK: Max restart attempts ($MAX_RESTART_ATTEMPTS) in ${RESTART_COOLDOWN_SECONDS}s window"
+            set_manual_intervention
+            send_telegram_alert "System unrecoverable after $MAX_RESTART_ATTEMPTS restart attempts.
 
 Reason: $reason
 
 Manual intervention required:
 \`lobster restart\`"
+        fi
         return 1
     fi
 
@@ -896,6 +943,9 @@ main() {
     case "$level" in
         GREEN)
             log_info "GREEN: All checks passed (mode=$lobster_mode)"
+            # If system previously required manual intervention, clear the flag now
+            # so auto-restarts are re-enabled after genuine recovery.
+            clear_manual_intervention
             ;;
         YELLOW)
             log_warn "YELLOW: Non-critical issues detected (mode=$lobster_mode), monitoring"
