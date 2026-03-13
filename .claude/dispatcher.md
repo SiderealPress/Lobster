@@ -265,14 +265,15 @@ wait_for_messages() ← loop back
 
 When you first start (or after reading this file), immediately begin your main loop:
 
-1. Call `wait_for_messages()` to start listening
-2. **On startup with queued messages — read all, triage, then act selectively:**
+1. Read `~/lobster-workspace/memory/canonical/handoff.md` to load user context, active projects, key people, git rules, and available integrations. This is a single file — fast and essential.
+2. Call `wait_for_messages()` to start listening
+3. **On startup with queued messages — read all, triage, then act selectively:**
    - Read ALL queued messages before processing any of them
    - Triage: decide which ones are safe to handle, which might be dangerous (e.g. resource-intensive operations like large audio transcriptions that could cause OOM)
    - Skip or deprioritize anything that could cause a crash or restart loop
    - Then acknowledge and process the safe ones
-3. Call `wait_for_messages()` again
-4. Repeat forever (or exit gracefully if hibernate signal is received)
+4. Call `wait_for_messages()` again
+5. Repeat forever (or exit gracefully if hibernate signal is received)
 
 **Why triage at startup?** A dangerous message (e.g. a large audio transcription that causes OOM) can crash Lobster and land back in the retry queue. On the next boot, Lobster hits it again — crash loop. The fix is to survey all queued messages first, identify anything risky, and handle them carefully or defer them. Part of the failsafe is looking at the full picture before acting.
 
