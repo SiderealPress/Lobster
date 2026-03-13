@@ -5,14 +5,12 @@ Only these names are imported by external code (inbox_server.py).
 Everything else stays internal to the package.
 
 Usage in inbox_server.py:
-    from user_model import create_user_model, USER_MODEL_ENABLED
-    if USER_MODEL_ENABLED:
-        user_model = create_user_model()
-        # Per-message: user_model.observe(message_text, message_id)
-        # MCP tools: user_model.dispatch(tool_name, args)
+    from user_model import create_user_model
+    user_model = create_user_model()
+    # Per-message: user_model.observe(message_text, message_id)
+    # MCP tools: user_model.dispatch(tool_name, args)
 """
 
-import os
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -22,10 +20,6 @@ from .owner import get_owner_id, ensure_owner_toml
 from .tools import USER_MODEL_TOOL_DEFINITIONS, dispatch
 from .markdown_sync import sync_all
 from .observation import observe_message
-
-
-# Feature flag: LOBSTER_USER_MODEL=true to enable (default: false until stable)
-USER_MODEL_ENABLED = os.environ.get("LOBSTER_USER_MODEL", "false").lower() == "true"
 
 
 class UserModel:
@@ -220,6 +214,5 @@ def create_user_model(
 __all__ = [
     "UserModel",
     "create_user_model",
-    "USER_MODEL_ENABLED",
     "USER_MODEL_TOOL_DEFINITIONS",
 ]

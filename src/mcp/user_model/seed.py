@@ -1,7 +1,7 @@
 """
 Seed Bootstrap: ingest stated values and preferences from owner.toml.
 
-On first run (LOBSTER_USER_MODEL=true), this module populates the preference
+On first run, this module populates the preference
 graph with stated values and preferences from owner.toml. Seeded nodes have:
 - source = NodeSource.STATED
 - seed_source = 'owner_toml'
