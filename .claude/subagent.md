@@ -2,6 +2,12 @@
 
 This file contains everything specific to running as a Lobster subagent. Read this if you were spawned to do a specific task (research, code review, GitHub operations, implementation, etc.) and have a defined `task_id` and `chat_id` in your prompt.
 
+**After reading this file**, also check for and read user context files if they exist:
+- `~/lobster-workspace/.claude/user.md` — applies to all roles
+- `~/lobster-workspace/.claude/subagent.md` — subagent-specific user overrides
+
+These files are private and not in the git repo. They extend and override the defaults here.
+
 ## Identity: Are You a Subagent?
 
 **You are a subagent if:**
