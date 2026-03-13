@@ -821,7 +821,7 @@ if [ ! -f "$GLOBAL_ENV_FILE" ]; then
 
 # === Add your own below ===
 GLOBALENV
-    chmod 600 "$GLOBAL_ENV_FILE"
+    chmod 600 "$GLOBAL_ENV_FILE" || true
     success "Global env store created: $GLOBAL_ENV_FILE"
 else
     info "Global env store already exists: $GLOBAL_ENV_FILE"
@@ -949,7 +949,7 @@ fi
 
 exit $EXIT_CODE
 RUNJOB
-chmod +x "$INSTALL_DIR/scheduled-tasks/run-job.sh"
+chmod +x "$INSTALL_DIR/scheduled-tasks/run-job.sh" || true
 
 # Create sync-crontab.sh
 cat > "$INSTALL_DIR/scheduled-tasks/sync-crontab.sh" << 'SYNCCRON'
@@ -998,7 +998,7 @@ fi
 echo "Crontab synchronized:"
 crontab -l 2>/dev/null | grep "$MARKER" || echo "(no lobster jobs)"
 SYNCCRON
-chmod +x "$INSTALL_DIR/scheduled-tasks/sync-crontab.sh"
+chmod +x "$INSTALL_DIR/scheduled-tasks/sync-crontab.sh" || true
 
 # Enable cron service (name differs by distro)
 if [ "$PKG_MANAGER" = "apt" ]; then
@@ -1023,8 +1023,8 @@ success "Scheduled tasks infrastructure ready"
 step "Setting up health monitoring..."
 
 # Make scripts executable
-chmod +x "$INSTALL_DIR/scripts/health-check-v3.sh"
-chmod +x "$INSTALL_DIR/scripts/self-check-reminder.sh"
+chmod +x "$INSTALL_DIR/scripts/health-check-v3.sh" || true
+chmod +x "$INSTALL_DIR/scripts/self-check-reminder.sh" || true
 
 # Add health check to crontab (runs every 2 minutes)
 HEALTH_MARKER="# LOBSTER-HEALTH"
@@ -1039,7 +1039,7 @@ success "Health monitoring configured (checks every 2 minutes)"
 
 step "Setting up daily dependency health check..."
 
-chmod +x "$INSTALL_DIR/scripts/daily-health-check.sh"
+chmod +x "$INSTALL_DIR/scripts/daily-health-check.sh" || true
 
 # Add daily health check to crontab (runs at 06:00 every day)
 DAILY_MARKER="# LOBSTER-DAILY-HEALTH"
@@ -1060,7 +1060,7 @@ step "Setting up self-check reminder system..."
 # results are now delivered directly to the inbox via write_result.
 
 # Make self-check scripts executable
-chmod +x "$INSTALL_DIR/scripts/periodic-self-check.sh"
+chmod +x "$INSTALL_DIR/scripts/periodic-self-check.sh" || true
 
 # Create state directory for rate limiting
 mkdir -p "$INSTALL_DIR/.state"
@@ -1075,10 +1075,22 @@ CLAUDE_SETTINGS="$CLAUDE_SETTINGS_DIR/settings.json"
 mkdir -p "$CLAUDE_SETTINGS_DIR"
 
 if [ ! -f "$CLAUDE_SETTINGS" ]; then
-    # Create settings.json with PreToolUse hooks
+    # Create settings.json with PreToolUse and PostToolUse hooks
     cat > "$CLAUDE_SETTINGS" << HOOKEOF
 {
   "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 $INSTALL_DIR/hooks/restore-exec-bit.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "Write|Edit",
@@ -1120,7 +1132,7 @@ else
 fi
 
 # Set up Claude Code PreToolUse hook to enforce clickable links for completed work
-chmod +x "$INSTALL_DIR/hooks/link-checker.py"
+chmod +x "$INSTALL_DIR/hooks/link-checker.py" || true
 if [ -f "$CLAUDE_SETTINGS" ]; then
     if ! jq -e '.hooks.PreToolUse[]? | select(.matcher == "mcp__lobster-inbox__send_reply")' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
         TMP_SETTINGS=$(mktemp)
@@ -1141,7 +1153,7 @@ else
 fi
 
 # Set up Claude Code PreToolUse hook to block generic Agent calls without subagent_type
-chmod +x "$INSTALL_DIR/hooks/require-subagent-type.py"
+chmod +x "$INSTALL_DIR/hooks/require-subagent-type.py" || true
 if [ -f "$CLAUDE_SETTINGS" ]; then
     if ! jq -e '.hooks.PreToolUse[]? | select(.matcher == "Agent")' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
         TMP_SETTINGS=$(mktemp)
@@ -1159,6 +1171,27 @@ if [ -f "$CLAUDE_SETTINGS" ]; then
     fi
 else
     info "Skipping require-subagent-type hook (settings.json not yet created)"
+fi
+
+# Set up Claude Code PostToolUse hook to restore execute bit after Edit/Write
+chmod +x "$INSTALL_DIR/hooks/restore-exec-bit.py" || true
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '.hooks.PostToolUse[]? | select(.matcher == "Edit|Write")' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq '.hooks.PostToolUse = (.hooks.PostToolUse // []) + [{
+            "matcher": "Edit|Write",
+            "hooks": [{
+                "type": "command",
+                "command": "python3 '"$INSTALL_DIR"'/hooks/restore-exec-bit.py",
+                "timeout": 5
+            }]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "restore-exec-bit hook installed"
+    else
+        info "restore-exec-bit hook already configured in Claude Code settings"
+    fi
+else
+    info "Skipping restore-exec-bit hook (settings.json not yet created)"
 fi
 
 #===============================================================================
@@ -1468,7 +1501,7 @@ else
     echo "GitHub CLI (gh) is not authenticated."
     echo "This is needed for creating PRs, managing issues, etc."
     echo ""
-    read -p "Authenticate GitHub CLI now? [y/N] " -n 1 -r
+    read -p "Authenticate GitHub CLI now? [y/N] " -n 1 -r || true
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         if gh auth login; then
@@ -1830,7 +1863,7 @@ for script in \
     "$INSTALL_DIR/scripts/start-claude.sh" \
     "$INSTALL_DIR/scripts/claude-persistent.sh" \
     "$INSTALL_DIR/scripts/claude-wrapper.exp"; do
-    [ -f "$script" ] && chmod +x "$script"
+    [ -f "$script" ] && chmod +x "$script" || true
 done
 success "Claude launchers ready (start-claude.sh, claude-persistent.sh, claude-wrapper.exp)"
 
