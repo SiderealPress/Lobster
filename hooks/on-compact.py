@@ -18,8 +18,6 @@ import json
 import os
 import time
 import urllib.request
-import urllib.error
-import urllib.parse
 from pathlib import Path
 
 
