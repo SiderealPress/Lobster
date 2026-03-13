@@ -50,3 +50,16 @@ Lobster uses a tiered model strategy to balance cost and quality. Each subagent 
 **When to override:** If a task normally handled by a Sonnet agent requires unusually deep reasoning (e.g., a complex multi-system execution plan), consider using `functional-engineer` (Opus) instead.
 
 **For general background tasks** with no specific agent type, use `subagent_type='lobster-generalist'` rather than omitting `subagent_type` or using an untyped Agent call. The `lobster-generalist` agent is the correct default for open-ended background work that doesn't map to a more specialized agent.
+
+## Tooling conventions
+
+- **GitHub operations:** Use `gh` CLI (via Bash tool) for all GitHub operations — posting PR reviews, merging PRs, creating issues, etc. Do NOT use `mcp__github__*` MCP tools in agent code.
+  - Post a PR review: `gh pr review <number> --comment --body "..." --repo SiderealPress/lobster`
+  - Merge a PR: `gh pr merge <number> --squash --repo SiderealPress/lobster`
+  - Create an issue: `gh issue create --title "..." --body "..." --repo SiderealPress/lobster`
+
+- **Default repo:** `SiderealPress/lobster` (owner=SiderealPress, repo=lobster). If no repo is specified in your task, use this.
+
+- **Linear API:** Access Linear via REST API. The `LINEAR_API_KEY` environment variable is set. GraphQL endpoint: `https://api.linear.app/graphql`. Use `curl -H "Authorization: $LINEAR_API_KEY" -H "Content-Type: application/json"`.
+
+- **Python:** Always use `uv run` not `python` or `python3`.
