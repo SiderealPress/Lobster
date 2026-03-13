@@ -284,9 +284,10 @@ check_wrapper_process() {
         return 1
     fi
 
-    # Verify at least one wrapper is in the lobster tmux
+    # Verify at least one wrapper is in the lobster tmux.
+    # Use -a to scan all sessions and windows, not just the default window.
     local tmux_panes
-    tmux_panes=$(tmux -L "$TMUX_SOCKET" list-panes -t "$TMUX_SESSION" -F '#{pane_pid}' 2>/dev/null)
+    tmux_panes=$(tmux -L "$TMUX_SOCKET" list-panes -a -F '#{pane_pid}' 2>/dev/null)
     [[ -z "$tmux_panes" ]] && return 1
 
     for pid in $wrapper_pids; do
@@ -380,9 +381,10 @@ check_claude_process() {
         return 1
     fi
 
-    # Verify at least one Claude process is a descendant of the tmux session
+    # Verify at least one Claude process is a descendant of the tmux session.
+    # Use -a to scan all sessions and windows, not just the default window.
     local tmux_panes
-    tmux_panes=$(tmux -L "$TMUX_SOCKET" list-panes -t "$TMUX_SESSION" -F '#{pane_pid}' 2>/dev/null)
+    tmux_panes=$(tmux -L "$TMUX_SOCKET" list-panes -a -F '#{pane_pid}' 2>/dev/null)
 
     if [[ -z "$tmux_panes" ]]; then
         log_error "Cannot list tmux panes"
