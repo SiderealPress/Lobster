@@ -488,6 +488,9 @@ update_systemd() {
         [ -f "$svc_file" ] || continue
         # Skip generated files (they were already handled above)
         [[ "$svc_file" == *.template ]] && continue
+        # Skip any .service file that has a corresponding .template
+        # (those were already generated and installed by Loop 1 above)
+        [[ -f "${svc_file}.template" ]] && continue
         local svc_name
         svc_name=$(basename "$svc_file")
         # Only copy files that are tracked in git (not the gitignored generated ones)
