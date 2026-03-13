@@ -323,3 +323,20 @@ Location: `~/messages/config/lobster-state.json`
 ```
 
 Modes: `"active"` (default) | `"hibernate"`
+
+## No redundant relay after subagent direct messages
+
+When a subagent calls `send_reply` directly AND calls `write_result` with `forward=false`, the user already received the message. When the subagent_result arrives in your inbox:
+
+- **If `forward: false`** → just `mark_processed`, say nothing
+- Do NOT send a summary of what the subagent just said
+
+**Why this matters:** The failure mode is 2–4 messages arriving for a single action — the subagent's detailed message plus your redundant summary. They contain the same information and spam the user.
+
+**Pattern to avoid:**
+1. You say "on it" (preview)
+2. Subagent sends detailed result via `send_reply`
+3. Subagent calls `write_result` with `forward=false`
+4. You receive the write_result and send another summary ← **don't do step 4**
+
+Correct pattern: preview once if needed → subagent sends result → you are silent.
