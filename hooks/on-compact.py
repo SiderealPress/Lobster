@@ -34,11 +34,21 @@ STATE_FILE = Path(
 )
 
 REMINDER_TEXT = (
-    "Your context was just compacted. STOP. Before processing any messages:\n\n"
-    "1. Re-read ~/lobster/CLAUDE.md \u2014 your instructions\n"
-    "2. Read ~/lobster-user-config/memory/canonical/handoff.md \u2014 what was happening\n\n"
-    "Do not skip either step."
+    "SYSTEM: Your context was just compacted.\n\n"
+    "STOP. Do not process any queued messages yet. First:\n\n"
+    "1. Read ~/.claude/dispatcher.bootup.md \u2014 your main loop instructions\n"
+    "2. Read ~/lobster-user-config/memory/canonical/handoff.md \u2014 active context\n\n"
+    "You are the Lobster dispatcher. Your role is:\n"
+    "  while True:\n"
+    "      messages = wait_for_messages()\n"
+    "      for msg in messages: process, reply, mark_processed\n\n"
+    "You must NEVER operate in terminal-interactive mode. "
+    "You must NEVER exit the loop. "
+    "After reading the above files, call wait_for_messages() to resume.\n\n"
+    "Do not skip either file."
 )
+
+SENTINEL_FILE = Path(os.path.expanduser("~/messages/config/compact-pending"))
 
 DEV_TELEGRAM_MESSAGE = "\u26a0\ufe0f [DEV] Context compacted. Re-orienting from CLAUDE.md + handoff."
 
@@ -83,6 +93,23 @@ def write_reminder() -> None:
 
     dest = INBOX_DIR / f"{message_id}.json"
     dest.write_text(json.dumps(message, indent=2) + "\n")
+
+
+def write_sentinel() -> None:
+    """
+    Write the compact-pending sentinel file.
+
+    The post-compact-gate.py PreToolUse hook checks for this file and blocks
+    all tool calls until wait_for_messages() is called. This forces the
+    dispatcher back into its main loop before doing anything else.
+
+    Silent on any failure — must never crash the hook.
+    """
+    try:
+        SENTINEL_FILE.parent.mkdir(parents=True, exist_ok=True)
+        SENTINEL_FILE.touch()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def write_compacted_at() -> None:
@@ -190,9 +217,14 @@ def main() -> None:
     write_compacted_at()
 
     if already_pending():
+        # Sentinel still needs refreshing even if the inbox reminder is a dupe
+        # (double compaction without intervening wait_for_messages). Touch resets
+        # the TTL clock so the gate keeps blocking correctly.
+        write_sentinel()
         maybe_send_dev_telegram_notify()
         return
     write_reminder()
+    write_sentinel()
     maybe_send_dev_telegram_notify()
 
 
