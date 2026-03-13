@@ -169,6 +169,8 @@ except Exception:
 #     considered "ours" and is left alone
 #   - Processes adopted by PID 1 (init) are always considered orphans
 #   - SIGTERM first, SIGKILL only after a 3-second grace period
+#   - SIGKILL pass iterates only PIDs that received SIGTERM (not the original
+#     capture) to avoid hitting recycled PIDs after the sleep window
 #===============================================================================
 kill_orphaned_claude_processes() {
     local tmux_panes
@@ -187,6 +189,9 @@ kill_orphaned_claude_processes() {
 
     local killed=0
     local skipped=0
+    # Track only the PIDs we actually SIGTERMed so the SIGKILL pass does not
+    # iterate the original capture and risk hitting recycled PIDs after sleep.
+    local -a killed_pids=()
 
     for pid in $claude_pids; do
         # Skip if process no longer exists
@@ -219,6 +224,7 @@ kill_orphaned_claude_processes() {
         else
             log "CLEANUP: Killing orphaned Claude PID $pid (SIGTERM)"
             kill -TERM "$pid" 2>/dev/null || true
+            killed_pids+=("$pid")
             killed=$((killed + 1))
         fi
     done
@@ -226,8 +232,9 @@ kill_orphaned_claude_processes() {
     # Give processes a brief grace period to exit cleanly
     if [[ $killed -gt 0 ]]; then
         sleep 3
-        # SIGKILL any survivors
-        for pid in $claude_pids; do
+        # SIGKILL any survivors — iterate killed_pids (the PIDs we SIGTERMed),
+        # not the original claude_pids capture, to avoid hitting recycled PIDs.
+        for pid in "${killed_pids[@]}"; do
             if kill -0 "$pid" 2>/dev/null; then
                 log "CLEANUP: PID $pid still alive after SIGTERM — sending SIGKILL"
                 kill -KILL "$pid" 2>/dev/null || true
