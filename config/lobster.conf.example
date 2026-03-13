@@ -36,6 +36,12 @@ LOBSTER_INSTALL_DIR="${LOBSTER_INSTALL_DIR:-${LOBSTER_HOME}/lobster}"
 # This is where Claude performs work and stores temporary files
 LOBSTER_WORKSPACE="${LOBSTER_WORKSPACE:-${LOBSTER_HOME}/lobster-workspace}"
 
+# User-specific config and memory (canonical memory files, agent context overrides)
+# This directory is private and not committed to git.
+# Created automatically by install.sh.
+# Contains: memory/canonical/, agents/base.bootup.md, agents/base.context.md, etc.
+LOBSTER_USER_CONFIG="${LOBSTER_USER_CONFIG:-${LOBSTER_HOME}/lobster-user-config}"
+
 # Message queue directories
 # Stores incoming/outgoing messages, audio files, and processed messages
 LOBSTER_MESSAGES="${LOBSTER_MESSAGES:-${LOBSTER_HOME}/messages}"

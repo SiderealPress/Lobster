@@ -64,7 +64,17 @@ def mark_user_onboarded(user_id: int) -> None:
 
 
 def get_onboarding_message(user_name: str) -> str:
-    """Return the full onboarding/welcome message for a user."""
+    """Return the full onboarding/welcome message personalised for a user.
+
+    Args:
+        user_name: The user's first name (e.g. ``user.first_name`` from the
+            Telegram ``User`` object).  This argument is required — the
+            message greeting embeds the name directly.
+
+    Returns:
+        A multi-line Markdown string suitable for splitting with
+        ``split_message`` and sending via ``reply_text``.
+    """
     return (
         f"Welcome, {user_name}! I'm *Lobster* -- your always-on AI assistant.\n"
         "\n"

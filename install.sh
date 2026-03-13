@@ -130,6 +130,7 @@ LOBSTER_USER="${LOBSTER_USER:-${USER:-$(whoami)}}"
 LOBSTER_GROUP="${LOBSTER_GROUP:-${USER:-$(whoami)}}"
 LOBSTER_HOME="${LOBSTER_HOME:-$HOME}"
 CONFIG_DIR="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}"
+USER_CONFIG_DIR="${LOBSTER_USER_CONFIG:-$HOME/lobster-user-config}"
 
 #===============================================================================
 # Template Processing
@@ -155,6 +156,7 @@ generate_from_template() {
         -e "s|{{WORKSPACE_DIR}}|${WORKSPACE_DIR}|g" \
         -e "s|{{MESSAGES_DIR}}|${MESSAGES_DIR}|g" \
         -e "s|{{CONFIG_DIR}}|${CONFIG_DIR}|g" \
+        -e "s|{{USER_CONFIG_DIR}}|${USER_CONFIG_DIR}|g" \
         "$template" > "$output"
 
     success "Generated: $output"
@@ -761,10 +763,11 @@ fi
 step "Creating directories..."
 
 mkdir -p "$WORKSPACE_DIR"/{logs,data,scheduled-jobs/{logs,tasks}}
-mkdir -p "$WORKSPACE_DIR/memory"/{canonical/{people,projects},archive/digests}
 mkdir -p "$MESSAGES_DIR"/{inbox,outbox,processed,processing,failed,config,audio,task-outputs}
 mkdir -p "$CONFIG_DIR"
 mkdir -p "$PROJECTS_DIR"
+mkdir -p "$USER_CONFIG_DIR/memory"/{canonical/{people,projects},archive/digests}
+mkdir -p "$USER_CONFIG_DIR/agents/subagents"
 
 # Legacy: also create ~/projects/ for backward compatibility
 mkdir -p "$HOME/projects"/{personal,business}
@@ -775,13 +778,22 @@ if [ -d "$TEMPLATES_DIR" ]; then
     for tmpl in "$TEMPLATES_DIR"/*.md; do
         [ -f "$tmpl" ] || continue
         base=$(basename "$tmpl")
-        dest="$WORKSPACE_DIR/memory/canonical/$base"
+        dest="$USER_CONFIG_DIR/memory/canonical/$base"
         if [ ! -f "$dest" ]; then
             cp "$tmpl" "$dest"
             info "  Seeded canonical template: $base"
         fi
     done
 fi
+
+# Create stub user-config agent files if they don't exist
+for stub_file in "base.bootup.md" "base.context.md" "dispatcher.bootup.md" "subagent.bootup.md"; do
+    stub_dest="$USER_CONFIG_DIR/agents/$stub_file"
+    if [ ! -f "$stub_dest" ]; then
+        touch "$stub_dest"
+        info "  Created stub: agents/$stub_file"
+    fi
+done
 
 success "Directories created"
 info "  $PROJECTS_DIR - All Lobster-managed projects"
@@ -2187,6 +2199,7 @@ echo -e "${BOLD}Directories:${NC}"
 echo "  $INSTALL_DIR        Lobster code"
 echo "  $CONFIG_DIR          Configuration"
 echo "  $CONFIG_DIR/global.env  Global API token store"
+echo "  $USER_CONFIG_DIR    User config and memory"
 echo "  $WORKSPACE_DIR      Claude workspace"
 echo "  $PROJECTS_DIR  Projects"
 echo "  $MESSAGES_DIR       Message queues"
