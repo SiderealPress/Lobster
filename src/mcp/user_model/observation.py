@@ -240,4 +240,11 @@ def observe_message(
     # Update last observation timestamp
     set_metadata_value(conn, "last_observation_at", ts.isoformat())
 
+    # Record activity rhythm (non-critical)
+    try:
+        from .rhythm import record_message_rhythm
+        record_message_rhythm(conn, ts, len(message_text))
+    except Exception:
+        pass
+
     return obs_ids

@@ -1,7 +1,7 @@
 """
 MCP Tool handlers for the User Model subsystem.
 
-Provides 7 MCP tools:
+Provides 9 MCP tools:
   model_observe      — record observations from messages
   model_query        — structured query over the model
   model_preferences  — context-resolved preference list
@@ -9,6 +9,8 @@ Provides 7 MCP tools:
   model_correct      — apply user correction
   model_inspect      — deep-read a specific entity
   model_attention    — get scored attention stack
+  model_infer        — context-aware prediction of user state and needs
+  model_user_context — get user profile context for system prompt injection
 
 Tool definitions (for inbox_server.py list_tools) are exported as
 USER_MODEL_TOOLS (list of Tool dicts).
@@ -229,6 +231,56 @@ USER_MODEL_TOOL_DEFINITIONS = [
             },
         },
     },
+    {
+        "name": "model_infer",
+        "description": (
+            "Context-aware prediction of user state and needs. Returns mood estimate "
+            "(VAD), response style hint, likely next request type, and optional value "
+            "alignment score. Results are cached for 30 minutes."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "contexts": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Active contexts (e.g. ['work', 'coding']). Empty = general.",
+                    "default": [],
+                },
+                "recent_message": {
+                    "type": "string",
+                    "description": "The most recent user message for intent detection.",
+                },
+                "task_description": {
+                    "type": "string",
+                    "description": "Optional task description for value alignment scoring.",
+                },
+                "force_refresh": {
+                    "type": "boolean",
+                    "description": "If true, bypass cache and recompute. Default: false.",
+                    "default": False,
+                },
+            },
+        },
+    },
+    {
+        "name": "model_user_context",
+        "description": (
+            "Get the user's profile context for system prompt injection. "
+            "With deep=false (default), returns a compact ~150 token header. "
+            "With deep=true, returns full profile, goals, and preferences."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "deep": {
+                    "type": "boolean",
+                    "description": "If true, return full profile data. Default: false.",
+                    "default": False,
+                },
+            },
+        },
+    },
 ]
 
 
@@ -371,6 +423,39 @@ def handle_model_attention(conn: sqlite3.Connection, args: dict) -> str:
     return json.dumps(result, default=str)
 
 
+def handle_model_infer(conn: sqlite3.Connection, args: dict) -> str:
+    """Handle model_infer tool call."""
+    from .infer import run_inference
+
+    contexts = args.get("contexts", [])
+    recent_message = args.get("recent_message")
+    task_description = args.get("task_description")
+    force_refresh = bool(args.get("force_refresh", False))
+
+    result = run_inference(
+        conn,
+        contexts=contexts,
+        recent_message=recent_message,
+        task_description=task_description,
+        force_refresh=force_refresh,
+    )
+    return json.dumps(result, default=str)
+
+
+def handle_model_user_context(conn: sqlite3.Connection, args: dict) -> str:
+    """Handle model_user_context tool call."""
+    from .profile import get_compact_context, read_all_profiles
+
+    deep = bool(args.get("deep", False))
+
+    if deep:
+        profiles = read_all_profiles()
+        return json.dumps(profiles, default=str)
+    else:
+        context = get_compact_context()
+        return json.dumps({"context": context})
+
+
 # ---------------------------------------------------------------------------
 # Dispatch table
 # ---------------------------------------------------------------------------
@@ -393,6 +478,8 @@ def dispatch(
         "model_correct": lambda: handle_model_correct(conn, args),
         "model_inspect": lambda: handle_model_inspect(conn, args),
         "model_attention": lambda: handle_model_attention(conn, args),
+        "model_infer": lambda: handle_model_infer(conn, args),
+        "model_user_context": lambda: handle_model_user_context(conn, args),
     }
 
     handler = handlers.get(tool_name)
