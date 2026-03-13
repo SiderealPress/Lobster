@@ -299,11 +299,15 @@ def touch_heartbeat():
 # or write to the outbox. Interactive SSH Claude sessions must be blocked from
 # calling these tools to prevent dual-processing of messages.
 #
-# Detection strategy: the claude-persistent.sh startup script sets the env var
-#   LOBSTER_MAIN_SESSION=1
-# before launching Claude. Because the MCP server is started as a stdio child
-# of Claude, it inherits this variable. Any other Claude process launched from
-# a plain SSH shell will not have this variable set.
+# Detection strategy (two-layer):
+#   Primary: tmux ancestry walk — verifies the MCP server is a descendant of a
+#     pane in the "lobster" tmux session. This is unforgeable: process ancestry
+#     cannot leak across sessions. Works whether the session was started via
+#     claude-persistent.sh or claude-wrapper.exp (both end up as direct children
+#     of the tmux pane process — expect's spawn() creates no intermediate PID).
+#   Fallback: LOBSTER_MAIN_SESSION=1 env var — set by both claude-persistent.sh
+#     and claude-wrapper.exp before spawning Claude. Covers edge cases where the
+#     tmux session name differs or pane_pid lookup fails.
 #
 # Tools that are BLOCKED for non-main sessions:
 #   wait_for_messages, check_inbox, send_reply, send_whatsapp_reply,
@@ -393,7 +397,7 @@ def _session_guard_error(tool_name: str) -> list[TextContent]:
         text=(
             f"SESSION GUARD: '{tool_name}' is blocked in this session.\n\n"
             "Inbox monitoring and outbox writes are restricted to the main "
-            "Lobster tmux session (started by claude-persistent.sh).\n\n"
+            "Lobster tmux session (started by claude-persistent.sh or claude-wrapper.exp).\n\n"
             "This Claude process is not a descendant of the lobster tmux "
             "session, so it is treated as an interactive/ad-hoc session.\n\n"
             "Read-only tools (get_stats, list_sources, memory_search, etc.) "
@@ -1563,10 +1567,10 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     """Dispatch tool calls to handlers."""
     # Session guard: block inbox-monitoring and outbox-write tools for any
-    # Claude process that was NOT started by claude-persistent.sh (i.e. does
-    # not have LOBSTER_MAIN_SESSION=1 in its environment).
+    # Claude process that is not a descendant of the lobster tmux session
+    # (primary check) or does not have LOBSTER_MAIN_SESSION=1 (fallback).
     if name in _SESSION_GUARDED_TOOLS and not _is_main_session():
-        log.warning(f"Session guard blocked '{name}' — LOBSTER_MAIN_SESSION not set")
+        log.warning(f"Session guard blocked '{name}' — not in lobster tmux session")
         return _session_guard_error(name)
 
     if name == "wait_for_messages":

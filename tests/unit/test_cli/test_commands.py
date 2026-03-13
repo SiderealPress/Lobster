@@ -271,3 +271,42 @@ class TestStatusCommand:
         # Should show status information
         # Note: Services may not be running in test environment
         assert "Status" in result.stdout or "status" in result.stdout.lower() or "Service" in result.stdout
+
+
+class TestServiceStatusTmuxAwareness:
+    """Tests that lobster-claude service_status distinguishes tmux state from systemd state.
+
+    The lobster-claude service uses RemainAfterExit=yes, meaning systemctl reports
+    "active" even when the tmux session has died. The service_status helper must
+    perform an explicit tmux check for lobster-claude and surface a warning when
+    the session is missing.
+    """
+
+    @pytest.fixture
+    def cli_path(self) -> Path:
+        """Get path to CLI script."""
+        return Path(__file__).parent.parent.parent.parent / "src" / "cli"
+
+    def test_service_status_contains_tmux_check(self, cli_path: Path):
+        """Verify that the CLI source contains a tmux check for lobster-claude."""
+        source = cli_path.read_text()
+        assert "tmux -L lobster has-session" in source, (
+            "CLI must check tmux session for lobster-claude; "
+            "systemctl is-active alone is not sufficient (RemainAfterExit=yes)"
+        )
+
+    def test_service_status_warns_on_missing_tmux(self, cli_path: Path):
+        """Verify the warning text for the 'service active, tmux MISSING' state."""
+        source = cli_path.read_text()
+        assert "service active, tmux session MISSING" in source, (
+            "CLI must emit a clear warning when lobster-claude service is active "
+            "but the tmux session is missing"
+        )
+
+    def test_service_status_handles_lobster_claude_specifically(self, cli_path: Path):
+        """Verify that the tmux check is scoped to lobster-claude only."""
+        source = cli_path.read_text()
+        # The guard should be present so other services are not affected
+        assert '"lobster-claude"' in source or "'lobster-claude'" in source, (
+            "The tmux guard must be scoped to the lobster-claude service specifically"
+        )
