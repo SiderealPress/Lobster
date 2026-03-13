@@ -70,9 +70,19 @@ LOG_FILE = Path(os.path.expanduser("~/lobster-workspace/logs/compact-gate.log"))
 
 WAIT_FOR_MESSAGES_TOOL = "mcp__lobster-inbox__wait_for_messages"
 
+CONFIRMATION_TOKEN = "LOBSTER_COMPACTED_REORIENTED"
+
+DENY_REASON_NEEDS_TOKEN = (
+    "GATE BLOCKED: Context compaction was just detected. "
+    "Read `~/lobster-workspace/.claude/dispatcher.bootup.md` for the confirmation token, "
+    "then call `mcp__lobster-inbox__wait_for_messages(confirmation='LOBSTER_COMPACTED_REORIENTED')` directly. "
+    "No ToolSearch needed — the MCP schema is pre-registered."
+)
+
 DENY_REASON = (
     "GATE BLOCKED: Context compaction was just detected. Your only permitted "
-    "action right now is to call wait_for_messages(). When it returns, you will "
+    "action right now is to call `mcp__lobster-inbox__wait_for_messages` by its full name directly — "
+    "no ToolSearch needed, the schema is pre-registered. When it returns, you will "
     "receive a compact-reminder system message — read it to re-orient as the "
     "Lobster dispatcher, then resume your main loop normally. Do not retry this "
     "tool call."
@@ -104,7 +114,7 @@ def _get_tmux_pane_pids() -> set[str]:
             ],
             capture_output=True,
             text=True,
-            timeout=3,
+            timeout=1,
         )
         if result.returncode == 0 and result.stdout.strip():
             return set(result.stdout.strip().split("\n"))
@@ -206,15 +216,37 @@ def main() -> None:
         sys.exit(0)
 
     tool_name = data.get("tool_name", "")
+    tool_input = data.get("tool_input", {})
 
-    # If the tool IS wait_for_messages, clear the sentinel and allow it through.
+    # If the tool IS wait_for_messages, handle based on sentinel state.
     if tool_name == WAIT_FOR_MESSAGES_TOOL:
-        try:
-            SENTINEL_FILE.unlink(missing_ok=True)
-        except OSError:
-            pass
-        log_gate_event(tool_name, "cleared")
-        sys.exit(0)
+        if sentinel_is_fresh():
+            # Sentinel is active — require the confirmation token.
+            confirmation = tool_input.get("confirmation", "")
+            if confirmation == CONFIRMATION_TOKEN:
+                # Correct token: clear the sentinel and allow through.
+                try:
+                    SENTINEL_FILE.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                log_gate_event(tool_name, "cleared")
+                sys.exit(0)
+            else:
+                # No or wrong token: deny with instructions.
+                log_gate_event(tool_name, "blocked-needs-token")
+                print(json.dumps({
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": DENY_REASON_NEEDS_TOKEN,
+                    }
+                }))
+                sys.exit(0)
+        else:
+            # No active sentinel: wait_for_messages passes through normally
+            # regardless of confirmation param.
+            log_gate_event(tool_name, "cleared")
+            sys.exit(0)
 
     # If sentinel is absent or stale, allow everything through.
     if not sentinel_is_fresh():

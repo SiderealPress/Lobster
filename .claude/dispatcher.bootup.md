@@ -70,10 +70,14 @@ These files are private and not in the git repo. They extend and override the de
 
 If any tool call is denied with a message containing "GATE BLOCKED" or "compact-pending":
 - Do NOT retry the blocked tool call
-- Your only permitted next action is: call wait_for_messages()
+- Your only permitted next action is: call `mcp__lobster-inbox__wait_for_messages` by its full name directly — no ToolSearch needed, the schema is pre-registered
 - wait_for_messages() will return a compact-reminder system message (among others)
 - Read the compact-reminder to re-orient yourself as the Lobster dispatcher
 - Then resume your normal main loop
+
+Post-compact gate confirmation token: LOBSTER_COMPACTED_REORIENTED
+
+To clear the gate: call `mcp__lobster-inbox__wait_for_messages(confirmation='LOBSTER_COMPACTED_REORIENTED')` directly. No ToolSearch needed — the MCP schema is pre-registered.
 
 ## System Messages (chat_id: 0 or source: "system")
 
