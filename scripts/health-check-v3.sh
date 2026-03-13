@@ -423,7 +423,10 @@ check_tmux() {
 # Check 3: Is a Claude process running inside the lobster tmux?
 check_claude_process() {
     local claude_pids
-    claude_pids=$(pgrep -f "claude.*--dangerously-skip-permissions" 2>/dev/null)
+    # Claude's cmdline shows just "claude" (flags not preserved in /proc/cmdline),
+    # so match the exact binary name. The tmux ancestry check below filters out
+    # any non-Lobster Claude sessions (e.g., interactive SSH sessions).
+    claude_pids=$(pgrep -x "claude" 2>/dev/null)
 
     if [[ -z "$claude_pids" ]]; then
         log_error "No Claude process found"
@@ -680,6 +683,80 @@ check_disk() {
 
     log_info "Disk OK: ${disk_pct}%"
     return 0
+}
+
+# Check 8: Claude auth token expiry
+# Proactively warn before OAuth token expires so the user can re-auth.
+#
+# FALSE POSITIVE GUARD: Claude refreshes OAuth tokens lazily — only when making
+# an actual API call, not when tools like `claude auth status` are run. This
+# means the expiresAt timestamp in the credentials file can appear stale even
+# though Claude is fully operational. To avoid false-positive alerts, we only
+# escalate to RED (and send a Telegram alert) after the token has shown as
+# expired or near-expired for AUTH_CONSECUTIVE_RED_THRESHOLD consecutive checks.
+# A single near-expiry reading is reported as YELLOW for monitoring purposes only.
+#
+# Returns: 0=GREEN, 1=YELLOW (< 4h remaining), 2=RED (confirmed expired/near-expiry)
+AUTH_FAILURE_COUNTER_FILE="$WORKSPACE_DIR/logs/auth-token-failures"
+AUTH_CONSECUTIVE_RED_THRESHOLD=3  # Must fail this many consecutive 2-min checks (~6 min total)
+
+check_auth_token() {
+    local creds_file="$HOME/.claude/.credentials.json"
+    if [[ ! -f "$creds_file" ]]; then
+        log_warn "No credentials file found at $creds_file"
+        return 1
+    fi
+
+    local remaining
+    remaining=$(python3 -c "
+import json, time
+try:
+    d = json.load(open('$creds_file'))
+    ea = d.get('claudeAiOauth', {}).get('expiresAt', 0) / 1000
+    print(f'{ea - time.time():.0f}')
+except:
+    print('-1')
+" 2>/dev/null)
+
+    if [[ "${remaining:-0}" -lt 0 || "${remaining:-0}" -lt 3600 ]]; then
+        # Token is expired or expiring very soon — increment consecutive counter
+        local failure_count=0
+        if [[ -f "$AUTH_FAILURE_COUNTER_FILE" ]]; then
+            failure_count=$(cat "$AUTH_FAILURE_COUNTER_FILE" 2>/dev/null || echo 0)
+        fi
+        failure_count=$((failure_count + 1))
+        echo "$failure_count" > "$AUTH_FAILURE_COUNTER_FILE"
+
+        if [[ "${remaining:-0}" -lt 0 ]]; then
+            log_error "AUTH: Token has EXPIRED (consecutive: $failure_count/$AUTH_CONSECUTIVE_RED_THRESHOLD)"
+        else
+            log_error "AUTH RED: Token expires in $((remaining / 60)) minutes (consecutive: $failure_count/$AUTH_CONSECUTIVE_RED_THRESHOLD)"
+        fi
+
+        # Only return RED (which triggers a Telegram alert) after consecutive failures.
+        # On the first few hits, return YELLOW — Claude likely hasn't needed to
+        # refresh yet, or will refresh on next API call.
+        if [[ $failure_count -ge $AUTH_CONSECUTIVE_RED_THRESHOLD ]]; then
+            # Reset counter after crossing the threshold so we don't spam —
+            # the main loop will send one Telegram alert, then the counter
+            # resets. If the problem persists, it will escalate again after
+            # another AUTH_CONSECUTIVE_RED_THRESHOLD checks.
+            rm -f "$AUTH_FAILURE_COUNTER_FILE"
+            return 2
+        else
+            return 1
+        fi
+    elif [[ "${remaining:-0}" -lt 14400 ]]; then
+        # Token healthy but within 4-hour warning window: reset counter, stay YELLOW
+        rm -f "$AUTH_FAILURE_COUNTER_FILE"
+        log_warn "AUTH YELLOW: Token expires in $((remaining / 3600)) hours"
+        return 1
+    else
+        # Token is healthy: reset consecutive failure counter
+        rm -f "$AUTH_FAILURE_COUNTER_FILE"
+        log_info "AUTH OK: Token expires in $((remaining / 3600)) hours"
+        return 0
+    fi
 }
 
 # Check 9: Dashboard server - silently restart if not listening on port 9100
@@ -1109,6 +1186,21 @@ main() {
             level="RED"
             restart_reason="${restart_reason:+$restart_reason + }wait_for_messages stale (>${WFM_STALE_SECONDS}s)"
         fi
+    fi
+
+    # --- Auth token check (proactive expiry warning) ---
+
+    check_auth_token
+    local auth_rc=$?
+    if [[ $auth_rc -eq 2 ]]; then
+        # Token expired or expiring very soon — log only, no Telegram alert.
+        # Claude refreshes tokens lazily; if it truly can't work, the stale
+        # inbox check will catch it and escalate via that path instead.
+        if [[ "$level" != "RED" ]]; then
+            level="YELLOW"
+        fi
+    elif [[ $auth_rc -eq 1 && "$level" == "GREEN" ]]; then
+        level="YELLOW"
     fi
 
     # --- Dashboard server check (soft restart, never RED) ---

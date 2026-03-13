@@ -93,10 +93,22 @@ class UserModel:
 
     def get_context(self, contexts: list[str] | None = None) -> str:
         """
-        Return a brief markdown context snippet for the given contexts.
-        Used for context injection into the main loop.
+        Return a brief markdown context snippet.
+        First tries the pre-computed cache file (fast path, <1ms).
+        Falls back to live DB query if cache doesn't exist.
         Returns empty string on failure (graceful degradation).
         """
+        # Fast path: read pre-computed cache
+        try:
+            cache_path = Path(self._workspace_path) / "user-model" / "_context.md" if self._workspace_path else None
+            if cache_path and cache_path.exists():
+                content = cache_path.read_text(encoding="utf-8")
+                if content.strip():
+                    return content
+        except Exception:
+            pass
+
+        # Slow path: live query
         try:
             from .introspection import get_resolved_preferences
             prefs = get_resolved_preferences(
