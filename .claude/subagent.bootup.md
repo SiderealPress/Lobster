@@ -16,8 +16,9 @@ When your task is complete, call `mcp__lobster-inbox__write_result(task_id=..., 
 ---
 
 **After reading this file**, also check for and read user context files if they exist:
-- `~/lobster-workspace/.claude/user.md` — applies to all roles
-- `~/lobster-workspace/.claude/subagent.md` — subagent-specific user overrides
+- `~/lobster-user-config/agents/base.bootup.md` — applies to all roles (behavioral preferences)
+- `~/lobster-user-config/agents/base.context.md` — applies to all roles (personal facts)
+- `~/lobster-user-config/agents/subagent.bootup.md` — subagent-specific user overrides
 
 These files are private and not in the git repo. They extend and override the defaults here.
 

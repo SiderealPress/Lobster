@@ -95,6 +95,7 @@ from mcp.types import Tool, TextContent
 # Directories
 _MESSAGES = Path(os.environ.get("LOBSTER_MESSAGES", Path.home() / "messages"))
 _WORKSPACE = Path(os.environ.get("LOBSTER_WORKSPACE", Path.home() / "lobster-workspace"))
+_USER_CONFIG = Path(os.environ.get("LOBSTER_USER_CONFIG", Path.home() / "lobster-user-config"))
 BASE_DIR = _MESSAGES
 INBOX_DIR = BASE_DIR / "inbox"
 OUTBOX_DIR = BASE_DIR / "outbox"
@@ -179,8 +180,8 @@ SCHEDULED_TASKS_TASKS_DIR = SCHEDULED_JOBS_DIR / "tasks"
 SCHEDULED_JOBS_FILE = SCHEDULED_JOBS_DIR / "jobs.json"
 SCHEDULED_TASKS_LOGS_DIR = SCHEDULED_JOBS_DIR / "logs"
 
-# Canonical memory directory (workspace)
-CANONICAL_DIR = _WORKSPACE / "memory" / "canonical"
+# Canonical memory directory (user-config)
+CANONICAL_DIR = _USER_CONFIG / "memory" / "canonical"
 
 # Ensure directories exist
 for d in [INBOX_DIR, OUTBOX_DIR, PROCESSED_DIR, PROCESSING_DIR, FAILED_DIR, SENT_DIR, CONFIG_DIR,
@@ -3874,7 +3875,7 @@ async def handle_get_brain_dump_status(args: dict) -> list[TextContent]:
 # =============================================================================
 
 
-CANONICAL_DIR = _WORKSPACE / "memory" / "canonical"
+CANONICAL_DIR = _USER_CONFIG / "memory" / "canonical"
 HANDOFF_PATH = CANONICAL_DIR / "handoff.md"
 
 
