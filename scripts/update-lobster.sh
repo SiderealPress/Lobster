@@ -475,6 +475,49 @@ update_cli() {
 }
 
 #-------------------------------------------------------------------------------
+# Re-chmod launchers
+#
+# git pull does not preserve execute bits lost via editor saves or other
+# accidents.  Re-applying chmod +x after every pull ensures launchers and
+# hooks remain executable regardless of how they were modified.
+#-------------------------------------------------------------------------------
+
+rechmod_launchers() {
+    log STEP "Re-applying execute bits to launchers"
+
+    cd "$LOBSTER_DIR"
+
+    if $DRY_RUN; then
+        log INFO "Would chmod +x scripts/*.sh scripts/*.exp hooks/*.py install.sh"
+        return 0
+    fi
+
+    # Shell scripts in scripts/
+    if ls scripts/*.sh &>/dev/null 2>&1; then
+        chmod +x scripts/*.sh
+        log OK "chmod +x scripts/*.sh"
+    fi
+
+    # Expect scripts in scripts/
+    if ls scripts/*.exp &>/dev/null 2>&1; then
+        chmod +x scripts/*.exp
+        log OK "chmod +x scripts/*.exp"
+    fi
+
+    # Executable Python hooks in hooks/
+    if ls hooks/*.py &>/dev/null 2>&1; then
+        chmod +x hooks/*.py
+        log OK "chmod +x hooks/*.py"
+    fi
+
+    # Top-level installer
+    if [ -f "install.sh" ]; then
+        chmod +x install.sh
+        log OK "chmod +x install.sh"
+    fi
+}
+
+#-------------------------------------------------------------------------------
 # Health checks
 #-------------------------------------------------------------------------------
 
@@ -762,6 +805,9 @@ main() {
 
     # Phase 7.5: CLI
     update_cli
+
+    # Phase 7.6: Re-chmod launchers (idempotent; guards against lost execute bits)
+    rechmod_launchers
 
     # Phase 8: Start services
     if ! start_services; then
