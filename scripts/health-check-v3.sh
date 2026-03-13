@@ -58,7 +58,7 @@ YELLOW_THRESHOLD_SECONDS=120         # 2 minutes - YELLOW warning
 COMPACTION_SUPPRESS_SECONDS=300      # 5 minutes - skip stale-inbox check after a compaction event
 
 WFM_STALE_SECONDS=600                # 10 minutes - RED if wait_for_messages not called since this long ago
-AUDIT_LOG="$WORKSPACE_DIR/logs/audit.jsonl"
+HEARTBEAT_FILE="$WORKSPACE_DIR/logs/claude-heartbeat"
 
 OUTBOX_DIR="$MESSAGES_DIR/outbox"
 OUTBOX_STALE_THRESHOLD_SECONDS=900   # 15 min = RED
@@ -619,54 +619,34 @@ check_outbox_drain() {
 }
 
 # Check 6: wait_for_messages freshness
-# Reads audit.jsonl to find the most recent wait_for_messages call. If the
-# dispatcher hasn't called it within WFM_STALE_SECONDS, the main loop is
-# presumed stuck (e.g. infinite loop, hung tool call, or Claude exit without
-# wrapper noticing). Suppressed during hibernation and the compaction window.
+# Checks the mtime of the claude-heartbeat file, which inbox_server.py touches
+# at the start of every wait_for_messages call. If the file hasn't been updated
+# within WFM_STALE_SECONDS, the main loop is presumed stuck (e.g. infinite
+# loop, hung tool call, or Claude exit without wrapper noticing). Suppressed
+# during hibernation and the compaction window.
 #
-# Gracefully skips the check if:
-#   - audit.jsonl does not exist (fresh install)
-#   - audit.jsonl has no wait_for_messages entries
+# Gracefully skips the check if the heartbeat file does not exist (fresh install).
 #
 # Returns: 0=GREEN (fresh or skipped), 2=RED (stale)
 check_wfm_freshness() {
-    if [[ ! -f "$AUDIT_LOG" ]]; then
-        log_info "WFM freshness: audit.jsonl not found — skipping check"
+    if [[ ! -f "$HEARTBEAT_FILE" ]]; then
+        log_info "WFM freshness: heartbeat file not found — skipping check (fresh install?)"
         return 0
     fi
 
-    local last_ts
-    last_ts=$(grep '"wait_for_messages"' "$AUDIT_LOG" 2>/dev/null \
-        | tail -1 \
-        | python3 -c "
-import json, sys
-try:
-    line = sys.stdin.read().strip()
-    if not line:
-        sys.exit(0)
-    d = json.loads(line)
-    print(d.get('ts', ''))
-except Exception:
-    sys.exit(0)
-" 2>/dev/null)
-
-    if [[ -z "$last_ts" ]]; then
-        log_info "WFM freshness: no wait_for_messages entries in audit.jsonl — skipping check"
+    local last_heartbeat
+    last_heartbeat=$(stat -c %Y "$HEARTBEAT_FILE" 2>/dev/null)
+    if [[ -z "$last_heartbeat" ]]; then
+        log_info "WFM freshness: cannot stat heartbeat file — skipping check"
         return 0
     fi
-
-    local last_epoch
-    last_epoch=$(date -d "$last_ts" +%s 2>/dev/null) || {
-        log_info "WFM freshness: cannot parse timestamp '$last_ts' — skipping check"
-        return 0
-    }
 
     local now age
     now=$(date +%s)
-    age=$((now - last_epoch))
+    age=$(( now - last_heartbeat ))
 
     if [[ $age -gt $WFM_STALE_SECONDS ]]; then
-        log_error "RED: wait_for_messages last called ${age}s ago (threshold: ${WFM_STALE_SECONDS}s)"
+        log_error "RED: wait_for_messages stale — heartbeat last updated ${age}s ago (threshold: ${WFM_STALE_SECONDS}s)"
         return 2
     fi
 
@@ -1109,11 +1089,17 @@ main() {
     fi
 
     # --- wait_for_messages freshness check ---
-    # Suppressed during hibernation (dispatcher isn't running) and during the
-    # compaction grace period (tool calls pause while Claude compacts context).
+    # Suppressed during hibernation (dispatcher isn't running), transient
+    # lifecycle states where Claude hasn't started yet (starting, restarting,
+    # waking, backoff, stopped), and during the compaction grace period (tool
+    # calls pause while Claude compacts context).
 
     if is_hibernating; then
         log_info "WFM freshness suppressed (hibernating)"
+    elif [[ "$lobster_mode" == "starting" || "$lobster_mode" == "restarting" || \
+            "$lobster_mode" == "waking"    || "$lobster_mode" == "backoff"    || \
+            "$lobster_mode" == "stopped" ]]; then
+        log_info "WFM freshness suppressed (transient lifecycle state: $lobster_mode)"
     elif [[ "$compaction_recent" == "true" ]]; then
         log_info "WFM freshness suppressed (recent compaction)"
     else
