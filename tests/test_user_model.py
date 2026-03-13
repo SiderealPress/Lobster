@@ -988,8 +988,8 @@ class TestActivityRhythm:
     def test_update_and_get_rhythm(self, conn):
         """Should insert and retrieve activity rhythm entries."""
         from user_model.db import update_activity_rhythm, get_activity_rhythm
-        update_activity_rhythm(conn, hour=14, day=2, message_length=100, latency_ms=500)
-        update_activity_rhythm(conn, hour=14, day=2, message_length=200, latency_ms=300)
+        update_activity_rhythm(conn, hour_of_day=14, day_of_week=2, message_length=100, latency_ms=500)
+        update_activity_rhythm(conn, hour_of_day=14, day_of_week=2, message_length=200, latency_ms=300)
         rhythm = get_activity_rhythm(conn)
         slot = next(r for r in rhythm if r.hour_of_day == 14 and r.day_of_week == 2)
         assert slot.message_count == 2
@@ -1001,11 +1001,11 @@ class TestActivityRhythm:
         """Should return top hours by message count."""
         from user_model.db import update_activity_rhythm, get_peak_activity_hours
         for _ in range(5):
-            update_activity_rhythm(conn, hour=10, day=0, message_length=50)
+            update_activity_rhythm(conn, hour_of_day=10, day_of_week=0, message_length=50)
         for _ in range(3):
-            update_activity_rhythm(conn, hour=15, day=0, message_length=50)
+            update_activity_rhythm(conn, hour_of_day=15, day_of_week=0, message_length=50)
         for _ in range(1):
-            update_activity_rhythm(conn, hour=20, day=0, message_length=50)
+            update_activity_rhythm(conn, hour_of_day=20, day_of_week=0, message_length=50)
         peaks = get_peak_activity_hours(conn, top_n=2)
         assert peaks[0] == 10
         assert len(peaks) == 2
@@ -1083,7 +1083,7 @@ class TestTemporalSnapshots:
         )
         drift_id = insert_drift_record(conn, drift)
         assert drift_id is not None
-        recent = get_recent_drifts(conn, days=1)
+        recent = get_recent_drifts(conn, limit=10)
         assert any(d.id == drift_id for d in recent)
         unsurfaced = get_unsurfaced_drifts(conn)
         assert any(d.id == drift_id for d in unsurfaced)

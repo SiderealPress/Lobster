@@ -87,6 +87,54 @@ except Exception as _um_err:
     import traceback as _um_tb
     print(f"[WARN] User Model subsystem unavailable: {_um_err}", file=sys.stderr)
 
+# ---------------------------------------------------------------------------
+# Background observation worker — fire-and-forget, zero main-thread blocking
+# ---------------------------------------------------------------------------
+import queue as _queue_mod
+
+_observation_queue: _queue_mod.Queue = _queue_mod.Queue(maxsize=500)
+_observation_thread: threading.Thread | None = None
+
+
+def _observation_worker() -> None:
+    """Daemon thread: drain observation queue, call user_model.observe()."""
+    while True:
+        try:
+            item = _observation_queue.get(timeout=10)
+        except _queue_mod.Empty:
+            continue
+        if item is None:  # shutdown sentinel
+            break
+        try:
+            msg_text, msg_id, source, ts = item
+            if _user_model is not None:
+                _user_model.observe(msg_text, msg_id, context=source or "", message_ts=ts)
+        except Exception:
+            pass  # never crash the worker
+
+
+def _ensure_observation_worker() -> None:
+    """Start the background observation thread if not already running."""
+    global _observation_thread
+    if not USER_MODEL_ENABLED or _user_model is None:
+        return
+    if _observation_thread is not None and _observation_thread.is_alive():
+        return
+    _observation_thread = threading.Thread(
+        target=_observation_worker, daemon=True, name="um-observer"
+    )
+    _observation_thread.start()
+
+
+def _queue_observation(msg_text: str, msg_id: str, source: str | None = None, ts: str | None = None) -> None:
+    """Non-blocking: enqueue a message for background observation. Drops if full."""
+    if not USER_MODEL_ENABLED or _user_model is None:
+        return
+    try:
+        _observation_queue.put_nowait((msg_text, msg_id, source, ts))
+    except _queue_mod.Full:
+        pass  # drop silently — observation is best-effort
+
 # MCP SDK
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -2209,9 +2257,25 @@ async def handle_mark_processing(args: dict) -> list[TextContent]:
     if not found:
         return [TextContent(type="text", text=f"Message not found in inbox: {message_id}")]
 
+    # Read message content BEFORE moving (for observation queue)
+    try:
+        msg_data = json.loads(found.read_text())
+    except Exception:
+        msg_data = {}
+
     # Atomic move to processing
     dest = PROCESSING_DIR / found.name
     found.rename(dest)
+
+    # Queue background observation (non-blocking, best-effort)
+    msg_text = msg_data.get("text", "") or msg_data.get("transcription", "")
+    msg_type = msg_data.get("type", "")
+    if msg_text and msg_type not in ("subagent_result", "subagent_error", "self_check"):
+        _queue_observation(
+            msg_text, message_id,
+            source=msg_data.get("source"),
+            ts=msg_data.get("timestamp"),
+        )
 
     log.info(f"Message claimed for processing: {message_id}")
     return [TextContent(type="text", text=f"Message claimed: {message_id}")]
@@ -4782,6 +4846,7 @@ async def handle_list_calendar_events(args: dict) -> list[TextContent]:
 
 async def main():
     """Run the MCP server."""
+    _ensure_observation_worker()
     async with stdio_server() as (read_stream, write_stream):
         await server.run(read_stream, write_stream, server.create_initialization_options())
 
