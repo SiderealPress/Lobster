@@ -89,6 +89,72 @@ check "lobster-claude (tmux)"     "tmux -L lobster has-session -t lobster"
 #-------------------------------------------------------------------------------
 check "inbox writable"  "[ -d '$INBOX_DIR' ] && touch '$INBOX_DIR/.health-write-test' && rm '$INBOX_DIR/.health-write-test'"
 
+#-------------------------------------------------------------------------------
+# OS package updates
+#-------------------------------------------------------------------------------
+update_system_packages() {
+    local sudo_prefix=""
+    if [ "$(id -u)" -ne 0 ]; then
+        sudo_prefix="sudo "
+    fi
+
+    if command -v apt-get &>/dev/null; then
+        log "INFO: update_system_packages: using apt-get"
+        if ${sudo_prefix}apt-get update -q &>>"$LOG_FILE" && \
+           ${sudo_prefix}apt-get upgrade -y -q &>>"$LOG_FILE"; then
+            log "OK: system packages updated (apt-get)"
+        else
+            log "ERROR: system packages update failed (apt-get)"
+            FAILURES+=("system-packages-apt-get")
+        fi
+    elif command -v dnf &>/dev/null; then
+        log "INFO: update_system_packages: using dnf"
+        if ${sudo_prefix}dnf upgrade -y -q &>>"$LOG_FILE"; then
+            log "OK: system packages updated (dnf)"
+        else
+            log "ERROR: system packages update failed (dnf)"
+            FAILURES+=("system-packages-dnf")
+        fi
+    elif command -v yum &>/dev/null; then
+        log "INFO: update_system_packages: using yum"
+        if ${sudo_prefix}yum upgrade -y -q &>>"$LOG_FILE"; then
+            log "OK: system packages updated (yum)"
+        else
+            log "ERROR: system packages update failed (yum)"
+            FAILURES+=("system-packages-yum")
+        fi
+    elif command -v pacman &>/dev/null; then
+        log "INFO: update_system_packages: using pacman"
+        if ${sudo_prefix}pacman -Syu --noconfirm &>>"$LOG_FILE"; then
+            log "OK: system packages updated (pacman)"
+        else
+            log "ERROR: system packages update failed (pacman)"
+            FAILURES+=("system-packages-pacman")
+        fi
+    elif command -v zypper &>/dev/null; then
+        log "INFO: update_system_packages: using zypper"
+        if ${sudo_prefix}zypper update -y &>>"$LOG_FILE"; then
+            log "OK: system packages updated (zypper)"
+        else
+            log "ERROR: system packages update failed (zypper)"
+            FAILURES+=("system-packages-zypper")
+        fi
+    elif command -v apk &>/dev/null; then
+        log "INFO: update_system_packages: using apk"
+        if ${sudo_prefix}apk update &>>"$LOG_FILE" && \
+           ${sudo_prefix}apk upgrade &>>"$LOG_FILE"; then
+            log "OK: system packages updated (apk)"
+        else
+            log "ERROR: system packages update failed (apk)"
+            FAILURES+=("system-packages-apk")
+        fi
+    else
+        log "WARN: update_system_packages: no supported package manager found, skipping"
+    fi
+}
+
+update_system_packages
+
 log "=== Health check complete: ${#FAILURES[@]} failure(s) ==="
 
 #-------------------------------------------------------------------------------
