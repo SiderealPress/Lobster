@@ -659,6 +659,19 @@ Manual intervention required:
 
     record_restart
 
+    # Clean up any stale tmux socket before restarting.
+    # When ExecStop fails (e.g. "no server running on /tmp/tmux-1000/lobster"),
+    # the socket file is left behind and can prevent the new tmux server from
+    # binding on the next ExecStart. Removing it here is safe: if tmux is
+    # running it ignores the rm; if it is not running we unblock the bind.
+    local tmux_uid
+    tmux_uid=$(id -u)
+    local stale_socket="/tmp/tmux-${tmux_uid}/${TMUX_SOCKET}"
+    if [[ -S "$stale_socket" ]]; then
+        log_warn "Removing stale tmux socket: $stale_socket"
+        rm -f "$stale_socket"
+    fi
+
     # Restart via systemd - this handles tmux lifecycle correctly
     sudo systemctl restart "$SERVICE_CLAUDE" 2>&1 | while read -r line; do
         log_info "systemctl: $line"
