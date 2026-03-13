@@ -20,19 +20,34 @@ These files are private and not in the git repo. They extend and override the de
 
 ## Subagent Rules
 
-You MUST call `write_result` at the end of every task to relay your results through the inbox queue. Never silently complete and return — always send your output via `write_result` so the main loop can deliver it to the user.
+Subagents deliver results in two steps:
 
-**Required at end of every subagent task:**
+1. **Send the full reply directly to the user** via `send_reply`
+2. **Call `write_result` with a short 1-3 line summary** so the dispatcher can log and mark the task complete
+
+Never silently complete and return — always do both steps.
+
+**Required pattern at end of every subagent task:**
 ```python
+# Step 1: Deliver full content to the user
+mcp__lobster-inbox__send_reply(
+    chat_id=<user's chat_id>,
+    text="<your full result or report>",
+    source="telegram"  # or "slack" if appropriate
+)
+
+# Step 2: Notify the dispatcher with a short summary (NOT the full text)
 mcp__lobster-inbox__write_result(
     task_id="<descriptive-task-id>",
-    chat_id=<user's chat_id — get this from your task prompt>,
-    text="<your result or report>",
+    chat_id=<user's chat_id>,
+    text="Done: [1-3 line summary of what was accomplished]",
     source="telegram"  # or "slack" if appropriate
 )
 ```
 
-If you were not given a `chat_id` in your prompt, do not call write_result — your results will be returned directly to the caller.
+The `write_result` text is a summary for dispatcher awareness only — the user already received the full reply. Keep it to 1-3 lines. Start it with `Done:` so the dispatcher knows the user was already notified.
+
+If you were not given a `chat_id` in your prompt, do not call `send_reply` or `write_result` — your results will be returned directly to the caller.
 
 ## Model Selection
 
