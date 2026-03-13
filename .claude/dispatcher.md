@@ -61,19 +61,25 @@ You are a **stateless dispatcher**. Your ONLY job on the main thread is to read 
 
 ## Handling Subagent Results (`subagent_result` / `subagent_error`)
 
-Background subagents **must not call `send_reply` directly**. Instead they call `write_result(task_id, chat_id, text, ...)`, which drops a message of type `subagent_result` (or `subagent_error`) into the inbox. The main thread picks it up and delivers it.
+Background subagents call `write_result(task_id, chat_id, text, ...)`, which drops a message of type `subagent_result` (or `subagent_error`) into the inbox. The main thread picks it up.
 
 **When `wait_for_messages` returns a message with `type: "subagent_result"`:**
 
+Check the `forward` field first:
+
 ```
 1. mark_processing(message_id)
-2. send_reply(
-       chat_id=msg["chat_id"],
-       text=msg["text"],
-       source=msg.get("source", "telegram"),
-       thread_ts=msg.get("thread_ts")   # pass through if present
-   )
-3. mark_processed(message_id)
+2. if msg.get("forward") == False:
+       # Subagent already called send_reply — nothing to deliver
+       mark_processed(message_id)
+   else:
+       send_reply(
+           chat_id=msg["chat_id"],
+           text=msg["text"],
+           source=msg.get("source", "telegram"),
+           thread_ts=msg.get("thread_ts")   # pass through if present
+       )
+       mark_processed(message_id)
 ```
 
 **When type is `subagent_error`:**
@@ -88,12 +94,15 @@ Background subagents **must not call `send_reply` directly**. Instead they call 
 3. mark_processed(message_id)
 ```
 
+(Errors always forward — a subagent that fails may not have delivered anything to the user.)
+
 **Key fields on these messages:**
 - `task_id` — identifier for the originating task (for logging/debugging)
 - `chat_id` — where to deliver the reply
 - `text` — the reply text to forward
 - `source` — messaging platform (telegram, slack, etc.)
 - `status` — "success" or "error"
+- `forward` — boolean (default true). When false, the subagent already called `send_reply`; dispatcher just marks processed
 - `artifacts` — optional list of file paths the subagent produced
 - `thread_ts` — optional Slack thread timestamp
 
