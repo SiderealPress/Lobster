@@ -70,19 +70,15 @@ except Exception as _mem_err:
     import traceback as _tb
     print(f"[WARN] Memory system unavailable: {_mem_err}", file=sys.stderr)
 
-# User Model subsystem (optional — feature-flagged via LOBSTER_USER_MODEL=true)
+# User Model subsystem
 _user_model = None
 _user_model_tool_names: set[str] = set()
-USER_MODEL_ENABLED = False
 USER_MODEL_TOOL_DEFINITIONS: list = []
 try:
-    from user_model import create_user_model, USER_MODEL_ENABLED, USER_MODEL_TOOL_DEFINITIONS
-    if USER_MODEL_ENABLED:
-        _user_model = create_user_model()
-        _user_model_tool_names = _user_model.tool_names
-        print("[INFO] User Model subsystem initialized.", file=sys.stderr)
-    else:
-        print("[INFO] User Model subsystem disabled (LOBSTER_USER_MODEL != true).", file=sys.stderr)
+    from user_model import create_user_model, USER_MODEL_TOOL_DEFINITIONS
+    _user_model = create_user_model()
+    _user_model_tool_names = _user_model.tool_names
+    print("[INFO] User Model subsystem initialized.", file=sys.stderr)
 except Exception as _um_err:
     import traceback as _um_tb
     print(f"[WARN] User Model subsystem unavailable: {_um_err}", file=sys.stderr)
@@ -116,7 +112,7 @@ def _observation_worker() -> None:
 def _ensure_observation_worker() -> None:
     """Start the background observation thread if not already running."""
     global _observation_thread
-    if not USER_MODEL_ENABLED or _user_model is None:
+    if _user_model is None:
         return
     if _observation_thread is not None and _observation_thread.is_alive():
         return
@@ -128,7 +124,7 @@ def _ensure_observation_worker() -> None:
 
 def _queue_observation(msg_text: str, msg_id: str, source: str | None = None, ts: str | None = None) -> None:
     """Non-blocking: enqueue a message for background observation. Drops if full."""
-    if not USER_MODEL_ENABLED or _user_model is None:
+    if _user_model is None:
         return
     try:
         _observation_queue.put_nowait((msg_text, msg_id, source, ts))
@@ -1604,7 +1600,7 @@ async def list_tools() -> list[Tool]:
             )
             for t in USER_MODEL_TOOL_DEFINITIONS
         ]
-        if USER_MODEL_ENABLED
+        if _user_model is not None
         else []
     )
 
@@ -1764,7 +1760,7 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
         result_json = _user_model.dispatch(name, arguments)
         return [TextContent(type="text", text=result_json)]
     elif name in _user_model_tool_names and _user_model is None:
-        return [TextContent(type="text", text='{"error": "User model subsystem not initialized. Set LOBSTER_USER_MODEL=true in config.env."}')]
+        return [TextContent(type="text", text='{"error": "User model subsystem not initialized."}')]
     else:
         return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
