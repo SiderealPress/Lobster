@@ -58,7 +58,7 @@ Before forming any opinion, read:
 ## What to do (step by step)
 
 1. Read all relevant context (issue, ticket, diff, surrounding code).
-2. **Run relevant tests.** After reading the code, attempt to run the project's test suite using `uv run pytest` or the project's documented test command. Note the results (pass/fail/error) in your review. If tests cannot be run (no test environment, missing deps), note that explicitly rather than skipping silently.
+2. **Run relevant tests.** After reading the code, figure out how to run the project's test suite — check for a Makefile, CI config, test runner config, or project docs. Run the relevant tests and note the results (pass/fail/error) in your review. If tests cannot be run (no test environment, missing deps), note that explicitly rather than skipping silently.
 3. Update the issue or ticket body so that someone without repo knowledge can understand: what the bug/feature was, why it happened or was needed, how the fix/implementation works, and what would break without it.
 4. Post the review comment (if a PR exists and changes are on GitHub).
 5. Report back via `write_result`.
