@@ -12,6 +12,9 @@ inbox it skips writing a duplicate.
 Dev mode: if LOBSTER_DEBUG=true (or set in config.env), also sends a Telegram
 message directly to the owner's chat ID so the developer is immediately notified
 that a compaction occurred.
+
+State: always writes compacted_at to lobster-state.json so that the health
+check can suppress stale-inbox false-positives during the compaction pause.
 """
 
 import json
@@ -23,6 +26,12 @@ from pathlib import Path
 
 INBOX_DIR = Path(os.path.expanduser("~/messages/inbox"))
 CONFIG_ENV = Path(os.path.expanduser("~/lobster-config/config.env"))
+STATE_FILE = Path(
+    os.environ.get(
+        "LOBSTER_STATE_FILE_OVERRIDE",
+        os.path.expanduser("~/messages/config/lobster-state.json"),
+    )
+)
 
 REMINDER_TEXT = (
     "Your context was just compacted. STOP. Before processing any messages:\n\n"
@@ -74,6 +83,32 @@ def write_reminder() -> None:
 
     dest = INBOX_DIR / f"{message_id}.json"
     dest.write_text(json.dumps(message, indent=2) + "\n")
+
+
+def write_compacted_at() -> None:
+    """
+    Record the current UTC timestamp as compacted_at in lobster-state.json.
+
+    Preserves the existing 'mode' field (and any other fields) so that the
+    health check can still read lifecycle state correctly. Only adds or
+    overwrites the compacted_at field.
+
+    Silent on any failure — must never crash the hook.
+    """
+    try:
+        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        state: dict = {}
+        if STATE_FILE.exists():
+            try:
+                state = json.loads(STATE_FILE.read_text())
+            except (json.JSONDecodeError, OSError):
+                state = {}
+        state["compacted_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        tmp_path = STATE_FILE.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(state, indent=2) + "\n")
+        tmp_path.replace(STATE_FILE)  # atomic on Linux (same filesystem)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _parse_config_env() -> dict:
@@ -149,7 +184,13 @@ def maybe_send_dev_telegram_notify() -> None:
 
 
 def main() -> None:
+    # Always record compaction timestamp first — before any early returns.
+    # This ensures the health check can suppress false-positive restarts even
+    # if a compact-reminder is already pending.
+    write_compacted_at()
+
     if already_pending():
+        maybe_send_dev_telegram_notify()
         return
     write_reminder()
     maybe_send_dev_telegram_notify()
