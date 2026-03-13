@@ -54,6 +54,17 @@ print_header() {
 service_status() {
     local service=$1
     if systemctl is-active --quiet "$service" 2>/dev/null; then
+        # lobster-claude uses RemainAfterExit=yes, so the service stays "active"
+        # even after the tmux session dies. Check tmux explicitly.
+        if [[ "$service" == "lobster-claude" ]]; then
+            if tmux -L lobster has-session -t lobster 2>/dev/null; then
+                echo -e "${GREEN}\u25cf${NC} $service: ${GREEN}running${NC} (tmux session alive)"
+                return 0
+            else
+                echo -e "${YELLOW}\u25cf${NC} $service: ${YELLOW}service active, tmux session MISSING${NC} \u26a0"
+                return 1
+            fi
+        fi
         echo -e "${GREEN}\u25cf${NC} $service: ${GREEN}running${NC}"
         return 0
     else
