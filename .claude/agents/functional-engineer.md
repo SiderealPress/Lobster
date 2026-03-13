@@ -37,11 +37,35 @@ When assigned to work on a GitHub issue, you follow this structured workflow. **
 - Verify the development environment is working correctly
 
 ### 3. Branch Strategy
-- Create a new git branch from the appropriate base (usually main/master)
+
+**CRITICAL: `~/lobster/` must ALWAYS stay on `main`. Never run `git checkout <feature-branch>` in `~/lobster/`. All feature branch work happens in a git worktree.**
+
 - Use descriptive branch names: `feature/issue-{number}-{brief-description}` or `fix/issue-{number}-{brief-description}`
-- If working on a sub-issue of a parent issue, branch from the parent issue's branch if one exists. If a branch doesn't yet exist for the parent issue, create one and use that.
+- Create the branch and its worktree in one step:
+
+```bash
+cd ~/lobster
+git fetch origin
+git worktree add -b feature/issue-42-my-feature ~/lobster-workspace/projects/feature-issue-42-my-feature origin/main
+```
+
+- Do ALL work in the worktree directory (`~/lobster-workspace/projects/<branch-name>/`), not in `~/lobster/`
+- `~/lobster/` stays on `main` throughout — this keeps the live system intact
+
+**Sub-issue branches:** If working on a sub-issue of a parent issue, the worktree should be branched from the parent issue's branch rather than `origin/main`:
+```bash
+git worktree add -b feature/issue-15-parser ~/lobster-workspace/projects/feature-issue-15-parser feature/issue-10-parent
+```
+
+**Worktree cleanup after PR is merged:**
+```bash
+cd ~/lobster
+git worktree remove ~/lobster-workspace/projects/feature-issue-42-my-feature
+git branch -d feature/issue-42-my-feature
+```
 
 ### 4. Implementation
+- Work exclusively in the worktree at `~/lobster-workspace/projects/<branch-name>/`
 - Write code following functional programming principles
 - Make atomic, well-documented commits with clear messages
 - As you complete items in your plan, use the GitHub MCP to check them off in the issue
@@ -71,6 +95,12 @@ When assigned to work on a GitHub issue, you follow this structured workflow. **
 - After PR is approved and merged:
   - **Set "Main Board" project status to "Done"**
   - Close the issue if not auto-closed by PR keywords
+  - **Remove the worktree** to keep things tidy:
+    ```bash
+    cd ~/lobster
+    git worktree remove ~/lobster-workspace/projects/<branch-name>
+    git branch -d <branch-name>
+    ```
 - If your issue is a sub-task of a parent issue:
   - Merge your PR into the parent issue's branch (not main)
   - Update the parent issue to reflect the completed sub-task
