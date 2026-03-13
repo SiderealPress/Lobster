@@ -418,38 +418,92 @@ update_claude_cli() {
 
 #-------------------------------------------------------------------------------
 # Systemd update
+#
+# Always regenerates service files from their repo templates and reinstalls
+# them to /etc/systemd/system/. This corrects any divergence between the
+# installed service files and the repo templates — including manual edits
+# that are invisible to git (lobster-claude.service is gitignored because
+# it is generated at install time from lobster-claude.service.template).
+#
+# Uses the same {{PLACEHOLDER}} substitution logic as install.sh.
 #-------------------------------------------------------------------------------
 
 update_systemd() {
-    log STEP "Checking systemd services"
+    log STEP "Reinstalling systemd service files from templates"
 
     cd "$LOBSTER_DIR"
 
-    # Check if service files changed
-    local changed=false
-    if git diff --name-only "$PREVIOUS_COMMIT..HEAD" 2>/dev/null | grep -q "services/"; then
-        changed=true
+    # Resolve substitution variables (same defaults as install.sh)
+    local lobster_user="${LOBSTER_USER:-${USER:-$(whoami)}}"
+    local lobster_group="${LOBSTER_GROUP:-$lobster_user}"
+    local lobster_home="${LOBSTER_HOME:-$HOME}"
+    local install_dir="$LOBSTER_DIR"
+    local workspace_dir="$WORKSPACE_DIR"
+    local messages_dir="$MESSAGES_DIR"
+    local config_dir="$LOBSTER_CONFIG_DIR"
+
+    # Inner helper: substitute placeholders and write output file
+    generate_from_template() {
+        local template="$1"
+        local output="$2"
+        sed -e "s|{{USER}}|${lobster_user}|g" \
+            -e "s|{{GROUP}}|${lobster_group}|g" \
+            -e "s|{{HOME}}|${lobster_home}|g" \
+            -e "s|{{INSTALL_DIR}}|${install_dir}|g" \
+            -e "s|{{WORKSPACE_DIR}}|${workspace_dir}|g" \
+            -e "s|{{MESSAGES_DIR}}|${messages_dir}|g" \
+            -e "s|{{CONFIG_DIR}}|${config_dir}|g" \
+            "$template" > "$output"
+    }
+
+    if $DRY_RUN; then
+        log INFO "Would regenerate service files from templates and reinstall to /etc/systemd/system/"
+        for tmpl in services/*.service.template; do
+            [ -f "$tmpl" ] || continue
+            local svc_name
+            svc_name=$(basename "$tmpl" .template)
+            log INFO "  $tmpl -> /etc/systemd/system/$svc_name"
+        done
+        return 0
     fi
 
-    if $changed; then
-        log INFO "Service files changed, updating..."
+    local updated=false
+    for tmpl in services/*.service.template; do
+        [ -f "$tmpl" ] || continue
+        local svc_name
+        svc_name=$(basename "$tmpl" .template)
+        local generated="services/$svc_name"
 
-        if $DRY_RUN; then
-            log INFO "Would copy service files and reload systemd"
-        else
-            for svc_file in services/*.service; do
-                if [ -f "$svc_file" ]; then
-                    local svc_name=$(basename "$svc_file")
-                    sudo cp "$svc_file" "/etc/systemd/system/$svc_name"
-                    log OK "Updated $svc_name"
-                fi
-            done
+        # Generate the service file from the template
+        generate_from_template "$tmpl" "$generated"
 
-            sudo systemctl daemon-reload
-            log OK "Systemd daemon reloaded"
+        # Install to systemd directory
+        sudo cp "$generated" "/etc/systemd/system/$svc_name"
+        log OK "Reinstalled $svc_name"
+        updated=true
+    done
+
+    # Also copy any non-template service files (e.g. lobster.target)
+    for svc_file in services/*.service services/*.target; do
+        [ -f "$svc_file" ] || continue
+        # Skip generated files (they were already handled above)
+        [[ "$svc_file" == *.template ]] && continue
+        # Skip any .service file that has a corresponding .template
+        # (those were already generated and installed by Loop 1 above)
+        [[ -f "${svc_file}.template" ]] && continue
+        local svc_name
+        svc_name=$(basename "$svc_file")
+        # Only copy files that are tracked in git (not the gitignored generated ones)
+        if git ls-files --error-unmatch "$svc_file" 2>/dev/null; then
+            sudo cp "$svc_file" "/etc/systemd/system/$svc_name"
+            log OK "Reinstalled $svc_name"
+            updated=true
         fi
-    else
-        log OK "No service file changes"
+    done
+
+    if $updated; then
+        sudo systemctl daemon-reload
+        log OK "Systemd daemon reloaded"
     fi
 }
 
