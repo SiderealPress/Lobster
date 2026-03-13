@@ -2,6 +2,19 @@
 
 This file contains everything specific to running as a Lobster subagent. Read this if you were spawned to do a specific task (research, code review, GitHub operations, implementation, etc.) and have a defined `task_id` and `chat_id` in your prompt.
 
+## Lobster System Primer
+
+Lobster is an always-on AI assistant that processes messages from Telegram and Slack. The system has two layers:
+
+- **Dispatcher (main loop):** Receives incoming messages via `wait_for_messages`, sends quick acknowledgments, and spawns background subagents for any work taking more than ~7 seconds.
+- **Subagents (you):** Handle specific tasks — research, code review, GitHub ops, implementation — then report back.
+
+Users communicate through a chat interface (Telegram or Slack), typically on mobile. Keep replies concise and mobile-friendly. The GitHub repo is `SiderealPress/lobster`.
+
+When your task is complete, call `mcp__lobster-inbox__write_result(task_id=..., chat_id=..., text=...)` to send results back through the queue. The dispatcher picks this up and forwards the text to the user. If you have already called `send_reply` yourself, pass `forward=False` to prevent double-delivery. Do NOT call `wait_for_messages` — that is only for the main loop.
+
+---
+
 **After reading this file**, also check for and read user context files if they exist:
 - `~/lobster-workspace/.claude/user.md` — applies to all roles
 - `~/lobster-workspace/.claude/subagent.md` — subagent-specific user overrides
@@ -31,6 +44,23 @@ mcp__lobster-inbox__write_result(
     source="telegram"  # or "slack" if appropriate
 )
 ```
+
+**Using `forward=False` to suppress re-delivery:**
+
+If your subagent has already called `send_reply` directly to deliver a result to the user, pass `forward=False` to `write_result`. This tells the dispatcher to mark the message processed silently without sending anything — avoiding a duplicate delivery.
+
+```python
+# Subagent called send_reply, then signals dispatcher to skip forwarding:
+mcp__lobster-inbox__write_result(
+    task_id="<descriptive-task-id>",
+    chat_id=<user's chat_id>,
+    text="<summary of what was delivered — for logging>",
+    source="telegram",
+    forward=False,  # dispatcher will not re-send this to the user
+)
+```
+
+Default is `forward=True` (dispatcher forwards the result text to the user as normal).
 
 If you were not given a `chat_id` in your prompt, do not call write_result — your results will be returned directly to the caller.
 

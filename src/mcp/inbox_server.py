@@ -996,6 +996,16 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Slack thread timestamp. If provided, the reply will be sent as a thread reply.",
                     },
+                    "forward": {
+                        "type": "boolean",
+                        "description": (
+                            "Whether the dispatcher should forward this result to the user. "
+                            "Default true. Set to false when the subagent has already called "
+                            "send_reply directly — the dispatcher will mark the message processed "
+                            "silently without re-sending to the user."
+                        ),
+                        "default": True,
+                    },
                 },
                 "required": ["task_id", "chat_id", "text"],
             },
@@ -3437,6 +3447,7 @@ async def handle_write_result(args: dict) -> list[TextContent]:
     status = args.get("status", "success")
     artifacts = args.get("artifacts") or []
     thread_ts = args.get("thread_ts")
+    forward = args.get("forward", True)
 
     if not task_id:
         return [TextContent(type="text", text="Error: task_id is required")]
@@ -3464,6 +3475,7 @@ async def handle_write_result(args: dict) -> list[TextContent]:
         "text": text,
         "task_id": task_id,
         "status": status,
+        "forward": bool(forward),
         "timestamp": now.isoformat(),
     }
     if artifacts:
