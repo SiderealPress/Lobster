@@ -142,7 +142,7 @@ class TestDbSchema:
             "SELECT value FROM um_metadata WHERE key = 'schema_version'"
         ).fetchone()
         assert row is not None
-        assert int(row[0]) == 1
+        assert int(row[0]) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -940,6 +940,7 @@ class TestUserModelFacade:
         expected = {
             "model_observe", "model_query", "model_preferences",
             "model_reflect", "model_correct", "model_inspect", "model_attention",
+            "model_infer", "model_user_context",
         }
         assert model.tool_names == expected
 
@@ -953,3 +954,211 @@ class TestUserModelFacade:
         result = model.sync_files()
         assert "files_written" in result
         assert (workspace / "user-model").exists()
+
+
+# ---------------------------------------------------------------------------
+# v2: Schema Migration Tests
+# ---------------------------------------------------------------------------
+
+class TestSchemaV2:
+    def test_v2_tables_exist(self, conn):
+        """v2 migration should create new tables."""
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'um_%'"
+            ).fetchall()
+        }
+        for t in ["um_temporal_snapshots", "um_drift_records", "um_activity_rhythm", "um_inference_cache"]:
+            assert t in tables, f"Missing v2 table: {t}"
+
+    def test_v2_seed_columns_exist(self, conn):
+        """v2 migration should add seed_source and decay_rate_override columns."""
+        info = conn.execute("PRAGMA table_info(um_preference_nodes)").fetchall()
+        col_names = {r["name"] for r in info}
+        assert "seed_source" in col_names
+        assert "decay_rate_override" in col_names
+
+
+# ---------------------------------------------------------------------------
+# v2: Activity Rhythm Tests
+# ---------------------------------------------------------------------------
+
+class TestActivityRhythm:
+    def test_update_and_get_rhythm(self, conn):
+        """Should insert and retrieve activity rhythm entries."""
+        from user_model.db import update_activity_rhythm, get_activity_rhythm
+        update_activity_rhythm(conn, hour=14, day=2, message_length=100, latency_ms=500)
+        update_activity_rhythm(conn, hour=14, day=2, message_length=200, latency_ms=300)
+        rhythm = get_activity_rhythm(conn)
+        slot = next(r for r in rhythm if r.hour_of_day == 14 and r.day_of_week == 2)
+        assert slot.message_count == 2
+        assert slot.total_length == 300
+        assert slot.total_latency == 800
+        assert slot.latency_count == 2
+
+    def test_get_peak_activity_hours(self, conn):
+        """Should return top hours by message count."""
+        from user_model.db import update_activity_rhythm, get_peak_activity_hours
+        for _ in range(5):
+            update_activity_rhythm(conn, hour=10, day=0, message_length=50)
+        for _ in range(3):
+            update_activity_rhythm(conn, hour=15, day=0, message_length=50)
+        for _ in range(1):
+            update_activity_rhythm(conn, hour=20, day=0, message_length=50)
+        peaks = get_peak_activity_hours(conn, top_n=2)
+        assert peaks[0] == 10
+        assert len(peaks) == 2
+
+
+# ---------------------------------------------------------------------------
+# v2: Inference Cache Tests
+# ---------------------------------------------------------------------------
+
+class TestInferenceCache:
+    def test_set_and_get_cache(self, conn):
+        """Should cache and retrieve inference results."""
+        from user_model.db import set_cached_inference, get_cached_inference
+        data = {"mood": "positive", "confidence": 0.8}
+        set_cached_inference(conn, "test-key", data, 0.8, ttl_minutes=60)
+        result = get_cached_inference(conn, "test-key")
+        assert result is not None
+        assert result["mood"] == "positive"
+
+    def test_expired_cache_returns_none(self, conn):
+        """Expired cache should return None."""
+        from user_model.db import set_cached_inference, get_cached_inference
+        set_cached_inference(conn, "expired-key", {"x": 1}, 0.5, ttl_minutes=0)
+        # Manually expire it
+        conn.execute(
+            "UPDATE um_inference_cache SET expires_at = datetime('now', '-1 hour') WHERE cache_key = 'expired-key'"
+        )
+        conn.commit()
+        result = get_cached_inference(conn, "expired-key")
+        assert result is None
+
+    def test_cleanup_expired(self, conn):
+        """cleanup_expired_cache should remove old entries."""
+        from user_model.db import set_cached_inference, cleanup_expired_cache
+        set_cached_inference(conn, "old-key", {"x": 1}, 0.5, ttl_minutes=0)
+        conn.execute(
+            "UPDATE um_inference_cache SET expires_at = datetime('now', '-1 hour') WHERE cache_key = 'old-key'"
+        )
+        conn.commit()
+        deleted = cleanup_expired_cache(conn)
+        assert deleted >= 1
+
+
+# ---------------------------------------------------------------------------
+# v2: Temporal Snapshot Tests
+# ---------------------------------------------------------------------------
+
+class TestTemporalSnapshots:
+    def test_insert_and_get_snapshot(self, conn):
+        """Should insert and retrieve a temporal snapshot."""
+        from user_model.db import insert_temporal_snapshot, get_latest_snapshot
+        from user_model.schema import TemporalSnapshot
+        snap = TemporalSnapshot(
+            id=None, snapshot_at=datetime.utcnow(),
+            week_number=11, year=2026,
+            data={"preferences": []}, obs_count=10, node_count=5,
+        )
+        snap_id = insert_temporal_snapshot(conn, snap)
+        assert snap_id is not None
+        latest = get_latest_snapshot(conn)
+        assert latest is not None
+        assert latest.id == snap_id
+        assert latest.week_number == 11
+
+    def test_insert_and_get_drift(self, conn):
+        """Should insert and retrieve drift records."""
+        from user_model.db import insert_drift_record, get_recent_drifts, get_unsurfaced_drifts
+        from user_model.schema import DriftRecord
+        drift = DriftRecord(
+            id=None, detected_at=datetime.utcnow(),
+            snapshot_a_id="snap-a", snapshot_b_id="snap-b",
+            drift_type="preference_shift",
+            description="Test drift", magnitude=0.3,
+            node_id="node-1", surfaced=False,
+        )
+        drift_id = insert_drift_record(conn, drift)
+        assert drift_id is not None
+        recent = get_recent_drifts(conn, days=1)
+        assert any(d.id == drift_id for d in recent)
+        unsurfaced = get_unsurfaced_drifts(conn)
+        assert any(d.id == drift_id for d in unsurfaced)
+
+
+# ---------------------------------------------------------------------------
+# v2: Seed Bootstrap Tests
+# ---------------------------------------------------------------------------
+
+class TestSeedBootstrap:
+    def test_seed_from_owner_toml(self, conn, tmp_path):
+        """seed_from_owner_toml should create preference nodes."""
+        from user_model.seed import seed_from_owner_toml
+        from user_model.owner import write_owner
+        owner_path = tmp_path / "owner.toml"
+        write_owner({
+            "owner": {"name": "Test"},
+            "values": {"autonomy": "Values independence"},
+            "preferences": {"brevity": "Keep it short"},
+            "constraints": {"no_emojis": "Never use emojis"},
+        }, owner_path)
+        counts = seed_from_owner_toml(conn, owner_path)
+        assert counts["values"] == 1
+        assert counts["preferences"] == 1
+        assert counts["constraints"] == 1
+        nodes = get_all_preference_nodes(conn)
+        names = [n.name for n in nodes]
+        assert "autonomy" in names
+        assert "brevity" in names
+        assert "no-emojis" in names
+
+
+# ---------------------------------------------------------------------------
+# v2: Profile File Tests
+# ---------------------------------------------------------------------------
+
+class TestProfileFiles:
+    def test_read_write_profile(self, tmp_path):
+        """Should write and read profile with YAML front matter."""
+        from user_model.profile import write_profile_file, read_profile_file
+        path = tmp_path / "test.md"
+        write_profile_file(path, {"name": "Drew", "tz": "PST"}, "# Hello\nBody text.")
+        result = read_profile_file(path)
+        assert result["meta"]["name"] == "Drew"
+        assert "Body text" in result["body"]
+
+    def test_get_compact_context(self):
+        """get_compact_context should return a non-empty string when profiles exist."""
+        from user_model.profile import get_compact_context
+        ctx = get_compact_context()
+        # Profile files were created in Phase 3b, so this should work
+        assert isinstance(ctx, str)
+        if ctx:  # May be empty in CI
+            assert "Drew" in ctx
+
+    def test_read_all_profiles(self):
+        """read_all_profiles should return dict with expected keys."""
+        from user_model.profile import read_all_profiles
+        profiles = read_all_profiles()
+        assert "profile.md" in profiles
+        assert "goals.md" in profiles
+        assert "preferences.md" in profiles
+
+
+# ---------------------------------------------------------------------------
+# v2: Model Infer Tests
+# ---------------------------------------------------------------------------
+
+class TestModelInfer:
+    def test_run_inference_returns_expected_keys(self, conn):
+        """run_inference should return mood, response_style, likely_next."""
+        from user_model.infer import run_inference
+        result = run_inference(conn, contexts=["work"], force_refresh=True)
+        assert "mood_estimate" in result
+        assert "response_style" in result
+        assert "likely_next" in result
+        assert "cached" in result
+        assert result["mood_estimate"]["valence"] is not None

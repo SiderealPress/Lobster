@@ -184,3 +184,44 @@ class ModelMetadata:
     last_consolidation_at: datetime | None
     observation_count: int
     preference_node_count: int
+
+
+# ---------------------------------------------------------------------------
+# v2 data structures (temporal modeling, drift detection, activity rhythm)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TemporalSnapshot:
+    """A weekly snapshot of the preference graph state for drift detection."""
+    id: str | None
+    snapshot_at: datetime
+    week_number: int
+    year: int
+    data: dict[str, Any]       # Serialized graph state
+    obs_count: int             # Total observations at snapshot time
+    node_count: int            # Total preference nodes at snapshot time
+
+
+@dataclass
+class DriftRecord:
+    """A detected change between two temporal snapshots."""
+    id: str | None
+    detected_at: datetime
+    snapshot_a_id: str | None  # Earlier snapshot
+    snapshot_b_id: str | None  # Later snapshot
+    drift_type: str            # preference_shift, value_drift, pattern_change, emotional_drift
+    description: str
+    magnitude: float           # 0.0–1.0
+    node_id: str | None = None # Related preference node (if applicable)
+    surfaced: bool = False     # Has this been shown to the user?
+
+
+@dataclass
+class ActivityRhythmSlot:
+    """Activity statistics for a specific hour/day-of-week slot."""
+    hour_of_day: int           # 0–23
+    day_of_week: int           # 0=Monday, 6=Sunday
+    message_count: int
+    total_length: int          # Cumulative message length
+    total_latency: int         # Cumulative latency in ms
+    latency_count: int         # Number of latency samples

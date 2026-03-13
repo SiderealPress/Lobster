@@ -60,6 +60,12 @@ class UserModel:
             if not row:
                 from datetime import datetime
                 set_metadata_value(self._conn, "created_at", datetime.utcnow().isoformat())
+            # Seed bootstrap from owner.toml (non-critical)
+            try:
+                from .seed import reseed_if_needed
+                reseed_if_needed(self._conn)
+            except Exception:
+                pass
         return self._conn
 
     def observe(
@@ -102,6 +108,17 @@ class UserModel:
             for p in prefs["preferences"][:5]:
                 lines.append(f"- {p['name']}: {p['description'][:80]}")
             return "\n".join(lines)
+        except Exception:
+            return ""
+
+    def get_user_context(self) -> str:
+        """
+        Return a compact user profile context string for system prompt injection.
+        Graceful degradation — returns empty string on failure.
+        """
+        try:
+            from .profile import get_compact_context
+            return get_compact_context()
         except Exception:
             return ""
 

@@ -101,6 +101,34 @@ def run_consolidation(
     except Exception as e:
         summary["steps"].append({"step": "attention_refresh", "error": str(e)})
 
+    # Step 4.5: Temporal snapshot and drift detection (non-critical)
+    try:
+        from .temporal import (
+            take_weekly_snapshot_if_due,
+            detect_drift_since_last_snapshot,
+            persist_drift_records,
+        )
+        snapshot_id = take_weekly_snapshot_if_due(conn)
+        if snapshot_id:
+            drifts = detect_drift_since_last_snapshot(conn)
+            if drifts:
+                drift_ids = persist_drift_records(conn, drifts)
+                summary["steps"].append({
+                    "step": "temporal_snapshot",
+                    "snapshot_id": snapshot_id,
+                    "drifts_detected": len(drift_ids),
+                })
+            else:
+                summary["steps"].append({
+                    "step": "temporal_snapshot",
+                    "snapshot_id": snapshot_id,
+                    "drifts_detected": 0,
+                })
+        else:
+            summary["steps"].append({"step": "temporal_snapshot", "skipped": True})
+    except Exception as e:
+        summary["steps"].append({"step": "temporal_snapshot", "error": str(e)})
+
     # Step 5: Sync markdown file layer
     if workspace_path:
         try:
