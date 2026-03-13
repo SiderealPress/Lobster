@@ -1,6 +1,7 @@
 [Unit]
 Description=Lobster Claude - Always-on Claude Code session
 After=network.target lobster-router.service
+Wants=lobster-router.service
 
 [Service]
 Type=forking
