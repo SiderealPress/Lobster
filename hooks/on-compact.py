@@ -223,8 +223,11 @@ def main() -> None:
         write_sentinel()
         maybe_send_dev_telegram_notify()
         return
-    write_reminder()
     write_sentinel()
+    try:
+        write_reminder()
+    except Exception:  # noqa: BLE001
+        pass  # Reminder failure is non-fatal — sentinel is the critical artifact
     maybe_send_dev_telegram_notify()
 
 
