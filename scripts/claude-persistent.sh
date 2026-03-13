@@ -151,6 +151,108 @@ except Exception:
 }
 
 #===============================================================================
+# Orphan Process Cleanup
+#
+# Kill stale `claude --dangerously-skip-permissions` processes that are NOT
+# descendants of the current tmux session's pane PIDs.
+#
+# Why this is needed:
+#   When the systemd ExecStop fails (e.g. tmux server already dead), the
+#   `claude` and `bash` child processes from the previous session can linger
+#   as orphans. On the next start these consume resources and can prevent a
+#   clean new session from launching.
+#
+# Safety contract:
+#   - Only kills processes matching "claude.*--dangerously-skip-permissions"
+#   - Walks up to 8 ancestor levels to check lineage
+#   - Any process whose ancestor chain reaches a current tmux pane PID is
+#     considered "ours" and is left alone
+#   - Processes adopted by PID 1 (init) are always considered orphans
+#   - SIGTERM first, SIGKILL only after a 3-second grace period
+#   - SIGKILL is only sent to PIDs that previously received SIGTERM (not the
+#     full original list), preventing accidental kills due to PID reuse
+#===============================================================================
+kill_orphaned_claude_processes() {
+    # Use -a to list panes across ALL sessions and windows, not just the
+    # default window. Without -a, Claude running in a non-default tmux window
+    # would not appear in the pane list and would be misclassified as an orphan.
+    local tmux_panes
+    tmux_panes=$(tmux -L lobster list-panes -a -F '#{pane_pid}' 2>/dev/null || true)
+
+    # If tmux session doesn't exist yet, any found claude process is an orphan
+    local claude_pids
+    claude_pids=$(pgrep -f "claude.*--dangerously-skip-permissions" 2>/dev/null || true)
+
+    if [[ -z "$claude_pids" ]]; then
+        log "CLEANUP: No stale Claude processes found"
+        return 0
+    fi
+
+    log "CLEANUP: Found Claude PID(s): $(echo "$claude_pids" | tr '\n' ' ')"
+
+    local killed=0
+    local skipped=0
+    # Track only the PIDs that received SIGTERM so the SIGKILL pass doesn't
+    # accidentally target unrelated processes that the OS assigned the same
+    # PID during the 3-second grace window.
+    local sigterm_pids=()
+
+    for pid in $claude_pids; do
+        # Skip if process no longer exists
+        if ! kill -0 "$pid" 2>/dev/null; then
+            continue
+        fi
+
+        # Check if this pid is a descendant of any current tmux pane
+        local is_ours=false
+        if [[ -n "$tmux_panes" ]]; then
+            local check_pid="$pid"
+            for _ in 1 2 3 4 5 6 7 8; do
+                local ppid
+                ppid=$(ps -o ppid= -p "$check_pid" 2>/dev/null | tr -d ' ')
+                if [[ -z "$ppid" || "$ppid" == "1" ]]; then
+                    # Reached init — orphan
+                    break
+                fi
+                if echo "$tmux_panes" | grep -qw "$ppid"; then
+                    is_ours=true
+                    break
+                fi
+                check_pid="$ppid"
+            done
+        fi
+
+        if [[ "$is_ours" == "true" ]]; then
+            log "CLEANUP: PID $pid is a current-session descendant — skipping"
+            skipped=$((skipped + 1))
+        else
+            log "CLEANUP: Killing orphaned Claude PID $pid (SIGTERM)"
+            if kill -TERM "$pid" 2>/dev/null; then
+                sigterm_pids+=("$pid")
+            fi
+            killed=$((killed + 1))
+        fi
+    done
+
+    # Give processes a brief grace period to exit cleanly
+    if [[ $killed -gt 0 ]]; then
+        sleep 3
+        # SIGKILL only the PIDs we sent SIGTERM to — not the full original list.
+        # This avoids killing unrelated processes that may have been assigned
+        # one of the recycled PIDs during the 3-second grace window.
+        for pid in "${sigterm_pids[@]}"; do
+            if kill -0 "$pid" 2>/dev/null; then
+                log "CLEANUP: PID $pid still alive after SIGTERM — sending SIGKILL"
+                kill -KILL "$pid" 2>/dev/null || true
+            fi
+        done
+        log "CLEANUP: Sent SIGTERM to $killed orphaned Claude process(es), skipped $skipped in-session"
+    else
+        log "CLEANUP: No orphaned Claude processes to kill (skipped $skipped in-session)"
+    fi
+}
+
+#===============================================================================
 # Launch Claude in persistent mode
 #===============================================================================
 launch_claude() {
@@ -160,6 +262,12 @@ launch_claude() {
     log "STARTING: Launching Claude (attempt $attempt)"
 
     cd "$WORKSPACE_DIR"
+
+    # -------------------------------------------------------------------------
+    # Kill orphaned claude processes from prior sessions before launching a new one.
+    # This prevents resource leaks when ExecStop fails (e.g. tmux already dead).
+    # -------------------------------------------------------------------------
+    kill_orphaned_claude_processes
 
     # -------------------------------------------------------------------------
     # Clean leaked Claude Code env vars before launching.
