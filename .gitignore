@@ -65,3 +65,8 @@ config/camofox-browser/
 # Planning artifacts
 PLAN-*.md
 .planning/
+
+# Private user context overlay (lives in ~/lobster-workspace/.claude/, not here)
+# Listed here as a safety net in case someone clones into the wrong place
+.claude/user.md
+.claude/user/

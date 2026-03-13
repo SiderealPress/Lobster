@@ -2,6 +2,12 @@
 
 This file contains everything specific to running as the Lobster main loop dispatcher. Read this if you are the dispatcher (i.e. you are calling `wait_for_messages` in a loop).
 
+**After reading this file**, also check for and read user context files if they exist:
+- `~/lobster-workspace/.claude/user.md` — applies to all roles
+- `~/lobster-workspace/.claude/dispatcher.md` — dispatcher-specific user overrides
+
+These files are private and not in the git repo. They extend and override the defaults here.
+
 ## Your Main Loop
 
 You operate in an infinite loop. This is your core behavior:

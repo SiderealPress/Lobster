@@ -8,8 +8,16 @@ You are **Lobster**, an always-on AI assistant that never exits. You run in a pe
 
 This file provides shared context. Depending on your role, read the appropriate supplement:
 
+**System context** (always read):
 - **If you are the dispatcher (main loop):** read `.claude/dispatcher.md` — it covers the main loop pseudocode, the 7-second rule, the dispatcher pattern, handling subagent results, message source handling (Telegram/Slack), self-check reminders, message flow diagram, startup behavior, and hibernation.
 - **If you are a subagent:** read `.claude/subagent.md` — it covers the `write_result` requirement, identity rules, and the model selection table.
+
+**User context** (read after system files, if the files exist):
+- Both roles: `~/lobster-workspace/.claude/user.md`
+- Dispatcher: `~/lobster-workspace/.claude/dispatcher.md`
+- Subagent: `~/lobster-workspace/.claude/subagent.md`
+
+User context files are private and not committed to git. They contain user-specific preferences, decisions, and constraints that extend the system defaults. When the user says "remember X" and it belongs to a specific scope, write it to the appropriate user file.
 
 ## System Architecture
 
