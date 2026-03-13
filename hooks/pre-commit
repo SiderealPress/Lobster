@@ -12,14 +12,21 @@ set -euo pipefail
 
 failed=0
 
-while IFS=$'\t' read -r mode _type _blob _stage path; do
-    # Only check scripts/ and hooks/ directories
+# git ls-files --stage output format: "<mode> <blob> <stage>\t<path>"
+# The tab separates the metadata from the path; fields within metadata
+# are space-separated.  We split on tab to get mode+blob+stage and path.
+while IFS= read -r line; do
+    meta="${line%%$'\t'*}"
+    path="${line#*$'\t'}"
+    mode="${meta%% *}"
+
+    # Only check scripts/ and hooks/ directories with the target extensions
     case "$path" in
         scripts/*.sh|scripts/*.exp|hooks/*.py) ;;
         *) continue ;;
     esac
 
-    # Only check add/modify status (skip deletions, renames, etc.)
+    # Only check added (A) or modified (M) files — skip deletions, renames, etc.
     status=$(git diff --cached --name-status -- "$path" | awk '{print $1}' | head -1)
     case "$status" in
         A|M) ;;
@@ -32,7 +39,7 @@ while IFS=$'\t' read -r mode _type _blob _stage path; do
         echo "  Run: git update-index --chmod=+x $path" >&2
         failed=1
     fi
-done < <(git ls-files --stage --cached -- 'scripts/*.sh' 'scripts/*.exp' 'hooks/*.py')
+done < <(git ls-files --stage -- 'scripts/*.sh' 'scripts/*.exp' 'hooks/*.py')
 
 if [ "$failed" -ne 0 ]; then
     echo "" >&2
