@@ -1,0 +1,43 @@
+#!/bin/bash
+# hooks/pre-commit — git pre-commit hook
+#
+# Enforces execute bits on staged .sh, .exp, and .py files inside scripts/
+# and hooks/ directories.  Install by copying to .git/hooks/pre-commit
+# (install.sh does this automatically).
+#
+# Only Added (A) and Modified (M) files are checked — deletions and renames
+# are skipped.
+
+set -euo pipefail
+
+failed=0
+
+while IFS=$'\t' read -r mode _type _blob _stage path; do
+    # Only check scripts/ and hooks/ directories
+    case "$path" in
+        scripts/*.sh|scripts/*.exp|hooks/*.py) ;;
+        *) continue ;;
+    esac
+
+    # Only check add/modify status (skip deletions, renames, etc.)
+    status=$(git diff --cached --name-status -- "$path" | awk '{print $1}' | head -1)
+    case "$status" in
+        A|M) ;;
+        *) continue ;;
+    esac
+
+    # 100755 means executable; 100644 means not
+    if [ "$mode" != "100755" ]; then
+        echo "Error: staged file '$path' must be executable." >&2
+        echo "  Run: git update-index --chmod=+x $path" >&2
+        failed=1
+    fi
+done < <(git ls-files --stage --cached -- 'scripts/*.sh' 'scripts/*.exp' 'hooks/*.py')
+
+if [ "$failed" -ne 0 ]; then
+    echo "" >&2
+    echo "Commit aborted: fix execute bits on the files listed above, then retry." >&2
+    exit 1
+fi
+
+exit 0
