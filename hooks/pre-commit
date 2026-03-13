@@ -1,9 +1,9 @@
 #!/bin/bash
 # hooks/pre-commit — git pre-commit hook
 #
-# Enforces execute bits on staged .sh, .exp, and .py files inside scripts/
-# and hooks/ directories.  Install by copying to .git/hooks/pre-commit
-# (install.sh does this automatically).
+# Enforces execute bits on staged .sh, .exp, and hook entry point files
+# inside scripts/ and hooks/ directories.  Install by copying to
+# .git/hooks/pre-commit (install.sh does this automatically).
 #
 # Only Added (A) and Modified (M) files are checked — deletions and renames
 # are skipped.
@@ -20,16 +20,23 @@ while IFS= read -r line; do
     path="${line#*$'\t'}"
     mode="${meta%% *}"
 
-    # Only check scripts/ and hooks/ directories with the target extensions
+    # Only check scripts/ and hooks/ directories with the target extensions.
+    # hooks/* (no extension) catches hook entry points like pre-commit,
+    # post-commit, etc. — NOT Python support files (hooks/*.py).
     case "$path" in
-        scripts/*.sh|scripts/*.exp|hooks/*.py) ;;
+        scripts/*.sh|scripts/*.exp|hooks/*) ;;
         *) continue ;;
     esac
 
     # Only check added (A) or modified (M) files — skip deletions, renames, etc.
-    status=$(git diff --cached --name-status -- "$path" | awk '{print $1}' | head -1)
+    # || true prevents set -e from aborting when git diff produces no output
+    # (e.g. for a file being added fresh with no prior index entry).
+    status=$(git diff --cached --name-status -- "$path" | awk '{print $1}' | head -1) || true
     case "$status" in
         A|M) ;;
+        # git outputs R100 (not plain R) for renames — D* and R* catch both
+        # the status letter and any numeric suffix git appends.
+        D*|R*) continue ;;
         *) continue ;;
     esac
 
@@ -39,7 +46,7 @@ while IFS= read -r line; do
         echo "  Run: git update-index --chmod=+x $path" >&2
         failed=1
     fi
-done < <(git ls-files --stage -- 'scripts/*.sh' 'scripts/*.exp' 'hooks/*.py')
+done < <(git ls-files --stage -- 'scripts/*.sh' 'scripts/*.exp' 'hooks/*')
 
 if [ "$failed" -ne 0 ]; then
     echo "" >&2
