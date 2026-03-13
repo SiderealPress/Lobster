@@ -297,22 +297,18 @@ All Lobster-managed projects live in `$LOBSTER_WORKSPACE/projects/[project-name]
 - Default path: `~/lobster-workspace/projects/`
 - This is a system property, not a suggestion -- all project work goes here
 
-## Development Conventions
-
-- **Always use `uv`** instead of bare `python`, `python3`, or `pip` for running scripts and managing packages. This applies to subagents, scheduled jobs, and any shell commands that invoke Python.
-  - Run scripts: `uv run script.py` (not `python script.py`)
-  - Install packages: `uv add <package>` or `uv pip install <package>` (not `pip install`)
-  - Execute modules: `uv run -m module` (not `python -m module`)
-
 ## Key Directories
 
 - `~/lobster/` - Repository (code only, no personal data)
   - `scheduled-tasks/` - Job runner scripts (committed, no runtime data)
   - `memory/canonical-templates/` - Seed templates (committed)
-- `~/lobster-workspace/` - Runtime data (never in repo)
-  - `projects/` - All Lobster-managed projects (`$LOBSTER_PROJECTS`)
+- `~/lobster-config/` - Identity & configuration (portable, back up this)
+  - `config.env` - Bot tokens and secrets
+  - `global.env` - Machine-wide API tokens
   - `memory/canonical/` - Handoff, priorities, people, projects
   - `memory/archive/digests/` - Archived daily digests
+- `~/lobster-workspace/` - Runtime data (ephemeral, machine-specific)
+  - `projects/` - All Lobster-managed projects (`$LOBSTER_PROJECTS`)
   - `data/memory.db` - Vector memory SQLite DB
   - `data/events.jsonl` - Event log
   - `scheduled-jobs/jobs.json` - Job registry state
