@@ -14,8 +14,8 @@ WORKSPACE_DIR="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
 INSTALL_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
 MESSAGES_DIR="${LOBSTER_MESSAGES:-$HOME/messages}"
 
-# Ensure Claude is in PATH
-export PATH="$HOME/.local/bin:$PATH"
+# Ensure Claude and npm global tools (vercel, prisma) are in PATH
+export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
 
 # Verify claude is available
 if ! command -v claude &>/dev/null; then

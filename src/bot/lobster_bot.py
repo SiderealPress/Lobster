@@ -1104,6 +1104,38 @@ class OutboxHandler(FileSystemEventHandler):
             chat_id = reply.get('chat_id')
             text = reply.get('text', '')
             buttons = reply.get('buttons')
+            reply_type = reply.get('type', 'text')
+            photo_url = reply.get('photo_url', '')
+            caption = reply.get('caption', '')
+
+            # Handle photo messages (from image-generation skill or other sources)
+            if reply_type == 'photo' and photo_url and chat_id and bot_app:
+                try:
+                    caption_html = md_to_html(caption) if caption else None
+                    await bot_app.bot.send_photo(
+                        chat_id=chat_id,
+                        photo=photo_url,
+                        caption=caption_html,
+                        parse_mode="HTML" if caption_html else None,
+                    )
+                    log.info(f"Sent photo to {chat_id}: {photo_url[:80]}...")
+                    os.remove(filepath)
+                    return
+                except Exception as e:
+                    log.warning(f"send_photo failed for {chat_id} ({photo_url[:60]}): {e} — falling back to URL in text")
+                    # Fall back: send the URL as a text message so user gets something
+                    fallback_text = f"Here's your generated image:\n{photo_url}"
+                    if caption:
+                        fallback_text = f"{caption}\n\n{fallback_text}"
+                    try:
+                        await bot_app.bot.send_message(chat_id=chat_id, text=fallback_text)
+                        log.info(f"Sent photo URL as text fallback to {chat_id}")
+                        os.remove(filepath)
+                        return
+                    except Exception as e2:
+                        log.error(f"Fallback text send also failed for {chat_id}: {e2}")
+                        os.remove(filepath)
+                        return
 
             if chat_id and text and bot_app:
                 reply_markup = build_inline_keyboard(buttons) if buttons else None
