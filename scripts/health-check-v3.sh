@@ -19,11 +19,18 @@
 #   stopped    - Wrapper received signal, shutting down
 #   waking     - Wrapper detected messages, about to launch Claude
 #
+# Compaction suppression:
+#   When Claude Code compacts its context, tool calls pause for 1-3+ minutes.
+#   During this window real user messages can age past STALE_THRESHOLD_SECONDS
+#   and trigger a false-positive restart. To prevent this, on-compact.py writes
+#   a compacted_at timestamp to lobster-state.json, and the stale-inbox check
+#   is skipped for COMPACTION_SUPPRESS_SECONDS after that timestamp.
+#
 # Escalation ladder:
 #   GREEN  - All checks pass (or in expected transient state)
 #   YELLOW - Inbox messages exist < STALE threshold, or transient state
-#   RED    - Stale inbox > threshold OR missing process/tmux/service → restart
-#   BLACK  - 3 restart failures in cooldown window → alert, stop retrying
+#   RED    - Stale inbox > threshold OR missing process/tmux/service -> restart
+#   BLACK  - 3 restart failures in cooldown window -> alert, stop retrying
 #
 # Run via cron every 2 minutes:
 #   */2 * * * * $HOME/lobster/scripts/health-check-v3.sh
@@ -47,6 +54,8 @@ MAINTENANCE_FLAG="$MESSAGES_DIR/config/lobster-maintenance"
 LOBSTER_STATE_FILE="${LOBSTER_STATE_FILE_OVERRIDE:-$MESSAGES_DIR/config/lobster-state.json}"
 STALE_THRESHOLD_SECONDS=180          # 3 minutes - RED if any message older (watchdog handles soft recovery at 90s)
 YELLOW_THRESHOLD_SECONDS=120         # 2 minutes - YELLOW warning
+
+COMPACTION_SUPPRESS_SECONDS=300      # 5 minutes - skip stale-inbox check after a compaction event
 
 OUTBOX_DIR="$MESSAGES_DIR/outbox"
 OUTBOX_STALE_THRESHOLD_SECONDS=900   # 15 min = RED
@@ -275,7 +284,38 @@ read_state_age() {
 is_hibernating() {
     local mode
     mode=$(read_lobster_mode)
-    [[ "$mode" == "hibernate" ]]
+    [[  "$mode" == "hibernate" ]]
+}
+
+# Check if a context compaction occurred within the last COMPACTION_SUPPRESS_SECONDS.
+# Returns 0 (true) if inbox staleness checks should be suppressed, 1 otherwise.
+# Reads compacted_at from lobster-state.json (written by hooks/on-compact.py).
+is_compaction_recent() {
+    if [[ ! -f "$LOBSTER_STATE_FILE" ]]; then
+        return 1
+    fi
+    local compacted_at
+    compacted_at=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('$LOBSTER_STATE_FILE'))
+    print(d.get('compacted_at', ''))
+except Exception:
+    print('')
+" 2>/dev/null)
+    if [[ -z "$compacted_at" ]]; then
+        return 1
+    fi
+    local compacted_epoch
+    compacted_epoch=$(date -d "$compacted_at" +%s 2>/dev/null) || return 1
+    local now
+    now=$(date +%s)
+    local age=$((now - compacted_epoch))
+    if [[ $age -le $COMPACTION_SUPPRESS_SECONDS ]]; then
+        log_info "Recent compaction ${age}s ago (threshold: ${COMPACTION_SUPPRESS_SECONDS}s) — stale-inbox check suppressed"
+        return 0
+    fi
+    return 1
 }
 
 # Check if the wrapper script (claude-persistent.sh) is running in tmux.
@@ -783,6 +823,15 @@ main() {
     state_age=$(read_state_age)
     log_info "Lifecycle state: mode=$lobster_mode, state_age=${state_age}s"
 
+    # --- Check for recent compaction (suppress stale-inbox false-positives) ---
+    # Claude Code pauses tool calls during context compaction for 1-3+ minutes.
+    # If on-compact.py recorded a compacted_at within the last
+    # COMPACTION_SUPPRESS_SECONDS, skip all stale-inbox checks this run.
+    local compaction_recent=false
+    if is_compaction_recent; then
+        compaction_recent=true
+    fi
+
     # --- Always check systemd services (includes router/bot) ---
     if ! check_services; then
         level="RED"
@@ -820,12 +869,16 @@ main() {
             # Still check inbox: if user messages are sitting stale, the wrapper
             # should have woken Claude by now. Give extra time (5 min) since
             # the wrapper polls every 10s.
-            check_inbox_drain
-            local hibernate_inbox_rc=$?
-            if [[ $hibernate_inbox_rc -eq 2 ]]; then
-                # Stale user messages during hibernation — wrapper may be stuck
-                level="RED"
-                restart_reason="${restart_reason:+$restart_reason + }stale inbox during hibernation"
+            if [[ "$compaction_recent" == "true" ]]; then
+                log_info "Inbox drain suppressed (recent compaction)"
+            else
+                check_inbox_drain
+                local hibernate_inbox_rc=$?
+                if [[ $hibernate_inbox_rc -eq 2 ]]; then
+                    # Stale user messages during hibernation — wrapper may be stuck
+                    level="RED"
+                    restart_reason="${restart_reason:+$restart_reason + }stale inbox during hibernation"
+                fi
             fi
             ;;
 
@@ -843,15 +896,19 @@ main() {
             fi
 
             # Still check inbox drain
-            check_inbox_drain
-            local transient_inbox_rc=$?
-            if [[ $transient_inbox_rc -eq 2 ]]; then
-                level="RED"
-                restart_reason="${restart_reason:+$restart_reason + }stale inbox (>$((STALE_THRESHOLD_SECONDS/60))m)"
-            elif [[ $transient_inbox_rc -eq 1 && "$level" == "GREEN" ]]; then
-                level="YELLOW"
-            elif [[ $transient_inbox_rc -eq 0 ]]; then
-                clear_stale_inbox_markers
+            if [[ "$compaction_recent" == "true" ]]; then
+                log_info "Inbox drain suppressed (recent compaction)"
+            else
+                check_inbox_drain
+                local transient_inbox_rc=$?
+                if [[ $transient_inbox_rc -eq 2 ]]; then
+                    level="RED"
+                    restart_reason="${restart_reason:+$restart_reason + }stale inbox (>$((STALE_THRESHOLD_SECONDS/60))m)"
+                elif [[ $transient_inbox_rc -eq 1 && "$level" == "GREEN" ]]; then
+                    level="YELLOW"
+                elif [[ $transient_inbox_rc -eq 0 ]]; then
+                    clear_stale_inbox_markers
+                fi
             fi
             ;;
 
@@ -866,13 +923,17 @@ main() {
             fi
 
             # Check inbox drain even during backoff
-            check_inbox_drain
-            local backoff_inbox_rc=$?
-            if [[ $backoff_inbox_rc -eq 2 ]]; then
-                level="RED"
-                restart_reason="${restart_reason:+$restart_reason + }stale inbox during backoff"
-            elif [[ $backoff_inbox_rc -eq 0 ]]; then
-                clear_stale_inbox_markers
+            if [[ "$compaction_recent" == "true" ]]; then
+                log_info "Inbox drain suppressed (recent compaction)"
+            else
+                check_inbox_drain
+                local backoff_inbox_rc=$?
+                if [[ $backoff_inbox_rc -eq 2 ]]; then
+                    level="RED"
+                    restart_reason="${restart_reason:+$restart_reason + }stale inbox during backoff"
+                elif [[ $backoff_inbox_rc -eq 0 ]]; then
+                    clear_stale_inbox_markers
+                fi
             fi
             ;;
 
@@ -897,15 +958,19 @@ main() {
             fi
 
             # Inbox drain check
-            check_inbox_drain
-            local debug_inbox_rc=$?
-            if [[ $debug_inbox_rc -eq 2 ]]; then
-                level="RED"
-                restart_reason="${restart_reason:+$restart_reason + }stale inbox (>$((STALE_THRESHOLD_SECONDS/60))m)"
-            elif [[ $debug_inbox_rc -eq 1 && "$level" == "GREEN" ]]; then
-                level="YELLOW"
-            elif [[ $debug_inbox_rc -eq 0 ]]; then
-                clear_stale_inbox_markers
+            if [[ "$compaction_recent" == "true" ]]; then
+                log_info "Inbox drain suppressed (recent compaction)"
+            else
+                check_inbox_drain
+                local debug_inbox_rc=$?
+                if [[ $debug_inbox_rc -eq 2 ]]; then
+                    level="RED"
+                    restart_reason="${restart_reason:+$restart_reason + }stale inbox (>$((STALE_THRESHOLD_SECONDS/60))m)"
+                elif [[ $debug_inbox_rc -eq 1 && "$level" == "GREEN" ]]; then
+                    level="YELLOW"
+                elif [[ $debug_inbox_rc -eq 0 ]]; then
+                    clear_stale_inbox_markers
+                fi
             fi
             ;;
 
@@ -956,15 +1021,19 @@ main() {
             fi
 
             # Inbox drain check
-            check_inbox_drain
-            local inbox_rc=$?
-            if [[ $inbox_rc -eq 2 ]]; then
-                level="RED"
-                restart_reason="${restart_reason:+$restart_reason + }stale inbox (>$((STALE_THRESHOLD_SECONDS/60))m)"
-            elif [[ $inbox_rc -eq 1 && "$level" == "GREEN" ]]; then
-                level="YELLOW"
-            elif [[ $inbox_rc -eq 0 ]]; then
-                clear_stale_inbox_markers
+            if [[ "$compaction_recent" == "true" ]]; then
+                log_info "Inbox drain suppressed (recent compaction)"
+            else
+                check_inbox_drain
+                local inbox_rc=$?
+                if [[ $inbox_rc -eq 2 ]]; then
+                    level="RED"
+                    restart_reason="${restart_reason:+$restart_reason + }stale inbox (>$((STALE_THRESHOLD_SECONDS/60))m)"
+                elif [[ $inbox_rc -eq 1 && "$level" == "GREEN" ]]; then
+                    level="YELLOW"
+                elif [[ $inbox_rc -eq 0 ]]; then
+                    clear_stale_inbox_markers
+                fi
             fi
             ;;
     esac
