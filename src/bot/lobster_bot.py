@@ -642,7 +642,7 @@ async def onboarding_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if user.id not in ALLOWED_USERS:
         await update.message.reply_text("Sorry, you're not authorized to use this bot.")
         return
-    onboarding_msg = get_onboarding_message()
+    onboarding_msg = get_onboarding_message(user.first_name)
     chunks = split_message(onboarding_msg)
     for chunk in chunks:
         await update.message.reply_text(md_to_html(chunk), parse_mode="HTML")
@@ -1027,7 +1027,7 @@ async def _flush_media_group(media_group_id: str, chat_id: int) -> None:
 async def send_onboarding(update: Update, user) -> None:
     """Send onboarding message to a first-time user and mark them as onboarded."""
     mark_user_onboarded(user.id)
-    onboarding_msg = get_onboarding_message()
+    onboarding_msg = get_onboarding_message(user.first_name)
     chunks = split_message(onboarding_msg)
     for chunk in chunks:
         await update.message.reply_text(md_to_html(chunk), parse_mode="HTML")
