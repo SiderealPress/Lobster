@@ -2026,6 +2026,13 @@ sudo chmod +x /usr/local/bin/lobster
 
 success "CLI installed"
 
+# Install git pre-commit hook (enforces execute bits on scripts/ and hooks/)
+if [ -f "$INSTALL_DIR/hooks/pre-commit" ]; then
+    cp "$INSTALL_DIR/hooks/pre-commit" "$INSTALL_DIR/.git/hooks/pre-commit"
+    chmod +x "$INSTALL_DIR/.git/hooks/pre-commit"
+    success "Pre-commit hook installed (.git/hooks/pre-commit)"
+fi
+
 #===============================================================================
 # Claude Code Discovery Symlinks
 #
