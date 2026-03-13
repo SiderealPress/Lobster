@@ -130,7 +130,16 @@ def _track_reply(chat_id: Any) -> None:
             _recent_replies = dict(sorted_items[:_REPLY_TRACK_MAX])
 
 # Sources that represent human users (not system/automated)
+# NOTE: Do NOT use this to classify whether a message needs a reply — source is
+# the routing destination, not the message type. A subagent_result has
+# source="telegram" for routing but is NOT a direct user message.
 _HUMAN_SOURCES = {"telegram", "sms", "signal", "slack", "whatsapp", "bisque"}
+
+# Message types that represent direct user-facing messages requiring a reply.
+# Used by mark_processed to guard against dropping human messages without reply.
+# subagent_result / subagent_error are excluded: they are system routing messages
+# even though they carry source="telegram" for delivery purposes.
+USER_FACING_TYPES = {"message", "photo", "image", "voice", "audio", "callback", "text", "document"}
 
 # Heartbeat file for health monitoring
 HEARTBEAT_FILE = _WORKSPACE / "logs" / "claude-heartbeat"
@@ -2126,7 +2135,10 @@ async def handle_mark_processed(args: dict) -> list[TextContent]:
     if not found:
         return [TextContent(type="text", text=f"Message not found: {message_id}")]
 
-    # Guard: check that a reply was sent for human messages.
+    # Guard: check that a reply was sent for user-facing messages.
+    # Uses msg type (not source) to classify — source is the routing destination
+    # and cannot distinguish a direct user message from a subagent_result that
+    # happens to carry source="telegram" for delivery.
     # If no reply was sent, auto-send a fallback reply instead of returning a
     # soft warning (which the LLM ignores, causing silent message drops).
     if not force:
@@ -2137,7 +2149,7 @@ async def handle_mark_processed(args: dict) -> list[TextContent]:
             chat_id = msg.get("chat_id", 0)
             msg_ts_raw = msg.get("timestamp", "")
 
-            if source in _HUMAN_SOURCES and chat_id != 0:
+            if msg_type in USER_FACING_TYPES and chat_id != 0:
                 # Parse message timestamp to epoch
                 msg_epoch = 0.0
                 if msg_ts_raw:
