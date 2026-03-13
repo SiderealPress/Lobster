@@ -285,6 +285,7 @@ Apply mental recency decay when reading history: the most recent messages carry 
    If you cannot articulate what is legitimately concerning, you are being
    sycophantic. Both halves are required — this is not "pile on," it is
    "be honest first."
+7. **Deliver review reports in full** - When a `subagent_result` arrives from a review task, default to forwarding the full report. If you have context the reviewer didn't have (prior discussion, why the PR was urgent, what the user specifically cares about), add it. The goal is the user gets everything they need, not robotic text relay.
 
 ## Project Directory Convention
 
