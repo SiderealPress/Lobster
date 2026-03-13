@@ -123,7 +123,7 @@ send_telegram_alert() {
         return 1
     fi
 
-    local full_message="🚨 *Lobster Health Alert*
+    local full_message="\U0001F6A8 *Lobster Health Alert*
 
 ${message}
 
@@ -629,6 +629,11 @@ clear_stale_inbox_markers() {
 #===============================================================================
 # Recovery - always via systemd, never manual tmux
 #===============================================================================
+# DANGER: do_restart() must ONLY be called when the system is confirmed
+# unhealthy (RED state). Calling it on a healthy system would unlink the tmux
+# socket path (via the stale-socket cleanup below), preventing new client
+# connections even while the server is still running. The safety of the socket
+# cleanup relies entirely on this function being called only from the RED state.
 do_restart() {
     local reason="$1"
     log_warn "Restarting $SERVICE_CLAUDE (reason: $reason)"
@@ -658,6 +663,22 @@ Manual intervention required:
     fi
 
     record_restart
+
+    # Clean up any stale tmux socket before restarting.
+    # When ExecStop fails (e.g. "no server running on /tmp/tmux-1000/lobster"),
+    # the socket file is left behind and can prevent the new tmux server from
+    # binding on the next ExecStart. rm -f unlinks the socket path
+    # unconditionally regardless of whether tmux is running. A running tmux
+    # server keeps its open file descriptor but the named path is gone,
+    # preventing new client connections to that path; if tmux is not running,
+    # removing it unblocks the bind on the next ExecStart.
+    local tmux_uid
+    tmux_uid=$(id -u)
+    local stale_socket="/tmp/tmux-${tmux_uid}/${TMUX_SOCKET}"
+    if [[ -S "$stale_socket" ]]; then
+        log_warn "Removing stale tmux socket: $stale_socket"
+        rm -f "$stale_socket"
+    fi
 
     # Restart via systemd - this handles tmux lifecycle correctly
     sudo systemctl restart "$SERVICE_CLAUDE" 2>&1 | while read -r line; do
