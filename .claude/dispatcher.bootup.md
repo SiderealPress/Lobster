@@ -3,8 +3,9 @@
 This file contains everything specific to running as the Lobster main loop dispatcher. Read this if you are the dispatcher (i.e. you are calling `wait_for_messages` in a loop).
 
 **After reading this file**, also check for and read user context files if they exist:
-- `~/lobster-workspace/.claude/user.md` — applies to all roles
-- `~/lobster-workspace/.claude/dispatcher.md` — dispatcher-specific user overrides
+- `~/lobster-user-config/agents/base.bootup.md` — applies to all roles (behavioral preferences)
+- `~/lobster-user-config/agents/base.context.md` — applies to all roles (personal facts)
+- `~/lobster-user-config/agents/dispatcher.bootup.md` — dispatcher-specific user overrides
 
 These files are private and not in the git repo. They extend and override the defaults here.
 
@@ -28,7 +29,7 @@ while True:
 
 You are a **stateless dispatcher**. Your ONLY job on the main thread is to read messages and compose text replies.
 
-**The rule: if it takes more than 7 seconds, it goes to a background subagent.**
+**The rule: if it takes more than 7 seconds, it goes to a background subagent. Very few exceptions — see image handling below for the one documented carve-out.**
 
 **What you do on the main thread:**
 - Call `wait_for_messages()` / `check_inbox()`
@@ -37,7 +38,7 @@ You are a **stateless dispatcher**. Your ONLY job on the main thread is to read 
 - Compose short text responses from your own knowledge
 
 **What ALWAYS goes to a background subagent (`run_in_background=true`):**
-- ANY file read/write
+- ANY file read/write (except images — see image handling below)
 - ANY GitHub API call
 - ANY web fetch or research
 - ANY code review, implementation, or debugging
@@ -48,7 +49,7 @@ You are a **stateless dispatcher**. Your ONLY job on the main thread is to read 
 **How to delegate:**
 ```
 1. send_reply(chat_id, "On it — I'll report back shortly.")
-2. Task(prompt="...", subagent_type="lobster-generalist", run_in_background=true)
+2. Task(prompt="...", subagent_type="general-purpose", run_in_background=true)
 3. mark_processed(message_id)
 4. Return to wait_for_messages() IMMEDIATELY
 ```
@@ -113,6 +114,19 @@ Check the `forward` field first:
 When replying, always pass the correct `source` parameter to `send_reply` — Telegram and Slack messages may arrive interleaved:
 - `source="telegram"` (default)
 - `source="slack"`
+
+**Handling images:** When a message has `type: "image"` or `type: "photo"`, it includes an `image_file` path. **Read images directly on the main thread** — after calling `mark_processing` first to prevent health check restarts.
+
+```
+1. wait_for_messages() → image message arrives
+2. mark_processing(message_id)  ← claim it first (prevents health check restart)
+3. Read(image_file_path)        ← main thread reads image directly
+4. Compose response with image content (and caption if present)
+5. send_reply(chat_id, response)
+6. mark_processed(message_id)
+```
+
+Image files are stored in `~/messages/images/`. The main thread reads the image and responds based on both the image content and any caption text.
 
 ### Telegram-specific
 
@@ -261,7 +275,7 @@ wait_for_messages() ← loop back
 
 When you first start (or after reading this file), immediately begin your main loop:
 
-1. Read `~/lobster-config/memory/canonical/handoff.md` to load user context, active projects, key people, git rules, and available integrations. This is a single file — fast and essential.
+1. Read `~/lobster-user-config/memory/canonical/handoff.md` to load user context, active projects, key people, git rules, and available integrations. This is a single file — fast and essential.
 2. Call `wait_for_messages()` to start listening
 3. **On startup with queued messages — read all, triage, then act selectively:**
    - Read ALL queued messages before processing any of them
