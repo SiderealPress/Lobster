@@ -1266,7 +1266,7 @@ SQLITE_VEC_OK=false
 # Try stable release first
 if uv pip install --quiet sqlite-vec 2>/dev/null; then
     # Verify it actually loads (aarch64 bug produces an import error)
-    if "$INSTALL_DIR/.venv/bin/python" -c "import sqlite_vec" 2>/dev/null; then
+    if "$INSTALL_DIR/.venv/bin/python" -c "import sqlite3, sqlite_vec; c=sqlite3.connect(':memory:'); c.enable_load_extension(True); sqlite_vec.load(c)" 2>/dev/null; then
         success "sqlite-vec installed and loads correctly"
         SQLITE_VEC_OK=true
     else
@@ -1278,7 +1278,7 @@ fi
 if [ "$SQLITE_VEC_OK" = false ]; then
     # Try known-good alpha that contains the aarch64 fix
     if uv pip install --quiet "sqlite-vec==0.1.7a2" 2>/dev/null; then
-        if "$INSTALL_DIR/.venv/bin/python" -c "import sqlite_vec" 2>/dev/null; then
+        if "$INSTALL_DIR/.venv/bin/python" -c "import sqlite3, sqlite_vec; c=sqlite3.connect(':memory:'); c.enable_load_extension(True); sqlite_vec.load(c)" 2>/dev/null; then
             success "sqlite-vec 0.1.7a2 (alpha) installed and loads correctly"
             SQLITE_VEC_OK=true
         else
@@ -1294,7 +1294,7 @@ if [ "$SQLITE_VEC_OK" = false ]; then
     if git clone --quiet --depth 1 https://github.com/asg017/sqlite-vec.git "$_SQLITE_VEC_SRC_DIR" 2>/dev/null; then
         cd "$_SQLITE_VEC_SRC_DIR"
         if make loadable python 2>/dev/null && uv pip install --quiet -e . 2>/dev/null; then
-            if "$INSTALL_DIR/.venv/bin/python" -c "import sqlite_vec" 2>/dev/null; then
+            if "$INSTALL_DIR/.venv/bin/python" -c "import sqlite3, sqlite_vec; c=sqlite3.connect(':memory:'); c.enable_load_extension(True); sqlite_vec.load(c)" 2>/dev/null; then
                 success "sqlite-vec built from source and loads correctly"
                 SQLITE_VEC_OK=true
             else
