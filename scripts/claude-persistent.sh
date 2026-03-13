@@ -169,10 +169,15 @@ except Exception:
 #     considered "ours" and is left alone
 #   - Processes adopted by PID 1 (init) are always considered orphans
 #   - SIGTERM first, SIGKILL only after a 3-second grace period
+#   - SIGKILL is only sent to PIDs that previously received SIGTERM (not the
+#     full original list), preventing accidental kills due to PID reuse
 #===============================================================================
 kill_orphaned_claude_processes() {
+    # Use -a to list panes across ALL sessions and windows, not just the
+    # default window. Without -a, Claude running in a non-default tmux window
+    # would not appear in the pane list and would be misclassified as an orphan.
     local tmux_panes
-    tmux_panes=$(tmux -L lobster list-panes -t lobster -F '#{pane_pid}' 2>/dev/null || true)
+    tmux_panes=$(tmux -L lobster list-panes -a -F '#{pane_pid}' 2>/dev/null || true)
 
     # If tmux session doesn't exist yet, any found claude process is an orphan
     local claude_pids
@@ -187,6 +192,10 @@ kill_orphaned_claude_processes() {
 
     local killed=0
     local skipped=0
+    # Track only the PIDs that received SIGTERM so the SIGKILL pass doesn't
+    # accidentally target unrelated processes that the OS assigned the same
+    # PID during the 3-second grace window.
+    local sigterm_pids=()
 
     for pid in $claude_pids; do
         # Skip if process no longer exists
@@ -218,7 +227,9 @@ kill_orphaned_claude_processes() {
             skipped=$((skipped + 1))
         else
             log "CLEANUP: Killing orphaned Claude PID $pid (SIGTERM)"
-            kill -TERM "$pid" 2>/dev/null || true
+            if kill -TERM "$pid" 2>/dev/null; then
+                sigterm_pids+=("$pid")
+            fi
             killed=$((killed + 1))
         fi
     done
@@ -226,14 +237,16 @@ kill_orphaned_claude_processes() {
     # Give processes a brief grace period to exit cleanly
     if [[ $killed -gt 0 ]]; then
         sleep 3
-        # SIGKILL any survivors
-        for pid in $claude_pids; do
+        # SIGKILL only the PIDs we sent SIGTERM to — not the full original list.
+        # This avoids killing unrelated processes that may have been assigned
+        # one of the recycled PIDs during the 3-second grace window.
+        for pid in "${sigterm_pids[@]}"; do
             if kill -0 "$pid" 2>/dev/null; then
                 log "CLEANUP: PID $pid still alive after SIGTERM — sending SIGKILL"
                 kill -KILL "$pid" 2>/dev/null || true
             fi
         done
-        log "CLEANUP: Sent SIGTERM to $killed orphaned Claude process(es), skipped $skipped"
+        log "CLEANUP: Sent SIGTERM to $killed orphaned Claude process(es), skipped $skipped in-session"
     else
         log "CLEANUP: No orphaned Claude processes to kill (skipped $skipped in-session)"
     fi
