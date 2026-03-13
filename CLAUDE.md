@@ -309,10 +309,13 @@ All Lobster-managed projects live in `$LOBSTER_WORKSPACE/projects/[project-name]
 - `~/lobster/` - Repository (code only, no personal data)
   - `scheduled-tasks/` - Job runner scripts (committed, no runtime data)
   - `memory/canonical-templates/` - Seed templates (committed)
-- `~/lobster-workspace/` - Runtime data (never in repo)
-  - `projects/` - All Lobster-managed projects (`$LOBSTER_PROJECTS`)
+- `~/lobster-config/` - Identity & configuration (portable, back up this)
+  - `config.env` - Bot tokens and secrets
+  - `global.env` - Machine-wide API tokens
   - `memory/canonical/` - Handoff, priorities, people, projects
   - `memory/archive/digests/` - Archived daily digests
+- `~/lobster-workspace/` - Runtime data (ephemeral, machine-specific)
+  - `projects/` - All Lobster-managed projects (`$LOBSTER_PROJECTS`)
   - `data/memory.db` - Vector memory SQLite DB
   - `data/events.jsonl` - Event log
   - `scheduled-jobs/jobs.json` - Job registry state

@@ -23,12 +23,14 @@ import psutil
 _HOME = Path.home()
 _MESSAGES = Path(os.environ.get("LOBSTER_MESSAGES", _HOME / "messages"))
 _WORKSPACE = Path(os.environ.get("LOBSTER_WORKSPACE", _HOME / "lobster-workspace"))
+_CONFIG_DIR = Path(os.environ.get("LOBSTER_CONFIG_DIR", _HOME / "lobster-config"))
 _LOBSTER_SRC = Path(os.environ.get("LOBSTER_SRC", _HOME / "lobster"))
 _SCHEDULED_TASKS = _LOBSTER_SRC / "scheduled-tasks" / "tasks"
 _MEMORY_DB = _WORKSPACE / "data" / "memory.db"
 _PENDING_AGENTS_FILE = _MESSAGES / "config" / "pending-agents.json"
 _TASK_OUTPUTS_DIR = Path(f"/tmp/claude-1000/-home-admin-lobster-workspace/tasks")
-_MEMORY_CANONICAL_DIR = _WORKSPACE / "memory" / "canonical"
+# Canonical memory lives in lobster-config (identity layer), not workspace (issue #201)
+_MEMORY_CANONICAL_DIR = _CONFIG_DIR / "memory" / "canonical"
 
 # Cache for parsed JSONL stats: maps (path_str, mtime_float) -> stats dict
 _JSONL_CACHE: dict[tuple[str, float], dict] = {}
@@ -325,7 +327,7 @@ def collect_filesystem_overview() -> list[dict]:
         ("lobster/scheduled-tasks", _LOBSTER_SRC / "scheduled-tasks"),
         ("lobster/scripts", _LOBSTER_SRC / "scripts"),
         ("workspace/data", _WORKSPACE / "data"),
-        ("workspace/memory", _WORKSPACE / "memory"),
+        ("config/memory", _CONFIG_DIR / "memory"),
         ("workspace/logs", _WORKSPACE / "logs"),
     ]
     result = []

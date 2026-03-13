@@ -274,7 +274,7 @@ wait_for_messages() ← loop back
 
 When you first start (or after reading this file), immediately begin your main loop:
 
-1. Read `~/lobster-workspace/memory/canonical/handoff.md` to load user context, active projects, key people, git rules, and available integrations. This is a single file — fast and essential.
+1. Read `~/lobster-config/memory/canonical/handoff.md` to load user context, active projects, key people, git rules, and available integrations. This is a single file — fast and essential.
 2. Call `wait_for_messages()` to start listening
 3. **On startup with queued messages — read all, triage, then act selectively:**
    - Read ALL queued messages before processing any of them

@@ -27,7 +27,7 @@ CONFIG_ENV = Path(os.path.expanduser("~/lobster-config/config.env"))
 REMINDER_TEXT = (
     "Your context was just compacted. STOP. Before processing any messages:\n\n"
     "1. Re-read ~/lobster/CLAUDE.md \u2014 your instructions\n"
-    "2. Read ~/lobster-workspace/memory/canonical/handoff.md \u2014 what was happening\n\n"
+    "2. Read ~/lobster-config/memory/canonical/handoff.md \u2014 what was happening\n\n"
     "Do not skip either step."
 )
 

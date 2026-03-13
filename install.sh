@@ -761,7 +761,9 @@ fi
 step "Creating directories..."
 
 mkdir -p "$WORKSPACE_DIR"/{logs,data,scheduled-jobs/{logs,tasks}}
-mkdir -p "$WORKSPACE_DIR/memory"/{canonical/{people,projects},archive/digests}
+# Note: memory/canonical lives in $CONFIG_DIR (identity layer), NOT workspace (runtime layer)
+# See issue #201 — lobster-config split
+mkdir -p "$CONFIG_DIR/memory"/{canonical/{people,projects},archive/digests}
 mkdir -p "$MESSAGES_DIR"/{inbox,outbox,processed,processing,failed,config,audio,task-outputs}
 mkdir -p "$CONFIG_DIR"
 mkdir -p "$PROJECTS_DIR"
@@ -775,7 +777,7 @@ if [ -d "$TEMPLATES_DIR" ]; then
     for tmpl in "$TEMPLATES_DIR"/*.md; do
         [ -f "$tmpl" ] || continue
         base=$(basename "$tmpl")
-        dest="$WORKSPACE_DIR/memory/canonical/$base"
+        dest="$CONFIG_DIR/memory/canonical/$base"
         if [ ! -f "$dest" ]; then
             cp "$tmpl" "$dest"
             info "  Seeded canonical template: $base"

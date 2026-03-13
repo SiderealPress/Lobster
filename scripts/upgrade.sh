@@ -609,9 +609,9 @@ create_new_directories() {
         "$MESSAGES_DIR/task-outputs"
         "$WORKSPACE_DIR/scheduled-jobs/tasks"
         "$WORKSPACE_DIR/data"
-        "$WORKSPACE_DIR/memory/canonical/people"
-        "$WORKSPACE_DIR/memory/canonical/projects"
-        "$WORKSPACE_DIR/memory/archive/digests"
+        "$LOBSTER_CONFIG_DIR/memory/canonical/people"
+        "$LOBSTER_CONFIG_DIR/memory/canonical/projects"
+        "$LOBSTER_CONFIG_DIR/memory/archive/digests"
         "$WORKSPACE_DIR/scheduled-jobs/logs"
     )
 
@@ -1015,7 +1015,8 @@ run_migrations() {
     fi
 
     # Migration 8: Seed canonical templates if empty
-    local canonical_dir="$WORKSPACE_DIR/memory/canonical"
+    # Note: canonical memory lives in $LOBSTER_CONFIG_DIR now (issue #201 — lobster-config split)
+    local canonical_dir="$LOBSTER_CONFIG_DIR/memory/canonical"
     local templates_dir="$LOBSTER_DIR/memory/canonical-templates"
     if [ -d "$templates_dir" ] && [ -d "$canonical_dir" ]; then
         local md_count
