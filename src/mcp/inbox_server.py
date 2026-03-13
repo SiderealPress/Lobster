@@ -131,6 +131,40 @@ def _queue_observation(msg_text: str, msg_id: str, source: str | None = None, ts
     except _queue_mod.Full:
         pass  # drop silently — observation is best-effort
 
+# ---------------------------------------------------------------------------
+# User model context injection heuristic
+# ---------------------------------------------------------------------------
+import re as _re
+
+_USER_CONTEXT_TRIGGERS = _re.compile(
+    r'(?i)(?:'
+    r'(?:what|where)\s+should\s+i'             # "what should I focus on"
+    r'|priorit(?:y|ies|ize)'                    # priorities
+    r'|what\s+(?:matters|do\s+i\s+care)'        # "what matters to me"
+    r'|help\s+me\s+(?:decide|choose|think)'     # decision-making
+    r'|(?:my|the)\s+(?:values?|principles?|preferences?|constraints?)' # explicit model refs
+    r'|what.{0,8}(?:on\s+my\s+plate|next)'     # "what's on my plate"
+    r'|big\s+picture'                           # stepping back
+    r'|step(?:ping)?\s+back'                    # reflection
+    r'|how\s+am\s+i\s+doing'                    # self-check
+    r'|(?:over|under)whelm'                     # emotional state
+    r'|burn.?out|stressed\s+(?:about|out)'      # stress
+    r'|life\s+(?:situation|direction|goals?)'    # life-level
+    r'|introspect|self.?reflect'                # introspection
+    r'|what\s+(?:do\s+i|did\s+i)\s+think'      # recall preferences
+    r'|remind\s+me\s+(?:what|why)\s+i'          # recall motivations
+    r'|(?:deprioritize|reprioritize|reorder)'   # attention management
+    r'|what.{0,8}(?:important|urgent)'          # importance queries
+    r'|good\s+(?:morning|evening|night)'        # greetings that often start reflective exchanges
+    r')',
+)
+
+def _should_inject_user_context(text: str) -> bool:
+    """Fast heuristic: does this message benefit from user model context?"""
+    if not text or len(text) < 8:
+        return False
+    return bool(_USER_CONTEXT_TRIGGERS.search(text))
+
 # MCP SDK
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -2273,8 +2307,25 @@ async def handle_mark_processing(args: dict) -> list[TextContent]:
             ts=msg_data.get("timestamp"),
         )
 
+    # Conditionally inject user model context for messages that would benefit
+    context_block = ""
+    if _user_model is not None and msg_text and msg_type not in (
+        "subagent_result", "subagent_error", "self_check", "callback", "system"
+    ):
+        if _should_inject_user_context(msg_text):
+            try:
+                ctx = _user_model.get_context()
+                if ctx and ctx.strip():
+                    context_block = (
+                        "\n\n---\n"
+                        "**User Model Context** (auto-injected for this message):\n\n"
+                        f"{ctx}"
+                    )
+            except Exception:
+                pass  # never block mark_processing
+
     log.info(f"Message claimed for processing: {message_id}")
-    return [TextContent(type="text", text=f"Message claimed: {message_id}")]
+    return [TextContent(type="text", text=f"Message claimed: {message_id}{context_block}")]
 
 
 async def handle_mark_failed(args: dict) -> list[TextContent]:
