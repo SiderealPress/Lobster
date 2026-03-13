@@ -488,26 +488,27 @@ rechmod_launchers() {
     cd "$LOBSTER_DIR"
 
     if $DRY_RUN; then
-        log INFO "Would chmod +x scripts/*.sh scripts/*.exp hooks/*.py install.sh"
+        log INFO "Would chmod +x scripts/*.sh scripts/*.exp hooks/* install.sh"
         return 0
     fi
 
     # Shell scripts in scripts/
-    if ls scripts/*.sh &>/dev/null 2>&1; then
+    # compgen -G tests whether a glob matches any files (bash builtin, no subprocess)
+    if compgen -G 'scripts/*.sh' > /dev/null 2>&1; then
         chmod +x scripts/*.sh
         log OK "chmod +x scripts/*.sh"
     fi
 
     # Expect scripts in scripts/
-    if ls scripts/*.exp &>/dev/null 2>&1; then
+    if compgen -G 'scripts/*.exp' > /dev/null 2>&1; then
         chmod +x scripts/*.exp
         log OK "chmod +x scripts/*.exp"
     fi
 
-    # Executable Python hooks in hooks/
-    if ls hooks/*.py &>/dev/null 2>&1; then
-        chmod +x hooks/*.py
-        log OK "chmod +x hooks/*.py"
+    # Hook entry points in hooks/ (pre-commit, post-commit, etc. — no extension)
+    if compgen -G 'hooks/*' > /dev/null 2>&1; then
+        chmod +x hooks/*
+        log OK "chmod +x hooks/*"
     fi
 
     # Top-level installer
