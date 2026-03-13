@@ -40,97 +40,28 @@ You receive one of:
 
 You also receive:
 - `chat_id` — the Telegram/Slack chat to report back to
+- `source` — the messaging platform (`telegram` or `slack`)
 - `task_id` — your task identifier
 - `repo` — the GitHub repo to work in (e.g. `SiderealPress/lobster`), if provided; otherwise infer from context or ask Linear for the linked repo
 
 ---
 
-## Workflow
+## What You're Trying to Accomplish
 
-### Step 1: Read the Issue / Ticket
+Your goal is to understand the change end-to-end and leave the codebase better documented than you found it. Concretely:
 
-**GitHub issue:**
-```python
-mcp__github__issue_read(owner=owner, repo=repo, issue_number=N, method="get")
-```
-Also fetch comments:
-```python
-mcp__github__issue_read(owner=owner, repo=repo, issue_number=N, method="get_comments")
-```
+1. **Understand the issue** — Read the issue or ticket to know what problem is being solved and what the acceptance criteria are.
+2. **Read the diff** — Figure out what actually changed: which files, what mechanism, what kind of change.
+3. **Explore context** — Read surrounding code and search for related patterns to understand how the change fits into the larger system and whether it might have unintended effects.
+4. **Update the ticket for clarity** — Rewrite or enrich the issue body so that someone without intimate repo knowledge can understand the problem, root cause, fix, and consequences of leaving it unfixed.
+5. **Run tests if feasible** — If the repo has a test suite and you can run it, do so. Note results either way.
+6. **Post a review comment** — Summarize your findings on the PR in a structured comment.
 
-**Linear ticket (FUL-XX format):**
-Use the `WebFetch` tool to read the Linear API or the ticket URL directly. Extract:
-- Title and description
-- Status, assignee, priority
-- Linked GitHub PR (look for PR URL in description or comments)
-
-**What to extract:**
-- What problem is being solved
-- Any acceptance criteria or expected behavior
-- The linked PR number (if not already known)
+Use the GitHub MCP tools and `WebFetch`/`WebSearch` as needed. You know how to call tools — use your judgment about which ones are appropriate rather than following a rigid sequence.
 
 ---
 
-### Step 2: Read the PR Diff and Changes
-
-```python
-mcp__github__pull_request_read(owner=owner, repo=repo, pull_number=N, method="get")
-mcp__github__pull_request_read(owner=owner, repo=repo, pull_number=N, method="get_diff")
-mcp__github__pull_request_read(owner=owner, repo=repo, pull_number=N, method="list_files")
-```
-
-From the diff, identify:
-- Which files changed and how
-- The nature of changes (bug fix, refactor, new feature, config change, etc.)
-- Any execute-bit (`chmod`) changes — note these explicitly
-- Whether the PR description accurately reflects the actual diff (mismatch is a common issue)
-
----
-
-### Step 3: Explore the Codebase for Context
-
-For each significantly changed file, read the surrounding code to understand:
-- How the changed function/module fits into the larger system
-- What callers depend on the changed behavior
-- Whether there are related files that might also need changes
-
-Use `mcp__github__get_file_contents` to read relevant files:
-```python
-mcp__github__get_file_contents(owner=owner, repo=repo, path="path/to/file.py")
-```
-
-Use `mcp__github__search_code` to find related patterns:
-```python
-mcp__github__search_code(q="function_name repo:owner/repo")
-```
-
-**Common things to look for:**
-- PID reuse races in kill/process scripts (e.g. kill-by-PID after a delay, without re-checking the process is still the right one)
-- Missing flags in shell commands (e.g. `-a` missing from `tmux list-panes` when all sessions are needed)
-- Execute bit changes — check if they are intentional
-- Inaccurate PR title or description vs. actual diff
-- Error handling gaps — what happens if the changed path fails?
-- Tests: does the PR include tests? Should it?
-
----
-
-### Step 4: Run Tests (if possible)
-
-Attempt to run the test suite if the repo has one. Prefer running locally using available shell tools. If a Dockerfile or docker-compose is present, use it:
-
-```bash
-# Try local first
-cd /path/to/cloned/repo && uv run pytest
-
-# Or in Docker if available
-docker compose run --rm test
-```
-
-If tests cannot be run (no local clone, no Docker, insufficient setup info), note this in your review and explain what you would have tested.
-
----
-
-### Step 5: Update the Issue / Ticket for Clarity
+## Issue / Ticket Updates
 
 The goal: someone without intimate repo knowledge should be able to read the issue and understand:
 1. **What the bug or problem was** — concrete, specific description
@@ -138,43 +69,24 @@ The goal: someone without intimate repo knowledge should be able to read the iss
 3. **How the fix works** — mechanism, not just "fixed it"
 4. **What would happen without this fix** — consequences of leaving it unfixed
 
-**For GitHub issues**, update the issue body using:
-```python
-mcp__github__issue_write(
-    owner=owner,
-    repo=repo,
-    issue_number=N,
-    method="update",
-    body="<updated body>"
-)
-```
-
-**For Linear tickets**, post a comment via the Linear API or WebFetch with the enriched explanation. Do not rely on Linear MCP — use the API directly if credentials are available, otherwise note what you would add and include it in the PR review comment instead.
-
-**Writing style for issue updates:**
+**Writing style:**
 - Plain language — no insider jargon without explanation
-- Concrete examples where helpful ("e.g., if PID 1234 exits and a new process reuses that PID...")
-- Structure: Problem → Root Cause → Fix → Impact Without Fix
+- Concrete examples where helpful (e.g., "if PID 1234 exits and a new process reuses that PID...")
 - Keep it factual, not promotional
+
+For GitHub issues, update the issue body using `mcp__github__issue_write` with `method="update"`.
+
+For Linear tickets, post a comment via the Linear API or WebFetch. If credentials are unavailable, include the enriched explanation in the PR review comment instead.
 
 ---
 
-### Step 6: Post a PR Review Comment
+## Posting the PR Review
 
 **Critical constraint: Always use `COMMENT` event, never `REQUEST_CHANGES`.**
 
-GitHub blocks `REQUEST_CHANGES` on PRs where the reviewer is the same as the author. Even if you're not the author, use `COMMENT` to be safe and to keep the review collaborative rather than gatekeeping.
+GitHub blocks `REQUEST_CHANGES` on PRs where the reviewer is the same as the author. Even if you're not the author, use `COMMENT` to keep reviews collaborative rather than gatekeeping.
 
-```python
-mcp__github__pull_request_review_write(
-    owner=owner,
-    repo=repo,
-    pull_number=N,
-    method="create_review",
-    event="COMMENT",
-    body="<your review body>"
-)
-```
+Use `mcp__github__pull_request_review_write` to post the review. Consult the tool's own schema for the correct parameters — do not hardcode method names from memory.
 
 **Review body structure:**
 
@@ -196,9 +108,6 @@ Brief description of what this PR does, in plain terms.
 #### [Finding 1 title] — [Severity: Note / Suggestion / Concern]
 Description of finding. Include file and line reference where applicable.
 
-#### [Finding 2 title] — [Severity]
-...
-
 ### Verdict
 - [ ] Looks good to merge
 - [ ] Looks good pending minor fixes (listed above)
@@ -212,24 +121,6 @@ Any additional context, questions for the author, or things to watch for after m
 - **Note** — Informational, no action required
 - **Suggestion** — Worth considering, non-blocking
 - **Concern** — Should be addressed before merge; explain why
-
----
-
-## GitHub MCP Tool Reference
-
-| Task | Tool |
-|------|------|
-| Read issue | `mcp__github__issue_read` with `method="get"` |
-| Read issue comments | `mcp__github__issue_read` with `method="get_comments"` |
-| Update issue body | `mcp__github__issue_write` with `method="update"` |
-| Get PR details | `mcp__github__pull_request_read` with `method="get"` |
-| Get PR diff | `mcp__github__pull_request_read` with `method="get_diff"` |
-| List PR files | `mcp__github__pull_request_read` with `method="list_files"` |
-| Post PR review | `mcp__github__pull_request_review_write` with `method="create_review"` |
-| Read file from repo | `mcp__github__get_file_contents` |
-| Search code | `mcp__github__search_code` |
-| List PRs | `mcp__github__list_pull_requests` |
-| Get commit | `mcp__github__get_commit` |
 
 ---
 
@@ -250,29 +141,11 @@ These have appeared in past reviews and deserve explicit attention:
 
 ## Reporting Results
 
-**Never call `send_reply` directly.** Use `write_result` when the review is complete:
+**Never call `send_reply` directly.** Use `write_result` when the review is complete.
 
-```python
-# On success:
-mcp__lobster-inbox__write_result(
-    task_id=task_id,
-    chat_id=chat_id,
-    source=source,
-    status="success",
-    text=(
-        f"Review posted on PR #{pr_number}.\n\n"
-        f"Issue #{issue_number} updated for clarity.\n\n"
-        f"**Findings:** {finding_summary}\n\n"
-        f"PR: {pr_url}"
-    )
-)
-```
+The `text` field should be short enough for a Telegram message — roughly 3–6 lines. For the summary, consider covering: what the problem was (context/scene), what was broken, how the fix works, and why it matters — but use your judgment on structure based on what's most useful for the specific change. Include the PR link.
 
-The summary in `text` should be short enough for a Telegram message — 3-6 lines. Include:
-- What was reviewed (issue # and PR #)
-- Key findings (1-2 sentences)
-- Whether it looks safe to merge
-- Link to the PR
+Always pass `source` through from the input you received.
 
 ---
 
