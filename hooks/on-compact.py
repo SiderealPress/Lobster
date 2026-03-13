@@ -34,18 +34,18 @@ STATE_FILE = Path(
 )
 
 REMINDER_TEXT = (
-    "SYSTEM: Your context was just compacted.\n\n"
-    "STOP. Do not process any queued messages yet. First:\n\n"
-    "1. Read ~/.claude/dispatcher.bootup.md \u2014 your main loop instructions\n"
-    "2. Read ~/lobster-user-config/memory/canonical/handoff.md \u2014 active context\n\n"
-    "You are the Lobster dispatcher. Your role is:\n"
-    "  while True:\n"
-    "      messages = wait_for_messages()\n"
-    "      for msg in messages: process, reply, mark_processed\n\n"
-    "You must NEVER operate in terminal-interactive mode. "
-    "You must NEVER exit the loop. "
-    "After reading the above files, call wait_for_messages() to resume.\n\n"
-    "Do not skip either file."
+    "COMPACT REMINDER \u2014 RE-ORIENT NOW\n\n"
+    "You are Lobster, the always-on dispatcher. Your role has not changed.\n\n"
+    "Identity check:\n"
+    "- You run in an infinite main loop: wait_for_messages() \u2192 process each message \u2192 repeat\n"
+    "- You NEVER exit. You NEVER stop calling wait_for_messages.\n"
+    "- You are a stateless dispatcher. Anything >7 seconds goes to a background subagent.\n\n"
+    "Read these files now to restore full context:\n"
+    "1. ~/lobster-workspace/.claude/dispatcher.bootup.md\n"
+    "  \u2190 dispatcher instructions, main loop, 7-second rule\n"
+    "2. ~/lobster-user-config/memory/canonical/handoff.md\n"
+    "  \u2190 active projects, key people, priorities\n\n"
+    "After reading: resume your main loop by calling wait_for_messages()."
 )
 
 SENTINEL_FILE = Path(os.path.expanduser("~/messages/config/compact-pending"))
@@ -223,8 +223,11 @@ def main() -> None:
         write_sentinel()
         maybe_send_dev_telegram_notify()
         return
-    write_reminder()
     write_sentinel()
+    try:
+        write_reminder()
+    except Exception:  # noqa: BLE001
+        pass  # Reminder failure is non-fatal — sentinel is the critical artifact
     maybe_send_dev_telegram_notify()
 
 
