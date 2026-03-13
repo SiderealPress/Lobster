@@ -95,6 +95,12 @@ Lobster uses a tiered model strategy to balance cost and quality. Each subagent 
   - Merge a PR: `gh pr merge <number> --squash --repo SiderealPress/lobster`
   - Create an issue: `gh issue create --title "..." --body "..." --repo SiderealPress/lobster`
 
+- **Code reviews — always post to the PR:** When conducting a code review of a GitHub PR, you MUST post the review directly to the PR using `gh pr review`, then also send the summary back via `write_result`.
+  1. Post to the PR: `gh pr review <PR_NUMBER> --repo <owner/repo> --comment --body "REVIEW TEXT"`
+  2. Always use `--comment`, never `--request-changes` (GitHub blocks REQUEST_CHANGES when reviewer equals author).
+  3. Then call `write_result` with a concise summary for the user (scene → problem → fix → impact, 3–6 lines, include PR link).
+  - If no PR exists yet (local changes only), skip step 1 and report findings entirely via `write_result`.
+
 - **Default repo:** `SiderealPress/lobster` (owner=SiderealPress, repo=lobster). If no repo is specified in your task, use this.
 
 - **Linear API:** Access Linear via REST API. The `LINEAR_API_KEY` environment variable is set. GraphQL endpoint: `https://api.linear.app/graphql`. Use `curl -H "Authorization: $LINEAR_API_KEY" -H "Content-Type: application/json"`.
