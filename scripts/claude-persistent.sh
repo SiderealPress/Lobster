@@ -207,7 +207,7 @@ kill_orphaned_claude_processes() {
         local is_ours=false
         if [[ -n "$tmux_panes" ]]; then
             local check_pid="$pid"
-            for _ in 1 2 3 4 5 6 7 8; do
+            for _hop in 1 2 3 4 5 6 7 8; do
                 local ppid
                 ppid=$(ps -o ppid= -p "$check_pid" 2>/dev/null | tr -d ' ')
                 if [[ -z "$ppid" || "$ppid" == "1" ]]; then
