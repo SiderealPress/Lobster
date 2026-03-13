@@ -70,7 +70,7 @@ USER_FACING_SOURCES="telegram sms signal slack"
 # Internal queue messages like subagent_result/subagent_error may carry
 # source="telegram" for routing purposes but are NOT user messages and must
 # not trigger stale-inbox alerts or restarts.
-USER_FACING_TYPES="message photo image voice audio callback text"
+USER_FACING_TYPES="message photo image voice audio callback text document"
 
 # Circuit breaker: tracks which stale files already triggered a restart
 # to prevent restart loops when the same message persists after restart
@@ -440,7 +440,7 @@ is_user_facing_type() {
 # Only counts genuine user-originated messages. Two filters are applied:
 #   1. source must be user-facing (telegram, sms, signal, slack)
 #   2. type must be a genuine user type (message, photo, image, voice, audio,
-#      callback, text) — this excludes internal queue messages such as
+#      callback, text, document) — this excludes internal queue messages such as
 #      subagent_result and subagent_error which carry source="telegram" for
 #      routing but are not real user messages.
 # System/internal/task-output messages are ignored - they may sit in the inbox
