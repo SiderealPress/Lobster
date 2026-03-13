@@ -1049,6 +1049,21 @@ DAILY_MARKER="# LOBSTER-DAILY-HEALTH"
 success "Daily dependency health check configured (runs at 06:00 daily)"
 
 #===============================================================================
+# Nightly Consolidation
+#===============================================================================
+
+step "Setting up nightly consolidation..."
+
+chmod +x "$INSTALL_DIR/scripts/nightly-consolidation.sh" || true
+
+# Add nightly consolidation to crontab (runs at 03:00 every night)
+CONSOLIDATION_MARKER="# LOBSTER-NIGHTLY-CONSOLIDATION"
+({ crontab -l 2>/dev/null | grep -v "$CONSOLIDATION_MARKER" | grep -v "nightly-consolidation" || true; }; \
+ echo "0 3 * * * $INSTALL_DIR/scripts/nightly-consolidation.sh $CONSOLIDATION_MARKER") | crontab -
+
+success "Nightly consolidation configured (runs at 03:00 nightly)"
+
+#===============================================================================
 # Self-Check Reminder System
 #===============================================================================
 
