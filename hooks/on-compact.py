@@ -8,20 +8,28 @@ reminder to re-read CLAUDE.md and re-orient from handoff/memory context.
 
 The script is idempotent: if a compact-reminder message already exists in the
 inbox it skips writing a duplicate.
+
+Dev mode: if LOBSTER_DEBUG=true (or set in config.env), also sends a Telegram
+message directly to the owner's chat ID so the developer is immediately notified
+that a compaction occurred.
 """
 
 import json
 import os
 import time
+import urllib.request
 from pathlib import Path
 
 
 INBOX_DIR = Path(os.path.expanduser("~/messages/inbox"))
+CONFIG_ENV = Path(os.path.expanduser("~/lobster-config/config.env"))
 
 REMINDER_TEXT = (
     "Your context was just compacted. Re-read CLAUDE.md \u2014 it will guide you "
     "to the handoff, memory, and all other bootup context you need to re-orient."
 )
+
+DEV_TELEGRAM_MESSAGE = "\u26a0\ufe0f [DEV] Context compacted. Re-orienting from CLAUDE.md + handoff."
 
 
 def already_pending() -> bool:
@@ -66,10 +74,83 @@ def write_reminder() -> None:
     dest.write_text(json.dumps(message, indent=2) + "\n")
 
 
+def _parse_config_env() -> dict:
+    """Parse key=value pairs from config.env, ignoring comments and blank lines."""
+    config = {}
+    if not CONFIG_ENV.exists():
+        return config
+    try:
+        for line in CONFIG_ENV.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            # Strip optional surrounding quotes from the value.
+            value = value.strip().strip('"').strip("'")
+            config[key.strip()] = value
+    except OSError:
+        pass
+    return config
+
+
+def _is_debug_mode(config: dict) -> bool:
+    """Return True if LOBSTER_DEBUG is 'true' in the environment or config.env."""
+    env_val = os.environ.get("LOBSTER_DEBUG", "").lower()
+    if env_val == "true":
+        return True
+    config_val = config.get("LOBSTER_DEBUG", "").lower()
+    return config_val == "true"
+
+
+def _send_telegram_dev_notify(bot_token: str, chat_id: str) -> None:
+    """
+    Send DEV_TELEGRAM_MESSAGE to chat_id via the Telegram Bot API.
+    Silent on any failure — must never crash the hook.
+    """
+    try:
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        payload = json.dumps({"chat_id": chat_id, "text": DEV_TELEGRAM_MESSAGE}).encode()
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5):
+            pass
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def maybe_send_dev_telegram_notify() -> None:
+    """
+    If LOBSTER_DEBUG is true and credentials are available, send a Telegram
+    notification to the owner that a context compaction occurred.
+    """
+    config = _parse_config_env()
+
+    if not _is_debug_mode(config):
+        return
+
+    bot_token = config.get("TELEGRAM_BOT_TOKEN", "").strip()
+    allowed_users = config.get("TELEGRAM_ALLOWED_USERS", "").strip()
+
+    if not bot_token or not allowed_users:
+        return
+
+    # Take the first user ID from a comma- or space-separated list.
+    first_chat_id = allowed_users.replace(",", " ").split()[0]
+
+    _send_telegram_dev_notify(bot_token, first_chat_id)
+
+
 def main() -> None:
     if already_pending():
         return
     write_reminder()
+    maybe_send_dev_telegram_notify()
 
 
 if __name__ == "__main__":
