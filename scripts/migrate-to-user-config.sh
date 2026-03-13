@@ -125,7 +125,7 @@ fi
 OLD_ARCHIVE="$WORKSPACE_DIR/memory/archive/digests"
 NEW_ARCHIVE="$USER_CONFIG_DIR/memory/archive/digests"
 if [ -d "$OLD_ARCHIVE" ]; then
-    for f in "$OLD_ARCHIVE"/*.md "$OLD_ARCHIVE"/*.json 2>/dev/null; do
+    for f in "$OLD_ARCHIVE"/*.md "$OLD_ARCHIVE"/*.json; do
         [ -f "$f" ] || continue
         base=$(basename "$f")
         dest="$NEW_ARCHIVE/$base"
