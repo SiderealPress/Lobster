@@ -40,6 +40,7 @@ LOBSTER_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
 WORKSPACE_DIR="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
 MESSAGES_DIR="${LOBSTER_MESSAGES:-$HOME/messages}"
 LOBSTER_CONFIG_DIR="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}"
+USER_CONFIG_DIR="${LOBSTER_USER_CONFIG:-$HOME/lobster-user-config}"
 BACKUP_BASE="$HOME/lobster-backups"
 CONFIG_FILE="$LOBSTER_CONFIG_DIR/config.env"
 LOCK_FILE="/tmp/lobster-upgrade.lock"
@@ -609,10 +610,11 @@ create_new_directories() {
         "$MESSAGES_DIR/task-outputs"
         "$WORKSPACE_DIR/scheduled-jobs/tasks"
         "$WORKSPACE_DIR/data"
-        "$WORKSPACE_DIR/memory/canonical/people"
-        "$WORKSPACE_DIR/memory/canonical/projects"
-        "$WORKSPACE_DIR/memory/archive/digests"
         "$WORKSPACE_DIR/scheduled-jobs/logs"
+        "$USER_CONFIG_DIR/memory/canonical/people"
+        "$USER_CONFIG_DIR/memory/canonical/projects"
+        "$USER_CONFIG_DIR/memory/archive/digests"
+        "$USER_CONFIG_DIR/agents/subagents"
     )
 
     local created=0
@@ -1014,8 +1016,8 @@ run_migrations() {
         fi
     fi
 
-    # Migration 8: Seed canonical templates if empty
-    local canonical_dir="$WORKSPACE_DIR/memory/canonical"
+    # Migration 8: Seed canonical templates if empty (now in lobster-user-config)
+    local canonical_dir="$USER_CONFIG_DIR/memory/canonical"
     local templates_dir="$LOBSTER_DIR/memory/canonical-templates"
     if [ -d "$templates_dir" ] && [ -d "$canonical_dir" ]; then
         local md_count
@@ -1030,6 +1032,76 @@ run_migrations() {
                 substep "Seeded canonical template: $base"
                 migrated=$((migrated + 1))
             done
+        fi
+    fi
+
+    # Migration 9: Move canonical memory from workspace to lobster-user-config
+    local old_canonical="$WORKSPACE_DIR/memory/canonical"
+    local new_canonical="$USER_CONFIG_DIR/memory/canonical"
+    if [ -d "$old_canonical" ] && [ "$(find "$old_canonical" -name '*.md' 2>/dev/null | wc -l)" -gt 0 ]; then
+        # Check if new location is empty (avoid overwriting if already migrated)
+        local new_count
+        new_count=$(find "$new_canonical" -maxdepth 1 -name '*.md' 2>/dev/null | wc -l)
+        if [ "$new_count" -eq 0 ]; then
+            substep "Migrating canonical memory from workspace to lobster-user-config..."
+            mkdir -p "$new_canonical"/{people,projects}
+            # Copy top-level .md files
+            for f in "$old_canonical"/*.md; do
+                [ -f "$f" ] || continue
+                base=$(basename "$f")
+                cp "$f" "$new_canonical/$base"
+                substep "  Moved: $base"
+                migrated=$((migrated + 1))
+            done
+            # Copy subdirectories
+            for subdir in people projects; do
+                if [ -d "$old_canonical/$subdir" ]; then
+                    mkdir -p "$new_canonical/$subdir"
+                    for f in "$old_canonical/$subdir"/*.md; do
+                        [ -f "$f" ] || continue
+                        base=$(basename "$f")
+                        cp "$f" "$new_canonical/$subdir/$base"
+                        substep "  Moved: $subdir/$base"
+                        migrated=$((migrated + 1))
+                    done
+                fi
+            done
+            success "Canonical memory migrated to $new_canonical"
+        fi
+    fi
+
+    # Migration 10: Create stub agent files in lobster-user-config if missing
+    mkdir -p "$USER_CONFIG_DIR/agents/subagents"
+    for stub_file in "base.bootup.md" "base.context.md" "dispatcher.bootup.md" "subagent.bootup.md"; do
+        stub_dest="$USER_CONFIG_DIR/agents/$stub_file"
+        if [ ! -f "$stub_dest" ]; then
+            touch "$stub_dest"
+            substep "Created stub: agents/$stub_file"
+            migrated=$((migrated + 1))
+        fi
+    done
+
+    # Migration 11: Migrate .claude/ user context files from workspace to user-config
+    local old_claude_dir="$WORKSPACE_DIR/.claude"
+    local new_agents_dir="$USER_CONFIG_DIR/agents"
+    if [ -d "$old_claude_dir" ]; then
+        # Migrate user.md -> base.bootup.md (behavioral) if not already done
+        if [ -f "$old_claude_dir/user.md" ] && [ ! -s "$new_agents_dir/base.bootup.md" ]; then
+            cp "$old_claude_dir/user.md" "$new_agents_dir/base.bootup.md"
+            substep "Migrated .claude/user.md -> lobster-user-config/agents/base.bootup.md"
+            migrated=$((migrated + 1))
+        fi
+        # Migrate dispatcher.md -> dispatcher.bootup.md
+        if [ -f "$old_claude_dir/dispatcher.md" ] && [ ! -s "$new_agents_dir/dispatcher.bootup.md" ]; then
+            cp "$old_claude_dir/dispatcher.md" "$new_agents_dir/dispatcher.bootup.md"
+            substep "Migrated .claude/dispatcher.md -> lobster-user-config/agents/dispatcher.bootup.md"
+            migrated=$((migrated + 1))
+        fi
+        # Migrate subagent.md -> subagent.bootup.md
+        if [ -f "$old_claude_dir/subagent.md" ] && [ ! -s "$new_agents_dir/subagent.bootup.md" ]; then
+            cp "$old_claude_dir/subagent.md" "$new_agents_dir/subagent.bootup.md"
+            substep "Migrated .claude/subagent.md -> lobster-user-config/agents/subagent.bootup.md"
+            migrated=$((migrated + 1))
         fi
     fi
 

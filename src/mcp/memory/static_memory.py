@@ -21,9 +21,10 @@ from path_guard import assert_not_in_git_repo
 
 log = logging.getLogger("lobster-memory")
 
-# Default paths (runtime data lives in workspace, not the repo)
+# Default paths (canonical memory lives in user-config; event log in workspace)
 _WORKSPACE = Path(os.environ.get("LOBSTER_WORKSPACE", Path.home() / "lobster-workspace"))
-DEFAULT_CANONICAL_DIR = _WORKSPACE / "memory" / "canonical"
+_USER_CONFIG = Path(os.environ.get("LOBSTER_USER_CONFIG", Path.home() / "lobster-user-config"))
+DEFAULT_CANONICAL_DIR = _USER_CONFIG / "memory" / "canonical"
 DEFAULT_EVENT_LOG = _WORKSPACE / "data" / "events.jsonl"
 
 

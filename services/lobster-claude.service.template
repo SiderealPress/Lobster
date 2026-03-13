@@ -14,6 +14,7 @@ Environment=LOBSTER_CONFIG_DIR={{CONFIG_DIR}}
 Environment=LOBSTER_INSTALL_DIR={{INSTALL_DIR}}
 Environment=LOBSTER_MESSAGES={{MESSAGES_DIR}}
 Environment=LOBSTER_WORKSPACE={{WORKSPACE_DIR}}
+Environment=LOBSTER_USER_CONFIG={{USER_CONFIG_DIR}}
 EnvironmentFile=-{{INSTALL_DIR}}/config/config.env
 EnvironmentFile={{CONFIG_DIR}}/config.env
 EnvironmentFile=-{{CONFIG_DIR}}/global.env
