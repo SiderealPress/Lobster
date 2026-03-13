@@ -1,0 +1,118 @@
+# Lobster Manual Install-Test Environment
+#
+# PURPOSE
+#   Spin up a clean Debian container that mimics a fresh VPS so you can run
+#   install.sh end-to-end and inspect the result. Nothing is baked into the
+#   image — secrets are injected at runtime via env vars or volume mounts.
+#
+# QUICK START
+#   1. Build the base image (one-time, or after changing the Dockerfile):
+#        docker compose -f tests/docker/docker-compose.install-test.yml build
+#
+#   2. Start the container and drop into a shell:
+#        docker compose -f tests/docker/docker-compose.install-test.yml run --rm install-test
+#
+#   3. Inside the container, run the installer:
+#        cd ~/lobster && bash install.sh --non-interactive
+#
+#   4. Poke around, then Ctrl-D to exit. The container is removed automatically
+#      (--rm). Re-run step 2 for a completely fresh environment.
+#
+# KEEPING A NAMED CONTAINER FOR REPEATED EXEC
+#   Start without --rm to keep the container alive:
+#        docker compose -f tests/docker/docker-compose.install-test.yml up -d
+#
+#   Then exec into it from another terminal:
+#        docker exec -it lobster-install-test bash
+#
+#   Wipe it and start over:
+#        docker compose -f tests/docker/docker-compose.install-test.yml down -v
+#        docker compose -f tests/docker/docker-compose.install-test.yml up -d
+#
+# SECRET INJECTION
+#   Secrets are never hardcoded. Pass them as env vars on the host before
+#   running compose, for example:
+#
+#     export TELEGRAM_BOT_TOKEN=123456:ABC...
+#     export TELEGRAM_ALLOWED_USERS=123456789
+#     export ANTHROPIC_API_KEY=sk-ant-...
+#     export GITHUB_TOKEN=ghp_...
+#
+#   The compose file forwards these into the container (see `environment:`
+#   below). install.sh reads them from the environment when NON_INTERACTIVE=true.
+#
+# CLAUDE CODE AUTH
+#   Mount your local ~/.claude/ directory so the container can use your existing
+#   Claude Code credentials without any extra auth steps:
+#
+#     volumes:
+#       - ~/.claude:/home/lobster/.claude:ro
+#
+#   This is done via the CLAUDE_CONFIG_VOLUME env var (set it to your path):
+#     export CLAUDE_CONFIG_VOLUME=~/.claude
+#
+#   If you prefer not to mount credentials, unset CLAUDE_CONFIG_VOLUME and
+#   authenticate inside the container manually after install.sh runs.
+#
+# FULL DOCUMENTATION
+#   See docs/DOCKER-INSTALL-TEST.md
+
+services:
+  install-test:
+    build:
+      context: ../..
+      dockerfile: tests/docker/Dockerfile.install-test
+    image: lobster-install-test
+    container_name: lobster-install-test
+
+    # Drop into an interactive shell by default.
+    # Override at `docker compose run` time, e.g.:
+    #   docker compose ... run install-test bash install.sh --non-interactive
+    stdin_open: true
+    tty: true
+
+    volumes:
+      # Mount the repo so install.sh always reflects your current working copy.
+      # The installer looks for the repo at ~/lobster when already cloned.
+      - type: bind
+        source: ../..
+        target: /home/lobster/lobster
+        read_only: false
+
+      # Mount Claude Code credentials if available.
+      # Set CLAUDE_CONFIG_VOLUME on the host to your ~/.claude path.
+      # Leave unset to skip (auth manually inside the container instead).
+      - type: bind
+        source: ${CLAUDE_CONFIG_VOLUME:-/dev/null}
+        target: /home/lobster/.claude
+        read_only: true
+
+    environment:
+      # --- Telegram ---
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - TELEGRAM_ALLOWED_USERS=${TELEGRAM_ALLOWED_USERS:-}
+
+      # --- Anthropic ---
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+
+      # --- GitHub ---
+      # Used by install.sh when configuring the GitHub MCP server.
+      # Also used by gh CLI inside the container if you want to run gh commands.
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - GH_TOKEN=${GITHUB_TOKEN:-}
+
+      # --- Install behaviour ---
+      # Set to true to skip interactive prompts. install.sh will use env vars
+      # for all configuration values instead of asking questions.
+      - NON_INTERACTIVE=${NON_INTERACTIVE:-false}
+
+      # Tell install.sh where the repo already lives so it skips the git clone.
+      - LOBSTER_INSTALL_DIR=/home/lobster/lobster
+
+    # Named network so you can attach other services (mock APIs etc.) if needed.
+    networks:
+      - install-test
+
+networks:
+  install-test:
+    driver: bridge

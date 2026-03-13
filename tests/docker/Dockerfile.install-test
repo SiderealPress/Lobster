@@ -1,0 +1,56 @@
+# Lobster Install-Test Base Image
+#
+# This image provides a clean Debian environment for manually testing
+# the Lobster install.sh script end-to-end. It does NOT run install.sh
+# at build time — that happens at runtime so you can test your current
+# working copy of install.sh without rebuilding the image.
+#
+# The image pre-installs only the minimal host-level packages that a
+# fresh VPS would already have (curl, sudo, etc.). Everything else is
+# left for install.sh to handle, which is the point.
+#
+# See tests/docker/docker-compose.install-test.yml for usage, or
+# docs/DOCKER-INSTALL-TEST.md for the full workflow.
+#
+# Build:
+#   docker build -f tests/docker/Dockerfile.install-test \
+#                -t lobster-install-test .
+#
+# Run interactively (compose file does this with volume mounts):
+#   docker run -it --name lobster-install-test lobster-install-test bash
+
+FROM debian:bookworm
+
+# Prevent apt from asking interactive questions during the base setup.
+# install.sh sets this itself too, but we need it for the RUN steps below.
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install the absolute minimum that any freshly provisioned VPS would have
+# before the user starts installing things. Deliberately minimal — install.sh
+# is responsible for everything else.
+RUN apt-get update -qq && apt-get install -y --no-install-recommends \
+    sudo \
+    curl \
+    ca-certificates \
+    openssh-client \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create the 'lobster' user exactly as install.sh would create it when run
+# as root. We pre-create it so the container can run as a non-root user by
+# default, which is also what install.sh re-execs into.
+RUN useradd -m -s /bin/bash lobster \
+    && echo "lobster ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/lobster \
+    && chmod 0440 /etc/sudoers.d/lobster
+
+USER lobster
+WORKDIR /home/lobster
+
+ENV HOME=/home/lobster
+ENV PATH="${HOME}/.local/bin:${PATH}"
+
+# The repo is mounted at runtime (see docker-compose.install-test.yml).
+# We keep WORKDIR at /home/lobster so install.sh's default paths all line up.
+
+# Default: drop into a shell. Install.sh is run manually (or via the
+# docker-compose entrypoint override) so you can observe every step.
+CMD ["bash", "--login"]
