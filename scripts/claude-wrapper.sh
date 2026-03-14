@@ -17,6 +17,10 @@ MESSAGES_DIR="${LOBSTER_MESSAGES:-$HOME/messages}"
 # Ensure Claude and npm global tools (vercel, prisma) are in PATH
 export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
 
+# Prevent "cannot launch inside another Claude Code session" error.
+# CLAUDECODE leaks when this script is run from an interactive Claude session.
+unset CLAUDECODE
+
 # Verify claude is available
 if ! command -v claude &>/dev/null; then
     echo "ERROR: claude not found in PATH"
