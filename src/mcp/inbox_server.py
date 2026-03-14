@@ -807,7 +807,7 @@ async def list_tools() -> list[Tool]:
                     },
                     "reply_to_message_id": {
                         "type": "integer",
-                        "description": "Telegram message ID to reply to. If provided, the bot sends the reply as a threaded reply to that specific message (Telegram only). Pass the telegram_message_id from the incoming message.",
+                        "description": "Telegram message ID to reply to (Telegram only). If provided, threads the reply against that specific message. If omitted, threading is automatic: the server looks up the telegram_message_id from any message currently in processing/ for this chat_id and threads against it. You rarely need to set this explicitly.",
                     },
                     "message_id": {
                         "type": "string",
@@ -2389,6 +2389,42 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
     return [TextContent(type="text", text=output)]
 
 
+def _lookup_telegram_message_id_for_chat(chat_id: int | str) -> int | None:
+    """Return the telegram_message_id of any message currently in processing/ for chat_id.
+
+    Scans the processing directory for a JSON file whose chat_id matches and
+    which contains a telegram_message_id field.  Returns the first match, or
+    None if nothing is found.
+
+    This is used by handle_send_reply for automatic threading: when the caller
+    does not pass an explicit reply_to_message_id, we look up the in-flight
+    message and thread the reply against it automatically.  This makes threading
+    structural rather than dependent on dispatcher compliance.
+    """
+    try:
+        chat_id_int = int(chat_id)
+    except (TypeError, ValueError):
+        return None
+
+    try:
+        for f in PROCESSING_DIR.glob("*.json"):
+            try:
+                data = json.loads(f.read_text())
+            except (json.JSONDecodeError, OSError):
+                continue
+            if int(data.get("chat_id", -1)) != chat_id_int:
+                continue
+            tg_id = data.get("telegram_message_id")
+            if tg_id is not None:
+                try:
+                    return int(tg_id)
+                except (TypeError, ValueError):
+                    continue
+    except Exception:
+        pass
+    return None
+
+
 async def handle_send_reply(args: dict) -> list[TextContent]:
     """Send a reply to a message with input validation."""
     # Validate inputs (raises ValidationError on bad data)
@@ -2417,10 +2453,23 @@ async def handle_send_reply(args: dict) -> list[TextContent]:
     if thread_ts and source == "slack":
         reply_data["thread_ts"] = thread_ts
 
-    # Include reply_to_message_id if provided (Telegram only)
+    # Include reply_to_message_id if provided (Telegram only).
+    # If not provided, auto-look up the telegram_message_id from any message
+    # currently in processing/ for this chat_id. This makes threading structural
+    # (automatic at the code level) rather than relying on dispatcher compliance.
     reply_to_msg_id = args.get("reply_to_message_id")
-    if reply_to_msg_id and source == "telegram":
-        reply_data["reply_to_message_id"] = int(reply_to_msg_id)
+    if source == "telegram":
+        if reply_to_msg_id:
+            reply_data["reply_to_message_id"] = int(reply_to_msg_id)
+        else:
+            # Auto-threading: scan processing/ for a message belonging to this chat
+            auto_tg_msg_id = _lookup_telegram_message_id_for_chat(chat_id)
+            if auto_tg_msg_id:
+                reply_data["reply_to_message_id"] = auto_tg_msg_id
+                log.debug(
+                    f"Auto-threaded reply to chat {chat_id} using "
+                    f"telegram_message_id={auto_tg_msg_id}"
+                )
 
     # Route bisque replies to the bisque-outbox so the relay server picks them up.
     # All other sources go to the standard outbox for the bot process.

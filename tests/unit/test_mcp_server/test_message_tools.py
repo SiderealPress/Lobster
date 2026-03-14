@@ -5,10 +5,23 @@ Tests check_inbox, send_reply, mark_processed, list_sources, get_stats
 """
 
 import json
+import sys
 import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 from datetime import datetime, timezone
+
+# Ensure src/mcp is on sys.path so that `reliability` (a sibling module) can
+# be resolved when inbox_server is imported via the `src.mcp.inbox_server`
+# dotted path.  The root conftest adds `src/` but not `src/mcp/`, so we add
+# the latter here; this is a no-op if the path is already present.
+_MCP_DIR = Path(__file__).parent.parent.parent.parent / "src" / "mcp"
+if str(_MCP_DIR) not in sys.path:
+    sys.path.insert(0, str(_MCP_DIR))
+
+# Pre-load the module so that unittest.mock can resolve "src.mcp.inbox_server"
+# as an attribute of the `src.mcp` package before patch.multiple opens.
+import src.mcp.inbox_server  # noqa: F401
 
 # We'll test the handlers directly by importing them
 # and patching the directory constants
@@ -246,6 +259,204 @@ class TestSendReply:
             files = list(outbox_dir.glob("*.json"))
             content = json.loads(files[0].read_text())
             assert content["source"] == "telegram"
+
+
+class TestAutoThreading:
+    """Tests for automatic reply threading (issue #330).
+
+    When send_reply is called for a Telegram message without an explicit
+    reply_to_message_id, it should auto-look up the telegram_message_id from
+    any message currently in processing/ for that chat_id and thread against it.
+    """
+
+    @pytest.fixture
+    def dirs(self, temp_messages_dir: Path):
+        outbox = temp_messages_dir / "outbox"
+        processing = temp_messages_dir / "processing"
+        sent = temp_messages_dir / "sent"
+        outbox.mkdir(parents=True, exist_ok=True)
+        processing.mkdir(parents=True, exist_ok=True)
+        sent.mkdir(parents=True, exist_ok=True)
+        return outbox, processing, sent
+
+    def _make_processing_msg(self, processing_dir: Path, chat_id: int, tg_msg_id: int) -> None:
+        """Write a fake processing message with a telegram_message_id."""
+        msg = {
+            "id": f"12345_msg",
+            "source": "telegram",
+            "chat_id": chat_id,
+            "type": "text",
+            "text": "Hello",
+            "telegram_message_id": tg_msg_id,
+            "timestamp": "2026-03-14T12:00:00.000000",
+        }
+        (processing_dir / "12345_msg.json").write_text(json.dumps(msg))
+
+    def test_auto_threads_when_processing_message_exists(self, dirs):
+        """When no reply_to_message_id is given, threading uses the message in processing/."""
+        outbox, processing, sent = dirs
+        self._make_processing_msg(processing, chat_id=123456, tg_msg_id=9001)
+
+        with patch.multiple(
+            "src.mcp.inbox_server",
+            OUTBOX_DIR=outbox,
+            PROCESSING_DIR=processing,
+            SENT_DIR=sent,
+        ):
+            import asyncio
+            from src.mcp.inbox_server import handle_send_reply
+
+            asyncio.run(handle_send_reply({
+                "chat_id": 123456,
+                "text": "Auto-threaded reply",
+                "source": "telegram",
+            }))
+
+        files = list(outbox.glob("*.json"))
+        assert len(files) == 1
+        content = json.loads(files[0].read_text())
+        assert content.get("reply_to_message_id") == 9001, (
+            "Expected reply_to_message_id=9001 from auto-threading"
+        )
+
+    def test_explicit_reply_id_takes_precedence_over_auto(self, dirs):
+        """An explicit reply_to_message_id overrides auto-threading."""
+        outbox, processing, sent = dirs
+        self._make_processing_msg(processing, chat_id=123456, tg_msg_id=9001)
+
+        with patch.multiple(
+            "src.mcp.inbox_server",
+            OUTBOX_DIR=outbox,
+            PROCESSING_DIR=processing,
+            SENT_DIR=sent,
+        ):
+            import asyncio
+            from src.mcp.inbox_server import handle_send_reply
+
+            asyncio.run(handle_send_reply({
+                "chat_id": 123456,
+                "text": "Explicit thread",
+                "source": "telegram",
+                "reply_to_message_id": 5555,
+            }))
+
+        files = list(outbox.glob("*.json"))
+        content = json.loads(files[0].read_text())
+        assert content.get("reply_to_message_id") == 5555, (
+            "Explicit reply_to_message_id should win over auto-threading"
+        )
+
+    def test_no_threading_when_no_processing_message(self, dirs):
+        """When processing/ is empty, reply_to_message_id is absent."""
+        outbox, processing, sent = dirs
+        # No message in processing/
+
+        with patch.multiple(
+            "src.mcp.inbox_server",
+            OUTBOX_DIR=outbox,
+            PROCESSING_DIR=processing,
+            SENT_DIR=sent,
+        ):
+            import asyncio
+            from src.mcp.inbox_server import handle_send_reply
+
+            asyncio.run(handle_send_reply({
+                "chat_id": 123456,
+                "text": "No thread",
+                "source": "telegram",
+            }))
+
+        files = list(outbox.glob("*.json"))
+        content = json.loads(files[0].read_text())
+        assert "reply_to_message_id" not in content, (
+            "reply_to_message_id should be absent when no processing message exists"
+        )
+
+    def test_no_threading_for_wrong_chat_id(self, dirs):
+        """Processing message for a different chat_id is not used for threading."""
+        outbox, processing, sent = dirs
+        self._make_processing_msg(processing, chat_id=999999, tg_msg_id=9001)
+
+        with patch.multiple(
+            "src.mcp.inbox_server",
+            OUTBOX_DIR=outbox,
+            PROCESSING_DIR=processing,
+            SENT_DIR=sent,
+        ):
+            import asyncio
+            from src.mcp.inbox_server import handle_send_reply
+
+            asyncio.run(handle_send_reply({
+                "chat_id": 123456,  # different from 999999
+                "text": "Different chat",
+                "source": "telegram",
+            }))
+
+        files = list(outbox.glob("*.json"))
+        content = json.loads(files[0].read_text())
+        assert "reply_to_message_id" not in content, (
+            "Should not thread against a message for a different chat_id"
+        )
+
+    def test_no_auto_threading_for_slack_source(self, dirs):
+        """Auto-threading only applies to telegram; Slack messages are unaffected."""
+        outbox, processing, sent = dirs
+        # Put a processing message with tg_msg_id for this chat
+        self._make_processing_msg(processing, chat_id=123456, tg_msg_id=9001)
+
+        with patch.multiple(
+            "src.mcp.inbox_server",
+            OUTBOX_DIR=outbox,
+            PROCESSING_DIR=processing,
+            SENT_DIR=sent,
+        ):
+            import asyncio
+            from src.mcp.inbox_server import handle_send_reply
+
+            asyncio.run(handle_send_reply({
+                "chat_id": 123456,
+                "text": "Slack reply",
+                "source": "slack",
+            }))
+
+        files = list(outbox.glob("*.json"))
+        content = json.loads(files[0].read_text())
+        assert "reply_to_message_id" not in content, (
+            "reply_to_message_id should not be set for Slack replies"
+        )
+
+    def test_processing_message_without_tg_msg_id_is_skipped(self, dirs):
+        """Processing message lacking telegram_message_id does not trigger threading."""
+        outbox, processing, sent = dirs
+        # Message without telegram_message_id
+        msg = {
+            "id": "no_tg_id_msg",
+            "source": "telegram",
+            "chat_id": 123456,
+            "type": "text",
+            "text": "No tg msg id",
+            "timestamp": "2026-03-14T12:00:00.000000",
+        }
+        (processing / "no_tg_id_msg.json").write_text(json.dumps(msg))
+
+        with patch.multiple(
+            "src.mcp.inbox_server",
+            OUTBOX_DIR=outbox,
+            PROCESSING_DIR=processing,
+            SENT_DIR=sent,
+        ):
+            import asyncio
+            from src.mcp.inbox_server import handle_send_reply
+
+            asyncio.run(handle_send_reply({
+                "chat_id": 123456,
+                "text": "No tg id processing msg",
+                "source": "telegram",
+            }))
+
+        files = list(outbox.glob("*.json"))
+        content = json.loads(files[0].read_text())
+        assert "reply_to_message_id" not in content
 
 
 class TestMarkProcessed:
