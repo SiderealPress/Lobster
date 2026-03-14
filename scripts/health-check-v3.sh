@@ -141,17 +141,13 @@ send_telegram_alert() {
         return 1
     fi
 
-    local full_message="\U0001F6A8 *Lobster Health Alert*
-
-${message}
-
-_$(date '+%Y-%m-%d %H:%M:%S %Z')_"
+    local full_message=$'🚨 *Lobster Health Alert*\n\n'"${message}"$'\n\n_'"$(date '+%Y-%m-%d %H:%M:%S %Z')"$'_'
 
     curl -s -X POST \
         "https://api.telegram.org/bot${bot_token}/sendMessage" \
-        -d chat_id="$chat_id" \
-        -d text="$full_message" \
-        -d parse_mode="Markdown" \
+        --data-urlencode "chat_id=${chat_id}" \
+        --data-urlencode "text=${full_message}" \
+        --data-urlencode "parse_mode=Markdown" \
         --max-time 10 \
         > /dev/null 2>&1
 
