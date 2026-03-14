@@ -18,6 +18,7 @@ import os
 import sys
 import time
 import threading
+import uuid
 import httpx
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1057,6 +1058,13 @@ async def list_tools() -> list[Tool]:
                     "task_id": {
                         "type": "string",
                         "description": "Optional identifier for the originating task.",
+                    },
+                    "source": {
+                        "type": "string",
+                        "description": (
+                            "Messaging source the observation originated from "
+                            "('telegram', 'slack', etc.). Defaults to 'telegram'."
+                        ),
                     },
                 },
                 "required": ["chat_id", "text", "category"],
@@ -3575,6 +3583,7 @@ async def handle_write_observation(args: dict) -> list[TextContent]:
     text = args.get("text", "").strip()
     category = args.get("category", "").strip()
     task_id = args.get("task_id", "").strip() or None
+    source = args.get("source", "telegram").strip() or "telegram"
 
     if chat_id is None:
         return [TextContent(type="text", text="Error: chat_id is required")]
@@ -3586,12 +3595,12 @@ async def handle_write_observation(args: dict) -> list[TextContent]:
 
     now = datetime.now(timezone.utc)
     ts_ms = int(now.timestamp() * 1000)
-    message_id = f"{ts_ms}_observation"
+    message_id = f"{ts_ms}_observation_{uuid.uuid4().hex[:8]}"
 
     message: dict = {
         "id": message_id,
         "type": "subagent_observation",
-        "source": "telegram",
+        "source": source,
         "chat_id": chat_id,
         "text": text,
         "category": category,

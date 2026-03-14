@@ -88,7 +88,7 @@ mcp__lobster-inbox__write_observation(
 
 | Category | Use when | Dispatcher action |
 |---|---|---|
-| `user_context` | Something the user said or revealed that's worth remembering or acting on | Forwarded to user + stored |
+| `user_context` | Something the user said or revealed that's worth remembering or acting on | Forwarded to user |
 | `system_context` | Internal system info worth storing silently | Stored to memory, no user message |
 | `system_error` | Error or anomaly to log | Written to `observations.log`, no user message |
 
@@ -96,7 +96,7 @@ mcp__lobster-inbox__write_observation(
 
 - Call `write_observation` before or after `write_result` — order doesn't matter
 - You can call it multiple times if you have multiple observations
-- It is non-blocking — the dispatcher handles routing asynchronously
+- The write is synchronous; the dispatcher picks it up in its next loop iteration
 - Do NOT use it as a substitute for `write_result` — always call both if you have a primary result and observations
 
 ## Model Selection
