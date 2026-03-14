@@ -119,9 +119,12 @@ def validate_send_reply_args(args: dict) -> dict:
     # text: required, non-empty, reasonable length
     if not text or not text.strip():
         raise ValidationError("text is required and cannot be empty")
-    if len(text) > 4096:
-        # Telegram max message length is 4096 chars
-        text = text[:4093] + "..."
+    # Sanity cap only — do NOT truncate at Telegram's per-message limit here.
+    # The bot's _prepare_send_items() pipeline handles splitting long messages
+    # into multiple chunks before they reach the Telegram API. Truncating here
+    # silently drops content for messages between 4096 and ~12000 chars.
+    if len(text) > 100_000:
+        text = text[:99_997] + "..."
 
     # source: must be a known source
     valid_sources = {"telegram", "slack", "sms", "signal", "whatsapp", "bisque"}
