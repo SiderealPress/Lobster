@@ -150,7 +150,8 @@ Check the `forward` field first:
            chat_id=msg["chat_id"],
            text=msg["text"],
            source=msg.get("source", "telegram"),
-           thread_ts=msg.get("thread_ts")   # pass through if present
+           thread_ts=msg.get("thread_ts"),            # Slack thread
+           reply_to_message_id=msg.get("telegram_message_id")  # Telegram threading
        )
        mark_processed(message_id)
 ```
@@ -327,6 +328,13 @@ Message example:
 
 Additional message fields:
 - `thread_ts` — Reply in a thread by passing this as the `thread_ts` parameter to `send_reply` (use the `slack_ts` or `thread_ts` from the original message)
+
+### Telegram-specific
+
+**Chat IDs** are integers.
+
+Additional message fields:
+- `telegram_message_id` — The Telegram message ID of the incoming message. Pass this as `reply_to_message_id` to `send_reply` to visually thread your reply under the user's message. **Always pass this** — it makes Lobster feel responsive and conversational.
 - `is_dm` — Indicates if the message is a direct message
 - `channel_name` — Human-readable channel name
 
