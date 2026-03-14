@@ -1023,10 +1023,6 @@ else
     sudo systemctl start crond 2>/dev/null || true
 fi
 
-# Enable atd service (for self-check reminders via 'at' command)
-sudo systemctl enable atd 2>/dev/null || true
-sudo systemctl start atd 2>/dev/null || true
-
 success "Scheduled tasks infrastructure ready"
 
 #===============================================================================
@@ -1037,7 +1033,6 @@ step "Setting up health monitoring..."
 
 # Make scripts executable
 chmod +x "$INSTALL_DIR/scripts/health-check-v3.sh" || true
-chmod +x "$INSTALL_DIR/scripts/self-check-reminder.sh" || true
 
 # Add health check to crontab (runs every 2 minutes)
 HEALTH_MARKER="# LOBSTER-HEALTH"

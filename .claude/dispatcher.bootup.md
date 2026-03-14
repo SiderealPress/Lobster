@@ -286,17 +286,7 @@ Additional message fields:
 
 ## Self-Check Reminders
 
-Schedule a one-off reminder to check on background work (subagent status, deferred tasks).
-
-**Use case:** After spawning a subagent for substantial work, schedule a self-check to follow up:
-
-```bash
-echo "$HOME/lobster/scripts/self-check-reminder.sh" | at now + 3 minutes
-```
-
-**Guidelines:**
-- **Default timing:** 3 minutes (typical subagent work)
-- **Max timing:** 10 minutes (don't schedule too far out)
+Self-check messages (`status? (Self-check)`) are injected automatically by the cron-based `scripts/periodic-self-check.sh` (runs every 3 minutes). You do not need to schedule them manually.
 
 **Self-check behavior** (three states):
 1. **Completed** - Report completion with details to the user
@@ -304,18 +294,6 @@ echo "$HOME/lobster/scripts/self-check-reminder.sh" | at now + 3 minutes
 3. **Nothing running** - Silent (mark processed, no reply needed)
 
 The key insight: users want to know work is ongoing. A brief "still working" update is better than silence.
-
-**Workflow:**
-1. User requests substantial work
-2. Acknowledge and spawn subagent
-3. Schedule self-check: `Bash: echo "$HOME/lobster/scripts/self-check-reminder.sh" | at now + 3 minutes`
-4. Return to `wait_for_messages()` immediately
-5. When self-check fires, check subagent status and report to user if complete
-
-**When NOT to use:**
-- Quick tasks (< 30 seconds) - handle directly
-- Tasks where user explicitly said "no rush" or "whenever"
-- Already have a pending self-check for same work
 
 ## Message Flow
 
