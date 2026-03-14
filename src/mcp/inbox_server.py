@@ -49,6 +49,9 @@ from reliability import (
 # Self-update system
 from update_manager import UpdateManager
 
+# Pending agent tracker
+from agents.tracker import add_pending_agent as _add_pending_agent, remove_pending_agent as _remove_pending_agent
+
 # Skill management system
 from skill_manager import (
     list_available_skills as _list_available_skills,
@@ -1148,6 +1151,64 @@ async def list_tools() -> list[Tool]:
                 "required": ["chat_id", "text", "category"],
             },
         ),
+        # Pending Agent Tracker Tools
+        Tool(
+            name="register_agent",
+            description=(
+                "Record a newly-spawned background agent in the pending-agents tracker. "
+                "Call this immediately after spawning a Task, passing the agent_id extracted "
+                "from the Task tool result text and a human-readable description of what the "
+                "agent is doing. This creates a durable record that survives dispatcher restarts "
+                "and compactions, so in-flight agents are never silently lost."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "agent_id": {
+                        "type": "string",
+                        "description": (
+                            "Unique identifier for the agent task. Extract from the Task tool "
+                            "result text (looks like 'agentId: abc123...'). If the ID cannot be "
+                            "parsed, use a synthetic ID derived from task context."
+                        ),
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": (
+                            "Human-readable summary of what the agent is doing. Include enough "
+                            "context so Lobster can relay results correctly after a restart "
+                            "(e.g. 'Implement feature X on issue #42 for chat 1234567890')."
+                        ),
+                    },
+                    "chat_id": {
+                        "oneOf": [
+                            {"type": "integer"},
+                            {"type": "string"},
+                        ],
+                        "description": "Telegram/Slack chat_id to notify when the agent completes.",
+                    },
+                },
+                "required": ["agent_id", "description", "chat_id"],
+            },
+        ),
+        Tool(
+            name="unregister_agent",
+            description=(
+                "Remove a completed or failed agent from the pending-agents tracker. "
+                "Call this when a write_result arrives from a background agent to mark it done. "
+                "Idempotent: removing a non-existent ID is a no-op."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "agent_id": {
+                        "type": "string",
+                        "description": "The agent_id that was passed to register_agent when the task was spawned.",
+                    },
+                },
+                "required": ["agent_id"],
+            },
+        ),
         # Brain Dump Triage Tools
         Tool(
             name="triage_brain_dump",
@@ -1777,6 +1838,11 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
         return await handle_write_result(arguments)
     elif name == "write_observation":
         return await handle_write_observation(arguments)
+    # Pending Agent Tracker Tools
+    elif name == "register_agent":
+        return await handle_register_agent(arguments)
+    elif name == "unregister_agent":
+        return await handle_unregister_agent(arguments)
     # Brain Dump Triage Tools
     elif name == "triage_brain_dump":
         return await handle_triage_brain_dump(arguments)
@@ -3730,6 +3796,71 @@ async def handle_write_observation(args: dict) -> list[TextContent]:
     return [TextContent(
         type="text",
         text=f"Observation queued (id={message_id}, category={category}). The dispatcher will route it.",
+    )]
+
+
+# =============================================================================
+# Pending Agent Tracker Handlers
+# =============================================================================
+
+
+async def handle_register_agent(args: dict) -> list[TextContent]:
+    """Record a newly-spawned background agent in the pending-agents tracker.
+
+    Delegates to tracker.add_pending_agent(), which atomically writes to
+    ~/messages/config/pending-agents.json under a file lock. Records survive
+    dispatcher restarts and context compactions.
+    """
+    agent_id = args.get("agent_id", "").strip()
+    description = args.get("description", "").strip()
+    chat_id = args.get("chat_id")
+
+    if not agent_id:
+        return [TextContent(type="text", text="Error: agent_id is required")]
+    if not description:
+        return [TextContent(type="text", text="Error: description is required")]
+    if chat_id is None:
+        return [TextContent(type="text", text="Error: chat_id is required")]
+
+    # Normalise chat_id to int when possible (tracker stores it as int)
+    try:
+        chat_id_int = int(chat_id)
+    except (TypeError, ValueError):
+        chat_id_int = chat_id  # type: ignore[assignment]
+
+    try:
+        _add_pending_agent(agent_id=agent_id, description=description, chat_id=chat_id_int)
+    except Exception as exc:
+        log.error(f"register_agent failed: {exc}", exc_info=True)
+        return [TextContent(type="text", text=f"Error recording agent: {exc}")]
+
+    log.info(f"Registered pending agent: agent_id={agent_id!r} chat_id={chat_id_int}")
+    return [TextContent(
+        type="text",
+        text=f"Agent registered: {agent_id!r} — {description}",
+    )]
+
+
+async def handle_unregister_agent(args: dict) -> list[TextContent]:
+    """Remove a completed or failed agent from the pending-agents tracker.
+
+    Idempotent: removing an agent_id that does not exist is a no-op.
+    """
+    agent_id = args.get("agent_id", "").strip()
+
+    if not agent_id:
+        return [TextContent(type="text", text="Error: agent_id is required")]
+
+    try:
+        _remove_pending_agent(agent_id=agent_id)
+    except Exception as exc:
+        log.error(f"unregister_agent failed: {exc}", exc_info=True)
+        return [TextContent(type="text", text=f"Error removing agent: {exc}")]
+
+    log.info(f"Unregistered pending agent: agent_id={agent_id!r}")
+    return [TextContent(
+        type="text",
+        text=f"Agent unregistered: {agent_id!r}",
     )]
 
 
