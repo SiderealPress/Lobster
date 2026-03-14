@@ -9,8 +9,8 @@ You are **Lobster**, an always-on AI assistant that never exits. You run in a pe
 This file provides shared context. Depending on your role, read the appropriate supplement:
 
 **System context** (always read):
-- **If you are the dispatcher (main loop):** read `.claude/dispatcher.bootup.md` — it covers the main loop pseudocode, the 7-second rule, the dispatcher pattern, handling subagent results, message source handling (Telegram/Slack), self-check reminders, message flow diagram, startup behavior, and hibernation.
-- **If you are a subagent:** read `.claude/subagent.bootup.md` — it covers the `write_result` requirement, identity rules, and the model selection table.
+- **If you are the dispatcher (main loop):** read `.claude/sys.dispatcher.md` — it covers the main loop pseudocode, the 7-second rule, the dispatcher pattern, handling subagent results, message source handling (Telegram/Slack), self-check reminders, message flow diagram, startup behavior, and hibernation.
+- **If you are a subagent:** read `.claude/sys.subagent.md` — it covers the `write_result` requirement, identity rules, and the model selection table.
 
 ```
 while True:
@@ -22,10 +22,10 @@ while True:
 ```
 
 **User context** (read after system files, if the files exist):
-- Both roles: `~/lobster-user-config/agents/base.bootup.md` (behavioral preferences)
-- Both roles: `~/lobster-user-config/agents/base.context.md` (personal facts and context)
-- Dispatcher: `~/lobster-user-config/agents/dispatcher.bootup.md`
-- Subagent: `~/lobster-user-config/agents/subagent.bootup.md`
+- Both roles: `~/lobster-user-config/agents/user.base.md` (behavioral preferences)
+- Both roles: `~/lobster-user-config/agents/user.base.context.md` (personal facts and context)
+- Dispatcher: `~/lobster-user-config/agents/user.dispatcher.md`
+- Subagent: `~/lobster-user-config/agents/user.subagent.md`
 
 User context files are private and not committed to git. They contain user-specific preferences, decisions, and constraints that extend the system defaults. When the user says "remember X" and it belongs to a specific scope, write it to the appropriate user file.
 
@@ -424,10 +424,10 @@ All Lobster-managed projects live in `$LOBSTER_WORKSPACE/projects/[project-name]
 - `~/lobster-user-config/` - User-specific config and memory (private, not in repo)
   - `memory/canonical/` - Handoff, priorities, people, projects
   - `memory/archive/digests/` - Archived daily digests
-  - `agents/base.bootup.md` - Behavioral preferences (all roles)
-  - `agents/base.context.md` - Personal facts and context (all roles)
-  - `agents/dispatcher.bootup.md` - Dispatcher-specific overrides
-  - `agents/subagent.bootup.md` - Subagent-specific overrides
+  - `agents/user.base.md` - Behavioral preferences (all roles)
+  - `agents/user.base.context.md` - Personal facts and context (all roles)
+  - `agents/user.dispatcher.md` - Dispatcher-specific overrides
+  - `agents/user.subagent.md` - Subagent-specific overrides
   - `agents/subagents/` - User-defined custom subagent definitions
 - `~/lobster-workspace/` - Runtime data (never in repo)
   - `projects/` - All Lobster-managed projects (`$LOBSTER_PROJECTS`)
