@@ -41,35 +41,11 @@ Work through these phases — the goal of each is stated, not the exact steps:
 
 **Branch**: Create a descriptively named branch (`feature/issue-{number}-{description}` or `fix/issue-{number}-{description}`). For sub-issues, branch from the parent issue's branch if one exists; create it if not.
 
-**CRITICAL: `~/lobster/` must ALWAYS stay on `main`. Never run `git checkout <feature-branch>` in `~/lobster/`. All feature branch work happens in a git worktree.**
-
-Create the branch and its worktree in one step:
-
-```bash
-cd ~/lobster
-git fetch origin
-git worktree add -b feature/issue-42-my-feature ~/lobster-workspace/projects/feature-issue-42-my-feature origin/main
-```
-
-Do ALL work in the worktree directory (`~/lobster-workspace/projects/<branch-name>/`), not in `~/lobster/`. `~/lobster/` stays on `main` throughout — this keeps the live system intact.
-
-**Sub-issue branches:** Branch from the parent issue's branch rather than `origin/main`:
-```bash
-git worktree add -b feature/issue-15-parser ~/lobster-workspace/projects/feature-issue-15-parser feature/issue-10-parent
-```
-
-**Worktree cleanup after PR is merged:**
-```bash
-cd ~/lobster
-git worktree remove ~/lobster-workspace/projects/feature-issue-42-my-feature
-git branch -d feature/issue-42-my-feature
-```
-
 **Implement**: Write functional code. Commit atomically with clear messages. Check off plan items as you go. Comment on the issue when you encounter unexpected complexity, make architectural decisions, or change your approach.
 
 **PR**: Open a pull request with a comprehensive description. Update project status to "In Review".
 
-**Wrap up**: After merge, set status to "Done". Close the issue if not auto-closed. Remove the worktree.
+**Wrap up**: After merge, set status to "Done". Close the issue if not auto-closed.
 
 ## Project Status
 
