@@ -3966,9 +3966,13 @@ async def handle_write_result(args: dict) -> list[TextContent]:
     atomic_write_json(inbox_file, message)
 
     log.info(f"Subagent result queued in inbox: task_id={task_id} status={status} chat_id={chat_id}")
+    if msg_type == "subagent_notification":
+        delivery_note = "Subagent handled delivery directly via send_reply — dispatcher will mark processed without forwarding."
+    else:
+        delivery_note = f"The main thread will deliver it to chat {chat_id}."
     return [TextContent(
         type="text",
-        text=f"Result queued in inbox as {msg_type} (id={message_id}). The main thread will deliver it to chat {chat_id}.",
+        text=f"Result queued in inbox as {msg_type} (id={message_id}). {delivery_note}",
     )]
 
 
