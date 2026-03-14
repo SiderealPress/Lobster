@@ -48,24 +48,34 @@ You are a **stateless dispatcher**. Your ONLY job on the main thread is to read 
 1. send_reply(chat_id, "On it — I'll report back shortly.")
 2. task_result = Task(prompt="...", subagent_type="general-purpose", run_in_background=true)
 3. agent_id = extract agentId from task_result text (look for "agentId: <id>")
-4. register_agent(agent_id=agent_id, description="Brief what/why + chat_id", chat_id=chat_id)
-5. mark_processed(message_id)
-6. Return to wait_for_messages() IMMEDIATELY
+4. output_file = extract output file path from task_result text (look for a /tmp/... path ending in .output)
+5. register_agent(
+       agent_id=agent_id,
+       description="Brief what/why + chat_id",
+       chat_id=chat_id,
+       source=msg.get("source", "telegram"),
+       output_file=output_file,   # enables liveness detection via mtime
+       timeout_minutes=30,        # adjust for long-running tasks
+   )
+6. mark_processed(message_id)
+7. Return to wait_for_messages() IMMEDIATELY
 ```
 
 **Closing the loop when write_result arrives:**
 ```
 When wait_for_messages() returns a subagent_result/subagent_error:
 1. mark_processing(message_id)
-2. agent_id = msg.get("task_id")   # subagents pass task_id = agent_id by convention
-3. unregister_agent(agent_id=agent_id)   # remove from pending tracker
-4. ... forward or drop based on forward field as usual ...
-5. mark_processed(message_id)
+2. # Note: write_result auto-unregisters the agent server-side — no manual unregister_agent call needed.
+   # The tracker is updated atomically when write_result is called.
+3. ... forward or drop based on forward field as usual ...
+4. mark_processed(message_id)
 ```
 
 **Agent tracking — why it matters:**
 
-`register_agent` / `unregister_agent` write to `~/messages/config/pending-agents.json` via `tracker.py`. This JSON file is the single source of truth for in-flight agents. It survives dispatcher restarts and context compactions, so you can always answer "what agents are running?" even after a crash. Without it, any compaction leaves a blind spot where you cannot distinguish agents that completed silently from agents that are still running.
+`register_agent` writes to `~/messages/config/pending-agents.json` via `tracker.py`. This JSON file is the single source of truth for in-flight agents. It survives dispatcher restarts and context compactions, so you can always answer "what agents are running?" even after a crash. Without it, any compaction leaves a blind spot where you cannot distinguish agents that completed silently from agents that are still running.
+
+When a subagent calls `write_result`, the inbox server **automatically removes** that agent from pending-agents — so the tracker stays accurate without any dispatcher action required.
 
 **Extracting the agentId from a Task result:**
 
@@ -76,6 +86,16 @@ match = re.search(r'agentId[:\s]+([a-f0-9\-]{8,})', task_result or "", re.IGNORE
 agent_id = match.group(1) if match else f"agent-{int(time.time())}"
 ```
 If the pattern does not match, fall back to a synthetic timestamp-based ID — the record is still useful for human review even without the real agent UUID.
+
+**Extracting the output_file path from a Task result:**
+
+The Task tool result text contains the path to the agent's live output file. Parse it:
+```python
+import re
+match = re.search(r'(/tmp/[^\s]+\.output)', task_result or "")
+output_file = match.group(1) if match else None
+```
+Pass this to `register_agent` as `output_file`. It enables future liveness detection — the self-check handler can stat the file's mtime to determine whether the agent is still active or has gone silent.
 
 **Why this matters:**
 - If you spend even 60 seconds on a task, new messages pile up unanswered

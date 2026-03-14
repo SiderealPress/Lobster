@@ -1333,10 +1333,11 @@ async def list_tools() -> list[Tool]:
             name="register_agent",
             description=(
                 "Record a newly-spawned background agent in the pending-agents tracker. "
-                "Call this immediately after spawning a Task, passing the agent_id extracted "
-                "from the Task tool result text and a human-readable description of what the "
-                "agent is doing. This creates a durable record that survives dispatcher restarts "
-                "and compactions, so in-flight agents are never silently lost."
+                "Call this BEFORE spawning a Task (pre-registration), passing the agent_id "
+                "extracted from the Task tool result text and a human-readable description. "
+                "This creates a durable record that survives dispatcher restarts and compactions, "
+                "so in-flight agents are never silently lost. Pass output_file to enable liveness "
+                "detection — the path to the agent's Claude Code output file in /tmp."
             ),
             inputSchema={
                 "type": "object",
@@ -1363,6 +1364,34 @@ async def list_tools() -> list[Tool]:
                             {"type": "string"},
                         ],
                         "description": "Telegram/Slack chat_id to notify when the agent completes.",
+                    },
+                    "task_id": {
+                        "type": "string",
+                        "description": (
+                            "Logical task identifier — the same value the subagent will pass "
+                            "as task_id to write_result. Used for auto-unregister matching. "
+                            "If omitted, agent_id is used for matching."
+                        ),
+                    },
+                    "source": {
+                        "type": "string",
+                        "description": "Messaging platform ('telegram', 'slack', etc.). Default: 'telegram'.",
+                    },
+                    "output_file": {
+                        "type": "string",
+                        "description": (
+                            "Full path to the Claude Code agent output file "
+                            "(e.g. /tmp/claude-1000/-home-lobster-lobster-workspace/{session}/{agentId}.output). "
+                            "Used for liveness detection: stat the mtime to determine if the agent is still active. "
+                            "Extract from the Task tool result text."
+                        ),
+                    },
+                    "timeout_minutes": {
+                        "type": "integer",
+                        "description": (
+                            "Expected maximum runtime in minutes. Agents older than this without "
+                            "recent output file activity can be presumed dead. Default: 30."
+                        ),
                     },
                 },
                 "required": ["agent_id", "description", "chat_id"],
@@ -3959,6 +3988,14 @@ async def handle_write_result(args: dict) -> list[TextContent]:
     inbox_file = INBOX_DIR / f"{message_id}.json"
     atomic_write_json(inbox_file, message)
 
+    # Auto-unregister: remove this agent from the pending-agents tracker.
+    # The task_id passed to write_result matches the agent_id registered by the dispatcher.
+    # This is the atomic "result delivered → agent done" guarantee described in issue #295.
+    try:
+        _remove_pending_agent(agent_id=task_id)
+    except Exception as exc:
+        log.warning(f"write_result auto-unregister failed for task_id={task_id!r}: {exc}")
+
     log.info(f"Subagent result queued in inbox: task_id={task_id} status={status} chat_id={chat_id}")
     return [TextContent(
         type="text",
@@ -4045,6 +4082,10 @@ async def handle_register_agent(args: dict) -> list[TextContent]:
     agent_id = args.get("agent_id", "").strip()
     description = args.get("description", "").strip()
     chat_id = args.get("chat_id")
+    task_id = args.get("task_id") or None
+    source = (args.get("source") or "telegram").strip() or "telegram"
+    output_file = args.get("output_file") or None
+    timeout_minutes = args.get("timeout_minutes") or None
 
     if not agent_id:
         return [TextContent(type="text", text="Error: agent_id is required")]
@@ -4059,8 +4100,23 @@ async def handle_register_agent(args: dict) -> list[TextContent]:
     except (TypeError, ValueError):
         chat_id_int = chat_id  # type: ignore[assignment]
 
+    # Normalise timeout_minutes to int when possible
+    if timeout_minutes is not None:
+        try:
+            timeout_minutes = int(timeout_minutes)
+        except (TypeError, ValueError):
+            timeout_minutes = None
+
     try:
-        _add_pending_agent(agent_id=agent_id, description=description, chat_id=chat_id_int)
+        _add_pending_agent(
+            agent_id=agent_id,
+            description=description,
+            chat_id=chat_id_int,
+            task_id=task_id,
+            source=source,
+            output_file=output_file,
+            timeout_minutes=timeout_minutes,
+        )
     except Exception as exc:
         log.error(f"register_agent failed: {exc}", exc_info=True)
         return [TextContent(type="text", text=f"Error recording agent: {exc}")]
