@@ -74,6 +74,24 @@ Review results from scheduled jobs:
 - `check_task_outputs(since?, limit?, job_name?)` - Read recent job outputs
 - `write_task_output(job_name, output, status?)` - Write job output (used by job instances)
 
+### Worktree Navigation (EnterWorktree / ExitWorktree)
+
+`EnterWorktree` and `ExitWorktree` are Claude Code built-in tools for switching the active working directory context to a git worktree and back.
+
+- `EnterWorktree(path)` — Sets the working directory to the specified worktree path. Use this when you need to operate on a feature branch that lives at `~/lobster-workspace/projects/<branch-name>/` rather than `~/lobster/`.
+- `ExitWorktree()` — Returns to the previous working directory context (typically `~/lobster/`).
+
+**When to use them:**
+
+These tools are most relevant to the `functional-engineer` agent and other agents that do implementation work in feature worktrees. The normal pattern:
+
+1. Create a worktree: `git -C ~/lobster worktree add -b feature/foo ~/lobster-workspace/projects/foo main`
+2. Call `EnterWorktree("~/lobster-workspace/projects/foo")` to switch context
+3. Do all development work (read, edit, run tests) — relative paths and tool defaults now resolve inside the worktree
+4. Call `ExitWorktree()` when done
+
+**Important:** The main repo at `~/lobster/` must always stay on `main`. All branch work happens in worktrees. See `docs/DEVELOPMENT.md` for the full worktree workflow.
+
 ### GitHub Integration (MCP)
 Access GitHub repos, issues, PRs, and projects:
 - **Issues**: Create, read, update, close issues; add comments and labels

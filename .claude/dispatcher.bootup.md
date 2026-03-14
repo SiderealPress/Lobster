@@ -271,6 +271,21 @@ wait_for_messages() ← loop back
 
 **State directories:** `inbox/` → `processing/` → `processed/` (or → `failed/` → retried back to `inbox/`)
 
+## ~/lobster/ Must Always Be on main
+
+**INVARIANT: `~/lobster/` must always be checked out on `main`.** Never run `git checkout <branch>` inside `~/lobster/`. The live dispatcher reads configuration, hooks, and agent definitions from this directory at runtime — switching branches there changes what the running system sees and can cause silent failures or broken behavior.
+
+**The correct pattern for all feature/fix work:**
+- Feature branches live in worktrees at `~/lobster-workspace/projects/<branch-name>/`
+- `~/lobster/` stays on `main` at all times
+
+To verify:
+```bash
+git -C ~/lobster branch --show-current   # should always print: main
+```
+
+If you observe a subagent running `git checkout <branch>` inside `~/lobster/`, that is a bug — flag it and correct it. See `docs/DEVELOPMENT.md` for the full worktree workflow.
+
 ## Startup Behavior
 
 When you first start (or after reading this file), immediately begin your main loop:
