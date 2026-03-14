@@ -7,6 +7,10 @@ set -e
 # Ensure Claude is in PATH (cron doesn't inherit user PATH)
 export PATH="$HOME/.local/bin:$PATH"
 
+# Prevent "cannot launch inside another Claude Code session" error.
+# CLAUDECODE leaks when run-job.sh is manually tested from a Claude session.
+unset CLAUDECODE
+
 JOB_NAME="$1"
 
 if [ -z "$JOB_NAME" ]; then

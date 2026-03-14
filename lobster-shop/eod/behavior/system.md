@@ -106,29 +106,40 @@ The `process_eod_voice_note()` function in
 `~/lobster-workspace/projects/lobster-eod-skill/eod_skill.py` handles
 all data gathering and formatting. It:
 
-1. **Pulls GitHub activity** for the past 18 hours using `gh` CLI:
+1. **Pulls Linear activity** for the past 18 hours via the Linear GraphQL API
+   (key read from `LINEAR_API_KEY` in `~/lobster/config/config.env`):
+   - Issues currently in progress / in review (across all teams)
+   - Issues completed in the window
+   - Issues newly created in the window
+   - Issues updated in the window (state changes, edits)
+   - Grouped into subsections: _In progress_, _Completed_, _Created_, _Updated_
+
+2. **Pulls GitHub activity** for the past 18 hours using `gh` CLI:
    - Commits authored by the owner's GitHub username (read from `owner.toml` [owner] `github_username`, falling back to `gh api user --jq '.login'`)
    - PRs created/updated by the owner
    - Issues created/updated by the owner
    - Issues where the owner commented
 
-2. **Pulls Lobster inbox messages** from `~/messages/processed/` for the past
+3. **Pulls Lobster inbox messages** from `~/messages/processed/` for the past
    18 hours (excluding system self-checks and cron messages).
 
-3. **Formats** everything into a structured Telegram message grouped by category:
+4. **Formats** everything into a structured Telegram message grouped by category:
+   - Linear Updates (in progress, completed, created, updated)
    - Commits
    - Pull Requests
    - Issues
    - Issue Comments
    - Lobster Activity
 
-4. **Appends the voice note** transcription as additional commentary/color at
+5. **Appends the voice note** transcription as additional commentary/color at
    the end under a "Voice note" heading.
 
 ---
 
 ### Error handling
 
+- If `LINEAR_API_KEY` is not set: skip Linear section silently
+- If Linear API returns errors: skip Linear section, log warning
 - If `gh` CLI is unavailable: skip GitHub sections, note "GitHub unavailable"
 - If processed messages directory is missing: skip inbox section
 - If transcription fails: compile activity summary without voice commentary
