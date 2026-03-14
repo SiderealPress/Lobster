@@ -757,6 +757,12 @@ send_notification() {
     done
 }
 
+notify_starting() {
+    local msg="<b>🔄 Lobster updating</b>
+Going down for update. Current: <code>$PREVIOUS_COMMIT</code>"
+    send_notification "info" "$msg"
+}
+
 notify_success() {
     local msg="<b>Lobster updated successfully</b>
 Previous: <code>$PREVIOUS_COMMIT</code>
@@ -835,6 +841,11 @@ main() {
 
     # Phase 2: Backup
     create_backup
+
+    # Notify before going down
+    if ! $DRY_RUN; then
+        notify_starting
+    fi
 
     # Phase 3: Stop services
     stop_services
