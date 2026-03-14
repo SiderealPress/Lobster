@@ -1,0 +1,27 @@
+[Unit]
+Description=Lobster WhatsApp Bridge Adapter (wa-events to inbox)
+After=network.target lobster-whatsapp-bridge.service
+Requires=lobster-whatsapp-bridge.service
+
+[Service]
+Type=simple
+User=admin
+Group=admin
+WorkingDirectory=/home/admin/lobster
+Environment=PATH=/home/admin/.local/bin:/home/admin/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+Environment=LOBSTER_MESSAGES=/home/admin/messages
+Environment=LOBSTER_WORKSPACE=/home/admin/lobster-workspace
+Environment=WA_EVENTS_DIR=/home/admin/messages/wa-events
+Environment=WA_COMMANDS_DIR=/home/admin/messages/wa-commands
+EnvironmentFile=-/home/admin/lobster-workspace/config/whatsapp.env
+ExecStart=/home/admin/lobster/.venv/bin/python /home/admin/lobster/src/bot/whatsapp_bridge_adapter.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lobster-whatsapp-adapter
+
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

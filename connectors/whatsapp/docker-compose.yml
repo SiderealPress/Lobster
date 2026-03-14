@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  whatsapp-bridge:
+    build: .
+    image: lobster-whatsapp-bridge:latest
+    restart: unless-stopped
+
+    # Override env vars for local development
+    # Copy .env.example to .env and fill in values
+    env_file:
+      - .env.example
+
+    volumes:
+      # Session persistence across container restarts
+      # Replace with a named volume or host path for production
+      - ./session:/home/node/session
+
+      # Lobster file bus mounts — connect to the host's messages directory
+      # In production, use the host path: ~/messages
+      - whatsapp-commands:/home/node/messages/wa-commands
+      - whatsapp-events:/home/node/messages/wa-events
+      - whatsapp-logs:/home/node/lobster-workspace/logs
+
+    environment:
+      - WHATSAPP_SESSION_PATH=/home/node/session
+      - WA_COMMANDS_DIR=/home/node/messages/wa-commands
+      - WA_EVENTS_DIR=/home/node/messages/wa-events
+      - WA_HEARTBEAT_FILE=/home/node/lobster-workspace/logs/whatsapp-heartbeat
+      # Set after first QR scan:
+      # - WHATSAPP_LOBSTER_JID=<your-jid>@c.us
+
+    # Chromium requires shared memory
+    shm_size: '256mb'
+
+    # No ports needed — file-based communication only
+    # stdin_open: true  # Uncomment for interactive QR display
+
+# Named volumes for inter-service communication
+volumes:
+  whatsapp-commands:
+  whatsapp-events:
+  whatsapp-logs:
