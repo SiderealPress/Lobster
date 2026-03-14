@@ -315,6 +315,7 @@ FAILED_DIR = BASE_DIR / "failed"
 CONFIG_DIR = BASE_DIR / "config"
 AUDIO_DIR = BASE_DIR / "audio"
 SENT_DIR = BASE_DIR / "sent"
+SENT_REPLIES_DIR = BASE_DIR / "sent-replies"
 TASKS_FILE = BASE_DIR / "tasks.json"
 TASK_OUTPUTS_DIR = BASE_DIR / "task-outputs"
 BISQUE_OUTBOX_DIR = BASE_DIR / "bisque-outbox"
@@ -338,6 +339,54 @@ def _track_reply(chat_id: Any) -> None:
         if len(_recent_replies) > _REPLY_TRACK_MAX:
             sorted_items = sorted(_recent_replies.items(), key=lambda x: x[1], reverse=True)
             _recent_replies = dict(sorted_items[:_REPLY_TRACK_MAX])
+
+# Direct-send deduplication — tracks recent send_reply calls by (chat_id, text_hash).
+# When write_result is called with forward=True, we check whether an identical message
+# was already delivered directly to the same chat within the dedup window.  If so,
+# forward is silently overridden to False to prevent the dispatcher from sending a
+# duplicate to the user.
+#
+# State is stored as small files in SENT_REPLIES_DIR rather than an in-memory dict so
+# that it survives MCP server restarts.  Each file is named after the dedup key and
+# contains the Unix timestamp of the send.  Files older than the window are expired
+# lazily on each record call.
+_DIRECT_SEND_WINDOW_SECS = 60  # suppress duplicates within this window
+
+def _direct_send_key(chat_id: Any, text: str) -> str:
+    import hashlib
+    return f"{chat_id}_{hashlib.sha256(text.encode()).hexdigest()[:16]}"
+
+def _record_direct_send(chat_id: Any, text: str) -> None:
+    """Record a direct send_reply call so write_result can detect duplicates."""
+    key = _direct_send_key(chat_id, text)
+    marker = SENT_REPLIES_DIR / key
+    marker.write_text(str(time.time()))
+    # Lazily evict files older than the window
+    try:
+        cutoff = time.time() - _DIRECT_SEND_WINDOW_SECS
+        for f in SENT_REPLIES_DIR.iterdir():
+            try:
+                if float(f.read_text()) < cutoff:
+                    f.unlink(missing_ok=True)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+def _was_sent_directly(chat_id: Any, text: str) -> bool:
+    """Return True if an identical message was sent directly to chat_id recently."""
+    key = _direct_send_key(chat_id, text)
+    marker = SENT_REPLIES_DIR / key
+    if not marker.exists():
+        return False
+    try:
+        sent_at = float(marker.read_text())
+    except Exception:
+        return False
+    if (time.time() - sent_at) >= _DIRECT_SEND_WINDOW_SECS:
+        marker.unlink(missing_ok=True)
+        return False
+    return True
 
 # Sources that represent human users (not system/automated)
 # NOTE: Do NOT use this to classify whether a message needs a reply — source is
@@ -403,9 +452,9 @@ SCHEDULED_TASKS_LOGS_DIR = SCHEDULED_JOBS_DIR / "logs"
 CANONICAL_DIR = _USER_CONFIG / "memory" / "canonical"
 
 # Ensure directories exist
-for d in [INBOX_DIR, OUTBOX_DIR, PROCESSED_DIR, PROCESSING_DIR, FAILED_DIR, SENT_DIR, CONFIG_DIR,
-          AUDIO_DIR, TASK_OUTPUTS_DIR, BISQUE_OUTBOX_DIR, SCHEDULED_TASKS_TASKS_DIR, SCHEDULED_JOBS_DIR,
-          SCHEDULED_TASKS_LOGS_DIR, CANONICAL_DIR]:
+for d in [INBOX_DIR, OUTBOX_DIR, PROCESSED_DIR, PROCESSING_DIR, FAILED_DIR, SENT_DIR, SENT_REPLIES_DIR,
+          CONFIG_DIR, AUDIO_DIR, TASK_OUTPUTS_DIR, BISQUE_OUTBOX_DIR, SCHEDULED_TASKS_TASKS_DIR,
+          SCHEDULED_JOBS_DIR, SCHEDULED_TASKS_LOGS_DIR, CANONICAL_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
 # Logging
@@ -2344,6 +2393,9 @@ async def handle_send_reply(args: dict) -> list[TextContent]:
     # Track reply for mark_processed guard
     _track_reply(chat_id)
 
+    # Record direct send for write_result deduplication (suppress duplicate forwards)
+    _record_direct_send(chat_id, text)
+
     log.info(f"Reply sent to {source} chat {chat_id}")
 
     # Atomic mark_processed: if message_id provided, move message to processed/ in same call
@@ -2408,6 +2460,7 @@ async def handle_send_whatsapp_reply(args: dict) -> list[TextContent]:
     atomic_write_json(sent_file, reply_data)
 
     _track_reply(chat_id)
+    _record_direct_send(chat_id, text)
 
     log.info(f"WhatsApp reply queued for {chat_id}")
     return [TextContent(type="text", text=f"✅ WhatsApp message queued for {chat_id}:\n\n{text[:100]}{'...' if len(text) > 100 else ''}")]
@@ -2441,6 +2494,7 @@ async def handle_send_sms_reply(args: dict) -> list[TextContent]:
     atomic_write_json(sent_file, reply_data)
 
     _track_reply(chat_id)
+    _record_direct_send(chat_id, text)
 
     log.info(f"SMS reply queued for {chat_id}")
     return [TextContent(type="text", text=f"SMS message queued for {chat_id}:\n\n{text[:100]}{'...' if len(text) > 100 else ''}")]
@@ -3862,6 +3916,18 @@ async def handle_write_result(args: dict) -> list[TextContent]:
         return [TextContent(type="text", text="Error: chat_id is required")]
     if not text:
         return [TextContent(type="text", text="Error: text is required")]
+
+    # Server-side deduplication: if the subagent already called send_reply with the
+    # same text to the same chat, suppress the forwarded duplicate regardless of the
+    # forward flag passed by the caller.  This prevents the common mistake where a
+    # subagent calls send_reply AND write_result without forward=False, causing the
+    # dispatcher to deliver the message a second time.
+    if forward and _was_sent_directly(chat_id, text):
+        log.info(
+            f"write_result dedup: suppressing forward for task {task_id!r} — "
+            f"identical message already sent directly to chat {chat_id}"
+        )
+        forward = False
 
     if status not in ("success", "error"):
         status = "success"
