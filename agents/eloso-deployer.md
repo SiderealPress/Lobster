@@ -58,7 +58,7 @@ hcloud context create eloso
 ### Step 2: Run the Provisioning Script
 
 ```bash
-export HCLOUD_TOKEN="<REDACTED_SECRET>"
+export HCLOUD_TOKEN="your-token-here"
 export ELOSO_SERVER_NAME="eloso-prod"
 export SSH_KEY_NAME="your-key-name"
 
