@@ -35,8 +35,11 @@ lobster-shop/gcal-links/behavior/system.md:Phone number
 lobster-shop/gcal-links/context/reference.md:Phone number
 src/bot/sms_router.py:Phone number
 src/integrations/google_calendar/config.py:Hardcoded token
+tests/unit/test_integrations/test_google_calendar_callback_server.py:Hardcoded token
+tests/unit/test_integrations/test_google_calendar_client.py:Hardcoded token
 tests/unit/test_integrations/test_google_calendar_config.py:Hardcoded token
 tests/unit/test_integrations/test_google_calendar_oauth.py:Hardcoded token
 tests/unit/test_integrations/test_google_calendar_phase4.py:Hardcoded token
 tests/unit/test_integrations/test_google_calendar_token_store.py:Hardcoded token
+agents/eloso-deployer.md:Hardcoded token
 uv.lock:Phone number
