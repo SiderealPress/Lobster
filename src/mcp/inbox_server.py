@@ -3917,12 +3917,25 @@ async def handle_write_result(args: dict) -> list[TextContent]:
     if not text:
         return [TextContent(type="text", text="Error: text is required")]
 
+    # If forward=False, the subagent already called send_reply directly and delivery
+    # is complete.  Do not write anything to the inbox — the dispatcher must never
+    # see this result so it cannot accidentally send a duplicate reply.
+    if not forward:
+        log.info(
+            f"write_result: forward=False for task {task_id!r}, skipping inbox write — "
+            f"subagent already delivered directly to chat {chat_id}"
+        )
+        return [TextContent(
+            type="text",
+            text=f"Result acknowledged (forward=False). Subagent delivery already complete for task {task_id!r}.",
+        )]
+
     # Server-side deduplication: if the subagent already called send_reply with the
     # same text to the same chat, suppress the forwarded duplicate regardless of the
     # forward flag passed by the caller.  This prevents the common mistake where a
     # subagent calls send_reply AND write_result without forward=False, causing the
     # dispatcher to deliver the message a second time.
-    if forward and _was_sent_directly(chat_id, text):
+    if _was_sent_directly(chat_id, text):
         log.info(
             f"write_result dedup: suppressing forward for task {task_id!r} — "
             f"identical message already sent directly to chat {chat_id}"
