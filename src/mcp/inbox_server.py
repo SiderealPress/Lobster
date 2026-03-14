@@ -2390,39 +2390,79 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
 
 
 def _lookup_telegram_message_id_for_chat(chat_id: int | str) -> int | None:
-    """Return the telegram_message_id of any message currently in processing/ for chat_id.
+    """Return the telegram_message_id from a recent message for chat_id.
 
-    Scans the processing directory for a JSON file whose chat_id matches and
-    which contains a telegram_message_id field.  Returns the first match, or
-    None if nothing is found.
+    Scanning order:
+    1. processing/ — the common dispatcher-direct case where the original message
+       is still in-flight while send_reply is called.
+    2. processed/ (most-recently-modified first, up to _PROCESSED_SCAN_LIMIT) —
+       the subagent case where the dispatcher already moved the message to
+       processed/ before the subagent calls send_reply via write_result.
+
+    Returns the first telegram_message_id found, or None.
 
     This is used by handle_send_reply for automatic threading: when the caller
-    does not pass an explicit reply_to_message_id, we look up the in-flight
-    message and thread the reply against it automatically.  This makes threading
-    structural rather than dependent on dispatcher compliance.
+    does not pass an explicit reply_to_message_id, we look up the in-flight (or
+    recently-processed) message and thread the reply against it automatically.
+    This makes threading structural rather than dependent on dispatcher compliance.
     """
     try:
         chat_id_int = int(chat_id)
     except (TypeError, ValueError):
         return None
 
+    def _extract_tg_id(f: Path) -> int | None:
+        """Parse a JSON message file and return its telegram_message_id, or None."""
+        try:
+            data = json.loads(f.read_text())
+        except (json.JSONDecodeError, OSError):
+            return None
+        if int(data.get("chat_id", -1)) != chat_id_int:
+            return None
+        tg_id = data.get("telegram_message_id")
+        if tg_id is None:
+            return None
+        try:
+            return int(tg_id)
+        except (TypeError, ValueError):
+            return None
+
+    # Pass 1: processing/ (no sort needed — typically 0–1 files)
     try:
         for f in PROCESSING_DIR.glob("*.json"):
-            try:
-                data = json.loads(f.read_text())
-            except (json.JSONDecodeError, OSError):
-                continue
-            if int(data.get("chat_id", -1)) != chat_id_int:
-                continue
-            tg_id = data.get("telegram_message_id")
-            if tg_id is not None:
-                try:
-                    return int(tg_id)
-                except (TypeError, ValueError):
-                    continue
+            result = _extract_tg_id(f)
+            if result is not None:
+                return result
     except Exception:
         pass
+
+    # Pass 2: processed/ sorted newest-first (subagent reply case — message already
+    # moved to processed/ by the time the subagent calls write_result → send_reply)
+    try:
+        recent = sorted(
+            PROCESSED_DIR.glob("*.json"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )[:_PROCESSED_SCAN_LIMIT]
+        for f in recent:
+            result = _extract_tg_id(f)
+            if result is not None:
+                log.debug(
+                    f"Auto-threading (subagent path): found telegram_message_id in processed/ "
+                    f"for chat {chat_id_int}"
+                )
+                return result
+    except Exception:
+        pass
+
     return None
+
+
+# Maximum number of recently-processed files to scan when looking for a
+# telegram_message_id to use for auto-threading.  Processing/ is nearly always
+# empty or tiny, so pass-1 is fast.  For processed/ we limit the scan to avoid
+# iterating over potentially thousands of old messages.
+_PROCESSED_SCAN_LIMIT = 50
 
 
 async def handle_send_reply(args: dict) -> list[TextContent]:
