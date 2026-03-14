@@ -65,6 +65,8 @@ mcp__lobster-inbox__write_result(
 
 **Why two steps?** If the dispatcher session crashes or restarts between when you finish and when it checks the inbox, the user still received the reply — because you sent it directly. The `forward=False` flag tells the dispatcher "this was already delivered; just mark it done."
 
+**CRITICAL: Always set `forward=False` when you have called `send_reply` directly.** If you call `send_reply` and then call `write_result` without `forward=False`, the dispatcher will forward the result a second time — producing duplicate messages to the user. This is a common bug. There are no exceptions to this rule.
+
 **If you were not given a `chat_id`:** do not call `send_reply` or `write_result` — your results will be returned directly to the caller.
 
 ## Surfacing Observations (`write_observation`)
