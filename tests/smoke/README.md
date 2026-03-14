@@ -40,6 +40,9 @@ uv run pytest tests/smoke/test_on_compact.py -v
 | File | Group | What it covers |
 |------|-------|----------------|
 | `test_on_compact.py` | A | `hooks/on-compact.py` — context-compaction hook |
+| `test_post_compact_gate.py` | B | `hooks/post-compact-gate.py` — tool-call gate during compaction |
+| `test_require_write_result.py` | C | `hooks/require-write-result.py` — subagent write_result enforcement |
+| `test_health_check.py` | D | `scripts/health-check-v3.sh` — health check critical paths |
 
 ## Adding new smoke tests
 

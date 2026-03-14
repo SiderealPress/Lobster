@@ -73,3 +73,82 @@ def test_no_reminder_when_write_result_called():
         f"Expected empty stdout (no reminder), got: {result.stdout!r}\n"
         "Hook emitted a spurious reminder despite write_result being present."
     )
+
+
+# ---------------------------------------------------------------------------
+# C2 — reminder IS emitted when write_result was NOT called
+# ---------------------------------------------------------------------------
+
+
+def test_reminder_emitted_when_write_result_not_called():
+    """C2: Hook emits a reminder when a subagent had tool calls but no write_result.
+
+    Failure mode caught: a subagent that finishes work without calling
+    write_result leaves the dispatcher blocked waiting for a result message
+    that never arrives.  The hook injects a STOP prompt so Claude is forced
+    to report back before the session ends.
+    """
+    transcript = _build_transcript(
+        "mcp__github__issue_read",
+        "mcp__github__create_pull_request",
+    )
+    result = _run_hook(transcript)
+
+    assert result.returncode == 0, (
+        f"Hook must exit 0 (inject mode), got {result.returncode}. "
+        "A non-zero exit would block Claude Code from proceeding."
+    )
+    assert result.stdout.strip(), (
+        "Hook must print a reminder to stdout when write_result was not called.\n"
+        f"Got empty stdout. stderr={result.stderr!r}"
+    )
+    assert "write_result" in result.stdout, (
+        "Reminder text must mention 'write_result' so the subagent knows "
+        f"which tool to call. Got: {result.stdout!r}"
+    )
+
+
+def test_reminder_emitted_when_transcript_is_empty():
+    """C2 (edge case): an empty transcript also counts as missing write_result.
+
+    A session with no tool calls at all is still a subagent that failed to
+    report back; the hook should fire here too.
+    """
+    result = _run_hook(json.dumps({"transcript": []}))
+
+    assert result.returncode == 0
+    assert result.stdout.strip(), (
+        "Hook must emit a reminder even when the transcript has no tool calls at all."
+    )
+
+
+# ---------------------------------------------------------------------------
+# C3 — dispatcher sessions are exempt from the enforcement
+# ---------------------------------------------------------------------------
+
+
+def test_dispatcher_skips_enforcement():
+    """C3: Hook emits nothing when the transcript contains wait_for_messages.
+
+    The dispatcher is identified by the presence of wait_for_messages in its
+    tool calls.  The hook must never tell the dispatcher to call write_result —
+    the dispatcher never does (it receives results, it does not produce them).
+
+    Failure mode caught: if the hook fires for the dispatcher, every post-
+    compact cycle would inject a spurious STOP message into the main loop,
+    breaking the dispatcher's ability to resume normal message processing.
+    """
+    transcript = _build_transcript(
+        "mcp__lobster-inbox__wait_for_messages",
+        "mcp__lobster-inbox__send_reply",
+        "mcp__lobster-inbox__mark_processed",
+    )
+    result = _run_hook(transcript)
+
+    assert result.returncode == 0, (
+        f"Hook must exit 0 for dispatcher sessions, got {result.returncode}."
+    )
+    assert result.stdout.strip() == "", (
+        "Hook must produce no output for dispatcher sessions. "
+        f"Got: {result.stdout!r}"
+    )
