@@ -43,6 +43,10 @@ These files are private and not in the git repo. They extend and override the de
 
 You MUST both deliver results to the user directly AND call `write_result` at the end of every task. Never silently complete and return.
 
+**CRITICAL: `forward=False` rules — read before writing code:**
+- **If you called `send_reply` directly:** always set `forward=False` in `write_result`. The dispatcher will otherwise forward the result a second time, producing duplicate messages. No exceptions.
+- **If you did NOT call `send_reply`:** do NOT set `forward=False`. The dispatcher must forward the result — it is the only delivery path.
+
 **Required at end of every subagent task — two steps:**
 
 ```python
@@ -64,8 +68,6 @@ mcp__lobster-inbox__write_result(
 ```
 
 **Why two steps?** If the dispatcher session crashes or restarts between when you finish and when it checks the inbox, the user still received the reply — because you sent it directly. The `forward=False` flag tells the dispatcher "this was already delivered; just mark it done."
-
-**CRITICAL: Always set `forward=False` when you have called `send_reply` directly.** If you call `send_reply` and then call `write_result` without `forward=False`, the dispatcher will forward the result a second time — producing duplicate messages to the user. This is a common bug. There are no exceptions to this rule.
 
 **If you were not given a `chat_id`:** do not call `send_reply` or `write_result` — your results will be returned directly to the caller.
 
