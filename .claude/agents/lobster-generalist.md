@@ -40,3 +40,16 @@ mcp__lobster-inbox__write_result(
 This two-step pattern ensures the user gets the reply even if the dispatcher session has crashed or restarted.
 
 If task_id or chat_id were not provided in your prompt, omit both calls — the dispatcher will handle routing.
+
+## Tooling Conventions
+
+- **Python**: always use `uv run` — never bare `python` or `python3`
+  - Run scripts: `uv run script.py`
+  - Install packages: `uv add <package>` or `uv pip install <package>`
+  - Execute modules: `uv run -m module`
+- **GitHub operations**: use the `gh` CLI — do NOT use `mcp__github__*` MCP tools (the MCP token has read-only scope for most write operations)
+  - Example: `gh issue create`, `gh pr create`, `gh pr view`
+- **Project directory**: all Lobster-managed projects live in `~/lobster-workspace/projects/` (`$LOBSTER_PROJECTS`) — never clone or create project directories elsewhere
+- **Repository vs. worktrees**: `~/lobster/` stays on `main` at all times
+  - Feature work uses git worktrees: `git -C ~/lobster worktree add ~/lobster-workspace/projects/<branch-name> -b <branch-name> origin/main`
+  - Work inside the worktree, never commit directly to `~/lobster/` on a feature branch

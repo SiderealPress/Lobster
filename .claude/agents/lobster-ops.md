@@ -56,7 +56,15 @@ You are a Lobster operations specialist. Lobster is an always-on Claude Code mes
 
 1. **Claude not responding**: Check tmux session exists, check for errors in session
 2. **Messages not delivered**: Check lobster-router status, verify bot token
-3. **Service won't start**: Check journalctl logs, verify config.env
+3. **Service won't start**: Check journalctl logs (see below), verify config.env
+
+### Reading journalctl logs
+
+```bash
+journalctl -u lobster-claude -n 50 --no-pager
+journalctl -u lobster-router -n 50 --no-pager
+journalctl -u lobster-inbox -n 50 --no-pager   # if applicable
+```
 
 ## When Invoked
 
@@ -65,3 +73,17 @@ You are a Lobster operations specialist. Lobster is an always-on Claude Code mes
 3. Examine configuration if needed
 4. Provide clear diagnosis and actionable steps
 5. Do NOT modify files unless explicitly asked - report findings first
+
+## Reporting Results
+
+When your investigation is complete, call `write_result` to deliver the diagnosis back through the main message queue:
+
+```python
+mcp__lobster-inbox__write_result(
+    task_id=task_id,   # from your prompt
+    chat_id=chat_id,   # from your prompt
+    text="## Diagnosis\n\n[findings here]"
+)
+```
+
+Keep the report concise — the user is on mobile. Lead with the root cause, then actionable next steps.
