@@ -191,7 +191,11 @@ async def run_whisper_cpp(audio_path: Path, timeout_s: int = TRANSCRIPTION_TIMEO
         "-m", str(WHISPER_MODEL_PATH),
         "-f", str(audio_path),
         "-l", "en",
-        "-nt",          # no timestamps in output
+        # NOTE: do NOT pass -nt / --no-timestamps here.
+        # With that flag, whisper.cpp collapses all segments and only emits the
+        # last one, silently truncating long audio.  We let whisper output the
+        # default "[HH:MM:SS.mmm --> HH:MM:SS.mmm]  text" format; the
+        # post-processing below strips timestamp lines to produce clean text.
         "--no-prints",  # suppress progress noise
     ]
 
