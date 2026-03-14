@@ -40,3 +40,16 @@ tests/unit/test_integrations/test_google_calendar_oauth.py:Hardcoded token
 tests/unit/test_integrations/test_google_calendar_phase4.py:Hardcoded token
 tests/unit/test_integrations/test_google_calendar_token_store.py:Hardcoded token
 uv.lock:Phone number
+
+# eloso-deployer documents env var names (HCLOUD_TOKEN, SECRET_KEY) as configuration
+# references — not actual credential values
+agents/eloso-deployer.md:Hardcoded token
+agents/eloso-deployer.md:Hardcoded secret
+
+# kissinger bins contain a pre-existing email address used as a contact reference
+lobster-shop/kissinger/bin/kissinger:Email address
+lobster-shop/kissinger/bin/kissinger-mcp:Email address
+
+# google calendar callback and client test files use fake/mock tokens for unit tests
+tests/unit/test_integrations/test_google_calendar_callback_server.py:Hardcoded token
+tests/unit/test_integrations/test_google_calendar_client.py:Hardcoded token
