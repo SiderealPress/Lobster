@@ -184,6 +184,7 @@ FAILED_DIR = BASE_DIR / "failed"
 CONFIG_DIR = BASE_DIR / "config"
 AUDIO_DIR = BASE_DIR / "audio"
 SENT_DIR = BASE_DIR / "sent"
+SENT_REPLIES_DIR = BASE_DIR / "sent-replies"
 TASKS_FILE = BASE_DIR / "tasks.json"
 TASK_OUTPUTS_DIR = BASE_DIR / "task-outputs"
 BISQUE_OUTBOX_DIR = BASE_DIR / "bisque-outbox"
@@ -213,32 +214,48 @@ def _track_reply(chat_id: Any) -> None:
 # was already delivered directly to the same chat within the dedup window.  If so,
 # forward is silently overridden to False to prevent the dispatcher from sending a
 # duplicate to the user.
-_direct_sends: dict[str, float] = {}
+#
+# State is stored as small files in SENT_REPLIES_DIR rather than an in-memory dict so
+# that it survives MCP server restarts.  Each file is named after the dedup key and
+# contains the Unix timestamp of the send.  Files older than the window are expired
+# lazily on each record call.
 _DIRECT_SEND_WINDOW_SECS = 60  # suppress duplicates within this window
-_DIRECT_SEND_MAX = 500
+
+def _direct_send_key(chat_id: Any, text: str) -> str:
+    import hashlib
+    return f"{chat_id}_{hashlib.sha256(text.encode()).hexdigest()[:16]}"
 
 def _record_direct_send(chat_id: Any, text: str) -> None:
     """Record a direct send_reply call so write_result can detect duplicates."""
-    global _direct_sends
-    import hashlib
-    key = f"{chat_id}:{hashlib.sha256(text.encode()).hexdigest()[:16]}"
-    _direct_sends[key] = time.time()
-    # Evict expired entries to keep memory bounded
-    if len(_direct_sends) > _DIRECT_SEND_MAX:
+    key = _direct_send_key(chat_id, text)
+    marker = SENT_REPLIES_DIR / key
+    marker.write_text(str(time.time()))
+    # Lazily evict files older than the window
+    try:
         cutoff = time.time() - _DIRECT_SEND_WINDOW_SECS
-        _direct_sends = {k: v for k, v in _direct_sends.items() if v > cutoff}
-        if len(_direct_sends) > _DIRECT_SEND_MAX:
-            sorted_items = sorted(_direct_sends.items(), key=lambda x: x[1], reverse=True)
-            _direct_sends = dict(sorted_items[:_DIRECT_SEND_MAX])
+        for f in SENT_REPLIES_DIR.iterdir():
+            try:
+                if float(f.read_text()) < cutoff:
+                    f.unlink(missing_ok=True)
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 def _was_sent_directly(chat_id: Any, text: str) -> bool:
     """Return True if an identical message was sent directly to chat_id recently."""
-    import hashlib
-    key = f"{chat_id}:{hashlib.sha256(text.encode()).hexdigest()[:16]}"
-    sent_at = _direct_sends.get(key)
-    if sent_at is None:
+    key = _direct_send_key(chat_id, text)
+    marker = SENT_REPLIES_DIR / key
+    if not marker.exists():
         return False
-    return (time.time() - sent_at) < _DIRECT_SEND_WINDOW_SECS
+    try:
+        sent_at = float(marker.read_text())
+    except Exception:
+        return False
+    if (time.time() - sent_at) >= _DIRECT_SEND_WINDOW_SECS:
+        marker.unlink(missing_ok=True)
+        return False
+    return True
 
 # Sources that represent human users (not system/automated)
 # NOTE: Do NOT use this to classify whether a message needs a reply — source is
@@ -304,9 +321,9 @@ SCHEDULED_TASKS_LOGS_DIR = SCHEDULED_JOBS_DIR / "logs"
 CANONICAL_DIR = _USER_CONFIG / "memory" / "canonical"
 
 # Ensure directories exist
-for d in [INBOX_DIR, OUTBOX_DIR, PROCESSED_DIR, PROCESSING_DIR, FAILED_DIR, SENT_DIR, CONFIG_DIR,
-          AUDIO_DIR, TASK_OUTPUTS_DIR, BISQUE_OUTBOX_DIR, SCHEDULED_TASKS_TASKS_DIR, SCHEDULED_JOBS_DIR,
-          SCHEDULED_TASKS_LOGS_DIR, CANONICAL_DIR]:
+for d in [INBOX_DIR, OUTBOX_DIR, PROCESSED_DIR, PROCESSING_DIR, FAILED_DIR, SENT_DIR, SENT_REPLIES_DIR,
+          CONFIG_DIR, AUDIO_DIR, TASK_OUTPUTS_DIR, BISQUE_OUTBOX_DIR, SCHEDULED_TASKS_TASKS_DIR,
+          SCHEDULED_JOBS_DIR, SCHEDULED_TASKS_LOGS_DIR, CANONICAL_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
 # Logging
