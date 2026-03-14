@@ -235,27 +235,43 @@ def _send_telegram_direct(bot_token: str, chat_id: int, text: str) -> None:
     Used by _emit_debug_observation to deliver debug push notifications without
     routing through the dispatcher inbox, avoiding token-costly round-trips.
     Silent on any failure — must never raise.
+
+    When called from a running event loop (e.g. inside an async handler), the
+    blocking urlopen is dispatched to a thread via run_in_executor so the event
+    loop is not stalled for the up-to-5-second network timeout.
     """
     import urllib.request as _urllib_request
+
+    def _do_send() -> None:
+        try:
+            url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+            # Truncate very long debug messages to stay within Telegram limits (4096 chars).
+            display_text = text[:4000] + ("…" if len(text) > 4000 else "")
+            # No parse_mode — debug text is unescaped and HTML special chars
+            # (<, >, &) would cause Telegram to silently drop the message.
+            payload = json.dumps({
+                "chat_id": chat_id,
+                "text": display_text,
+            }).encode()
+            req = _urllib_request.Request(
+                url,
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with _urllib_request.urlopen(req, timeout=5):
+                pass
+        except Exception:
+            pass  # never block on debug instrumentation
+
+    # If an event loop is running (we're inside an async handler), offload the
+    # blocking I/O to a thread so we don't stall the loop for up to 5 seconds.
     try:
-        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-        # Truncate very long debug messages to stay within Telegram limits (4096 chars).
-        display_text = text[:4000] + ("…" if len(text) > 4000 else "")
-        payload = json.dumps({
-            "chat_id": chat_id,
-            "text": display_text,
-            "parse_mode": "HTML",
-        }).encode()
-        req = _urllib_request.Request(
-            url,
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with _urllib_request.urlopen(req, timeout=5):
-            pass
-    except Exception:
-        pass  # never block on debug instrumentation
+        loop = asyncio.get_running_loop()
+        loop.run_in_executor(None, _do_send)
+    except RuntimeError:
+        # No running event loop — safe to call directly (e.g. from a thread).
+        _do_send()
 
 
 def _emit_debug_observation(text: str, category: str = "system_context") -> None:
