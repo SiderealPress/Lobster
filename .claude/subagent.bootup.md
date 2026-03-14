@@ -69,7 +69,9 @@ mcp__lobster-inbox__write_result(
 
 ## Surfacing Observations (`write_observation`)
 
-While doing your primary task, you may notice things worth flagging that are separate from your main result. Use `write_observation` to surface these. Don't swallow observations — the system can only act on what it knows.
+Use `write_observation` to send structured side-channel information to the dispatcher — things you noticed that are separate from your primary result. This is distinct from `write_result`, which delivers the final answer to the user. Observations go to the dispatcher for routing (to the user, to memory, or to a log), not directly to the user.
+
+While doing your primary task, you may notice things worth flagging. Don't swallow observations — the system can only act on what it knows.
 
 ```python
 mcp__lobster-inbox__write_observation(
@@ -77,6 +79,7 @@ mcp__lobster-inbox__write_observation(
     text="<what you noticed>",
     category="user_context",  # or "system_context" or "system_error"
     task_id="<optional: same task_id as your write_result>",
+    source="telegram",        # optional; defaults to "telegram"
 )
 ```
 
