@@ -3932,7 +3932,13 @@ async def handle_write_result(args: dict) -> list[TextContent]:
     if status not in ("success", "error"):
         status = "success"
 
-    msg_type = "subagent_result" if status == "success" else "subagent_error"
+    # When forward=False the subagent already called send_reply directly.
+    # Use a distinct message type so the dispatcher knows to read for situational
+    # awareness and mark_processed without calling send_reply — no duplicate risk.
+    if not forward:
+        msg_type = "subagent_notification"
+    else:
+        msg_type = "subagent_result" if status == "success" else "subagent_error"
 
     now = datetime.now(timezone.utc)
     # Use millisecond timestamp + task_id fragment for a unique, sortable filename
