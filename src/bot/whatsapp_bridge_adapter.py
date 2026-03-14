@@ -1,72 +1,77 @@
 #!/usr/bin/env python3
 """
-Lobster WhatsApp Bridge Adapter — BIS-47
+Lobster WhatsApp Bridge Adapter - BIS-47 / BIS-48
 
-Bridges the whatsapp-bridge Node.js process to Lobster's inbox queue.
+Bridges the whatsapp-web.js bridge output into Lobster's file-based inbox/outbox system.
 
 Architecture:
-  1. Spawns `node index.js` in the bridge directory as a subprocess.
-  2. Reads newline-delimited JSON events from the bridge's stdout.
-  3. Normalizes each event to Lobster's inbox format and atomically writes
-     it to ~/messages/inbox/{id}.json.
-  4. Watches ~/messages/outbox/ for files with source="whatsapp" and
-     delivers reply commands to ~/messages/wa-commands/{timestamp}_{id}.json.
-  5. Monitors the bridge process and restarts it on exit (after 5s backoff).
+    wa-events/  <-- JSON files written by Node.js bridge (one file per message event)
+        |
+        v
+    normalize()  <-- convert to Lobster's standard inbox schema
+        |
+        v
+    ~/messages/inbox/   <-- Lobster reads these via check_inbox()
+        |
+    Lobster processes, calls send_reply()
+        |
+        v
+    ~/messages/outbox/  <-- reply JSON files (source="whatsapp")
+        |
+        v
+    wa-commands/  <-- JSON command files written here for the Node bridge to pick up
+        |
+    Node bridge sends reply via WhatsApp
+
+Replaces: whatsapp_router.py (Twilio-based, kept for backward compatibility)
+
+BIS-48 additions:
+  - is_routable() enforces @mention gate: group messages only route when
+    mentions_lobster is True; DMs always route.
+  - normalize_event() passes through bridge's authoritative mentions_lobster
+    field and resolves group_name from both 'chatName' (connectors/whatsapp)
+    and 'group_name' (whatsapp-bridge) field names.
 
 Environment variables:
-  WHATSAPP_BRIDGE_DIR   Path to the whatsapp-bridge project directory.
-                        Default: ~/lobster-workspace/projects/whatsapp-bridge
-  LOBSTER_MESSAGES      Path to the messages directory.
-                        Default: ~/messages
-  LOBSTER_WORKSPACE     Path to the lobster-workspace directory.
-                        Default: ~/lobster-workspace
-
-Usage:
-  python3 whatsapp_bridge_adapter.py   # run directly
-  from whatsapp_bridge_adapter import start  # import and call start()
+    LOBSTER_MESSAGES      - Base messages directory (default: ~/messages)
+    LOBSTER_WORKSPACE     - Workspace directory (default: ~/lobster-workspace)
+    WA_EVENTS_DIR         - Incoming event files from bridge (default: ~/messages/wa-events)
+    WA_COMMANDS_DIR       - Outgoing command files for bridge (default: ~/messages/wa-commands)
+    WHATSAPP_LOBSTER_JID  - Lobster's own WhatsApp JID (e.g. 15551234567@c.us)
 """
+
+from __future__ import annotations
 
 import json
 import logging
 import os
-import subprocess
-import tempfile
 import time
 from datetime import datetime, timezone
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from threading import Thread
-from typing import Optional
 
-from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
 _HOME = Path.home()
-_MESSAGES = Path(os.environ.get("LOBSTER_MESSAGES", _HOME / "messages"))
-_WORKSPACE = Path(os.environ.get("LOBSTER_WORKSPACE", _HOME / "lobster-workspace"))
-
-BRIDGE_DIR = Path(
-    os.environ.get(
-        "WHATSAPP_BRIDGE_DIR",
-        _WORKSPACE / "projects" / "whatsapp-bridge",
-    )
-)
+_MESSAGES = Path(os.environ.get("LOBSTER_MESSAGES", str(_HOME / "messages")))
+_WORKSPACE = Path(os.environ.get("LOBSTER_WORKSPACE", str(_HOME / "lobster-workspace")))
 
 INBOX_DIR = _MESSAGES / "inbox"
 OUTBOX_DIR = _MESSAGES / "outbox"
-WA_COMMANDS_DIR = _MESSAGES / "wa-commands"
+EVENTS_DIR = Path(os.environ.get("WA_EVENTS_DIR", str(_MESSAGES / "wa-events")))
+COMMANDS_DIR = Path(os.environ.get("WA_COMMANDS_DIR", str(_MESSAGES / "wa-commands")))
+# Alias used by tests and external code
+WA_COMMANDS_DIR = COMMANDS_DIR
 
-RESTART_DELAY_SECONDS = 5
+# Lobster's own WhatsApp JID for mention detection
+LOBSTER_JID = os.environ.get("WHATSAPP_LOBSTER_JID", "")
 
-# ---------------------------------------------------------------------------
-# Directories
-# ---------------------------------------------------------------------------
-
-for _d in [INBOX_DIR, OUTBOX_DIR, WA_COMMANDS_DIR]:
+for _d in (INBOX_DIR, OUTBOX_DIR, EVENTS_DIR, COMMANDS_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
 # ---------------------------------------------------------------------------
@@ -76,391 +81,289 @@ for _d in [INBOX_DIR, OUTBOX_DIR, WA_COMMANDS_DIR]:
 LOG_DIR = _WORKSPACE / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-log = logging.getLogger("lobster-whatsapp-bridge")
+log = logging.getLogger("lobster-whatsapp-adapter")
 log.setLevel(logging.INFO)
-
-_fh = RotatingFileHandler(
-    LOG_DIR / "whatsapp-bridge-adapter.log",
-    maxBytes=5 * 1024 * 1024,
-    backupCount=3,
-)
+_fh = logging.FileHandler(LOG_DIR / "whatsapp-adapter.log")
 _fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
 log.addHandler(_fh)
 log.addHandler(logging.StreamHandler())
 
+# Group name cache
+_group_name_cache: dict[str, str] = {}
+
 # ---------------------------------------------------------------------------
-# Pure helpers — no side effects, fully testable in isolation
+# Pure functions (exported / testable)
 # ---------------------------------------------------------------------------
 
 
-def make_msg_id(bridge_event_id: str) -> str:
-    """Derive a stable inbox message ID from the bridge event ID."""
-    ts_ms = int(time.time() * 1000)
-    # Sanitize bridge ID: replace chars that are unsafe in filenames
-    safe = bridge_event_id.replace("/", "_").replace(":", "_")[:64]
-    return f"{ts_ms}_wa_{safe}"
+def is_system_event(event: dict) -> bool:
+    """Return True if this is a system/control event from the bridge."""
+    return event.get("type") == "system"
 
 
-def extract_lobster_id(bridge_event: dict) -> Optional[str]:
-    """Return the 'user id' / author phone from a bridge event.
-
-    For group messages the sender is in `author`; for 1:1 it is in `from`.
+def is_routable(event: dict, lobster_jid: str = "") -> bool:
     """
-    author = bridge_event.get("author")
-    if author:
-        return author
-    return bridge_event.get("from")
+    Determine whether this bridge event should be written to Lobster's inbox.
 
-
-def normalize_event(bridge_event: dict) -> Optional[dict]:
-    """Convert a bridge stdout event dict to the Lobster inbox schema.
-
-    Returns None if the event should be skipped (e.g. fromMe=True).
-
-    Bridge event fields (from index.js):
-      id, body, from, fromMe, isGroup, author, timestamp, mentionedIds,
-      hasMedia, type
-
-    Lobster inbox schema (required):
-      id, source, chat_id, user_id, user_name, text, is_group,
-      group_name, timestamp, mentions_lobster
+    Rules:
+    - fromMe messages are never routed
+    - System events are always routed (bridge notifications to Drew)
+    - DMs (non-group) are always routed
+    - Group messages are routed only if mentions_lobster is True
     """
-    # Skip messages sent by this session — they are our own outgoing replies
-    if bridge_event.get("fromMe"):
+    if event.get("fromMe"):
+        return False
+    if is_system_event(event):
+        return True
+    if not event.get("isGroup"):
+        return True
+    return bool(event.get("mentions_lobster"))
+
+
+def normalize_event(event: dict) -> dict | None:
+    """
+    Convert a whatsapp-web.js bridge event to Lobster's standard inbox schema.
+
+    Returns None if the event should be dropped (fromMe=True or missing id).
+
+    Bridge fields: id, body, from, fromMe, isGroup, author, timestamp,
+                   mentionedIds, mentions_lobster, chatName
+    Inbox fields:  id, source, chat_id, user_id, user_name, text, is_group,
+                   group_name, mentions_lobster, timestamp
+    """
+    # Drop outgoing messages and events with no bridge id
+    if event.get("fromMe"):
+        return None
+    if not event.get("id"):
         return None
 
-    raw_id = str(bridge_event.get("id", ""))
-    if not raw_id:
-        log.warning("Received bridge event with empty id — skipping")
-        return None
+    msg_id = f"{int(time.time() * 1000)}_wa_{event['id']}"
+    chat_id = event.get("from", "")
+    is_group = bool(event.get("isGroup"))
 
-    body = bridge_event.get("body", "") or ""
-    chat_id = bridge_event.get("from", "")
-    is_group = bool(bridge_event.get("isGroup", False))
-    author_id = extract_lobster_id(bridge_event)
+    # In groups, 'author' is the sender's JID; 'from' is the group JID
+    user_id = event.get("author") or event.get("from") or ""
+    # Derive readable name from JID (real names require extra API call)
+    user_name = user_id.split("@")[0] if "@" in user_id else user_id
 
-    # Timestamp: bridge sends Unix seconds (integer); convert to ISO-8601
-    raw_ts = bridge_event.get("timestamp")
+    # Cache/retrieve group names.
+    # Accept both field names: 'chatName' (connectors/whatsapp/index.js) and
+    # 'group_name' (whatsapp-bridge/index.js - BIS-48) for cross-compatibility.
+    # Fall back to the group JID (from field) when no name is available.
+    chat_name = event.get("chatName") or event.get("group_name") or ""
+    if is_group and chat_name:
+        _group_name_cache[chat_id] = chat_name
+    elif is_group and chat_id in _group_name_cache:
+        chat_name = _group_name_cache[chat_id]
+    elif is_group and not chat_name:
+        # Use the group JID as a fallback name when nothing else is available
+        chat_name = chat_id
+
+    # Convert Unix timestamp to ISO 8601
+    raw_ts = event.get("timestamp")
     if raw_ts:
         try:
-            dt = datetime.fromtimestamp(int(raw_ts), tz=timezone.utc)
-            iso_ts = dt.isoformat()
+            ts = datetime.fromtimestamp(float(raw_ts), tz=timezone.utc).isoformat()
         except (ValueError, OSError):
-            iso_ts = datetime.now(tz=timezone.utc).isoformat()
+            ts = datetime.now(tz=timezone.utc).isoformat()
     else:
-        iso_ts = datetime.now(tz=timezone.utc).isoformat()
+        ts = datetime.now(tz=timezone.utc).isoformat()
 
-    # Group name: we don't have it from the bridge event directly.
-    # The chat_id for groups ends with @g.us (e.g. "120363xxxxxx@g.us").
-    # We store the raw group JID as the group_name placeholder; a future
-    # enhancement can resolve display names via the bridge's contact API.
-    group_name = chat_id if is_group else ""
-
-    # Determine if Lobster is mentioned (any mentionedIds present)
-    mentioned_ids = bridge_event.get("mentionedIds", [])
-    mentions_lobster = len(mentioned_ids) > 0
-
-    msg_id = make_msg_id(raw_id)
+    # mentions_lobster: use explicit bridge field if present; otherwise fall back
+    # to non-empty mentionedIds (any @mention in the message counts as a mention)
+    mentioned_ids = event.get("mentionedIds") or []
+    mentions_lobster = bool(event.get("mentions_lobster")) or bool(mentioned_ids)
 
     return {
         "id": msg_id,
         "source": "whatsapp",
         "chat_id": chat_id,
-        "user_id": author_id or chat_id,
-        "user_name": author_id or chat_id,
-        "text": body,
+        "user_id": user_id,
+        "user_name": user_name,
+        "text": event.get("body") or "",
         "is_group": is_group,
-        "group_name": group_name,
-        "timestamp": iso_ts,
+        "group_name": chat_name,
         "mentions_lobster": mentions_lobster,
-        # Extra fields that aid debugging (not part of core schema)
-        "_bridge_id": raw_id,
-        "_has_media": bridge_event.get("hasMedia", False),
-        "_type": bridge_event.get("type", ""),
+        "timestamp": ts,
     }
 
 
-def build_wa_command(chat_id: str, text: str) -> dict:
-    """Build the wa-commands JSON payload for the bridge."""
-    return {"action": "send", "to": chat_id, "text": text}
+def normalize_system_event(event: dict) -> dict:
+    """Normalize a bridge system event (e.g. session_expired) into an inbox message."""
+    return {
+        "id": f"{int(time.time() * 1000)}_wa_sys",
+        "source": "whatsapp",
+        "type": "system",
+        "subtype": event.get("subtype", ""),
+        "chat_id": "system",
+        "user_id": "system",
+        "user_name": "WhatsApp Bridge",
+        "text": event.get("body") or "[WhatsApp system event]",
+        "is_group": False,
+        "group_name": "",
+        "mentions_lobster": False,
+        "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+    }
 
 
-def build_command_filename(msg_id: str) -> str:
-    """Build a timestamped filename for a wa-commands file."""
-    ts = int(time.time() * 1000)
-    return f"{ts}_{msg_id}.json"
+def build_wa_command(to: str, text: str) -> dict:
+    """Build a bridge send-command payload."""
+    return {"action": "send", "to": to, "text": text}
+
+
+def outbox_reply_to_command(reply: dict) -> dict | None:
+    """
+    Convert a Lobster outbox reply with source='whatsapp' into a bridge command dict.
+
+    Returns None if the reply is not a WhatsApp reply or has missing fields.
+    """
+    if reply.get("source", "").lower() != "whatsapp":
+        return None
+    chat_id = reply.get("chat_id", "")
+    text = reply.get("text", "")
+    if not chat_id or not text:
+        return None
+    if chat_id in ("system", ""):
+        return None
+    return build_wa_command(chat_id, text)
 
 
 # ---------------------------------------------------------------------------
-# Atomic file I/O
+# File I/O
 # ---------------------------------------------------------------------------
 
 
-def atomic_write_json(path: Path, data: dict, indent: int = 2) -> None:
-    """Write JSON to *path* atomically via a sibling temp file + rename."""
-    content = json.dumps(data, indent=indent)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+def _atomic_write(path: Path, data: dict) -> None:
+    """Write JSON atomically via a temp file rename."""
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    tmp.rename(path)
+
+
+def process_event_file(file_path: Path) -> None:
+    """Read one bridge event file, normalize it, write to inbox, then delete."""
     try:
-        with os.fdopen(fd, "w") as f:
-            f.write(content)
-            f.flush()
-            os.fsync(f.fileno())
-        os.rename(tmp, str(path))
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+        raw = file_path.read_text(encoding="utf-8")
+        event = json.loads(raw)
+    except Exception as exc:
+        log.error("Failed to read event file %s: %s", file_path, exc)
+        return
+
+    try:
+        if not is_routable(event, LOBSTER_JID):
+            log.debug("Skipping non-routable event from %s", event.get("from"))
+        else:
+            inbox_msg = normalize_system_event(event) if is_system_event(event) else normalize_event(event)
+            if inbox_msg is None:
+                log.debug("normalize_event returned None for event from %s", event.get("from"))
+            else:
+                inbox_path = INBOX_DIR / f"{inbox_msg['id']}.json"
+                _atomic_write(inbox_path, inbox_msg)
+                log.info(
+                    "Inbox: %s | from=%s group=%s mentions=%s",
+                    inbox_msg["id"],
+                    inbox_msg.get("user_id", "?"),
+                    inbox_msg.get("is_group"),
+                    inbox_msg.get("mentions_lobster"),
+                )
+    except Exception as exc:
+        log.error("Failed to process event %s: %s", file_path, exc)
+
+    try:
+        file_path.unlink(missing_ok=True)
+    except Exception as exc:
+        log.warning("Could not delete event file %s: %s", file_path, exc)
 
 
 # ---------------------------------------------------------------------------
-# Inbox writer
+# Watchdog
 # ---------------------------------------------------------------------------
 
 
-def write_to_inbox(msg: dict) -> None:
-    """Atomically write a normalized message to the inbox directory."""
-    msg_id = msg["id"]
-    inbox_file = INBOX_DIR / f"{msg_id}.json"
-    atomic_write_json(inbox_file, msg)
-    log.info(f"Wrote WhatsApp message to inbox: {msg_id} from={msg.get('chat_id')}")
-
-
-# ---------------------------------------------------------------------------
-# Outbox watcher — reads outbox files with source="whatsapp" and writes
-# wa-commands for the bridge to deliver.
-# ---------------------------------------------------------------------------
+class EventsDirHandler(FileSystemEventHandler):
+    def on_created(self, event):
+        if event.is_directory:
+            return
+        path = Path(event.src_path)
+        if path.suffix == ".json":
+            time.sleep(0.05)
+            Thread(target=process_event_file, args=(path,), daemon=True).start()
 
 
 class WhatsAppOutboxHandler(FileSystemEventHandler):
-    """Watches ~/messages/outbox/ and converts whatsapp replies to wa-commands."""
-
     def on_created(self, event):
-        if event.is_directory or not event.src_path.endswith(".json"):
+        if event.is_directory:
             return
-        Thread(
-            target=self._process,
-            args=(event.src_path,),
-            daemon=True,
-        ).start()
-
-    def on_moved(self, event):
-        """Handle atomic writes that rename a .tmp to .json."""
-        if event.is_directory or not event.dest_path.endswith(".json"):
-            return
-        Thread(
-            target=self._process,
-            args=(event.dest_path,),
-            daemon=True,
-        ).start()
+        if event.src_path.endswith(".json"):
+            Thread(target=self._process, args=(event.src_path,), daemon=True).start()
 
     def _process(self, filepath: str) -> None:
         try:
-            time.sleep(0.1)  # Brief pause to ensure the write is flushed
-            with open(filepath, "r") as f:
-                reply = json.load(f)
+            time.sleep(0.1)
+            data = json.loads(Path(filepath).read_text(encoding="utf-8"))
         except Exception as exc:
-            log.error(f"Could not read outbox file {filepath}: {exc}")
+            log.warning("Could not read outbox file %s: %s", filepath, exc)
             return
 
-        if reply.get("source", "").lower() != "whatsapp":
+        cmd = outbox_reply_to_command(data)
+        if cmd is None:
             return
 
-        chat_id = reply.get("chat_id", "")
-        text = reply.get("text", "")
-
-        if not chat_id or not text:
-            log.warning(f"Invalid WhatsApp reply in {filepath}: missing chat_id or text")
-            try:
-                os.remove(filepath)
-            except OSError:
-                pass
-            return
-
-        # Derive a reply ID for the command filename
-        reply_id = reply.get("id", Path(filepath).stem)
-        cmd_filename = build_command_filename(reply_id)
-        cmd_path = WA_COMMANDS_DIR / cmd_filename
-
-        command = build_wa_command(chat_id, text)
-        atomic_write_json(cmd_path, command)
-        log.info(f"Wrote wa-command: {cmd_filename} → to={chat_id}")
+        ts_ms = int(time.time() * 1000)
+        cmd_path = WA_COMMANDS_DIR / f"{ts_ms}_wa_cmd.json"
+        try:
+            _atomic_write(cmd_path, cmd)
+            log.info("Command written: send to %s - %s", cmd["to"], cmd["text"][:50])
+        except Exception as exc:
+            log.error("Failed to write command file: %s", exc)
 
         try:
-            os.remove(filepath)
-        except OSError as exc:
-            log.warning(f"Could not remove outbox file {filepath}: {exc}")
-
-
-def process_existing_outbox() -> None:
-    """Deliver any whatsapp outbox files that accumulated before startup."""
-    handler = WhatsAppOutboxHandler()
-    for filepath in sorted(OUTBOX_DIR.glob("*.json")):
-        try:
-            with open(filepath, "r") as f:
-                reply = json.load(f)
-            if reply.get("source", "").lower() == "whatsapp":
-                handler._process(str(filepath))
+            Path(filepath).unlink(missing_ok=True)
         except Exception as exc:
-            log.error(f"Error draining outbox file {filepath}: {exc}")
+            log.warning("Could not remove outbox file %s: %s", filepath, exc)
+
+
+# Backward-compatible alias
+OutboxHandler = WhatsAppOutboxHandler
 
 
 # ---------------------------------------------------------------------------
-# Bridge process manager
+# Main
 # ---------------------------------------------------------------------------
 
 
-class BridgeRunner:
-    """Manages the whatsapp-bridge subprocess lifecycle.
-
-    Reads newline-delimited JSON from the bridge's stdout in a background
-    thread.  Restarts the bridge process if it exits unexpectedly.
-    """
-
-    def __init__(self, bridge_dir: Path = BRIDGE_DIR) -> None:
-        self._bridge_dir = bridge_dir
-        self._process: Optional[subprocess.Popen] = None
-        self._running = False
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
-    def start(self) -> None:
-        """Start the bridge and the stdout-reader thread."""
-        self._running = True
-        self._spawn_and_watch()
-
-    def stop(self) -> None:
-        """Signal the runner to stop and terminate the bridge process."""
-        self._running = False
-        if self._process and self._process.poll() is None:
-            log.info("Terminating bridge process…")
-            self._process.terminate()
-            try:
-                self._process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self._process.kill()
-
-    # ------------------------------------------------------------------
-    # Internal
-    # ------------------------------------------------------------------
-
-    def _spawn_and_watch(self) -> None:
-        """Spawn bridge; block reading stdout; restart if it dies."""
-        while self._running:
-            log.info(f"Starting whatsapp-bridge in {self._bridge_dir}")
-
-            if not self._bridge_dir.exists():
-                log.error(
-                    f"Bridge directory not found: {self._bridge_dir}. "
-                    "Set WHATSAPP_BRIDGE_DIR to the correct path."
-                )
-                if self._running:
-                    time.sleep(RESTART_DELAY_SECONDS)
-                continue
-
-            try:
-                self._process = subprocess.Popen(
-                    ["node", "index.js"],
-                    cwd=str(self._bridge_dir),
-                    stdout=subprocess.PIPE,
-                    stderr=None,  # Inherit stderr so QR codes / diagnostics show in our logs
-                    text=True,
-                    bufsize=1,  # Line-buffered
-                )
-                log.info(f"Bridge process started (pid={self._process.pid})")
-                self._read_stdout(self._process)
-
-            except FileNotFoundError:
-                log.error(
-                    "Could not start bridge: `node` not found in PATH. "
-                    "Install Node.js >= 18."
-                )
-            except Exception as exc:
-                log.error(f"Unexpected error starting bridge: {exc}")
-
-            if self._running:
-                log.warning(
-                    f"Bridge exited. Restarting in {RESTART_DELAY_SECONDS}s…"
-                )
-                time.sleep(RESTART_DELAY_SECONDS)
-
-        log.info("BridgeRunner stopped.")
-
-    def _read_stdout(self, proc: subprocess.Popen) -> None:
-        """Read bridge stdout line-by-line, parse JSON, write to inbox."""
-        for raw_line in proc.stdout:
-            if not self._running:
-                break
-
-            line = raw_line.strip()
-            if not line:
-                continue
-
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                log.warning(f"Non-JSON line from bridge (ignored): {line[:120]}")
-                continue
-
-            try:
-                msg = normalize_event(event)
-                if msg is not None:
-                    write_to_inbox(msg)
-            except Exception as exc:
-                log.error(f"Error normalizing/writing bridge event: {exc} | raw={line[:200]}")
-
-        # Reap the process once stdout closes
-        proc.wait()
-        exit_code = proc.returncode
-        if exit_code != 0:
-            log.error(f"Bridge exited with code {exit_code}")
-        else:
-            log.info("Bridge process exited cleanly.")
-
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
-
-def start() -> None:
-    """Start the adapter: outbox watcher + bridge subprocess.
-
-    This function blocks until KeyboardInterrupt or SIGTERM.
-    It is both the module-level entry point and importable by Lobster's
-    startup orchestrator.
-    """
+def main() -> None:
     log.info("Starting Lobster WhatsApp Bridge Adapter")
-    log.info(f"Bridge dir : {BRIDGE_DIR}")
-    log.info(f"Inbox      : {INBOX_DIR}")
-    log.info(f"Outbox     : {OUTBOX_DIR}")
-    log.info(f"WA commands: {WA_COMMANDS_DIR}")
+    log.info("Events dir:   %s", EVENTS_DIR)
+    log.info("Commands dir: %s", COMMANDS_DIR)
+    log.info("Lobster JID:  %s", LOBSTER_JID or "(not set)")
 
-    # 1. Drain any whatsapp replies already sitting in the outbox
-    process_existing_outbox()
+    # Process files left over from previous session
+    for f in sorted(EVENTS_DIR.glob("*.json")):
+        process_event_file(f)
+    for f in sorted(OUTBOX_DIR.glob("*.json")):
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+            if data.get("source", "").lower() == "whatsapp":
+                WhatsAppOutboxHandler()._process(str(f))
+        except Exception as exc:
+            log.warning("Error in startup outbox sweep: %s", exc)
 
-    # 2. Start outbox watcher (background thread)
     observer = Observer()
+    observer.schedule(EventsDirHandler(), str(EVENTS_DIR), recursive=False)
     observer.schedule(WhatsAppOutboxHandler(), str(OUTBOX_DIR), recursive=False)
-    observer.daemon = True
     observer.start()
-    log.info("Outbox watcher started.")
+    log.info("Adapter running - watching %s and %s", EVENTS_DIR, OUTBOX_DIR)
 
-    # 3. Start bridge runner (blocks in its own loop; runs bridge as subprocess)
-    runner = BridgeRunner()
     try:
-        runner.start()  # blocks here
+        while True:
+            time.sleep(1)
     except KeyboardInterrupt:
-        log.info("Received KeyboardInterrupt — shutting down.")
+        log.info("Shutting down adapter...")
     finally:
-        runner.stop()
         observer.stop()
         observer.join()
-        log.info("Adapter stopped.")
 
 
 if __name__ == "__main__":
-    start()
+    main()
