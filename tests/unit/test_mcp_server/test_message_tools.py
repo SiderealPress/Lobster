@@ -526,12 +526,15 @@ class TestWriteResultDeduplication:
     was already called with the same text to the same chat."""
 
     @pytest.fixture(autouse=True)
-    def reset_direct_sends(self):
-        """Clear the _direct_sends registry before each test."""
-        import src.mcp.inbox_server as server
-        server._direct_sends.clear()
+    def reset_direct_sends(self, tmp_path):
+        """Clear the sent-replies directory before each test."""
+        sent_replies = tmp_path / "sent-replies"
+        sent_replies.mkdir(exist_ok=True)
+        self._sent_replies_dir = sent_replies
         yield
-        server._direct_sends.clear()
+        # Cleanup
+        for f in sent_replies.iterdir():
+            f.unlink(missing_ok=True)
 
     @pytest.fixture
     def dirs(self, temp_messages_dir: Path):
@@ -544,7 +547,6 @@ class TestWriteResultDeduplication:
     def test_forward_suppressed_after_send_reply(self, dirs):
         """write_result with forward=True is overridden to False when an identical
         message was already delivered via send_reply to the same chat."""
-        import src.mcp.inbox_server as server
         inbox, outbox, sent = dirs
 
         with patch.multiple(
@@ -552,6 +554,7 @@ class TestWriteResultDeduplication:
             INBOX_DIR=inbox,
             OUTBOX_DIR=outbox,
             SENT_DIR=sent,
+            SENT_REPLIES_DIR=self._sent_replies_dir,
         ):
             import asyncio
             from src.mcp.inbox_server import handle_send_reply, handle_write_result
@@ -588,7 +591,6 @@ class TestWriteResultDeduplication:
     def test_forward_not_suppressed_for_different_text(self, dirs):
         """write_result forward is NOT suppressed when the text differs from
         what was sent via send_reply."""
-        import src.mcp.inbox_server as server
         inbox, outbox, sent = dirs
 
         with patch.multiple(
@@ -596,6 +598,7 @@ class TestWriteResultDeduplication:
             INBOX_DIR=inbox,
             OUTBOX_DIR=outbox,
             SENT_DIR=sent,
+            SENT_REPLIES_DIR=self._sent_replies_dir,
         ):
             import asyncio
             from src.mcp.inbox_server import handle_send_reply, handle_write_result
@@ -625,7 +628,6 @@ class TestWriteResultDeduplication:
 
     def test_forward_not_suppressed_for_different_chat(self, dirs):
         """write_result forward is NOT suppressed when the chat_id differs."""
-        import src.mcp.inbox_server as server
         inbox, outbox, sent = dirs
 
         with patch.multiple(
@@ -633,6 +635,7 @@ class TestWriteResultDeduplication:
             INBOX_DIR=inbox,
             OUTBOX_DIR=outbox,
             SENT_DIR=sent,
+            SENT_REPLIES_DIR=self._sent_replies_dir,
         ):
             import asyncio
             from src.mcp.inbox_server import handle_send_reply, handle_write_result
@@ -664,7 +667,6 @@ class TestWriteResultDeduplication:
 
     def test_explicit_forward_false_still_false(self, dirs):
         """write_result with explicit forward=False is preserved regardless."""
-        import src.mcp.inbox_server as server
         inbox, outbox, sent = dirs
 
         with patch.multiple(
@@ -672,6 +674,7 @@ class TestWriteResultDeduplication:
             INBOX_DIR=inbox,
             OUTBOX_DIR=outbox,
             SENT_DIR=sent,
+            SENT_REPLIES_DIR=self._sent_replies_dir,
         ):
             import asyncio
             from src.mcp.inbox_server import handle_write_result
