@@ -67,6 +67,16 @@ mcp__lobster-inbox__write_result(
 )
 ```
 
+**CRITICAL: If you called `send_reply` directly at any point, you MUST pass `forward=False` to `write_result`:**
+
+```python
+mcp__lobster-inbox__write_result(
+    task_id=..., chat_id=..., text=..., forward=False
+)
+```
+
+Failing to pass `forward=False` causes duplicate messages — the dispatcher will forward your `write_result` on top of the `send_reply` you already sent.
+
 **Why two steps?** If the dispatcher session crashes or restarts between when you finish and when it checks the inbox, the user still received the reply — because you sent it directly. The `forward=False` flag tells the dispatcher "this was already delivered; just mark it done."
 
 **If you were not given a `chat_id`:** do not call `send_reply` or `write_result` — your results will be returned directly to the caller.
