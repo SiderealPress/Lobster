@@ -3978,7 +3978,13 @@ async def handle_write_result(args: dict) -> list[TextContent]:
     if status not in ("success", "error"):
         status = "success"
 
-    msg_type = "subagent_result" if status == "success" else "subagent_error"
+    # When forward=False the subagent already called send_reply directly.
+    # Use a distinct message type so the dispatcher knows to read for situational
+    # awareness and mark_processed without calling send_reply — no duplicate risk.
+    if not forward:
+        msg_type = "subagent_notification"
+    else:
+        msg_type = "subagent_result" if status == "success" else "subagent_error"
 
     now = datetime.now(timezone.utc)
     # Use millisecond timestamp + task_id fragment for a unique, sortable filename
@@ -4014,9 +4020,13 @@ async def handle_write_result(args: dict) -> list[TextContent]:
         log.warning(f"write_result auto-unregister failed for task_id={task_id!r}: {exc}")
 
     log.info(f"Subagent result queued in inbox: task_id={task_id} status={status} chat_id={chat_id}")
+    if msg_type == "subagent_notification":
+        delivery_note = "Subagent handled delivery directly via send_reply — dispatcher will mark processed without forwarding."
+    else:
+        delivery_note = f"The main thread will deliver it to chat {chat_id}."
     return [TextContent(
         type="text",
-        text=f"Result queued in inbox as {msg_type} (id={message_id}). The main thread will deliver it to chat {chat_id}.",
+        text=f"Result queued in inbox as {msg_type} (id={message_id}). {delivery_note}",
     )]
 
 
