@@ -43,3 +43,8 @@ tests/unit/test_integrations/test_google_calendar_phase4.py:Hardcoded token
 tests/unit/test_integrations/test_google_calendar_token_store.py:Hardcoded token
 agents/eloso-deployer.md:Hardcoded token
 uv.lock:Phone number
+
+# Kissinger skill binaries — compiled binaries that contain byte sequences
+# that false-positive as email addresses. These are not actual secrets.
+lobster-shop/kissinger/bin/kissinger:Email address
+lobster-shop/kissinger/bin/kissinger-mcp:Email address
