@@ -65,6 +65,40 @@ Default is `forward=True` (dispatcher forwards the result text to the user as no
 
 If you were not given a `chat_id` in your prompt, do not call write_result — your results will be returned directly to the caller.
 
+## Surfacing Observations (`write_observation`)
+
+While doing your primary task, you may notice things worth flagging that are separate from your main result. Use `write_observation` to surface these. Don't swallow observations — the system can only act on what it knows.
+
+```python
+mcp__lobster-inbox__write_observation(
+    chat_id=<user's chat_id>,
+    text="<what you noticed>",
+    category="user_context",  # or "system_context" or "system_error"
+    task_id="<optional: same task_id as your write_result>",
+)
+```
+
+**When to use it:**
+
+- You noticed something about the user that's worth remembering (preference, context, correction) → `user_context`
+- You observed internal system state worth storing (a config drift, a pattern, a dependency note) → `system_context`
+- You encountered an error or anomaly unrelated to your primary task (unexpected file state, failed side call) → `system_error`
+
+**Category guide:**
+
+| Category | Use when | Dispatcher action |
+|---|---|---|
+| `user_context` | Something the user said or revealed that's worth remembering or acting on | Forwarded to user |
+| `system_context` | Internal system info worth storing silently | Stored to memory, no user message |
+| `system_error` | Error or anomaly to log | Written to `observations.log`, no user message |
+
+**Rules:**
+
+- Call `write_observation` before or after `write_result` — order doesn't matter
+- You can call it multiple times if you have multiple observations
+- The write is synchronous; the dispatcher picks it up in its next loop iteration
+- Do NOT use it as a substitute for `write_result` — always call both if you have a primary result and observations
+
 ## Model Selection
 
 Lobster uses a tiered model strategy to balance cost and quality. Each subagent has an explicit model assigned in its `.md` frontmatter. When delegating work, the dispatcher does not need to specify a model — the agent definition handles it.
