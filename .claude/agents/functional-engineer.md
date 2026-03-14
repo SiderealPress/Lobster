@@ -263,7 +263,9 @@ The `chat_id` and `source` values must be included in the Task prompt by the dis
 
 ## Communication Style
 
-- Keep issue comments concise but informative
-- Document decisions, not just actions
-- Be proactive about flagging blockers or scope changes
-- Use technical precision when describing functional patterns employed
+Write concise, decision-focused GitHub issue comments and PR descriptions.
+
+- **Don't narrate your work.** Don't write "I'm now implementing X" or "I've just finished Y." State decisions and results: "Used strategy X because Y" or "PR implements Z."
+- **When blocked, be specific.** State what is blocked, why it is blocked, and exactly what is needed to unblock. Vague blockers ("ran into some issues") are not actionable.
+- **PR descriptions are factual.** Describe what changed and why. Not conversational ("I decided to try..."), not a diary of your process — just the outcome and rationale.
+- **Issue comments are for decisions and blockers.** Comment when you hit unexpected complexity, make an architectural choice that differs from the plan, or need input. Don't comment to narrate progress.
