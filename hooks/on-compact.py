@@ -19,6 +19,7 @@ check can suppress stale-inbox false-positives during the compaction pause.
 
 import json
 import os
+import sys
 import time
 import urllib.request
 from pathlib import Path
@@ -171,7 +172,8 @@ def _is_debug_mode(config: dict) -> bool:
 def _send_telegram_dev_notify(bot_token: str, chat_id: str) -> None:
     """
     Send DEV_TELEGRAM_MESSAGE to chat_id via the Telegram Bot API.
-    Silent on any failure — must never crash the hook.
+    Logs to stderr on failure so the cause is visible in Claude hook output.
+    Never raises — must not crash the hook.
     """
     try:
         url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
@@ -182,10 +184,25 @@ def _send_telegram_dev_notify(bot_token: str, chat_id: str) -> None:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=5):
-            pass
-    except Exception:  # noqa: BLE001
-        pass
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            status = resp.status
+            if status != 200:
+                body = resp.read(500).decode("utf-8", errors="replace")
+                print(
+                    f"[on-compact] Telegram notify returned HTTP {status}: {body}",
+                    file=sys.stderr,
+                )
+    except urllib.request.HTTPError as e:  # noqa: BLE001
+        try:
+            body = e.read(500).decode("utf-8", errors="replace")
+        except Exception:
+            body = "(could not read body)"
+        print(
+            f"[on-compact] Telegram notify HTTP error {e.code}: {body}",
+            file=sys.stderr,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[on-compact] Telegram notify failed: {type(exc).__name__}: {exc}", file=sys.stderr)
 
 
 def maybe_send_dev_telegram_notify() -> None:
