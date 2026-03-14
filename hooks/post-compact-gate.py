@@ -48,11 +48,13 @@ Add this to ~/.claude/settings.json under "hooks" → "PreToolUse":
       "hooks": [
         {
           "type": "command",
-          "command": "python3 /home/lobster/lobster/hooks/post-compact-gate.py",
+          "command": "python3 $HOME/lobster/hooks/post-compact-gate.py",
           "timeout": 5
         }
       ]
     }
+
+Note: $HOME is expanded by the shell at runtime, so this works for any username.
 
 The empty string matcher fires on every tool call.
 """

@@ -324,11 +324,12 @@ if [ "$(id -u)" = "0" ]; then
         chmod 0440 /etc/sudoers.d/lobster
         # Copy SSH authorized_keys so user can SSH in directly next time
         if [ -f /root/.ssh/authorized_keys ]; then
-            mkdir -p /home/lobster/.ssh
-            cp /root/.ssh/authorized_keys /home/lobster/.ssh/authorized_keys
-            chown -R lobster:lobster /home/lobster/.ssh
-            chmod 700 /home/lobster/.ssh
-            chmod 600 /home/lobster/.ssh/authorized_keys
+            LOBSTER_HOME=$(getent passwd lobster | cut -d: -f6)
+            mkdir -p "$LOBSTER_HOME/.ssh"
+            cp /root/.ssh/authorized_keys "$LOBSTER_HOME/.ssh/authorized_keys"
+            chown -R lobster:lobster "$LOBSTER_HOME/.ssh"
+            chmod 700 "$LOBSTER_HOME/.ssh"
+            chmod 600 "$LOBSTER_HOME/.ssh/authorized_keys"
         fi
         success "User 'lobster' created."
     else
