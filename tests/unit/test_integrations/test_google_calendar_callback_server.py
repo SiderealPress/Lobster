@@ -72,10 +72,10 @@ _FAKE_CODE = "4/0AfJohXmFakeAuthCode"
 _FUTURE = datetime.now(tz=timezone.utc) + timedelta(hours=1)
 
 _FAKE_TOKEN = TokenData(
-    access_token="<REDACTED_SECRET>",
+    access_token="ya29.fake",
     expires_at=_FUTURE,
     scope=f"{SCOPE_READONLY} {SCOPE_EVENTS}",
-    refresh_token="<REDACTED_SECRET>",
+    refresh_token="1//fake-refresh",
 )
 
 
