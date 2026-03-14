@@ -29,7 +29,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyParameters
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
 
@@ -714,6 +714,7 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
             "source": "telegram",
             "type": "photo",
             "chat_id": message.chat_id,
+            "telegram_message_id": message.message_id,
             "user_id": user.id,
             "username": user.username,
             "user_name": user.first_name,
@@ -798,6 +799,7 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
             "source": "telegram",
             "type": "document",
             "chat_id": message.chat_id,
+            "telegram_message_id": message.message_id,
             "user_id": user.id,
             "username": user.username,
             "user_name": user.first_name,
@@ -872,6 +874,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "id": msg_id,
         "source": "telegram",
         "chat_id": message.chat_id,
+        "telegram_message_id": message.message_id,
         "user_id": user.id,
         "username": user.username,
         "user_name": user.first_name,
@@ -944,6 +947,7 @@ async def handle_audio_message(
             "source": "telegram",
             "type": msg_type,
             "chat_id": message.chat_id,
+            "telegram_message_id": message.message_id,
             "user_id": user.id,
             "username": user.username,
             "user_name": user.first_name,
@@ -1107,6 +1111,7 @@ class OutboxHandler(FileSystemEventHandler):
             reply_type = reply.get('type', 'text')
             photo_url = reply.get('photo_url', '')
             caption = reply.get('caption', '')
+            reply_to_id = reply.get('reply_to_message_id')
 
             # Handle photo messages (from image-generation skill or other sources)
             if reply_type == 'photo' and photo_url and chat_id and bot_app:
@@ -1139,17 +1144,21 @@ class OutboxHandler(FileSystemEventHandler):
 
             if chat_id and text and bot_app:
                 reply_markup = build_inline_keyboard(buttons) if buttons else None
+                reply_params = ReplyParameters(message_id=int(reply_to_id)) if reply_to_id else None
                 send_items = _prepare_send_items(text)
                 n = len(send_items)
                 for i, (md_chunk, html_chunk) in enumerate(send_items):
                     # Only attach inline keyboard to the final chunk
                     chunk_markup = reply_markup if i == n - 1 else None
+                    # Only thread the first chunk; subsequent chunks are continuations
+                    chunk_reply_params = reply_params if i == 0 else None
                     try:
                         await bot_app.bot.send_message(
                             chat_id=chat_id,
                             text=html_chunk,
                             parse_mode="HTML",
-                            reply_markup=chunk_markup
+                            reply_markup=chunk_markup,
+                            reply_parameters=chunk_reply_params,
                         )
                     except Exception as exc:
                         # Fallback to plain text if HTML parsing fails.
@@ -1165,7 +1174,8 @@ class OutboxHandler(FileSystemEventHandler):
                         await bot_app.bot.send_message(
                             chat_id=chat_id,
                             text=plain,
-                            reply_markup=chunk_markup
+                            reply_markup=chunk_markup,
+                            reply_parameters=chunk_reply_params,
                         )
                 if n > 1:
                     log.info(f"Sent reply to {chat_id} in {n} chunks: {text[:50]}...")
