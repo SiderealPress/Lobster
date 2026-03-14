@@ -1022,10 +1022,6 @@ else
     sudo systemctl start crond 2>/dev/null || true
 fi
 
-# Enable atd service (for self-check reminders via 'at' command)
-sudo systemctl enable atd 2>/dev/null || true
-sudo systemctl start atd 2>/dev/null || true
-
 success "Scheduled tasks infrastructure ready"
 
 #===============================================================================
