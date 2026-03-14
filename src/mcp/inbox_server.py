@@ -851,7 +851,7 @@ async def list_tools() -> list[Tool]:
                     },
                     "reply_to_message_id": {
                         "type": "integer",
-                        "description": "Telegram message ID to reply to. If provided, the bot sends the reply as a threaded reply to that specific message (Telegram only). Pass the telegram_message_id from the incoming message.",
+                        "description": "Telegram message ID to reply to (Telegram only). If provided, threads the reply against that specific message. If omitted, threading is automatic: the server looks up the telegram_message_id from any message currently in processing/ for this chat_id and threads against it. You rarely need to set this explicitly.",
                     },
                     "message_id": {
                         "type": "string",
@@ -2433,6 +2433,82 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
     return [TextContent(type="text", text=output)]
 
 
+def _lookup_telegram_message_id_for_chat(chat_id: int | str) -> int | None:
+    """Return the telegram_message_id from a recent message for chat_id.
+
+    Scanning order:
+    1. processing/ — the common dispatcher-direct case where the original message
+       is still in-flight while send_reply is called.
+    2. processed/ (most-recently-modified first, up to _PROCESSED_SCAN_LIMIT) —
+       the subagent case where the dispatcher already moved the message to
+       processed/ before the subagent calls send_reply via write_result.
+
+    Returns the first telegram_message_id found, or None.
+
+    This is used by handle_send_reply for automatic threading: when the caller
+    does not pass an explicit reply_to_message_id, we look up the in-flight (or
+    recently-processed) message and thread the reply against it automatically.
+    This makes threading structural rather than dependent on dispatcher compliance.
+    """
+    try:
+        chat_id_int = int(chat_id)
+    except (TypeError, ValueError):
+        return None
+
+    def _extract_tg_id(f: Path) -> int | None:
+        """Parse a JSON message file and return its telegram_message_id, or None."""
+        try:
+            data = json.loads(f.read_text())
+        except (json.JSONDecodeError, OSError):
+            return None
+        if int(data.get("chat_id", -1)) != chat_id_int:
+            return None
+        tg_id = data.get("telegram_message_id")
+        if tg_id is None:
+            return None
+        try:
+            return int(tg_id)
+        except (TypeError, ValueError):
+            return None
+
+    # Pass 1: processing/ (no sort needed — typically 0–1 files)
+    try:
+        for f in PROCESSING_DIR.glob("*.json"):
+            result = _extract_tg_id(f)
+            if result is not None:
+                return result
+    except Exception:
+        pass
+
+    # Pass 2: processed/ sorted newest-first (subagent reply case — message already
+    # moved to processed/ by the time the subagent calls write_result → send_reply)
+    try:
+        recent = sorted(
+            PROCESSED_DIR.glob("*.json"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )[:_PROCESSED_SCAN_LIMIT]
+        for f in recent:
+            result = _extract_tg_id(f)
+            if result is not None:
+                log.debug(
+                    f"Auto-threading (subagent path): found telegram_message_id in processed/ "
+                    f"for chat {chat_id_int}"
+                )
+                return result
+    except Exception:
+        pass
+
+    return None
+
+
+# Maximum number of recently-processed files to scan when looking for a
+# telegram_message_id to use for auto-threading.  Processing/ is nearly always
+# empty or tiny, so pass-1 is fast.  For processed/ we limit the scan to avoid
+# iterating over potentially thousands of old messages.
+_PROCESSED_SCAN_LIMIT = 50
+
+
 async def handle_send_reply(args: dict) -> list[TextContent]:
     """Send a reply to a message with input validation."""
     # Validate inputs (raises ValidationError on bad data)
@@ -2461,10 +2537,23 @@ async def handle_send_reply(args: dict) -> list[TextContent]:
     if thread_ts and source == "slack":
         reply_data["thread_ts"] = thread_ts
 
-    # Include reply_to_message_id if provided (Telegram only)
+    # Include reply_to_message_id if provided (Telegram only).
+    # If not provided, auto-look up the telegram_message_id from any message
+    # currently in processing/ for this chat_id. This makes threading structural
+    # (automatic at the code level) rather than relying on dispatcher compliance.
     reply_to_msg_id = args.get("reply_to_message_id")
-    if reply_to_msg_id and source == "telegram":
-        reply_data["reply_to_message_id"] = int(reply_to_msg_id)
+    if source == "telegram":
+        if reply_to_msg_id:
+            reply_data["reply_to_message_id"] = int(reply_to_msg_id)
+        else:
+            # Auto-threading: scan processing/ for a message belonging to this chat
+            auto_tg_msg_id = _lookup_telegram_message_id_for_chat(chat_id)
+            if auto_tg_msg_id:
+                reply_data["reply_to_message_id"] = auto_tg_msg_id
+                log.debug(
+                    f"Auto-threaded reply to chat {chat_id} using "
+                    f"telegram_message_id={auto_tg_msg_id}"
+                )
 
     # Route bisque replies to the bisque-outbox so the relay server picks them up.
     # All other sources go to the standard outbox for the bot process.
