@@ -12,6 +12,12 @@
 #   - WARNS (but allows push) if PII is found
 #   - Supports allowlisting via .security-allowlist in repo root
 #   - Set SECURITY_SCAN_SKIP=1 to bypass entirely (emergency only)
+#
+# Exclusions (never scanned):
+#   - Test directories: tests/, test/, spec/, or any path with /test
+#   - Documentation: .md files
+#   - Binary files: non-text files detected by git's binary check
+#   - Known safe extensions: lock files, compiled artifacts, images, etc.
 # =============================================================================
 
 set -euo pipefail
@@ -179,10 +185,36 @@ PII_PATTERNS=(
     "Server IP Address:::(?<![\\.0-9])(?!(?:127\\.0\\.0\\.1|0\\.0\\.0\\.0|10\\.0\\.0\\.|192\\.168\\.0\\.|172\\.(?:1[6-9]|2[0-9]|3[01])\\.0\\.|255\\.))(?:[1-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\\.(?:[0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\\.(?:[0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\\.(?:[1-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])(?![\\.0-9])"
 )
 
-# --- File exclusion patterns (skip binary files, lock files, etc.) -----------
+# --- File exclusion -----------------------------------------------------------
 
+# Returns 0 (should skip) or 1 (should scan) for a given file path.
+# Skips:
+#   - Test directories: any path starting with tests/, test/, spec/, or
+#     containing /test/ anywhere in the path
+#   - Documentation: .md files (contain examples and placeholders by design)
+#   - Known binary/generated extensions: lock files, compiled artifacts, images
 should_skip_file() {
     local filepath="$1"
+
+    # Skip test directories — fake/mock values are intentional there.
+    # Pattern: path starts with tests/, test/, spec/, or contains /test anywhere.
+    case "$filepath" in
+        tests/*|test/*|spec/*)
+            return 0
+            ;;
+    esac
+    if [[ "$filepath" == */test/* || "$filepath" == */tests/* || "$filepath" == */spec/* ]]; then
+        return 0
+    fi
+
+    # Skip documentation files — .md files use example/placeholder values by design.
+    case "$filepath" in
+        *.md)
+            return 0
+            ;;
+    esac
+
+    # Skip known binary/generated extensions and lock files.
     case "$filepath" in
         *.lock|*.min.js|*.min.css|*.map|*.png|*.jpg|*.jpeg|*.gif|*.ico| \
         *.woff|*.woff2|*.ttf|*.eot|*.svg|*.pdf|*.zip|*.tar|*.gz|*.bz2| \
@@ -192,7 +224,23 @@ should_skip_file() {
             return 0
             ;;
     esac
+
     return 1
+}
+
+# Returns 0 if git diff considers this file binary (contains NUL bytes in the
+# diff header), 1 if it is a text file.  Binary files are never scanned —
+# text replacement on them corrupts the content.
+is_binary_file() {
+    local commit="$1"
+    local filepath="$2"
+    # git diff-tree --numstat reports "-  -  <file>" for binary files
+    local numstat
+    numstat=$(git diff-tree --numstat -r "$commit" -- "$filepath" 2>/dev/null || true)
+    if [[ "$numstat" =~ ^-[[:space:]]+-[[:space:]] ]]; then
+        return 0  # binary
+    fi
+    return 1  # text
 }
 
 # --- Scanning function --------------------------------------------------------
@@ -205,12 +253,22 @@ scan_diff_content() {
     local line_num=0
     local in_hunk=0
     local hunk_start=0
+    local skip_current_file=0
 
     while IFS= read -r line; do
         # Track current file
         if [[ "$line" =~ ^\+\+\+\ b/(.*) ]]; then
             current_file="${BASH_REMATCH[1]}"
             in_hunk=0
+            # Pre-compute whether this file should be skipped.
+            # This avoids calling should_skip_file and is_binary_file on every line.
+            if should_skip_file "$current_file"; then
+                skip_current_file=1
+            elif is_binary_file "$commit_sha" "$current_file"; then
+                skip_current_file=1
+            else
+                skip_current_file=0
+            fi
             continue
         fi
 
@@ -231,8 +289,8 @@ scan_diff_content() {
                 # Skip empty lines
                 [[ -z "${added_content// /}" ]] && continue
 
-                # Skip binary-looking or generated files
-                if should_skip_file "$current_file"; then
+                # Skip this file if flagged above
+                if [[ $skip_current_file -eq 1 ]]; then
                     continue
                 fi
 
@@ -250,15 +308,21 @@ scan_diff_content() {
 
                     if echo "$added_content" | grep -qP -- "$pattern" 2>/dev/null; then
                         # Additional false-positive filters
-                        # Skip if line is a comment
+
+                        # Skip if line is a comment (unless it contains a high-confidence
+                        # token prefix like AKIA, sk-ant-, ghp_, sk_live_, pk_live_)
                         if [[ "$added_content" =~ ^[[:space:]]*(#|//|/\*|\*|<!--) ]]; then
-                            # Still flag if it contains actual key patterns even in comments
                             if ! echo "$added_content" | grep -qP -- "(?:AKIA|sk-ant-|ghp_|sk_live_|pk_live_)" 2>/dev/null; then
                                 continue
                             fi
                         fi
-                        # Skip test/example placeholder values
-                        if echo "$added_content" | grep -qiP -- "(?:example|placeholder|your[_-]?(?:key|token|secret)|xxx|dummy|fake|test[_-]?key|CHANGEME|TODO|FIXME)" 2>/dev/null; then
+
+                        # Skip obvious placeholder/fake/test values.
+                        # Also skip the scanner's own redaction placeholder.
+                        # Patterns: "fake", "dummy", "example", "placeholder",
+                        # "your_*_here" style, "CHANGEME", "TODO", "FIXME",
+                        # and <REDACTED (the scanner's own output string).
+                        if echo "$added_content" | grep -qiP -- "(?:example|placeholder|your[_-]?\w*[_-]?here|your[_-]?(?:key|token|secret)|xxx|dummy|fake|test[_-]?key|CHANGEME|TODO|FIXME|<REDACTED)" 2>/dev/null; then
                             continue
                         fi
 
@@ -387,6 +451,7 @@ if [[ $CRITICAL_FOUND -gt 0 ]]; then
     echo -e "${RED}${BOLD}[security-scan] BLOCKED: ${CRITICAL_FOUND} secret(s)/credential(s) found!${RESET}"
     echo ""
     echo -e "${RED}  Your push has been blocked to prevent leaking secrets.${RESET}"
+    echo -e "${RED}  The file has NOT been modified — fix the issue manually.${RESET}"
     echo ""
     echo -e "  ${BOLD}To fix:${RESET}"
     echo -e "    1. Remove the secret from your code"
