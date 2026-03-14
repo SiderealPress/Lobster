@@ -13,7 +13,7 @@
 #
 # Exclusions (never scanned):
 #   - Test directories: tests/, test/, spec/, or any path with /test
-#   - Documentation: .md files (contain examples/placeholders by design)
+#   - Documentation: .md, .mdx, .rst, .txt, .adoc (examples/placeholders by design)
 #   - Binary files: detected by extension or git's binary check
 #   - Files in the allowlist: .githooks/security-allowlist.txt
 #
@@ -92,9 +92,9 @@ should_skip_file() {
         return 0
     fi
 
-    # Skip documentation files — .md files use example/placeholder values by design.
+    # Skip documentation files — these use example/placeholder values by design.
     case "$filepath" in
-        *.md)
+        *.md|*.mdx|*.rst|*.txt|*.adoc)
             return 0
             ;;
     esac

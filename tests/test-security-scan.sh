@@ -77,33 +77,14 @@ assert_line_detected() {
     fi
 }
 
-# Source the should_skip_file function from the hook
+# Source should_skip_file from the shared library so tests always exercise the
+# real production logic. Any changes to the function in security-scan-lib.sh
+# are automatically picked up here — no manual sync required.
+# shellcheck source=../scripts/security-scan-lib.sh
+source "$REPO_ROOT/scripts/security-scan-lib.sh"
+
 source_should_skip_file() {
-    local filepath="$1"
-    # Inline the should_skip_file logic for testability
-    case "$filepath" in
-        tests/*|test/*|spec/*)
-            return 0
-            ;;
-    esac
-    if [[ "$filepath" == */test/* || "$filepath" == */tests/* || "$filepath" == */spec/* ]]; then
-        return 0
-    fi
-    case "$filepath" in
-        *.md)
-            return 0
-            ;;
-    esac
-    case "$filepath" in
-        *.lock|*.min.js|*.min.css|*.map|*.png|*.jpg|*.jpeg|*.gif|*.ico| \
-        *.woff|*.woff2|*.ttf|*.eot|*.svg|*.pdf|*.zip|*.tar|*.gz|*.bz2| \
-        *.exe|*.dll|*.so|*.dylib|*.pyc|*.pyo|*.class|*.o|*.a| \
-        package-lock.json|yarn.lock|Cargo.lock|go.sum|poetry.lock|Gemfile.lock| \
-        *.pb.go|*_generated.*|*.gen.*|vendor/*|node_modules/*)
-            return 0
-            ;;
-    esac
-    return 1
+    should_skip_file "$@"
 }
 
 # ---------------------------------------------------------------------------
@@ -121,12 +102,16 @@ assert_skipped "path with /test/" "src/integrations/test/mock_client.py"
 assert_skipped "path with /tests/" "src/integrations/tests/mock_client.py"
 
 echo ""
-echo "=== should_skip_file: .md exclusion ==="
+echo "=== should_skip_file: documentation file exclusion ==="
 
 assert_skipped "root .md file" "README.md"
 assert_skipped "agents .md file" "agents/eloso-deployer.md"
 assert_skipped "docs .md file" "docs/google-calendar-setup.md"
 assert_skipped "nested .md file" ".claude/agents/functional-engineer.md"
+assert_skipped ".mdx file" "docs/guide.mdx"
+assert_skipped ".rst file" "docs/api.rst"
+assert_skipped ".txt file" "docs/notes.txt"
+assert_skipped ".adoc file" "docs/readme.adoc"
 
 echo ""
 echo "=== should_skip_file: binary extension exclusion ==="

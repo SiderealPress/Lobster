@@ -15,7 +15,7 @@
 #
 # Exclusions (never scanned):
 #   - Test directories: tests/, test/, spec/, or any path with /test
-#   - Documentation: .md files
+#   - Documentation: .md, .mdx, .rst, .txt, .adoc files
 #   - Binary files: non-text files detected by git's binary check
 #   - Known safe extensions: lock files, compiled artifacts, images, etc.
 # =============================================================================
@@ -187,46 +187,12 @@ PII_PATTERNS=(
 
 # --- File exclusion -----------------------------------------------------------
 
-# Returns 0 (should skip) or 1 (should scan) for a given file path.
-# Skips:
-#   - Test directories: any path starting with tests/, test/, spec/, or
-#     containing /test/ anywhere in the path
-#   - Documentation: .md files (contain examples and placeholders by design)
-#   - Known binary/generated extensions: lock files, compiled artifacts, images
-should_skip_file() {
-    local filepath="$1"
-
-    # Skip test directories — fake/mock values are intentional there.
-    # Pattern: path starts with tests/, test/, spec/, or contains /test anywhere.
-    case "$filepath" in
-        tests/*|test/*|spec/*)
-            return 0
-            ;;
-    esac
-    if [[ "$filepath" == */test/* || "$filepath" == */tests/* || "$filepath" == */spec/* ]]; then
-        return 0
-    fi
-
-    # Skip documentation files — .md files use example/placeholder values by design.
-    case "$filepath" in
-        *.md)
-            return 0
-            ;;
-    esac
-
-    # Skip known binary/generated extensions and lock files.
-    case "$filepath" in
-        *.lock|*.min.js|*.min.css|*.map|*.png|*.jpg|*.jpeg|*.gif|*.ico| \
-        *.woff|*.woff2|*.ttf|*.eot|*.svg|*.pdf|*.zip|*.tar|*.gz|*.bz2| \
-        *.exe|*.dll|*.so|*.dylib|*.pyc|*.pyo|*.class|*.o|*.a| \
-        package-lock.json|yarn.lock|Cargo.lock|go.sum|poetry.lock|Gemfile.lock| \
-        *.pb.go|*_generated.*|*.gen.*|vendor/*|node_modules/*)
-            return 0
-            ;;
-    esac
-
-    return 1
-}
+# should_skip_file is defined in scripts/security-scan-lib.sh (sourced below).
+# Keeping it there ensures the test suite always exercises the real production
+# logic rather than a hand-maintained copy.
+SCRIPT_DIR_HOOK="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/security-scan-lib.sh
+source "$SCRIPT_DIR_HOOK/security-scan-lib.sh"
 
 # Returns 0 if git diff considers this file binary (contains NUL bytes in the
 # diff header), 1 if it is a text file.  Binary files are never scanned —
