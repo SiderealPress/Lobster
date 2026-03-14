@@ -2461,7 +2461,14 @@ def _lookup_telegram_message_id_for_chat(chat_id: int | str) -> int | None:
             data = json.loads(f.read_text())
         except (json.JSONDecodeError, OSError):
             return None
-        if int(data.get("chat_id", -1)) != chat_id_int:
+        stored_chat_id = data.get("chat_id")
+        try:
+            match = int(stored_chat_id) == chat_id_int
+        except (TypeError, ValueError):
+            # stored chat_id is a non-numeric string (e.g. Slack channel ID);
+            # fall back to string comparison
+            match = str(stored_chat_id) == str(chat_id)
+        if not match:
             return None
         tg_id = data.get("telegram_message_id")
         if tg_id is None:
@@ -2483,9 +2490,15 @@ def _lookup_telegram_message_id_for_chat(chat_id: int | str) -> int | None:
     # Pass 2: processed/ sorted newest-first (subagent reply case — message already
     # moved to processed/ by the time the subagent calls write_result → send_reply)
     try:
+        def _safe_mtime(p: Path) -> float:
+            try:
+                return p.stat().st_mtime
+            except FileNotFoundError:
+                return 0.0
+
         recent = sorted(
             PROCESSED_DIR.glob("*.json"),
-            key=lambda p: p.stat().st_mtime,
+            key=_safe_mtime,
             reverse=True,
         )[:_PROCESSED_SCAN_LIMIT]
         for f in recent:
