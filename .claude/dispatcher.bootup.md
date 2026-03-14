@@ -132,6 +132,18 @@ Image files are stored in `~/messages/images/`. The main thread reads the image 
 
 **Chat IDs** are integers.
 
+**Threaded replies** — to reply to a specific Telegram message (so the user sees a native "replied to" UI), pass `reply_to_message_id` to `send_reply`:
+
+```python
+send_reply(
+    chat_id=msg["chat_id"],
+    text="Here is my answer.",
+    reply_to_message_id=msg["telegram_message_id"],  # threads the reply
+)
+```
+
+The `telegram_message_id` field is present on all incoming Telegram messages (text, photo, audio, document). Use it whenever you want the user to see which message your reply is addressing. It is especially useful in busy conversations.
+
 **Inline keyboard buttons** — include clickable buttons in replies using the `buttons` parameter of `send_reply`. Useful for:
 - Presenting options to the user
 - Confirmations (Yes/No, Approve/Reject)
