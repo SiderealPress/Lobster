@@ -180,6 +180,25 @@ Check the `forward` field first:
 - `artifacts` — optional list of file paths the subagent produced
 - `thread_ts` — optional Slack thread timestamp
 
+## Handling Subagent Notifications (`subagent_notification`)
+
+When `write_result` is called with `forward=False`, `inbox_server` writes a message of type `subagent_notification` instead of `subagent_result`. This is the canonical signal that the subagent already delivered its reply to the user via `send_reply`.
+
+**When `wait_for_messages` returns a message with `type: "subagent_notification"`:**
+
+```
+1. mark_processing(message_id)
+2. Read msg["text"] for situational awareness — understand what the task did and what it reported
+3. mark_processed(message_id)
+   # Do NOT call send_reply — the user already received the message
+```
+
+The distinct type enforces correct behavior structurally: the dispatcher's `subagent_result` branch (which calls `send_reply`) never fires for these messages. There is no risk of a duplicate reply even if the dispatcher ignores the `forward` field.
+
+**Why this matters:** Without a distinct type, the only safeguard against duplicate replies is the dispatcher reading and obeying the `forward: false` field. With `subagent_notification`, the message type itself routes correctly — the dispatcher gains situational awareness without any possibility of sending a duplicate.
+
+---
+
 ## Handling Subagent Observations (`subagent_observation`)
 
 Background subagents call `write_observation(chat_id, text, category, ...)`, which drops a message of type `subagent_observation` into the inbox. These are side-channel signals — things the subagent noticed, not its primary result.
@@ -441,9 +460,10 @@ Modes: `"active"` (default) | `"hibernate"`
 
 ## No redundant relay after subagent direct messages
 
-When a subagent calls `send_reply` directly AND calls `write_result` with `forward=false`, the user already received the message. When the subagent_result arrives in your inbox:
+When a subagent calls `send_reply` directly AND calls `write_result` with `forward=False`, the user already received the message. The inbox server writes this as a `subagent_notification` (not `subagent_result`), which is the structural guarantee you never forward it.
 
-- **If `forward: false`** → just `mark_processed`, say nothing
+**When `subagent_notification` arrives:**
+- `mark_processed` — nothing to deliver
 - Do NOT send a summary of what the subagent just said
 
 **Why this matters:** The failure mode is 2–4 messages arriving for a single action — the subagent's detailed message plus your redundant summary. They contain the same information and spam the user.
@@ -451,7 +471,9 @@ When a subagent calls `send_reply` directly AND calls `write_result` with `forwa
 **Pattern to avoid:**
 1. You say "on it" (preview)
 2. Subagent sends detailed result via `send_reply`
-3. Subagent calls `write_result` with `forward=false`
-4. You receive the write_result and send another summary ← **don't do step 4**
+3. Subagent calls `write_result` with `forward=False`
+4. You receive the `subagent_notification` and send another summary ← **don't do step 4**
 
 Correct pattern: preview once if needed → subagent sends result → you are silent.
+
+**Note on `forward=None`:** If a subagent passes `forward=None` (omits the argument), the server treats it as `forward=True` — the message becomes a `subagent_result` and the dispatcher will forward it. This is the safe default: missing forward means "please deliver."
