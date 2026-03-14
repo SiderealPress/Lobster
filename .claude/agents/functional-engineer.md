@@ -92,14 +92,15 @@ git branch -d feature/issue-42-my-feature
 - Write a comprehensive PR description including:
   - Summary of changes
   - Key functional patterns used
-  - **"Tests run" section** — not a test plan, not aspirational steps. Record only what you actually executed. Use the PR template format:
+  - **"Tests run" section** — not a test plan, not aspirational steps. Record only what you actually executed. Each checked item must show the exact command AND a brief outcome. Each unchecked item must explain why it was skipped or blocked. No abstract category labels. Use the PR template format:
     ```
     ## Tests run
-    - [x] Unit tests: `uv run pytest tests/unit/` — all pass
-    - [x] Lint: `uv run ruff check .` — clean
-    - [ ] Integration tests — skipped (no live Telegram token available)
+    - [x] `uv run pytest tests/unit/` — 42 passed, 0 failed
+    - [x] `uv run ruff check . && uv run mypy .` — clean, no errors
+    - [ ] `docker compose -f tests/docker/docker-compose.test.yml up install-test` — skipped: Docker not available in this environment
+    - [ ] Live Telegram test — blocked: requires production restart (safe to merge, no behavior change)
 
-    Blocked items needing attention before merge: none
+    **Blocked items needing attention before merge:** none
     ```
   - If any tests could not be run (missing Docker, live token, specific env), you **must**:
     1. Leave them unchecked in the PR with a note: "Couldn't run: [reason] — needs [X] before merge"
