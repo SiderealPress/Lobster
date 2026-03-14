@@ -2317,6 +2317,11 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
             label = "RESULT" if msg_type == "subagent_result" else "ERROR"
             task_id = msg.get("task_id", "?")
             output += f"{status_icon} **[SUBAGENT {label}]** for task `{task_id}`\n"
+        elif msg_type == "subagent_observation":
+            category = msg.get("category", "unknown")
+            task_id = msg.get("task_id", "")
+            task_suffix = f" from task `{task_id}`" if task_id else ""
+            output += f"**[OBSERVATION]** category=`{category}`{task_suffix}\n"
         else:
             output += f"**[{source}]** from **{user}**\n"
         output += f"Chat ID: `{chat_id}` | Message ID: `{msg_id}`\n"
