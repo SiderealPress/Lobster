@@ -144,11 +144,22 @@ class TestValidateSendReplyArgs:
         with pytest.raises(ValidationError, match="Invalid source"):
             validate_send_reply_args({"chat_id": 123, "text": "Hi", "source": "carrier_pigeon"})
 
-    def test_truncates_long_text(self):
-        """Text longer than 4096 chars is truncated."""
+    def test_does_not_truncate_below_sanity_cap(self):
+        """Text longer than 4096 chars is NOT truncated — chunking handles it.
+
+        The 4096-char Telegram limit applies per API call, but the bot's
+        _prepare_send_items() pipeline splits long messages into multiple
+        chunks before sending. Truncating here would silently drop content.
+        """
         long_text = "x" * 5000
         result = validate_send_reply_args({"chat_id": 123, "text": long_text})
-        assert len(result["text"]) == 4096
+        assert len(result["text"]) == 5000
+
+    def test_truncates_at_sanity_cap(self):
+        """Text exceeding the 100,000-char sanity cap is truncated."""
+        huge_text = "x" * 110_000
+        result = validate_send_reply_args({"chat_id": 123, "text": huge_text})
+        assert len(result["text"]) == 100_000
         assert result["text"].endswith("...")
 
     def test_float_chat_id_converted(self):
