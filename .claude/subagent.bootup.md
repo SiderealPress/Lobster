@@ -11,7 +11,14 @@ Lobster is an always-on AI assistant that processes messages from Telegram and S
 
 Users communicate through a chat interface (Telegram or Slack), typically on mobile. Keep replies concise and mobile-friendly. The GitHub repo is `SiderealPress/lobster`.
 
-When your task is complete, call `mcp__lobster-inbox__write_result(task_id=..., chat_id=..., text=...)` to send results back through the queue. The dispatcher picks this up and forwards the text to the user. If you have already called `send_reply` yourself, pass `forward=False` to prevent double-delivery. Do NOT call `wait_for_messages` — that is only for the main loop.
+When your task is complete:
+
+1. **Call `send_reply(chat_id, text)` directly** to deliver the result to the user immediately. This ensures the user gets their reply even if the dispatcher session has crashed or restarted.
+2. **Then call `write_result(..., forward=False)`** so the dispatcher marks the message processed without re-delivering it.
+
+This two-step pattern is crash-safe: the user gets the reply from you regardless of dispatcher state.
+
+Do NOT call `wait_for_messages` — that is only for the main loop.
 
 ---
 
@@ -34,36 +41,31 @@ These files are private and not in the git repo. They extend and override the de
 
 ## Subagent Rules
 
-You MUST call `write_result` at the end of every task to relay your results through the inbox queue. Never silently complete and return — always send your output via `write_result` so the main loop can deliver it to the user.
+You MUST both deliver results to the user directly AND call `write_result` at the end of every task. Never silently complete and return.
 
-**Required at end of every subagent task:**
+**Required at end of every subagent task — two steps:**
+
 ```python
-mcp__lobster-inbox__write_result(
-    task_id="<descriptive-task-id>",
+# Step 1: Deliver directly to the user (crash-safe delivery)
+mcp__lobster-inbox__send_reply(
     chat_id=<user's chat_id — get this from your task prompt>,
     text="<your result or report>",
     source="telegram"  # or "slack" if appropriate
 )
-```
 
-**Using `forward=False` to suppress re-delivery:**
-
-If your subagent has already called `send_reply` directly to deliver a result to the user, pass `forward=False` to `write_result`. This tells the dispatcher to mark the message processed silently without sending anything — avoiding a duplicate delivery.
-
-```python
-# Subagent called send_reply, then signals dispatcher to skip forwarding:
+# Step 2: Signal the dispatcher to mark processed without re-sending
 mcp__lobster-inbox__write_result(
     task_id="<descriptive-task-id>",
     chat_id=<user's chat_id>,
-    text="<summary of what was delivered — for logging>",
+    text="<same result text, or a brief log summary>",
     source="telegram",
-    forward=False,  # dispatcher will not re-send this to the user
+    forward=False,  # REQUIRED — you already sent via send_reply above
 )
 ```
 
-Default is `forward=True` (dispatcher forwards the result text to the user as normal).
+**Why two steps?** If the dispatcher session crashes or restarts between when you finish and when it checks the inbox, the user still received the reply — because you sent it directly. The `forward=False` flag tells the dispatcher "this was already delivered; just mark it done."
 
-If you were not given a `chat_id` in your prompt, do not call write_result — your results will be returned directly to the caller.
+**If you were not given a `chat_id`:** do not call `send_reply` or `write_result` — your results will be returned directly to the caller.
 
 ## Surfacing Observations (`write_observation`)
 

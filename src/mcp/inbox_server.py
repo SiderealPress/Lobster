@@ -1042,10 +1042,10 @@ async def list_tools() -> list[Tool]:
             name="write_result",
             description=(
                 "Write a result from a background subagent back to the main message queue. "
-                "The main thread will pick this up during its normal wait_for_messages loop, "
-                "send the text to the user, and mark it processed. "
-                "Use this instead of send_reply — subagents must not call send_reply directly. "
-                "On failure, call this with status='error' so the main thread can notify the user gracefully."
+                "Subagents should call send_reply directly first (crash-safe delivery), then call "
+                "this with forward=False so the dispatcher marks the message processed without "
+                "re-sending. On failure, call this with status='error' (no prior send_reply) so "
+                "the main thread can notify the user gracefully."
             ),
             inputSchema={
                 "type": "object",
