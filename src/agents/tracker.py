@@ -10,9 +10,14 @@ Format:
       "agents": [
         {
           "id": "abc123",
+          "task_id": "fix-all-problems-1741967040",
           "description": "Implement feature X on issue #42",
           "chat_id": 1234567890,
-          "started_at": "2026-02-22T10:30:00.000000Z"
+          "source": "telegram",
+          "started_at": "2026-02-22T10:30:00.000000Z",
+          "output_file": "/tmp/claude-1000/.../tasks/abc123.output",
+          "timeout_minutes": 30,
+          "status": "running"
         }
       ]
     }
@@ -47,19 +52,60 @@ def _empty_store() -> dict:
     return {"agents": []}
 
 
-def _make_agent_entry(agent_id: str, description: str, chat_id: int) -> dict:
-    """Construct an immutable agent record."""
-    return {
+def _make_agent_entry(
+    agent_id: str,
+    description: str,
+    chat_id: int,
+    task_id: str | None = None,
+    source: str = "telegram",
+    output_file: str | None = None,
+    timeout_minutes: int | None = None,
+    status: str = "running",
+) -> dict:
+    """Construct an immutable agent record.
+
+    Args:
+        agent_id:        Unique identifier extracted from the Task tool result.
+        description:     Human-readable summary of what the agent is doing.
+        chat_id:         Chat/channel to notify when the agent completes.
+        task_id:         Logical task identifier (e.g. 'fix-all-problems-1741967040').
+                         Typically matches the task_id the subagent will pass to write_result.
+        source:          Messaging platform ('telegram', 'slack', etc.).
+        output_file:     Full path to the Claude Code agent output file in /tmp.
+                         Used for liveness detection: stat the file mtime to determine
+                         if the agent is still active.
+        timeout_minutes: Expected maximum runtime. Agents older than this without
+                         output file activity can be presumed dead.
+        status:          Lifecycle state — 'running' (default) | 'dead' | 'completed'.
+    """
+    entry: dict[str, Any] = {
         "id": agent_id,
         "description": description,
         "chat_id": chat_id,
+        "source": source,
         "started_at": datetime.now(timezone.utc).isoformat(),
+        "status": status,
     }
+    if task_id is not None:
+        entry["task_id"] = task_id
+    if output_file is not None:
+        entry["output_file"] = output_file
+    if timeout_minutes is not None:
+        entry["timeout_minutes"] = timeout_minutes
+    return entry
 
 
-def _filter_out(agents: list, agent_id: str) -> list:
-    """Return agents list with the given ID removed (pure, non-mutating)."""
-    return [a for a in agents if a.get("id") != agent_id]
+def _filter_out(agents: list, lookup_key: str) -> list:
+    """Return agents list with the matching entry removed (pure, non-mutating).
+
+    Matches on either the 'id' field or the 'task_id' field so that callers
+    using either identifier (e.g. handle_write_result passes task_id as the
+    lookup key) correctly remove the record.
+    """
+    return [
+        a for a in agents
+        if a.get("id") != lookup_key and a.get("task_id") != lookup_key
+    ]
 
 
 def _find_agent(agents: list, agent_id: str) -> dict | None:
@@ -141,18 +187,36 @@ def add_pending_agent(
     agent_id: str,
     description: str,
     chat_id: int,
+    task_id: str | None = None,
+    source: str = "telegram",
+    output_file: str | None = None,
+    timeout_minutes: int | None = None,
     path: Path = _DEFAULT_PATH,
 ) -> None:
     """Record a newly-spawned background agent.
 
     Args:
-        agent_id:    Unique identifier for the agent task (e.g. task UUID).
-        description: Human-readable summary of what the agent is doing.
-                     Include enough context so Lobster can relay results to Drew.
-        chat_id:     Telegram chat_id to notify when the agent completes.
-        path:        Override the default pending-agents.json path (for testing).
+        agent_id:        Unique identifier for the agent (extracted from Task result).
+        description:     Human-readable summary of what the agent is doing.
+                         Include enough context so Lobster can relay results after restart.
+        chat_id:         Chat/channel to notify when the agent completes.
+        task_id:         Logical task identifier passed to write_result by the subagent.
+        source:          Messaging platform ('telegram', 'slack', etc.).
+        output_file:     Full path to the Claude Code agent output file in /tmp.
+                         Enables liveness detection via mtime checks.
+        timeout_minutes: Expected maximum runtime. Agents older than this can be
+                         presumed dead if there is no recent output file activity.
+        path:            Override the default pending-agents.json path (for testing).
     """
-    entry = _make_agent_entry(agent_id, description, chat_id)
+    entry = _make_agent_entry(
+        agent_id=agent_id,
+        description=description,
+        chat_id=chat_id,
+        task_id=task_id,
+        source=source,
+        output_file=output_file,
+        timeout_minutes=timeout_minutes,
+    )
 
     def update(store: dict) -> dict:
         agents = store.get("agents", [])
