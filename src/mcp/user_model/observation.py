@@ -236,6 +236,11 @@ def observe_message(
     - previous_topic: topic of previous message (for topic shift detection)
     - previous_message_ts: timestamp of previous message (for follow-up detection)
     """
+    if isinstance(message_ts, str):
+        try:
+            message_ts = datetime.fromisoformat(message_ts)
+        except (ValueError, TypeError):
+            message_ts = None
     ts = message_ts or datetime.utcnow()
     reply_length = len(message_text)
     signals = extract_signals(message_text, message_id, context, metadata)
