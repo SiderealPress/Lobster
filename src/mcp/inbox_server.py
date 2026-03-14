@@ -208,6 +208,38 @@ def _track_reply(chat_id: Any) -> None:
             sorted_items = sorted(_recent_replies.items(), key=lambda x: x[1], reverse=True)
             _recent_replies = dict(sorted_items[:_REPLY_TRACK_MAX])
 
+# Direct-send deduplication — tracks recent send_reply calls by (chat_id, text_hash).
+# When write_result is called with forward=True, we check whether an identical message
+# was already delivered directly to the same chat within the dedup window.  If so,
+# forward is silently overridden to False to prevent the dispatcher from sending a
+# duplicate to the user.
+_direct_sends: dict[str, float] = {}
+_DIRECT_SEND_WINDOW_SECS = 60  # suppress duplicates within this window
+_DIRECT_SEND_MAX = 500
+
+def _record_direct_send(chat_id: Any, text: str) -> None:
+    """Record a direct send_reply call so write_result can detect duplicates."""
+    global _direct_sends
+    import hashlib
+    key = f"{chat_id}:{hashlib.sha256(text.encode()).hexdigest()[:16]}"
+    _direct_sends[key] = time.time()
+    # Evict expired entries to keep memory bounded
+    if len(_direct_sends) > _DIRECT_SEND_MAX:
+        cutoff = time.time() - _DIRECT_SEND_WINDOW_SECS
+        _direct_sends = {k: v for k, v in _direct_sends.items() if v > cutoff}
+        if len(_direct_sends) > _DIRECT_SEND_MAX:
+            sorted_items = sorted(_direct_sends.items(), key=lambda x: x[1], reverse=True)
+            _direct_sends = dict(sorted_items[:_DIRECT_SEND_MAX])
+
+def _was_sent_directly(chat_id: Any, text: str) -> bool:
+    """Return True if an identical message was sent directly to chat_id recently."""
+    import hashlib
+    key = f"{chat_id}:{hashlib.sha256(text.encode()).hexdigest()[:16]}"
+    sent_at = _direct_sends.get(key)
+    if sent_at is None:
+        return False
+    return (time.time() - sent_at) < _DIRECT_SEND_WINDOW_SECS
+
 # Sources that represent human users (not system/automated)
 # NOTE: Do NOT use this to classify whether a message needs a reply — source is
 # the routing destination, not the message type. A subagent_result has
@@ -2150,6 +2182,9 @@ async def handle_send_reply(args: dict) -> list[TextContent]:
     # Track reply for mark_processed guard
     _track_reply(chat_id)
 
+    # Record direct send for write_result deduplication (suppress duplicate forwards)
+    _record_direct_send(chat_id, text)
+
     log.info(f"Reply sent to {source} chat {chat_id}")
 
     # Atomic mark_processed: if message_id provided, move message to processed/ in same call
@@ -2214,6 +2249,7 @@ async def handle_send_whatsapp_reply(args: dict) -> list[TextContent]:
     atomic_write_json(sent_file, reply_data)
 
     _track_reply(chat_id)
+    _record_direct_send(chat_id, text)
 
     log.info(f"WhatsApp reply queued for {chat_id}")
     return [TextContent(type="text", text=f"✅ WhatsApp message queued for {chat_id}:\n\n{text[:100]}{'...' if len(text) > 100 else ''}")]
@@ -2247,6 +2283,7 @@ async def handle_send_sms_reply(args: dict) -> list[TextContent]:
     atomic_write_json(sent_file, reply_data)
 
     _track_reply(chat_id)
+    _record_direct_send(chat_id, text)
 
     log.info(f"SMS reply queued for {chat_id}")
     return [TextContent(type="text", text=f"SMS message queued for {chat_id}:\n\n{text[:100]}{'...' if len(text) > 100 else ''}")]
@@ -3631,6 +3668,18 @@ async def handle_write_result(args: dict) -> list[TextContent]:
         return [TextContent(type="text", text="Error: chat_id is required")]
     if not text:
         return [TextContent(type="text", text="Error: text is required")]
+
+    # Server-side deduplication: if the subagent already called send_reply with the
+    # same text to the same chat, suppress the forwarded duplicate regardless of the
+    # forward flag passed by the caller.  This prevents the common mistake where a
+    # subagent calls send_reply AND write_result without forward=False, causing the
+    # dispatcher to deliver the message a second time.
+    if forward and _was_sent_directly(chat_id, text):
+        log.info(
+            f"write_result dedup: suppressing forward for task {task_id!r} — "
+            f"identical message already sent directly to chat {chat_id}"
+        )
+        forward = False
 
     if status not in ("success", "error"):
         status = "success"

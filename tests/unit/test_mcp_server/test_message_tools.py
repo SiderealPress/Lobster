@@ -519,3 +519,172 @@ class TestGetStats:
             result = asyncio.run(handle_get_stats({}))
 
             assert "Statistics" in result[0].text
+
+
+class TestWriteResultDeduplication:
+    """Tests for server-side dedup: write_result should not forward when send_reply
+    was already called with the same text to the same chat."""
+
+    @pytest.fixture(autouse=True)
+    def reset_direct_sends(self):
+        """Clear the _direct_sends registry before each test."""
+        import src.mcp.inbox_server as server
+        server._direct_sends.clear()
+        yield
+        server._direct_sends.clear()
+
+    @pytest.fixture
+    def dirs(self, temp_messages_dir: Path):
+        inbox = temp_messages_dir / "inbox"
+        outbox = temp_messages_dir / "outbox"
+        sent = temp_messages_dir / "sent"
+        sent.mkdir(exist_ok=True)
+        return inbox, outbox, sent
+
+    def test_forward_suppressed_after_send_reply(self, dirs):
+        """write_result with forward=True is overridden to False when an identical
+        message was already delivered via send_reply to the same chat."""
+        import src.mcp.inbox_server as server
+        inbox, outbox, sent = dirs
+
+        with patch.multiple(
+            "src.mcp.inbox_server",
+            INBOX_DIR=inbox,
+            OUTBOX_DIR=outbox,
+            SENT_DIR=sent,
+        ):
+            import asyncio
+            from src.mcp.inbox_server import handle_send_reply, handle_write_result
+
+            text = "Done! PR #42 is open."
+
+            # Subagent calls send_reply first
+            asyncio.run(handle_send_reply({
+                "chat_id": 111,
+                "text": text,
+                "source": "telegram",
+            }))
+
+            # Then calls write_result with forward=True (the buggy pattern)
+            result = asyncio.run(handle_write_result({
+                "task_id": "issue-42",
+                "chat_id": 111,
+                "text": text,
+                "source": "telegram",
+                "forward": True,
+            }))
+
+            assert len(result) == 1
+            assert "Result queued" in result[0].text
+
+            # Read the written message and verify forward was overridden to False
+            inbox_files = list(inbox.glob("*.json"))
+            assert len(inbox_files) == 1
+            msg = json.loads(inbox_files[0].read_text())
+            assert msg["forward"] is False, (
+                "forward should be overridden to False when send_reply was already called"
+            )
+
+    def test_forward_not_suppressed_for_different_text(self, dirs):
+        """write_result forward is NOT suppressed when the text differs from
+        what was sent via send_reply."""
+        import src.mcp.inbox_server as server
+        inbox, outbox, sent = dirs
+
+        with patch.multiple(
+            "src.mcp.inbox_server",
+            INBOX_DIR=inbox,
+            OUTBOX_DIR=outbox,
+            SENT_DIR=sent,
+        ):
+            import asyncio
+            from src.mcp.inbox_server import handle_send_reply, handle_write_result
+
+            # send_reply with one text
+            asyncio.run(handle_send_reply({
+                "chat_id": 222,
+                "text": "Interim update: working on it.",
+                "source": "telegram",
+            }))
+
+            # write_result with different text
+            asyncio.run(handle_write_result({
+                "task_id": "issue-99",
+                "chat_id": 222,
+                "text": "Final result: all done.",
+                "source": "telegram",
+                "forward": True,
+            }))
+
+            inbox_files = list(inbox.glob("*.json"))
+            assert len(inbox_files) == 1
+            msg = json.loads(inbox_files[0].read_text())
+            assert msg["forward"] is True, (
+                "forward should remain True when texts differ"
+            )
+
+    def test_forward_not_suppressed_for_different_chat(self, dirs):
+        """write_result forward is NOT suppressed when the chat_id differs."""
+        import src.mcp.inbox_server as server
+        inbox, outbox, sent = dirs
+
+        with patch.multiple(
+            "src.mcp.inbox_server",
+            INBOX_DIR=inbox,
+            OUTBOX_DIR=outbox,
+            SENT_DIR=sent,
+        ):
+            import asyncio
+            from src.mcp.inbox_server import handle_send_reply, handle_write_result
+
+            text = "Task complete."
+
+            # send_reply to chat 333
+            asyncio.run(handle_send_reply({
+                "chat_id": 333,
+                "text": text,
+                "source": "telegram",
+            }))
+
+            # write_result to a different chat 444
+            asyncio.run(handle_write_result({
+                "task_id": "issue-77",
+                "chat_id": 444,
+                "text": text,
+                "source": "telegram",
+                "forward": True,
+            }))
+
+            inbox_files = list(inbox.glob("*.json"))
+            assert len(inbox_files) == 1
+            msg = json.loads(inbox_files[0].read_text())
+            assert msg["forward"] is True, (
+                "forward should remain True when chat_id differs"
+            )
+
+    def test_explicit_forward_false_still_false(self, dirs):
+        """write_result with explicit forward=False is preserved regardless."""
+        import src.mcp.inbox_server as server
+        inbox, outbox, sent = dirs
+
+        with patch.multiple(
+            "src.mcp.inbox_server",
+            INBOX_DIR=inbox,
+            OUTBOX_DIR=outbox,
+            SENT_DIR=sent,
+        ):
+            import asyncio
+            from src.mcp.inbox_server import handle_write_result
+
+            asyncio.run(handle_write_result({
+                "task_id": "issue-55",
+                "chat_id": 555,
+                "text": "No forward needed.",
+                "source": "telegram",
+                "forward": False,
+            }))
+
+            inbox_files = list(inbox.glob("*.json"))
+            assert len(inbox_files) == 1
+            msg = json.loads(inbox_files[0].read_text())
+            assert msg["forward"] is False
