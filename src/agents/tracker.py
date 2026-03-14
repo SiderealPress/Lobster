@@ -95,9 +95,17 @@ def _make_agent_entry(
     return entry
 
 
-def _filter_out(agents: list, agent_id: str) -> list:
-    """Return agents list with the given ID removed (pure, non-mutating)."""
-    return [a for a in agents if a.get("id") != agent_id]
+def _filter_out(agents: list, lookup_key: str) -> list:
+    """Return agents list with the matching entry removed (pure, non-mutating).
+
+    Matches on either the 'id' field or the 'task_id' field so that callers
+    using either identifier (e.g. handle_write_result passes task_id as the
+    lookup key) correctly remove the record.
+    """
+    return [
+        a for a in agents
+        if a.get("id") != lookup_key and a.get("task_id") != lookup_key
+    ]
 
 
 def _find_agent(agents: list, agent_id: str) -> dict | None:
