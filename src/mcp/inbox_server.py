@@ -805,6 +805,10 @@ async def list_tools() -> list[Tool]:
                             }
                         }
                     },
+                    "reply_to_message_id": {
+                        "type": "integer",
+                        "description": "Telegram message ID to reply to. If provided, the bot sends the reply as a threaded reply to that specific message (Telegram only). Pass the telegram_message_id from the incoming message.",
+                    },
                     "message_id": {
                         "type": "string",
                         "description": "If provided, atomically marks this message as processed after sending the reply. Combines send_reply + mark_processed into one call.",
@@ -2325,6 +2329,9 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
         else:
             output += f"**[{source}]** from **{user}**\n"
         output += f"Chat ID: `{chat_id}` | Message ID: `{msg_id}`\n"
+        tg_msg_id = msg.get("telegram_message_id")
+        if tg_msg_id:
+            output += f"Telegram Message ID: `{tg_msg_id}` (pass as reply_to_message_id to send_reply to thread your reply)\n"
         output += f"Time: {ts}\n"
         # dispatcher_hint: flag messages with file attachments so dispatcher knows to use a subagent
         _has_file = msg_type in ("voice", "photo", "document") or bool(
@@ -2409,6 +2416,11 @@ async def handle_send_reply(args: dict) -> list[TextContent]:
     # Include thread_ts if provided (Slack only)
     if thread_ts and source == "slack":
         reply_data["thread_ts"] = thread_ts
+
+    # Include reply_to_message_id if provided (Telegram only)
+    reply_to_msg_id = args.get("reply_to_message_id")
+    if reply_to_msg_id and source == "telegram":
+        reply_data["reply_to_message_id"] = int(reply_to_msg_id)
 
     # Route bisque replies to the bisque-outbox so the relay server picks them up.
     # All other sources go to the standard outbox for the bot process.
