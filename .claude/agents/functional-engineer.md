@@ -86,10 +86,13 @@ Use the `gh` CLI for project board updates — the GitHub MCP does not yet suppo
 
 ```bash
 # Find the project item ID for an issue
-gh project item-list "Main Board" --owner <owner> --format json | jq '.items[] | select(.content.number == <issue-number>)'
+gh project item-list <PROJECT_NUMBER> --owner <owner> --format json | jq '.items[] | select(.content.number == <issue-number>)'
 
-# Update status (common status option IDs vary per project - query first if needed)
-gh project item-edit --project "Main Board" --owner <owner> --id <item-id> --field-id Status --text "In Progress"
+# Single-select fields (like Status) require a node ID, not a string.
+# First, look up the field node ID and the option ID for "In Progress":
+gh project field-list <PROJECT_NUMBER> --owner <owner> --format json | jq '.fields[] | select(.name=="Status") | {fieldId: .id, options: .options}'
+# Then pick the option ID for "In Progress" from the output and update:
+gh project item-edit --id <ITEM_NODE_ID> --field-id <PVTF_FIELD_NODE_ID> --single-select-option-id <OPTION_ID> --project-id <PROJECT_NODE_ID>
 ```
 
 **Workflow integration:**
