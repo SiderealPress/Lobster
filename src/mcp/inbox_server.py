@@ -105,9 +105,41 @@ def _observation_worker() -> None:
         try:
             msg_text, msg_id, source, ts = item
             if _user_model is not None:
-                _user_model.observe(msg_text, msg_id, context=source or "", message_ts=ts)
-        except Exception:
-            pass  # never crash the worker
+                obs_ids = _user_model.observe(msg_text, msg_id, context=source or "", message_ts=ts)
+                # Debug: emit Tier 1 signal summary when LOBSTER_DEBUG=true.
+                # _emit_debug_observation resolves debug mode lazily and is a no-op
+                # when LOBSTER_DEBUG != true, so this is safe on the hot path.
+                if obs_ids:
+                    try:
+                        from user_model.observation import extract_signals
+                        signals = extract_signals(msg_text, msg_id, context=source or "")
+                        if signals:
+                            signal_parts = []
+                            for sig in signals:
+                                sig_type = (
+                                    sig.signal_type.value
+                                    if hasattr(sig.signal_type, "value")
+                                    else str(sig.signal_type)
+                                )
+                                signal_parts.append(
+                                    f"{sig_type}={sig.content[:30]!r} ({sig.confidence:.2f})"
+                                )
+                            summary = ", ".join(signal_parts[:6])  # cap at 6
+                            short_id = msg_id[:20] if len(msg_id) > 20 else msg_id
+                            _emit_debug_observation(
+                                f"\U0001f50d [tier 1 fired] msg={short_id} "
+                                f"extracted {len(signals)} signal(s): {summary}"
+                            )
+                    except Exception:
+                        pass  # never block observation on debug emit
+        except Exception as _obs_exc:
+            import traceback as _tb
+            _emit_debug_observation(
+                f"\U0001f50d [observation worker error] {type(_obs_exc).__name__}: {_obs_exc}\n"
+                + _tb.format_exc()[-800:],
+                category="system_error",
+            )
+            # never crash the worker
 
 
 def _ensure_observation_worker() -> None:
@@ -131,6 +163,102 @@ def _queue_observation(msg_text: str, msg_id: str, source: str | None = None, ts
         _observation_queue.put_nowait((msg_text, msg_id, source, ts))
     except _queue_mod.Full:
         pass  # drop silently — observation is best-effort
+
+# ---------------------------------------------------------------------------
+# Debug observability — LOBSTER_DEBUG=true push notifications
+#
+# _emit_debug_observation() is defined here (early, so workers can call it)
+# but the actual mode/chat_id detection is lazy (reads config on first call)
+# to avoid referencing _CONFIG_DIR / INBOX_DIR before they are defined.
+# ---------------------------------------------------------------------------
+
+_DEBUG_MODE: bool | None = None        # None = not yet resolved
+_DEBUG_OWNER_CHAT_ID: int | None = None
+_DEBUG_RESOLVED: bool = False
+
+
+def _resolve_debug_config() -> None:
+    """
+    Lazily resolve LOBSTER_DEBUG and owner chat_id from env + config.env.
+    Must only be called after _CONFIG_DIR is available (module init complete).
+    Thread-safe by idempotency — worst case reads config twice.
+    """
+    global _DEBUG_MODE, _DEBUG_OWNER_CHAT_ID, _DEBUG_RESOLVED
+    if _DEBUG_RESOLVED:
+        return
+
+    # Determine debug mode
+    env_val = os.environ.get("LOBSTER_DEBUG", "").lower()
+    debug = env_val == "true"
+    if not debug:
+        try:
+            config_file = _CONFIG_DIR / "config.env"
+            if config_file.exists():
+                for line in config_file.read_text().splitlines():
+                    if line.strip().startswith("LOBSTER_DEBUG="):
+                        val = line.split("=", 1)[1].strip().strip('"').strip("'").lower()
+                        debug = val == "true"
+                        break
+        except Exception:
+            pass
+    _DEBUG_MODE = debug
+
+    # Determine owner chat_id
+    if debug:
+        try:
+            config_file = _CONFIG_DIR / "config.env"
+            if config_file.exists():
+                for line in config_file.read_text().splitlines():
+                    if line.strip().startswith("TELEGRAM_ALLOWED_USERS="):
+                        val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                        first = val.split(",")[0].strip()
+                        if first.lstrip("-").isdigit():
+                            _DEBUG_OWNER_CHAT_ID = int(first)
+                        break
+        except Exception:
+            pass
+
+    _DEBUG_RESOLVED = True
+
+
+def _emit_debug_observation(text: str, category: str = "system_context") -> None:
+    """
+    Emit a debug push notification via the write_observation inbox path.
+
+    Only fires when LOBSTER_DEBUG=true and owner chat_id is known.
+    Non-blocking: writes directly to inbox as a subagent_observation message.
+    Never raises — must be safe to call from any context including threads.
+
+    category: "system_context" or "system_error"
+    """
+    # Fast path: skip I/O if env var is clearly not set and we've already resolved.
+    if _DEBUG_RESOLVED and not _DEBUG_MODE:
+        return
+    _resolve_debug_config()
+    if not _DEBUG_MODE:
+        return
+    chat_id = _DEBUG_OWNER_CHAT_ID
+    if chat_id is None:
+        return
+    try:
+        now = datetime.now(timezone.utc)
+        ts_ms = int(now.timestamp() * 1000)
+        msg_id = f"{ts_ms}_dbgobs_{uuid.uuid4().hex[:8]}"
+        message: dict = {
+            "id": msg_id,
+            "type": "subagent_observation",
+            "source": "telegram",
+            "chat_id": chat_id,
+            "text": text,
+            "category": category,
+            "timestamp": now.isoformat(),
+            "task_id": "debug-observability",
+        }
+        inbox_file = INBOX_DIR / f"{msg_id}.json"
+        atomic_write_json(inbox_file, message)
+    except Exception:
+        pass  # never block on debug instrumentation
+
 
 # ---------------------------------------------------------------------------
 # User model context injection heuristic
@@ -2352,7 +2480,10 @@ async def handle_mark_processing(args: dict) -> list[TextContent]:
     # Queue background observation (non-blocking, best-effort)
     msg_text = msg_data.get("text", "") or msg_data.get("transcription", "")
     msg_type = msg_data.get("type", "")
-    if msg_text and msg_type not in ("subagent_result", "subagent_error", "self_check"):
+    _SKIP_OBSERVATION_TYPES = (
+        "subagent_result", "subagent_error", "self_check", "subagent_observation"
+    )
+    if msg_text and msg_type not in _SKIP_OBSERVATION_TYPES:
         _queue_observation(
             msg_text, message_id,
             source=msg_data.get("source"),
@@ -2361,9 +2492,12 @@ async def handle_mark_processing(args: dict) -> list[TextContent]:
 
     # Conditionally inject user model context for messages that would benefit
     context_block = ""
-    if _user_model is not None and msg_text and msg_type not in (
-        "subagent_result", "subagent_error", "self_check", "callback", "system"
-    ):
+    short_msg_id = message_id[:20] if len(message_id) > 20 else message_id
+    _SKIP_CONTEXT_TYPES = (
+        "subagent_result", "subagent_error", "self_check", "callback", "system",
+        "subagent_observation",  # avoid debug observations triggering more debug observations
+    )
+    if _user_model is not None and msg_text and msg_type not in _SKIP_CONTEXT_TYPES:
         if _should_inject_user_context(msg_text):
             try:
                 ctx = _user_model.get_context()
@@ -2373,8 +2507,39 @@ async def handle_mark_processing(args: dict) -> list[TextContent]:
                         "**User Model Context** (auto-injected for this message):\n\n"
                         f"{ctx}"
                     )
-            except Exception:
-                pass  # never block mark_processing
+                    # Debug: notify context was injected
+                    _emit_debug_observation(
+                        f"\U0001f50d [context injected] msg={short_msg_id} "
+                        f"trigger matched, injected {len(ctx)} chars of user model context"
+                    )
+                else:
+                    # Debug: trigger matched but no context available.
+                    # _emit_debug_observation is a no-op when not in debug mode.
+                    _emit_debug_observation(
+                        f"\U0001f50d [context skipped] msg={short_msg_id} "
+                        "trigger matched but user model returned empty context"
+                    )
+            except Exception as _ctx_exc:
+                import traceback as _tb
+                _emit_debug_observation(
+                    f"\U0001f50d [context inject error] msg={short_msg_id} "
+                    f"{type(_ctx_exc).__name__}: {_ctx_exc}\n"
+                    + _tb.format_exc()[-600:],
+                    category="system_error",
+                )
+                # never block mark_processing
+        else:
+            # Debug: no trigger match — context injection skipped.
+            # _emit_debug_observation is a no-op when not in debug mode.
+            # Skip for system messages (chat_id=0) — context injection is never
+            # expected for self-check or other system-originated messages, so
+            # emitting an observation for them is pure noise.
+            _msg_chat_id = msg_data.get("chat_id", None)
+            if msg_text and len(msg_text) >= 8 and _msg_chat_id != 0:
+                _emit_debug_observation(
+                    f"\U0001f50d [context skipped] msg={short_msg_id} "
+                    "no trigger match — user model context not injected"
+                )
 
     log.info(f"Message claimed for processing: {message_id}")
     return [TextContent(type="text", text=f"Message claimed: {message_id}{context_block}")]
