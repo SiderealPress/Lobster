@@ -125,11 +125,22 @@ git branch -d feature/issue-42-my-feature
 2. Use `gh` CLI to update the project item status on "Main Board":
 
 ```bash
-# Find the project item ID for an issue
-gh project item-list "Main Board" --owner <owner> --format json | jq '.items[] | select(.content.number == <issue-number>)'
+# Step 1: List projects to get the project number and node ID
+gh project list --owner <owner> --format json
 
-# Update status (common status option IDs vary per project - query first if needed)
-gh project item-edit --project "Main Board" --owner <owner> --id <item-id> --field-id Status --text "In Progress"
+# Step 2: Discover field IDs and single-select option IDs (node IDs like PVTF_..., PVTSSF_...)
+gh project field-list <PROJECT_NUMBER> --owner <owner> --format json
+
+# Step 3: Find the item ID for an issue/PR
+gh project item-list <PROJECT_NUMBER> --owner <owner> --format json | jq '.items[] | select(.content.number == <issue-number>)'
+
+# Step 4: Update a single-select field (e.g. Status) — note: --field-id takes a node ID,
+#          not a name; --single-select-option-id takes the option's node ID, not its label
+gh project item-edit \
+  --project-id <PROJECT_NODE_ID> \
+  --id <ITEM_NODE_ID> \
+  --field-id <FIELD_NODE_ID> \
+  --single-select-option-id <OPTION_NODE_ID>
 ```
 
 **Workflow integration:**
