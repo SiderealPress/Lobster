@@ -2,10 +2,8 @@
 #===============================================================================
 # Test Suite: Self-Check Reminder System
 #
-# Tests the three scripts that make up Lobster's self-check system:
+# Tests the cron-based self-check script:
 #   1. periodic-self-check.sh  (cron-based, primary)
-#   2. self-check-reminder.sh  (at-based, hook-triggered)
-#   3. schedule-self-check.sh  (hook glue)
 #
 # Usage: bash tests/test-self-check.sh
 #===============================================================================
@@ -28,8 +26,6 @@ TOTAL=0
 # Script locations
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/scripts"
 PERIODIC_SCRIPT="$SCRIPT_DIR/periodic-self-check.sh"
-REMINDER_SCRIPT="$SCRIPT_DIR/self-check-reminder.sh"
-SCHEDULE_SCRIPT="$SCRIPT_DIR/schedule-self-check.sh"
 
 # Test isolation: use temp directories
 TEST_TMPDIR=$(mktemp -d /tmp/lobster-test-XXXXXX)
@@ -311,124 +307,13 @@ else
 fi
 
 #===============================================================================
-# Tests: self-check-reminder.sh
-#===============================================================================
-
-echo ""
-echo -e "${BOLD}=== self-check-reminder.sh (at-based) ===${NC}"
-
-# Test 12: Creates message in correct directory
-begin_test "Creates message in inbox directory"
-reset_inbox
-LOBSTER_MESSAGES="$TEST_TMPDIR" bash "$REMINDER_SCRIPT" > /dev/null 2>&1
-if [ "$(count_inbox)" -eq 1 ]; then
-    pass
-else
-    fail "Expected 1 message, got $(count_inbox)"
-fi
-
-# Test 13: Created message is valid JSON
-begin_test "Created message is valid JSON"
-reset_inbox
-LOBSTER_MESSAGES="$TEST_TMPDIR" bash "$REMINDER_SCRIPT" > /dev/null 2>&1
-MSG_FILE=$(ls "$TEST_INBOX"/*.json 2>/dev/null | head -1)
-if [ -n "$MSG_FILE" ] && jq . "$MSG_FILE" > /dev/null 2>&1; then
-    pass
-else
-    fail "Not valid JSON"
-fi
-
-# Test 14: Message fields are correct
-begin_test "Message fields are correct"
-reset_inbox
-LOBSTER_MESSAGES="$TEST_TMPDIR" bash "$REMINDER_SCRIPT" > /dev/null 2>&1
-MSG_FILE=$(ls "$TEST_INBOX"/*.json 2>/dev/null | head -1)
-if [ -z "$MSG_FILE" ]; then
-    fail "No message file"
-else
-    SOURCE=$(jq -r '.source' "$MSG_FILE")
-    TEXT=$(jq -r '.text' "$MSG_FILE")
-    USERNAME=$(jq -r '.username' "$MSG_FILE")
-    USER_NAME=$(jq -r '.user_name' "$MSG_FILE")
-    ALL_OK=true
-    ERRORS=""
-    if [ "$SOURCE" != "system" ]; then
-        ALL_OK=false
-        ERRORS="source=$SOURCE"
-    fi
-    if [[ "$TEXT" != *"Self-check"* ]]; then
-        ALL_OK=false
-        ERRORS="$ERRORS text='$TEXT'"
-    fi
-    if [ "$USERNAME" != "lobster-system" ]; then
-        ALL_OK=false
-        ERRORS="$ERRORS username=$USERNAME"
-    fi
-    if [ "$USER_NAME" != "Self-Check" ]; then
-        ALL_OK=false
-        ERRORS="$ERRORS user_name=$USER_NAME"
-    fi
-    if [ "$ALL_OK" = true ]; then
-        pass
-    else
-        fail "$ERRORS"
-    fi
-fi
-
-# Test 15: Filename matches *_self.json pattern
-begin_test "Filename matches *_self.json pattern"
-reset_inbox
-LOBSTER_MESSAGES="$TEST_TMPDIR" bash "$REMINDER_SCRIPT" > /dev/null 2>&1
-MSG_FILE=$(ls "$TEST_INBOX"/*_self.json 2>/dev/null | head -1)
-if [ -n "$MSG_FILE" ]; then
-    pass
-else
-    fail "No file matching *_self.json"
-fi
-
-# Test 16: Prints confirmation message
-begin_test "Prints confirmation message to stdout"
-reset_inbox
-OUTPUT=$(LOBSTER_MESSAGES="$TEST_TMPDIR" bash "$REMINDER_SCRIPT" 2>&1)
-if [[ "$OUTPUT" == *"Self-check reminder injected"* ]]; then
-    pass
-else
-    fail "Expected 'Self-check reminder injected' in output, got: $OUTPUT"
-fi
-
-#===============================================================================
-# Tests: schedule-self-check.sh
-#===============================================================================
-
-echo ""
-echo -e "${BOLD}=== schedule-self-check.sh (hook glue) ===${NC}"
-
-# Test 17: Schedules an at job
-begin_test "Schedules an at job"
-# Count existing at jobs
-BEFORE=$(atq 2>/dev/null | wc -l)
-bash "$SCHEDULE_SCRIPT" 2>/dev/null
-sleep 1
-AFTER=$(atq 2>/dev/null | wc -l)
-if [ "$AFTER" -gt "$BEFORE" ]; then
-    pass
-    # Clean up: remove the job we just added
-    LATEST_JOB=$(atq 2>/dev/null | sort -n | tail -1 | awk '{print $1}')
-    if [ -n "$LATEST_JOB" ]; then
-        atrm "$LATEST_JOB" 2>/dev/null || true
-    fi
-else
-    fail "at job count did not increase (before=$BEFORE, after=$AFTER)"
-fi
-
-#===============================================================================
 # Tests: Integration / System
 #===============================================================================
 
 echo ""
 echo -e "${BOLD}=== Integration Tests ===${NC}"
 
-# Test 18: Cron entry exists for periodic-self-check.sh
+# Test 12: Cron entry exists for periodic-self-check.sh
 begin_test "Cron entry exists for periodic-self-check.sh"
 if crontab -l 2>/dev/null | grep -q "periodic-self-check.sh"; then
     pass
@@ -436,23 +321,15 @@ else
     fail "No cron entry found for periodic-self-check.sh"
 fi
 
-# Test 19: All three scripts are executable
-begin_test "All self-check scripts are executable"
-ALL_EXEC=true
-ERRORS=""
-for script in "$PERIODIC_SCRIPT" "$REMINDER_SCRIPT" "$SCHEDULE_SCRIPT"; do
-    if [ ! -x "$script" ]; then
-        ALL_EXEC=false
-        ERRORS="$ERRORS $(basename "$script")"
-    fi
-done
-if [ "$ALL_EXEC" = true ]; then
+# Test 13: periodic-self-check.sh is executable
+begin_test "periodic-self-check.sh is executable"
+if [ -x "$PERIODIC_SCRIPT" ]; then
     pass
 else
-    fail "Not executable:$ERRORS"
+    fail "Not executable: periodic-self-check.sh"
 fi
 
-# Test 20: State directory exists or can be created
+# Test 14: State directory exists or can be created
 begin_test "State directory exists at ~/lobster/.state"
 if [ -d "$HOME/lobster/.state" ]; then
     pass
@@ -460,37 +337,11 @@ else
     fail "State directory not found at $HOME/lobster/.state"
 fi
 
-# Test 21: Hook config exists in settings.json
-begin_test "Claude Code hook is configured in settings.json"
-SETTINGS_FILE="$HOME/.claude/settings.json"
-if [ -f "$SETTINGS_FILE" ]; then
-    if jq -e '.hooks.PostToolUse[] | select(.matcher == "mcp__lobster-inbox__send_reply")' "$SETTINGS_FILE" > /dev/null 2>&1; then
-        pass
-    else
-        fail "PostToolUse hook for send_reply not found in settings.json"
-    fi
-else
-    fail "settings.json not found at $SETTINGS_FILE"
-fi
-
-# Test 22: Hook references the correct script
-begin_test "Hook command references schedule-self-check.sh"
-SETTINGS_FILE="$HOME/.claude/settings.json"
-if [ -f "$SETTINGS_FILE" ]; then
-    HOOK_CMD=$(jq -r '.hooks.PostToolUse[] | select(.matcher == "mcp__lobster-inbox__send_reply") | .hooks[0].command' "$SETTINGS_FILE" 2>/dev/null)
-    if [[ "$HOOK_CMD" == *"schedule-self-check.sh"* ]]; then
-        pass
-    else
-        fail "Hook command is '$HOOK_CMD', expected path to schedule-self-check.sh"
-    fi
-else
-    fail "settings.json not found"
-fi
-
-# Test 23: Messages format matches inbox server expectations (same fields as telegram messages)
+# Test 15: Self-check message format matches inbox server expectations (same fields as telegram messages)
 begin_test "Self-check message format matches inbox server expectations"
 reset_inbox
-LOBSTER_MESSAGES="$TEST_TMPDIR" bash "$REMINDER_SCRIPT" > /dev/null 2>&1
+reset_state
+run_periodic "with_claude" || true
 MSG_FILE=$(ls "$TEST_INBOX"/*.json 2>/dev/null | head -1)
 if [ -z "$MSG_FILE" ]; then
     fail "No message file"
@@ -504,33 +355,6 @@ else
     else
         fail "Field count=$FIELD_COUNT, has_all=$HAS_ALL"
     fi
-fi
-
-# Test 24: Both scripts produce identical message format
-begin_test "periodic and reminder scripts produce identical message schema"
-reset_inbox
-reset_state
-# Run periodic
-run_periodic "with_claude" || true
-PERIODIC_FILE=$(ls "$TEST_INBOX"/*.json 2>/dev/null | head -1)
-PERIODIC_KEYS=""
-if [ -n "$PERIODIC_FILE" ]; then
-    PERIODIC_KEYS=$(jq -r 'keys | sort | join(",")' "$PERIODIC_FILE")
-fi
-
-reset_inbox
-# Run reminder
-LOBSTER_MESSAGES="$TEST_TMPDIR" bash "$REMINDER_SCRIPT" > /dev/null 2>&1
-REMINDER_FILE=$(ls "$TEST_INBOX"/*.json 2>/dev/null | head -1)
-REMINDER_KEYS=""
-if [ -n "$REMINDER_FILE" ]; then
-    REMINDER_KEYS=$(jq -r 'keys | sort | join(",")' "$REMINDER_FILE")
-fi
-
-if [ -n "$PERIODIC_KEYS" ] && [ "$PERIODIC_KEYS" = "$REMINDER_KEYS" ]; then
-    pass
-else
-    fail "periodic keys=$PERIODIC_KEYS, reminder keys=$REMINDER_KEYS"
 fi
 
 #===============================================================================
