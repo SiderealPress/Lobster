@@ -1,0 +1,226 @@
+"""
+Tests for handle_write_observation MCP tool handler.
+"""
+
+import asyncio
+import json
+import sys
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+
+# Ensure src/mcp is on sys.path so that `reliability` (a sibling module) can
+# be resolved when inbox_server is imported via the `src.mcp.inbox_server`
+# dotted path.  The root conftest adds `src/` but not `src/mcp/`, so we add
+# the latter here; this is a no-op if the path is already present.
+_MCP_DIR = Path(__file__).parent.parent.parent.parent / "src" / "mcp"
+if str(_MCP_DIR) not in sys.path:
+    sys.path.insert(0, str(_MCP_DIR))
+
+# Pre-load the module so that unittest.mock can resolve "src.mcp.inbox_server"
+# as an attribute of the `src.mcp` package before patch.multiple opens.
+import src.mcp.inbox_server  # noqa: F401
+
+
+class TestHandleWriteObservation:
+    """Tests for the write_observation handler."""
+
+    @pytest.fixture
+    def inbox_dir(self, temp_messages_dir: Path) -> Path:
+        """Get inbox directory."""
+        return temp_messages_dir / "inbox"
+
+    def _run(self, args: dict, inbox_dir: Path) -> list:
+        # Import inside the patch block, matching the pattern used throughout
+        # the existing MCP server test suite.
+        with patch.multiple(
+            "src.mcp.inbox_server",
+            INBOX_DIR=inbox_dir,
+        ):
+            from src.mcp.inbox_server import handle_write_observation
+            return asyncio.run(handle_write_observation(args))
+
+    # ------------------------------------------------------------------
+    # Happy path
+    # ------------------------------------------------------------------
+
+    def test_valid_observation_writes_file(self, inbox_dir: Path):
+        """Valid args produce a file in the inbox with correct fields."""
+        result = self._run(
+            {
+                "chat_id": 8305714125,
+                "text": "User prefers metric units.",
+                "category": "user_context",
+            },
+            inbox_dir,
+        )
+
+        assert len(result) == 1
+        assert "Observation queued" in result[0].text
+
+        files = list(inbox_dir.glob("*.json"))
+        assert len(files) == 1
+
+        content = json.loads(files[0].read_text())
+        assert content["type"] == "subagent_observation"
+        assert content["category"] == "user_context"
+        assert content["chat_id"] == 8305714125
+        assert content["text"] == "User prefers metric units."
+        assert content["source"] == "telegram"  # default
+
+    def test_system_context_category_accepted(self, inbox_dir: Path):
+        """system_context is a valid category."""
+        result = self._run(
+            {
+                "chat_id": 123,
+                "text": "Config drift detected.",
+                "category": "system_context",
+            },
+            inbox_dir,
+        )
+        assert "Observation queued" in result[0].text
+        files = list(inbox_dir.glob("*.json"))
+        content = json.loads(files[0].read_text())
+        assert content["category"] == "system_context"
+
+    def test_system_error_category_accepted(self, inbox_dir: Path):
+        """system_error is a valid category."""
+        result = self._run(
+            {
+                "chat_id": 123,
+                "text": "Side call to memory API failed.",
+                "category": "system_error",
+            },
+            inbox_dir,
+        )
+        assert "Observation queued" in result[0].text
+
+    def test_optional_task_id_included_when_provided(self, inbox_dir: Path):
+        """task_id is written to the message when supplied."""
+        result = self._run(
+            {
+                "chat_id": 123,
+                "text": "Observation with task reference.",
+                "category": "system_context",
+                "task_id": "my-task-42",
+            },
+            inbox_dir,
+        )
+        assert "Observation queued" in result[0].text
+        files = list(inbox_dir.glob("*.json"))
+        content = json.loads(files[0].read_text())
+        assert content.get("task_id") == "my-task-42"
+
+    def test_optional_task_id_omitted_when_absent(self, inbox_dir: Path):
+        """task_id key is absent from the message when not supplied."""
+        self._run(
+            {
+                "chat_id": 123,
+                "text": "No task ID here.",
+                "category": "system_context",
+            },
+            inbox_dir,
+        )
+        files = list(inbox_dir.glob("*.json"))
+        content = json.loads(files[0].read_text())
+        assert "task_id" not in content
+
+    def test_source_parameter_overrides_default(self, inbox_dir: Path):
+        """Passing source='slack' writes 'slack' into the file."""
+        self._run(
+            {
+                "chat_id": 456,
+                "text": "Slack observation.",
+                "category": "user_context",
+                "source": "slack",
+            },
+            inbox_dir,
+        )
+        files = list(inbox_dir.glob("*.json"))
+        content = json.loads(files[0].read_text())
+        assert content["source"] == "slack"
+
+    def test_message_ids_are_unique_for_rapid_calls(self, inbox_dir: Path):
+        """Rapid sequential calls produce distinct message IDs (no collision)."""
+        args = {"chat_id": 1, "text": "obs", "category": "system_error"}
+        for _ in range(5):
+            self._run(args, inbox_dir)
+
+        files = list(inbox_dir.glob("*.json"))
+        assert len(files) == 5
+        ids = [json.loads(f.read_text())["id"] for f in files]
+        assert len(set(ids)) == 5, "Duplicate message IDs detected"
+
+    # ------------------------------------------------------------------
+    # Invalid category
+    # ------------------------------------------------------------------
+
+    def test_invalid_category_returns_error(self, inbox_dir: Path):
+        """An unknown category is rejected with a descriptive error."""
+        result = self._run(
+            {
+                "chat_id": 123,
+                "text": "Some observation.",
+                "category": "banana",
+            },
+            inbox_dir,
+        )
+        assert "Error" in result[0].text
+        assert "category" in result[0].text.lower()
+        # No file should be written
+        assert list(inbox_dir.glob("*.json")) == []
+
+    # ------------------------------------------------------------------
+    # Missing required fields
+    # ------------------------------------------------------------------
+
+    def test_missing_chat_id_returns_error(self, inbox_dir: Path):
+        """Omitting chat_id returns an error and writes no file."""
+        result = self._run(
+            {
+                "text": "Missing chat_id.",
+                "category": "system_error",
+            },
+            inbox_dir,
+        )
+        assert "Error" in result[0].text
+        assert "chat_id" in result[0].text
+        assert list(inbox_dir.glob("*.json")) == []
+
+    def test_missing_text_returns_error(self, inbox_dir: Path):
+        """Omitting text returns an error and writes no file."""
+        result = self._run(
+            {
+                "chat_id": 123,
+                "category": "system_error",
+            },
+            inbox_dir,
+        )
+        assert "Error" in result[0].text
+        assert list(inbox_dir.glob("*.json")) == []
+
+    def test_empty_text_returns_error(self, inbox_dir: Path):
+        """Blank text string is treated as missing."""
+        result = self._run(
+            {
+                "chat_id": 123,
+                "text": "   ",
+                "category": "system_error",
+            },
+            inbox_dir,
+        )
+        assert "Error" in result[0].text
+        assert list(inbox_dir.glob("*.json")) == []
+
+    def test_missing_category_returns_error(self, inbox_dir: Path):
+        """Omitting category returns an error and writes no file."""
+        result = self._run(
+            {
+                "chat_id": 123,
+                "text": "No category supplied.",
+            },
+            inbox_dir,
+        )
+        assert "Error" in result[0].text
+        assert list(inbox_dir.glob("*.json")) == []

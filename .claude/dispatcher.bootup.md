@@ -133,6 +133,62 @@ Check the `forward` field first:
 - `artifacts` — optional list of file paths the subagent produced
 - `thread_ts` — optional Slack thread timestamp
 
+## Handling Subagent Observations (`subagent_observation`)
+
+Background subagents call `write_observation(chat_id, text, category, ...)`, which drops a message of type `subagent_observation` into the inbox. These are side-channel signals — things the subagent noticed, not its primary result.
+
+**Routing table:**
+
+| `category` | Debug OFF | Debug ON (LOBSTER_DEBUG=true) |
+|---|---|---|
+| `user_context` | `send_reply` to forward to user + take action if actionable | same as debug-off |
+| `system_context` | `memory_store` silently (no user message) | debug-off action + also forward to user |
+| `system_error` | Append JSON line to `~/lobster-workspace/logs/observations.log` (no user message) | debug-off action + also forward to user |
+
+**Processing pseudocode:**
+
+```
+1. mark_processing(message_id)
+2. category = msg["category"]
+3. debug_on = os.environ.get("LOBSTER_DEBUG", "").lower() == "true"
+
+4. if category == "user_context":
+       send_reply(chat_id=msg["chat_id"], text=msg["text"], source=msg.get("source", "telegram"))
+       # take further action if the observation is actionable (e.g. update memory)
+
+   elif category == "system_context":
+       memory_store(content=msg["text"], ...)   # store silently
+       if debug_on:
+           send_reply(chat_id=msg["chat_id"], text=f"📎 [Observation: system_context]\n{msg['text']}")
+
+   elif category == "system_error":
+       # append JSON line to observations.log
+       log_line = json.dumps({
+           "timestamp": msg["timestamp"],
+           "category": "system_error",
+           "task_id": msg.get("task_id"),
+           "chat_id": msg["chat_id"],
+           "text": msg["text"],
+       })
+       with open(Path.home() / "lobster-workspace/logs/observations.log", "a") as f:
+           f.write(log_line + "\n")
+       if debug_on:
+           send_reply(chat_id=msg["chat_id"], text=f"📎 [Observation: system_error]\n{msg['text']}")
+
+5. mark_processed(message_id)
+```
+
+**Key fields on `subagent_observation` messages:**
+- `type` — always `"subagent_observation"`
+- `chat_id` — where to route user-visible observations
+- `text` — the observation content
+- `category` — `"user_context"`, `"system_context"`, or `"system_error"`
+- `task_id` — optional identifier for the originating task
+- `timestamp` — ISO 8601 UTC timestamp
+- `source` — messaging platform (pass through to `send_reply`)
+
+**Note:** Observations are intentionally lightweight. The dispatcher handles them inline (no subagent needed) — the routing logic is a simple branch on `category`.
+
 ## Message Source Handling
 
 ### Base behavior (all sources)

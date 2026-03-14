@@ -18,6 +18,7 @@ import os
 import sys
 import time
 import threading
+import uuid
 import httpx
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1098,6 +1099,55 @@ async def list_tools() -> list[Tool]:
                 "required": ["task_id", "chat_id", "text"],
             },
         ),
+        # Subagent Observation
+        Tool(
+            name="write_observation",
+            description=(
+                "Write an observation from a background subagent into the inbox. "
+                "Use this to surface things you noticed that are separate from your primary result — "
+                "user context worth remembering, system issues you spotted, or errors to log. "
+                "The dispatcher routes each observation based on its category. "
+                "Don't swallow observations — surface them."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "chat_id": {
+                        "oneOf": [
+                            {"type": "integer"},
+                            {"type": "string"},
+                        ],
+                        "description": "The chat/channel ID this observation relates to (same as write_result chat_id).",
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "The observation content.",
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": (
+                            "Category of observation. "
+                            "'user_context': something about the user worth remembering or forwarding. "
+                            "'system_context': internal state or info the system should store silently. "
+                            "'system_error': an error or anomaly to log."
+                        ),
+                        "enum": ["user_context", "system_context", "system_error"],
+                    },
+                    "task_id": {
+                        "type": "string",
+                        "description": "Optional identifier for the originating task.",
+                    },
+                    "source": {
+                        "type": "string",
+                        "description": (
+                            "Messaging source the observation originated from "
+                            "('telegram', 'slack', etc.). Defaults to 'telegram'."
+                        ),
+                    },
+                },
+                "required": ["chat_id", "text", "category"],
+            },
+        ),
         # Brain Dump Triage Tools
         Tool(
             name="triage_brain_dump",
@@ -1725,6 +1775,8 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
         return await handle_write_task_output(arguments)
     elif name == "write_result":
         return await handle_write_result(arguments)
+    elif name == "write_observation":
+        return await handle_write_observation(arguments)
     # Brain Dump Triage Tools
     elif name == "triage_brain_dump":
         return await handle_triage_brain_dump(arguments)
@@ -3614,6 +3666,70 @@ async def handle_write_result(args: dict) -> list[TextContent]:
     return [TextContent(
         type="text",
         text=f"Result queued in inbox as {msg_type} (id={message_id}). The main thread will deliver it to chat {chat_id}.",
+    )]
+
+
+# =============================================================================
+# Subagent Observation Handler
+# =============================================================================
+
+OBSERVATION_CATEGORIES = frozenset({"user_context", "system_context", "system_error"})
+
+
+async def handle_write_observation(args: dict) -> list[TextContent]:
+    """Write a subagent observation into the inbox for the dispatcher to route.
+
+    Observations are separate from primary results — they surface things the
+    subagent noticed in passing (user context, system state, errors). The
+    dispatcher routes each observation based on its category:
+
+      user_context   → forward to user + act if actionable
+      system_context → store to memory silently (no user message)
+      system_error   → write to observations.log (no user message)
+
+    When LOBSTER_DEBUG=true, all categories are also forwarded to the user
+    with a label like "📎 [Observation: system_context]".
+    """
+    chat_id = args.get("chat_id")
+    text = args.get("text", "").strip()
+    category = args.get("category", "").strip()
+    task_id = args.get("task_id", "").strip() or None
+    source = args.get("source", "telegram").strip() or "telegram"
+
+    if chat_id is None:
+        return [TextContent(type="text", text="Error: chat_id is required")]
+    if not text:
+        return [TextContent(type="text", text="Error: text is required")]
+    if category not in OBSERVATION_CATEGORIES:
+        valid = ", ".join(sorted(OBSERVATION_CATEGORIES))
+        return [TextContent(type="text", text=f"Error: category must be one of: {valid}")]
+
+    now = datetime.now(timezone.utc)
+    ts_ms = int(now.timestamp() * 1000)
+    message_id = f"{ts_ms}_observation_{uuid.uuid4().hex[:8]}"
+
+    message: dict = {
+        "id": message_id,
+        "type": "subagent_observation",
+        "source": source,
+        "chat_id": chat_id,
+        "text": text,
+        "category": category,
+        "timestamp": now.isoformat(),
+    }
+    if task_id:
+        message["task_id"] = task_id
+
+    inbox_file = INBOX_DIR / f"{message_id}.json"
+    atomic_write_json(inbox_file, message)
+
+    log.info(
+        f"Subagent observation queued in inbox: category={category} chat_id={chat_id}"
+        + (f" task_id={task_id}" if task_id else "")
+    )
+    return [TextContent(
+        type="text",
+        text=f"Observation queued (id={message_id}, category={category}). The dispatcher will route it.",
     )]
 
 
