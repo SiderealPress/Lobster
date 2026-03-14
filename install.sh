@@ -1036,7 +1036,6 @@ step "Setting up health monitoring..."
 
 # Make scripts executable
 chmod +x "$INSTALL_DIR/scripts/health-check-v3.sh" || true
-chmod +x "$INSTALL_DIR/scripts/self-check-reminder.sh" || true
 
 # Add health check to crontab (runs every 2 minutes)
 HEALTH_MARKER="# LOBSTER-HEALTH"
