@@ -91,8 +91,22 @@ This is what caused the post-compact-enforcement incident.
 
 ---
 
+## Post-Update Checklist (VPS)
+
+After pulling updates on the VPS (`git pull` + `uv pip install -e .`):
+
+1. **Fix file permissions**: `chmod +x scripts/claude-persistent.sh scripts/claude-wrapper.sh`
+   - `git pull` can change file modes (755→644), which silently breaks the tmux launch
+2. **Verify auth**: Test that Claude can authenticate — see `docs/REMOTE-AUTH.md`
+3. **Restart services**: `systemctl restart lobster-claude && lobster restart`
+4. **Verify startup**: `tail -f /home/lobster/lobster-workspace/logs/claude-persistent.log`
+   - Should see `"Starting fresh session (attempt 1)..."` without immediate exit
+
+---
+
 ## Related documentation
 
 - `dispatcher.bootup.md` — runtime behavior and the worktree constraint from the dispatcher's perspective
 - `docs/engineering-lessons-learned.md` — recurring patterns to check during PR review
+- `docs/REMOTE-AUTH.md` — headless OAuth re-authentication for the VPS
 - `CLAUDE.md` — full system architecture and key directories
