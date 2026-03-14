@@ -39,7 +39,7 @@ import pytest
 HOOK = Path(__file__).parent.parent.parent / "hooks" / "post-compact-gate.py"
 
 # The confirmation token the hook requires before clearing the sentinel.
-CONFIRMATION_TOKEN = "LOBSTER_COMPACTED_REORIENTED"
+CONFIRMATION_TOKEN = "<REDACTED_SECRET>"
 
 # Relative path (from HOME) where the hook looks for the sentinel.
 SENTINEL_REL = Path("messages") / "config" / "compact-pending"
