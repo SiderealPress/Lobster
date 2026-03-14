@@ -177,16 +177,17 @@ def _queue_observation(msg_text: str, msg_id: str, source: str | None = None, ts
 
 _DEBUG_MODE: bool | None = None        # None = not yet resolved
 _DEBUG_OWNER_CHAT_ID: int | None = None
+_DEBUG_BOT_TOKEN: str | None = None
 _DEBUG_RESOLVED: bool = False
 
 
 def _resolve_debug_config() -> None:
     """
-    Lazily resolve LOBSTER_DEBUG and owner chat_id from env + config.env.
+    Lazily resolve LOBSTER_DEBUG, owner chat_id, and bot token from env + config.env.
     Must only be called after _CONFIG_DIR is available (module init complete).
     Thread-safe by idempotency — worst case reads config twice.
     """
-    global _DEBUG_MODE, _DEBUG_OWNER_CHAT_ID, _DEBUG_RESOLVED
+    global _DEBUG_MODE, _DEBUG_OWNER_CHAT_ID, _DEBUG_BOT_TOKEN, _DEBUG_RESOLVED
     if _DEBUG_RESOLVED:
         return
 
@@ -206,33 +207,87 @@ def _resolve_debug_config() -> None:
             pass
     _DEBUG_MODE = debug
 
-    # Determine owner chat_id
+    # Determine owner chat_id and bot token
     if debug:
         try:
             config_file = _CONFIG_DIR / "config.env"
             if config_file.exists():
                 for line in config_file.read_text().splitlines():
-                    if line.strip().startswith("TELEGRAM_ALLOWED_USERS="):
-                        val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    stripped = line.strip()
+                    if stripped.startswith("TELEGRAM_ALLOWED_USERS="):
+                        val = stripped.split("=", 1)[1].strip().strip('"').strip("'")
                         first = val.split(",")[0].strip()
                         if first.lstrip("-").isdigit():
                             _DEBUG_OWNER_CHAT_ID = int(first)
-                        break
+                    elif stripped.startswith("TELEGRAM_BOT_TOKEN="):
+                        val = stripped.split("=", 1)[1].strip().strip('"').strip("'")
+                        if val:
+                            _DEBUG_BOT_TOKEN = val
         except Exception:
             pass
 
     _DEBUG_RESOLVED = True
 
 
+def _send_telegram_direct(bot_token: str, chat_id: int, text: str) -> None:
+    """Send a message directly to Telegram via Bot API without touching the inbox.
+
+    Used by _emit_debug_observation to deliver debug push notifications without
+    routing through the dispatcher inbox, avoiding token-costly round-trips.
+    Silent on any failure — must never raise.
+
+    When called from a running event loop (e.g. inside an async handler), the
+    blocking urlopen is dispatched to a thread via run_in_executor so the event
+    loop is not stalled for the up-to-5-second network timeout.
+    """
+    import urllib.request as _urllib_request
+
+    def _do_send() -> None:
+        try:
+            url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+            # Truncate very long debug messages to stay within Telegram limits (4096 chars).
+            display_text = text[:4000] + ("…" if len(text) > 4000 else "")
+            # No parse_mode — debug text is unescaped and HTML special chars
+            # (<, >, &) would cause Telegram to silently drop the message.
+            payload = json.dumps({
+                "chat_id": chat_id,
+                "text": display_text,
+            }).encode()
+            req = _urllib_request.Request(
+                url,
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with _urllib_request.urlopen(req, timeout=5):
+                pass
+        except Exception:
+            pass  # never block on debug instrumentation
+
+    # If an event loop is running (we're inside an async handler), offload the
+    # blocking I/O to a thread so we don't stall the loop for up to 5 seconds.
+    try:
+        loop = asyncio.get_running_loop()
+        loop.run_in_executor(None, _do_send)
+    except RuntimeError:
+        # No running event loop — safe to call directly (e.g. from a thread).
+        _do_send()
+
+
 def _emit_debug_observation(text: str, category: str = "system_context") -> None:
     """
-    Emit a debug push notification via the write_observation inbox path.
+    Emit a debug push notification directly to Telegram (when LOBSTER_DEBUG=true).
 
-    Only fires when LOBSTER_DEBUG=true and owner chat_id is known.
-    Non-blocking: writes directly to inbox as a subagent_observation message.
+    When debug mode is on, bypasses the dispatcher inbox entirely and calls
+    the Telegram Bot API directly. This avoids the token-costly round-trip
+    through the dispatcher that previously prevented debug observations from
+    reaching the user (the dispatcher would silently memory_store system_context
+    observations instead of forwarding them).
+
+    When debug mode is off, this function is a no-op.
+
+    category: "system_context" or "system_error" (included in the message label)
     Never raises — must be safe to call from any context including threads.
-
-    category: "system_context" or "system_error"
     """
     # Fast path: skip I/O if env var is clearly not set and we've already resolved.
     if _DEBUG_RESOLVED and not _DEBUG_MODE:
@@ -241,24 +296,13 @@ def _emit_debug_observation(text: str, category: str = "system_context") -> None
     if not _DEBUG_MODE:
         return
     chat_id = _DEBUG_OWNER_CHAT_ID
-    if chat_id is None:
+    bot_token = _DEBUG_BOT_TOKEN
+    if chat_id is None or not bot_token:
         return
     try:
-        now = datetime.now(timezone.utc)
-        ts_ms = int(now.timestamp() * 1000)
-        msg_id = f"{ts_ms}_dbgobs_{uuid.uuid4().hex[:8]}"
-        message: dict = {
-            "id": msg_id,
-            "type": "subagent_observation",
-            "source": "telegram",
-            "chat_id": chat_id,
-            "text": text,
-            "category": category,
-            "timestamp": now.isoformat(),
-            "task_id": "debug-observability",
-        }
-        inbox_file = INBOX_DIR / f"{msg_id}.json"
-        atomic_write_json(inbox_file, message)
+        label = f"[debug/{category}]"
+        full_text = f"{label}\n{text}"
+        _send_telegram_direct(bot_token, chat_id, full_text)
     except Exception:
         pass  # never block on debug instrumentation
 
