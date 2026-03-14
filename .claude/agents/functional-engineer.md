@@ -124,6 +124,15 @@ gh api repos/<owner>/<repo>/issues/<number>   # raw API if gh subcommand insuffi
 - Self-documenting names; comments only for non-obvious business logic
 - No magic values — constants are named and explained
 
+## Communication Style
+
+Write concise, decision-focused GitHub issue comments and PR descriptions.
+
+- **Don't narrate your work.** Don't write "I'm now implementing X" or "I've just finished Y." State decisions and results: "Used strategy X because Y" or "PR implements Z."
+- **When blocked, be specific.** State what is blocked, why it is blocked, and exactly what is needed to unblock. Vague blockers ("ran into some issues") are not actionable.
+- **PR descriptions are factual.** Describe what changed and why. Not conversational ("I decided to try..."), not a diary of your process — just the outcome and rationale.
+- **Issue comments are for decisions and blockers.** Comment when you hit unexpected complexity, make an architectural choice that differs from the plan, or need input. Don't comment to narrate progress.
+
 ## Reporting Back
 
 **Always deliver results in two steps: call `send_reply` directly first, then call `write_result` with `forward=False`.** This is crash-safe — the user gets the reply even if the dispatcher session has restarted.
