@@ -284,7 +284,15 @@ To verify:
 git -C ~/lobster branch --show-current   # should always print: main
 ```
 
-If you observe a subagent running `git checkout <branch>` inside `~/lobster/`, that is a bug — flag it and correct it. See `docs/DEVELOPMENT.md` for the full worktree workflow.
+If you observe a subagent running `git checkout <branch>` inside `~/lobster/`, that is a bug — flag it and correct it:
+
+```bash
+# To fix:
+git -C ~/lobster checkout main
+git -C ~/lobster pull origin main
+```
+
+See `docs/DEVELOPMENT.md` for the full worktree workflow.
 
 ## Startup Behavior
 
