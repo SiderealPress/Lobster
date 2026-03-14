@@ -34,6 +34,10 @@ STATE_FILE="$MESSAGES_DIR/config/lobster-state.json"
 LOG_DIR="$WORKSPACE_DIR/logs"
 LOG_FILE="$LOG_DIR/claude-persistent.log"
 
+# Auth failure tracking
+AUTH_FAIL_COUNT=0
+AUTH_FAIL_ALERTED=false
+
 # Ensure directories exist
 mkdir -p "$MESSAGES_DIR/config" "$LOG_DIR"
 
@@ -71,6 +75,28 @@ log() {
     local msg="[$(date -Iseconds)] $1"
     echo "$msg" >> "$LOG_FILE"
     echo "$msg"
+}
+
+#===============================================================================
+# Telegram Alerting (direct curl, bypasses outbox)
+#===============================================================================
+send_telegram_alert() {
+    local message="$1"
+    local config_file="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}/config.env"
+    local bot_token="" chat_id=""
+
+    if [[ -f "$config_file" ]]; then
+        bot_token=$(grep '^TELEGRAM_BOT_TOKEN=' "$config_file" | cut -d'=' -f2-)
+        chat_id=$(grep '^TELEGRAM_ALLOWED_USERS=' "$config_file" | cut -d'=' -f2- | cut -d',' -f1)
+    fi
+
+    [[ -z "$bot_token" || -z "$chat_id" ]] && return
+
+    curl -s -X POST "https://api.telegram.org/bot${bot_token}/sendMessage" \
+        --data-urlencode "chat_id=${chat_id}" \
+        --data-urlencode "text=${message}" \
+        --data-urlencode "parse_mode=Markdown" \
+        --max-time 10 >/dev/null 2>&1 || true
 }
 
 #===============================================================================
@@ -335,11 +361,30 @@ handle_exit() {
             # This can happen when --max-turns is exhausted
             log "Claude exited cleanly (code 0) but not in hibernate mode. Will restart."
             write_state "restarting" "clean exit, max-turns likely exhausted"
+            # Reset auth failure tracking — a clean exit means auth is working
+            AUTH_FAIL_COUNT=0
+            AUTH_FAIL_ALERTED=false
             return 1
         fi
     else
         log "Claude exited with code $exit_code. Will restart after backoff."
         write_state "restarting" "exit_code=$exit_code"
+
+        # Detect auth failures from session log
+        if tail -5 "$LOG_DIR/claude-session.log" 2>/dev/null | grep -q "authentication_error\|OAuth token has expired\|API usage limits"; then
+            AUTH_FAIL_COUNT=$((AUTH_FAIL_COUNT + 1))
+            if [[ $AUTH_FAIL_COUNT -ge 3 ]] && [[ "$AUTH_FAIL_ALERTED" != "true" ]]; then
+                AUTH_FAIL_ALERTED=true
+                send_telegram_alert "🔴 *Lobster Auth Failure*
+
+Claude cannot authenticate after $AUTH_FAIL_COUNT attempts.
+Check \`/home/lobster/.claude/.credentials.json\` — OAuth token may be expired.
+
+See \`docs/REMOTE-AUTH.md\` for re-authentication steps."
+                log "AUTH ALERT: Sent Telegram notification after $AUTH_FAIL_COUNT auth failures"
+            fi
+        fi
+
         return 1
     fi
 }
@@ -376,6 +421,9 @@ main() {
     log "================================================================"
 
     preflight
+
+    send_telegram_alert "🔄 *Lobster Starting*
+Claude persistent session initializing."
 
     local attempt=0
     local max_rapid_restarts=5
