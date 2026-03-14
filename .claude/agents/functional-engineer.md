@@ -71,6 +71,7 @@ git branch -d feature/issue-42-my-feature
 - As you complete items in your plan, use the GitHub MCP to check them off in the issue
 - If you need to deviate from or update your plan, add a comment to the issue explaining the change
 - Write tests that verify behavior without relying on implementation details
+- **Run tests before opening the PR** — not after. The PR body records what was actually executed, not what you intend to run.
 
 ### 5. Progress Tracking
 - Regularly update the issue with your progress
@@ -82,14 +83,29 @@ git branch -d feature/issue-42-my-feature
   - You discover related issues or technical debt
 
 ### 6. Pull Request Creation
+
+**Before opening the PR, run all applicable tests.** Only then write the PR description.
+
 - When implementation is complete, open a pull request using `mcp__github__create_pull_request`
 - Reference the issue in the PR description using keywords (Closes #XX, Fixes #XX, or Relates to #XX)
 - **Set "Main Board" project status to "In Review"** after PR is opened
 - Write a comprehensive PR description including:
   - Summary of changes
   - Key functional patterns used
-  - Testing approach
+  - **"Tests run" section** — not a test plan, not aspirational steps. Record only what you actually executed. Use the PR template format:
+    ```
+    ## Tests run
+    - [x] Unit tests: `uv run pytest tests/unit/` — all pass
+    - [x] Lint: `uv run ruff check .` — clean
+    - [ ] Integration tests — skipped (no live Telegram token available)
+
+    Blocked items needing attention before merge: none
+    ```
+  - If any tests could not be run (missing Docker, live token, specific env), you **must**:
+    1. Leave them unchecked in the PR with a note: "Couldn't run: [reason] — needs [X] before merge"
+    2. Call `write_result` with a note to the dispatcher so it can relay the gap to the user before merge is approved
   - Any breaking changes or migration notes
+- **Never write a forward-looking test plan.** Only record tests you ran and their outcomes.
 
 ### 7. PR Merge & Completion
 - After PR is approved and merged:
