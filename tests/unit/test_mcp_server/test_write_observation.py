@@ -359,12 +359,17 @@ class TestHandleWriteObservation:
     # Debug mode: automatic routing (LOBSTER_DEBUG=true)
     # ------------------------------------------------------------------
 
-    def test_system_context_bypasses_inbox_in_debug_mode(self, inbox_dir: Path):
-        """system_context observations bypass the inbox when LOBSTER_DEBUG=true."""
+    def test_system_context_writes_inbox_and_mirrors_in_debug_mode(self, inbox_dir: Path):
+        """system_context observations write to inbox AND emit a debug mirror when LOBSTER_DEBUG=true."""
         emitted: list[dict] = []
 
-        def fake_emit(text: str, category: str = "system_context") -> None:
-            emitted.append({"text": text, "category": category})
+        def fake_emit(
+            text: str,
+            category: str = "system_context",
+            visibility: str = "mcp-only",
+            emitter: str | None = None,
+        ) -> None:
+            emitted.append({"text": text, "category": category, "visibility": visibility, "emitter": emitter})
 
         with patch.multiple(
             "src.mcp.inbox_server",
@@ -380,20 +385,27 @@ class TestHandleWriteObservation:
                 "category": "system_context",
             }))
 
-        # No inbox file — bypassed entirely
-        assert list(inbox_dir.glob("*.json")) == []
-        # Direct Telegram delivery
+        # Inbox file written — dispatcher still sees it (additive, not bypass)
+        files = list(inbox_dir.glob("*.json"))
+        assert len(files) == 1
+        # Debug mirror also emitted directly to Telegram with mcp-only visibility
         assert len(emitted) == 1
         assert emitted[0]["category"] == "system_context"
+        assert emitted[0]["visibility"] == "mcp-only"
         assert "Config drift detected." in emitted[0]["text"]
-        assert "debug mode" in result[0].text
+        assert "Observation queued" in result[0].text
 
-    def test_system_error_bypasses_inbox_in_debug_mode(self, inbox_dir: Path):
-        """system_error observations bypass the inbox when LOBSTER_DEBUG=true."""
+    def test_system_error_writes_inbox_and_mirrors_in_debug_mode(self, inbox_dir: Path):
+        """system_error observations write to inbox AND emit a debug mirror when LOBSTER_DEBUG=true."""
         emitted: list[dict] = []
 
-        def fake_emit(text: str, category: str = "system_context") -> None:
-            emitted.append({"text": text, "category": category})
+        def fake_emit(
+            text: str,
+            category: str = "system_context",
+            visibility: str = "mcp-only",
+            emitter: str | None = None,
+        ) -> None:
+            emitted.append({"text": text, "category": category, "visibility": visibility, "emitter": emitter})
 
         with patch.multiple(
             "src.mcp.inbox_server",
@@ -409,17 +421,27 @@ class TestHandleWriteObservation:
                 "category": "system_error",
             }))
 
-        assert list(inbox_dir.glob("*.json")) == []
+        # Inbox file written — dispatcher still sees it (additive, not bypass)
+        files = list(inbox_dir.glob("*.json"))
+        assert len(files) == 1
+        # Debug mirror also emitted directly to Telegram with mcp-only visibility
         assert len(emitted) == 1
         assert emitted[0]["category"] == "system_error"
-        assert "debug mode" in result[0].text
+        assert emitted[0]["visibility"] == "mcp-only"
+        assert "API call failed." in emitted[0]["text"]
+        assert "Observation queued" in result[0].text
 
     def test_user_context_still_queues_inbox_in_debug_mode(self, inbox_dir: Path):
         """user_context observations always write to inbox even when LOBSTER_DEBUG=true."""
         emitted: list[dict] = []
 
-        def fake_emit(text: str, category: str = "system_context") -> None:
-            emitted.append({"text": text, "category": category})
+        def fake_emit(
+            text: str,
+            category: str = "system_context",
+            visibility: str = "mcp-only",
+            emitter: str | None = None,
+        ) -> None:
+            emitted.append({"text": text, "category": category, "visibility": visibility, "emitter": emitter})
 
         with patch.multiple(
             "src.mcp.inbox_server",
@@ -441,14 +463,20 @@ class TestHandleWriteObservation:
         # Also emitted directly so user sees it in debug mode
         assert len(emitted) == 1
         assert emitted[0]["category"] == "user_context"
+        assert emitted[0]["visibility"] == "mcp-only"
         assert "Observation queued" in result[0].text
 
     def test_system_context_goes_to_inbox_in_non_debug_mode(self, inbox_dir: Path):
         """system_context observations write to inbox when LOBSTER_DEBUG=false."""
         emitted: list[dict] = []
 
-        def fake_emit(text: str, category: str = "system_context") -> None:
-            emitted.append({"text": text, "category": category})
+        def fake_emit(
+            text: str,
+            category: str = "system_context",
+            visibility: str = "mcp-only",
+            emitter: str | None = None,
+        ) -> None:
+            emitted.append({"text": text, "category": category, "visibility": visibility, "emitter": emitter})
 
         with patch.multiple(
             "src.mcp.inbox_server",
@@ -471,12 +499,17 @@ class TestHandleWriteObservation:
         assert emitted == []
         assert "Observation queued" in result[0].text
 
-    def test_debug_bypass_includes_task_id_in_emitted_text(self, inbox_dir: Path):
-        """When bypassing inbox in debug mode, task_id is appended to the emitted text."""
+    def test_debug_mirror_includes_task_id_as_emitter(self, inbox_dir: Path):
+        """In debug mode, task_id is passed as the emitter to _emit_debug_observation."""
         emitted: list[dict] = []
 
-        def fake_emit(text: str, category: str = "system_context") -> None:
-            emitted.append({"text": text, "category": category})
+        def fake_emit(
+            text: str,
+            category: str = "system_context",
+            visibility: str = "mcp-only",
+            emitter: str | None = None,
+        ) -> None:
+            emitted.append({"text": text, "category": category, "visibility": visibility, "emitter": emitter})
 
         with patch.multiple(
             "src.mcp.inbox_server",
@@ -494,4 +527,5 @@ class TestHandleWriteObservation:
             }))
 
         assert len(emitted) == 1
-        assert "task-42" in emitted[0]["text"]
+        assert emitted[0]["emitter"] == "task:task-42"
+        assert emitted[0]["visibility"] == "mcp-only"
