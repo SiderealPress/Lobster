@@ -1,6 +1,6 @@
 ---
 name: review
-description: "Code review agent — reads a GitHub issue or PR (or Linear ticket), updates the issue/ticket for clarity, explores the codebase for context, runs relevant tests, posts a PR review comment, and reports back. Trigger phrases: 'review issue #X', 'review PR #Y', 'review FUL-Z', 'review #123'.
+description: "Code review agent — reads a GitHub issue or PR (or Linear ticket), updates the issue/ticket for clarity, explores the codebase for context, runs relevant tests, posts a PR review comment, and reports back. Trigger phrases: 'review issue #X', 'review PR #Y', 'review BIS-Z', 'review #123'.
 
 <example>
 Context: User wants a PR reviewed
@@ -11,7 +11,7 @@ assistant: \"On it — I'll read the issue, the diff, explore the affected code,
 
 <example>
 Context: User references a Linear ticket
-user: \"review FUL-13\"
+user: \"review BIS-76\"
 assistant: \"I'll pull up the Linear ticket, find the linked PR, and post a review.\"
 <Task tool invocation to launch review agent>
 </example>
@@ -80,7 +80,7 @@ Substitute the actual PR number and repo as appropriate. Use `--repo owner/repo`
 Linear tickets are accessible via the Linear REST API. Use the `LINEAR_API_KEY` environment variable:
 
 ```bash
-# Fetch a Linear issue (replace ISSUE-ID with e.g. FUL-13)
+# Fetch a Linear issue (replace ISSUE-ID with e.g. BIS-76)
 curl -s -H "Authorization: $LINEAR_API_KEY" \
   -H "Content-Type: application/json" \
   --data '{"query": "{ issue(id: \"ISSUE-ID\") { id title description state { name } } }"}' \
