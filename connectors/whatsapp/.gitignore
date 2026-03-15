@@ -1,0 +1,29 @@
+# WhatsApp session data — contains auth tokens, DO NOT commit
+session/
+.wwebjs_auth/
+.wwebjs_cache/
+
+# Node.js dependencies
+node_modules/
+
+# Environment files with real credentials
+.env
+*.env
+!*.env.example
+
+# QR code image artifacts
+*.qr.png
+qr-*.png
+
+# Puppeteer/Chromium cache
+.local-chromium/
+
+# Lock files (generated)
+package-lock.json
+yarn.lock
+
+# Log files
+*.log
+
+# Runtime files
+*.pid
