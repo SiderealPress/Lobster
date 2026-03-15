@@ -1,0 +1,37 @@
+[skill]
+name = "lobster-watcher"
+version = "1.0.0"
+description = "Real-time observability dashboard — see all running and recent Lobster agent sessions as a timeline and 3D view"
+author = "Bisque Labs"
+category = "tool"
+
+[activation]
+mode = "triggered"
+triggers = ["/watcher", "lobster-watcher", "agent dashboard", "agent sessions"]
+context_patterns = [
+    "when user asks about running agents",
+    "when user asks to see agent sessions",
+    "when user asks about the dashboard",
+]
+
+[layering]
+priority = 50
+merge_strategy = "append"
+
+[provides]
+mcp_tools = []
+bot_commands = ["/watcher"]
+
+[compatibility]
+enhances = []
+conflicts = []
+
+[dependencies]
+pip = ["starlette", "uvicorn"]
+npm = []
+system = ["nginx"]
+api_keys = []
+
+[dependencies.runtime]
+python = ">=3.11"
+node = ">=18"
