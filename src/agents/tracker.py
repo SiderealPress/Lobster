@@ -49,6 +49,8 @@ def add_pending_agent(
     source: str = "telegram",
     output_file: str | None = None,
     timeout_minutes: int | None = None,
+    trigger_message_id: str | None = None,
+    trigger_snippet: str | None = None,
     path: Path | None = None,
 ) -> None:
     """Record a newly-spawned background agent.
@@ -57,15 +59,17 @@ def add_pending_agent(
     agent_id — duplicate calls replace the existing entry.
 
     Args:
-        agent_id:        Unique identifier for the agent.
-        description:     Human-readable summary of what the agent is doing.
-        chat_id:         Chat/channel to notify when the agent completes.
-        task_id:         Logical task identifier passed to write_result.
-        source:          Messaging platform ('telegram', 'slack', etc.).
-        output_file:     Full path to the Claude Code agent output file in /tmp.
-        timeout_minutes: Expected maximum runtime.
-        path:            DB path override (for testing). Accepts and ignores the
-                         old JSON-path semantics — treated as SQLite DB path.
+        agent_id:           Unique identifier for the agent.
+        description:        Human-readable summary of what the agent is doing.
+        chat_id:            Chat/channel to notify when the agent completes.
+        task_id:            Logical task identifier passed to write_result.
+        source:             Messaging platform ('telegram', 'slack', etc.).
+        output_file:        Full path to the Claude Code agent output file in /tmp.
+        timeout_minutes:    Expected maximum runtime.
+        trigger_message_id: Inbox message_id that caused this spawn (causality).
+        trigger_snippet:    First 200 chars of the triggering message text (PII).
+        path:               DB path override (for testing). Accepts and ignores the
+                            old JSON-path semantics — treated as SQLite DB path.
     """
     session_start(
         id=agent_id,
@@ -75,6 +79,8 @@ def add_pending_agent(
         source=source,
         output_file=output_file,
         timeout_minutes=timeout_minutes,
+        trigger_message_id=trigger_message_id,
+        trigger_snippet=trigger_snippet,
         path=path,
     )
 
