@@ -1263,6 +1263,28 @@ else
     info "Skipping post-compact-gate hook (settings.json not yet created)"
 fi
 
+# Set up Claude Code SessionStart hook to write the dispatcher session ID
+# This enables hooks to reliably distinguish dispatcher from subagent sessions.
+chmod +x "$INSTALL_DIR/hooks/write-dispatcher-session-id.py" || true
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("write-dispatcher-session-id"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq '.hooks.SessionStart = (.hooks.SessionStart // []) + [{
+            "matcher": "",
+            "hooks": [{
+                "type": "command",
+                "command": "python3 '"$INSTALL_DIR"'/hooks/write-dispatcher-session-id.py",
+                "timeout": 5
+            }]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "write-dispatcher-session-id hook installed"
+    else
+        info "write-dispatcher-session-id hook already configured in Claude Code settings"
+    fi
+else
+    info "Skipping write-dispatcher-session-id hook (settings.json not yet created)"
+fi
+
 # Set up Claude Code SessionStart hook to set compact flag on context compaction
 chmod +x "$INSTALL_DIR/hooks/on-compact.py" || true
 if [ -f "$CLAUDE_SETTINGS" ]; then
