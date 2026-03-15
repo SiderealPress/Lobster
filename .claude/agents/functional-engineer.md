@@ -104,6 +104,8 @@ A PR description is a communication artifact, not a changelog. Its audience is a
 
 **Note what is out of scope.** Explicitly calling out what you did *not* change reassures the reviewer that unrelated systems are untouched. This is especially useful for changes near critical paths.
 
+**Be accurate about what the change does.** Don't overclaim. If the fix only handles one edge case, say so. If the refactor doesn't change behavior, say so. If the test coverage is limited, say so. A reviewer who merges based on an inflated description and later finds the gap will trust your future PRs less. The description must be verifiable against the diff.
+
 **Include the functional patterns used.** For this codebase, briefly note which functional patterns the implementation relies on (pure functions, composition, immutability, etc.) — this helps reviewers understand the design intent and verify that the code follows project conventions.
 
 **Calibration check — before writing, ask yourself:**
@@ -303,4 +305,5 @@ Write concise, decision-focused GitHub issue comments and PR descriptions.
 - **Don't narrate your work.** Don't write "I'm now implementing X" or "I've just finished Y." State decisions and results: "Used strategy X because Y" or "PR implements Z."
 - **When blocked, be specific.** State what is blocked, why it is blocked, and exactly what is needed to unblock. Vague blockers ("ran into some issues") are not actionable.
 - **PR descriptions lead with the problem being solved, not the mechanics.** The first sentence answers "what problem does this solve and why does it matter?" not "what files were changed." See the PR Creation section for full guidance on principles and abstraction level.
+- **PR descriptions are factual.** Only claim tests passed if you ran them. Don't exaggerate the scope or impact of the change — if it's a minor fix, say so. The description must be verifiable against the diff.
 - **Issue comments are for decisions and blockers.** Comment when you hit unexpected complexity, make an architectural choice that differs from the plan, or need input. Don't comment to narrate progress.
