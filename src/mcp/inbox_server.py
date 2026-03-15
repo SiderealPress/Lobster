@@ -579,6 +579,31 @@ try:
 except Exception as _ss_err:
     log.warning(f"Agent session store init failed (non-fatal): {_ss_err}")
 
+# ---------------------------------------------------------------------------
+# Wire server notification — event-driven SSE push (<40ms latency)
+# ---------------------------------------------------------------------------
+
+_WIRE_SERVER_NOTIFY_URL = os.environ.get(
+    "LOBSTER_WIRE_NOTIFY_URL",
+    f"http://localhost:{os.environ.get('LOBSTER_WIRE_PORT', '8765')}/notify",
+)
+
+
+async def _notify_wire_server() -> None:
+    """Fire-and-forget POST to wire server /notify endpoint.
+
+    Called after every session write so the wire server wakes its SSE generators
+    immediately instead of waiting for the next poll interval.  Silently swallowed
+    on any error — the wire server will still catch the change on its next fallback
+    poll (LOBSTER_WIRE_POLL_INTERVAL, default 0.5s).
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            await client.post(_WIRE_SERVER_NOTIFY_URL, timeout=0.15)
+    except Exception:
+        pass  # wire server may be down or not yet started — not critical
+
+
 # Source configurations
 SOURCES = {
     "telegram": {
@@ -4347,6 +4372,9 @@ async def handle_write_result(args: dict) -> list[TextContent]:
     except Exception as exc:
         log.warning(f"write_result auto-unregister failed for task_id={task_id!r}: {exc}")
 
+    # Notify wire server so SSE clients update within 40ms
+    asyncio.create_task(_notify_wire_server())
+
     log.info(f"Subagent result queued in inbox: task_id={task_id} status={status} chat_id={chat_id}")
     if msg_type == "subagent_notification":
         delivery_note = "Subagent handled delivery directly via send_reply — dispatcher will mark processed without forwarding."
@@ -4585,6 +4613,8 @@ async def handle_session_start(args: dict) -> list[TextContent]:
         return [TextContent(type="text", text=f"Error starting session: {exc}")]
 
     log.info(f"Session started: agent_id={agent_id!r} agent_type={agent_type!r} chat_id={chat_id}")
+    # Notify wire server so SSE clients update within 40ms
+    asyncio.create_task(_notify_wire_server())
     return [TextContent(
         type="text",
         text=f"Session started: {agent_id!r} ({agent_type or 'agent'}) — {description}",
@@ -4616,6 +4646,8 @@ async def handle_session_end(args: dict) -> list[TextContent]:
         return [TextContent(type="text", text=f"Error ending session: {exc}")]
 
     log.info(f"Session ended: agent_id={agent_id!r} status={status!r}")
+    # Notify wire server so SSE clients update within 40ms
+    asyncio.create_task(_notify_wire_server())
     return [TextContent(
         type="text",
         text=f"Session ended: {agent_id!r} → {status}",
@@ -5989,6 +6021,8 @@ async def reconcile_agent_sessions() -> None:
                         status="completed",
                         result_summary="Auto-closed by reconciler: stop_reason=end_turn",
                     )
+                    # Notify wire server so dashboard updates within 40ms
+                    asyncio.create_task(_notify_wire_server())
                 elif scan_status == "missing" and elapsed > DEAD_THRESHOLD_SECONDS:
                     log.warning(
                         f"[reconciler] Agent {agent_id!r} output file missing after "
@@ -5999,6 +6033,8 @@ async def reconcile_agent_sessions() -> None:
                         status="dead",
                         result_summary=f"Auto-closed by reconciler: output missing after {elapsed}s",
                     )
+                    # Notify wire server so dashboard updates within 40ms
+                    asyncio.create_task(_notify_wire_server())
                 # scan_status == "running" or None (no output file registered) → no action
 
             # Log unregistered running agents (in scan but not in DB)
