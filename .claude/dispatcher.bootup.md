@@ -67,7 +67,7 @@ When wait_for_messages() returns a subagent_result/subagent_error:
 1. mark_processing(message_id)
 2. # Note: write_result auto-unregisters the agent server-side — no manual unregister_agent call needed.
    # The tracker is updated atomically when write_result is called.
-3. ... forward or drop based on forward field as usual ...
+3. ... relay or drop based on sent_reply_to_user field as usual ...
 4. mark_processed(message_id)
 ```
 
@@ -140,11 +140,11 @@ Background subagents call `write_result(task_id, chat_id, text, ...)`, which dro
 
 **When `wait_for_messages` returns a message with `type: "subagent_result"`:**
 
-Check the `forward` field first:
+Check the `sent_reply_to_user` field first:
 
 ```
 1. mark_processing(message_id)
-2. if msg.get("forward") == False:
+2. if msg.get("sent_reply_to_user") == True:
        # Subagent already called send_reply — nothing to deliver
        mark_processed(message_id)
    else:
@@ -170,21 +170,21 @@ Check the `forward` field first:
 3. mark_processed(message_id)
 ```
 
-(Errors always forward — a subagent that fails may not have delivered anything to the user.)
+(Errors always relay — a subagent that fails may not have delivered anything to the user.)
 
 **Key fields on these messages:**
 - `task_id` — identifier for the originating task (for logging/debugging)
 - `chat_id` — where to deliver the reply
-- `text` — the reply text to forward
+- `text` — the reply text to relay
 - `source` — messaging platform (telegram, slack, etc.)
 - `status` — "success" or "error"
-- `forward` — boolean (default true). When false, the subagent already called `send_reply`; dispatcher just marks processed
+- `sent_reply_to_user` — boolean (default false). When true, the subagent already called `send_reply`; dispatcher just marks processed
 - `artifacts` — optional list of file paths the subagent produced
 - `thread_ts` — optional Slack thread timestamp
 
 ## Handling Subagent Notifications (`subagent_notification`)
 
-When `write_result` is called with `forward=False`, `inbox_server` writes a message of type `subagent_notification` instead of `subagent_result`. This is the canonical signal that the subagent already delivered its reply to the user via `send_reply`.
+When `write_result` is called with `sent_reply_to_user=True`, `inbox_server` writes a message of type `subagent_notification` instead of `subagent_result`. This is the canonical signal that the subagent already delivered its reply to the user via `send_reply`.
 
 **When `wait_for_messages` returns a message with `type: "subagent_notification"`:**
 
@@ -195,9 +195,9 @@ When `write_result` is called with `forward=False`, `inbox_server` writes a mess
    # Do NOT call send_reply — the user already received the message
 ```
 
-The distinct type enforces correct behavior structurally: the dispatcher's `subagent_result` branch (which calls `send_reply`) never fires for these messages. There is no risk of a duplicate reply even if the dispatcher ignores the `forward` field.
+The distinct type enforces correct behavior structurally: the dispatcher's `subagent_result` branch (which calls `send_reply`) never fires for these messages. There is no risk of a duplicate reply even if the dispatcher ignores the `sent_reply_to_user` field.
 
-**Why this matters:** Without a distinct type, the only safeguard against duplicate replies is the dispatcher reading and obeying the `forward: false` field. With `subagent_notification`, the message type itself routes correctly — the dispatcher gains situational awareness without any possibility of sending a duplicate.
+**Why this matters:** Without a distinct type, the only safeguard against duplicate replies is the dispatcher reading and obeying the `sent_reply_to_user: true` field. With `subagent_notification`, the message type itself routes correctly — the dispatcher gains situational awareness without any possibility of sending a duplicate.
 
 ---
 
@@ -462,7 +462,7 @@ Modes: `"active"` (default) | `"hibernate"`
 
 ## No redundant relay after subagent direct messages
 
-When a subagent calls `send_reply` directly AND calls `write_result` with `forward=False`, the user already received the message. The inbox server writes this as a `subagent_notification` (not `subagent_result`), which is the structural guarantee you never forward it.
+When a subagent calls `send_reply` directly AND calls `write_result` with `sent_reply_to_user=True`, the user already received the message. The inbox server writes this as a `subagent_notification` (not `subagent_result`), which is the structural guarantee you never relay it.
 
 **When `subagent_notification` arrives:**
 - `mark_processed` — nothing to deliver
@@ -473,12 +473,12 @@ When a subagent calls `send_reply` directly AND calls `write_result` with `forwa
 **Pattern to avoid:**
 1. You say "on it" (preview)
 2. Subagent sends detailed result via `send_reply`
-3. Subagent calls `write_result` with `forward=False`
+3. Subagent calls `write_result` with `sent_reply_to_user=True`
 4. You receive the `subagent_notification` and send another summary ← **don't do step 4**
 
 Correct pattern: preview once if needed → subagent sends result → you are silent.
 
-**Note on `forward=None`:** If a subagent passes `forward=None` (omits the argument), the server now treats it as `forward=False` — the message becomes a `subagent_notification` and the dispatcher will NOT forward it. Always pass `forward` explicitly. Subagents that want the dispatcher to relay their result must pass `forward=True` explicitly.
+**Note on omitting `sent_reply_to_user`:** If a subagent omits `sent_reply_to_user`, the server treats it as `False` — the message becomes a `subagent_result` and the dispatcher WILL relay it to the user. Always pass `sent_reply_to_user` explicitly. Subagents that already called `send_reply` must pass `sent_reply_to_user=True` explicitly.
 
 ## Skill System: Dispatcher Behavior
 

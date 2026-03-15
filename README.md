@@ -266,7 +266,7 @@ The lobster-inbox MCP server provides:
 - `get_stats()` - Inbox statistics
 
 ### Subagent Result Bus
-- `write_result(task_id, chat_id, text, forward?, status?)` - Return a result from a background subagent. Pass `forward=False` if already called `send_reply` directly.
+- `write_result(task_id, chat_id, text, sent_reply_to_user?, status?)` - Return a result from a background subagent. Pass `sent_reply_to_user=True` if already called `send_reply` directly.
 - `write_observation(chat_id, text, category, task_id?)` - Write a side-channel observation (user_context, system_context, system_error)
 
 ### Agent Session Tracking (SQLite)

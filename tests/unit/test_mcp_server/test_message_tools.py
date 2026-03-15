@@ -886,7 +886,7 @@ class TestGetStats:
 
 
 class TestWriteResultDeduplication:
-    """Tests for server-side dedup: write_result should not forward when send_reply
+    """Tests for server-side dedup: write_result should not relay when send_reply
     was already called with the same text to the same chat."""
 
     @pytest.fixture(autouse=True)
@@ -908,8 +908,8 @@ class TestWriteResultDeduplication:
         sent.mkdir(exist_ok=True)
         return inbox, outbox, sent
 
-    def test_forward_suppressed_after_send_reply(self, dirs):
-        """write_result with forward=True is overridden to False when an identical
+    def test_sent_reply_promoted_after_send_reply(self, dirs):
+        """write_result with sent_reply_to_user=False is promoted to True when an identical
         message was already delivered via send_reply to the same chat."""
         inbox, outbox, sent = dirs
 
@@ -932,29 +932,28 @@ class TestWriteResultDeduplication:
                 "source": "telegram",
             }))
 
-            # Then calls write_result with forward=True (the buggy pattern)
+            # Then calls write_result omitting sent_reply_to_user (buggy pattern — would relay duplicate)
             result = asyncio.run(handle_write_result({
                 "task_id": "issue-42",
                 "chat_id": 111,
                 "text": text,
                 "source": "telegram",
-                "forward": True,
+                # sent_reply_to_user omitted — server should detect dedup and set True
             }))
 
             assert len(result) == 1
             assert "Result queued" in result[0].text
 
-            # Read the written message and verify forward was overridden to False
+            # Verify sent_reply_to_user was promoted to True by server-side dedup
             inbox_files = list(inbox.glob("*.json"))
             assert len(inbox_files) == 1
             msg = json.loads(inbox_files[0].read_text())
-            assert msg["forward"] is False, (
-                "forward should be overridden to False when send_reply was already called"
+            assert msg["sent_reply_to_user"] is True, (
+                "sent_reply_to_user should be promoted to True when send_reply was already called"
             )
 
-    def test_forward_not_suppressed_for_different_text(self, dirs):
-        """write_result forward is NOT suppressed when the text differs from
-        what was sent via send_reply."""
+    def test_relay_not_suppressed_for_different_text(self, dirs):
+        """write_result is NOT suppressed when the text differs from what was sent via send_reply."""
         inbox, outbox, sent = dirs
 
         with patch.multiple(
@@ -974,24 +973,24 @@ class TestWriteResultDeduplication:
                 "source": "telegram",
             }))
 
-            # write_result with different text
+            # write_result with different text and sent_reply_to_user=False
             asyncio.run(handle_write_result({
                 "task_id": "issue-99",
                 "chat_id": 222,
                 "text": "Final result: all done.",
                 "source": "telegram",
-                "forward": True,
+                "sent_reply_to_user": False,
             }))
 
             inbox_files = list(inbox.glob("*.json"))
             assert len(inbox_files) == 1
             msg = json.loads(inbox_files[0].read_text())
-            assert msg["forward"] is True, (
-                "forward should remain True when texts differ"
+            assert msg["sent_reply_to_user"] is False, (
+                "sent_reply_to_user should remain False when texts differ"
             )
 
-    def test_forward_not_suppressed_for_different_chat(self, dirs):
-        """write_result forward is NOT suppressed when the chat_id differs."""
+    def test_relay_not_suppressed_for_different_chat(self, dirs):
+        """write_result is NOT suppressed when the chat_id differs."""
         inbox, outbox, sent = dirs
 
         with patch.multiple(
@@ -1013,24 +1012,24 @@ class TestWriteResultDeduplication:
                 "source": "telegram",
             }))
 
-            # write_result to a different chat 444
+            # write_result to a different chat 444 with sent_reply_to_user=False
             asyncio.run(handle_write_result({
                 "task_id": "issue-77",
                 "chat_id": 444,
                 "text": text,
                 "source": "telegram",
-                "forward": True,
+                "sent_reply_to_user": False,
             }))
 
             inbox_files = list(inbox.glob("*.json"))
             assert len(inbox_files) == 1
             msg = json.loads(inbox_files[0].read_text())
-            assert msg["forward"] is True, (
-                "forward should remain True when chat_id differs"
+            assert msg["sent_reply_to_user"] is False, (
+                "sent_reply_to_user should remain False when chat_id differs"
             )
 
-    def test_explicit_forward_false_still_false(self, dirs):
-        """write_result with explicit forward=False is preserved regardless."""
+    def test_explicit_sent_reply_true(self, dirs):
+        """write_result with explicit sent_reply_to_user=True produces subagent_notification."""
         inbox, outbox, sent = dirs
 
         with patch.multiple(
@@ -1046,12 +1045,69 @@ class TestWriteResultDeduplication:
             asyncio.run(handle_write_result({
                 "task_id": "issue-55",
                 "chat_id": 555,
-                "text": "No forward needed.",
+                "text": "Already delivered directly.",
                 "source": "telegram",
-                "forward": False,
+                "sent_reply_to_user": True,
             }))
 
             inbox_files = list(inbox.glob("*.json"))
             assert len(inbox_files) == 1
             msg = json.loads(inbox_files[0].read_text())
-            assert msg["forward"] is False
+            assert msg["sent_reply_to_user"] is True
+            assert msg["type"] == "subagent_notification"
+
+    def test_legacy_forward_false_compat(self, dirs):
+        """Legacy callers using forward=False are treated as sent_reply_to_user=True (inverse semantics)."""
+        inbox, outbox, sent = dirs
+
+        with patch.multiple(
+            "src.mcp.inbox_server",
+            INBOX_DIR=inbox,
+            OUTBOX_DIR=outbox,
+            SENT_DIR=sent,
+            SENT_REPLIES_DIR=self._sent_replies_dir,
+        ):
+            import asyncio
+            from src.mcp.inbox_server import handle_write_result
+
+            asyncio.run(handle_write_result({
+                "task_id": "issue-legacy",
+                "chat_id": 666,
+                "text": "Legacy forward=False call.",
+                "source": "telegram",
+                "forward": False,  # old API: forward=False meant "don't relay" → sent_reply_to_user=True
+            }))
+
+            inbox_files = list(inbox.glob("*.json"))
+            assert len(inbox_files) == 1
+            msg = json.loads(inbox_files[0].read_text())
+            assert msg["sent_reply_to_user"] is True
+            assert msg["type"] == "subagent_notification"
+
+    def test_legacy_forward_true_compat(self, dirs):
+        """Legacy callers using forward=True are treated as sent_reply_to_user=False (inverse semantics)."""
+        inbox, outbox, sent = dirs
+
+        with patch.multiple(
+            "src.mcp.inbox_server",
+            INBOX_DIR=inbox,
+            OUTBOX_DIR=outbox,
+            SENT_DIR=sent,
+            SENT_REPLIES_DIR=self._sent_replies_dir,
+        ):
+            import asyncio
+            from src.mcp.inbox_server import handle_write_result
+
+            asyncio.run(handle_write_result({
+                "task_id": "issue-legacy-fwd",
+                "chat_id": 777,
+                "text": "Legacy forward=True call.",
+                "source": "telegram",
+                "forward": True,  # old API: forward=True meant "relay" → sent_reply_to_user=False
+            }))
+
+            inbox_files = list(inbox.glob("*.json"))
+            assert len(inbox_files) == 1
+            msg = json.loads(inbox_files[0].read_text())
+            assert msg["sent_reply_to_user"] is False
+            assert msg["type"] == "subagent_result"

@@ -42,7 +42,7 @@ User context files are private and not committed to git. They contain user-speci
 ## Available Tools (MCP)
 
 ### Messaging Tools
-- `send_reply(chat_id, text, source?, thread_ts?, buttons?, message_id?, task_id?)` - Send a reply to a user. **Pass `message_id` to atomically mark the message as processed** (combines send_reply + mark_processed in one call). **Pass `task_id` (subagents only) to auto-suppress duplicate forwarding: if write_result is later called with the same task_id, forward is automatically set to False.** Supports inline keyboard buttons (Telegram) and thread replies (Slack).
+- `send_reply(chat_id, text, source?, thread_ts?, buttons?, message_id?, task_id?)` - Send a reply to a user. **Pass `message_id` to atomically mark the message as processed** (combines send_reply + mark_processed in one call). **Pass `task_id` (subagents only) to auto-suppress duplicate delivery: if write_result is later called with the same task_id, sent_reply_to_user is automatically set to True.** Supports inline keyboard buttons (Telegram) and thread replies (Slack).
 - `check_inbox(source?, limit?)` - Non-blocking inbox check
 - `list_sources()` - List available channels
 - `get_stats()` - Inbox statistics

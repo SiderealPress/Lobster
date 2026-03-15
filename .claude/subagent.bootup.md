@@ -14,7 +14,7 @@ Users communicate through a chat interface (Telegram or Slack), typically on mob
 When your task is complete:
 
 1. **Call `send_reply(chat_id, text)` directly** to deliver the result to the user immediately. This ensures the user gets their reply even if the dispatcher session has crashed or restarted.
-2. **Then call `write_result(..., forward=False)`** so the dispatcher marks the message processed without re-delivering it.
+2. **Then call `write_result(..., sent_reply_to_user=True)`** so the dispatcher marks the message processed without re-delivering it.
 
 This two-step pattern is crash-safe: the user gets the reply from you regardless of dispatcher state.
 
@@ -43,18 +43,18 @@ These files are private and not in the git repo. They extend and override the de
 
 You MUST both deliver results to the user directly AND call `write_result` at the end of every task. Never silently complete and return.
 
-**CRITICAL: `forward` must always be explicit — never omit it:**
-- The server default for `forward` is `False`. If you omit `forward`, the dispatcher will NOT relay your result to the user.
-- **If you called `send_reply` directly:** pass `forward=False`. The dispatcher will otherwise forward the result a second time, producing duplicate messages. No exceptions.
-- **If you did NOT call `send_reply` and want the dispatcher to relay your result:** pass `forward=True` explicitly. Omitting it is NOT safe — it will silently drop delivery.
-- Both `True` and `False` are valid. Omitting `forward` is never correct.
+**CRITICAL: `sent_reply_to_user` must always be explicit — never omit it:**
+- The server default for `sent_reply_to_user` is `False`. If you omit it, the dispatcher WILL relay your result to the user.
+- **If you called `send_reply` directly:** pass `sent_reply_to_user=True`. The dispatcher will otherwise relay the result a second time, producing duplicate messages. No exceptions.
+- **If you did NOT call `send_reply` and want the dispatcher to relay your result:** pass `sent_reply_to_user=False` explicitly (or omit it — False is the default).
+- Both `True` and `False` are valid. Passing `True` when you haven't called `send_reply` will silently drop delivery — the dispatcher will not relay.
 
 **Required at end of every subagent task — two steps:**
 
 ```python
 # Step 1: Deliver directly to the user (crash-safe delivery)
 # Pass task_id to enable server-side auto-dedup: the inbox server will
-# automatically suppress forward=True in write_result for this task_id.
+# automatically set sent_reply_to_user=True in write_result for this task_id.
 mcp__lobster-inbox__send_reply(
     chat_id=<user's chat_id — get this from your task prompt>,
     text="<your result or report>",
@@ -68,23 +68,23 @@ mcp__lobster-inbox__write_result(
     chat_id=<user's chat_id>,
     text="<same result text, or a brief log summary>",
     source="telegram",
-    forward=False,  # REQUIRED — you already sent via send_reply above
+    sent_reply_to_user=True,  # REQUIRED — you already sent via send_reply above
 )
 ```
 
-**CRITICAL: If you called `send_reply` directly at any point, you MUST pass `forward=False` to `write_result`:**
+**CRITICAL: If you called `send_reply` directly at any point, you MUST pass `sent_reply_to_user=True` to `write_result`:**
 
 ```python
 mcp__lobster-inbox__write_result(
-    task_id=..., chat_id=..., text=..., forward=False
+    task_id=..., chat_id=..., text=..., sent_reply_to_user=True
 )
 ```
 
-Failing to pass `forward=False` causes duplicate messages — the dispatcher will forward your `write_result` on top of the `send_reply` you already sent.
+Failing to pass `sent_reply_to_user=True` causes duplicate messages — the dispatcher will relay your `write_result` on top of the `send_reply` you already sent.
 
-**Why two steps?** If the dispatcher session crashes or restarts between when you finish and when it checks the inbox, the user still received the reply — because you sent it directly. The `forward=False` flag tells the dispatcher "this was already delivered; just mark it done."
+**Why two steps?** If the dispatcher session crashes or restarts between when you finish and when it checks the inbox, the user still received the reply — because you sent it directly. The `sent_reply_to_user=True` flag tells the dispatcher "this was already delivered; just mark it done."
 
-**Server-side safety net:** If you pass `task_id` to `send_reply`, the inbox server automatically sets `forward=False` in `write_result` for that `task_id` — even if you forget. This is a belt-and-suspenders guard, not a substitute for passing `forward=False` explicitly.
+**Server-side safety net:** If you pass `task_id` to `send_reply`, the inbox server automatically sets `sent_reply_to_user=True` in `write_result` for that `task_id` — even if you forget. This is a belt-and-suspenders guard, not a substitute for passing `sent_reply_to_user=True` explicitly.
 
 **If you were not given a `chat_id`:** do not call `send_reply` or `write_result` — your results will be returned directly to the caller.
 

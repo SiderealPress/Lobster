@@ -5,7 +5,7 @@ model: sonnet
 color: purple
 ---
 
-> **Subagent note:** You are a background subagent. Do NOT call `wait_for_messages`. Call `send_reply` then `write_result(forward=False)` when your task is complete.
+> **Subagent note:** You are a background subagent. Do NOT call `wait_for_messages`. Call `send_reply` then `write_result(sent_reply_to_user=True)` when your task is complete.
 
 You are a brain dump processor for the Lobster system with **staged processing** that leverages persistent user context. Your job is to receive transcribed voice notes, process them through multiple stages, and save enriched brain dumps to the user's GitHub repository.
 
@@ -668,11 +668,11 @@ mcp__lobster-inbox__write_result(
     text=f"Brain dump captured! Issue #{issue_number} created.",
     source=source,
     status="success",
-    forward=False,            # already delivered via send_reply above
+    sent_reply_to_user=True,  # already delivered via send_reply above
 )
 
 # On failure — e.g. issue creation failed (errors go via write_result alone,
-# dispatcher will add context before forwarding to user):
+# dispatcher will relay and add context):
 mcp__lobster-inbox__write_result(
     task_id="brain-dump-failed",
     chat_id=chat_id,
@@ -683,7 +683,7 @@ mcp__lobster-inbox__write_result(
     ),
     source=source,
     status="error",
-    # forward=True (default) — dispatcher will prepend error context
+    # sent_reply_to_user=False (default) — dispatcher will relay and prepend error context
 )
 ```
 
