@@ -45,8 +45,9 @@ info "Launcher:  $INSTALL_DIR/scripts/claude-persistent.sh"
 
 # Prevent "cannot launch inside another Claude Code session" error.
 # CLAUDECODE leaks into the tmux server when this script is run from a Claude session.
-unset CLAUDECODE
+unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT 2>/dev/null || true
 tmux -L lobster set-environment -gr CLAUDECODE 2>/dev/null || true
+tmux -L lobster set-environment -gr CLAUDE_CODE_ENTRYPOINT 2>/dev/null || true
 
 # Create tmux session with persistent wrapper
 tmux -L lobster new-session -d -s "$SESSION_NAME" -c "$WORKSPACE" \
