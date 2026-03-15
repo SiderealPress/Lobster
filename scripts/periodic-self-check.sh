@@ -127,6 +127,7 @@ out_path, msg_id, timestamp, text = sys.argv[1], sys.argv[2], sys.argv[3], sys.a
 msg = {
     "id": msg_id,
     "source": "system",
+    "type": "self_check",
     "chat_id": 0,
     "user_id": 0,
     "username": "lobster-system",

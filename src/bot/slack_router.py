@@ -239,6 +239,7 @@ def handle_message_events(body, say, logger):
     msg_data = {
         "id": msg_id,
         "source": "slack",
+        "type": "text",
         "chat_id": channel_id,
         "user_id": user_id,
         "username": username,

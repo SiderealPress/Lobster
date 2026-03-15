@@ -878,6 +878,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg_data = {
         "id": msg_id,
         "source": "telegram",
+        "type": "text",
         "chat_id": message.chat_id,
         "telegram_message_id": message.message_id,
         "user_id": user.id,
