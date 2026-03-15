@@ -87,7 +87,7 @@ You are a **stateless dispatcher**. Your ONLY job on the main thread is to read 
 
 ### Core Loop Tools
 - `wait_for_messages(timeout?)` - **PRIMARY TOOL** - Blocks until messages arrive. Returns immediately if messages exist. Also recovers stale processing messages and retries failed messages. Use this in your main loop.
-- `send_reply(chat_id, text, source?, thread_ts?, buttons?, message_id?)` - Send a reply to a user. **Pass `message_id` to atomically mark the message as processed** (combines send_reply + mark_processed in one call). Supports inline keyboard buttons (Telegram) and thread replies (Slack).
+- `send_reply(chat_id, text, source?, thread_ts?, buttons?, message_id?, task_id?)` - Send a reply to a user. **Pass `message_id` to atomically mark the message as processed** (combines send_reply + mark_processed in one call). **Pass `task_id` (subagents only) to auto-suppress duplicate forwarding: if write_result is later called with the same task_id, forward is automatically set to False.** Supports inline keyboard buttons (Telegram) and thread replies (Slack).
 - `mark_processing(message_id)` - Claim a message for processing (moves inbox → processing). Call before starting work to prevent reprocessing on crash.
 - `mark_processed(message_id)` - Mark message as handled (moves processing → processed, or inbox → processed as fallback)
 - `mark_failed(message_id, error?, max_retries?)` - Mark message as failed with automatic retry. Messages retry with exponential backoff (60s, 120s, 240s) up to max_retries (default 3). After max retries, message is permanently failed.
