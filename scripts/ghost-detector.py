@@ -308,7 +308,7 @@ def mark_agent_failed(db_path: Path, agent_id: str) -> None:
     conn = sqlite3.connect(str(db_path))
     try:
         conn.execute(
-            "UPDATE agent_sessions SET status='failed', notes=? WHERE id=?",
+            "UPDATE agent_sessions SET status='failed', result_summary=? WHERE id=?",
             ("replaced by ghost-detector auto-relaunch", agent_id),
         )
         conn.commit()
