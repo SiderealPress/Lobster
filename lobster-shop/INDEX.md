@@ -10,6 +10,7 @@ Browse available skills for your Lobster assistant. Install any skill with one c
 |-------|-------------|----------|--------|
 | [Camofox Browser](./camofox-browser/) | Browse the real web with anti-detection — search Google, Amazon, LinkedIn without getting blocked | Tool | Available |
 | [GCal Links](./gcal-links/) | Google Calendar integration: read/create events via API when authenticated, or fall back to deep links — all via natural language | Behavioral | Available |
+| [Lobster Watcher](./lobster-watcher/) | Real-time observability dashboard — see all running and recent Lobster agent sessions as a live timeline and 3D view | Tool | Available |
 
 ## Templates
 
