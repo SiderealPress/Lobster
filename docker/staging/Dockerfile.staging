@@ -1,0 +1,63 @@
+# Lobster Staging Instance
+#
+# A full Lobster runtime (router + Claude session) for live Telegram testing.
+
+FROM debian:bookworm-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    git \
+    ca-certificates \
+    jq \
+    tmux \
+    procps \
+    python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create the lobster user (uid 1000 matches host)
+RUN useradd -u 1000 -m -s /bin/bash lobster
+
+USER lobster
+WORKDIR /home/lobster
+
+# Create directories owned by lobster user
+RUN mkdir -p /home/lobster/.local/bin /home/lobster/.local/share
+
+# Install uv (Python package manager)
+RUN curl -fsSL https://astral.sh/uv/install.sh | sh
+
+ENV PATH="/home/lobster/.local/bin:${PATH}"
+
+# Copy repo (mounted at build context = repo root)
+COPY --chown=lobster:lobster . /home/lobster/lobster
+
+# Install Python dependencies using uv
+WORKDIR /home/lobster/lobster
+RUN uv sync --frozen --no-install-project
+
+# Create required runtime directories
+RUN mkdir -p /home/lobster/messages/inbox \
+    /home/lobster/messages/outbox \
+    /home/lobster/messages/processed \
+    /home/lobster/messages/failed \
+    /home/lobster/messages/audio \
+    /home/lobster/messages/task-outputs \
+    /home/lobster/messages/config \
+    /home/lobster/lobster-workspace/logs \
+    /home/lobster/lobster-workspace/data \
+    /home/lobster/lobster-workspace/projects \
+    /home/lobster/lobster-workspace/scheduled-jobs/logs \
+    /home/lobster/lobster-user-config/memory/canonical \
+    /home/lobster/lobster-user-config/agents/subagents \
+    /home/lobster/lobster-config
+
+# Default scheduled-jobs registry
+RUN echo '{"jobs": {}}' > /home/lobster/lobster-workspace/scheduled-jobs/jobs.json
+
+COPY --chown=lobster:lobster docker/staging/entrypoint-staging.sh /home/lobster/entrypoint-staging.sh
+RUN chmod +x /home/lobster/entrypoint-staging.sh
+
+WORKDIR /home/lobster
+ENTRYPOINT ["/home/lobster/entrypoint-staging.sh"]

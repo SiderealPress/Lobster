@@ -1,0 +1,48 @@
+# Lobster Staging Instance
+#
+# Runs a live Lobster instance against the real Telegram API using a
+# dedicated test bot token. Isolated from production via a separate
+# messages volume and workspace.
+#
+# Usage:
+#   cd ~/lobster
+#   sudo docker compose -f docker/staging/docker-compose.staging.yml up -d
+#
+# Attach to Claude session:
+#   sudo docker exec -it lobster-staging tmux -L lobster attach -t lobster
+#
+# View logs:
+#   sudo docker compose -f docker/staging/docker-compose.staging.yml logs -f
+#
+# Stop:
+#   sudo docker compose -f docker/staging/docker-compose.staging.yml down
+
+services:
+  lobster-staging:
+    build:
+      context: ../..
+      dockerfile: docker/staging/Dockerfile.staging
+    container_name: lobster-staging
+    restart: unless-stopped
+    environment:
+      # Test bot token - safe to use in staging
+      TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN}"
+      TELEGRAM_ALLOWED_USERS: "${TELEGRAM_ALLOWED_USERS}"
+      LOBSTER_DEBUG: "false"
+    volumes:
+      # Mount host Claude credentials (read-only auth, but settings.json needs write)
+      # We mount the whole .claude dir so credentials are available
+      - /home/lobster/.claude:/home/lobster/.claude
+      # Mount host claude binary (avoid reinstalling)
+      - /home/lobster/.local/bin/claude:/home/lobster/.local/bin/claude:ro
+      - /home/lobster/.local/share/claude:/home/lobster/.local/share/claude:ro
+      # Persistent staging volumes (isolated from production)
+      - lobster-staging-messages:/home/lobster/messages
+      - lobster-staging-workspace:/home/lobster/lobster-workspace
+    # Staging runs without resource limits for now
+
+volumes:
+  lobster-staging-messages:
+    name: lobster-staging-messages
+  lobster-staging-workspace:
+    name: lobster-staging-workspace
