@@ -1,5 +1,10 @@
 # Lobster - Product Requirements Document
 
+> **Note: This document describes the original monolithic-loop architecture and is kept for historical reference.**
+> The current system uses a dispatcher+subagent model with the 7-second rule, SQLite agent tracking,
+> a skill system, and brain-dump routing. Voice transcription is now local (whisper.cpp), not OpenAI Whisper API.
+> See [README.md](README.md) for the current architecture and [CLAUDE.md](CLAUDE.md) for system context.
+
 ## Overview
 
 Lobster is a secure, self-hosted personal server environment for running an always-on Claude Code session with Telegram integration. Claude maintains persistent context across all messages, running in an infinite loop that blocks until new messages arrive.
@@ -25,7 +30,7 @@ A systemd-managed always-on Claude Code session with:
 | Always-on Claude | Persistent Claude Code session in tmux via systemd |
 | Telegram Bot | Receive/send messages through Telegram Bot API |
 | Blocking inbox | `wait_for_messages` tool blocks until new messages arrive (inotify) |
-| Voice messages | Audio transcription via OpenAI Whisper API |
+| Voice messages | Audio transcription via local whisper.cpp (no cloud API needed) |
 | tmux session | Claude runs in `lobster` tmux session, attachable for debugging |
 | Security | Firewall, intrusion prevention, SSH hardening |
 
@@ -87,7 +92,7 @@ A systemd-managed always-on Claude Code session with:
 
 1. User sends Telegram message (text or voice)
 2. `lobster-router` (Telegram bot) writes JSON to `~/messages/inbox/`
-3. Voice messages: bot downloads audio, transcribes via OpenAI Whisper
+3. Voice messages: bot downloads audio, transcribes via local whisper.cpp
 4. Claude's `wait_for_messages()` returns with new messages
 5. Claude processes message, calls `send_reply(chat_id, text)`
 6. Reply JSON written to `~/messages/outbox/`
