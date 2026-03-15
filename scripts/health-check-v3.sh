@@ -832,7 +832,7 @@ count_active_subagents() {
         echo "0"
         return
     fi
-    python3 -c "
+    uv run python3 -c "
 import sqlite3, sys
 try:
     conn = sqlite3.connect('$db_file')
@@ -1021,10 +1021,12 @@ main() {
                 restart_reason="tmux session missing (hibernate mode)"
             elif [[ "$LOBSTER_DEBUG" == "true" ]]; then
                 # Debug mode: no persistent wrapper is expected. Claude Code runs
-                # directly in the tmux pane without claude-persistent.sh. Hibernation
-                # means the dispatcher exited cleanly — this is normal. Only verify
-                # the tmux session is still present (checked above).
-                log_info "Hibernate in debug mode — no wrapper expected, tmux check sufficient"
+                # directly in the tmux pane without claude-persistent.sh. Check for
+                # the Claude process directly instead of checking for the wrapper.
+                if ! check_claude_process; then
+                    level="RED"
+                    restart_reason="no Claude process in lobster tmux (debug mode, hibernate)"
+                fi
             elif ! check_wrapper_process; then
                 # Wrapper died during hibernation — need systemd restart
                 level="RED"
