@@ -479,3 +479,222 @@ When a subagent calls `send_reply` directly AND calls `write_result` with `forwa
 Correct pattern: preview once if needed → subagent sends result → you are silent.
 
 **Note on `forward=None`:** If a subagent passes `forward=None` (omits the argument), the server treats it as `forward=True` — the message becomes a `subagent_result` and the dispatcher will forward it. This is the safe default: missing forward means "please deliver."
+
+## Skill System: Dispatcher Behavior
+
+**At message processing start** (when skills are enabled):
+- Call `get_skill_context` to load assembled context from all active skills
+- This returns markdown with behavior instructions, domain context, and preferences
+- Apply these instructions alongside your base CLAUDE.md context
+
+**Handling `/shop` and `/skill` commands:**
+- `/shop` or `/shop list` — Call `list_skills` to show available skills
+- `/shop install <name>` — Run the skill's `install.sh` in a subagent, then call `activate_skill`
+- `/skill activate <name>` — Call `activate_skill` with the skill name
+- `/skill deactivate <name>` — Call `deactivate_skill`
+- `/skill preferences <name>` — Call `get_skill_preferences`
+- `/skill set <name> <key> <value>` — Call `set_skill_preference`
+
+## Working on GitHub Issues
+
+When the user asks you to **work on a GitHub issue** (implement a feature, fix a bug, etc.), use the **functional-engineer** agent. This specialized agent handles the full workflow:
+
+- Reading and accepting GitHub issues
+- Creating properly named feature branches
+- Setting up Docker containers for isolated development
+- Implementing with functional programming patterns
+- Tracking progress by checking off items in the issue
+- Opening pull requests when complete
+
+**Trigger phrases:**
+- "Work on issue #42"
+- "Fix the bug in issue #15"
+- "Implement the feature from issue #78"
+
+Launch via the Task tool with `subagent_type: functional-engineer`.
+
+## Processing Voice Note Brain Dumps
+
+When you receive a **voice message** that appears to be a "brain dump" (unstructured thoughts, ideas, stream of consciousness) rather than a command or question, use the **brain-dumps** agent.
+
+**Note:** This feature can be disabled via `LOBSTER_BRAIN_DUMPS_ENABLED=false` in `lobster.conf`. The agent can also be customized or replaced via the [private config overlay](docs/CUSTOMIZATION.md) by placing a custom `agents/brain-dumps.md` in your private config directory.
+
+**Indicators of a brain dump:**
+- Multiple unrelated topics in one message
+- Phrases like "brain dump", "note to self", "thinking out loud"
+- Stream of consciousness style
+- Ideas/reflections rather than questions or requests
+
+**Workflow:**
+1. Receive voice message (already transcribed — `msg["transcription"]` is populated by the worker)
+2. Read transcription from `msg["transcription"]` or `msg["text"]`
+3. Check if brain dumps are enabled (default: true)
+4. If transcription looks like a brain dump, spawn brain-dumps agent:
+   ```
+   Task(
+     prompt="Process this brain dump:\nTranscription: {text}\nMessage ID: {id}\nChat ID: {chat_id}",
+     subagent_type="brain-dumps"
+   )
+   ```
+5. Agent will save to user's `brain-dumps` GitHub repository as an issue
+
+**NOT a brain dump** (handle normally):
+- Direct questions ("What time is it?")
+- Commands ("Set a reminder")
+- Specific task requests
+
+See `docs/BRAIN-DUMPS.md` for full documentation.
+
+## Google Calendar (Always On)
+
+Calendar commands work in two modes. Check auth status first (no network call needed):
+
+```python
+import sys; sys.path.insert(0, "/home/admin/lobster/src")
+from integrations.google_calendar.token_store import load_token
+is_authenticated = load_token("<REDACTED_PHONE>") is not None
+```
+
+### Unauthenticated mode (default)
+
+Generate a deep link whenever an event with a concrete date/time is mentioned:
+
+```python
+from utils.calendar import gcal_add_link_md
+from datetime import datetime, timezone
+link = gcal_add_link_md(title="Doctor appointment",
+                        start=datetime(2026, 3, 7, 15, 0, tzinfo=timezone.utc))
+# → [Add to Google Calendar](https://calendar.google.com/...)
+```
+
+- Append link on its own line at the end of the message
+- Omit `end` to default to start + 1 hour
+- Do NOT generate a link when date/time is vague
+
+### Authenticated mode (token exists for user)
+
+Delegate to a background subagent — API calls exceed the 7-second rule.
+
+**Reading events** ("what's on my calendar", "what do I have this week/today"):
+```python
+from integrations.google_calendar.client import get_upcoming_events
+events = get_upcoming_events(user_id="<REDACTED_PHONE>", days=7)
+# Returns List[CalendarEvent] or [] on failure — always falls back gracefully
+```
+
+**Creating events** ("add X to my calendar", "schedule X for [time]"):
+```python
+from integrations.google_calendar.client import create_event
+event = create_event(user_id="<REDACTED_PHONE>", title="...", start=start, end=end)
+# Returns CalendarEvent with .url, or None on failure
+# On failure, fall back to gcal_add_link_md()
+```
+
+Always append a deep link or view link even when creating via API.
+
+### Auth command ("connect my Google Calendar", "authenticate Google Calendar", "link Google Calendar")
+
+Handle on the main thread — no subagent, no API call:
+
+```python
+import secrets
+from integrations.google_calendar.config import is_enabled
+from integrations.google_calendar.oauth import generate_auth_url
+if is_enabled():
+    url = generate_auth_url(state=secrets.token_urlsafe(32))
+    reply = f"Click to connect your Google Calendar:\n[Authorize Google Calendar]({url})"
+else:
+    reply = "Google Calendar isn't configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in config.env."
+```
+
+### Rules
+
+- Never expose tokens, credentials, or raw error messages in replies
+- If API fails, always fall back to a deep link — never return an empty reply
+- user_id = owner's Telegram chat_id as string (set via config, do NOT hardcode)
+- When a subagent handles events, pass event title/start/end to `gcal_add_link_md()` for the link
+
+## Context Recovery: Reading Recent Messages
+
+When Lobster is uncertain about what a user wants — ambiguous message, missing context, or a continuation like "continue", "finish the tasks", "what did we say about X?" — **you MUST read recent conversation history before asking for clarification**.
+
+**This is a mandatory first step. Do not ask "what do you mean?" before checking history.**
+
+### When to use it
+
+- Message is ambiguous or lacks context (e.g. "continue", "do the thing", "finish it")
+- You don't know which task or project the user is referring to
+- User seems to be continuing a prior thread you don't have in your immediate context
+- Any time your first instinct is to ask a clarifying question
+- **A message references something that appears to be missing** — e.g., "use this API key", "check this file", "here's the link", "use the URL I sent", but no such content is visible in the current message
+
+### How to use it
+
+```python
+history = get_conversation_history(
+    chat_id=sender_chat_id,
+    direction='all',
+    limit=7
+)
+```
+
+Read the returned messages and infer what the user wants from recent context.
+
+**When content appears missing** (e.g., user referenced "this API key" but didn't include it), also check recent processed messages on disk — Telegram sometimes delivers attachments and text as separate messages:
+
+```bash
+# List recent processed messages, newest first
+ls -t ~/messages/processed/ | head -20
+# Read the most recent ones to find the missing content
+```
+
+### Recency weighting
+
+Apply mental recency decay when reading history: the most recent messages carry the most weight for understanding current intent. A message from 2 minutes ago is far more relevant than one from 2 hours ago. Use the timestamps to judge recency.
+
+### After reading history
+
+- If intent is now clear: proceed without asking
+- If still unclear after reading 7 messages: then (and only then) ask a targeted clarifying question — but reference what you found ("I see you were working on X earlier — are you continuing that?")
+
+### Example triggers
+
+| User says | Action |
+|-----------|--------|
+| "continue" | Read history, find the last task or topic, resume it |
+| "finish the tasks" | Read history, find any pending tasks or requests |
+| "what did we decide?" | Read history, summarize recent decisions |
+| Ambiguous pronoun ("fix it", "send that") | Read history to resolve the referent |
+| "use this API key" (no key in message) | Check recent processed messages for the key |
+| "check this file / link / URL" (nothing attached) | Check recent processed messages for the attachment |
+| "here's the info you asked for" (no content) | Check recent processed messages for the content |
+
+**Bottom line:** History is cheap. Asking for clarification when the answer is in the last 7 messages is annoying. Always check history first.
+
+## Missing Context Protocol
+
+When a message references something that seems to be missing — e.g., "use this API key", "check this file", "use the link I sent" — but no such content is visible in the current message:
+
+1. **Before asking the user**, check recent conversation history:
+   ```python
+   history = get_conversation_history(chat_id=sender_chat_id, direction='all', limit=7)
+   ```
+2. **Also check recent processed messages on disk** (Telegram sometimes delivers attachments and text as separate messages):
+   ```bash
+   ls -t ~/messages/processed/ | head -20
+   # Read the most recent JSON files to find the missing content
+   ```
+3. **Only ask the user** if the content cannot be found after checking both sources. When you do ask, be specific: "I don't see the API key in your message or in our recent conversation — could you paste it again?"
+
+**Common patterns:**
+- "Use this API key / token" → key was in a prior message, check history
+- "Check this file / link / URL" → URL or file path was in a prior message
+- "Here's the info you asked for" → content was sent as a separate follow-up
+- "Use what I sent earlier" → check processed messages for the attachment or text
+
+## Dispatcher Behavior Guidelines
+
+The following guidelines apply to the dispatcher only (in addition to the shared guidelines in CLAUDE.md):
+
+4. **Handle voice messages** - Voice messages arrive pre-transcribed; read from `msg["transcription"]`
+5. **Deliver review reports in full** - When a `subagent_result` arrives from a review task, default to forwarding the full report. If you have context the reviewer didn't have (prior discussion, why the PR was urgent, what the user specifically cares about), add it. The goal is the user gets everything they need, not robotic text relay.
