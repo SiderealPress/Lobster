@@ -939,7 +939,7 @@ async def list_tools() -> list[Tool]:
                     },
                     "reply_to_message_id": {
                         "type": "integer",
-                        "description": "Telegram message ID to reply to (Telegram only). If provided, threads the reply against that specific message. If omitted, threading is automatic: the server looks up the telegram_message_id from any message currently in processing/ for this chat_id and threads against it. You rarely need to set this explicitly.",
+                        "description": "Telegram message ID to reply to (Telegram only). If provided, threads the reply against that specific message. If omitted, the server checks processing/ for a currently in-flight message for this chat_id and threads against it if found; otherwise the reply is sent standalone (no thread). You rarely need to set this explicitly.",
                     },
                     "message_id": {
                         "type": "string",
@@ -2737,21 +2737,17 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
 
 
 def _lookup_telegram_message_id_for_chat(chat_id: int | str) -> int | None:
-    """Return the telegram_message_id from a recent message for chat_id.
+    """Return the telegram_message_id from a message currently in processing/ for chat_id.
 
-    Scanning order:
-    1. processing/ — the common dispatcher-direct case where the original message
-       is still in-flight while send_reply is called.
-    2. processed/ (most-recently-modified first, up to _PROCESSED_SCAN_LIMIT) —
-       the subagent case where the dispatcher already moved the message to
-       processed/ before the subagent calls send_reply via write_result.
+    Only scans processing/ — the common dispatcher-direct case where the original
+    message is still in-flight while send_reply is called.
 
-    Returns the first telegram_message_id found, or None.
+    Deliberately does NOT fall back to processed/: scanning recently-processed
+    messages would thread replies under arbitrary unrelated messages when no
+    in-progress message exists for this chat.
 
-    This is used by handle_send_reply for automatic threading: when the caller
-    does not pass an explicit reply_to_message_id, we look up the in-flight (or
-    recently-processed) message and thread the reply against it automatically.
-    This makes threading structural rather than dependent on dispatcher compliance.
+    Returns the telegram_message_id if a matching in-flight message is found, or
+    None (causing send_reply to send a standalone unthreaded message).
     """
     try:
         chat_id_int = int(chat_id)
@@ -2790,39 +2786,7 @@ def _lookup_telegram_message_id_for_chat(chat_id: int | str) -> int | None:
     except Exception:
         pass
 
-    # Pass 2: processed/ sorted newest-first (subagent reply case — message already
-    # moved to processed/ by the time the subagent calls write_result → send_reply)
-    try:
-        def _safe_mtime(p: Path) -> float:
-            try:
-                return p.stat().st_mtime
-            except FileNotFoundError:
-                return 0.0
-
-        recent = sorted(
-            PROCESSED_DIR.glob("*.json"),
-            key=_safe_mtime,
-            reverse=True,
-        )[:_PROCESSED_SCAN_LIMIT]
-        for f in recent:
-            result = _extract_tg_id(f)
-            if result is not None:
-                log.debug(
-                    f"Auto-threading (subagent path): found telegram_message_id in processed/ "
-                    f"for chat {chat_id_int}"
-                )
-                return result
-    except Exception:
-        pass
-
     return None
-
-
-# Maximum number of recently-processed files to scan when looking for a
-# telegram_message_id to use for auto-threading.  Processing/ is nearly always
-# empty or tiny, so pass-1 is fast.  For processed/ we limit the scan to avoid
-# iterating over potentially thousands of old messages.
-_PROCESSED_SCAN_LIMIT = 50
 
 
 async def handle_send_reply(args: dict) -> list[TextContent]:
@@ -2855,14 +2819,16 @@ async def handle_send_reply(args: dict) -> list[TextContent]:
 
     # Include reply_to_message_id if provided (Telegram only).
     # If not provided, auto-look up the telegram_message_id from any message
-    # currently in processing/ for this chat_id. This makes threading structural
-    # (automatic at the code level) rather than relying on dispatcher compliance.
+    # currently in processing/ for this chat_id. Only threads if a message for
+    # this chat is actively in-flight; falls back to standalone (no threading)
+    # rather than picking an arbitrary recent message from processed/.
     reply_to_msg_id = args.get("reply_to_message_id")
     if source == "telegram":
         if reply_to_msg_id:
             reply_data["reply_to_message_id"] = int(reply_to_msg_id)
         else:
-            # Auto-threading: scan processing/ for a message belonging to this chat
+            # Auto-threading: scan processing/ for a message belonging to this chat.
+            # No fallback to processed/ — that would thread under unrelated messages.
             auto_tg_msg_id = _lookup_telegram_message_id_for_chat(chat_id)
             if auto_tg_msg_id:
                 reply_data["reply_to_message_id"] = auto_tg_msg_id
