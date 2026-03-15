@@ -22,37 +22,53 @@ Lobster transforms a server into an always-on Claude Code hub that:
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                  🦞 LOBSTER CORE (tmux)                     │
-│         Long-running Claude Code session in tmux            │
-│         Blocks on wait_for_messages() - infinite loop       │
-│                                                             │
-│   MCP Server: lobster-inbox                                 │
-│   - Message queue management                                │
-│   - Task tracking                                           │
-│   - Scheduled job management                                │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                   🦞 LOBSTER DISPATCHER (tmux)                    │
+│         Stateless main loop — runs forever in tmux               │
+│         Blocks on wait_for_messages(); routes messages in <7s    │
+│                                                                   │
+│  7-second rule: anything taking longer goes to a subagent        │
+│    → Task(subagent_type=..., run_in_background=True)             │
+│    → register_agent(agent_id, chat_id, ...)  [SQLite tracking]   │
+│    → Subagent calls write_result() when done                     │
+│    → Dispatcher forwards result or drops if already delivered    │
+│                                                                   │
+│  Skill system: composable context layers loaded per message      │
+│    → always / triggered / contextual activation modes           │
+│                                                                   │
+│  Brain-dump routing: voice notes → brain-dumps subagent          │
+│    → transcribe_audio() → detect brain dump → GitHub issue       │
+│                                                                   │
+│   MCP Server: lobster-inbox                                       │
+│   - Message queue (check_inbox, mark_processing, mark_processed) │
+│   - Task tracking (create_task, update_task, list_tasks)         │
+│   - Scheduled job management                                      │
+│   - Agent session store (register_agent, get_active_sessions)    │
+│   - Subagent result bus (write_result, write_observation)        │
+└──────────────────────────────────────────────────────────────────┘
                               ↑↓
                ~/messages/inbox/ ←→ ~/messages/outbox/
+               ~/messages/processing/ (claimed messages)
+               ~/messages/config/agent_sessions.db (SQLite)
                               ↑↓
-┌─────────────────────────────────────────────────────────────┐
-│              TELEGRAM BOT (lobster-router)                  │
-│   Writes incoming messages to inbox                         │
-│   Watches outbox and sends replies                          │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│              TELEGRAM BOT (lobster-router)                        │
+│   Writes incoming messages to inbox                               │
+│   Watches outbox and sends replies                                │
+└──────────────────────────────────────────────────────────────────┘
 
-┌─────────────────────────────────────────────────────────────┐
-│              SLACK BOT (lobster-slack-router)               │
-│   Receives messages via Socket Mode                         │
-│   Writes to inbox, sends replies from outbox                │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│              SLACK BOT (lobster-slack-router)                     │
+│   Receives messages via Socket Mode                               │
+│   Writes to inbox, sends replies from outbox                      │
+└──────────────────────────────────────────────────────────────────┘
 
-┌─────────────────────────────────────────────────────────────┐
-│              SCHEDULED TASKS (Cron)                         │
-│   Automated jobs run on schedule                            │
-│   Each job spawns a fresh Claude instance                   │
-│   Outputs go to ~/messages/task-outputs/                    │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│              SCHEDULED TASKS (Cron)                               │
+│   Automated jobs run on schedule                                  │
+│   Each job spawns a fresh Claude subagent instance                │
+│   Outputs go to ~/messages/task-outputs/                          │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 ## Prerequisites
@@ -239,12 +255,23 @@ All projects cloned or created by Lobster live in `~/lobster-workspace/projects/
 
 The lobster-inbox MCP server provides:
 
-### Message Queue
-- `check_inbox(source?, limit?)` - Get new messages
-- `send_reply(chat_id, text, source?)` - Send a reply
+### Message Queue (Dispatcher)
+- `wait_for_messages(timeout?, hibernate_on_timeout?)` - Block until messages arrive (dispatcher only)
+- `check_inbox(source?, limit?)` - Non-blocking inbox check
+- `send_reply(chat_id, text, source?, message_id?, task_id?)` - Send a reply (pass `message_id` to atomically mark processed)
+- `mark_processing(message_id)` - Claim a message before processing
 - `mark_processed(message_id)` - Mark message handled
+- `mark_failed(message_id, error?)` - Mark message failed (auto-retried with backoff)
 - `list_sources()` - List available channels
 - `get_stats()` - Inbox statistics
+
+### Subagent Result Bus
+- `write_result(task_id, chat_id, text, forward?, status?)` - Return a result from a background subagent. Pass `forward=False` if already called `send_reply` directly.
+- `write_observation(chat_id, text, category, task_id?)` - Write a side-channel observation (user_context, system_context, system_error)
+
+### Agent Session Tracking (SQLite)
+- `register_agent(agent_id, description, chat_id, source?, output_file?, timeout_minutes?)` - Register a running subagent; survives restarts
+- `get_active_sessions()` - List all running/recently completed subagent sessions
 
 ### Voice Transcription
 - `transcribe_audio(message_id)` - Transcribe voice messages using local whisper.cpp (small model). Fully local, no cloud API needed.
