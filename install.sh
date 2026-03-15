@@ -1327,6 +1327,28 @@ else
     info "Skipping require-write-result Stop hook (settings.json not yet created)"
 fi
 
+# Set up Claude Code SubagentStop hook to enforce write_result in subagent sessions
+# SubagentStop fires when a background sidechain session considers stopping — this is
+# the hook that actually catches subagents, whereas Stop only fires for the main session.
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '.hooks.SubagentStop[]? | select(.matcher == "")' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq '.hooks.SubagentStop = (.hooks.SubagentStop // []) + [{
+            "matcher": "",
+            "hooks": [{
+                "type": "command",
+                "command": "python3 '"$INSTALL_DIR"'/hooks/require-write-result.py",
+                "timeout": 10
+            }]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "require-write-result SubagentStop hook installed"
+    else
+        info "require-write-result SubagentStop hook already configured in Claude Code settings"
+    fi
+else
+    info "Skipping require-write-result SubagentStop hook (settings.json not yet created)"
+fi
+
 #===============================================================================
 # Python Environment
 #===============================================================================
