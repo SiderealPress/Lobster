@@ -867,6 +867,15 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "If provided, atomically marks this message as processed after sending the reply. Combines send_reply + mark_processed into one call.",
                     },
+                    "task_id": {
+                        "type": "string",
+                        "description": (
+                            "Subagent task identifier. When provided, the server records that this task has "
+                            "already delivered a reply directly. If write_result is later called with the same "
+                            "task_id, forward is automatically set to False — preventing duplicate messages "
+                            "even if the subagent forgets to pass forward=False."
+                        ),
+                    },
                 },
                 "required": ["chat_id", "text"],
             },
