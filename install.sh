@@ -884,7 +884,7 @@ export PATH="$HOME/.local/bin:$PATH"
 
 # Prevent "cannot launch inside another Claude Code session" error.
 # CLAUDECODE leaks when run-job.sh is manually tested from a Claude session.
-unset CLAUDECODE
+unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT 2>/dev/null || true
 
 JOB_NAME="$1"
 

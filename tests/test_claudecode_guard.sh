@@ -3,9 +3,9 @@
 # Test: CLAUDECODE Environment Variable Leak Prevention
 #
 # Verifies that every script which launches `claude` (or creates a tmux session
-# that will host claude) contains the `unset CLAUDECODE` guard.
+# that will host claude) contains the `unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT` guard.
 #
-# Also verifies that systemd service files include `UnsetEnvironment=CLAUDECODE`.
+# Also verifies that systemd service files include `UnsetEnvironment=CLAUDECODE CLAUDE_CODE_ENTRYPOINT`.
 #
 # This test is structural (grep-based) — it catches regressions at CI time
 # without needing to actually run Claude.
@@ -74,15 +74,20 @@ else
     for script in "${SCRIPTS_INVOKING_CLAUDE[@]}"; do
         rel="${script#$REPO_DIR/}"
 
-        # Special case: scripts that use `env -u CLAUDECODE claude` are already
-        # protected inline (e.g., token-refresh.sh). Accept that pattern too.
-        if grep -q 'env -u CLAUDECODE claude' "$script" 2>/dev/null; then
-            pass "$rel (uses env -u CLAUDECODE inline)"
+        # Special case: scripts that use `env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT claude`
+        # are already protected inline (e.g., token-refresh.sh). Accept that pattern too.
+        if grep -q 'env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT claude' "$script" 2>/dev/null; then
+            pass "$rel (uses env -u inline for both vars)"
             continue
         fi
 
         if grep -q 'unset CLAUDECODE' "$script" 2>/dev/null; then
-            pass "$rel"
+            # Also verify CLAUDE_CODE_ENTRYPOINT is unset
+            if grep -q 'CLAUDE_CODE_ENTRYPOINT' "$script" 2>/dev/null; then
+                pass "$rel (both CLAUDECODE and CLAUDE_CODE_ENTRYPOINT)"
+            else
+                fail "$rel — unsets CLAUDECODE but missing CLAUDE_CODE_ENTRYPOINT"
+            fi
         else
             fail "$rel — missing 'unset CLAUDECODE'"
         fi
@@ -181,7 +186,11 @@ else
     for svc in "${SERVICE_FILES[@]}"; do
         rel="${svc#$REPO_DIR/}"
         if grep -q 'UnsetEnvironment=CLAUDECODE' "$svc"; then
-            pass "$rel"
+            if grep -q 'CLAUDE_CODE_ENTRYPOINT' "$svc"; then
+                pass "$rel (both CLAUDECODE and CLAUDE_CODE_ENTRYPOINT)"
+            else
+                fail "$rel — has UnsetEnvironment=CLAUDECODE but missing CLAUDE_CODE_ENTRYPOINT"
+            fi
         else
             fail "$rel — missing 'UnsetEnvironment=CLAUDECODE'"
         fi
@@ -244,7 +253,7 @@ for script in "${SCRIPTS_INVOKING_CLAUDE[@]}"; do
     rel="${script#$REPO_DIR/}"
 
     # Skip scripts that use env -u inline
-    if grep -q 'env -u CLAUDECODE claude' "$script" 2>/dev/null; then
+    if grep -q 'env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT claude' "$script" 2>/dev/null; then
         pass "$rel (inline env -u, order N/A)"
         continue
     fi

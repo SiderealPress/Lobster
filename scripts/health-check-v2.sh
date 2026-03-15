@@ -259,8 +259,9 @@ restart_lobster() {
     # Start new session
     log_info "Starting new Lobster session..."
     # Prevent CLAUDECODE leak into tmux server environment
-    unset CLAUDECODE
+    unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT 2>/dev/null || true
     tmux -L "$TMUX_SOCKET" set-environment -gr CLAUDECODE 2>/dev/null || true
+    tmux -L "$TMUX_SOCKET" set-environment -gr CLAUDE_CODE_ENTRYPOINT 2>/dev/null || true
     tmux -L "$TMUX_SOCKET" new-session -d -s "$SESSION_NAME" -c "$HOME/lobster-workspace" \
         "$HOME/lobster/scripts/claude-wrapper.exp"
 

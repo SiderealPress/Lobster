@@ -141,7 +141,7 @@ print(d.get('claudeAiOauth', {}).get('expiresAt', 0))
 " 2>/dev/null)
 
     # Run auth status (unset CLAUDECODE to avoid nested session error)
-    env -u CLAUDECODE claude auth status > /dev/null 2>&1
+    env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT claude auth status > /dev/null 2>&1
 
     # Check if expiresAt changed (indicating successful refresh)
     local post_expires_at
