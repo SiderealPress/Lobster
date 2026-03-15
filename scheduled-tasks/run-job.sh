@@ -48,15 +48,18 @@ START_ISO=$(date -Iseconds)
 echo "[$START_ISO] Starting job: $JOB_NAME" | tee "$LOG_FILE"
 
 # Run Claude with the task
-# The task instructions tell Claude to call write_task_output with results
+# The task instructions tell Claude to call write_task_output AND write_result with results
 claude -p "$TASK_CONTENT
 
 ---
 
 IMPORTANT: You are running as a scheduled task. When you complete your task:
-1. Call write_task_output() with your results summary
-2. Keep output concise - the main Lobster instance will review this later
-3. Exit after writing output - do not start a loop" \
+1. Call write_task_output() with your results summary (job_name: \"$JOB_NAME\", output: ..., status: \"success\" or \"failed\")
+2. Call write_result() to notify the dispatcher (task_id: \"scheduled-job-$JOB_NAME\", chat_id: 8305714125, text: ..., forward: True)
+3. Keep output concise - the main Lobster instance will review this
+4. Exit after writing output - do not start a loop
+
+Both calls are required: write_task_output archives the output for check_task_outputs; write_result delivers the result to the dispatcher inbox so the user is notified automatically." \
     --dangerously-skip-permissions \
     --max-turns 15 \
     2>&1 | tee -a "$LOG_FILE"
