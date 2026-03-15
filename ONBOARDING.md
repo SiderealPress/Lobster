@@ -75,8 +75,8 @@ Brain dumps turn unstructured voice notes into organized GitHub issues with acti
 - The `brain-dumps` GitHub repo is created automatically on first use
 - For richer context matching (linking to your projects, people, goals), set up personal context files:
   ```
-  mkdir -p ~/lobster-config/context
-  cp ~/lobster/context-templates/*.md ~/lobster-config/context/
+  mkdir -p ~/lobster-user-config/context
+  cp ~/lobster/context-templates/*.md ~/lobster-user-config/context/
   ```
   Then fill in `goals.md`, `projects.md`, `people.md`, etc.
 
@@ -93,19 +93,25 @@ Lobster's behavior is configured through a few key files:
 
 | File | What it controls |
 |------|-----------------|
-| `CLAUDE.md` | Core behavior instructions, personality, response style |
+| `~/lobster-user-config/agents/base.bootup.md` | Behavioral preferences (response style, tone, rules) — applies to all roles |
+| `~/lobster-user-config/agents/base.context.md` | Personal facts and context (projects, people, preferences) |
+| `~/lobster-user-config/agents/dispatcher.bootup.md` | Dispatcher-specific behavior overrides |
+| `~/lobster-user-config/agents/subagent.bootup.md` | Subagent-specific behavior overrides |
 | `config/lobster.conf` | Feature flags (brain dumps on/off, repo names) |
 | `config/config.env` | Credentials (Telegram token, GitHub PAT) |
 
-**Private config overlay:**
-For persistent customizations that survive upgrades, create a private config directory:
+These bootup files live in `~/lobster-user-config/` (private, not committed to git) and are read by both the dispatcher and subagents at startup. They extend the system defaults without replacing them.
+
+**Private config directory:**
+The `~/lobster-user-config/` directory is set up by the installer and holds all user-specific customizations that survive upgrades:
 ```
-mkdir ~/lobster-config
-cp ~/lobster/config/config.env ~/lobster-config/config.env
-export LOBSTER_CONFIG_DIR=~/lobster-config
+~/lobster-user-config/
+├── agents/         # Bootup files and custom agent definitions
+├── memory/         # Handoff, priorities, canonical context
+└── ...
 ```
 
-You can also place a custom `CLAUDE.md` or custom agents in this directory. See `docs/CUSTOMIZATION.md` for the full guide.
+You can also place custom agent definitions in `~/lobster-user-config/agents/subagents/`. See `docs/CUSTOMIZATION.md` for the full guide.
 
 ---
 

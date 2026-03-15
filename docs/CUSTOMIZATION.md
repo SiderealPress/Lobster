@@ -44,8 +44,8 @@ Set up a private config repo in minutes:
 
 ```bash
 # Create and initialize the config directory
-mkdir ~/lobster-config
-cd ~/lobster-config
+mkdir ~/lobster-user-config
+cd ~/lobster-user-config
 git init
 
 # Create the basic structure
@@ -56,7 +56,7 @@ mkdir -p agents scheduled-tasks/tasks hooks
 
 ```bash
 # Copy the existing config.env (contains your credentials)
-cp ~/lobster/config/config.env ~/lobster-config/config.env
+cp ~/lobster/config/config.env ~/lobster-user-config/config.env
 ```
 
 ### Step 3: Set the Overlay Path
@@ -64,7 +64,7 @@ cp ~/lobster/config/config.env ~/lobster-config/config.env
 Add this to your shell profile (`~/.bashrc` or `~/.zshrc`):
 
 ```bash
-export LOBSTER_CONFIG_DIR=~/lobster-config
+export LOBSTER_CONFIG_DIR=~/lobster-user-config
 ```
 
 Reload your shell:
@@ -85,7 +85,7 @@ The installer will detect your private config directory and apply the overlay.
 ### Step 5: Push to a Private Remote (Recommended)
 
 ```bash
-cd ~/lobster-config
+cd ~/lobster-user-config
 git add .
 git commit -m "Initial configuration"
 
@@ -101,7 +101,7 @@ git push -u origin main
 Your private config repo can contain any of the following:
 
 ```
-lobster-config/
+lobster-user-config/
 ├── config.env              # Credentials and settings (REQUIRED)
 ├── CLAUDE.md               # Custom Claude context (optional)
 ├── agents/                 # Custom agent definitions (optional)
@@ -225,7 +225,7 @@ To customize a built-in agent, copy it to your private config and modify:
 
 ```bash
 # Example: Customize the brain-dumps agent
-cp ~/lobster/.claude/agents/brain-dumps.md ~/lobster-config/agents/brain-dumps.md
+cp ~/lobster/.claude/agents/brain-dumps.md ~/lobster-user-config/agents/brain-dumps.md
 # Edit to add custom labels, change behavior, etc.
 ```
 
@@ -329,10 +329,10 @@ When you send a brain dump, the agent can:
 
 ```bash
 # Create context directory
-mkdir -p ~/lobster-config/context
+mkdir -p ~/lobster-user-config/context
 
 # Copy templates
-cp ~/lobster/context-templates/*.md ~/lobster-config/context/
+cp ~/lobster/context-templates/*.md ~/lobster-user-config/context/
 ```
 
 2. **Configure the context path** in your `config.env`:
@@ -344,8 +344,8 @@ LOBSTER_CONTEXT_DIR="${LOBSTER_CONFIG_DIR}/context"
 3. **Fill in your context files** - Edit each file to add your information:
 
 ```bash
-nano ~/lobster-config/context/goals.md
-nano ~/lobster-config/context/projects.md
+nano ~/lobster-user-config/context/goals.md
+nano ~/lobster-user-config/context/projects.md
 # etc.
 ```
 
@@ -415,7 +415,7 @@ When processing a brain dump that mentions "the auth system for MyApp" and "call
 
 - Context files contain personal information
 - Always keep in a **private** repository
-- Set restrictive permissions: `chmod 600 ~/lobster-config/context/*`
+- Set restrictive permissions: `chmod 600 ~/lobster-user-config/context/*`
 - Review files before sharing any backups
 
 ### Tips
@@ -444,7 +444,7 @@ Runs after `install.sh` completes. Use for:
 
 ```bash
 #!/bin/bash
-# ~/lobster-config/hooks/post-install.sh
+# ~/lobster-user-config/hooks/post-install.sh
 
 set -e
 
@@ -456,7 +456,7 @@ pip install pandas matplotlib
 deactivate
 
 # Set up custom symlinks
-ln -sf ~/lobster-config/my-scripts ~/scripts
+ln -sf ~/lobster-user-config/my-scripts ~/scripts
 
 # Configure external services
 if command -v ngrok &> /dev/null; then
@@ -484,7 +484,7 @@ Runs after `git pull` updates the main repository. Use for:
 
 ```bash
 #!/bin/bash
-# ~/lobster-config/hooks/post-update.sh
+# ~/lobster-user-config/hooks/post-update.sh
 
 set -e
 
@@ -510,7 +510,7 @@ echo "Post-update complete!"
 **Important:** Make your hooks executable:
 
 ```bash
-chmod +x ~/lobster-config/hooks/*.sh
+chmod +x ~/lobster-user-config/hooks/*.sh
 ```
 
 ---
@@ -587,7 +587,7 @@ cd ~/lobster
 git pull origin main
 
 # 2. Re-run installer to apply your overlay
-LOBSTER_CONFIG_DIR=~/lobster-config ./install.sh
+LOBSTER_CONFIG_DIR=~/lobster-user-config ./install.sh
 
 # 3. Restart services
 lobster restart
@@ -614,7 +614,7 @@ If the config format changes:
 
 1. Compare your config with the new example:
    ```bash
-   diff ~/lobster-config/config.env ~/lobster/config/config.env.example
+   diff ~/lobster-user-config/config.env ~/lobster/config/config.env.example
    ```
 
 2. Add any new required variables to your config
@@ -633,7 +633,7 @@ git tag -l
 git checkout v1.2.3
 
 # Re-apply overlay
-LOBSTER_CONFIG_DIR=~/lobster-config ./install.sh
+LOBSTER_CONFIG_DIR=~/lobster-user-config ./install.sh
 ```
 
 ---
@@ -659,7 +659,7 @@ LOBSTER_CONFIG_DIR=~/lobster-config ./install.sh
 
 3. Check file permissions:
    ```bash
-   ls -la ~/lobster-config/
+   ls -la ~/lobster-user-config/
    ```
 
 #### Services Won't Start
@@ -676,7 +676,7 @@ LOBSTER_CONFIG_DIR=~/lobster-config ./install.sh
 
 2. Verify config.env syntax:
    ```bash
-   source ~/lobster-config/config.env && echo "Config OK"
+   source ~/lobster-user-config/config.env && echo "Config OK"
    ```
 
 3. Check for missing dependencies:
@@ -691,18 +691,18 @@ LOBSTER_CONFIG_DIR=~/lobster-config ./install.sh
 **Solutions:**
 1. Check execution permission:
    ```bash
-   ls -la ~/lobster-config/hooks/
-   chmod +x ~/lobster-config/hooks/*.sh
+   ls -la ~/lobster-user-config/hooks/
+   chmod +x ~/lobster-user-config/hooks/*.sh
    ```
 
 2. Test manually:
    ```bash
-   bash -x ~/lobster-config/hooks/post-install.sh
+   bash -x ~/lobster-user-config/hooks/post-install.sh
    ```
 
 3. Check for syntax errors:
    ```bash
-   bash -n ~/lobster-config/hooks/post-install.sh
+   bash -n ~/lobster-user-config/hooks/post-install.sh
    ```
 
 #### Scheduled Jobs Not Running
