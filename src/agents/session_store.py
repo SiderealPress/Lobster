@@ -391,6 +391,105 @@ def format_active_sessions_block(sessions: list[dict]) -> str:
 # JSON migration (one-time, idempotent)
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Ground-truth scanner — reads Claude Code JSONL output files
+# ---------------------------------------------------------------------------
+
+# Default tasks symlink directory where Claude Code writes *.output symlinks
+_CLAUDE_TASKS_DIR = Path("/tmp/claude-1000/-home-admin-lobster-workspace/tasks")
+
+
+def scan_agent_outputs(
+    tasks_dir: Path | None = None,
+) -> dict[str, str]:
+    """Scan Claude Code agent output files and return their liveness status.
+
+    Each background Task spawned by Claude Code creates a symlink (or file) at:
+        /tmp/claude-1000/-home-admin-lobster-workspace/tasks/<agent-id>.output
+
+    The symlink resolves to a JSONL file in ~/.claude/projects/.../subagents/.
+    Claude Code writes a ``stop_reason`` field into these JSONL lines:
+      - ``"end_turn"``  → agent has definitively finished
+      - ``"tool_use"``  → agent is mid-turn, actively running
+
+    We read only the last 4 KB of each file (fast, constant-time) and scan for
+    the last occurrence of ``"stop_reason":``.
+
+    Args:
+        tasks_dir: Override the default tasks directory (for testing).
+
+    Returns:
+        A dict mapping agent_id → status string, where status is one of:
+          ``"running"``  — file exists, last stop_reason is "tool_use" or not yet written
+          ``"done"``     — last stop_reason is "end_turn"
+          ``"missing"``  — symlink target JSONL does not exist yet (agent just spawned)
+    """
+    import re
+
+    resolved_dir = tasks_dir if tasks_dir is not None else _CLAUDE_TASKS_DIR
+
+    result: dict[str, str] = {}
+
+    if not resolved_dir.exists():
+        return result
+
+    # Pattern to extract the last stop_reason value in the tail bytes
+    _stop_reason_re = re.compile(rb'"stop_reason"\s*:\s*"([^"]+)"')
+
+    for output_path in resolved_dir.glob("*.output"):
+        # agent_id is the filename stem (e.g. "a24c111e0daad91f7" from "a24c111e0daad91f7.output")
+        agent_id = output_path.stem
+
+        # Resolve symlink to real JSONL path (or use the file itself)
+        try:
+            real_path = output_path.resolve()
+        except OSError:
+            result[agent_id] = "missing"
+            continue
+
+        if not real_path.exists():
+            result[agent_id] = "missing"
+            continue
+
+        # Read last 4 KB — constant-time regardless of file size
+        try:
+            with open(real_path, "rb") as f:
+                try:
+                    f.seek(-4096, 2)
+                except OSError:
+                    # File smaller than 4 KB; read from start
+                    f.seek(0)
+                tail = f.read()
+        except OSError:
+            result[agent_id] = "missing"
+            continue
+
+        if not tail:
+            # Empty file → agent just spawned, no output yet
+            result[agent_id] = "running"
+            continue
+
+        # Find the *last* stop_reason in the tail
+        matches = _stop_reason_re.findall(tail)
+        if not matches:
+            # No stop_reason written yet → still running
+            result[agent_id] = "running"
+            continue
+
+        last_reason = matches[-1].decode("utf-8", errors="replace")
+        if last_reason == "end_turn":
+            result[agent_id] = "done"
+        else:
+            # "tool_use" or any other value → still running
+            result[agent_id] = "running"
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# JSON migration (one-time, idempotent)
+# ---------------------------------------------------------------------------
+
 def _migrate_json_to_sqlite(json_path: Path, conn: sqlite3.Connection) -> int:
     """One-time migration: read pending-agents.json and insert entries into SQLite.
 

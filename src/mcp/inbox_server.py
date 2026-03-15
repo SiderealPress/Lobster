@@ -5936,9 +5936,92 @@ async def handle_list_calendar_events(args: dict) -> list[TextContent]:
     return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
 
+async def reconcile_agent_sessions() -> None:
+    """Background task: auto-close finished or dead agent sessions.
+
+    Runs every 5 seconds inside the inbox_server asyncio event loop.
+    Uses scan_agent_outputs() — a deterministic check of the ``stop_reason``
+    field in Claude Code JSONL output files — to detect completion without
+    requiring any cooperation from the agent itself.
+
+    Reconciliation rules:
+      - Session in DB with status='running', scanner says 'done'
+        → call session_end(..., status='completed')
+      - Session in DB with status='running', output file missing AND session
+        is older than 25 minutes → call session_end(..., status='dead')
+      - Sessions found by scanner but not in DB are logged as unregistered
+        (informational only — no write action).
+
+    This eliminates the mtime-based heuristic used previously and provides
+    ~5-second latency from agent completion to DB reconciliation.
+    """
+    from agents.session_store import scan_agent_outputs
+
+    DEAD_THRESHOLD_SECONDS = 25 * 60  # 25 minutes
+
+    while True:
+        await asyncio.sleep(5)
+        try:
+            scan = scan_agent_outputs()
+            active_sessions = _session_store.get_active_sessions()
+
+            for session in active_sessions:
+                agent_id = session.get("id", "")
+                output_file = session.get("output_file") or ""
+                elapsed = session.get("elapsed_seconds") or 0
+
+                # Derive agent_id from output_file path if not directly in scan
+                # output_file stored as full path like /tmp/.../tasks/HEXID.output
+                file_stem = None
+                if output_file:
+                    file_stem = Path(output_file).stem
+
+                scan_key = file_stem or agent_id
+                scan_status = scan.get(scan_key)
+
+                if scan_status == "done":
+                    log.info(
+                        f"[reconciler] Agent {agent_id!r} (scan_key={scan_key!r}) "
+                        f"finished (stop_reason=end_turn) — marking completed"
+                    )
+                    _session_store.session_end(
+                        id_or_task_id=agent_id,
+                        status="completed",
+                        result_summary="Auto-closed by reconciler: stop_reason=end_turn",
+                    )
+                elif scan_status == "missing" and elapsed > DEAD_THRESHOLD_SECONDS:
+                    log.warning(
+                        f"[reconciler] Agent {agent_id!r} output file missing after "
+                        f"{elapsed}s — marking dead"
+                    )
+                    _session_store.session_end(
+                        id_or_task_id=agent_id,
+                        status="dead",
+                        result_summary=f"Auto-closed by reconciler: output missing after {elapsed}s",
+                    )
+                # scan_status == "running" or None (no output file registered) → no action
+
+            # Log unregistered running agents (in scan but not in DB)
+            active_ids = {
+                Path(s.get("output_file", "")).stem
+                for s in active_sessions
+                if s.get("output_file")
+            }
+            active_ids |= {s.get("id", "") for s in active_sessions}
+            for scan_key, scan_status in scan.items():
+                if scan_status == "running" and scan_key not in active_ids:
+                    log.debug(
+                        f"[reconciler] Unregistered running agent output: {scan_key!r}"
+                    )
+
+        except Exception as exc:
+            log.error(f"[reconciler] Error in reconcile_agent_sessions: {exc}", exc_info=True)
+
+
 async def main():
     """Run the MCP server."""
     _ensure_observation_worker()
+    asyncio.create_task(reconcile_agent_sessions())
     async with stdio_server() as (read_stream, write_stream):
         await server.run(read_stream, write_stream, server.create_initialization_options())
 
