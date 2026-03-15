@@ -473,6 +473,93 @@ fi
 success "Core system dependencies installed"
 
 #===============================================================================
+# Swap File Setup
+#
+# An always-on Claude Code session with 7-8 GB RAM and no swap is at real OOM
+# risk. This section creates a 4 GB swapfile if no swap is already configured,
+# making persistent across reboots via /etc/fstab, and tunes vm.swappiness to
+# 10 so the kernel only reaches for swap under genuine memory pressure.
+#
+# Cross-distro notes:
+#   - Uses fallocate where available (fast), falls back to dd (universal)
+#   - swapon/mkswap may live in /sbin or /usr/sbin depending on distro; we
+#     resolve the path explicitly rather than relying on $PATH
+#===============================================================================
+
+setup_swap() {
+    local swapfile="/swapfile"
+    local swap_size_mb=4096   # 4 GB
+
+    # Resolve swapon/mkswap regardless of distro PATH layout
+    local SWAPON
+    SWAPON=$(command -v swapon 2>/dev/null || command -v /sbin/swapon 2>/dev/null || command -v /usr/sbin/swapon 2>/dev/null || echo "")
+    local MKSWAP
+    MKSWAP=$(command -v mkswap 2>/dev/null || command -v /sbin/mkswap 2>/dev/null || command -v /usr/sbin/mkswap 2>/dev/null || echo "")
+
+    if [ -z "$SWAPON" ] || [ -z "$MKSWAP" ]; then
+        warn "swapon/mkswap not found — skipping swap setup"
+        return 0
+    fi
+
+    # Check if any swap is already active
+    if "$SWAPON" --show 2>/dev/null | grep -q .; then
+        success "Swap already configured — skipping"
+        return 0
+    fi
+
+    step "Setting up ${swap_size_mb}MB swap file at $swapfile..."
+
+    # Create the file.
+    # fallocate is instant but fails on BTRFS (BTRFS doesn't support preallocation
+    # for swap files). Detect BTRFS on the target filesystem and fall back to dd.
+    # Also fall back to dd if fallocate is not installed.
+    # dd status=progress requires GNU coreutils >= 8.24 and is omitted for
+    # portability across older Ubuntu LTS and Amazon Linux releases.
+    local use_dd=0
+    if ! command -v fallocate &>/dev/null; then
+        use_dd=1
+        info "fallocate not available — using dd (this may take a moment)..."
+    elif stat -f -c %T "$(dirname "$swapfile")" 2>/dev/null | grep -qi btrfs; then
+        use_dd=1
+        info "BTRFS filesystem detected — fallocate unsupported for swap, using dd (this may take a moment)..."
+    fi
+
+    if [ "$use_dd" -eq 0 ]; then
+        sudo fallocate -l "${swap_size_mb}M" "$swapfile"
+    else
+        sudo dd if=/dev/zero of="$swapfile" bs=1M count="$swap_size_mb"
+    fi
+
+    # Secure permissions (world-readable swap is a security risk)
+    sudo chmod 600 "$swapfile"
+
+    # Format and enable
+    sudo "$MKSWAP" "$swapfile"
+    sudo "$SWAPON" "$swapfile"
+
+    success "Swap enabled: $(free -h | awk '/^Swap:/ {print $2}')"
+
+    # Persist across reboots
+    if ! grep -q "$swapfile" /etc/fstab; then
+        echo "$swapfile none swap sw 0 0" | sudo tee -a /etc/fstab >/dev/null
+        success "Added $swapfile to /etc/fstab"
+    fi
+
+    # Tune swappiness: avoid aggressive swapping but keep OOM buffer available.
+    # 10 means the kernel only uses swap when RAM is nearly exhausted.
+    local sysctl_conf="/etc/sysctl.d/99-lobster-swap.conf"
+    if [ ! -f "$sysctl_conf" ]; then
+        echo "vm.swappiness=10" | sudo tee "$sysctl_conf" >/dev/null
+        sudo sysctl -p "$sysctl_conf" >/dev/null 2>&1 || true
+        success "vm.swappiness set to 10 via $sysctl_conf"
+    else
+        info "Swappiness already configured in $sysctl_conf"
+    fi
+}
+
+setup_swap
+
+#===============================================================================
 # Install Modern CLI Tools (ripgrep, fd, bat, fzf) on dnf systems
 #
 # Ubuntu/Debian provides these in apt. On Amazon Linux 2023 / Fedora they are
