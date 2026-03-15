@@ -57,6 +57,8 @@ YELLOW_THRESHOLD_SECONDS=120         # 2 minutes - YELLOW warning
 
 COMPACTION_SUPPRESS_SECONDS=300      # 5 minutes - skip stale-inbox check after a compaction event
 
+HIBERNATE_FRESH_SECONDS=30           # Ignore hibernate state younger than this — transient dispatcher hibernation
+
 WFM_STALE_SECONDS=600                # 10 minutes - RED if wait_for_messages not called since this long ago
 HEARTBEAT_FILE="$WORKSPACE_DIR/logs/claude-heartbeat"
 
@@ -819,6 +821,29 @@ clear_stale_inbox_markers() {
 }
 
 #===============================================================================
+# Subagent Guard - abort restart if active subagent sessions exist
+#===============================================================================
+
+# Returns the count of currently-running subagent sessions from agent_sessions.db.
+# Returns 0 if the database doesn't exist or cannot be read (fail-open: allow restart).
+count_active_subagents() {
+    local db_file="${MESSAGES_DIR}/config/agent_sessions.db"
+    if [[ ! -f "$db_file" ]]; then
+        echo "0"
+        return
+    fi
+    uv run python3 -c "
+import sqlite3, sys
+try:
+    conn = sqlite3.connect('$db_file')
+    row = conn.execute(\"SELECT COUNT(*) FROM agent_sessions WHERE status='running'\").fetchone()
+    print(row[0] if row else 0)
+except Exception as e:
+    print(0)
+" 2>/dev/null || echo "0"
+}
+
+#===============================================================================
 # Recovery - always via systemd, never manual tmux
 #===============================================================================
 # DANGER: do_restart() must ONLY be called when the system is confirmed
@@ -829,6 +854,23 @@ clear_stale_inbox_markers() {
 do_restart() {
     local reason="$1"
     log_warn "Restarting $SERVICE_CLAUDE (reason: $reason)"
+
+    # Subagent guard: do not restart while subagents are active.
+    # A systemd restart kills the entire Claude process tree including all
+    # sidechain agents. If the DB shows running sessions, log a warning and
+    # abort — the subagent will complete and the next health-check run will
+    # re-evaluate whether a restart is still needed.
+    local active_subagents
+    active_subagents=$(count_active_subagents)
+    if [[ "$active_subagents" -gt 0 ]]; then
+        log_warn "SUBAGENT GUARD: Skipping restart ($active_subagents active subagent(s) running) — will re-evaluate next check"
+        send_telegram_alert "Health check deferred restart: $active_subagents active subagent(s) in flight.
+
+Reason that triggered restart: $reason
+
+The restart has been skipped to avoid killing running subagents. If the problem persists, the next health check will re-evaluate."
+        return 0
+    fi
 
     if ! can_restart; then
         if is_manual_intervention_required; then
@@ -968,10 +1010,23 @@ main() {
         hibernate)
             log_info "HIBERNATE: Claude cleanly exited. Wrapper polling for new messages."
 
-            # In hibernate mode, check if the wrapper is still running
-            if ! check_tmux; then
+            # Fresh-state guard: ignore hibernate states younger than HIBERNATE_FRESH_SECONDS.
+            # The dispatcher briefly writes mode=hibernate after wait_for_messages times out,
+            # then immediately wakes if new messages arrive. A health check that fires within
+            # this window would see a momentarily-missing wrapper and false-positive into RED.
+            if [[ $state_age -lt $HIBERNATE_FRESH_SECONDS ]]; then
+                log_info "Hibernate state is only ${state_age}s old (threshold: ${HIBERNATE_FRESH_SECONDS}s) — skipping process check (transient)"
+            elif ! check_tmux; then
                 level="RED"
                 restart_reason="tmux session missing (hibernate mode)"
+            elif [[ "$LOBSTER_DEBUG" == "true" ]]; then
+                # Debug mode: no persistent wrapper is expected. Claude Code runs
+                # directly in the tmux pane without claude-persistent.sh. Check for
+                # the Claude process directly instead of checking for the wrapper.
+                if ! check_claude_process; then
+                    level="RED"
+                    restart_reason="no Claude process in lobster tmux (debug mode, hibernate)"
+                fi
             elif ! check_wrapper_process; then
                 # Wrapper died during hibernation — need systemd restart
                 level="RED"
