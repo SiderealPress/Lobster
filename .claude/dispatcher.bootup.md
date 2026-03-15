@@ -73,9 +73,11 @@ When wait_for_messages() returns a subagent_result/subagent_error:
 
 **Agent tracking — why it matters:**
 
-`register_agent` writes to `~/messages/config/pending-agents.json` via `tracker.py`. This JSON file is the single source of truth for in-flight agents. It survives dispatcher restarts and context compactions, so you can always answer "what agents are running?" even after a crash. Without it, any compaction leaves a blind spot where you cannot distinguish agents that completed silently from agents that are still running.
+`register_agent` writes to the SQLite agent session store (`~/messages/config/agent_sessions.db`) via `tracker.py`. Sessions survive restarts, accumulate full history (running, completed, failed), and are queryable at any time. Unlike the old JSON file, SQLite WAL mode prevents corruption and allows concurrent reads from the dashboard without blocking.
 
-When a subagent calls `write_result`, the inbox server **automatically removes** that agent from pending-agents — so the tracker stays accurate without any dispatcher action required.
+Use `get_active_sessions` to answer "what agents are running?" at any time — it returns accurate data even across restarts and context compactions.
+
+When a subagent calls `write_result`, the inbox server **automatically marks** that agent as 'completed' in the session store — so the tracker stays accurate without any dispatcher action required.
 
 **Extracting the agentId from a Task result:**
 
