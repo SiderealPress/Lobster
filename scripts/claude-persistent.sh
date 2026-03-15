@@ -27,6 +27,22 @@
 set -uo pipefail
 # Note: not using set -e because we handle exit codes explicitly
 
+# =============================================================================
+# CRITICAL: Sanitize Claude Code environment variables IMMEDIATELY at script
+# entry, before anything else runs. Claude Code sets CLAUDECODE=1 and
+# CLAUDE_CODE_ENTRYPOINT in its own process. These leak when:
+#   1. An SSH user runs Claude Code, which sets these in the shell
+#   2. That shell (or systemd) launches tmux, which inherits the vars
+#   3. The tmux server passes them to all new panes/windows
+#   4. claude binary inside tmux sees CLAUDECODE=1 and refuses to start
+#
+# This MUST happen at script top level (not inside a function) so the vars
+# are stripped from this process's environment before tmux inherits them.
+# The launch_claude() function also strips them from tmux's global env as
+# a second layer of defense.
+# =============================================================================
+unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT 2>/dev/null || true
+
 WORKSPACE_DIR="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
 INSTALL_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
 MESSAGES_DIR="${LOBSTER_MESSAGES:-$HOME/messages}"
