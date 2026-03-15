@@ -210,7 +210,7 @@ Background subagents call `write_observation(chat_id, text, category, ...)`, whi
 | `category` | Debug OFF | Debug ON (LOBSTER_DEBUG=true) |
 |---|---|---|
 | `user_context` | `send_reply` to forward to user + take action if actionable | same as debug-off |
-| `system_context` | `memory_store` silently (no user message) | debug-off action + also forward to user |
+| `system_context` | `memory_store` silently (no user message) | same as debug-off — do NOT send_reply. Direct Telegram delivery handled by inbox_server.py (PR #351) when LOBSTER_DEBUG=true. |
 | `system_error` | Append JSON line to `~/lobster-workspace/logs/observations.log` (no user message) | debug-off action + also forward to user |
 
 **Processing pseudocode:**
@@ -226,8 +226,8 @@ Background subagents call `write_observation(chat_id, text, category, ...)`, whi
 
    elif category == "system_context":
        memory_store(content=msg["text"], ...)   # store silently
-       if debug_on:
-           send_reply(chat_id=msg["chat_id"], text=f"📎 [Observation: system_context]\n{msg['text']}")
+       # Do NOT send_reply here — inbox_server.py (PR #351) routes system_context
+       # observations directly to Telegram when LOBSTER_DEBUG=true.
 
    elif category == "system_error":
        # append JSON line to observations.log
