@@ -1117,11 +1117,13 @@ class OutboxHandler(FileSystemEventHandler):
             if reply_type == 'photo' and photo_url and chat_id and bot_app:
                 try:
                     caption_html = md_to_html(caption) if caption else None
+                    photo_reply_params = ReplyParameters(message_id=int(reply_to_id)) if reply_to_id else None
                     await bot_app.bot.send_photo(
                         chat_id=chat_id,
                         photo=photo_url,
                         caption=caption_html,
                         parse_mode="HTML" if caption_html else None,
+                        reply_parameters=photo_reply_params,
                     )
                     log.info(f"Sent photo to {chat_id}: {photo_url[:80]}...")
                     os.remove(filepath)
