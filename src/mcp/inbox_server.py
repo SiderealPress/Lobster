@@ -1336,11 +1336,12 @@ async def list_tools() -> list[Tool]:
                         "type": "boolean",
                         "description": (
                             "Whether the dispatcher should forward this result to the user. "
-                            "Default true. Set to false when the subagent has already called "
-                            "send_reply directly — the dispatcher will mark the message processed "
-                            "silently without re-sending to the user."
+                            "Default false. Set to True if you want the dispatcher to relay this "
+                            "result as a message to the user. Most subagents should use False and "
+                            "call send_reply directly, or set True only when the dispatcher should "
+                            "relay a short verdict."
                         ),
-                        "default": True,
+                        "default": False,
                     },
                 },
                 "required": ["task_id", "chat_id", "text"],
@@ -4276,7 +4277,7 @@ async def handle_write_result(args: dict) -> list[TextContent]:
     status = args.get("status", "success")
     artifacts = args.get("artifacts") or []
     thread_ts = args.get("thread_ts")
-    forward = args.get("forward", True)
+    forward = args.get("forward", False)
 
     if not task_id:
         return [TextContent(type="text", text="Error: task_id is required")]
