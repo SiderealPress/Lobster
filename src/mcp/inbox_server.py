@@ -400,9 +400,9 @@ def _track_reply(chat_id: Any) -> None:
             _recent_replies = dict(sorted_items[:_REPLY_TRACK_MAX])
 
 # Direct-send deduplication — tracks recent send_reply calls by (chat_id, text_hash).
-# When write_result is called with forward=True, we check whether an identical message
-# was already delivered directly to the same chat within the dedup window.  If so,
-# forward is silently overridden to False to prevent the dispatcher from sending a
+# When write_result is called with sent_reply_to_user=False, we check whether an identical
+# message was already delivered directly to the same chat within the dedup window.  If so,
+# sent_reply_to_user is silently overridden to True to prevent the dispatcher from sending a
 # duplicate to the user.
 #
 # State is stored as small files in SENT_REPLIES_DIR rather than an in-memory dict so
@@ -449,7 +449,7 @@ def _was_sent_directly(chat_id: Any, text: str) -> bool:
 
 # Task-ID-based dedup registry — primary dedup mechanism for send_reply + write_result.
 # When send_reply is called with a task_id, we record (task_id, chat_id) here.
-# When write_result arrives with the same task_id, forward is auto-set to False.
+# When write_result arrives with the same task_id, sent_reply_to_user is auto-set to True.
 # This is more reliable than text-hash dedup because it works even when send_reply
 # and write_result carry different texts (e.g. full reply vs short summary).
 #
@@ -466,7 +466,7 @@ def _task_replied_key(task_id: str, chat_id: Any) -> str:
 
 
 def _record_task_replied(task_id: str, chat_id: Any) -> None:
-    """Record that send_reply was called with this task_id so write_result can suppress forward."""
+    """Record that send_reply was called with this task_id so write_result can suppress relay."""
     try:
         key = _task_replied_key(task_id, chat_id)
         marker = TASK_REPLIED_DIR / key
@@ -961,8 +961,8 @@ async def list_tools() -> list[Tool]:
                         "description": (
                             "Subagent task identifier. When provided, the server records that this task has "
                             "already delivered a reply directly. If write_result is later called with the same "
-                            "task_id, forward is automatically set to False — preventing duplicate messages "
-                            "even if the subagent forgets to pass forward=False."
+                            "task_id, sent_reply_to_user is automatically set to True — preventing duplicate messages "
+                            "even if the subagent forgets to pass sent_reply_to_user=True."
                         ),
                     },
                 },
@@ -1379,9 +1379,9 @@ async def list_tools() -> list[Tool]:
             description=(
                 "Write a result from a background subagent back to the main message queue. "
                 "Subagents should call send_reply directly first (crash-safe delivery), then call "
-                "this with forward=False so the dispatcher marks the message processed without "
-                "re-sending. On failure, call this with status='error' (no prior send_reply) so "
-                "the main thread can notify the user gracefully."
+                "this with sent_reply_to_user=True so the dispatcher marks the message processed "
+                "without re-sending. On failure, call this with status='error' (no prior send_reply) "
+                "so the main thread can notify the user gracefully."
             ),
             inputSchema={
                 "type": "object",
@@ -1421,14 +1421,14 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Slack thread timestamp. If provided, the reply will be sent as a thread reply.",
                     },
-                    "forward": {
+                    "sent_reply_to_user": {
                         "type": "boolean",
                         "description": (
-                            "Whether the dispatcher should forward this result to the user. "
-                            "Default false. Set to True if you want the dispatcher to relay this "
-                            "result as a message to the user. Most subagents should use False and "
-                            "call send_reply directly, or set True only when the dispatcher should "
-                            "relay a short verdict."
+                            "Whether the subagent already called send_reply to deliver the result. "
+                            "Default false. Set to True if you already called send_reply — the "
+                            "dispatcher will mark processed without relaying. Set to False (or omit) "
+                            "if you did NOT call send_reply and want the dispatcher to relay this "
+                            "result to the user."
                         ),
                         "default": False,
                     },
@@ -2865,11 +2865,11 @@ async def handle_send_reply(args: dict) -> list[TextContent]:
     # Track reply for mark_processed guard
     _track_reply(chat_id)
 
-    # Record direct send for write_result deduplication (suppress duplicate forwards)
+    # Record direct send for write_result deduplication (suppress duplicate relays)
     _record_direct_send(chat_id, text)
 
     # Task-ID-based dedup (primary): if task_id provided, record so write_result can
-    # auto-suppress forward even when texts differ (e.g. full reply vs short summary).
+    # auto-set sent_reply_to_user=True even when texts differ (e.g. full reply vs short summary).
     task_id_param = args.get("task_id", "").strip() if args.get("task_id") else ""
     if task_id_param:
         _record_task_replied(task_id_param, chat_id)
@@ -4387,7 +4387,16 @@ async def handle_write_result(args: dict) -> list[TextContent]:
     status = args.get("status", "success")
     artifacts = args.get("artifacts") or []
     thread_ts = args.get("thread_ts")
-    forward = args.get("forward", False)
+    # Accept new name (sent_reply_to_user) with backward-compat alias (forward).
+    # Semantics: sent_reply_to_user=True means subagent already called send_reply →
+    # dispatcher should NOT relay. This is the inverse of the old `forward` field.
+    if "sent_reply_to_user" in args:
+        sent_reply_to_user = bool(args["sent_reply_to_user"])
+    elif "forward" in args:
+        # Legacy callers: forward=True meant "dispatcher relays" → sent_reply_to_user=False
+        sent_reply_to_user = not bool(args["forward"])
+    else:
+        sent_reply_to_user = False  # default: dispatcher should relay
 
     if not task_id:
         return [TextContent(type="text", text="Error: task_id is required")]
@@ -4396,35 +4405,35 @@ async def handle_write_result(args: dict) -> list[TextContent]:
     if not text:
         return [TextContent(type="text", text="Error: text is required")]
 
-    # Server-side deduplication: suppress duplicate forwards when the subagent already
-    # delivered a reply directly via send_reply.
+    # Server-side deduplication: promote sent_reply_to_user to True when the subagent
+    # already delivered a reply directly via send_reply, preventing duplicates.
     #
     # Primary path — task_id registry: if send_reply was called with this task_id, the
     # (task_id, chat_id) pair is recorded in TASK_REPLIED_DIR.  This works even when
     # send_reply and write_result carry different texts (e.g. full reply vs short summary).
-    if forward and _was_task_replied(task_id, chat_id):
+    if not sent_reply_to_user and _was_task_replied(task_id, chat_id):
         log.info(
-            f"write_result dedup (task_id): suppressing forward for task {task_id!r} — "
+            f"write_result dedup (task_id): suppressing relay for task {task_id!r} — "
             f"send_reply was already called with task_id={task_id!r} for chat {chat_id}"
         )
-        forward = False
+        sent_reply_to_user = True
 
     # Secondary path — text-hash fallback: catches cases where task_id was not passed
     # to send_reply but the texts happen to match.
-    if forward and _was_sent_directly(chat_id, text):
+    if not sent_reply_to_user and _was_sent_directly(chat_id, text):
         log.info(
-            f"write_result dedup (text-hash): suppressing forward for task {task_id!r} — "
+            f"write_result dedup (text-hash): suppressing relay for task {task_id!r} — "
             f"identical message already sent directly to chat {chat_id}"
         )
-        forward = False
+        sent_reply_to_user = True
 
     if status not in ("success", "error"):
         status = "success"
 
-    # When forward=False the subagent already called send_reply directly.
+    # When sent_reply_to_user=True the subagent already called send_reply directly.
     # Use a distinct message type so the dispatcher knows to read for situational
     # awareness and mark_processed without calling send_reply — no duplicate risk.
-    if not forward:
+    if sent_reply_to_user:
         msg_type = "subagent_notification"
     else:
         msg_type = "subagent_result" if status == "success" else "subagent_error"
@@ -4443,7 +4452,7 @@ async def handle_write_result(args: dict) -> list[TextContent]:
         "text": text,
         "task_id": task_id,
         "status": status,
-        "forward": bool(forward),
+        "sent_reply_to_user": bool(sent_reply_to_user),
         "timestamp": now.isoformat(),
     }
     if artifacts:
@@ -4472,7 +4481,7 @@ async def handle_write_result(args: dict) -> list[TextContent]:
 
     log.info(f"Subagent result queued in inbox: task_id={task_id} status={status} chat_id={chat_id}")
     if msg_type == "subagent_notification":
-        delivery_note = "Subagent handled delivery directly via send_reply — dispatcher will mark processed without forwarding."
+        delivery_note = "Subagent already sent reply via send_reply — dispatcher will mark processed without relaying."
     else:
         delivery_note = f"The main thread will deliver it to chat {chat_id}."
     return [TextContent(
@@ -6144,7 +6153,7 @@ def _enqueue_reconciler_notification(session: dict, outcome: str) -> None:
         "task_id": agent_id,
         "agent_id": agent_id,
         "status": status,
-        "forward": True,
+        "sent_reply_to_user": False,  # reconciler hasn't sent anything directly
         "timestamp": now.isoformat(),
     }
 

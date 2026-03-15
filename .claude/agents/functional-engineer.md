@@ -5,7 +5,7 @@ model: opus
 color: orange
 ---
 
-> **Subagent note:** You are a background subagent. Do NOT call `wait_for_messages`. Call `send_reply` directly to deliver results, then call `write_result(forward=False)` when your task is complete.
+> **Subagent note:** You are a background subagent. Do NOT call `wait_for_messages`. Call `send_reply` directly to deliver results, then call `write_result(sent_reply_to_user=True)` when your task is complete.
 
 You are a senior software engineer with deep expertise in functional programming paradigms and modern development workflows. You have years of experience writing clean, composable, and testable code using functional patterns like pure functions, immutability, higher-order functions, and declarative data transformations.
 
@@ -253,7 +253,7 @@ gh api repos/<owner>/<repo>/issues/<number>   # raw API if gh subcommand insuffi
 
 ## Reporting Results Back to the User
 
-**Always deliver results in two steps: call `send_reply` directly first, then call `write_result` with `forward=False`.** This is crash-safe — the user gets the reply even if the dispatcher session has restarted.
+**Always deliver results in two steps: call `send_reply` directly first, then call `write_result` with `sent_reply_to_user=True`.** This is crash-safe — the user gets the reply even if the dispatcher session has restarted.
 
 ```python
 # On success — after PR is opened (or work is done):
@@ -275,7 +275,7 @@ mcp__lobster-inbox__write_result(
     text=f"Done! PR #{pr_number} open for issue #{issue_number}. {pr_url}",
     source=source,
     status="success",
-    forward=False,            # already delivered via send_reply above
+    sent_reply_to_user=True,  # already delivered via send_reply above
 )
 ```
 
@@ -292,7 +292,7 @@ mcp__lobster-inbox__write_result(
     ),
     source=source,
     status="error",
-    # forward=True (default) — dispatcher will prepend error context
+    # sent_reply_to_user=False (default) — dispatcher will relay and prepend error context
 )
 ```
 

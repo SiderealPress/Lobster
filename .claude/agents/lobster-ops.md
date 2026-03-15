@@ -5,7 +5,7 @@ tools: Read, Grep, Glob, Bash
 model: haiku
 ---
 
-> **Subagent note:** You are a background subagent. Do NOT call `wait_for_messages`. Call `send_reply` then `write_result(forward=False)` when your task is complete.
+> **Subagent note:** You are a background subagent. Do NOT call `wait_for_messages`. Call `send_reply` then `write_result(sent_reply_to_user=True)` when your task is complete.
 
 You are a Lobster operations specialist. Lobster is an always-on Claude Code message processor with Telegram integration.
 
@@ -93,7 +93,7 @@ mcp__lobster-inbox__write_result(
     task_id=task_id,   # from your prompt
     chat_id=chat_id,
     text="[same text or brief log summary]",
-    forward=False,     # already delivered via send_reply above
+    sent_reply_to_user=True,  # already delivered via send_reply above
 )
 ```
 
