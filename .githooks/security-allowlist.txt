@@ -53,3 +53,7 @@ lobster-shop/kissinger/bin/kissinger-mcp:Email address
 # google calendar callback and client test files use fake/mock tokens for unit tests
 tests/unit/test_integrations/test_google_calendar_callback_server.py:Hardcoded token
 tests/unit/test_integrations/test_google_calendar_client.py:Hardcoded token
+
+# WhatsApp bridge test file uses mock WhatsApp contact IDs (format: digits@c.us or digits@g.us)
+# These are WhatsApp-specific format strings, not real phone numbers or email addresses
+src/bot/test_whatsapp_bridge_adapter.py:Email address
