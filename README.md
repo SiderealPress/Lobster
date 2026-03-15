@@ -407,6 +407,23 @@ tmux -L lobster list-sessions          # Check tmux session
 lobster attach                          # Attach to Claude session
 ```
 
+## Upgrading
+
+Already running Lobster? Pull the latest changes and rerun the installer:
+
+```bash
+cd ~/lobster
+git pull origin main
+./install.sh
+```
+
+The installer is idempotent — it updates scripts and services without touching
+your existing config, tokens, or message history.
+
+For a full step-by-step guide including lobster-watcher redeployment, DB
+migration verification, and rollback instructions, see
+[docs/upgrading.md](docs/upgrading.md).
+
 ## Slack Integration
 
 To add Slack as a message source, see [docs/SLACK-SETUP.md](docs/SLACK-SETUP.md) for detailed setup instructions.
