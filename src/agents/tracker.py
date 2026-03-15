@@ -1,187 +1,45 @@
 """
-Pending Agents Tracker
+Pending Agents Tracker — thin adapter over session_store
 
-Manages a JSON file that records background agents spawned by Lobster so
-that the dispatcher can relay results to Drew even after a context reset.
+This module provides a backward-compatible public API that delegates all
+storage to the SQLite-backed session_store module. The previous implementation
+used a JSON file (~/messages/config/pending-agents.json) with file locking;
+the new implementation uses WAL-mode SQLite for reliability and queryability.
 
-File location: ~/messages/config/pending-agents.json
-Format:
-    {
-      "agents": [
-        {
-          "id": "abc123",
-          "task_id": "fix-all-problems-1741967040",
-          "description": "Implement feature X on issue #42",
-          "chat_id": 1234567890,
-          "source": "telegram",
-          "started_at": "2026-02-22T10:30:00.000000Z",
-          "output_file": "/tmp/claude-1000/.../tasks/abc123.output",
-          "timeout_minutes": 30,
-          "status": "running"
-        }
-      ]
-    }
+Public API (unchanged from v1):
+    add_pending_agent(agent_id, description, chat_id, task_id, source,
+                      output_file, timeout_minutes, path) -> None
+    remove_pending_agent(agent_id, path) -> None
+    get_pending_agents(path) -> list
+    is_agent_pending(agent_id, path) -> bool
+    pending_agent_count(path) -> int
 
-Design principles:
-- Pure functions where possible; side effects only in add/remove
-- Atomic writes via write-to-temp-then-rename (POSIX guarantee)
-- File locking to handle concurrent access safely
-- Graceful degradation: missing file treated as empty agent list
+Backward-compatibility notes:
+  - The `path` parameter is accepted and passed through to session_store, which
+    uses it as the SQLite DB path (not a JSON path). Tests that pass a path
+    override receive an isolated DB — previously, passing a path pointed to an
+    alternate JSON file. The semantics are preserved for test isolation.
+  - All callers in inbox_server.py, tracker.py tests, and CLAUDE.md use the
+    same parameter names — no changes needed at call sites.
+  - The `path` default of None resolves to the standard DB location in
+    session_store (~/messages/config/agent_sessions.db).
 """
 
-import fcntl
-import json
-import os
-import tempfile
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
-
-# Default path: ~/messages/config/pending-agents.json
-_MESSAGES_DIR = Path(os.environ.get("LOBSTER_MESSAGES", Path.home() / "messages"))
-_DEFAULT_PATH = _MESSAGES_DIR / "config" / "pending-agents.json"
-
-
-# =============================================================================
-# Pure helpers
-# =============================================================================
-
-def _empty_store() -> dict:
-    """Return a fresh empty agents store."""
-    return {"agents": []}
-
-
-def _make_agent_entry(
-    agent_id: str,
-    description: str,
-    chat_id: int,
-    task_id: str | None = None,
-    source: str = "telegram",
-    output_file: str | None = None,
-    timeout_minutes: int | None = None,
-    status: str = "running",
-) -> dict:
-    """Construct an immutable agent record.
-
-    Args:
-        agent_id:        Unique identifier extracted from the Task tool result.
-        description:     Human-readable summary of what the agent is doing.
-        chat_id:         Chat/channel to notify when the agent completes.
-        task_id:         Logical task identifier (e.g. 'fix-all-problems-1741967040').
-                         Typically matches the task_id the subagent will pass to write_result.
-        source:          Messaging platform ('telegram', 'slack', etc.).
-        output_file:     Full path to the Claude Code agent output file in /tmp.
-                         Used for liveness detection: stat the file mtime to determine
-                         if the agent is still active.
-        timeout_minutes: Expected maximum runtime. Agents older than this without
-                         output file activity can be presumed dead.
-        status:          Lifecycle state — 'running' (default) | 'dead' | 'completed'.
-    """
-    entry: dict[str, Any] = {
-        "id": agent_id,
-        "description": description,
-        "chat_id": chat_id,
-        "source": source,
-        "started_at": datetime.now(timezone.utc).isoformat(),
-        "status": status,
-    }
-    if task_id is not None:
-        entry["task_id"] = task_id
-    if output_file is not None:
-        entry["output_file"] = output_file
-    if timeout_minutes is not None:
-        entry["timeout_minutes"] = timeout_minutes
-    return entry
-
-
-def _filter_out(agents: list, lookup_key: str) -> list:
-    """Return agents list with the matching entry removed (pure, non-mutating).
-
-    Matches on either the 'id' field or the 'task_id' field so that callers
-    using either identifier (e.g. handle_write_result passes task_id as the
-    lookup key) correctly remove the record.
-    """
-    return [
-        a for a in agents
-        if a.get("id") != lookup_key and a.get("task_id") != lookup_key
-    ]
-
-
-def _find_agent(agents: list, agent_id: str) -> dict | None:
-    """Return the first agent matching agent_id, or None."""
-    matches = [a for a in agents if a.get("id") == agent_id]
-    return matches[0] if matches else None
+from agents.session_store import (
+    session_start,
+    session_end,
+    get_active_sessions,
+    find_session,
+    init_db,
+)
 
 
 # =============================================================================
-# File I/O
+# Public API — identical signatures to the JSON-based v1 implementation
 # =============================================================================
 
-def _read_store(path: Path) -> dict:
-    """Read and parse the pending-agents JSON file.
-
-    Returns an empty store if the file is missing or malformed.
-    Never raises.
-    """
-    try:
-        content = path.read_text(encoding="utf-8")
-        data = json.loads(content)
-        # Validate expected shape; fall back to empty on unexpected structure
-        if not isinstance(data, dict) or not isinstance(data.get("agents"), list):
-            return _empty_store()
-        return data
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return _empty_store()
-
-
-def _atomic_write(path: Path, data: dict) -> None:
-    """Atomically write data to path as pretty-printed JSON.
-
-    Uses write-to-temp-then-rename. On POSIX, rename() within the same
-    filesystem is atomic, so readers never observe a partial file.
-
-    Raises:
-        OSError: If the write or rename fails.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    content = json.dumps(data, indent=2)
-    fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write(content)
-            f.flush()
-            os.fsync(f.fileno())
-        os.rename(tmp_path, str(path))
-    except BaseException:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
-
-
-def _with_lock(path: Path, fn):
-    """Execute fn(store: dict) -> dict under a file lock, then write result.
-
-    Uses a companion lock file (<path>.lock) to serialize concurrent access.
-    fn receives the current store and must return the updated store.
-    """
-    lock_path = path.with_suffix(".lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(lock_path, "w") as lock_file:
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
-        try:
-            store = _read_store(path)
-            updated = fn(store)
-            _atomic_write(path, updated)
-        finally:
-            fcntl.flock(lock_file, fcntl.LOCK_UN)
-
-
-# =============================================================================
-# Public API
-# =============================================================================
 
 def add_pending_agent(
     agent_id: str,
@@ -191,83 +49,74 @@ def add_pending_agent(
     source: str = "telegram",
     output_file: str | None = None,
     timeout_minutes: int | None = None,
-    path: Path = _DEFAULT_PATH,
+    path: Path | None = None,
 ) -> None:
     """Record a newly-spawned background agent.
 
+    Delegates to session_store.session_start(). Idempotent for the same
+    agent_id — duplicate calls replace the existing entry.
+
     Args:
-        agent_id:        Unique identifier for the agent (extracted from Task result).
+        agent_id:        Unique identifier for the agent.
         description:     Human-readable summary of what the agent is doing.
-                         Include enough context so Lobster can relay results after restart.
         chat_id:         Chat/channel to notify when the agent completes.
-        task_id:         Logical task identifier passed to write_result by the subagent.
+        task_id:         Logical task identifier passed to write_result.
         source:          Messaging platform ('telegram', 'slack', etc.).
         output_file:     Full path to the Claude Code agent output file in /tmp.
-                         Enables liveness detection via mtime checks.
-        timeout_minutes: Expected maximum runtime. Agents older than this can be
-                         presumed dead if there is no recent output file activity.
-        path:            Override the default pending-agents.json path (for testing).
+        timeout_minutes: Expected maximum runtime.
+        path:            DB path override (for testing). Accepts and ignores the
+                         old JSON-path semantics — treated as SQLite DB path.
     """
-    entry = _make_agent_entry(
-        agent_id=agent_id,
+    session_start(
+        id=agent_id,
         description=description,
-        chat_id=chat_id,
+        chat_id=str(chat_id),
         task_id=task_id,
         source=source,
         output_file=output_file,
         timeout_minutes=timeout_minutes,
+        path=path,
     )
-
-    def update(store: dict) -> dict:
-        agents = store.get("agents", [])
-        # Avoid duplicate entries for the same ID
-        filtered = _filter_out(agents, agent_id)
-        return {"agents": filtered + [entry]}
-
-    _with_lock(path, update)
 
 
 def remove_pending_agent(
     agent_id: str,
-    path: Path = _DEFAULT_PATH,
+    path: Path | None = None,
 ) -> None:
-    """Remove a completed or failed agent from the pending list.
+    """Remove a completed agent from the pending list.
 
-    Idempotent: removing a non-existent ID is a no-op.
+    Delegates to session_store.session_end() with status='completed'.
+    Idempotent: removing a non-existent agent_id is a no-op.
 
     Args:
-        agent_id: The ID to remove.
-        path:     Override path (for testing).
+        agent_id: The ID (or task_id) to remove.
+        path:     DB path override (for testing).
     """
-    def update(store: dict) -> dict:
-        agents = store.get("agents", [])
-        return {"agents": _filter_out(agents, agent_id)}
-
-    _with_lock(path, update)
+    session_end(id_or_task_id=agent_id, status="completed", path=path)
 
 
-def get_pending_agents(path: Path = _DEFAULT_PATH) -> list:
-    """Return a snapshot of all currently pending agents.
+def get_pending_agents(path: Path | None = None) -> list:
+    """Return a snapshot of all currently running agent sessions.
 
     Returns:
-        List of agent dicts: [{"id", "description", "chat_id", "started_at"}, ...]
-        Returns empty list if the file is missing or empty.
+        List of session dicts from session_store.get_active_sessions().
+        Each dict includes: id, description, chat_id, status, spawned_at,
+        elapsed_seconds, and optional task_id, output_file, timeout_minutes.
     """
-    store = _read_store(path)
-    return list(store.get("agents", []))
+    return get_active_sessions(path=path)
 
 
-def is_agent_pending(agent_id: str, path: Path = _DEFAULT_PATH) -> bool:
-    """Return True if the given agent_id is in the pending list.
+def is_agent_pending(agent_id: str, path: Path | None = None) -> bool:
+    """Return True if the given agent_id is registered and still running.
 
     Args:
-        agent_id: The ID to check.
-        path:     Override path (for testing).
+        agent_id: The ID to check (matches on id or task_id).
+        path:     DB path override (for testing).
     """
-    agents = get_pending_agents(path)
-    return _find_agent(agents, agent_id) is not None
+    session = find_session(agent_id, path=path)
+    return session is not None and session.get("status") == "running"
 
 
-def pending_agent_count(path: Path = _DEFAULT_PATH) -> int:
-    """Return the number of currently pending agents."""
-    return len(get_pending_agents(path))
+def pending_agent_count(path: Path | None = None) -> int:
+    """Return the number of currently running agent sessions."""
+    return len(get_active_sessions(path=path))
