@@ -15,6 +15,10 @@ that a compaction occurred.
 
 State: always writes compacted_at to lobster-state.json so that the health
 check can suppress stale-inbox false-positives during the compaction pause.
+
+Dispatcher-only: exits immediately for subagent sessions (detected via
+session_role.is_dispatcher()). Subagent compactions must not write compact-
+reminders or the sentinel — those signals are only meaningful to the dispatcher.
 """
 
 import json
@@ -23,6 +27,10 @@ import sys
 import time
 import urllib.request
 from pathlib import Path
+
+# Import shared session role utility.
+sys.path.insert(0, str(Path(__file__).parent))
+from session_role import is_dispatcher
 
 
 INBOX_DIR = Path(os.path.expanduser("~/messages/inbox"))
@@ -228,6 +236,17 @@ def maybe_send_dev_telegram_notify() -> None:
 
 
 def main() -> None:
+    try:
+        data = json.load(sys.stdin)
+    except (json.JSONDecodeError, ValueError):
+        data = {}
+
+    # Only act for the dispatcher session. Subagent compactions must not
+    # inject compact-reminders into the shared inbox or write the sentinel,
+    # because those signals are only meaningful to the dispatcher.
+    if not is_dispatcher(data):
+        sys.exit(0)
+
     # Always record compaction timestamp first — before any early returns.
     # This ensures the health check can suppress false-positive restarts even
     # if a compact-reminder is already pending.
