@@ -1,23 +1,22 @@
 #!/usr/bin/env python3
 """
-Lobster Bisque Relay Server
+Lobster Bisque Relay Server — Wire Protocol v2
 
 A WebSocket relay that bridges bisque-chat (browser PWA) with the Lobster
-message queue. Authenticates connections using session tokens from the
-bisque-chat token store, injects incoming messages into Lobster's inbox,
-and pushes outgoing replies to connected clients by watching the bisque-outbox.
+message queue. Supports session-token auth, snapshot-on-connect, event replay,
+and inotify-based delivery via an event bus.
 
-Protocol:
-    Client → Server: {"type": "message", "text": "<user message>"}
-    Client → Server: {"type": "ping"}
-    Server → Client: {"type": "hello", "email": "<user email>"}
-    Server → Client: {"type": "message", "text": "<lobster reply>", "id": "<id>"}
-    Server → Client: {"type": "pong"}
-    Server → Client: {"type": "error", "message": "<description>"}
+Protocol v2:
+    Client → Server: auth, send_message, ack, ping
+    Server → Client: auth_success, auth_error, snapshot, message, inbox_update,
+                     status, tool_call, tool_result, stream_start, stream_delta,
+                     stream_end, agent_started, agent_completed, error, pong
 
 Usage:
     python3 relay_server.py [--host 0.0.0.0] [--port 9101]
 """
+
+from __future__ import annotations
 
 import argparse
 import asyncio
@@ -26,15 +25,28 @@ import logging
 import logging.handlers
 import os
 import signal
-import sys
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from typing import Any
 
-import websockets
-from websockets.asyncio.server import serve
+import aiohttp
+from aiohttp import web
+
+from bisque.auth import TokenStore, handle_auth_exchange
+from bisque.event_bus import EventBus, OutboxEventSource, FileSystemEventSource
+from bisque.event_log import EventLog
+from bisque.protocol import (
+    ProtocolError,
+    deserialize,
+    frame_auth_error,
+    frame_auth_success,
+    frame_error,
+    frame_pong,
+    frame_snapshot,
+    validate_client_frame,
+)
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -46,8 +58,9 @@ _WORKSPACE = Path(os.environ.get("LOBSTER_WORKSPACE", _HOME / "lobster-workspace
 
 INBOX_DIR = _MESSAGES / "inbox"
 BISQUE_OUTBOX_DIR = _MESSAGES / "bisque-outbox"
+WIRE_EVENTS_DIR = _MESSAGES / "wire-events"
+SENT_DIR = _MESSAGES / "sent"
 
-# Token store for bisque-chat session tokens (managed by bisque-chat Next.js app)
 _BISQUE_CHAT_PROJECT = _WORKSPACE / "projects" / "bisque-chat"
 _TOKENS_FILE = _BISQUE_CHAT_PROJECT / "data" / "tokens.json"
 
@@ -70,90 +83,13 @@ _file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(mess
 log.addHandler(_file_handler)
 log.addHandler(logging.StreamHandler())
 
-# ---------------------------------------------------------------------------
-# Directory setup
-# ---------------------------------------------------------------------------
-
-for _d in [INBOX_DIR, BISQUE_OUTBOX_DIR]:
-    _d.mkdir(parents=True, exist_ok=True)
 
 # ---------------------------------------------------------------------------
-# Token validation (pure functions operating on immutable store snapshots)
+# Inbox injection
 # ---------------------------------------------------------------------------
 
-def _read_token_store() -> dict:
-    """Read the bisque-chat token store from disk.
-
-    Returns an empty store structure if the file is missing or corrupt.
-    This is a pure read — no side effects beyond I/O.
-    """
-    empty: dict = {"bootstrapTokens": {}, "sessionTokens": {}}
-    try:
-        raw = _TOKENS_FILE.read_text(encoding="utf-8")
-        return json.loads(raw)
-    except FileNotFoundError:
-        log.warning("Token store not found at %s — all auth will fail", _TOKENS_FILE)
-        return empty
-    except json.JSONDecodeError as exc:
-        log.error("Token store is corrupt: %s", exc)
-        return empty
-
-
-def _validate_session_token(token: str) -> tuple[bool, str]:
-    """Validate a session token and return (valid, email).
-
-    Returns (True, email) on success, (False, "") on failure.
-    Pure: only reads from disk, no mutations.
-    """
-    if not token or len(token) > 256:
-        return False, ""
-    store = _read_token_store()
-    session_tokens = store.get("sessionTokens", {})
-    record = session_tokens.get(token)
-    if not record:
-        return False, ""
-    email = record.get("email", "")
-    return bool(email), email
-
-
-# ---------------------------------------------------------------------------
-# Message frame builders (pure — return JSON strings)
-# ---------------------------------------------------------------------------
-
-def _frame(msg_type: str, **fields) -> str:
-    """Build a JSON protocol frame."""
-    return json.dumps(
-        {"type": msg_type, "timestamp": datetime.now(tz=timezone.utc).isoformat(), **fields},
-        default=str,
-    )
-
-
-def _frame_hello(email: str) -> str:
-    return _frame("hello", email=email, server="lobster-bisque-relay")
-
-
-def _frame_pong() -> str:
-    return _frame("pong")
-
-
-def _frame_error(message: str) -> str:
-    return _frame("error", message=message)
-
-
-def _frame_message(text: str, msg_id: str) -> str:
-    return _frame("message", text=text, id=msg_id)
-
-
-# ---------------------------------------------------------------------------
-# Inbox injection (side effect — isolated here)
-# ---------------------------------------------------------------------------
-
-def _inject_into_inbox(email: str, text: str) -> str:
-    """Write a bisque message into Lobster's inbox as a JSON file.
-
-    Returns the generated message ID.
-    Format mirrors Telegram messages so the main dispatcher handles it normally.
-    """
+def _inject_into_inbox(inbox_dir: Path, email: str, text: str) -> str:
+    """Write a bisque message into Lobster's inbox. Returns message ID."""
     msg_id = f"bisque_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
     payload = {
         "id": msg_id,
@@ -163,9 +99,8 @@ def _inject_into_inbox(email: str, text: str) -> str:
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "type": "text",
     }
-    dest = INBOX_DIR / f"{msg_id}.json"
-    # Atomic write: temp → rename (prevents partial reads by watchdog)
-    tmp = INBOX_DIR / f".{msg_id}.tmp"
+    dest = inbox_dir / f"{msg_id}.json"
+    tmp = inbox_dir / f".{msg_id}.tmp"
     try:
         tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         tmp.rename(dest)
@@ -180,211 +115,337 @@ def _inject_into_inbox(email: str, text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# URL token extraction
-# ---------------------------------------------------------------------------
-
-def _extract_token(path: str) -> str | None:
-    """Parse ?token=<value> from the WebSocket request path."""
-    try:
-        params = parse_qs(urlparse(path).query)
-        tokens = params.get("token")
-        return tokens[0] if tokens else None
-    except Exception:
-        return None
-
-
-# ---------------------------------------------------------------------------
 # Relay server
 # ---------------------------------------------------------------------------
 
 class BisqueRelayServer:
-    """WebSocket relay between bisque-chat browser clients and Lobster inbox.
+    """Wire Protocol v2 relay server.
 
-    Each connection is authenticated with a session token. Authenticated
-    connections are stored keyed by email so outbox messages can be routed
-    to the correct client.
+    Uses aiohttp for HTTP + WebSocket on the same port.
+    POST /auth/exchange — bootstrap token → session token
+    GET  /              — WebSocket upgrade → v2 protocol
     """
 
-    def __init__(self, host: str = "0.0.0.0", port: int = 9101):
+    def __init__(
+        self,
+        host: str = "0.0.0.0",
+        port: int = 9101,
+        token_store: TokenStore | None = None,
+        event_log: EventLog | None = None,
+        event_bus: EventBus | None = None,
+        inbox_dir: Path | None = None,
+        outbox_dir: Path | None = None,
+        wire_events_dir: Path | None = None,
+        sent_dir: Path | None = None,
+    ) -> None:
         self.host = host
-        self.port = port
+        self._requested_port = port
+        self.port: int | None = port if port != 0 else None
+        self._token_store = token_store if token_store is not None else TokenStore(_TOKENS_FILE)
+        self._event_log = event_log if event_log is not None else EventLog()
+        self._event_bus = event_bus if event_bus is not None else EventBus()
+        self._inbox_dir = inbox_dir or INBOX_DIR
+        self._outbox_dir = outbox_dir or BISQUE_OUTBOX_DIR
+        self._wire_events_dir = wire_events_dir or WIRE_EVENTS_DIR
+        self._sent_dir = sent_dir or SENT_DIR
         self._running = True
-        # email -> set of websocket connections (supports multiple tabs)
-        self._clients: dict[str, set] = {}
+        self._clients: set[web.WebSocketResponse] = set()
+        self._client_emails: dict[int, str] = {}  # ws id -> email
+        # Event sources
+        self._outbox_source: OutboxEventSource | None = None
+        self._fs_source: FileSystemEventSource | None = None
+        self._runner: web.AppRunner | None = None
 
-    # --- Connection registry (pure helpers) ---
+    # --- HTTP handler: POST /auth/exchange ---
 
-    def _register(self, email: str, ws) -> None:
-        self._clients.setdefault(email, set()).add(ws)
+    async def _http_auth_exchange(self, request: web.Request) -> web.Response:
+        """Handle bootstrap token exchange via HTTP POST."""
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, Exception):
+            return web.json_response({"error": "Invalid JSON"}, status=400)
 
-    def _unregister(self, email: str, ws) -> None:
-        connections = self._clients.get(email, set())
-        connections.discard(ws)
-        if not connections:
-            self._clients.pop(email, None)
+        status_code, response_body = handle_auth_exchange(body, self._token_store)
+
+        return web.json_response(
+            response_body,
+            status=status_code,
+            headers={"Access-Control-Allow-Origin": "*"},
+        )
+
+    async def _http_options(self, request: web.Request) -> web.Response:
+        """Handle CORS preflight."""
+        return web.Response(
+            status=204,
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type",
+            },
+        )
 
     # --- WebSocket handler ---
 
-    async def handler(self, websocket) -> None:
-        """Handle a single client connection lifecycle."""
-        remote = websocket.remote_address
-        request_path = getattr(websocket.request, "path", "") if websocket.request else ""
+    async def _ws_handler(self, request: web.Request) -> web.WebSocketResponse:
+        """Handle WebSocket connections via aiohttp."""
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        remote = request.remote
 
-        # Authenticate
-        token = _extract_token(request_path)
-        valid, email = _validate_session_token(token or "")
+        # Auth handshake: wait up to 5 seconds for auth frame
+        try:
+            msg = await asyncio.wait_for(ws.receive(), timeout=5.0)
+        except asyncio.TimeoutError:
+            log.warning("Auth timeout from %s", remote)
+            await ws.send_str(frame_auth_error("Authentication timeout"))
+            await ws.close(code=4401, message=b"Authentication timeout")
+            return ws
 
+        if msg.type == aiohttp.WSMsgType.BINARY:
+            await ws.send_str(frame_error("Binary frames not supported"))
+            await ws.close(code=4400, message=b"Binary not supported")
+            return ws
+
+        if msg.type != aiohttp.WSMsgType.TEXT:
+            return ws
+
+        # Parse and validate auth frame
+        try:
+            envelope = deserialize(msg.data)
+        except ProtocolError as exc:
+            await ws.send_str(frame_auth_error(str(exc)))
+            await ws.close(code=4400, message=b"Invalid frame")
+            return ws
+
+        if envelope.type != "auth":
+            await ws.send_str(frame_auth_error(
+                f"Expected 'auth' frame, got '{envelope.type}'"
+            ))
+            await ws.close(code=4401, message=b"Auth required")
+            return ws
+
+        token = envelope.payload.get("token", "")
+        valid, email = self._token_store.validate_session(token)
         if not valid:
-            log.warning("Rejected unauthenticated connection from %s (path=%r)", remote, request_path)
-            await websocket.send(_frame_error("Unauthorized: invalid or missing session token"))
-            await websocket.close(code=4401, reason="Unauthorized")
-            return
+            log.warning("Rejected invalid session from %s", remote)
+            await ws.send_str(frame_auth_error("Invalid session token"))
+            await ws.close(code=4401, message=b"Unauthorized")
+            return ws
+
+        # Touch session
+        self._token_store.touch_session(token)
 
         log.info("Authenticated bisque client: %s (%s)", remote, email)
-        self._register(email, websocket)
+        self._clients.add(ws)
+        self._client_emails[id(ws)] = email
 
         try:
-            await websocket.send(_frame_hello(email))
+            # Send auth_success
+            await ws.send_str(frame_auth_success(email))
 
-            async for raw in websocket:
-                await self._handle_client_message(websocket, email, raw)
+            # Replay or snapshot
+            last_event_id = envelope.payload.get("last_event_id")
+            await self._send_initial_state(ws, last_event_id)
 
-        except websockets.ConnectionClosed:
-            log.info("Bisque client disconnected: %s (%s)", remote, email)
+            # Client message loop
+            async for msg in ws:
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    await self._handle_client_message(ws, email, msg.data)
+                elif msg.type == aiohttp.WSMsgType.BINARY:
+                    await ws.send_str(frame_error("Binary frames not supported"))
+                elif msg.type == aiohttp.WSMsgType.ERROR:
+                    log.error("WS error for %s: %s", email, ws.exception())
+
         except Exception as exc:
             log.error("Error in handler for %s: %s", email, exc)
         finally:
-            self._unregister(email, websocket)
+            self._clients.discard(ws)
+            self._client_emails.pop(id(ws), None)
+            log.info("Bisque client disconnected: %s (%s)", remote, email)
 
-    async def _handle_client_message(self, websocket, email: str, raw: str) -> None:
+        return ws
+
+    async def _send_initial_state(self, ws: web.WebSocketResponse, last_event_id: str | None) -> None:
+        """Send replay or snapshot to a newly connected client."""
+        if last_event_id:
+            frames = self._event_log.replay_after(last_event_id)
+            if frames is not None:
+                for frame in frames:
+                    await ws.send_str(frame)
+                return
+            # else: stale ID, fall through to snapshot
+
+        snapshot = self._build_snapshot()
+        await ws.send_str(snapshot)
+
+    def _build_snapshot(self) -> str:
+        """Build a snapshot frame from current filesystem state."""
+        recent_messages = self._load_recent_messages()
+        last_event_id = self._event_log.get_latest_id()
+
+        return frame_snapshot(
+            status="idle",
+            recent_messages=recent_messages,
+            last_event_id=last_event_id,
+        )
+
+    def _load_recent_messages(self, limit: int = 20) -> list[dict[str, Any]]:
+        """Load recent messages from the sent/ directory."""
+        messages = []
+        try:
+            sent_files = sorted(
+                self._sent_dir.glob("*.json"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )[:limit]
+            for path in reversed(sent_files):
+                try:
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                    messages.append({
+                        "id": data.get("id", path.stem),
+                        "text": data.get("text", ""),
+                        "source": data.get("source", ""),
+                        "chat_id": data.get("chat_id", ""),
+                        "timestamp": data.get("timestamp", ""),
+                    })
+                except (json.JSONDecodeError, OSError):
+                    continue
+        except OSError:
+            pass
+        return messages
+
+    async def _handle_client_message(self, ws: web.WebSocketResponse, email: str, raw: str) -> None:
         """Dispatch a single client message."""
         try:
-            msg = json.loads(raw)
-        except json.JSONDecodeError:
-            await websocket.send(_frame_error("Invalid JSON"))
+            envelope = deserialize(raw)
+            validate_client_frame(envelope)
+        except ProtocolError as exc:
+            await ws.send_str(frame_error(str(exc)))
             return
 
-        msg_type = msg.get("type", "")
+        if envelope.type == "ping":
+            await ws.send_str(frame_pong())
 
-        if msg_type == "ping":
-            await websocket.send(_frame_pong())
-
-        elif msg_type == "message":
-            text = str(msg.get("text", "")).strip()
+        elif envelope.type == "send_message":
+            text = str(envelope.payload.get("text", "")).strip()
             if not text:
-                await websocket.send(_frame_error("Empty message text"))
+                await ws.send_str(frame_error("Empty message text"))
                 return
             if len(text) > 32_000:
-                await websocket.send(_frame_error("Message too long (max 32000 chars)"))
+                await ws.send_str(frame_error("Message too long (max 32000 chars)"))
                 return
-            _inject_into_inbox(email, text)
-            # Acknowledgement (client will show the reply when it arrives via outbox)
+
+            msg_id = _inject_into_inbox(self._inbox_dir, email, text)
+            ack_frame = json.dumps({
+                "v": 2,
+                "id": str(uuid.uuid4()),
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "type": "ack",
+                "message_id": msg_id,
+                "status": "received",
+            })
+            await ws.send_str(ack_frame)
             log.debug("Queued message from %s: %r", email, text[:80])
 
+        elif envelope.type == "ack":
+            pass  # Client acknowledges — no action needed
+
         else:
-            await websocket.send(_frame_error(f"Unknown message type: {msg_type!r}"))
+            await ws.send_str(frame_error(f"Unknown message type: {envelope.type!r}"))
 
-    # --- Outbox watcher ---
+    # --- Event bus callback ---
 
-    async def outbox_watcher(self) -> None:
-        """Poll bisque-outbox/ and push pending messages to connected clients.
+    async def _on_event(self, event_id: str, frame: str) -> None:
+        """Called by the event bus when a new event is available."""
+        self._event_log.append(event_id, frame)
+        await self._fan_out(frame)
 
-        Uses polling rather than inotify so it works in all environments
-        without additional dependencies. Poll interval is intentionally short
-        (0.25s) for near-real-time delivery.
-        """
-        seen: set[str] = set()
-
-        while self._running:
-            await asyncio.sleep(0.25)
-            try:
-                for path in sorted(BISQUE_OUTBOX_DIR.glob("*.json")):
-                    if path.name in seen:
-                        continue
-                    seen.add(path.name)
-                    await self._deliver_outbox_file(path)
-            except Exception as exc:
-                log.error("Outbox watcher error: %s", exc)
-
-    async def _deliver_outbox_file(self, path: Path) -> None:
-        """Read an outbox file, push to the target client, then remove it."""
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            log.error("Could not read outbox file %s: %s", path, exc)
-            return
-
-        email = str(payload.get("chat_id", ""))
-        text = str(payload.get("text", ""))
-        msg_id = str(payload.get("id", path.stem))
-
-        if not email or not text:
-            log.warning("Skipping malformed outbox file %s", path.name)
-            path.unlink(missing_ok=True)
-            return
-
-        connections = self._clients.get(email, set())
-        if not connections:
-            # Client not connected — leave file for retry (up to 60s)
-            age = time.time() - path.stat().st_mtime
-            if age > 60:
-                log.warning("Dropping stale outbox message for %s (age=%.0fs)", email, age)
-                path.unlink(missing_ok=True)
-            return
-
-        frame = _frame_message(text, msg_id)
-        delivered = False
+    async def _fan_out(self, frame: str) -> None:
+        """Send a frame to all connected clients."""
         dead: set = set()
-
-        for ws in connections.copy():
+        for ws in self._clients.copy():
             try:
-                await ws.send(frame)
-                delivered = True
-            except websockets.ConnectionClosed:
+                await ws.send_str(frame)
+            except Exception:
                 dead.add(ws)
-            except Exception as exc:
-                log.error("Error sending to %s: %s", email, exc)
 
         for ws in dead:
-            self._unregister(email, ws)
-
-        if delivered:
-            path.unlink(missing_ok=True)
-            log.info("Delivered outbox message %s to %s", msg_id, email)
+            self._clients.discard(ws)
+            self._client_emails.pop(id(ws), None)
 
     # --- Server lifecycle ---
 
+    def shutdown(self) -> None:
+        """Signal the server to stop."""
+        self._running = False
+
     async def run(self) -> None:
-        """Start the WebSocket server and outbox watcher."""
-        log.info(
-            "Starting Lobster Bisque Relay on ws://%s:%d",
-            self.host, self.port,
-        )
+        """Start the HTTP/WS server and event sources."""
+        for d in [self._inbox_dir, self._outbox_dir, self._wire_events_dir, self._sent_dir]:
+            d.mkdir(parents=True, exist_ok=True)
+
+        log.info("Starting Lobster Bisque Relay v2 on %s:%s", self.host, self._requested_port)
 
         loop = asyncio.get_running_loop()
         stop = loop.create_future()
 
-        def _on_signal():
-            self._running = False
-            if not stop.done():
-                stop.set_result(None)
-
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            loop.add_signal_handler(sig, _on_signal)
-
-        watcher_task = asyncio.create_task(self.outbox_watcher())
-
-        async with serve(self.handler, self.host, self.port) as server:
-            log.info("Bisque relay ready. Token store: %s", _TOKENS_FILE)
-            await stop
-
-        log.info("Shutting down bisque relay...")
-        self._running = False
-        watcher_task.cancel()
         try:
-            await watcher_task
+            def _on_signal():
+                self._running = False
+                if not stop.done():
+                    stop.set_result(None)
+
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                loop.add_signal_handler(sig, _on_signal)
+        except (NotImplementedError, RuntimeError):
+            pass
+
+        # Subscribe to event bus
+        self._event_bus.subscribe(self._on_event)
+
+        # Start event sources
+        self._outbox_source = OutboxEventSource(self._outbox_dir, self._event_bus, loop)
+        self._outbox_source.start()
+
+        self._fs_source = FileSystemEventSource(self._wire_events_dir, self._event_bus, loop)
+        self._fs_source.start()
+
+        # Build aiohttp app
+        app = web.Application()
+        app.router.add_post("/auth/exchange", self._http_auth_exchange)
+        app.router.add_route("OPTIONS", "/auth/exchange", self._http_options)
+        app.router.add_get("/", self._ws_handler)
+        # Catch-all for WS connections on any path
+        app.router.add_get("/{path:.*}", self._ws_handler)
+
+        self._runner = web.AppRunner(app)
+        await self._runner.setup()
+        site = web.TCPSite(self._runner, self.host, self._requested_port)
+        await site.start()
+
+        # Extract actual port
+        for site_obj in self._runner.addresses:
+            if isinstance(site_obj, tuple) and len(site_obj) >= 2:
+                self.port = site_obj[1]
+                break
+
+        log.info("Bisque relay v2 ready on port %s", self.port)
+
+        try:
+            await stop
         except asyncio.CancelledError:
             pass
+
+        log.info("Shutting down bisque relay v2...")
+        self._event_bus.unsubscribe(self._on_event)
+
+        if self._outbox_source:
+            self._outbox_source.stop()
+        if self._fs_source:
+            self._fs_source.stop()
+
+        if self._runner:
+            await self._runner.cleanup()
 
 
 # ---------------------------------------------------------------------------
@@ -392,12 +453,22 @@ class BisqueRelayServer:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Lobster Bisque Relay Server")
+    parser = argparse.ArgumentParser(description="Lobster Bisque Relay Server v2")
     parser.add_argument("--host", default="0.0.0.0", help="Bind host (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=9101, help="Bind port (default: 9101)")
     args = parser.parse_args()
 
-    server = BisqueRelayServer(host=args.host, port=args.port)
+    token_store = TokenStore(_TOKENS_FILE)
+    event_log = EventLog()
+    event_bus = EventBus()
+
+    server = BisqueRelayServer(
+        host=args.host,
+        port=args.port,
+        token_store=token_store,
+        event_log=event_log,
+        event_bus=event_bus,
+    )
     asyncio.run(server.run())
 
 
