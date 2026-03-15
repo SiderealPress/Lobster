@@ -36,7 +36,8 @@ from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQu
 def md_to_html(text: str) -> str:
     """Convert Telegram-flavored Markdown to HTML for reliable rendering.
 
-    Handles: [text](url) links, `code`, ```code blocks```, **bold**, *bold*, _italic_
+    Handles: [text](url) links, `code`, ```code blocks```, **bold**, *bold*, _italic_,
+    ## headings, ### headings, --- horizontal rules.
     Escapes &, <, > in non-HTML portions.
     """
     # Split on code blocks first to avoid formatting inside them
@@ -60,6 +61,10 @@ def md_to_html(text: str) -> str:
         else:
             # Regular text — escape HTML entities first, then apply inline formatting
             p = part.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            # Horizontal rules: --- on its own line → blank line
+            p = re.sub(r'(?m)^---+\s*$', '', p)
+            # Headers: ### or ## or # at start of line → <b>text</b>
+            p = re.sub(r'(?m)^#{1,6}\s+(.+)$', r'<b>\1</b>', p)
             # Links: [text](url)
             p = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2">\1</a>', p)
             # Bold: **text** or __text__
