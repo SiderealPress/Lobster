@@ -49,8 +49,11 @@ from reliability import (
 # Self-update system
 from update_manager import UpdateManager
 
-# Pending agent tracker
+# Pending agent tracker (thin adapter over session_store)
 from agents.tracker import add_pending_agent as _add_pending_agent, remove_pending_agent as _remove_pending_agent
+
+# Agent session store — SQLite-backed, used directly for new MCP tools
+import agents.session_store as _session_store
 
 # Skill management system
 from skill_manager import (
@@ -568,6 +571,13 @@ if not TASKS_FILE.exists():
 # Initialize scheduled jobs file if needed
 if not SCHEDULED_JOBS_FILE.exists():
     SCHEDULED_JOBS_FILE.write_text(json.dumps({"jobs": {}}, indent=2))
+
+# Initialize SQLite agent session store (idempotent, runs JSON migration on first boot)
+try:
+    _session_store.init_db()
+    log.info("Agent session store initialized (SQLite WAL mode)")
+except Exception as _ss_err:
+    log.warning(f"Agent session store init failed (non-fatal): {_ss_err}")
 
 # Source configurations
 SOURCES = {
@@ -1463,6 +1473,122 @@ async def list_tools() -> list[Tool]:
                 "required": ["agent_id"],
             },
         ),
+        # Agent Session Store Tools (SQLite-backed, supersede register/unregister_agent long-term)
+        Tool(
+            name="session_start",
+            description=(
+                "Record a newly-spawned background agent session in the SQLite session store. "
+                "Equivalent to register_agent but with richer metadata. Sessions survive restarts, "
+                "accumulate history, and are queryable via get_active_sessions / get_session_history. "
+                "Use this for new code; register_agent remains a working alias."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "agent_id": {
+                        "type": "string",
+                        "description": "Unique identifier for the agent (uuid or synthetic slug).",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Human-readable summary of what the agent is doing.",
+                    },
+                    "chat_id": {
+                        "oneOf": [{"type": "integer"}, {"type": "string"}],
+                        "description": "Chat/channel to notify when the agent completes.",
+                    },
+                    "agent_type": {
+                        "type": "string",
+                        "description": "Agent subtype: 'functional-engineer', 'general-purpose', etc.",
+                    },
+                    "task_id": {
+                        "type": "string",
+                        "description": "Logical task identifier for auto-unregister matching via write_result.",
+                    },
+                    "source": {
+                        "type": "string",
+                        "description": "Messaging platform ('telegram', 'slack', etc.). Default: 'telegram'.",
+                    },
+                    "output_file": {
+                        "type": "string",
+                        "description": "Full path to /tmp/.../*.output for liveness detection.",
+                    },
+                    "timeout_minutes": {
+                        "type": "integer",
+                        "description": "Expected maximum runtime in minutes.",
+                    },
+                    "parent_id": {
+                        "type": "string",
+                        "description": "Parent session ID for nested agents (NULL = top-level).",
+                    },
+                    "input_summary": {
+                        "type": "string",
+                        "description": "First ~200 chars of task prompt (optional context).",
+                    },
+                },
+                "required": ["agent_id", "description", "chat_id"],
+            },
+        ),
+        Tool(
+            name="session_end",
+            description=(
+                "Mark an agent session as completed or failed in the SQLite session store. "
+                "Equivalent to unregister_agent but records final status and result summary. "
+                "Matches on either agent_id or task_id. Idempotent."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "agent_id": {
+                        "type": "string",
+                        "description": "The agent_id (or task_id) to end.",
+                    },
+                    "status": {
+                        "type": "string",
+                        "description": "Final status: 'completed' | 'failed' | 'dead'.",
+                        "enum": ["completed", "failed", "dead"],
+                    },
+                    "result_summary": {
+                        "type": "string",
+                        "description": "Optional short summary of the outcome.",
+                    },
+                },
+                "required": ["agent_id", "status"],
+            },
+        ),
+        Tool(
+            name="get_active_sessions",
+            description=(
+                "Return all currently running agent sessions with elapsed time. "
+                "Queries the SQLite session store — fast local read, always accurate, "
+                "survives restarts. Use this to answer 'what agents are running?'."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
+        Tool(
+            name="get_session_history",
+            description=(
+                "Return historical agent session records from the SQLite store, newest first. "
+                "Includes completed, failed, and dead sessions. Useful for auditing recent work."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of records to return. Default: 20.",
+                        "default": 20,
+                    },
+                    "status": {
+                        "type": "string",
+                        "description": "Filter by status: 'running' | 'completed' | 'failed' | 'dead'. Omit for all.",
+                    },
+                },
+            },
+        ),
         # Brain Dump Triage Tools
         Tool(
             name="triage_brain_dump",
@@ -2092,11 +2218,20 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
         return await handle_write_result(arguments)
     elif name == "write_observation":
         return await handle_write_observation(arguments)
-    # Pending Agent Tracker Tools
+    # Pending Agent Tracker Tools (register/unregister kept as aliases)
     elif name == "register_agent":
         return await handle_register_agent(arguments)
     elif name == "unregister_agent":
         return await handle_unregister_agent(arguments)
+    # Agent Session Store Tools (SQLite-backed)
+    elif name == "session_start":
+        return await handle_session_start(arguments)
+    elif name == "session_end":
+        return await handle_session_end(arguments)
+    elif name == "get_active_sessions":
+        return await handle_get_active_sessions(arguments)
+    elif name == "get_session_history":
+        return await handle_get_session_history(arguments)
     # Brain Dump Triage Tools
     elif name == "triage_brain_dump":
         return await handle_triage_brain_dump(arguments)
@@ -2217,6 +2352,33 @@ def _recover_retryable_messages():
             continue
 
 
+def _build_active_sessions_prefix() -> str:
+    """Return a compact active-sessions context block, or empty string if none running.
+
+    Called at the start of wait_for_messages and on timeouts so the dispatcher
+    always has an accurate picture of in-flight agents. Uses a synchronous SQLite
+    read (<1ms) — safe to call from the main thread.
+    """
+    try:
+        active = _session_store.get_active_sessions()
+        return _session_store.format_active_sessions_block(active)
+    except Exception:
+        return ""
+
+
+def _prepend_sessions_prefix(prefix: str, results: list[TextContent]) -> list[TextContent]:
+    """Prepend active-sessions block to the first TextContent item if prefix is non-empty.
+
+    Returns the (possibly modified) list unchanged in structure — only the text
+    of the first element is prepended. This is a pure transformation.
+    """
+    if not prefix or not results:
+        return results
+    first = results[0]
+    new_text = prefix + "\n\n" + first.text
+    return [TextContent(type=first.type, text=new_text)] + results[1:]
+
+
 async def handle_wait_for_messages(args: dict) -> list[TextContent]:
     """Block until new messages arrive in inbox, or return immediately if messages exist."""
     timeout = args.get("timeout", 72000)
@@ -2228,6 +2390,9 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
     # Recover stale processing and retryable failed messages
     _recover_stale_processing()
     _recover_retryable_messages()
+
+    # Build active-sessions prefix once (fast SQLite read, <1ms)
+    sessions_prefix = _build_active_sessions_prefix()
 
     # Start the observer BEFORE the initial glob check to eliminate the TOCTOU
     # race window: a message that arrives between the glob and observer.start()
@@ -2255,7 +2420,8 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
         if existing:
             # Messages already waiting - return them immediately
             touch_heartbeat()
-            return await handle_check_inbox({"limit": 10})
+            inbox_results = await handle_check_inbox({"limit": 10})
+            return _prepend_sessions_prefix(sessions_prefix, inbox_results)
         # Wait with periodic heartbeats (every 60 seconds)
         heartbeat_interval = 60
         elapsed = 0
@@ -2280,7 +2446,8 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
             await asyncio.sleep(0.1)
             touch_heartbeat()
             log.info("New message(s) arrived in inbox")
-            return await handle_check_inbox({"limit": 10})
+            inbox_results = await handle_check_inbox({"limit": 10})
+            return _prepend_sessions_prefix(sessions_prefix, inbox_results)
         else:
             # Timeout expired with no messages
             touch_heartbeat()
@@ -2300,10 +2467,10 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
                     ),
                 )]
 
-            return [TextContent(
-                type="text",
-                text=f"⏰ No messages received in the last {timeout} seconds. Call `wait_for_messages` again to continue waiting."
-            )]
+            timeout_text = f"⏰ No messages received in the last {timeout} seconds. Call `wait_for_messages` again to continue waiting."
+            if sessions_prefix:
+                timeout_text = sessions_prefix + "\n\n" + timeout_text
+            return [TextContent(type="text", text=timeout_text)]
     finally:
         observer.stop()
         observer.join(timeout=1)
@@ -4157,11 +4324,16 @@ async def handle_write_result(args: dict) -> list[TextContent]:
     inbox_file = INBOX_DIR / f"{message_id}.json"
     atomic_write_json(inbox_file, message)
 
-    # Auto-unregister: remove this agent from the pending-agents tracker.
-    # The task_id passed to write_result matches the agent_id registered by the dispatcher.
+    # Auto-unregister: mark this agent session as completed in the SQLite store.
+    # The task_id passed to write_result matches the agent_id or task_id registered by the dispatcher.
     # This is the atomic "result delivered → agent done" guarantee described in issue #295.
+    # Uses session_store.session_end directly so the completion status is recorded in history.
     try:
-        _remove_pending_agent(agent_id=task_id)
+        _session_store.session_end(
+            id_or_task_id=task_id,
+            status="completed",
+            result_summary=(text[:200] if text else None),
+        )
     except Exception as exc:
         log.warning(f"write_result auto-unregister failed for task_id={task_id!r}: {exc}")
 
@@ -4321,6 +4493,136 @@ async def handle_unregister_agent(args: dict) -> list[TextContent]:
     return [TextContent(
         type="text",
         text=f"Agent unregistered: {agent_id!r}",
+    )]
+
+
+# =============================================================================
+# Agent Session Store Handlers (SQLite-backed, supersede register/unregister)
+# =============================================================================
+
+
+async def handle_session_start(args: dict) -> list[TextContent]:
+    """Record a newly-spawned background agent session in the SQLite store.
+
+    Richer than register_agent: supports agent_type, parent_id, input_summary.
+    register_agent remains a working alias that delegates to this via tracker.py.
+    """
+    agent_id = args.get("agent_id", "").strip()
+    description = args.get("description", "").strip()
+    chat_id = args.get("chat_id")
+    agent_type = args.get("agent_type") or None
+    task_id = args.get("task_id") or None
+    source = (args.get("source") or "telegram").strip() or "telegram"
+    output_file = args.get("output_file") or None
+    timeout_minutes = args.get("timeout_minutes") or None
+    parent_id = args.get("parent_id") or None
+    input_summary = args.get("input_summary") or None
+
+    if not agent_id:
+        return [TextContent(type="text", text="Error: agent_id is required")]
+    if not description:
+        return [TextContent(type="text", text="Error: description is required")]
+    if chat_id is None:
+        return [TextContent(type="text", text="Error: chat_id is required")]
+
+    if timeout_minutes is not None:
+        try:
+            timeout_minutes = int(timeout_minutes)
+        except (TypeError, ValueError):
+            timeout_minutes = None
+
+    try:
+        _session_store.session_start(
+            id=agent_id,
+            description=description,
+            chat_id=str(chat_id),
+            agent_type=agent_type,
+            task_id=task_id,
+            source=source,
+            output_file=output_file,
+            timeout_minutes=timeout_minutes,
+            parent_id=parent_id,
+            input_summary=input_summary,
+        )
+    except Exception as exc:
+        log.error(f"session_start failed: {exc}", exc_info=True)
+        return [TextContent(type="text", text=f"Error starting session: {exc}")]
+
+    log.info(f"Session started: agent_id={agent_id!r} agent_type={agent_type!r} chat_id={chat_id}")
+    return [TextContent(
+        type="text",
+        text=f"Session started: {agent_id!r} ({agent_type or 'agent'}) — {description}",
+    )]
+
+
+async def handle_session_end(args: dict) -> list[TextContent]:
+    """Mark an agent session as completed or failed in the SQLite store.
+
+    Matches on agent_id or task_id. Idempotent.
+    """
+    agent_id = args.get("agent_id", "").strip()
+    status = args.get("status", "completed").strip()
+    result_summary = args.get("result_summary") or None
+
+    if not agent_id:
+        return [TextContent(type="text", text="Error: agent_id is required")]
+    if status not in ("completed", "failed", "dead"):
+        return [TextContent(type="text", text=f"Error: status must be 'completed', 'failed', or 'dead' (got {status!r})")]
+
+    try:
+        _session_store.session_end(
+            id_or_task_id=agent_id,
+            status=status,
+            result_summary=result_summary,
+        )
+    except Exception as exc:
+        log.error(f"session_end failed: {exc}", exc_info=True)
+        return [TextContent(type="text", text=f"Error ending session: {exc}")]
+
+    log.info(f"Session ended: agent_id={agent_id!r} status={status!r}")
+    return [TextContent(
+        type="text",
+        text=f"Session ended: {agent_id!r} → {status}",
+    )]
+
+
+async def handle_get_active_sessions(args: dict) -> list[TextContent]:
+    """Return all currently running agent sessions from the SQLite store."""
+    try:
+        sessions = _session_store.get_active_sessions()
+    except Exception as exc:
+        log.error(f"get_active_sessions failed: {exc}", exc_info=True)
+        return [TextContent(type="text", text=f"Error querying active sessions: {exc}")]
+
+    if not sessions:
+        return [TextContent(type="text", text="No active agent sessions.")]
+
+    import json as _json_mod
+    return [TextContent(
+        type="text",
+        text=_json_mod.dumps(sessions, indent=2),
+    )]
+
+
+async def handle_get_session_history(args: dict) -> list[TextContent]:
+    """Return historical agent session records from the SQLite store."""
+    limit = int(args.get("limit", 20))
+    status = args.get("status") or None
+
+    try:
+        history = _session_store.get_session_history(limit=limit, status=status)
+    except Exception as exc:
+        log.error(f"get_session_history failed: {exc}", exc_info=True)
+        return [TextContent(type="text", text=f"Error querying session history: {exc}")]
+
+    if not history:
+        filter_note = f" with status={status!r}" if status else ""
+        return [TextContent(type="text", text=f"No session history{filter_note}.")]
+
+    import json as _json_mod
+    return [TextContent(
+        type="text",
+        text=_json_mod.dumps(history, indent=2),
     )]
 
 
