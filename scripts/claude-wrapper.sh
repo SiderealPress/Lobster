@@ -19,7 +19,7 @@ export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
 
 # Prevent "cannot launch inside another Claude Code session" error.
 # CLAUDECODE leaks when this script is run from an interactive Claude session.
-unset CLAUDECODE
+unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT 2>/dev/null || true
 
 # Verify claude is available
 if ! command -v claude &>/dev/null; then

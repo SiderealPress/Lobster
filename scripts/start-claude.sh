@@ -44,7 +44,7 @@ LOBSTER_DEBUG="${LOBSTER_DEBUG:-false}"
 
 # Prevent "cannot launch inside another Claude Code session" error.
 # Clear before exec-ing into the actual launcher script.
-unset CLAUDECODE
+unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT 2>/dev/null || true
 
 if [[ "$LOBSTER_DEBUG" == "true" ]]; then
     echo "[start-claude] LOBSTER_DEBUG=true — launching interactive REPL (claude-wrapper.exp)"
