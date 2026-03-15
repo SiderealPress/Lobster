@@ -51,10 +51,13 @@ You MUST both deliver results to the user directly AND call `write_result` at th
 
 ```python
 # Step 1: Deliver directly to the user (crash-safe delivery)
+# Pass task_id to enable server-side auto-dedup: the inbox server will
+# automatically suppress forward=True in write_result for this task_id.
 mcp__lobster-inbox__send_reply(
     chat_id=<user's chat_id — get this from your task prompt>,
     text="<your result or report>",
-    source="telegram"  # or "slack" if appropriate
+    source="telegram",  # or "slack" if appropriate
+    task_id="<same task_id you will use in write_result>",
 )
 
 # Step 2: Signal the dispatcher to mark processed without re-sending
@@ -78,6 +81,8 @@ mcp__lobster-inbox__write_result(
 Failing to pass `forward=False` causes duplicate messages — the dispatcher will forward your `write_result` on top of the `send_reply` you already sent.
 
 **Why two steps?** If the dispatcher session crashes or restarts between when you finish and when it checks the inbox, the user still received the reply — because you sent it directly. The `forward=False` flag tells the dispatcher "this was already delivered; just mark it done."
+
+**Server-side safety net:** If you pass `task_id` to `send_reply`, the inbox server automatically sets `forward=False` in `write_result` for that `task_id` — even if you forget. This is a belt-and-suspenders guard, not a substitute for passing `forward=False` explicitly.
 
 **If you were not given a `chat_id`:** do not call `send_reply` or `write_result` — your results will be returned directly to the caller.
 
