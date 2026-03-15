@@ -51,7 +51,21 @@ TASK_OUTPUTS_DIR = _MESSAGES / "task-outputs"
 # Lobster install start: use config/lobster-state.json if available, else
 # fall back to the age of the oldest processed message.
 STATE_FILE = CONFIG_DIR / "lobster-state.json"
-PENDING_AGENTS_FILE = CONFIG_DIR / "pending-agents.json"
+PENDING_AGENTS_FILE = CONFIG_DIR / "pending-agents.json"  # Legacy fallback
+SESSION_DB_PATH = CONFIG_DIR / "agent_sessions.db"
+
+# ---------------------------------------------------------------------------
+# Agent session store — SQLite-backed, optional (graceful fallback to JSON)
+# ---------------------------------------------------------------------------
+_LOBSTER_SRC = Path(os.environ.get("LOBSTER_SRC", Path.home() / "lobster")) / "src"
+if str(_LOBSTER_SRC) not in sys.path:
+    sys.path.insert(0, str(_LOBSTER_SRC))
+try:
+    from agents import session_store as _session_store
+    _SESSION_STORE_AVAILABLE = True
+except ImportError:
+    _session_store = None  # type: ignore[assignment]
+    _SESSION_STORE_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
 # Auth
@@ -218,24 +232,77 @@ def _parse_agent_type_from_output(output_text: str) -> str | None:
 
 
 def _compute_agent_stats(task_outputs: list[dict], pending_agents: dict) -> dict:
-    """Compute agent usage statistics from task outputs and pending agents file."""
+    """Compute agent usage statistics from session history and task outputs.
+
+    Queries the SQLite session store when available (accurate history with
+    agent_type, duration, and status). Falls back to task output heuristics
+    and the legacy pending-agents dict when the store is not available.
+    """
     by_type: dict[str, int] = {}
     total = 0
+    currently_active = 0
+    avg_duration_ms: int = 45000  # placeholder default
 
+    if _SESSION_STORE_AVAILABLE and SESSION_DB_PATH.is_file():
+        try:
+            _session_store.init_db(SESSION_DB_PATH)
+            active_sessions = _session_store.get_active_sessions(path=SESSION_DB_PATH)
+            history = _session_store.get_session_history(limit=200, path=SESSION_DB_PATH)
+            currently_active = len(active_sessions)
+
+            # Aggregate by agent_type from full history
+            durations_ms: list[int] = []
+            for record in history:
+                agent_type = record.get("agent_type") or _parse_agent_type_from_output(
+                    record.get("result_summary") or ""
+                )
+                if agent_type:
+                    by_type[agent_type] = by_type.get(agent_type, 0) + 1
+                    total += 1
+
+                # Compute duration if both timestamps present
+                spawned_at = record.get("spawned_at")
+                completed_at = record.get("completed_at")
+                if spawned_at and completed_at:
+                    try:
+                        s = datetime.fromisoformat(spawned_at)
+                        e = datetime.fromisoformat(completed_at)
+                        if s.tzinfo is None:
+                            s = s.replace(tzinfo=timezone.utc)
+                        if e.tzinfo is None:
+                            e = e.replace(tzinfo=timezone.utc)
+                        ms = int((e - s).total_seconds() * 1000)
+                        if ms > 0:
+                            durations_ms.append(ms)
+                    except (ValueError, TypeError):
+                        pass
+
+            if durations_ms:
+                avg_duration_ms = sum(durations_ms) // len(durations_ms)
+
+            return {
+                "total_spawned": total,
+                "by_type": by_type,
+                "avg_duration_ms": avg_duration_ms,
+                "currently_active": currently_active,
+            }
+        except Exception:
+            pass  # Fall through to legacy path
+
+    # Legacy path: heuristics from task outputs + pending-agents.json
     for output in task_outputs:
         agent_type = _parse_agent_type_from_output(output.get("output", ""))
         if agent_type:
             by_type[agent_type] = by_type.get(agent_type, 0) + 1
             total += 1
 
-    # Count currently active agents from pending-agents.json
     agents_list = pending_agents.get("agents", []) if isinstance(pending_agents, dict) else []
     currently_active = len(agents_list)
 
     return {
         "total_spawned": total,
         "by_type": by_type,
-        "avg_duration_ms": 45000,  # placeholder — no timing data available yet
+        "avg_duration_ms": avg_duration_ms,
         "currently_active": currently_active,
     }
 

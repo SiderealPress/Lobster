@@ -17,6 +17,18 @@ from typing import Any
 
 import psutil
 
+# Agent session store — SQLite-backed, WAL mode, safe for multi-process reads
+import sys as _sys
+_LOBSTER_SRC_PATH = Path(os.environ.get("LOBSTER_SRC", Path.home() / "lobster")) / "src"
+if str(_LOBSTER_SRC_PATH) not in _sys.path:
+    _sys.path.insert(0, str(_LOBSTER_SRC_PATH))
+try:
+    from agents import session_store as _session_store
+    _SESSION_STORE_AVAILABLE = True
+except ImportError:
+    _session_store = None  # type: ignore[assignment]
+    _SESSION_STORE_AVAILABLE = False
+
 
 # --- Directories -----------------------------------------------------------
 
@@ -27,7 +39,8 @@ _USER_CONFIG = Path(os.environ.get("LOBSTER_USER_CONFIG", _HOME / "lobster-user-
 _LOBSTER_SRC = Path(os.environ.get("LOBSTER_SRC", _HOME / "lobster"))
 _SCHEDULED_TASKS = _LOBSTER_SRC / "scheduled-tasks" / "tasks"
 _MEMORY_DB = _WORKSPACE / "data" / "memory.db"
-_PENDING_AGENTS_FILE = _MESSAGES / "config" / "pending-agents.json"
+_PENDING_AGENTS_FILE = _MESSAGES / "config" / "pending-agents.json"  # Legacy — kept for fallback
+_SESSION_DB_PATH = _MESSAGES / "config" / "agent_sessions.db"
 _TASK_OUTPUTS_DIR = Path(f"/tmp/claude-1000/-home-admin-lobster-workspace/tasks")
 _MEMORY_CANONICAL_DIR = _USER_CONFIG / "memory" / "canonical"
 
@@ -521,26 +534,95 @@ def _iso_to_epoch(iso_str: str) -> float | None:
         return None
 
 
-def collect_subagent_list() -> dict:
-    """Collect the list of pending Lobster agents and their runtime stats.
-
-    Reads the pending-agents.json file for declared agents and correlates
-    each with its JSONL task output file by matching start-time (within a
-    10-second window).
+def _collect_subagent_list_from_sqlite() -> dict:
+    """Collect active agent sessions from the SQLite session store.
 
     Returns a dict with keys: pending_count, agents, running_tasks.
+    The agents list is enriched with elapsed_seconds from session_store.
+    Unmatched running tasks (task output files without a session entry) are
+    also included for observability completeness.
     """
-    # 1. Read pending agents
+    try:
+        active_sessions = _session_store.get_active_sessions()
+    except Exception:
+        active_sessions = []
+
+    running_tasks = _collect_running_tasks()
+
+    now = time.time()
+    matched_files: set[str] = set()
+    enriched_agents = []
+
+    for session in active_sessions:
+        spawned_at = session.get("spawned_at", "")
+        agent_epoch = _iso_to_epoch(spawned_at) if spawned_at else None
+
+        # Try to match with a running task output file by start-time proximity
+        best_runtime: dict | None = None
+        output_file = session.get("output_file")
+        if output_file:
+            # Prefer exact match by output_file path
+            file_name = Path(output_file).name
+            for task in running_tasks:
+                if task.get("file", "") == file_name:
+                    best_runtime = task
+                    matched_files.add(file_name)
+                    break
+
+        # Fall back to start-time proximity matching (10-second window)
+        if best_runtime is None and agent_epoch is not None:
+            for task in running_tasks:
+                first_ts = task.get("first_timestamp")
+                if first_ts is None:
+                    continue
+                task_epoch = _iso_to_epoch(first_ts)
+                if task_epoch is None:
+                    continue
+                if abs(task_epoch - agent_epoch) <= 10.0:
+                    best_runtime = task
+                    matched_files.add(task.get("file", ""))
+                    break
+
+        elapsed = session.get("elapsed_seconds")
+
+        # Determine display status from runtime data
+        display_status = session.get("status", "running")
+        if best_runtime is not None and display_status == "running":
+            display_status = "stale" if best_runtime.get("stale") else "running"
+
+        enriched_agents.append({
+            "id": session.get("id", ""),
+            "description": session.get("description", ""),
+            "chat_id": session.get("chat_id"),
+            "agent_type": session.get("agent_type"),
+            "started_at": spawned_at,
+            "elapsed_seconds": elapsed,
+            "status": display_status,
+            "runtime": best_runtime,
+        })
+
+    # Include unmatched running tasks (no session entry for this output file)
+    unmatched_tasks = [t for t in running_tasks if t.get("file", "") not in matched_files]
+
+    return {
+        "pending_count": len(active_sessions),
+        "agents": enriched_agents,
+        "running_tasks": unmatched_tasks,
+    }
+
+
+def _collect_subagent_list_from_json() -> dict:
+    """Fallback: collect agent list from legacy pending-agents.json.
+
+    Used when the SQLite session store is not available.
+    """
     pending_agents: list[dict] = []
     if _PENDING_AGENTS_FILE.is_file():
         raw = _read_json(_PENDING_AGENTS_FILE)
         if isinstance(raw, dict):
             pending_agents = raw.get("agents", [])
 
-    # 2. Collect runtime stats for all task output files
     running_tasks = _collect_running_tasks()
-
-    # 3. Match pending agents to runtime tasks by start-time proximity
     now = time.time()
     matched_files: set[str] = set()
     enriched_agents = []
@@ -548,8 +630,6 @@ def collect_subagent_list() -> dict:
     for agent in pending_agents:
         started_at = agent.get("started_at", "")
         agent_epoch = _iso_to_epoch(started_at) if started_at else None
-
-        # Find the best-matching runtime task within a 10-second window
         best_runtime: dict | None = None
         if agent_epoch is not None:
             for task in running_tasks:
@@ -563,18 +643,12 @@ def collect_subagent_list() -> dict:
                     best_runtime = task
                     matched_files.add(task.get("file", ""))
                     break
-
         elapsed = int(now - agent_epoch) if agent_epoch is not None else None
-
-        # Determine status from runtime data
         status = "unknown"
         if best_runtime is not None:
-            ago = best_runtime.get("last_activity_seconds_ago")
-            if ago is not None:
-                status = "stale" if best_runtime.get("stale") else "running"
+            status = "stale" if best_runtime.get("stale") else "running"
         elif elapsed is not None:
             status = "running"
-
         enriched_agents.append({
             "id": agent.get("id", ""),
             "description": agent.get("description", ""),
@@ -585,14 +659,33 @@ def collect_subagent_list() -> dict:
             "runtime": best_runtime,
         })
 
-    # Include unmatched running tasks (no pending agent entry)
     unmatched_tasks = [t for t in running_tasks if t.get("file", "") not in matched_files]
-
     return {
         "pending_count": len(pending_agents),
         "agents": enriched_agents,
         "running_tasks": unmatched_tasks,
     }
+
+
+def collect_subagent_list() -> dict:
+    """Collect the list of active Lobster agent sessions and their runtime stats.
+
+    Queries the SQLite session store (agent_sessions.db) when available.
+    Falls back to reading pending-agents.json if the session store is not
+    accessible (e.g., old installation, import error).
+
+    Returns a dict with keys: pending_count, agents, running_tasks.
+    """
+    if _SESSION_STORE_AVAILABLE and _SESSION_DB_PATH.is_file():
+        # Initialize the store (idempotent) so it's ready for reads
+        try:
+            _session_store.init_db(_SESSION_DB_PATH)
+        except Exception:
+            pass
+        return _collect_subagent_list_from_sqlite()
+
+    # Fallback to legacy JSON-based collection
+    return _collect_subagent_list_from_json()
 
 
 # ---------------------------------------------------------------------------
