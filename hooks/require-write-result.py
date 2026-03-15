@@ -34,14 +34,14 @@ def main():
     if "mcp__lobster-inbox__write_result" in tool_calls:
         sys.exit(0)
 
-    # Subagent finished without calling write_result — inject reminder
+    # Subagent finished without calling write_result — block exit
     print(
         "STOP: You must call mcp__lobster-inbox__write_result before finishing. "
         "The dispatcher is waiting for your result. "
         "If the task failed, report the failure — but you must call write_result. "
         "Call it now with your findings, then you may exit."
     )
-    sys.exit(0)  # Exit 0 so the message is injected (not a hard block)
+    sys.exit(2)  # Exit 2 to hard-block the session from terminating
 
 
 if __name__ == "__main__":
