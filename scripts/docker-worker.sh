@@ -64,6 +64,10 @@ fi
 #===============================================================================
 CONTAINER_NAME="lobster-worker-${JOB_NAME}-$(date +%s)"
 
+# Prevent CLAUDECODE from leaking into Docker container via explicit -e flags
+# or docker's default environment passthrough.
+unset CLAUDECODE
+
 container_id=$(sudo docker run -d --rm \
     --name "$CONTAINER_NAME" \
     --memory=2g --cpus=2 \

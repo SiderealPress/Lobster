@@ -66,7 +66,7 @@ OUTBOX_YELLOW_THRESHOLD_SECONDS=300  # 5 min = YELLOW
 OUTBOX_HISTORICAL_CUTOFF=3600        # Skip files > 1 hour (dead-letter candidates)
 
 LOG_FILE="$WORKSPACE_DIR/logs/health-check.log"
-LOCK_FILE="/tmp/lobster-health-check-v3.lock"
+LOCK_FILE="${LOBSTER_HEALTH_LOCK:-/tmp/lobster-health-check-v3.lock}"
 
 MAX_RESTART_ATTEMPTS=3
 RESTART_COOLDOWN_SECONDS=600         # 10 min window for counting attempts

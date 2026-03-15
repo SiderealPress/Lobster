@@ -37,6 +37,9 @@ fi
 #===============================================================================
 # Run Claude
 #===============================================================================
+# Prevent "cannot launch inside another Claude Code session" error.
+unset CLAUDECODE
+
 start_time=$(date +%s)
 echo "Worker starting: job=$WORKER_JOB_NAME, max_turns=$WORKER_MAX_TURNS"
 

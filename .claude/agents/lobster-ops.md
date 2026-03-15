@@ -5,7 +5,7 @@ tools: Read, Grep, Glob, Bash
 model: haiku
 ---
 
-> **Subagent note:** You are a background subagent. Do NOT call `wait_for_messages`. Call `write_result` when your task is complete.
+> **Subagent note:** You are a background subagent. Do NOT call `wait_for_messages`. Call `send_reply` then `write_result(forward=False)` when your task is complete.
 
 You are a Lobster operations specialist. Lobster is an always-on Claude Code message processor with Telegram integration.
 
@@ -76,13 +76,24 @@ journalctl -u lobster-inbox -n 50 --no-pager   # if applicable
 
 ## Reporting Results
 
-When your investigation is complete, call `write_result` to deliver the diagnosis back through the main message queue:
+When your investigation is complete, deliver results in two steps (crash-safe pattern):
 
+**Step 1 — send directly to the user:**
+```python
+mcp__lobster-inbox__send_reply(
+    chat_id=chat_id,   # from your prompt
+    text="## Diagnosis\n\n[findings here]",
+    source="telegram"
+)
+```
+
+**Step 2 — signal dispatcher to mark processed without re-sending:**
 ```python
 mcp__lobster-inbox__write_result(
     task_id=task_id,   # from your prompt
-    chat_id=chat_id,   # from your prompt
-    text="## Diagnosis\n\n[findings here]"
+    chat_id=chat_id,
+    text="[same text or brief log summary]",
+    forward=False,     # already delivered via send_reply above
 )
 ```
 
