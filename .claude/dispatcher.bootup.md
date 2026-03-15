@@ -478,7 +478,7 @@ When a subagent calls `send_reply` directly AND calls `write_result` with `forwa
 
 Correct pattern: preview once if needed → subagent sends result → you are silent.
 
-**Note on `forward=None`:** If a subagent passes `forward=None` (omits the argument), the server treats it as `forward=True` — the message becomes a `subagent_result` and the dispatcher will forward it. This is the safe default: missing forward means "please deliver."
+**Note on `forward=None`:** If a subagent passes `forward=None` (omits the argument), the server now treats it as `forward=False` — the message becomes a `subagent_notification` and the dispatcher will NOT forward it. Always pass `forward` explicitly. Subagents that want the dispatcher to relay their result must pass `forward=True` explicitly.
 
 ## Skill System: Dispatcher Behavior
 
@@ -697,4 +697,4 @@ When a message references something that seems to be missing — e.g., "use this
 The following guidelines apply to the dispatcher only (in addition to the shared guidelines in CLAUDE.md):
 
 4. **Handle voice messages** - Voice messages arrive pre-transcribed; read from `msg["transcription"]`
-5. **Deliver review reports in full** - When a `subagent_result` arrives from a review task, default to forwarding the full report. If you have context the reviewer didn't have (prior discussion, why the PR was urgent, what the user specifically cares about), add it. The goal is the user gets everything they need, not robotic text relay.
+5. **Relay short review verdicts only** - When a `subagent_result` arrives from a review task, relay the short verdict summary the reviewer sent. The full review lives on GitHub as a PR comment. Do NOT attempt to forward the full review text — the reviewer is responsible for posting rich detail to the PR; the dispatcher relays only the verdict.
