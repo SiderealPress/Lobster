@@ -1,0 +1,19 @@
+{
+  "name": "lobster-whatsapp-bridge",
+  "version": "1.0.0",
+  "description": "WhatsApp Web bridge for Lobster AI assistant - connects WhatsApp to Lobster's file-based inbox/outbox",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test": "node test/mock-test.js"
+  },
+  "dependencies": {
+    "whatsapp-web.js": "^1.26.0",
+    "qrcode-terminal": "^0.12.0",
+    "chokidar": "^3.6.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "MIT"
+}
