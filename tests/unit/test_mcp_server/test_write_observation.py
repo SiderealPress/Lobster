@@ -34,9 +34,13 @@ class TestHandleWriteObservation:
     def _run(self, args: dict, inbox_dir: Path) -> list:
         # Import inside the patch block, matching the pattern used throughout
         # the existing MCP server test suite.
+        # Always mock _DEBUG_MODE=False/_DEBUG_RESOLVED=True so tests that
+        # expect inbox writes are not affected by the host LOBSTER_DEBUG setting.
         with patch.multiple(
             "src.mcp.inbox_server",
             INBOX_DIR=inbox_dir,
+            _DEBUG_MODE=False,
+            _DEBUG_RESOLVED=True,
         ):
             from src.mcp.inbox_server import handle_write_observation
             return asyncio.run(handle_write_observation(args))
@@ -350,3 +354,144 @@ class TestHandleWriteObservation:
         assert "Observation queued" in result[0].text
         files = list(inbox_dir.glob("*.json"))
         assert len(files) == 1
+
+    # ------------------------------------------------------------------
+    # Debug mode: automatic routing (LOBSTER_DEBUG=true)
+    # ------------------------------------------------------------------
+
+    def test_system_context_bypasses_inbox_in_debug_mode(self, inbox_dir: Path):
+        """system_context observations bypass the inbox when LOBSTER_DEBUG=true."""
+        emitted: list[dict] = []
+
+        def fake_emit(text: str, category: str = "system_context") -> None:
+            emitted.append({"text": text, "category": category})
+
+        with patch.multiple(
+            "src.mcp.inbox_server",
+            INBOX_DIR=inbox_dir,
+            _DEBUG_MODE=True,
+            _DEBUG_RESOLVED=True,
+            _emit_debug_observation=fake_emit,
+        ):
+            from src.mcp.inbox_server import handle_write_observation
+            result = asyncio.run(handle_write_observation({
+                "chat_id": 123,
+                "text": "Config drift detected.",
+                "category": "system_context",
+            }))
+
+        # No inbox file — bypassed entirely
+        assert list(inbox_dir.glob("*.json")) == []
+        # Direct Telegram delivery
+        assert len(emitted) == 1
+        assert emitted[0]["category"] == "system_context"
+        assert "Config drift detected." in emitted[0]["text"]
+        assert "debug mode" in result[0].text
+
+    def test_system_error_bypasses_inbox_in_debug_mode(self, inbox_dir: Path):
+        """system_error observations bypass the inbox when LOBSTER_DEBUG=true."""
+        emitted: list[dict] = []
+
+        def fake_emit(text: str, category: str = "system_context") -> None:
+            emitted.append({"text": text, "category": category})
+
+        with patch.multiple(
+            "src.mcp.inbox_server",
+            INBOX_DIR=inbox_dir,
+            _DEBUG_MODE=True,
+            _DEBUG_RESOLVED=True,
+            _emit_debug_observation=fake_emit,
+        ):
+            from src.mcp.inbox_server import handle_write_observation
+            result = asyncio.run(handle_write_observation({
+                "chat_id": 123,
+                "text": "API call failed.",
+                "category": "system_error",
+            }))
+
+        assert list(inbox_dir.glob("*.json")) == []
+        assert len(emitted) == 1
+        assert emitted[0]["category"] == "system_error"
+        assert "debug mode" in result[0].text
+
+    def test_user_context_still_queues_inbox_in_debug_mode(self, inbox_dir: Path):
+        """user_context observations always write to inbox even when LOBSTER_DEBUG=true."""
+        emitted: list[dict] = []
+
+        def fake_emit(text: str, category: str = "system_context") -> None:
+            emitted.append({"text": text, "category": category})
+
+        with patch.multiple(
+            "src.mcp.inbox_server",
+            INBOX_DIR=inbox_dir,
+            _DEBUG_MODE=True,
+            _DEBUG_RESOLVED=True,
+            _emit_debug_observation=fake_emit,
+        ):
+            from src.mcp.inbox_server import handle_write_observation
+            result = asyncio.run(handle_write_observation({
+                "chat_id": 123,
+                "text": "User prefers dark mode.",
+                "category": "user_context",
+            }))
+
+        # Inbox file written (dispatcher needs to act on user_context)
+        files = list(inbox_dir.glob("*.json"))
+        assert len(files) == 1
+        # Also emitted directly so user sees it in debug mode
+        assert len(emitted) == 1
+        assert emitted[0]["category"] == "user_context"
+        assert "Observation queued" in result[0].text
+
+    def test_system_context_goes_to_inbox_in_non_debug_mode(self, inbox_dir: Path):
+        """system_context observations write to inbox when LOBSTER_DEBUG=false."""
+        emitted: list[dict] = []
+
+        def fake_emit(text: str, category: str = "system_context") -> None:
+            emitted.append({"text": text, "category": category})
+
+        with patch.multiple(
+            "src.mcp.inbox_server",
+            INBOX_DIR=inbox_dir,
+            _DEBUG_MODE=False,
+            _DEBUG_RESOLVED=True,
+            _emit_debug_observation=fake_emit,
+        ):
+            from src.mcp.inbox_server import handle_write_observation
+            result = asyncio.run(handle_write_observation({
+                "chat_id": 123,
+                "text": "Config state normal.",
+                "category": "system_context",
+            }))
+
+        # Goes to inbox — dispatcher handles it
+        files = list(inbox_dir.glob("*.json"))
+        assert len(files) == 1
+        # No direct Telegram delivery
+        assert emitted == []
+        assert "Observation queued" in result[0].text
+
+    def test_debug_bypass_includes_task_id_in_emitted_text(self, inbox_dir: Path):
+        """When bypassing inbox in debug mode, task_id is appended to the emitted text."""
+        emitted: list[dict] = []
+
+        def fake_emit(text: str, category: str = "system_context") -> None:
+            emitted.append({"text": text, "category": category})
+
+        with patch.multiple(
+            "src.mcp.inbox_server",
+            INBOX_DIR=inbox_dir,
+            _DEBUG_MODE=True,
+            _DEBUG_RESOLVED=True,
+            _emit_debug_observation=fake_emit,
+        ):
+            from src.mcp.inbox_server import handle_write_observation
+            asyncio.run(handle_write_observation({
+                "chat_id": 123,
+                "text": "Something happened.",
+                "category": "system_context",
+                "task_id": "task-42",
+            }))
+
+        assert len(emitted) == 1
+        assert "task-42" in emitted[0]["text"]
