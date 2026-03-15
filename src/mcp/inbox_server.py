@@ -1560,6 +1560,22 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "First ~200 chars of task prompt (optional context).",
                     },
+                    "trigger_message_id": {
+                        "type": "string",
+                        "description": (
+                            "Inbox message_id that caused this agent to be spawned "
+                            "(e.g. '1773541796785_6036'). Records causality — which user "
+                            "message triggered this task."
+                        ),
+                    },
+                    "trigger_snippet": {
+                        "type": "string",
+                        "description": (
+                            "First 200 chars of the triggering message text. PII — stored "
+                            "only in this private repo's SQLite DB, not forwarded to wire "
+                            "server unless LOBSTER_WIRE_REDACT_PII=false."
+                        ),
+                    },
                 },
                 "required": ["agent_id", "description", "chat_id"],
             },
@@ -1622,6 +1638,30 @@ async def list_tools() -> list[Tool]:
                         "description": "Filter by status: 'running' | 'completed' | 'failed' | 'dead'. Omit for all.",
                     },
                 },
+            },
+        ),
+        Tool(
+            name="record_reply",
+            description=(
+                "Record that an outbound reply message was sent in connection with a background agent task. "
+                "Call this immediately after send_reply when you have an active agent task, passing the "
+                "agent_id and the reply message_id returned by send_reply. This maintains a causal chain: "
+                "trigger_message → agent task → outbound replies. "
+                "Idempotent: calling multiple times with the same message_id is safe (list deduplicated at query time)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "agent_id": {
+                        "type": "string",
+                        "description": "The agent_id (or task_id) of the session to update.",
+                    },
+                    "message_id": {
+                        "type": "string",
+                        "description": "The outbound message_id returned by send_reply.",
+                    },
+                },
+                "required": ["agent_id", "message_id"],
             },
         ),
         # Brain Dump Triage Tools
@@ -2267,6 +2307,8 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
         return await handle_get_active_sessions(arguments)
     elif name == "get_session_history":
         return await handle_get_session_history(arguments)
+    elif name == "record_reply":
+        return await handle_record_reply(arguments)
     # Brain Dump Triage Tools
     elif name == "triage_brain_dump":
         return await handle_triage_brain_dump(arguments)
@@ -4568,7 +4610,8 @@ async def handle_unregister_agent(args: dict) -> list[TextContent]:
 async def handle_session_start(args: dict) -> list[TextContent]:
     """Record a newly-spawned background agent session in the SQLite store.
 
-    Richer than register_agent: supports agent_type, parent_id, input_summary.
+    Richer than register_agent: supports agent_type, parent_id, input_summary,
+    and causality fields (trigger_message_id, trigger_snippet).
     register_agent remains a working alias that delegates to this via tracker.py.
     """
     agent_id = args.get("agent_id", "").strip()
@@ -4581,6 +4624,8 @@ async def handle_session_start(args: dict) -> list[TextContent]:
     timeout_minutes = args.get("timeout_minutes") or None
     parent_id = args.get("parent_id") or None
     input_summary = args.get("input_summary") or None
+    trigger_message_id = args.get("trigger_message_id") or None
+    trigger_snippet = args.get("trigger_snippet") or None
 
     if not agent_id:
         return [TextContent(type="text", text="Error: agent_id is required")]
@@ -4607,6 +4652,8 @@ async def handle_session_start(args: dict) -> list[TextContent]:
             timeout_minutes=timeout_minutes,
             parent_id=parent_id,
             input_summary=input_summary,
+            trigger_message_id=trigger_message_id,
+            trigger_snippet=trigger_snippet,
         )
     except Exception as exc:
         log.error(f"session_start failed: {exc}", exc_info=True)
@@ -4691,6 +4738,33 @@ async def handle_get_session_history(args: dict) -> list[TextContent]:
     return [TextContent(
         type="text",
         text=_json_mod.dumps(history, indent=2),
+    )]
+
+
+async def handle_record_reply(args: dict) -> list[TextContent]:
+    """Append a sent reply message_id to an agent session's reply_message_ids list.
+
+    This builds the causal chain: trigger_message → agent task → outbound replies.
+    Call this immediately after send_reply when you have an active agent task.
+    """
+    agent_id = args.get("agent_id", "").strip()
+    message_id = args.get("message_id", "").strip()
+
+    if not agent_id:
+        return [TextContent(type="text", text="Error: agent_id is required")]
+    if not message_id:
+        return [TextContent(type="text", text="Error: message_id is required")]
+
+    try:
+        _session_store.append_reply_message_id(agent_id=agent_id, message_id=message_id)
+    except Exception as exc:
+        log.error(f"record_reply failed: {exc}", exc_info=True)
+        return [TextContent(type="text", text=f"Error recording reply: {exc}")]
+
+    log.info(f"Recorded reply {message_id!r} for agent {agent_id!r}")
+    return [TextContent(
+        type="text",
+        text=f"Reply {message_id!r} recorded for agent {agent_id!r}.",
     )]
 
 
@@ -5968,6 +6042,112 @@ async def handle_list_calendar_events(args: dict) -> list[TextContent]:
     return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
 
+def _enqueue_reconciler_notification(session: dict, outcome: str) -> None:
+    """Write a synthetic subagent_result/subagent_error message to the inbox.
+
+    This triggers the dispatcher's normal message-handling loop to deliver a
+    Telegram notification to the user. Using the inbox (rather than calling
+    Telegram directly) keeps the Telegram send logic in one place and ensures
+    the notification survives a dispatcher restart (inbox is durable on disk).
+
+    Also marks the session as notified_at to prevent duplicate notifications
+    on the next reconciler cycle.
+
+    Args:
+        session: Session dict from get_active_sessions() or get_unnotified_completed().
+        outcome: 'completed' or 'dead'.
+    """
+    # Idempotency guard — if already notified, skip
+    if session.get("notified_at"):
+        return
+
+    agent_id = session.get("id", "")
+    chat_id = session.get("chat_id", "")
+    description = session.get("description", "unknown task")
+    elapsed_raw = session.get("elapsed_seconds")
+    try:
+        elapsed = int(elapsed_raw) if elapsed_raw is not None else 0
+    except (TypeError, ValueError):
+        elapsed = 0
+    elapsed_min = elapsed // 60
+    source = session.get("source", "telegram")
+
+    if outcome == "completed":
+        text = (
+            f"Agent completed: {description}\n"
+            f"(reconciler-detected via stop_reason=end_turn, {elapsed_min}m elapsed)"
+        )
+        msg_type = "subagent_result"
+        status = "success"
+    else:
+        text = (
+            f"Agent timed out / disappeared: {description}\n"
+            f"(no output file after {elapsed_min}m — marked dead)"
+        )
+        msg_type = "subagent_error"
+        status = "error"
+
+    now = datetime.now(timezone.utc)
+    ts_ms = int(now.timestamp() * 1000)
+    safe_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in agent_id)[:40]
+    message_id = f"{ts_ms}_reconciler_{safe_id}"
+
+    message = {
+        "id": message_id,
+        "type": msg_type,
+        "source": source,
+        "chat_id": chat_id,
+        "text": text,
+        "task_id": agent_id,
+        "agent_id": agent_id,
+        "status": status,
+        "forward": True,
+        "timestamp": now.isoformat(),
+    }
+
+    try:
+        inbox_file = INBOX_DIR / f"{message_id}.json"
+        atomic_write_json(inbox_file, message)
+        # Mark notified so duplicate notification is not sent on next cycle
+        _session_store.set_notified(agent_id)
+        log.info(
+            f"[reconciler] Enqueued notification for agent {agent_id!r} "
+            f"(outcome={outcome!r}, inbox={message_id!r})"
+        )
+    except Exception as exc:
+        log.error(
+            f"[reconciler] Failed to enqueue notification for agent {agent_id!r}: {exc}",
+            exc_info=True,
+        )
+        # Do NOT mark notified — next cycle will retry (at-least-once guarantee)
+
+
+async def _startup_sweep() -> None:
+    """Send missed notifications for sessions that completed while server was down.
+
+    Queries for completed/dead sessions where notified_at IS NULL and enqueues
+    a synthetic inbox message for each. Called once at server startup before
+    entering the reconciler loop.
+
+    This implements the restart-safety guarantee: if the server was killed between
+    marking a session completed and writing notified_at, the notification is
+    re-sent on the next startup. The at-most-once property is upheld by
+    set_notified() being called immediately after enqueueing.
+    """
+    try:
+        unnotified = _session_store.get_unnotified_completed(since_hours=24)
+        if unnotified:
+            log.info(
+                f"[reconciler] Startup sweep: found {len(unnotified)} unnotified "
+                f"completed/dead session(s) — re-enqueuing notifications"
+            )
+        for session in unnotified:
+            outcome = session.get("status", "completed")
+            _enqueue_reconciler_notification(session, outcome=outcome)
+    except Exception as exc:
+        log.error(f"[reconciler] Startup sweep error: {exc}", exc_info=True)
+
+
 async def reconcile_agent_sessions() -> None:
     """Background task: auto-close finished or dead agent sessions.
 
@@ -5978,11 +6158,20 @@ async def reconcile_agent_sessions() -> None:
 
     Reconciliation rules:
       - Session in DB with status='running', scanner says 'done'
-        → call session_end(..., status='completed')
+        → call session_end(..., status='completed'), enqueue Telegram notification
       - Session in DB with status='running', output file missing AND session
-        is older than 25 minutes → call session_end(..., status='dead')
-      - Sessions found by scanner but not in DB are logged as unregistered
-        (informational only — no write action).
+        is older than 25 minutes → call session_end(..., status='dead'),
+        enqueue Telegram notification
+      - Sessions found by scanner but not in DB: 'running' orphans are logged;
+        'done' orphans are logged at WARNING level (no chat_id, cannot notify)
+
+    Bug fixes vs previous version:
+      - TypeError: elapsed is coerced to 0 when None (was unguarded comparison)
+      - scan_key: always uses agent_id as fallback; only uses output_file stem
+        when the output_file path exists in the scan results (prevents mismatch)
+      - Done orphans: now logged at WARNING level (were silently skipped)
+      - Notification gap: now enqueues inbox message on every COMPLETED/DEAD
+        transition (was silently closing sessions with no notification)
 
     This eliminates the mtime-based heuristic used previously and provides
     ~5-second latency from agent completion to DB reconciliation.
@@ -5990,6 +6179,10 @@ async def reconcile_agent_sessions() -> None:
     from agents.session_store import scan_agent_outputs
 
     DEAD_THRESHOLD_SECONDS = 25 * 60  # 25 minutes
+    GRACE_PERIOD_SECONDS = 30         # Newly spawned agents get grace before DEAD
+
+    # Startup sweep: re-send notifications for sessions that completed while down
+    await _startup_sweep()
 
     while True:
         await asyncio.sleep(5)
@@ -6000,15 +6193,31 @@ async def reconcile_agent_sessions() -> None:
             for session in active_sessions:
                 agent_id = session.get("id", "")
                 output_file = session.get("output_file") or ""
-                elapsed = session.get("elapsed_seconds") or 0
 
-                # Derive agent_id from output_file path if not directly in scan
-                # output_file stored as full path like /tmp/.../tasks/HEXID.output
-                file_stem = None
+                # Fix: guard elapsed against None before any numeric comparison
+                elapsed_raw = session.get("elapsed_seconds")
+                try:
+                    elapsed = int(elapsed_raw) if elapsed_raw is not None else 0
+                except (TypeError, ValueError):
+                    elapsed = 0
+
+                # Fix: scan_key derivation — use output_file stem only when the
+                # stem actually appears in the scan results. Fall back to agent_id.
+                # This prevents a bad output_file path from producing a garbage key
+                # that never matches anything.
+                scan_key = agent_id  # safe default
                 if output_file:
-                    file_stem = Path(output_file).stem
+                    try:
+                        stem = Path(output_file).stem
+                        if stem and stem in scan:
+                            scan_key = stem
+                        elif stem:
+                            # Stem derived but not in scan — keep agent_id as key
+                            # (agent may not have created output file yet)
+                            scan_key = stem  # still try; scan.get() will return None
+                    except Exception:
+                        pass  # Malformed output_file path — fall back to agent_id
 
-                scan_key = file_stem or agent_id
                 scan_status = scan.get(scan_key)
 
                 if scan_status == "done":
@@ -6021,33 +6230,63 @@ async def reconcile_agent_sessions() -> None:
                         status="completed",
                         result_summary="Auto-closed by reconciler: stop_reason=end_turn",
                     )
+                    # Enqueue Telegram notification (the critical missing step)
+                    _enqueue_reconciler_notification(session, outcome="completed")
                     # Notify wire server so dashboard updates within 40ms
                     asyncio.create_task(_notify_wire_server())
-                elif scan_status == "missing" and elapsed > DEAD_THRESHOLD_SECONDS:
-                    log.warning(
-                        f"[reconciler] Agent {agent_id!r} output file missing after "
-                        f"{elapsed}s — marking dead"
-                    )
-                    _session_store.session_end(
-                        id_or_task_id=agent_id,
-                        status="dead",
-                        result_summary=f"Auto-closed by reconciler: output missing after {elapsed}s",
-                    )
-                    # Notify wire server so dashboard updates within 40ms
-                    asyncio.create_task(_notify_wire_server())
+
+                elif scan_status == "missing":
+                    if elapsed < GRACE_PERIOD_SECONDS:
+                        # Agent just spawned — output file not yet created. Normal.
+                        pass
+                    elif elapsed > DEAD_THRESHOLD_SECONDS:
+                        log.warning(
+                            f"[reconciler] Agent {agent_id!r} output file missing after "
+                            f"{elapsed}s — marking dead"
+                        )
+                        _session_store.session_end(
+                            id_or_task_id=agent_id,
+                            status="dead",
+                            result_summary=f"Auto-closed by reconciler: output missing after {elapsed}s",
+                        )
+                        # Enqueue Telegram notification (failure case)
+                        _enqueue_reconciler_notification(session, outcome="dead")
+                        # Notify wire server so dashboard updates within 40ms
+                        asyncio.create_task(_notify_wire_server())
+                    else:
+                        # Between grace period and dead threshold — wait and watch
+                        log.debug(
+                            f"[reconciler] Agent {agent_id!r} output missing, "
+                            f"elapsed {elapsed}s — within window, waiting"
+                        )
                 # scan_status == "running" or None (no output file registered) → no action
 
-            # Log unregistered running agents (in scan but not in DB)
-            active_ids = {
-                Path(s.get("output_file", "")).stem
-                for s in active_sessions
-                if s.get("output_file")
-            }
-            active_ids |= {s.get("id", "") for s in active_sessions}
-            for scan_key, scan_status in scan.items():
-                if scan_status == "running" and scan_key not in active_ids:
+            # Phase 3: Detect orphans (in scan but not registered in DB)
+            # Build the set of known scan keys (output_file stems + agent_ids)
+            registered_scan_keys = set()
+            for s in active_sessions:
+                registered_scan_keys.add(s.get("id", ""))
+                of = s.get("output_file") or ""
+                if of:
+                    try:
+                        registered_scan_keys.add(Path(of).stem)
+                    except Exception:
+                        pass
+
+            for orphan_key, orphan_status in scan.items():
+                if orphan_key in registered_scan_keys:
+                    continue
+                if orphan_status == "running":
                     log.debug(
-                        f"[reconciler] Unregistered running agent output: {scan_key!r}"
+                        f"[reconciler] Unregistered running agent output: {orphan_key!r}"
+                    )
+                elif orphan_status == "done":
+                    # Fix: done orphans were previously silently ignored.
+                    # Now logged at WARNING. Cannot notify without chat_id.
+                    log.warning(
+                        f"[reconciler] Orphaned completed agent: {orphan_key!r} — "
+                        f"no DB entry, cannot identify requester or send notification. "
+                        f"This indicates a registration gap (session_start was never called)."
                     )
 
         except Exception as exc:

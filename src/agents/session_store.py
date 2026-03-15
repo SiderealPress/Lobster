@@ -41,29 +41,50 @@ _connections: dict[str, sqlite3.Connection] = {}
 # Schema
 # ---------------------------------------------------------------------------
 
-_SCHEMA_SQL = """
+# Core table DDL — used for both fresh installs and as documentation of full schema.
+# On fresh installs this creates the complete table. On existing DBs, the
+# CREATE TABLE IF NOT EXISTS is a no-op (existing table unchanged); the ALTER
+# TABLE migrations in _MIGRATION_STMTS then add any missing columns.
+_SCHEMA_CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS agent_sessions (
-    id              TEXT PRIMARY KEY,
-    task_id         TEXT,
-    agent_type      TEXT,
-    description     TEXT NOT NULL,
-    chat_id         TEXT NOT NULL,
-    source          TEXT NOT NULL DEFAULT 'telegram',
-    status          TEXT NOT NULL DEFAULT 'running',
-    output_file     TEXT,
-    timeout_minutes INTEGER,
-    input_summary   TEXT,
-    result_summary  TEXT,
-    parent_id       TEXT,
-    spawned_at      TEXT NOT NULL,
-    completed_at    TEXT,
-    last_seen_at    TEXT
+    id                  TEXT PRIMARY KEY,
+    task_id             TEXT,
+    agent_type          TEXT,
+    description         TEXT NOT NULL,
+    chat_id             TEXT NOT NULL,
+    source              TEXT NOT NULL DEFAULT 'telegram',
+    status              TEXT NOT NULL DEFAULT 'running',
+    output_file         TEXT,
+    timeout_minutes     INTEGER,
+    input_summary       TEXT,
+    result_summary      TEXT,
+    parent_id           TEXT,
+    spawned_at          TEXT NOT NULL,
+    completed_at        TEXT,
+    last_seen_at        TEXT,
+    notified_at         TEXT,
+    trigger_message_id  TEXT,
+    trigger_snippet     TEXT,
+    reply_message_ids   TEXT
 );
+"""
 
+# Indexes — run after all columns are guaranteed to exist (i.e., after migrations)
+_SCHEMA_INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_status ON agent_sessions (status);
 CREATE INDEX IF NOT EXISTS idx_spawned_at ON agent_sessions (spawned_at DESC);
 CREATE INDEX IF NOT EXISTS idx_task_id ON agent_sessions (task_id);
+CREATE INDEX IF NOT EXISTS idx_notified ON agent_sessions (notified_at);
 """
+
+# Safe ALTER TABLE migrations for existing databases (idempotent via try/except).
+# Each statement fails silently if the column already exists (fresh install).
+_MIGRATION_STMTS = [
+    "ALTER TABLE agent_sessions ADD COLUMN notified_at TEXT",
+    "ALTER TABLE agent_sessions ADD COLUMN trigger_message_id TEXT",
+    "ALTER TABLE agent_sessions ADD COLUMN trigger_snippet TEXT",
+    "ALTER TABLE agent_sessions ADD COLUMN reply_message_ids TEXT",
+]
 
 _MIGRATION_JSON_PATH = _MESSAGES_DIR / "config" / "pending-agents.json"
 
@@ -109,15 +130,36 @@ def init_db(path: Path | None = None) -> None:
     """Initialize the SQLite database and run schema migrations.
 
     Idempotent: safe to call multiple times. Creates the DB file and tables
-    if they do not exist. Also runs one-time migration from pending-agents.json
-    if that file exists and has not already been migrated.
+    if they do not exist. Also runs safe ALTER TABLE migrations for new columns
+    (each wrapped in try/except so they are no-ops on fresh DBs that already
+    have the column from the CREATE TABLE statement). Also runs one-time
+    migration from pending-agents.json if that file exists and has not already
+    been migrated.
 
     Args:
         path: Override the default DB path. Primarily used in tests.
     """
     resolved = path if path is not None else _DEFAULT_DB_PATH
     conn = _get_connection(resolved)
-    conn.executescript(_SCHEMA_SQL)
+
+    # Step 1: Create the table if it does not exist.
+    # On fresh installs this creates the complete schema including all new columns.
+    # On existing DBs the IF NOT EXISTS guard is a no-op (table kept as-is).
+    conn.executescript(_SCHEMA_CREATE_TABLE)
+    conn.commit()
+
+    # Step 2: Safe ALTER TABLE migrations for existing DBs — each is idempotent.
+    # SQLite raises OperationalError if the column already exists; we ignore it.
+    # Order matters: run before creating indexes that reference the new columns.
+    for stmt in _MIGRATION_STMTS:
+        try:
+            conn.execute(stmt)
+            conn.commit()
+        except Exception:
+            pass  # Column already exists (or other non-fatal DDL error) — no-op
+
+    # Step 3: Create indexes — run after migrations so all referenced columns exist.
+    conn.executescript(_SCHEMA_INDEXES)
     conn.commit()
 
     # One-time JSON migration
@@ -140,6 +182,8 @@ def session_start(
     task_id: str | None = None,
     parent_id: str | None = None,
     input_summary: str | None = None,
+    trigger_message_id: str | None = None,
+    trigger_snippet: str | None = None,
     path: Path | None = None,
 ) -> None:
     """Record a newly-spawned agent session.
@@ -148,30 +192,35 @@ def session_start(
     already exists, it is replaced (idempotent for duplicate spawns).
 
     Args:
-        id:              Unique agent identifier (uuid or synthetic slug).
-        description:     Human-readable summary of what the agent is doing.
-        chat_id:         Destination chat for result relay (stored as TEXT).
-        agent_type:      Agent subtype string ('functional-engineer', etc.).
-        source:          Messaging platform ('telegram', 'slack', etc.).
-        output_file:     Full path to /tmp/.../*.output for liveness detection.
-        timeout_minutes: Expected maximum runtime.
-        task_id:         Logical task identifier for auto-unregister matching.
-        parent_id:       Parent session ID for nested agents (NULL = top-level).
-        input_summary:   First ~200 chars of task prompt (optional).
-        path:            DB path override (for tests).
+        id:                 Unique agent identifier (uuid or synthetic slug).
+        description:        Human-readable summary of what the agent is doing.
+        chat_id:            Destination chat for result relay (stored as TEXT).
+        agent_type:         Agent subtype string ('functional-engineer', etc.).
+        source:             Messaging platform ('telegram', 'slack', etc.).
+        output_file:        Full path to /tmp/.../*.output for liveness detection.
+        timeout_minutes:    Expected maximum runtime.
+        task_id:            Logical task identifier for auto-unregister matching.
+        parent_id:          Parent session ID for nested agents (NULL = top-level).
+        input_summary:      First ~200 chars of task prompt (optional).
+        trigger_message_id: Inbox message_id that caused this spawn (causality).
+        trigger_snippet:    First 200 chars of the triggering message text (PII).
+        path:               DB path override (for tests).
     """
     resolved = path if path is not None else _DEFAULT_DB_PATH
     conn = _get_connection(resolved)
     now = datetime.now(timezone.utc).isoformat()
+    snippet = trigger_snippet[:200] if trigger_snippet else None
 
     conn.execute(
         """
         INSERT OR REPLACE INTO agent_sessions
             (id, task_id, agent_type, description, chat_id, source, status,
              output_file, timeout_minutes, input_summary, result_summary,
-             parent_id, spawned_at, completed_at, last_seen_at)
+             parent_id, spawned_at, completed_at, last_seen_at,
+             notified_at, trigger_message_id, trigger_snippet, reply_message_ids)
         VALUES
-            (?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, NULL, ?, ?, NULL, NULL)
+            (?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, NULL, ?, ?, NULL, NULL,
+             NULL, ?, ?, NULL)
         """,
         (
             id,
@@ -185,6 +234,8 @@ def session_start(
             input_summary,
             parent_id,
             now,
+            trigger_message_id,
+            snippet,
         ),
     )
     conn.commit()
@@ -224,6 +275,159 @@ def session_end(
         (status, now, result_summary, id_or_task_id, id_or_task_id),
     )
     conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Public: causality and notification writes
+# ---------------------------------------------------------------------------
+
+def set_trigger(
+    agent_id: str,
+    trigger_message_id: str,
+    trigger_snippet: str,
+    path: Path | None = None,
+) -> None:
+    """Write causality fields to an existing session.
+
+    Records the inbox message_id that caused the agent to be spawned, and the
+    first 200 chars of the triggering message text (PII — stays in this private
+    store, never forwarded unless LOBSTER_WIRE_REDACT_PII=false).
+
+    Args:
+        agent_id:           The session id (or task_id) to update.
+        trigger_message_id: The inbox message_id that caused this spawn
+                            (e.g. "1773541796785_6036").
+        trigger_snippet:    First 200 chars of the triggering message text.
+        path:               DB path override (for tests).
+    """
+    resolved = path if path is not None else _DEFAULT_DB_PATH
+    conn = _get_connection(resolved)
+    snippet = trigger_snippet[:200] if trigger_snippet else ""
+    conn.execute(
+        """
+        UPDATE agent_sessions
+        SET trigger_message_id = ?, trigger_snippet = ?
+        WHERE id = ? OR task_id = ?
+        """,
+        (trigger_message_id, snippet, agent_id, agent_id),
+    )
+    conn.commit()
+
+
+def set_notified(
+    agent_id: str,
+    path: Path | None = None,
+) -> None:
+    """Write the current UTC timestamp to notified_at for the given session.
+
+    Idempotent: calling on an already-notified session is a no-op (it just
+    overwrites with a new timestamp, which is harmless).
+
+    Args:
+        agent_id: The session id (or task_id) to mark as notified.
+        path:     DB path override (for tests).
+    """
+    resolved = path if path is not None else _DEFAULT_DB_PATH
+    conn = _get_connection(resolved)
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        UPDATE agent_sessions
+        SET notified_at = ?
+        WHERE id = ? OR task_id = ?
+        """,
+        (now, agent_id, agent_id),
+    )
+    conn.commit()
+
+
+def append_reply_message_id(
+    agent_id: str,
+    message_id: str,
+    path: Path | None = None,
+) -> None:
+    """Append a sent reply message_id to the session's reply_message_ids JSON array.
+
+    Creates the array if it does not yet exist. This tracks which outbound
+    messages were sent back to the user about this agent task.
+
+    Args:
+        agent_id:   The session id (or task_id) to update.
+        message_id: The outbound message_id to append.
+        path:       DB path override (for tests).
+    """
+    import json as _json
+
+    resolved = path if path is not None else _DEFAULT_DB_PATH
+    conn = _get_connection(resolved)
+
+    # Read current value
+    cursor = conn.execute(
+        "SELECT reply_message_ids FROM agent_sessions WHERE id = ? OR task_id = ? LIMIT 1",
+        (agent_id, agent_id),
+    )
+    row = cursor.fetchone()
+    if row is None:
+        return  # Session not found — no-op
+
+    current_raw = row[0]
+    try:
+        current_list = _json.loads(current_raw) if current_raw else []
+        if not isinstance(current_list, list):
+            current_list = []
+    except (ValueError, TypeError):
+        current_list = []
+
+    current_list.append(message_id)
+    new_raw = _json.dumps(current_list)
+
+    conn.execute(
+        """
+        UPDATE agent_sessions
+        SET reply_message_ids = ?
+        WHERE id = ? OR task_id = ?
+        """,
+        (new_raw, agent_id, agent_id),
+    )
+    conn.commit()
+
+
+def get_unnotified_completed(
+    since_hours: int = 24,
+    path: Path | None = None,
+) -> list[dict]:
+    """Return completed/dead sessions where notified_at IS NULL.
+
+    Used by the startup sweep to re-send notifications that were enqueued but
+    not delivered before a crash or restart.
+
+    Args:
+        since_hours: Only return sessions completed within this many hours.
+                     Prevents re-notifying ancient sessions on a fresh install.
+        path:        DB path override (for tests).
+
+    Returns:
+        List of session dicts (same format as get_active_sessions).
+    """
+    resolved = path if path is not None else _DEFAULT_DB_PATH
+    conn = _get_connection(resolved)
+
+    import datetime as _dt
+    cutoff_dt = datetime.now(timezone.utc) - _dt.timedelta(hours=since_hours)
+    cutoff_str = cutoff_dt.isoformat()
+
+    cursor = conn.execute(
+        """
+        SELECT * FROM agent_sessions
+        WHERE status IN ('completed', 'dead')
+          AND notified_at IS NULL
+          AND completed_at >= ?
+        ORDER BY completed_at ASC
+        """,
+        (cutoff_str,),
+    )
+    rows = cursor.fetchall()
+    return [_row_to_dict(row) for row in rows]
 
 
 # ---------------------------------------------------------------------------
