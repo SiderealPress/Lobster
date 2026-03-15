@@ -76,7 +76,7 @@ DB_PATH = Path(
 ).expanduser()
 
 # PII fields that must never appear in logs and are redacted when REDACT_PII=true
-_PII_FIELDS = frozenset({"description", "input_summary", "result_summary"})
+_PII_FIELDS = frozenset({"description", "input_summary", "result_summary", "trigger_snippet"})
 
 # ---------------------------------------------------------------------------
 # Event-driven push: broadcast to all SSE generators via subscriber list
@@ -164,7 +164,9 @@ def _query_sessions(path: Path) -> list[dict]:
                     id, task_id, agent_type, description, chat_id, source,
                     status, output_file, timeout_minutes, input_summary,
                     result_summary, parent_id, spawned_at, completed_at,
-                    last_seen_at
+                    last_seen_at,
+                    trigger_message_id, reply_message_ids,
+                    notified_at, trigger_snippet
                 FROM agent_sessions
                 WHERE
                     status = 'running'
