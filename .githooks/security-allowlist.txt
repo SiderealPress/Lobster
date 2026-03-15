@@ -57,3 +57,12 @@ tests/unit/test_integrations/test_google_calendar_client.py:Hardcoded token
 # WhatsApp bridge test file uses mock WhatsApp contact IDs (format: digits@c.us or digits@g.us)
 # These are WhatsApp-specific format strings, not real phone numbers or email addresses
 src/bot/test_whatsapp_bridge_adapter.py:Email address
+
+# WhatsApp connector files use example JID format strings (digits@c.us) in comments and docs
+# These are placeholder format examples, not real phone numbers or email addresses
+config/whatsapp.env.example:Email address
+connectors/whatsapp/.env.example:Email address
+connectors/whatsapp/.env.example:Phone number
+connectors/whatsapp/index.js:Email address
+scripts/install-whatsapp-connector.sh:Email address
+src/bot/whatsapp_bridge_adapter.py:Email address
