@@ -8,7 +8,7 @@
 # Usage:
 #   source agent-status.sh
 #   summary=$(scan_agent_status)
-#   # Returns: "Agents: abc123 (52 turns, last activity 30s ago), def456 (49 turns, stale 2h)"
+#   # Returns: "Agents: abc123 (52 turns, running), def456 (49 turns, done)"
 #   # Returns: "" (empty string) if no agents found
 #
 #   completed=$(scan_completed_tasks)
@@ -17,13 +17,12 @@
 #
 # Environment:
 #   AGENT_TASKS_DIR - Override the agent output directory (for testing)
+#
+# Key insight: Claude Code writes a stop_reason field to JSONL output files.
+#   "end_turn"  = agent definitively finished
+#   "tool_use"  = agent is actively running
+# This is zero-cooperation, deterministic, and scans all agents in ~3ms.
 #===============================================================================
-
-# Staleness threshold: 15 minutes in seconds
-AGENT_STALE_THRESHOLD=900
-
-# Completion threshold: task file unchanged for this long = likely done
-AGENT_COMPLETION_THRESHOLD=120
 
 # State directory for tracking reported completions
 AGENT_STATE_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}/.state"
@@ -43,10 +42,36 @@ _format_duration() {
     fi
 }
 
+# Extract the stop_reason from the last 4KB of a JSONL file.
+# Prints "end_turn", "tool_use", or "" (if not yet written / file empty).
+_get_stop_reason() {
+    local filepath="$1"
+
+    # Resolve symlink to real JSONL path
+    local real_path
+    real_path=$(readlink -f "$filepath" 2>/dev/null)
+    if [ -z "$real_path" ] || [ ! -f "$real_path" ]; then
+        # Not a symlink — try the file directly
+        real_path="$filepath"
+    fi
+
+    if [ ! -f "$real_path" ] || [ ! -s "$real_path" ]; then
+        echo ""
+        return
+    fi
+
+    # Read last 4KB and find the last stop_reason value
+    tail -c 4096 "$real_path" 2>/dev/null \
+        | grep -o '"stop_reason":"[^"]*"' \
+        | tail -1 \
+        | grep -o '"[^"]*"$' \
+        | tr -d '"'
+}
+
 # Scan agent output files and return a summary string.
 # Returns empty string if no agents found.
 scan_agent_status() {
-    local tasks_dir="${AGENT_TASKS_DIR:-/tmp/claude-1000/-home-ec2-user-lobster-workspace/tasks}"
+    local tasks_dir="${AGENT_TASKS_DIR:-/tmp/claude-1000/-home-admin-lobster-workspace/tasks}"
 
     # No directory or no .output files -> empty
     if [ ! -d "$tasks_dir" ]; then
@@ -62,8 +87,6 @@ scan_agent_status() {
         return 0
     fi
 
-    local now
-    now=$(date +%s)
     local entries=()
     local total_count=${#output_files[@]}
 
@@ -86,20 +109,18 @@ scan_agent_status() {
         local turns
         turns=$(grep -c '"type":"assistant"' "$filepath" 2>/dev/null) || turns=0
 
-        # Calculate age from mtime
-        local file_mtime
-        file_mtime=$(stat -c %Y "$filepath" 2>/dev/null || echo "$now")
-        local age=$(( now - file_mtime ))
-
-        # Format the entry
-        local duration
-        duration=$(_format_duration "$age")
+        # Determine agent status from stop_reason (deterministic, ~1ms)
+        local stop_reason
+        stop_reason=$(_get_stop_reason "$filepath")
 
         local status_text
-        if [ "$age" -ge "$AGENT_STALE_THRESHOLD" ]; then
-            status_text="stale ${duration}"
+        if [ "$stop_reason" = "end_turn" ]; then
+            status_text="done"
+        elif [ -z "$stop_reason" ]; then
+            status_text="starting"
         else
-            status_text="last activity ${duration} ago"
+            # "tool_use" or any other value = actively running
+            status_text="running"
         fi
 
         entries+=("${basename_f} (${turns} turns, ${status_text})")
@@ -132,9 +153,8 @@ scan_agent_status() {
 }
 
 # Scan for completed tasks that haven't been reported yet.
-# A task is "completed" when:
-#   1. Its output file hasn't been modified for AGENT_COMPLETION_THRESHOLD seconds
-#   2. It hasn't been previously reported (tracked via .state/reported-tasks)
+# A task is "completed" when its last stop_reason is "end_turn" (deterministic).
+# Previously used mtime heuristic — now uses the JSONL stop_reason field.
 #
 # Returns a structured completion summary or empty string if nothing new.
 scan_completed_tasks() {
@@ -157,8 +177,6 @@ scan_completed_tasks() {
         return 0
     fi
 
-    local now
-    now=$(date +%s)
     local completed=()
 
     for filepath in "${output_files[@]}"; do
@@ -170,12 +188,11 @@ scan_completed_tasks() {
             continue
         fi
 
-        # Check staleness (file not modified recently = task done)
-        local file_mtime
-        file_mtime=$(stat -c %Y "$filepath" 2>/dev/null || echo "$now")
-        local age=$(( now - file_mtime ))
+        # Check stop_reason — only "end_turn" means definitively done
+        local stop_reason
+        stop_reason=$(_get_stop_reason "$filepath")
 
-        if [ "$age" -lt "$AGENT_COMPLETION_THRESHOLD" ]; then
+        if [ "$stop_reason" != "end_turn" ]; then
             continue
         fi
 
@@ -202,13 +219,10 @@ except Exception:
         local turns
         turns=$(grep -c '"type":"assistant"' "$filepath" 2>/dev/null) || turns=0
 
-        local duration
-        duration=$(_format_duration "$age")
-
         # Mark as reported
         echo "$basename_f" >> "$reported_file"
 
-        completed+=("Task ${basename_f} completed (${turns} turns, ${duration} ago): ${last_msg}")
+        completed+=("Task ${basename_f} completed (${turns} turns, stop_reason=end_turn): ${last_msg}")
     done
 
     if [ ${#completed[@]} -eq 0 ]; then
