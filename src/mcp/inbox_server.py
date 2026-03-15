@@ -363,6 +363,7 @@ CONFIG_DIR = BASE_DIR / "config"
 AUDIO_DIR = BASE_DIR / "audio"
 SENT_DIR = BASE_DIR / "sent"
 SENT_REPLIES_DIR = BASE_DIR / "sent-replies"
+TASK_REPLIED_DIR = BASE_DIR / "task-replied"
 TASKS_FILE = BASE_DIR / "tasks.json"
 TASK_OUTPUTS_DIR = BASE_DIR / "task-outputs"
 BISQUE_OUTBOX_DIR = BASE_DIR / "bisque-outbox"
@@ -435,6 +436,58 @@ def _was_sent_directly(chat_id: Any, text: str) -> bool:
         return False
     return True
 
+# Task-ID-based dedup registry — primary dedup mechanism for send_reply + write_result.
+# When send_reply is called with a task_id, we record (task_id, chat_id) here.
+# When write_result arrives with the same task_id, forward is auto-set to False.
+# This is more reliable than text-hash dedup because it works even when send_reply
+# and write_result carry different texts (e.g. full reply vs short summary).
+#
+# State is stored as small files in TASK_REPLIED_DIR (same pattern as SENT_REPLIES_DIR)
+# so it survives MCP server restarts within the dedup window.
+_TASK_REPLIED_WINDOW_SECS = 300  # 5-minute window — generous enough to cover slow subagents
+
+
+def _task_replied_key(task_id: str, chat_id: Any) -> str:
+    """Return a filesystem-safe key for the (task_id, chat_id) pair."""
+    import hashlib
+    combined = f"{task_id}::{chat_id}"
+    return f"tr_{hashlib.sha256(combined.encode()).hexdigest()[:24]}"
+
+
+def _record_task_replied(task_id: str, chat_id: Any) -> None:
+    """Record that send_reply was called with this task_id so write_result can suppress forward."""
+    try:
+        key = _task_replied_key(task_id, chat_id)
+        marker = TASK_REPLIED_DIR / key
+        marker.write_text(str(time.time()))
+        # Lazily evict expired entries
+        cutoff = time.time() - _TASK_REPLIED_WINDOW_SECS
+        for f in TASK_REPLIED_DIR.iterdir():
+            try:
+                if float(f.read_text()) < cutoff:
+                    f.unlink(missing_ok=True)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def _was_task_replied(task_id: str, chat_id: Any) -> bool:
+    """Return True if send_reply was called with this task_id for this chat_id recently."""
+    try:
+        key = _task_replied_key(task_id, chat_id)
+        marker = TASK_REPLIED_DIR / key
+        if not marker.exists():
+            return False
+        sent_at = float(marker.read_text())
+        if (time.time() - sent_at) >= _TASK_REPLIED_WINDOW_SECS:
+            marker.unlink(missing_ok=True)
+            return False
+        return True
+    except Exception:
+        return False
+
+
 # Sources that represent human users (not system/automated)
 # NOTE: Do NOT use this to classify whether a message needs a reply — source is
 # the routing destination, not the message type. A subagent_result has
@@ -500,8 +553,8 @@ CANONICAL_DIR = _USER_CONFIG / "memory" / "canonical"
 
 # Ensure directories exist
 for d in [INBOX_DIR, OUTBOX_DIR, PROCESSED_DIR, PROCESSING_DIR, FAILED_DIR, SENT_DIR, SENT_REPLIES_DIR,
-          CONFIG_DIR, AUDIO_DIR, TASK_OUTPUTS_DIR, BISQUE_OUTBOX_DIR, SCHEDULED_TASKS_TASKS_DIR,
-          SCHEDULED_JOBS_DIR, SCHEDULED_TASKS_LOGS_DIR, CANONICAL_DIR]:
+          TASK_REPLIED_DIR, CONFIG_DIR, AUDIO_DIR, TASK_OUTPUTS_DIR, BISQUE_OUTBOX_DIR,
+          SCHEDULED_TASKS_TASKS_DIR, SCHEDULED_JOBS_DIR, SCHEDULED_TASKS_LOGS_DIR, CANONICAL_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
 # Logging
@@ -2609,6 +2662,10 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
             label = "RESULT" if msg_type == "subagent_result" else "ERROR"
             task_id = msg.get("task_id", "?")
             output += f"{status_icon} **[SUBAGENT {label}]** for task `{task_id}`\n"
+        elif msg_type == "subagent_notification":
+            task_id = msg.get("task_id", "?")
+            status_icon = "✅" if msg.get("status") != "error" else "❌"
+            output += f"{status_icon} **[SUBAGENT NOTIFICATION]** for task `{task_id}`\n"
         elif msg_type == "subagent_observation":
             category = msg.get("category", "unknown")
             task_id = msg.get("task_id", "")
@@ -2621,7 +2678,9 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
         if tg_msg_id:
             output += f"Telegram Message ID: `{tg_msg_id}` (pass as reply_to_message_id to send_reply to thread your reply)\n"
         output += f"Time: {ts}\n"
-        # dispatcher_hint: flag messages with file attachments so dispatcher knows to use a subagent
+        # dispatcher_hint: structural signals for the dispatcher to route correctly
+        if msg_type == "subagent_notification":
+            output += "dispatcher_hint: mark_processed only — do NOT call send_reply (subagent already delivered directly)\n"
         _has_file = msg_type in ("voice", "photo", "document") or bool(
             msg.get("image_file") or msg.get("image_files") or
             msg.get("file_path") or msg.get("audio_file")
@@ -2831,6 +2890,13 @@ async def handle_send_reply(args: dict) -> list[TextContent]:
 
     # Record direct send for write_result deduplication (suppress duplicate forwards)
     _record_direct_send(chat_id, text)
+
+    # Task-ID-based dedup (primary): if task_id provided, record so write_result can
+    # auto-suppress forward even when texts differ (e.g. full reply vs short summary).
+    task_id_param = args.get("task_id", "").strip() if args.get("task_id") else ""
+    if task_id_param:
+        _record_task_replied(task_id_param, chat_id)
+        log.debug(f"Recorded task_id dedup for task={task_id_param!r} chat={chat_id}")
 
     log.info(f"Reply sent to {source} chat {chat_id}")
 
@@ -4353,14 +4419,24 @@ async def handle_write_result(args: dict) -> list[TextContent]:
     if not text:
         return [TextContent(type="text", text="Error: text is required")]
 
-    # Server-side deduplication: if the subagent already called send_reply with the
-    # same text to the same chat, suppress the forwarded duplicate regardless of the
-    # forward flag passed by the caller.  This prevents the common mistake where a
-    # subagent calls send_reply AND write_result without forward=False, causing the
-    # dispatcher to deliver the message a second time.
+    # Server-side deduplication: suppress duplicate forwards when the subagent already
+    # delivered a reply directly via send_reply.
+    #
+    # Primary path — task_id registry: if send_reply was called with this task_id, the
+    # (task_id, chat_id) pair is recorded in TASK_REPLIED_DIR.  This works even when
+    # send_reply and write_result carry different texts (e.g. full reply vs short summary).
+    if forward and _was_task_replied(task_id, chat_id):
+        log.info(
+            f"write_result dedup (task_id): suppressing forward for task {task_id!r} — "
+            f"send_reply was already called with task_id={task_id!r} for chat {chat_id}"
+        )
+        forward = False
+
+    # Secondary path — text-hash fallback: catches cases where task_id was not passed
+    # to send_reply but the texts happen to match.
     if forward and _was_sent_directly(chat_id, text):
         log.info(
-            f"write_result dedup: suppressing forward for task {task_id!r} — "
+            f"write_result dedup (text-hash): suppressing forward for task {task_id!r} — "
             f"identical message already sent directly to chat {chat_id}"
         )
         forward = False
