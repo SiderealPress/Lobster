@@ -89,24 +89,50 @@ git branch -d feature/issue-42-my-feature
 - When implementation is complete, open a pull request using `mcp__github__create_pull_request`
 - Reference the issue in the PR description using keywords (Closes #XX, Fixes #XX, or Relates to #XX)
 - **Set "Main Board" project status to "In Review"** after PR is opened
-- Write a comprehensive PR description including:
-  - Summary of changes
-  - Key functional patterns used
-  - **"Tests run" section** — not a test plan, not aspirational steps. Record only what you actually executed. Each checked item must show the exact command AND a brief outcome. Each unchecked item must explain why it was skipped or blocked. No abstract category labels. Use the PR template format:
-    ```
-    ## Tests run
-    - [x] `uv run pytest tests/unit/` — 42 passed, 0 failed
-    - [x] `uv run ruff check . && uv run mypy .` — clean, no errors
-    - [ ] `docker compose -f tests/docker/docker-compose.test.yml up install-test` — skipped: Docker not available in this environment
-    - [ ] Live Telegram test — blocked: requires production restart (safe to merge, no behavior change)
 
-    **Blocked items needing attention before merge:** none
-    ```
-  - If any tests could not be run (missing Docker, live token, specific env), you **must**:
-    1. Leave them unchecked in the PR with a note: "Couldn't run: [reason] — needs [X] before merge"
-    2. Call `write_result` with a note to the dispatcher so it can relay the gap to the user before merge is approved
-  - Any breaking changes or migration notes
-- **Never write a forward-looking test plan.** Only record tests you ran and their outcomes.
+**Writing the PR description:**
+
+A PR description is a communication artifact, not a changelog. Its audience is a maintainer reviewing on mobile who needs to answer one question: "Is this safe to merge?" Write for that person, not for someone re-implementing the feature.
+
+**Structure every PR description in this order:**
+
+1. **What this PR does** — one or two sentences at the top. Lead with purpose: what problem is solved and why it matters. "Hardens the Stop hook so subagents that forget to call `write_result` are hard-blocked from exiting" is the right level of abstraction. "Changed `sys.exit(0)` to `sys.exit(2)` on line 44" is not.
+
+2. **Background** (if needed) — the system context a reviewer needs to understand the change. Explain the relevant invariant, protocol, or constraint being enforced. This is where conceptual frameworks, decision tables, and diagrams belong — not in a changes list.
+
+3. **What this changes** — explain conceptually what the new behavior is. State what was impossible before and is now enforced (or vice versa). Do not narrate the diff.
+
+4. **How it works** (optional, for non-obvious logic) — decision trees, routing tables, edge cases. Only include this if the implementation logic is genuinely non-obvious and the reviewer needs to trace it to assess correctness.
+
+5. **What was NOT changed** — explicitly call out what is out of scope. This reassures the reviewer that unrelated systems are untouched.
+
+6. **Tests run** — not a test plan, not aspirational steps. Record only what you actually executed. Each checked item must show the exact command AND a brief outcome. Each unchecked item must explain why it was skipped or blocked.
+
+```
+## Tests run
+- [x] `uv run pytest tests/unit/` — 42 passed, 0 failed
+- [x] `uv run ruff check . && uv run mypy .` — clean, no errors
+- [ ] `docker compose -f tests/docker/docker-compose.test.yml up install-test` — skipped: Docker not available in this environment
+- [ ] Live Telegram test — blocked: requires production restart (safe to merge, no behavior change)
+
+**Blocked items needing attention before merge:** none
+```
+
+**Abstraction calibration — before/after:**
+
+| Too low (avoid) | Right level |
+|---|---|
+| "Changed `sys.exit(0)` to `sys.exit(2)` in `require-write-result.py`" | "Subagents that forget to call `write_result` are now hard-blocked from exiting" |
+| "Added `background` key to `message` dict in `inbox_server.py`" | "Messages now carry a flag indicating whether they were delivered in the background, so the dispatcher can route them correctly" |
+| "Refactored `_route_result` to use match statement" | "Result routing now handles all four cases (forward, notify, error, stale) without the silent-drop bug in the previous if/elif chain" |
+
+**Reference:** PR #338 exemplifies this structure — it leads with purpose, provides the conceptual framework (the subagent contract, the `forward` flag routing table, exit code semantics) before any implementation details, and ends with a focused files-changed summary.
+
+If any tests could not be run (missing Docker, live token, specific env), you **must**:
+1. Leave them unchecked in the PR with a note: "Couldn't run: [reason] — needs [X] before merge"
+2. Call `write_result` with a note to the dispatcher so it can relay the gap to the user before merge is approved
+
+**Never write a forward-looking test plan.** Only record tests you ran and their outcomes.
 
 ### 7. PR Merge & Completion
 - After PR is approved and merged:
@@ -267,5 +293,5 @@ Write concise, decision-focused GitHub issue comments and PR descriptions.
 
 - **Don't narrate your work.** Don't write "I'm now implementing X" or "I've just finished Y." State decisions and results: "Used strategy X because Y" or "PR implements Z."
 - **When blocked, be specific.** State what is blocked, why it is blocked, and exactly what is needed to unblock. Vague blockers ("ran into some issues") are not actionable.
-- **PR descriptions are factual.** Describe what changed and why. Not conversational ("I decided to try..."), not a diary of your process — just the outcome and rationale.
+- **PR descriptions lead with purpose, not mechanics.** The first sentence answers "what problem does this solve?" not "what files were changed." See the PR Creation section for full guidance on structure and abstraction level.
 - **Issue comments are for decisions and blockers.** Comment when you hit unexpected complexity, make an architectural choice that differs from the plan, or need input. Don't comment to narrate progress.
