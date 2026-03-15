@@ -2,9 +2,17 @@
 """
 Stop hook: ensure subagents call write_result before exiting.
 Injects a reminder if write_result was not called during the session.
+
+Dispatcher sessions (detected via session_role.is_dispatcher()) are exempt —
+the dispatcher never calls write_result, so the check only applies to subagents.
 """
 import json
 import sys
+from pathlib import Path
+
+# Import shared session role utility.
+sys.path.insert(0, str(Path(__file__).parent))
+from session_role import is_dispatcher
 
 
 def main():
@@ -13,8 +21,12 @@ def main():
     except Exception:
         sys.exit(0)  # If we can't read transcript, don't block
 
-    # Check if this is a subagent session (not the dispatcher)
-    # Dispatchers call wait_for_messages; subagents don't
+    # Dispatcher sessions are exempt — skip the write_result check.
+    # session_role.is_dispatcher() uses the marker file as primary signal and
+    # the transcript (which is present in Stop hooks) as fallback.
+    if is_dispatcher(data):
+        sys.exit(0)
+
     transcript = data.get("transcript", [])
 
     tool_calls = []
@@ -25,10 +37,6 @@ def main():
                 for item in content:
                     if isinstance(item, dict) and item.get("type") == "tool_use":
                         tool_calls.append(item.get("name", ""))
-
-    # If this session called wait_for_messages, it's the dispatcher — skip
-    if "mcp__lobster-inbox__wait_for_messages" in tool_calls:
-        sys.exit(0)
 
     # If this session called write_result, we're good
     if "mcp__lobster-inbox__write_result" in tool_calls:
