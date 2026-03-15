@@ -277,19 +277,29 @@ def _send_telegram_direct(bot_token: str, chat_id: int, text: str) -> None:
         _do_send()
 
 
-def _emit_debug_observation(text: str, category: str = "system_context") -> None:
+def _emit_debug_observation(
+    text: str,
+    category: str = "system_context",
+    visibility: str = "mcp-only",
+    emitter: str | None = None,
+) -> None:
     """
     Emit a debug push notification directly to Telegram (when LOBSTER_DEBUG=true).
 
-    When debug mode is on, bypasses the dispatcher inbox entirely and calls
-    the Telegram Bot API directly. This avoids the token-costly round-trip
-    through the dispatcher that previously prevented debug observations from
-    reaching the user (the dispatcher would silently memory_store system_context
-    observations instead of forwarding them).
-
     When debug mode is off, this function is a no-op.
 
-    category: "system_context" or "system_error" (included in the message label)
+    Args:
+        text: The observation body text.
+        category: "system_context", "system_error", or "user_context".
+        visibility: "mcp-only" if the MCP layer is emitting this directly (dispatcher
+            has not seen it yet), or "dispatcher" if the dispatcher's main loop is
+            emitting this after processing the message through its inbox.
+        emitter: task_id or agent description identifying who generated the observation.
+            Falls back to "unknown" if not provided.
+
+    Label format: [debug|{visibility}] {category} from {emitter}
+    Example: [debug|mcp-only] system_context from task:linear-digest
+
     Never raises — must be safe to call from any context including threads.
     """
     # Fast path: skip I/O if env var is clearly not set and we've already resolved.
@@ -303,7 +313,8 @@ def _emit_debug_observation(text: str, category: str = "system_context") -> None
     if chat_id is None or not bot_token:
         return
     try:
-        label = f"[debug/{category}]"
+        emitter_label = emitter or "unknown"
+        label = f"[debug|{visibility}] {category} from {emitter_label}"
         full_text = f"{label}\n{text}"
         _send_telegram_direct(bot_token, chat_id, full_text)
     except Exception:
@@ -4534,9 +4545,11 @@ async def handle_write_observation(args: dict) -> list[TextContent]:
     # When LOBSTER_DEBUG=true, also emit a direct Telegram mirror so the user
     # sees what the dispatcher sees in real time. This is additive — the inbox
     # write above always happens first regardless of debug mode.
+    # Visibility is "mcp-only": this fires at the MCP layer before the dispatcher
+    # picks up the inbox message, so the dispatcher has not yet seen it.
     if _DEBUG_MODE:
-        task_suffix = f" [task={task_id}]" if task_id else ""
-        _emit_debug_observation(f"{text}{task_suffix}", category=category)
+        emitter = f"task:{task_id}" if task_id else "unknown"
+        _emit_debug_observation(text, category=category, visibility="mcp-only", emitter=emitter)
 
     log.info(
         f"Subagent observation queued in inbox: category={category} chat_id={chat_id}"
