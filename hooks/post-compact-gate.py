@@ -7,7 +7,7 @@ main loop before doing anything else.
 The sentinel file ~/messages/config/compact-pending is written by
 on-compact.py when a compaction occurs. This hook passes when:
   1. No sentinel file exists (normal operation), OR
-  2. Not the dispatcher session (see is_dispatcher_session()), OR
+  2. Not the dispatcher session (see session_role.is_dispatcher()), OR
   3. The sentinel is older than SENTINEL_TTL_SECONDS (stale / post-hibernation), OR
   4. The tool being called IS wait_for_messages (let it through, delete sentinel).
 
@@ -17,27 +17,21 @@ finds a stale sentinel and the gate passes immediately. No deadlock.
 
 ## Dispatcher vs subagent detection
 
-LOBSTER_MAIN_SESSION=1 is set by claude-persistent.sh and is inherited by
-subagents spawned via the Task tool. A bare env-var check would incorrectly
-activate the gate for subagents too.
+Detection is delegated to session_role.is_dispatcher(), which uses a layered
+strategy:
 
-The fix: walk the process tree upward from the current process. If we encounter
-a parent 'claude' process before reaching a tmux pane PID, this process is a
-subagent (child of the dispatcher Claude). If the first non-hook ancestor is
-the dispatcher Claude directly under a tmux pane, we are the dispatcher.
+1. Marker file (primary): At dispatcher startup, write-dispatcher-session-id.py
+   (a SessionStart hook) writes the session ID to
+   ~/messages/config/dispatcher-session-id. This hook reads that file and
+   compares it to the session_id in the hook JSON input. Match → dispatcher.
 
-Concretely: a subagent's hook process ancestry looks like:
-  hook.py → claude (subagent) → claude (dispatcher) → tmux pane → ...
+2. Process-tree fallback (secondary): If the marker file is absent or
+   unreadable, walk the process tree upward. Two consecutive claude-like
+   ancestors before reaching a tmux pane PID → subagent. One or fewer →
+   dispatcher. See _is_dispatcher_by_process_tree() below.
 
-The dispatcher's hook process ancestry looks like:
-  hook.py → claude (dispatcher) → tmux pane → ...
-
-We detect the subagent case by finding two consecutive claude-like processes
-in the ancestor chain before reaching a tmux pane PID. If we see only one
-claude-like process before the tmux pane, we are the dispatcher.
-
-Falls back to the env-var-only check when tmux is unavailable or the process
-tree walk fails — maintaining prior behaviour (slightly imprecise but safe).
+3. Env-var-only fallback: If tmux is unavailable, fall back to
+   LOBSTER_MAIN_SESSION=1 alone.
 
 ## Settings.json configuration
 
@@ -65,6 +59,9 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
+# Make hooks/ importable regardless of cwd.
+sys.path.insert(0, str(Path(__file__).parent))
 
 SENTINEL_FILE = Path(os.path.expanduser("~/messages/config/compact-pending"))
 SENTINEL_TTL_SECONDS = 600  # 10 minutes — treats stale sentinel as harmless
@@ -153,8 +150,10 @@ def _is_claude_process(name: str) -> bool:
     return "claude" in name.lower()
 
 
-def is_dispatcher_session() -> bool:
+def _is_dispatcher_by_process_tree() -> bool:
     """Return True only when this hook is running inside the dispatcher Claude.
+
+    Process-tree fallback used when the session_role marker file is absent.
 
     Strategy:
       1. Must have LOBSTER_MAIN_SESSION=1 (env var set by claude-persistent.sh).
@@ -196,6 +195,40 @@ def is_dispatcher_session() -> bool:
     return True
 
 
+def is_dispatcher_session(hook_input: dict) -> bool:
+    """Return True when this hook is running inside the dispatcher Claude.
+
+    Uses session_role.is_dispatcher() (marker-file + transcript) as the primary
+    check. Falls back to the process-tree walk when neither signal is available
+    (e.g. marker file not yet written on first boot, no transcript in PreToolUse).
+    """
+    # Primary: marker file + transcript (via session_role).
+    # session_role returns False by default when no signal is found; we need to
+    # distinguish "definitely subagent" from "no signal" to know when to apply
+    # the process-tree fallback. We probe the marker file directly here.
+    from session_role import (
+        _check_marker_file,
+        get_session_id,
+        _transcript_has_dispatcher_tool,
+        DISPATCHER_SESSION_FILE,
+    )
+
+    session_id = get_session_id(hook_input)
+    marker_result = _check_marker_file(session_id)
+
+    if marker_result is not None:
+        # Marker file exists and gave a definitive answer.
+        return marker_result
+
+    # Transcript fallback (Stop hooks only — transcript absent in PreToolUse).
+    transcript = hook_input.get("transcript")
+    if transcript is not None:
+        return _transcript_has_dispatcher_tool(transcript)
+
+    # No session_role signal available — fall back to process-tree.
+    return _is_dispatcher_by_process_tree()
+
+
 def sentinel_is_fresh() -> bool:
     """Return True if the sentinel exists and is recent enough to enforce."""
     if not SENTINEL_FILE.exists():
@@ -214,7 +247,7 @@ def main() -> None:
         sys.exit(0)
 
     # Only enforce for the main dispatcher session.
-    if not is_dispatcher_session():
+    if not is_dispatcher_session(data):
         sys.exit(0)
 
     tool_name = data.get("tool_name", "")
