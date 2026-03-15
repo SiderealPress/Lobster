@@ -807,6 +807,9 @@ fi
 
 echo "🚀 Creating: $SESSION ($LAYOUT)"
 
+# Prevent CLAUDECODE leak into tmux server environment
+unset CLAUDECODE
+
 case "$LAYOUT" in
     dev)
         tmux new-session -d -s "$SESSION" -n 'claude'

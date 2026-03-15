@@ -25,7 +25,7 @@ means something fundamental is broken and the system cannot operate correctly.
 From the project root:
 
 ```bash
-cd ~/lobster-workspace/projects/smoke-tests
+cd ~/lobster
 uv run pytest tests/smoke/ -v
 ```
 

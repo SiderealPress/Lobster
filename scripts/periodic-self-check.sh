@@ -121,18 +121,22 @@ TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%S.%6N)
 EPOCH_MS=$(date +%s%3N)
 MSG_ID="${EPOCH_MS}_self"
 
-cat > "${INBOX_DIR}/${MSG_ID}.json" << EOF
-{
-  "id": "${MSG_ID}",
-  "source": "system",
-  "chat_id": 0,
-  "user_id": 0,
-  "username": "lobster-system",
-  "user_name": "Self-Check",
-  "text": "${SELF_CHECK_TEXT}",
-  "timestamp": "${TIMESTAMP}"
+python3 - "${INBOX_DIR}/${MSG_ID}.json" "${MSG_ID}" "${TIMESTAMP}" "${SELF_CHECK_TEXT}" << 'PYEOF'
+import json, sys
+out_path, msg_id, timestamp, text = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+msg = {
+    "id": msg_id,
+    "source": "system",
+    "chat_id": 0,
+    "user_id": 0,
+    "username": "lobster-system",
+    "user_name": "Self-Check",
+    "text": text,
+    "timestamp": timestamp,
 }
-EOF
+with open(out_path, "w") as f:
+    json.dump(msg, f, ensure_ascii=False, indent=2)
+PYEOF
 
 # Record timestamp
 date +%s > "$LAST_CHECK_FILE"
