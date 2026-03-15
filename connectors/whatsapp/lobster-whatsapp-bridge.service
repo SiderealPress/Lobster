@@ -1,0 +1,20 @@
+[Unit]
+Description=Lobster WhatsApp Bridge (whatsapp-web.js)
+After=network-online.target lobster-claude.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=admin
+WorkingDirectory=/home/admin/lobster-workspace/projects/whatsapp-bridge
+ExecStart=/usr/bin/node index.js
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/admin/lobster-workspace/logs/whatsapp-bridge.log
+StandardError=append:/home/admin/lobster-workspace/logs/whatsapp-bridge.log
+Environment=NODE_ENV=production
+Environment=LOBSTER_MESSAGES_DIR=/home/admin/messages/inbox
+Environment=WA_COMMANDS_DIR=/home/admin/messages/wa-commands
+
+[Install]
+WantedBy=multi-user.target
