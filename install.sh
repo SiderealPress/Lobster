@@ -509,12 +509,25 @@ setup_swap() {
 
     step "Setting up ${swap_size_mb}MB swap file at $swapfile..."
 
-    # Create the file: fallocate is instant; dd is the universal fallback
-    if command -v fallocate &>/dev/null; then
+    # Create the file.
+    # fallocate is instant but fails on BTRFS (BTRFS doesn't support preallocation
+    # for swap files). Detect BTRFS on the target filesystem and fall back to dd.
+    # Also fall back to dd if fallocate is not installed.
+    # dd status=progress requires GNU coreutils >= 8.24 and is omitted for
+    # portability across older Ubuntu LTS and Amazon Linux releases.
+    local use_dd=0
+    if ! command -v fallocate &>/dev/null; then
+        use_dd=1
+        info "fallocate not available — using dd (this may take a moment)..."
+    elif stat -f -c %T "$(dirname "$swapfile")" 2>/dev/null | grep -qi btrfs; then
+        use_dd=1
+        info "BTRFS filesystem detected — fallocate unsupported for swap, using dd (this may take a moment)..."
+    fi
+
+    if [ "$use_dd" -eq 0 ]; then
         sudo fallocate -l "${swap_size_mb}M" "$swapfile"
     else
-        info "fallocate not available — using dd (this may take a moment)..."
-        sudo dd if=/dev/zero of="$swapfile" bs=1M count="$swap_size_mb" status=progress
+        sudo dd if=/dev/zero of="$swapfile" bs=1M count="$swap_size_mb"
     fi
 
     # Secure permissions (world-readable swap is a security risk)
