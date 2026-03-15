@@ -92,21 +92,40 @@ git branch -d feature/issue-42-my-feature
 
 **Writing the PR description:**
 
-A PR description is a communication artifact, not a changelog. Its audience is a maintainer reviewing on mobile who needs to answer one question: "Is this safe to merge?" Write for that person, not for someone re-implementing the feature.
+A PR description is a communication artifact, not a changelog. Its audience is a maintainer reviewing on mobile who needs to answer one question: "Is this safe to merge?" Write for that person.
 
-**Structure every PR description in this order:**
+**Principles, not a template.** There is no required section order. Use the structure that best serves your specific change. The principles below govern every choice:
 
-1. **What this PR does** — one or two sentences at the top. Lead with purpose: what problem is solved and why it matters. "Hardens the Stop hook so subagents that forget to call `write_result` are hard-blocked from exiting" is the right level of abstraction. "Changed `sys.exit(0)` to `sys.exit(2)` on line 44" is not.
+**Lead with the problem being solved, not the solution.** The first thing a reviewer reads should answer "why does this exist?" A sentence like "Subagents that forget to call `write_result` are now hard-blocked from exiting" tells the reviewer what the world was missing before. "Changed `sys.exit(0)` to `sys.exit(2)`" does not.
 
-2. **Background** (if needed) — the system context a reviewer needs to understand the change. Explain the relevant invariant, protocol, or constraint being enforced. This is where conceptual frameworks, decision tables, and diagrams belong — not in a changes list.
+**Match abstraction level to your reader.** Explain the *effect* and *why*, not the diff. State what was impossible before and is now enforced (or vice versa). Describe what the new behavior *means*, not how the lines of code produce it. The reviewer is not re-implementing your feature — they are deciding whether to trust it.
 
-3. **What this changes** — explain conceptually what the new behavior is. State what was impossible before and is now enforced (or vice versa). Do not narrate the diff.
+**Give context before details.** If your change enforces a protocol, describe the protocol. If it fixes a bug, describe the bug's root cause. If it changes routing logic, describe what gets routed where and why. Background that seems obvious to you is not obvious to someone reviewing 30 PRs a week.
 
-4. **How it works** (optional, for non-obvious logic) — decision trees, routing tables, edge cases. Only include this if the implementation logic is genuinely non-obvious and the reviewer needs to trace it to assess correctness.
+**Note what is out of scope.** Explicitly calling out what you did *not* change reassures the reviewer that unrelated systems are untouched. This is especially useful for changes near critical paths.
 
-5. **What was NOT changed** — explicitly call out what is out of scope. This reassures the reviewer that unrelated systems are untouched.
+**Include the functional patterns used.** For this codebase, briefly note which functional patterns the implementation relies on (pure functions, composition, immutability, etc.) — this helps reviewers understand the design intent and verify that the code follows project conventions.
 
-6. **Tests run** — not a test plan, not aspirational steps. Record only what you actually executed. Each checked item must show the exact command AND a brief outcome. Each unchecked item must explain why it was skipped or blocked.
+**Calibration check — before writing, ask yourself:**
+- Can a reviewer understand *why* this change exists from the first two sentences?
+- If they can only read 30 seconds of your description, do they have enough to decide "safe to merge"?
+- Have you described the change conceptually, or just narrated the diff?
+
+**Abstraction calibration — before/after:**
+
+| Too low (avoid) | Right level |
+|---|---|
+| "Changed `sys.exit(0)` to `sys.exit(2)` in `require-write-result.py`" | "Subagents that forget to call `write_result` are now hard-blocked from exiting" |
+| "Added `background` key to `message` dict in `inbox_server.py`" | "Messages now carry a flag indicating whether they were delivered in the background, so the dispatcher can route them correctly" |
+| "Refactored `_route_result` to use match statement" | "Result routing now handles all four cases (forward, notify, error, stale) without the silent-drop bug in the previous if/elif chain" |
+
+**What not to do:**
+- Don't list changed files as the body of the description — that's what the diff is for
+- Don't paste code snippets unless the exact text is load-bearing to the reviewer's decision
+- Don't write a narrative of your implementation process ("I tried X, then switched to Y")
+- Don't leave the description as the auto-generated template with unchecked boxes
+
+**Tests run** — not a test plan, not aspirational steps. Record only what you actually executed. Each checked item must show the exact command AND a brief outcome. Each unchecked item must explain why it was skipped or blocked.
 
 ```
 ## Tests run
@@ -117,16 +136,6 @@ A PR description is a communication artifact, not a changelog. Its audience is a
 
 **Blocked items needing attention before merge:** none
 ```
-
-**Abstraction calibration — before/after:**
-
-| Too low (avoid) | Right level |
-|---|---|
-| "Changed `sys.exit(0)` to `sys.exit(2)` in `require-write-result.py`" | "Subagents that forget to call `write_result` are now hard-blocked from exiting" |
-| "Added `background` key to `message` dict in `inbox_server.py`" | "Messages now carry a flag indicating whether they were delivered in the background, so the dispatcher can route them correctly" |
-| "Refactored `_route_result` to use match statement" | "Result routing now handles all four cases (forward, notify, error, stale) without the silent-drop bug in the previous if/elif chain" |
-
-**Reference:** PR #338 exemplifies this structure — it leads with purpose, provides the conceptual framework (the subagent contract, the `forward` flag routing table, exit code semantics) before any implementation details, and ends with a focused files-changed summary.
 
 If any tests could not be run (missing Docker, live token, specific env), you **must**:
 1. Leave them unchecked in the PR with a note: "Couldn't run: [reason] — needs [X] before merge"
@@ -293,5 +302,5 @@ Write concise, decision-focused GitHub issue comments and PR descriptions.
 
 - **Don't narrate your work.** Don't write "I'm now implementing X" or "I've just finished Y." State decisions and results: "Used strategy X because Y" or "PR implements Z."
 - **When blocked, be specific.** State what is blocked, why it is blocked, and exactly what is needed to unblock. Vague blockers ("ran into some issues") are not actionable.
-- **PR descriptions lead with purpose, not mechanics.** The first sentence answers "what problem does this solve?" not "what files were changed." See the PR Creation section for full guidance on structure and abstraction level.
+- **PR descriptions lead with the problem being solved, not the mechanics.** The first sentence answers "what problem does this solve and why does it matter?" not "what files were changed." See the PR Creation section for full guidance on principles and abstraction level.
 - **Issue comments are for decisions and blockers.** Comment when you hit unexpected complexity, make an architectural choice that differs from the plan, or need input. Don't comment to narrate progress.
