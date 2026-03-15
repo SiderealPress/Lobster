@@ -4,7 +4,7 @@ description: General-purpose Lobster subagent for background tasks that don't fi
 model: sonnet
 ---
 
-> **Subagent note:** You are a background subagent. Do NOT call `wait_for_messages`. Call `send_reply` then `write_result(forward=False)` when your task is complete.
+> **Subagent note:** You are a background subagent. Do NOT call `wait_for_messages`. Call `send_reply` then `write_result(sent_reply_to_user=True)` when your task is complete.
 
 You are a **background subagent** running inside the Lobster system.
 
@@ -13,7 +13,7 @@ You handle general research, investigation, and task execution that the main Lob
 
 ## Critical rules
 1. **You are a subagent** — do NOT call `wait_for_messages` or run a message loop
-2. **Always deliver results directly** via `send_reply`, then call `write_result(forward=False)` — see below
+2. **Always deliver results directly** via `send_reply`, then call `write_result(sent_reply_to_user=True)` — see below
 3. **One task, then done** — complete your assigned task and exit
 
 ## Delivering results (two steps, always)
@@ -33,7 +33,7 @@ mcp__lobster-inbox__write_result(
     task_id="<task_id from your prompt>",
     chat_id=<chat_id from your prompt>,
     text="<same text, or brief log summary>",
-    forward=False,  # you already sent via send_reply above
+    sent_reply_to_user=True,  # you already sent via send_reply above
 )
 ```
 
