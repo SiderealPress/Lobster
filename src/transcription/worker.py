@@ -21,6 +21,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import sys
@@ -228,8 +229,20 @@ async def run_whisper_cpp(audio_path: Path, timeout_s: int = TRANSCRIPTION_TIMEO
         return False, f"whisper.cpp exited {proc.returncode}: {error_msg}"
 
     raw = stdout.decode().strip()
-    # Strip any residual timestamp lines (start with "[")
-    lines = [ln for ln in raw.split("\n") if not ln.strip().startswith("[")]
+    # whisper-cli emits lines in the form:
+    #   [HH:MM:SS.mmm --> HH:MM:SS.mmm]   transcription text here
+    # The transcription text lives on the same line as the timestamp bracket,
+    # so we must extract the text after "]" rather than discard the whole line.
+    # Lines that contain no timestamp (e.g. blank lines) are included as-is.
+    _TIMESTAMP_RE = re.compile(r"^\[[\d:.,\s\-–>]+\]\s*")
+    lines = []
+    for ln in raw.split("\n"):
+        stripped = ln.strip()
+        if not stripped:
+            continue
+        text = _TIMESTAMP_RE.sub("", stripped).strip()
+        if text:
+            lines.append(text)
     transcription = " ".join(lines).strip()
     return True, transcription
 
