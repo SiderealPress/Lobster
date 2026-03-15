@@ -42,3 +42,31 @@ else
     # Touch a heartbeat file to show health check is running
     touch "$HOME/lobster-workspace/logs/health-check.heartbeat"
 fi
+
+# WhatsApp bridge health check
+WA_STATUS=$(systemctl is-active lobster-whatsapp-bridge 2>/dev/null || echo "unknown")
+if [ "$WA_STATUS" != "active" ] && [ "$WA_STATUS" != "unknown" ]; then
+    # Inject alert to Lobster inbox
+    ALERT_FILE=~/messages/inbox/wa_health_$(date +%s).json
+    cat > "$ALERT_FILE" <<EOF
+{
+    "id": "wa_health_$(date +%s)",
+    "source": "system",
+    "chat_id": "system",
+    "text": "[Health] lobster-whatsapp-bridge is $WA_STATUS",
+    "timestamp": "$(date -Iseconds)"
+}
+EOF
+    log "ALERT: lobster-whatsapp-bridge is $WA_STATUS — injected inbox alert"
+fi
+
+# Check heartbeat (last message received)
+HEARTBEAT=~/lobster-workspace/logs/whatsapp-heartbeat
+if [ -f "$HEARTBEAT" ]; then
+    LAST=$(cat "$HEARTBEAT")
+    NOW=$(date +%s%3N)
+    AGE=$(( ($NOW - $LAST) / 1000 ))
+    if [ $AGE -gt 3600 ]; then
+        log "WARN: WhatsApp bridge - no messages for ${AGE}s"
+    fi
+fi
