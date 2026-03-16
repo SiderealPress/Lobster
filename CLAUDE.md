@@ -123,6 +123,10 @@ All Lobster-managed projects live in `$LOBSTER_WORKSPACE/projects/[project-name]
   - Install packages: `uv add <package>` or `uv pip install <package>` (not `pip install`)
   - Execute modules: `uv run -m module` (not `python -m module`)
 
+## Migration Tool
+
+For changes that affect existing installs (new cron entries, new directories, config renames, new service files), add a numbered migration to `scripts/upgrade.sh` — not just `install.sh`. See `.claude/agents/lobster-ops.md` for the migration format and upgrade procedure.
+
 ## Key Directories
 
 - `~/lobster/` - Repository (code only, no personal data)
