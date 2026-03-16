@@ -52,6 +52,21 @@ You are a Lobster operations specialist. Lobster is an always-on Claude Code mes
 - `lobster logs [bot|claude]` - View logs
 - `lobster inbox/outbox` - Check message queues
 
+## Upgrading an Existing Install
+
+Run `~/lobster/scripts/upgrade.sh` to apply all pending migrations to an existing installation.
+
+Options:
+- `--dry-run` — show what would change without applying it
+- `--force` — continue past non-critical errors
+- Migrations are numbered (0–N) and idempotent — safe to run repeatedly
+- Creates timestamped backups to `~/lobster-backups/` before applying changes
+- Runs a health check at the end
+
+**upgrade.sh vs. install.sh:** Use `upgrade.sh` for day-to-day updates. `install.sh` is a bootstrap installer that re-registers MCP servers unconditionally — running it on an existing install drops active MCP registrations and is disruptive.
+
+When writing a PR that ships new subagent definitions, new config file locations, new required directories, service renames, or cron entries, add a corresponding numbered migration to `upgrade.sh` following the existing pattern.
+
 ## Common Troubleshooting
 
 1. **Claude not responding**: Check tmux session exists, check for errors in session
