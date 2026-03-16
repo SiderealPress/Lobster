@@ -272,7 +272,7 @@ def test_optional_fields(isolated_db):
     session_store.session_start(
         id="minimal",
         description="Minimal session",
-        chat_id=OWNER_CHAT_ID_PLACEHOLDER,  # int chat_id gets converted to str
+        chat_id="OWNER_CHAT_ID_PLACEHOLDER",  # int chat_id gets converted to str
         path=db,
     )
     found = session_store.find_session("minimal", path=db)
@@ -402,7 +402,7 @@ def test_tracker_add_with_all_params(isolated_db):
     add_pending_agent(
         agent_id="full-agent",
         description="Full params test",
-        chat_id=OWNER_CHAT_ID_PLACEHOLDER,
+        chat_id="OWNER_CHAT_ID_PLACEHOLDER",
         task_id="task-full-001",
         source="telegram",
         output_file="/tmp/claude-1000/tasks/full-agent.output",
@@ -436,7 +436,7 @@ def test_json_migration(tmp_path):
             {
                 "id": "migrated-001",
                 "description": "Migrated agent",
-                "chat_id": OWNER_CHAT_ID_PLACEHOLDER,
+                "chat_id": "OWNER_CHAT_ID_PLACEHOLDER",
                 "source": "telegram",
                 "started_at": "2026-03-15T10:00:00+00:00",
                 "status": "running",
