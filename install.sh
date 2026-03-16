@@ -341,7 +341,7 @@ if [ "$CONTAINER_SETUP" = true ]; then
     fi
 
     # Create stub user-config agent files if they don't exist
-    for stub_file in "base.bootup.md" "base.context.md" "dispatcher.bootup.md" "subagent.bootup.md"; do
+    for stub_file in "user.base.md" "user.base.context.md" "user.dispatcher.md" "user.subagent.md"; do
         stub_dest="$USER_CONFIG_DIR/agents/$stub_file"
         if [ ! -f "$stub_dest" ]; then
             touch "$stub_dest"
@@ -998,7 +998,7 @@ if [ -f "$AUDIT_CONTEXT_SEED" ] && [ ! -f "$AUDIT_CONTEXT_DEST" ]; then
 fi
 
 # Create stub user-config agent files if they don't exist
-for stub_file in "base.bootup.md" "base.context.md" "dispatcher.bootup.md" "subagent.bootup.md"; do
+for stub_file in "user.base.md" "user.base.context.md" "user.dispatcher.md" "user.subagent.md"; do
     stub_dest="$USER_CONFIG_DIR/agents/$stub_file"
     if [ ! -f "$stub_dest" ]; then
         touch "$stub_dest"
