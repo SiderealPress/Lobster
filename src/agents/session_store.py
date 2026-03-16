@@ -666,9 +666,7 @@ def get_active_sessions(
 
     cursor = conn.execute(
         """
-        SELECT id, task_id, agent_type, description, chat_id, source, status,
-               output_file, timeout_minutes, parent_id, spawned_at
-        FROM agent_sessions
+        SELECT * FROM agent_sessions
         WHERE status IN ('running', 'starting')
         ORDER BY spawned_at ASC
         """
