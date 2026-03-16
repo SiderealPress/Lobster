@@ -39,7 +39,7 @@ def _load_hook(monkeypatch, tmp_path):
 
     # Patch module-level path constants to point at tmp_path
     config_env = tmp_path / "config.env"
-    debug_file = tmp_path / "debug.sys.bootup.md"
+    debug_file = tmp_path / "sys.debug.bootup.md"
     monkeypatch.setattr(mod, "CONFIG_ENV", config_env)
     monkeypatch.setattr(mod, "DEBUG_BOOTUP_FILE", debug_file)
 

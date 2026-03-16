@@ -50,7 +50,7 @@ REMINDER_TEXT = (
     "- You NEVER exit. You NEVER stop calling wait_for_messages.\n"
     "- You are a stateless dispatcher. Anything >7 seconds goes to a background subagent.\n\n"
     "Read these files now to restore full context:\n"
-    "1. ~/lobster-workspace/.claude/dispatcher.bootup.md\n"
+    "1. ~/lobster-workspace/.claude/sys.dispatcher.bootup.md\n"
     "  \u2190 dispatcher instructions, main loop, 7-second rule\n"
     "2. ~/lobster-user-config/memory/canonical/handoff.md\n"
     "  \u2190 active projects, key people, priorities\n\n"

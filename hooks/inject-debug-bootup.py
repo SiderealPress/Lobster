@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-SessionStart hook: inject debug.sys.bootup.md when LOBSTER_DEBUG=true.
+SessionStart hook: inject sys.debug.bootup.md when LOBSTER_DEBUG=true.
 
 Fires on every SessionStart event. If the LOBSTER_DEBUG environment variable
 is set to 'true' (case-insensitive), reads
-~/lobster/.claude/debug.sys.bootup.md and prints its contents to stdout.
+~/lobster/.claude/sys.debug.bootup.md and prints its contents to stdout.
 
 Claude Code SessionStart hooks can inject content into the agent's initial
 context by printing to stdout. This causes the content to appear as a system
@@ -24,7 +24,7 @@ from pathlib import Path
 
 
 CONFIG_ENV = Path(os.path.expanduser("~/lobster-config/config.env"))
-DEBUG_BOOTUP_FILE = Path(os.path.expanduser("~/lobster/.claude/debug.sys.bootup.md"))
+DEBUG_BOOTUP_FILE = Path(os.path.expanduser("~/lobster/.claude/sys.debug.bootup.md"))
 
 
 def _parse_config_env() -> dict:
