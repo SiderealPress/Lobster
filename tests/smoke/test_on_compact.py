@@ -23,14 +23,27 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import io
 import json
 import os
 import sys
 import types
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+
+
+@contextmanager
+def _stdin_from_module(mod: types.ModuleType):
+    """Replace sys.stdin with a StringIO containing the module's test hook input."""
+    old_stdin = sys.stdin
+    sys.stdin = io.StringIO(mod._test_stdin_data)
+    try:
+        yield
+    finally:
+        sys.stdin = old_stdin
 
 
 # ---------------------------------------------------------------------------
@@ -44,6 +57,7 @@ def _load_hook(
     inbox_dir: Path,
     state_file: Path,
     sentinel_file: Path,
+    session_id: str = "test-dispatcher-session",
 ) -> types.ModuleType:
     """
     Load hooks/on-compact.py as a fresh module with patched path constants.
@@ -68,6 +82,19 @@ def _load_hook(
     # Suppress the Telegram dev-notify side-effect — we never want real network
     # calls in smoke tests and we don't want to depend on config.env being present.
     mod.maybe_send_dev_telegram_notify = lambda: None  # type: ignore[attr-defined]
+
+    # Stub is_dispatcher to return True so tests exercise the dispatcher path.
+    # The real is_dispatcher() checks a marker file + transcript; in tests there
+    # is no marker file and no stdin transcript, so it would return False and
+    # silently exit without writing any inbox/state files.
+    mod.is_dispatcher = lambda _data: True  # type: ignore[attr-defined]
+
+    # Patch sys.stdin so main()'s json.load(sys.stdin) gets a valid compact event
+    # rather than hitting pytest's captured stdin which raises OSError.
+    hook_input = json.dumps(
+        {"session_id": session_id, "hook_event_name": "SessionStart", "is_compact": True}
+    )
+    mod._test_stdin_data = hook_input  # store for reference
 
     return mod
 
@@ -102,7 +129,8 @@ def test_on_compact_runs_without_crashing(tmp_path: Path) -> None:
     mod = _load_hook(inbox_dir, state_file, sentinel_file)
 
     # Should complete without raising.
-    mod.main()
+    with _stdin_from_module(mod):
+        mod.main()
 
 
 # ---------------------------------------------------------------------------
@@ -124,7 +152,8 @@ def test_on_compact_writes_compact_reminder(tmp_path: Path) -> None:
     sentinel_file = tmp_path / "config" / "compact-pending"
 
     mod = _load_hook(inbox_dir, state_file, sentinel_file)
-    mod.main()
+    with _stdin_from_module(mod):
+        mod.main()
 
     reminders = _compact_reminders(inbox_dir)
     assert len(reminders) == 1, (
@@ -161,7 +190,8 @@ def test_on_compact_writes_compacted_at_to_state(tmp_path: Path) -> None:
     sentinel_file = tmp_path / "config" / "compact-pending"
 
     mod = _load_hook(inbox_dir, state_file, sentinel_file)
-    mod.main()
+    with _stdin_from_module(mod):
+        mod.main()
 
     assert state_file.exists(), f"lobster-state.json was not created at {state_file}"
 
@@ -217,12 +247,14 @@ def test_on_compact_idempotent(tmp_path: Path) -> None:
 
     # First invocation — normal path.
     mod = _load_hook(inbox_dir, state_file, sentinel_file)
-    mod.main()
+    with _stdin_from_module(mod):
+        mod.main()
 
     # Second invocation — simulates double-compaction (compact event fires
     # again before the dispatcher has consumed the first reminder).
     mod2 = _load_hook(inbox_dir, state_file, sentinel_file)
-    mod2.main()
+    with _stdin_from_module(mod2):
+        mod2.main()
 
     reminders = _compact_reminders(inbox_dir)
     assert len(reminders) == 1, (
