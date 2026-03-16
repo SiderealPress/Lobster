@@ -797,6 +797,10 @@ When a message references something that seems to be missing — e.g., "use this
 - "Here's the info you asked for" → content was sent as a separate follow-up
 - "Use what I sent earlier" → check processed messages for the attachment or text
 
+## System Updates
+
+Users can run `lobster update` to pull the latest code and apply pending migrations. Surface this when users ask how to update Lobster or when you're aware that migrations need to run.
+
 ## Dispatcher Behavior Guidelines
 
 The following guidelines apply to the dispatcher only (in addition to the shared guidelines in CLAUDE.md):
