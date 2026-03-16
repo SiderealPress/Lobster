@@ -898,32 +898,52 @@ Manual intervention required:
 
     record_restart
 
-    # Clean up any stale tmux socket before restarting.
-    # When ExecStop fails (e.g. "no server running on /tmp/tmux-1000/lobster"),
-    # the socket file is left behind and can prevent the new tmux server from
-    # binding on the next ExecStart. rm -f unlinks the socket path
-    # unconditionally regardless of whether tmux is running. A running tmux
-    # server keeps its open file descriptor but the named path is gone,
-    # preventing new client connections to that path; if tmux is not running,
-    # removing it unblocks the bind on the next ExecStart.
+    # Capture the Claude PID before stopping, so we can verify a new process
+    # is running after restart (not just the same surviving process).
+    local pre_restart_pid
+    pre_restart_pid=$(pgrep -x "claude" 2>/dev/null | head -1)
+
     local tmux_uid
     tmux_uid=$(id -u)
     local stale_socket="/tmp/tmux-${tmux_uid}/${TMUX_SOCKET}"
+
+    # Stop first while the tmux socket still exists.
+    # ExecStop runs "tmux kill-session", which requires the socket to be present.
+    # If we delete the socket before stopping, ExecStop fails silently and the
+    # old Claude session survives alongside the new one started by ExecStart.
+    sudo systemctl stop "$SERVICE_CLAUDE" 2>&1 | while read -r line; do
+        log_info "systemctl stop: $line"
+    done
+
+    # Clean up the socket only if stop left it behind.
+    # A successful ExecStop removes it via tmux kill-session; if stop failed or
+    # the socket was already stale, we clean it up here so ExecStart can bind.
     if [[ -S "$stale_socket" ]]; then
-        log_warn "Removing stale tmux socket: $stale_socket"
+        log_warn "Removing stale tmux socket after stop: $stale_socket"
         rm -f "$stale_socket"
     fi
 
-    # Restart via systemd - this handles tmux lifecycle correctly
-    sudo systemctl restart "$SERVICE_CLAUDE" 2>&1 | while read -r line; do
-        log_info "systemctl: $line"
+    # Start fresh
+    sudo systemctl start "$SERVICE_CLAUDE" 2>&1 | while read -r line; do
+        log_info "systemctl start: $line"
     done
 
     # Wait for startup
     sleep 5
 
-    # Verify recovery: service and tmux must be running
-    if systemctl is-active --quiet "$SERVICE_CLAUDE" 2>/dev/null && \
+    # Verify recovery: service and tmux must be running, and the Claude PID
+    # must differ from the pre-restart PID (catching ghost sessions where the
+    # old process survived alongside the newly started one).
+    local post_restart_pid
+    post_restart_pid=$(pgrep -x "claude" 2>/dev/null | head -1)
+    local pid_changed=true
+    if [[ -n "$pre_restart_pid" && "$post_restart_pid" == "$pre_restart_pid" ]]; then
+        pid_changed=false
+        log_error "Restart verification failed: Claude PID $pre_restart_pid unchanged — old session may have survived"
+    fi
+
+    if [[ "$pid_changed" == true ]] && \
+       systemctl is-active --quiet "$SERVICE_CLAUDE" 2>/dev/null && \
        tmux -L "$TMUX_SOCKET" has-session -t "$TMUX_SESSION" 2>/dev/null; then
 
         # For stale-inbox restarts, also re-verify inbox drain
