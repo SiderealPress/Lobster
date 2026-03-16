@@ -1075,12 +1075,12 @@ run_migrations() {
     # renamed into place before Migration 11 would create empty stubs at the new names.
     # System files (.claude/ in workspace): dispatcher.bootup.md -> sys.dispatcher.md, subagent.bootup.md -> sys.subagent.md
     local ws_claude_dir="$WORKSPACE_DIR/.claude"
-    if [ -f "$ws_claude_dir/dispatcher.bootup.md" ] && [ ! -f "$ws_claude_dir/sys.dispatcher.md" ]; then
+    if [ -f "$ws_claude_dir/dispatcher.bootup.md" ] && [ ! -s "$ws_claude_dir/sys.dispatcher.md" ]; then
         mv "$ws_claude_dir/dispatcher.bootup.md" "$ws_claude_dir/sys.dispatcher.md"
         substep "Renamed .claude/dispatcher.bootup.md -> .claude/sys.dispatcher.md"
         migrated=$((migrated + 1))
     fi
-    if [ -f "$ws_claude_dir/subagent.bootup.md" ] && [ ! -f "$ws_claude_dir/sys.subagent.md" ]; then
+    if [ -f "$ws_claude_dir/subagent.bootup.md" ] && [ ! -s "$ws_claude_dir/sys.subagent.md" ]; then
         mv "$ws_claude_dir/subagent.bootup.md" "$ws_claude_dir/sys.subagent.md"
         substep "Renamed .claude/subagent.bootup.md -> .claude/sys.subagent.md"
         migrated=$((migrated + 1))
