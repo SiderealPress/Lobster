@@ -58,7 +58,7 @@ DB_PATH = Path.home() / "messages" / "config" / "agent_sessions.db"
 
 # Glob pattern for Claude Code session task directories.
 # The middle component is a session UUID that changes per Claude Code invocation.
-AGENT_OUTPUT_GLOB = "/tmp/claude-1000/-home-lobster-lobster-workspace/*/tasks/"
+AGENT_OUTPUT_GLOB = "/tmp/claude-1000/-home-admin-lobster-workspace/*/tasks/"
 
 # Pattern for agent JSONL symlink filenames: agent-<hex_id>.jsonl
 AGENT_SYMLINK_PATTERN = re.compile(r"^agent-([0-9a-f]+)\.jsonl$")
