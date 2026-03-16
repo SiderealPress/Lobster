@@ -1068,46 +1068,30 @@ check_dashboard_server() {
     return 0
 }
 
-# Check 11: messages.db liveness (BIS-167 Slice 6, advisory only - never RED)
-# Reports DB size and WAL health when LOBSTER_USE_DB=1.
-# Never escalates to RED: the DB is additive; JSON files remain source of truth.
-check_messages_db() {
-    local db_path="${LOBSTER_MESSAGES_DB:-$MESSAGES_DIR/messages.db}"
-
-    # If DB feature flag is off, silently pass
-    if [[ "${LOBSTER_USE_DB:-0}" != "1" ]]; then
-        log_info "messages.db: LOBSTER_USE_DB not enabled — skipping DB check"
-        return 0
-    fi
-
-    if [[ ! -f "$db_path" ]]; then
-        log_warn "messages.db: not found at $db_path (DB writes enabled but file absent)"
-        return 0  # Not RED — DB created on first write
-    fi
-
-    # Check DB integrity (fast check, < 1s on healthy DB)
-    if ! sqlite3 "$db_path" "PRAGMA integrity_check;" 2>/dev/null | grep -q "^ok$"; then
-        log_warn "messages.db: integrity_check failed at $db_path"
-        return 0  # Advisory only — never RED
-    fi
-
-    local db_size_kb
-    db_size_kb=$(du -k "$db_path" 2>/dev/null | cut -f1)
-    local row_count
-    row_count=$(sqlite3 "$db_path" "SELECT (SELECT COUNT(*) FROM messages) + (SELECT COUNT(*) FROM bisque_events) + (SELECT COUNT(*) FROM agent_events);" 2>/dev/null || echo "?")
-    log_info "messages.db: OK — ${db_size_kb}K, ${row_count} total rows"
-    return 0
-}
-
-# Check 10: Required cron entries
+# Check 10: Required cron entries - auto-restore LOBSTER-SELF-CHECK if missing
 check_cron_entries() {
-    local REQUIRED_CRON_MARKERS=("# LOBSTER-HEALTH")
+    local install_dir="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
+    local cron_manage="$install_dir/scripts/cron-manage.sh"
+    local REQUIRED_CRON_MARKERS=("# LOBSTER-SELF-CHECK" "# LOBSTER-HEALTH")
 
     for marker in "${REQUIRED_CRON_MARKERS[@]}"; do
         if ! crontab -l 2>/dev/null | grep -qF "$marker"; then
             log_warn "Missing cron entry: $marker"
-            # LOBSTER-HEALTH checking itself is circular (if we're running, the health cron is working).
-            # Just warn; do not attempt auto-restore.
+            case "$marker" in
+                "# LOBSTER-SELF-CHECK")
+                    if [[ -x "$cron_manage" ]]; then
+                        "$cron_manage" add "# LOBSTER-SELF-CHECK" \
+                            "*/3 * * * * $install_dir/scripts/periodic-self-check.sh # LOBSTER-SELF-CHECK"
+                        log_info "Auto-restored: $marker"
+                    else
+                        log_warn "cron-manage.sh not found or not executable at $cron_manage — cannot auto-restore $marker"
+                    fi
+                    ;;
+                *)
+                    # LOBSTER-HEALTH checking itself is circular (if we're running, the health cron is working).
+                    # Just warn; do not attempt auto-restore.
+                    ;;
+            esac
         else
             log_info "Cron entry present: $marker"
         fi
@@ -1863,10 +1847,6 @@ ssh into the server and run: claude auth login"
     # --- Cron entry guard (auto-restore SELF-CHECK if missing) ---
 
     check_cron_entries
-
-    # --- messages.db liveness (advisory, BIS-167 Slice 6, never RED) ---
-
-    check_messages_db
 
     # --- Resource checks (RED if critical) ---
 

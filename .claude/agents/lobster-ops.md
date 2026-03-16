@@ -66,6 +66,12 @@ Options:
 
 When writing a PR that ships new subagent definitions, new config file locations, new required directories, service renames, or cron entries, add a corresponding numbered migration to `upgrade.sh` following the existing pattern.
 
+**Crontab safety:** Never write `echo "..." | crontab -` directly — it overwrites the entire crontab and destroys unrelated entries (this is how the LOBSTER-SELF-CHECK entry was lost). Always use:
+```bash
+~/lobster/scripts/cron-manage.sh add "# LOBSTER-MY-MARKER" "*/5 * * * * /path/to/script.sh # LOBSTER-MY-MARKER"
+~/lobster/scripts/cron-manage.sh remove "# LOBSTER-MY-MARKER"
+```
+
 ## Common Troubleshooting
 
 1. **Claude not responding**: Check tmux session exists, check for errors in session

@@ -1973,9 +1973,8 @@ step "Setting up health monitoring..."
 chmod +x "$INSTALL_DIR/scripts/health-check-v3.sh" || true
 
 # Add health check to crontab (runs every 4 minutes)
-HEALTH_MARKER="# LOBSTER-HEALTH"
-({ crontab -l 2>/dev/null | grep -v "$HEALTH_MARKER" | grep -v "health-check" || true; }; \
- echo "*/4 * * * * $INSTALL_DIR/scripts/health-check-v3.sh $HEALTH_MARKER") | crontab -
+"$INSTALL_DIR/scripts/cron-manage.sh" add "# LOBSTER-HEALTH" \
+    "*/4 * * * * $INSTALL_DIR/scripts/health-check-v3.sh # LOBSTER-HEALTH"
 
 success "Health monitoring configured (checks every 4 minutes)"
 
@@ -2035,7 +2034,9 @@ success "Ghost detector configured (runs every 5 minutes)"
 # OOM Monitor
 #===============================================================================
 
-step "Setting up OOM monitor cron..."
+# Add periodic self-check to crontab (runs every 3 minutes)
+"$INSTALL_DIR/scripts/cron-manage.sh" add "# LOBSTER-SELF-CHECK" \
+    "*/3 * * * * $INSTALL_DIR/scripts/periodic-self-check.sh # LOBSTER-SELF-CHECK"
 
 # oom-monitor.py runs every 10 minutes, scans the kernel journal for OOM kills
 # affecting Lobster/Claude processes, and writes an inbox message for the
