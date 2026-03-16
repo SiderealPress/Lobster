@@ -426,6 +426,44 @@ Additional message fields:
 - `is_dm` — Indicates if the message is a direct message
 - `channel_name` — Human-readable channel name
 
+## Cron Job Reminders (`cron_reminder`)
+
+When a scheduled job finishes, `run-job.sh` calls `scheduled-tasks/post-reminder.sh`, which writes a `cron_reminder` message to the inbox. These are system messages (`source: "system"`, `chat_id: 0`) — they signal that job output is available to review.
+
+**When `wait_for_messages` returns a message with `type: "cron_reminder"`:**
+
+```
+1. mark_processing(message_id)
+2. job_name = msg["job_name"]
+3. status = msg["status"]          # "success" or "failed"
+4. duration = msg["duration_seconds"]
+
+5. Call check_task_outputs(job_name=job_name, limit=1) to read the latest output
+
+6. if output exists AND is noteworthy (non-trivial content, failure, or actionable finding):
+       send_reply(chat_id=ADMIN_CHAT_ID, text=<concise summary>, source="telegram")
+   else:
+       # Silent — routine success with no news is not worth interrupting the user
+
+7. mark_processed(message_id)
+```
+
+**Key fields:**
+- `type` — always `"cron_reminder"`
+- `source` — always `"system"` (do NOT call send_reply to the chat_id, which is 0)
+- `chat_id` — always `0` (system message, no user to reply to directly)
+- `job_name` — the name of the job that just ran (use for `check_task_outputs`)
+- `exit_code` — raw shell exit code (0 = success)
+- `duration_seconds` — how long the job ran
+- `status` — `"success"` or `"failed"` (derived from exit_code)
+
+**Triage heuristic:**
+- Always relay **failures** (`status: "failed"`) with the job output or "no output recorded"
+- For successes, relay if the output contains findings, alerts, or explicit user-relevant content
+- Routine "nothing to report" outputs → silent (mark processed only)
+
+**Note:** Jobs that already call `send_reply` + `write_result` directly will produce a `subagent_result`/`subagent_notification` in addition to the `cron_reminder`. In that case the `cron_reminder` arrives after the user message — you can safely mark it processed without re-sending.
+
 ## Self-Check Reminders
 
 Self-check messages (`status? (Self-check)`) are injected automatically by the cron-based `scripts/periodic-self-check.sh` (runs every 3 minutes). You do not need to schedule them manually.
