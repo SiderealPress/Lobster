@@ -81,6 +81,8 @@ RESTART_WINDOW_BUFFER_SECONDS=120    # Pre-mark messages within this window of t
 
 MAINTENANCE_EXPIRY_SECONDS=3600      # 1 hour - stale maintenance flag is auto-cleared and checks resume
 
+MAINTENANCE_EXPIRY_SECONDS=3600      # 1 hour - stale maintenance flag is auto-cleared and checks resume
+
 COMPACTION_SUPPRESS_SECONDS=300      # 5 minutes - skip stale-inbox check after a compaction event
 COMPACT_GRACE_SECONDS=900            # 15 minutes - skip stale-inbox check after a compaction (last-compact.ts)
 # CATCHUP_SUPPRESS_SECONDS removed (issue #1483): dispatcher heartbeat threshold covers catchup naturally
