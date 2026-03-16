@@ -2,6 +2,8 @@
 Unit tests for hooks/require-write-result.py
 
 Tests cover:
+- Stop hook (CC 2.1.76+): reads transcript from transcript_path JSONL file
+- Stop hook (legacy): falls back to inline transcript[] if transcript_path absent
 - Stop hook: exits 0 with suppressOutput JSON when write_result was called
 - Stop hook: exits 2 with stderr when write_result was not called
 - SubagentStop hook: reads transcript from agent_transcript_path JSONL file
@@ -78,7 +80,21 @@ def _make_transcript_no_write_result() -> list:
     ]
 
 
-def _make_stop_hook_input(transcript: list, session_id: str = "sess-001") -> dict:
+def _make_stop_hook_input_with_path(
+    transcript_path: str, session_id: str = "sess-001"
+) -> dict:
+    """CC 2.1.76+ Stop hook: uses transcript_path (JSONL file)."""
+    return {
+        "hook_event_name": "Stop",
+        "session_id": session_id,
+        "transcript_path": transcript_path,
+    }
+
+
+def _make_stop_hook_input_legacy(
+    transcript: list, session_id: str = "sess-001"
+) -> dict:
+    """Legacy Stop hook: inline transcript list (older CC versions)."""
     return {
         "hook_event_name": "Stop",
         "session_id": session_id,
@@ -128,14 +144,16 @@ def _run_hook(mod, hook_input: dict) -> tuple[int, str, str]:
 
 
 # ---------------------------------------------------------------------------
-# Stop hook tests (inline transcript)
+# Stop hook tests (CC 2.1.76+ — transcript_path JSONL file)
 # ---------------------------------------------------------------------------
 
 class TestStopHook:
-    def test_exits_0_when_write_result_called(self, monkeypatch, tmp_path):
+    def test_exits_0_when_write_result_called_via_path(self, monkeypatch, tmp_path):
+        """CC 2.1.76+: Stop hook reads transcript from transcript_path file."""
         mod = _load_hook(monkeypatch, tmp_path)
-        transcript = _make_transcript_with_write_result(chat_id=12345)
-        hook_input = _make_stop_hook_input(transcript)
+        transcript_file = tmp_path / "session.jsonl"
+        _write_jsonl_transcript(transcript_file, _make_transcript_with_write_result(chat_id=12345))
+        hook_input = _make_stop_hook_input_with_path(str(transcript_file))
 
         exit_code, stdout, stderr = _run_hook(mod, hook_input)
 
@@ -144,8 +162,9 @@ class TestStopHook:
     def test_success_outputs_suppress_output_json(self, monkeypatch, tmp_path):
         """Exit 0 must print JSON with suppressOutput=true to prevent CC feedback injection."""
         mod = _load_hook(monkeypatch, tmp_path)
-        transcript = _make_transcript_with_write_result(chat_id=12345)
-        hook_input = _make_stop_hook_input(transcript)
+        transcript_file = tmp_path / "session.jsonl"
+        _write_jsonl_transcript(transcript_file, _make_transcript_with_write_result(chat_id=12345))
+        hook_input = _make_stop_hook_input_with_path(str(transcript_file))
 
         exit_code, stdout, stderr = _run_hook(mod, hook_input)
 
@@ -153,10 +172,12 @@ class TestStopHook:
         output = json.loads(stdout.strip())
         assert output.get("suppressOutput") is True, f"Expected suppressOutput=true, got {output}"
 
-    def test_exits_2_when_no_write_result(self, monkeypatch, tmp_path):
+    def test_exits_2_when_no_write_result_via_path(self, monkeypatch, tmp_path):
+        """CC 2.1.76+: Stop hook blocks exit when write_result absent from JSONL."""
         mod = _load_hook(monkeypatch, tmp_path)
-        transcript = _make_transcript_no_write_result()
-        hook_input = _make_stop_hook_input(transcript)
+        transcript_file = tmp_path / "session.jsonl"
+        _write_jsonl_transcript(transcript_file, _make_transcript_no_write_result())
+        hook_input = _make_stop_hook_input_with_path(str(transcript_file))
 
         exit_code, stdout, stderr = _run_hook(mod, hook_input)
 
@@ -165,8 +186,9 @@ class TestStopHook:
     def test_exits_2_when_write_result_chat_id_none(self, monkeypatch, tmp_path):
         """write_result with chat_id=None is invalid — should block exit."""
         mod = _load_hook(monkeypatch, tmp_path)
-        transcript = _make_transcript_with_write_result(chat_id=None)
-        hook_input = _make_stop_hook_input(transcript)
+        transcript_file = tmp_path / "session.jsonl"
+        _write_jsonl_transcript(transcript_file, _make_transcript_with_write_result(chat_id=None))
+        hook_input = _make_stop_hook_input_with_path(str(transcript_file))
 
         exit_code, stdout, stderr = _run_hook(mod, hook_input)
 
@@ -176,8 +198,9 @@ class TestStopHook:
     def test_exits_0_when_write_result_chat_id_zero(self, monkeypatch, tmp_path):
         """chat_id=0 is valid (background agent / no user context)."""
         mod = _load_hook(monkeypatch, tmp_path)
-        transcript = _make_transcript_with_write_result(chat_id=0)
-        hook_input = _make_stop_hook_input(transcript)
+        transcript_file = tmp_path / "session.jsonl"
+        _write_jsonl_transcript(transcript_file, _make_transcript_with_write_result(chat_id=0))
+        hook_input = _make_stop_hook_input_with_path(str(transcript_file))
 
         exit_code, stdout, stderr = _run_hook(mod, hook_input)
 
@@ -186,8 +209,9 @@ class TestStopHook:
     def test_blocking_message_goes_to_stderr(self, monkeypatch, tmp_path):
         """Block messages must go to stderr (exit 2 reads stderr as feedback)."""
         mod = _load_hook(monkeypatch, tmp_path)
-        transcript = _make_transcript_no_write_result()
-        hook_input = _make_stop_hook_input(transcript)
+        transcript_file = tmp_path / "session.jsonl"
+        _write_jsonl_transcript(transcript_file, _make_transcript_no_write_result())
+        hook_input = _make_stop_hook_input_with_path(str(transcript_file))
 
         exit_code, stdout, stderr = _run_hook(mod, hook_input)
 
@@ -195,6 +219,16 @@ class TestStopHook:
         assert "write_result" in stderr, f"Expected write_result in stderr, got: {stderr!r}"
         # stdout should NOT contain the block message (only JSON on success)
         assert "STOP:" not in stdout
+
+    def test_legacy_inline_transcript_still_works(self, monkeypatch, tmp_path):
+        """Legacy CC: inline transcript[] field works when transcript_path absent."""
+        mod = _load_hook(monkeypatch, tmp_path)
+        transcript = _make_transcript_with_write_result(chat_id=12345)
+        hook_input = _make_stop_hook_input_legacy(transcript)
+
+        exit_code, stdout, stderr = _run_hook(mod, hook_input)
+
+        assert exit_code == 0, f"Legacy inline transcript should work, got {exit_code}. stderr={stderr}"
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +330,10 @@ class TestDispatcherExemption:
         config_dir.mkdir(parents=True)
         (config_dir / "dispatcher-session-id").write_text("dispatcher-sess-001")
 
+        # Write a transcript file with no write_result (dispatcher never calls it).
+        transcript_file = tmp_path / "dispatcher.jsonl"
+        _write_jsonl_transcript(transcript_file, _make_transcript_no_write_result())
+
         # Patch the DISPATCHER_SESSION_FILE in session_role module.
         import session_role
         original = session_role.DISPATCHER_SESSION_FILE
@@ -304,8 +342,8 @@ class TestDispatcherExemption:
             config_dir / "dispatcher-session-id"
         )
 
-        hook_input = _make_stop_hook_input(
-            _make_transcript_no_write_result(),
+        hook_input = _make_stop_hook_input_with_path(
+            str(transcript_file),
             session_id="dispatcher-sess-001",
         )
         exit_code, stdout, stderr = _run_hook(mod, hook_input)

@@ -35,10 +35,13 @@ output file.
 
 ## SubagentStop vs Stop transcript handling
 
-SubagentStop hooks do NOT receive an inline `transcript` field. Instead they
-receive `agent_transcript_path` — a path to a JSONL file containing the
-subagent's conversation. This hook detects which event it is handling and reads
-the transcript from the file when running as SubagentStop.
+Neither SubagentStop nor Stop hooks receive an inline `transcript` field in
+CC 2.1.76+. Both pass a file path instead:
+- Stop: `transcript_path` (JSONL file of the current session's conversation)
+- SubagentStop: `agent_transcript_path` (JSONL file of the subagent's conversation)
+
+This hook reads the appropriate file path for each event type. An inline
+`transcript` field is supported as a legacy fallback for older CC versions.
 
 ## Suppressing feedback injection on success
 
@@ -188,16 +191,23 @@ def main():
     is_subagentstop = hook_event == "SubagentStop"
 
     if is_subagentstop:
-        # SubagentStop: transcript is in a JSONL file, not inline.
-        agent_transcript_path = data.get("agent_transcript_path", "")
-        if agent_transcript_path:
-            transcript = _load_transcript_from_jsonl(agent_transcript_path)
-        else:
+        # SubagentStop: transcript is in a JSONL file at agent_transcript_path.
+        # CC does NOT include an inline transcript field for this event.
+        transcript_path = data.get("agent_transcript_path", "")
+        if not transcript_path:
             # No path provided — can't verify; allow exit to avoid blocking.
             _exit_ok()
+        transcript = _load_transcript_from_jsonl(transcript_path)
     else:
-        # Stop hook: transcript is inline in the hook input.
-        transcript = data.get("transcript", [])
+        # Stop hook: CC 2.1.76+ passes transcript_path (JSONL file), not inline.
+        # Try the file path first; fall back to inline transcript[] for older CC
+        # versions that may still embed the transcript directly.
+        transcript_path = data.get("transcript_path", "")
+        if transcript_path:
+            transcript = _load_transcript_from_jsonl(transcript_path)
+        else:
+            # Older CC: transcript may be inline (legacy fallback).
+            transcript = data.get("transcript", [])
 
     # Collect all tool call items so we can inspect both name and input.
     # Also collect text content parts for pseudocode detection.
