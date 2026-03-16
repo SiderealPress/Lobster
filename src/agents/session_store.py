@@ -631,18 +631,16 @@ def get_active_sessions(path: Path | None = None) -> list[dict]:
     """Return all currently running sessions with elapsed time.
 
     Returns:
-        List of dicts with keys: id, task_id, agent_type, description,
-        chat_id, source, status, output_file, timeout_minutes, parent_id,
-        spawned_at, elapsed_seconds.
+        List of dicts with all session columns plus elapsed_seconds.
+        Uses SELECT * so new columns (e.g. stop_reason) are included
+        automatically without requiring updates to this function.
     """
     resolved = path if path is not None else _DEFAULT_DB_PATH
     conn = _get_connection(resolved)
 
     cursor = conn.execute(
         """
-        SELECT id, task_id, agent_type, description, chat_id, source, status,
-               output_file, timeout_minutes, parent_id, spawned_at
-        FROM agent_sessions
+        SELECT * FROM agent_sessions
         WHERE status IN ('running', 'starting')
         ORDER BY spawned_at ASC
         """
