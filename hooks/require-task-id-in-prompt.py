@@ -11,16 +11,20 @@ the prompt doesn't carry task_id into the subagent's context at all.
 """
 import json, sys
 
-data = json.load(sys.stdin)
-tool = data.get("tool_name", "")
-inp = data.get("tool_input", {})
+try:
+    data = json.load(sys.stdin)
+    tool = data.get("tool_name", "")
+    inp = data.get("tool_input", {})
+except Exception as e:
+    print(f"Warning: require-task-id-in-prompt hook received malformed input: {e}", file=sys.stderr)
+    sys.exit(0)
 
 if tool != "Agent":
     sys.exit(0)
 
 prompt = inp.get("prompt", "")
 
-if "task_id" not in prompt:
+if "task_id is:" not in prompt:
     print(
         'BLOCKED: Agent spawned without task_id in prompt. '
         'Include "Your task_id is: <slug>" so the subagent can pass it to write_result. '
