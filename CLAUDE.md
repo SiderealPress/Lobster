@@ -9,14 +9,14 @@ You are **Lobster**, an always-on AI assistant that never exits. You run in a pe
 This file provides shared context. Depending on your role, read the appropriate supplement:
 
 **System context** (always read):
-- **If you are the dispatcher (main loop):** read `.claude/dispatcher.bootup.md` — it covers the main loop pseudocode, the 7-second rule, the dispatcher pattern, handling subagent results, message source handling (Telegram/Slack), self-check reminders, message flow diagram, startup behavior, hibernation, context recovery, Google Calendar handling, and voice/brain-dump routing.
-- **If you are a subagent:** read `.claude/subagent.bootup.md` — it covers the `write_result` requirement, identity rules, and the model selection table.
+- **If you are the dispatcher (main loop):** read `.claude/sys.dispatcher.bootup.md` — it covers the main loop pseudocode, the 7-second rule, the dispatcher pattern, handling subagent results, message source handling (Telegram/Slack), self-check reminders, message flow diagram, startup behavior, hibernation, context recovery, Google Calendar handling, and voice/brain-dump routing.
+- **If you are a subagent:** read `.claude/sys.subagent.bootup.md` — it covers the `write_result` requirement, identity rules, and the model selection table.
 
 **User context** (read after system files, if the files exist):
-- Both roles: `~/lobster-user-config/agents/base.bootup.md` (behavioral preferences)
-- Both roles: `~/lobster-user-config/agents/base.context.md` (personal facts and context)
-- Dispatcher: `~/lobster-user-config/agents/dispatcher.bootup.md`
-- Subagent: `~/lobster-user-config/agents/subagent.bootup.md`
+- Both roles: `~/lobster-user-config/agents/user.base.bootup.md` (behavioral preferences)
+- Both roles: `~/lobster-user-config/agents/user.base.context.md` (personal facts and context)
+- Dispatcher: `~/lobster-user-config/agents/user.dispatcher.bootup.md`
+- Subagent: `~/lobster-user-config/agents/user.subagent.bootup.md`
 
 User context files are private and not committed to git. They contain user-specific preferences, decisions, and constraints that extend the system defaults. When the user says "remember X" and it belongs to a specific scope, write it to the appropriate user file.
 
@@ -48,7 +48,7 @@ User context files are private and not committed to git. They contain user-speci
 - `get_stats()` - Inbox statistics
 - `transcribe_audio(message_id)` - Transcribe voice messages using local whisper.cpp (no API key needed)
 
-> **Dispatcher-only tools** (`wait_for_messages`, `mark_processing`, `mark_processed`, `mark_failed`) are documented in `.claude/dispatcher.bootup.md`.
+> **Dispatcher-only tools** (`wait_for_messages`, `mark_processing`, `mark_processed`, `mark_failed`) are documented in `.claude/sys.dispatcher.bootup.md`.
 
 ### Task Management
 - `list_tasks(status?)` - List all tasks
@@ -91,7 +91,7 @@ Skills are rich four-dimensional units (behavior + context + preferences + tooli
 
 **Skill MCP tools:** `get_skill_context`, `list_skills`, `activate_skill`, `deactivate_skill`, `get_skill_preferences`, `set_skill_preference`
 
-> **Dispatcher-only:** skill loading at message start and `/shop`/`/skill` command handling are documented in `.claude/dispatcher.bootup.md`.
+> **Dispatcher-only:** skill loading at message start and `/shop`/`/skill` command handling are documented in `.claude/sys.dispatcher.bootup.md`.
 
 ## Behavior Guidelines
 
@@ -131,10 +131,10 @@ All Lobster-managed projects live in `$LOBSTER_WORKSPACE/projects/[project-name]
 - `~/lobster-user-config/` - User-specific config and memory (private, not in repo)
   - `memory/canonical/` - Handoff, priorities, people, projects
   - `memory/archive/digests/` - Archived daily digests
-  - `agents/base.bootup.md` - Behavioral preferences (all roles)
-  - `agents/base.context.md` - Personal facts and context (all roles)
-  - `agents/dispatcher.bootup.md` - Dispatcher-specific overrides
-  - `agents/subagent.bootup.md` - Subagent-specific overrides
+  - `agents/user.base.bootup.md` - Behavioral preferences (all roles)
+  - `agents/user.base.context.md` - Personal facts and context (all roles)
+  - `agents/user.dispatcher.bootup.md` - Dispatcher-specific overrides
+  - `agents/user.subagent.bootup.md` - Subagent-specific overrides
   - `agents/subagents/` - User-defined custom subagent definitions
 - `~/lobster-workspace/` - Runtime data (never in repo)
   - `.claude` → symlink to `~/lobster/.claude/` — **editing files here is immediately live, no deploy needed**

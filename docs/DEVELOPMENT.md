@@ -106,7 +106,7 @@ After pulling updates on the VPS (`git pull` + `uv pip install -e .`):
 
 ## Related documentation
 
-- `.claude/dispatcher.bootup.md` — runtime behavior and the worktree constraint from the dispatcher's perspective
+- `.claude/sys.dispatcher.bootup.md` — runtime behavior and the worktree constraint from the dispatcher's perspective
 - `docs/engineering-lessons-learned.md` — recurring patterns to check during PR review
 - `docs/REMOTE-AUTH.md` — headless OAuth re-authentication for the VPS
 - `CLAUDE.md` — full system architecture and key directories

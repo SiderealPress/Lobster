@@ -10,10 +10,10 @@
 #     memory/
 #       canonical/          <- was ~/lobster-workspace/memory/canonical/
 #     agents/
-#       base.bootup.md      <- was ~/lobster-workspace/.claude/user.md (behavioral)
-#       base.context.md     <- new file for personal facts (stub if not present)
-#       dispatcher.bootup.md <- was ~/lobster-workspace/.claude/dispatcher.md
-#       subagent.bootup.md  <- was ~/lobster-workspace/.claude/subagent.md
+#       user.base.bootup.md        <- was ~/lobster-workspace/.claude/user.md (behavioral)
+#       user.base.context.md <- new file for personal facts (stub if not present)
+#       user.dispatcher.bootup.md  <- was ~/lobster-workspace/.claude/dispatcher.md
+#       user.subagent.bootup.md    <- was ~/lobster-workspace/.claude/subagent.md
 #       subagents/          <- empty dir for user-defined custom subagents
 #
 # Safe to run multiple times (idempotent).
@@ -145,43 +145,43 @@ step "Migrating .claude/ user context files..."
 
 NEW_AGENTS="$USER_CONFIG_DIR/agents"
 
-# Migrate user.md -> base.bootup.md
+# Migrate user.md -> user.base.bootup.md
 if [ -f "$OLD_CLAUDE_DIR/user.md" ]; then
-    dest="$NEW_AGENTS/base.bootup.md"
+    dest="$NEW_AGENTS/user.base.bootup.md"
     if [ ! -s "$dest" ]; then
         cp "$OLD_CLAUDE_DIR/user.md" "$dest"
-        success "Migrated: .claude/user.md -> agents/base.bootup.md"
+        success "Migrated: .claude/user.md -> agents/user.base.bootup.md"
         MIGRATED=$((MIGRATED + 1))
     else
-        info "agents/base.bootup.md already populated — skipping"
+        info "agents/user.base.bootup.md already populated — skipping"
     fi
 else
     info ".claude/user.md not found — skipping"
 fi
 
-# Migrate dispatcher.md -> dispatcher.bootup.md
+# Migrate dispatcher.md -> user.dispatcher.bootup.md
 if [ -f "$OLD_CLAUDE_DIR/dispatcher.md" ]; then
-    dest="$NEW_AGENTS/dispatcher.bootup.md"
+    dest="$NEW_AGENTS/user.dispatcher.bootup.md"
     if [ ! -s "$dest" ]; then
         cp "$OLD_CLAUDE_DIR/dispatcher.md" "$dest"
-        success "Migrated: .claude/dispatcher.md -> agents/dispatcher.bootup.md"
+        success "Migrated: .claude/dispatcher.md -> agents/user.dispatcher.bootup.md"
         MIGRATED=$((MIGRATED + 1))
     else
-        info "agents/dispatcher.bootup.md already populated — skipping"
+        info "agents/user.dispatcher.bootup.md already populated — skipping"
     fi
 else
     info ".claude/dispatcher.md not found — skipping"
 fi
 
-# Migrate subagent.md -> subagent.bootup.md
+# Migrate subagent.md -> user.subagent.bootup.md
 if [ -f "$OLD_CLAUDE_DIR/subagent.md" ]; then
-    dest="$NEW_AGENTS/subagent.bootup.md"
+    dest="$NEW_AGENTS/user.subagent.bootup.md"
     if [ ! -s "$dest" ]; then
         cp "$OLD_CLAUDE_DIR/subagent.md" "$dest"
-        success "Migrated: .claude/subagent.md -> agents/subagent.bootup.md"
+        success "Migrated: .claude/subagent.md -> agents/user.subagent.bootup.md"
         MIGRATED=$((MIGRATED + 1))
     else
-        info "agents/subagent.bootup.md already populated — skipping"
+        info "agents/user.subagent.bootup.md already populated — skipping"
     fi
 else
     info ".claude/subagent.md not found — skipping"
@@ -193,7 +193,7 @@ fi
 
 step "Ensuring stub agent files exist..."
 
-for stub in "base.bootup.md" "base.context.md" "dispatcher.bootup.md" "subagent.bootup.md"; do
+for stub in "user.base.bootup.md" "user.base.context.md" "user.dispatcher.bootup.md" "user.subagent.bootup.md"; do
     dest="$USER_CONFIG_DIR/agents/$stub"
     if [ ! -f "$dest" ]; then
         touch "$dest"

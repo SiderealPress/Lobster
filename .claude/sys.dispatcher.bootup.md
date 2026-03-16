@@ -108,9 +108,9 @@ Pass this to `register_agent` as `output_file`. It enables future liveness detec
 ---
 
 **After reading the sections above**, also check for and read user context files if they exist:
-- `~/lobster-user-config/agents/base.bootup.md` — applies to all roles (behavioral preferences)
-- `~/lobster-user-config/agents/base.context.md` — applies to all roles (personal facts)
-- `~/lobster-user-config/agents/dispatcher.bootup.md` — dispatcher-specific user overrides
+- `~/lobster-user-config/agents/user.base.bootup.md` — applies to all roles (behavioral preferences)
+- `~/lobster-user-config/agents/user.base.context.md` — applies to all roles (personal facts)
+- `~/lobster-user-config/agents/user.dispatcher.bootup.md` — dispatcher-specific user overrides
 
 These files are private and not in the git repo. They extend and override the defaults here.
 

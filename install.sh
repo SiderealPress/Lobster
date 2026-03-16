@@ -341,7 +341,7 @@ if [ "$CONTAINER_SETUP" = true ]; then
     fi
 
     # Create stub user-config agent files if they don't exist
-    for stub_file in "base.bootup.md" "base.context.md" "dispatcher.bootup.md" "subagent.bootup.md"; do
+    for stub_file in "user.base.bootup.md" "user.base.context.md" "user.dispatcher.bootup.md" "user.subagent.bootup.md"; do
         stub_dest="$USER_CONFIG_DIR/agents/$stub_file"
         if [ ! -f "$stub_dest" ]; then
             touch "$stub_dest"
@@ -998,7 +998,7 @@ if [ -f "$AUDIT_CONTEXT_SEED" ] && [ ! -f "$AUDIT_CONTEXT_DEST" ]; then
 fi
 
 # Create stub user-config agent files if they don't exist
-for stub_file in "base.bootup.md" "base.context.md" "dispatcher.bootup.md" "subagent.bootup.md"; do
+for stub_file in "user.base.bootup.md" "user.base.context.md" "user.dispatcher.bootup.md" "user.subagent.bootup.md"; do
     stub_dest="$USER_CONFIG_DIR/agents/$stub_file"
     if [ ! -f "$stub_dest" ]; then
         touch "$stub_dest"
@@ -1573,7 +1573,7 @@ else
     info "Skipping on-compact hook (settings.json not yet created)"
 fi
 
-# Set up Claude Code SessionStart hook to inject debug.sys.bootup.md when LOBSTER_DEBUG=true
+# Set up Claude Code SessionStart hook to inject sys.debug.bootup.md when LOBSTER_DEBUG=true
 chmod +x "$INSTALL_DIR/hooks/inject-debug-bootup.py" || true
 if [ -f "$CLAUDE_SETTINGS" ]; then
     if ! jq -e '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("inject-debug-bootup"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then

@@ -25,9 +25,9 @@ Do NOT call `wait_for_messages` — that is only for the main loop.
 ---
 
 **After reading this file**, also check for and read user context files if they exist:
-- `~/lobster-user-config/agents/base.bootup.md` — applies to all roles (behavioral preferences)
-- `~/lobster-user-config/agents/base.context.md` — applies to all roles (personal facts)
-- `~/lobster-user-config/agents/subagent.bootup.md` — subagent-specific user overrides
+- `~/lobster-user-config/agents/user.base.bootup.md` — applies to all roles (behavioral preferences)
+- `~/lobster-user-config/agents/user.base.context.md` — applies to all roles (personal facts)
+- `~/lobster-user-config/agents/user.subagent.bootup.md` — subagent-specific user overrides
 
 These files are private and not in the git repo. They extend and override the defaults here.
 
