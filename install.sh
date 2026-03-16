@@ -1163,6 +1163,21 @@ CONSOLIDATION_MARKER="# LOBSTER-NIGHTLY-CONSOLIDATION"
 success "Nightly consolidation configured (runs at 03:00 nightly)"
 
 #===============================================================================
+# OOM Kill Monitor
+#===============================================================================
+
+step "Setting up OOM kill monitor..."
+
+chmod +x "$INSTALL_DIR/scripts/oom-monitor.py" || true
+
+# Add OOM monitor to crontab (runs every 10 minutes, debug-gated via LOBSTER_DEBUG=true)
+OOM_MARKER="# LOBSTER-OOM"
+(crontab -l 2>/dev/null | grep -v "$OOM_MARKER" | grep -v "oom-monitor" || true; \
+ echo "*/10 * * * * LOBSTER_DEBUG=true uv run \$HOME/lobster/scripts/oom-monitor.py --since-minutes 10 $OOM_MARKER") | crontab -
+
+success "OOM kill monitor configured (runs every 10 minutes, active only when LOBSTER_DEBUG=true)"
+
+#===============================================================================
 # Self-Check Reminder System
 #===============================================================================
 
