@@ -69,9 +69,7 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
     trigger_message_id  TEXT,
     trigger_snippet     TEXT,
     reply_message_ids   TEXT,
-    stop_reason         TEXT,
-    idempotency         TEXT DEFAULT 'unknown',
-    task_origin         TEXT DEFAULT 'user'
+    stop_reason         TEXT
 );
 """
 
@@ -115,16 +113,6 @@ _MIGRATION_STMTS = [
     "ALTER TABLE agent_sessions ADD COLUMN trigger_snippet TEXT",
     "ALTER TABLE agent_sessions ADD COLUMN reply_message_ids TEXT",
     "ALTER TABLE agent_sessions ADD COLUMN stop_reason TEXT",
-    "ALTER TABLE agent_sessions ADD COLUMN idempotency TEXT DEFAULT 'unknown'",
-    "ALTER TABLE agent_sessions ADD COLUMN task_origin TEXT DEFAULT 'user'",
-]
-
-# Additive migrations for the reports table (BIS-85 multi-instance prep).
-# Wrapped in try/except so they are no-ops on fresh DBs that already have the
-# columns from the CREATE TABLE statement once this schema is finalised.
-_REPORTS_MIGRATION_STMTS = [
-    "ALTER TABLE reports ADD COLUMN instance_id TEXT",
-    "ALTER TABLE reports ADD COLUMN forwarded_at TEXT",
 ]
 
 # Additive migrations for the reports table (BIS-85 multi-instance prep).
@@ -361,7 +349,7 @@ def session_end(
     conn.execute(
         """
         UPDATE agent_sessions
-        SET status = ?, completed_at = ?, result_summary = ?
+        SET status = ?, completed_at = ?, result_summary = ?, stop_reason = ?
         WHERE (id = ? OR task_id = ?) AND status IN ('running', 'starting')
         """,
         (status, now, result_summary, stop_reason, id_or_task_id, id_or_task_id),
