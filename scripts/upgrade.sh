@@ -1147,7 +1147,7 @@ run_migrations() {
     # Migration 13: Ensure health-check-v3.sh cron entry exists
     # Installs that set up the crontab manually before health-check-v3.sh was added
     # to install.sh may be missing the entry entirely, meaning no monitoring runs.
-    HEALTH_MARKER="# LOBSTER-HEALTH"
+    local HEALTH_MARKER="# LOBSTER-HEALTH"
     if ! crontab -l 2>/dev/null | grep -q "$HEALTH_MARKER"; then
         local health_script="$LOBSTER_DIR/scripts/health-check-v3.sh"
         chmod +x "$health_script" 2>/dev/null || true
