@@ -9,6 +9,29 @@ the dispatcher never calls write_result, so the check only applies to subagents.
 When write_result was called, this hook also marks the session completed in
 agent_sessions.db synchronously — without relying on the unreliable server-side
 auto-unregister path in inbox_server.py.
+
+## Session ID strategy
+
+The SubagentStop hook receives a session_id that is CC's internal UUID for the
+subagent session. The agent_sessions.db can have two rows for the same subagent:
+
+  1. A "proper" row: id = hex agentId (e.g. "a78e2e20dbc483b2e"), registered by
+     the dispatcher via register_agent() after spawning the Task.
+
+  2. An "auto-register stub": id = session UUID (e.g. "29e27af2-..."), created by
+     the SessionStart hook (write-dispatcher-session-id.py) when the subagent's
+     session starts.
+
+To close both rows we call session_end() with up to three identifiers:
+  a. The task_id from the write_result call input (matches the `task_id` column
+     when the dispatcher set task_id in register_agent, or when the subagent uses
+     a stable task_id that both parties know).
+  b. The session_id from hook data (matches the auto-register stub by `id`).
+
+The proper hex-ID row is the primary target but is only reachable when
+task_id matches. When it is not reachable via this hook, the reconciler in
+inbox_server.py will close it when it detects stop_reason=end_turn in the
+output file.
 """
 import json
 import sys
@@ -19,23 +42,26 @@ sys.path.insert(0, str(Path(__file__).parent))
 from session_role import is_dispatcher, get_session_id
 
 
-def _extract_agent_id_from_transcript(transcript: list) -> str | None:
-    """Return the agentId from the first transcript entry that has one.
+def _extract_write_result_task_ids(all_tool_use_items: list) -> list[str]:
+    """Return all non-empty task_id values from write_result tool call inputs.
 
-    Every transcript entry carries an `agentId` field set by CC's infrastructure
-    (not by the LLM). This UUID matches the value the dispatcher stores when it
-    calls register_agent — it is the correct key for the agent_sessions.db `id`
-    column. CC's internal `session_id` is a different UUID and does not match
-    the DB row, so this value is preferred when available.
+    The task_id passed to write_result often matches either the `id` column
+    (when the subagent uses the hex agentId as task_id) or the `task_id` column
+    (when the dispatcher set task_id in register_agent). session_end() matches
+    on id OR task_id, so trying every task_id found in write_result calls gives
+    the best chance of closing the correct DB row.
 
-    Returns None if the transcript is empty or no entry carries agentId.
+    Returns a list of unique non-empty task_id strings (order preserved).
     """
-    for entry in transcript:
-        if isinstance(entry, dict):
-            agent_id = entry.get("agentId")
-            if agent_id:
-                return agent_id
-    return None
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in all_tool_use_items:
+        if item.get("name") == "mcp__lobster-inbox__write_result":
+            tid = item.get("input", {}).get("task_id")
+            if tid and isinstance(tid, str) and tid not in seen:
+                seen.add(tid)
+                result.append(tid)
+    return result
 
 
 def _mark_session_completed(id_or_task_id: str) -> None:
@@ -103,13 +129,25 @@ def main():
             if item.get("input", {}).get("chat_id") is not None
         ]
         if valid_calls:
-            # At least one valid call found — mark session and allow exit.
-            # Prefer agentId from transcript (matches the DB's id column);
-            # fall back to session_id if agentId is absent (defensive).
-            agent_id = _extract_agent_id_from_transcript(transcript)
-            lookup_id = agent_id or get_session_id(data)
-            if lookup_id:
-                _mark_session_completed(lookup_id)
+            # At least one valid call found — mark session(s) and allow exit.
+            #
+            # Use multiple identifiers to maximise the chance of closing the
+            # correct DB row (see module docstring for why multiple rows exist):
+            #
+            #   1. task_id(s) from write_result inputs — reaches the "proper"
+            #      hex-agentId row when task_id matches (id OR task_id column).
+            #   2. session_id from hook data — reaches the auto-register stub
+            #      row (id = session UUID).
+            #
+            # All calls are idempotent, so calling the same id twice is safe.
+            write_result_task_ids = _extract_write_result_task_ids(all_tool_use_items)
+            session_id = get_session_id(data)
+
+            for tid in write_result_task_ids:
+                _mark_session_completed(tid)
+            if session_id:
+                _mark_session_completed(session_id)
+
             sys.exit(0)
         else:
             # write_result was called but chat_id was None in every call —
