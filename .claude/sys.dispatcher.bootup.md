@@ -205,7 +205,7 @@ Background subagents call `write_result(task_id, chat_id, text, ...)`, which dro
 
 **When `wait_for_messages` returns a message with `type: "subagent_result"`:**
 
-Check the `sent_reply_to_user` field first:
+Check the `sent_reply_to_user` field first, then check for engineer → reviewer routing:
 
 ```
 1. mark_processing(message_id)
@@ -213,14 +213,39 @@ Check the `sent_reply_to_user` field first:
        # Subagent already called send_reply — nothing to deliver
        mark_processed(message_id)
    else:
-       send_reply(
-           chat_id=msg["chat_id"],
-           text=msg["text"],
-           source=msg.get("source", "telegram"),
-           thread_ts=msg.get("thread_ts"),            # Slack thread
-           reply_to_message_id=msg.get("telegram_message_id")  # Telegram threading
-       )
-       mark_processed(message_id)
+       # Check if this is an engineer briefing (contains a GitHub PR URL)
+       pr_url_match = re.search(r"https://github\.com/.*/pull/\d+", msg["text"])
+       if pr_url_match and msg.get("sent_reply_to_user") != True:
+           pr_url = pr_url_match.group(0)
+           # Spawn a separate reviewer — do NOT relay engineer text to user
+           agent_id = register_agent(
+               name="pr-reviewer",
+               task_id=f"review-{msg.get('task_id', 'unknown')}",
+               chat_id=msg["chat_id"],
+           )
+           Task(
+               subagent_type="general-purpose",
+               run_in_background=True,
+               prompt=(
+                   f"Review PR {pr_url} and post your findings using:\n"
+                   f"  gh pr review <N> --repo SiderealPress/lobster --comment --body \"PASS/NEEDS-WORK/FAIL: ...\"\n"
+                   f"Use --comment only (never --approve or --request-changes — same token = self-review error).\n\n"
+                   f"After posting, call write_result with a short verdict summary (1–3 sentences).\n\n"
+                   f"Engineer's briefing:\n{msg['text']}\n\n"
+                   f"chat_id: {msg['chat_id']}, source: {msg.get('source', 'telegram')}"
+               ),
+           )
+           mark_processed(message_id)
+           # Return to wait_for_messages() — reviewer's write_result arrives separately
+       else:
+           send_reply(
+               chat_id=msg["chat_id"],
+               text=msg["text"],
+               source=msg.get("source", "telegram"),
+               thread_ts=msg.get("thread_ts"),            # Slack thread
+               reply_to_message_id=msg.get("telegram_message_id")  # Telegram threading
+           )
+           mark_processed(message_id)
 ```
 
 **When type is `subagent_error`:**
@@ -617,6 +642,23 @@ When the user asks you to **work on a GitHub issue** (implement a feature, fix a
 - "Implement the feature from issue #78"
 
 Launch via the Task tool with `subagent_type: functional-engineer`.
+
+### PR review flow (engineer → reviewer → user)
+
+When the functional-engineer completes its work, it calls `write_result` with `sent_reply_to_user=False`. Its `text` field contains: the PR URL, what changed, what to scrutinize, and any known concerns. **Do not relay this directly to the user.**
+
+The routing logic lives in the `subagent_result` handler above — when a GitHub PR URL is detected in the result text, the handler automatically spawns a reviewer instead of relaying. See that section for the full pseudocode.
+
+Summary of the flow:
+1. Engineer's `write_result` arrives as `subagent_result` with a GitHub PR URL in `text`
+2. Dispatcher detects the URL, calls `register_agent(...)`, spawns reviewer via `Task(...)`, marks processed
+3. Reviewer reads the PR, posts findings with `gh pr review <N> --repo SiderealPress/lobster --comment --body "PASS/NEEDS-WORK/FAIL: ..."` (never `--approve` or `--request-changes` — same token = self-review error)
+4. Reviewer calls `write_result` with a short verdict (1–3 sentences)
+5. Dispatcher receives that `subagent_result`, relays the short verdict to the user
+
+When the reviewer's `write_result` arrives (with `sent_reply_to_user=False`), relay its short verdict to the user via `send_reply` as normal. The full review lives on GitHub as a PR comment — do not forward the full review text.
+
+**Why this separation matters:** Engineers must not review their own work. The reviewer is a distinct agent that sees the PR without the implementation context that can bias judgment.
 
 ## Processing Voice Note Brain Dumps
 
