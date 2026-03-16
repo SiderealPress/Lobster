@@ -1772,15 +1772,15 @@ chmod +x "$INSTALL_DIR/scripts/nightly-consolidation.sh" || true
 
 success "Nightly consolidation configured (runs at 03:00 nightly)"
 
-# Add daily log-export to crontab (runs at 03:00 UTC)
-# export-logs.py archives observations.log, lobster.log, and audit.jsonl to a
-# date-stamped directory under ~/lobster-workspace/logs/archive/ and writes a
-# summary to ~/messages/task-outputs/ (readable via check_task_outputs).
-chmod +x "$INSTALL_DIR/scheduled-tasks/export-logs.py" 2>/dev/null || true
-"$INSTALL_DIR/scripts/cron-manage.sh" add "# LOBSTER-LOG-EXPORT" \
-    "0 3 * * * cd $INSTALL_DIR && uv run scheduled-tasks/export-logs.py # LOBSTER-LOG-EXPORT"
+#===============================================================================
+# Cron-to-Inbox Reminder System (post-reminder.sh)
+#===============================================================================
 
-success "Log export configured (runs at 03:00 UTC daily)"
+step "Installing post-reminder.sh..."
+
+chmod +x "$INSTALL_DIR/scripts/post-reminder.sh" || true
+
+success "post-reminder.sh installed"
 
 #===============================================================================
 # Ghost Detector (agent-monitor)
