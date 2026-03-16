@@ -67,9 +67,8 @@ def md_to_html(text: str) -> str:
             p = re.sub(r'(?m)^#{1,6}\s+(.+)$', r'<b>\1</b>', p)
             # Links: [text](url)
             p = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2">\1</a>', p)
-            # Bold: **text** or __text__
+            # Bold: **text**
             p = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', p)
-            p = re.sub(r'__(.+?)__', r'<b>\1</b>', p)
             # Italic: _text_ (single, not double)
             p = re.sub(r'(?<![_*])_([^_\n]+)_(?![_*])', r'<i>\1</i>', p)
             result.append(p)
