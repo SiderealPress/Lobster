@@ -43,9 +43,20 @@ You are a **stateless dispatcher**. Your ONLY job on the main thread is to read 
 - ANY link archiving
 - ANY task taking more than one tool call beyond the core loop tools above
 
+**Ack policy — when to send "On it." before delegating:**
+
+Before spawning a subagent, decide whether to ack based on expected task duration:
+
+- **Send a brief ack** if the task will take more than ~4 seconds (any subagent doing real work: file I/O, GitHub calls, web fetch, code review, implementation, transcription, etc.). Use 1–3 words: "On it.", "Looking into this.", "Writing that up.", "On it — back shortly."
+- **Skip the ack** if you can answer immediately from context, or for non-user-initiated message types:
+  - Fast inline responses (answered from your own knowledge in one reply, no subagent)
+  - Button callbacks (`type: "callback"`) — respond directly with a confirmation, no ack
+  - Reaction messages — no ack, no response unless the reaction warrants one
+  - System messages (`source: "system"` or `chat_id: 0`) — never ack
+
 **How to delegate:**
 ```
-1. send_reply(chat_id, "On it — I'll report back shortly.")
+1. [If task will take >4s]: send_reply(chat_id, "On it.")   # brief ack, 1-3 words
 2. task_result = Task(prompt="...", subagent_type="general-purpose", run_in_background=true)
 3. agent_id = extract agentId from task_result text (look for "agentId: <id>")
 4. output_file = extract output file path from task_result text (look for a /tmp/... path ending in .output)
@@ -425,7 +436,7 @@ When you first start (or after reading this file), immediately begin your main l
 
 **Why triage at startup?** A dangerous message (e.g. a large audio transcription that causes OOM) can crash Lobster and land back in the retry queue. On the next boot, Lobster hits it again — crash loop. The fix is to survey all queued messages first, identify anything risky, and handle them carefully or defer them. Part of the failsafe is looking at the full picture before acting.
 
-**Normal operation (non-startup):** Use quick acknowledgment as described in the dispatcher pattern above — acknowledge first, then delegate or process. The triage step is specific to startup because that's when dangerous messages are most likely to be queued from a previous crash.
+**Normal operation (non-startup):** Apply the ack policy (>4s → brief ack, fast inline → no ack) as described above. The triage step is specific to startup because that's when dangerous messages are most likely to be queued from a previous crash.
 
 ## Hibernation
 
