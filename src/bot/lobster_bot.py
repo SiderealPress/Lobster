@@ -901,6 +901,89 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # No text acknowledgment — the typing indicator already signals receipt.
 
 
+def _find_message_by_telegram_id(tg_message_id: int) -> Path | None:
+    """Scan inbox/ and processing/ for a message file with a matching telegram_message_id.
+
+    Returns the Path to the matching file, or None if not found.
+    Only text messages are checked — edits arrive as updated_message which carries
+    the same message_id as the original, so this check finds messages that haven't
+    been processed yet.
+    """
+    _processing_dir = _MESSAGES / "processing"
+    for search_dir in (INBOX_DIR, _processing_dir):
+        if not search_dir.exists():
+            continue
+        for f in search_dir.glob("*.json"):
+            try:
+                data = json.loads(f.read_text())
+                if data.get("telegram_message_id") == tg_message_id:
+                    return f
+            except Exception:
+                continue
+    return None
+
+
+async def handle_edited_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle edited_message events from Telegram.
+
+    Design principle: deliver, don't discard.
+
+    If the original message is still in inbox/ or processing/, queue the edit
+    as a new message with annotation fields so the dispatcher knows it's an edit.
+    If the original has already been processed, also queue it as new (the edit
+    may still be actionable).
+
+    The subagent working on the original is NOT cancelled — its result is delivered
+    with a note that the user has since edited their message.
+    """
+    message = update.edited_message
+    if not message:
+        return
+
+    user = update.effective_user
+    if not user or user.id not in ALLOWED_USERS:
+        return
+
+    text = message.text
+    if not text:
+        return  # Ignore non-text edits (media caption edits are not yet handled)
+
+    original_tg_id = message.message_id
+    original_file = _find_message_by_telegram_id(original_tg_id)
+
+    msg_id = f"{int(time.time() * 1000)}_edit_{message.message_id}"
+
+    msg_data = {
+        "id": msg_id,
+        "source": "telegram",
+        "type": "text",
+        "chat_id": message.chat_id,
+        "telegram_message_id": message.message_id,
+        "user_id": user.id,
+        "username": user.username,
+        "user_name": user.first_name,
+        "text": text,
+        "timestamp": datetime.utcnow().isoformat(),
+        "_edit_of_telegram_id": original_tg_id,
+    }
+
+    if original_file is not None:
+        msg_data["_replaces_inbox_id"] = original_file.stem
+        log.info(
+            f"Edit of tg_id={original_tg_id} queued as {msg_id} "
+            f"(original file: {original_file.name})"
+        )
+    else:
+        msg_data["_edit_note"] = "User edited a previously processed message."
+        log.info(
+            f"Edit of tg_id={original_tg_id} queued as {msg_id} "
+            "(original already processed)"
+        )
+
+    inbox_file = INBOX_DIR / f"{msg_id}.json"
+    atomic_write_json(inbox_file, msg_data)
+
+
 async def handle_audio_message(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -1289,6 +1372,7 @@ async def run_bot():
     bot_app.add_handler(MessageHandler(filters.PHOTO, handle_message))
     bot_app.add_handler(MessageHandler(filters.Document.ALL, handle_message))
     bot_app.add_handler(CallbackQueryHandler(handle_callback_query))
+    bot_app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE & filters.TEXT, handle_edited_message))
     bot_app.add_error_handler(error_handler)
 
     # Initialize and start
