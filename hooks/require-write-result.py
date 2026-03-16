@@ -43,6 +43,15 @@ CC 2.1.76+. Both pass a file path instead:
 This hook reads the appropriate file path for each event type. An inline
 `transcript` field is supported as a legacy fallback for older CC versions.
 
+## JSONL message format
+
+Each line of the JSONL transcript file has the structure:
+    {"type": "assistant", "message": {"role": "assistant", "content": [...]}, ...}
+
+Tool use items are nested under entry["message"]["content"], NOT entry["content"].
+`_collect_tool_use_and_text` handles both the JSONL format and the legacy inline
+format where content is directly on the message dict.
+
 ## Suppressing feedback injection on success
 
 Claude Code injects a "Stop hook feedback: ... No stderr output" system message
@@ -156,13 +165,32 @@ def _load_transcript_from_jsonl(path: str) -> list:
 
 
 def _collect_tool_use_and_text(transcript: list) -> tuple[list, list]:
-    """Walk a transcript and return (tool_use_items, text_content_parts)."""
+    """Walk a transcript and return (tool_use_items, text_content_parts).
+
+    Handles both JSONL format (CC 2.1.76+) and legacy inline format:
+
+    JSONL format (each line is a JSONL entry):
+        {"type": "assistant", "message": {"role": "assistant", "content": [...]}, ...}
+
+    Legacy inline format (transcript is a list of messages):
+        {"role": "assistant", "content": [...]}
+
+    Both formats are tried so the hook works regardless of CC version.
+    """
     all_tool_use_items = []
     text_content_parts = []
-    for msg in transcript:
-        if not isinstance(msg, dict):
+    for entry in transcript:
+        if not isinstance(entry, dict):
             continue
-        content = msg.get("content", [])
+
+        # JSONL format: content is under entry["message"]["content"]
+        # Legacy format: content is directly under entry["content"]
+        nested_msg = entry.get("message")
+        if isinstance(nested_msg, dict):
+            content = nested_msg.get("content", [])
+        else:
+            content = entry.get("content", [])
+
         if not isinstance(content, list):
             continue
         for item in content:

@@ -55,8 +55,49 @@ def _make_tool_use_item(name: str, input_data: dict) -> dict:
     return {"type": "tool_use", "name": name, "input": input_data}
 
 
+def _make_jsonl_entry_with_write_result(chat_id=12345, task_id="task-abc") -> dict:
+    """Return a single JSONL entry (CC 2.1.76+ format) containing a write_result call."""
+    return {
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "content": [
+                _make_tool_use_item(
+                    "mcp__lobster-inbox__write_result",
+                    {"chat_id": chat_id, "task_id": task_id, "text": "done"},
+                )
+            ],
+        },
+        "uuid": "test-uuid-1",
+        "sessionId": "test-session",
+    }
+
+
+def _make_jsonl_entry_no_write_result() -> dict:
+    """Return a single JSONL entry with no write_result call."""
+    return {
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "I finished the task."}],
+        },
+        "uuid": "test-uuid-2",
+        "sessionId": "test-session",
+    }
+
+
 def _make_transcript_with_write_result(chat_id=12345, task_id="task-abc") -> list:
-    """Return a minimal inline transcript containing a write_result call."""
+    """Return a JSONL-format transcript list containing a write_result call."""
+    return [_make_jsonl_entry_with_write_result(chat_id=chat_id, task_id=task_id)]
+
+
+def _make_transcript_no_write_result() -> list:
+    """Return a JSONL-format transcript list with no write_result call."""
+    return [_make_jsonl_entry_no_write_result()]
+
+
+def _make_transcript_with_write_result_legacy(chat_id=12345, task_id="task-abc") -> list:
+    """Return a legacy inline transcript (content directly on message dict)."""
     return [
         {
             "role": "assistant",
@@ -66,16 +107,6 @@ def _make_transcript_with_write_result(chat_id=12345, task_id="task-abc") -> lis
                     {"chat_id": chat_id, "task_id": task_id, "text": "done"},
                 )
             ],
-        }
-    ]
-
-
-def _make_transcript_no_write_result() -> list:
-    """Return a minimal inline transcript with no write_result call."""
-    return [
-        {
-            "role": "assistant",
-            "content": [{"type": "text", "text": "I finished the task."}],
         }
     ]
 
@@ -221,9 +252,9 @@ class TestStopHook:
         assert "STOP:" not in stdout
 
     def test_legacy_inline_transcript_still_works(self, monkeypatch, tmp_path):
-        """Legacy CC: inline transcript[] field works when transcript_path absent."""
+        """Legacy CC: inline transcript[] with legacy message format works."""
         mod = _load_hook(monkeypatch, tmp_path)
-        transcript = _make_transcript_with_write_result(chat_id=12345)
+        transcript = _make_transcript_with_write_result_legacy(chat_id=12345)
         hook_input = _make_stop_hook_input_legacy(transcript)
 
         exit_code, stdout, stderr = _run_hook(mod, hook_input)
