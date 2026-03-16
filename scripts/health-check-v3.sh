@@ -1336,27 +1336,9 @@ Manual intervention required:
     record_restart
 
     # Capture the Claude PID before stopping, so we can verify a new process
-    # is running after restart (not just the same surviving process), and so we
-    # can kill it directly if ExecStop fails silently.
-    #
-    # Read from the PID file written by claude-persistent.sh at launch time.
-    # This is unambiguous: pgrep -x "claude" could match an unrelated Claude
-    # process (e.g. a debug session), but the PID file records exactly the
-    # dispatcher that this health check is responsible for.
-    local pre_restart_pid=""
-    if [[ -f "$DISPATCHER_PID_FILE" ]]; then
-        pre_restart_pid=$(< "$DISPATCHER_PID_FILE")
-        # Sanity check: must be a non-empty integer
-        if [[ ! "$pre_restart_pid" =~ ^[0-9]+$ ]]; then
-            log_warn "dispatcher.pid contains non-numeric value '$pre_restart_pid' — ignoring"
-            pre_restart_pid=""
-        fi
-    fi
-    if [[ -n "$pre_restart_pid" ]]; then
-        log_info "Pre-restart dispatcher PID: $pre_restart_pid (from $DISPATCHER_PID_FILE)"
-    else
-        log_warn "No dispatcher.pid found — pre-restart PID unknown (new install or first restart)"
-    fi
+    # is running after restart (not just the same surviving process).
+    local pre_restart_pid
+    pre_restart_pid=$(pgrep -x "claude" 2>/dev/null | head -1)
 
     local tmux_uid
     tmux_uid=$(id -u)
@@ -1369,53 +1351,6 @@ Manual intervention required:
     sudo systemctl stop "$SERVICE_CLAUDE" 2>&1 | while read -r line; do
         log_info "systemctl stop: $line"
     done
-
-    # Kill the tmux server directly — this terminates all sessions and their
-    # child processes. Under RemainAfterExit=yes, systemctl stop marks the
-    # service inactive but does not reliably kill the tmux server or the Claude
-    # process tree. kill-server sends SIGTERM to every attached process and then
-    # tears down the server, ensuring no orphan Claude process survives.
-    if tmux -L "$TMUX_SOCKET" kill-server 2>/dev/null; then
-        log_info "Tmux server on socket '$TMUX_SOCKET' killed successfully"
-    else
-        log_info "Tmux kill-server returned non-zero (socket may already be gone — OK)"
-    fi
-
-    # Belt-and-suspenders: if the pre-restart Claude PID is still alive after
-    # systemctl stop + tmux kill-server, kill it explicitly. SIGTERM first,
-    # then SIGKILL after a brief wait. This handles cases where the process
-    # detached from the tmux session before the kill-server ran.
-    #
-    # Unlike pgrep, targeting the PID file is unambiguous: it records exactly the
-    # dispatcher process launched by claude-persistent.sh, not any other Claude
-    # process that may be running (e.g. a debug session or subagent).
-    if [[ -n "$pre_restart_pid" ]] && kill -0 "$pre_restart_pid" 2>/dev/null; then
-        log_warn "Claude PID $pre_restart_pid survived systemctl stop + tmux kill-server — sending SIGTERM"
-        kill -TERM "$pre_restart_pid" 2>/dev/null || true
-        sleep 2
-        if kill -0 "$pre_restart_pid" 2>/dev/null; then
-            log_warn "Claude PID $pre_restart_pid still alive after SIGTERM — sending SIGKILL"
-            kill -KILL "$pre_restart_pid" 2>/dev/null || true
-            sleep 1
-        fi
-    fi
-
-    # Clean up the PID file — the process is gone (or was already gone).
-    rm -f "$DISPATCHER_PID_FILE" 2>/dev/null || true
-
-    # Verify the old process is actually dead before starting a new session.
-    # If we cannot confirm it is gone, abort rather than risk two competing
-    # dispatchers running simultaneously.
-    if [[ -n "$pre_restart_pid" ]] && kill -0 "$pre_restart_pid" 2>/dev/null; then
-        log_error "ABORT: Could not kill pre-restart Claude PID $pre_restart_pid — refusing to start new session to prevent duplicate dispatcher"
-        send_telegram_alert_deduped "restart-aborted-pid" "Restart aborted — could not kill existing Claude process (PID $pre_restart_pid).
-
-Reason: $reason
-
-Manual intervention required to kill the process before restarting:
-\`kill -9 $pre_restart_pid && lobster restart\`"
-        return 1
-    fi
 
     # Clean up the socket only if stop left it behind.
     # A successful ExecStop removes it via tmux kill-session; if stop failed or
@@ -1436,69 +1371,17 @@ Manual intervention required to kill the process before restarting:
     # Verify recovery: service and tmux must be running, and the Claude PID
     # must differ from the pre-restart PID (catching ghost sessions where the
     # old process survived alongside the newly started one).
-    #
-    # PID retry loop: the new claude-persistent.sh may not have written the PID
-    # file yet. Retry up to 3 times with 3-second gaps before concluding that
-    # the PID is genuinely unchanged (i.e. restart failed).
-    #
-    # Read from the PID file (same source as pre_restart_pid) for a consistent
-    # comparison. If the file is absent or empty, the new process hasn't written
-    # it yet — treat as "not ready" and keep retrying.
-    local post_restart_pid=""
+    local post_restart_pid
+    post_restart_pid=$(pgrep -x "claude" 2>/dev/null | head -1)
     local pid_changed=true
-    local pid_check_attempts=0
-    while [[ $pid_check_attempts -lt 3 ]]; do
-        if [[ -f "$DISPATCHER_PID_FILE" ]]; then
-            post_restart_pid=$(< "$DISPATCHER_PID_FILE")
-            [[ ! "$post_restart_pid" =~ ^[0-9]+$ ]] && post_restart_pid=""
-        else
-            post_restart_pid=""
-        fi
-        if [[ -z "$pre_restart_pid" || ( -n "$post_restart_pid" && "$post_restart_pid" != "$pre_restart_pid" ) ]]; then
-            break
-        fi
-        pid_check_attempts=$(( pid_check_attempts + 1 ))
-        if [[ $pid_check_attempts -lt 3 ]]; then
-            log_info "PID unchanged after restart (attempt $pid_check_attempts/3), waiting 3s..."
-            sleep 3
-        fi
-    done
     if [[ -n "$pre_restart_pid" && "$post_restart_pid" == "$pre_restart_pid" ]]; then
         pid_changed=false
-        log_error "Restart verification failed: Claude PID $pre_restart_pid unchanged after 3 attempts — old session may have survived"
+        log_error "Restart verification failed: Claude PID $pre_restart_pid unchanged — old session may have survived"
     fi
 
-    # Service/tmux check with retry: systemd and tmux may still be initializing
-    # when we first check. If the PID changed (restart succeeded), give the
-    # service up to 15 seconds to reach active state before declaring failure.
-    # This prevents the false-positive "PID unchanged" alert that fires when the
-    # new process starts fine but the service status query races the activation.
-    local service_ok=false
-    local tmux_ok=false
-    local svc_check_attempts=0
-    local max_svc_attempts=5
-    if [[ "$pid_changed" == true ]]; then
-        while [[ $svc_check_attempts -lt $max_svc_attempts ]]; do
-            service_ok=false
-            tmux_ok=false
-            if systemctl is-active --quiet "$SERVICE_CLAUDE" 2>/dev/null; then
-                service_ok=true
-            fi
-            if tmux -L "$TMUX_SOCKET" has-session -t "$TMUX_SESSION" 2>/dev/null; then
-                tmux_ok=true
-            fi
-            if [[ "$service_ok" == true && "$tmux_ok" == true ]]; then
-                break
-            fi
-            log_info "Service/tmux not ready yet (attempt $(( svc_check_attempts + 1 ))/$max_svc_attempts, service_ok=$service_ok tmux_ok=$tmux_ok), waiting 3s..."
-            svc_check_attempts=$(( svc_check_attempts + 1 ))
-            if [[ $svc_check_attempts -lt $max_svc_attempts ]]; then
-                sleep 3
-            fi
-        done
-    fi
-
-    if [[ "$pid_changed" == true && "$service_ok" == true && "$tmux_ok" == true ]]; then
+    if [[ "$pid_changed" == true ]] && \
+       systemctl is-active --quiet "$SERVICE_CLAUDE" 2>/dev/null && \
+       tmux -L "$TMUX_SOCKET" has-session -t "$TMUX_SESSION" 2>/dev/null; then
 
         # For stale-inbox restarts, also re-verify inbox drain
         if [[ "$reason" == *"stale inbox"* ]]; then
