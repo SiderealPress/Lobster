@@ -215,21 +215,27 @@ class TestFormatInboxMessage:
 
     def test_required_fields_present(self):
         events = [self._event(1, "claude")]
-        payload = om.format_inbox_message(events, "12345")
+        payload = om.format_inbox_message(events)
         assert "id" in payload
         assert "type" in payload
-        assert "chat_id" in payload
         assert "text" in payload
-        assert "source" in payload
+        assert "timestamp" in payload
 
-    def test_chat_id_is_int(self):
+    def test_type_is_observation(self):
+        """Inbox message must use type=observation for platform-agnostic routing."""
         events = [self._event(1, "claude")]
-        payload = om.format_inbox_message(events, "8305714125")
-        assert isinstance(payload["chat_id"], int)
+        payload = om.format_inbox_message(events)
+        assert payload["type"] == "observation"
+
+    def test_no_hardcoded_chat_id(self):
+        """Inbox message must not contain a hardcoded chat_id."""
+        events = [self._event(1, "claude")]
+        payload = om.format_inbox_message(events)
+        assert "chat_id" not in payload
 
     def test_text_mentions_oom(self):
         events = [self._event(1, "claude")]
-        payload = om.format_inbox_message(events, "12345")
+        payload = om.format_inbox_message(events)
         assert "OOM" in payload["text"] or "oom" in payload["text"].lower() or "killed" in payload["text"].lower()
 
 
@@ -275,22 +281,22 @@ class TestStateFile:
 # Integration: how to test the full flow manually
 # =============================================================================
 #
-# Since scan_journal depends on a real journalctl and send_telegram_direct
-# requires live credentials, integration testing is done manually:
+# Since scan_journal depends on a real journalctl, integration testing is
+# done manually:
 #
-# 1. Dry-run smoke test (safe, no alerts sent):
-#    uv run scripts/oom-monitor.py --dry-run --since-minutes 43200
+# 1. Dry-run smoke test (safe, no alerts sent, requires LOBSTER_DEBUG=true):
+#    LOBSTER_DEBUG=true uv run scripts/oom-monitor.py --dry-run --since-minutes 43200
 #    Expected: prints "no OOM events found" or shows any historical events
 #
-# 2. Inject a synthetic OOM event to test alert path:
-#    # Write a fake state with no seen events, then run against a mock journal
-#    # The --dry-run flag shows what would be sent without actually calling Telegram
+# 2. Debug-mode gate test:
+#    uv run scripts/oom-monitor.py --dry-run  # (no LOBSTER_DEBUG)
+#    Expected: exits 0 immediately with a log entry
 #
 # 3. Deduplication test:
-#    # Run twice in quick succession — second run should report "all already alerted"
-#    uv run scripts/oom-monitor.py --dry-run
-#    uv run scripts/oom-monitor.py --dry-run
+#    LOBSTER_DEBUG=true uv run scripts/oom-monitor.py --dry-run
+#    LOBSTER_DEBUG=true uv run scripts/oom-monitor.py --dry-run
+#    Expected: second run reports "all already alerted"
 #
 # 4. Live test on a system with OOM history:
 #    sudo journalctl -k | grep -i "out of memory\|killed process"
-#    # If events exist, run without --dry-run and verify Telegram receives the alert
+#    # If events exist, run without --dry-run and verify inbox message is written

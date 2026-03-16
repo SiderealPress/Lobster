@@ -2,25 +2,27 @@
 """OOM Kill Monitor — detects when the Linux OOM killer kills Lobster/Claude.
 
 Scans the kernel journal for OOM kill events involving claude/python/lobster
-processes. On detection, sends a direct Telegram alert and writes an alert to
-the Lobster inbox so the dispatcher can notify the user. Uses a state file to
-avoid duplicate alerts for the same kill event.
+processes. On detection, writes an alert to the Lobster inbox so the dispatcher
+can notify the user via whatever messaging platform is active. Uses a state file
+to avoid duplicate alerts for the same kill event.
+
+**Debug-mode gate:** This monitor only runs when LOBSTER_DEBUG=true. If that
+environment variable is absent or not "true", the script exits immediately
+with code 0 (no-op). This prevents unnecessary journal scanning in production
+unless debug monitoring is explicitly enabled.
 
 Usage:
-    uv run scripts/oom-monitor.py
-    uv run scripts/oom-monitor.py --since-minutes 10
-    uv run scripts/oom-monitor.py --dry-run
+    LOBSTER_DEBUG=true uv run scripts/oom-monitor.py
+    LOBSTER_DEBUG=true uv run scripts/oom-monitor.py --since-minutes 10
+    LOBSTER_DEBUG=true uv run scripts/oom-monitor.py --dry-run
 
 Design:
     - Pure functions for parsing and classification; side effects isolated at edges
     - State file tracks seen events (keyed by timestamp+pid) to prevent duplicates
-    - Two alert paths:
-        1. Direct Telegram via curl (like health-check-v3.sh) — works even if
-           dispatcher is down (because the OOM may have killed it)
-        2. Inbox JSON drop for dispatcher pickup when it recovers
+    - Alert path: inbox JSON drop for dispatcher pickup (platform-agnostic)
 
 Exit codes:
-    0 — no OOM kills detected
+    0 — no OOM kills detected (or LOBSTER_DEBUG not set)
     1 — OOM kill(s) detected (alert sent)
     2 — error (journalctl unavailable, config missing, etc.)
 """
@@ -58,9 +60,6 @@ LOBSTER_PROCESS_NAMES = frozenset(
 
 # State file: tracks seen OOM event IDs to prevent duplicate alerts
 STATE_FILE = Path.home() / "lobster-workspace" / "data" / "oom-monitor-state.json"
-
-# Lobster config for Telegram credentials
-CONFIG_ENV = Path(os.environ.get("LOBSTER_CONFIG_DIR", str(Path.home() / "lobster-config"))) / "config.env"
 
 # Inbox directory for dispatcher pickup
 INBOX_DIR = Path.home() / "messages" / "inbox"
@@ -274,8 +273,14 @@ def format_telegram_alert(events: list[OomKillEvent]) -> str:
     return "\n".join(lines)
 
 
-def format_inbox_message(events: list[OomKillEvent], chat_id: str) -> dict:
-    """Build an inbox JSON message payload for dispatcher pickup (pure)."""
+def format_inbox_message(events: list[OomKillEvent]) -> dict:
+    """Build an inbox JSON message payload for dispatcher pickup (pure).
+
+    The payload uses type "observation" so the dispatcher treats it as a
+    system-generated alert rather than a user message. The dispatcher is
+    responsible for routing to the active messaging platform — no Telegram
+    chat_id is hardcoded here.
+    """
     lobster_count = sum(1 for e in events if e.is_lobster_process)
     process_names = ", ".join(
         sorted({e.process_name for e in events if e.is_lobster_process})
@@ -289,58 +294,16 @@ def format_inbox_message(events: list[OomKillEvent], chat_id: str) -> dict:
     )
     return {
         "id": msg_id,
-        "type": "outbound",
-        "chat_id": int(chat_id),
+        "type": "observation",
+        "category": "oom_kill",
         "text": text,
-        "source": "telegram",
         "timestamp": datetime.now(tz=timezone.utc).isoformat(),
     }
 
 
 # ---------------------------------------------------------------------------
-# Config loading (isolated side effect)
-# ---------------------------------------------------------------------------
-
-
-def load_telegram_config(config_env: Path) -> tuple[str, str] | tuple[None, None]:
-    """Load bot_token and chat_id from config.env. Returns (None, None) on failure."""
-    if not config_env.exists():
-        return None, None
-    bot_token = None
-    chat_id = None
-    try:
-        for line in config_env.read_text().splitlines():
-            if line.startswith("TELEGRAM_BOT_TOKEN="):
-                bot_token = line.split("=", 1)[1].strip()
-            elif line.startswith("TELEGRAM_ALLOWED_USERS="):
-                chat_id = line.split("=", 1)[1].strip().split(",")[0].strip()
-    except OSError:
-        return None, None
-    if bot_token and chat_id:
-        return bot_token, chat_id
-    return None, None
-
-
-# ---------------------------------------------------------------------------
 # Alert delivery (isolated side effects)
 # ---------------------------------------------------------------------------
-
-
-def send_telegram_direct(bot_token: str, chat_id: str, message: str) -> bool:
-    """Send a Telegram message via curl. Returns True on success."""
-    cmd = [
-        "curl", "-s", "-X", "POST",
-        f"https://api.telegram.org/bot{bot_token}/sendMessage",
-        "--data-urlencode", f"chat_id={chat_id}",
-        "--data-urlencode", f"text={message}",
-        "--data-urlencode", "parse_mode=Markdown",
-        "--max-time", "10",
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, timeout=15)
-        return result.returncode == 0
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        return False
 
 
 def write_inbox_message(inbox_dir: Path, payload: dict) -> bool:
@@ -373,12 +336,17 @@ def log_event(log_file: Path, message: str) -> None:
 def run(
     since_minutes: int,
     dry_run: bool,
-    config_env: Path,
     state_file: Path,
     inbox_dir: Path,
     log_file: Path,
 ) -> int:
     """Main logic. Returns exit code (0=clean, 1=OOM detected, 2=error)."""
+
+    # 0. Debug-mode gate — only active when LOBSTER_DEBUG=true
+    if os.environ.get("LOBSTER_DEBUG", "").lower() != "true":
+        # Silent no-op: log-only so cron output stays clean
+        log_event(log_file, "LOBSTER_DEBUG not set — OOM monitor is disabled. Set LOBSTER_DEBUG=true to enable.")
+        return 0
 
     # 1. Scan the journal
     events, scan_error = scan_journal(since_minutes)
@@ -415,42 +383,20 @@ def run(
         print(f"New OOM events: {len(new_events)}")
         for e in new_events:
             print(f"  [{e.timestamp}] pid={e.pid} proc={e.process_name} lobster={e.is_lobster_process}")
-        print("\n--- Telegram alert message ---")
+        print("\n--- Alert message ---")
         print(alert_text)
         return 1
 
-    # 5. Load Telegram credentials and send direct alert
-    bot_token, chat_id = load_telegram_config(config_env)
-    alert_sent = False
-
-    if bot_token and chat_id:
-        ok = send_telegram_direct(bot_token, chat_id, alert_text)
-        if ok:
-            log_event(log_file, f"Telegram alert sent to chat {chat_id}.")
-            alert_sent = True
-        else:
-            log_event(log_file, "WARNING: Direct Telegram alert failed (curl error).")
+    # 5. Write inbox observation for dispatcher pickup (platform-agnostic routing)
+    payload = format_inbox_message(new_events)
+    if write_inbox_message(inbox_dir, payload):
+        log_event(log_file, f"Inbox observation written: {payload['id']}.json")
     else:
-        log_event(log_file, "WARNING: Telegram credentials not found in config.env — skipping direct alert.")
+        log_event(log_file, "WARNING: Failed to write inbox observation.")
 
-    # 6. Write inbox message for dispatcher pickup (belt-and-suspenders)
-    if chat_id:
-        payload = format_inbox_message(new_events, chat_id)
-        if write_inbox_message(inbox_dir, payload):
-            log_event(log_file, f"Inbox message written: {payload['id']}.json")
-        else:
-            log_event(log_file, "WARNING: Failed to write inbox message.")
-
-    # 7. Persist seen event IDs to prevent re-alerting
+    # 6. Persist seen event IDs to prevent re-alerting
     updated_seen = seen_ids | {e.event_id for e in new_events}
     save_state(state_file, updated_seen)
-
-    if not alert_sent and not chat_id:
-        print(
-            "OOM kill detected but no Telegram credentials found. "
-            "Check that config.env has TELEGRAM_BOT_TOKEN and TELEGRAM_ALLOWED_USERS.",
-            file=sys.stderr,
-        )
 
     return 1
 
@@ -475,12 +421,6 @@ def parse_args() -> argparse.Namespace:
         help="Print what would be alerted without sending anything.",
     )
     parser.add_argument(
-        "--config-env",
-        type=Path,
-        default=CONFIG_ENV,
-        help=f"Path to config.env with Telegram credentials (default: {CONFIG_ENV})",
-    )
-    parser.add_argument(
         "--state-file",
         type=Path,
         default=STATE_FILE,
@@ -494,7 +434,6 @@ def main() -> int:
     return run(
         since_minutes=args.since_minutes,
         dry_run=args.dry_run,
-        config_env=args.config_env,
         state_file=args.state_file,
         inbox_dir=INBOX_DIR,
         log_file=LOG_FILE,
