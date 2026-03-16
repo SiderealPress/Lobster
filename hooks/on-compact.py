@@ -245,30 +245,37 @@ def main() -> None:
     except (json.JSONDecodeError, ValueError):
         data = {}
 
-    # Only act for the dispatcher session. Subagent compactions must not
-    # inject compact-reminders into the shared inbox or write the sentinel,
-    # because those signals are only meaningful to the dispatcher.
+    # Always record compaction timestamp — runs for both dispatcher and subagent
+    # compactions.  The health check reads this to suppress false-positive
+    # "stale inbox" restarts during any compaction pause window.
+    write_compacted_at()
+
+    # Always send the debug Telegram notification when LOBSTER_DEBUG=true.
+    # This must fire even for the dispatcher compact, where is_dispatcher() would
+    # return False because context compaction assigns a new session_id that no
+    # longer matches the stored dispatcher-session-id marker file.
+    # NOTE: In debug mode this also fires for subagent compactions (rare), which
+    # is acceptable — the notification is informational.
+    maybe_send_dev_telegram_notify()
+
+    # Guard the inbox reminder and sentinel writes to the dispatcher only.
+    # Subagent compactions must not inject compact-reminders into the shared
+    # inbox or write the compact-pending sentinel, because those signals are
+    # only meaningful to the dispatcher.
     if not is_dispatcher(data):
         sys.exit(0)
-
-    # Always record compaction timestamp first — before any early returns.
-    # This ensures the health check can suppress false-positive restarts even
-    # if a compact-reminder is already pending.
-    write_compacted_at()
 
     if already_pending():
         # Sentinel still needs refreshing even if the inbox reminder is a dupe
         # (double compaction without intervening wait_for_messages). Touch resets
         # the TTL clock so the gate keeps blocking correctly.
         write_sentinel()
-        maybe_send_dev_telegram_notify()
         return
     write_sentinel()
     try:
         write_reminder()
     except Exception:  # noqa: BLE001
         pass  # Reminder failure is non-fatal — sentinel is the critical artifact
-    maybe_send_dev_telegram_notify()
 
 
 if __name__ == "__main__":
