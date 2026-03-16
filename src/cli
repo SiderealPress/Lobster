@@ -456,7 +456,8 @@ cmd_env() {
 
 cmd_update() {
     local args=("$@")
-    local script="$HOME/lobster/scripts/update-lobster.sh"
+    local install_dir="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
+    local script="$install_dir/scripts/update-lobster.sh"
 
     if [ ! -f "$script" ]; then
         echo -e "${RED}Error: Update script not found at $script${NC}"
