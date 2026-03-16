@@ -503,48 +503,24 @@ def main() -> None:
     except (json.JSONDecodeError, ValueError):
         data = {}
 
-    # Write cause=compaction BEFORE anything else.  inject-bootup-context.py reads
-    # this file on the next startup: if cause==compaction and ts is within 5 minutes,
-    # the startup is classified as a compaction-triggered restart rather than a plain
-    # restart.  After reading, inject-bootup-context.py resets the file to
-    # cause=restart, so subsequent startups default to restart unless this hook fires.
-    # Runs for both dispatcher and subagent compactions (the classification only matters
-    # for the dispatcher, but writing it early for all compactions is harmless).
-    write_startup_cause()
-
     # Always record compaction timestamp — runs for both dispatcher and subagent
     # compactions.  The health check reads this to suppress false-positive
     # "stale inbox" restarts during any compaction pause window.
     write_compacted_at()
 
-    # Write simple Unix timestamp for the 10-minute post-compaction grace period.
-    # health-check-v3.sh reads this file and skips staleness alerts for 10 minutes
-    # after a compaction, giving the dispatcher time to re-orient.
-    write_last_compact_ts()
-
-    # Always record last_compaction_ts for the catch-up subagent, regardless
-    # of whether this is a dispatcher or subagent compaction.  The catch-up
-    # subagent uses this to define its query window on next spawn.
-    write_compaction_state()
-
-    # Always send the Telegram notification for any compaction (dispatcher or
-    # subagent).  This must fire when credentials are available.  The
-    # health-check suppresses its own Telegram alerts during the compaction
-    # window (COMPACTION_SUPPRESS_SECONDS), so exactly one notification reaches
-    # the user per compaction event.
-    send_compaction_notify()
+    # Always send the debug Telegram notification when LOBSTER_DEBUG=true.
+    # This must fire even for the dispatcher compact, where is_dispatcher() would
+    # return False because context compaction assigns a new session_id that no
+    # longer matches the stored dispatcher-session-id marker file.
+    # NOTE: In debug mode this also fires for subagent compactions (rare), which
+    # is acceptable — the notification is informational.
+    maybe_send_dev_telegram_notify()
 
     # Guard the inbox reminder and sentinel writes to the dispatcher only.
     # Subagent compactions must not inject compact-reminders into the shared
     # inbox or write the compact-pending sentinel, because those signals are
     # only meaningful to the dispatcher.
-    #
-    # Uses _is_dispatcher_compact() instead of is_dispatcher() directly because
-    # CC assigns a NEW session_id after compaction — the hook input's session_id
-    # won't match the stored marker file even for a dispatcher compaction.
-    # _is_dispatcher_compact() adds a LOBSTER_MAIN_SESSION + stored-JSONL fallback
-    # to handle this case and updates the marker file for subsequent calls.
-    if not _is_dispatcher_compact(data):
+    if not is_dispatcher(data):
         sys.exit(0)
 
     if already_pending():
@@ -558,8 +534,6 @@ def main() -> None:
         write_reminder()
     except Exception:  # noqa: BLE001
         pass  # Reminder failure is non-fatal — sentinel is the critical artifact
-
-    _schedule_reflection_prompt("compaction")
 
 
 if __name__ == "__main__":
