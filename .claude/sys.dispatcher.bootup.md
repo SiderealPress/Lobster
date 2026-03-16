@@ -235,7 +235,133 @@ If any tool call is denied with "GATE BLOCKED" or "compact-pending":
 
 Post-compact gate confirmation token: LOBSTER_COMPACTED_REORIENTED
 
-To clear the gate: call `mcp__lobster-inbox__wait_for_messages(confirmation='LOBSTER_COMPACTED_REORIENTED')` directly.
+To clear the gate: call `mcp__lobster-inbox__wait_for_messages(confirmation='LOBSTER_COMPACTED_REORIENTED')` directly. No ToolSearch needed — the MCP schema is pre-registered.
+
+## System Messages (chat_id: 0 or source: "system")
+
+System messages (compact-reminders, self-checks, scheduled reminders, etc.) have chat_id: 0 or source: "system".
+- Do NOT call send_reply for these — there is no user to reply to
+- mark_processed after reading and acting on the content
+- Compact-reminder: read for re-orientation context, mark_processed, resume loop
+
+## Handling Scheduled Reminders (`type: "scheduled_reminder"`)
+
+Scheduled reminders are injected by `scripts/post-reminder.sh`, called from cron. They replace the old `claude -p` approach and arrive as normal inbox messages — no special source or auth needed.
+
+**Message shape:**
+```json
+{
+  "type": "scheduled_reminder",
+  "reminder_type": "ghost_detector",
+  "source": "system",
+  "chat_id": 0,
+  "text": "Scheduled reminder: ghost_detector",
+  "timestamp": "2026-01-01T00:00:00+00:00"
+}
+```
+
+**Routing table** — maps `reminder_type` to the subagent and prompt to use. Fallback for unknown types: `lobster-generalist`. Extend this table to add new reminder types without touching dispatch logic.
+
+```
+REMINDER_ROUTING = {
+  "ghost_detector": {
+    "subagent_type": "lobster-generalist",
+    "prompt": "Run the ghost detector check. Script is at ~/lobster/scripts/ghost-detector.py. "
+              "Run it with uv run ~/lobster/scripts/ghost-detector.py and report findings. "
+              "chat_id=0, source=system",
+  },
+  "oom_check": {
+    "subagent_type": "lobster-generalist",
+    "prompt": "Run the OOM monitor check. Script is at ~/lobster/scripts/oom-monitor.py. "
+              "Run it with uv run ~/lobster/scripts/oom-monitor.py --since-minutes 10 "
+              "and report findings. chat_id=0, source=system",
+  },
+  # Add new reminder types here. Fallback for unknown types: lobster-generalist.
+}
+```
+
+**When `wait_for_messages` returns a message with `type: "scheduled_reminder"`:**
+
+```
+1. mark_processing(message_id)
+2. reminder_type = msg["reminder_type"]
+3. route = REMINDER_ROUTING.get(reminder_type, fallback_lobster_generalist)
+4. Spawn subagent (run_in_background=True):
+   - subagent_type: route["subagent_type"]
+   - prompt: route["prompt"]
+5. mark_processed(message_id)
+6. Return to wait_for_messages() immediately — no ack, no send_reply
+```
+
+**Rules:**
+- Never call `send_reply` for scheduled reminders (chat_id: 0, source: "system")
+- The subagent should call `write_result` with `chat_id=0` if there is nothing actionable, or send a user-facing alert via `send_reply` to the admin chat_id if it finds a real problem
+- Do not ack these — they are background system tasks, not user requests
+
+## Handling Subagent Results (`subagent_result` / `subagent_error`)
+
+Background subagents call `write_result(task_id, chat_id, text, ...)`, which drops a message of type `subagent_result` (or `subagent_error`) into the inbox. The main thread picks it up.
+
+**When `wait_for_messages` returns a message with `type: "subagent_result"`:**
+
+Check the `sent_reply_to_user` field first:
+
+```
+1. mark_processing(message_id)
+2. if msg.get("sent_reply_to_user") == True:
+       # Subagent already called send_reply — nothing to deliver
+       mark_processed(message_id)
+   else:
+       send_reply(
+           chat_id=msg["chat_id"],
+           text=msg["text"],
+           source=msg.get("source", "telegram"),
+           thread_ts=msg.get("thread_ts"),            # Slack thread
+           reply_to_message_id=msg.get("telegram_message_id")  # Telegram threading
+       )
+       mark_processed(message_id)
+```
+
+**When type is `subagent_error`:**
+
+```
+1. mark_processing(message_id)
+2. send_reply(
+       chat_id=msg["chat_id"],
+       text=f"Sorry, something went wrong with that task:\n\n{msg['text']}",
+       source=msg.get("source", "telegram")
+   )
+3. mark_processed(message_id)
+```
+
+(Errors always relay — a subagent that fails may not have delivered anything to the user.)
+
+**Key fields on these messages:**
+- `task_id` — identifier for the originating task (for logging/debugging)
+- `chat_id` — where to deliver the reply
+- `text` — the reply text to relay
+- `source` — messaging platform (telegram, slack, etc.)
+- `status` — "success" or "error"
+- `sent_reply_to_user` — boolean (default false). When true, the subagent already called `send_reply`; dispatcher just marks processed
+- `artifacts` — optional list of file paths the subagent produced
+- `thread_ts` — optional Slack thread timestamp
+
+## Handling Subagent Notifications (`subagent_notification`)
+
+When `write_result` is called with `sent_reply_to_user=True`, `inbox_server` writes a message of type `subagent_notification` instead of `subagent_result`. This is the canonical signal that the subagent already delivered its reply to the user via `send_reply`.
+
+**When `wait_for_messages` returns a message with `type: "subagent_notification"`:**
+
+```
+1. mark_processing(message_id)
+2. Read msg["text"] for situational awareness — understand what the task did and what it reported
+3. mark_processed(message_id)
+   # Do NOT call send_reply — the user already received the message
+```
+
+The distinct type enforces correct behavior structurally: the dispatcher's `subagent_result` branch (which calls `send_reply`) never fires for these messages. There is no risk of a duplicate reply even if the dispatcher ignores the `sent_reply_to_user` field.
+
+**Why this matters:** Without a distinct type, the only safeguard against duplicate replies is the dispatcher reading and obeying the `sent_reply_to_user: true` field. With `subagent_notification`, the message type itself routes correctly — the dispatcher gains situational awareness without any possibility of sending a duplicate.
 
 ---
 
