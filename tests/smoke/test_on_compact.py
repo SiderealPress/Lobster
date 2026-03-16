@@ -62,7 +62,6 @@ def _load_hook(
     state_file: Path,
     sentinel_file: Path,
     session_id: str = "test-dispatcher-session",
-    processing_dir: Path | None = None,
 ) -> types.ModuleType:
     """
     Load hooks/on-compact.py as a fresh module with patched path constants.
@@ -92,6 +91,19 @@ def _load_hook(
     # Suppress the Telegram notify side-effect — we never want real network
     # calls in smoke tests and we don't want to depend on config.env being present.
     mod.send_compaction_notify = lambda: None  # type: ignore[attr-defined]
+
+    # Stub is_dispatcher to return True so tests exercise the dispatcher path.
+    # The real is_dispatcher() checks a marker file + transcript; in tests there
+    # is no marker file and no stdin transcript, so it would return False and
+    # silently exit without writing any inbox/state files.
+    mod.is_dispatcher = lambda _data: True  # type: ignore[attr-defined]
+
+    # Patch sys.stdin so main()'s json.load(sys.stdin) gets a valid compact event
+    # rather than hitting pytest's captured stdin which raises OSError.
+    hook_input = json.dumps(
+        {"session_id": session_id, "hook_event_name": "SessionStart", "is_compact": True}
+    )
+    mod._test_stdin_data = hook_input  # store for reference
 
     # Stub is_dispatcher to return True so tests exercise the dispatcher path.
     # The real is_dispatcher() checks a marker file + transcript; in tests there
