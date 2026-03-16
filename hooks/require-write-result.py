@@ -32,6 +32,32 @@ The proper hex-ID row is the primary target but is only reachable when
 task_id matches. When it is not reachable via this hook, the reconciler in
 inbox_server.py will close it when it detects stop_reason=end_turn in the
 output file.
+
+## SubagentStop vs Stop transcript handling
+
+Neither SubagentStop nor Stop hooks receive an inline `transcript` field in
+CC 2.1.76+. Both pass a file path instead:
+- Stop: `transcript_path` (JSONL file of the current session's conversation)
+- SubagentStop: `agent_transcript_path` (JSONL file of the subagent's conversation)
+
+This hook reads the appropriate file path for each event type. An inline
+`transcript` field is supported as a legacy fallback for older CC versions.
+
+## JSONL message format
+
+Each line of the JSONL transcript file has the structure:
+    {"type": "assistant", "message": {"role": "assistant", "content": [...]}, ...}
+
+Tool use items are nested under entry["message"]["content"], NOT entry["content"].
+`_collect_tool_use_and_text` handles both the JSONL format and the legacy inline
+format where content is directly on the message dict.
+
+## Suppressing feedback injection on success
+
+Claude Code injects a "Stop hook feedback: ... No stderr output" system message
+into the agent even when the hook exits 0. To prevent this feedback from
+triggering a new agent turn, the hook outputs JSON with `{"suppressOutput": true}`
+on all success paths. Per the CC hook spec, this suppresses feedback injection.
 """
 import json
 import sys
@@ -40,6 +66,17 @@ from pathlib import Path
 # Import shared session role utility.
 sys.path.insert(0, str(Path(__file__).parent))
 from session_role import is_dispatcher, get_session_id
+
+# JSON to emit on every successful (allow) exit — suppresses the
+# "Stop hook feedback: No stderr output" injection that CC 2.1.76+ produces
+# even when the hook exits 0 with no output.
+_SILENT_OK = json.dumps({"suppressOutput": True})
+
+
+def _exit_ok() -> None:
+    """Exit 0 with JSON that suppresses CC feedback injection."""
+    print(_SILENT_OK)
+    sys.exit(0)
 
 
 def _extract_write_result_task_ids(all_tool_use_items: list) -> list[str]:
@@ -85,34 +122,124 @@ def _mark_session_completed(id_or_task_id: str) -> None:
         pass  # DB update is best-effort; never block exit
 
 
+def _mark_session_notified(id_or_task_id: str) -> None:
+    """Set notified_at on the agent session row in agent_sessions.db.
+
+    Best-effort: any failure is silently swallowed so the hook always exits 0.
+    Uses session_store.set_notified() which matches on id OR task_id and is
+    idempotent — safe to call even if handle_write_result already set it.
+
+    This prevents the reconciler from treating the row as unnotified and
+    enqueuing a duplicate subagent_notification message. Must be called
+    AFTER _mark_session_completed so the row is in a terminal state first.
+    """
+    try:
+        hooks_dir = Path(__file__).parent
+        repo_src = hooks_dir.parent / "src"
+        sys.path.insert(0, str(repo_src))
+        from agents.session_store import set_notified  # noqa: PLC0415
+        set_notified(id_or_task_id)
+    except Exception:
+        pass  # DB update is best-effort; never block exit
+
+
+def _load_transcript_from_jsonl(path: str) -> list:
+    """Load transcript messages from a JSONL file.
+
+    SubagentStop passes agent_transcript_path (a .jsonl file) rather than an
+    inline transcript list. Each line is a JSON object. Returns [] on any error.
+    """
+    try:
+        messages = []
+        with open(path) as fh:
+            for line in fh:
+                line = line.strip()
+                if line:
+                    try:
+                        messages.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        pass
+        return messages
+    except Exception:
+        return []
+
+
+def _collect_tool_use_and_text(transcript: list) -> tuple[list, list]:
+    """Walk a transcript and return (tool_use_items, text_content_parts).
+
+    Handles both JSONL format (CC 2.1.76+) and legacy inline format:
+
+    JSONL format (each line is a JSONL entry):
+        {"type": "assistant", "message": {"role": "assistant", "content": [...]}, ...}
+
+    Legacy inline format (transcript is a list of messages):
+        {"role": "assistant", "content": [...]}
+
+    Both formats are tried so the hook works regardless of CC version.
+    """
+    all_tool_use_items = []
+    text_content_parts = []
+    for entry in transcript:
+        if not isinstance(entry, dict):
+            continue
+
+        # JSONL format: content is under entry["message"]["content"]
+        # Legacy format: content is directly under entry["content"]
+        nested_msg = entry.get("message")
+        if isinstance(nested_msg, dict):
+            content = nested_msg.get("content", [])
+        else:
+            content = entry.get("content", [])
+
+        if not isinstance(content, list):
+            continue
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "tool_use":
+                all_tool_use_items.append(item)
+            elif item.get("type") == "text":
+                text_content_parts.append(item.get("text", ""))
+    return all_tool_use_items, text_content_parts
+
+
 def main():
     try:
         data = json.load(sys.stdin)
     except Exception:
-        sys.exit(0)  # If we can't read transcript, don't block
+        _exit_ok()  # If we can't read input, don't block
 
     # Dispatcher sessions are exempt — skip the write_result check.
     # session_role.is_dispatcher() uses the marker file as primary signal and
     # the transcript (which is present in Stop hooks) as fallback.
     if is_dispatcher(data):
-        sys.exit(0)
+        _exit_ok()
 
-    transcript = data.get("transcript", [])
+    hook_event = data.get("hook_event_name", "")
+    is_subagentstop = hook_event == "SubagentStop"
+
+    if is_subagentstop:
+        # SubagentStop: transcript is in a JSONL file at agent_transcript_path.
+        # CC does NOT include an inline transcript field for this event.
+        transcript_path = data.get("agent_transcript_path", "")
+        if not transcript_path:
+            # No path provided — can't verify; allow exit to avoid blocking.
+            _exit_ok()
+        transcript = _load_transcript_from_jsonl(transcript_path)
+    else:
+        # Stop hook: CC 2.1.76+ passes transcript_path (JSONL file), not inline.
+        # Try the file path first; fall back to inline transcript[] for older CC
+        # versions that may still embed the transcript directly.
+        transcript_path = data.get("transcript_path", "")
+        if transcript_path:
+            transcript = _load_transcript_from_jsonl(transcript_path)
+        else:
+            # Older CC: transcript may be inline (legacy fallback).
+            transcript = data.get("transcript", [])
 
     # Collect all tool call items so we can inspect both name and input.
     # Also collect text content parts for pseudocode detection.
-    all_tool_use_items = []
-    text_content_parts = []
-    for msg in transcript:
-        if isinstance(msg, dict):
-            content = msg.get("content", [])
-            if isinstance(content, list):
-                for item in content:
-                    if isinstance(item, dict):
-                        if item.get("type") == "tool_use":
-                            all_tool_use_items.append(item)
-                        elif item.get("type") == "text":
-                            text_content_parts.append(item.get("text", ""))
+    all_tool_use_items, text_content_parts = _collect_tool_use_and_text(transcript)
 
     tool_call_names = [item.get("name", "") for item in all_tool_use_items]
 
@@ -148,7 +275,26 @@ def main():
             if session_id:
                 _mark_session_completed(session_id)
 
-            sys.exit(0)
+            # Set notified_at on all rows so the reconciler never sees them as
+            # unnotified and enqueues duplicate subagent_notification messages.
+            # Order: complete first, notify second (terminal state before marking
+            # notified is the correct sequence).
+            #
+            # Belt-and-suspenders for the task_id rows: handle_write_result in
+            # inbox_server.py also calls set_notified, but race conditions or
+            # server restarts can leave notified_at NULL. Setting it here too
+            # closes that gap synchronously in the hook.
+            #
+            # The session_id stub row is the primary target: it is never touched
+            # by handle_write_result (which matches on task_id, not session UUID),
+            # so without this call the stub row would permanently have
+            # notified_at IS NULL and trigger duplicate notifications on reconcile.
+            for tid in write_result_task_ids:
+                _mark_session_notified(tid)
+            if session_id:
+                _mark_session_notified(session_id)
+
+            _exit_ok()
         else:
             # write_result was called but chat_id was None in every call —
             # the MCP server rejected the call and the result was not stored.
@@ -158,7 +304,8 @@ def main():
                 "was not delivered. "
                 "Call write_result again with a valid chat_id. "
                 "If you were not given a user chat_id, use chat_id=0 — that is the "
-                "dispatcher system route for background agents with no user context."
+                "dispatcher system route for background agents with no user context.",
+                file=sys.stderr,
             )
             sys.exit(2)
 
@@ -173,14 +320,16 @@ def main():
             "description, not an invocation. You must call write_result using the tool "
             "invocation mechanism (the same way you call Read, Edit, Bash, etc.) — not "
             "by writing it as code output.\n\n"
-            "Call write_result now using the tool mechanism."
+            "Call write_result now using the tool mechanism.",
+            file=sys.stderr,
         )
     else:
         print(
             "STOP: You must call mcp__lobster-inbox__write_result before finishing. "
             "The dispatcher is waiting for your result. "
             "If the task failed, report the failure — but you must call write_result. "
-            "Call it now with your findings, then you may exit."
+            "Call it now with your findings, then you may exit.",
+            file=sys.stderr,
         )
     sys.exit(2)  # Exit 2 to hard-block the session from terminating
 
