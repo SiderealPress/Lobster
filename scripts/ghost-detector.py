@@ -144,19 +144,53 @@ def compute_output_file_age_minutes(output_file: str | None, now: datetime) -> f
 
 
 def check_transcript_for_write_result(output_file: str) -> bool:
-    """Return True if the agent's transcript shows write_result was called successfully.
+    """Return True if the agent's transcript shows write_result was called as a tool.
 
-    Scans the JSONL output file for evidence of a successful
-    mcp__lobster-inbox__write_result tool call. The tool name appears
-    verbatim in JSONL tool_use blocks. Both substrings must be present
-    to avoid false positives from unrelated content mentioning "write_result".
+    Scans the JSONL output file for evidence of an actual
+    mcp__lobster-inbox__write_result tool_use block. Looks for the tool name
+    inside a JSON "tool_use" block to avoid false positives from the subagent
+    bootup instructions, which mention the tool name verbatim in plain text.
+
+    A line is counted only when it contains both '"type": "tool_use"' (or
+    '"type":"tool_use"') and '"mcp__lobster-inbox__write_result"' within the
+    same JSON object. This is more precise than a plain substring scan.
     """
     if not output_file or not os.path.exists(output_file):
         return False
     try:
         with open(output_file, "r") as f:
-            content = f.read()
-        return "write_result" in content and "mcp__lobster-inbox" in content
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                # Fast pre-filter: both substrings must be present on this line
+                if "mcp__lobster-inbox__write_result" not in line:
+                    continue
+                if "tool_use" not in line:
+                    continue
+                # Parse the line to verify this is an actual tool_use record
+                try:
+                    obj = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                # Check inside the 'message' field (JSONL entry format) or
+                # directly at the top level (tool_result / assistant message format).
+                def _has_write_result_tool_use(node: object) -> bool:
+                    if isinstance(node, dict):
+                        if node.get("type") == "tool_use" and node.get("name") == "mcp__lobster-inbox__write_result":
+                            return True
+                        for v in node.values():
+                            if _has_write_result_tool_use(v):
+                                return True
+                    elif isinstance(node, list):
+                        for item in node:
+                            if _has_write_result_tool_use(item):
+                                return True
+                    return False
+
+                if _has_write_result_tool_use(obj):
+                    return True
+        return False
     except Exception:
         return False
 
