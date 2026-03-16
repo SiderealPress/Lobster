@@ -19,6 +19,16 @@ if [ -z "$JOB_NAME" ]; then
 fi
 
 REPO_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
+
+# Load config.env so env vars like LOBSTER_ADMIN_CHAT_ID are available when
+# running from cron (which does not inherit the systemd EnvironmentFile).
+CONFIG_ENV="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}/config.env"
+if [ -f "$CONFIG_ENV" ]; then
+    # shellcheck source=/dev/null
+    set -a
+    source "$CONFIG_ENV"
+    set +a
+fi
 WORKSPACE="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
 TASK_FILE="$WORKSPACE/scheduled-jobs/tasks/${JOB_NAME}.md"
 OUTPUT_DIR="$HOME/messages/task-outputs"
@@ -54,8 +64,8 @@ claude -p "$TASK_CONTENT
 ---
 
 IMPORTANT: You are running as a scheduled task. When you complete your task:
-1. Call send_reply(chat_id=OWNER_CHAT_ID_PLACEHOLDER, text=<your digest>, source=\"telegram\") to deliver results directly to the user
-2. Call write_result(task_id=\"scheduled-job-$JOB_NAME\", chat_id=OWNER_CHAT_ID_PLACEHOLDER, text=<same text>, forward=False) to notify the dispatcher that the job completed
+1. Call send_reply(chat_id=${LOBSTER_ADMIN_CHAT_ID}, text=<your digest>, source=\"telegram\") to deliver results directly to the user
+2. Call write_result(task_id=\"scheduled-job-$JOB_NAME\", chat_id=${LOBSTER_ADMIN_CHAT_ID}, text=<same text>, forward=False) to notify the dispatcher that the job completed
 3. Keep output concise - the user is on mobile
 4. Exit after writing output - do not start a loop
 
