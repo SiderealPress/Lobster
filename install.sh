@@ -1425,6 +1425,48 @@ else
     info "Skipping require-subagent-type hook (settings.json not yet created)"
 fi
 
+# Set up Claude Code PreToolUse hook to warn when Agent is called without run_in_background
+chmod +x "$INSTALL_DIR/hooks/require-background-agent.py" || true
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '.hooks.PreToolUse[]? | select(.hooks[]?.command | test("require-background-agent"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+            "matcher": "Agent",
+            "hooks": [{
+                "type": "command",
+                "command": "python3 '"$INSTALL_DIR"'/hooks/require-background-agent.py",
+                "timeout": 5
+            }]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "require-background-agent hook installed"
+    else
+        info "require-background-agent hook already configured in Claude Code settings"
+    fi
+else
+    info "Skipping require-background-agent hook (settings.json not yet created)"
+fi
+
+# Set up Claude Code PreToolUse hook to warn when WebFetch/WebSearch are called inline
+chmod +x "$INSTALL_DIR/hooks/dispatcher-inline-tool-guard.py" || true
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '.hooks.PreToolUse[]? | select(.hooks[]?.command | test("dispatcher-inline-tool-guard"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+            "matcher": "WebFetch|WebSearch",
+            "hooks": [{
+                "type": "command",
+                "command": "python3 '"$INSTALL_DIR"'/hooks/dispatcher-inline-tool-guard.py",
+                "timeout": 5
+            }]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "dispatcher-inline-tool-guard hook installed"
+    else
+        info "dispatcher-inline-tool-guard hook already configured in Claude Code settings"
+    fi
+else
+    info "Skipping dispatcher-inline-tool-guard hook (settings.json not yet created)"
+fi
+
 # Set up Claude Code PreToolUse hook to block edits to system files unless LOBSTER_DEBUG=true
 chmod +x "$INSTALL_DIR/hooks/system-file-protect.py" || true
 if [ -f "$CLAUDE_SETTINGS" ]; then
