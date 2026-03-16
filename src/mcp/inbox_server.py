@@ -1845,6 +1845,13 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Optional short summary of the outcome.",
                     },
+                    "stop_reason": {
+                        "type": "string",
+                        "description": (
+                            "Why the agent stopped. Known values: 'end_turn', 'tool_use', "
+                            "'max_turns', 'error', 'killed'. NULL for legacy rows."
+                        ),
+                    },
                 },
                 "required": ["agent_id", "status"],
             },
@@ -5139,6 +5146,7 @@ async def handle_write_result(args: dict) -> list[TextContent]:
             id_or_task_id=task_id,
             status="completed",
             result_summary=(text[:200] if text else None),
+            stop_reason="end_turn",
         )
     except Exception as exc:
         log.warning(f"write_result auto-unregister failed for task_id={task_id!r}: {exc}")
@@ -5420,6 +5428,7 @@ async def handle_session_end(args: dict) -> list[TextContent]:
     agent_id = args.get("agent_id", "").strip()
     status = args.get("status", "completed").strip()
     result_summary = args.get("result_summary") or None
+    stop_reason = args.get("stop_reason") or None
 
     if not agent_id:
         return [TextContent(type="text", text="Error: agent_id is required")]
@@ -5431,6 +5440,7 @@ async def handle_session_end(args: dict) -> list[TextContent]:
             id_or_task_id=agent_id,
             status=status,
             result_summary=result_summary,
+            stop_reason=stop_reason,
         )
     except Exception as exc:
         log.error(f"session_end failed: {exc}", exc_info=True)
@@ -7168,6 +7178,7 @@ async def reconcile_agent_sessions() -> None:
                         id_or_task_id=agent_id,
                         status="completed",
                         result_summary="Auto-closed by reconciler: stop_reason=end_turn",
+                        stop_reason="end_turn",
                     )
                     # Enqueue Telegram notification (the critical missing step)
                     _enqueue_reconciler_notification(session, outcome="completed")
@@ -7187,6 +7198,7 @@ async def reconcile_agent_sessions() -> None:
                             id_or_task_id=agent_id,
                             status="dead",
                             result_summary=f"Auto-closed by reconciler: output missing after {elapsed}s",
+                            stop_reason="killed",
                         )
                         # Enqueue Telegram notification (failure case)
                         _enqueue_reconciler_notification(session, outcome="dead")
