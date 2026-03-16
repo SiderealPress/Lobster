@@ -130,6 +130,63 @@ If memory usage exceeds 90%:
 | 7 checks (some LLM-dependent) | 6 checks, all fully deterministic |
 | No disk space monitoring | Disk usage check with threshold |
 
+## OOM Kill Monitor (`scripts/oom-monitor.py`)
+
+Runs every 10 minutes via cron. Detects when the Linux OOM (Out-Of-Memory) killer
+has terminated Lobster-related processes and alerts the operator via Telegram so
+ghost subagents can be cleaned up.
+
+### What it detects
+
+Scans the kernel journal (`journalctl -k`) for lines matching:
+- `Out of memory: Killed process <PID> (<name>)` — primary OOM kill confirmation
+- `Out of memory: Kill process <PID> (<name>)` — newer kernel variant
+- `Memory cgroup out of memory: Killed process <PID> (<name>)` — cgroup OOM kills
+- `oom_reaper: reaped process <PID> (<name>)` — reaper confirmation
+
+Processes watched: `claude`, `python`, `python3`, `node`, `lobster`, `uv`
+
+### Deduplication
+
+Each kill event is keyed by a stable hash of `(timestamp, pid)` and stored in
+`~/lobster-workspace/data/oom-monitor-state.json`. A given kill event triggers
+at most one alert regardless of how many times the monitor runs.
+
+### Alert paths
+
+Two alert paths run in parallel (belt-and-suspenders):
+
+1. **Direct Telegram via curl** — works even if the Lobster process itself was killed,
+   same approach as `health-check-v3.sh`.
+2. **Inbox JSON drop** — writes to `~/messages/inbox/` so the dispatcher picks it up
+   when it recovers and can relay context to the user.
+
+### Cron setup
+
+```cron
+*/10 * * * * $HOME/lobster/scripts/oom-monitor.py --since-minutes 10
+```
+
+Or via the automated cron installer:
+
+```bash
+(crontab -l 2>/dev/null; echo "*/10 * * * * uv run $HOME/lobster/scripts/oom-monitor.py --since-minutes 10 # LOBSTER-OOM") | crontab -
+```
+
+### Manual test
+
+```bash
+# Dry-run: shows what would be alerted without sending anything
+uv run ~/lobster/scripts/oom-monitor.py --dry-run --since-minutes 43200
+
+# Scan the last 30 days for any historical OOM events
+journalctl -k --since "30 days ago" | grep -i "out of memory\|killed process"
+```
+
+### Log file
+
+`~/lobster-workspace/logs/oom-monitor.log`
+
 ## Improvements Over v1
 
 | v1 (old) | v2 (replaced) |
