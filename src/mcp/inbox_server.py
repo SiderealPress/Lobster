@@ -3086,17 +3086,9 @@ async def handle_mark_processing(args: dict) -> list[TextContent]:
                 )
                 # never block mark_processing
         else:
-            # Debug: no trigger match — context injection skipped.
-            # _emit_debug_observation is a no-op when not in debug mode.
-            # Skip for system messages (chat_id=0) — context injection is never
-            # expected for self-check or other system-originated messages, so
-            # emitting an observation for them is pure noise.
-            _msg_chat_id = msg_data.get("chat_id", None)
-            if msg_text and len(msg_text) >= 8 and _msg_chat_id != 0:
-                _emit_debug_observation(
-                    f"\U0001f50d [context skipped] msg={short_msg_id} "
-                    "no trigger match — user model context not injected"
-                )
+            # No trigger match — context injection skipped. No notification emitted;
+            # this is the common case and emitting on every no-match is pure noise.
+            pass
 
     log.info(f"Message claimed for processing: {message_id}")
     return [TextContent(type="text", text=f"Message claimed: {message_id}{context_block}")]
