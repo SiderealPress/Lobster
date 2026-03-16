@@ -55,6 +55,8 @@ LOBSTER_STATE_FILE="${LOBSTER_STATE_FILE_OVERRIDE:-$MESSAGES_DIR/config/lobster-
 STALE_THRESHOLD_SECONDS=180          # 3 minutes - RED if any message older (watchdog handles soft recovery at 90s)
 YELLOW_THRESHOLD_SECONDS=120         # 2 minutes - YELLOW warning
 
+MAINTENANCE_EXPIRY_SECONDS=3600      # 1 hour - stale maintenance flag is auto-cleared and checks resume
+
 COMPACTION_SUPPRESS_SECONDS=300      # 5 minutes - skip stale-inbox check after a compaction event
 
 HIBERNATE_FRESH_SECONDS=30           # Ignore hibernate state younger than this — transient dispatcher hibernation
@@ -979,10 +981,25 @@ Status: Restarted successfully"
 main() {
     acquire_lock
 
-    # Maintenance mode: lobster stop sets this flag to prevent auto-restart
+    # Maintenance mode: lobster stop sets this flag to prevent auto-restart.
+    # The flag expires after MAINTENANCE_EXPIRY_SECONDS so a failed restart
+    # (which leaves the flag behind) doesn't suppress recovery indefinitely.
     if [[ -f "$MAINTENANCE_FLAG" ]]; then
-        log_info "=== Maintenance mode active, skipping all checks ==="
-        exit 0
+        local stopped_at_raw
+        stopped_at_raw=$(grep -oP 'stopped_at=\K[^ ]+' "$MAINTENANCE_FLAG" 2>/dev/null || true)
+        local flag_age=0
+        if [[ -n "$stopped_at_raw" ]]; then
+            local stopped_epoch
+            stopped_epoch=$(date -d "$stopped_at_raw" +%s 2>/dev/null || echo 0)
+            flag_age=$(( $(date +%s) - stopped_epoch ))
+        fi
+        if [[ $flag_age -lt $MAINTENANCE_EXPIRY_SECONDS ]]; then
+            log_info "=== Maintenance mode active (${flag_age}s old, expires at ${MAINTENANCE_EXPIRY_SECONDS}s), skipping all checks ==="
+            exit 0
+        else
+            log_warn "Maintenance flag is stale (${flag_age}s old, limit ${MAINTENANCE_EXPIRY_SECONDS}s) — auto-clearing and resuming checks"
+            rm -f "$MAINTENANCE_FLAG"
+        fi
     fi
 
     log_info "=== Health check v3 starting ==="
