@@ -82,8 +82,12 @@ def write_reminder() -> None:
     """Write a compact-reminder system message to the inbox."""
     INBOX_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Timestamp in milliseconds, matching the pattern used by other inbox files.
-    ts_ms = int(time.time() * 1000)
+    # Use ts_ms=0 so the filename ("0_compact.json") sorts lexicographically
+    # before any real user-message filename (which starts with the current epoch
+    # in milliseconds, e.g. "1741234567890_...").  This guarantees the
+    # compact-reminder is the first message the dispatcher sees after
+    # compaction, regardless of how many user messages were queued beforehand.
+    ts_ms = 0
     message_id = f"{ts_ms}_compact"
     timestamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + ".000000"
 
