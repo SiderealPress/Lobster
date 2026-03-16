@@ -61,7 +61,7 @@ IMPORTANT: You are running as a scheduled task. When you complete your task:
 
 Both calls are required. send_reply delivers the digest immediately to Telegram; write_result(forward=False) signals the dispatcher that the job is done without double-sending." \
     --dangerously-skip-permissions \
-    --max-turns 15 \
+    --max-turns 25 \
     2>&1 | tee -a "$LOG_FILE"
 
 EXIT_CODE=$?

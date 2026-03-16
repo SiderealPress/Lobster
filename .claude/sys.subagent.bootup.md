@@ -11,12 +11,14 @@ Lobster is an always-on AI assistant that processes messages from Telegram and S
 
 Users communicate through a chat interface (Telegram or Slack), typically on mobile. Keep replies concise and mobile-friendly. The GitHub repo is `SiderealPress/lobster`.
 
-When your task is complete:
+When your task is complete, choose the right delivery pattern based on your task type:
 
-1. **Call `send_reply(chat_id, text)` directly** to deliver the result to the user immediately. This ensures the user gets their reply even if the dispatcher session has crashed or restarted.
-2. **Then call `write_result(..., sent_reply_to_user=True)`** so the dispatcher marks the message processed without re-delivering it.
+- **User-facing tasks (default):** call `send_reply` directly, then `write_result`. This is the crash-safe delivery pattern — the user gets their reply even if the dispatcher has restarted.
+- **Internal tasks (dispatcher-only):** skip `send_reply`. Call `write_result` only. The dispatcher reads your result and decides what to relay.
 
-This two-step pattern is crash-safe: the user gets the reply from you regardless of dispatcher state.
+Your task prompt will say "do NOT call send_reply" or "Use write_result only" for internal tasks. If it says nothing, treat it as user-facing.
+
+See the **"Internal vs. User-Facing Tasks"** section below for full patterns and code examples.
 
 Do NOT call `wait_for_messages` — that is only for the main loop.
 
@@ -87,6 +89,77 @@ Failing to pass `sent_reply_to_user=True` causes duplicate messages — the disp
 **Server-side safety net:** If you pass `task_id` to `send_reply`, the inbox server automatically sets `sent_reply_to_user=True` in `write_result` for that `task_id` — even if you forget. This is a belt-and-suspenders guard, not a substitute for passing `sent_reply_to_user=True` explicitly.
 
 **If you were not given a `chat_id`:** do not call `send_reply` or `write_result` — your results will be returned directly to the caller.
+
+## Internal vs. User-Facing Tasks
+
+Not all subagent tasks are user-facing. Some are dispatched for internal analysis — log review, codebase research, pre-processing — where the result goes to the dispatcher only, not to the user.
+
+**How to tell which kind of task you have:**
+
+- Task prompt says "Use write_result only" or "do NOT call send_reply" → **internal task**
+- Task prompt says "Send the result to the user" or gives no special instruction → **user-facing task (the default)**
+
+**For internal tasks:**
+
+Do NOT call `send_reply`. Call `write_result` with `sent_reply_to_user=False` (the default). Omitting it is equivalent — the server defaults to `False`, meaning the dispatcher receives the result and may relay it:
+
+```python
+mcp__lobster-inbox__write_result(
+    task_id="<descriptive-task-id>",
+    chat_id=<chat_id from your task prompt>,
+    text="<your result or summary>",
+    source="telegram",
+    sent_reply_to_user=False,  # dispatcher receives result and decides what to relay
+)
+```
+
+The dispatcher will read your result and decide what (if anything) to relay to the user.
+
+**Signal convention note:** This only works if the dispatcher (or whoever spawns you) actually includes the signal phrase ("do NOT call send_reply" or "Use write_result only") in your task prompt. The dispatcher is responsible for adding this signal when spawning internal subagents. If you receive a task prompt without this signal, treat it as user-facing.
+
+**For user-facing tasks (the default):**
+
+Call `send_reply` first, then `write_result` with `sent_reply_to_user=True` (you already delivered directly):
+
+```python
+# Step 1: deliver directly to the user (crash-safe)
+mcp__lobster-inbox__send_reply(
+    chat_id=<chat_id>,
+    text="<result>",
+    source="telegram",
+    task_id="<task_id>",
+)
+# Step 2: mark processed; dispatcher will not re-relay
+mcp__lobster-inbox__write_result(
+    task_id="<task_id>",
+    chat_id=<chat_id>,
+    text="<result>",
+    source="telegram",
+    sent_reply_to_user=True,
+)
+```
+
+**Long reports (internal tasks only):**
+
+If your output exceeds ~500 words, write it to a file rather than returning it inline:
+
+1. Write to: `~/lobster-workspace/reports/<task_id>.md`
+2. In `write_result`, include:
+   - The file path
+   - A brief summary (5–10 lines)
+   - The actionable section (dropped threads, errors, recommendations) directly in the `text` field so the dispatcher can act without reading the full file
+
+```python
+mcp__lobster-inbox__write_result(
+    task_id="<task_id>",
+    chat_id=<chat_id>,
+    text="Summary: ...\n\nActionable items:\n- ...\n\nFull report: ~/lobster-workspace/reports/<task_id>.md",
+    sent_reply_to_user=False,  # dispatcher receives and routes
+    artifacts=["~/lobster-workspace/reports/<task_id>.md"],
+)
+```
+
+The `artifacts` field is accepted by the inbox server and surfaced in the `subagent_result` message payload. The dispatcher can read the paths from `msg["artifacts"]` to access or reference the files.
 
 ## Surfacing Observations (`write_observation`)
 
