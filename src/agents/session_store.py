@@ -599,17 +599,85 @@ def format_active_sessions_block(sessions: list[dict]) -> str:
 # Ground-truth scanner — reads Claude Code JSONL output files
 # ---------------------------------------------------------------------------
 
-# Default tasks symlink directory where Claude Code writes *.output symlinks
+# Default tasks symlink directory where Claude Code writes *.output symlinks.
+# NOTE: This path was historically hardcoded with the wrong username (-home-admin-
+# instead of the actual user). The reconciler now uses check_output_file_status()
+# for per-session checks based on the output_file stored in the DB, which avoids
+# this path entirely. scan_agent_outputs() is kept for tests and legacy callers.
 _CLAUDE_TASKS_DIR = Path("/tmp/claude-1000/-home-admin-lobster-workspace/tasks")
+
+# Compiled stop_reason pattern — shared by scan_agent_outputs and check_output_file_status
+import re as _re
+_STOP_REASON_RE = _re.compile(rb'"stop_reason"\s*:\s*"([^"]+)"')
+
+
+def _read_stop_reason_from_path(output_path: Path) -> str:
+    """Read the last stop_reason from a .output symlink or JSONL file.
+
+    Returns one of:
+      ``"running"``  — file exists, last stop_reason is "tool_use" or not yet written
+      ``"done"``     — last stop_reason is "end_turn"
+      ``"missing"``  — symlink target does not exist or file is unreadable
+    """
+    try:
+        real_path = output_path.resolve()
+    except OSError:
+        return "missing"
+
+    if not real_path.exists():
+        return "missing"
+
+    try:
+        with open(real_path, "rb") as f:
+            try:
+                f.seek(-4096, 2)
+            except OSError:
+                f.seek(0)
+            tail = f.read()
+    except OSError:
+        return "missing"
+
+    if not tail:
+        return "running"
+
+    matches = _STOP_REASON_RE.findall(tail)
+    if not matches:
+        return "running"
+
+    last_reason = matches[-1].decode("utf-8", errors="replace")
+    return "done" if last_reason == "end_turn" else "running"
+
+
+def check_output_file_status(output_file: str) -> str:
+    """Check liveness of a single agent by reading its output_file path directly.
+
+    This is the preferred method for the reconciler: it reads the path stored
+    in the ``output_file`` DB column, which is always correct regardless of
+    username or session layout. It avoids the directory-scan approach that
+    relied on a hardcoded (and often wrong) default tasks path.
+
+    Args:
+        output_file: Full path to the agent's .output symlink as stored in DB.
+
+    Returns:
+        ``"running"``  — agent is still executing (last stop_reason is tool_use
+                         or no stop_reason written yet).
+        ``"done"``     — agent has finished (last stop_reason is end_turn).
+        ``"missing"``  — output file does not exist (agent not yet started,
+                         was killed, or output_file was not registered).
+    """
+    if not output_file:
+        return "missing"
+    return _read_stop_reason_from_path(Path(output_file))
 
 
 def scan_agent_outputs(
     tasks_dir: Path | None = None,
 ) -> dict[str, str]:
-    """Scan Claude Code agent output files and return their liveness status.
+    """Scan a Claude Code tasks directory and return liveness status per agent.
 
     Each background Task spawned by Claude Code creates a symlink (or file) at:
-        /tmp/claude-1000/-home-admin-lobster-workspace/tasks/<agent-id>.output
+        <tasks_dir>/<agent-id>.output
 
     The symlink resolves to a JSONL file in ~/.claude/projects/.../subagents/.
     Claude Code writes a ``stop_reason`` field into these JSONL lines:
@@ -618,6 +686,10 @@ def scan_agent_outputs(
 
     We read only the last 4 KB of each file (fast, constant-time) and scan for
     the last occurrence of ``"stop_reason":``.
+
+    NOTE: The default tasks_dir (_CLAUDE_TASKS_DIR) uses a hardcoded legacy
+    path that may not match the current deployment. Prefer check_output_file_status()
+    for per-session checks when the output_file path is stored in the DB.
 
     Args:
         tasks_dir: Override the default tasks directory (for testing).
@@ -628,8 +700,6 @@ def scan_agent_outputs(
           ``"done"``     — last stop_reason is "end_turn"
           ``"missing"``  — symlink target JSONL does not exist yet (agent just spawned)
     """
-    import re
-
     resolved_dir = tasks_dir if tasks_dir is not None else _CLAUDE_TASKS_DIR
 
     result: dict[str, str] = {}
@@ -637,55 +707,9 @@ def scan_agent_outputs(
     if not resolved_dir.exists():
         return result
 
-    # Pattern to extract the last stop_reason value in the tail bytes
-    _stop_reason_re = re.compile(rb'"stop_reason"\s*:\s*"([^"]+)"')
-
     for output_path in resolved_dir.glob("*.output"):
-        # agent_id is the filename stem (e.g. "a24c111e0daad91f7" from "a24c111e0daad91f7.output")
         agent_id = output_path.stem
-
-        # Resolve symlink to real JSONL path (or use the file itself)
-        try:
-            real_path = output_path.resolve()
-        except OSError:
-            result[agent_id] = "missing"
-            continue
-
-        if not real_path.exists():
-            result[agent_id] = "missing"
-            continue
-
-        # Read last 4 KB — constant-time regardless of file size
-        try:
-            with open(real_path, "rb") as f:
-                try:
-                    f.seek(-4096, 2)
-                except OSError:
-                    # File smaller than 4 KB; read from start
-                    f.seek(0)
-                tail = f.read()
-        except OSError:
-            result[agent_id] = "missing"
-            continue
-
-        if not tail:
-            # Empty file → agent just spawned, no output yet
-            result[agent_id] = "running"
-            continue
-
-        # Find the *last* stop_reason in the tail
-        matches = _stop_reason_re.findall(tail)
-        if not matches:
-            # No stop_reason written yet → still running
-            result[agent_id] = "running"
-            continue
-
-        last_reason = matches[-1].decode("utf-8", errors="replace")
-        if last_reason == "end_turn":
-            result[agent_id] = "done"
-        else:
-            # "tool_use" or any other value → still running
-            result[agent_id] = "running"
+        result[agent_id] = _read_stop_reason_from_path(output_path)
 
     return result
 
