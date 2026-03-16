@@ -125,9 +125,48 @@ cmd_stop() {
 
 cmd_restart() {
     print_header "Restarting Lobster"
-    cmd_stop
-    sleep 1
-    cmd_start
+
+    # Schedule the start as a detached systemd transient unit BEFORE stopping.
+    # This is necessary because lobster-claude runs inside the very tmux session
+    # that `systemctl stop lobster-claude` will kill — so cmd_stop would destroy
+    # this process before cmd_start ever ran.
+    #
+    # systemd-run schedules a oneshot unit that fires 2 seconds after now,
+    # completely independent of the calling process. The delay gives the stop
+    # time to complete cleanly before the start fires.
+    #
+    # Note: we do NOT write the maintenance flag here. cmd_stop writes it to
+    # tell the health check "don't auto-restart, I intentionally stopped this".
+    # During a restart that flag is wrong — we WANT the services back up.
+    # cmd_start already removes the flag, but only if it runs; by scheduling
+    # start before stop we guarantee it runs even if this process dies.
+    echo "Scheduling start via systemd-run in 2s..."
+    if ! sudo systemd-run --on-active=2s --unit=lobster-restart-oneshot \
+            /bin/bash -c "rm -f '${MAINTENANCE_FLAG}'; systemctl start lobster-router lobster-claude" \
+            2>/dev/null; then
+        echo -e "${RED}systemd-run failed — falling back to stop+start${NC}"
+        echo -e "${YELLOW}Warning: if running inside lobster-claude, the start may not execute.${NC}"
+        cmd_stop
+        sleep 1
+        cmd_start
+        return
+    fi
+
+    # Stop services without writing the maintenance flag.
+    # (We stop directly rather than calling cmd_stop so the flag is not set.)
+    echo "Stopping services..."
+    for service in "${SERVICES[@]}"; do
+        echo -n "Stopping $service... "
+        if sudo systemctl stop "$service" 2>/dev/null; then
+            echo -e "${GREEN}OK${NC}"
+        else
+            echo -e "${YELLOW}not running${NC}"
+        fi
+    done
+
+    echo ""
+    echo -e "${GREEN}Services stopped. Start scheduled in ~2s (lobster-restart-oneshot).${NC}"
+    echo "Check status with: lobster status"
 }
 
 cmd_status() {
