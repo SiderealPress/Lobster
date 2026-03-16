@@ -299,6 +299,79 @@ class TestHandleReaction:
 
 
 # ---------------------------------------------------------------------------
+# Multi-chunk reply buffering
+# ---------------------------------------------------------------------------
+
+
+class TestMultiChunkReplyBuffering:
+    """Only the LAST chunk's message_id should be appended to _sent_message_buffer.
+
+    When a reply is split into multiple Telegram messages, the user can only
+    react to the final visible message.  Buffering every chunk would cause
+    reaction lookups to find the wrong (intermediate) text snippet.
+    """
+
+    @pytest.mark.asyncio
+    async def test_only_last_chunk_buffered(self, bot_module, tmp_path):
+        """Sending a 2-chunk reply buffers only the last chunk's message_id."""
+        import json
+
+        outbox = tmp_path / "outbox"
+        outbox.mkdir(parents=True, exist_ok=True)
+
+        # Build a message that will produce exactly 2 chunks (each ~3000+ chars)
+        long_text = "First chunk. " + "a" * 3000 + "\n\n" + "Second chunk. " + "b" * 3000
+
+        reply = {
+            "chat_id": 123456,
+            "text": long_text,
+            "source": "telegram",
+        }
+        reply_file = outbox / "reply_multichunk.json"
+        reply_file.write_text(json.dumps(reply))
+
+        # Set up mock bot that returns distinct sent_msg objects per call
+        mock_app = MagicMock()
+        first_msg = MagicMock()
+        first_msg.message_id = 1001
+        second_msg = MagicMock()
+        second_msg.message_id = 1002
+        mock_app.bot.send_message = AsyncMock(side_effect=[first_msg, second_msg])
+        mock_app.bot.send_photo = AsyncMock()
+
+        original_bot_app = bot_module.bot_app
+        bot_module.bot_app = mock_app
+        bot_module._sent_message_buffer.clear()
+
+        import asyncio
+        loop = asyncio.new_event_loop()
+        bot_module.main_loop = loop
+
+        try:
+            handler = bot_module.OutboxHandler()
+            await handler.process_reply(str(reply_file))
+
+            # Exactly 2 chunks were sent
+            assert mock_app.bot.send_message.call_count == 2
+
+            # Buffer must contain exactly ONE entry
+            assert len(bot_module._sent_message_buffer) == 1
+
+            buffered_ids = [msg_id for msg_id, _ in bot_module._sent_message_buffer]
+
+            # The buffered id must be the LAST chunk's message_id (1002), not the first (1001)
+            assert 1002 in buffered_ids, (
+                f"Expected last chunk id 1002 in buffer, got {buffered_ids}"
+            )
+            assert 1001 not in buffered_ids, (
+                f"First chunk id 1001 must NOT be in buffer, got {buffered_ids}"
+            )
+        finally:
+            bot_module.bot_app = original_bot_app
+            loop.close()
+
+
+# ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 

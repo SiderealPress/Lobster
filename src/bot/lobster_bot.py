@@ -1029,6 +1029,7 @@ async def _emit_reaction_signal(
     This coroutine is scheduled as an asyncio.Task and cancelled if the user
     removes the reaction within REACTION_UNDO_WINDOW_SECS.
     """
+    # Note: pending reactions are dropped on bot restart — acceptable given the 5s window
     await asyncio.sleep(REACTION_UNDO_WINDOW_SECS)
 
     reacted_to_text = _lookup_reacted_to_text(tg_msg_id)
@@ -1399,10 +1400,10 @@ class OutboxHandler(FileSystemEventHandler):
                             reply_markup=chunk_markup,
                             reply_parameters=chunk_reply_params,
                         )
-                    # Buffer the last sent chunk so reaction signals can include context.
-                    # We store the plain-text snippet (md_chunk) for readability.
-                    if sent_msg is not None:
-                        _sent_message_buffer.append((sent_msg.message_id, md_chunk[:200]))
+                # Buffer only the LAST chunk so that reactions (which reference the
+                # final visible message_id) map to the correct text snippet.
+                if sent_msg is not None:
+                    _sent_message_buffer.append((sent_msg.message_id, md_chunk[:200]))
                 if n > 1:
                     log.info(f"Sent reply to {chat_id} in {n} chunks: {text[:50]}...")
                 else:
@@ -1509,6 +1510,7 @@ async def run_bot():
     bot_app.add_handler(MessageHandler(filters.Document.ALL, handle_message))
     bot_app.add_handler(CallbackQueryHandler(handle_callback_query))
     bot_app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE & filters.TEXT, handle_edited_message))
+    # Requires python-telegram-bot >= v20.6 for Update.ALL_TYPES to include message_reaction
     bot_app.add_handler(MessageReactionHandler(handle_reaction))
     bot_app.add_error_handler(error_handler)
 
