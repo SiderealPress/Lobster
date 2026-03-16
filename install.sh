@@ -1811,6 +1811,10 @@ if [ "$NEED_CONFIG" = true ] && [ "$NON_INTERACTIVE" = true ]; then
 # Telegram Bot (UNCONFIGURED - run installer interactively to set up)
 TELEGRAM_BOT_TOKEN=your_bot_token_here
 TELEGRAM_ALLOWED_USERS=
+
+# Admin chat ID (Telegram numeric user ID for the primary admin user).
+# Used by run-job.sh (scheduled tasks) and alert.sh to deliver messages.
+LOBSTER_ADMIN_CHAT_ID=
 EOF
     fi
     NEED_CONFIG=false
@@ -1866,6 +1870,10 @@ if [ "$NEED_CONFIG" = true ]; then
 # Telegram Bot
 TELEGRAM_BOT_TOKEN=$BOT_TOKEN
 TELEGRAM_ALLOWED_USERS=$USER_ID
+
+# Admin chat ID (Telegram numeric user ID for the primary admin user).
+# Used by run-job.sh (scheduled tasks) and alert.sh to deliver messages.
+LOBSTER_ADMIN_CHAT_ID=$USER_ID
 EOF
 
     success "Telegram configuration saved"
