@@ -117,6 +117,11 @@ cmd_stop() {
         fi
     done
 
+    # Kill any stale wrapper processes that may be running outside of systemd
+    # (e.g. after a manual mode switch between debug and non-debug sessions)
+    pkill -u lobster -f 'claude-persistent.sh' 2>/dev/null || true
+    pkill -u lobster -f 'claude-wrapper.exp' 2>/dev/null || true
+
     # Set maintenance flag so health check doesn't restart services
     mkdir -p "$(dirname "$MAINTENANCE_FLAG")"
     echo "stopped_at=$(date -Iseconds) stopped_by=$(whoami)" > "$MAINTENANCE_FLAG"
