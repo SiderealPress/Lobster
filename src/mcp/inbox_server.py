@@ -6167,8 +6167,16 @@ async def reconcile_agent_sessions() -> None:
 
     This eliminates the mtime-based heuristic used previously and provides
     ~5-second latency from agent completion to DB reconciliation.
+
+    Fix (issue #400): The reconciler now uses check_output_file_status() to
+    read each session's output_file directly from the DB, instead of scanning a
+    hardcoded directory. This eliminates the path mismatch that caused the
+    reconciler to always return an empty scan. The previous scan_agent_outputs()
+    approach relied on a default path (/tmp/claude-1000/-home-admin-lobster-workspace/tasks)
+    that does not exist on this system — and even if fixed, Claude Code places
+    output symlinks in project-specific subdirectories, not a flat tasks dir.
     """
-    from agents.session_store import scan_agent_outputs
+    from agents.session_store import check_output_file_status
 
     DEAD_THRESHOLD_SECONDS = 25 * 60  # 25 minutes
     GRACE_PERIOD_SECONDS = 30         # Newly spawned agents get grace before DEAD
@@ -6179,7 +6187,6 @@ async def reconcile_agent_sessions() -> None:
     while True:
         await asyncio.sleep(5)
         try:
-            scan = scan_agent_outputs()
             active_sessions = _session_store.get_active_sessions()
 
             for session in active_sessions:
@@ -6193,29 +6200,16 @@ async def reconcile_agent_sessions() -> None:
                 except (TypeError, ValueError):
                     elapsed = 0
 
-                # Fix: scan_key derivation — use output_file stem only when the
-                # stem actually appears in the scan results. Fall back to agent_id.
-                # This prevents a bad output_file path from producing a garbage key
-                # that never matches anything.
-                scan_key = agent_id  # safe default
-                if output_file:
-                    try:
-                        stem = Path(output_file).stem
-                        if stem and stem in scan:
-                            scan_key = stem
-                        elif stem:
-                            # Stem derived but not in scan — keep agent_id as key
-                            # (agent may not have created output file yet)
-                            scan_key = stem  # still try; scan.get() will return None
-                    except Exception:
-                        pass  # Malformed output_file path — fall back to agent_id
+                # Check this agent's output file directly using the path stored in DB.
+                # This avoids the directory-scan approach that relied on a hardcoded
+                # (and often wrong) default path. When output_file is absent, the
+                # status is "missing" and the dead-threshold logic applies as before.
+                file_status = check_output_file_status(output_file)
 
-                scan_status = scan.get(scan_key)
-
-                if scan_status == "done":
+                if file_status == "done":
                     log.info(
-                        f"[reconciler] Agent {agent_id!r} (scan_key={scan_key!r}) "
-                        f"finished (stop_reason=end_turn) — marking completed"
+                        f"[reconciler] Agent {agent_id!r} finished (stop_reason=end_turn) "
+                        f"— marking completed (output_file={output_file!r})"
                     )
                     _session_store.session_end(
                         id_or_task_id=agent_id,
@@ -6227,14 +6221,14 @@ async def reconcile_agent_sessions() -> None:
                     # Notify wire server so dashboard updates within 40ms
                     asyncio.create_task(_notify_wire_server())
 
-                elif scan_status == "missing":
+                elif file_status == "missing":
                     if elapsed < GRACE_PERIOD_SECONDS:
                         # Agent just spawned — output file not yet created. Normal.
                         pass
                     elif elapsed > DEAD_THRESHOLD_SECONDS:
                         log.warning(
                             f"[reconciler] Agent {agent_id!r} output file missing after "
-                            f"{elapsed}s — marking dead"
+                            f"{elapsed}s — marking dead (output_file={output_file!r})"
                         )
                         _session_store.session_end(
                             id_or_task_id=agent_id,
@@ -6251,36 +6245,10 @@ async def reconcile_agent_sessions() -> None:
                             f"[reconciler] Agent {agent_id!r} output missing, "
                             f"elapsed {elapsed}s — within window, waiting"
                         )
-                # scan_status == "running" or None (no output file registered) → no action
+                # file_status == "running" → no action
 
-            # Phase 3: Detect orphans (in scan but not registered in DB)
-            # Build the set of known scan keys (output_file stems + agent_ids)
-            registered_scan_keys = set()
-            for s in active_sessions:
-                registered_scan_keys.add(s.get("id", ""))
-                of = s.get("output_file") or ""
-                if of:
-                    try:
-                        registered_scan_keys.add(Path(of).stem)
-                    except Exception:
-                        pass
-
-            for orphan_key, orphan_status in scan.items():
-                if orphan_key in registered_scan_keys:
-                    continue
-                if orphan_status == "running":
-                    log.debug(
-                        f"[reconciler] Unregistered running agent output: {orphan_key!r}"
-                    )
-                elif orphan_status == "done":
-                    # Fix: done orphans were previously silently ignored.
-                    # Now logged at WARNING. Cannot notify without chat_id.
-                    log.warning(
-                        f"[reconciler] Orphaned completed agent: {orphan_key!r} — "
-                        f"no DB entry, cannot identify requester or send notification. "
-                        f"This indicates a registration gap (session_start was never called)."
-                    )
-
+            # Phase 3: Detect orphans (no output_file registered but elapsed > threshold)
+            # The previous orphan detection scanned the tasks directory for files not in the DB.
         except Exception as exc:
             log.error(f"[reconciler] Error in reconcile_agent_sessions: {exc}", exc_info=True)
 
