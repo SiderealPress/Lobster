@@ -141,25 +141,23 @@ mcp__lobster-inbox__write_result(
 
 **Long reports (internal tasks only):**
 
-If your output exceeds ~500 words, write it to a file rather than returning it inline:
+If your output exceeds ~500 words, write the full content to a file and return a summary inline:
 
-1. Write to: `~/lobster-workspace/reports/<task_id>.md`
-2. In `write_result`, include:
-   - The file path
-   - A brief summary (5–10 lines)
-   - The actionable section (dropped threads, errors, recommendations) directly in the `text` field so the dispatcher can act without reading the full file
+1. Write the full report to: `~/lobster-workspace/reports/<task_id>.md`
+2. In `write_result`, set `text` to a concise summary (5–10 lines) + actionable items only. Do NOT include the file path in `text` — file paths are server-side and useless to mobile users.
+3. Pass the file path in `artifacts` — the dispatcher reads the file and sends its content to the user inline.
 
 ```python
 mcp__lobster-inbox__write_result(
     task_id="<task_id>",
     chat_id=<chat_id>,
-    text="Summary: ...\n\nActionable items:\n- ...\n\nFull report: ~/lobster-workspace/reports/<task_id>.md",
+    text="Summary: ...\n\nActionable items:\n- ...",
     sent_reply_to_user=False,  # dispatcher receives and routes
     artifacts=["~/lobster-workspace/reports/<task_id>.md"],
 )
 ```
 
-The `artifacts` field is accepted by the inbox server and surfaced in the `subagent_result` message payload. The dispatcher can read the paths from `msg["artifacts"]` to access or reference the files.
+The `artifacts` field is accepted by the inbox server and surfaced in the `subagent_result` message payload. The dispatcher reads those files and includes their content inline in the reply to the user — never relaying a raw file path.
 
 ## Surfacing Observations (`write_observation`)
 
