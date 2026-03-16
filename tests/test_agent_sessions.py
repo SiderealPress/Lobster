@@ -455,3 +455,143 @@ def test_json_migration_missing_json_is_noop(tmp_path):
     active = session_store.get_active_sessions(path=db_path)
     assert active == []
     session_store._close_connection(db_path)
+
+
+# ---------------------------------------------------------------------------
+# Test: cleanup_stale_running_sessions (issue #510)
+# ---------------------------------------------------------------------------
+
+import time as _time
+from datetime import datetime, timezone, timedelta
+
+
+def test_cleanup_stale_running_no_output_file(isolated_db):
+    """Session with no output_file and elapsed > timeout_minutes is marked dead."""
+    db = isolated_db
+
+    # Spawn a session with a timeout of 1 minute, spawned_at 120 minutes ago
+    old_spawned_at = (datetime.now(timezone.utc) - timedelta(minutes=120)).isoformat()
+    session_store._get_connection(db).execute(
+        """
+        INSERT INTO agent_sessions
+            (id, description, chat_id, source, status, spawned_at, timeout_minutes)
+        VALUES ('stale-no-file', 'Old agent', '123', 'telegram', 'running', ?, 60)
+        """,
+        (old_spawned_at,),
+    )
+    session_store._get_connection(db).commit()
+
+    server_start = datetime.now(timezone.utc)
+    dead = session_store.cleanup_stale_running_sessions(server_start, path=db)
+
+    assert "stale-no-file" in dead
+    result = session_store.find_session("stale-no-file", path=db)
+    assert result["status"] == "dead"
+
+
+def test_cleanup_stale_running_output_missing(isolated_db, tmp_path):
+    """Session whose output_file does not exist on disk is marked dead."""
+    db = isolated_db
+    missing_path = str(tmp_path / "nonexistent.output")
+
+    session_store.session_start(
+        id="stale-missing-file",
+        description="Agent with missing output",
+        chat_id="123",
+        output_file=missing_path,
+        path=db,
+    )
+
+    server_start = datetime.now(timezone.utc)
+    dead = session_store.cleanup_stale_running_sessions(server_start, path=db)
+
+    assert "stale-missing-file" in dead
+    result = session_store.find_session("stale-missing-file", path=db)
+    assert result["status"] == "dead"
+    assert "missing" in result["result_summary"]
+
+
+def test_cleanup_stale_running_output_old_mtime(isolated_db, tmp_path):
+    """Session whose output_file mtime predates server_start is marked dead."""
+    db = isolated_db
+    output_file = tmp_path / "old_agent.output"
+    output_file.write_text('{"stop_reason": "tool_use"}')
+
+    # Set mtime to 10 minutes ago
+    old_ts = _time.time() - 600
+    import os
+    os.utime(str(output_file), (old_ts, old_ts))
+
+    session_store.session_start(
+        id="stale-old-mtime",
+        description="Agent with old mtime",
+        chat_id="123",
+        output_file=str(output_file),
+        path=db,
+    )
+
+    # Server started 5 minutes ago — still newer than the file
+    server_start = datetime.now(timezone.utc) - timedelta(minutes=5)
+    dead = session_store.cleanup_stale_running_sessions(server_start, path=db)
+
+    assert "stale-old-mtime" in dead
+    result = session_store.find_session("stale-old-mtime", path=db)
+    assert result["status"] == "dead"
+    assert "mtime" in result["result_summary"]
+
+
+def test_cleanup_stale_running_skips_fresh_file(isolated_db, tmp_path):
+    """Session whose output_file mtime is newer than server_start is left running."""
+    db = isolated_db
+    output_file = tmp_path / "fresh_agent.output"
+    output_file.write_text('{"stop_reason": "tool_use"}')
+    # File was just written — mtime is now, which is after server_start
+
+    # Server started 10 minutes ago
+    server_start = datetime.now(timezone.utc) - timedelta(minutes=10)
+
+    session_store.session_start(
+        id="fresh-agent",
+        description="Fresh running agent",
+        chat_id="123",
+        output_file=str(output_file),
+        path=db,
+    )
+
+    dead = session_store.cleanup_stale_running_sessions(server_start, path=db)
+
+    assert "fresh-agent" not in dead
+    result = session_store.find_session("fresh-agent", path=db)
+    assert result["status"] == "running"
+
+
+def test_cleanup_stale_running_no_op_when_empty(isolated_db):
+    """cleanup_stale_running_sessions returns empty list when no running sessions."""
+    db = isolated_db
+    server_start = datetime.now(timezone.utc)
+    dead = session_store.cleanup_stale_running_sessions(server_start, path=db)
+    assert dead == []
+
+
+def test_cleanup_stale_running_skips_no_file_within_timeout(isolated_db):
+    """Session with no output_file but spawned recently (within timeout) is skipped."""
+    db = isolated_db
+
+    # Spawned 30 minutes ago, timeout=120 minutes — not yet over threshold
+    recent_spawned_at = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
+    session_store._get_connection(db).execute(
+        """
+        INSERT INTO agent_sessions
+            (id, description, chat_id, source, status, spawned_at, timeout_minutes)
+        VALUES ('recent-no-file', 'Recent agent', '123', 'telegram', 'running', ?, 120)
+        """,
+        (recent_spawned_at,),
+    )
+    session_store._get_connection(db).commit()
+
+    server_start = datetime.now(timezone.utc)
+    dead = session_store.cleanup_stale_running_sessions(server_start, path=db)
+
+    assert "recent-no-file" not in dead
+    result = session_store.find_session("recent-no-file", path=db)
+    assert result["status"] == "running"
