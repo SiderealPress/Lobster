@@ -989,6 +989,14 @@ if [ -d "$TEMPLATES_DIR" ]; then
     done
 fi
 
+# Seed system-audit.context.md to user-config/agents/ on first run
+AUDIT_CONTEXT_SEED="$INSTALL_DIR/memory/canonical-templates/system-audit.context.md"
+AUDIT_CONTEXT_DEST="$USER_CONFIG_DIR/agents/system-audit.context.md"
+if [ -f "$AUDIT_CONTEXT_SEED" ] && [ ! -f "$AUDIT_CONTEXT_DEST" ]; then
+    cp "$AUDIT_CONTEXT_SEED" "$AUDIT_CONTEXT_DEST"
+    info "  Seeded system-audit.context.md to user-config/agents/"
+fi
+
 # Create stub user-config agent files if they don't exist
 for stub_file in "base.bootup.md" "base.context.md" "dispatcher.bootup.md" "subagent.bootup.md"; do
     stub_dest="$USER_CONFIG_DIR/agents/$stub_file"
@@ -1585,6 +1593,29 @@ if [ -f "$CLAUDE_SETTINGS" ]; then
     fi
 else
     info "Skipping require-write-result SubagentStop hook (settings.json not yet created)"
+fi
+
+# Set up Claude Code SubagentStop hook to enforce auditor context updates.
+# This hook fires when a lobster-auditor session ends and ensures the agent
+# either updated system-audit.context.md or emitted AUDIT_CONTEXT_UNCHANGED.
+chmod +x "$INSTALL_DIR/hooks/require-auditor-context-update.py" || true
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '.hooks.SubagentStop[]? | select(.hooks[]?.command | contains("require-auditor-context-update"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq '.hooks.SubagentStop = (.hooks.SubagentStop // []) + [{
+            "matcher": "",
+            "hooks": [{
+                "type": "command",
+                "command": "python3 '"$INSTALL_DIR"'/hooks/require-auditor-context-update.py",
+                "timeout": 10
+            }]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "require-auditor-context-update SubagentStop hook installed"
+    else
+        info "require-auditor-context-update SubagentStop hook already configured in Claude Code settings"
+    fi
+else
+    info "Skipping require-auditor-context-update SubagentStop hook (settings.json not yet created)"
 fi
 
 #===============================================================================
