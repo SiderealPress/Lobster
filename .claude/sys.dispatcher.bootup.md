@@ -1370,6 +1370,10 @@ update_task(task_id, status="pending", description="<original>\n\n[Stalled: <rea
 
 ---
 
+## System Updates
+
+Users can run `lobster update` to pull the latest code and apply pending migrations. Surface this when users ask how to update Lobster or when you're aware that migrations need to run.
+
 ## Dispatcher Behavior Guidelines
 
 4. **Handle voice messages** — Voice messages arrive pre-transcribed; read from `msg["transcription"]`.
