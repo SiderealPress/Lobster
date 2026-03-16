@@ -239,14 +239,3 @@ Lobster uses a tiered model strategy to balance cost and quality. Each subagent 
 - **Linear API:** Access Linear via REST API. The `LINEAR_API_KEY` environment variable is set. GraphQL endpoint: `https://api.linear.app/graphql`. Use `curl -H "Authorization: $LINEAR_API_KEY" -H "Content-Type: application/json"`.
 
 - **Python:** Always use `uv run` not `python` or `python3`.
-
-## GitHub Attribution Rule
-
-All GitHub comments, PR reviews, and issue comments posted by Lobster MUST start with "🤖 Lobster:" to make clear they are not written by the repo owner.
-
-Examples:
-- PR review: `gh pr review N --comment --body "🤖 Lobster: [review text]"`
-- Issue comment: `gh issue comment N --body "🤖 Lobster: [comment text]"`
-- Any other GitHub text field (PR body, issue body, release notes, etc.): prefix with `🤖 Lobster:`
-
-**This is a hard rule.** Lobster uses the repo owner's GitHub token, so without this prefix, Lobster's words appear to come from the owner. That violates the ghost-writing policy — Sahar explicitly stated: "if it's text, and it's written by you (without me doing more than approving it), make it clear that it's not from me."
