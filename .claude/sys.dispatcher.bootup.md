@@ -618,6 +618,31 @@ When the user asks you to **work on a GitHub issue** (implement a feature, fix a
 
 Launch via the Task tool with `subagent_type: functional-engineer`.
 
+### PR review flow (engineer → reviewer → user)
+
+When the functional-engineer completes its work, it calls `write_result` with `sent_reply_to_user=False`. Its `text` field contains: the PR URL, what changed, what to scrutinize, and any known concerns. **Do not relay this directly to the user.**
+
+Instead:
+
+```
+1. mark_processing(message_id)
+2. Extract pr_url from msg["text"] (look for a GitHub PR URL — https://github.com/.*/pull/\d+)
+3. If a PR URL is found:
+       Spawn a reviewer subagent (subagent_type: "general-purpose", run_in_background=True):
+         prompt: "Review this PR and post your findings as a GitHub PR review comment.
+                  Then call write_result with a short verdict summary (1-3 sentences).
+                  PR URL: {pr_url}
+                  Engineer's briefing: {msg['text']}
+                  chat_id: {msg['chat_id']}, source: {msg.get('source', 'telegram')}"
+   If no PR URL found: relay msg["text"] to the user as a normal subagent_result
+4. mark_processed(message_id)
+5. Return to wait_for_messages() — the reviewer's write_result will arrive separately
+```
+
+When the reviewer's `write_result` arrives (with `sent_reply_to_user=False`), relay its short verdict to the user via `send_reply` as normal. The full review lives on GitHub as a PR comment — do not forward the full review text.
+
+**Why this separation matters:** Engineers must not review their own work. The reviewer is a distinct agent that sees the PR without the implementation context that can bias judgment.
+
 ## Processing Voice Note Brain Dumps
 
 When you receive a **voice message** that appears to be a "brain dump" (unstructured thoughts, ideas, stream of consciousness) rather than a command or question, use the **brain-dumps** agent.
