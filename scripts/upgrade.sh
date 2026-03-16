@@ -1070,42 +1070,9 @@ run_migrations() {
         fi
     fi
 
-    # Migration 10: Create stub agent files in lobster-user-config if missing
-    mkdir -p "$USER_CONFIG_DIR/agents/subagents"
-    for stub_file in "user.base.md" "user.base.context.md" "user.dispatcher.md" "user.subagent.md"; do
-        stub_dest="$USER_CONFIG_DIR/agents/$stub_file"
-        if [ ! -f "$stub_dest" ]; then
-            touch "$stub_dest"
-            substep "Created stub: agents/$stub_file"
-            migrated=$((migrated + 1))
-        fi
-    done
-
-    # Migration 11: Migrate .claude/ user context files from workspace to user-config
-    local old_claude_dir="$WORKSPACE_DIR/.claude"
-    local new_agents_dir="$USER_CONFIG_DIR/agents"
-    if [ -d "$old_claude_dir" ]; then
-        # Migrate user.md -> user.base.md (behavioral) if not already done
-        if [ -f "$old_claude_dir/user.md" ] && [ ! -s "$new_agents_dir/user.base.md" ]; then
-            cp "$old_claude_dir/user.md" "$new_agents_dir/user.base.md"
-            substep "Migrated .claude/user.md -> lobster-user-config/agents/user.base.md"
-            migrated=$((migrated + 1))
-        fi
-        # Migrate dispatcher.md -> user.dispatcher.md
-        if [ -f "$old_claude_dir/dispatcher.md" ] && [ ! -s "$new_agents_dir/user.dispatcher.md" ]; then
-            cp "$old_claude_dir/dispatcher.md" "$new_agents_dir/user.dispatcher.md"
-            substep "Migrated .claude/dispatcher.md -> lobster-user-config/agents/user.dispatcher.md"
-            migrated=$((migrated + 1))
-        fi
-        # Migrate subagent.md -> user.subagent.md
-        if [ -f "$old_claude_dir/subagent.md" ] && [ ! -s "$new_agents_dir/user.subagent.md" ]; then
-            cp "$old_claude_dir/subagent.md" "$new_agents_dir/user.subagent.md"
-            substep "Migrated .claude/subagent.md -> lobster-user-config/agents/user.subagent.md"
-            migrated=$((migrated + 1))
-        fi
-    fi
-
-    # Migration 12: Rename bootup files to sys.*/user.* naming convention
+    # Migration 10: Rename bootup files to sys.*/user.* naming convention
+    # Must run BEFORE Migration 11 (stub creation) so that existing populated files are
+    # renamed into place before Migration 11 would create empty stubs at the new names.
     # System files (.claude/ in workspace): dispatcher.bootup.md -> sys.dispatcher.md, subagent.bootup.md -> sys.subagent.md
     local ws_claude_dir="$WORKSPACE_DIR/.claude"
     if [ -f "$ws_claude_dir/dispatcher.bootup.md" ] && [ ! -f "$ws_claude_dir/sys.dispatcher.md" ]; then
@@ -1139,6 +1106,42 @@ run_migrations() {
         mv "$agents_dir/subagent.bootup.md" "$agents_dir/user.subagent.md"
         substep "Renamed agents/subagent.bootup.md -> agents/user.subagent.md"
         migrated=$((migrated + 1))
+    fi
+
+    # Migration 11: Create stub agent files in lobster-user-config if missing
+    # Runs after Migration 10 so that files renamed into place are not clobbered by empty stubs.
+    mkdir -p "$USER_CONFIG_DIR/agents/subagents"
+    for stub_file in "user.base.md" "user.base.context.md" "user.dispatcher.md" "user.subagent.md"; do
+        stub_dest="$USER_CONFIG_DIR/agents/$stub_file"
+        if [ ! -f "$stub_dest" ]; then
+            touch "$stub_dest"
+            substep "Created stub: agents/$stub_file"
+            migrated=$((migrated + 1))
+        fi
+    done
+
+    # Migration 12: Migrate .claude/ user context files from workspace to user-config
+    local old_claude_dir="$WORKSPACE_DIR/.claude"
+    local new_agents_dir="$USER_CONFIG_DIR/agents"
+    if [ -d "$old_claude_dir" ]; then
+        # Migrate user.md -> user.base.md (behavioral) if not already done
+        if [ -f "$old_claude_dir/user.md" ] && [ ! -s "$new_agents_dir/user.base.md" ]; then
+            cp "$old_claude_dir/user.md" "$new_agents_dir/user.base.md"
+            substep "Migrated .claude/user.md -> lobster-user-config/agents/user.base.md"
+            migrated=$((migrated + 1))
+        fi
+        # Migrate dispatcher.md -> user.dispatcher.md
+        if [ -f "$old_claude_dir/dispatcher.md" ] && [ ! -s "$new_agents_dir/user.dispatcher.md" ]; then
+            cp "$old_claude_dir/dispatcher.md" "$new_agents_dir/user.dispatcher.md"
+            substep "Migrated .claude/dispatcher.md -> lobster-user-config/agents/user.dispatcher.md"
+            migrated=$((migrated + 1))
+        fi
+        # Migrate subagent.md -> user.subagent.md
+        if [ -f "$old_claude_dir/subagent.md" ] && [ ! -s "$new_agents_dir/user.subagent.md" ]; then
+            cp "$old_claude_dir/subagent.md" "$new_agents_dir/user.subagent.md"
+            substep "Migrated .claude/subagent.md -> lobster-user-config/agents/user.subagent.md"
+            migrated=$((migrated + 1))
+        fi
     fi
 
     if [ "$migrated" -eq 0 ]; then
