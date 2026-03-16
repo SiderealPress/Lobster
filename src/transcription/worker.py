@@ -38,7 +38,7 @@ from watchdog.events import FileSystemEventHandler
 # ---------------------------------------------------------------------------
 _MESSAGES = Path(os.environ.get("LOBSTER_MESSAGES", Path.home() / "messages"))
 _WORKSPACE = Path(os.environ.get("LOBSTER_WORKSPACE", Path.home() / "lobster-workspace"))
-_CONFIG_DIR = _MESSAGES / "config"
+_CONFIG_DIR = Path(os.environ.get("LOBSTER_CONFIG_DIR", Path.home() / "lobster-config"))
 
 PENDING_DIR = _MESSAGES / "pending-transcription"
 INBOX_DIR = _MESSAGES / "inbox"
@@ -335,7 +335,9 @@ def move_to_dead_letter(pending_file: Path, msg_data: dict, reason: str) -> None
     # Stash the filename so notify_dispatcher_dead_letter can include it in the alert.
     msg_data["_pending_file"] = pending_file.name
     dest = DEAD_LETTER_DIR / pending_file.name
-    atomic_write_json(dest, msg_data)
+    # Pop internal field before writing to disk so it doesn't leak into stored JSON.
+    payload = {k: v for k, v in msg_data.items() if k != "_pending_file"}
+    atomic_write_json(dest, payload)
     pending_file.unlink(missing_ok=True)
     log.error(f"Moved {pending_file.name} to dead-letter: {reason}")
     notify_dispatcher_dead_letter(msg_data, reason)
