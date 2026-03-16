@@ -137,6 +137,8 @@ All Lobster-managed projects live in `$LOBSTER_WORKSPACE/projects/[project-name]
   - `agents/subagent.bootup.md` - Subagent-specific overrides
   - `agents/subagents/` - User-defined custom subagent definitions
 - `~/lobster-workspace/` - Runtime data (never in repo)
+  - `.claude` → symlink to `~/lobster/.claude/` — **editing files here is immediately live, no deploy needed**
+  - `CLAUDE.md` → symlink to `~/lobster/CLAUDE.md` — same, live immediately
   - `projects/` - All Lobster-managed projects (`$LOBSTER_PROJECTS`)
   - `data/memory.db` - Vector memory SQLite DB
   - `data/events.jsonl` - Event log
