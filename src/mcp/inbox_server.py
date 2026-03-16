@@ -2676,7 +2676,7 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
         elif msg_type == "subagent_notification":
             task_id = msg.get("task_id", "?")
             status_icon = "✅" if msg.get("status") != "error" else "❌"
-            output += f"⛔ DO NOT REPLY — user already received this message directly from the subagent. mark_processed ONLY. Any send_reply here is a duplicate.\n"
+            output += f"User already received the subagent's reply. Don't summarize it. If you respond, add new value only — a question, a correction, missing context.\n"
             output += f"{status_icon} **[SUBAGENT NOTIFICATION]** for task `{task_id}`\n"
         elif msg_type == "subagent_observation":
             category = msg.get("category", "unknown")
@@ -2692,7 +2692,7 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
         output += f"Time: {ts}\n"
         # dispatcher_hint: structural signals for the dispatcher to route correctly
         if msg_type == "subagent_notification":
-            output += "dispatcher_hint: SUBAGENT_NOTIFICATION — call mark_processed ONLY. DO NOT call send_reply. The user already received this reply directly from the subagent. Calling send_reply now would send a duplicate message.\n"
+            output += "dispatcher_hint: SUBAGENT_NOTIFICATION — user already received the subagent's reply. Don't summarize it. If you respond, add new value only — a question, a correction, missing context. Call mark_processed when done.\n"
         _has_file = msg_type in ("voice", "photo", "document") or bool(
             msg.get("image_file") or msg.get("image_files") or
             msg.get("file_path") or msg.get("audio_file")
@@ -4457,7 +4457,7 @@ async def handle_write_result(args: dict) -> list[TextContent]:
         "timestamp": now.isoformat(),
     }
     if msg_type == "subagent_notification":
-        message["warning"] = "DO NOT REPLY — user already received this message directly from the subagent. mark_processed ONLY. Any send_reply here is a duplicate."
+        message["warning"] = "User already received the subagent's reply. Don't summarize it. If you respond, add new value only — a question, a correction, missing context."
     if artifacts:
         message["artifacts"] = artifacts
     if thread_ts:
