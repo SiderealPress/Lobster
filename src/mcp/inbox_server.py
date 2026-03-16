@@ -2676,6 +2676,7 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
         elif msg_type == "subagent_notification":
             task_id = msg.get("task_id", "?")
             status_icon = "✅" if msg.get("status") != "error" else "❌"
+            output += f"⛔ DO NOT REPLY — user already received this message directly from the subagent. mark_processed ONLY. Any send_reply here is a duplicate.\n"
             output += f"{status_icon} **[SUBAGENT NOTIFICATION]** for task `{task_id}`\n"
         elif msg_type == "subagent_observation":
             category = msg.get("category", "unknown")
@@ -2691,7 +2692,7 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
         output += f"Time: {ts}\n"
         # dispatcher_hint: structural signals for the dispatcher to route correctly
         if msg_type == "subagent_notification":
-            output += "dispatcher_hint: mark_processed only — do NOT call send_reply (subagent already delivered directly)\n"
+            output += "dispatcher_hint: SUBAGENT_NOTIFICATION — call mark_processed ONLY. DO NOT call send_reply. The user already received this reply directly from the subagent. Calling send_reply now would send a duplicate message.\n"
         _has_file = msg_type in ("voice", "photo", "document") or bool(
             msg.get("image_file") or msg.get("image_files") or
             msg.get("file_path") or msg.get("audio_file")
@@ -4455,6 +4456,8 @@ async def handle_write_result(args: dict) -> list[TextContent]:
         "sent_reply_to_user": bool(sent_reply_to_user),
         "timestamp": now.isoformat(),
     }
+    if msg_type == "subagent_notification":
+        message["warning"] = "DO NOT REPLY — user already received this message directly from the subagent. mark_processed ONLY. Any send_reply here is a duplicate."
     if artifacts:
         message["artifacts"] = artifacts
     if thread_ts:
