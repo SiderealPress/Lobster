@@ -353,36 +353,13 @@ Before declaring any integration or manual test PASS:
 
 - **Python:** Always use `uv run` not `python` or `python3`.
 
-- **Crontab changes:** Never write `echo "..." | crontab -` directly — this overwrites the entire crontab and destroys unrelated entries. Always use `~/lobster/scripts/cron-manage.sh add/remove` instead:
-  ```bash
-  ~/lobster/scripts/cron-manage.sh add "# LOBSTER-MY-MARKER" "*/5 * * * * /path/to/script.sh # LOBSTER-MY-MARKER"
-  ~/lobster/scripts/cron-manage.sh remove "# LOBSTER-MY-MARKER"
-  ```
+## GitHub Attribution Rule
 
-- **Running tests:** The test suite uses `conftest.py` isolation fixtures — all
-  production paths (`LOBSTER_STATE_FILE`, `INBOX_DIR`, `OUTBOX_DIR`, etc.) are
-  redirected to tmp directories automatically via the autouse
-  `isolate_inbox_server_paths` fixture.  Do NOT add per-test mocks for
-  production paths.  Run the full unit suite with:
-  ```
-  cd $LOBSTER_PROJECTS/<your-worktree> && uv run pytest tests/unit/ -v
-  ```
-  The `patch.multiple` module target for inbox_server tests is always
-  `"src.mcp.inbox_server"` (not `"inbox_server"` or `"mcp.inbox_server"`).
+All GitHub comments, PR reviews, and issue comments posted by Lobster MUST start with "🤖 Lobster:" to make clear they are not written by the repo owner.
 
-## IFTTT Behavioral Rules
+Examples:
+- PR review: `gh pr review N --comment --body "🤖 Lobster: [review text]"`
+- Issue comment: `gh issue comment N --body "🤖 Lobster: [comment text]"`
+- Any other GitHub text field (PR body, issue body, release notes, etc.): prefix with `🤖 Lobster:`
 
-**IFTTT Behavioral Rules:** See CLAUDE.md for full reference. Key subagent distinction: you do NOT need to load all rules at the start of every subagent session — load them only if asked to act on them or if your task involves evaluating behavioral rules.
-
-## PR and Issue Body: Always Canonical
-
-The body of a PR or issue is the canonical state of that work — not just the opening post. As things evolve (reviews, new commits, design changes, resolved concerns, scope changes), update the body to reflect what the thing *is* now, not what it was when opened.
-
-A casual reader skimming the body should walk away understanding the current state without having to read and mentally "compact" the entire comment thread. The comment thread is history; the body is truth.
-
-When updating a body:
-- Note briefly that the body was updated and why (e.g., "*(Updated: design changed per comment thread — X now does Y instead of Z)*")
-- This preserves comment thread continuity — older comments won't seem strange without context
-- Prioritize clarity for a future reader over preserving the original framing
-
-Apply this to both PRs and issues. When you post a comment that changes the design, resolves a concern, or updates scope — also update the body.
+**This is a hard rule.** Lobster uses the repo owner's GitHub token, so without this prefix, Lobster's words appear to come from the owner. That violates the ghost-writing policy — Sahar explicitly stated: "if it's text, and it's written by you (without me doing more than approving it), make it clear that it's not from me."
