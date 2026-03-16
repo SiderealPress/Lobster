@@ -40,10 +40,15 @@ step() { echo -e "\n${CYAN}${BOLD}▶ $1${NC}"; }
 # Parse install mode from arguments
 DEV_MODE=false
 NON_INTERACTIVE=false
+CONTAINER_SETUP=false
 for arg in "$@"; do
     case "$arg" in
         --dev) DEV_MODE=true ;;
         --non-interactive|--skip-config) NON_INTERACTIVE=true ;;
+        --container-setup)
+            CONTAINER_SETUP=true
+            NON_INTERACTIVE=true
+            ;;
     esac
 done
 
@@ -298,6 +303,109 @@ echo -e "${NC}"
 # Show loaded configuration info
 if [ -n "$CONFIG_FILE" ] && [ -f "$CONFIG_FILE" ]; then
     info "Loaded configuration from: $CONFIG_FILE"
+fi
+
+#===============================================================================
+# Container Setup Mode
+#
+# --container-setup runs only the user-space setup steps that are safe and
+# necessary inside a Docker container (directories, symlinks, sqlite-vec).
+# It skips OS packages, systemd services, Claude auth, and anything requiring
+# sudo or a TTY. Called from docker/staging/entrypoint-staging.sh.
+#===============================================================================
+
+if [ "$CONTAINER_SETUP" = true ]; then
+    step "Container setup (directories, symlinks, sqlite-vec)..."
+
+    # Create runtime directories (same as full install)
+    mkdir -p "$WORKSPACE_DIR"/{logs,data,scheduled-jobs/{logs,tasks}}
+    mkdir -p "$MESSAGES_DIR"/{inbox,outbox,processed,processing,failed,config,audio,task-outputs}
+    mkdir -p "$CONFIG_DIR"
+    mkdir -p "$PROJECTS_DIR"
+    mkdir -p "$USER_CONFIG_DIR/memory"/{canonical/{people,projects},archive/digests}
+    mkdir -p "$USER_CONFIG_DIR/agents/subagents"
+    success "Directories created"
+
+    # Seed canonical templates (idempotent — skip existing files)
+    TEMPLATES_DIR="$INSTALL_DIR/memory/canonical-templates"
+    if [ -d "$TEMPLATES_DIR" ]; then
+        for tmpl in "$TEMPLATES_DIR"/*.md; do
+            [ -f "$tmpl" ] || continue
+            base=$(basename "$tmpl")
+            dest="$USER_CONFIG_DIR/memory/canonical/$base"
+            if [ ! -f "$dest" ]; then
+                cp "$tmpl" "$dest"
+                info "  Seeded canonical template: $base"
+            fi
+        done
+    fi
+
+    # Create stub user-config agent files if they don't exist
+    for stub_file in "base.bootup.md" "base.context.md" "dispatcher.bootup.md" "subagent.bootup.md"; do
+        stub_dest="$USER_CONFIG_DIR/agents/$stub_file"
+        if [ ! -f "$stub_dest" ]; then
+            touch "$stub_dest"
+            info "  Created stub: agents/$stub_file"
+        fi
+    done
+
+    # Create jobs.json if it doesn't exist
+    JOBS_FILE="$WORKSPACE_DIR/scheduled-jobs/jobs.json"
+    if [ ! -f "$JOBS_FILE" ]; then
+        echo '{"jobs": {}}' > "$JOBS_FILE"
+        info "  Created scheduled-jobs registry"
+    fi
+
+    # sqlite-vec: verify it loads correctly; fix ELFCLASS32 on aarch64 if needed
+    SQLITE_VEC_OK=false
+    export PATH="$INSTALL_DIR/.venv/bin:$PATH"
+    if "$INSTALL_DIR/.venv/bin/python" -c \
+        "import sqlite3, sqlite_vec; c=sqlite3.connect(':memory:'); c.enable_load_extension(True); sqlite_vec.load(c)" \
+        2>/dev/null; then
+        success "sqlite-vec loads correctly"
+        SQLITE_VEC_OK=true
+    else
+        warn "sqlite-vec failed to load (likely aarch64 ELFCLASS32). Attempting fix..."
+        uv pip uninstall sqlite-vec 2>/dev/null || true
+        # Try alpha release known to contain the aarch64 fix
+        if uv pip install --quiet "sqlite-vec==0.1.7a2" 2>/dev/null && \
+           "$INSTALL_DIR/.venv/bin/python" -c \
+               "import sqlite3, sqlite_vec; c=sqlite3.connect(':memory:'); c.enable_load_extension(True); sqlite_vec.load(c)" \
+               2>/dev/null; then
+            success "sqlite-vec 0.1.7a2 installed and loads correctly"
+            SQLITE_VEC_OK=true
+        else
+            warn "sqlite-vec alpha also failed. Vector search may be unavailable."
+        fi
+    fi
+
+    # Claude Code discovery symlinks (same logic as full install)
+    # CWD=$WORKSPACE_DIR — symlink CLAUDE.md and .claude/ so CC finds them.
+    make_symlink() {
+        local target="$1" link="$2"
+        if [ -L "$link" ]; then
+            if [ "$(readlink "$link")" != "$target" ]; then
+                rm "$link"; ln -s "$target" "$link"
+                info "  Updated symlink: $link -> $target"
+            else
+                info "  Symlink already correct: $link"
+            fi
+        elif [ -e "$link" ]; then
+            mv "$link" "${link}.pre-symlink-backup"
+            ln -s "$target" "$link"
+            info "  Created symlink (replaced existing): $(basename "$link") -> $target"
+        else
+            ln -s "$target" "$link"
+            info "  Created symlink: $(basename "$link") -> $target"
+        fi
+    }
+
+    make_symlink "$INSTALL_DIR/CLAUDE.md" "$WORKSPACE_DIR/CLAUDE.md"
+    make_symlink "$INSTALL_DIR/.claude"   "$WORKSPACE_DIR/.claude"
+    success "Claude Code discovery symlinks configured"
+
+    success "Container setup complete."
+    exit 0
 fi
 
 #===============================================================================
