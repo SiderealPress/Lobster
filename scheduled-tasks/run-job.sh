@@ -112,4 +112,10 @@ if '$JOB_NAME' in data.get('jobs', {}):
     fi
 fi
 
+# Post a reminder to the dispatcher inbox so it learns the job completed
+POST_REMINDER="$REPO_DIR/scheduled-tasks/post-reminder.sh"
+if [ -f "$POST_REMINDER" ]; then
+    bash "$POST_REMINDER" "$JOB_NAME" "$EXIT_CODE" "$DURATION" 2>&1 | tee -a "$LOG_FILE" || true
+fi
+
 exit $EXIT_CODE
