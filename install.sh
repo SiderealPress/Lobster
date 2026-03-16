@@ -335,6 +335,13 @@ if [ "$(id -u)" = "0" ]; then
     else
         success "User 'lobster' already exists."
     fi
+    # Add lobster user to the docker group so bare `docker` works (no sudo needed)
+    if getent group docker &>/dev/null; then
+        usermod -aG docker lobster
+        success "Added 'lobster' to the docker group."
+    else
+        warn "docker group not found — skipping docker group membership (install Docker first)."
+    fi
     echo ""
     info "Next time, SSH directly as: lobster@$(hostname)"
     echo ""
