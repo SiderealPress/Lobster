@@ -505,11 +505,18 @@ def _was_task_replied(task_id: str, chat_id: Any) -> bool:
 # source="telegram" for routing but is NOT a direct user message.
 _HUMAN_SOURCES = {"telegram", "sms", "signal", "slack", "whatsapp", "bisque"}
 
-# Message types that represent direct user-facing messages requiring a reply.
-# Used by mark_processed to guard against dropping human messages without reply.
-# subagent_result / subagent_error are excluded: they are system routing messages
-# even though they carry source="telegram" for delivery purposes.
-USER_FACING_TYPES = {"message", "photo", "image", "voice", "audio", "callback", "text", "document"}
+# ---------------------------------------------------------------------------
+# Formal message type taxonomy (issue #156)
+# Definitions live in message_types.py (dependency-free, independently testable).
+# Re-exported here so callers import from a single place.
+# ---------------------------------------------------------------------------
+from message_types import (  # noqa: E402 — placed after path-setup at top of file
+    INBOX_USER_TYPES,
+    INBOX_SYSTEM_TYPES,
+    INBOX_MESSAGE_TYPES,
+    INBOX_MESSAGE_SOURCES,
+    USER_FACING_TYPES,
+)
 
 # Heartbeat file for health monitoring
 HEARTBEAT_FILE = _WORKSPACE / "logs" / "claude-heartbeat"
@@ -3037,9 +3044,27 @@ async def handle_mark_processing(args: dict) -> list[TextContent]:
     dest = PROCESSING_DIR / found.name
     found.rename(dest)
 
+    # Validate message type against the formal taxonomy (issue #156).
+    # Non-blocking: unknown types are logged as a warning but not rejected,
+    # to preserve backward compatibility with external producers (scripts,
+    # bots) that may use ad-hoc types.
+    msg_type = msg_data.get("type", "")
+    msg_source = msg_data.get("source", "")
+    if msg_type and msg_type not in INBOX_MESSAGE_TYPES:
+        log.warning(
+            f"mark_processing: unknown message type {msg_type!r} "
+            f"(source={msg_source!r}, id={message_id}). "
+            "Add to INBOX_MESSAGE_TYPES in inbox_server.py if this is intentional."
+        )
+    if msg_source and msg_source not in INBOX_MESSAGE_SOURCES:
+        log.warning(
+            f"mark_processing: unknown message source {msg_source!r} "
+            f"(type={msg_type!r}, id={message_id}). "
+            "Add to INBOX_MESSAGE_SOURCES in inbox_server.py if this is intentional."
+        )
+
     # Queue background observation (non-blocking, best-effort)
     msg_text = msg_data.get("text", "") or msg_data.get("transcription", "")
-    msg_type = msg_data.get("type", "")
     _SKIP_OBSERVATION_TYPES = (
         "subagent_result", "subagent_error", "self_check", "subagent_observation"
     )
