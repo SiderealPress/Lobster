@@ -1359,9 +1359,8 @@ step "Setting up health monitoring..."
 chmod +x "$INSTALL_DIR/scripts/health-check-v3.sh" || true
 
 # Add health check to crontab (runs every 4 minutes)
-HEALTH_MARKER="# LOBSTER-HEALTH"
-({ crontab -l 2>/dev/null | grep -v "$HEALTH_MARKER" | grep -v "health-check" || true; }; \
- echo "*/4 * * * * $INSTALL_DIR/scripts/health-check-v3.sh $HEALTH_MARKER") | crontab -
+"$INSTALL_DIR/scripts/cron-manage.sh" add "# LOBSTER-HEALTH" \
+    "*/4 * * * * $INSTALL_DIR/scripts/health-check-v3.sh # LOBSTER-HEALTH"
 
 success "Health monitoring configured (checks every 4 minutes)"
 
@@ -1374,9 +1373,8 @@ step "Setting up daily dependency health check..."
 chmod +x "$INSTALL_DIR/scripts/daily-health-check.sh" || true
 
 # Add daily health check to crontab (runs at 06:00 every day)
-DAILY_MARKER="# LOBSTER-DAILY-HEALTH"
-({ crontab -l 2>/dev/null | grep -v "$DAILY_MARKER" | grep -v "daily-health-check" || true; }; \
- echo "0 6 * * * $INSTALL_DIR/scripts/daily-health-check.sh $DAILY_MARKER") | crontab -
+"$INSTALL_DIR/scripts/cron-manage.sh" add "# LOBSTER-DAILY-HEALTH" \
+    "0 6 * * * $INSTALL_DIR/scripts/daily-health-check.sh # LOBSTER-DAILY-HEALTH"
 
 success "Daily dependency health check configured (runs at 06:00 daily)"
 
@@ -1389,9 +1387,8 @@ step "Setting up nightly consolidation..."
 chmod +x "$INSTALL_DIR/scripts/nightly-consolidation.sh" || true
 
 # Add nightly consolidation to crontab (runs at 03:00 every night)
-CONSOLIDATION_MARKER="# LOBSTER-NIGHTLY-CONSOLIDATION"
-({ crontab -l 2>/dev/null | grep -v "$CONSOLIDATION_MARKER" | grep -v "nightly-consolidation" || true; }; \
- echo "0 3 * * * $INSTALL_DIR/scripts/nightly-consolidation.sh $CONSOLIDATION_MARKER") | crontab -
+"$INSTALL_DIR/scripts/cron-manage.sh" add "# LOBSTER-NIGHTLY-CONSOLIDATION" \
+    "0 3 * * * $INSTALL_DIR/scripts/nightly-consolidation.sh # LOBSTER-NIGHTLY-CONSOLIDATION"
 
 success "Nightly consolidation configured (runs at 03:00 nightly)"
 
@@ -1423,9 +1420,8 @@ chmod +x "$INSTALL_DIR/scripts/periodic-self-check.sh" || true
 mkdir -p "$INSTALL_DIR/.state"
 
 # Add periodic self-check to crontab (runs every 3 minutes)
-SELFCHECK_MARKER="# LOBSTER-SELF-CHECK"
-({ crontab -l 2>/dev/null | grep -v "$SELFCHECK_MARKER" | grep -v "periodic-self-check" || true; }; \
- echo "*/3 * * * * $INSTALL_DIR/scripts/periodic-self-check.sh $SELFCHECK_MARKER") | crontab -
+"$INSTALL_DIR/scripts/cron-manage.sh" add "# LOBSTER-SELF-CHECK" \
+    "*/3 * * * * $INSTALL_DIR/scripts/periodic-self-check.sh # LOBSTER-SELF-CHECK"
 
 CLAUDE_SETTINGS_DIR="$HOME/.claude"
 CLAUDE_SETTINGS="$CLAUDE_SETTINGS_DIR/settings.json"

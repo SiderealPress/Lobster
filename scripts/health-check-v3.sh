@@ -844,6 +844,36 @@ check_dashboard_server() {
     return 0
 }
 
+# Check 10: Required cron entries - auto-restore LOBSTER-SELF-CHECK if missing
+check_cron_entries() {
+    local install_dir="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
+    local cron_manage="$install_dir/scripts/cron-manage.sh"
+    local REQUIRED_CRON_MARKERS=("# LOBSTER-SELF-CHECK" "# LOBSTER-HEALTH")
+
+    for marker in "${REQUIRED_CRON_MARKERS[@]}"; do
+        if ! crontab -l 2>/dev/null | grep -qF "$marker"; then
+            log_warn "Missing cron entry: $marker"
+            case "$marker" in
+                "# LOBSTER-SELF-CHECK")
+                    if [[ -x "$cron_manage" ]]; then
+                        "$cron_manage" add "# LOBSTER-SELF-CHECK" \
+                            "*/3 * * * * $install_dir/scripts/periodic-self-check.sh # LOBSTER-SELF-CHECK"
+                        log_info "Auto-restored: $marker"
+                    else
+                        log_warn "cron-manage.sh not found or not executable at $cron_manage — cannot auto-restore $marker"
+                    fi
+                    ;;
+                *)
+                    # LOBSTER-HEALTH checking itself is circular (if we're running, the health cron is working).
+                    # Just warn; do not attempt auto-restore.
+                    ;;
+            esac
+        else
+            log_info "Cron entry present: $marker"
+        fi
+    done
+}
+
 #===============================================================================
 # Circuit Breaker - prevent restart loops for persistent stale messages
 #===============================================================================
@@ -1556,6 +1586,10 @@ main() {
     # --- Dashboard server check (soft restart, never RED) ---
 
     check_dashboard_server
+
+    # --- Cron entry guard (auto-restore SELF-CHECK if missing) ---
+
+    check_cron_entries
 
     # --- Resource checks (RED if critical) ---
 
