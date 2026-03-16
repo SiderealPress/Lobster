@@ -22,6 +22,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     jq \
     cron \
     ffmpeg \
+    build-essential \
+    cmake \
     && rm -rf /var/lib/apt/lists/*
 
 # Create test user
@@ -46,6 +48,22 @@ RUN mkdir -p \
     /home/testuser/messages/config \
     /home/testuser/messages/audio \
     /home/testuser/messages/task-outputs
+
+# Build whisper.cpp from source and download the small model.
+# Paths mirror production: ~/lobster-workspace/whisper.cpp/build/bin/whisper-cli
+#                          ~/lobster-workspace/whisper.cpp/models/ggml-small.bin
+RUN git clone --depth 1 https://github.com/ggml-org/whisper.cpp.git \
+        /home/testuser/lobster-workspace/whisper.cpp && \
+    cmake -B /home/testuser/lobster-workspace/whisper.cpp/build \
+          -S /home/testuser/lobster-workspace/whisper.cpp \
+          -DBUILD_SHARED_LIBS=OFF \
+          -DWHISPER_BUILD_TESTS=OFF \
+          -DWHISPER_BUILD_EXAMPLES=OFF && \
+    cmake --build /home/testuser/lobster-workspace/whisper.cpp/build \
+          --config Release -j$(nproc) --target whisper-cli && \
+    curl -L --retry 3 \
+        "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin" \
+        -o /home/testuser/lobster-workspace/whisper.cpp/models/ggml-small.bin
 
 # Copy source code
 COPY --chown=testuser:testuser . /home/testuser/lobster
