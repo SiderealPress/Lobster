@@ -652,6 +652,13 @@ except Exception as _ss_err:
 # stop_reason=tool_use, which the reconciler treats as still-running. We fix this
 # here by checking file existence and mtime against the server start time — any
 # output file that predates this process startup cannot belong to a live agent.
+#
+# Note on asymmetric notification: this sweep intentionally does NOT enqueue user
+# notifications for the sessions it marks dead. This is a bulk-cleanup pass, not a
+# live event. Any sessions that were completed/dead before this restart but not yet
+# notified are handled by the reconciler's _startup_sweep(), which fires immediately
+# after the reconciler loop starts and handles the notification backlog. Separating
+# the two concerns keeps this code path simple and idempotent.
 try:
     _dead_ids = _session_store.cleanup_stale_running_sessions(
         server_start_time=_SERVER_START_TIME

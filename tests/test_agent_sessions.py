@@ -7,9 +7,12 @@ Tests:
   - format_active_sessions_block: compact display helper
 """
 
+import os
 import pathlib
 import sys
 import tempfile
+import time as _time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -461,9 +464,6 @@ def test_json_migration_missing_json_is_noop(tmp_path):
 # Test: cleanup_stale_running_sessions (issue #510)
 # ---------------------------------------------------------------------------
 
-import time as _time
-from datetime import datetime, timezone, timedelta
-
 
 def test_cleanup_stale_running_no_output_file(isolated_db):
     """Session with no output_file and elapsed > timeout_minutes is marked dead."""
@@ -519,7 +519,6 @@ def test_cleanup_stale_running_output_old_mtime(isolated_db, tmp_path):
 
     # Set mtime to 10 minutes ago
     old_ts = _time.time() - 600
-    import os
     os.utime(str(output_file), (old_ts, old_ts))
 
     session_store.session_start(
@@ -595,3 +594,114 @@ def test_cleanup_stale_running_skips_no_file_within_timeout(isolated_db):
     assert "recent-no-file" not in dead
     result = session_store.find_session("recent-no-file", path=db)
     assert result["status"] == "running"
+
+
+def test_cleanup_stale_running_oserror_marks_dead(isolated_db, tmp_path):
+    """Session whose output_file raises OSError is marked dead (unreadable path)."""
+    db = isolated_db
+    # Use a path inside a non-existent directory to provoke OSError on resolve/stat.
+    # Path.resolve() on a dangling path inside a missing parent dir can raise OSError
+    # on some filesystems; we simulate by patching Path.resolve to raise.
+    import unittest.mock as mock
+
+    output_path = str(tmp_path / "unreadable.output")
+
+    session_store.session_start(
+        id="oserror-agent",
+        description="Agent with unreadable output",
+        chat_id="123",
+        output_file=output_path,
+        path=db,
+    )
+
+    # Patch Path.resolve to raise OSError for this specific path
+    original_resolve = Path.resolve
+
+    def patched_resolve(self, **kwargs):
+        if str(self) == output_path:
+            raise OSError("Permission denied (simulated)")
+        return original_resolve(self, **kwargs)
+
+    with mock.patch.object(Path, "resolve", patched_resolve):
+        server_start = datetime.now(timezone.utc)
+        dead = session_store.cleanup_stale_running_sessions(server_start, path=db)
+
+    assert "oserror-agent" in dead
+    result = session_store.find_session("oserror-agent", path=db)
+    assert result["status"] == "dead"
+    assert "unreadable" in result["result_summary"]
+
+
+def test_cleanup_stale_running_null_spawned_at_no_output_file_skips_with_warning(
+    isolated_db, caplog
+):
+    """Session with no output_file AND no spawned_at stays running and logs a warning.
+
+    The current schema has spawned_at NOT NULL, so this combination cannot arise
+    through normal inserts. The warning branch is defensive code for future schema
+    changes or direct DB manipulation. We test it by patching the DB cursor to
+    return a synthetic row with both fields set to None.
+    """
+    import logging
+    import unittest.mock as mock
+
+    db = isolated_db
+    server_start = datetime.now(timezone.utc)
+
+    # Build a fake row dict that looks like what the cursor would return
+    fake_row = {
+        "id": "null-everything",
+        "output_file": None,
+        "spawned_at": None,
+        "timeout_minutes": None,
+    }
+
+    # Patch _get_connection to return a mock whose .execute().fetchall() returns our row
+    mock_cursor = mock.MagicMock()
+    mock_cursor.fetchall.return_value = [fake_row]
+    mock_conn = mock.MagicMock()
+    mock_conn.execute.return_value = mock_cursor
+
+    with mock.patch.object(session_store, "_get_connection", return_value=mock_conn):
+        with caplog.at_level(logging.WARNING, logger="agents.session_store"):
+            dead = session_store.cleanup_stale_running_sessions(server_start, path=db)
+
+    # Row has no actionable info — should not be marked dead
+    assert "null-everything" not in dead
+
+    # Should have logged a warning about the uncleanable row
+    assert any("null-everything" in record.message for record in caplog.records)
+    assert any(record.levelno == logging.WARNING for record in caplog.records)
+
+
+def test_reconciler_check_output_file_status_running_for_stuck_tool_use(tmp_path):
+    """check_output_file_status returns 'running' for a file with stop_reason=tool_use.
+
+    This exercises the precondition for the reconciler's 60-min dead-threshold
+    branch: a file stuck at tool_use is treated as 'running', not 'missing' or
+    'done', so the normal 25-min threshold does not fire and only the 60-min
+    threshold applies.
+    """
+    output_file = tmp_path / "stuck_agent.output"
+    # JSONL with last stop_reason = tool_use (simulating mid-turn stuck state)
+    output_file.write_text(
+        '{"type": "result", "stop_reason": "tool_use", "subtype": "tool_use"}\n'
+    )
+
+    status = session_store.check_output_file_status(str(output_file))
+    assert status == "running", (
+        f"Expected 'running' for tool_use output file, got {status!r}"
+    )
+
+
+def test_reconciler_check_output_file_status_done_for_end_turn(tmp_path):
+    """check_output_file_status returns 'done' for a file with stop_reason=end_turn."""
+    output_file = tmp_path / "finished_agent.output"
+    output_file.write_text(
+        '{"type": "result", "stop_reason": "end_turn", "subtype": "end_turn"}\n'
+    )
+
+    status = session_store.check_output_file_status(str(output_file))
+    assert status == "done", (
+        f"Expected 'done' for end_turn output file, got {status!r}"
+    )

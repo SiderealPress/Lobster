@@ -19,11 +19,14 @@ Design principles:
   - WAL mode eliminates reader/writer blocking across processes
 """
 
+import logging
 import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # DB path resolution
@@ -415,6 +418,12 @@ def cleanup_stale_running_sessions(
        since ``spawned_at`` exceeds ``timeout_minutes`` (or a generous default
        of 120 minutes) — best-effort cleanup for unregistered output files.
 
+    **Assumption:** subagents cannot outlive a server restart. Claude Code
+    subagents run as child processes of the MCP server; when the server is
+    killed (e.g. ``systemctl restart``), all subagents are killed with it.
+    This means any ``status='running'`` row found at startup time cannot
+    belong to a genuinely live agent — it is always safe to mark it dead.
+
     All matched rows are marked ``status='dead'`` with a ``completed_at``
     timestamp of ``server_start_time`` so callers know when the cleanup ran.
 
@@ -487,6 +496,17 @@ def cleanup_stale_running_sessions(
                         )
                 except (ValueError, TypeError):
                     pass
+            else:
+                # No output_file and no spawned_at — cannot determine age.
+                # This row stays 'running' and will never be auto-cleaned by this
+                # function. Log a warning so the condition is visible rather than
+                # silently ignored.
+                log.warning(
+                    "[startup-cleanup] session %r has no output_file and no "
+                    "spawned_at — cannot determine age, leaving as 'running'. "
+                    "Manual cleanup may be required.",
+                    agent_id,
+                )
 
         if should_kill:
             conn.execute(
