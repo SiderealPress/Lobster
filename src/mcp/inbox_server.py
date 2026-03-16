@@ -2676,6 +2676,7 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
         elif msg_type == "subagent_notification":
             task_id = msg.get("task_id", "?")
             status_icon = "✅" if msg.get("status") != "error" else "❌"
+            output += f"User already received the subagent's reply. Don't summarize it. If you respond, add new value only — a question, a correction, missing context.\n"
             output += f"{status_icon} **[SUBAGENT NOTIFICATION]** for task `{task_id}`\n"
         elif msg_type == "subagent_observation":
             category = msg.get("category", "unknown")
@@ -2691,7 +2692,7 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
         output += f"Time: {ts}\n"
         # dispatcher_hint: structural signals for the dispatcher to route correctly
         if msg_type == "subagent_notification":
-            output += "dispatcher_hint: mark_processed only — do NOT call send_reply (subagent already delivered directly)\n"
+            output += "dispatcher_hint: SUBAGENT_NOTIFICATION — user already received the subagent's reply. Don't summarize it. If you respond, add new value only — a question, a correction, missing context. Call mark_processed when done.\n"
         _has_file = msg_type in ("voice", "photo", "document") or bool(
             msg.get("image_file") or msg.get("image_files") or
             msg.get("file_path") or msg.get("audio_file")
@@ -4455,6 +4456,8 @@ async def handle_write_result(args: dict) -> list[TextContent]:
         "sent_reply_to_user": bool(sent_reply_to_user),
         "timestamp": now.isoformat(),
     }
+    if msg_type == "subagent_notification":
+        message["warning"] = "User already received the subagent's reply. Don't summarize it. If you respond, add new value only — a question, a correction, missing context."
     if artifacts:
         message["artifacts"] = artifacts
     if thread_ts:
