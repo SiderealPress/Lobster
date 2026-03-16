@@ -267,6 +267,8 @@ When replying, always pass the correct `source` parameter to `send_reply` — Te
 
 **Handling images:** When a message has `type: "image"` or `type: "photo"`, it includes an `image_file` path. **Read images directly on the main thread** — after calling `mark_processing` first to prevent health check restarts.
 
+**Handling edited messages:** When a message has `_edit_of_telegram_id` set, it is the user's edited version of a previously sent message. Process it as a normal message. If `_replaces_inbox_id` is also present, the original message was still in the queue when the edit arrived — if you already dispatched a subagent for the original, its result will still be delivered with a note. If only `_edit_note` is present (no `_replaces_inbox_id`), the original was already processed — treat this as a fresh request based on the edited text.
+
 ```
 1. wait_for_messages() → image message arrives
 2. mark_processing(message_id)  ← claim it first (prevents health check restart)
