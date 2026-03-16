@@ -68,7 +68,8 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
     notified_at         TEXT,
     trigger_message_id  TEXT,
     trigger_snippet     TEXT,
-    reply_message_ids   TEXT
+    reply_message_ids   TEXT,
+    stop_reason         TEXT
 );
 """
 
@@ -111,6 +112,7 @@ _MIGRATION_STMTS = [
     "ALTER TABLE agent_sessions ADD COLUMN trigger_message_id TEXT",
     "ALTER TABLE agent_sessions ADD COLUMN trigger_snippet TEXT",
     "ALTER TABLE agent_sessions ADD COLUMN reply_message_ids TEXT",
+    "ALTER TABLE agent_sessions ADD COLUMN stop_reason TEXT",
 ]
 
 # Additive migrations for the reports table (BIS-85 multi-instance prep).
@@ -296,6 +298,7 @@ def session_end(
     id_or_task_id: str,
     status: str,
     result_summary: str | None = None,
+    stop_reason: str | None = None,
     path: Path | None = None,
 ) -> None:
     """Mark an agent session as completed or failed.
@@ -310,6 +313,9 @@ def session_end(
         id_or_task_id:  The id or task_id of the session to end.
         status:         Final status: 'completed' | 'failed' | 'dead'.
         result_summary: Optional short summary of the outcome.
+        stop_reason:    Why the agent stopped: 'end_turn', 'tool_use',
+                        'max_turns', 'error', 'killed', etc. NULL for
+                        sessions that ended before this column existed.
         path:           DB path override (for tests).
     """
     resolved = path if path is not None else _DEFAULT_DB_PATH
@@ -324,10 +330,10 @@ def session_end(
     conn.execute(
         """
         UPDATE agent_sessions
-        SET status = ?, completed_at = ?, result_summary = ?
+        SET status = ?, completed_at = ?, result_summary = ?, stop_reason = ?
         WHERE (id = ? OR task_id = ?) AND status IN ('running', 'starting')
         """,
-        (status, now, result_summary, id_or_task_id, id_or_task_id),
+        (status, now, result_summary, stop_reason, id_or_task_id, id_or_task_id),
     )
     conn.commit()
 
