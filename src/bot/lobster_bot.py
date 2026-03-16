@@ -70,7 +70,11 @@ def md_to_html(text: str) -> str:
             # Bold: **text**
             p = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', p)
             # Italic: _text_ (single, not double)
-            p = re.sub(r'(?<![_*])_([^_\n]+)_(?![_*])', r'<i>\1</i>', p)
+            # Use \w boundaries so snake_case tokens (write_result, STALE_NO_FILE)
+            # are not misread as italic spans.  A leading/trailing underscore
+            # only triggers italic when it is NOT adjacent to a word character,
+            # e.g. "  _italic_  " works but "write_result" is left untouched.
+            p = re.sub(r'(?<!\w)_([^_\n]+)_(?!\w)', r'<i>\1</i>', p)
             result.append(p)
     return ''.join(result)
 

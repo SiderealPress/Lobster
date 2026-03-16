@@ -129,3 +129,72 @@ class TestExistingBehaviourPreserved:
         assert "&lt;" in result
         assert "&amp;" in result
         assert "&gt;" in result
+
+
+# ---------------------------------------------------------------------------
+# Snake_case identifier escaping (issue #430)
+# ---------------------------------------------------------------------------
+
+class TestSnakeCaseNotItalicized:
+    """Bare underscores in snake_case identifiers must not become italic spans.
+
+    Telegram's HTML mode is used, so the risk is that md_to_html() converts
+    _token_ sequences inside snake_case words to <i>token</i>.  The italic
+    regex must require that the surrounding underscores are not adjacent to
+    word characters.
+    """
+
+    def test_two_part_snake_case(self):
+        # write_result should not become write<i>result</i>
+        result = md_to_html("write_result")
+        assert "<i>" not in result
+        assert "write_result" in result
+
+    def test_three_part_snake_case(self):
+        # STALE_NO_FILE: the middle segment _NO_ must not become italic
+        result = md_to_html("STALE_NO_FILE")
+        assert "<i>" not in result
+        assert "STALE_NO_FILE" in result
+
+    def test_snake_case_in_sentence(self):
+        result = md_to_html("Call send_reply to deliver the reply.")
+        assert "<i>" not in result
+        assert "send_reply" in result
+
+    def test_snake_case_multiple_in_sentence(self):
+        result = md_to_html("Use send_reply then write_result.")
+        assert "<i>" not in result
+
+    def test_underscore_env_var(self):
+        result = md_to_html("Set LOBSTER_ADMIN_CHAT_ID in your env.")
+        assert "<i>" not in result
+        assert "LOBSTER_ADMIN_CHAT_ID" in result
+
+    # --- Deliberate italic still works ---
+
+    def test_italic_standalone(self):
+        # Surrounded by spaces: _italic_ should still render as italic
+        assert md_to_html("_italic_") == "<i>italic</i>"
+
+    def test_italic_in_sentence(self):
+        result = md_to_html("This is _very_ important.")
+        assert "<i>very</i>" in result
+
+    def test_italic_start_of_string(self):
+        # Start of string counts as a non-word boundary
+        result = md_to_html("_note_ this")
+        assert "<i>note</i>" in result
+
+    def test_italic_end_of_string(self):
+        result = md_to_html("remember _this_")
+        assert "<i>this</i>" in result
+
+    def test_snake_case_in_inline_code_untouched(self):
+        # Inside backticks, content is never processed by the italic regex
+        result = md_to_html("`write_result`")
+        assert result == "<code>write_result</code>"
+
+    def test_snake_case_in_code_block_untouched(self):
+        result = md_to_html("```\nwrite_result\n```")
+        assert "<i>" not in result
+        assert "write_result" in result
