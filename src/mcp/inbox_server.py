@@ -2462,16 +2462,36 @@ def _find_message_file(directory: Path, message_id: str) -> Path | None:
     return None
 
 
-def _recover_stale_processing(max_age_seconds: int = 300):
-    """Move stale messages from processing/ back to inbox/."""
+def _stale_timeout_for_message(msg: dict) -> int:
+    """Return the stale processing timeout in seconds based on message type.
+
+    Text messages are expected to complete quickly; media types (voice, audio,
+    photo, document) may take longer due to transcription or download time.
+    """
+    slow_types = {"voice", "audio", "photo", "document"}
+    msg_type = msg.get("type", "text")
+    return 300 if msg_type in slow_types else 90
+
+
+def _recover_stale_processing():
+    """Move stale messages from processing/ back to inbox/.
+
+    Uses a type-aware timeout: 90s for text messages, 300s for media
+    (voice/audio/photo/document) where transcription or download can be slow.
+    """
     now = time.time()
     for f in PROCESSING_DIR.glob("*.json"):
         try:
             age = now - f.stat().st_mtime
-            if age > max_age_seconds:
+            msg = json.loads(f.read_text())
+            max_age = _stale_timeout_for_message(msg)
+            if age > max_age:
                 dest = INBOX_DIR / f.name
                 f.rename(dest)
-                log.warning(f"Recovered stale message from processing: {f.name} (age: {int(age)}s)")
+                log.warning(
+                    f"Recovered stale message from processing: {f.name} "
+                    f"(type: {msg.get('type', 'text')}, age: {int(age)}s, timeout: {max_age}s)"
+                )
         except Exception:
             continue
 

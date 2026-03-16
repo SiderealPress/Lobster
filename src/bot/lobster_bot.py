@@ -898,8 +898,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     log.info(f"Wrote message to inbox: {msg_id}")
 
-    # Send acknowledgment
-    await message.reply_text("📨 Message received. Processing...")
+    # No text acknowledgment — the typing indicator already signals receipt.
 
 
 async def handle_audio_message(
