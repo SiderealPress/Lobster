@@ -2982,6 +2982,9 @@ async def handle_mark_processed(args: dict) -> list[TextContent]:
                     # the bot already answered the callback query inline.
                     if msg_type == "callback":
                         log.info(f"Skipping auto-reply fallback for callback message {message_id}")
+                    elif abs(chat_id) <= 1_000_000:
+                        # Fake/test chat_id — Telegram rejects delivery; skip to avoid dead-letter buildup
+                        log.info(f"Skipping auto-reply fallback for fake/test chat_id {chat_id}")
                     else:
                         # Auto-send a fallback reply so the user isn't silently ignored
                         fallback_text = "Noted."
