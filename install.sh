@@ -1408,6 +1408,27 @@ else
     info "Skipping on-compact hook (settings.json not yet created)"
 fi
 
+# Set up Claude Code SessionStart hook to inject debug.sys.bootup.md when LOBSTER_DEBUG=true
+chmod +x "$INSTALL_DIR/hooks/inject-debug-bootup.py" || true
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("inject-debug-bootup"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq '.hooks.SessionStart = (.hooks.SessionStart // []) + [{
+            "matcher": "",
+            "hooks": [{
+                "type": "command",
+                "command": "python3 '"$INSTALL_DIR"'/hooks/inject-debug-bootup.py",
+                "timeout": 5
+            }]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "inject-debug-bootup hook installed"
+    else
+        info "inject-debug-bootup hook already configured in Claude Code settings"
+    fi
+else
+    info "Skipping inject-debug-bootup hook (settings.json not yet created)"
+fi
+
 # Set up Claude Code Stop hook to enforce write_result in subagent sessions
 chmod +x "$INSTALL_DIR/hooks/require-write-result.py" || true
 if [ -f "$CLAUDE_SETTINGS" ]; then
