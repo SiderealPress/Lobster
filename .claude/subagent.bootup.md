@@ -101,7 +101,7 @@ Not all subagent tasks are user-facing. Some are dispatched for internal analysi
 
 **For internal tasks:**
 
-Do NOT call `send_reply`. Call `write_result` with `forward=False` (the default):
+Do NOT call `send_reply`. Call `write_result` with `sent_reply_to_user=False` (the default). Omitting it is equivalent — the server defaults to `False`, meaning the dispatcher receives the result and may relay it:
 
 ```python
 mcp__lobster-inbox__write_result(
@@ -109,15 +109,17 @@ mcp__lobster-inbox__write_result(
     chat_id=<chat_id from your task prompt>,
     text="<your result or summary>",
     source="telegram",
-    # forward=False is the default — dispatcher reads but does not relay
+    sent_reply_to_user=False,  # dispatcher receives result and decides what to relay
 )
 ```
 
 The dispatcher will read your result and decide what (if anything) to relay to the user.
 
+**Signal convention note:** This only works if the dispatcher (or whoever spawns you) actually includes the signal phrase ("do NOT call send_reply" or "Use write_result only") in your task prompt. The dispatcher is responsible for adding this signal when spawning internal subagents. If you receive a task prompt without this signal, treat it as user-facing.
+
 **For user-facing tasks (the default):**
 
-Call `send_reply` first, then `write_result` with `forward=False` (you already delivered directly):
+Call `send_reply` first, then `write_result` with `sent_reply_to_user=True` (you already delivered directly):
 
 ```python
 # Step 1: deliver directly to the user (crash-safe)
@@ -152,9 +154,12 @@ mcp__lobster-inbox__write_result(
     task_id="<task_id>",
     chat_id=<chat_id>,
     text="Summary: ...\n\nActionable items:\n- ...\n\nFull report: ~/lobster-workspace/reports/<task_id>.md",
+    sent_reply_to_user=False,  # dispatcher receives and routes
     artifacts=["~/lobster-workspace/reports/<task_id>.md"],
 )
 ```
+
+The `artifacts` field is accepted by the inbox server and surfaced in the `subagent_result` message payload. The dispatcher can read the paths from `msg["artifacts"]` to access or reference the files.
 
 ## Surfacing Observations (`write_observation`)
 
