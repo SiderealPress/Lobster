@@ -3,15 +3,15 @@
 
 Fires after every Agent tool call. Extracts structured metadata from the
 agent prompt (YAML frontmatter or legacy "task_id is:" text), then inserts
-a 'running' row into agent_sessions.db so the spawned agent is immediately
-visible to the ghost detector and status queries. No intermediate 'starting'
-state is used — the agent IS running at the point this hook fires.
+a 'starting' row into agent_sessions.db so the spawned agent is visible to
+the ghost detector and status queries without requiring the dispatcher to call
+register_agent manually.
 
 ## Frontmatter format (preferred)
 
     ---
     task_id: my-task
-    chat_id: ADMIN_CHAT_ID_REDACTED
+    chat_id: 8305714125
     reply_to_message_id: 10924
     source: telegram
     ---
@@ -196,16 +196,11 @@ def insert_agent_session(
     source: str,
     session_id: str,
     output_file: str | None,
-    input_summary: str | None,
 ) -> None:
-    """Insert a 'running' row into agent_sessions.db.
+    """Insert a 'starting' row into agent_sessions.db.
 
-    Uses INSERT OR IGNORE so that a richer row written by session_start
+    Uses INSERT OR IGNORE so that a richer row written by register_agent
     (which may arrive concurrently) is left untouched.
-
-    The agent IS running at the point this PostToolUse hook fires — the Agent
-    tool was just called and the subagent process is live. There is no need for
-    a provisional 'starting' state.
 
     Raises on DB errors so the caller can log and swallow.
     """
@@ -239,15 +234,15 @@ def insert_agent_session(
                 reply_message_ids   TEXT
             )
         """)
-        now = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+        now = datetime.now(timezone.utc).isoformat()
         conn.execute(
             """
             INSERT OR IGNORE INTO agent_sessions
                 (id, task_id, agent_type, description, chat_id, source,
-                 status, output_file, input_summary, spawned_at)
+                 status, output_file, spawned_at)
             VALUES
                 (?, ?, 'subagent', 'auto-registered by PostToolUse hook', ?, ?,
-                 'running', ?, ?, ?)
+                 'starting', ?, ?)
             """,
             (
                 agent_id,
@@ -255,7 +250,6 @@ def insert_agent_session(
                 chat_id if chat_id is not None else "0",
                 source,
                 output_file,
-                input_summary,
                 now,
             ),
         )
@@ -294,10 +288,6 @@ def main() -> None:
             # No agent ID in response -- nothing to register
             sys.exit(0)
 
-        # Store first 500 chars of the prompt as input_summary so agent-monitor
-        # and the dispatcher can reconstruct context if the agent fails.
-        input_summary = prompt[:500] if prompt else None
-
         insert_agent_session(
             agent_id=agent_id,
             task_id=metadata["task_id"],
@@ -305,7 +295,6 @@ def main() -> None:
             source=metadata["source"],
             session_id=session_id,
             output_file=output_file,
-            input_summary=input_summary,
         )
 
     except Exception as exc:  # noqa: BLE001

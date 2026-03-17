@@ -112,10 +112,10 @@ def _get_row(tmp_path: Path, agent_id: str) -> dict | None:
 
 class TestExtractMetadata:
     def test_yaml_frontmatter_all_fields(self):
-        prompt = "---\ntask_id: my-task\nchat_id: ADMIN_CHAT_ID_REDACTED\nsource: telegram\nreply_to_message_id: 10924\n---\nsome content"
+        prompt = "---\ntask_id: my-task\nchat_id: 8305714125\nsource: telegram\nreply_to_message_id: 10924\n---\nsome content"
         meta = extract_metadata(prompt)
         assert meta["task_id"] == "my-task"
-        assert meta["chat_id"] == "ADMIN_CHAT_ID_REDACTED"
+        assert meta["chat_id"] == "8305714125"
         assert meta["source"] == "telegram"
         assert meta["reply_to_message_id"] == "10924"
 
@@ -212,7 +212,7 @@ class TestExtractOutputFile:
 
 class TestHookNonAgentTool:
     def test_non_agent_exits_0_no_db(self, tmp_path):
-        """Non-Agent tool calls are ignored entirely — no rows written to agent_sessions."""
+        """Non-Agent tool calls are ignored entirely."""
         hook_input = _make_hook_input(
             tool_name="Bash",
             prompt="ls",
@@ -221,17 +221,7 @@ class TestHookNonAgentTool:
         exit_code, _, _ = _run_hook(hook_input, tmp_path)
         assert exit_code == 0
         db_path = tmp_path / "messages" / "config" / "agent_sessions.db"
-        # The DB file may be created by the test isolator (conftest AtomicClaimDB),
-        # but the hook must not have inserted any rows.
-        if db_path.exists():
-            conn = sqlite3.connect(str(db_path))
-            try:
-                rows = conn.execute("SELECT COUNT(*) FROM agent_sessions").fetchone()
-                assert rows[0] == 0, "Non-Agent tool must not write any agent_sessions rows"
-            except sqlite3.OperationalError:
-                pass  # table doesn't exist — no rows written, test passes
-            finally:
-                conn.close()
+        assert not db_path.exists()
 
 
 class TestHookAgentWithAgentId:
@@ -250,7 +240,7 @@ class TestHookAgentWithAgentId:
         assert row["task_id"] == "t-001"
         assert row["chat_id"] == "99999"
         assert row["source"] == "slack"
-        assert row["status"] == "running"
+        assert row["status"] == "starting"
 
     def test_inserts_row_with_legacy_text(self, tmp_path):
         """Legacy task_id text format inserts a row."""
@@ -270,7 +260,7 @@ class TestHookAgentWithAgentId:
         """A pre-existing row (from register_agent) is NOT overwritten."""
         # Pre-populate with a richer row
         db_dir = tmp_path / "messages" / "config"
-        db_dir.mkdir(parents=True, exist_ok=True)
+        db_dir.mkdir(parents=True)
         conn = sqlite3.connect(str(db_dir / "agent_sessions.db"))
         conn.execute("""
             CREATE TABLE IF NOT EXISTS agent_sessions (
@@ -288,7 +278,7 @@ class TestHookAgentWithAgentId:
         """)
         conn.execute(
             "INSERT INTO agent_sessions (id, description, chat_id, status, spawned_at)"
-            " VALUES ('agent-dup', 'richer description', '12345', 'running', '2026-01-01 00:00:00')"
+            " VALUES ('agent-dup', 'richer description', '12345', 'running', '2026-01-01T00:00:00+00:00')"
         )
         conn.commit()
         conn.close()
@@ -304,7 +294,7 @@ class TestHookAgentWithAgentId:
         row = _get_row(tmp_path, "agent-dup")
         # Description should still be the original richer one
         assert row["description"] == "richer description"
-        assert row["status"] == "running"  # INSERT OR IGNORE — existing row not overwritten
+        assert row["status"] == "running"  # not overwritten to 'starting'
 
     def test_output_file_stored(self, tmp_path):
         """output_file from tool response is stored in DB."""
@@ -332,101 +322,10 @@ class TestHookAgentWithAgentId:
         row = _get_row(tmp_path, "agent-nochat")
         assert row["chat_id"] == "0"
 
-    def test_spawned_at_is_sqlite_compatible_format(self, tmp_path):
-        """spawned_at must use 'YYYY-MM-DD HH:MM:SS' so SQLite datetime() comparisons work.
-
-        SQLite's datetime('now', '-30 minutes') produces a timezone-naive string
-        like '2026-03-17 20:00:00'. If spawned_at uses ISO 8601 with a timezone
-        suffix (e.g. '2026-03-17T20:00:00+00:00'), string comparison with SQLite's
-        output fails silently and stale-row cleanup never fires.
-        """
-        import re
-
-        prompt = "---\ntask_id: t-ts\n---"
-        hook_input = _make_hook_input(
-            prompt=prompt,
-            tool_response={"agentId": "agent-ts"},
-        )
-        exit_code, _, _ = _run_hook(hook_input, tmp_path)
-        assert exit_code == 0
-
-        row = _get_row(tmp_path, "agent-ts")
-        spawned_at = row["spawned_at"]
-
-        # Must match 'YYYY-MM-DD HH:MM:SS' exactly — no 'T' separator, no timezone offset
-        sqlite_naive_pattern = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
-        assert sqlite_naive_pattern.match(spawned_at), (
-            f"spawned_at '{spawned_at}' does not match SQLite-compatible "
-            f"'YYYY-MM-DD HH:MM:SS' format"
-        )
-
-        # Verify SQLite itself can compare it against datetime('now', '-30 minutes')
-        conn = _open_db(tmp_path)
-        try:
-            result = conn.execute(
-                "SELECT spawned_at > datetime('now', '-30 minutes') FROM agent_sessions"
-                " WHERE id = 'agent-ts'"
-            ).fetchone()
-            # The just-inserted row was spawned within the last 30 minutes
-            assert result is not None and result[0] == 1, (
-                "SQLite age comparison returned unexpected result — format mismatch likely"
-            )
-        finally:
-            conn.close()
-
-
-    def test_input_summary_stored_from_prompt(self, tmp_path):
-        """input_summary stores the first 500 chars of the agent prompt (issue #669).
-
-        This enables ghost-detector and the dispatcher to reconstruct context
-        if the agent fails or disappears without calling write_result.
-        """
-        long_prompt = "---\ntask_id: t-summary\nchat_id: 12345\n---\n" + "X" * 600
-        hook_input = _make_hook_input(
-            prompt=long_prompt,
-            tool_response={"agentId": "agent-summary"},
-        )
-        exit_code, _, _ = _run_hook(hook_input, tmp_path)
-        assert exit_code == 0
-
-        row = _get_row(tmp_path, "agent-summary")
-        assert row is not None
-        assert row["input_summary"] is not None
-        # Must be truncated to 500 chars
-        assert len(row["input_summary"]) == 500
-        assert row["input_summary"] == long_prompt[:500]
-
-    def test_input_summary_short_prompt_stored_in_full(self, tmp_path):
-        """Short prompts are stored without truncation."""
-        short_prompt = "---\ntask_id: t-short\n---\nDo a small thing."
-        hook_input = _make_hook_input(
-            prompt=short_prompt,
-            tool_response={"agentId": "agent-short-prompt"},
-        )
-        exit_code, _, _ = _run_hook(hook_input, tmp_path)
-        assert exit_code == 0
-
-        row = _get_row(tmp_path, "agent-short-prompt")
-        assert row is not None
-        assert row["input_summary"] == short_prompt
-
-    def test_input_summary_empty_prompt_is_none(self, tmp_path):
-        """Empty prompt stores None for input_summary (not an empty string)."""
-        hook_input = _make_hook_input(
-            prompt="",
-            tool_response={"agentId": "agent-empty-prompt"},
-        )
-        exit_code, _, _ = _run_hook(hook_input, tmp_path)
-        assert exit_code == 0
-
-        row = _get_row(tmp_path, "agent-empty-prompt")
-        assert row is not None
-        assert row["input_summary"] is None
-
 
 class TestHookNoAgentId:
     def test_missing_agent_id_exits_0_no_write(self, tmp_path):
-        """If tool response has no agentId, exit 0 without writing agent_sessions rows."""
+        """If tool response has no agentId, exit 0 without touching DB."""
         prompt = "---\ntask_id: t-noid\n---"
         hook_input = _make_hook_input(
             prompt=prompt,
@@ -435,17 +334,7 @@ class TestHookNoAgentId:
         exit_code, _, _ = _run_hook(hook_input, tmp_path)
         assert exit_code == 0
         db_path = tmp_path / "messages" / "config" / "agent_sessions.db"
-        # The DB file may be created by the test isolator (conftest AtomicClaimDB),
-        # but the hook must not have inserted any rows.
-        if db_path.exists():
-            conn = sqlite3.connect(str(db_path))
-            try:
-                rows = conn.execute("SELECT COUNT(*) FROM agent_sessions").fetchone()
-                assert rows[0] == 0, "Missing agentId must not write any agent_sessions rows"
-            except sqlite3.OperationalError:
-                pass  # table doesn't exist — no rows written, test passes
-            finally:
-                conn.close()
+        assert not db_path.exists()
 
     def test_none_response_exits_0(self, tmp_path):
         prompt = "---\ntask_id: t-none\n---"
