@@ -1170,6 +1170,17 @@ run_migrations() {
         migrated=$((migrated + 1))
     fi
 
+    # Migration 15: Ensure messages/config/ directory exists for boot-grace state file
+    # The boot grace period feature stores booted_at in lobster-state.json, which lives
+    # in messages/config/. This directory is created by Migration 4 on new installs, but
+    # this step ensures it exists on any install that skipped Migration 4 (e.g. manually
+    # provisioned or very old installs where the directory may have been removed).
+    if [ ! -d "$MESSAGES_DIR/config" ]; then
+        mkdir -p "$MESSAGES_DIR/config"
+        substep "Created $MESSAGES_DIR/config/ (required for boot-grace state file)"
+        migrated=$((migrated + 1))
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
