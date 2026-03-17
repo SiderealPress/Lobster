@@ -239,3 +239,16 @@ Lobster uses a tiered model strategy to balance cost and quality. Each subagent 
 - **Linear API:** Access Linear via REST API. The `LINEAR_API_KEY` environment variable is set. GraphQL endpoint: `https://api.linear.app/graphql`. Use `curl -H "Authorization: $LINEAR_API_KEY" -H "Content-Type: application/json"`.
 
 - **Python:** Always use `uv run` not `python` or `python3`.
+
+## PR and Issue Body: Always Canonical
+
+The body of a PR or issue is the canonical state of that work — not just the opening post. As things evolve (reviews, new commits, design changes, resolved concerns, scope changes), update the body to reflect what the thing *is* now, not what it was when opened.
+
+A casual reader skimming the body should walk away understanding the current state without having to read and mentally "compact" the entire comment thread. The comment thread is history; the body is truth.
+
+When updating a body:
+- Note briefly that the body was updated and why (e.g., "*(Updated: design changed per comment thread — X now does Y instead of Z)*")
+- This preserves comment thread continuity — older comments won't seem strange without context
+- Prioritize clarity for a future reader over preserving the original framing
+
+Apply this to both PRs and issues. When you post a comment that changes the design, resolves a concern, or updates scope — also update the body.
