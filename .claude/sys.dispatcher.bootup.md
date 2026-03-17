@@ -760,18 +760,45 @@ Side-channel signals from subagents via `write_observation(chat_id, text, catego
 
 **Routing table:**
 
-| `category` | Action |
-|---|---|
-| `user_context` | `send_reply` to user + take action if actionable |
-| `system_context` | `memory_store` silently — do NOT send_reply (inbox_server.py routes to debug channel when LOBSTER_DEBUG=true) |
-| `system_error` | Append JSON line to `~/lobster-workspace/logs/observations.log`; also `send_reply` if `LOBSTER_DEBUG=true` |
+| `category` | Debug OFF | Debug ON (LOBSTER_DEBUG=true) |
+|---|---|---|
+| `user_context` | `send_reply` to forward to user + take action if actionable | same as debug-off |
+| `system_context` | `memory_store` silently (no user message) | same as debug-off — do NOT send_reply. Direct Telegram delivery handled by inbox_server.py (PR #351) when LOBSTER_DEBUG=true. |
+| `system_error` | Append JSON line to `~/lobster-workspace/logs/observations.log` **and always forward to user** | same as debug-off (already user-visible) |
+
+**Processing pseudocode:**
 
 ```
 1. mark_processing(message_id)
 2. category = msg["category"]
-3. debug_on = os.environ.get("LOBSTER_DEBUG", "").lower() == "true"
-4. Route per table above
-5. mark_processed(message_id)
+
+3. if category == "user_context":
+       send_reply(chat_id=msg["chat_id"], text=msg["text"], source=msg.get("source", "telegram"))
+       # take further action if the observation is actionable (e.g. update memory)
+
+   elif category == "system_context":
+       memory_store(content=msg["text"], ...)   # store silently
+       # Do NOT send_reply here — inbox_server.py (PR #351) routes system_context
+       # observations directly to Telegram when LOBSTER_DEBUG=true.
+
+   elif category == "system_error":
+       # append JSON line to observations.log
+       log_line = json.dumps({
+           "timestamp": msg["timestamp"],
+           "category": "system_error",
+           "task_id": msg.get("task_id"),
+           "chat_id": msg["chat_id"],
+           "text": msg["text"],
+       })
+       with open(Path.home() / "lobster-workspace/logs/observations.log", "a") as f:
+           f.write(log_line + "\n")
+       # Always forward system_error to the user — these are pipeline failures that
+       # require human visibility regardless of debug mode. This is the off-box
+       # alerting mechanism: errors appear in Telegram as soon as the dispatcher
+       # picks up the observation from the inbox.
+       send_reply(chat_id=msg["chat_id"], text=f"[system alert] {msg['text']}", source=msg.get("source", "telegram"))
+
+4. mark_processed(message_id)
 ```
 
 Observations are handled inline (no subagent needed) — simple branch on `category`.
