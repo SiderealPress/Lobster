@@ -548,3 +548,111 @@ class TestWriteResultDebugAlert:
         assert len(files) == 1
         content = json.loads(files[0].read_text())
         assert content["task_id"] == "file-check"
+
+
+# ---------------------------------------------------------------------------
+# Feature 4: _emit_debug_observation delivers to OUTBOX_DIR (not INBOX_DIR)
+# ---------------------------------------------------------------------------
+
+
+class TestEmitDebugObservationOutboxDelivery:
+    """_emit_debug_observation writes to OUTBOX_DIR so the bot delivers it
+    directly to Telegram — the dispatcher inbox is never touched."""
+
+    def _call_emit(
+        self,
+        outbox_dir: Path,
+        inbox_dir: Path,
+        text: str = "debug text",
+        category: str = "system_context",
+        visibility: str = "mcp-only",
+        emitter: str | None = "test-emitter",
+    ) -> None:
+        with patch.multiple(
+            "src.mcp.inbox_server",
+            OUTBOX_DIR=outbox_dir,
+            INBOX_DIR=inbox_dir,
+            _DEBUG_ALERTS_ENABLED=True,
+            _DEBUG_RESOLVED=True,
+            _DEBUG_OWNER_CHAT_ID=99999,
+            _DEBUG_OWNER_SOURCE="telegram",
+        ):
+            from src.mcp.inbox_server import _emit_debug_observation
+
+            _emit_debug_observation(text, category=category, visibility=visibility, emitter=emitter)
+
+    @pytest.fixture
+    def outbox_dir(self, temp_messages_dir: Path) -> Path:
+        return temp_messages_dir / "outbox"
+
+    @pytest.fixture
+    def inbox_dir(self, temp_messages_dir: Path) -> Path:
+        return temp_messages_dir / "inbox"
+
+    def test_writes_to_outbox_not_inbox(self, outbox_dir: Path, inbox_dir: Path):
+        """_emit_debug_observation writes to OUTBOX_DIR, not INBOX_DIR."""
+        self._call_emit(outbox_dir, inbox_dir)
+        assert len(list(outbox_dir.glob("*.json"))) == 1
+        assert len(list(inbox_dir.glob("*.json"))) == 0
+
+    def test_outbox_file_has_correct_type(self, outbox_dir: Path, inbox_dir: Path):
+        """The outbox file carries type=debug_observation."""
+        self._call_emit(outbox_dir, inbox_dir)
+        files = list(outbox_dir.glob("*.json"))
+        content = json.loads(files[0].read_text())
+        assert content["type"] == "debug_observation"
+
+    def test_outbox_file_has_correct_chat_id(self, outbox_dir: Path, inbox_dir: Path):
+        """The outbox file carries the configured debug owner chat_id."""
+        self._call_emit(outbox_dir, inbox_dir)
+        files = list(outbox_dir.glob("*.json"))
+        content = json.loads(files[0].read_text())
+        assert content["chat_id"] == 99999
+
+    def test_outbox_file_has_correct_source(self, outbox_dir: Path, inbox_dir: Path):
+        """The outbox file carries the configured debug owner source."""
+        self._call_emit(outbox_dir, inbox_dir)
+        files = list(outbox_dir.glob("*.json"))
+        content = json.loads(files[0].read_text())
+        assert content["source"] == "telegram"
+
+    def test_outbox_file_contains_full_text(self, outbox_dir: Path, inbox_dir: Path):
+        """The outbox file text includes the label and the body."""
+        self._call_emit(outbox_dir, inbox_dir, text="my debug message")
+        files = list(outbox_dir.glob("*.json"))
+        content = json.loads(files[0].read_text())
+        assert "my debug message" in content["text"]
+        assert "[debug|mcp-only]" in content["text"]
+
+    def test_no_write_when_alerts_disabled(self, outbox_dir: Path, inbox_dir: Path):
+        """When _DEBUG_ALERTS_ENABLED=False, nothing is written to outbox or inbox."""
+        with patch.multiple(
+            "src.mcp.inbox_server",
+            OUTBOX_DIR=outbox_dir,
+            INBOX_DIR=inbox_dir,
+            _DEBUG_ALERTS_ENABLED=False,
+            _DEBUG_RESOLVED=True,
+        ):
+            from src.mcp.inbox_server import _emit_debug_observation
+
+            _emit_debug_observation("silent")
+
+        assert len(list(outbox_dir.glob("*.json"))) == 0
+        assert len(list(inbox_dir.glob("*.json"))) == 0
+
+    def test_no_write_when_chat_id_none(self, outbox_dir: Path, inbox_dir: Path):
+        """When _DEBUG_OWNER_CHAT_ID is None, nothing is written."""
+        with patch.multiple(
+            "src.mcp.inbox_server",
+            OUTBOX_DIR=outbox_dir,
+            INBOX_DIR=inbox_dir,
+            _DEBUG_ALERTS_ENABLED=True,
+            _DEBUG_RESOLVED=True,
+            _DEBUG_OWNER_CHAT_ID=None,
+        ):
+            from src.mcp.inbox_server import _emit_debug_observation
+
+            _emit_debug_observation("no chat id")
+
+        assert len(list(outbox_dir.glob("*.json"))) == 0
+        assert len(list(inbox_dir.glob("*.json"))) == 0
