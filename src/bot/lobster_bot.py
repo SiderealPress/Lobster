@@ -78,36 +78,8 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyParameters
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ChatMemberHandler, MessageReactionHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, MessageReactionHandler, filters, ContextTypes
 from collections import deque
-
-
-# URLs longer than this are copy-paste targets (e.g. OAuth flows).  Telegram
-# hides the raw URL when it is embedded in an <a> tag, so we render them as
-# plain text instead — label on the first line, URL on the next — so the user
-# can long-press and copy without hunting through a menu.
-_LONG_URL_THRESHOLD = 200
-
-
-def _link_to_html(link_text: str, url: str) -> str:
-    """Convert a single [text](url) Markdown link to HTML.
-
-    Short URLs (≤ _LONG_URL_THRESHOLD chars) become a normal <a> tag so
-    Telegram renders them as a tappable hyperlink.
-
-    Long URLs (> _LONG_URL_THRESHOLD chars) are expanded to two lines of plain
-    text:
-        <b>link_text</b>
-        <pre>url</pre>
-
-    The <pre> wrapper prevents Telegram from collapsing the URL and makes it
-    easy to long-press and copy on mobile.
-    """
-    if len(url) > _LONG_URL_THRESHOLD:
-        # Escape HTML entities in the URL (it may contain & params already escaped)
-        escaped_url = url.replace('&amp;', '&').replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-        return f"<b>{link_text}</b>\n<pre>{escaped_url}</pre>"
-    return f'<a href="{url}">{link_text}</a>'
 
 
 def md_to_html(text: str) -> str:
@@ -209,6 +181,17 @@ CLAUDE_WAKE_SCRIPT = _REPO_DIR / "scripts" / "start-lobster.sh"
 TELEGRAM_HARD_LIMIT = 4096
 TELEGRAM_MAX_LENGTH = 4000
 
+# Reaction signal mapping: emoji -> structured signal understood by the dispatcher.
+# Unknown reactions are silently ignored — only map the unambiguous ones.
+REACTION_SIGNALS: dict[str, str] = {
+    "\U0001f44d": "yes",    # 👍 thumbs up
+    "\U0001f44e": "no",     # 👎 thumbs down
+    "\u2705": "yes",        # ✅ check mark button
+    "\U0001f44c": "yes",    # 👌 OK hand
+    "\u274c": "no",         # ❌ cross mark
+    "\U0001f6ab": "cancel", # 🚫 no entry sign
+}
+
 # Reactions undone within this window (seconds) are treated as cancelled and ignored.
 REACTION_UNDO_WINDOW_SECS: float = 5.0
 
@@ -217,7 +200,7 @@ REACTION_UNDO_WINDOW_SECS: float = 5.0
 _pending_reactions: dict[tuple[int, int], asyncio.Task] = {}
 
 # Rolling ring buffer of sent messages: tg_msg_id -> text snippet.
-# Populated in OutboxHandler.process_reply so reactions can include
+# Populated in OutboxHandler.process_reply so reaction signals can include
 # the text of the message that was reacted to.
 _sent_message_buffer: deque[tuple[int, str]] = deque(maxlen=50)
 
@@ -1482,6 +1465,7 @@ async def _emit_reaction_signal(
     chat_id: int,
     tg_msg_id: int,
     emoji: str,
+    signal: str,
 ) -> None:
     """Write a reaction inbox entry after the undo window has elapsed.
 
@@ -1501,24 +1485,15 @@ async def _emit_reaction_signal(
         "chat_id": chat_id,
         "telegram_message_id": tg_msg_id,
         "emoji": emoji,
+        "signal": signal,
         "reacted_to_text": reacted_to_text,
-        "text": f"[Reaction: {emoji} on message {tg_msg_id}]",
+        "text": f"[Reaction: {emoji} ({signal}) on message {tg_msg_id}]",
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
 
     inbox_file = INBOX_DIR / f"{msg_id}.json"
     atomic_write_json(inbox_file, msg_data)
-    log.info(f"Wrote reaction to inbox: {msg_id} emoji={emoji}")
-
-    # Send acknowledgment (same pattern as text/image messages)
-    if bot_app:
-        try:
-            await bot_app.bot.send_message(
-                chat_id=chat_id,
-                text=f"Reaction received: {emoji}",
-            )
-        except Exception as e:
-            log.warning(f"Failed to send reaction ack: {e}")
+    log.info(f"Wrote reaction signal to inbox: {msg_id} emoji={emoji} signal={signal}")
 
     # Clean up the pending entry
     _pending_reactions.pop((chat_id, tg_msg_id), None)
@@ -1531,7 +1506,8 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     - New reactions are buffered for REACTION_UNDO_WINDOW_SECS before being
       written to the inbox.  If the user removes the reaction within the window,
       the pending task is cancelled and nothing is written.
-    - All emoji reactions are delivered — the dispatcher interprets them in context.
+    - Only reactions listed in REACTION_SIGNALS are delivered; unknown emojis
+      are silently ignored.
     - Reaction removals (new_reaction is empty) cancel any pending task for that
       message, preventing spurious signals when the user quickly toggles.
     """
@@ -1540,11 +1516,7 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     user = update.effective_user
-    if not user:
-        return
-
-    chat = reaction_update.chat
-    if not await _check_group_gating(user, chat, context):
+    if not user or user.id not in ALLOWED_USERS:
         return
 
     chat_id: int = reaction_update.chat.id
@@ -1566,18 +1538,23 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         log.debug(f"Reaction cancelled for chat={chat_id} msg={tg_msg_id}")
 
     for emoji in added:
+        signal = REACTION_SIGNALS.get(emoji)
+        if signal is None:
+            log.debug(f"Unknown reaction emoji={emoji!r} — ignored")
+            continue
+
         # Cancel any existing pending task for this (chat, message) pair
         existing = _pending_reactions.pop(pending_key, None)
         if existing:
             existing.cancel()
 
-        # Schedule delivery after the undo window
+        # Schedule signal delivery after the undo window
         task = asyncio.create_task(
-            _emit_reaction_signal(chat_id, tg_msg_id, emoji)
+            _emit_reaction_signal(chat_id, tg_msg_id, emoji, signal)
         )
         _pending_reactions[pending_key] = task
         log.info(
-            f"Reaction buffered: emoji={emoji} "
+            f"Reaction buffered: emoji={emoji} signal={signal} "
             f"chat={chat_id} msg={tg_msg_id}"
         )
 
@@ -2198,7 +2175,6 @@ async def run_bot():
     bot_app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE & filters.TEXT, handle_edited_message))
     # Requires python-telegram-bot >= v20.6 for Update.ALL_TYPES to include message_reaction
     bot_app.add_handler(MessageReactionHandler(handle_reaction))
-    bot_app.add_handler(ChatMemberHandler(handle_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
     bot_app.add_error_handler(error_handler)
 
     # Initialize and start
