@@ -361,7 +361,7 @@ def session_end(
     conn.execute(
         """
         UPDATE agent_sessions
-        SET status = ?, completed_at = ?, result_summary = ?, stop_reason = ?
+        SET status = ?, completed_at = ?, result_summary = ?
         WHERE (id = ? OR task_id = ?) AND status IN ('running', 'starting')
         """,
         (status, now, result_summary, stop_reason, id_or_task_id, id_or_task_id),
