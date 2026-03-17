@@ -1157,6 +1157,19 @@ run_migrations() {
         migrated=$((migrated + 1))
     fi
 
+    # Migration 14: Remove orphan agents.db files — stale empty files not used by any code
+    # (real session store is agent_sessions.db in ~/messages/config/ and ~/lobster-workspace/data/)
+    if [ -f "$MESSAGES_DIR/config/agents.db" ]; then
+        rm -f "$MESSAGES_DIR/config/agents.db"
+        substep "Removed orphan agents.db from $MESSAGES_DIR/config/ (empty file, not used by any code)"
+        migrated=$((migrated + 1))
+    fi
+    if [ -f "$WORKSPACE_DIR/data/agents.db" ]; then
+        rm -f "$WORKSPACE_DIR/data/agents.db"
+        substep "Removed orphan agents.db from $WORKSPACE_DIR/data/ (empty file, not used by any code)"
+        migrated=$((migrated + 1))
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
