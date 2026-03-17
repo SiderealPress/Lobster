@@ -1013,23 +1013,31 @@ Reason: $reason
 Status: Restarted successfully"
         return 0
     else
-        # Build a specific failure description so the alert isn't misleading.
-        local failure_detail
+        local svc_timeout_s=$(( max_svc_attempts * 3 ))
         if [[ "$pid_changed" == false ]]; then
-            failure_detail="Claude PID $pre_restart_pid unchanged after 3 checks — old session may have survived"
-        elif [[ "$service_ok" == false && "$tmux_ok" == false ]]; then
-            failure_detail="Service not active and tmux session missing after restart"
-        elif [[ "$service_ok" == false ]]; then
-            failure_detail="Service not active after restart (tmux session exists)"
-        else
-            failure_detail="Tmux session missing after restart (service is active)"
-        fi
-        log_error "Restart verification failed: $failure_detail"
-        send_telegram_alert "Restart verification failed — manual check needed.
+            # PID did not change: the old process survived the restart attempt.
+            log_error "Restart failed: Claude PID $pre_restart_pid unchanged after 3 checks — old session survived"
+            send_telegram_alert "Restart failed — process still running under original PID $pre_restart_pid.
 
 Reason: $reason
-Problem: $failure_detail
-Action: Check \`lobster-claude\` service and tmux session"
+Manual intervention may be required: \`lobster restart\`"
+        else
+            # PID changed (restart happened) but service/tmux not ready within the timeout window.
+            local not_ready_detail
+            if [[ "$service_ok" == false && "$tmux_ok" == false ]]; then
+                not_ready_detail="service not active and tmux session missing"
+            elif [[ "$service_ok" == false ]]; then
+                not_ready_detail="service not active (tmux session exists)"
+            else
+                not_ready_detail="tmux session missing (service is active)"
+            fi
+            log_warn "Restart confirmed (PID changed) but service/tmux not ready after ${svc_timeout_s}s: $not_ready_detail"
+            send_telegram_alert "Restart confirmed (PID changed) — service/tmux not yet ready after ${svc_timeout_s}s.
+
+Reason: $reason
+Detail: $not_ready_detail
+System may still be initializing. Check \`lobster status\` in a moment."
+        fi
         return 1
     fi
 }
