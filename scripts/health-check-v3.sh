@@ -32,8 +32,8 @@
 #   RED    - Stale inbox > threshold OR missing process/tmux/service -> restart
 #   BLACK  - 3 restart failures in cooldown window -> alert, stop retrying
 #
-# Run via cron every 2 minutes:
-#   */2 * * * * $HOME/lobster/scripts/health-check-v3.sh
+# Run via cron every 4 minutes:
+#   */4 * * * * $HOME/lobster/scripts/health-check-v3.sh
 #===============================================================================
 
 set -o pipefail
@@ -52,8 +52,8 @@ WORKSPACE_DIR="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
 INBOX_DIR="$MESSAGES_DIR/inbox"
 MAINTENANCE_FLAG="$MESSAGES_DIR/config/lobster-maintenance"
 LOBSTER_STATE_FILE="${LOBSTER_STATE_FILE_OVERRIDE:-$MESSAGES_DIR/config/lobster-state.json}"
-STALE_THRESHOLD_SECONDS=180          # 3 minutes - RED if any message older (watchdog handles soft recovery at 90s)
-YELLOW_THRESHOLD_SECONDS=120         # 2 minutes - YELLOW warning
+STALE_THRESHOLD_SECONDS=240          # 4 minutes - RED if any message older (watchdog handles soft recovery at 90s)
+YELLOW_THRESHOLD_SECONDS=150         # 2.5 minutes - YELLOW warning
 
 MAINTENANCE_EXPIRY_SECONDS=3600      # 1 hour - stale maintenance flag is auto-cleared and checks resume
 
