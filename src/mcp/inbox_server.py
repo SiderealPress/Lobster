@@ -510,6 +510,13 @@ _HUMAN_SOURCES = {"telegram", "sms", "signal", "slack", "whatsapp", "bisque"}
 # Definitions live in message_types.py (dependency-free, independently testable).
 # Re-exported here so callers import from a single place.
 # ---------------------------------------------------------------------------
+# Explicit path guard: message_types.py lives in src/mcp/ alongside this file.
+# When this script is run directly, Python adds src/mcp/ to sys.path automatically,
+# but we make it explicit here so the import is not silently broken if the
+# launch mechanism ever changes (e.g. subprocess, importlib, test harness).
+_MCP_DIR = str(Path(__file__).resolve().parent)
+if _MCP_DIR not in sys.path:
+    sys.path.insert(0, _MCP_DIR)
 from message_types import (  # noqa: E402 — placed after path-setup at top of file
     INBOX_USER_TYPES,
     INBOX_SYSTEM_TYPES,
@@ -3054,13 +3061,13 @@ async def handle_mark_processing(args: dict) -> list[TextContent]:
         log.warning(
             f"mark_processing: unknown message type {msg_type!r} "
             f"(source={msg_source!r}, id={message_id}). "
-            "Add to INBOX_MESSAGE_TYPES in inbox_server.py if this is intentional."
+            "Add to INBOX_MESSAGE_TYPES in message_types.py if this is intentional."
         )
     if msg_source and msg_source not in INBOX_MESSAGE_SOURCES:
         log.warning(
             f"mark_processing: unknown message source {msg_source!r} "
             f"(type={msg_type!r}, id={message_id}). "
-            "Add to INBOX_MESSAGE_SOURCES in inbox_server.py if this is intentional."
+            "Add to INBOX_MESSAGE_SOURCES in message_types.py if this is intentional."
         )
 
     # Queue background observation (non-blocking, best-effort)
