@@ -5524,7 +5524,8 @@ async def handle_claim_and_ack(args: dict) -> list[TextContent]:
     msg_text = msg_data.get("text", "") or msg_data.get("transcription", "")
     msg_type = msg_data.get("type", "")
     _SKIP_OBSERVATION_TYPES = (
-        "subagent_result", "subagent_error", "self_check", "subagent_observation"
+        "subagent_result", "subagent_error", "self_check", "subagent_observation",
+        "debug_observation",  # never run tier 1 on our own debug output (would loop)
     )
     if msg_text and msg_type not in _SKIP_OBSERVATION_TYPES:
         _queue_observation(
@@ -5533,9 +5534,48 @@ async def handle_claim_and_ack(args: dict) -> list[TextContent]:
             ts=msg_data.get("timestamp"),
         )
 
-    # User message counter — session-note-appender trigger (issue #1159)
-    # Shared helper handles filtering, incrementing, and reminder injection.
-    _tick_user_message_counter(msg_type, msg_data.get("source", ""))
+    # Conditionally inject user model context for messages that would benefit
+    context_block = ""
+    short_msg_id = message_id[:20] if len(message_id) > 20 else message_id
+    _SKIP_CONTEXT_TYPES = (
+        "subagent_result", "subagent_error", "self_check", "callback", "system",
+        "subagent_observation", "debug_observation",  # internal messages — not real user content
+    )
+    if _user_model is not None and msg_text and msg_type not in _SKIP_CONTEXT_TYPES:
+        if _should_inject_user_context(msg_text):
+            try:
+                ctx = _user_model.get_context()
+                if ctx and ctx.strip():
+                    context_block = (
+                        "\n\n---\n"
+                        "**User Model Context** (auto-injected for this message):\n\n"
+                        f"{ctx}"
+                    )
+                    # Debug: notify context was injected
+                    _emit_debug_observation(
+                        f"\U0001f50d [context injected] msg={short_msg_id} "
+                        f"trigger matched, injected {len(ctx)} chars of user model context"
+                    )
+                else:
+                    # Debug: trigger matched but no context available.
+                    # _emit_debug_observation is a no-op when not in debug mode.
+                    _emit_debug_observation(
+                        f"\U0001f50d [context skipped] msg={short_msg_id} "
+                        "trigger matched but user model returned empty context"
+                    )
+            except Exception as _ctx_exc:
+                import traceback as _tb
+                _emit_debug_observation(
+                    f"\U0001f50d [context inject error] msg={short_msg_id} "
+                    f"{type(_ctx_exc).__name__}: {_ctx_exc}\n"
+                    + _tb.format_exc()[-600:],
+                    category="system_error",
+                )
+                # never block mark_processing
+        else:
+            # No trigger match — context injection skipped. No notification emitted;
+            # this is the common case and emitting on every no-match is pure noise.
+            pass
 
     log.info(f"claim_and_ack: message claimed: {message_id}")
 
