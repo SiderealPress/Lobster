@@ -161,6 +161,42 @@ def test_session_end_does_not_double_close(isolated_db):
     assert result["result_summary"] == "First close"
 
 
+def test_session_end_closes_starting_row(isolated_db):
+    """session_end closes rows with status='starting' (auto-registered by PostToolUse hook).
+
+    The auto-register-agent.py hook inserts rows as 'starting' before the agent
+    has fully initialised. Previously, session_end only matched 'running' rows,
+    so write_result calls on 'starting' rows were silently no-ops and the rows
+    accumulated indefinitely. This test verifies the fix: session_end now accepts
+    both 'running' and 'starting'.
+    """
+    import sqlite3
+    db = isolated_db
+    conn = sqlite3.connect(str(db))
+    # Insert a 'starting' row directly — mimics the PostToolUse hook
+    conn.execute(
+        """
+        INSERT INTO agent_sessions
+            (id, task_id, agent_type, description, chat_id, source, status, spawned_at)
+        VALUES
+            (?, ?, 'subagent', 'auto-registered by PostToolUse hook', '123', 'telegram',
+             'starting', datetime('now'))
+        """,
+        ("hook-agent-id", "hook-task-id"),
+    )
+    conn.commit()
+    conn.close()
+
+    # End by task_id (as write_result does)
+    session_store.session_end("hook-task-id", "completed", "Done.", path=db)
+
+    result = session_store.find_session("hook-task-id", path=db)
+    assert result is not None
+    assert result["status"] == "completed"
+    assert result["completed_at"] is not None
+    assert result["result_summary"] == "Done."
+
+
 def test_multiple_sessions(isolated_db):
     """Multiple concurrent sessions are tracked independently."""
     db = isolated_db

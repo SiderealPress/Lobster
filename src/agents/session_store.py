@@ -316,12 +316,16 @@ def session_end(
     conn = _get_connection(resolved)
     now = datetime.now(timezone.utc).isoformat()
 
-    # Try matching on id first, then task_id
+    # Match on id or task_id.  Accept both 'running' (registered by the
+    # dispatcher via session_start) and 'starting' (auto-registered by the
+    # PostToolUse hook before the agent has fully initialised).  This closes
+    # the lifecycle gap where rows inserted as 'starting' were never updated
+    # because the old WHERE clause only matched 'running'.
     conn.execute(
         """
         UPDATE agent_sessions
         SET status = ?, completed_at = ?, result_summary = ?
-        WHERE (id = ? OR task_id = ?) AND status = 'running'
+        WHERE (id = ? OR task_id = ?) AND status IN ('running', 'starting')
         """,
         (status, now, result_summary, id_or_task_id, id_or_task_id),
     )
