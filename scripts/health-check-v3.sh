@@ -936,12 +936,27 @@ Manual intervention required:
     # Verify recovery: service and tmux must be running, and the Claude PID
     # must differ from the pre-restart PID (catching ghost sessions where the
     # old process survived alongside the newly started one).
+    #
+    # Retry loop: the new process may not have started quickly enough for pgrep
+    # to see it yet. Retry up to 3 times with 3-second gaps before concluding
+    # that the PID is genuinely unchanged (i.e. restart failed).
     local post_restart_pid
-    post_restart_pid=$(pgrep -x "claude" 2>/dev/null | head -1)
     local pid_changed=true
+    local pid_check_attempts=0
+    while [[ $pid_check_attempts -lt 3 ]]; do
+        post_restart_pid=$(pgrep -x "claude" 2>/dev/null | head -1)
+        if [[ -z "$pre_restart_pid" || "$post_restart_pid" != "$pre_restart_pid" ]]; then
+            break
+        fi
+        pid_check_attempts=$(( pid_check_attempts + 1 ))
+        if [[ $pid_check_attempts -lt 3 ]]; then
+            log_info "PID unchanged after restart (attempt $pid_check_attempts/3), waiting 3s..."
+            sleep 3
+        fi
+    done
     if [[ -n "$pre_restart_pid" && "$post_restart_pid" == "$pre_restart_pid" ]]; then
         pid_changed=false
-        log_error "Restart verification failed: Claude PID $pre_restart_pid unchanged — old session may have survived"
+        log_error "Restart verification failed: Claude PID $pre_restart_pid unchanged after 3 attempts — old session may have survived"
     fi
 
     if [[ "$pid_changed" == true ]] && \
@@ -971,6 +986,10 @@ Status: Restarted successfully"
         return 0
     else
         log_error "Restart verification failed"
+        send_telegram_alert "Restart attempted but PID unchanged — restart may have failed. Check \`lobster-claude\` service.
+
+Reason: $reason
+Status: Restart verification failed"
         return 1
     fi
 }
