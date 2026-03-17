@@ -631,7 +631,7 @@ def _resolve_owner_chat_id() -> str:
         if first:
             return first
 
-    config_env = LOBSTER_HOME / "lobster-config" / "config.env"
+    config_env = Path.home() / "lobster-config" / "config.env"
     if config_env.exists():
         try:
             for line in config_env.read_text().splitlines():
