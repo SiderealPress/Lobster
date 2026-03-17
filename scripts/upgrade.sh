@@ -672,7 +672,7 @@ setup_syncthing() {
     echo -e "It requires setup on your client device too (Syncthing app)."
     echo ""
     if [ -t 0 ]; then
-        read -r -p "$(echo -e "${CYAN}Install and configure Syncthing? [y/N]:${NC} ")" response
+        read -r -p "$(echo -e "${CYAN}Install and configure Syncthing? [Y/n]:${NC} ")" response
     else
         info "No TTY detected — defaulting to install Syncthing. Use --skip-syncthing to suppress."
         response="y"
