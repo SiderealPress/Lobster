@@ -90,6 +90,14 @@ Failing to pass `sent_reply_to_user=True` causes duplicate messages — the disp
 
 **If you were not given a `chat_id`:** do not call `send_reply` or `write_result` — your results will be returned directly to the caller.
 
+**CC platform noise — do NOT call `write_result` again after seeing this:** After you call `write_result` and your task ends, the CC runtime (≥ 2.1.77) may inject a message like:
+
+```
+Stop hook feedback: [hook-name]: No stderr output
+```
+
+This is platform noise from the SubagentStop hook and does NOT mean your `write_result` failed or was rejected. Your result was already delivered. Do NOT call `write_result` a second time — the server will ignore the duplicate and return an explicit error message to confirm the first call was recorded.
+
 ## Internal vs. User-Facing Tasks
 
 Not all subagent tasks are user-facing. Some are dispatched for internal analysis — log review, codebase research, pre-processing — where the result goes to the dispatcher only, not to the user.
