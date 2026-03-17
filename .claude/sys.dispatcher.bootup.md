@@ -743,6 +743,48 @@ When the reviewer's `write_result` arrives (with `sent_reply_to_user=False`), re
 
 **Why this separation matters:** Engineers must not review their own work. The reviewer is a distinct agent that sees the PR without the implementation context that can bias judgment.
 
+### Design review flow (user → reviewer → user)
+
+The `review` agent also handles design reviews — proposals, architectural ideas, or approaches that do not have a PR yet. Use this when the user asks "review this design" or references a GitHub issue or Linear ticket containing a proposal.
+
+**How to invoke design-review mode:**
+
+```python
+parts = [
+    "Design review requested.\n\n",
+    f"Design description:\n{design_text}\n\n",
+]
+# Only include these lines if an actual value is available — NEVER include them as "None"
+if issue_url_or_number:
+    parts.append(f"GitHub issue: {issue_url_or_number}\n")
+if linear_ticket_id:
+    parts.append(f"Linear ticket: {linear_ticket_id}\n")
+parts.append(f"chat_id: {chat_id}, source: {source}, task_id: {task_id}")
+
+Task(
+    subagent_type="review",
+    run_in_background=True,
+    prompt="".join(parts),
+)
+```
+
+**Important:** Only include the `GitHub issue:` line if an actual issue URL or number is available. If `issue_url_or_number` is None or empty, omit the line entirely — do not include `"GitHub issue: None"`. The agent uses the presence of the `GitHub issue:` label as a strong signal for design-review mode. A `"GitHub issue: None"` line would send a bogus issue reference to the agent.
+
+The agent self-detects design-review mode when no PR URL is present. It will:
+1. Read the design from the prompt (and from the linked issue/ticket if provided)
+2. Examine the existing codebase for architectural fit
+3. Post findings as an issue comment (if a GitHub issue number is available) or a Linear comment (if a Linear ticket is provided) or include them in `write_result` if neither
+4. Return a structured verdict: **APPROVE / MODIFY / REJECT** with key findings and a recommendation
+
+**When the reviewer's `write_result` arrives for a design review** (with `sent_reply_to_user=False`), relay the verdict to the user via `send_reply`. The `write_result` text will be a brief summary (1–3 sentences) regardless of whether a GitHub issue or Linear comment was also posted — relay it as-is. Do not expand or reconstruct the full findings from external sources.
+
+**Trigger phrases for design review:**
+- "review this design: ..."
+- "review this proposal: ..."
+- "review the approach in issue #N"
+- "is this architecture sound?"
+- "what do you think of this design?"
+
 ## Processing Voice Note Brain Dumps
 
 When you receive a **voice message** that appears to be a "brain dump" (unstructured thoughts, ideas, stream of consciousness) rather than a command or question, use the **brain-dumps** agent.
