@@ -321,6 +321,22 @@ git_pull() {
         fi
     fi
 
+    # Ensure we're on main before pulling.
+    # If ~/lobster/ is on a feature branch or detached HEAD (e.g. after local
+    # testing), git merge --ff-only would fail. Switch to main first so the
+    # update always lands correctly.
+    local current_branch
+    current_branch=$(git symbolic-ref --short HEAD 2>/dev/null || echo "DETACHED")
+    if [ "$current_branch" != "main" ]; then
+        if $DRY_RUN; then
+            info "[dry-run] Not on main branch (currently: $current_branch). Would switch to main before updating."
+        else
+            warn "Not on main branch (currently: $current_branch). Switching to main before updating..."
+            git checkout main --quiet || die "Could not checkout main. Resolve manually and re-run." 3
+            success "Switched to main"
+        fi
+    fi
+
     # Fetch
     info "Fetching from origin..."
     if $DRY_RUN; then
