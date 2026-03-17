@@ -48,6 +48,15 @@
 #   NOTE: Dispatcher heartbeat check is NOT suppressed during boot grace — the
 #   20-minute threshold absorbs the 90s boot window naturally.
 #
+# Boot grace period:
+#   After any restart (health-check-initiated or manual), the new Claude session
+#   needs ~60-90s to initialize and begin draining the inbox. During this window
+#   the health-check skips stale-inbox, WFM freshness, and process/tmux checks
+#   to avoid false-positive restarts. The boot timestamp is written to
+#   lobster-state.json as booted_at by claude-persistent.sh (on first start) and
+#   by do_restart() (after each health-check-initiated restart). Resource checks
+#   (memory, disk, auth, outbox) still run during the grace period.
+#
 # Escalation ladder:
 #   GREEN  - All checks pass (or in expected transient state)
 #   YELLOW - Inbox messages exist < STALE threshold, or transient state
@@ -89,6 +98,8 @@ COMPACT_GRACE_SECONDS=900            # 15 minutes - skip stale-inbox check after
 RESTART_COOLDOWN_SUPPRESS_SECONDS=240 # 4 minutes - suppress stale-inbox RED after a recent restart
 
 BOOT_GRACE_SECONDS=90                # 90s - skip stale-inbox, WFM, and process checks after a restart
+
+HIBERNATE_FRESH_SECONDS=30           # Ignore hibernate state younger than this — transient dispatcher hibernation
 
 HIBERNATE_FRESH_SECONDS=30           # DEPRECATED — kept for reference; hibernate state is no longer written by dispatcher
 
@@ -511,37 +522,6 @@ except Exception:
     return 1
 }
 
-# Check if a context compaction occurred within the last COMPACT_GRACE_SECONDS.
-# Returns 0 (true) if inbox staleness checks should be suppressed, 1 otherwise.
-# Reads the Unix timestamp from last-compact.ts (written by hooks/on-compact.py).
-# This provides a 15-minute grace period for post-compaction re-orientation,
-# extending the existing COMPACTION_SUPPRESS_SECONDS (5 min) window by an additional
-# 10 minutes to cover cases where re-orientation takes longer than expected.
-is_compact_grace_period() {
-    local ts_file="$WORKSPACE_DIR/data/last-compact.ts"
-    if [[ ! -f "$ts_file" ]]; then
-        return 1
-    fi
-    local compact_ts
-    compact_ts=$(cat "$ts_file" 2>/dev/null | tr -d '[:space:]')
-    if [[ -z "$compact_ts" ]] || ! [[ "$compact_ts" =~ ^[0-9]+$ ]]; then
-        return 1
-    fi
-    local now
-    now=$(date +%s)
-    local age=$((now - compact_ts))
-    if [[ $age -le $COMPACT_GRACE_SECONDS ]]; then
-        log_info "Post-compaction grace period: compaction ${age}s ago (threshold: ${COMPACT_GRACE_SECONDS}s) — stale-inbox check suppressed"
-        return 0
-    fi
-    return 1
-}
-
-# is_catchup_active() removed (issue #1483).
-# The dispatcher heartbeat threshold (DISPATCHER_HEARTBEAT_STALE_SECONDS = 1200s)
-# covers catchup duration naturally. No per-catchup suppression needed.
-# The dispatcher no longer needs to call record-catchup-state.sh.
-
 # Check if a boot/restart occurred within the last BOOT_GRACE_SECONDS.
 # Returns 0 (true) if we are inside the grace window, 1 otherwise.
 # Reads booted_at from lobster-state.json (written by claude-persistent.sh on
@@ -551,7 +531,7 @@ is_boot_grace_period() {
         return 1
     fi
     local booted_at
-    booted_at=$(uv run python3 -c "
+    booted_at=$(python3 -c "
 import json, sys
 try:
     d = json.load(open('$LOBSTER_STATE_FILE'))
@@ -574,34 +554,6 @@ except Exception:
     return 1
 }
 
-# Check if a health-check-triggered restart occurred within the last
-# RESTART_COOLDOWN_SUPPRESS_SECONDS. When Lobster restarts, the MCP server
-# recovers stale messages from processing/ back to inbox/. Without this guard,
-# the next health check run sees those recovered messages as new stale messages
-# and fires another restart — a restart-triggered restart loop.
-#
-# Returns 0 (true) if inbox-stale RED should be suppressed, 1 otherwise.
-is_recent_restart() {
-    if [[ ! -f "$LOBSTER_STATE_FILE" ]]; then
-        return 1
-    fi
-    local last_restart_at
-    last_restart_at=$(jq -r '.last_restart_at // empty' "$LOBSTER_STATE_FILE" 2>/dev/null)
-    if [[ -z "$last_restart_at" ]]; then
-        return 1
-    fi
-    local restart_epoch
-    restart_epoch=$(date -d "$last_restart_at" +%s 2>/dev/null) || return 1
-    local now
-    now=$(date +%s)
-    local age=$((now - restart_epoch))
-    if [[ $age -le $RESTART_COOLDOWN_SUPPRESS_SECONDS ]]; then
-        log_info "Recent restart ${age}s ago (cooldown: ${RESTART_COOLDOWN_SUPPRESS_SECONDS}s) — stale-inbox RED suppressed"
-        return 0
-    fi
-    return 1
-}
-
 # Write booted_at timestamp into lobster-state.json without clobbering other fields.
 # Called by do_restart() after a successful health-check-initiated restart.
 write_boot_timestamp() {
@@ -610,7 +562,7 @@ write_boot_timestamp() {
     fi
     local now
     now=$(date -Iseconds)
-    uv run python3 -c "
+    python3 -c "
 import json, sys
 path = '$LOBSTER_STATE_FILE'
 now = '$now'
@@ -625,27 +577,6 @@ with open(path, 'w') as f:
     f.write('\n')
 " 2>/dev/null || true
     log_info "Boot timestamp written to state file (booted_at=$now)"
-}
-
-# Write the current time as last_restart_at into lobster-state.json.
-# Called by do_restart() just before triggering the systemd restart so the
-# post-restart health check can suppress false-positive stale-inbox REDs.
-write_last_restart_at() {
-    if [[ ! -f "$LOBSTER_STATE_FILE" ]]; then
-        log_warn "write_last_restart_at: state file not found, skipping"
-        return 0
-    fi
-    local ts
-    ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-    local tmp
-    tmp=$(mktemp)
-    if jq --arg ts "$ts" '.last_restart_at = $ts' "$LOBSTER_STATE_FILE" > "$tmp" 2>/dev/null; then
-        mv "$tmp" "$LOBSTER_STATE_FILE"
-        log_info "Wrote last_restart_at=$ts to state file"
-    else
-        rm -f "$tmp"
-        log_warn "write_last_restart_at: jq failed to update state file"
-    fi
 }
 
 # Check if the wrapper script (claude-persistent.sh) is running in tmux.
@@ -1445,9 +1376,7 @@ Status: Restarted, but new stale messages detected post-restart"
 
         log_info "Restart successful"
         write_boot_timestamp
-        if [[ "$suppress_alert" != "true" ]]; then
-            # "Recovered" alert: use raw send (important positive signal, not spammy)
-            send_telegram_alert "System recovered automatically.
+        send_telegram_alert "System recovered automatically.
 
 Reason: $reason
 Status: Restarted successfully"
@@ -1568,6 +1497,53 @@ main() {
     #
 
     case "$lobster_mode" in
+        hibernate)
+            log_info "HIBERNATE: Claude cleanly exited. Wrapper polling for new messages."
+
+            # Boot grace: skip process/tmux/inbox checks — session may not be fully up yet.
+            if [[ "$boot_grace" == "true" ]]; then
+                log_info "Process/inbox checks suppressed (boot grace period)"
+            else
+                # Fresh-state guard: ignore hibernate states younger than HIBERNATE_FRESH_SECONDS.
+                # The dispatcher briefly writes mode=hibernate after wait_for_messages times out,
+                # then immediately wakes if new messages arrive. A health check that fires within
+                # this window would see a momentarily-missing wrapper and false-positive into RED.
+                if [[ $state_age -lt $HIBERNATE_FRESH_SECONDS ]]; then
+                    log_info "Hibernate state is only ${state_age}s old (threshold: ${HIBERNATE_FRESH_SECONDS}s) — skipping process check (transient)"
+                elif ! check_tmux; then
+                    level="RED"
+                    restart_reason="tmux session missing (hibernate mode)"
+                elif [[ "$LOBSTER_DEBUG" == "true" ]]; then
+                    # Debug mode: no persistent wrapper is expected. Claude Code runs
+                    # directly in the tmux pane without claude-persistent.sh. Check for
+                    # the Claude process directly instead of checking for the wrapper.
+                    if ! check_claude_process; then
+                        level="RED"
+                        restart_reason="no Claude process in lobster tmux (debug mode, hibernate)"
+                    fi
+                elif ! check_wrapper_process; then
+                    # Wrapper died during hibernation — need systemd restart
+                    level="RED"
+                    restart_reason="wrapper process missing during hibernation"
+                fi
+
+                # Still check inbox: if user messages are sitting stale, the wrapper
+                # should have woken Claude by now. Give extra time (5 min) since
+                # the wrapper polls every 10s.
+                if [[ "$compaction_recent" == "true" ]]; then
+                    log_info "Inbox drain suppressed (recent compaction)"
+                else
+                    check_inbox_drain
+                    local hibernate_inbox_rc=$?
+                    if [[ $hibernate_inbox_rc -eq 2 ]]; then
+                        # Stale user messages during hibernation — wrapper may be stuck
+                        level="RED"
+                        restart_reason="${restart_reason:+$restart_reason + }stale inbox during hibernation"
+                    fi
+                fi
+            fi
+            ;;
+
         starting|restarting|waking)
             # Boot grace: skip stale-transient escalation and inbox checks.
             if [[ "$boot_grace" == "true" ]]; then
@@ -1592,12 +1568,8 @@ main() {
                     check_inbox_drain
                     local transient_inbox_rc=$?
                     if [[ $transient_inbox_rc -eq 2 ]]; then
-                        if is_recent_restart; then
-                            [[ "$level" == "GREEN" ]] && level="YELLOW"
-                        else
-                            level="RED"
-                            restart_reason="${restart_reason:+$restart_reason + }stale inbox (>$((STALE_THRESHOLD_SECONDS/60))m)"
-                        fi
+                        level="RED"
+                        restart_reason="${restart_reason:+$restart_reason + }stale inbox (>$((STALE_THRESHOLD_SECONDS/60))m)"
                     elif [[ $transient_inbox_rc -eq 1 && "$level" == "GREEN" ]]; then
                         level="YELLOW"
                     elif [[ $transient_inbox_rc -eq 0 ]]; then
@@ -1668,12 +1640,8 @@ main() {
                     check_inbox_drain
                     local debug_inbox_rc=$?
                     if [[ $debug_inbox_rc -eq 2 ]]; then
-                        if is_recent_restart; then
-                            [[ "$level" == "GREEN" ]] && level="YELLOW"
-                        else
-                            level="RED"
-                            restart_reason="${restart_reason:+$restart_reason + }stale inbox (>$((STALE_THRESHOLD_SECONDS/60))m)"
-                        fi
+                        level="RED"
+                        restart_reason="${restart_reason:+$restart_reason + }stale inbox (>$((STALE_THRESHOLD_SECONDS/60))m)"
                     elif [[ $debug_inbox_rc -eq 1 && "$level" == "GREEN" ]]; then
                         level="YELLOW"
                     elif [[ $debug_inbox_rc -eq 0 ]]; then
@@ -1683,13 +1651,7 @@ main() {
             fi
             ;;
 
-        hibernate|active|unknown|*)
-            # hibernate: DEPRECATED — dispatcher no longer writes this state (PR #1447).
-            # If seen in a stale state file, treat as active: full process and inbox checks apply.
-            if [[ "$lobster_mode" == "hibernate" ]]; then
-                log_warn "HIBERNATE: stale hibernate state found — dispatcher no longer uses hibernation (treating as active)"
-            fi
-
+        active|unknown|*)
             # Boot grace: skip process/tmux/inbox checks — session may still be initializing.
             if [[ "$boot_grace" == "true" ]]; then
                 log_info "Process/inbox checks suppressed (boot grace period)"
@@ -1746,12 +1708,8 @@ main() {
                     check_inbox_drain
                     local inbox_rc=$?
                     if [[ $inbox_rc -eq 2 ]]; then
-                        if is_recent_restart; then
-                            [[ "$level" == "GREEN" ]] && level="YELLOW"
-                        else
-                            level="RED"
-                            restart_reason="${restart_reason:+$restart_reason + }stale inbox (>$((STALE_THRESHOLD_SECONDS/60))m)"
-                        fi
+                        level="RED"
+                        restart_reason="${restart_reason:+$restart_reason + }stale inbox (>$((STALE_THRESHOLD_SECONDS/60))m)"
                     elif [[ $inbox_rc -eq 1 && "$level" == "GREEN" ]]; then
                         level="YELLOW"
                     elif [[ $inbox_rc -eq 0 ]]; then
@@ -1790,7 +1748,11 @@ main() {
     elif [[ "$lobster_mode" == "starting" || "$lobster_mode" == "restarting" || \
             "$lobster_mode" == "waking"    || "$lobster_mode" == "backoff"    || \
             "$lobster_mode" == "stopped" ]]; then
-        log_info "Dispatcher heartbeat suppressed (transient lifecycle state: $lobster_mode)"
+        log_info "WFM freshness suppressed (transient lifecycle state: $lobster_mode)"
+    elif [[ "$boot_grace" == "true" ]]; then
+        log_info "WFM freshness suppressed (boot grace period)"
+    elif [[ "$compaction_recent" == "true" ]]; then
+        log_info "WFM freshness suppressed (recent compaction)"
     else
         check_dispatcher_heartbeat
         local hb_rc=$?
