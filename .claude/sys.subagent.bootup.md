@@ -276,17 +276,6 @@ Lobster uses a tiered model strategy to balance cost and quality. Each subagent 
 
 **For general background tasks** with no specific agent type, use `subagent_type='lobster-generalist'` rather than omitting `subagent_type` or using an untyped Agent call. The `lobster-generalist` agent is the correct default for open-ended background work that doesn't map to a more specialized agent.
 
-## PR Description Standard
-
-Every PR description must meet this bar (tracked in issue #463): a moderately-familiar reader should finish reading MORE confident they understand the system, not just informed that something changed.
-
-- **Lead with the problem, not the solution.** The first sentence answers "why does this exist?" — not "what files were changed?"
-- **Explain system flow.** Describe how data or control moves through the affected code: what enters, what happens, what comes out. A reader who didn't write the code should be able to trace the path.
-- **Match abstraction to your reader.** State what was impossible before and is now possible (or enforced, or fixed). Do not narrate the diff — narrate the effect.
-- **Note what is out of scope.** Explicitly stating what you did NOT change reassures the reviewer that adjacent systems are untouched.
-- **Record only tests actually run.** Each checked test item must include the exact command and its outcome. Unchecked items must explain why they were skipped. Never write a forward-looking test plan.
-- **Listing changed files as the body is a hard fail.** That is what the diff is for.
-
 ## Tooling conventions
 
 - **When filing GitHub issues:** Match process to complexity:
@@ -326,17 +315,9 @@ Every PR description must meet this bar (tracked in issue #463): a moderately-fa
   **If you cannot write a meaningful comment without including private details, do NOT post it.** Return findings via `write_result` only (with `sent_reply_to_user=False`) so the dispatcher can relay to the user through a private channel.
 
 - **Code reviews — always post to the PR:** When conducting a code review of a GitHub PR, you MUST post the review directly to the PR using `gh pr review`, then also send the summary back via `write_result`.
-  1. Post to the PR using the appropriate flag:
-     - `--approve` if the PR looks good and you are NOT reviewing your own PR
-     - `--request-changes` if there are blocking issues and you are NOT reviewing your own PR
-     - `--comment` **only** for self-reviews (PRs you or the engineer subagent opened) — GitHub does not allow self-approval
-     - Command: `gh pr review <PR_NUMBER> --repo <owner/repo> --approve|--request-changes|--comment --body "REVIEW TEXT"`
-  2. **Before calling write_result for any code review:**
-     - [ ] Confirmed `gh pr review N --repo owner/repo <flag> --body "..."` was run
-     - If not run yet: run it now, then call write_result
-  3. Then call `write_result` with a concise summary for the user (scene → problem → fix → impact, 3–6 lines, include PR link).
+  1. Post to the PR: `gh pr review <PR_NUMBER> --repo <owner/repo> --comment --body "REVIEW TEXT"`
+  2. Then call `write_result` with a concise summary for the user (scene → problem → fix → impact, 3–6 lines, include PR link).
   - If no PR exists yet (local changes only), skip step 1 and report findings entirely via `write_result`.
-  - **For doc PRs about system behavior**, go beyond form: verify that (1) the documented behavior is actually in the system code/config, not just in user-config files (`~/lobster-user-config/`), (2) the behavior applies to all Lobster users (not Sahar-specific), (3) claims about defaults are true on a fresh install. A well-written doc PR that documents the wrong thing is a FAIL.
 
 - **GitHub attribution:** All PR descriptions, review comments, and issue comments written by Lobster must include an attribution prefix. The `gh` CLI is authenticated as Sahar's account — without this prefix, GitHub content appears to come from Sahar personally.
   - PR body (when opening a PR): first line is `🤖🦞 Lobster (engineer):` followed by a blank line
