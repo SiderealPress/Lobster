@@ -13,7 +13,12 @@ claude. If the file exists and the PID is still alive (kill -0), the session
 is the dispatcher. The flag is deleted by inject-bootup-context.py after
 detection so subagents never see it.
 
-## Hook-process-context API — `is_dispatcher_session(hook_input)`
+2. **Transcript fallback (secondary)**: Scan the transcript for tool_use blocks
+   containing the dispatcher-only tools `wait_for_messages` or `check_inbox`.
+   CC 2.1.76+ passes a file path (`transcript_path` for Stop hooks,
+   `agent_transcript_path` for SubagentStop hooks) rather than an inline
+   `transcript` list. Both file-based and inline forms are tried in order.
+   Found → dispatcher.  Not found → subagent.
 
 For use in **PreToolUse hooks** where an `agent_id` field is injected by
 CC for subagent sessions (absent for the dispatcher), and where the
@@ -101,22 +106,31 @@ def is_dispatcher(hook_input: dict) -> bool:  # noqa: ARG001
     hook_input is accepted for API compatibility but is not used — the startup
     flag is the sole detection signal for SessionStart hooks.
     """
-    try:
-        if not STARTUP_FLAG_FILE.exists():
-            return False
-        raw = STARTUP_FLAG_FILE.read_text().strip()
-        if not raw:
-            return False
-        pid = int(raw)
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            pass  # PID exists, can't signal — treat as alive
-        return True
-    except (OSError, ValueError):
-        return False
+    session_id = get_session_id(hook_input)
+
+    # --- Primary: marker file ---
+    marker_result = _check_marker_file(session_id)
+    if marker_result is not None:
+        return marker_result
+
+    # --- Secondary: transcript scan ---
+    # Try inline transcript first (legacy CC < 2.1.76).
+    transcript = hook_input.get("transcript")
+    if transcript is not None:
+        return _transcript_has_dispatcher_tool(transcript)
+
+    # Try file-based transcript (CC 2.1.76+):
+    #   Stop hook       → transcript_path
+    #   SubagentStop    → agent_transcript_path
+    for key in ("transcript_path", "agent_transcript_path"):
+        path = hook_input.get(key)
+        if path:
+            transcript = _load_transcript_from_jsonl(path)
+            if transcript:
+                return _transcript_has_dispatcher_tool(transcript)
+
+    # --- Default: no signal → treat as subagent (conservative) ---
+    return False
 
 
 def write_dispatcher_session_id(session_id: str) -> None:
@@ -182,144 +196,53 @@ def _check_state_file(path: Path, session_id: "str | None") -> "bool | None":
     return session_id == stored
 
 
-def _read_dispatcher_session_id() -> "str | None":
-    """Return the stored dispatcher session ID from the hook marker file, or None."""
-    result = _read_session_id_from_file(DISPATCHER_SESSION_FILE)
-    if isinstance(result, OSError):
-        return None
-    return result
+def _load_transcript_from_jsonl(path: str) -> list:
+    """Load transcript messages from a JSONL file.
 
-
-# ---------------------------------------------------------------------------
-# Hook-process-context API — for PreToolUse hooks (issue #1113)
-# MUST NOT CHANGE: PreToolUse hooks depend on is_dispatcher_session()
-# ---------------------------------------------------------------------------
-
-
-def _get_tmux_pane_pids() -> "set[str]":
-    """Return the set of PIDs for all panes in the lobster tmux session."""
-    try:
-        result = subprocess.run(
-            [
-                "tmux", "-L", _LOBSTER_TMUX_SESSION,
-                "list-panes", "-t", _LOBSTER_TMUX_SESSION,
-                "-F", "#{pane_pid}",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=1,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return set(result.stdout.strip().split("\n"))
-    except Exception:  # noqa: BLE001
-        pass
-    return set()
-
-
-def _get_proc_name(pid: int) -> str:
-    """Return the comm (process name) for a given PID, or '' on failure."""
-    try:
-        with open(f"/proc/{pid}/comm") as f:
-            return f.read().strip()
-    except OSError:
-        return ""
-
-
-def _get_ppid(pid: int) -> "int | None":
-    """Return the parent PID of a given PID, or None on failure."""
-    try:
-        with open(f"/proc/{pid}/stat") as f:
-            # Format: pid (comm) state ppid ...
-            content = f.read()
-            # rsplit on ')' to handle commas in comm name
-            after_comm = content.rsplit(")", 1)[-1]
-            ppid = int(after_comm.split()[1])
-            return ppid if ppid > 1 else None
-    except (OSError, ValueError, IndexError):
-        return None
-
-
-def _is_claude_process(name: str) -> bool:
-    """Return True if the process name looks like a Claude Code binary."""
-    return "claude" in name.lower()
-
-
-def _is_dispatcher_by_process_tree() -> bool:
-    """Return True only when this hook is running inside the dispatcher Claude.
-
-    Process-tree fallback used when the session_role marker file is absent.
+    CC 2.1.76+ Stop hooks pass transcript_path (a .jsonl file) rather than an
+    inline transcript list. Each line is a JSON object. Returns [] on any error.
     """
-    if os.environ.get("LOBSTER_MAIN_SESSION", "") != "1":
-        return False
-
-    tmux_pids = _get_tmux_pane_pids()
-    if not tmux_pids:
-        return True
-
-    claude_ancestor_count = 0
-    pid = os.getpid()
-    for _ in range(15):  # Safety limit
-        ppid = _get_ppid(pid)
-        if ppid is None:
-            break
-        if str(ppid) in tmux_pids:
-            return claude_ancestor_count <= 1
-        parent_name = _get_proc_name(ppid)
-        if _is_claude_process(parent_name):
-            claude_ancestor_count += 1
-        pid = ppid
-
-    return True
+    try:
+        messages = []
+        with open(path) as fh:
+            for line in fh:
+                line = line.strip()
+                if line:
+                    try:
+                        messages.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        pass
+        return messages
+    except Exception:
+        return []
 
 
-def is_dispatcher_session(hook_input: dict) -> bool:
-    """Return True when this hook is running inside the dispatcher Claude.
+def _transcript_has_dispatcher_tool(transcript: list) -> bool:
+    """Return True if any tool_use block in transcript calls a dispatcher-only tool.
 
-    **For use in PreToolUse hooks** (hook-process context).  Adds a process-tree
-    walk fallback on top of the state-file checks in `is_dispatcher()`, for the
-    early-boot window before `session_start` has been called.
+    Handles both JSONL format (CC 2.1.76+) and legacy inline format:
 
-    Detection strategy (in order):
-      0. agent_id fast path: CC injects agent_id only into subagent PreToolUse
-         payloads.  If present → subagent (return False immediately, no I/O).
-         See issue #1152.
-      1. MCP state files + hook marker file via `is_dispatcher()`.  Returns a
-         definitive answer when either file is present and readable.
-      2. Process-tree walk: count consecutive claude ancestors before a tmux pane
-         PID.  ≤1 ancestor → dispatcher; ≥2 → subagent.
-      3. Env-var-only fallback: LOBSTER_MAIN_SESSION=1 without tmux confirmation.
+    JSONL format (each line is a JSONL entry):
+        {"type": "assistant", "message": {"role": "assistant", "content": [...]}, ...}
 
-    For SessionStart / SubagentStop / Stop hooks, use the simpler `is_dispatcher()`
-    which checks the startup flag file.
-
-    NOTE: Intentionally unchanged by issue #1908 — PreToolUse hooks depend on this
-    function's process-tree + state-file logic during active processing (after the
-    startup flag has been consumed by inject-bootup-context.py).
+    Legacy inline format (transcript is a list of messages):
+        {"role": "assistant", "content": [...]}
     """
-    # Fast path: agent_id is present only in subagent PreToolUse payloads.
-    # The dispatcher never has agent_id.  Exit immediately without any file I/O.
-    if hook_input.get("agent_id"):
-        return False
-
-    # State-file check: covers MCP Claude UUID file + hook marker file.
-    #
-    # Only short-circuit on True (confirmed dispatcher match).  A False result
-    # means "this session ID does not match the stored dispatcher ID", which is
-    # ambiguous on restart: the stored ID may be stale (previous session) rather
-    # than a live dispatcher entry.  Falling through to the process-tree check
-    # resolves the ambiguity.  Only a confirmed match (True) is authoritative
-    # enough to skip the remaining checks.
-    session_id = get_session_id(hook_input)
-    primary_result = _check_state_file(_get_mcp_claude_session_file(), session_id)
-    if primary_result is True:
-        return True
-
-    # Tertiary: hook marker file.
-    tertiary_result = _check_state_file(DISPATCHER_SESSION_FILE, session_id)
-    if tertiary_result is True:
-        return True
-
-    # No state file confirmed dispatcher — fall back to process-tree.
-    # This handles both the "stale state file after restart" case and the
-    # "no state file yet" (early boot) case.
-    return _is_dispatcher_by_process_tree()
+    for msg in transcript:
+        if not isinstance(msg, dict):
+            continue
+        # JSONL format: content is under msg["message"]["content"]
+        # Legacy format: content is directly under msg["content"]
+        nested_msg = msg.get("message")
+        if isinstance(nested_msg, dict):
+            content = nested_msg.get("content", [])
+        else:
+            content = msg.get("content", [])
+        if not isinstance(content, list):
+            continue
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "tool_use" and item.get("name") in DISPATCHER_ONLY_TOOLS:
+                return True
+    return False
