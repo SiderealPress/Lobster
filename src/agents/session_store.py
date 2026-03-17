@@ -969,15 +969,22 @@ def _migrate_json_to_sqlite(json_path: Path, conn: sqlite3.Connection) -> int:
 # ---------------------------------------------------------------------------
 
 def _next_report_id(conn: sqlite3.Connection) -> str:
-    """Generate the next sequential report ID in the form RPT-NNN.
+    """Return the next sequential RPT-NNN id, collision-safe.
 
-    Reads the current max id from the reports table to derive the next
-    integer. Pure determination from DB state — no external counters.
+    Reads the report_id of the last-inserted row (by rowid order, which is
+    insertion order) and increments its numeric suffix. Using the stored
+    RPT-NNN string rather than MAX(id) means deletions cannot cause
+    collisions: even if row 5 is deleted, the next call will still read
+    RPT-005 from some other row and produce RPT-006.
     """
-    cursor = conn.execute("SELECT MAX(id) FROM reports")
-    row = cursor.fetchone()
-    next_int = (row[0] or 0) + 1
-    return f"RPT-{next_int:03d}"
+    row = conn.execute(
+        "SELECT report_id FROM reports ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    if row is None:
+        return "RPT-001"
+    last = row[0]  # e.g. "RPT-042"
+    n = int(last.split("-")[1]) + 1
+    return f"RPT-{n:03d}"
 
 
 def create_report(
