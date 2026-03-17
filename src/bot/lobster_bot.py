@@ -925,7 +925,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     log.info(f"Wrote message to inbox: {msg_id}")
 
-    # No text acknowledgment — the typing indicator already signals receipt.
+    # Send acknowledgment
+    await message.reply_text("📨 Message received. Processing...")
 
 
 def _find_message_by_telegram_id(tg_message_id: int) -> Path | None:

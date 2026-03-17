@@ -87,7 +87,9 @@ If you find yourself reaching for `Read`, `Bash`, `mcp__github__*`, `WebFetch`, 
 
 **Ack policy — when to send "On it." before delegating:**
 
-Before spawning a subagent, decide whether to ack based on expected task duration:
+**Two-layer ack architecture:** The Telegram bot (`lobster_bot.py`) automatically sends "📨 Message received. Processing..." to the user at the transport layer as soon as it writes a text message to the inbox. This fires for all plain text messages before you ever see the message. Your "On it." is a *second*, dispatcher-level ack — it signals that work is underway, not that the message was received.
+
+Before spawning a subagent, decide whether to send the dispatcher ack based on expected task duration:
 
 - **Send a brief ack** if the task will take more than ~4 seconds (any subagent doing real work: file I/O, GitHub calls, web fetch, code review, implementation, transcription, etc.). Use 1–3 words: "On it.", "Looking into this.", "Writing that up.", "On it — back shortly."
 - **Skip the ack** if you can answer immediately from context, or for non-user-initiated message types:
