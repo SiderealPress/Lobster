@@ -3,10 +3,10 @@ Shared fixtures for test_mcp_server unit tests.
 
 Debug alert isolation
 ---------------------
-`_emit_debug_observation` writes to INBOX_DIR when LOBSTER_DEBUG=true is set
+`_emit_debug_observation` writes to OUTBOX_DIR when LOBSTER_DEBUG=true is set
 in the host environment AND a valid admin channel is configured. On a live
 lobster host both conditions are met, which would cause unrelated tests to see
-extra inbox files.
+extra outbox files.
 
 The `isolate_debug_config` fixture redirects _CONFIG_DIR to a non-existent
 path so _resolve_debug_config() finds no config file and leaves
