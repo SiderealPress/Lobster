@@ -1357,12 +1357,12 @@ step "Setting up health monitoring..."
 # Make scripts executable
 chmod +x "$INSTALL_DIR/scripts/health-check-v3.sh" || true
 
-# Add health check to crontab (runs every 2 minutes)
+# Add health check to crontab (runs every 4 minutes)
 HEALTH_MARKER="# LOBSTER-HEALTH"
 ({ crontab -l 2>/dev/null | grep -v "$HEALTH_MARKER" | grep -v "health-check" || true; }; \
- echo "*/2 * * * * $INSTALL_DIR/scripts/health-check-v3.sh $HEALTH_MARKER") | crontab -
+ echo "*/4 * * * * $INSTALL_DIR/scripts/health-check-v3.sh $HEALTH_MARKER") | crontab -
 
-success "Health monitoring configured (checks every 2 minutes)"
+success "Health monitoring configured (checks every 4 minutes)"
 
 #===============================================================================
 # Daily Dependency Health Check
