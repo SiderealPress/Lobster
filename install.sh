@@ -1719,27 +1719,6 @@ else
     info "Skipping inject-debug-bootup hook (settings.json not yet created)"
 fi
 
-# Set up Claude Code Stop hook to enforce write_result in subagent sessions
-chmod +x "$INSTALL_DIR/hooks/require-write-result.py" || true
-if [ -f "$CLAUDE_SETTINGS" ]; then
-    if ! jq -e '.hooks.Stop[]? | select(.matcher == "")' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
-        TMP_SETTINGS=$(mktemp)
-        jq '.hooks.Stop = (.hooks.Stop // []) + [{
-            "matcher": "",
-            "hooks": [{
-                "type": "command",
-                "command": "python3 '"$INSTALL_DIR"'/hooks/require-write-result.py",
-                "timeout": 10
-            }]
-        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
-        success "require-write-result Stop hook installed"
-    else
-        info "require-write-result Stop hook already configured in Claude Code settings"
-    fi
-else
-    info "Skipping require-write-result Stop hook (settings.json not yet created)"
-fi
-
 # Set up Claude Code SubagentStop hook to enforce write_result in subagent sessions
 # SubagentStop fires when a background sidechain session considers stopping — this is
 # the hook that actually catches subagents, whereas Stop only fires for the main session.
