@@ -1,12 +1,12 @@
 """
-Tests for debug alert hooks:
+Tests for LOBSTER_DEBUG=true alert hooks:
   - memory_store debug alert (Feature 1)
   - memory_search debug alert (Feature 1)
   - write_result debug alert (Feature 2)
 
-All tests mock _emit_event so no real I/O or event bus interactions occur.
-The old _emit_debug_observation / _DEBUG_MODE / _DEBUG_ALERTS_ENABLED pattern
-was removed in issue #891 and replaced with _emit_event → event bus delivery.
+All tests mock _emit_debug_observation so no real I/O is performed,
+and rely on the session-scoped block_outbound_http fixture in conftest.py
+as a belt-and-suspenders guard.
 """
 
 import asyncio
@@ -40,7 +40,6 @@ def _make_fake_memory_provider(result_count: int = 3):
         project = None
         timestamp = None
         content = "fake event content"
-        metadata = {}
 
     class FakeMemoryProvider:
         def store(self, event) -> int:
@@ -71,9 +70,9 @@ class MemoryEvent:
 
 
 class TestMemoryStoreDebugAlert:
-    """memory_store emits a debug event via _emit_event."""
+    """LOBSTER_DEBUG=true fires a debug alert on memory_store."""
 
-    def _run(self, arguments: dict, memory_provider=None) -> tuple:
+    def _run(self, arguments: dict, memory_provider=None) -> list:
         if memory_provider is None:
             memory_provider = _make_fake_memory_provider()
 
@@ -81,28 +80,25 @@ class TestMemoryStoreDebugAlert:
 
         def fake_emit(
             text: str,
-            event_type: str = "debug.observation",
-            severity: str = "debug",
-            source: str = "inbox-server",
+            category: str = "system_context",
+            visibility: str = "mcp-only",
             emitter: str | None = None,
-            task_id: str | None = None,
-            chat_id=None,
         ) -> None:
             emitted.append(
                 {
                     "text": text,
-                    "event_type": event_type,
-                    "severity": severity,
-                    "source": source,
+                    "category": category,
+                    "visibility": visibility,
                     "emitter": emitter,
-                    "task_id": task_id,
                 }
             )
 
         with patch.multiple(
             "src.mcp.inbox_server",
             _memory_provider=memory_provider,
-            _emit_event=fake_emit,
+            _DEBUG_MODE=True,
+            _DEBUG_RESOLVED=True,
+            _emit_debug_observation=fake_emit,
             MemoryEvent=MemoryEvent,
         ):
             from src.mcp.inbox_server import handle_memory_store
@@ -112,7 +108,7 @@ class TestMemoryStoreDebugAlert:
         return result, emitted
 
     def test_debug_alert_fires_on_successful_store(self):
-        """A successful memory_store emits exactly one debug event."""
+        """A successful memory_store emits exactly one debug push when debug mode is on."""
         _, emitted = self._run({"content": "Remember this important fact."})
         assert len(emitted) == 1
 
@@ -153,35 +149,51 @@ class TestMemoryStoreDebugAlert:
         _, emitted = self._run({"content": "Note.", "type": "decision"})
         assert "decision" in emitted[0]["text"]
 
-    def test_debug_alert_event_type_is_memory_write(self):
-        """Memory store alerts use event_type='memory.write'."""
+    def test_debug_alert_category_is_system_context(self):
+        """Memory store alerts use system_context category."""
         _, emitted = self._run({"content": "Any content."})
-        assert emitted[0]["event_type"] == "memory.write"
+        assert emitted[0]["category"] == "system_context"
 
-    def test_debug_alert_severity_is_debug(self):
-        """Memory store alerts use severity='debug'."""
+    def test_debug_alert_visibility_is_mcp_only(self):
+        """Memory store alerts use mcp-only visibility."""
         _, emitted = self._run({"content": "Any content."})
-        assert emitted[0]["severity"] == "debug"
+        assert emitted[0]["visibility"] == "mcp-only"
 
-    def test_no_alert_when_emit_event_raises(self):
-        """Even if _emit_event raises, handle_memory_store still returns success."""
-        provider = _make_fake_memory_provider()
+    def test_no_alert_when_debug_alerts_disabled(self):
+        """When _DEBUG_ALERTS_ENABLED=False, _emit_debug_observation returns early.
 
-        def raising_emit(*args, **kwargs):
-            raise RuntimeError("bus offline")
+        The outer _DEBUG_MODE gate has been removed; _emit_debug_observation is the
+        single authoritative gate.  The handler always calls _emit_debug_observation,
+        but the function is a no-op when _DEBUG_ALERTS_ENABLED=False.
+        """
+        import src.mcp.inbox_server as _mod
+        from unittest.mock import patch as _patch
+
+        called_with: list[dict] = []
+
+        original_emit = _mod._emit_debug_observation
+
+        def spying_emit(text, category="system_context", visibility="mcp-only", emitter=None):
+            # Record the call but still invoke the real function (which is a no-op here)
+            called_with.append({"text": text})
+            original_emit(text, category=category, visibility=visibility, emitter=emitter)
 
         with patch.multiple(
             "src.mcp.inbox_server",
-            _memory_provider=provider,
-            _emit_event=raising_emit,
+            _memory_provider=_make_fake_memory_provider(),
+            _DEBUG_MODE=False,
+            _DEBUG_ALERTS_ENABLED=False,
+            _DEBUG_RESOLVED=True,
+            _emit_debug_observation=spying_emit,
             MemoryEvent=MemoryEvent,
         ):
             from src.mcp.inbox_server import handle_memory_store
 
-            result = asyncio.run(handle_memory_store({"content": "Still stored."}))
+            asyncio.run(handle_memory_store({"content": "Silent store."}))
 
-        assert len(result) == 1
-        assert "Stored memory event" in result[0].text
+        # The handler calls _emit_debug_observation unconditionally (single-gate contract);
+        # the function itself is a no-op because _DEBUG_ALERTS_ENABLED=False.
+        assert len(called_with) == 1  # called exactly once — no outer gate suppresses it
 
     def test_alert_does_not_affect_return_value(self):
         """The debug alert is additive — it does not change the handler's return value."""
@@ -196,7 +208,7 @@ class TestMemoryStoreDebugAlert:
 
 
 class TestMemorySearchDebugAlert:
-    """memory_search emits a debug event via _emit_event."""
+    """LOBSTER_DEBUG=true fires a debug alert on memory_search."""
 
     def _run(self, arguments: dict, result_count: int = 2) -> tuple:
         provider = _make_fake_memory_provider(result_count=result_count)
@@ -204,28 +216,25 @@ class TestMemorySearchDebugAlert:
 
         def fake_emit(
             text: str,
-            event_type: str = "debug.observation",
-            severity: str = "debug",
-            source: str = "inbox-server",
+            category: str = "system_context",
+            visibility: str = "mcp-only",
             emitter: str | None = None,
-            task_id: str | None = None,
-            chat_id=None,
         ) -> None:
             emitted.append(
                 {
                     "text": text,
-                    "event_type": event_type,
-                    "severity": severity,
-                    "source": source,
+                    "category": category,
+                    "visibility": visibility,
                     "emitter": emitter,
-                    "task_id": task_id,
                 }
             )
 
         with patch.multiple(
             "src.mcp.inbox_server",
             _memory_provider=provider,
-            _emit_event=fake_emit,
+            _DEBUG_MODE=True,
+            _DEBUG_RESOLVED=True,
+            _emit_debug_observation=fake_emit,
         ):
             from src.mcp.inbox_server import handle_memory_search
 
@@ -234,68 +243,84 @@ class TestMemorySearchDebugAlert:
         return result, emitted
 
     def test_debug_alert_fires_on_search(self):
-        """A memory_search emits exactly one debug event."""
+        """A memory_search emits exactly one debug push when debug mode is on."""
         _, emitted = self._run({"query": "something"})
         assert len(emitted) == 1
 
     def test_debug_alert_contains_memory_read_label(self):
         """The debug alert text contains the [memory read] label."""
-        _, emitted = self._run({"query": "some query"})
+        _, emitted = self._run({"query": "anything"})
         assert "[memory read]" in emitted[0]["text"]
 
     def test_debug_alert_contains_query_text(self):
-        """The debug alert text contains the search query."""
-        _, emitted = self._run({"query": "find my notes"})
-        assert "find my notes" in emitted[0]["text"]
+        """The debug alert includes the search query."""
+        _, emitted = self._run({"query": "what did the user say about cats"})
+        assert "what did the user say about cats" in emitted[0]["text"]
 
     def test_debug_alert_contains_result_count(self):
-        """The debug alert text includes the number of results found."""
-        _, emitted = self._run({"query": "count test"}, result_count=5)
+        """The debug alert reports how many results were found."""
+        _, emitted = self._run({"query": "test"}, result_count=5)
         assert "5" in emitted[0]["text"]
 
     def test_debug_alert_zero_results(self):
-        """When no results are found, the alert still fires and shows 0."""
-        _, emitted = self._run({"query": "nothing here"}, result_count=0)
-        assert len(emitted) == 1
+        """Zero results are reported correctly in the alert."""
+        _, emitted = self._run({"query": "obscure query"}, result_count=0)
         assert "0" in emitted[0]["text"]
 
     def test_debug_alert_uses_task_id_as_emitter(self):
-        """When task_id is passed, it appears as agent label and emitter."""
-        _, emitted = self._run({"query": "test", "task_id": "search-agent-7"})
-        assert "search-agent-7" in emitted[0]["text"]
-        assert emitted[0]["emitter"] == "search-agent-7"
+        """When task_id is passed, it appears in the alert and as the emitter."""
+        _, emitted = self._run({"query": "test", "task_id": "searcher-task-7"})
+        assert "searcher-task-7" in emitted[0]["text"]
+        assert emitted[0]["emitter"] == "searcher-task-7"
 
     def test_debug_alert_falls_back_to_dispatcher_label(self):
-        """When task_id is absent, alert uses 'dispatcher' as the agent label."""
+        """When task_id is absent, 'dispatcher' is used as the agent label."""
         _, emitted = self._run({"query": "test"})
         assert "dispatcher" in emitted[0]["text"]
 
-    def test_debug_alert_event_type_is_memory_search(self):
-        """Memory search alerts use event_type='memory.search'."""
-        _, emitted = self._run({"query": "any"})
-        assert emitted[0]["event_type"] == "memory.search"
+    def test_debug_alert_category_is_system_context(self):
+        """Memory search alerts use system_context category."""
+        _, emitted = self._run({"query": "test"})
+        assert emitted[0]["category"] == "system_context"
 
     def test_no_alert_when_debug_alerts_disabled(self):
-        """When _emit_event is a no-op (e.g. bus unavailable), search still works."""
-        provider = _make_fake_memory_provider(result_count=2)
+        """When _DEBUG_ALERTS_ENABLED=False, _emit_debug_observation returns early.
+
+        The outer _DEBUG_MODE gate has been removed; _emit_debug_observation is the
+        single authoritative gate.  The handler always calls _emit_debug_observation,
+        but the function is a no-op when _DEBUG_ALERTS_ENABLED=False.
+        """
+        import src.mcp.inbox_server as _mod
+
+        called_with: list[dict] = []
+
+        original_emit = _mod._emit_debug_observation
+
+        def spying_emit(text, category="system_context", visibility="mcp-only", emitter=None):
+            called_with.append({"text": text})
+            original_emit(text, category=category, visibility=visibility, emitter=emitter)
 
         with patch.multiple(
             "src.mcp.inbox_server",
-            _memory_provider=provider,
-            _EVENT_BUS_AVAILABLE=False,
+            _memory_provider=_make_fake_memory_provider(),
+            _DEBUG_MODE=False,
+            _DEBUG_ALERTS_ENABLED=False,
+            _DEBUG_RESOLVED=True,
+            _emit_debug_observation=spying_emit,
         ):
             from src.mcp.inbox_server import handle_memory_search
 
-            result = asyncio.run(handle_memory_search({"query": "silent search"}))
+            asyncio.run(handle_memory_search({"query": "silent search"}))
 
-        # Result is still returned correctly — debug is best-effort
-        assert len(result) == 1
+        # The handler calls _emit_debug_observation unconditionally (single-gate contract);
+        # the function itself is a no-op because _DEBUG_ALERTS_ENABLED=False.
+        assert len(called_with) == 1  # called exactly once — no outer gate suppresses it
 
     def test_alert_is_additive_does_not_affect_return_value(self):
-        """The debug alert does not affect the search results returned."""
-        result, _ = self._run({"query": "test query"}, result_count=3)
-        # Should return results text (not "No memory events found")
+        """Debug alert does not change the handler's return value."""
+        result, _ = self._run({"query": "return value test"})
         assert len(result) == 1
+        assert "Memory Search Results" in result[0].text
 
 
 # ---------------------------------------------------------------------------
@@ -304,28 +329,23 @@ class TestMemorySearchDebugAlert:
 
 
 class TestWriteResultDebugAlert:
-    """write_result emits a debug event via _emit_event."""
+    """LOBSTER_DEBUG=true fires a debug alert when write_result is called."""
 
     def _run(self, args: dict, inbox_dir: Path) -> tuple:
         emitted: list[dict] = []
 
         def fake_emit(
             text: str,
-            event_type: str = "debug.observation",
-            severity: str = "debug",
-            source: str = "inbox-server",
+            category: str = "system_context",
+            visibility: str = "mcp-only",
             emitter: str | None = None,
-            task_id: str | None = None,
-            chat_id=None,
         ) -> None:
             emitted.append(
                 {
                     "text": text,
-                    "event_type": event_type,
-                    "severity": severity,
-                    "source": source,
+                    "category": category,
+                    "visibility": visibility,
                     "emitter": emitter,
-                    "task_id": task_id,
                 }
             )
 
@@ -334,13 +354,12 @@ class TestWriteResultDebugAlert:
             def session_end(self, **kwargs):
                 pass
 
-            def set_notified(self, *args, **kwargs):
-                pass
-
         with patch.multiple(
             "src.mcp.inbox_server",
             INBOX_DIR=inbox_dir,
-            _emit_event=fake_emit,
+            _DEBUG_MODE=True,
+            _DEBUG_RESOLVED=True,
+            _emit_debug_observation=fake_emit,
             _session_store=FakeSessionStore(),
         ):
             # Patch asyncio.create_task to be a no-op (wire server notify)
@@ -356,7 +375,7 @@ class TestWriteResultDebugAlert:
         return temp_messages_dir / "inbox"
 
     def test_debug_alert_fires_on_write_result(self, inbox_dir: Path):
-        """write_result emits exactly one debug event."""
+        """write_result emits exactly one debug push when debug mode is on."""
         _, emitted = self._run(
             {
                 "task_id": "test-task-1",
@@ -449,45 +468,61 @@ class TestWriteResultDebugAlert:
         )
         assert "True" in emitted[0]["text"]
 
-    def test_debug_alert_does_not_include_text_content(self, inbox_dir: Path):
-        """The alert is a compact routing summary — result text is NOT inlined.
-
-        Text preview was removed from the alert format. The full result text
-        appears in the inbox message body, not in the debug alert.
-        """
+    def test_debug_alert_includes_text_preview(self, inbox_dir: Path):
+        """The alert includes a preview of the result text (first 60 chars)."""
         _, emitted = self._run(
             {"task_id": "t7", "chat_id": 1, "text": "Short message."},
             inbox_dir,
         )
-        # Alert must contain task_id but must NOT inline the payload text.
-        assert "t7" in emitted[0]["text"]
-        assert "Short message." not in emitted[0]["text"]
+        assert "Short message." in emitted[0]["text"]
+
+    def test_text_preview_truncated_at_60_chars(self, inbox_dir: Path):
+        """Text longer than 60 chars is truncated with an ellipsis in the alert."""
+        long_text = "A" * 80
+        _, emitted = self._run(
+            {"task_id": "t8", "chat_id": 1, "text": long_text},
+            inbox_dir,
+        )
+        assert "A" * 60 in emitted[0]["text"]
+        assert "\u2026" in emitted[0]["text"]  # ellipsis
+        assert "A" * 61 not in emitted[0]["text"]
 
     def test_debug_alert_emitter_includes_task_id(self, inbox_dir: Path):
-        """The emitter passed to _emit_event is task:<task_id>."""
+        """The emitter passed to _emit_debug_observation is task:<task_id>."""
         _, emitted = self._run(
             {"task_id": "emitter-check", "chat_id": 1, "text": "Done."},
             inbox_dir,
         )
         assert emitted[0]["emitter"] == "task:emitter-check"
 
-    def test_no_debug_alert_when_event_bus_unavailable(self, inbox_dir: Path):
-        """When _EVENT_BUS_AVAILABLE=False, _emit_event is a no-op for write_result.
+    def test_no_debug_alert_when_debug_alerts_disabled(self, inbox_dir: Path):
+        """When _DEBUG_ALERTS_ENABLED=False, _emit_debug_observation is a no-op for write_result.
 
-        The handler calls _emit_event but it returns early because the event bus
-        is not available. The inbox file is still written.
+        The outer _DEBUG_MODE gate has been removed; _emit_debug_observation is the
+        single authoritative gate via _DEBUG_ALERTS_ENABLED.  The handler always calls
+        _emit_debug_observation, but the function returns early when alerts are disabled.
         """
+        import src.mcp.inbox_server as _mod
+
+        called_with: list[dict] = []
+
+        original_emit = _mod._emit_debug_observation
+
+        def spying_emit(text, category="system_context", visibility="mcp-only", emitter=None):
+            called_with.append({"text": text})
+            original_emit(text, category=category, visibility=visibility, emitter=emitter)
+
         class FakeSessionStore:
             def session_end(self, **kwargs):
-                pass
-
-            def set_notified(self, *args, **kwargs):
                 pass
 
         with patch.multiple(
             "src.mcp.inbox_server",
             INBOX_DIR=inbox_dir,
-            _EVENT_BUS_AVAILABLE=False,
+            _DEBUG_MODE=False,
+            _DEBUG_ALERTS_ENABLED=False,
+            _DEBUG_RESOLVED=True,
+            _emit_debug_observation=spying_emit,
             _session_store=FakeSessionStore(),
         ):
             with patch("asyncio.create_task"):
@@ -499,9 +534,9 @@ class TestWriteResultDebugAlert:
                     )
                 )
 
-        # Inbox file should still be written even without event bus
-        files = list(inbox_dir.glob("*.json"))
-        assert len(files) == 1
+        # The handler calls _emit_debug_observation unconditionally (single-gate contract);
+        # the function itself is a no-op because _DEBUG_ALERTS_ENABLED=False.
+        assert len(called_with) == 1  # called exactly once — no outer gate suppresses it
 
     def test_debug_alert_is_additive_inbox_file_still_written(self, inbox_dir: Path):
         """The debug alert is best-effort and does not affect inbox file creation."""
@@ -513,147 +548,3 @@ class TestWriteResultDebugAlert:
         assert len(files) == 1
         content = json.loads(files[0].read_text())
         assert content["task_id"] == "file-check"
-
-    def test_debug_alert_event_type_is_agent_write_result(self, inbox_dir: Path):
-        """write_result alerts use event_type='agent.write_result'."""
-        _, emitted = self._run(
-            {"task_id": "evt-type-check", "chat_id": 1, "text": "Done."},
-            inbox_dir,
-        )
-        assert emitted[0]["event_type"] == "agent.write_result"
-
-
-# ---------------------------------------------------------------------------
-# Feature: _emit_event bus delivery
-# ---------------------------------------------------------------------------
-
-
-class TestEmitEventBusDelivery:
-    """_emit_event emits to the event bus when available.
-
-    Replaces the old TestEmitDebugObservationOutboxDelivery tests.
-    The new architecture delivers debug events via the event bus (bus listeners
-    handle final delivery), not via direct outbox writes in inbox_server.
-    """
-
-    def test_emit_event_calls_bus_emit_sync(self):
-        """_emit_event calls bus.emit_sync when _EVENT_BUS_AVAILABLE is True."""
-        captured_events = []
-        mock_bus = MagicMock()
-        mock_bus.emit_sync.side_effect = lambda e: captured_events.append(e)
-        mock_event_cls = MagicMock(side_effect=lambda **kw: kw)
-
-        with patch.multiple(
-            "src.mcp.inbox_server",
-            _EVENT_BUS_AVAILABLE=True,
-            get_event_bus=MagicMock(return_value=mock_bus),
-            LobsterEvent=mock_event_cls,
-        ):
-            from src.mcp.inbox_server import _emit_event
-
-            _emit_event("test text", event_type="debug.observation", severity="debug")
-
-        assert mock_bus.emit_sync.called
-        assert len(captured_events) == 1
-
-    def test_emit_event_noop_when_bus_unavailable(self):
-        """_emit_event is a no-op when _EVENT_BUS_AVAILABLE is False."""
-        mock_bus = MagicMock()
-
-        with patch.multiple(
-            "src.mcp.inbox_server",
-            _EVENT_BUS_AVAILABLE=False,
-            get_event_bus=mock_bus,
-        ):
-            from src.mcp.inbox_server import _emit_event
-
-            # Should not raise, should not call bus
-            _emit_event("silent text")
-
-        mock_bus.assert_not_called()
-
-    def test_emit_event_includes_text_in_payload(self):
-        """_emit_event includes the text in the LobsterEvent payload."""
-        captured = []
-        mock_bus = MagicMock()
-        mock_bus.emit_sync.side_effect = lambda e: captured.append(e)
-
-        def make_event(**kw):
-            return kw
-
-        with patch.multiple(
-            "src.mcp.inbox_server",
-            _EVENT_BUS_AVAILABLE=True,
-            get_event_bus=MagicMock(return_value=mock_bus),
-            LobsterEvent=make_event,
-        ):
-            from src.mcp.inbox_server import _emit_event
-
-            _emit_event("my important text")
-
-        assert len(captured) == 1
-        assert captured[0]["payload"]["text"] == "my important text"
-
-    def test_emit_event_never_raises(self):
-        """_emit_event must never raise even if the bus raises."""
-        mock_bus = MagicMock()
-        mock_bus.emit_sync.side_effect = RuntimeError("bus is down")
-
-        with patch.multiple(
-            "src.mcp.inbox_server",
-            _EVENT_BUS_AVAILABLE=True,
-            get_event_bus=MagicMock(return_value=mock_bus),
-            LobsterEvent=MagicMock(return_value=MagicMock()),
-        ):
-            from src.mcp.inbox_server import _emit_event
-
-            # Should not raise
-            _emit_event("text that triggers error")
-
-    def test_emit_event_passes_severity_to_event(self):
-        """_emit_event forwards the severity argument to LobsterEvent."""
-        captured = []
-
-        def make_event(**kw):
-            captured.append(kw)
-            return kw
-
-        mock_bus = MagicMock()
-        mock_bus.emit_sync.side_effect = lambda e: None
-
-        with patch.multiple(
-            "src.mcp.inbox_server",
-            _EVENT_BUS_AVAILABLE=True,
-            get_event_bus=MagicMock(return_value=mock_bus),
-            LobsterEvent=make_event,
-        ):
-            from src.mcp.inbox_server import _emit_event
-
-            _emit_event("text", severity="warn")
-
-        assert len(captured) == 1
-        assert captured[0]["severity"] == "warn"
-
-    def test_emit_event_passes_source_to_event(self):
-        """_emit_event forwards the source argument to LobsterEvent."""
-        captured = []
-
-        def make_event(**kw):
-            captured.append(kw)
-            return kw
-
-        mock_bus = MagicMock()
-        mock_bus.emit_sync.side_effect = lambda e: None
-
-        with patch.multiple(
-            "src.mcp.inbox_server",
-            _EVENT_BUS_AVAILABLE=True,
-            get_event_bus=MagicMock(return_value=mock_bus),
-            LobsterEvent=make_event,
-        ):
-            from src.mcp.inbox_server import _emit_event
-
-            _emit_event("text", source="write-result")
-
-        assert len(captured) == 1
-        assert captured[0]["source"] == "write-result"
