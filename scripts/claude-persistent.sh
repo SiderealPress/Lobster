@@ -387,11 +387,31 @@ launch_claude() {
     # Once we hand off to claude, we're active.
     write_state "active" "claude running, attempt=$attempt"
 
-    claude --dangerously-skip-permissions \
-        --model sonnet \
-        --max-turns 150 \
-        -p "$init_prompt" \
-        2>&1 | tee -a "$LOG_DIR/claude-session.log" || claude_exit_code=$?
+    # Write the dispatcher PID file so the health check can target this specific
+    # process for cleanup without relying on ambiguous pgrep matches.
+    #
+    # We use a subshell that writes $BASHPID (the actual subshell PID) and then
+    # exec-replaces itself with claude. After exec, the running claude process
+    # has the same PID that was written to the file. $$ would give the *parent*
+    # shell's PID in bash, so $BASHPID is required here.
+    local dispatcher_pid_file="$MESSAGES_DIR/config/dispatcher.pid"
+    mkdir -p "$(dirname "$dispatcher_pid_file")"
+
+    (
+        echo "$BASHPID" > "$dispatcher_pid_file"
+        exec claude --dangerously-skip-permissions \
+            --model sonnet \
+            --max-turns 150 \
+            -p "$init_prompt"
+    ) 2>&1 | tee -a "$LOG_DIR/claude-session.log" || claude_exit_code=$?
+
+    # Clean up PID file on exit — the process is gone, the file is stale.
+    # Note: if claude-persistent.sh's parent is SIGKILLed, this cleanup won't run,
+    # leaving a stale PID file. On next launch, the health check reads it, finds the
+    # PID dead via kill -0, treats any kill as no-op, and self-heals when the new PID
+    # overwrites the file at launch start.
+    rm -f "$dispatcher_pid_file" 2>/dev/null || true
+    log "Claude exited (exit_code=$claude_exit_code), PID file removed"
 
     return $claude_exit_code
 }
