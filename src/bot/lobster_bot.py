@@ -1347,14 +1347,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     log.info(f"Wrote message to inbox: {msg_id}")
 
-    # Send acknowledgment.
-    # In DMs: always ack.
-    # In groups: ack only for direct invocations and engaged thread continuations.
-    # Passive group messages are processed silently — no ack, no noise.
-    if not _is_group:
-        await message.reply_text("📨 Message received. Processing...")
-    elif direct_inv or engaged:
-        await message.reply_text("📨 Got it. Processing...")
+    # Send acknowledgment
+    await message.reply_text("📨 Message received. Processing...")
 
 
 def _find_message_by_telegram_id(tg_message_id: int) -> Path | None:
