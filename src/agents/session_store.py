@@ -127,6 +127,14 @@ _REPORTS_MIGRATION_STMTS = [
     "ALTER TABLE reports ADD COLUMN forwarded_at TEXT",
 ]
 
+# Additive migrations for the reports table (BIS-85 multi-instance prep).
+# Wrapped in try/except so they are no-ops on fresh DBs that already have the
+# columns from the CREATE TABLE statement once this schema is finalised.
+_REPORTS_MIGRATION_STMTS = [
+    "ALTER TABLE reports ADD COLUMN instance_id TEXT",
+    "ALTER TABLE reports ADD COLUMN forwarded_at TEXT",
+]
+
 _MIGRATION_JSON_PATH = _MESSAGES_DIR / "config" / "pending-agents.json"
 
 
@@ -1100,6 +1108,7 @@ def create_report(
     recent_messages: list | None = None,
     active_session_ids: list[str] | None = None,
     snapshot_state: dict | None = None,
+    instance_id: str | None = None,
     path: Path | None = None,
 ) -> dict:
     """Insert a new report record and return its data dict.
@@ -1115,11 +1124,14 @@ def create_report(
         recent_messages:    Last N messages from conversation history (list of dicts).
         active_session_ids: IDs of agent sessions active at report time.
         snapshot_state:     Any additional ambient state to capture (arbitrary dict).
+        instance_id:        Observability token or hostname identifying the Lobster
+                            instance that filed the report. Used by BIS-85 forwarder
+                            for multi-instance routing. NULL means unknown/single-instance.
         path:               DB path override (for tests).
 
     Returns:
         Dict with keys: report_id, id, description, chat_id, source,
-        created_at, status.
+        instance_id, created_at, status.
     """
     import json as _json
 
@@ -1138,8 +1150,8 @@ def create_report(
         INSERT INTO reports
             (report_id, description, chat_id, source,
              recent_messages_json, agent_session_ids_json,
-             snapshot_state_json, created_at, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open')
+             snapshot_state_json, created_at, status, instance_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)
         """,
         (
             report_id,
@@ -1150,6 +1162,7 @@ def create_report(
             session_ids_json,
             snapshot_json,
             now,
+            instance_id,
         ),
     )
     conn.commit()
@@ -1159,6 +1172,7 @@ def create_report(
         "description": description,
         "chat_id": str(chat_id),
         "source": source,
+        "instance_id": instance_id,
         "created_at": now,
         "status": "open",
     }
