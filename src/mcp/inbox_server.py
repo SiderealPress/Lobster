@@ -3105,7 +3105,8 @@ async def handle_mark_processing(args: dict) -> list[TextContent]:
     msg_text = msg_data.get("text", "") or msg_data.get("transcription", "")
     msg_type = msg_data.get("type", "")
     _SKIP_OBSERVATION_TYPES = (
-        "subagent_result", "subagent_error", "self_check", "subagent_observation"
+        "subagent_result", "subagent_error", "self_check", "subagent_observation",
+        "debug_observation",  # never run tier 1 on our own debug output (would loop)
     )
     if msg_text and msg_type not in _SKIP_OBSERVATION_TYPES:
         _queue_observation(
@@ -3119,7 +3120,7 @@ async def handle_mark_processing(args: dict) -> list[TextContent]:
     short_msg_id = message_id[:20] if len(message_id) > 20 else message_id
     _SKIP_CONTEXT_TYPES = (
         "subagent_result", "subagent_error", "self_check", "callback", "system",
-        "subagent_observation",  # avoid debug observations triggering more debug observations
+        "subagent_observation", "debug_observation",  # internal messages — not real user content
     )
     if _user_model is not None and msg_text and msg_type not in _SKIP_CONTEXT_TYPES:
         if _should_inject_user_context(msg_text):
