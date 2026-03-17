@@ -115,43 +115,13 @@ scan_agent_status() {
         local basename_f
         basename_f=$(basename "$filepath" .output)
 
-        # Skip bash tool output files — only symlinks are real subagent outputs
-        if [ ! -L "$filepath" ]; then
-            continue
-        fi
-
         # Determine agent status from stop_reason (deterministic, ~1ms)
         local stop_reason
         stop_reason=$(_get_stop_reason "$filepath")
 
-        # Skip completed agents — self-check is only for active work.
-        # Terminal stop reasons: end_turn (normal), stop_sequence (hit stop seq),
-        # max_tokens (hit token limit). All mean the agent is done.
-        if [ "$stop_reason" = "end_turn" ] || [ "$stop_reason" = "stop_sequence" ] || [ "$stop_reason" = "max_tokens" ]; then
+        # Skip completed agents — self-check is only for active work
+        if [ "$stop_reason" = "end_turn" ]; then
             continue
-        fi
-
-        # Agents whose output files are stale are treated as dead.
-        # - stop_reason=tool_use: stale after 30 min (crashed mid-tool-call)
-        # - empty stop_reason:    stale after 60 min (never progressed past "starting")
-        # Without these checks a crashed agent would show as "running"/"starting" forever.
-        local STALE_TOOL_USE_SECONDS=$(( 30 * 60 ))
-        local STALE_STARTING_SECONDS=$(( 60 * 60 ))
-        if [ "$stop_reason" = "tool_use" ] || [ -z "$stop_reason" ]; then
-            local now file_mtime file_age_seconds
-            now=$(date +%s)
-            # stat -c %Y is GNU coreutils; stat -f %m is BSD/macOS fallback
-            file_mtime=$(stat -c %Y "$filepath" 2>/dev/null || stat -f %m "$filepath" 2>/dev/null || echo "$now")
-            file_age_seconds=$(( now - file_mtime ))
-            local threshold
-            if [ "$stop_reason" = "tool_use" ]; then
-                threshold=$STALE_TOOL_USE_SECONDS
-            else
-                threshold=$STALE_STARTING_SECONDS
-            fi
-            if [ "$file_age_seconds" -gt "$threshold" ]; then
-                continue  # file too old — agent is dead, not running
-            fi
         fi
 
         local status_text
@@ -252,7 +222,7 @@ scan_completed_tasks() {
         local stop_reason
         stop_reason=$(_get_stop_reason "$filepath")
 
-        if [ "$stop_reason" = "end_turn" ] || [ "$stop_reason" = "stop_sequence" ] || [ "$stop_reason" = "max_tokens" ]; then
+        if [ "$stop_reason" = "end_turn" ]; then
             unreported_completed+=("$filepath")
         fi
     done
