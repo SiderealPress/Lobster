@@ -326,6 +326,16 @@ if [ "$CONTAINER_SETUP" = true ]; then
     mkdir -p "$USER_CONFIG_DIR/agents/subagents"
     # Safety: remove orphan agents.db if it was created (real store is agent_sessions.db)
     rm -f "$MESSAGES_DIR/config/agents.db" "$WORKSPACE_DIR/data/agents.db"
+
+    # Seed lobster-state.json with booted_at so the health check's boot grace period
+    # applies immediately on first start. Without this, is_boot_grace_period() returns
+    # false (missing field) and the health check fires within seconds of first launch,
+    # triggering a restart loop before Claude has had time to initialize.
+    local state_file="$MESSAGES_DIR/config/lobster-state.json"
+    if [ ! -f "$state_file" ]; then
+        echo '{"mode": "active", "booted_at": "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' > "$state_file"
+        info "  Seeded lobster-state.json with initial booted_at timestamp"
+    fi
     success "Directories created"
 
     # Seed canonical templates (idempotent — skip existing files)
@@ -975,6 +985,16 @@ mkdir -p "$USER_CONFIG_DIR/memory"/{canonical/{people,projects},archive/digests}
 mkdir -p "$USER_CONFIG_DIR/agents/subagents"
 # Safety: remove orphan agents.db if it was created (real store is agent_sessions.db)
 rm -f "$MESSAGES_DIR/config/agents.db" "$WORKSPACE_DIR/data/agents.db"
+
+# Seed lobster-state.json with booted_at so the health check's boot grace period
+# applies immediately on first start. Without this, is_boot_grace_period() returns
+# false (missing field) and the health check fires within seconds of first launch,
+# triggering a restart loop before Claude has had time to initialize.
+STATE_FILE="$MESSAGES_DIR/config/lobster-state.json"
+if [ ! -f "$STATE_FILE" ]; then
+    echo '{"mode": "active", "booted_at": "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' > "$STATE_FILE"
+    info "  Seeded lobster-state.json with initial booted_at timestamp"
+fi
 
 # Legacy: also create ~/projects/ for backward compatibility
 mkdir -p "$HOME/projects"/{personal,business}
