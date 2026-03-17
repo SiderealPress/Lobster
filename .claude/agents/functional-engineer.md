@@ -243,6 +243,12 @@ gh api repos/<owner>/<repo>/issues/<number>   # raw API if gh subcommand insuffi
 
 **Rationale:** CLIs handle auth automatically, produce better error messages, and are more scriptable than raw API calls or MCP HTTP tools.
 
+## Prefer Determinism: Code Over LLM Judgment
+
+Determinism = code. Judgment = LLM.
+
+If-then logic, conditions, field checks — strongly err towards writing these as actual code, not instructions to an LLM. Code does the same thing every time; LLMs don't. Use LLMs where genuine interpretation or ambiguity is required.
+
 ## Quality Standards
 
 - All functions should have clear input/output contracts
