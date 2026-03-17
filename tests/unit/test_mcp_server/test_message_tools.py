@@ -1111,3 +1111,137 @@ class TestWriteResultDeduplication:
             msg = json.loads(inbox_files[0].read_text())
             assert msg["sent_reply_to_user"] is False
             assert msg["type"] == "subagent_result"
+
+
+# ---------------------------------------------------------------------------
+# Tests for _enqueue_recovery_notification summary_marker coupling
+# ---------------------------------------------------------------------------
+
+class TestEnqueueRecoveryNotification:
+    """Tests for the summary_marker boundary logic in _enqueue_recovery_notification.
+
+    The summary_marker "Recovered content:\\n\\n" is the coupling point between
+    _write_synthetic_inbox_message (in require-write-result.py) and
+    _enqueue_recovery_notification (in inbox_server.py). These tests verify
+    that the marker correctly identifies the boundary, that content after it
+    is used as the notification summary, and that the no-content fallback
+    works when the marker is absent.
+    """
+
+    def _call_enqueue(self, inbox_dir: Path, msg: dict, owner_chat_id: int = 99999) -> dict:
+        """Call _enqueue_recovery_notification and return the written notification."""
+        from src.mcp.inbox_server import _enqueue_recovery_notification
+
+        with patch("src.mcp.inbox_server._get_owner_chat_id_and_source", return_value=(owner_chat_id, "telegram")), \
+             patch.multiple("src.mcp.inbox_server", INBOX_DIR=inbox_dir):
+            _enqueue_recovery_notification(msg)
+
+        files = list(inbox_dir.glob("*.json"))
+        assert len(files) == 1, "expected exactly one notification file"
+        return json.loads(files[0].read_text())
+
+    def test_summary_marker_extracts_salvaged_content(self, tmp_path):
+        """Content after 'Recovered content:\\n\\n' appears in the notification summary."""
+        inbox_dir = tmp_path / "inbox"
+        inbox_dir.mkdir()
+
+        salvaged = "The agent was working on issue #42 and had drafted a solution."
+        msg = {
+            "task_id": "agent-42",
+            "text": (
+                "Agent exited without calling write_result. "
+                "Content recovered from transcript after 5 hook fires."
+                "\n\nRecovered content:\n\n"
+                + salvaged
+            ),
+        }
+        notification = self._call_enqueue(inbox_dir, msg)
+
+        assert salvaged in notification["text"]
+        assert "Last known activity:" in notification["text"]
+
+    def test_summary_marker_boundary_excludes_preamble(self, tmp_path):
+        """The preamble (recovery note before the marker) does not appear as the summary."""
+        inbox_dir = tmp_path / "inbox"
+        inbox_dir.mkdir()
+
+        preamble = "Agent exited without calling write_result."
+        salvaged = "Actual salvaged content from the transcript."
+        msg = {
+            "task_id": "agent-boundary",
+            "text": f"{preamble}\n\nRecovered content:\n\n{salvaged}",
+        }
+        notification = self._call_enqueue(inbox_dir, msg)
+
+        # The summary line should contain the salvaged part, not the preamble verbatim.
+        assert "Last known activity:" in notification["text"]
+        assert salvaged in notification["text"]
+        # Preamble text should not be duplicated inside the "Last known activity:" line.
+        summary_portion = notification["text"].split("Last known activity:")[1]
+        assert preamble not in summary_portion
+
+    def test_summary_marker_truncates_long_content(self, tmp_path):
+        """Salvaged content longer than 300 characters is truncated with an ellipsis."""
+        inbox_dir = tmp_path / "inbox"
+        inbox_dir.mkdir()
+
+        long_content = "x" * 400
+        msg = {
+            "task_id": "agent-long",
+            "text": "Preamble.\n\nRecovered content:\n\n" + long_content,
+        }
+        notification = self._call_enqueue(inbox_dir, msg)
+
+        assert "Last known activity:" in notification["text"]
+        assert "…" in notification["text"]
+        # The full 400-char content should not appear verbatim.
+        assert long_content not in notification["text"]
+
+    def test_no_summary_marker_uses_fallback(self, tmp_path):
+        """When text does not contain the summary marker, fallback message is used."""
+        inbox_dir = tmp_path / "inbox"
+        inbox_dir.mkdir()
+
+        msg = {
+            "task_id": "agent-no-content",
+            "text": "Agent exited without calling write_result.\n\n(No recoverable transcript content found.)",
+        }
+        notification = self._call_enqueue(inbox_dir, msg)
+
+        assert "No recoverable transcript content was found." in notification["text"]
+        assert "Last known activity:" not in notification["text"]
+
+    def test_empty_text_uses_fallback(self, tmp_path):
+        """Empty text field (no transcript content at all) uses the fallback message."""
+        inbox_dir = tmp_path / "inbox"
+        inbox_dir.mkdir()
+
+        msg = {"task_id": "agent-empty", "text": ""}
+        notification = self._call_enqueue(inbox_dir, msg)
+
+        assert "No recoverable transcript content was found." in notification["text"]
+
+    def test_notification_uses_owner_chat_id(self, tmp_path):
+        """Recovery notification is addressed to the owner, not to chat_id=0."""
+        inbox_dir = tmp_path / "inbox"
+        inbox_dir.mkdir()
+
+        owner_id = 123456789
+        msg = {"task_id": "agent-chat", "text": ""}
+        notification = self._call_enqueue(inbox_dir, msg, owner_chat_id=owner_id)
+
+        assert notification["chat_id"] == owner_id
+        assert notification["type"] == "subagent_notification"
+
+    def test_owner_chat_id_none_skips_notification(self, tmp_path):
+        """When owner chat_id cannot be resolved, no notification file is written."""
+        inbox_dir = tmp_path / "inbox"
+        inbox_dir.mkdir()
+
+        from src.mcp.inbox_server import _enqueue_recovery_notification
+
+        with patch("src.mcp.inbox_server._get_owner_chat_id_and_source", return_value=(None, "telegram")), \
+             patch.multiple("src.mcp.inbox_server", INBOX_DIR=inbox_dir):
+            _enqueue_recovery_notification({"task_id": "x", "text": ""})
+
+        assert list(inbox_dir.glob("*.json")) == []
