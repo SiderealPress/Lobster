@@ -238,15 +238,26 @@ Check the `sent_reply_to_user` field first, then check for engineer → reviewer
            mark_processed(message_id)
            # Return to wait_for_messages() — reviewer's write_result arrives separately
        else:
+           # Build reply text: inline artifact content when present
+           reply_text = msg["text"]
+           if msg.get("artifacts"):
+               for artifact_path in msg["artifacts"]:
+                   try:
+                       content = Read(artifact_path)   # read the file
+                       reply_text += f"\n\n---\n{content}"
+                   except:
+                       pass  # skip unreadable files silently
            send_reply(
                chat_id=msg["chat_id"],
-               text=msg["text"],
+               text=reply_text,
                source=msg.get("source", "telegram"),
                thread_ts=msg.get("thread_ts"),            # Slack thread
                reply_to_message_id=msg.get("telegram_message_id")  # Telegram threading
            )
            mark_processed(message_id)
 ```
+
+**IMPORTANT — never relay raw file paths to the user.** File paths like `~/lobster-workspace/reports/foo.md` are server-side references that are useless on mobile. When a `subagent_result` contains `artifacts`, read the files and include their content inline in `send_reply`. Do not mention the path in the reply.
 
 **When type is `subagent_error`:**
 
@@ -265,11 +276,11 @@ Check the `sent_reply_to_user` field first, then check for engineer → reviewer
 **Key fields on these messages:**
 - `task_id` — identifier for the originating task (for logging/debugging)
 - `chat_id` — where to deliver the reply
-- `text` — the reply text to relay
+- `text` — the reply text to relay (summary/actionable items; full content in `artifacts`)
 - `source` — messaging platform (telegram, slack, etc.)
 - `status` — "success" or "error"
 - `sent_reply_to_user` — boolean (default false). When true, the subagent already called `send_reply`; dispatcher just marks processed
-- `artifacts` — optional list of file paths the subagent produced
+- `artifacts` — optional list of file paths the subagent produced; dispatcher reads and inlines their content
 - `thread_ts` — optional Slack thread timestamp
 
 ## Handling Subagent Notifications (`subagent_notification`)
