@@ -2980,7 +2980,7 @@ def _enqueue_recovery_notification(msg: dict) -> None:
         if owner_chat_id is None:
             log.warning(
                 "subagent_recovered: cannot enqueue recovery notification — "
-                "owner chat_id not resolvable from config.env"
+                "owner chat_id not resolvable from config.env or environment variables"
             )
             return
 
