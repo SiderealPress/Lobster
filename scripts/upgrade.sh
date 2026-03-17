@@ -1187,6 +1187,49 @@ run_migrations() {
         migrated=$((migrated + 1))
     fi
 
+    # Migration 16: Ensure lobster-state.json has a booted_at field.
+    # Fresh installs before this fix never wrote an initial lobster-state.json,
+    # so is_boot_grace_period() in health-check-v3.sh always returned false on
+    # first start — the grace window never applied and the health check fired
+    # immediately, triggering a restart loop. We backfill booted_at only when
+    # the field is absent; existing timestamps are left untouched.
+    local state_json="$MESSAGES_DIR/config/lobster-state.json"
+    if [ -f "$state_json" ]; then
+        local has_booted_at
+        has_booted_at=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('$state_json'))
+    print('yes' if 'booted_at' in d else 'no')
+except Exception:
+    print('no')
+" 2>/dev/null)
+        if [ "$has_booted_at" = "no" ]; then
+            python3 -c "
+import json, sys
+from datetime import datetime, timezone
+path = '$state_json'
+now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+try:
+    with open(path) as f:
+        d = json.load(f)
+except Exception:
+    d = {}
+d['booted_at'] = now
+with open(path, 'w') as f:
+    json.dump(d, f, indent=2)
+    f.write('\n')
+" 2>/dev/null
+            substep "Backfilled booted_at in lobster-state.json (fixes fresh-install restart loop)"
+            migrated=$((migrated + 1))
+        fi
+    else
+        # State file is absent entirely — create it so the next start has a grace period.
+        echo '{"mode": "active", "booted_at": "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' > "$state_json"
+        substep "Created lobster-state.json with initial booted_at (fixes fresh-install restart loop)"
+        migrated=$((migrated + 1))
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
