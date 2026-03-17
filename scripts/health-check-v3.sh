@@ -970,6 +970,8 @@ Manual intervention required:
     local max_svc_attempts=5
     if [[ "$pid_changed" == true ]]; then
         while [[ $svc_check_attempts -lt $max_svc_attempts ]]; do
+            service_ok=false
+            tmux_ok=false
             if systemctl is-active --quiet "$SERVICE_CLAUDE" 2>/dev/null; then
                 service_ok=true
             fi
@@ -979,9 +981,9 @@ Manual intervention required:
             if [[ "$service_ok" == true && "$tmux_ok" == true ]]; then
                 break
             fi
+            log_info "Service/tmux not ready yet (attempt $(( svc_check_attempts + 1 ))/$max_svc_attempts, service_ok=$service_ok tmux_ok=$tmux_ok), waiting 3s..."
             svc_check_attempts=$(( svc_check_attempts + 1 ))
             if [[ $svc_check_attempts -lt $max_svc_attempts ]]; then
-                log_info "Service/tmux not ready yet (attempt $svc_check_attempts/$max_svc_attempts, service_ok=$service_ok tmux_ok=$tmux_ok), waiting 3s..."
                 sleep 3
             fi
         done
