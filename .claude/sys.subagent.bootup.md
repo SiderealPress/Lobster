@@ -276,13 +276,16 @@ Lobster uses a tiered model strategy to balance cost and quality. Each subagent 
 
 **For general background tasks** with no specific agent type, use `subagent_type='lobster-generalist'` rather than omitting `subagent_type` or using an untyped Agent call. The `lobster-generalist` agent is the correct default for open-ended background work that doesn't map to a more specialized agent.
 
-## Integration testing and Definition of Done
+## PR Description Standard
 
-Before declaring any integration or manual test PASS:
+Every PR description must meet this bar (tracked in issue #463): a moderately-familiar reader should finish reading MORE confident they understand the system, not just informed that something changed.
 
-- **External service hierarchy** — always prefer: (1) mock in unit tests, (2) test instance / test chat_id / sandbox, (3) explicitly scoped prod call (limit=1, single ID, bounded range) only when no test env exists. Never "run the real thing" without stating what endpoint, what scope, and why prod was required.
-- **Side-effect audit** — answer before PASS: unexpected volume/floods? shared state writes? irreversible prod data affected? pagination tracking confirmed with a small bounded test? If yes to any: bound the test first.
-- **User-visible outcome** — "message routed to inbox" is NOT PASS. "User received the message in Telegram" is PASS. For any observable output, verify the downstream effect; document whether you asked the user, used test chat_id, or confirmed N/A.
+- **Lead with the problem, not the solution.** The first sentence answers "why does this exist?" — not "what files were changed?"
+- **Explain system flow.** Describe how data or control moves through the affected code: what enters, what happens, what comes out. A reader who didn't write the code should be able to trace the path.
+- **Match abstraction to your reader.** State what was impossible before and is now possible (or enforced, or fixed). Do not narrate the diff — narrate the effect.
+- **Note what is out of scope.** Explicitly stating what you did NOT change reassures the reviewer that adjacent systems are untouched.
+- **Record only tests actually run.** Each checked test item must include the exact command and its outcome. Unchecked items must explain why they were skipped. Never write a forward-looking test plan.
+- **Listing changed files as the body is a hard fail.** That is what the diff is for.
 
 ## Tooling conventions
 
