@@ -2893,6 +2893,149 @@ async def _handle_report_slash_command(msg: dict, msg_file: Path) -> None:
             pass
 
 
+def _get_owner_chat_id_and_source() -> tuple[int | str | None, str]:
+    """Return (owner_chat_id, source) for delivering recovery notifications.
+
+    Resolution order:
+      1. config.env — LOBSTER_ENABLE_SLACK / LOBSTER_SLACK_ALLOWED_CHANNELS
+         and TELEGRAM_ALLOWED_USERS (same logic as _resolve_debug_config())
+      2. Environment variables — TELEGRAM_ALLOWED_USERS and
+         LOBSTER_SLACK_ALLOWED_CHANNELS as a fallback for environments where
+         config.env is absent or incomplete (e.g. CI, test runners).
+
+    Returns (None, "telegram") with a logged warning when the owner's
+    chat_id cannot be resolved from either source.
+    """
+    try:
+        slack_enabled = False
+        slack_channel: str | None = None
+        telegram_chat_id: int | None = None
+
+        config_file = _CONFIG_DIR / "config.env"
+        if config_file.exists():
+            for line in config_file.read_text().splitlines():
+                stripped = line.strip()
+                if stripped.startswith("TELEGRAM_ALLOWED_USERS="):
+                    val = stripped.split("=", 1)[1].strip().strip('"').strip("'")
+                    first = val.split(",")[0].strip()
+                    if first.lstrip("-").isdigit():
+                        telegram_chat_id = int(first)
+                elif stripped.startswith("LOBSTER_ENABLE_SLACK="):
+                    val = stripped.split("=", 1)[1].strip().strip('"').strip("'").lower()
+                    slack_enabled = val == "true"
+                elif stripped.startswith("LOBSTER_SLACK_ALLOWED_CHANNELS="):
+                    val = stripped.split("=", 1)[1].strip().strip('"').strip("'")
+                    first_chan = val.split(",")[0].strip()
+                    if first_chan:
+                        slack_channel = first_chan
+
+        # Env var fallback: used when config.env is absent or the relevant
+        # vars were not set there (e.g. CI / test environments).
+        if telegram_chat_id is None:
+            env_users = os.environ.get("TELEGRAM_ALLOWED_USERS", "").strip().strip('"').strip("'")
+            first = env_users.split(",")[0].strip() if env_users else ""
+            if first.lstrip("-").isdigit():
+                telegram_chat_id = int(first)
+
+        if not slack_channel:
+            env_chans = os.environ.get("LOBSTER_SLACK_ALLOWED_CHANNELS", "").strip().strip('"').strip("'")
+            first_chan = env_chans.split(",")[0].strip() if env_chans else ""
+            if first_chan:
+                slack_channel = first_chan
+
+        if not slack_enabled:
+            env_slack = os.environ.get("LOBSTER_ENABLE_SLACK", "").strip().lower()
+            slack_enabled = env_slack == "true"
+
+        if slack_enabled and slack_channel:
+            return slack_channel, "slack"
+        if telegram_chat_id is not None:
+            return telegram_chat_id, "telegram"
+
+        log.warning(
+            "_get_owner_chat_id_and_source: owner chat_id not resolvable from "
+            "config.env or environment variables"
+        )
+        return None, "telegram"
+    except Exception:
+        log.warning(
+            "_get_owner_chat_id_and_source: unexpected error resolving owner chat_id",
+            exc_info=True,
+        )
+        return None, "telegram"
+
+
+def _enqueue_recovery_notification(msg: dict) -> None:
+    """Write a subagent_notification to the owner's inbox when a subagent_recovered event arrives.
+
+    The notification tells the owner which agent failed to write a result and
+    includes a brief summary of the salvaged transcript content. It is delivered
+    to the owner's chat_id (resolved from config.env) — not to the original
+    chat_id carried by the recovery message, which is always 0 (unknown).
+
+    Best-effort: any failure is logged but never raises.
+    """
+    try:
+        owner_chat_id, owner_source = _get_owner_chat_id_and_source()
+        if owner_chat_id is None:
+            log.warning(
+                "subagent_recovered: cannot enqueue recovery notification — "
+                "owner chat_id not resolvable from config.env or environment variables"
+            )
+            return
+
+        task_id = msg.get("task_id") or "unknown"
+        raw_text = msg.get("text", "")
+
+        # Extract a brief summary (first 300 chars of salvaged content, if any).
+        summary_marker = "Recovered content:\n\n"
+        summary: str
+        if summary_marker in raw_text:
+            salvaged = raw_text.split(summary_marker, 1)[1]
+            summary = salvaged[:300].strip()
+            if len(salvaged) > 300:
+                summary += "…"
+            summary_line = f"Last known activity: {summary}"
+        else:
+            summary_line = "No recoverable transcript content was found."
+
+        notification_text = (
+            f"Agent `{task_id}` failed to write a result (exited without calling write_result).\n"
+            f"{summary_line}\n\n"
+            "Consider relaunching the task if the result is needed."
+        )
+
+        now = datetime.now(timezone.utc)
+        ts_ms = int(now.timestamp() * 1000)
+        safe_task_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in task_id)[:40]
+        notification_id = f"{ts_ms}_{safe_task_id}_recovery_notify"
+
+        notification = {
+            "id": notification_id,
+            "type": "subagent_notification",
+            "source": owner_source,
+            "chat_id": owner_chat_id,
+            "text": notification_text,
+            "task_id": task_id,
+            "status": "error",
+            "sent_reply_to_user": False,
+            "timestamp": now.isoformat(),
+            "warning": (
+                "Agent exited without calling write_result. "
+                "Salvaged content was logged. Consider relaunching if result is needed."
+            ),
+        }
+
+        inbox_file = INBOX_DIR / f"{notification_id}.json"
+        atomic_write_json(inbox_file, notification)
+        log.info(
+            f"subagent_recovered: recovery notification enqueued for task {task_id!r} "
+            f"→ owner chat_id={owner_chat_id!r} ({owner_source})"
+        )
+    except Exception as exc:
+        log.error(f"subagent_recovered: failed to enqueue recovery notification: {exc}", exc_info=True)
+
+
 async def handle_check_inbox(args: dict) -> list[TextContent]:
     """Check for new messages in inbox."""
     source_filter = args.get("source", "").lower()
@@ -2914,6 +3057,15 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
                     except Exception as exc:
                         log.error(f"check_inbox: /report pre-processor error: {exc}", exc_info=True)
                     continue  # skip — already handled
+                # subagent_recovered pre-processor: enqueue an owner notification so the
+                # user is informed about the failed agent. The raw recovery message still
+                # flows through to the dispatcher (with a dispatcher_hint) so it can call
+                # mark_processed — but the salvaged dump is never relayed directly.
+                if msg.get("type") == "subagent_recovered":
+                    try:
+                        _enqueue_recovery_notification(msg)
+                    except Exception as exc:
+                        log.error(f"check_inbox: subagent_recovered pre-processor error: {exc}", exc_info=True)
                 msg["_filename"] = f.name
                 messages.append(msg)
                 if len(messages) >= limit:
@@ -2968,6 +3120,9 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
             task_id = msg.get("task_id", "")
             task_suffix = f" from task `{task_id}`" if task_id else ""
             output += f"**[OBSERVATION]** category=`{category}`{task_suffix}\n"
+        elif msg_type == "subagent_recovered":
+            task_id = msg.get("task_id", "?")
+            output += f"⚠️ **[SUBAGENT RECOVERY]** task `{task_id}` exited without calling write_result — salvaged content logged\n"
         else:
             output += f"**[{source}]** from **{user}**\n"
         output += f"Chat ID: `{chat_id}` | Message ID: `{msg_id}`\n"
@@ -2978,6 +3133,8 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
         # dispatcher_hint: structural signals for the dispatcher to route correctly
         if msg_type == "subagent_notification":
             output += "dispatcher_hint: SUBAGENT_NOTIFICATION — user already received the subagent's reply. Don't summarize it. If you respond, add new value only — a question, a correction, missing context. Call mark_processed when done.\n"
+        if msg_type == "subagent_recovered":
+            output += "dispatcher_hint: SUBAGENT_RECOVERED — agent exited without calling write_result; content was salvaged from transcript. The owner has been notified via inbox. Do NOT relay the raw dump to the user. Call mark_processed when done.\n"
         _has_file = msg_type in ("voice", "photo", "document") or bool(
             msg.get("image_file") or msg.get("image_files") or
             msg.get("file_path") or msg.get("audio_file")
@@ -3325,6 +3482,7 @@ async def handle_mark_processing(args: dict) -> list[TextContent]:
     msg_text = msg_data.get("text", "") or msg_data.get("transcription", "")
     _SKIP_OBSERVATION_TYPES = (
         "subagent_result", "subagent_error", "self_check", "subagent_observation",
+        "subagent_recovered",  # recovery events are system-internal; salvaged text is not user content
         "debug_observation",  # never run tier 1 on our own debug output (would loop)
     )
     if msg_text and msg_type not in _SKIP_OBSERVATION_TYPES:
@@ -3339,7 +3497,7 @@ async def handle_mark_processing(args: dict) -> list[TextContent]:
     short_msg_id = message_id[:20] if len(message_id) > 20 else message_id
     _SKIP_CONTEXT_TYPES = (
         "subagent_result", "subagent_error", "self_check", "callback", "system",
-        "subagent_observation", "debug_observation",  # internal messages — not real user content
+        "subagent_observation", "subagent_recovered", "debug_observation",  # internal messages — not real user content
     )
     if _user_model is not None and msg_text and msg_type not in _SKIP_CONTEXT_TYPES:
         if _should_inject_user_context(msg_text):
