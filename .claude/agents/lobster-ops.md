@@ -1,7 +1,6 @@
 ---
 name: lobster-ops
 description: Lobster system operations specialist. Use for troubleshooting services, checking logs, managing configuration, and understanding the Lobster architecture.
-tools: Read, Grep, Glob, Bash
 model: haiku
 ---
 
