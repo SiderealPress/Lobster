@@ -679,7 +679,7 @@ setup_syncthing() {
     fi
     echo ""
 
-    if [[ ! "$response" =~ ^[Yy]$ ]]; then
+    if [[ -n "$response" && ! "$response" =~ ^[Yy]$ ]]; then
         info "Skipping Syncthing setup"
         return 0
     fi
