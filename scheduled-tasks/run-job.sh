@@ -11,6 +11,12 @@ export PATH="$HOME/.local/bin:$PATH"
 # CLAUDECODE leaks when run-job.sh is manually tested from a Claude session.
 unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT 2>/dev/null || true
 
+# Allow scheduled jobs to call send_reply and other session-guarded MCP tools.
+# Without this, inbox_server.py's session guard blocks send_reply silently
+# because cron-launched processes are not descendants of the lobster tmux session.
+# See issue #571.
+export LOBSTER_MAIN_SESSION=1
+
 JOB_NAME="$1"
 
 if [ -z "$JOB_NAME" ]; then
