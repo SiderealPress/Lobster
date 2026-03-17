@@ -30,6 +30,22 @@ AGENT_STATE_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}/.state"
 # Maximum agents to show in summary (keep messages concise)
 AGENT_MAX_DISPLAY=5
 
+# Derive the Claude Code tmp base for this user and workspace.
+# Claude Code stores session data under /tmp/claude-<uid>/<workspace-hash>/
+# where workspace-hash = workspace path with '/' replaced by '-'.
+# Task output files live in per-session UUID subdirs: <base>/<uuid>/tasks/*.output
+# If AGENT_TASKS_DIR is set, it overrides this (used by tests).
+_default_tasks_glob() {
+    if [ -n "${AGENT_TASKS_DIR:-}" ]; then
+        echo "${AGENT_TASKS_DIR}/*.output"
+        return
+    fi
+    local claude_tmp_base="/tmp/claude-$(id -u)"
+    local workspace_hash
+    workspace_hash=$(echo "${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}" | sed 's|/|-|g')
+    echo "${claude_tmp_base}/${workspace_hash}/*/tasks/*.output"
+}
+
 # Format seconds into human-readable duration: 30s, 5m, 2h
 _format_duration() {
     local seconds="$1"
@@ -71,17 +87,13 @@ _get_stop_reason() {
 # Scan agent output files and return a summary string.
 # Returns empty string if no agents found.
 scan_agent_status() {
-    local tasks_dir="${AGENT_TASKS_DIR:-/tmp/claude-1000/-home-admin-lobster-workspace/tasks}"
-
-    # No directory or no .output files -> empty
-    if [ ! -d "$tasks_dir" ]; then
-        return 0
-    fi
+    local tasks_glob
+    tasks_glob=$(_default_tasks_glob)
 
     local output_files=()
-    while IFS= read -r -d '' f; do
+    while IFS= read -r f; do
         output_files+=("$f")
-    done < <(find "$tasks_dir" -maxdepth 1 -name "*.output" -print0 2>/dev/null)
+    done < <(compgen -G "$tasks_glob" 2>/dev/null | sort)
 
     if [ ${#output_files[@]} -eq 0 ]; then
         return 0
@@ -158,20 +170,17 @@ scan_agent_status() {
 #
 # Returns a structured completion summary or empty string if nothing new.
 scan_completed_tasks() {
-    local tasks_dir="${AGENT_TASKS_DIR:-/tmp/claude-1000/-home-admin-lobster-workspace/tasks}"
+    local tasks_glob
+    tasks_glob=$(_default_tasks_glob)
     local reported_file="$AGENT_STATE_DIR/reported-tasks"
 
     mkdir -p "$AGENT_STATE_DIR"
     touch "$reported_file" 2>/dev/null
 
-    if [ ! -d "$tasks_dir" ]; then
-        return 0
-    fi
-
     local output_files=()
-    while IFS= read -r -d '' f; do
+    while IFS= read -r f; do
         output_files+=("$f")
-    done < <(find "$tasks_dir" -maxdepth 1 -name "*.output" -print0 2>/dev/null)
+    done < <(compgen -G "$tasks_glob" 2>/dev/null | sort)
 
     if [ ${#output_files[@]} -eq 0 ]; then
         return 0
