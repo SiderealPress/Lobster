@@ -8,8 +8,53 @@ from write_result args in the transcript.
 This is the spawn-side mirror of require-register-agent-task-id.py: that hook
 blocks register_agent calls without task_id; this hook blocks Agent spawns where
 the prompt doesn't carry task_id into the subagent's context at all.
+
+## Accepted formats
+
+YAML frontmatter (preferred):
+
+    ---
+    task_id: my-task
+    chat_id: 8305714125
+    source: telegram
+    ---
+
+Legacy text format (backward compat, still accepted):
+
+    Your task_id is: my-task
 """
-import json, sys
+import json
+import re
+import sys
+
+
+def _has_task_id_in_frontmatter(prompt: str) -> bool:
+    """Return True if prompt starts with YAML frontmatter containing a task_id key."""
+    prompt = prompt.lstrip()
+    if not prompt.startswith("---"):
+        return False
+
+    rest = prompt[3:]
+    end = rest.find("\n---")
+    if end == -1:
+        return False
+
+    block = rest[:end]
+    for line in block.splitlines():
+        line = line.strip()
+        if re.match(r"^task_id\s*:", line):
+            # Check the value is non-empty
+            _, _, value = line.partition(":")
+            if value.strip():
+                return True
+
+    return False
+
+
+def _has_task_id_in_text(prompt: str) -> bool:
+    """Return True if prompt contains the legacy 'task_id is: X' pattern."""
+    return bool(re.search(r"task_id\s+is:\s*\S+", prompt, re.IGNORECASE))
+
 
 try:
     data = json.load(sys.stdin)
@@ -24,11 +69,14 @@ if tool != "Agent":
 
 prompt = inp.get("prompt", "")
 
-if "task_id is:" not in prompt:
-    print(
-        'BLOCKED: Agent spawned without task_id in prompt. '
-        'Include "Your task_id is: <slug>" so the subagent can pass it to write_result. '
-        'This enables reliable DB matching in the SubagentStop hook.',
-        file=sys.stderr,
-    )
-    sys.exit(2)
+if _has_task_id_in_frontmatter(prompt) or _has_task_id_in_text(prompt):
+    sys.exit(0)
+
+print(
+    'BLOCKED: Agent spawned without task_id in prompt. '
+    'Include a YAML frontmatter block (---\\ntask_id: <slug>\\n---) at the top of the prompt, '
+    'or the legacy format "Your task_id is: <slug>". '
+    'This enables reliable DB matching in the SubagentStop hook.',
+    file=sys.stderr,
+)
+sys.exit(2)

@@ -1634,6 +1634,27 @@ else
     info "Skipping restore-exec-bit hook (settings.json not yet created)"
 fi
 
+# Set up Claude Code PostToolUse hook to auto-register Agent spawns in agent_sessions.db
+chmod +x "$INSTALL_DIR/hooks/auto-register-agent.py" || true
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '.hooks.PostToolUse[]? | select(.hooks[]?.command | test("auto-register-agent"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq '.hooks.PostToolUse = (.hooks.PostToolUse // []) + [{
+            "matcher": "Agent",
+            "hooks": [{
+                "type": "command",
+                "command": "python3 '"$INSTALL_DIR"'/hooks/auto-register-agent.py",
+                "timeout": 10
+            }]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "auto-register-agent hook installed"
+    else
+        info "auto-register-agent hook already configured in Claude Code settings"
+    fi
+else
+    info "Skipping auto-register-agent hook (settings.json not yet created)"
+fi
+
 # Set up Claude Code PreToolUse hook to block tool use after compaction without context reload
 chmod +x "$INSTALL_DIR/hooks/post-compact-gate.py" || true
 if [ -f "$CLAUDE_SETTINGS" ]; then
