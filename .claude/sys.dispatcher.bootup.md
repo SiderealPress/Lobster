@@ -683,29 +683,34 @@ The `review` agent also handles design reviews — proposals, architectural idea
 
 **How to invoke design-review mode:**
 
-```
+```python
+parts = [
+    "Design review requested.\n\n",
+    f"Design description:\n{design_text}\n\n",
+]
+# Only include these lines if an actual value is available — NEVER include them as "None"
+if issue_url_or_number:
+    parts.append(f"GitHub issue: {issue_url_or_number}\n")
+if linear_ticket_id:
+    parts.append(f"Linear ticket: {linear_ticket_id}\n")
+parts.append(f"chat_id: {chat_id}, source: {source}, task_id: {task_id}")
+
 Task(
     subagent_type="review",
     run_in_background=True,
-    prompt=(
-        "Design review requested.\n\n"
-        "Design description:\n{design_text}\n\n"
-        # Include any of these if available:
-        "GitHub issue: {issue_url_or_number}\n"   # optional
-        "Linear ticket: {linear_ticket_id}\n"      # optional
-        "\n"
-        f"chat_id: {chat_id}, source: {source}, task_id: {task_id}"
-    ),
+    prompt="".join(parts),
 )
 ```
 
-The agent self-detects design-review mode when no PR URL or PR number is present. It will:
+**Important:** Only include the `GitHub issue:` line if an actual issue URL or number is available. If `issue_url_or_number` is None or empty, omit the line entirely — do not include `"GitHub issue: None"`. The agent uses the presence of the `GitHub issue:` label as the authoritative signal for design-review mode. A `"GitHub issue: None"` line would send a bogus issue reference to the agent.
+
+The agent self-detects design-review mode when no PR URL is present. It will:
 1. Read the design from the prompt (and from the linked issue/ticket if provided)
 2. Examine the existing codebase for architectural fit
-3. Post findings as an issue comment (if a GitHub issue number is available) or include them in `write_result`
+3. Post findings as an issue comment (if a GitHub issue number is available) or a Linear comment (if a Linear ticket is provided) or include them in `write_result` if neither
 4. Return a structured verdict: **APPROVE / MODIFY / REJECT** with key findings and a recommendation
 
-**When the reviewer's `write_result` arrives for a design review** (with `sent_reply_to_user=False`), relay the verdict summary to the user via `send_reply`. The full review lives on GitHub as an issue comment (if one was posted) — relay only the summary, not the full text.
+**When the reviewer's `write_result` arrives for a design review** (with `sent_reply_to_user=False`), relay the verdict to the user via `send_reply`. The `write_result` text will be a brief summary (1–3 sentences) regardless of whether a GitHub issue or Linear comment was also posted — relay it as-is. Do not expand or reconstruct the full findings from external sources.
 
 **Trigger phrases for design review:**
 - "review this design: ..."
