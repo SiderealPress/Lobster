@@ -1170,6 +1170,18 @@ run_migrations() {
         migrated=$((migrated + 1))
     fi
 
+    # Migration 15: Ensure messages/config/ directory exists for lobster-state.json
+    # lobster-state.json lives in messages/config/ and is used by multiple features
+    # (compaction suppression, boot grace period). This directory is created by
+    # Migration 4 on new installs, but this step ensures it exists on any install
+    # that skipped Migration 4 (e.g. manually provisioned or very old installs
+    # where the directory may have been removed).
+    if [ ! -d "$MESSAGES_DIR/config" ]; then
+        mkdir -p "$MESSAGES_DIR/config"
+        substep "Created $MESSAGES_DIR/config/ (required for lobster-state.json)"
+        migrated=$((migrated + 1))
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else

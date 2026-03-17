@@ -133,6 +133,43 @@ write_state() {
 EOF
 }
 
+# Write a booted_at timestamp into the state file without clobbering other fields.
+# Called once at startup so the health-check can suppress false-positive alerts
+# during the ~60-90s it takes a fresh session to initialize.
+write_boot_stamp() {
+    local now
+    now=$(date -Iseconds)
+    # If state file already exists, merge booted_at in without losing other fields.
+    # Fall back to writing a minimal JSON if the file is absent or unreadable.
+    if [[ -f "$STATE_FILE" ]]; then
+        python3 -c "
+import json, sys
+path = '$STATE_FILE'
+now = '$now'
+try:
+    with open(path) as f:
+        d = json.load(f)
+except Exception:
+    d = {}
+d['booted_at'] = now
+with open(path, 'w') as f:
+    json.dump(d, f, indent=2)
+    f.write('\n')
+" 2>/dev/null || true
+    else
+        cat > "$STATE_FILE" << EOF
+{
+  "mode": "starting",
+  "detail": "boot",
+  "updated_at": "$now",
+  "booted_at": "$now",
+  "pid": $$
+}
+EOF
+    fi
+    log "Boot stamp written (booted_at=$now)"
+}
+
 read_state_mode() {
     if [[ -f "$STATE_FILE" ]]; then
         python3 -c "
@@ -437,6 +474,11 @@ main() {
     log "================================================================"
 
     preflight
+
+    # Write boot timestamp before the first health-check can fire.
+    # This gives the health-check BOOT_GRACE_SECONDS to wait before
+    # expecting a running Claude process or a drained inbox.
+    write_boot_stamp
 
     send_telegram_alert "🔄 *Lobster Starting*
 Claude persistent session initializing."
