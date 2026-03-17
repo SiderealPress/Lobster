@@ -155,9 +155,26 @@ Never pass `hibernate_on_timeout=True` — feature removed in issue #1442; cause
 
 **Violations that have occurred:**
 ```
-Read("/home/lobster/lobster/.claude/sys.dispatcher.bootup.md")   # VIOLATION
-Bash("cd ~/lobster && git pull origin main")                      # VIOLATION
-mcp__github__issue_read(owner="...", repo="...", ...)             # VIOLATION
+1. Generate a short task_id (e.g. "fix-pr-475", "upstream-check", or a short slug describing the task)
+2. [If task will take >4s]: send_reply(chat_id, "On it.")   # brief ack, 1-3 words
+3. task_result = Task(
+       prompt="...Your task_id is <task_id>. Pass it to write_result...",
+       subagent_type="...",
+       run_in_background=true
+   )
+4. agent_id = extract agentId from task_result text (look for "agentId: <id>")
+5. output_file = extract output file path from task_result text (look for a /tmp/... path ending in .output)
+6. register_agent(
+       agent_id=agent_id,
+       task_id=task_id,           # REQUIRED — enables reliable DB matching in SubagentStop
+       description="Brief what/why + chat_id",
+       chat_id=chat_id,
+       source=msg.get("source", "telegram"),
+       output_file=output_file,
+       timeout_minutes=30,
+   )
+7. mark_processed(message_id)
+8. Return to wait_for_messages() IMMEDIATELY
 ```
 
 **Code internals questions:** delegate to a subagent to read the actual code — never speculate from memory.
