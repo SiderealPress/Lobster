@@ -702,7 +702,7 @@ Task(
 )
 ```
 
-**Important:** Only include the `GitHub issue:` line if an actual issue URL or number is available. If `issue_url_or_number` is None or empty, omit the line entirely — do not include `"GitHub issue: None"`. The agent uses the presence of the `GitHub issue:` label as the authoritative signal for design-review mode. A `"GitHub issue: None"` line would send a bogus issue reference to the agent.
+**Important:** Only include the `GitHub issue:` line if an actual issue URL or number is available. If `issue_url_or_number` is None or empty, omit the line entirely — do not include `"GitHub issue: None"`. The agent uses the presence of the `GitHub issue:` label as a strong signal for design-review mode. A `"GitHub issue: None"` line would send a bogus issue reference to the agent.
 
 The agent self-detects design-review mode when no PR URL is present. It will:
 1. Read the design from the prompt (and from the linked issue/ticket if provided)
