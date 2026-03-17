@@ -30,7 +30,8 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyParameters
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, MessageReactionHandler, filters, ContextTypes
+from collections import deque
 
 
 def md_to_html(text: str) -> str:
@@ -123,6 +124,29 @@ CLAUDE_WAKE_SCRIPT = _REPO_DIR / "scripts" / "start-lobster.sh"
 # performs a second-pass split at a progressively tighter limit.
 TELEGRAM_HARD_LIMIT = 4096
 TELEGRAM_MAX_LENGTH = 4000
+
+# Reaction signal mapping: emoji -> structured signal understood by the dispatcher.
+# Unknown reactions are silently ignored — only map the unambiguous ones.
+REACTION_SIGNALS: dict[str, str] = {
+    "\U0001f44d": "yes",    # 👍 thumbs up
+    "\U0001f44e": "no",     # 👎 thumbs down
+    "\u2705": "yes",        # ✅ check mark button
+    "\U0001f44c": "yes",    # 👌 OK hand
+    "\u274c": "no",         # ❌ cross mark
+    "\U0001f6ab": "cancel", # 🚫 no entry sign
+}
+
+# Reactions undone within this window (seconds) are treated as cancelled and ignored.
+REACTION_UNDO_WINDOW_SECS: float = 5.0
+
+# Pending reactions: tg_msg_id -> asyncio.Task — allows cancellation on undo.
+# Keyed by (chat_id, tg_msg_id) to handle multi-user group chats correctly.
+_pending_reactions: dict[tuple[int, int], asyncio.Task] = {}
+
+# Rolling ring buffer of sent messages: tg_msg_id -> text snippet.
+# Populated in OutboxHandler.process_reply so reaction signals can include
+# the text of the message that was reacted to.
+_sent_message_buffer: deque[tuple[int, str]] = deque(maxlen=50)
 
 
 def _is_inside_code_block(text: str, pos: int) -> bool:
@@ -987,6 +1011,115 @@ async def handle_edited_message(update: Update, context: ContextTypes.DEFAULT_TY
     atomic_write_json(inbox_file, msg_data)
 
 
+def _lookup_reacted_to_text(tg_msg_id: int) -> str:
+    """Return the buffered text for a sent message, or empty string if not found.
+
+    Pure lookup against _sent_message_buffer — no I/O.
+    """
+    for buffered_id, buffered_text in _sent_message_buffer:
+        if buffered_id == tg_msg_id:
+            return buffered_text
+    return ""
+
+
+async def _emit_reaction_signal(
+    chat_id: int,
+    tg_msg_id: int,
+    emoji: str,
+    signal: str,
+) -> None:
+    """Write a reaction inbox entry after the undo window has elapsed.
+
+    This coroutine is scheduled as an asyncio.Task and cancelled if the user
+    removes the reaction within REACTION_UNDO_WINDOW_SECS.
+    """
+    # Note: pending reactions are dropped on bot restart — acceptable given the 5s window
+    await asyncio.sleep(REACTION_UNDO_WINDOW_SECS)
+
+    reacted_to_text = _lookup_reacted_to_text(tg_msg_id)
+    msg_id = f"{int(time.time() * 1000)}_reaction_{tg_msg_id}"
+
+    msg_data = {
+        "id": msg_id,
+        "source": "telegram",
+        "type": "reaction",
+        "chat_id": chat_id,
+        "telegram_message_id": tg_msg_id,
+        "emoji": emoji,
+        "signal": signal,
+        "reacted_to_text": reacted_to_text,
+        "text": f"[Reaction: {emoji} ({signal}) on message {tg_msg_id}]",
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+
+    inbox_file = INBOX_DIR / f"{msg_id}.json"
+    atomic_write_json(inbox_file, msg_data)
+    log.info(f"Wrote reaction signal to inbox: {msg_id} emoji={emoji} signal={signal}")
+
+    # Clean up the pending entry
+    _pending_reactions.pop((chat_id, tg_msg_id), None)
+
+
+async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle MessageReactionUpdated events from Telegram.
+
+    Design:
+    - New reactions are buffered for REACTION_UNDO_WINDOW_SECS before being
+      written to the inbox.  If the user removes the reaction within the window,
+      the pending task is cancelled and nothing is written.
+    - Only reactions listed in REACTION_SIGNALS are delivered; unknown emojis
+      are silently ignored.
+    - Reaction removals (new_reaction is empty) cancel any pending task for that
+      message, preventing spurious signals when the user quickly toggles.
+    """
+    reaction_update = update.message_reaction
+    if not reaction_update:
+        return
+
+    user = update.effective_user
+    if not user or user.id not in ALLOWED_USERS:
+        return
+
+    chat_id: int = reaction_update.chat.id
+    tg_msg_id: int = reaction_update.message_id
+    pending_key = (chat_id, tg_msg_id)
+
+    new_reactions = reaction_update.new_reaction or []
+    old_reactions = reaction_update.old_reaction or []
+
+    # Determine the newly added emoji (present in new but not old)
+    old_emojis = {r.emoji for r in old_reactions if hasattr(r, "emoji")}
+    new_emojis = {r.emoji for r in new_reactions if hasattr(r, "emoji")}
+    added = new_emojis - old_emojis
+    removed = old_emojis - new_emojis
+
+    # Cancel pending task for this message on any removal (covers undo pattern)
+    if removed and pending_key in _pending_reactions:
+        _pending_reactions.pop(pending_key).cancel()
+        log.debug(f"Reaction cancelled for chat={chat_id} msg={tg_msg_id}")
+
+    for emoji in added:
+        signal = REACTION_SIGNALS.get(emoji)
+        if signal is None:
+            log.debug(f"Unknown reaction emoji={emoji!r} — ignored")
+            continue
+
+        # Cancel any existing pending task for this (chat, message) pair
+        existing = _pending_reactions.pop(pending_key, None)
+        if existing:
+            existing.cancel()
+
+        # Schedule signal delivery after the undo window
+        task = asyncio.create_task(
+            _emit_reaction_signal(chat_id, tg_msg_id, emoji, signal)
+        )
+        _pending_reactions[pending_key] = task
+        log.info(
+            f"Reaction buffered: emoji={emoji} signal={signal} "
+            f"chat={chat_id} msg={tg_msg_id}"
+        )
+
+
 async def handle_audio_message(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -1245,8 +1378,9 @@ class OutboxHandler(FileSystemEventHandler):
                     chunk_markup = reply_markup if i == n - 1 else None
                     # Only thread the first chunk; subsequent chunks are continuations
                     chunk_reply_params = reply_params if i == 0 else None
+                    sent_msg = None
                     try:
-                        await bot_app.bot.send_message(
+                        sent_msg = await bot_app.bot.send_message(
                             chat_id=chat_id,
                             text=html_chunk,
                             parse_mode="HTML",
@@ -1264,12 +1398,16 @@ class OutboxHandler(FileSystemEventHandler):
                                 f"HTML send failed for {chat_id}, falling back to "
                                 f"truncated plain text ({len(md_chunk)} chars): {exc}"
                             )
-                        await bot_app.bot.send_message(
+                        sent_msg = await bot_app.bot.send_message(
                             chat_id=chat_id,
                             text=plain,
                             reply_markup=chunk_markup,
                             reply_parameters=chunk_reply_params,
                         )
+                # Buffer only the LAST chunk so that reactions (which reference the
+                # final visible message_id) map to the correct text snippet.
+                if sent_msg is not None:
+                    _sent_message_buffer.append((sent_msg.message_id, md_chunk[:200]))
                 if n > 1:
                     log.info(f"Sent reply to {chat_id} in {n} chunks: {text[:50]}...")
                 else:
@@ -1376,6 +1514,8 @@ async def run_bot():
     bot_app.add_handler(MessageHandler(filters.Document.ALL, handle_message))
     bot_app.add_handler(CallbackQueryHandler(handle_callback_query))
     bot_app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE & filters.TEXT, handle_edited_message))
+    # Requires python-telegram-bot >= v20.6 for Update.ALL_TYPES to include message_reaction
+    bot_app.add_handler(MessageReactionHandler(handle_reaction))
     bot_app.add_error_handler(error_handler)
 
     # Initialize and start
