@@ -1075,22 +1075,15 @@ def _migrate_json_to_sqlite(json_path: Path, conn: sqlite3.Connection) -> int:
 # ---------------------------------------------------------------------------
 
 def _next_report_id(conn: sqlite3.Connection) -> str:
-    """Return the next sequential RPT-NNN id, collision-safe.
+    """Generate the next sequential report ID in the form RPT-NNN.
 
-    Reads the report_id of the last-inserted row (by rowid order, which is
-    insertion order) and increments its numeric suffix. Using the stored
-    RPT-NNN string rather than MAX(id) means deletions cannot cause
-    collisions: even if row 5 is deleted, the next call will still read
-    RPT-005 from some other row and produce RPT-006.
+    Reads the current max id from the reports table to derive the next
+    integer. Pure determination from DB state — no external counters.
     """
-    row = conn.execute(
-        "SELECT report_id FROM reports ORDER BY id DESC LIMIT 1"
-    ).fetchone()
-    if row is None:
-        return "RPT-001"
-    last = row[0]  # e.g. "RPT-042"
-    n = int(last.split("-")[1]) + 1
-    return f"RPT-{n:03d}"
+    cursor = conn.execute("SELECT MAX(id) FROM reports")
+    row = cursor.fetchone()
+    next_int = (row[0] or 0) + 1
+    return f"RPT-{next_int:03d}"
 
 
 def create_report(
@@ -1100,7 +1093,6 @@ def create_report(
     recent_messages: list | None = None,
     active_session_ids: list[str] | None = None,
     snapshot_state: dict | None = None,
-    instance_id: str | None = None,
     path: Path | None = None,
 ) -> dict:
     """Insert a new report record and return its data dict.
@@ -1116,14 +1108,11 @@ def create_report(
         recent_messages:    Last N messages from conversation history (list of dicts).
         active_session_ids: IDs of agent sessions active at report time.
         snapshot_state:     Any additional ambient state to capture (arbitrary dict).
-        instance_id:        Observability token or hostname identifying the Lobster
-                            instance that filed the report. Used by BIS-85 forwarder
-                            for multi-instance routing. NULL means unknown/single-instance.
         path:               DB path override (for tests).
 
     Returns:
         Dict with keys: report_id, id, description, chat_id, source,
-        instance_id, created_at, status.
+        created_at, status.
     """
     import json as _json
 
@@ -1142,8 +1131,8 @@ def create_report(
         INSERT INTO reports
             (report_id, description, chat_id, source,
              recent_messages_json, agent_session_ids_json,
-             snapshot_state_json, created_at, status, instance_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)
+             snapshot_state_json, created_at, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open')
         """,
         (
             report_id,
@@ -1154,7 +1143,6 @@ def create_report(
             session_ids_json,
             snapshot_json,
             now,
-            instance_id,
         ),
     )
     conn.commit()
@@ -1164,7 +1152,6 @@ def create_report(
         "description": description,
         "chat_id": str(chat_id),
         "source": source,
-        "instance_id": instance_id,
         "created_at": now,
         "status": "open",
     }
