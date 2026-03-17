@@ -27,6 +27,7 @@ import signal
 import sys
 import tempfile
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from watchdog.observers import Observer
@@ -37,6 +38,7 @@ from watchdog.events import FileSystemEventHandler
 # ---------------------------------------------------------------------------
 _MESSAGES = Path(os.environ.get("LOBSTER_MESSAGES", Path.home() / "messages"))
 _WORKSPACE = Path(os.environ.get("LOBSTER_WORKSPACE", Path.home() / "lobster-workspace"))
+_CONFIG_DIR = Path(os.environ.get("LOBSTER_CONFIG_DIR", Path.home() / "lobster-config"))
 
 PENDING_DIR = _MESSAGES / "pending-transcription"
 INBOX_DIR = _MESSAGES / "inbox"
@@ -247,15 +249,98 @@ async def run_whisper_cpp(audio_path: Path, timeout_s: int = TRANSCRIPTION_TIMEO
     return True, transcription
 
 
+def _read_admin_chat_id() -> int | None:
+    """Read the first TELEGRAM_ALLOWED_USERS entry from config.env as the admin chat_id.
+
+    Returns None if config is unavailable or the value cannot be parsed.
+    This mirrors the same lookup in inbox_server.py (_resolve_debug_config).
+    """
+    try:
+        config_file = _CONFIG_DIR / "config.env"
+        if not config_file.exists():
+            return None
+        for line in config_file.read_text().splitlines():
+            stripped = line.strip()
+            if stripped.startswith("TELEGRAM_ALLOWED_USERS="):
+                val = stripped.split("=", 1)[1].strip().strip('"').strip("'")
+                first = val.split(",")[0].strip()
+                if first.lstrip("-").isdigit():
+                    return int(first)
+    except Exception:
+        pass
+    return None
+
+
+def notify_dispatcher_dead_letter(msg_data: dict, reason: str) -> None:
+    """Write a system_error observation to the dispatcher inbox on dead-letter.
+
+    Drops a subagent_observation JSON file directly into ~/messages/inbox/ so
+    the dispatcher picks it up on its next wait_for_messages() call. This
+    mirrors the format written by handle_write_observation() in inbox_server.py.
+
+    Uses LOBSTER_ADMIN_CHAT_ID env var if set, otherwise reads the first entry
+    of TELEGRAM_ALLOWED_USERS from config.env. Silent on any failure — alerting
+    must never block or crash the transcription pipeline.
+    """
+    try:
+        # Resolve admin chat_id: env override takes priority
+        chat_id: int | None = None
+        env_val = os.environ.get("LOBSTER_ADMIN_CHAT_ID", "").strip()
+        if env_val.lstrip("-").isdigit():
+            chat_id = int(env_val)
+        else:
+            chat_id = _read_admin_chat_id()
+
+        if chat_id is None:
+            log.warning("notify_dispatcher_dead_letter: no admin chat_id found, skipping alert")
+            return
+
+        msg_id = msg_data.get("id", "unknown")
+        # Use _pending_file hint if set by move_to_dead_letter, fall back to msg_id
+        pending_file_name = msg_data.get("_pending_file", msg_id)
+        now = datetime.now(timezone.utc)
+        ts_ms = int(now.timestamp() * 1000)
+        observation_id = f"{ts_ms}_observation_{uuid.uuid4().hex[:8]}"
+
+        alert_text = (
+            f"[system_error] Transcription dead-letter: {pending_file_name}\n"
+            f"Message ID: {msg_id}\n"
+            f"Reason: {reason}"
+        )
+
+        observation: dict = {
+            "id": observation_id,
+            "type": "subagent_observation",
+            "source": "telegram",
+            "chat_id": chat_id,
+            "text": alert_text,
+            "category": "system_error",
+            "timestamp": now.isoformat(),
+            "task_id": f"transcription-dead-letter-{msg_id}",
+        }
+
+        INBOX_DIR.mkdir(parents=True, exist_ok=True)
+        inbox_file = INBOX_DIR / f"{observation_id}.json"
+        atomic_write_json(inbox_file, observation)
+        log.info(f"Dead-letter alert queued for dispatcher (chat_id={chat_id}): {observation_id}")
+    except Exception as e:
+        log.warning(f"notify_dispatcher_dead_letter failed (non-fatal): {e}")
+
+
 def move_to_dead_letter(pending_file: Path, msg_data: dict, reason: str) -> None:
     """Move a failed file to dead-letter, annotating with failure reason."""
     DEAD_LETTER_DIR.mkdir(parents=True, exist_ok=True)
     msg_data["transcription_failure_reason"] = reason
     msg_data["transcription_failed_at"] = datetime.now(timezone.utc).isoformat()
+    # Stash the filename so notify_dispatcher_dead_letter can include it in the alert.
+    msg_data["_pending_file"] = pending_file.name
     dest = DEAD_LETTER_DIR / pending_file.name
-    atomic_write_json(dest, msg_data)
+    # Pop internal field before writing to disk so it doesn't leak into stored JSON.
+    payload = {k: v for k, v in msg_data.items() if k != "_pending_file"}
+    atomic_write_json(dest, payload)
     pending_file.unlink(missing_ok=True)
     log.error(f"Moved {pending_file.name} to dead-letter: {reason}")
+    notify_dispatcher_dead_letter(msg_data, reason)
 
 
 # ---------------------------------------------------------------------------
