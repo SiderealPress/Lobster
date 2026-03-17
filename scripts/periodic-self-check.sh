@@ -69,28 +69,19 @@ if [ "$INBOX_COUNT" -ge "$MAX_INBOX_DEPTH" ]; then
     exit 0
 fi
 
-# Guard 5: Subagent check — only self-check when subagents are running
-# If claude count is <= 1, only the main session exists (no subagents to check on)
-CLAUDE_COUNT=$(pgrep -c -f "claude" 2>/dev/null || echo "0")
-
 # Source agent status scanner for both status and completion detection
 AGENT_STATUS_SCRIPT="${LOBSTER_INSTALL_DIR:-$HOME/lobster}/scripts/agent-status.sh"
 source "$AGENT_STATUS_SCRIPT"
 
-# Check for completed tasks first (works even if subagents already exited)
+# Check for completed tasks first (works even if subagents already exited).
+# scan_completed_tasks() is capped at COMPLETED_MAX_REPORT=3 entries per cycle;
+# any larger backlog is silently marked reported so it never bloats the message.
 COMPLETED_TASKS=$(scan_completed_tasks)
 
-if [ -n "$COMPLETED_TASKS" ]; then
-    # Completed task found — inject structured completion message.
-    # This replaces the generic "status?" prompt with actionable info,
-    # so the dispatcher can relay results directly without LLM reasoning
-    # about what to check.
-    SELF_CHECK_TEXT="[Task Completed] ${COMPLETED_TASKS}"
-else
-    # Check pending-agents.json tracker — subagents may have already exited
-    # but still need relay to Drew (processes gone, record still in file).
-    PENDING_AGENTS_FILE="${MESSAGES_DIR}/config/pending-agents.json"
-    PENDING_COUNT=$(python3 -c "
+# Check pending-agents.json tracker — subagents may have already exited
+# but still need relay to Drew (processes gone, record still in file).
+PENDING_AGENTS_FILE="${MESSAGES_DIR}/config/pending-agents.json"
+PENDING_COUNT=$(python3 -c "
 import json, sys
 try:
     with open('$PENDING_AGENTS_FILE') as f:
@@ -100,14 +91,26 @@ except Exception:
     print(0)
 " 2>/dev/null || echo "0")
 
-    # No completed tasks — only inject status check if subagents are still
-    # running OR there are pending agents in the tracker.
-    if [ "$CLAUDE_COUNT" -le 1 ] && [ "$PENDING_COUNT" -eq 0 ] 2>/dev/null; then
-        exit 0
+# scan_agent_status() only returns running/starting agents — done agents are excluded.
+AGENT_SUMMARY=$(scan_agent_status)
+
+# If nothing is actionable, exit silently — no message needed.
+# "Nothing running" is a valid, expected state that requires no dispatcher attention.
+if [ -z "$COMPLETED_TASKS" ] && [ -z "$AGENT_SUMMARY" ] && [ "$PENDING_COUNT" -eq 0 ] 2>/dev/null; then
+    exit 0
+fi
+
+if [ -n "$COMPLETED_TASKS" ]; then
+    # Completed task found — inject structured completion message (capped, no transcripts).
+    SELF_CHECK_TEXT="[Task Completed] ${COMPLETED_TASKS}"
+    if [ -n "$AGENT_SUMMARY" ]; then
+        SELF_CHECK_TEXT="${SELF_CHECK_TEXT} | ${AGENT_SUMMARY}"
     fi
-
-    AGENT_SUMMARY=$(scan_agent_status)
-
+    if [ "$PENDING_COUNT" -gt 0 ] 2>/dev/null; then
+        SELF_CHECK_TEXT="${SELF_CHECK_TEXT} [${PENDING_COUNT} agents pending]"
+    fi
+else
+    # Only inject status check if subagents are still running or pending.
     SELF_CHECK_TEXT="status? (Self-check)"
     if [ -n "$AGENT_SUMMARY" ]; then
         SELF_CHECK_TEXT="status? (Self-check) | ${AGENT_SUMMARY}"
