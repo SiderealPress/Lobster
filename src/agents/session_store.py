@@ -72,6 +72,30 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
 );
 """
 
+# Reports table DDL — stores user-filed /report slash command records.
+# Unified into agent_sessions.db to keep all operational data in one place.
+_SCHEMA_REPORTS_TABLE = """
+CREATE TABLE IF NOT EXISTS reports (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    report_id               TEXT NOT NULL UNIQUE,
+    description             TEXT NOT NULL,
+    chat_id                 TEXT NOT NULL,
+    source                  TEXT NOT NULL DEFAULT 'telegram',
+    recent_messages_json    TEXT,
+    agent_session_ids_json  TEXT,
+    snapshot_state_json     TEXT,
+    created_at              TEXT NOT NULL DEFAULT (datetime('now')),
+    status                  TEXT NOT NULL DEFAULT 'open'
+);
+"""
+
+# Reports table indexes
+_SCHEMA_REPORTS_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_reports_chat_id   ON reports (chat_id);
+CREATE INDEX IF NOT EXISTS idx_reports_created_at ON reports (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_reports_status    ON reports (status);
+"""
+
 # Indexes — run after all columns are guaranteed to exist (i.e., after migrations)
 _SCHEMA_INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_status ON agent_sessions (status);
@@ -151,6 +175,10 @@ def init_db(path: Path | None = None) -> None:
     conn.executescript(_SCHEMA_CREATE_TABLE)
     conn.commit()
 
+    # Step 1b: Create the reports table (idempotent — IF NOT EXISTS guard).
+    conn.executescript(_SCHEMA_REPORTS_TABLE)
+    conn.commit()
+
     # Step 2: Safe ALTER TABLE migrations for existing DBs — each is idempotent.
     # SQLite raises OperationalError if the column already exists; we ignore it.
     # Order matters: run before creating indexes that reference the new columns.
@@ -163,6 +191,10 @@ def init_db(path: Path | None = None) -> None:
 
     # Step 3: Create indexes — run after migrations so all referenced columns exist.
     conn.executescript(_SCHEMA_INDEXES)
+    conn.commit()
+
+    # Step 3b: Create reports indexes.
+    conn.executescript(_SCHEMA_REPORTS_INDEXES)
     conn.commit()
 
     # One-time JSON migration
@@ -930,3 +962,155 @@ def _migrate_json_to_sqlite(json_path: Path, conn: sqlite3.Connection) -> int:
         pass  # Rename failed — not fatal, migration data is in DB
 
     return count
+
+
+# ---------------------------------------------------------------------------
+# Public: reports
+# ---------------------------------------------------------------------------
+
+def _next_report_id(conn: sqlite3.Connection) -> str:
+    """Generate the next sequential report ID in the form RPT-NNN.
+
+    Reads the current max id from the reports table to derive the next
+    integer. Pure determination from DB state — no external counters.
+    """
+    cursor = conn.execute("SELECT MAX(id) FROM reports")
+    row = cursor.fetchone()
+    next_int = (row[0] or 0) + 1
+    return f"RPT-{next_int:03d}"
+
+
+def create_report(
+    description: str,
+    chat_id: str | int,
+    source: str = "telegram",
+    recent_messages: list | None = None,
+    active_session_ids: list[str] | None = None,
+    snapshot_state: dict | None = None,
+    path: Path | None = None,
+) -> dict:
+    """Insert a new report record and return its data dict.
+
+    Captures a point-in-time snapshot of recent messages and active agent
+    sessions alongside the user-supplied description. The report_id is
+    auto-generated as a sequential RPT-NNN identifier.
+
+    Args:
+        description:        User-provided problem description.
+        chat_id:            Chat that filed the report (stored as TEXT).
+        source:             Messaging platform the report came from.
+        recent_messages:    Last N messages from conversation history (list of dicts).
+        active_session_ids: IDs of agent sessions active at report time.
+        snapshot_state:     Any additional ambient state to capture (arbitrary dict).
+        path:               DB path override (for tests).
+
+    Returns:
+        Dict with keys: report_id, id, description, chat_id, source,
+        created_at, status.
+    """
+    import json as _json
+
+    resolved = path if path is not None else _DEFAULT_DB_PATH
+    conn = _get_connection(resolved)
+    now = datetime.now(timezone.utc).isoformat()
+
+    report_id = _next_report_id(conn)
+
+    recent_json = _json.dumps(recent_messages) if recent_messages is not None else None
+    session_ids_json = _json.dumps(active_session_ids) if active_session_ids is not None else None
+    snapshot_json = _json.dumps(snapshot_state) if snapshot_state is not None else None
+
+    conn.execute(
+        """
+        INSERT INTO reports
+            (report_id, description, chat_id, source,
+             recent_messages_json, agent_session_ids_json,
+             snapshot_state_json, created_at, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open')
+        """,
+        (
+            report_id,
+            description,
+            str(chat_id),
+            source,
+            recent_json,
+            session_ids_json,
+            snapshot_json,
+            now,
+        ),
+    )
+    conn.commit()
+
+    return {
+        "report_id": report_id,
+        "description": description,
+        "chat_id": str(chat_id),
+        "source": source,
+        "created_at": now,
+        "status": "open",
+    }
+
+
+def get_report(
+    report_id: str,
+    path: Path | None = None,
+) -> dict | None:
+    """Return the full report record for the given report_id, or None.
+
+    Args:
+        report_id: The RPT-NNN identifier string.
+        path:      DB path override (for tests).
+    """
+    resolved = path if path is not None else _DEFAULT_DB_PATH
+    conn = _get_connection(resolved)
+
+    cursor = conn.execute(
+        "SELECT * FROM reports WHERE report_id = ? LIMIT 1",
+        (report_id,),
+    )
+    row = cursor.fetchone()
+    return dict(row) if row is not None else None
+
+
+def list_reports(
+    chat_id: str | int | None = None,
+    status: str | None = None,
+    limit: int = 20,
+    path: Path | None = None,
+) -> list[dict]:
+    """Return reports newest-first, optionally filtered by chat_id and status.
+
+    Args:
+        chat_id: If provided, restrict to reports from this chat.
+        status:  If provided, restrict to reports with this status.
+        limit:   Maximum number of rows to return.
+        path:    DB path override (for tests).
+    """
+    resolved = path if path is not None else _DEFAULT_DB_PATH
+    conn = _get_connection(resolved)
+
+    conditions: list[str] = []
+    params: list = []
+
+    if chat_id is not None:
+        conditions.append("chat_id = ?")
+        params.append(str(chat_id))
+    if status is not None:
+        conditions.append("status = ?")
+        params.append(status)
+
+    where_clause = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    params.append(limit)
+
+    cursor = conn.execute(
+        f"""
+        SELECT id, report_id, description, chat_id, source, created_at, status
+        FROM reports
+        {where_clause}
+        ORDER BY created_at DESC
+        LIMIT ?
+        """,
+        params,
+    )
+    rows = cursor.fetchall()
+    return [dict(r) for r in rows]
