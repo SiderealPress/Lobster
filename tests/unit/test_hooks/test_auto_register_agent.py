@@ -278,7 +278,7 @@ class TestHookAgentWithAgentId:
         """)
         conn.execute(
             "INSERT INTO agent_sessions (id, description, chat_id, status, spawned_at)"
-            " VALUES ('agent-dup', 'richer description', '12345', 'running', '2026-01-01T00:00:00+00:00')"
+            " VALUES ('agent-dup', 'richer description', '12345', 'running', '2026-01-01 00:00:00')"
         )
         conn.commit()
         conn.close()
@@ -321,6 +321,48 @@ class TestHookAgentWithAgentId:
 
         row = _get_row(tmp_path, "agent-nochat")
         assert row["chat_id"] == "0"
+
+    def test_spawned_at_is_sqlite_compatible_format(self, tmp_path):
+        """spawned_at must use 'YYYY-MM-DD HH:MM:SS' so SQLite datetime() comparisons work.
+
+        SQLite's datetime('now', '-30 minutes') produces a timezone-naive string
+        like '2026-03-17 20:00:00'. If spawned_at uses ISO 8601 with a timezone
+        suffix (e.g. '2026-03-17T20:00:00+00:00'), string comparison with SQLite's
+        output fails silently and stale-row cleanup never fires.
+        """
+        import re
+
+        prompt = "---\ntask_id: t-ts\n---"
+        hook_input = _make_hook_input(
+            prompt=prompt,
+            tool_response={"agentId": "agent-ts"},
+        )
+        exit_code, _, _ = _run_hook(hook_input, tmp_path)
+        assert exit_code == 0
+
+        row = _get_row(tmp_path, "agent-ts")
+        spawned_at = row["spawned_at"]
+
+        # Must match 'YYYY-MM-DD HH:MM:SS' exactly — no 'T' separator, no timezone offset
+        sqlite_naive_pattern = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
+        assert sqlite_naive_pattern.match(spawned_at), (
+            f"spawned_at '{spawned_at}' does not match SQLite-compatible "
+            f"'YYYY-MM-DD HH:MM:SS' format"
+        )
+
+        # Verify SQLite itself can compare it against datetime('now', '-30 minutes')
+        conn = _open_db(tmp_path)
+        try:
+            result = conn.execute(
+                "SELECT spawned_at > datetime('now', '-30 minutes') FROM agent_sessions"
+                " WHERE id = 'agent-ts'"
+            ).fetchone()
+            # The just-inserted row was spawned within the last 30 minutes
+            assert result is not None and result[0] == 1, (
+                "SQLite age comparison returned unexpected result — format mismatch likely"
+            )
+        finally:
+            conn.close()
 
 
 class TestHookNoAgentId:
