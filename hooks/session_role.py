@@ -13,9 +13,11 @@ dispatcher or a background subagent.
    compares to the `session_id` field in the hook JSON input.
    Match → dispatcher.  Mismatch or file absent → try fallback.
 
-2. **Transcript fallback (secondary)**: Scan the `transcript` field (present in
-   Stop hooks; absent in PreToolUse hooks) for tool_use blocks containing the
-   dispatcher-only tool `wait_for_messages` or `check_inbox`.
+2. **Transcript fallback (secondary)**: Scan the transcript for tool_use blocks
+   containing the dispatcher-only tools `wait_for_messages` or `check_inbox`.
+   CC 2.1.76+ passes a file path (`transcript_path` for Stop hooks,
+   `agent_transcript_path` for SubagentStop hooks) rather than an inline
+   `transcript` list. Both file-based and inline forms are tried in order.
    Found → dispatcher.  Not found → subagent.
 
 3. **Default**: If neither signal is available (e.g. a PreToolUse hook with no
@@ -67,9 +69,20 @@ def is_dispatcher(hook_input: dict) -> bool:
         return marker_result
 
     # --- Secondary: transcript scan ---
+    # Try inline transcript first (legacy CC < 2.1.76).
     transcript = hook_input.get("transcript")
     if transcript is not None:
         return _transcript_has_dispatcher_tool(transcript)
+
+    # Try file-based transcript (CC 2.1.76+):
+    #   Stop hook       → transcript_path
+    #   SubagentStop    → agent_transcript_path
+    for key in ("transcript_path", "agent_transcript_path"):
+        path = hook_input.get(key)
+        if path:
+            transcript = _load_transcript_from_jsonl(path)
+            if transcript:
+                return _transcript_has_dispatcher_tool(transcript)
 
     # --- Default: no signal → treat as subagent (conservative) ---
     return False
@@ -125,12 +138,48 @@ def _check_marker_file(session_id: str | None) -> bool | None:
     return session_id == stored
 
 
+def _load_transcript_from_jsonl(path: str) -> list:
+    """Load transcript messages from a JSONL file.
+
+    CC 2.1.76+ Stop hooks pass transcript_path (a .jsonl file) rather than an
+    inline transcript list. Each line is a JSON object. Returns [] on any error.
+    """
+    try:
+        messages = []
+        with open(path) as fh:
+            for line in fh:
+                line = line.strip()
+                if line:
+                    try:
+                        messages.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        pass
+        return messages
+    except Exception:
+        return []
+
+
 def _transcript_has_dispatcher_tool(transcript: list) -> bool:
-    """Return True if any tool_use block in transcript calls a dispatcher-only tool."""
+    """Return True if any tool_use block in transcript calls a dispatcher-only tool.
+
+    Handles both JSONL format (CC 2.1.76+) and legacy inline format:
+
+    JSONL format (each line is a JSONL entry):
+        {"type": "assistant", "message": {"role": "assistant", "content": [...]}, ...}
+
+    Legacy inline format (transcript is a list of messages):
+        {"role": "assistant", "content": [...]}
+    """
     for msg in transcript:
         if not isinstance(msg, dict):
             continue
-        content = msg.get("content", [])
+        # JSONL format: content is under msg["message"]["content"]
+        # Legacy format: content is directly under msg["content"]
+        nested_msg = msg.get("message")
+        if isinstance(nested_msg, dict):
+            content = nested_msg.get("content", [])
+        else:
+            content = msg.get("content", [])
         if not isinstance(content, list):
             continue
         for item in content:
