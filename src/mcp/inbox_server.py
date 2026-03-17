@@ -293,11 +293,11 @@ def _emit_debug_observation(
     emitter: str | None = None,
 ) -> None:
     """
-    Emit a debug notification via the inbox when LOBSTER_DEBUG=true.
+    Emit a debug notification directly to the bot outbox when LOBSTER_DEBUG=true.
 
-    Routes through the normal inbox/outbox mechanism so the alert is delivered
-    via whatever messaging source the admin has configured (Telegram, Slack, etc.)
-    rather than calling any provider API directly.
+    Writes directly to OUTBOX_DIR (the bot watchdog outbox) so the message is
+    delivered to Telegram without entering the dispatcher inbox. The dispatcher
+    never sees these messages and no dispatcher tokens are burned.
 
     When debug mode is off, this function is a no-op.
 
@@ -342,8 +342,11 @@ def _emit_debug_observation(
             "text": full_text,
             "timestamp": now.isoformat(),
         }
-        inbox_file = INBOX_DIR / f"{message_id}.json"
-        atomic_write_json(inbox_file, message)
+        # Deliver directly to the bot outbox so the message reaches Telegram
+        # without entering the dispatcher inbox. The dispatcher never sees
+        # debug_observation messages — no tokens burned, no silent drops.
+        outbox_file = OUTBOX_DIR / f"{message_id}.json"
+        atomic_write_json(outbox_file, message)
     except Exception:
         pass  # never block on debug instrumentation
 
