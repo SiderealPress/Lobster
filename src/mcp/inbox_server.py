@@ -2318,6 +2318,41 @@ async def list_tools() -> list[Tool]:
                 "required": ["telegram_chat_id"],
             },
         ),
+        # /report Slash Command Tool
+        Tool(
+            name="create_report",
+            description=(
+                "File a user report triggered by the /report slash command. "
+                "Captures a point-in-time snapshot: the user's description, the last 10 "
+                "messages for context, and the IDs of any active agent sessions. "
+                "Stores the record in the reports table of agent_sessions.db and returns "
+                "a unique report ID (e.g. RPT-001). "
+                "Call this when the user sends '/report <description>' — the response "
+                "should be sent back to the user with the report ID as confirmation."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "description": {
+                        "type": "string",
+                        "description": "The problem or feedback description from the user (everything after '/report ').",
+                    },
+                    "chat_id": {
+                        "oneOf": [
+                            {"type": "integer"},
+                            {"type": "string"},
+                        ],
+                        "description": "The chat_id of the user filing the report.",
+                    },
+                    "source": {
+                        "type": "string",
+                        "description": "Messaging source (telegram, slack, etc.). Default: telegram.",
+                        "default": "telegram",
+                    },
+                },
+                "required": ["description", "chat_id"],
+            },
+        ),
     ] + (
         # User Model Tools (only registered when feature flag is enabled)
         [
@@ -2501,6 +2536,9 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
         return await handle_create_calendar_event(arguments)
     elif name == "list_calendar_events":
         return await handle_list_calendar_events(arguments)
+    # /report Slash Command Tool
+    elif name == "create_report":
+        return await handle_create_report(arguments)
     # User Model Tools (dispatched to user_model subsystem)
     elif name in _user_model_tool_names and _user_model is not None:
         result_json = _user_model.dispatch(name, arguments)
@@ -2701,6 +2739,100 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
         observer.join(timeout=1)
 
 
+def _is_report_command(text: str) -> bool:
+    """Return True if text is a /report slash command (with a description).
+
+    Matches "/report <description>" at the start of the message.
+    The command token must be exactly "/report" (case-insensitive), followed by
+    whitespace and a non-empty description. Does NOT match "/reports" or other
+    commands that begin with "/report" but have extra characters.
+    """
+    if not text:
+        return False
+    stripped = text.strip()
+    lower = stripped.lower()
+    # Must start with "/report" followed by whitespace or end of string
+    if lower == "/report":
+        return False  # No description — ignore bare command
+    if lower.startswith("/report ") or lower.startswith("/report\t"):
+        rest = stripped[len("/report"):].strip()
+        return bool(rest)
+    return False
+
+
+def _extract_report_description(text: str) -> str:
+    """Extract the description part from a /report command text."""
+    stripped = text.strip()
+    rest = stripped[len("/report"):].strip()
+    return rest
+
+
+async def _handle_report_slash_command(msg: dict, msg_file: Path) -> None:
+    """Auto-handle a /report slash command message.
+
+    Creates the report record, queues a confirmation reply to the user, and
+    moves the message to processed/. This is called from handle_check_inbox
+    before the message reaches the main dispatcher loop.
+
+    Args:
+        msg:      The parsed message dict from the inbox JSON file.
+        msg_file: The Path to the inbox JSON file.
+    """
+    text = msg.get("text", "")
+    chat_id = msg.get("chat_id", "")
+    source = msg.get("source", "telegram")
+    msg_id = msg.get("id", msg_file.stem)
+
+    description = _extract_report_description(text)
+
+    # Capture active agent sessions
+    active_session_ids: list[str] = []
+    try:
+        active = _session_store.get_active_sessions()
+        active_session_ids = [s.get("id", "") for s in active if s.get("id")]
+    except Exception:
+        pass
+
+    snapshot_state = {
+        "active_session_count": len(active_session_ids),
+        "lobster_state": _read_lobster_state(),
+    }
+
+    # Store the report
+    try:
+        report = _session_store.create_report(
+            description=description,
+            chat_id=chat_id,
+            source=source,
+            recent_messages=None,  # not captured in pre-processor to stay fast
+            active_session_ids=active_session_ids if active_session_ids else None,
+            snapshot_state=snapshot_state,
+        )
+        report_id = report["report_id"]
+        log.info(f"/report pre-processor: created {report_id} for chat {chat_id}")
+    except Exception as exc:
+        log.error(f"/report pre-processor: failed to create report: {exc}", exc_info=True)
+        report_id = "RPT-ERR"
+
+    # Send confirmation reply and mark processed atomically
+    confirmation = f"Report filed as {report_id}. We'll look into it."
+    try:
+        await handle_send_reply({
+            "chat_id": chat_id,
+            "text": confirmation,
+            "source": source,
+            "message_id": msg_id,
+        })
+    except Exception as exc:
+        log.error(f"/report pre-processor: send_reply failed: {exc}", exc_info=True)
+        # Fall back to just marking processed
+        try:
+            dest = PROCESSED_DIR / msg_file.name
+            msg_file.rename(dest)
+        except Exception:
+            pass
+
+
 async def handle_check_inbox(args: dict) -> list[TextContent]:
     """Check for new messages in inbox."""
     source_filter = args.get("source", "").lower()
@@ -2713,6 +2845,15 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
                 msg = json.load(fp)
                 if source_filter and msg.get("source", "").lower() != source_filter:
                     continue
+                # /report slash command pre-processor: handle automatically without
+                # surfacing the raw message to the main dispatcher loop.
+                msg_text = msg.get("text", "")
+                if _is_report_command(msg_text):
+                    try:
+                        await _handle_report_slash_command(msg, f)
+                    except Exception as exc:
+                        log.error(f"check_inbox: /report pre-processor error: {exc}", exc_info=True)
+                    continue  # skip — already handled
                 msg["_filename"] = f.name
                 messages.append(msg)
                 if len(messages) >= limit:
@@ -6166,6 +6307,83 @@ async def handle_list_calendar_events(args: dict) -> list[TextContent]:
         for e in events
     ]
     return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+
+# ---------------------------------------------------------------------------
+# /report Slash Command Handler
+# ---------------------------------------------------------------------------
+
+async def handle_create_report(args: dict) -> list[TextContent]:
+    """Handle the create_report MCP tool.
+
+    Captures a point-in-time snapshot (recent conversation messages, active
+    agent sessions) alongside the user's description and stores it in the
+    reports table of agent_sessions.db. Returns a confirmation dict with
+    the generated report_id.
+
+    This is the backend for the /report slash command pre-processor.
+    """
+    description = str(args.get("description", "")).strip()
+    chat_id = args.get("chat_id", "")
+    source = str(args.get("source", "telegram")).strip() or "telegram"
+
+    if not description:
+        return [TextContent(type="text", text='{"error": "description is required"}')]
+    if not chat_id:
+        return [TextContent(type="text", text='{"error": "chat_id is required"}')]
+
+    # Capture ambient state: last 10 messages for this chat from conversation history
+    recent_messages: list = []
+    try:
+        history_result = await handle_get_conversation_history({
+            "chat_id": chat_id,
+            "limit": 10,
+            "direction": "all",
+        })
+        # The handler returns JSON text — parse it back to extract raw message list
+        if history_result:
+            raw = history_result[0].text
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, list):
+                    recent_messages = parsed
+                elif isinstance(parsed, dict) and "messages" in parsed:
+                    recent_messages = parsed["messages"]
+            except (json.JSONDecodeError, ValueError):
+                pass  # Non-JSON response format — skip snapshot
+    except Exception:
+        pass  # Conversation history is best-effort; never block report creation
+
+    # Capture active agent session IDs
+    active_session_ids: list[str] = []
+    try:
+        active = _session_store.get_active_sessions()
+        active_session_ids = [s.get("id", "") for s in active if s.get("id")]
+    except Exception:
+        pass  # Session capture is best-effort
+
+    # Build a minimal ambient snapshot
+    snapshot_state = {
+        "active_session_count": len(active_session_ids),
+        "lobster_state": _read_lobster_state(),
+    }
+
+    # Store the report
+    try:
+        report = _session_store.create_report(
+            description=description,
+            chat_id=chat_id,
+            source=source,
+            recent_messages=recent_messages if recent_messages else None,
+            active_session_ids=active_session_ids if active_session_ids else None,
+            snapshot_state=snapshot_state,
+        )
+    except Exception as exc:
+        log.error(f"create_report failed: {exc}", exc_info=True)
+        return [TextContent(type="text", text=f'{{"error": "Failed to create report: {exc}"}}')]
+
+    log.info(f"Report filed: {report['report_id']} from chat {chat_id}")
+    return [TextContent(type="text", text=json.dumps(report))]
 
 
 def _enqueue_reconciler_notification(session: dict, outcome: str) -> None:
