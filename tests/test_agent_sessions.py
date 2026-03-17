@@ -7,9 +7,12 @@ Tests:
   - format_active_sessions_block: compact display helper
 """
 
+import os
 import pathlib
 import sys
 import tempfile
+import time as _time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -455,3 +458,250 @@ def test_json_migration_missing_json_is_noop(tmp_path):
     active = session_store.get_active_sessions(path=db_path)
     assert active == []
     session_store._close_connection(db_path)
+
+
+# ---------------------------------------------------------------------------
+# Test: cleanup_stale_running_sessions (issue #510)
+# ---------------------------------------------------------------------------
+
+
+def test_cleanup_stale_running_no_output_file(isolated_db):
+    """Session with no output_file and elapsed > timeout_minutes is marked dead."""
+    db = isolated_db
+
+    # Spawn a session with a timeout of 1 minute, spawned_at 120 minutes ago
+    old_spawned_at = (datetime.now(timezone.utc) - timedelta(minutes=120)).isoformat()
+    session_store._get_connection(db).execute(
+        """
+        INSERT INTO agent_sessions
+            (id, description, chat_id, source, status, spawned_at, timeout_minutes)
+        VALUES ('stale-no-file', 'Old agent', '123', 'telegram', 'running', ?, 60)
+        """,
+        (old_spawned_at,),
+    )
+    session_store._get_connection(db).commit()
+
+    server_start = datetime.now(timezone.utc)
+    dead = session_store.cleanup_stale_running_sessions(server_start, path=db)
+
+    assert "stale-no-file" in dead
+    result = session_store.find_session("stale-no-file", path=db)
+    assert result["status"] == "dead"
+
+
+def test_cleanup_stale_running_output_missing(isolated_db, tmp_path):
+    """Session whose output_file does not exist on disk is marked dead."""
+    db = isolated_db
+    missing_path = str(tmp_path / "nonexistent.output")
+
+    session_store.session_start(
+        id="stale-missing-file",
+        description="Agent with missing output",
+        chat_id="123",
+        output_file=missing_path,
+        path=db,
+    )
+
+    server_start = datetime.now(timezone.utc)
+    dead = session_store.cleanup_stale_running_sessions(server_start, path=db)
+
+    assert "stale-missing-file" in dead
+    result = session_store.find_session("stale-missing-file", path=db)
+    assert result["status"] == "dead"
+    assert "missing" in result["result_summary"]
+
+
+def test_cleanup_stale_running_output_old_mtime(isolated_db, tmp_path):
+    """Session whose output_file mtime predates server_start is marked dead."""
+    db = isolated_db
+    output_file = tmp_path / "old_agent.output"
+    output_file.write_text('{"stop_reason": "tool_use"}')
+
+    # Set mtime to 10 minutes ago
+    old_ts = _time.time() - 600
+    os.utime(str(output_file), (old_ts, old_ts))
+
+    session_store.session_start(
+        id="stale-old-mtime",
+        description="Agent with old mtime",
+        chat_id="123",
+        output_file=str(output_file),
+        path=db,
+    )
+
+    # Server started 5 minutes ago — still newer than the file
+    server_start = datetime.now(timezone.utc) - timedelta(minutes=5)
+    dead = session_store.cleanup_stale_running_sessions(server_start, path=db)
+
+    assert "stale-old-mtime" in dead
+    result = session_store.find_session("stale-old-mtime", path=db)
+    assert result["status"] == "dead"
+    assert "mtime" in result["result_summary"]
+
+
+def test_cleanup_stale_running_skips_fresh_file(isolated_db, tmp_path):
+    """Session whose output_file mtime is newer than server_start is left running."""
+    db = isolated_db
+    output_file = tmp_path / "fresh_agent.output"
+    output_file.write_text('{"stop_reason": "tool_use"}')
+    # File was just written — mtime is now, which is after server_start
+
+    # Server started 10 minutes ago
+    server_start = datetime.now(timezone.utc) - timedelta(minutes=10)
+
+    session_store.session_start(
+        id="fresh-agent",
+        description="Fresh running agent",
+        chat_id="123",
+        output_file=str(output_file),
+        path=db,
+    )
+
+    dead = session_store.cleanup_stale_running_sessions(server_start, path=db)
+
+    assert "fresh-agent" not in dead
+    result = session_store.find_session("fresh-agent", path=db)
+    assert result["status"] == "running"
+
+
+def test_cleanup_stale_running_no_op_when_empty(isolated_db):
+    """cleanup_stale_running_sessions returns empty list when no running sessions."""
+    db = isolated_db
+    server_start = datetime.now(timezone.utc)
+    dead = session_store.cleanup_stale_running_sessions(server_start, path=db)
+    assert dead == []
+
+
+def test_cleanup_stale_running_skips_no_file_within_timeout(isolated_db):
+    """Session with no output_file but spawned recently (within timeout) is skipped."""
+    db = isolated_db
+
+    # Spawned 30 minutes ago, timeout=120 minutes — not yet over threshold
+    recent_spawned_at = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
+    session_store._get_connection(db).execute(
+        """
+        INSERT INTO agent_sessions
+            (id, description, chat_id, source, status, spawned_at, timeout_minutes)
+        VALUES ('recent-no-file', 'Recent agent', '123', 'telegram', 'running', ?, 120)
+        """,
+        (recent_spawned_at,),
+    )
+    session_store._get_connection(db).commit()
+
+    server_start = datetime.now(timezone.utc)
+    dead = session_store.cleanup_stale_running_sessions(server_start, path=db)
+
+    assert "recent-no-file" not in dead
+    result = session_store.find_session("recent-no-file", path=db)
+    assert result["status"] == "running"
+
+
+def test_cleanup_stale_running_oserror_marks_dead(isolated_db, tmp_path):
+    """Session whose output_file raises OSError is marked dead (unreadable path)."""
+    db = isolated_db
+    # Use a path inside a non-existent directory to provoke OSError on resolve/stat.
+    # Path.resolve() on a dangling path inside a missing parent dir can raise OSError
+    # on some filesystems; we simulate by patching Path.resolve to raise.
+    import unittest.mock as mock
+
+    output_path = str(tmp_path / "unreadable.output")
+
+    session_store.session_start(
+        id="oserror-agent",
+        description="Agent with unreadable output",
+        chat_id="123",
+        output_file=output_path,
+        path=db,
+    )
+
+    # Patch Path.resolve to raise OSError for this specific path
+    original_resolve = Path.resolve
+
+    def patched_resolve(self, **kwargs):
+        if str(self) == output_path:
+            raise OSError("Permission denied (simulated)")
+        return original_resolve(self, **kwargs)
+
+    with mock.patch.object(Path, "resolve", patched_resolve):
+        server_start = datetime.now(timezone.utc)
+        dead = session_store.cleanup_stale_running_sessions(server_start, path=db)
+
+    assert "oserror-agent" in dead
+    result = session_store.find_session("oserror-agent", path=db)
+    assert result["status"] == "dead"
+    assert "unreadable" in result["result_summary"]
+
+
+def test_cleanup_stale_running_null_spawned_at_no_output_file_skips_with_warning(
+    isolated_db, caplog
+):
+    """Session with no output_file AND no spawned_at stays running and logs a warning.
+
+    The current schema has spawned_at NOT NULL, so this combination cannot arise
+    through normal inserts. The warning branch is defensive code for future schema
+    changes or direct DB manipulation. We test it by patching the DB cursor to
+    return a synthetic row with both fields set to None.
+    """
+    import logging
+    import unittest.mock as mock
+
+    db = isolated_db
+    server_start = datetime.now(timezone.utc)
+
+    # Build a fake row dict that looks like what the cursor would return
+    fake_row = {
+        "id": "null-everything",
+        "output_file": None,
+        "spawned_at": None,
+        "timeout_minutes": None,
+    }
+
+    # Patch _get_connection to return a mock whose .execute().fetchall() returns our row
+    mock_cursor = mock.MagicMock()
+    mock_cursor.fetchall.return_value = [fake_row]
+    mock_conn = mock.MagicMock()
+    mock_conn.execute.return_value = mock_cursor
+
+    with mock.patch.object(session_store, "_get_connection", return_value=mock_conn):
+        with caplog.at_level(logging.WARNING, logger="agents.session_store"):
+            dead = session_store.cleanup_stale_running_sessions(server_start, path=db)
+
+    # Row has no actionable info — should not be marked dead
+    assert "null-everything" not in dead
+
+    # Should have logged a warning about the uncleanable row
+    assert any("null-everything" in record.message for record in caplog.records)
+    assert any(record.levelno == logging.WARNING for record in caplog.records)
+
+
+def test_reconciler_check_output_file_status_running_for_stuck_tool_use(tmp_path):
+    """check_output_file_status returns 'running' for a file with stop_reason=tool_use.
+
+    This exercises the precondition for the reconciler's 60-min dead-threshold
+    branch: a file stuck at tool_use is treated as 'running', not 'missing' or
+    'done', so the normal 25-min threshold does not fire and only the 60-min
+    threshold applies.
+    """
+    output_file = tmp_path / "stuck_agent.output"
+    # JSONL with last stop_reason = tool_use (simulating mid-turn stuck state)
+    output_file.write_text(
+        '{"type": "result", "stop_reason": "tool_use", "subtype": "tool_use"}\n'
+    )
+
+    status = session_store.check_output_file_status(str(output_file))
+    assert status == "running", (
+        f"Expected 'running' for tool_use output file, got {status!r}"
+    )
+
+
+def test_reconciler_check_output_file_status_done_for_end_turn(tmp_path):
+    """check_output_file_status returns 'done' for a file with stop_reason=end_turn."""
+    output_file = tmp_path / "finished_agent.output"
+    output_file.write_text(
+        '{"type": "result", "stop_reason": "end_turn", "subtype": "end_turn"}\n'
+    )
+
+    status = session_store.check_output_file_status(str(output_file))
+    assert status == "done", (
+        f"Expected 'done' for end_turn output file, got {status!r}"
+    )

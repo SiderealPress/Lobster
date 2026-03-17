@@ -636,12 +636,42 @@ if not TASKS_FILE.exists():
 if not SCHEDULED_JOBS_FILE.exists():
     SCHEDULED_JOBS_FILE.write_text(json.dumps({"jobs": {}}, indent=2))
 
+# Record the moment this server process started. Used by stale-session cleanup
+# to distinguish output files from the current run vs a previous (dead) run.
+_SERVER_START_TIME = datetime.now(timezone.utc)
+
 # Initialize SQLite agent session store (idempotent, runs JSON migration on first boot)
 try:
     _session_store.init_db()
     log.info("Agent session store initialized (SQLite WAL mode)")
 except Exception as _ss_err:
     log.warning(f"Agent session store init failed (non-fatal): {_ss_err}")
+
+# Startup cleanup: mark stale 'running' rows as 'dead' before reconciler loop begins.
+# After a force-restart, agents killed mid-run leave their output files with
+# stop_reason=tool_use, which the reconciler treats as still-running. We fix this
+# here by checking file existence and mtime against the server start time — any
+# output file that predates this process startup cannot belong to a live agent.
+#
+# Note on asymmetric notification: this sweep intentionally does NOT enqueue user
+# notifications for the sessions it marks dead. This is a bulk-cleanup pass, not a
+# live event. Any sessions that were completed/dead before this restart but not yet
+# notified are handled by the reconciler's _startup_sweep(), which fires immediately
+# after the reconciler loop starts and handles the notification backlog. Separating
+# the two concerns keeps this code path simple and idempotent.
+try:
+    _dead_ids = _session_store.cleanup_stale_running_sessions(
+        server_start_time=_SERVER_START_TIME
+    )
+    if _dead_ids:
+        log.warning(
+            f"[startup] Marked {len(_dead_ids)} stale 'running' session(s) as dead "
+            f"(pre-existing from before this server start): {_dead_ids}"
+        )
+    else:
+        log.info("[startup] No stale 'running' sessions found at startup")
+except Exception as _cleanup_err:
+    log.warning(f"[startup] Stale session cleanup failed (non-fatal): {_cleanup_err}")
 
 # ---------------------------------------------------------------------------
 # Wire server notification — event-driven SSE push (<40ms latency)
@@ -6193,8 +6223,9 @@ async def reconcile_agent_sessions() -> None:
     """
     from agents.session_store import check_output_file_status
 
-    DEAD_THRESHOLD_SECONDS = 25 * 60  # 25 minutes
-    GRACE_PERIOD_SECONDS = 30         # Newly spawned agents get grace before DEAD
+    DEAD_THRESHOLD_SECONDS = 25 * 60   # 25 minutes — for missing output files
+    DEAD_THRESHOLD_RUNNING_SECONDS = 60 * 60  # 60 minutes — for stuck tool_use files
+    GRACE_PERIOD_SECONDS = 30          # Newly spawned agents get grace before DEAD
 
     # Startup sweep: re-send notifications for sessions that completed while down
     await _startup_sweep()
@@ -6260,7 +6291,28 @@ async def reconcile_agent_sessions() -> None:
                             f"[reconciler] Agent {agent_id!r} output missing, "
                             f"elapsed {elapsed}s — within window, waiting"
                         )
-                # file_status == "running" → no action
+                elif file_status == "running":
+                    # File exists with stop_reason=tool_use. This is normal for live
+                    # agents, but if elapsed exceeds the generous running threshold the
+                    # agent has almost certainly been killed (e.g. mid-restart). The
+                    # startup cleanup handles the common case; this branch catches any
+                    # that slip through (e.g. output file mtime was updated after restart).
+                    if elapsed > DEAD_THRESHOLD_RUNNING_SECONDS:
+                        log.warning(
+                            f"[reconciler] Agent {agent_id!r} output stuck at tool_use "
+                            f"after {elapsed}s (>{DEAD_THRESHOLD_RUNNING_SECONDS}s) "
+                            f"— marking dead (output_file={output_file!r})"
+                        )
+                        _session_store.session_end(
+                            id_or_task_id=agent_id,
+                            status="dead",
+                            result_summary=(
+                                f"Auto-closed by reconciler: stop_reason=tool_use "
+                                f"after {elapsed}s"
+                            ),
+                        )
+                        _enqueue_reconciler_notification(session, outcome="dead")
+                        asyncio.create_task(_notify_wire_server())
 
             # Phase 3: Detect orphans (no output_file registered but elapsed > threshold)
             # The previous orphan detection scanned the tasks directory for files not in the DB.
