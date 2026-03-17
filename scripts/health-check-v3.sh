@@ -985,6 +985,46 @@ Manual intervention required:
         log_info "systemctl stop: $line"
     done
 
+    # Kill the tmux server directly — this terminates all sessions and their
+    # child processes. Under RemainAfterExit=yes, systemctl stop marks the
+    # service inactive but does not reliably kill the tmux server or the Claude
+    # process tree. kill-server sends SIGTERM to every attached process and then
+    # tears down the server, ensuring no orphan Claude process survives.
+    if tmux -L "$TMUX_SOCKET" kill-server 2>/dev/null; then
+        log_info "Tmux server on socket '$TMUX_SOCKET' killed successfully"
+    else
+        log_info "Tmux kill-server returned non-zero (socket may already be gone — OK)"
+    fi
+
+    # Belt-and-suspenders: if the pre-restart Claude PID is still alive after
+    # systemctl stop + tmux kill-server, kill it explicitly. SIGTERM first,
+    # then SIGKILL after a brief wait. This handles cases where the process
+    # detached from the tmux session before the kill-server ran.
+    if [[ -n "$pre_restart_pid" ]] && kill -0 "$pre_restart_pid" 2>/dev/null; then
+        log_warn "Claude PID $pre_restart_pid survived systemctl stop + tmux kill-server — sending SIGTERM"
+        kill -TERM "$pre_restart_pid" 2>/dev/null || true
+        sleep 2
+        if kill -0 "$pre_restart_pid" 2>/dev/null; then
+            log_warn "Claude PID $pre_restart_pid still alive after SIGTERM — sending SIGKILL"
+            kill -KILL "$pre_restart_pid" 2>/dev/null || true
+            sleep 1
+        fi
+    fi
+
+    # Verify the old process is actually dead before starting a new session.
+    # If we cannot confirm it is gone, abort rather than risk two competing
+    # dispatchers running simultaneously.
+    if [[ -n "$pre_restart_pid" ]] && kill -0 "$pre_restart_pid" 2>/dev/null; then
+        log_error "ABORT: Could not kill pre-restart Claude PID $pre_restart_pid — refusing to start new session to prevent duplicate dispatcher"
+        send_telegram_alert "Restart aborted — could not kill existing Claude process (PID $pre_restart_pid).
+
+Reason: $reason
+
+Manual intervention required to kill the process before restarting:
+\`kill -9 $pre_restart_pid && lobster restart\`"
+        return 1
+    fi
+
     # Clean up the socket only if stop left it behind.
     # A successful ExecStop removes it via tmux kill-session; if stop failed or
     # the socket was already stale, we clean it up here so ExecStart can bind.
