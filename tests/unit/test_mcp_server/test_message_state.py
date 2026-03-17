@@ -480,3 +480,4 @@ class TestRetryRecovery:
 
             assert (failed / f"{msg_id}.json").exists()
             assert not (inbox / f"{msg_id}.json").exists()
+
