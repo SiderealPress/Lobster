@@ -573,28 +573,17 @@ def test_cleanup_stale_running_no_output_file(isolated_db):
 
 
 def test_cleanup_stale_running_output_missing(isolated_db, tmp_path):
-    """Session whose output_file does not exist is marked dead after the grace period.
-
-    The session must have been spawned more than 2 minutes ago for the missing-file
-    rule to fire.  Sessions spawned within 2 minutes are left running (see
-    test_cleanup_stale_running_output_missing_within_grace_period).
-    """
+    """Session whose output_file does not exist on disk is marked dead."""
     db = isolated_db
     missing_path = str(tmp_path / "nonexistent.output")
 
-    # Insert a session with spawned_at well in the past (5 minutes ago) so that
-    # the 2-minute grace period has already elapsed.
-    old_spawned_at = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
-    session_store._get_connection(db).execute(
-        """
-        INSERT INTO agent_sessions
-            (id, description, chat_id, source, status, spawned_at, output_file)
-        VALUES ('stale-missing-file', 'Agent with missing output', '123', 'telegram',
-                'running', ?, ?)
-        """,
-        (old_spawned_at, missing_path),
+    session_store.session_start(
+        id="stale-missing-file",
+        description="Agent with missing output",
+        chat_id="123",
+        output_file=missing_path,
+        path=db,
     )
-    session_store._get_connection(db).commit()
 
     server_start = datetime.now(timezone.utc)
     dead = session_store.cleanup_stale_running_sessions(server_start, path=db)
@@ -605,108 +594,42 @@ def test_cleanup_stale_running_output_missing(isolated_db, tmp_path):
     assert "missing" in result["result_summary"]
 
 
-def test_cleanup_stale_running_output_missing_within_grace_period(isolated_db, tmp_path):
-    """Session with missing output_file is left running within the 2-minute grace period.
-
-    The output_file for a freshly-spawned agent may not exist yet (Claude Code creates
-    it after the first tool turn).  If the MCP server restarts within 2 minutes of
-    spawning, the startup cleanup must not mark the session dead prematurely.
-    """
+def test_cleanup_stale_running_output_old_mtime(isolated_db, tmp_path):
+    """Session whose output_file mtime predates server_start is marked dead."""
     db = isolated_db
-    missing_path = str(tmp_path / "not_yet_created.output")
+    output_file = tmp_path / "old_agent.output"
+    output_file.write_text('{"stop_reason": "tool_use"}')
 
-    session_store.session_start(
-        id="fresh-missing-file",
-        description="Newly spawned agent — output file not yet created",
-        chat_id="123",
-        output_file=missing_path,
-        path=db,
-    )
-
-    # Server restarts 30 seconds after spawn — well within the 2-minute grace period.
-    server_start = datetime.now(timezone.utc) + timedelta(seconds=30)
-    dead = session_store.cleanup_stale_running_sessions(server_start, path=db)
-
-    assert "fresh-missing-file" not in dead, (
-        "Freshly-spawned agent should NOT be killed within the 2-minute grace period "
-        "even if its output_file is missing"
-    )
-    result = session_store.find_session("fresh-missing-file", path=db)
-    assert result["status"] == "running"
-
-
-def test_cleanup_stale_running_output_tool_use_left_running(isolated_db, tmp_path):
-    """Session whose output_file has stop_reason=tool_use is left running after restart.
-
-    Previously the mtime-based check would mark this agent dead if the file
-    predated the server start time. The fix reads stop_reason instead: tool_use
-    means the agent may still be alive, so we leave it running (issue #645).
-    """
-    db = isolated_db
-    output_file = tmp_path / "live_agent.output"
-    output_file.write_text('{"stop_reason": "tool_use"}\n')
-
-    # Set mtime to 10 minutes ago to simulate a file that predates server start.
-    # Under the old logic this would have been killed; under the new logic it stays.
+    # Set mtime to 10 minutes ago
     old_ts = _time.time() - 600
     os.utime(str(output_file), (old_ts, old_ts))
 
     session_store.session_start(
-        id="live-tool-use",
-        description="Agent with tool_use output (may still be alive)",
+        id="stale-old-mtime",
+        description="Agent with old mtime",
         chat_id="123",
         output_file=str(output_file),
         path=db,
     )
 
-    # Server started 5 minutes ago — file mtime predates it, but stop_reason=tool_use
+    # Server started 5 minutes ago — still newer than the file
     server_start = datetime.now(timezone.utc) - timedelta(minutes=5)
-    changed = session_store.cleanup_stale_running_sessions(server_start, path=db)
+    dead = session_store.cleanup_stale_running_sessions(server_start, path=db)
 
-    assert "live-tool-use" not in changed, (
-        "Agent with stop_reason=tool_use should NOT be killed — it may still be alive"
-    )
-    result = session_store.find_session("live-tool-use", path=db)
-    assert result["status"] == "running"
-
-
-def test_cleanup_stale_running_output_end_turn_marked_completed(isolated_db, tmp_path):
-    """Session whose output_file has stop_reason=end_turn is marked completed at startup.
-
-    If an agent finished before or during a server restart, its output file
-    contains stop_reason=end_turn. The startup cleanup should mark it completed
-    (not dead) so the notification message says 'completed' not 'dead'.
-    """
-    db = isolated_db
-    output_file = tmp_path / "finished_agent.output"
-    output_file.write_text('{"stop_reason": "end_turn"}\n')
-
-    session_store.session_start(
-        id="finished-agent",
-        description="Agent that finished",
-        chat_id="123",
-        output_file=str(output_file),
-        path=db,
-    )
-
-    server_start = datetime.now(timezone.utc)
-    changed = session_store.cleanup_stale_running_sessions(server_start, path=db)
-
-    assert "finished-agent" in changed
-    result = session_store.find_session("finished-agent", path=db)
-    assert result["status"] == "completed"
-    assert "end_turn" in result["result_summary"]
+    assert "stale-old-mtime" in dead
+    result = session_store.find_session("stale-old-mtime", path=db)
+    assert result["status"] == "dead"
+    assert "mtime" in result["result_summary"]
 
 
 def test_cleanup_stale_running_skips_fresh_file(isolated_db, tmp_path):
-    """Session whose output_file has stop_reason=tool_use is left running.
-
-    Regardless of mtime, a file with tool_use means the agent may be alive.
-    """
+    """Session whose output_file mtime is newer than server_start is left running."""
     db = isolated_db
     output_file = tmp_path / "fresh_agent.output"
-    output_file.write_text('{"stop_reason": "tool_use"}\n')
+    output_file.write_text('{"stop_reason": "tool_use"}')
+    # File was just written — mtime is now, which is after server_start
 
+    # Server started 10 minutes ago
     server_start = datetime.now(timezone.utc) - timedelta(minutes=10)
 
     session_store.session_start(
@@ -717,9 +640,9 @@ def test_cleanup_stale_running_skips_fresh_file(isolated_db, tmp_path):
         path=db,
     )
 
-    changed = session_store.cleanup_stale_running_sessions(server_start, path=db)
+    dead = session_store.cleanup_stale_running_sessions(server_start, path=db)
 
-    assert "fresh-agent" not in changed
+    assert "fresh-agent" not in dead
     result = session_store.find_session("fresh-agent", path=db)
     assert result["status"] == "running"
 
@@ -757,7 +680,7 @@ def test_cleanup_stale_running_skips_no_file_within_timeout(isolated_db):
 
 
 def test_cleanup_stale_running_oserror_marks_dead(isolated_db, tmp_path):
-    """Session whose output_file raises OSError is marked dead after the grace period."""
+    """Session whose output_file raises OSError is marked dead (unreadable path)."""
     db = isolated_db
     # Use a path inside a non-existent directory to provoke OSError on resolve/stat.
     # Path.resolve() on a dangling path inside a missing parent dir can raise OSError
@@ -766,18 +689,13 @@ def test_cleanup_stale_running_oserror_marks_dead(isolated_db, tmp_path):
 
     output_path = str(tmp_path / "unreadable.output")
 
-    # Insert with spawned_at 5 minutes ago so the 2-minute grace period has elapsed.
-    old_spawned_at = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
-    session_store._get_connection(db).execute(
-        """
-        INSERT INTO agent_sessions
-            (id, description, chat_id, source, status, spawned_at, output_file)
-        VALUES ('oserror-agent', 'Agent with unreadable output', '123', 'telegram',
-                'running', ?, ?)
-        """,
-        (old_spawned_at, output_path),
+    session_store.session_start(
+        id="oserror-agent",
+        description="Agent with unreadable output",
+        chat_id="123",
+        output_file=output_path,
+        path=db,
     )
-    session_store._get_connection(db).commit()
 
     # Patch Path.resolve to raise OSError for this specific path
     original_resolve = Path.resolve
@@ -794,9 +712,7 @@ def test_cleanup_stale_running_oserror_marks_dead(isolated_db, tmp_path):
     assert "oserror-agent" in dead
     result = session_store.find_session("oserror-agent", path=db)
     assert result["status"] == "dead"
-    # _read_stop_reason_from_path returns "missing" for OSError (path unresolvable),
-    # so the result_summary says "output_file missing" (not "unreadable")
-    assert "missing" in result["result_summary"]
+    assert "unreadable" in result["result_summary"]
 
 
 def test_cleanup_stale_running_null_spawned_at_no_output_file_skips_with_warning(
@@ -871,77 +787,4 @@ def test_reconciler_check_output_file_status_done_for_end_turn(tmp_path):
     status = session_store.check_output_file_status(str(output_file))
     assert status == "done", (
         f"Expected 'done' for end_turn output file, got {status!r}"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Test: startup cleanup leaves tool_use agents running (issue #645 fix)
-# ---------------------------------------------------------------------------
-
-
-def test_cleanup_stale_does_not_kill_agents_surviving_restart(isolated_db, tmp_path):
-    """Agents with stop_reason=tool_use survive server restarts unchanged.
-
-    Regression test for issue #645: the old mtime-based heuristic marked agents
-    dead whenever their output file predated the server start time — which happens
-    on every restart for any running agent. The fix reads stop_reason instead:
-    tool_use means the agent may still be alive.
-    """
-    db = isolated_db
-    output_file = tmp_path / "surviving_agent.output"
-    output_file.write_text('{"stop_reason": "tool_use"}\n')
-
-    # Backdate mtime to simulate a file that predates the server restart
-    old_ts = _time.time() - 3600  # 1 hour ago
-    os.utime(str(output_file), (old_ts, old_ts))
-
-    session_store.session_start(
-        id="surviving-agent",
-        description="Agent that was running when server restarted",
-        chat_id="123",
-        output_file=str(output_file),
-        path=db,
-    )
-
-    # Server started just now — clearly after the file's mtime
-    server_start = datetime.now(timezone.utc)
-    changed = session_store.cleanup_stale_running_sessions(server_start, path=db)
-
-    assert "surviving-agent" not in changed, (
-        "Agent with stop_reason=tool_use must NOT be killed at startup "
-        "(it may have survived the server restart)"
-    )
-    result = session_store.find_session("surviving-agent", path=db)
-    assert result["status"] == "running", (
-        f"Expected 'running' but got {result['status']!r}"
-    )
-
-
-def test_cleanup_stale_marks_end_turn_as_completed_not_dead(isolated_db, tmp_path):
-    """Agents with stop_reason=end_turn are marked completed (not dead) at startup.
-
-    Regression test for issue #645: previously only the mtime path existed,
-    so an agent that finished before a restart would be left in limbo (mtime
-    newer than server start → skipped; but the reconciler would eventually
-    catch it). Now the startup cleanup proactively marks it completed.
-    """
-    db = isolated_db
-    output_file = tmp_path / "completed_agent.output"
-    output_file.write_text('{"stop_reason": "end_turn"}\n')
-
-    session_store.session_start(
-        id="completed-at-restart",
-        description="Agent that finished before restart",
-        chat_id="123",
-        output_file=str(output_file),
-        path=db,
-    )
-
-    server_start = datetime.now(timezone.utc)
-    changed = session_store.cleanup_stale_running_sessions(server_start, path=db)
-
-    assert "completed-at-restart" in changed
-    result = session_store.find_session("completed-at-restart", path=db)
-    assert result["status"] == "completed", (
-        f"Expected 'completed' for end_turn agent but got {result['status']!r}"
     )

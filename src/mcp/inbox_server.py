@@ -1365,6 +1365,10 @@ def _is_main_http_session() -> bool:
     current = _get_current_http_session_id()
     return current is not None and current == _dispatcher_session_id
 
+# Record the moment this server process started. Used by stale-session cleanup
+# to distinguish output files from the current run vs a previous (dead) run.
+_SERVER_START_TIME = datetime.now(timezone.utc)
+
 # Initialize SQLite agent session store (idempotent, runs JSON migration on first boot)
 try:
     _session_store.init_db()
@@ -1372,32 +1376,31 @@ try:
 except Exception as _ss_err:
     log.warning(f"Agent session store init failed (non-fatal): {_ss_err}")
 
-# Initialize atomic claim DB — creates message_claims and dispatcher_lock tables
-# in the existing agent_sessions.db. Idempotent.
+# Startup cleanup: mark stale 'running' rows as 'dead' before reconciler loop begins.
+# After a force-restart, agents killed mid-run leave their output files with
+# stop_reason=tool_use, which the reconciler treats as still-running. We fix this
+# here by checking file existence and mtime against the server start time — any
+# output file that predates this process startup cannot belong to a live agent.
+#
+# Note on asymmetric notification: this sweep intentionally does NOT enqueue user
+# notifications for the sessions it marks dead. This is a bulk-cleanup pass, not a
+# live event. Any sessions that were completed/dead before this restart but not yet
+# notified are handled by the reconciler's _startup_sweep(), which fires immediately
+# after the reconciler loop starts and handles the notification backlog. Separating
+# the two concerns keeps this code path simple and idempotent.
 try:
-    _claims_db = _AtomicClaimDB()
-    log.info("Atomic claim DB initialized (message_claims + dispatcher_lock tables)")
-except Exception as _claims_err:
-    # Degrade gracefully: create a no-op stub so the rest of the module
-    # continues to work even if the DB cannot be opened.
-    log.warning(f"Atomic claim DB init failed — degrading to filesystem-only claims: {_claims_err}")
-    class _NoOpClaimsDB:  # type: ignore[no-redef]
-        def claim(self, *a, **kw) -> bool: return True
-        def release(self, *a, **kw) -> None: pass
-        def update_status(self, *a, **kw) -> None: pass
-        def is_claimed(self, *a, **kw) -> bool: return False
-        def acquire_dispatcher_lock(self, *a, **kw) -> bool: return True
-        def get_dispatcher_lock(self, *a, **kw): return None
-        def release_dispatcher_lock(self, *a, **kw) -> None: pass
-        def force_replace_dispatcher_lock(self, *a, **kw) -> None: pass
-    _claims_db = _NoOpClaimsDB()
-
-# NOTE: Startup cleanup (cleanup_stale_running_sessions) is intentionally NOT
-# called here at module level. This module is imported by inbox_server_http.py
-# (the HTTP bridge) which may be run as a separate process. Running the cleanup
-# at import time would incorrectly mark running agents as dead every time the
-# HTTP server restarts. The cleanup runs inside main() so it only fires when
-# inbox_server.py is the actual stdio MCP server entry point.
+    _dead_ids = _session_store.cleanup_stale_running_sessions(
+        server_start_time=_SERVER_START_TIME
+    )
+    if _dead_ids:
+        log.warning(
+            f"[startup] Marked {len(_dead_ids)} stale 'running' session(s) as dead "
+            f"(pre-existing from before this server start): {_dead_ids}"
+        )
+    else:
+        log.info("[startup] No stale 'running' sessions found at startup")
+except Exception as _cleanup_err:
+    log.warning(f"[startup] Stale session cleanup failed (non-fatal): {_cleanup_err}")
 
 # ---------------------------------------------------------------------------
 # Wire server notification — event-driven SSE push (<40ms latency)
@@ -9772,15 +9775,9 @@ async def reconcile_agent_sessions() -> None:
     """
     from agents.session_store import check_output_file_status, get_output_file_mtime
 
-    DEFAULT_DEAD_THRESHOLD_SECONDS = 30 * 60   # 30 minutes — fallback for missing output files
-    DEFAULT_DEAD_THRESHOLD_RUNNING_SECONDS = 120 * 60  # 120 minutes — fallback for stuck tool_use files
+    DEAD_THRESHOLD_SECONDS = 25 * 60   # 25 minutes — for missing output files
+    DEAD_THRESHOLD_RUNNING_SECONDS = 60 * 60  # 60 minutes — for stuck tool_use files
     GRACE_PERIOD_SECONDS = 30          # Newly spawned agents get grace before DEAD
-    # Mtime staleness gate (issue #868): if output file hasn't been written to in
-    # this many seconds, treat the agent as interrupted rather than actively running.
-    # An active agent updates its JSONL output continuously; an interrupted one stops
-    # immediately. 15 minutes gives ample margin to avoid false positives during slow
-    # tool calls, while cutting the misclassification window from 120 min → 30 min.
-    MTIME_STALE_THRESHOLD_SECONDS = 15 * 60    # 15 minutes
 
     # Startup sweep: re-send notifications for sessions that completed while down
     await _startup_sweep()
@@ -9880,46 +9877,23 @@ async def reconcile_agent_sessions() -> None:
                             f"elapsed {elapsed}s — within window, waiting"
                         )
                 elif file_status == "running":
-                    # File exists but no stop_reason=end_turn (either tool_use or
-                    # no stop_reason at all — both return "running" from the scanner).
-                    # This is normal for live agents, but two failure modes land here:
-                    #   1. Agent killed mid-turn (no stop_reason written) — file mtime
-                    #      stops updating immediately; detectable within 15 minutes.
-                    #   2. Legitimately slow tool call — mtime keeps ticking; leave alone.
-                    #
-                    # Mtime gate (issue #868): if the output file has been idle for
-                    # MTIME_STALE_THRESHOLD_SECONDS, use the short threshold (same as
-                    # the "missing file" branch) rather than the generous 120-minute cap.
-                    # This closes the gap where interrupted agents are misclassified as
-                    # "still running" for up to 120 minutes.
-                    output_mtime = get_output_file_mtime(output_file)
-                    now_ts = time.time()
-                    file_is_stale = (
-                        output_mtime is not None
-                        and (now_ts - output_mtime) > MTIME_STALE_THRESHOLD_SECONDS
-                    )
-                    effective_running_threshold = (
-                        dead_threshold_missing if file_is_stale else dead_threshold_running
-                    )
-
-                    if elapsed > effective_running_threshold:
-                        stale_note = (
-                            f", file idle {int(now_ts - output_mtime)}s (mtime gate active)"
-                            if file_is_stale
-                            else ""
-                        )
+                    # File exists with stop_reason=tool_use. This is normal for live
+                    # agents, but if elapsed exceeds the generous running threshold the
+                    # agent has almost certainly been killed (e.g. mid-restart). The
+                    # startup cleanup handles the common case; this branch catches any
+                    # that slip through (e.g. output file mtime was updated after restart).
+                    if elapsed > DEAD_THRESHOLD_RUNNING_SECONDS:
                         log.warning(
                             f"[reconciler] Agent {agent_id!r} output stuck at tool_use "
-                            f"after {elapsed}s (>{effective_running_threshold}s{stale_note}) "
+                            f"after {elapsed}s (>{DEAD_THRESHOLD_RUNNING_SECONDS}s) "
                             f"— marking dead (output_file={output_file!r})"
                         )
                         _session_store.session_end(
                             id_or_task_id=agent_id,
                             status="dead",
                             result_summary=(
-                                f"Auto-closed by reconciler: output idle "
+                                f"Auto-closed by reconciler: stop_reason=tool_use "
                                 f"after {elapsed}s"
-                                + (f" (mtime stale {int(now_ts - output_mtime)}s)" if file_is_stale else "")
                             ),
                         )
                         _enqueue_reconciler_notification(session, outcome="dead")
