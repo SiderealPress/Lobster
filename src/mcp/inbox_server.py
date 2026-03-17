@@ -15,7 +15,6 @@ import json
 import logging
 from logging.handlers import RotatingFileHandler
 import os
-import re
 import socket
 import sys
 import time
@@ -3735,6 +3734,37 @@ async def list_tools() -> list[Tool]:
                 "required": ["description", "chat_id"],
             },
         ),
+        Tool(
+            name="list_reports",
+            description=(
+                "List filed /report records from the reports table, newest first. "
+                "Optionally filter by chat_id or status. Useful for reviewing open "
+                "user-reported issues or checking what has already been triaged."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "chat_id": {
+                        "oneOf": [
+                            {"type": "integer"},
+                            {"type": "string"},
+                        ],
+                        "description": "If provided, restrict results to reports from this chat.",
+                    },
+                    "status": {
+                        "type": "string",
+                        "description": "Filter by report status (e.g. 'open', 'closed'). Default: 'open'.",
+                        "default": "open",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of results to return. Default: 20.",
+                        "default": 20,
+                    },
+                },
+                "required": [],
+            },
+        ),
     ] + (
         # User Model Tools (only registered when feature flag is enabled)
         [
@@ -3982,9 +4012,11 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
         return await handle_create_calendar_event(arguments)
     elif name == "list_calendar_events":
         return await handle_list_calendar_events(arguments)
-    # /report Slash Command Tool
+    # /report Slash Command Tools
     elif name == "create_report":
         return await handle_create_report(arguments)
+    elif name == "list_reports":
+        return await handle_list_reports(arguments)
     # User Model Tools (dispatched to user_model subsystem)
     elif name in _user_model_tool_names and _user_model is not None:
         result_json = _user_model.dispatch(name, arguments)
@@ -4700,6 +4732,7 @@ async def _handle_report_slash_command(msg: dict, msg_file: Path) -> None:
     }
 
     # Store the report
+    report_id: str | None = None
     try:
         report = _session_store.create_report(
             description=description,
@@ -4708,12 +4741,15 @@ async def _handle_report_slash_command(msg: dict, msg_file: Path) -> None:
             recent_messages=None,  # not captured in pre-processor to stay fast
             active_session_ids=active_session_ids if active_session_ids else None,
             snapshot_state=snapshot_state,
+            instance_id=_INSTANCE_ID,
         )
         report_id = report["report_id"]
         log.info(f"/report pre-processor: created {report_id} for chat {chat_id}")
     except Exception as exc:
         log.error(f"/report pre-processor: failed to create report: {exc}", exc_info=True)
-        report_id = "RPT-ERR"
+        # Do not send a misleading RPT-ERR ID to the user — the message remains
+        # in the inbox so the dispatcher can handle it or retry.
+        return
 
     # Send confirmation reply and mark processed atomically
     confirmation = f"Report filed as {report_id}. We'll look into it."
@@ -9554,13 +9590,41 @@ async def handle_create_report(args: dict) -> list[TextContent]:
             recent_messages=recent_messages if recent_messages else None,
             active_session_ids=active_session_ids if active_session_ids else None,
             snapshot_state=snapshot_state,
+            instance_id=_INSTANCE_ID,
         )
     except Exception as exc:
         log.error(f"create_report failed: {exc}", exc_info=True)
-        return [TextContent(type="text", text=f'{{"error": "Failed to create report: {exc}"}}')]
+        raise ValueError(f"Failed to create report: {exc}") from exc
 
     log.info(f"Report filed: {report['report_id']} from chat {chat_id}")
     return [TextContent(type="text", text=json.dumps(report))]
+
+
+async def handle_list_reports(args: dict) -> list[TextContent]:
+    """Handle the list_reports MCP tool.
+
+    Returns a JSON array of report records, newest first, optionally filtered
+    by chat_id and/or status.
+    """
+    chat_id = args.get("chat_id")
+    status = str(args.get("status", "open")).strip() or "open"
+    limit_raw = args.get("limit", 20)
+    try:
+        limit = int(limit_raw)
+    except (TypeError, ValueError):
+        limit = 20
+
+    try:
+        reports = _session_store.list_reports(
+            chat_id=chat_id,
+            status=status,
+            limit=limit,
+        )
+    except Exception as exc:
+        log.error(f"list_reports failed: {exc}", exc_info=True)
+        raise ValueError(f"Failed to list reports: {exc}") from exc
+
+    return [TextContent(type="text", text=json.dumps(reports))]
 
 
 def _enqueue_reconciler_notification(session: dict, outcome: str) -> None:
