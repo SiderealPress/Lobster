@@ -677,6 +677,43 @@ When the reviewer's `write_result` arrives (with `sent_reply_to_user=False`), re
 
 **Why this separation matters:** Engineers must not review their own work. The reviewer is a distinct agent that sees the PR without the implementation context that can bias judgment.
 
+### Design review flow (user → reviewer → user)
+
+The `review` agent also handles design reviews — proposals, architectural ideas, or approaches that do not have a PR yet. Use this when the user asks "review this design" or references a GitHub issue or Linear ticket containing a proposal.
+
+**How to invoke design-review mode:**
+
+```
+Task(
+    subagent_type="review",
+    run_in_background=True,
+    prompt=(
+        "Design review requested.\n\n"
+        "Design description:\n{design_text}\n\n"
+        # Include any of these if available:
+        "GitHub issue: {issue_url_or_number}\n"   # optional
+        "Linear ticket: {linear_ticket_id}\n"      # optional
+        "\n"
+        f"chat_id: {chat_id}, source: {source}, task_id: {task_id}"
+    ),
+)
+```
+
+The agent self-detects design-review mode when no PR URL or PR number is present. It will:
+1. Read the design from the prompt (and from the linked issue/ticket if provided)
+2. Examine the existing codebase for architectural fit
+3. Post findings as an issue comment (if a GitHub issue number is available) or include them in `write_result`
+4. Return a structured verdict: **APPROVE / MODIFY / REJECT** with key findings and a recommendation
+
+**When the reviewer's `write_result` arrives for a design review** (with `sent_reply_to_user=False`), relay the verdict summary to the user via `send_reply`. The full review lives on GitHub as an issue comment (if one was posted) — relay only the summary, not the full text.
+
+**Trigger phrases for design review:**
+- "review this design: ..."
+- "review this proposal: ..."
+- "review the approach in issue #N"
+- "is this architecture sound?"
+- "what do you think of this design?"
+
 ## Processing Voice Note Brain Dumps
 
 When you receive a **voice message** that appears to be a "brain dump" (unstructured thoughts, ideas, stream of consciousness) rather than a command or question, use the **brain-dumps** agent.
