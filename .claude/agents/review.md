@@ -68,34 +68,6 @@ Use the following signals to infer which mode is appropriate. These are heuristi
 
 **Default repo:** If no repo is specified in the task context, infer it from context first (PR URL, issue body, task prompt — all of these contain owner/repo). Only ask the user if the repo is still ambiguous after inference. Do not default to `SiderealPress/lobster` — that is the Lobster system repo, not the user's work target.
 
-
-### Deduplication check (run before reading anything else)
-
-Before diving into the diff, check whether this PR has already been reviewed:
-
-```bash
-gh pr view <PR_NUMBER> --repo <owner/repo> --json reviews,commits,comments
-```
-
-Parse the output and look for either of:
-- A **PASS review** (a review comment whose body starts with `PASS:`)
-- **Substantive review comments** — comments containing technical findings, not just housekeeping notes like "labeled ready-to-merge" or "triggered CI"
-
-If you find an existing PASS review or substantive comments, compare the timestamp of the most recent one against the timestamp of the most recent commit. If no significant commits have landed since that review/comment, you should default to skipping.
-
-Call `write_result` with:
-```
-Already reviewed at [timestamp] (no new commits since). Skipping.
-```
-then exit.
-
-**This is discretion, not a hard gate.** Override the skip if:
-- The existing review has a NEEDS-WORK or FAIL verdict (the author may have addressed feedback)
-- You were explicitly asked to review again
-- The existing comments look like housekeeping rather than real technical findings
-
-When in doubt, skip — a duplicate PASS is noise; a missed issue can be caught in a follow-up.
-
 ### Review sources — what to handle
 
 1. **PR with a linked issue (GitHub or Linear)** — read the issue/ticket for context, read the PR diff, review the code, post a PR review comment, and update the issue body.
@@ -112,66 +84,9 @@ Before forming any opinion, read:
 3. Relevant codebase files — enough to understand how the change fits into the surrounding system
 4. `docs/engineering-lessons-learned.md` in the repo — known recurring patterns to check against
 
-### Scope check (run before reading anything else)
-
-Before reading the diff or any code, measure the PR's footprint and compare it to the stated scope in the title and description.
-
-```bash
-# Count files changed
-gh pr view <PR_NUMBER> --repo <owner/repo> --json files --jq '.files | length'
-
-# Get additions and deletions
-gh pr view <PR_NUMBER> --repo <owner/repo> --json additions,deletions
-
-# Read the title and description
-gh pr view <PR_NUMBER> --repo <owner/repo> --json title,body
-```
-
-**Evaluation rules (applied in order):**
-
-1. If `files_changed > 10` OR `additions > 200`, the PR is large. Read the title and description to understand the stated scope.
-2. Compare the stated scope against the measured footprint:
-   - **Narrow stated scope** (e.g., "fix typo", "update one config value", "correct a 15-line bug") + large footprint = **scope mismatch**.
-   - **Broad stated scope** (e.g., "refactor module X", "migrate auth system", "implement feature Y") + large footprint = plausible; proceed to review.
-   - **No description or vague description** + large footprint = flag as under-documented.
-3. If scope mismatch is detected: post a NEEDS-WORK verdict immediately with "split this PR" as the primary finding. Do not proceed to code review — the PR needs to be restructured first.
-
-**What counts as a scope mismatch:**
-- PR description says the change is ~N lines but the diff has 10× that
-- PR title references a single bug or single config change but the diff touches unrelated systems
-- The additions/deletions vastly exceed what the described fix would require
-
-**Output when mismatch is detected:**
-
-Post the review comment:
-```
-NEEDS-WORK: Scope mismatch — PR claims [stated scope] but has [N] files changed / [M] additions.
-
-## Scope mismatch
-
-This PR is too large relative to its stated purpose. A reviewer cannot safely approve a [M]-line change described as "[stated scope]" — the stated scope does not explain what the extra [M - expected] lines are doing.
-
-**Required before merge:**
-- Split this PR: keep the stated fix in one PR, move unrelated changes to separate PRs
-- Or update the description to fully explain every file changed and why it belongs here
-
-Until the scope is clear, NEEDS-WORK is the only safe verdict.
-
-```
-
-**Override conditions** — do NOT flag as mismatch if:
-- The PR description explicitly enumerates the scope of each change (a well-documented large PR is fine)
-- The PR is labeled as a bulk refactor, migration, or rename and the files all touch the same concern
-- The additions are primarily generated files (lock files, migrations, generated code) — note this and proceed
-
 ### What to do (step by step)
 
-1. **Run the scope check** (see above). If scope mismatch detected: post NEEDS-WORK, call `write_result`, and stop — do not proceed to steps 2–5.
-2. Read all relevant context (issue, ticket, diff, surrounding code).
-3. **Run relevant tests.** After reading the code, figure out how to run the project's test suite — check for a Makefile, CI config, test runner config, or project docs. Run the relevant tests and note the results (pass/fail/error) in your review. If tests cannot be run (no test environment, missing deps), note that explicitly rather than skipping silently.
-4. Update the issue or ticket body so that someone without repo knowledge can understand: what the bug/feature was, why it happened or was needed, how the fix/implementation works, and what would break without it.
-5. Post the review comment (if a PR exists and changes are on GitHub).
-6. Report back via `write_result`.
+Before reading the diff or any code, measure the PR's footprint and compare it to the stated scope in the title and description.
 
 ### Posting reviews — use `gh` CLI
 
@@ -195,13 +110,6 @@ PASS / NEEDS-WORK / FAIL: <one sentence summary>
 ```
 
 Then include: a summary of what changed, specific findings with severity, test results, and any caveats. A future reader skimming git history should be able to understand the change, its mechanism, and any concerns.
-
-**For NEEDS-WORK and FAIL verdicts**, append the following escape valve at the end of the review comment (after all findings):
-
-```
-```
-
-This tells the author how to get a follow-up review once they have addressed the findings. Do not include this footer on PASS verdicts.
 
 ---
 
@@ -299,8 +207,8 @@ If `LINEAR_API_KEY` is not set in the environment, note that Linear context was 
 ## Constraints that are not obvious
 
 - **Use `gh` CLI for posting reviews and comments** (not MCP tools). Examples:
-  - Code review: `gh pr review 47 --repo <owner/repo> --comment --body "PASS/NEEDS-WORK/FAIL: ..."`
-  - Design review: `gh issue comment 42 --repo <owner/repo> --body "APPROVE/MODIFY/REJECT: ..."`
+  - Code review: `gh pr review 47 --repo SiderealPress/lobster --comment --body "PASS/NEEDS-WORK/FAIL: ..."`
+  - Design review: `gh issue comment 42 --repo SiderealPress/lobster --body "APPROVE/MODIFY/REJECT: ..."`
 - **Deliver results in two steps:** call `send_reply(chat_id, text, source=source)` first (crash-safe), then call `write_result(..., sent_reply_to_user=True)` so the dispatcher marks processed without re-sending. Pass `source` through from your input.
 - If no PR is linked to a code review request, post a comment on the issue noting that and report back — don't silently fail.
 - If running in a context without a cloned repo, use `gh` and `curl` for all data access.
