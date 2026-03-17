@@ -22,6 +22,10 @@ if str(_MCP_DIR) not in sys.path:
 # as an attribute of the `src.mcp` package before patch.multiple opens.
 import src.mcp.inbox_server  # noqa: F401
 
+# Placeholder string used as a test chat_id value. Used as a bare name in
+# some test assertions, so it must be defined as a module-level constant.
+OWNER_CHAT_ID_PLACEHOLDER = "OWNER_CHAT_ID_PLACEHOLDER"
+
 
 class TestHandleWriteObservation:
     """Tests for the write_observation handler."""

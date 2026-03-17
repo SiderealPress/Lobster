@@ -23,6 +23,10 @@ sys.path.insert(0, str(SRC_DIR))
 
 from agents import session_store
 
+# Placeholder string used as a test chat_id value. Several tests pass this as
+# a bare name (not a quoted string literal), so it must be defined here.
+OWNER_CHAT_ID_PLACEHOLDER = "OWNER_CHAT_ID_PLACEHOLDER"
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
