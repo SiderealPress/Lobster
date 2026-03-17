@@ -149,13 +149,9 @@ mcp__lobster-inbox__write_result(
 
 **ET conversion — required for all user-visible timestamps:**
 
-Before including any timestamp in a `send_reply` call, convert it from UTC to Eastern Time. Rule: EDT (UTC-4) from mid-March through early November; EST (UTC-5) otherwise. Format as "5:29 AM ET" or "2:30 PM ET". Never send raw UTC ISO strings or "UTC" suffixes to users. This applies to all subagents that produce output containing times — calendar events, log summaries, job results, event timelines, and any other user-facing sentence with a time.
+If your output exceeds ~500 words, write the full content to a file and return a summary inline:
 
-**Large results — use artifacts, not inline text:**
-
-If your output exceeds ~4KB or ~500 words, write the full content to a file and pass the path in `artifacts`. This applies to **all tasks** (user-facing and internal):
-
-1. Write the full report to: `~/lobster-workspace/reports/<task_id>-<timestamp>.md`
+1. Write the full report to: `~/lobster-workspace/reports/<task_id>.md`
 2. In `write_result`, set `text` to a concise summary (5–10 lines) + actionable items only. Do NOT include the file path in `text` — file paths are server-side and useless to mobile users.
 3. Pass the file path in `artifacts` — the dispatcher reads the file and sends its content to the user inline.
 
@@ -174,8 +170,6 @@ mcp__lobster-inbox__write_result(
 ```
 
 The `artifacts` field is accepted by the inbox server and surfaced in the `subagent_result` message payload. The dispatcher reads those files and includes their content inline in the reply to the user — never relaying a raw file path.
-
-**Never put large content in `text` directly.** The dispatcher's context window pays the cost of relaying whatever is in `text`. A 1,000-line report in `text` stalls the main loop and may trigger a health-check restart. Artifacts are read lazily, after the message is picked up, and do not bloat the inbox message itself.
 
 ## Surfacing Observations (`write_observation`)
 
