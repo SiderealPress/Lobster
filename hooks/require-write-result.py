@@ -416,13 +416,13 @@ def _write_synthetic_inbox_message(
 
         message = {
             "id": message_id,
-            "type": "subagent_result",
-            "source": "telegram",
+            "type": "subagent_recovered",
+            "source": "system",
             "chat_id": chat_id,
             "text": text,
             "task_id": task_id,
             "status": "recovered",
-            "sent_reply_to_user": False,
+            "sent_reply_to_user": True,  # chat_id is unknown; dispatcher must not relay via send_reply
             "timestamp": now.isoformat(),
             "recovered": True,
         }
