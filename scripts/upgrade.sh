@@ -1258,6 +1258,36 @@ with open(path, 'w') as f:
         migrated=$((migrated + 1))
     fi
 
+    # Migration 17: Remove require-write-result.py from the Stop hook in settings.json
+    # The Stop event fires for the dispatcher main session; SubagentStop fires for
+    # Task-spawned subagents — they are mutually exclusive. The hook was incorrectly
+    # registered under Stop (which hit the dispatcher) as well as SubagentStop.
+    # The is_dispatcher() guard in the hook was a band-aid for this misregistration.
+    # Fix: remove the entry from Stop[], leave it only under SubagentStop.
+    if [ -f "$CLAUDE_SETTINGS" ] && command -v jq >/dev/null 2>&1; then
+        local stop_has_write_result
+        stop_has_write_result=$(jq -r '
+            [.hooks.Stop[]?.hooks[]?.command // empty]
+            | map(select(contains("require-write-result")))
+            | length
+        ' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
+        if [ "${stop_has_write_result:-0}" != "0" ] && [ "${stop_has_write_result:-0}" != "" ]; then
+            TMP_SETTINGS=$(mktemp)
+            jq '
+                .hooks.Stop = (
+                    (.hooks.Stop // [])
+                    | map(select(
+                        (.hooks // [])
+                        | map(.command // "")
+                        | all(contains("require-write-result") | not)
+                    ))
+                )
+            ' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+            substep "Removed require-write-result.py from Stop hook (was mis-registered; SubagentStop entry kept)"
+            migrated=$((migrated + 1))
+        fi
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
