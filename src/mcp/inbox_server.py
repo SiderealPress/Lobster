@@ -179,18 +179,28 @@ def _queue_observation(msg_text: str, msg_id: str, source: str | None = None, ts
 # ---------------------------------------------------------------------------
 
 _DEBUG_MODE: bool | None = None        # None = not yet resolved
+_DEBUG_ALERTS_ENABLED: bool = False    # True only when alerts are explicitly configured
 _DEBUG_OWNER_CHAT_ID: int | None = None
-_DEBUG_BOT_TOKEN: str | None = None
+_DEBUG_OWNER_SOURCE: str = "telegram"  # messaging source for debug alerts
 _DEBUG_RESOLVED: bool = False
 
 
 def _resolve_debug_config() -> None:
     """
-    Lazily resolve LOBSTER_DEBUG, owner chat_id, and bot token from env + config.env.
+    Lazily resolve LOBSTER_DEBUG, owner chat_id, and messaging source from env + config.env.
     Must only be called after _CONFIG_DIR is available (module init complete).
     Thread-safe by idempotency — worst case reads config twice.
+
+    Debug alerts are only enabled when LOBSTER_DEBUG=true AND a valid admin chat_id
+    can be resolved from config. This prevents spurious inbox writes in environments
+    where LOBSTER_DEBUG=true is set but no admin notification channel is configured
+    (e.g. test environments, staging).
+
+    Source resolution order:
+      1. LOBSTER_DEBUG_SOURCE env var (explicit override)
+      2. Detected from config: if LOBSTER_ENABLE_SLACK=true, use "slack"; else "telegram"
     """
-    global _DEBUG_MODE, _DEBUG_OWNER_CHAT_ID, _DEBUG_BOT_TOKEN, _DEBUG_RESOLVED
+    global _DEBUG_MODE, _DEBUG_ALERTS_ENABLED, _DEBUG_OWNER_CHAT_ID, _DEBUG_OWNER_SOURCE, _DEBUG_RESOLVED
     if _DEBUG_RESOLVED:
         return
 
@@ -210,9 +220,22 @@ def _resolve_debug_config() -> None:
             pass
     _DEBUG_MODE = debug
 
-    # Determine owner chat_id and bot token
+    # Determine owner chat_id and messaging source.
+    # _DEBUG_ALERTS_ENABLED is only set to True when both a valid chat_id AND
+    # the source's bot credentials are present. This prevents spurious inbox writes
+    # in environments that have LOBSTER_DEBUG=true but no bot configured for delivery
+    # (e.g. test environments, CI, staging without a bot token).
     if debug:
         try:
+            # Allow explicit source override via env var
+            explicit_source = os.environ.get("LOBSTER_DEBUG_SOURCE", "").strip().lower()
+
+            slack_enabled = False
+            slack_channel: str | None = None
+            slack_bot_token: str | None = None
+            telegram_chat_id: int | None = None
+            telegram_bot_token: str | None = None
+
             config_file = _CONFIG_DIR / "config.env"
             if config_file.exists():
                 for line in config_file.read_text().splitlines():
@@ -221,60 +244,45 @@ def _resolve_debug_config() -> None:
                         val = stripped.split("=", 1)[1].strip().strip('"').strip("'")
                         first = val.split(",")[0].strip()
                         if first.lstrip("-").isdigit():
-                            _DEBUG_OWNER_CHAT_ID = int(first)
+                            telegram_chat_id = int(first)
                     elif stripped.startswith("TELEGRAM_BOT_TOKEN="):
                         val = stripped.split("=", 1)[1].strip().strip('"').strip("'")
                         if val:
-                            _DEBUG_BOT_TOKEN = val
+                            telegram_bot_token = val
+                    elif stripped.startswith("LOBSTER_ENABLE_SLACK="):
+                        val = stripped.split("=", 1)[1].strip().strip('"').strip("'").lower()
+                        slack_enabled = val == "true"
+                    elif stripped.startswith("LOBSTER_SLACK_ALLOWED_CHANNELS="):
+                        val = stripped.split("=", 1)[1].strip().strip('"').strip("'")
+                        first_chan = val.split(",")[0].strip()
+                        if first_chan:
+                            slack_channel = first_chan
+                    elif stripped.startswith("LOBSTER_SLACK_BOT_TOKEN="):
+                        val = stripped.split("=", 1)[1].strip().strip('"').strip("'")
+                        if val:
+                            slack_bot_token = val
+
+            if explicit_source:
+                _DEBUG_OWNER_SOURCE = explicit_source
+            elif slack_enabled:
+                _DEBUG_OWNER_SOURCE = "slack"
+            else:
+                _DEBUG_OWNER_SOURCE = "telegram"
+
+            # chat_id: use Slack channel if source is slack, else Telegram numeric id.
+            # Require the source's bot credentials to be present before enabling alerts —
+            # this prevents silent inbox pollution in environments where LOBSTER_DEBUG=true
+            # is set but the bot that delivers messages is not configured.
+            if _DEBUG_OWNER_SOURCE == "slack" and slack_channel and slack_bot_token:
+                _DEBUG_OWNER_CHAT_ID = slack_channel  # type: ignore[assignment]
+                _DEBUG_ALERTS_ENABLED = True
+            elif _DEBUG_OWNER_SOURCE != "slack" and telegram_chat_id is not None and telegram_bot_token:
+                _DEBUG_OWNER_CHAT_ID = telegram_chat_id
+                _DEBUG_ALERTS_ENABLED = True
         except Exception:
             pass
 
     _DEBUG_RESOLVED = True
-
-
-def _send_telegram_direct(bot_token: str, chat_id: int, text: str) -> None:
-    """Send a message directly to Telegram via Bot API without touching the inbox.
-
-    Used by _emit_debug_observation to deliver debug push notifications without
-    routing through the dispatcher inbox, avoiding token-costly round-trips.
-    Silent on any failure — must never raise.
-
-    When called from a running event loop (e.g. inside an async handler), the
-    blocking urlopen is dispatched to a thread via run_in_executor so the event
-    loop is not stalled for the up-to-5-second network timeout.
-    """
-    import urllib.request as _urllib_request
-
-    def _do_send() -> None:
-        try:
-            url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-            # Truncate very long debug messages to stay within Telegram limits (4096 chars).
-            display_text = text[:4000] + ("…" if len(text) > 4000 else "")
-            # No parse_mode — debug text is unescaped and HTML special chars
-            # (<, >, &) would cause Telegram to silently drop the message.
-            payload = json.dumps({
-                "chat_id": chat_id,
-                "text": display_text,
-            }).encode()
-            req = _urllib_request.Request(
-                url,
-                data=payload,
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            with _urllib_request.urlopen(req, timeout=5):
-                pass
-        except Exception:
-            pass  # never block on debug instrumentation
-
-    # If an event loop is running (we're inside an async handler), offload the
-    # blocking I/O to a thread so we don't stall the loop for up to 5 seconds.
-    try:
-        loop = asyncio.get_running_loop()
-        loop.run_in_executor(None, _do_send)
-    except RuntimeError:
-        # No running event loop — safe to call directly (e.g. from a thread).
-        _do_send()
 
 
 def _emit_debug_observation(
@@ -284,7 +292,11 @@ def _emit_debug_observation(
     emitter: str | None = None,
 ) -> None:
     """
-    Emit a debug push notification directly to Telegram (when LOBSTER_DEBUG=true).
+    Emit a debug notification via the inbox when LOBSTER_DEBUG=true.
+
+    Routes through the normal inbox/outbox mechanism so the alert is delivered
+    via whatever messaging source the admin has configured (Telegram, Slack, etc.)
+    rather than calling any provider API directly.
 
     When debug mode is off, this function is a no-op.
 
@@ -302,21 +314,35 @@ def _emit_debug_observation(
 
     Never raises — must be safe to call from any context including threads.
     """
-    # Fast path: skip I/O if env var is clearly not set and we've already resolved.
-    if _DEBUG_RESOLVED and not _DEBUG_MODE:
+    # Fast path: skip I/O if debug alerts have been resolved and are disabled.
+    if _DEBUG_RESOLVED and not _DEBUG_ALERTS_ENABLED:
         return
     _resolve_debug_config()
-    if not _DEBUG_MODE:
+    if not _DEBUG_ALERTS_ENABLED:
         return
     chat_id = _DEBUG_OWNER_CHAT_ID
-    bot_token = _DEBUG_BOT_TOKEN
-    if chat_id is None or not bot_token:
+    if chat_id is None:
         return
     try:
         emitter_label = emitter or "unknown"
         label = f"[debug|{visibility}] {category} from {emitter_label}"
         full_text = f"{label}\n{text}"
-        _send_telegram_direct(bot_token, chat_id, full_text)
+
+        from datetime import datetime, timezone as _timezone
+        now = datetime.now(_timezone.utc)
+        ts_ms = int(now.timestamp() * 1000)
+        safe_emitter = "".join(c if c.isalnum() or c in "-_" else "_" for c in emitter_label)[:40]
+        message_id = f"{ts_ms}_debug_{safe_emitter}"
+        message = {
+            "id": message_id,
+            "type": "debug_observation",
+            "source": _DEBUG_OWNER_SOURCE,
+            "chat_id": chat_id,
+            "text": full_text,
+            "timestamp": now.isoformat(),
+        }
+        inbox_file = INBOX_DIR / f"{message_id}.json"
+        atomic_write_json(inbox_file, message)
     except Exception:
         pass  # never block on debug instrumentation
 
@@ -1951,6 +1977,10 @@ async def list_tools() -> list[Tool]:
                         "items": {"type": "string"},
                         "description": "Optional tags for categorization.",
                     },
+                    "task_id": {
+                        "type": "string",
+                        "description": "Optional subagent task identifier. Included in debug alerts when LOBSTER_DEBUG=true so the caller is visible in the memory write notification.",
+                    },
                 },
                 "required": ["content"],
             },
@@ -1973,6 +2003,10 @@ async def list_tools() -> list[Tool]:
                     "project": {
                         "type": "string",
                         "description": "Optional project filter.",
+                    },
+                    "task_id": {
+                        "type": "string",
+                        "description": "Optional subagent task identifier. Included in debug alerts when LOBSTER_DEBUG=true so the caller is visible in the memory search notification.",
                     },
                 },
                 "required": ["query"],
@@ -4464,6 +4498,29 @@ async def handle_write_result(args: dict) -> list[TextContent]:
     # Notify wire server so SSE clients update within 40ms
     asyncio.create_task(_notify_wire_server())
 
+    # Debug alert: enqueue best-effort inbox message when LOBSTER_DEBUG=true.
+    # Fires at the MCP layer (before the dispatcher picks up the inbox message)
+    # so the user sees the subagent message arrive in real time.
+    # _emit_debug_observation is a no-op when debug alerts are disabled — single gate.
+    agent_id = args.get("agent_id", "").strip() or None
+    text_preview = text[:60] + "…" if len(text) > 60 else text
+    alert_lines = [
+        f"\U0001f4e8 [subagent\u2192dispatcher] type: {msg_type}",
+        f"task: {task_id}",
+    ]
+    if agent_id:
+        alert_lines.append(f"agent: {agent_id}")
+    if status:
+        alert_lines.append(f"status: {status}")
+    alert_lines.append(f"sent_reply: {bool(sent_reply_to_user)}")
+    alert_lines.append(f"preview: {text_preview}")
+    _emit_debug_observation(
+        "\n".join(alert_lines),
+        category="system_context",
+        visibility="mcp-only",
+        emitter=f"task:{task_id}",
+    )
+
     log.info(f"Subagent result queued in inbox: task_id={task_id} status={status} chat_id={chat_id}")
     if msg_type == "subagent_notification":
         delivery_note = "Subagent already sent reply via send_reply — dispatcher will mark processed without relaying."
@@ -4494,8 +4551,8 @@ async def handle_write_observation(args: dict) -> list[TextContent]:
       system_error   → written to inbox; dispatcher stores/logs
 
     When LOBSTER_DEBUG=true, debug mode is purely additive: every observation
-    that is written to the inbox also triggers a direct [debug/category] Telegram
-    push so the user gets real-time visibility into what the dispatcher sees.
+    that is written to the inbox also triggers an additional debug inbox message
+    so the user gets real-time visibility into what the dispatcher sees.
     This mirror copy is suppressed for noop observations from the dispatcher's own
     context-injection logic (those are emitted by mark_processing, not here).
 
@@ -4536,7 +4593,7 @@ async def handle_write_observation(args: dict) -> list[TextContent]:
     inbox_file = INBOX_DIR / f"{message_id}.json"
     atomic_write_json(inbox_file, message)
 
-    # When LOBSTER_DEBUG=true, also emit a direct Telegram mirror so the user
+    # When LOBSTER_DEBUG=true, also enqueue a debug inbox message so the user
     # sees what the dispatcher sees in real time. This is additive — the inbox
     # write above always happens first regardless of debug mode.
     # Visibility is "mcp-only": this fires at the MCP layer before the dispatcher
@@ -5211,13 +5268,28 @@ async def handle_memory_store(arguments: dict[str, Any]) -> list[TextContent]:
 
     try:
         event_id = _memory_provider.store(event)
-        return [TextContent(
-            type="text",
-            text=f"Stored memory event #{event_id} (type={event.type}, source={event.source})"
-        )]
+        result_text = f"Stored memory event #{event_id} (type={event.type}, source={event.source})"
     except Exception as e:
         log.error(f"memory_store failed: {e}", exc_info=True)
         return [TextContent(type="text", text=f"Error storing memory: {e}")]
+
+    # Debug alert: best-effort, isolated so a failure here never affects the store result.
+    # _emit_debug_observation is a no-op when debug alerts are disabled — single gate.
+    try:
+        task_id_label = arguments.get("task_id", "").strip() or "dispatcher"
+        content_preview = content[:80] + "…" if len(content) > 80 else content
+        _emit_debug_observation(
+            f"\U0001f9e0 [memory write] agent: {task_id_label}\n"
+            f"type: {event.type}\n"
+            f"content: {content_preview}",
+            category="system_context",
+            visibility="mcp-only",
+            emitter=task_id_label,
+        )
+    except Exception:
+        pass
+
+    return [TextContent(type="text", text=result_text)]
 
 
 async def handle_memory_search(arguments: dict[str, Any]) -> list[TextContent]:
@@ -5234,24 +5306,40 @@ async def handle_memory_search(arguments: dict[str, Any]) -> list[TextContent]:
 
     try:
         results = _memory_provider.search(query, limit=limit, project=project)
-
-        if not results:
-            return [TextContent(type="text", text=f"No memory events found for: {query}")]
-
-        lines = [f"**Memory Search Results** ({len(results)} found for \"{query}\"):"]
-        for i, event in enumerate(results, 1):
-            ts = event.timestamp.strftime("%Y-%m-%d %H:%M") if event.timestamp else "?"
-            proj = f" [{event.project}]" if event.project else ""
-            eid = f"#{event.id}" if event.id else ""
-            # Truncate content for display
-            content_preview = event.content[:200] + "..." if len(event.content) > 200 else event.content
-            lines.append(f"\n{i}. {eid} ({event.type}/{event.source}{proj}) {ts}")
-            lines.append(f"   {content_preview}")
-
-        return [TextContent(type="text", text="\n".join(lines))]
     except Exception as e:
         log.error(f"memory_search failed: {e}", exc_info=True)
         return [TextContent(type="text", text=f"Error searching memory: {e}")]
+
+    # Debug alert: best-effort, isolated so a failure here never affects the search result.
+    # _emit_debug_observation is a no-op when debug alerts are disabled — single gate.
+    try:
+        task_id_label = arguments.get("task_id", "").strip() or "dispatcher"
+        result_count = len(results) if results else 0
+        _emit_debug_observation(
+            f"\U0001f50d [memory read] agent: {task_id_label}\n"
+            f"query: {query}\n"
+            f"results: {result_count} found",
+            category="system_context",
+            visibility="mcp-only",
+            emitter=task_id_label,
+        )
+    except Exception:
+        pass
+
+    if not results:
+        return [TextContent(type="text", text=f"No memory events found for: {query}")]
+
+    lines = [f"**Memory Search Results** ({len(results)} found for \"{query}\"):"]
+    for i, event in enumerate(results, 1):
+        ts = event.timestamp.strftime("%Y-%m-%d %H:%M") if event.timestamp else "?"
+        proj = f" [{event.project}]" if event.project else ""
+        eid = f"#{event.id}" if event.id else ""
+        # Truncate content for display
+        content_preview = event.content[:200] + "..." if len(event.content) > 200 else event.content
+        lines.append(f"\n{i}. {eid} ({event.type}/{event.source}{proj}) {ts}")
+        lines.append(f"   {content_preview}")
+
+    return [TextContent(type="text", text="\n".join(lines))]
 
 
 async def handle_memory_recent(arguments: dict[str, Any]) -> list[TextContent]:
