@@ -1373,12 +1373,27 @@ Manual intervention required:
     # Verify recovery: service and tmux must be running, and the Claude PID
     # must differ from the pre-restart PID (catching ghost sessions where the
     # old process survived alongside the newly started one).
+    #
+    # Retry loop: the new process may not have started quickly enough for pgrep
+    # to see it yet. Retry up to 3 times with 3-second gaps before concluding
+    # that the PID is genuinely unchanged (i.e. restart failed).
     local post_restart_pid
-    post_restart_pid=$(pgrep -x "claude" 2>/dev/null | head -1)
     local pid_changed=true
+    local pid_check_attempts=0
+    while [[ $pid_check_attempts -lt 3 ]]; do
+        post_restart_pid=$(pgrep -x "claude" 2>/dev/null | head -1)
+        if [[ -z "$pre_restart_pid" || "$post_restart_pid" != "$pre_restart_pid" ]]; then
+            break
+        fi
+        pid_check_attempts=$(( pid_check_attempts + 1 ))
+        if [[ $pid_check_attempts -lt 3 ]]; then
+            log_info "PID unchanged after restart (attempt $pid_check_attempts/3), waiting 3s..."
+            sleep 3
+        fi
+    done
     if [[ -n "$pre_restart_pid" && "$post_restart_pid" == "$pre_restart_pid" ]]; then
         pid_changed=false
-        log_error "Restart verification failed: Claude PID $pre_restart_pid unchanged — old session may have survived"
+        log_error "Restart verification failed: Claude PID $pre_restart_pid unchanged after 3 attempts — old session may have survived"
     fi
 
     if [[ "$pid_changed" == true ]] && \
@@ -1413,31 +1428,11 @@ Status: Restarted successfully"
         fi
         return 0
     else
-        local svc_timeout_s=$(( max_svc_attempts * 3 ))
-        if [[ "$pid_changed" == false ]]; then
-            # PID did not change: the old process survived the restart attempt.
-            log_error "Restart failed: Claude PID $pre_restart_pid unchanged after 3 checks — old session survived"
-            send_telegram_alert_deduped "restart-failed-pid" "Restart failed — process still running under original PID $pre_restart_pid.
+        log_error "Restart verification failed"
+        send_telegram_alert "Restart attempted but PID unchanged — restart may have failed. Check \`lobster-claude\` service.
 
 Reason: $reason
-Manual intervention may be required: \`lobster restart\`"
-        else
-            # PID changed (restart happened) but service/tmux not ready within the timeout window.
-            local not_ready_detail
-            if [[ "$service_ok" == false && "$tmux_ok" == false ]]; then
-                not_ready_detail="service not active and tmux session missing"
-            elif [[ "$service_ok" == false ]]; then
-                not_ready_detail="service not active (tmux session exists)"
-            else
-                not_ready_detail="tmux session missing (service is active)"
-            fi
-            log_warn "Restart confirmed (PID changed) but service/tmux not ready after ${svc_timeout_s}s: $not_ready_detail"
-            send_telegram_alert_deduped "restart-not-ready" "Restart confirmed (PID changed) — service/tmux not yet ready after ${svc_timeout_s}s.
-
-Reason: $reason
-Detail: $not_ready_detail
-System may still be initializing. Check \`lobster status\` in a moment."
-        fi
+Status: Restart verification failed"
         return 1
     fi
 }
