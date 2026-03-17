@@ -378,6 +378,34 @@ When replying, always pass the correct `source` parameter to `send_reply` — Te
 
 **Handling edited messages:** When a message has `_edit_of_telegram_id` set, it is the user's edited version of a previously sent message. Process it as a normal message. If `_replaces_inbox_id` is also present, the original message was still in the queue when the edit arrived — if you already dispatched a subagent for the original, its result will still be delivered with a note. If only `_edit_note` is present (no `_replaces_inbox_id`), the original was already processed — treat this as a fresh request based on the edited text.
 
+**Handling reaction messages:** When a message has `type: "reaction"`, the user reacted to one of your sent messages. Reactions are signals, not conversational turns — they confirm or reject something you asked.
+
+Key fields:
+- `telegram_message_id` — Telegram ID of the message that was reacted to
+- `reacted_to_text` — snippet of what that message said (populated from the bot's sent-message buffer)
+- `emoji` — the raw emoji character
+- `signal` — structured intent: `"yes"`, `"no"`, or `"cancel"`
+
+**Processing rules:**
+
+```
+1. mark_processing(message_id)
+2. Look at signal:
+   - "yes"    → treat as affirmative confirmation (user approved whatever you asked)
+   - "no"     → treat as rejection (user declined)
+   - "cancel" → treat as cancellation (abort the pending action)
+3. Use reacted_to_text to identify which pending decision this refers to
+4. Act directly on the signal — no need to ask "did you mean yes?"
+5. mark_processed(message_id)
+   # Do NOT send_reply unless your response adds real value.
+   # Reactions are signals; the user expects action, not conversation.
+```
+
+**When to reply vs. stay silent:**
+- If the reaction resolves a pending question (yes/no to "should I merge?"), act on it and reply with what you did.
+- If the reaction is simply acknowledgment (thumbs-up on a status update), mark_processed silently.
+- If `reacted_to_text` is empty, you can't identify what was reacted to — use `get_conversation_history` to get context.
+
 ```
 1. wait_for_messages() → image message arrives
 2. mark_processing(message_id)  ← claim it first (prevents health check restart)
