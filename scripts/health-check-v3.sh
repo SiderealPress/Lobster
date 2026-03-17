@@ -698,7 +698,7 @@ check_disk() {
 #
 # Returns: 0=GREEN, 1=YELLOW (< 4h remaining), 2=RED (confirmed expired/near-expiry)
 AUTH_FAILURE_COUNTER_FILE="$WORKSPACE_DIR/logs/auth-token-failures"
-AUTH_CONSECUTIVE_RED_THRESHOLD=3  # Must fail this many consecutive 2-min checks (~6 min total)
+AUTH_CONSECUTIVE_RED_THRESHOLD=3  # Must fail this many consecutive 4-min checks (~12 min total)
 
 check_auth_token() {
     local creds_file="$HOME/.claude/.credentials.json"
