@@ -101,7 +101,7 @@ Before spawning a subagent, decide whether to ack based on expected task duratio
 1. Generate a short task_id (e.g. "fix-pr-475", "upstream-check", or a short slug describing the task)
 2. [If task will take >4s]: send_reply(chat_id, "On it.")   # brief ack, 1-3 words
 3. task_result = Task(
-       prompt="...Your task_id is <task_id>. Pass it to write_result...",
+       prompt="---\ntask_id: <task_id>\nchat_id: <chat_id>\nsource: <source>\n---\n\n...<rest of prompt>...",
        subagent_type="...",
        run_in_background=true
    )
@@ -209,15 +209,16 @@ Scheduled reminders are injected by `scripts/post-reminder.sh`, called from cron
 REMINDER_ROUTING = {
   "ghost_detector": {
     "subagent_type": "lobster-generalist",
-    "prompt": "Run the ghost detector check. Script is at ~/lobster/scripts/ghost-detector.py. "
-              "Run it with uv run ~/lobster/scripts/ghost-detector.py and report findings. "
-              "chat_id=0, source=system",
+    "prompt": "---\ntask_id: ghost-detector\nchat_id: 0\nsource: system\n---\n\n"
+              "Run the ghost detector check. Script is at ~/lobster/scripts/ghost-detector.py. "
+              "Run it with uv run ~/lobster/scripts/ghost-detector.py and report findings.",
   },
   "oom_check": {
     "subagent_type": "lobster-generalist",
-    "prompt": "Run the OOM monitor check. Script is at ~/lobster/scripts/oom-monitor.py. "
+    "prompt": "---\ntask_id: oom-check\nchat_id: 0\nsource: system\n---\n\n"
+              "Run the OOM monitor check. Script is at ~/lobster/scripts/oom-monitor.py. "
               "Run it with uv run ~/lobster/scripts/oom-monitor.py --since-minutes 10 "
-              "and report findings. chat_id=0, source=system",
+              "and report findings.",
   },
   # Add new reminder types here. Fallback for unknown types: lobster-generalist.
 }
@@ -269,12 +270,16 @@ Check the `sent_reply_to_user` field first, then check for engineer → reviewer
                subagent_type="general-purpose",
                run_in_background=True,
                prompt=(
+                   f"---\n"
+                   f"task_id: review-{msg.get('task_id', 'unknown')}\n"
+                   f"chat_id: {msg['chat_id']}\n"
+                   f"source: {msg.get('source', 'telegram')}\n"
+                   f"---\n\n"
                    f"Review PR {pr_url} and post your findings using:\n"
                    f"  gh pr review <N> --repo SiderealPress/lobster --comment --body \"PASS/NEEDS-WORK/FAIL: ...\"\n"
                    f"Use --comment only (never --approve or --request-changes — same token = self-review error).\n\n"
                    f"After posting, call write_result with a short verdict summary (1–3 sentences).\n\n"
-                   f"Engineer's briefing:\n{msg['text']}\n\n"
-                   f"chat_id: {msg['chat_id']}, source: {msg.get('source', 'telegram')}"
+                   f"Engineer's briefing:\n{msg['text']}"
                ),
            )
            mark_processed(message_id)
@@ -751,6 +756,11 @@ The `review` agent also handles design reviews — proposals, architectural idea
 
 ```python
 parts = [
+    f"---\n",
+    f"task_id: {task_id}\n",
+    f"chat_id: {chat_id}\n",
+    f"source: {source}\n",
+    f"---\n\n",
     "Design review requested.\n\n",
     f"Design description:\n{design_text}\n\n",
 ]
@@ -759,7 +769,6 @@ if issue_url_or_number:
     parts.append(f"GitHub issue: {issue_url_or_number}\n")
 if linear_ticket_id:
     parts.append(f"Linear ticket: {linear_ticket_id}\n")
-parts.append(f"chat_id: {chat_id}, source: {source}, task_id: {task_id}")
 
 Task(
     subagent_type="review",
@@ -804,7 +813,7 @@ When you receive a **voice message** that appears to be a "brain dump" (unstruct
 4. If transcription looks like a brain dump, spawn brain-dumps agent:
    ```
    Task(
-     prompt="Process this brain dump:\nTranscription: {text}\nMessage ID: {id}\nChat ID: {chat_id}",
+     prompt=f"---\ntask_id: brain-dump-{id}\nchat_id: {chat_id}\nsource: {source}\nreply_to_message_id: {id}\n---\n\nProcess this brain dump:\nTranscription: {text}",
      subagent_type="brain-dumps"
    )
    ```
