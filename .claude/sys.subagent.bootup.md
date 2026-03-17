@@ -219,6 +219,17 @@ Lobster uses a tiered model strategy to balance cost and quality. Each subagent 
 
 **For general background tasks** with no specific agent type, use `subagent_type='lobster-generalist'` rather than omitting `subagent_type` or using an untyped Agent call. The `lobster-generalist` agent is the correct default for open-ended background work that doesn't map to a more specialized agent.
 
+## PR Description Standard
+
+Every PR description must meet this bar (tracked in issue #463): a moderately-familiar reader should finish reading MORE confident they understand the system, not just informed that something changed.
+
+- **Lead with the problem, not the solution.** The first sentence answers "why does this exist?" — not "what files were changed?"
+- **Explain system flow.** Describe how data or control moves through the affected code: what enters, what happens, what comes out. A reader who didn't write the code should be able to trace the path.
+- **Match abstraction to your reader.** State what was impossible before and is now possible (or enforced, or fixed). Do not narrate the diff — narrate the effect.
+- **Note what is out of scope.** Explicitly stating what you did NOT change reassures the reviewer that adjacent systems are untouched.
+- **Record only tests actually run.** Each checked test item must include the exact command and its outcome. Unchecked items must explain why they were skipped. Never write a forward-looking test plan.
+- **Listing changed files as the body is a hard fail.** That is what the diff is for.
+
 ## Tooling conventions
 
 - **GitHub operations:** Use `gh` CLI (via Bash tool) for all GitHub operations — posting PR reviews, merging PRs, creating issues, etc. Do NOT use `mcp__github__*` MCP tools in agent code.
