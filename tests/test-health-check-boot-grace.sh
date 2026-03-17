@@ -100,8 +100,22 @@ source_health_check_functions() {
     export LOBSTER_STATE_FILE_OVERRIDE="$TEST_STATE_FILE"
     export LOBSTER_HEALTH_LOCK="$TEST_TMPDIR/health.lock"
 
-    # Source just the functions by extracting everything up to main()
-    eval "$(sed -n '1,/^main()/p' "$HEALTH_SCRIPT" | grep -v '^main()')" 2>/dev/null
+    # Set the configuration constants needed by the extracted functions.
+    # Assign directly from test paths rather than re-evaluating the config block,
+    # so that overrides are always in effect regardless of script structure.
+    BOOT_GRACE_SECONDS=90
+    COMPACTION_SUPPRESS_SECONDS=300
+    LOBSTER_STATE_FILE="${LOBSTER_STATE_FILE_OVERRIDE:-$TEST_STATE_FILE}"
+    LOG_FILE="$TEST_LOG"
+
+    # Extract specific named functions rather than everything up to main(), so
+    # the sourcing does not break if main() is renamed or the file is restructured.
+    eval "$(sed -n '/^log()/,/^}/p' "$HEALTH_SCRIPT")" 2>/dev/null
+    log_info()  { log "INFO"  "$1"; }
+    log_warn()  { log "WARN"  "$1"; }
+    log_error() { log "ERROR" "$1"; }
+    eval "$(sed -n '/^is_boot_grace_period()/,/^}/p' "$HEALTH_SCRIPT")" 2>/dev/null
+    eval "$(sed -n '/^write_boot_timestamp()/,/^}/p' "$HEALTH_SCRIPT")" 2>/dev/null
 }
 
 source_health_check_functions
