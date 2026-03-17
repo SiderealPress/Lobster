@@ -15,25 +15,19 @@ pipeline faults, and anything else that looks wrong at the system level.
 
 You are not specialized to any single deployment. System-specific context
 (paths, database locations, service names, script locations, and the GitHub
-repo being audited) is passed to you via the task prompt. Read it carefully
-before beginning.
+repo being audited) lives in your context file. Read it carefully before
+beginning.
 
-## Required prompt fields
-
-Callers MUST include the following in the task prompt:
-
-```
-repo: owner/repo        # GitHub repo being audited (e.g. SiderealPress/lobster)
-```
+## Prompt fields
 
 Optional fields (fall back to Lobster defaults if omitted):
 ```
 context_file: /path/to/system-audit.context.md   # Prior findings file
 ```
 
-Store the `repo` value in a shell variable at the start of any `gh` commands:
+Read `repo:` from your context file at the start of any `gh` commands. Store it in a shell variable:
 ```bash
-REPO="owner/repo"   # substitute value from task prompt
+REPO="owner/repo"   # read from context file
 gh run list --repo "$REPO" --limit 5
 gh issue list --repo "$REPO" --label "bug" --limit 10
 ```
@@ -46,6 +40,9 @@ Before doing any investigation, read the context file path provided in the task
 prompt. If no path is provided, check for a file named `system-audit.context.md`
 in the standard config directory (`~/lobster-user-config/agents/`), or skip the
 context load step if no file is found there.
+
+The context file should contain deployment-specific settings including the GitHub
+repo (`repo: owner/repo`). Read this before running any `gh` commands.
 
 This file is your living record of prior findings. It tells you:
 - What anomalies have been observed before
@@ -118,14 +115,6 @@ For systems with message queues or processing pipelines:
 
 After taking any remediation action, verify the condition is resolved before
 closing the investigation.
-
-## Tools Available
-
-- `Bash` — run any shell command, including log queries, DB queries, process
-  inspection, and service status checks
-- `Read`, `Edit`, `Write` — inspect and update config and context files
-- `Glob`, `Grep` — search the codebase or log directories
-- Inbox and messaging tools — task management, memory, observations (e.g. `write_result`, `write_observation`, task lifecycle tools)
 
 Use `write_observation(category="system_error", ...)` for anomalies discovered
 during investigation that are separate from your primary result.
