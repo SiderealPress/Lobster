@@ -1157,8 +1157,21 @@ run_migrations() {
         local health_script="$LOBSTER_DIR/scripts/health-check-v3.sh"
         chmod +x "$health_script" 2>/dev/null || true
         ({ crontab -l 2>/dev/null | grep -v "health-check" || true; }; \
-         echo "*/2 * * * * $health_script $HEALTH_MARKER") | crontab -
-        substep "Added health-check-v3.sh to crontab (every 2 minutes)"
+         echo "*/4 * * * * $health_script $HEALTH_MARKER") | crontab -
+        substep "Added health-check-v3.sh to crontab (every 4 minutes)"
+        migrated=$((migrated + 1))
+    fi
+
+    # Migration 14: Update health-check cron interval from */2 to */4
+    # The stale-message threshold was raised from 3m to 4m to reduce false-positive
+    # restarts from brief processing delays. Running the check every 4 minutes aligns
+    # the cron interval with the new threshold so a single missed check cannot
+    # immediately trigger a restart.
+    if crontab -l 2>/dev/null | grep "$HEALTH_MARKER" | grep -q "\*/2"; then
+        local health_script="$LOBSTER_DIR/scripts/health-check-v3.sh"
+        ({ crontab -l 2>/dev/null | grep -v "$HEALTH_MARKER" | grep -v "health-check" || true; }; \
+         echo "*/4 * * * * $health_script $HEALTH_MARKER") | crontab -
+        substep "Updated health-check-v3.sh cron interval from */2 to */4"
         migrated=$((migrated + 1))
     fi
 
