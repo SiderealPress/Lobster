@@ -1243,6 +1243,21 @@ with open(path, 'w') as f:
         migrated=$((migrated + 1))
     fi
 
+    # Migration 14: Ensure periodic-self-check.sh cron entry exists
+    # The cron entry was added to install.sh in commit 420903e but was never
+    # backfilled as a migration. Existing installs are missing the entry,
+    # so the self-check system (background agent completion checks) never fires.
+    local SELFCHECK_MARKER="# LOBSTER-SELF-CHECK"
+    if ! crontab -l 2>/dev/null | grep -q "$SELFCHECK_MARKER"; then
+        local selfcheck_script="$LOBSTER_DIR/scripts/periodic-self-check.sh"
+        chmod +x "$selfcheck_script" 2>/dev/null || true
+        mkdir -p "$LOBSTER_DIR/.state"
+        ({ crontab -l 2>/dev/null | grep -v "$SELFCHECK_MARKER" | grep -v "periodic-self-check" || true; }; \
+         echo "*/3 * * * * $selfcheck_script $SELFCHECK_MARKER") | crontab -
+        substep "Added periodic-self-check.sh to crontab (every 3 minutes)"
+        migrated=$((migrated + 1))
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
