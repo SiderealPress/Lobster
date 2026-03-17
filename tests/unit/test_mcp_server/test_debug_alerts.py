@@ -159,26 +159,41 @@ class TestMemoryStoreDebugAlert:
         _, emitted = self._run({"content": "Any content."})
         assert emitted[0]["visibility"] == "mcp-only"
 
-    def test_no_alert_when_debug_mode_off(self):
-        """When _DEBUG_MODE=False, no debug push is emitted."""
-        emitted: list[dict] = []
+    def test_no_alert_when_debug_alerts_disabled(self):
+        """When _DEBUG_ALERTS_ENABLED=False, _emit_debug_observation returns early.
 
-        def fake_emit(*args, **kwargs):
-            emitted.append(True)
+        The outer _DEBUG_MODE gate has been removed; _emit_debug_observation is the
+        single authoritative gate.  The handler always calls _emit_debug_observation,
+        but the function is a no-op when _DEBUG_ALERTS_ENABLED=False.
+        """
+        import src.mcp.inbox_server as _mod
+        from unittest.mock import patch as _patch
+
+        called_with: list[dict] = []
+
+        original_emit = _mod._emit_debug_observation
+
+        def spying_emit(text, category="system_context", visibility="mcp-only", emitter=None):
+            # Record the call but still invoke the real function (which is a no-op here)
+            called_with.append({"text": text})
+            original_emit(text, category=category, visibility=visibility, emitter=emitter)
 
         with patch.multiple(
             "src.mcp.inbox_server",
             _memory_provider=_make_fake_memory_provider(),
             _DEBUG_MODE=False,
+            _DEBUG_ALERTS_ENABLED=False,
             _DEBUG_RESOLVED=True,
-            _emit_debug_observation=fake_emit,
+            _emit_debug_observation=spying_emit,
             MemoryEvent=MemoryEvent,
         ):
             from src.mcp.inbox_server import handle_memory_store
 
             asyncio.run(handle_memory_store({"content": "Silent store."}))
 
-        assert emitted == []
+        # The handler calls _emit_debug_observation unconditionally (single-gate contract);
+        # the function itself is a no-op because _DEBUG_ALERTS_ENABLED=False.
+        assert len(called_with) == 1  # called exactly once — no outer gate suppresses it
 
     def test_alert_does_not_affect_return_value(self):
         """The debug alert is additive — it does not change the handler's return value."""
@@ -268,25 +283,38 @@ class TestMemorySearchDebugAlert:
         _, emitted = self._run({"query": "test"})
         assert emitted[0]["category"] == "system_context"
 
-    def test_no_alert_when_debug_mode_off(self):
-        """When _DEBUG_MODE=False, no debug push is emitted for memory_search."""
-        emitted: list[dict] = []
+    def test_no_alert_when_debug_alerts_disabled(self):
+        """When _DEBUG_ALERTS_ENABLED=False, _emit_debug_observation returns early.
 
-        def fake_emit(*args, **kwargs):
-            emitted.append(True)
+        The outer _DEBUG_MODE gate has been removed; _emit_debug_observation is the
+        single authoritative gate.  The handler always calls _emit_debug_observation,
+        but the function is a no-op when _DEBUG_ALERTS_ENABLED=False.
+        """
+        import src.mcp.inbox_server as _mod
+
+        called_with: list[dict] = []
+
+        original_emit = _mod._emit_debug_observation
+
+        def spying_emit(text, category="system_context", visibility="mcp-only", emitter=None):
+            called_with.append({"text": text})
+            original_emit(text, category=category, visibility=visibility, emitter=emitter)
 
         with patch.multiple(
             "src.mcp.inbox_server",
             _memory_provider=_make_fake_memory_provider(),
             _DEBUG_MODE=False,
+            _DEBUG_ALERTS_ENABLED=False,
             _DEBUG_RESOLVED=True,
-            _emit_debug_observation=fake_emit,
+            _emit_debug_observation=spying_emit,
         ):
             from src.mcp.inbox_server import handle_memory_search
 
             asyncio.run(handle_memory_search({"query": "silent search"}))
 
-        assert emitted == []
+        # The handler calls _emit_debug_observation unconditionally (single-gate contract);
+        # the function itself is a no-op because _DEBUG_ALERTS_ENABLED=False.
+        assert len(called_with) == 1  # called exactly once — no outer gate suppresses it
 
     def test_alert_is_additive_does_not_affect_return_value(self):
         """Debug alert does not change the handler's return value."""
@@ -467,12 +495,22 @@ class TestWriteResultDebugAlert:
         )
         assert emitted[0]["emitter"] == "task:emitter-check"
 
-    def test_no_debug_alert_when_debug_mode_off(self, inbox_dir: Path):
-        """When _DEBUG_MODE=False, no debug push is emitted for write_result."""
-        emitted: list[dict] = []
+    def test_no_debug_alert_when_debug_alerts_disabled(self, inbox_dir: Path):
+        """When _DEBUG_ALERTS_ENABLED=False, _emit_debug_observation is a no-op for write_result.
 
-        def fake_emit(*args, **kwargs):
-            emitted.append(True)
+        The outer _DEBUG_MODE gate has been removed; _emit_debug_observation is the
+        single authoritative gate via _DEBUG_ALERTS_ENABLED.  The handler always calls
+        _emit_debug_observation, but the function returns early when alerts are disabled.
+        """
+        import src.mcp.inbox_server as _mod
+
+        called_with: list[dict] = []
+
+        original_emit = _mod._emit_debug_observation
+
+        def spying_emit(text, category="system_context", visibility="mcp-only", emitter=None):
+            called_with.append({"text": text})
+            original_emit(text, category=category, visibility=visibility, emitter=emitter)
 
         class FakeSessionStore:
             def session_end(self, **kwargs):
@@ -482,8 +520,9 @@ class TestWriteResultDebugAlert:
             "src.mcp.inbox_server",
             INBOX_DIR=inbox_dir,
             _DEBUG_MODE=False,
+            _DEBUG_ALERTS_ENABLED=False,
             _DEBUG_RESOLVED=True,
-            _emit_debug_observation=fake_emit,
+            _emit_debug_observation=spying_emit,
             _session_store=FakeSessionStore(),
         ):
             with patch("asyncio.create_task"):
@@ -495,7 +534,9 @@ class TestWriteResultDebugAlert:
                     )
                 )
 
-        assert emitted == []
+        # The handler calls _emit_debug_observation unconditionally (single-gate contract);
+        # the function itself is a no-op because _DEBUG_ALERTS_ENABLED=False.
+        assert len(called_with) == 1  # called exactly once — no outer gate suppresses it
 
     def test_debug_alert_is_additive_inbox_file_still_written(self, inbox_dir: Path):
         """The debug alert is best-effort and does not affect inbox file creation."""

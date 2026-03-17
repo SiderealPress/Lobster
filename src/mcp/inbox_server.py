@@ -4501,26 +4501,25 @@ async def handle_write_result(args: dict) -> list[TextContent]:
     # Debug alert: enqueue best-effort inbox message when LOBSTER_DEBUG=true.
     # Fires at the MCP layer (before the dispatcher picks up the inbox message)
     # so the user sees the subagent message arrive in real time.
-    _resolve_debug_config()
-    if _DEBUG_MODE:
-        agent_id = args.get("agent_id", "").strip() or None
-        text_preview = text[:60] + "…" if len(text) > 60 else text
-        alert_lines = [
-            f"\U0001f4e8 [subagent\u2192dispatcher] type: {msg_type}",
-            f"task: {task_id}",
-        ]
-        if agent_id:
-            alert_lines.append(f"agent: {agent_id}")
-        if status:
-            alert_lines.append(f"status: {status}")
-        alert_lines.append(f"sent_reply: {bool(sent_reply_to_user)}")
-        alert_lines.append(f"preview: {text_preview}")
-        _emit_debug_observation(
-            "\n".join(alert_lines),
-            category="system_context",
-            visibility="mcp-only",
-            emitter=f"task:{task_id}",
-        )
+    # _emit_debug_observation is a no-op when debug alerts are disabled — single gate.
+    agent_id = args.get("agent_id", "").strip() or None
+    text_preview = text[:60] + "…" if len(text) > 60 else text
+    alert_lines = [
+        f"\U0001f4e8 [subagent\u2192dispatcher] type: {msg_type}",
+        f"task: {task_id}",
+    ]
+    if agent_id:
+        alert_lines.append(f"agent: {agent_id}")
+    if status:
+        alert_lines.append(f"status: {status}")
+    alert_lines.append(f"sent_reply: {bool(sent_reply_to_user)}")
+    alert_lines.append(f"preview: {text_preview}")
+    _emit_debug_observation(
+        "\n".join(alert_lines),
+        category="system_context",
+        visibility="mcp-only",
+        emitter=f"task:{task_id}",
+    )
 
     log.info(f"Subagent result queued in inbox: task_id={task_id} status={status} chat_id={chat_id}")
     if msg_type == "subagent_notification":
@@ -5270,26 +5269,27 @@ async def handle_memory_store(arguments: dict[str, Any]) -> list[TextContent]:
     try:
         event_id = _memory_provider.store(event)
         result_text = f"Stored memory event #{event_id} (type={event.type}, source={event.source})"
-
-        # Debug alert: enqueue best-effort inbox message when LOBSTER_DEBUG=true
-        if _DEBUG_MODE or not _DEBUG_RESOLVED:
-            _resolve_debug_config()
-        if _DEBUG_MODE:
-            task_id_label = arguments.get("task_id", "").strip() or "dispatcher"
-            content_preview = content[:80] + "…" if len(content) > 80 else content
-            _emit_debug_observation(
-                f"\U0001f9e0 [memory write] agent: {task_id_label}\n"
-                f"type: {event.type}\n"
-                f"content: {content_preview}",
-                category="system_context",
-                visibility="mcp-only",
-                emitter=task_id_label,
-            )
-
-        return [TextContent(type="text", text=result_text)]
     except Exception as e:
         log.error(f"memory_store failed: {e}", exc_info=True)
         return [TextContent(type="text", text=f"Error storing memory: {e}")]
+
+    # Debug alert: best-effort, isolated so a failure here never affects the store result.
+    # _emit_debug_observation is a no-op when debug alerts are disabled — single gate.
+    try:
+        task_id_label = arguments.get("task_id", "").strip() or "dispatcher"
+        content_preview = content[:80] + "…" if len(content) > 80 else content
+        _emit_debug_observation(
+            f"\U0001f9e0 [memory write] agent: {task_id_label}\n"
+            f"type: {event.type}\n"
+            f"content: {content_preview}",
+            category="system_context",
+            visibility="mcp-only",
+            emitter=task_id_label,
+        )
+    except Exception:
+        pass
+
+    return [TextContent(type="text", text=result_text)]
 
 
 async def handle_memory_search(arguments: dict[str, Any]) -> list[TextContent]:
@@ -5306,39 +5306,40 @@ async def handle_memory_search(arguments: dict[str, Any]) -> list[TextContent]:
 
     try:
         results = _memory_provider.search(query, limit=limit, project=project)
-
-        # Debug alert: enqueue best-effort inbox message when LOBSTER_DEBUG=true
-        if _DEBUG_MODE or not _DEBUG_RESOLVED:
-            _resolve_debug_config()
-        if _DEBUG_MODE:
-            task_id_label = arguments.get("task_id", "").strip() or "dispatcher"
-            result_count = len(results) if results else 0
-            _emit_debug_observation(
-                f"\U0001f50d [memory read] agent: {task_id_label}\n"
-                f"query: {query}\n"
-                f"results: {result_count} found",
-                category="system_context",
-                visibility="mcp-only",
-                emitter=task_id_label,
-            )
-
-        if not results:
-            return [TextContent(type="text", text=f"No memory events found for: {query}")]
-
-        lines = [f"**Memory Search Results** ({len(results)} found for \"{query}\"):"]
-        for i, event in enumerate(results, 1):
-            ts = event.timestamp.strftime("%Y-%m-%d %H:%M") if event.timestamp else "?"
-            proj = f" [{event.project}]" if event.project else ""
-            eid = f"#{event.id}" if event.id else ""
-            # Truncate content for display
-            content_preview = event.content[:200] + "..." if len(event.content) > 200 else event.content
-            lines.append(f"\n{i}. {eid} ({event.type}/{event.source}{proj}) {ts}")
-            lines.append(f"   {content_preview}")
-
-        return [TextContent(type="text", text="\n".join(lines))]
     except Exception as e:
         log.error(f"memory_search failed: {e}", exc_info=True)
         return [TextContent(type="text", text=f"Error searching memory: {e}")]
+
+    # Debug alert: best-effort, isolated so a failure here never affects the search result.
+    # _emit_debug_observation is a no-op when debug alerts are disabled — single gate.
+    try:
+        task_id_label = arguments.get("task_id", "").strip() or "dispatcher"
+        result_count = len(results) if results else 0
+        _emit_debug_observation(
+            f"\U0001f50d [memory read] agent: {task_id_label}\n"
+            f"query: {query}\n"
+            f"results: {result_count} found",
+            category="system_context",
+            visibility="mcp-only",
+            emitter=task_id_label,
+        )
+    except Exception:
+        pass
+
+    if not results:
+        return [TextContent(type="text", text=f"No memory events found for: {query}")]
+
+    lines = [f"**Memory Search Results** ({len(results)} found for \"{query}\"):"]
+    for i, event in enumerate(results, 1):
+        ts = event.timestamp.strftime("%Y-%m-%d %H:%M") if event.timestamp else "?"
+        proj = f" [{event.project}]" if event.project else ""
+        eid = f"#{event.id}" if event.id else ""
+        # Truncate content for display
+        content_preview = event.content[:200] + "..." if len(event.content) > 200 else event.content
+        lines.append(f"\n{i}. {eid} ({event.type}/{event.source}{proj}) {ts}")
+        lines.append(f"   {content_preview}")
+
+    return [TextContent(type="text", text="\n".join(lines))]
 
 
 async def handle_memory_recent(arguments: dict[str, Any]) -> list[TextContent]:
