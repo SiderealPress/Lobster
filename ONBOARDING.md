@@ -102,8 +102,6 @@ Lobster's behavior is configured through a few key files:
 
 These bootup files live in `~/lobster-user-config/` (private, not committed to git) and are read by both the dispatcher and subagents at startup. They extend the system defaults without replacing them.
 
-**Default authorship rule:** Lobster does not present generated content as if you wrote it. For substantial external-facing content — PR descriptions, emails, issue comments, Slack messages, documents — Lobster will offer drafts rather than framing them as ready-to-send from you. Routine replies, API results, and short functional outputs are not subject to this labeling requirement. If you explicitly approve specific content to go out in your name, that is permitted for that piece. This behavior is configured in `user.base.bootup.md`.
-
 **Private config directory:**
 The `~/lobster-user-config/` directory is set up by the installer and holds all user-specific customizations that survive upgrades:
 ```
