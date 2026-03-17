@@ -263,12 +263,111 @@ def _queue_observation(msg_text: str, msg_id: str, source: str | None = None, ts
 # environment variables.
 # ---------------------------------------------------------------------------
 
-# Module-level debug state — patchable by tests via patch.multiple
-_DEBUG_MODE: bool = os.environ.get("LOBSTER_DEBUG", "").lower() in ("true", "1", "yes")
-_DEBUG_ALERTS_ENABLED: bool = _DEBUG_MODE
-_DEBUG_RESOLVED: bool = False  # True once _resolve_debug_config has run
-_DEBUG_OWNER_CHAT_ID: int | str | None = None
-_DEBUG_OWNER_SOURCE: str = "telegram"
+_DEBUG_MODE: bool | None = None        # None = not yet resolved
+_DEBUG_ALERTS_ENABLED: bool = False    # True only when alerts are explicitly configured
+_DEBUG_OWNER_CHAT_ID: int | None = None
+_DEBUG_OWNER_SOURCE: str = "telegram"  # messaging source for debug alerts
+_DEBUG_RESOLVED: bool = False
+
+
+def _resolve_debug_config() -> None:
+    """
+    Lazily resolve LOBSTER_DEBUG, owner chat_id, and messaging source from env + config.env.
+    Must only be called after _CONFIG_DIR is available (module init complete).
+    Thread-safe by idempotency — worst case reads config twice.
+
+    Debug alerts are only enabled when LOBSTER_DEBUG=true AND a valid admin chat_id
+    can be resolved from config. This prevents spurious inbox writes in environments
+    where LOBSTER_DEBUG=true is set but no admin notification channel is configured
+    (e.g. test environments, staging).
+
+    Source resolution order:
+      1. LOBSTER_DEBUG_SOURCE env var (explicit override)
+      2. Detected from config: if LOBSTER_ENABLE_SLACK=true, use "slack"; else "telegram"
+    """
+    global _DEBUG_MODE, _DEBUG_ALERTS_ENABLED, _DEBUG_OWNER_CHAT_ID, _DEBUG_OWNER_SOURCE, _DEBUG_RESOLVED
+    if _DEBUG_RESOLVED:
+        return
+
+    # Determine debug mode
+    env_val = os.environ.get("LOBSTER_DEBUG", "").lower()
+    debug = env_val == "true"
+    if not debug:
+        try:
+            config_file = _CONFIG_DIR / "config.env"
+            if config_file.exists():
+                for line in config_file.read_text().splitlines():
+                    if line.strip().startswith("LOBSTER_DEBUG="):
+                        val = line.split("=", 1)[1].strip().strip('"').strip("'").lower()
+                        debug = val == "true"
+                        break
+        except Exception:
+            pass
+    _DEBUG_MODE = debug
+
+    # Determine owner chat_id and messaging source.
+    # _DEBUG_ALERTS_ENABLED is only set to True when both a valid chat_id AND
+    # the source's bot credentials are present. This prevents spurious inbox writes
+    # in environments that have LOBSTER_DEBUG=true but no bot configured for delivery
+    # (e.g. test environments, CI, staging without a bot token).
+    if debug:
+        try:
+            # Allow explicit source override via env var
+            explicit_source = os.environ.get("LOBSTER_DEBUG_SOURCE", "").strip().lower()
+
+            slack_enabled = False
+            slack_channel: str | None = None
+            slack_bot_token: str | None = None
+            telegram_chat_id: int | None = None
+            telegram_bot_token: str | None = None
+
+            config_file = _CONFIG_DIR / "config.env"
+            if config_file.exists():
+                for line in config_file.read_text().splitlines():
+                    stripped = line.strip()
+                    if stripped.startswith("TELEGRAM_ALLOWED_USERS="):
+                        val = stripped.split("=", 1)[1].strip().strip('"').strip("'")
+                        first = val.split(",")[0].strip()
+                        if first.lstrip("-").isdigit():
+                            telegram_chat_id = int(first)
+                    elif stripped.startswith("TELEGRAM_BOT_TOKEN="):
+                        val = stripped.split("=", 1)[1].strip().strip('"').strip("'")
+                        if val:
+                            telegram_bot_token = val
+                    elif stripped.startswith("LOBSTER_ENABLE_SLACK="):
+                        val = stripped.split("=", 1)[1].strip().strip('"').strip("'").lower()
+                        slack_enabled = val == "true"
+                    elif stripped.startswith("LOBSTER_SLACK_ALLOWED_CHANNELS="):
+                        val = stripped.split("=", 1)[1].strip().strip('"').strip("'")
+                        first_chan = val.split(",")[0].strip()
+                        if first_chan:
+                            slack_channel = first_chan
+                    elif stripped.startswith("LOBSTER_SLACK_BOT_TOKEN="):
+                        val = stripped.split("=", 1)[1].strip().strip('"').strip("'")
+                        if val:
+                            slack_bot_token = val
+
+            if explicit_source:
+                _DEBUG_OWNER_SOURCE = explicit_source
+            elif slack_enabled:
+                _DEBUG_OWNER_SOURCE = "slack"
+            else:
+                _DEBUG_OWNER_SOURCE = "telegram"
+
+            # chat_id: use Slack channel if source is slack, else Telegram numeric id.
+            # Require the source's bot credentials to be present before enabling alerts —
+            # this prevents silent inbox pollution in environments where LOBSTER_DEBUG=true
+            # is set but the bot that delivers messages is not configured.
+            if _DEBUG_OWNER_SOURCE == "slack" and slack_channel and slack_bot_token:
+                _DEBUG_OWNER_CHAT_ID = slack_channel  # type: ignore[assignment]
+                _DEBUG_ALERTS_ENABLED = True
+            elif _DEBUG_OWNER_SOURCE != "slack" and telegram_chat_id is not None and telegram_bot_token:
+                _DEBUG_OWNER_CHAT_ID = telegram_chat_id
+                _DEBUG_ALERTS_ENABLED = True
+        except Exception:
+            pass
+
+    _DEBUG_RESOLVED = True
 
 
 def _emit_debug_observation(
@@ -288,9 +387,36 @@ def _emit_debug_observation(
 
     Never raises — must be safe to call from any handler.
     """
+    Emit a debug notification via the inbox when LOBSTER_DEBUG=true.
+
+    Routes through the normal inbox/outbox mechanism so the alert is delivered
+    via whatever messaging source the admin has configured (Telegram, Slack, etc.)
+    rather than calling any provider API directly.
+
+    When debug mode is off, this function is a no-op.
+
+    Args:
+        text: The observation body text.
+        category: "system_context", "system_error", or "user_context".
+        visibility: "mcp-only" if the MCP layer is emitting this directly (dispatcher
+            has not seen it yet), or "dispatcher" if the dispatcher's main loop is
+            emitting this after processing the message through its inbox.
+        emitter: task_id or agent description identifying who generated the observation.
+            Falls back to "unknown" if not provided.
+
+    Label format: [debug|{visibility}] {category} from {emitter}
+    Example: [debug|mcp-only] system_context from task:linear-digest
+
+    Never raises — must be safe to call from any context including threads.
+    """
+    # Fast path: skip I/O if debug alerts have been resolved and are disabled.
+    if _DEBUG_RESOLVED and not _DEBUG_ALERTS_ENABLED:
+        return
+    _resolve_debug_config()
     if not _DEBUG_ALERTS_ENABLED:
         return
-    if _DEBUG_OWNER_CHAT_ID is None:
+    chat_id = _DEBUG_OWNER_CHAT_ID
+    if chat_id is None:
         return
     try:
         import time as _time_mod
@@ -301,21 +427,22 @@ def _emit_debug_observation(
         if emitter:
             label += f" {emitter}"
         full_text = f"{label}\n{text}"
+
+        from datetime import datetime, timezone as _timezone
+        now = datetime.now(_timezone.utc)
+        ts_ms = int(now.timestamp() * 1000)
+        safe_emitter = "".join(c if c.isalnum() or c in "-_" else "_" for c in emitter_label)[:40]
+        message_id = f"{ts_ms}_debug_{safe_emitter}"
         message = {
             "id": message_id,
             "type": "debug_observation",
             "source": _DEBUG_OWNER_SOURCE,
-            "chat_id": _DEBUG_OWNER_CHAT_ID,
+            "chat_id": chat_id,
             "text": full_text,
-            "timestamp": __import__("datetime").datetime.now(
-                __import__("datetime").timezone.utc
-            ).isoformat(),
+            "timestamp": now.isoformat(),
         }
-        OUTBOX_DIR.mkdir(parents=True, exist_ok=True)
-        outbox_file = OUTBOX_DIR / f"{message_id}.json"
-        tmp_file = outbox_file.with_suffix(".tmp")
-        tmp_file.write_text(__import__("json").dumps(message), encoding="utf-8")
-        tmp_file.rename(outbox_file)
+        inbox_file = INBOX_DIR / f"{message_id}.json"
+        atomic_write_json(inbox_file, message)
     except Exception:
         pass  # debug delivery must never crash production
 
@@ -3210,10 +3337,6 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Optional subagent task identifier. Included in debug alerts when LOBSTER_DEBUG=true so the caller is visible in the memory write notification.",
                     },
-                    "chat_id": {
-                        "type": "string",
-                        "description": "Optional: chat_id of the user storing this memory. Embedded as source_chat_id in metadata for attribution.",
-                    },
                 },
                 "required": ["content"],
             },
@@ -3240,10 +3363,6 @@ async def list_tools() -> list[Tool]:
                     "task_id": {
                         "type": "string",
                         "description": "Optional subagent task identifier. Included in debug alerts when LOBSTER_DEBUG=true so the caller is visible in the memory search notification.",
-                    },
-                    "chat_id": {
-                        "type": "string",
-                        "description": "Optional: filter results to memories attributed to this chat_id (plus unattributed legacy memories).",
                     },
                 },
                 "required": ["query"],
@@ -7499,11 +7618,12 @@ async def handle_write_result(args: dict) -> list[TextContent]:
     # Notify wire server so SSE clients update within 40ms
     asyncio.create_task(_notify_wire_server())
 
-    # Debug alert: emit bus event when LOBSTER_DEBUG=true.
+    # Debug alert: enqueue best-effort inbox message when LOBSTER_DEBUG=true.
     # Fires at the MCP layer (before the dispatcher picks up the inbox message)
     # so the user sees the subagent message arrive in real time.
-    # system_context events are suppressed by TelegramOutboxListener — bus gate.
+    # _emit_debug_observation is a no-op when debug alerts are disabled — single gate.
     agent_id = args.get("agent_id", "").strip() or None
+    text_preview = text[:60] + "…" if len(text) > 60 else text
     alert_lines = [
         f"\U0001f4e8 [subagent\u2192dispatcher] type: {msg_type}",
         f"task: {task_id}",
@@ -7513,13 +7633,12 @@ async def handle_write_result(args: dict) -> list[TextContent]:
     if status:
         alert_lines.append(f"status: {status}")
     alert_lines.append(f"sent_reply: {bool(sent_reply_to_user)}")
-    _emit_event(
+    alert_lines.append(f"preview: {text_preview}")
+    _emit_debug_observation(
         "\n".join(alert_lines),
-        event_type="agent.write_result",
-        severity="debug",
-        source="write-result",
+        category="system_context",
+        visibility="mcp-only",
         emitter=f"task:{task_id}",
-        task_id=task_id,
     )
 
     log.info(f"Subagent result queued in inbox: task_id={task_id} status={status} chat_id={chat_id}")
@@ -7594,45 +7713,14 @@ async def handle_write_observation(args: dict) -> list[TextContent]:
     inbox_file = INBOX_DIR / f"{message_id}.json"
     atomic_write_json(inbox_file, message)
 
-    # BIS-167 Slice 6: persist observation as agent event immediately
-    if _db_persist_agent_event is not None:
-        _db_persist_agent_event(message)
-
-    # Belt-and-suspenders: for system_error, also append directly to observations.log
-    # at the MCP layer. The inbox write above is the primary path — the dispatcher
-    # picks it up and writes to the log as part of routing. This direct append is a
-    # durability fallback: if the dispatcher is restarting or compacting at the moment
-    # the observation arrives, the error is still recorded. The source field
-    # "mcp-direct" distinguishes these entries from dispatcher-written ones.
-    # Worst case: two log entries for one event (acceptable — no deduplication needed).
-    if category == "system_error":
-        obs_log = LOG_DIR / "observations.log"
-        log_entry: dict = {
-            "ts": now.isoformat(),
-            "category": category,
-            "content": text,
-            "source": "mcp-direct",
-        }
-        if task_id:
-            log_entry["task_id"] = task_id
-        try:
-            with obs_log.open("a") as f:
-                f.write(json.dumps(log_entry) + "\n")
-        except OSError as exc:
-            log.warning(f"Failed to write observation to {obs_log}: {exc}")
-
-    # When LOBSTER_DEBUG=true, emit a direct debug observation for non-system_context
-    # categories so the user sees the observation arrive in real time.
-    # system_context is suppressed (internal bookkeeping only).
-    # This is additive: the inbox write above always happens regardless of debug mode.
-    emitter = f"task:{task_id}" if task_id else "unknown"
-    if _DEBUG_MODE and category != "system_context":
-        _emit_debug_observation(
-            text,
-            category=category,
-            visibility="mcp-only",
-            emitter=emitter,
-        )
+    # When LOBSTER_DEBUG=true, also enqueue a debug inbox message so the user
+    # sees what the dispatcher sees in real time. This is additive — the inbox
+    # write above always happens first regardless of debug mode.
+    # Visibility is "mcp-only": this fires at the MCP layer before the dispatcher
+    # picks up the inbox message, so the dispatcher has not yet seen it.
+    if _DEBUG_MODE:
+        emitter = f"task:{task_id}" if task_id else "unknown"
+        _emit_debug_observation(text, category=category, visibility="mcp-only", emitter=emitter)
 
     log.info(
         f"Subagent observation queued in inbox: category={category} chat_id={chat_id}"
@@ -8419,19 +8507,17 @@ async def handle_memory_store(arguments: dict[str, Any]) -> list[TextContent]:
         return [TextContent(type="text", text=f"Error storing memory: {e}")]
 
     # Debug alert: best-effort, isolated so a failure here never affects the store result.
-    # system_context events are suppressed by TelegramOutboxListener — no manual gate needed.
+    # _emit_debug_observation is a no-op when debug alerts are disabled — single gate.
     try:
         task_id_label = arguments.get("task_id", "").strip() or "dispatcher"
         content_preview = content[:80] + "…" if len(content) > 80 else content
-        _emit_event(
+        _emit_debug_observation(
             f"\U0001f9e0 [memory write] agent: {task_id_label}\n"
             f"type: {event.type}\n"
             f"content: {content_preview}",
-            event_type="memory.write",
-            severity="debug",
-            source="memory-store",
+            category="system_context",
+            visibility="mcp-only",
             emitter=task_id_label,
-            task_id=task_id_label if task_id_label != "dispatcher" else None,
         )
     except Exception:
         pass
@@ -8457,29 +8543,18 @@ async def handle_memory_search(arguments: dict[str, Any]) -> list[TextContent]:
         log.error(f"memory_search failed: {e}", exc_info=True)
         return [TextContent(type="text", text=f"Error searching memory: {e}")]
 
-    # Post-filter by chat_id if provided (attribution-based filtering)
-    chat_id = arguments.get("chat_id")
-    if chat_id is not None and results:
-        results = [
-            e for e in results
-            if e.metadata.get("source_chat_id") == chat_id
-            or "source_chat_id" not in e.metadata
-        ]
-
     # Debug alert: best-effort, isolated so a failure here never affects the search result.
-    # system_context events are suppressed by TelegramOutboxListener — no manual gate needed.
+    # _emit_debug_observation is a no-op when debug alerts are disabled — single gate.
     try:
         task_id_label = arguments.get("task_id", "").strip() or "dispatcher"
         result_count = len(results) if results else 0
-        _emit_event(
+        _emit_debug_observation(
             f"\U0001f50d [memory read] agent: {task_id_label}\n"
             f"query: {query}\n"
             f"results: {result_count} found",
-            event_type="memory.search",
-            severity="debug",
-            source="memory-search",
+            category="system_context",
+            visibility="mcp-only",
             emitter=task_id_label,
-            task_id=task_id_label if task_id_label != "dispatcher" else None,
         )
     except Exception:
         pass
@@ -8489,7 +8564,7 @@ async def handle_memory_search(arguments: dict[str, Any]) -> list[TextContent]:
 
     lines = [f"**Memory Search Results** ({len(results)} found for \"{query}\"):"]
     for i, event in enumerate(results, 1):
-        ts = _format_display_ts(event.timestamp, "%Y-%m-%d %I:%M %p %Z") if event.timestamp else "?"
+        ts = event.timestamp.strftime("%Y-%m-%d %H:%M") if event.timestamp else "?"
         proj = f" [{event.project}]" if event.project else ""
         eid = f"#{event.id}" if event.id else ""
         # Truncate content for display
