@@ -671,7 +671,12 @@ setup_syncthing() {
     echo -e "${YELLOW}${BOLD}LobsterDrop${NC} uses Syncthing to sync files between your phone/laptop and this server."
     echo -e "It requires setup on your client device too (Syncthing app)."
     echo ""
-    read -r -p "$(echo -e "${CYAN}Install and configure Syncthing? [y/N]:${NC} ")" response
+    if [ -t 0 ]; then
+        read -r -p "$(echo -e "${CYAN}Install and configure Syncthing? [y/N]:${NC} ")" response
+    else
+        info "No TTY detected — defaulting to install Syncthing. Use --skip-syncthing to suppress."
+        response="y"
+    fi
     echo ""
 
     if [[ ! "$response" =~ ^[Yy]$ ]]; then
