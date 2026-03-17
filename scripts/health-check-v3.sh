@@ -26,6 +26,15 @@
 #   a compacted_at timestamp to lobster-state.json, and the stale-inbox check
 #   is skipped for COMPACTION_SUPPRESS_SECONDS after that timestamp.
 #
+# Boot grace period:
+#   After any restart (health-check-initiated or manual), the new Claude session
+#   needs ~60-90s to initialize and begin draining the inbox. During this window
+#   the health-check skips stale-inbox, WFM freshness, and process/tmux checks
+#   to avoid false-positive restarts. The boot timestamp is written to
+#   lobster-state.json as booted_at by claude-persistent.sh (on first start) and
+#   by do_restart() (after each health-check-initiated restart). Resource checks
+#   (memory, disk, auth, outbox) still run during the grace period.
+#
 # Escalation ladder:
 #   GREEN  - All checks pass (or in expected transient state)
 #   YELLOW - Inbox messages exist < STALE threshold, or transient state
@@ -58,6 +67,8 @@ YELLOW_THRESHOLD_SECONDS=120         # 2 minutes - YELLOW warning
 MAINTENANCE_EXPIRY_SECONDS=3600      # 1 hour - stale maintenance flag is auto-cleared and checks resume
 
 COMPACTION_SUPPRESS_SECONDS=300      # 5 minutes - skip stale-inbox check after a compaction event
+
+BOOT_GRACE_SECONDS=90                # 90s - skip stale-inbox, WFM, and process checks after a restart
 
 HIBERNATE_FRESH_SECONDS=30           # Ignore hibernate state younger than this — transient dispatcher hibernation
 
@@ -319,6 +330,63 @@ except Exception:
         return 0
     fi
     return 1
+}
+
+# Check if a boot/restart occurred within the last BOOT_GRACE_SECONDS.
+# Returns 0 (true) if we are inside the grace window, 1 otherwise.
+# Reads booted_at from lobster-state.json (written by claude-persistent.sh on
+# first start and by do_restart() after a health-check-initiated restart).
+is_boot_grace_period() {
+    if [[ ! -f "$LOBSTER_STATE_FILE" ]]; then
+        return 1
+    fi
+    local booted_at
+    booted_at=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('$LOBSTER_STATE_FILE'))
+    print(d.get('booted_at', ''))
+except Exception:
+    print('')
+" 2>/dev/null)
+    if [[ -z "$booted_at" ]]; then
+        return 1
+    fi
+    local booted_epoch
+    booted_epoch=$(date -d "$booted_at" +%s 2>/dev/null) || return 1
+    local now
+    now=$(date +%s)
+    local age=$((now - booted_epoch))
+    if [[ $age -le $BOOT_GRACE_SECONDS ]]; then
+        log_info "Boot grace period active: booted ${age}s ago (grace window: ${BOOT_GRACE_SECONDS}s) — skipping inbox/process/WFM checks"
+        return 0
+    fi
+    return 1
+}
+
+# Write booted_at timestamp into lobster-state.json without clobbering other fields.
+# Called by do_restart() after a successful health-check-initiated restart.
+write_boot_timestamp() {
+    if [[ ! -f "$LOBSTER_STATE_FILE" ]]; then
+        return
+    fi
+    local now
+    now=$(date -Iseconds)
+    python3 -c "
+import json, sys
+path = '$LOBSTER_STATE_FILE'
+now = '$now'
+try:
+    with open(path) as f:
+        d = json.load(f)
+except Exception:
+    d = {}
+d['booted_at'] = now
+with open(path, 'w') as f:
+    json.dump(d, f, indent=2)
+    f.write('\n')
+" 2>/dev/null || true
+    log_info "Boot timestamp written to state file (booted_at=$now)"
 }
 
 # Check if the wrapper script (claude-persistent.sh) is running in tmux.
@@ -1007,6 +1075,7 @@ Status: Restarted, but new stale messages detected post-restart"
         fi
 
         log_info "Restart successful"
+        write_boot_timestamp
         send_telegram_alert "System recovered automatically.
 
 Reason: $reason
@@ -1090,6 +1159,17 @@ main() {
         compaction_recent=true
     fi
 
+    # --- Boot grace period check ---
+    # After a restart (health-check-initiated or manual), skip stale-inbox,
+    # WFM freshness, and process/tmux checks for BOOT_GRACE_SECONDS. This
+    # prevents false-positive alerts during the ~60-90s a fresh session needs
+    # to initialize and start draining the inbox. Resource, auth, and service
+    # checks still run — they are fast and restart-independent.
+    local boot_grace=false
+    if is_boot_grace_period; then
+        boot_grace=true
+    fi
+
     # --- Always check systemd services (includes router/bot) ---
     if ! check_services; then
         level="RED"
@@ -1114,71 +1194,81 @@ main() {
         hibernate)
             log_info "HIBERNATE: Claude cleanly exited. Wrapper polling for new messages."
 
-            # Fresh-state guard: ignore hibernate states younger than HIBERNATE_FRESH_SECONDS.
-            # The dispatcher briefly writes mode=hibernate after wait_for_messages times out,
-            # then immediately wakes if new messages arrive. A health check that fires within
-            # this window would see a momentarily-missing wrapper and false-positive into RED.
-            if [[ $state_age -lt $HIBERNATE_FRESH_SECONDS ]]; then
-                log_info "Hibernate state is only ${state_age}s old (threshold: ${HIBERNATE_FRESH_SECONDS}s) — skipping process check (transient)"
-            elif ! check_tmux; then
-                level="RED"
-                restart_reason="tmux session missing (hibernate mode)"
-            elif [[ "$LOBSTER_DEBUG" == "true" ]]; then
-                # Debug mode: no persistent wrapper is expected. Claude Code runs
-                # directly in the tmux pane without claude-persistent.sh. Check for
-                # the Claude process directly instead of checking for the wrapper.
-                if ! check_claude_process; then
-                    level="RED"
-                    restart_reason="no Claude process in lobster tmux (debug mode, hibernate)"
-                fi
-            elif ! check_wrapper_process; then
-                # Wrapper died during hibernation — need systemd restart
-                level="RED"
-                restart_reason="wrapper process missing during hibernation"
-            fi
-
-            # Still check inbox: if user messages are sitting stale, the wrapper
-            # should have woken Claude by now. Give extra time (5 min) since
-            # the wrapper polls every 10s.
-            if [[ "$compaction_recent" == "true" ]]; then
-                log_info "Inbox drain suppressed (recent compaction)"
+            # Boot grace: skip process/tmux/inbox checks — session may not be fully up yet.
+            if [[ "$boot_grace" == "true" ]]; then
+                log_info "Process/inbox checks suppressed (boot grace period)"
             else
-                check_inbox_drain
-                local hibernate_inbox_rc=$?
-                if [[ $hibernate_inbox_rc -eq 2 ]]; then
-                    # Stale user messages during hibernation — wrapper may be stuck
+                # Fresh-state guard: ignore hibernate states younger than HIBERNATE_FRESH_SECONDS.
+                # The dispatcher briefly writes mode=hibernate after wait_for_messages times out,
+                # then immediately wakes if new messages arrive. A health check that fires within
+                # this window would see a momentarily-missing wrapper and false-positive into RED.
+                if [[ $state_age -lt $HIBERNATE_FRESH_SECONDS ]]; then
+                    log_info "Hibernate state is only ${state_age}s old (threshold: ${HIBERNATE_FRESH_SECONDS}s) — skipping process check (transient)"
+                elif ! check_tmux; then
                     level="RED"
-                    restart_reason="${restart_reason:+$restart_reason + }stale inbox during hibernation"
+                    restart_reason="tmux session missing (hibernate mode)"
+                elif [[ "$LOBSTER_DEBUG" == "true" ]]; then
+                    # Debug mode: no persistent wrapper is expected. Claude Code runs
+                    # directly in the tmux pane without claude-persistent.sh. Check for
+                    # the Claude process directly instead of checking for the wrapper.
+                    if ! check_claude_process; then
+                        level="RED"
+                        restart_reason="no Claude process in lobster tmux (debug mode, hibernate)"
+                    fi
+                elif ! check_wrapper_process; then
+                    # Wrapper died during hibernation — need systemd restart
+                    level="RED"
+                    restart_reason="wrapper process missing during hibernation"
+                fi
+
+                # Still check inbox: if user messages are sitting stale, the wrapper
+                # should have woken Claude by now. Give extra time (5 min) since
+                # the wrapper polls every 10s.
+                if [[ "$compaction_recent" == "true" ]]; then
+                    log_info "Inbox drain suppressed (recent compaction)"
+                else
+                    check_inbox_drain
+                    local hibernate_inbox_rc=$?
+                    if [[ $hibernate_inbox_rc -eq 2 ]]; then
+                        # Stale user messages during hibernation — wrapper may be stuck
+                        level="RED"
+                        restart_reason="${restart_reason:+$restart_reason + }stale inbox during hibernation"
+                    fi
                 fi
             fi
             ;;
 
         starting|restarting|waking)
-            # Transient states — allow some time before alarming
-            if is_transient_state "$lobster_mode" "$state_age"; then
-                log_info "TRANSIENT: mode=$lobster_mode for ${state_age}s — within expected window"
-                # Don't check for Claude process during transient states
+            # Boot grace: skip stale-transient escalation and inbox checks.
+            if [[ "$boot_grace" == "true" ]]; then
+                log_info "Transient state check and inbox drain suppressed (boot grace period)"
             else
-                # Stale transient state is itself RED — something is stuck.
-                # Don't wait for inbox to pile up; the state being stale IS the signal.
-                log_error "STALE TRANSIENT: mode=$lobster_mode for ${state_age}s — exceeded expected window"
-                level="RED"
-                restart_reason="stale $lobster_mode state (${state_age}s)"
-            fi
-
-            # Still check inbox drain
-            if [[ "$compaction_recent" == "true" ]]; then
-                log_info "Inbox drain suppressed (recent compaction)"
-            else
-                check_inbox_drain
-                local transient_inbox_rc=$?
-                if [[ $transient_inbox_rc -eq 2 ]]; then
+                # Transient states — allow some time before alarming
+                if is_transient_state "$lobster_mode" "$state_age"; then
+                    log_info "TRANSIENT: mode=$lobster_mode for ${state_age}s — within expected window"
+                    # Don't check for Claude process during transient states
+                else
+                    # Stale transient state is itself RED — something is stuck.
+                    # Don't wait for inbox to pile up; the state being stale IS the signal.
+                    log_error "STALE TRANSIENT: mode=$lobster_mode for ${state_age}s — exceeded expected window"
                     level="RED"
-                    restart_reason="${restart_reason:+$restart_reason + }stale inbox (>$((STALE_THRESHOLD_SECONDS/60))m)"
-                elif [[ $transient_inbox_rc -eq 1 && "$level" == "GREEN" ]]; then
-                    level="YELLOW"
-                elif [[ $transient_inbox_rc -eq 0 ]]; then
-                    clear_stale_inbox_markers
+                    restart_reason="stale $lobster_mode state (${state_age}s)"
+                fi
+
+                # Still check inbox drain
+                if [[ "$compaction_recent" == "true" ]]; then
+                    log_info "Inbox drain suppressed (recent compaction)"
+                else
+                    check_inbox_drain
+                    local transient_inbox_rc=$?
+                    if [[ $transient_inbox_rc -eq 2 ]]; then
+                        level="RED"
+                        restart_reason="${restart_reason:+$restart_reason + }stale inbox (>$((STALE_THRESHOLD_SECONDS/60))m)"
+                    elif [[ $transient_inbox_rc -eq 1 && "$level" == "GREEN" ]]; then
+                        level="YELLOW"
+                    elif [[ $transient_inbox_rc -eq 0 ]]; then
+                        clear_stale_inbox_markers
+                    fi
                 fi
             fi
             ;;
@@ -1194,7 +1284,9 @@ main() {
             fi
 
             # Check inbox drain even during backoff
-            if [[ "$compaction_recent" == "true" ]]; then
+            if [[ "$boot_grace" == "true" ]]; then
+                log_info "Inbox drain suppressed (boot grace period)"
+            elif [[ "$compaction_recent" == "true" ]]; then
                 log_info "Inbox drain suppressed (recent compaction)"
             else
                 check_inbox_drain
@@ -1217,93 +1309,102 @@ main() {
         active-debug)
             # Debug mode: claude-wrapper.exp runs Claude interactively.
             # No persistent wrapper process expected — only check tmux and Claude.
-            log_info "ACTIVE-DEBUG: Debug mode active, checking tmux and Claude process"
-            if ! check_tmux; then
-                level="RED"
-                restart_reason="tmux session missing (debug mode)"
-            fi
-
-            if ! check_claude_process; then
-                level="RED"
-                restart_reason="${restart_reason:+$restart_reason + }no Claude process in lobster tmux (debug mode)"
-            fi
-
-            # Inbox drain check
-            if [[ "$compaction_recent" == "true" ]]; then
-                log_info "Inbox drain suppressed (recent compaction)"
+            if [[ "$boot_grace" == "true" ]]; then
+                log_info "Process/inbox checks suppressed (boot grace period)"
             else
-                check_inbox_drain
-                local debug_inbox_rc=$?
-                if [[ $debug_inbox_rc -eq 2 ]]; then
+                log_info "ACTIVE-DEBUG: Debug mode active, checking tmux and Claude process"
+                if ! check_tmux; then
                     level="RED"
-                    restart_reason="${restart_reason:+$restart_reason + }stale inbox (>$((STALE_THRESHOLD_SECONDS/60))m)"
-                elif [[ $debug_inbox_rc -eq 1 && "$level" == "GREEN" ]]; then
-                    level="YELLOW"
-                elif [[ $debug_inbox_rc -eq 0 ]]; then
-                    clear_stale_inbox_markers
+                    restart_reason="tmux session missing (debug mode)"
+                fi
+
+                if ! check_claude_process; then
+                    level="RED"
+                    restart_reason="${restart_reason:+$restart_reason + }no Claude process in lobster tmux (debug mode)"
+                fi
+
+                # Inbox drain check
+                if [[ "$compaction_recent" == "true" ]]; then
+                    log_info "Inbox drain suppressed (recent compaction)"
+                else
+                    check_inbox_drain
+                    local debug_inbox_rc=$?
+                    if [[ $debug_inbox_rc -eq 2 ]]; then
+                        level="RED"
+                        restart_reason="${restart_reason:+$restart_reason + }stale inbox (>$((STALE_THRESHOLD_SECONDS/60))m)"
+                    elif [[ $debug_inbox_rc -eq 1 && "$level" == "GREEN" ]]; then
+                        level="YELLOW"
+                    elif [[ $debug_inbox_rc -eq 0 ]]; then
+                        clear_stale_inbox_markers
+                    fi
                 fi
             fi
             ;;
 
         active|unknown|*)
-            # Standard checks: wrapper + Claude should be running
-            if ! check_tmux; then
-                level="RED"
-                restart_reason="tmux session missing"
-            fi
-
-            # In persistent mode, check for wrapper OR Claude process
-            # The wrapper is always running; Claude may be temporarily absent
-            # during restarts, but the wrapper handles that.
-            local has_wrapper=false
-            local has_claude=false
-
-            if check_wrapper_process; then
-                has_wrapper=true
-            fi
-            if check_claude_process; then
-                has_claude=true
-            fi
-
-            if [[ "$has_wrapper" == "false" && "$has_claude" == "false" ]]; then
-                level="RED"
-                restart_reason="${restart_reason:+$restart_reason + }no wrapper or Claude process in lobster tmux"
-            elif [[ "$has_wrapper" == "false" && "$has_claude" == "true" ]]; then
-                # Claude running without persistent wrapper.
-                # In debug mode (LOBSTER_DEBUG=true) this is expected: claude-wrapper.exp
-                # runs Claude interactively without the persistent wrapper lifecycle.
-                # Suppress the warning to avoid noise.
-                if [[ "$LOBSTER_DEBUG" == "true" ]]; then
-                    log_info "Claude running without persistent wrapper (debug mode — expected)"
-                else
-                    log_warn "Claude running without persistent wrapper (old-style mode?)"
-                fi
-            elif [[ "$has_wrapper" == "true" && "$has_claude" == "false" ]]; then
-                # Wrapper running but no Claude — could be between launches
-                # Check state age: if it's been a while, something may be stuck
-                if [[ $state_age -gt 120 && "$lobster_mode" == "active" ]]; then
-                    log_warn "Wrapper running but no Claude for ${state_age}s in active state"
-                    if [[ "$level" == "GREEN" ]]; then
-                        level="YELLOW"
-                    fi
-                else
-                    log_info "Wrapper running, Claude temporarily absent (state: $lobster_mode, age: ${state_age}s)"
-                fi
-            fi
-
-            # Inbox drain check
-            if [[ "$compaction_recent" == "true" ]]; then
-                log_info "Inbox drain suppressed (recent compaction)"
+            # Boot grace: skip process/tmux/inbox checks — session may still be initializing.
+            if [[ "$boot_grace" == "true" ]]; then
+                log_info "Process/inbox checks suppressed (boot grace period)"
             else
-                check_inbox_drain
-                local inbox_rc=$?
-                if [[ $inbox_rc -eq 2 ]]; then
+                # Standard checks: wrapper + Claude should be running
+                if ! check_tmux; then
                     level="RED"
-                    restart_reason="${restart_reason:+$restart_reason + }stale inbox (>$((STALE_THRESHOLD_SECONDS/60))m)"
-                elif [[ $inbox_rc -eq 1 && "$level" == "GREEN" ]]; then
-                    level="YELLOW"
-                elif [[ $inbox_rc -eq 0 ]]; then
-                    clear_stale_inbox_markers
+                    restart_reason="tmux session missing"
+                fi
+
+                # In persistent mode, check for wrapper OR Claude process
+                # The wrapper is always running; Claude may be temporarily absent
+                # during restarts, but the wrapper handles that.
+                local has_wrapper=false
+                local has_claude=false
+
+                if check_wrapper_process; then
+                    has_wrapper=true
+                fi
+                if check_claude_process; then
+                    has_claude=true
+                fi
+
+                if [[ "$has_wrapper" == "false" && "$has_claude" == "false" ]]; then
+                    level="RED"
+                    restart_reason="${restart_reason:+$restart_reason + }no wrapper or Claude process in lobster tmux"
+                elif [[ "$has_wrapper" == "false" && "$has_claude" == "true" ]]; then
+                    # Claude running without persistent wrapper.
+                    # In debug mode (LOBSTER_DEBUG=true) this is expected: claude-wrapper.exp
+                    # runs Claude interactively without the persistent wrapper lifecycle.
+                    # Suppress the warning to avoid noise.
+                    if [[ "$LOBSTER_DEBUG" == "true" ]]; then
+                        log_info "Claude running without persistent wrapper (debug mode — expected)"
+                    else
+                        log_warn "Claude running without persistent wrapper (old-style mode?)"
+                    fi
+                elif [[ "$has_wrapper" == "true" && "$has_claude" == "false" ]]; then
+                    # Wrapper running but no Claude — could be between launches
+                    # Check state age: if it's been a while, something may be stuck
+                    if [[ $state_age -gt 120 && "$lobster_mode" == "active" ]]; then
+                        log_warn "Wrapper running but no Claude for ${state_age}s in active state"
+                        if [[ "$level" == "GREEN" ]]; then
+                            level="YELLOW"
+                        fi
+                    else
+                        log_info "Wrapper running, Claude temporarily absent (state: $lobster_mode, age: ${state_age}s)"
+                    fi
+                fi
+
+                # Inbox drain check
+                if [[ "$compaction_recent" == "true" ]]; then
+                    log_info "Inbox drain suppressed (recent compaction)"
+                else
+                    check_inbox_drain
+                    local inbox_rc=$?
+                    if [[ $inbox_rc -eq 2 ]]; then
+                        level="RED"
+                        restart_reason="${restart_reason:+$restart_reason + }stale inbox (>$((STALE_THRESHOLD_SECONDS/60))m)"
+                    elif [[ $inbox_rc -eq 1 && "$level" == "GREEN" ]]; then
+                        level="YELLOW"
+                    elif [[ $inbox_rc -eq 0 ]]; then
+                        clear_stale_inbox_markers
+                    fi
                 fi
             fi
             ;;
@@ -1332,6 +1433,8 @@ main() {
             "$lobster_mode" == "waking"    || "$lobster_mode" == "backoff"    || \
             "$lobster_mode" == "stopped" ]]; then
         log_info "WFM freshness suppressed (transient lifecycle state: $lobster_mode)"
+    elif [[ "$boot_grace" == "true" ]]; then
+        log_info "WFM freshness suppressed (boot grace period)"
     elif [[ "$compaction_recent" == "true" ]]; then
         log_info "WFM freshness suppressed (recent compaction)"
     else
