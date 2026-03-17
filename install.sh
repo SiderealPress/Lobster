@@ -1550,6 +1550,27 @@ else
     info "Skipping require-background-agent hook (settings.json not yet created)"
 fi
 
+# Set up Claude Code PreToolUse hook to block Agent spawns without task_id in prompt
+chmod +x "$INSTALL_DIR/hooks/require-task-id-in-prompt.py" || true
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '.hooks.PreToolUse[]? | select(.hooks[]?.command | test("require-task-id-in-prompt"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+            "matcher": "Agent",
+            "hooks": [{
+                "type": "command",
+                "command": "python3 '"$INSTALL_DIR"'/hooks/require-task-id-in-prompt.py",
+                "timeout": 5
+            }]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "require-task-id-in-prompt hook installed"
+    else
+        info "require-task-id-in-prompt hook already configured in Claude Code settings"
+    fi
+else
+    info "Skipping require-task-id-in-prompt hook (settings.json not yet created)"
+fi
+
 # Set up Claude Code PreToolUse hook to warn when WebFetch/WebSearch are called inline
 chmod +x "$INSTALL_DIR/hooks/dispatcher-inline-tool-guard.py" || true
 if [ -f "$CLAUDE_SETTINGS" ]; then
