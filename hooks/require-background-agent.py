@@ -1,22 +1,26 @@
 #!/usr/bin/env python3
-"""PreToolUse hook: warns when the Agent tool is called without run_in_background: true.
+"""PreToolUse hook: blocks the dispatcher from calling Agent without run_in_background: true.
 
 The Lobster dispatcher runs in an infinite message-processing loop. A foreground
 Agent call (run_in_background omitted or false) blocks the dispatcher for the
 full duration of the agent — potentially minutes — while incoming messages queue
-up unprocessed.
+up unprocessed and health-check pings go unanswered.
+
+This hook enforces the 7-second rule as a hard constraint for the dispatcher.
+Subagents are exempt: they may legitimately spawn nested agents synchronously
+when the result is needed to decide the next step.
 
 Exit codes:
-  0 — tool is not Agent, or Agent is called with run_in_background: true (OK)
-  1 — soft warning: Agent called without run_in_background: true
-
-Exit 1 (not 2) is intentional. Claude sees the warning and can reconsider, but
-is not hard-blocked. There are legitimate cases where a foreground Agent is
-genuinely needed (e.g., the result is required synchronously to decide the next
-step). Hard-blocking those would be counterproductive.
+  0 — tool is not Agent, Agent has run_in_background: true, or session is a subagent
+  2 — hard block: dispatcher called Agent without run_in_background: true
 """
 import json
 import sys
+from pathlib import Path
+
+# Import the shared dispatcher/subagent detection utility.
+sys.path.insert(0, str(Path(__file__).parent))
+from session_role import is_dispatcher
 
 data = json.load(sys.stdin)
 tool = data.get("tool_name", "")
@@ -28,10 +32,15 @@ if tool != "Agent":
 if inp.get("run_in_background") is True:
     sys.exit(0)
 
+# Only enforce for the dispatcher. Subagents may call Agent synchronously.
+if not is_dispatcher(data):
+    sys.exit(0)
+
 print(
-    "Warning: Agent tool called without run_in_background: true. "
-    "This blocks message processing for the duration of the agent. "
-    "Pass run_in_background: true unless you genuinely need the result "
-    "synchronously to decide your next step.",
+    "BLOCKED: Dispatcher called Agent without run_in_background: true. "
+    "This blocks the message-processing loop for the full duration of the "
+    "subagent. Always pass run_in_background=True when spawning agents from "
+    "the dispatcher. The result will be delivered via write_result.",
+    file=sys.stderr,
 )
-sys.exit(1)
+sys.exit(2)
