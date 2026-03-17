@@ -1,10 +1,10 @@
 """
 Tests for LOBSTER_DEBUG=true alert hooks:
-  - memory_store debug Telegram push (Feature 1)
-  - memory_search debug Telegram push (Feature 1)
-  - write_result debug Telegram push (Feature 2)
+  - memory_store debug alert (Feature 1)
+  - memory_search debug alert (Feature 1)
+  - write_result debug alert (Feature 2)
 
-All tests mock _emit_debug_observation so no real HTTP calls are made,
+All tests mock _emit_debug_observation so no real I/O is performed,
 and rely on the session-scoped block_outbound_http fixture in conftest.py
 as a belt-and-suspenders guard.
 """
@@ -70,7 +70,7 @@ class MemoryEvent:
 
 
 class TestMemoryStoreDebugAlert:
-    """LOBSTER_DEBUG=true fires a Telegram push on memory_store."""
+    """LOBSTER_DEBUG=true fires a debug alert on memory_store."""
 
     def _run(self, arguments: dict, memory_provider=None) -> list:
         if memory_provider is None:
@@ -193,7 +193,7 @@ class TestMemoryStoreDebugAlert:
 
 
 class TestMemorySearchDebugAlert:
-    """LOBSTER_DEBUG=true fires a Telegram push on memory_search."""
+    """LOBSTER_DEBUG=true fires a debug alert on memory_search."""
 
     def _run(self, arguments: dict, result_count: int = 2) -> tuple:
         provider = _make_fake_memory_provider(result_count=result_count)
@@ -301,7 +301,7 @@ class TestMemorySearchDebugAlert:
 
 
 class TestWriteResultDebugAlert:
-    """LOBSTER_DEBUG=true fires a Telegram push when write_result is called."""
+    """LOBSTER_DEBUG=true fires a debug alert when write_result is called."""
 
     def _run(self, args: dict, inbox_dir: Path) -> tuple:
         emitted: list[dict] = []
