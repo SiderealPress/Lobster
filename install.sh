@@ -324,6 +324,8 @@ if [ "$CONTAINER_SETUP" = true ]; then
     mkdir -p "$PROJECTS_DIR"
     mkdir -p "$USER_CONFIG_DIR/memory"/{canonical/{people,projects},archive/digests}
     mkdir -p "$USER_CONFIG_DIR/agents/subagents"
+    # Safety: remove orphan agents.db if it was created (real store is agent_sessions.db)
+    rm -f "$MESSAGES_DIR/config/agents.db" "$WORKSPACE_DIR/data/agents.db"
     success "Directories created"
 
     # Seed canonical templates (idempotent — skip existing files)
@@ -971,6 +973,8 @@ mkdir -p "$CONFIG_DIR"
 mkdir -p "$PROJECTS_DIR"
 mkdir -p "$USER_CONFIG_DIR/memory"/{canonical/{people,projects},archive/digests}
 mkdir -p "$USER_CONFIG_DIR/agents/subagents"
+# Safety: remove orphan agents.db if it was created (real store is agent_sessions.db)
+rm -f "$MESSAGES_DIR/config/agents.db" "$WORKSPACE_DIR/data/agents.db"
 
 # Legacy: also create ~/projects/ for backward compatibility
 mkdir -p "$HOME/projects"/{personal,business}
