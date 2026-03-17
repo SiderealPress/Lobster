@@ -588,7 +588,43 @@ def send_alert(
 # Mark-failed remediation (isolated side effects — DB write + inbox drop)
 # ---------------------------------------------------------------------------
 
-RELAUNCH_CHAT_ID = OWNER_CHAT_ID_PLACEHOLDER
+
+def _resolve_owner_chat_id() -> str:
+    """Return the owner's Telegram chat_id as a string.
+
+    Lookup order:
+      1. OWNER_CHAT_ID env var (explicit override)
+      2. TELEGRAM_ALLOWED_USERS env var (first entry)
+      3. TELEGRAM_ALLOWED_USERS from ~/lobster-config/config.env (first entry)
+      4. Empty string (alerts will silently drop if delivery is attempted)
+    """
+    explicit = os.environ.get("OWNER_CHAT_ID", "").strip()
+    if explicit:
+        return explicit
+
+    allowed_env = os.environ.get("TELEGRAM_ALLOWED_USERS", "").strip()
+    if allowed_env:
+        first = allowed_env.split(",")[0].strip()
+        if first:
+            return first
+
+    config_env = Path.home() / "lobster-config" / "config.env"
+    if config_env.exists():
+        try:
+            for line in config_env.read_text().splitlines():
+                stripped = line.strip()
+                if stripped.startswith("TELEGRAM_ALLOWED_USERS="):
+                    val = stripped.split("=", 1)[1].strip().strip('"').strip("'")
+                    first = val.split(",")[0].strip()
+                    if first:
+                        return first
+        except Exception:
+            pass
+
+    return ""
+
+
+RELAUNCH_CHAT_ID = _resolve_owner_chat_id()
 
 
 def mark_agent_completed(db_path: Path, agent_id: str) -> None:
