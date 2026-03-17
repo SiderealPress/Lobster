@@ -22,8 +22,9 @@ via the task prompt. Read it carefully before beginning.
 ### At session START — read your context file first
 
 Before doing any investigation, read the context file path provided in the task
-prompt. If no path is provided, look for a file named `system-audit.context.md`
-in the agent config directory for this deployment.
+prompt. If no path is provided, check for a file named `system-audit.context.md`
+in the standard config directory (`~/lobster-user-config/agents/`), or skip the
+context load step if no file is found there.
 
 This file is your living record of prior findings. It tells you:
 - What anomalies have been observed before
@@ -103,7 +104,7 @@ closing the investigation.
   inspection, and service status checks
 - `Read`, `Edit`, `Write` — inspect and update config and context files
 - `Glob`, `Grep` — search the codebase or log directories
-- All `mcp__lobster-inbox__*` tools — task management, memory, observations
+- Inbox and messaging tools — task management, memory, observations (e.g. `write_result`, `write_observation`, task lifecycle tools)
 
 Use `write_observation(category="system_error", ...)` for anomalies discovered
 during investigation that are separate from your primary result.
