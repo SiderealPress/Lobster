@@ -8,8 +8,8 @@
 # Usage:
 #   source agent-status.sh
 #   summary=$(scan_agent_status)
-#   # Returns: "Agents: abc123 (52 turns, running), def456 (49 turns, done)"
-#   # Returns: "" (empty string) if no agents found
+#   # Returns: "Agents: abc123 (52 turns, running), def456 (3 turns, starting)"
+#   # Returns: "" (empty string) if no agents found or all are done
 #
 #   completed=$(scan_completed_tasks)
 #   # Returns: JSON-like summary of completed tasks not yet reported
@@ -85,7 +85,8 @@ _get_stop_reason() {
 }
 
 # Scan agent output files and return a summary string.
-# Returns empty string if no agents found.
+# Only includes running/starting agents — completed (end_turn) agents are excluded.
+# Returns empty string if no agents found or all are done.
 scan_agent_status() {
     local tasks_glob
     tasks_glob=$(_default_tasks_glob)
@@ -100,7 +101,8 @@ scan_agent_status() {
     fi
 
     local entries=()
-    local total_count=${#output_files[@]}
+    local running_count=0
+    local running_skipped=0
 
     # Sort by mtime descending (most recently active first) and take top N
     local sorted_files=()
@@ -110,30 +112,36 @@ scan_agent_status() {
 
     local display_count=0
     for filepath in "${sorted_files[@]}"; do
-        if [ "$display_count" -ge "$AGENT_MAX_DISPLAY" ]; then
-            break
-        fi
-
         local basename_f
         basename_f=$(basename "$filepath" .output)
-
-        # Count assistant turns
-        local turns
-        turns=$(grep -c '"type":"assistant"' "$filepath" 2>/dev/null) || turns=0
 
         # Determine agent status from stop_reason (deterministic, ~1ms)
         local stop_reason
         stop_reason=$(_get_stop_reason "$filepath")
 
-        local status_text
+        # Skip completed agents — self-check is only for active work
         if [ "$stop_reason" = "end_turn" ]; then
-            status_text="done"
-        elif [ -z "$stop_reason" ]; then
+            continue
+        fi
+
+        local status_text
+        if [ -z "$stop_reason" ]; then
             status_text="starting"
         else
             # "tool_use" or any other value = actively running
             status_text="running"
         fi
+
+        running_count=$(( running_count + 1 ))
+
+        if [ "$display_count" -ge "$AGENT_MAX_DISPLAY" ]; then
+            running_skipped=$(( running_skipped + 1 ))
+            continue
+        fi
+
+        # Count assistant turns
+        local turns
+        turns=$(grep -c '"type":"assistant"' "$filepath" 2>/dev/null) || turns=0
 
         entries+=("${basename_f} (${turns} turns, ${status_text})")
         display_count=$(( display_count + 1 ))
@@ -155,18 +163,24 @@ scan_agent_status() {
         fi
     done
 
-    # Add "+N more" if we capped the display
-    local remaining=$(( total_count - display_count ))
-    if [ "$remaining" -gt 0 ]; then
-        result+=", +${remaining} more"
+    # Add "+N more" if we capped the display (only running agents count)
+    if [ "$running_skipped" -gt 0 ]; then
+        result+=", +${running_skipped} more"
     fi
 
     echo "$result"
 }
 
+# Maximum completed tasks to surface per self-check cycle.
+# Any backlog beyond this is silently marked as reported to prevent message bloat.
+COMPLETED_MAX_REPORT=3
+
 # Scan for completed tasks that haven't been reported yet.
 # A task is "completed" when its last stop_reason is "end_turn" (deterministic).
 # Previously used mtime heuristic — now uses the JSONL stop_reason field.
+#
+# Cap: reports at most COMPLETED_MAX_REPORT tasks per cycle. Any backlog beyond
+# that is immediately marked as reported so it never accumulates.
 #
 # Returns a structured completion summary or empty string if nothing new.
 scan_completed_tasks() {
@@ -186,8 +200,8 @@ scan_completed_tasks() {
         return 0
     fi
 
-    local completed=()
-
+    # Collect all unreported completed task paths first (to allow batch-marking overflow)
+    local unreported_completed=()
     for filepath in "${output_files[@]}"; do
         local basename_f
         basename_f=$(basename "$filepath" .output)
@@ -201,44 +215,55 @@ scan_completed_tasks() {
         local stop_reason
         stop_reason=$(_get_stop_reason "$filepath")
 
-        if [ "$stop_reason" != "end_turn" ]; then
-            continue
+        if [ "$stop_reason" = "end_turn" ]; then
+            unreported_completed+=("$filepath")
+        fi
+    done
+
+    if [ ${#unreported_completed[@]} -eq 0 ]; then
+        return 0
+    fi
+
+    # If backlog exceeds cap, mark all overflow as reported silently.
+    # This prevents a large backlog from ever producing an oversized message.
+    local total_unreported=${#unreported_completed[@]}
+    if [ "$total_unreported" -gt "$COMPLETED_MAX_REPORT" ]; then
+        local overflow_start=$COMPLETED_MAX_REPORT
+        for i in "${!unreported_completed[@]}"; do
+            if [ "$i" -ge "$overflow_start" ]; then
+                local overflow_base
+                overflow_base=$(basename "${unreported_completed[$i]}" .output)
+                echo "$overflow_base" >> "$reported_file"
+            fi
+        done
+    fi
+
+    # Report at most COMPLETED_MAX_REPORT entries
+    local completed=()
+    local report_count=0
+    for filepath in "${unreported_completed[@]}"; do
+        if [ "$report_count" -ge "$COMPLETED_MAX_REPORT" ]; then
+            break
         fi
 
-        # Extract the last assistant message text for a brief summary
-        local last_msg
-        last_msg=$(grep '"type":"assistant"' "$filepath" 2>/dev/null | tail -1 | \
-            python3 -c "
-import json, sys
-try:
-    line = sys.stdin.readline()
-    d = json.loads(line)
-    msg = d.get('message', {})
-    content = msg.get('content', [])
-    texts = [c.get('text', '') for c in content if c.get('type') == 'text']
-    result = ' '.join(texts).strip()
-    # Truncate to 200 chars for concise reporting
-    if len(result) > 200:
-        result = result[:197] + '...'
-    print(result)
-except Exception:
-    print('')
-" 2>/dev/null)
+        local basename_f
+        basename_f=$(basename "$filepath" .output)
 
         local turns
         turns=$(grep -c '"type":"assistant"' "$filepath" 2>/dev/null) || turns=0
 
         # Mark as reported
         echo "$basename_f" >> "$reported_file"
+        report_count=$(( report_count + 1 ))
 
-        completed+=("Task ${basename_f} completed (${turns} turns, stop_reason=end_turn): ${last_msg}")
+        completed+=("Task ${basename_f} completed (${turns} turns)")
     done
 
     if [ ${#completed[@]} -eq 0 ]; then
         return 0
     fi
 
-    # Build structured result
+    # Build structured result — no transcript content, just task ID and turn count
     local result=""
     for entry in "${completed[@]}"; do
         if [ -z "$result" ]; then
