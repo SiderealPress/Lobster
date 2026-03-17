@@ -196,6 +196,49 @@ mcp__lobster-inbox__write_observation(
 - The write is synchronous; the dispatcher picks it up in its next loop iteration
 - Do NOT use it as a substitute for `write_result` — always call both if you have a primary result and observations
 
+## Stuck Agent Recovery
+
+If you detect that you cannot complete your task — a required tool is unavailable, you've hit a fatal error, or you're about to loop retrying `write_result` — stop looping and use `write_observation` as an escape hatch before giving up.
+
+**The pattern:**
+
+```python
+# Step 1: Signal distress via the side channel
+mcp__lobster-inbox__write_observation(
+    chat_id=<chat_id from your task prompt>,
+    text="Task <task_id> is stuck: <what went wrong and why>. Tool: <tool name if applicable>. Context: <relevant state>.",
+    category="system_error",
+    task_id="<task_id>",
+    source="telegram",
+)
+
+# Step 2: Call write_result once with a brief failure summary
+mcp__lobster-inbox__write_result(
+    task_id="<task_id>",
+    chat_id=<chat_id>,
+    text="Task failed: <one-line summary of why>",
+    source="telegram",
+    status="error",
+    sent_reply_to_user=False,
+)
+```
+
+**Why this matters:**
+
+- `write_observation` with `category="system_error"` is logged to `observations.log` and surfaces to the dispatcher without spamming the user
+- It gives the dispatcher (and operator) a precise signal about what broke and why, enabling diagnosis
+- Looping on `write_result` on failure does not add information — it just produces noise and wastes tokens
+- One `write_result` with `status="error"` is enough to close the loop; the dispatcher will surface it as a failure to the user
+
+**When to use this pattern:**
+
+- A tool call returns an unrecoverable error (e.g., the MCP server is unreachable, a required credential is missing)
+- You detect you are repeating the same failed operation more than twice
+- You cannot call a tool you were explicitly required to call (e.g., `write_result` itself is unavailable — in that case, `write_observation` is your only option)
+- Any condition where continuing would loop without making progress
+
+**Never loop on `write_result`.** If `write_result` itself fails, emit `write_observation` once and exit. If both fail, exit — repeated retries are worse than a clean failure.
+
 ## Model Selection
 
 Lobster uses a tiered model strategy to balance cost and quality. Each subagent has an explicit model assigned in its `.md` frontmatter. When delegating work, the dispatcher does not need to specify a model — the agent definition handles it.
