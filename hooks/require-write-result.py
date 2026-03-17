@@ -58,9 +58,29 @@ Claude Code injects a "Stop hook feedback: ... No stderr output" system message
 into the agent even when the hook exits 0. To prevent this feedback from
 triggering a new agent turn, the hook outputs JSON with `{"suppressOutput": true}`
 on all success paths. Per the CC hook spec, this suppresses feedback injection.
+
+## Fallback after N retry fires
+
+When write_result is not called and the hook blocks with exit 2, CC re-runs the
+subagent with the error message injected. If the subagent still cannot call
+write_result (e.g. turn exhaustion, crash loop), the hook fires repeatedly and
+the agent never terminates.
+
+After MAX_HOOK_FIRES fires without a successful write_result, the hook gives up
+blocking and emits a synthetic subagent_result to ~/messages/inbox/ with the
+last meaningful transcript content (extracted from turns BEFORE the hook started
+firing). This ensures the dispatcher always gets something instead of nothing.
+
+Fire count is tracked in /tmp/lobster-hook-fires-{agent_key} as JSON:
+    {"count": N, "first_fire_ts": <unix timestamp>}
+
+The file is cleaned up after the fallback emit.
 """
 import json
+import os
 import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Import shared session role utility.
@@ -71,6 +91,12 @@ from session_role import is_dispatcher, get_session_id
 # "Stop hook feedback: No stderr output" injection that CC 2.1.76+ produces
 # even when the hook exits 0 with no output.
 _SILENT_OK = json.dumps({"suppressOutput": True})
+
+# Maximum number of hook fires before giving up and emitting a synthetic result.
+MAX_HOOK_FIRES = 5
+
+# Number of pre-hook transcript turns to extract for the synthetic result.
+_FALLBACK_TURNS = 3
 
 
 def _exit_ok() -> None:
@@ -203,6 +229,213 @@ def _collect_tool_use_and_text(transcript: list) -> tuple[list, list]:
     return all_tool_use_items, text_content_parts
 
 
+# ---------------------------------------------------------------------------
+# Retry-fire tracking
+# ---------------------------------------------------------------------------
+
+def _agent_key(data: dict) -> str:
+    """Return a stable key for the fire-count temp file.
+
+    Prefer agent_id (SubagentStop) over session_id (Stop). Falls back to
+    a constant so the temp file path is always well-defined.
+    """
+    agent_id = data.get("agent_id") or ""
+    session_id = data.get("session_id") or ""
+    key = agent_id or session_id or "unknown"
+    # Sanitise: keep only alphanumeric, dash, and dot characters.
+    return "".join(c if c.isalnum() or c in "-._" else "_" for c in key)
+
+
+def _fire_count_path(agent_key: str) -> Path:
+    """Return the Path of the temp file that tracks hook fires for this agent."""
+    return Path(f"/tmp/lobster-hook-fires-{agent_key}")
+
+
+def _read_fire_state(path: Path) -> tuple[int, float]:
+    """Read (fire_count, first_fire_ts) from the temp file.
+
+    Returns (0, 0.0) if the file is absent or unreadable.
+    """
+    try:
+        state = json.loads(path.read_text())
+        count = int(state.get("count", 0))
+        first_ts = float(state.get("first_fire_ts", 0.0))
+        return count, first_ts
+    except Exception:
+        return 0, 0.0
+
+
+def _write_fire_state(path: Path, count: int, first_fire_ts: float) -> None:
+    """Write (count, first_fire_ts) to the temp file. Best-effort."""
+    try:
+        path.write_text(json.dumps({"count": count, "first_fire_ts": first_fire_ts}))
+    except Exception:
+        pass
+
+
+def _cleanup_fire_state(path: Path) -> None:
+    """Remove the fire-count temp file. Best-effort."""
+    try:
+        path.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def _increment_fire_count(data: dict) -> tuple[int, float]:
+    """Increment the fire count for this agent and return (new_count, first_fire_ts).
+
+    On the first fire, records the current timestamp as first_fire_ts.
+    """
+    key = _agent_key(data)
+    path = _fire_count_path(key)
+    count, first_fire_ts = _read_fire_state(path)
+
+    now = time.time()
+    count += 1
+    if count == 1:
+        first_fire_ts = now
+
+    _write_fire_state(path, count, first_fire_ts)
+    return count, first_fire_ts
+
+
+# ---------------------------------------------------------------------------
+# Fallback: extract pre-hook transcript content and write synthetic result
+# ---------------------------------------------------------------------------
+
+def _entry_timestamp(entry: dict) -> float:
+    """Extract a unix timestamp from a JSONL transcript entry.
+
+    CC 2.1.76+ transcript entries have a 'timestamp' field (ISO-8601 or epoch).
+    Returns 0.0 if absent or unparseable — entries without timestamps are
+    treated as pre-hook (included in fallback content).
+    """
+    ts = entry.get("timestamp")
+    if ts is None:
+        return 0.0
+    if isinstance(ts, (int, float)):
+        return float(ts)
+    if isinstance(ts, str):
+        # Try ISO-8601 first, then numeric string.
+        try:
+            return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            pass
+        try:
+            return float(ts)
+        except ValueError:
+            return 0.0
+    return 0.0
+
+
+def _extract_pre_hook_text(transcript: list, first_fire_ts: float, n_turns: int) -> str:
+    """Extract meaningful text from transcript turns that predate the hook firing.
+
+    Filters to entries whose timestamp < first_fire_ts (or all entries if
+    first_fire_ts is 0 / timestamps are missing), then takes the last n_turns
+    assistant text blocks and joins them.
+
+    Returns a non-empty string, or an empty string if nothing useful was found.
+    """
+    # Select entries that predate the first hook fire.
+    # If first_fire_ts is 0 (unknown), include all entries.
+    if first_fire_ts > 0:
+        pre_hook = [e for e in transcript if _entry_timestamp(e) < first_fire_ts]
+    else:
+        pre_hook = list(transcript)
+
+    # Collect text parts from the pre-hook portion of the transcript.
+    # Walk entries in order so we can take the last N meaningful turns.
+    turns = []
+    for entry in pre_hook:
+        if not isinstance(entry, dict):
+            continue
+        nested_msg = entry.get("message")
+        if isinstance(nested_msg, dict):
+            content = nested_msg.get("content", [])
+        else:
+            content = entry.get("content", [])
+        if not isinstance(content, list):
+            continue
+
+        texts = [
+            item.get("text", "").strip()
+            for item in content
+            if isinstance(item, dict) and item.get("type") == "text"
+        ]
+        combined = "\n".join(t for t in texts if t)
+        if combined:
+            turns.append(combined)
+
+    # Take the last n_turns non-empty turns.
+    recent_turns = turns[-n_turns:] if turns else []
+    return "\n\n---\n\n".join(recent_turns)
+
+
+def _write_synthetic_inbox_message(
+    data: dict,
+    content: str,
+    task_id_hint: str,
+) -> None:
+    """Write a synthetic subagent_result message to ~/messages/inbox/.
+
+    The message has the same JSON structure as a normal write_result inbox
+    message (type='subagent_result', status='success'), with a note that the
+    content was recovered from the transcript after the agent failed to call
+    write_result. chat_id defaults to 0 (system route) when not discoverable.
+
+    Best-effort: any failure is silently swallowed.
+    """
+    try:
+        inbox_dir = Path(os.path.expanduser("~/messages/inbox"))
+        inbox_dir.mkdir(parents=True, exist_ok=True)
+
+        now = datetime.now(timezone.utc)
+        ts_ms = int(now.timestamp() * 1000)
+
+        # Derive a task_id: prefer the hint extracted from the transcript,
+        # fall back to session/agent id, then a generic fallback.
+        task_id = task_id_hint or data.get("agent_id") or data.get("session_id") or "recovered-agent"
+        safe_task_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in task_id)[:40]
+        message_id = f"{ts_ms}_{safe_task_id}_recovered"
+
+        # chat_id: we don't know the original chat_id when the agent didn't call
+        # write_result. Use 0 as the dispatcher system route so the dispatcher
+        # can decide what to do with the recovered result.
+        chat_id = 0
+
+        recovery_note = (
+            "Agent exited without calling write_result. "
+            f"Content recovered from transcript after {MAX_HOOK_FIRES} hook fires."
+        )
+
+        if content:
+            text = f"{recovery_note}\n\nRecovered content:\n\n{content}"
+        else:
+            text = f"{recovery_note}\n\n(No recoverable transcript content found.)"
+
+        message = {
+            "id": message_id,
+            "type": "subagent_result",
+            "source": "telegram",
+            "chat_id": chat_id,
+            "text": text,
+            "task_id": task_id,
+            "status": "recovered",
+            "sent_reply_to_user": False,
+            "timestamp": now.isoformat(),
+            "recovered": True,
+        }
+
+        inbox_file = inbox_dir / f"{message_id}.json"
+        # Atomic write: write to .tmp then rename.
+        tmp_file = inbox_file.with_suffix(".tmp")
+        tmp_file.write_text(json.dumps(message, indent=2))
+        tmp_file.rename(inbox_file)
+    except Exception:
+        pass  # Never block exit on fallback emit failure
+
+
 def main():
     try:
         data = json.load(sys.stdin)
@@ -294,6 +527,11 @@ def main():
             if session_id:
                 _mark_session_notified(session_id)
 
+            # Clean up any fire-count temp file — the agent eventually called
+            # write_result, so reset the counter for this session.
+            key = _agent_key(data)
+            _cleanup_fire_state(_fire_count_path(key))
+
             _exit_ok()
         else:
             # write_result was called but chat_id was None in every call —
@@ -309,7 +547,35 @@ def main():
             )
             sys.exit(2)
 
-    # Subagent finished without calling write_result — block exit.
+    # Subagent finished without calling write_result.
+    # Increment the fire counter and decide whether to block or fall back.
+    fire_count, first_fire_ts = _increment_fire_count(data)
+
+    if fire_count > MAX_HOOK_FIRES:
+        # Give up blocking — extract the best pre-hook content and emit a
+        # synthetic subagent_result so the dispatcher gets something.
+        task_id_hint = ""
+        # Try to extract a task_id hint from the prompt text in the transcript.
+        # A common pattern is "Your task_id is: <id>" injected by the dispatcher.
+        for part in text_content_parts:
+            if "task_id" in part.lower():
+                import re
+                m = re.search(r"task[_\s-]?id\s*(?:is\s*)?[:\-]?\s*([A-Za-z0-9_-]+)", part, re.IGNORECASE)
+                if m:
+                    task_id_hint = m.group(1)
+                    break
+
+        content = _extract_pre_hook_text(transcript, first_fire_ts, _FALLBACK_TURNS)
+        _write_synthetic_inbox_message(data, content, task_id_hint)
+
+        # Clean up the fire-count temp file.
+        key = _agent_key(data)
+        _cleanup_fire_state(_fire_count_path(key))
+
+        _exit_ok()
+
+    # Still within the retry window — block with exit 2 and a reminder message.
+    fires_remaining = MAX_HOOK_FIRES - fire_count
     # Check whether write_result appeared as text output (pseudocode failure mode)
     # to give a more actionable error message.
     combined_text = "\n".join(text_content_parts)
@@ -320,7 +586,8 @@ def main():
             "description, not an invocation. You must call write_result using the tool "
             "invocation mechanism (the same way you call Read, Edit, Bash, etc.) — not "
             "by writing it as code output.\n\n"
-            "Call write_result now using the tool mechanism.",
+            f"Call write_result now using the tool mechanism. "
+            f"({fires_remaining} attempt(s) remaining before the hook gives up.)",
             file=sys.stderr,
         )
     else:
@@ -328,7 +595,8 @@ def main():
             "STOP: You must call mcp__lobster-inbox__write_result before finishing. "
             "The dispatcher is waiting for your result. "
             "If the task failed, report the failure — but you must call write_result. "
-            "Call it now with your findings, then you may exit.",
+            f"Call it now with your findings, then you may exit. "
+            f"({fires_remaining} attempt(s) remaining before the hook gives up.)",
             file=sys.stderr,
         )
     sys.exit(2)  # Exit 2 to hard-block the session from terminating
