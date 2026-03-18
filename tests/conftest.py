@@ -2,6 +2,28 @@
 Lobster Test Suite - Shared Fixtures and Configuration
 
 This module provides pytest fixtures shared across all test modules.
+
+Production path isolation
+--------------------------
+The ``isolate_inbox_server_paths`` fixture (autouse=True, session-scoped setup
+with per-test tmp_path) is the central guard that prevents any test from
+accidentally writing to production directories or files.  It uses
+``patch.multiple("src.mcp.inbox_server", ...)`` to redirect every path global
+in inbox_server.py to a per-test temporary directory.
+
+Every test gets this isolation by default.  Tests should never add their own
+per-test patches for production paths — the autouse fixture already covers them.
+If you are writing a test that needs to verify *which path* was used, inject the
+paths via the ``inbox_server_dirs`` fixture, which exposes the redirected paths.
+
+Do NOT add per-test mocks for:
+    LOBSTER_STATE_FILE, INBOX_DIR, OUTBOX_DIR, PROCESSED_DIR, PROCESSING_DIR,
+    FAILED_DIR, CONFIG_DIR, AUDIO_DIR, SENT_DIR, SENT_REPLIES_DIR,
+    TASK_REPLIED_DIR, TASKS_FILE, TASK_OUTPUTS_DIR, BISQUE_OUTBOX_DIR,
+    SCHEDULED_JOBS_DIR, SCHEDULED_JOBS_FILE, SCHEDULED_TASKS_TASKS_DIR,
+    SCHEDULED_TASKS_LOGS_DIR, LOG_DIR
+
+These are all redirected automatically.
 """
 
 import asyncio
@@ -29,6 +51,143 @@ from tests.fixtures.generators import (
     ScheduledJobGenerator,
     FixtureLoader,
 )
+
+
+# =============================================================================
+# Production Path Isolation (autouse — applies to every test by default)
+# =============================================================================
+
+_INBOX_SERVER_MODULE = "src.mcp.inbox_server"
+
+
+@pytest.fixture(autouse=True)
+def isolate_inbox_server_paths(tmp_path: Path):
+    """Redirect all inbox_server.py production paths to tmp_path for every test.
+
+    This fixture is the single authoritative guard against accidental production
+    path writes.  It applies to every test without requiring any test-level
+    decoration or per-test patch.
+
+    The fixture patches ``src.mcp.inbox_server`` — the canonical module path used
+    by the test suite.  Tests that import ``inbox_server`` via a bare sys.path
+    insertion (e.g. the legacy test_hibernation.py style) must be updated to use
+    ``from src.mcp.inbox_server import ...`` so that the same module object is
+    patched.
+
+    Module-level side-effects in inbox_server.py that run at import time (directory
+    creation, _reset_state_on_startup, etc.) fire before this fixture is applied.
+    That is unavoidable without restructuring the module.  The fixture redirects
+    all path *globals* so that any subsequent function call in the test uses the
+    redirected paths.
+
+    Dirs created under tmp_path:
+        messages/
+            inbox/, outbox/, processed/, processing/, failed/,
+            config/, audio/, sent/, sent-replies/, task-replied/,
+            task-outputs/, bisque-outbox/
+        workspace/
+            logs/
+            scheduled-jobs/
+                tasks/, logs/
+        lobster-state.json is inside messages/config/
+    """
+    # Build temp directory tree
+    messages = tmp_path / "messages"
+    for subdir in [
+        "inbox", "outbox", "processed", "processing", "failed",
+        "config", "audio", "sent", "sent-replies", "task-replied",
+        "task-outputs", "bisque-outbox",
+    ]:
+        (messages / subdir).mkdir(parents=True, exist_ok=True)
+
+    workspace = tmp_path / "workspace"
+    (workspace / "logs").mkdir(parents=True, exist_ok=True)
+
+    sched = workspace / "scheduled-jobs"
+    (sched / "tasks").mkdir(parents=True, exist_ok=True)
+    (sched / "logs").mkdir(parents=True, exist_ok=True)
+    (sched / "jobs.json").write_text(json.dumps({"jobs": {}}))
+
+    (messages / "tasks.json").write_text(json.dumps({"tasks": [], "next_id": 1}))
+
+    state_file = messages / "config" / "lobster-state.json"
+    log_dir = workspace / "logs"
+
+    dirs_result = {
+        "base": messages,
+        "inbox": messages / "inbox",
+        "outbox": messages / "outbox",
+        "processed": messages / "processed",
+        "processing": messages / "processing",
+        "failed": messages / "failed",
+        "config": messages / "config",
+        "audio": messages / "audio",
+        "sent": messages / "sent",
+        "sent_replies": messages / "sent-replies",
+        "task_replied": messages / "task-replied",
+        "tasks_file": messages / "tasks.json",
+        "task_outputs": messages / "task-outputs",
+        "bisque_outbox": messages / "bisque-outbox",
+        "state_file": state_file,
+        "log_dir": log_dir,
+        "scheduled_jobs_dir": sched,
+        "scheduled_jobs_file": sched / "jobs.json",
+        "scheduled_tasks_dir": sched / "tasks",
+        "scheduled_tasks_logs": sched / "logs",
+    }
+
+    # Ensure the module is in sys.modules before patching.  patch.multiple
+    # resolves the target via attribute traversal on the already-imported module
+    # object; it raises AttributeError if inbox_server hasn't been imported yet.
+    # We attempt the import here — if it fails (e.g. missing deps), we skip the
+    # patch and just yield the dirs dict so tests that don't import inbox_server
+    # still get their tmp_path dirs.
+    try:
+        import importlib
+        importlib.import_module(_INBOX_SERVER_MODULE)
+    except Exception:
+        yield dirs_result
+        return
+
+    try:
+        with patch.multiple(
+            _INBOX_SERVER_MODULE,
+            BASE_DIR=messages,
+            INBOX_DIR=messages / "inbox",
+            OUTBOX_DIR=messages / "outbox",
+            PROCESSED_DIR=messages / "processed",
+            PROCESSING_DIR=messages / "processing",
+            FAILED_DIR=messages / "failed",
+            CONFIG_DIR=messages / "config",
+            AUDIO_DIR=messages / "audio",
+            SENT_DIR=messages / "sent",
+            SENT_REPLIES_DIR=messages / "sent-replies",
+            TASK_REPLIED_DIR=messages / "task-replied",
+            TASKS_FILE=messages / "tasks.json",
+            TASK_OUTPUTS_DIR=messages / "task-outputs",
+            BISQUE_OUTBOX_DIR=messages / "bisque-outbox",
+            LOBSTER_STATE_FILE=state_file,
+            LOG_DIR=log_dir,
+            SCHEDULED_JOBS_DIR=sched,
+            SCHEDULED_JOBS_FILE=sched / "jobs.json",
+            SCHEDULED_TASKS_TASKS_DIR=sched / "tasks",
+            SCHEDULED_TASKS_LOGS_DIR=sched / "logs",
+        ):
+            yield dirs_result
+    except Exception:
+        # Fallback: yield without patching so tests that don't need
+        # inbox_server isolation still run cleanly.
+        yield dirs_result
+
+
+@pytest.fixture
+def inbox_server_dirs(isolate_inbox_server_paths):
+    """Expose the redirected inbox_server paths for tests that need to verify them.
+
+    Returns the same dict as ``isolate_inbox_server_paths``.  Use this fixture
+    when your test needs to know which tmp_path the server is writing to.
+    """
+    return isolate_inbox_server_paths
 
 
 # =============================================================================
@@ -258,9 +417,13 @@ def mcp_directories(temp_messages_dir: Path, temp_scheduled_tasks_dir: Path):
     Patch MCP server directories to use temporary directories.
 
     This fixture patches the global directory constants in inbox_server.py.
+    Note: the autouse ``isolate_inbox_server_paths`` fixture already provides
+    per-test path isolation.  Use ``mcp_directories`` only when you need the
+    legacy ``temp_messages_dir`` / ``temp_scheduled_tasks_dir`` layout instead
+    of the default tmp_path layout.
     """
     with patch.multiple(
-        "mcp.inbox_server",
+        _INBOX_SERVER_MODULE,
         BASE_DIR=temp_messages_dir,
         INBOX_DIR=temp_messages_dir / "inbox",
         OUTBOX_DIR=temp_messages_dir / "outbox",
