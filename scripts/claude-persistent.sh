@@ -541,6 +541,11 @@ Claude persistent session initializing."
         if handle_exit "$exit_code"; then
             # Clean hibernation - wait for new messages
             wait_for_wake
+            # Write a fresh boot stamp so the health-check's BOOT_GRACE_SECONDS
+            # suppression window activates for the upcoming wakeup launch.
+            # Without this, hibernate wakeups have no grace period and the
+            # stale-inbox check fires during the ~60-90s initialization window.
+            write_boot_stamp
             attempt=0  # Reset attempt counter after clean cycle
         else
             # Abnormal exit - brief pause before restart
