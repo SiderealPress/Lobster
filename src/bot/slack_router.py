@@ -315,7 +315,7 @@ def download_slack_file(file_info: dict, msg_id: str, msg_data: dict) -> None:
     if mimetype.startswith("image/"):
         save_path = IMAGES_DIR / f"{msg_id}{ext}"
         msg_data["image_file"] = str(save_path)
-        msg_data["type"] = "image"
+        msg_data["type"] = "photo"
     else:
         save_path = FILES_DIR / f"{msg_id}{ext}"
         msg_data["file_path"] = str(save_path)
