@@ -69,6 +69,7 @@ RESTART_WINDOW_BUFFER_SECONDS=120    # Pre-mark messages within this window of t
 MAINTENANCE_EXPIRY_SECONDS=3600      # 1 hour - stale maintenance flag is auto-cleared and checks resume
 
 COMPACTION_SUPPRESS_SECONDS=300      # 5 minutes - skip stale-inbox check after a compaction event
+RESTART_COOLDOWN_SUPPRESS_SECONDS=240 # 4 minutes - suppress stale-inbox RED after a recent restart
 
 BOOT_GRACE_SECONDS=90                # 90s - skip stale-inbox, WFM, and process checks after a restart
 
@@ -366,6 +367,34 @@ except Exception:
     return 1
 }
 
+# Check if a health-check-triggered restart occurred within the last
+# RESTART_COOLDOWN_SUPPRESS_SECONDS. When Lobster restarts, the MCP server
+# recovers stale messages from processing/ back to inbox/. Without this guard,
+# the next health check run sees those recovered messages as new stale messages
+# and fires another restart — a restart-triggered restart loop.
+#
+# Returns 0 (true) if inbox-stale RED should be suppressed, 1 otherwise.
+is_recent_restart() {
+    if [[ ! -f "$LOBSTER_STATE_FILE" ]]; then
+        return 1
+    fi
+    local last_restart_at
+    last_restart_at=$(jq -r '.last_restart_at // empty' "$LOBSTER_STATE_FILE" 2>/dev/null)
+    if [[ -z "$last_restart_at" ]]; then
+        return 1
+    fi
+    local restart_epoch
+    restart_epoch=$(date -d "$last_restart_at" +%s 2>/dev/null) || return 1
+    local now
+    now=$(date +%s)
+    local age=$((now - restart_epoch))
+    if [[ $age -le $RESTART_COOLDOWN_SUPPRESS_SECONDS ]]; then
+        log_info "Recent restart ${age}s ago (cooldown: ${RESTART_COOLDOWN_SUPPRESS_SECONDS}s) — stale-inbox RED suppressed"
+        return 0
+    fi
+    return 1
+}
+
 # Write booted_at timestamp into lobster-state.json without clobbering other fields.
 # Called by do_restart() after a successful health-check-initiated restart.
 write_boot_timestamp() {
@@ -389,6 +418,27 @@ with open(path, 'w') as f:
     f.write('\n')
 " 2>/dev/null || true
     log_info "Boot timestamp written to state file (booted_at=$now)"
+}
+
+# Write the current time as last_restart_at into lobster-state.json.
+# Called by do_restart() just before triggering the systemd restart so the
+# post-restart health check can suppress false-positive stale-inbox REDs.
+write_last_restart_at() {
+    if [[ ! -f "$LOBSTER_STATE_FILE" ]]; then
+        log_warn "write_last_restart_at: state file not found, skipping"
+        return 0
+    fi
+    local ts
+    ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    local tmp
+    tmp=$(mktemp)
+    if jq --arg ts "$ts" '.last_restart_at = $ts' "$LOBSTER_STATE_FILE" > "$tmp" 2>/dev/null; then
+        mv "$tmp" "$LOBSTER_STATE_FILE"
+        log_info "Wrote last_restart_at=$ts to state file"
+    else
+        rm -f "$tmp"
+        log_warn "write_last_restart_at: jq failed to update state file"
+    fi
 }
 
 # Check if the wrapper script (claude-persistent.sh) is running in tmux.
@@ -1016,6 +1066,11 @@ Manual intervention required:
         record_stale_inbox_markers
     fi
 
+    # Record the restart time in lobster-state.json so the next health check
+    # run can suppress false-positive stale-inbox REDs caused by messages
+    # recovered from processing/ back to inbox/ during the restart.
+    write_last_restart_at
+
     record_restart
 
     # Capture the Claude PID before stopping, so we can verify a new process
@@ -1326,6 +1381,7 @@ main() {
             if [[ "$boot_grace" == "true" ]]; then
                 log_info "Process/inbox checks suppressed (boot grace period)"
             else
+<<<<<<< HEAD
                 # Fresh-state guard: ignore hibernate states younger than HIBERNATE_FRESH_SECONDS.
                 # The dispatcher briefly writes mode=hibernate after wait_for_messages times out,
                 # then immediately wakes if new messages arrive. A health check that fires within
@@ -1359,6 +1415,18 @@ main() {
                     local hibernate_inbox_rc=$?
                     if [[ $hibernate_inbox_rc -eq 2 ]]; then
                         # Stale user messages during hibernation — wrapper may be stuck
+=======
+                check_inbox_drain
+                local hibernate_inbox_rc=$?
+                if [[ $hibernate_inbox_rc -eq 2 ]]; then
+                    # Stale user messages during hibernation — wrapper may be stuck.
+                    # Suppress to YELLOW if a health-check restart just fired: the
+                    # MCP server recovers processing/ messages to inbox/ on startup,
+                    # which would otherwise trigger an immediate second restart.
+                    if is_recent_restart; then
+                        [[ "$level" == "GREEN" ]] && level="YELLOW"
+                    else
+>>>>>>> 5d4f0c8 (fix: suppress stale-inbox RED within 4 minutes of a health-check restart)
                         level="RED"
                         restart_reason="${restart_reason:+$restart_reason + }stale inbox during hibernation"
                     fi
@@ -1371,6 +1439,7 @@ main() {
             if [[ "$boot_grace" == "true" ]]; then
                 log_info "Transient state check and inbox drain suppressed (boot grace period)"
             else
+<<<<<<< HEAD
                 # Transient states — allow some time before alarming
                 if is_transient_state "$lobster_mode" "$state_age"; then
                     log_info "TRANSIENT: mode=$lobster_mode for ${state_age}s — within expected window"
@@ -1397,6 +1466,32 @@ main() {
                     elif [[ $transient_inbox_rc -eq 0 ]]; then
                         clear_stale_inbox_markers
                     fi
+=======
+                # Stale transient state is itself RED — something is stuck.
+                # Don't wait for inbox to pile up; the state being stale IS the signal.
+                log_error "STALE TRANSIENT: mode=$lobster_mode for ${state_age}s — exceeded expected window"
+                level="RED"
+                restart_reason="stale $lobster_mode state (${state_age}s)"
+            fi
+
+            # Still check inbox drain
+            if [[ "$compaction_recent" == "true" ]]; then
+                log_info "Inbox drain suppressed (recent compaction)"
+            else
+                check_inbox_drain
+                local transient_inbox_rc=$?
+                if [[ $transient_inbox_rc -eq 2 ]]; then
+                    if is_recent_restart; then
+                        [[ "$level" == "GREEN" ]] && level="YELLOW"
+                    else
+                        level="RED"
+                        restart_reason="${restart_reason:+$restart_reason + }stale inbox (>$((STALE_THRESHOLD_SECONDS/60))m)"
+                    fi
+                elif [[ $transient_inbox_rc -eq 1 && "$level" == "GREEN" ]]; then
+                    level="YELLOW"
+                elif [[ $transient_inbox_rc -eq 0 ]]; then
+                    clear_stale_inbox_markers
+>>>>>>> 5d4f0c8 (fix: suppress stale-inbox RED within 4 minutes of a health-check restart)
                 fi
             fi
             ;;
@@ -1420,8 +1515,12 @@ main() {
                 check_inbox_drain
                 local backoff_inbox_rc=$?
                 if [[ $backoff_inbox_rc -eq 2 ]]; then
-                    level="RED"
-                    restart_reason="${restart_reason:+$restart_reason + }stale inbox during backoff"
+                    if is_recent_restart; then
+                        [[ "$level" == "GREEN" ]] && level="YELLOW"
+                    else
+                        level="RED"
+                        restart_reason="${restart_reason:+$restart_reason + }stale inbox during backoff"
+                    fi
                 elif [[ $backoff_inbox_rc -eq 0 ]]; then
                     clear_stale_inbox_markers
                 fi
@@ -1440,6 +1539,7 @@ main() {
             if [[ "$boot_grace" == "true" ]]; then
                 log_info "Process/inbox checks suppressed (boot grace period)"
             else
+<<<<<<< HEAD
                 log_info "ACTIVE-DEBUG: Debug mode active, checking tmux and Claude process"
                 if ! check_tmux; then
                     level="RED"
@@ -1465,6 +1565,21 @@ main() {
                     elif [[ $debug_inbox_rc -eq 0 ]]; then
                         clear_stale_inbox_markers
                     fi
+=======
+                check_inbox_drain
+                local debug_inbox_rc=$?
+                if [[ $debug_inbox_rc -eq 2 ]]; then
+                    if is_recent_restart; then
+                        [[ "$level" == "GREEN" ]] && level="YELLOW"
+                    else
+                        level="RED"
+                        restart_reason="${restart_reason:+$restart_reason + }stale inbox (>$((STALE_THRESHOLD_SECONDS/60))m)"
+                    fi
+                elif [[ $debug_inbox_rc -eq 1 && "$level" == "GREEN" ]]; then
+                    level="YELLOW"
+                elif [[ $debug_inbox_rc -eq 0 ]]; then
+                    clear_stale_inbox_markers
+>>>>>>> 5d4f0c8 (fix: suppress stale-inbox RED within 4 minutes of a health-check restart)
                 fi
             fi
             ;;
@@ -1474,6 +1589,7 @@ main() {
             if [[ "$boot_grace" == "true" ]]; then
                 log_info "Process/inbox checks suppressed (boot grace period)"
             else
+<<<<<<< HEAD
                 # Standard checks: wrapper + Claude should be running
                 if ! check_tmux; then
                     level="RED"
@@ -1533,6 +1649,21 @@ main() {
                     elif [[ $inbox_rc -eq 0 ]]; then
                         clear_stale_inbox_markers
                     fi
+=======
+                check_inbox_drain
+                local inbox_rc=$?
+                if [[ $inbox_rc -eq 2 ]]; then
+                    if is_recent_restart; then
+                        [[ "$level" == "GREEN" ]] && level="YELLOW"
+                    else
+                        level="RED"
+                        restart_reason="${restart_reason:+$restart_reason + }stale inbox (>$((STALE_THRESHOLD_SECONDS/60))m)"
+                    fi
+                elif [[ $inbox_rc -eq 1 && "$level" == "GREEN" ]]; then
+                    level="YELLOW"
+                elif [[ $inbox_rc -eq 0 ]]; then
+                    clear_stale_inbox_markers
+>>>>>>> 5d4f0c8 (fix: suppress stale-inbox RED within 4 minutes of a health-check restart)
                 fi
             fi
             ;;
