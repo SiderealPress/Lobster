@@ -61,6 +61,7 @@ WORKSPACE_DIR="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
 INBOX_DIR="$MESSAGES_DIR/inbox"
 MAINTENANCE_FLAG="$MESSAGES_DIR/config/lobster-maintenance"
 LOBSTER_STATE_FILE="${LOBSTER_STATE_FILE_OVERRIDE:-$MESSAGES_DIR/config/lobster-state.json}"
+DISPATCHER_PID_FILE="$MESSAGES_DIR/config/dispatcher.pid"
 STALE_THRESHOLD_SECONDS=240          # 4 minutes - RED if any message older (watchdog handles soft recovery at 90s)
 YELLOW_THRESHOLD_SECONDS=150         # 2.5 minutes - YELLOW warning
 
@@ -982,9 +983,27 @@ Manual intervention required:
     record_restart
 
     # Capture the Claude PID before stopping, so we can verify a new process
-    # is running after restart (not just the same surviving process).
-    local pre_restart_pid
-    pre_restart_pid=$(pgrep -x "claude" 2>/dev/null | head -1)
+    # is running after restart (not just the same surviving process), and so we
+    # can kill it directly if ExecStop fails silently.
+    #
+    # Read from the PID file written by claude-persistent.sh at launch time.
+    # This is unambiguous: pgrep -x "claude" could match an unrelated Claude
+    # process (e.g. a debug session), but the PID file records exactly the
+    # dispatcher that this health check is responsible for.
+    local pre_restart_pid=""
+    if [[ -f "$DISPATCHER_PID_FILE" ]]; then
+        pre_restart_pid=$(< "$DISPATCHER_PID_FILE")
+        # Sanity check: must be a non-empty integer
+        if [[ ! "$pre_restart_pid" =~ ^[0-9]+$ ]]; then
+            log_warn "dispatcher.pid contains non-numeric value '$pre_restart_pid' — ignoring"
+            pre_restart_pid=""
+        fi
+    fi
+    if [[ -n "$pre_restart_pid" ]]; then
+        log_info "Pre-restart dispatcher PID: $pre_restart_pid (from $DISPATCHER_PID_FILE)"
+    else
+        log_warn "No dispatcher.pid found — pre-restart PID unknown (new install or first restart)"
+    fi
 
     local tmux_uid
     tmux_uid=$(id -u)
@@ -1013,6 +1032,10 @@ Manual intervention required:
     # systemctl stop + tmux kill-server, kill it explicitly. SIGTERM first,
     # then SIGKILL after a brief wait. This handles cases where the process
     # detached from the tmux session before the kill-server ran.
+    #
+    # Unlike pgrep, targeting the PID file is unambiguous: it records exactly the
+    # dispatcher process launched by claude-persistent.sh, not any other Claude
+    # process that may be running (e.g. a debug session or subagent).
     if [[ -n "$pre_restart_pid" ]] && kill -0 "$pre_restart_pid" 2>/dev/null; then
         log_warn "Claude PID $pre_restart_pid survived systemctl stop + tmux kill-server — sending SIGTERM"
         kill -TERM "$pre_restart_pid" 2>/dev/null || true
@@ -1023,6 +1046,9 @@ Manual intervention required:
             sleep 1
         fi
     fi
+
+    # Clean up the PID file — the process is gone (or was already gone).
+    rm -f "$DISPATCHER_PID_FILE" 2>/dev/null || true
 
     # Verify the old process is actually dead before starting a new session.
     # If we cannot confirm it is gone, abort rather than risk two competing
@@ -1058,15 +1084,24 @@ Manual intervention required to kill the process before restarting:
     # must differ from the pre-restart PID (catching ghost sessions where the
     # old process survived alongside the newly started one).
     #
-    # PID retry loop: the new process may not have started quickly enough for
-    # pgrep to see it yet. Retry up to 3 times with 3-second gaps before
-    # concluding that the PID is genuinely unchanged (i.e. restart failed).
-    local post_restart_pid
+    # PID retry loop: the new claude-persistent.sh may not have written the PID
+    # file yet. Retry up to 3 times with 3-second gaps before concluding that
+    # the PID is genuinely unchanged (i.e. restart failed).
+    #
+    # Read from the PID file (same source as pre_restart_pid) for a consistent
+    # comparison. If the file is absent or empty, the new process hasn't written
+    # it yet — treat as "not ready" and keep retrying.
+    local post_restart_pid=""
     local pid_changed=true
     local pid_check_attempts=0
     while [[ $pid_check_attempts -lt 3 ]]; do
-        post_restart_pid=$(pgrep -x "claude" 2>/dev/null | head -1)
-        if [[ -z "$pre_restart_pid" || "$post_restart_pid" != "$pre_restart_pid" ]]; then
+        if [[ -f "$DISPATCHER_PID_FILE" ]]; then
+            post_restart_pid=$(< "$DISPATCHER_PID_FILE")
+            [[ ! "$post_restart_pid" =~ ^[0-9]+$ ]] && post_restart_pid=""
+        else
+            post_restart_pid=""
+        fi
+        if [[ -z "$pre_restart_pid" || ( -n "$post_restart_pid" && "$post_restart_pid" != "$pre_restart_pid" ) ]]; then
             break
         fi
         pid_check_attempts=$(( pid_check_attempts + 1 ))
