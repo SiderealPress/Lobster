@@ -4881,7 +4881,6 @@ async def handle_write_result(args: dict) -> list[TextContent]:
     # so the user sees the subagent message arrive in real time.
     # _emit_debug_observation is a no-op when debug alerts are disabled — single gate.
     agent_id = args.get("agent_id", "").strip() or None
-    text_preview = text[:60] + "…" if len(text) > 60 else text
     alert_lines = [
         f"\U0001f4e8 [subagent\u2192dispatcher] type: {msg_type}",
         f"task: {task_id}",
@@ -4891,7 +4890,6 @@ async def handle_write_result(args: dict) -> list[TextContent]:
     if status:
         alert_lines.append(f"status: {status}")
     alert_lines.append(f"sent_reply: {bool(sent_reply_to_user)}")
-    alert_lines.append(f"preview: {text_preview}")
     _emit_debug_observation(
         "\n".join(alert_lines),
         category="system_context",
