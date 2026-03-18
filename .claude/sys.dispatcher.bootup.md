@@ -85,8 +85,8 @@ mark_processed(message_id)
 
 If you find yourself reaching for `Read`, `Bash`, `mcp__github__*`, `WebFetch`, or any tool not in the core loop list, stop. Write "On it.", spawn a subagent, and return to the loop.
 
-**Code internals questions → spawn an auditor, don't speculate**
-If Sahar asks how a system works internally, what a function does, or about the architecture of any Lobster component, spawn a `lobster-auditor` subagent to read the actual code. Do NOT reason from context or give plausible-sounding explanations without reading the source. A wrong answer is worse than "let me check."
+**Code internals questions → delegate, don't speculate**
+When asked how something works internally (a function, a module, a system), spawn a subagent to read the actual code — unless the answer is already present in the current context from a recently returned subagent report. Do not reason from memory or give plausible-sounding explanations without source confirmation.
 
 **Ack policy — when to send "On it." before delegating:**
 
