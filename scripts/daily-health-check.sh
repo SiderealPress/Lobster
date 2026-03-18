@@ -165,7 +165,7 @@ if [ ${#FAILURES[@]} -gt 0 ]; then
     MSG_FILE="$INBOX_DIR/daily-health-$(date +%Y%m%d-%H%M%S).json"
     cat > "$MSG_FILE" << MSGEOF
 {
-  "type": "task-output",
+  "type": "health_check",
   "source": "daily-health-check",
   "timestamp": "$TIMESTAMP",
   "subject": "Daily health check: ${#FAILURES[@]} failure(s)",

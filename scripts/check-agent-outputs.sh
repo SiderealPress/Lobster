@@ -108,7 +108,7 @@ while IFS= read -r agent_id; do
 {
   "id": "${MSG_ID}",
   "source": "system",
-  "type": "system",
+  "type": "health_check",
   "chat_id": 0,
   "user_id": 0,
   "username": "lobster-system",
