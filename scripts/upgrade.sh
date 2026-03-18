@@ -1385,6 +1385,19 @@ with open(path, 'w') as f:
         migrated=$((migrated + 1))
     fi
 
+    # Migration 14: Add stop_reason column to agent_sessions SQLite table
+    # Existing rows will have NULL for stop_reason (nullable, backward-compatible).
+    local DB_PATH="${LOBSTER_MESSAGES:-$HOME/messages}/config/agent_sessions.db"
+    if [ -f "$DB_PATH" ]; then
+        if ! sqlite3 "$DB_PATH" "PRAGMA table_info(agent_sessions);" 2>/dev/null | grep -q "stop_reason"; then
+            substep "Adding stop_reason column to agent_sessions table..."
+            sqlite3 "$DB_PATH" "ALTER TABLE agent_sessions ADD COLUMN stop_reason TEXT;" 2>/dev/null && \
+                success "stop_reason column added to agent_sessions" || \
+                warn "Failed to add stop_reason column (may already exist)"
+            migrated=$((migrated + 1))
+        fi
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
