@@ -268,7 +268,7 @@ def format_telegram_alert(events: list[OomKillEvent]) -> str:
             lines.append(f"  • `{e.process_name}` (PID {e.pid})")
 
     lines.append("")
-    lines.append("Run `uv run scripts/ghost-detector.py` to check for ghost agents.")
+    lines.append("Run `uv run scripts/agent-monitor.py` to check for ghost agents.")
 
     return "\n".join(lines)
 
@@ -290,7 +290,7 @@ def format_inbox_message(events: list[OomKillEvent]) -> dict:
     text = (
         f"OOM kill alert: {len(events)} process(es) killed by the Linux OOM killer. "
         f"{lobster_count} Lobster-related process(es) affected ({process_names}). "
-        f"Subagents may have become ghosts — run ghost-detector.py to check."
+        f"Subagents may have become ghosts — run agent-monitor.py to check."
     )
     return {
         "id": msg_id,
