@@ -539,66 +539,23 @@ Image files are stored in `~/messages/images/`. The main thread reads the image 
 
 **Chat IDs** are integers.
 
-**Inline keyboard buttons** — include clickable buttons in replies using the `buttons` parameter of `send_reply`. Useful for:
-- Presenting options to the user
-- Confirmations (Yes/No, Approve/Reject)
-- Quick actions (View Details, Cancel, Retry)
-- Multi-step workflows
+Additional message fields:
+- `telegram_message_id` — The Telegram message ID of the incoming message. Pass this as `reply_to_message_id` to `send_reply` to visually thread your reply under the user's message. **Always pass this** — it makes Lobster feel responsive and conversational.
+- `is_dm` — Indicates if the message is a direct message
+- `channel_name` — Human-readable channel name
 
-**Button Format:**
-
-```python
-# Simple format - text is also the callback_data
-buttons = [
-    ["Option A", "Option B"],    # Row 1: two buttons
-    ["Option C"]                  # Row 2: one button
-]
-
-# Object format - explicit text and callback_data
-buttons = [
-    [{"text": "Approve", "callback_data": "approve_123"}],
-    [{"text": "Reject", "callback_data": "reject_123"}]
-]
-
-# Mixed format
-buttons = [
-    ["Quick Option"],
-    [{"text": "Detailed", "callback_data": "detail_action"}]
-]
-```
-
-**Example Usage:**
+**Inline keyboard buttons** — include clickable buttons via the `buttons` parameter of `send_reply`. Useful for confirmations (Yes/No), options, quick actions, multi-step workflows.
 
 ```python
-send_reply(
-    chat_id=12345,
-    text="Would you like to proceed?",
-    buttons=[["Yes", "No"]]
-)
+# Simple format (text = callback_data)
+buttons = [["Option A", "Option B"], ["Option C"]]
+# Object format (explicit text + callback_data)
+buttons = [[{"text": "Approve", "callback_data": "approve_123"}, {"text": "Reject", "callback_data": "reject_123"}]]
+
+send_reply(chat_id=12345, text="Proceed?", buttons=[["Yes", "No"]])
 ```
 
-**Handling button presses (callback type):**
-
-When a user presses a button, you receive a message with:
-- `type: "callback"`
-- `callback_data`: The data string from the pressed button
-- `original_message_text`: The text of the message containing the buttons
-
-```
-Message example:
-{
-  "type": "callback",
-  "callback_data": "approve_123",
-  "text": "[Button pressed: approve_123]",
-  "original_message_text": "Would you like to proceed?"
-}
-```
-
-**Best Practices:**
-- Keep button text short (fits on mobile)
-- Use callback_data to encode action + context (e.g., "approve_task_42")
-- Respond to button presses with a new message confirming the action
-- Consider including a "Cancel" option for destructive actions
+**Button presses** arrive as `type: "callback"` with `callback_data` and `original_message_text`. Respond with a confirmation; no ack needed. Keep text short (mobile). Use `callback_data` to encode action+context. Include "Cancel" for destructive actions.
 
 ### Slack-specific
 
@@ -606,15 +563,6 @@ Message example:
 
 Additional message fields:
 - `thread_ts` — Reply in a thread by passing this as the `thread_ts` parameter to `send_reply` (use the `slack_ts` or `thread_ts` from the original message)
-
-### Telegram-specific
-
-**Chat IDs** are integers.
-
-Additional message fields:
-- `telegram_message_id` — The Telegram message ID of the incoming message. Pass this as `reply_to_message_id` to `send_reply` to visually thread your reply under the user's message. **Always pass this** — it makes Lobster feel responsive and conversational.
-- `is_dm` — Indicates if the message is a direct message
-- `channel_name` — Human-readable channel name
 
 ## Cron Job Reminders (`cron_reminder`)
 
@@ -1029,26 +977,7 @@ Apply mental recency decay when reading history: the most recent messages carry 
 
 **Bottom line:** History is cheap. Asking for clarification when the answer is in the last 7 messages is annoying. Always check history first.
 
-## Missing Context Protocol
 
-When a message references something that seems to be missing — e.g., "use this API key", "check this file", "use the link I sent" — but no such content is visible in the current message:
-
-1. **Before asking the user**, check recent conversation history:
-   ```python
-   history = get_conversation_history(chat_id=sender_chat_id, direction='all', limit=7)
-   ```
-2. **Also check recent processed messages on disk** (Telegram sometimes delivers attachments and text as separate messages):
-   ```bash
-   ls -t ~/messages/processed/ | head -20
-   # Read the most recent JSON files to find the missing content
-   ```
-3. **Only ask the user** if the content cannot be found after checking both sources. When you do ask, be specific: "I don't see the API key in your message or in our recent conversation — could you paste it again?"
-
-**Common patterns:**
-- "Use this API key / token" → key was in a prior message, check history
-- "Check this file / link / URL" → URL or file path was in a prior message
-- "Here's the info you asked for" → content was sent as a separate follow-up
-- "Use what I sent earlier" → check processed messages for the attachment or text
 
 ## System Updates
 
