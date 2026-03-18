@@ -42,6 +42,29 @@ set env(CLAUDE_CODE_SUBAGENT_MODEL) sonnet
 # Trigger context compaction at 80% capacity instead of default 95%.
 set env(CLAUDE_AUTOCOMPACT_PCT_OVERRIDE) 80
 
+# Send startup alert via Telegram (mirrors what claude-persistent.sh does).
+# Read bot token and first allowed user from config.env; curl directly so the
+# alert fires before Claude is even spawned — same semantics as the persistent
+# mode alert.
+set config_file [file join $::env(HOME) "lobster-config" "config.env"]
+if {[file readable $config_file]} {
+    set bot_token [exec sh -c "grep '^TELEGRAM_BOT_TOKEN=' [set config_file] | cut -d= -f2-"]
+    set chat_id   [exec sh -c "grep '^TELEGRAM_ALLOWED_USERS=' [set config_file] | cut -d= -f2- | cut -d, -f1"]
+    set bot_token [string trim $bot_token]
+    set chat_id   [string trim $chat_id]
+    if {$bot_token ne "" && $chat_id ne ""} {
+        # Ensure emoji in the message text is encoded correctly on non-UTF-8 locales.
+        encoding system utf-8
+        catch {
+            exec curl -s -X POST "https://api.telegram.org/bot${bot_token}/sendMessage" \
+                --data-urlencode "chat_id=${chat_id}" \
+                --data-urlencode "text=\uD83D\uDD04 *Lobster Starting* (debug mode)\nClaude interactive session initializing." \
+                --data-urlencode "parse_mode=Markdown" \
+                --max-time 10
+        }
+    }
+}
+
 # Start Claude with bypass permissions
 spawn claude --dangerously-skip-permissions
 
