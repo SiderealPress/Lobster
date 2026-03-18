@@ -365,6 +365,55 @@ class TestHookAgentWithAgentId:
             conn.close()
 
 
+    def test_input_summary_stored_from_prompt(self, tmp_path):
+        """input_summary stores the first 500 chars of the agent prompt (issue #669).
+
+        This enables ghost-detector and the dispatcher to reconstruct context
+        if the agent fails or disappears without calling write_result.
+        """
+        long_prompt = "---\ntask_id: t-summary\nchat_id: 12345\n---\n" + "X" * 600
+        hook_input = _make_hook_input(
+            prompt=long_prompt,
+            tool_response={"agentId": "agent-summary"},
+        )
+        exit_code, _, _ = _run_hook(hook_input, tmp_path)
+        assert exit_code == 0
+
+        row = _get_row(tmp_path, "agent-summary")
+        assert row is not None
+        assert row["input_summary"] is not None
+        # Must be truncated to 500 chars
+        assert len(row["input_summary"]) == 500
+        assert row["input_summary"] == long_prompt[:500]
+
+    def test_input_summary_short_prompt_stored_in_full(self, tmp_path):
+        """Short prompts are stored without truncation."""
+        short_prompt = "---\ntask_id: t-short\n---\nDo a small thing."
+        hook_input = _make_hook_input(
+            prompt=short_prompt,
+            tool_response={"agentId": "agent-short-prompt"},
+        )
+        exit_code, _, _ = _run_hook(hook_input, tmp_path)
+        assert exit_code == 0
+
+        row = _get_row(tmp_path, "agent-short-prompt")
+        assert row is not None
+        assert row["input_summary"] == short_prompt
+
+    def test_input_summary_empty_prompt_is_none(self, tmp_path):
+        """Empty prompt stores None for input_summary (not an empty string)."""
+        hook_input = _make_hook_input(
+            prompt="",
+            tool_response={"agentId": "agent-empty-prompt"},
+        )
+        exit_code, _, _ = _run_hook(hook_input, tmp_path)
+        assert exit_code == 0
+
+        row = _get_row(tmp_path, "agent-empty-prompt")
+        assert row is not None
+        assert row["input_summary"] is None
+
+
 class TestHookNoAgentId:
     def test_missing_agent_id_exits_0_no_write(self, tmp_path):
         """If tool response has no agentId, exit 0 without touching DB."""

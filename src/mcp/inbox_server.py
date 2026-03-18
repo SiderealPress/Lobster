@@ -9597,110 +9597,6 @@ async def handle_list_reports(args: dict) -> list[TextContent]:
     return [TextContent(type="text", text=json.dumps(reports))]
 
 
-def _enqueue_reconciler_notification(session: dict, outcome: str) -> None:
-    """Write a synthetic subagent_result/subagent_error message to the inbox.
-
-async def handle_create_report(args: dict) -> list[TextContent]:
-    """Handle the create_report MCP tool.
-
-    Captures a point-in-time snapshot (recent conversation messages, active
-    agent sessions) alongside the user's description and stores it in the
-    reports table of agent_sessions.db. Returns a confirmation dict with
-    the generated report_id.
-
-    This is the backend for the /report slash command pre-processor.
-    """
-    description = str(args.get("description", "")).strip()
-    chat_id = args.get("chat_id", "")
-    source = str(args.get("source", "telegram")).strip() or "telegram"
-
-    if not description:
-        return [TextContent(type="text", text='{"error": "description is required"}')]
-    if not chat_id:
-        return [TextContent(type="text", text='{"error": "chat_id is required"}')]
-
-    # Capture ambient state: last 10 messages for this chat from conversation history
-    recent_messages: list = []
-    try:
-        history_result = await handle_get_conversation_history({
-            "chat_id": chat_id,
-            "limit": 10,
-            "direction": "all",
-        })
-        # The handler returns JSON text — parse it back to extract raw message list
-        if history_result:
-            raw = history_result[0].text
-            try:
-                parsed = json.loads(raw)
-                if isinstance(parsed, list):
-                    recent_messages = parsed
-                elif isinstance(parsed, dict) and "messages" in parsed:
-                    recent_messages = parsed["messages"]
-            except (json.JSONDecodeError, ValueError):
-                pass  # Non-JSON response format — skip snapshot
-    except Exception:
-        pass  # Conversation history is best-effort; never block report creation
-
-    # Capture active agent session IDs
-    active_session_ids: list[str] = []
-    try:
-        active = _session_store.get_active_sessions()
-        active_session_ids = [s.get("id", "") for s in active if s.get("id")]
-    except Exception:
-        pass  # Session capture is best-effort
-
-    # Build a minimal ambient snapshot
-    snapshot_state = {
-        "active_session_count": len(active_session_ids),
-        "lobster_state": _read_lobster_state(),
-    }
-
-    # Store the report
-    try:
-        report = _session_store.create_report(
-            description=description,
-            chat_id=chat_id,
-            source=source,
-            recent_messages=recent_messages if recent_messages else None,
-            active_session_ids=active_session_ids if active_session_ids else None,
-            snapshot_state=snapshot_state,
-            instance_id=_INSTANCE_ID,
-        )
-    except Exception as exc:
-        log.error(f"create_report failed: {exc}", exc_info=True)
-        raise ValueError(f"Failed to create report: {exc}") from exc
-
-    log.info(f"Report filed: {report['report_id']} from chat {chat_id}")
-    return [TextContent(type="text", text=json.dumps(report))]
-
-
-async def handle_list_reports(args: dict) -> list[TextContent]:
-    """Handle the list_reports MCP tool.
-
-    Returns a JSON array of report records, newest first, optionally filtered
-    by chat_id and/or status.
-    """
-    chat_id = args.get("chat_id")
-    status = str(args.get("status", "open")).strip() or "open"
-    limit_raw = args.get("limit", 20)
-    try:
-        limit = int(limit_raw)
-    except (TypeError, ValueError):
-        limit = 20
-
-    try:
-        reports = _session_store.list_reports(
-            chat_id=chat_id,
-            status=status,
-            limit=limit,
-        )
-    except Exception as exc:
-        log.error(f"list_reports failed: {exc}", exc_info=True)
-        raise ValueError(f"Failed to list reports: {exc}") from exc
-
-    return [TextContent(type="text", text=json.dumps(reports))]
-
-
 def _read_last_output(output_file: str | None, max_chars: int = 500) -> str | None:
     """Return the last `max_chars` characters of an agent output file, or None.
 
@@ -9748,7 +9644,6 @@ def _build_reconciler_message(
     task_id = session.get("task_id") or agent_id
     input_summary = session.get("input_summary")
     output_file = session.get("output_file")
-    session_task_origin = session.get("task_origin") or "user"
 
     elapsed_raw = session.get("elapsed_seconds")
     try:
@@ -9768,7 +9663,6 @@ def _build_reconciler_message(
             "type": "subagent_result",
             "source": session.get("source", "telegram"),
             "chat_id": session.get("chat_id", ""),
-            "task_origin": session_task_origin,
             "text": (
                 f"Agent completed: {description}\n"
                 f"(reconciler-detected via stop_reason=end_turn, {elapsed_min}m elapsed)"
@@ -9785,20 +9679,18 @@ def _build_reconciler_message(
         # escalate to the user, or drop silently. Never relay raw failure noise to
         # the user's Telegram.
         last_output = _read_last_output(output_file)
-        original_chat_id = session.get("chat_id", "")
         return {
             "id": message_id,
             "type": "agent_failed",
             "source": "system",
             "chat_id": 0,
-            "task_origin": "internal",
             "text": (
                 f"Agent failed/disappeared: {description}\n"
                 f"(no output file after {elapsed_min}m — marked dead)"
             ),
             "task_id": task_id,
             "agent_id": agent_id,
-            "original_chat_id": original_chat_id,
+            "original_chat_id": session.get("chat_id", ""),
             "original_prompt": input_summary,
             "last_output": last_output,
             "status": "error",
