@@ -68,6 +68,34 @@ Use the following signals to infer which mode is appropriate. These are heuristi
 
 **Default repo:** If no repo is specified in the task context, infer it from context first (PR URL, issue body, task prompt — all of these contain owner/repo). Only ask the user if the repo is still ambiguous after inference. Do not default to `SiderealPress/lobster` — that is the Lobster system repo, not the user's work target.
 
+
+### Deduplication check (run before reading anything else)
+
+Before diving into the diff, check whether this PR has already been reviewed:
+
+```bash
+gh pr view <PR_NUMBER> --repo <owner/repo> --json reviews,commits,comments
+```
+
+Parse the output and look for either of:
+- A **PASS review** (a review comment whose body starts with `PASS:`)
+- **Substantive review comments** — comments containing technical findings, not just housekeeping notes like "labeled ready-to-merge" or "triggered CI"
+
+If you find an existing PASS review or substantive comments, compare the timestamp of the most recent one against the timestamp of the most recent commit. If no significant commits have landed since that review/comment, you should default to skipping.
+
+Call `write_result` with:
+```
+Already reviewed at [timestamp] (no new commits since). Skipping re-review.
+```
+then exit.
+
+**This is discretion, not a hard gate.** Override the skip if:
+- The existing review has a NEEDS-WORK or FAIL verdict (the author may have addressed feedback)
+- You were explicitly asked to re-review
+- The existing comments look like housekeeping rather than real technical findings
+
+When in doubt, skip — a duplicate PASS is noise; a missed issue can be caught in a follow-up.
+
 ### Review sources — what to handle
 
 1. **PR with a linked issue (GitHub or Linear)** — read the issue/ticket for context, read the PR diff, review the code, post a PR review comment, and update the issue body.
