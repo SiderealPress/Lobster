@@ -466,15 +466,8 @@ cmd_ps() {
 }
 
 cmd_env() {
-    # LOBSTER_CONFIG_DIR holds service-critical config (config.env).
-    # Default matches install.sh: $HOME/lobster-config.
-    # Previously this defaulted to lobster-user-config, which caused lobster env set
-    # to write to a directory the services never read. (#1454)
-    # global.env was the secondary token store prior to issue #1785; config.env is now
-    # the single canonical file for all credentials and configuration.
     local config_dir="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}"
-    local env_file="$config_dir/config.env"
-    local legacy_global_env="$config_dir/global.env"
+    local env_file="$config_dir/global.env"
     local subcmd="${1:-}"
 
     case "$subcmd" in
@@ -486,26 +479,20 @@ cmd_env() {
                 exit 1
             fi
             mkdir -p "$config_dir"
-
-            # All keys are written to config.env — the single canonical credential file.
-            # global.env is deprecated (issue #1785); keys that existed there have been
-            # merged into config.env by upgrade.sh migration 79.
-            local target_file="$env_file"
-
-            touch "$target_file" && chmod 600 "$target_file"
+            touch "$env_file" && chmod 600 "$env_file"
             # Update existing key in place, or append if not present
-            if grep -qF "^${key}=" "$target_file" 2>/dev/null; then
+            if grep -q "^${key}=" "$env_file" 2>/dev/null; then
                 # Use a temp file to avoid sed -i portability issues
                 local tmp
                 tmp=$(mktemp)
-                chmod 600 "$tmp"
-                grep -vF "^${key}=" "$target_file" > "$tmp"
+                grep -v "^${key}=" "$env_file" > "$tmp"
                 echo "${key}=${value}" >> "$tmp"
-                mv "$tmp" "$target_file"
-                echo -e "${GREEN}Updated${NC} $key in $(basename "$target_file")"
+                mv "$tmp" "$env_file"
+                chmod 600 "$env_file"
+                echo -e "${GREEN}Updated${NC} $key"
             else
-                echo "${key}=${value}" >> "$target_file"
-                echo -e "${GREEN}Set${NC} $key in $(basename "$target_file")"
+                echo "${key}=${value}" >> "$env_file"
+                echo -e "${GREEN}Set${NC} $key"
             fi
             ;;
         get)
@@ -514,18 +501,13 @@ cmd_env() {
                 echo "Usage: lobster env get KEY"
                 exit 1
             fi
-            # Search config.env first, then legacy global.env for backward compatibility
-            # on installs that haven't yet run upgrade.sh migration 79.
-            local found_in=""
-            local val=""
-            if grep -qE "^${key}=" "$env_file" 2>/dev/null; then
-                found_in="$env_file"
-                val=$(grep -E "^${key}=" "$env_file" | cut -d= -f2-)
-            elif grep -qF "^${key}=" "$legacy_global_env" 2>/dev/null; then
-                found_in="$legacy_global_env"
-                val=$(grep -F "^${key}=" "$legacy_global_env" | cut -d= -f2-)
+            if [ ! -f "$env_file" ]; then
+                echo -e "${RED}No env file found at $env_file${NC}"
+                exit 1
             fi
-            if [ -z "$found_in" ]; then
+            local val
+            val=$(grep "^${key}=" "$env_file" 2>/dev/null | cut -d= -f2-)
+            if [ -z "$val" ]; then
                 echo -e "${RED}Key not found: $key${NC}"
                 exit 1
             fi

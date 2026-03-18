@@ -47,7 +47,7 @@ INBOX_SYSTEM_TYPES: frozenset[str] = frozenset({
     "compact_reminder",       # on-compact hook reminder (hooks/on-compact.py)
     "cron_reminder",          # DEPRECATED alias — normalizes to "scheduled_reminder" on ingest
     "scheduled_reminder",     # scheduled reminder (scripts/post-reminder.sh, scheduled-tasks/post-reminder.sh)
-    "update_notification",    # system update available (scripts/daily-update-check.sh)
+    "update_notification",    # system update available (scripts/check-updates.sh)
     "consolidation",          # nightly consolidation result
     "observation",            # OOM-monitor or similar system observation
     "health_check",           # health check output (replaces "task-output" and "system" from health check scripts)
