@@ -1596,7 +1596,7 @@ fi
 # Set up Claude Code PreToolUse hook to block edits to system files unless LOBSTER_DEBUG=true
 chmod +x "$INSTALL_DIR/hooks/system-file-protect.py" || true
 if [ -f "$CLAUDE_SETTINGS" ]; then
-    if ! jq -e '.hooks.PreToolUse[]? | select(.matcher == "Edit|Write|NotebookEdit")' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+    if ! jq -e '.hooks.PreToolUse[]? | select(.hooks[]?.command | contains("system-file-protect"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
         TMP_SETTINGS=$(mktemp)
         jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
             "matcher": "Edit|Write|NotebookEdit",
