@@ -1,4 +1,4 @@
-"""Unit tests for the filesystem-based ghost detection additions in ghost-detector.py.
+"""Unit tests for the filesystem-based ghost detection additions in agent-monitor.py.
 
 All tests operate on pure functions — no DB access, no real filesystem reads
 beyond temp-dir fixtures.
@@ -15,9 +15,9 @@ import importlib.util
 
 import pytest
 
-# ghost-detector.py has a hyphenated filename so it can't be imported via
+# agent-monitor.py has a hyphenated filename so it can't be imported via
 # normal sys.path manipulation. Use importlib to load it directly.
-_SCRIPT_PATH = Path(__file__).parent.parent.parent / "scripts" / "ghost-detector.py"
+_SCRIPT_PATH = Path(__file__).parent.parent.parent / "scripts" / "agent-monitor.py"
 _spec = importlib.util.spec_from_file_location("ghost_detector", _SCRIPT_PATH)
 assert _spec is not None and _spec.loader is not None
 gd = importlib.util.module_from_spec(_spec)
