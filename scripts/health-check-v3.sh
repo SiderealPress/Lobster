@@ -921,9 +921,16 @@ except Exception as e:
 # socket path (via the stale-socket cleanup below), preventing new client
 # connections even while the server is still running. The safety of the socket
 # cleanup relies entirely on this function being called only from the RED state.
+#
+# Parameters:
+#   $1 reason        - human-readable reason for the restart
+#   $2 suppress_alert - "true" to skip Telegram alerts (used during compaction
+#                       window so exactly one notification fires per compaction:
+#                       on-compact.py already notified the user)
 do_restart() {
     local reason="$1"
-    log_warn "Restarting $SERVICE_CLAUDE (reason: $reason)"
+    local suppress_alert="${2:-false}"
+    log_warn "Restarting $SERVICE_CLAUDE (reason: $reason, suppress_alert=$suppress_alert)"
 
     # Subagent guard: do not restart while subagents are active.
     # A systemd restart kills the entire Claude process tree including all
@@ -934,11 +941,15 @@ do_restart() {
     active_subagents=$(count_active_subagents)
     if [[ "$active_subagents" -gt 0 ]]; then
         log_warn "SUBAGENT GUARD: Skipping restart ($active_subagents active subagent(s) running) — will re-evaluate next check"
-        send_telegram_alert "Health check deferred restart: $active_subagents active subagent(s) in flight.
+        if [[ "$suppress_alert" != "true" ]]; then
+            send_telegram_alert "Health check deferred restart: $active_subagents active subagent(s) in flight.
 
 Reason that triggered restart: $reason
 
 The restart has been skipped to avoid killing running subagents. If the problem persists, the next health check will re-evaluate."
+        else
+            log_info "Telegram alert suppressed (compaction window active)"
+        fi
         return 0
     fi
 
@@ -947,7 +958,9 @@ The restart has been skipped to avoid killing running subagents. If the problem 
             # Already in BLACK/manual-intervention state — log only, no Telegram spam
             log_error "BLACK: Manual intervention required (flag already set) — skipping restart and alert"
         else
-            # First time hitting BLACK — set flag and send a single alert
+            # First time hitting BLACK — set flag and send a single alert.
+            # Alert fires even during compaction window: this is a severe state
+            # that requires user action regardless of what triggered the restart.
             log_error "BLACK: Max restart attempts ($MAX_RESTART_ATTEMPTS) in ${RESTART_COOLDOWN_SECONDS}s window"
             set_manual_intervention
             send_telegram_alert "System unrecoverable after $MAX_RESTART_ATTEMPTS restart attempts.
@@ -1116,10 +1129,14 @@ Status: Restarted, but new stale messages detected post-restart"
 
         log_info "Restart successful"
         write_boot_timestamp
-        send_telegram_alert "System recovered automatically.
+        if [[ "$suppress_alert" != "true" ]]; then
+            send_telegram_alert "System recovered automatically.
 
 Reason: $reason
 Status: Restarted successfully"
+        else
+            log_info "Post-restart Telegram alert suppressed (compaction window active)"
+        fi
         return 0
     else
         local svc_timeout_s=$(( max_svc_attempts * 3 ))
@@ -1534,7 +1551,13 @@ main() {
             ;;
         RED)
             log_error "RED: Critical failure (mode=$lobster_mode) - $restart_reason"
-            do_restart "$restart_reason"
+            # Pass compaction_recent as suppress_alert so do_restart() skips its
+            # Telegram alerts when compaction is still within the suppression
+            # window.  on-compact.py already sent exactly one notification, so
+            # the deferred-restart and recovered-successfully alerts would be
+            # duplicates.  Genuine failure alerts (restart failed, BLACK state)
+            # always fire regardless of this flag.
+            do_restart "$restart_reason" "$compaction_recent"
             ;;
     esac
 
