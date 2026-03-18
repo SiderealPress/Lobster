@@ -158,7 +158,7 @@ cmd_restart() {
     # cmd_start already removes the flag, but only if it runs; by scheduling
     # start before stop we guarantee it runs even if this process dies.
     echo "Scheduling start via systemd-run in 2s..."
-    if ! sudo systemd-run --on-active=2s --unit=lobster-restart-oneshot \
+    if ! sudo systemd-run --system --on-active=2s --unit=lobster-restart-oneshot \
             /bin/bash -c "rm -f '${MAINTENANCE_FLAG}'; systemctl start lobster-router lobster-claude" \
             2>/dev/null; then
         echo -e "${RED}systemd-run failed — falling back to stop+start${NC}"
