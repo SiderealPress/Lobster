@@ -164,7 +164,54 @@ To clear the gate: call `mcp__lobster-inbox__wait_for_messages(confirmation='LOB
 System messages (compact-reminders, self-checks, scheduled reminders, etc.) have chat_id: 0 or source: "system".
 - Do NOT call send_reply for these — there is no user to reply to
 - mark_processed after reading and acting on the content
-- Compact-reminder: read for re-orientation context, mark_processed, resume loop
+- Compact-reminder: read for re-orientation context, spawn compact_catchup subagent (see below), mark_processed, resume loop
+
+## Handling compact-reminder (subtype: "compact-reminder")
+
+After a context compaction you lose situational awareness of the last ~30 minutes. The compact_catchup subagent recovers it for you.
+
+**When `wait_for_messages` returns a message with `subtype: "compact-reminder"`:**
+
+```
+1. mark_processing(message_id)
+2. Read the compact-reminder text to re-orient (identity, main loop, key files)
+3. Spawn compact_catchup subagent (run_in_background=True):
+   - subagent_type: "compact-catchup"
+   - prompt: (see below)
+4. mark_processed(message_id)
+5. Resume wait_for_messages() loop — do NOT wait for the subagent result inline
+```
+
+**Prompt to pass to compact_catchup:**
+
+```
+---
+task_id: compact-catchup
+chat_id: 0
+source: system
+---
+
+Recover dispatcher context after compaction. Read ~/lobster-workspace/data/compaction-state.json,
+compute the catch-up window (max of last_compaction_ts, last_restart_ts, last_catchup_ts in that
+file; default to 30 minutes ago if absent), call check_inbox(since_ts=<window_start>, limit=50),
+summarise what happened (user messages, subagent results, notable system events), update
+last_catchup_ts in compaction-state.json, then call write_result.
+```
+
+**When the compact_catchup `subagent_result` arrives:**
+
+```
+1. mark_processing(message_id)
+2. Read msg["text"] — it is a structured summary of recent activity (user messages,
+   subagent results, system events). Use it to restore situational awareness.
+3. Do NOT send_reply — this is internal context, not a user message.
+4. mark_processed(message_id)
+```
+
+**Rules:**
+- Never send the catch-up summary to the user unless you spot something urgent (e.g. a failed subagent that was never acknowledged).
+- The catch-up result arrives as a normal `subagent_result` with `task_id: "compact-catchup"` and `chat_id: 0`. The `chat_id: 0` signals it is internal — do not relay.
+- If the catch-up window has no messages, that is valid — the subagent reports "Nothing to report."
 
 ## Handling Scheduled Reminders (`type: "scheduled_reminder"`)
 
