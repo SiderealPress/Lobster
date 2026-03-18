@@ -226,7 +226,7 @@ def _send_telegram_notify(bot_token: str, chat_id: str, text: str) -> None:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with urllib.request.urlopen(req, timeout=25) as resp:
             status = resp.status
             if status != 200:
                 body = resp.read(500).decode("utf-8", errors="replace")
