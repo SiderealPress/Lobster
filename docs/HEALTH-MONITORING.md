@@ -59,10 +59,10 @@ DISK_THRESHOLD=95                    # percentage
 
 ## Cron Setup
 
-The health check runs every 2 minutes:
+The health check runs every 4 minutes:
 
 ```cron
-*/2 * * * * $HOME/lobster/scripts/health-check-v3.sh
+*/4 * * * * $HOME/lobster/scripts/health-check-v3.sh
 ```
 
 ## Log Files
