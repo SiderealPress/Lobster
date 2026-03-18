@@ -4,7 +4,7 @@ Tests for agent failure recovery — issue #669.
 Verifies:
 - _build_reconciler_message routes 'dead' outcomes to chat_id=0 / type='agent_failed'
 - _build_reconciler_message routes 'completed' outcomes to originating chat_id / type='subagent_result'
-- build_mark_failed_inbox_message (ghost-detector) uses chat_id=0 / type='agent_failed'
+- build_mark_failed_inbox_message (agent-monitor) uses chat_id=0 / type='agent_failed'
 - build_unregistered_mark_failed_payload uses chat_id=0 / type='agent_failed'
 - auto-register-agent stores input_summary in DB
 - agent_failed is present in INBOX_SYSTEM_TYPES
@@ -30,7 +30,7 @@ _MCP_DIR = str(_ROOT / "src" / "mcp")
 if _MCP_DIR not in sys.path:
     sys.path.insert(0, _MCP_DIR)
 
-_GHOST_DETECTOR_PATH = _ROOT / "scripts" / "ghost-detector.py"
+_GHOST_DETECTOR_PATH = _ROOT / "scripts" / "agent-monitor.py"
 _spec = importlib.util.spec_from_file_location("ghost_detector_669", _GHOST_DETECTOR_PATH)
 assert _spec is not None and _spec.loader is not None
 _gd = importlib.util.module_from_spec(_spec)
@@ -125,7 +125,7 @@ class TestBuildReconcilerMessage:
         session = dict(_BASE_SESSION)
         # Dead agents are those with outcome == "dead"
         # The function should produce a message with chat_id=0 and type=agent_failed
-        # We verify this through the ghost-detector path which shares the same contract.
+        # We verify this through the agent-monitor path which shares the same contract.
         # Direct function test is done below via a minimal reimplementation.
         assert True  # Placeholder — see TestBuildReconcilerMessageDirect below
 
@@ -220,11 +220,11 @@ class TestBuildReconcilerMessageDirect:
 
 
 # ---------------------------------------------------------------------------
-# Test: ghost-detector build_mark_failed_inbox_message
+# Test: agent-monitor build_mark_failed_inbox_message
 # ---------------------------------------------------------------------------
 
 class TestGhostDetectorMarkFailedPayload:
-    """Verify ghost-detector routes agent_failed to chat_id=0."""
+    """Verify agent-monitor routes agent_failed to chat_id=0."""
 
     def _make_classified_agent(self, chat_id: str = "ADMIN_CHAT_ID_REDACTED") -> object:
         """Create a minimal ClassifiedAgent-like object for testing."""
@@ -283,7 +283,7 @@ class TestGhostDetectorMarkFailedPayload:
 
 
 class TestGhostDetectorUnregisteredPayload:
-    """Verify ghost-detector unregistered agent notifications route to chat_id=0."""
+    """Verify agent-monitor unregistered agent notifications route to chat_id=0."""
 
     def _make_unregistered(self) -> object:
         return _gd.UnregisteredAgent(

@@ -176,9 +176,9 @@ Scheduled reminders are injected by `scripts/post-reminder.sh`, called from cron
 REMINDER_ROUTING = {
   "ghost_detector": {
     "subagent_type": "lobster-generalist",
-    "prompt": "---\ntask_id: ghost-detector\nchat_id: 0\nsource: system\n---\n\n"
-              "Run the ghost detector check. Script is at ~/lobster/scripts/ghost-detector.py. "
-              "Run it with uv run ~/lobster/scripts/ghost-detector.py and report findings.",
+    "prompt": "---\ntask_id: agent-monitor\nchat_id: 0\nsource: system\n---\n\n"
+              "Run the agent monitor check. Script is at ~/lobster/scripts/agent-monitor.py. "
+              "Run it with uv run ~/lobster/scripts/agent-monitor.py and report findings.",
   },
   "oom_check": {
     "subagent_type": "lobster-generalist",
@@ -294,7 +294,7 @@ Check the `sent_reply_to_user` field first, then check for engineer → reviewer
 
 ## Handling Agent Failures (`agent_failed`)
 
-The reconciler and ghost-detector route dead/failed agent events to `chat_id=0` with `type: "agent_failed"`. These are **system-internal** — never relay them to the user's Telegram directly. The dispatcher reads the context and decides the right action.
+The reconciler and agent-monitor route dead/failed agent events to `chat_id=0` with `type: "agent_failed"`. These are **system-internal** — never relay them to the user's Telegram directly. The dispatcher reads the context and decides the right action.
 
 **When `wait_for_messages` returns a message with `type: "agent_failed"`:**
 
@@ -315,7 +315,7 @@ The reconciler and ghost-detector route dead/failed agent events to `chat_id=0` 
       summary to the original_chat_id:
         send_reply(chat_id=msg["original_chat_id"], text="A background task failed: <description>. Let me know if you would like to retry.")
    C. Log and drop silently: if the task_id suggests a background/system job (e.g.,
-      "ghost-mark-failed-*", "oom-check", "ghost-detector", reconciler tasks with
+      "ghost-mark-failed-*", "oom-check", "agent-monitor", reconciler tasks with
       no original_chat_id or original_chat_id=0/"") — just mark_processed without
       notifying the user.
 
