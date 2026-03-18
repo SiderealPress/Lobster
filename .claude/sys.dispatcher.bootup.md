@@ -289,26 +289,39 @@ Check the `sent_reply_to_user` field first, then check for engineer → reviewer
        pr_url_match = re.search(r"https://github\.com/.*/pull/\d+", msg["text"])
        if pr_url_match and msg.get("sent_reply_to_user") != True:
            pr_url = pr_url_match.group(0)
-           # Spawn a separate reviewer — do NOT relay engineer text to user
-           Task(
-               subagent_type="general-purpose",
-               run_in_background=True,
-               prompt=(
-                   f"---\n"
-                   f"task_id: review-{msg.get('task_id', 'unknown')}\n"
-                   f"chat_id: {msg['chat_id']}\n"
-                   f"source: {msg.get('source', 'telegram')}\n"
-                   f"---\n\n"
-                   f"Review PR {pr_url} and post your findings using:\n"
-                   f"  gh pr review <N> --repo <owner/repo> --comment --body \"PASS/NEEDS-WORK/FAIL: ...\"\n"
-                   f"The owner/repo is in the PR URL above — extract it from there (e.g. https://github.com/owner/repo/pull/N).\n"
-                   f"Use --comment only (never --approve or --request-changes — same token = self-review error).\n\n"
-                   f"After posting, call write_result with a short verdict summary (1–3 sentences).\n\n"
-                   f"Engineer's briefing:\n{msg['text']}"
-               ),
+           # Dedup check: skip if a reviewer is already running for this PR.
+           # This prevents double-reviews caused by restarts or re-processed results.
+           pr_number = pr_url.rstrip("/").split("/")[-1]
+           active_sessions = get_active_sessions()
+           reviewer_task_id = f"review-{msg.get('task_id', 'unknown')}"
+           already_running = any(
+               s.get("task_id") == reviewer_task_id
+               or str(pr_number) in str(s.get("description", ""))
+               for s in active_sessions
            )
-           mark_processed(message_id)
-           # Return to wait_for_messages() — reviewer's write_result arrives separately
+           if already_running:
+               log(f"Reviewer already running for PR #{pr_number}, skipping duplicate spawn")
+               mark_processed(message_id)
+           else:
+               # Spawn a separate reviewer — do NOT relay engineer text to user
+               Task(
+                   subagent_type="general-purpose",
+                   run_in_background=True,
+                   prompt=(
+                       f"---\n"
+                       f"task_id: review-{msg.get('task_id', 'unknown')}\n"
+                       f"chat_id: {msg['chat_id']}\n"
+                       f"source: {msg.get('source', 'telegram')}\n"
+                       f"---\n\n"
+                       f"Review PR {pr_url} and post your findings using:\n"
+                       f"  gh pr review <N> --repo SiderealPress/lobster --comment --body \"PASS/NEEDS-WORK/FAIL: ...\"\n"
+                       f"Use --comment only (never --approve or --request-changes — same token = self-review error).\n\n"
+                       f"After posting, call write_result with a short verdict summary (1–3 sentences).\n\n"
+                       f"Engineer's briefing:\n{msg['text']}"
+                   ),
+               )
+               mark_processed(message_id)
+               # Return to wait_for_messages() — reviewer's write_result arrives separately
        else:
            # Build reply text: inline artifact content when present
            reply_text = msg["text"]
