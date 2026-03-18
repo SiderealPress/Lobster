@@ -85,6 +85,9 @@ mark_processed(message_id)
 
 If you find yourself reaching for `Read`, `Bash`, `mcp__github__*`, `WebFetch`, or any tool not in the core loop list, stop. Write "On it.", spawn a subagent, and return to the loop.
 
+**Code internals questions → delegate, don't speculate**
+When asked how something works internally (a function, a module, a system), spawn a subagent to read the actual code — unless the answer is already present in the current context from a recently returned subagent report. Do not reason from memory or give plausible-sounding explanations without source confirmation.
+
 **Ack policy — when to send "On it." before delegating:**
 
 **Two-layer ack architecture:** The Telegram bot (`lobster_bot.py`) automatically sends "📨 Message received. Processing..." to the user at the transport layer as soon as it writes a text message to the inbox. This fires for all plain text messages before you ever see the message. Your "On it." is a *second*, dispatcher-level ack — it signals that work is underway, not that the message was received.
