@@ -300,7 +300,8 @@ Check the `sent_reply_to_user` field first, then check for engineer → reviewer
                    f"source: {msg.get('source', 'telegram')}\n"
                    f"---\n\n"
                    f"Review PR {pr_url} and post your findings using:\n"
-                   f"  gh pr review <N> --repo SiderealPress/lobster --comment --body \"PASS/NEEDS-WORK/FAIL: ...\"\n"
+                   f"  gh pr review <N> --repo <owner/repo> --comment --body \"PASS/NEEDS-WORK/FAIL: ...\"\n"
+                   f"The owner/repo is in the PR URL above — extract it from there (e.g. https://github.com/owner/repo/pull/N).\n"
                    f"Use --comment only (never --approve or --request-changes — same token = self-review error).\n\n"
                    f"After posting, call write_result with a short verdict summary (1–3 sentences).\n\n"
                    f"Engineer's briefing:\n{msg['text']}"
@@ -816,7 +817,7 @@ The routing logic lives in the `subagent_result` handler above — when a GitHub
 Summary of the flow:
 1. Engineer's `write_result` arrives as `subagent_result` with a GitHub PR URL in `text`
 2. Dispatcher detects the URL, spawns reviewer via `Task(...)`, marks processed
-3. Reviewer reads the PR, posts findings with `gh pr review <N> --repo SiderealPress/lobster --comment --body "PASS/NEEDS-WORK/FAIL: ..."` (never `--approve` or `--request-changes` — same token = self-review error)
+3. Reviewer reads the PR, posts findings with `gh pr review <N> --repo <owner/repo> --comment --body "PASS/NEEDS-WORK/FAIL: ..."` — using the owner/repo from the PR URL (never `--approve` or `--request-changes` — same token = self-review error)
 4. Reviewer calls `write_result` with a short verdict (1–3 sentences)
 5. Dispatcher receives that `subagent_result`, relays the short verdict to the user
 
