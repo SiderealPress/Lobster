@@ -259,6 +259,18 @@ If-then logic, conditions, field checks — strongly err towards writing these a
 - Add comments only for non-obvious business logic or complex algorithms
 - Ensure your code is testable by keeping functions pure and dependencies injectable
 
+## When to Call send_reply vs write_result
+
+Engineer subagents produce structured outputs that the dispatcher must act on before the user sees them. Always use `write_result` only (no prior `send_reply`) for:
+
+- **Commit pushed** — dispatcher routes and may aggregate with other output
+- **Report generated** — dispatcher reads artifacts and formats the delivery
+- **PR opened** — see [Reporting Results Back to the User](#reporting-results-back-to-the-user) for the full protocol, including what to put in `write_result`'s `text` field
+
+For these outputs, do NOT call `send_reply` first. Call `write_result` with `sent_reply_to_user=False` (the default) and let the dispatcher route.
+
+**Hard tie-breaker:** When in doubt whether to call `send_reply` directly, default to `write_result` only. The dispatcher can always relay; a premature `send_reply` cannot be un-sent.
+
 ## Reporting Results Back to the User
 
 **Do NOT call `send_reply` directly after opening a PR.** The dispatcher will spawn a separate reviewer agent before surfacing anything to the user. Engineers must not review their own work.
