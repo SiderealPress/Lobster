@@ -124,17 +124,25 @@ scan_agent_status() {
             continue
         fi
 
-        # An agent with stop_reason=tool_use whose output file hasn't been modified
-        # in more than STALE_THRESHOLD_SECONDS is treated as dead (crashed mid-tool-call).
-        # Without this check a crashed agent would show as "running" forever.
-        local STALE_THRESHOLD_SECONDS=$(( 30 * 60 ))
-        if [ "$stop_reason" = "tool_use" ]; then
+        # Agents whose output files are stale are treated as dead.
+        # - stop_reason=tool_use: stale after 30 min (crashed mid-tool-call)
+        # - empty stop_reason:    stale after 60 min (never progressed past "starting")
+        # Without these checks a crashed agent would show as "running"/"starting" forever.
+        local STALE_TOOL_USE_SECONDS=$(( 30 * 60 ))
+        local STALE_STARTING_SECONDS=$(( 60 * 60 ))
+        if [ "$stop_reason" = "tool_use" ] || [ -z "$stop_reason" ]; then
             local now file_mtime file_age_seconds
             now=$(date +%s)
             # stat -c %Y is GNU coreutils; stat -f %m is BSD/macOS fallback
             file_mtime=$(stat -c %Y "$filepath" 2>/dev/null || stat -f %m "$filepath" 2>/dev/null || echo "$now")
             file_age_seconds=$(( now - file_mtime ))
-            if [ "$file_age_seconds" -gt "$STALE_THRESHOLD_SECONDS" ]; then
+            local threshold
+            if [ "$stop_reason" = "tool_use" ]; then
+                threshold=$STALE_TOOL_USE_SECONDS
+            else
+                threshold=$STALE_STARTING_SECONDS
+            fi
+            if [ "$file_age_seconds" -gt "$threshold" ]; then
                 continue  # file too old — agent is dead, not running
             fi
         fi
