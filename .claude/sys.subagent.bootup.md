@@ -301,6 +301,17 @@ Lobster uses a tiered model strategy to balance cost and quality. Each subagent 
   ~/lobster/scripts/cron-manage.sh remove "# LOBSTER-MY-MARKER"
   ```
 
+- **Running tests:** The test suite uses `conftest.py` isolation fixtures — all
+  production paths (`LOBSTER_STATE_FILE`, `INBOX_DIR`, `OUTBOX_DIR`, etc.) are
+  redirected to tmp directories automatically via the autouse
+  `isolate_inbox_server_paths` fixture.  Do NOT add per-test mocks for
+  production paths.  Run the full unit suite with:
+  ```
+  cd $LOBSTER_PROJECTS/<your-worktree> && uv run pytest tests/unit/ -v
+  ```
+  The `patch.multiple` module target for inbox_server tests is always
+  `"src.mcp.inbox_server"` (not `"inbox_server"` or `"mcp.inbox_server"`).
+
 ## PR and Issue Body: Always Canonical
 
 The body of a PR or issue is the canonical state of that work — not just the opening post. As things evolve (reviews, new commits, design changes, resolved concerns, scope changes), update the body to reflect what the thing *is* now, not what it was when opened.

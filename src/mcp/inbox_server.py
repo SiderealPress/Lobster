@@ -650,14 +650,31 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 log = logging.getLogger("lobster-mcp")
 log.setLevel(logging.INFO)
-_file_handler = RotatingFileHandler(
-    LOG_DIR / "mcp-server.log",
-    maxBytes=5 * 1024 * 1024,  # 5MB
-    backupCount=3,
-)
-_file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-log.addHandler(_file_handler)
+# StreamHandler added unconditionally so log output is visible in tests and in
+# production.  The RotatingFileHandler is added only when the server is started
+# as __main__ (via setup_logging()), so importing this module in tests does NOT
+# create or write to the production mcp-server.log file.
 log.addHandler(logging.StreamHandler())
+
+
+def setup_logging() -> None:
+    """Attach the production RotatingFileHandler to the lobster-mcp logger.
+
+    Called only from main() so that importing inbox_server in tests does not
+    create or write to the production log file at LOG_DIR / "mcp-server.log".
+    Calling this function more than once is idempotent — it checks whether a
+    RotatingFileHandler is already attached before adding another.
+    """
+    for handler in log.handlers:
+        if isinstance(handler, RotatingFileHandler):
+            return  # already set up
+    _file_handler = RotatingFileHandler(
+        LOG_DIR / "mcp-server.log",
+        maxBytes=5 * 1024 * 1024,  # 5MB
+        backupCount=3,
+    )
+    _file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    log.addHandler(_file_handler)
 
 # Seed canonical templates on startup (idempotent — only copies missing files)
 def _seed_canonical_templates():
@@ -2881,9 +2898,18 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
             log.info(f"wait_for_messages timed out after {timeout}s")
 
             if hibernate_on_timeout:
-                # Write hibernate state so the bot knows to wake us on next message
-                _write_lobster_state(LOBSTER_STATE_FILE, "hibernate")
-                log.info("Hibernating: wrote state=hibernate, signalling graceful exit")
+                # Write hibernate state so the bot knows to wake us on next message.
+                # Guard: only write the state file when running inside the designated
+                # main Lobster session.  Non-main sessions (including tests and
+                # subagent instances) must never overwrite the production state file.
+                if _is_main_session():
+                    _write_lobster_state(LOBSTER_STATE_FILE, "hibernate")
+                    log.info("Hibernating: wrote state=hibernate, signalling graceful exit")
+                else:
+                    log.info(
+                        "Hibernating: skipped state write — not the main session "
+                        "(session guard prevented production state file mutation)"
+                    )
                 return [TextContent(
                     type="text",
                     text=(
@@ -7241,6 +7267,7 @@ async def reconcile_agent_sessions() -> None:
 
 async def main():
     """Run the MCP server."""
+    setup_logging()
     _ensure_observation_worker()
     asyncio.create_task(reconcile_agent_sessions())
     async with stdio_server() as (read_stream, write_stream):
