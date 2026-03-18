@@ -719,7 +719,7 @@ def build_mark_failed_inbox_message(agent: ClassifiedAgent) -> dict:
         "text": (
             f"Ghost agent detected and marked failed: '{desc}'\n"
             f"Agent age: {age_str} | Last output: {file_age_str} ago\n"
-            f"Detected by agent-monitor.py. Dispatcher should decide whether to re-queue."
+            f"Detected by ghost-detector.py. Dispatcher should decide whether to re-queue."
         ),
         "task_id": f"ghost-mark-failed-{short_id}",
         "agent_id": agent_id,
@@ -772,7 +772,7 @@ def build_unregistered_mark_failed_payload(agent: UnregisteredAgent) -> dict:
         "source": "system",
         "chat_id": 0,
         "text": (
-            f"Unregistered dead agent {agent.agent_id} detected by agent-monitor.py. "
+            f"Unregistered dead agent {agent.agent_id} detected by ghost-detector.py. "
             f"Output file last modified {agent.output_file_age_minutes:.0f}m ago. "
             f"This agent was never registered in agent_sessions.db — likely a registration failure."
         ),

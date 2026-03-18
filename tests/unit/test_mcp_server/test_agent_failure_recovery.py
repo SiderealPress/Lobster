@@ -4,7 +4,7 @@ Tests for agent failure recovery — issue #669.
 Verifies:
 - _build_reconciler_message routes 'dead' outcomes to chat_id=0 / type='agent_failed'
 - _build_reconciler_message routes 'completed' outcomes to originating chat_id / type='subagent_result'
-- build_mark_failed_inbox_message (agent-monitor) uses chat_id=0 / type='agent_failed'
+- build_mark_failed_inbox_message (ghost-detector) uses chat_id=0 / type='agent_failed'
 - build_unregistered_mark_failed_payload uses chat_id=0 / type='agent_failed'
 - auto-register-agent stores input_summary in DB
 - agent_failed is present in INBOX_SYSTEM_TYPES
@@ -30,7 +30,7 @@ _MCP_DIR = str(_ROOT / "src" / "mcp")
 if _MCP_DIR not in sys.path:
     sys.path.insert(0, _MCP_DIR)
 
-_GHOST_DETECTOR_PATH = _ROOT / "scripts" / "agent-monitor.py"
+_GHOST_DETECTOR_PATH = _ROOT / "scripts" / "ghost-detector.py"
 _spec = importlib.util.spec_from_file_location("ghost_detector_669", _GHOST_DETECTOR_PATH)
 assert _spec is not None and _spec.loader is not None
 _gd = importlib.util.module_from_spec(_spec)
@@ -48,11 +48,11 @@ _BASE_SESSION: dict = {
     "id": "agent-abc123",
     "task_id": "my-task-id",
     "description": "Implement feature X",
-    "chat_id": "ADMIN_CHAT_ID_REDACTED",
+    "chat_id": "8305714125",
     "source": "telegram",
     "status": "running",
     "output_file": None,
-    "input_summary": "---\ntask_id: my-task-id\nchat_id: ADMIN_CHAT_ID_REDACTED\n---\nDo something",
+    "input_summary": "---\ntask_id: my-task-id\nchat_id: 8305714125\n---\nDo something",
     "elapsed_seconds": 1800,
     "notified_at": None,
 }
@@ -125,7 +125,7 @@ class TestBuildReconcilerMessage:
         session = dict(_BASE_SESSION)
         # Dead agents are those with outcome == "dead"
         # The function should produce a message with chat_id=0 and type=agent_failed
-        # We verify this through the agent-monitor path which shares the same contract.
+        # We verify this through the ghost-detector path which shares the same contract.
         # Direct function test is done below via a minimal reimplementation.
         assert True  # Placeholder — see TestBuildReconcilerMessageDirect below
 
@@ -181,7 +181,7 @@ class TestBuildReconcilerMessageDirect:
         session = dict(_BASE_SESSION)
         msg = build_fn(session, "dead", NOW)
 
-        assert msg["original_chat_id"] == "ADMIN_CHAT_ID_REDACTED"
+        assert msg["original_chat_id"] == "8305714125"
 
     def test_dead_includes_task_id(self, build_fn):
         """Dead outcome: task_id field is preserved from session."""
@@ -202,7 +202,7 @@ class TestBuildReconcilerMessageDirect:
         session = dict(_BASE_SESSION)
         msg = build_fn(session, "completed", NOW)
 
-        assert msg["chat_id"] == "ADMIN_CHAT_ID_REDACTED"
+        assert msg["chat_id"] == "8305714125"
         assert msg["type"] == "subagent_result"
         assert msg["source"] == "telegram"
 
@@ -220,13 +220,13 @@ class TestBuildReconcilerMessageDirect:
 
 
 # ---------------------------------------------------------------------------
-# Test: agent-monitor build_mark_failed_inbox_message
+# Test: ghost-detector build_mark_failed_inbox_message
 # ---------------------------------------------------------------------------
 
 class TestGhostDetectorMarkFailedPayload:
-    """Verify agent-monitor routes agent_failed to chat_id=0."""
+    """Verify ghost-detector routes agent_failed to chat_id=0."""
 
-    def _make_classified_agent(self, chat_id: str = "ADMIN_CHAT_ID_REDACTED") -> object:
+    def _make_classified_agent(self, chat_id: str = "8305714125") -> object:
         """Create a minimal ClassifiedAgent-like object for testing."""
         row = _gd.AgentRow(
             agent_id="deadbeef01234567",
@@ -283,7 +283,7 @@ class TestGhostDetectorMarkFailedPayload:
 
 
 class TestGhostDetectorUnregisteredPayload:
-    """Verify agent-monitor unregistered agent notifications route to chat_id=0."""
+    """Verify ghost-detector unregistered agent notifications route to chat_id=0."""
 
     def _make_unregistered(self) -> object:
         return _gd.UnregisteredAgent(
@@ -338,7 +338,7 @@ class TestMarkFailedGhostNoUserAlert:
           1. type='agent_failed' to chat_id=0 (dispatcher-internal only)
         """
         inbox_dir = tmp_path / "messages" / "inbox"
-        inbox_dir.mkdir(parents=True, exist_ok=True)
+        inbox_dir.mkdir(parents=True)
 
         # Patch the inbox dir and DB path
         monkeypatch.setattr(_gd, "DB_PATH", tmp_path / "agent_sessions.db")
@@ -361,7 +361,7 @@ class TestMarkFailedGhostNoUserAlert:
         """)
         db_conn.execute(
             "INSERT INTO agent_sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            ("deadbeef0123", None, "Test task", "ADMIN_CHAT_ID_REDACTED", "running",
+            ("deadbeef0123", None, "Test task", "8305714125", "running",
              "2026-03-18T13:00:00", None, None, None),
         )
         db_conn.commit()
@@ -378,7 +378,7 @@ class TestMarkFailedGhostNoUserAlert:
             agent_id="deadbeef0123",
             task_id=None,
             description="Test task",
-            chat_id="ADMIN_CHAT_ID_REDACTED",
+            chat_id="8305714125",
             status="running",
             spawned_at="2026-03-18T13:00:00+00:00",
             output_file=None,
