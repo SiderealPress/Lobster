@@ -17,6 +17,10 @@ Why these tests exist:
 - A4: PR #237 fixed double-compaction. If the hook is run twice without an
   intervening wait_for_messages() call, there should still be exactly one
   compact-reminder in the inbox, not two. This is the regression test.
+- A5: send_compaction_notify() must be called on every compaction, regardless
+  of LOBSTER_DEBUG.  Previously the notification was gated on LOBSTER_DEBUG,
+  causing 0 notifications in production and 2+ when health-check also alerted.
+  This test pins the always-on behaviour.
 """
 
 from __future__ import annotations
@@ -79,9 +83,9 @@ def _load_hook(
     mod.STATE_FILE = state_file
     mod.SENTINEL_FILE = sentinel_file
 
-    # Suppress the Telegram dev-notify side-effect — we never want real network
+    # Suppress the Telegram notify side-effect — we never want real network
     # calls in smoke tests and we don't want to depend on config.env being present.
-    mod.maybe_send_dev_telegram_notify = lambda: None  # type: ignore[attr-defined]
+    mod.send_compaction_notify = lambda: None  # type: ignore[attr-defined]
 
     # Stub is_dispatcher to return True so tests exercise the dispatcher path.
     # The real is_dispatcher() checks a marker file + transcript; in tests there
@@ -265,4 +269,60 @@ def test_on_compact_idempotent(tmp_path: Path) -> None:
     assert sentinel_file.exists(), (
         f"Sentinel file {sentinel_file} was not present after second run. "
         "The gate hook relies on this file to block tool calls during compaction."
+    )
+
+
+# ---------------------------------------------------------------------------
+# A5 – send_compaction_notify() is always called (not gated on LOBSTER_DEBUG)
+# ---------------------------------------------------------------------------
+
+
+def test_on_compact_always_sends_notification(tmp_path: Path) -> None:
+    """
+    A5: send_compaction_notify() must be called unconditionally on every
+    compaction invocation, regardless of the LOBSTER_DEBUG setting.
+
+    Previously the notification was gated on LOBSTER_DEBUG=true, which meant:
+    - Production (LOBSTER_DEBUG=false): 0 notifications from on-compact.py,
+      then 1-2 from health-check = wrong total.
+    - Debug mode: 1 from on-compact.py + 1-2 from health-check = duplicates.
+
+    The fix: always call send_compaction_notify(), and have health-check
+    suppress its own alerts during the compaction window.  This test pins
+    the always-on behaviour by verifying the call happens even when
+    LOBSTER_DEBUG is explicitly false.
+
+    Failure mode: if the notification is re-gated on LOBSTER_DEBUG, production
+    users will again receive 0 notifications from on-compact.py and will see
+    confusing health-check alerts instead.
+    """
+    inbox_dir = tmp_path / "inbox"
+    state_file = tmp_path / "config" / "lobster-state.json"
+    sentinel_file = tmp_path / "config" / "compact-pending"
+
+    mod = _load_hook(inbox_dir, state_file, sentinel_file)
+
+    # Replace send_compaction_notify with a tracking stub instead of the
+    # no-op lambda from _load_hook so we can assert it was called.
+    call_count: list[int] = [0]
+
+    def _track_notify() -> None:
+        call_count[0] += 1
+
+    mod.send_compaction_notify = _track_notify  # type: ignore[attr-defined]
+
+    # Ensure LOBSTER_DEBUG is NOT set in the environment so we can verify the
+    # call happens without relying on the debug flag.
+    old_env = os.environ.pop("LOBSTER_DEBUG", None)
+    try:
+        with _stdin_from_module(mod):
+            mod.main()
+    finally:
+        if old_env is not None:
+            os.environ["LOBSTER_DEBUG"] = old_env
+
+    assert call_count[0] == 1, (
+        f"Expected send_compaction_notify() to be called exactly once, "
+        f"but it was called {call_count[0]} time(s). "
+        "The notification must fire unconditionally, not gated on LOBSTER_DEBUG."
     )
