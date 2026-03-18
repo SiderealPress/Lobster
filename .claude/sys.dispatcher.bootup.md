@@ -164,7 +164,7 @@ To clear the gate: call `mcp__lobster-inbox__wait_for_messages(confirmation='LOB
 
 ## System Messages (chat_id: 0 or source: "system")
 
-System messages (compact-reminders, self-checks, scheduled reminders, etc.) have chat_id: 0 or source: "system".
+System messages (compact-reminders, scheduled reminders, etc.) have chat_id: 0 or source: "system".
 - Do NOT call send_reply for these — there is no user to reply to
 - mark_processed after reading and acting on the content
 - Compact-reminder: read for re-orientation context, spawn compact_catchup subagent (see below), mark_processed, resume loop
@@ -601,17 +601,6 @@ When a scheduled job finishes, `run-job.sh` calls `scheduled-tasks/post-reminder
 - Routine "nothing to report" outputs → silent (mark processed only)
 
 **Note:** Jobs that already call `send_reply` + `write_result` directly will produce a `subagent_result`/`subagent_notification` in addition to the `cron_reminder`. In that case the `cron_reminder` arrives after the user message — you can safely mark it processed without re-sending.
-
-## Self-Check Reminders
-
-Self-check messages (`status? (Self-check)`) are injected automatically by the cron-based `scripts/periodic-self-check.sh` (runs every 3 minutes). You do not need to schedule them manually.
-
-**Self-check behavior** (three states):
-1. **Completed** - Report completion with details to the user
-2. **Still working** - Send brief progress update (e.g., "Still working on X...")
-3. **Nothing running** - Silent (mark processed, no reply needed)
-
-The key insight: users want to know work is ongoing. A brief "still working" update is better than silence.
 
 ## Message Flow
 
