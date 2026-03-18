@@ -36,21 +36,24 @@ class TestTranscribeAudio:
         return inbox, audio_dir, msg_id, audio_path
 
     def test_transcribes_voice_message(self, setup_voice_message, temp_messages_dir):
-        """Test successful voice message transcription."""
+        """Test successful voice message transcription via whisper.cpp."""
         inbox, audio_dir, msg_id, audio_path = setup_voice_message
         processed = temp_messages_dir / "processed"
 
-        # Mock the whisper model and ffmpeg
-        mock_model = MagicMock()
-        mock_model.transcribe.return_value = {"text": "Hello, this is a test"}
-
+        # Transcription now goes through run_whisper_cpp (returns (success, text) tuple).
+        # The old get_whisper_model / model.transcribe() API was replaced with the
+        # whisper.cpp CLI integration.
         with patch.multiple(
             "src.mcp.inbox_server",
             INBOX_DIR=inbox,
             PROCESSED_DIR=processed,
             AUDIO_DIR=audio_dir,
         ):
-            with patch("src.mcp.inbox_server.get_whisper_model", return_value=mock_model):
+            with patch(
+                "src.mcp.inbox_server.run_whisper_cpp",
+                new_callable=AsyncMock,
+                return_value=(True, "Hello, this is a test"),
+            ):
                 with patch(
                     "src.mcp.inbox_server.convert_ogg_to_wav",
                     new_callable=AsyncMock,
@@ -171,21 +174,22 @@ class TestTranscribeAudio:
             assert "required" in result[0].text.lower()
 
     def test_handles_transcription_error(self, setup_voice_message, temp_messages_dir):
-        """Test that transcription errors are handled."""
+        """Test that transcription errors are handled gracefully."""
         inbox, audio_dir, msg_id, audio_path = setup_voice_message
         processed = temp_messages_dir / "processed"
 
-        # Mock whisper to raise an error
-        mock_model = MagicMock()
-        mock_model.transcribe.side_effect = Exception("Model error")
-
+        # Simulate run_whisper_cpp raising an unexpected exception (e.g. subprocess crash).
         with patch.multiple(
             "src.mcp.inbox_server",
             INBOX_DIR=inbox,
             PROCESSED_DIR=processed,
             AUDIO_DIR=audio_dir,
         ):
-            with patch("src.mcp.inbox_server.get_whisper_model", return_value=mock_model):
+            with patch(
+                "src.mcp.inbox_server.run_whisper_cpp",
+                new_callable=AsyncMock,
+                side_effect=Exception("whisper.cpp process crashed"),
+            ):
                 with patch(
                     "src.mcp.inbox_server.convert_ogg_to_wav",
                     new_callable=AsyncMock,
