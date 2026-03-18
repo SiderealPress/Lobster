@@ -3431,8 +3431,13 @@ async def handle_mark_processed(args: dict) -> list[TextContent]:
                     # No reply was sent for this human message.
                     # Skip auto-reply for callback (button press) messages —
                     # the bot already answered the callback query inline.
+                    # Skip auto-reply for reaction messages — reactions are
+                    # signals that the dispatcher processes contextually;
+                    # sending "Noted." is never correct.
                     if msg_type == "callback":
                         log.info(f"Skipping auto-reply fallback for callback message {message_id}")
+                    elif msg_type == "reaction":
+                        log.info(f"Skipping auto-reply fallback for reaction message {message_id}")
                     elif abs(chat_id) <= 1_000_000:
                         # Fake/test chat_id — Telegram rejects delivery; skip to avoid dead-letter buildup
                         log.info(f"Skipping auto-reply fallback for fake/test chat_id {chat_id}")
