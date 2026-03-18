@@ -234,6 +234,25 @@ else
 fi
 
 #===============================================================================
+# Step 9: Activate the skill in Lobster's skill manager
+#===============================================================================
+step "Activating skill in Lobster"
+
+ACTIVATE_SCRIPT="
+import sys
+sys.path.insert(0, '$LOBSTER_DIR/src')
+from mcp.skill_manager import activate_skill
+result = activate_skill('camofox-browser', mode='always')
+print(result)
+"
+
+if "$PYTHON_PATH" -c "$ACTIVATE_SCRIPT" 2>/dev/null; then
+    success "Skill activated: camofox-browser (mode: always)"
+else
+    warn "Could not auto-activate skill. Run: lobster skill activate camofox-browser"
+fi
+
+#===============================================================================
 # Done
 #===============================================================================
 echo ""
