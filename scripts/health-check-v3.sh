@@ -63,6 +63,7 @@ MAINTENANCE_FLAG="$MESSAGES_DIR/config/lobster-maintenance"
 LOBSTER_STATE_FILE="${LOBSTER_STATE_FILE_OVERRIDE:-$MESSAGES_DIR/config/lobster-state.json}"
 STALE_THRESHOLD_SECONDS=240          # 4 minutes - RED if any message older (watchdog handles soft recovery at 90s)
 YELLOW_THRESHOLD_SECONDS=150         # 2.5 minutes - YELLOW warning
+RESTART_WINDOW_BUFFER_SECONDS=120    # Pre-mark messages within this window of the stale threshold before a restart
 
 MAINTENANCE_EXPIRY_SECONDS=3600      # 1 hour - stale maintenance flag is auto-cleared and checks resume
 
@@ -876,9 +877,14 @@ record_stale_inbox_markers() {
         [[ -z "$file_time" ]] && continue
 
         local age=$((now - file_time))
-        if [[ $age -gt $STALE_THRESHOLD_SECONDS ]]; then
+        local mark_threshold=$(( STALE_THRESHOLD_SECONDS - RESTART_WINDOW_BUFFER_SECONDS ))
+        if [[ $age -gt $mark_threshold ]]; then
             touch "$STALE_INBOX_MARKER_DIR/$basename_f"
-            log_info "Circuit breaker: marked $basename_f as restart-triggering"
+            if [[ $age -gt $STALE_THRESHOLD_SECONDS ]]; then
+                log_info "Circuit breaker: marked $basename_f as restart-triggering (stale: ${age}s)"
+            else
+                log_info "Circuit breaker: pre-emptively marked $basename_f (near-threshold: ${age}s, within ${RESTART_WINDOW_BUFFER_SECONDS}s restart window)"
+            fi
         fi
     done < <(find "$INBOX_DIR" -maxdepth 1 -name "*.json" -print0 2>/dev/null)
 }
