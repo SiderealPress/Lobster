@@ -3368,8 +3368,12 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
 
 async def handle_send_reply(args: dict) -> list[TextContent]:
     """Send a reply to a message with input validation."""
-    # Validate inputs (raises ValidationError on bad data)
-    args = validate_send_reply_args(args)
+    # Validate inputs — return error TextContent instead of raising so callers
+    # (and tests) always receive a list[TextContent] back.
+    try:
+        args = validate_send_reply_args(args)
+    except ValidationError as e:
+        return [TextContent(type="text", text=f"Error: {e}")]
     chat_id = args["chat_id"]
     text = args["text"]
     source = args["source"]
@@ -3536,7 +3540,10 @@ async def handle_send_sms_reply(args: dict) -> list[TextContent]:
 
 async def handle_mark_processed(args: dict) -> list[TextContent]:
     """Mark a message as processed."""
-    message_id = validate_message_id(args.get("message_id", ""))
+    try:
+        message_id = validate_message_id(args.get("message_id", ""))
+    except ValidationError as e:
+        return [TextContent(type="text", text=f"Error: {e}")]
     force = args.get("force", False)
 
     # Check processing/ first, then inbox/ as fallback

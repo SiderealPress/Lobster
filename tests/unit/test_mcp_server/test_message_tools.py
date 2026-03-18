@@ -300,7 +300,13 @@ class TestAutoThreading:
         (processing_dir / "12345_msg.json").write_text(json.dumps(msg))
 
     def test_auto_threads_when_processing_message_exists(self, dirs):
-        """When no reply_to_message_id is given, threading uses the message in processing/."""
+        """Auto-threading was removed (PR #420): reply is standalone even when processing/ has a message.
+
+        Previously send_reply would look up telegram_message_id from processing/ and set
+        reply_to_message_id automatically.  That behaviour was removed to avoid threading
+        under the wrong message when multiple messages are in-flight.  Without an explicit
+        reply_to_message_id the reply is now sent standalone.
+        """
         outbox, processing, processed, sent = dirs
         self._make_processing_msg(processing, chat_id=123456, tg_msg_id=9001)
 
@@ -316,15 +322,15 @@ class TestAutoThreading:
 
             asyncio.run(handle_send_reply({
                 "chat_id": 123456,
-                "text": "Auto-threaded reply",
+                "text": "Reply without auto-threading",
                 "source": "telegram",
             }))
 
         files = list(outbox.glob("*.json"))
         assert len(files) == 1
         content = json.loads(files[0].read_text())
-        assert content.get("reply_to_message_id") == 9001, (
-            "Expected reply_to_message_id=9001 from auto-threading"
+        assert "reply_to_message_id" not in content, (
+            "reply_to_message_id should not be auto-set: auto-threading was removed in PR #420"
         )
 
     def test_explicit_reply_id_takes_precedence_over_auto(self, dirs):
@@ -491,9 +497,12 @@ class TestAutoThreading:
         (processed_dir / filename).write_text(json.dumps(msg))
 
     def test_auto_threads_from_processed_when_processing_empty(self, dirs):
-        """Subagent path: processing/ is empty but message is in processed/ — should thread."""
+        """Auto-threading fallback via processed/ was also removed (PR #361 then #420).
+
+        Both the processing/ lookup and the processed/ fallback were removed.  Replies are
+        sent standalone unless reply_to_message_id is supplied explicitly.
+        """
         outbox, processing, processed, sent = dirs
-        # Simulate the subagent case: original message has already moved to processed/
         self._make_processed_msg(processed, chat_id=123456, tg_msg_id=9001)
         # processing/ is empty
 
@@ -516,14 +525,17 @@ class TestAutoThreading:
         files = list(outbox.glob("*.json"))
         assert len(files) == 1
         content = json.loads(files[0].read_text())
-        assert content.get("reply_to_message_id") == 9001, (
-            "Expected reply_to_message_id=9001 from auto-threading via processed/ fallback"
+        assert "reply_to_message_id" not in content, (
+            "reply_to_message_id should not be auto-set: processed/ fallback was removed in PR #361"
         )
 
     def test_processing_takes_priority_over_processed(self, dirs):
-        """When a message is in processing/, it is used — processed/ is not consulted."""
+        """Auto-threading removed: neither processing/ nor processed/ sets reply_to_message_id.
+
+        Previously processing/ took priority over processed/ for auto-threading.  Both lookups
+        were removed (PRs #361, #420).  With messages in both dirs, the reply is still standalone.
+        """
         outbox, processing, processed, sent = dirs
-        # processing/ has tg_msg_id=9001, processed/ has a different one for the same chat
         self._make_processing_msg(processing, chat_id=123456, tg_msg_id=9001)
         self._make_processed_msg(processed, chat_id=123456, tg_msg_id=7777)
 
@@ -539,14 +551,14 @@ class TestAutoThreading:
 
             asyncio.run(handle_send_reply({
                 "chat_id": 123456,
-                "text": "Should use processing/ message",
+                "text": "Should be sent standalone",
                 "source": "telegram",
             }))
 
         files = list(outbox.glob("*.json"))
         content = json.loads(files[0].read_text())
-        assert content.get("reply_to_message_id") == 9001, (
-            "processing/ match should take priority over processed/ match"
+        assert "reply_to_message_id" not in content, (
+            "reply_to_message_id should not be set: auto-threading removed in PRs #361 and #420"
         )
 
     def test_processed_fallback_wrong_chat_id_not_used(self, dirs):
@@ -578,15 +590,17 @@ class TestAutoThreading:
         )
 
     def test_processed_fallback_uses_most_recent(self, dirs):
-        """When multiple processed messages exist, the most recently modified one is used."""
+        """Auto-threading removed: multiple processed messages still yield no reply_to_message_id.
+
+        Previously the most recently modified processed/ message was used for threading.
+        That fallback was removed in PR #361; neither processed/ message sets reply_to_message_id.
+        """
         import time as _time
 
         outbox, processing, processed, sent = dirs
 
-        # Write older message first (tg_msg_id=1111)
         self._make_processed_msg(processed, chat_id=123456, tg_msg_id=1111, filename="old_msg.json")
-        _time.sleep(0.02)  # ensure distinct mtime
-        # Write newer message second (tg_msg_id=2222)
+        _time.sleep(0.02)
         self._make_processed_msg(processed, chat_id=123456, tg_msg_id=2222, filename="new_msg.json")
 
         with patch.multiple(
@@ -601,14 +615,14 @@ class TestAutoThreading:
 
             asyncio.run(handle_send_reply({
                 "chat_id": 123456,
-                "text": "Should use newest processed message",
+                "text": "Should be sent standalone regardless of processed/ contents",
                 "source": "telegram",
             }))
 
         files = list(outbox.glob("*.json"))
         content = json.loads(files[0].read_text())
-        assert content.get("reply_to_message_id") == 2222, (
-            "Expected reply_to_message_id=2222 from the most recently modified processed message"
+        assert "reply_to_message_id" not in content, (
+            "reply_to_message_id should not be set: processed/ fallback removed in PR #361"
         )
 
 
@@ -703,11 +717,17 @@ class TestMarkProcessed:
 
 
     def test_blocks_human_message_without_reply(self, setup_dirs, message_generator):
-        """Test that marking a human message without reply returns a warning."""
+        """Guard auto-sends fallback reply for real chat_ids; skips for test/fake chat_ids.
+
+        For chat_ids <= 1_000_000 (test/fake IDs that Telegram would reject), the guard
+        skips the auto-reply fallback but still marks the message as processed.  The old
+        soft-warning behaviour ("No reply sent") was replaced by an auto-send-then-proceed
+        pattern to prevent silent message drops in production.
+        """
         inbox, processed = setup_dirs
 
         msg = message_generator.generate_text_message(
-            source="telegram", chat_id=123456,
+            source="telegram", chat_id=123456,  # fake/test chat_id — guard skips auto-reply
         )
         msg_id = msg["id"]
         (inbox / f"{msg_id}.json").write_text(json.dumps(msg))
@@ -722,10 +742,10 @@ class TestMarkProcessed:
 
             result = asyncio.run(handle_mark_processed({"message_id": msg_id}))
 
-            assert "No reply sent" in result[0].text
-            # File should NOT have been moved
-            assert (inbox / f"{msg_id}.json").exists()
-            assert not (processed / f"{msg_id}.json").exists()
+            # For fake/test chat_ids the guard skips auto-reply but still marks processed
+            assert "processed" in result[0].text.lower()
+            assert not (inbox / f"{msg_id}.json").exists()
+            assert (processed / f"{msg_id}.json").exists()
 
     def test_allows_human_message_with_force(self, setup_dirs, message_generator):
         """Test that force=True bypasses the reply guard."""
