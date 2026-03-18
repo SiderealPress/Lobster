@@ -34,32 +34,6 @@ Each line of the JSONL transcript file has the structure:
 Tool use items are nested under entry["message"]["content"], NOT entry["content"].
 `_extract_tool_calls` handles both the JSONL format and the legacy inline
 format where content is directly on the message dict.
-
-## Circuit breaker (MAX_HOOK_FIRES)
-
-If the auditor agent cannot satisfy the exit conditions and the hook keeps
-blocking (e.g. turn exhaustion, crash loop), the hook would fire indefinitely.
-To prevent runaway sessions, after MAX_HOOK_FIRES fires without the condition
-being met the hook logs a loud system_error entry and allows the exit (exit 0).
-
-MAX_HOOK_FIRES = 3 (lower than require-write-result's 5) because repeated
-firing here means the auditor ran, read the context file, but never satisfied
-the post-condition — a serious signal that something is structurally wrong with
-the auditor agent or its environment.
-
-Fire count is tracked in /tmp/lobster-auditor-hook-fires-{agent_key} as JSON:
-    {"count": N, "first_fire_ts": <unix timestamp>}
-
-The file is cleaned up after a successful exit (either condition met) or after
-the circuit breaker trips.
-
-## suppressOutput
-
-This hook exits silently (no stdout/stderr) on all exit-0 paths.
-require-write-result.py (which runs first for the same SubagentStop event)
-already emits {"suppressOutput": true} and covers the event. Emitting a
-second suppressOutput here causes CC to surface it as feedback content
-rather than suppress it.
 """
 import json
 import os
@@ -189,33 +163,6 @@ def _safe_word_in_transcript(tool_calls: list[dict]) -> bool:
         if SAFE_WORD in text:
             return True
     return False
-
-
-def _parse_timestamp(t: str | int | float | None) -> float | None:
-    """Parse a timestamp value to a Unix float.
-
-    Accepts:
-      - int/float: returned as float directly
-      - str: tried as ISO-8601 first (CC 2.1.76+ format), then as a numeric string
-
-    Returns None if the value cannot be parsed or if t is None.
-    """
-    if t is None:
-        return None
-    if isinstance(t, (int, float)):
-        return float(t)
-    if isinstance(t, str):
-        # ISO-8601 (CC 2.1.76+): e.g. "2026-03-19T16:52:01.657Z"
-        try:
-            return datetime.fromisoformat(t.replace("Z", "+00:00")).timestamp()
-        except ValueError:
-            pass
-        # Numeric string fallback (older CC versions)
-        try:
-            return float(t)
-        except ValueError:
-            pass
-    return None
 
 
 def _session_start_time(hook_input: dict, transcript: list) -> float | None:
@@ -371,6 +318,15 @@ def main() -> None:
         hook_input = json.load(sys.stdin)
     except Exception:
         _exit_ok()  # Unreadable input — never block
+
+    # CC 2.1.76+: SubagentStop passes the transcript as a JSONL file at
+    # agent_transcript_path rather than inline. Load from the file path,
+    # falling back to the legacy inline key for older CC versions.
+    transcript_path = hook_input.get("agent_transcript_path", "")
+    if transcript_path:
+        transcript = _load_transcript_from_jsonl(transcript_path)
+    else:
+        transcript = hook_input.get("transcript", [])
 
     # CC 2.1.76+: SubagentStop passes the transcript as a JSONL file at
     # agent_transcript_path rather than inline. Load from the file path,
