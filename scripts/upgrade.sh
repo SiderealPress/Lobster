@@ -45,6 +45,7 @@ BACKUP_BASE="$HOME/lobster-backups"
 CONFIG_FILE="$LOBSTER_CONFIG_DIR/config.env"
 LOCK_FILE="/tmp/lobster-upgrade.lock"
 VENV_DIR="$LOBSTER_DIR/.venv"
+CLAUDE_SETTINGS="$HOME/.claude/settings.json"
 
 # Options
 DRY_RUN=false
