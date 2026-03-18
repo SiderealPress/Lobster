@@ -368,7 +368,9 @@ if [ "$CONTAINER_SETUP" = true ]; then
         info "  Created scheduled-jobs registry"
     fi
 
-    # sqlite-vec: verify it loads correctly; fix ELFCLASS32 on aarch64 if needed
+    # sqlite-vec: verify it loads correctly
+    # pyproject.toml requires >=0.1.7a1 which has correct aarch64 wheels.
+    # This verification step catches any future regressions.
     SQLITE_VEC_OK=false
     export PATH="$INSTALL_DIR/.venv/bin:$PATH"
     if "$INSTALL_DIR/.venv/bin/python" -c \
@@ -377,17 +379,16 @@ if [ "$CONTAINER_SETUP" = true ]; then
         success "sqlite-vec loads correctly"
         SQLITE_VEC_OK=true
     else
-        warn "sqlite-vec failed to load (likely aarch64 ELFCLASS32). Attempting fix..."
+        warn "sqlite-vec failed to load. Attempting reinstall with >=0.1.7a1..."
         uv pip uninstall sqlite-vec 2>/dev/null || true
-        # Try alpha release known to contain the aarch64 fix
-        if uv pip install --quiet "sqlite-vec==0.1.7a2" 2>/dev/null && \
+        if uv pip install --quiet "sqlite-vec>=0.1.7a1" 2>/dev/null && \
            "$INSTALL_DIR/.venv/bin/python" -c \
                "import sqlite3, sqlite_vec; c=sqlite3.connect(':memory:'); c.enable_load_extension(True); sqlite_vec.load(c)" \
                2>/dev/null; then
-            success "sqlite-vec 0.1.7a2 installed and loads correctly"
+            success "sqlite-vec reinstalled and loads correctly"
             SQLITE_VEC_OK=true
         else
-            warn "sqlite-vec alpha also failed. Vector search may be unavailable."
+            warn "sqlite-vec failed to load after reinstall. Vector search may be unavailable."
         fi
     fi
 
@@ -1834,33 +1835,24 @@ else
 fi
 
 #-------------------------------------------------------------------------------
-# sqlite-vec  (known aarch64 ELFCLASS32 bug in older releases; try alpha first)
+# sqlite-vec  (0.1.6 aarch64 wheel contains a 32-bit ARM .so — use >=0.1.7a1)
 #-------------------------------------------------------------------------------
+# pyproject.toml now requires >=0.1.7a1 so `uv sync` picks the right wheel.
+# This block handles the case where install.sh is run standalone against an
+# existing venv (e.g. re-run after a partial install) and also provides a
+# load-verification step that catches any future regressions.
 info "Installing sqlite-vec..."
 SQLITE_VEC_OK=false
 
-# Try stable release first
-if uv pip install --quiet sqlite-vec 2>/dev/null; then
-    # Verify it actually loads (aarch64 bug produces an import error)
+# Install the version that pyproject.toml requires (>=0.1.7a1, resolves to 0.1.7a10)
+if uv pip install --quiet "sqlite-vec>=0.1.7a1" 2>/dev/null; then
+    # Verify it actually loads
     if "$INSTALL_DIR/.venv/bin/python" -c "import sqlite3, sqlite_vec; c=sqlite3.connect(':memory:'); c.enable_load_extension(True); sqlite_vec.load(c)" 2>/dev/null; then
         success "sqlite-vec installed and loads correctly"
         SQLITE_VEC_OK=true
     else
-        warn "sqlite-vec installed but fails to load (likely aarch64 ELFCLASS32 bug). Trying alpha..."
+        warn "sqlite-vec installed but fails to load. Will attempt to compile from source."
         uv pip uninstall sqlite-vec 2>/dev/null || true
-    fi
-fi
-
-if [ "$SQLITE_VEC_OK" = false ]; then
-    # Try known-good alpha that contains the aarch64 fix
-    if uv pip install --quiet "sqlite-vec==0.1.7a2" 2>/dev/null; then
-        if "$INSTALL_DIR/.venv/bin/python" -c "import sqlite3, sqlite_vec; c=sqlite3.connect(':memory:'); c.enable_load_extension(True); sqlite_vec.load(c)" 2>/dev/null; then
-            success "sqlite-vec 0.1.7a2 (alpha) installed and loads correctly"
-            SQLITE_VEC_OK=true
-        else
-            warn "sqlite-vec alpha also fails to load. Will attempt to compile from source."
-            uv pip uninstall sqlite-vec 2>/dev/null || true
-        fi
     fi
 fi
 
