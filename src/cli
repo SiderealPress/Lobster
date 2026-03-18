@@ -460,7 +460,7 @@ cmd_ps() {
 }
 
 cmd_env() {
-    local config_dir="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}"
+    local config_dir="${LOBSTER_CONFIG_DIR:-$HOME/lobster-user-config}"
     local env_file="$config_dir/global.env"
     local subcmd="${1:-}"
 
@@ -475,14 +475,14 @@ cmd_env() {
             mkdir -p "$config_dir"
             touch "$env_file" && chmod 600 "$env_file"
             # Update existing key in place, or append if not present
-            if grep -q "^${key}=" "$env_file" 2>/dev/null; then
+            if grep -qF "^${key}=" "$env_file" 2>/dev/null; then
                 # Use a temp file to avoid sed -i portability issues
                 local tmp
                 tmp=$(mktemp)
-                grep -v "^${key}=" "$env_file" > "$tmp"
+                chmod 600 "$tmp"
+                grep -vF "^${key}=" "$env_file" > "$tmp"
                 echo "${key}=${value}" >> "$tmp"
                 mv "$tmp" "$env_file"
-                chmod 600 "$env_file"
                 echo -e "${GREEN}Updated${NC} $key"
             else
                 echo "${key}=${value}" >> "$env_file"
@@ -499,12 +499,14 @@ cmd_env() {
                 echo -e "${RED}No env file found at $env_file${NC}"
                 exit 1
             fi
-            local val
-            val=$(grep "^${key}=" "$env_file" 2>/dev/null | cut -d= -f2-)
-            if [ -z "$val" ]; then
+            # Check key existence first (separate from value extraction) so that
+            # an empty value is not misreported as "key not found"
+            if ! grep -qF "^${key}=" "$env_file" 2>/dev/null; then
                 echo -e "${RED}Key not found: $key${NC}"
                 exit 1
             fi
+            local val
+            val=$(grep -F "^${key}=" "$env_file" | cut -d= -f2-)
             echo "$val"
             ;;
         list)
