@@ -66,7 +66,7 @@ REMINDER_TEXT = (
     "  \u2190 active projects, key people, priorities\n\n"
     "After reading: spawn the compact_catchup subagent to recover context from the\n"
     "last ~30 minutes (see sys.dispatcher.bootup.md \u2192 'Handling compact-reminder').\n"
-    "Then resume your main loop by calling wait_for_messages()."
+    "Then resume your main loop by calling wait_for_messages(timeout=1800, hibernate_on_timeout=True)."
 )
 
 SENTINEL_FILE = Path(os.path.expanduser("~/messages/config/compact-pending"))
