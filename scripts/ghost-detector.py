@@ -364,7 +364,13 @@ def discover_filesystem_agents(
 
 
 def load_running_agents(db_path: Path) -> list[AgentRow]:
-    """Query agent_sessions.db for all running agents."""
+    """Query agent_sessions.db for all running or starting agents.
+
+    Includes 'starting' rows as a safety net: with hook-only registration
+    those rows should never accumulate, but any historical 'starting' rows
+    (from before the fix) will be caught and ghost-detected here rather than
+    silently leaking forever.
+    """
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     try:
@@ -373,7 +379,7 @@ def load_running_agents(db_path: Path) -> list[AgentRow]:
             SELECT id, task_id, description, chat_id, status,
                    spawned_at, output_file, last_seen_at
             FROM agent_sessions
-            WHERE status = 'running'
+            WHERE status IN ('running', 'starting')
             ORDER BY spawned_at ASC
             """
         ).fetchall()

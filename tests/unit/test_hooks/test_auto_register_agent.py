@@ -240,7 +240,7 @@ class TestHookAgentWithAgentId:
         assert row["task_id"] == "t-001"
         assert row["chat_id"] == "99999"
         assert row["source"] == "slack"
-        assert row["status"] == "starting"
+        assert row["status"] == "running"
 
     def test_inserts_row_with_legacy_text(self, tmp_path):
         """Legacy task_id text format inserts a row."""
@@ -294,7 +294,7 @@ class TestHookAgentWithAgentId:
         row = _get_row(tmp_path, "agent-dup")
         # Description should still be the original richer one
         assert row["description"] == "richer description"
-        assert row["status"] == "running"  # not overwritten to 'starting'
+        assert row["status"] == "running"  # INSERT OR IGNORE — existing row not overwritten
 
     def test_output_file_stored(self, tmp_path):
         """output_file from tool response is stored in DB."""
