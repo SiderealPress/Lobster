@@ -823,6 +823,35 @@ from message_types import (  # noqa: E402 — placed after path-setup at top of 
     USER_FACING_TYPES,
 )
 
+# ---------------------------------------------------------------------------
+# Message type normalization (issue #635)
+# Aliases are resolved at ingest so the rest of the system only sees canonical
+# names. Adding a new alias here is the only change needed to support a new
+# producer that uses a legacy or non-standard type string.
+# ---------------------------------------------------------------------------
+TYPE_ALIASES: dict[str, str] = {
+    "message": "text",
+    "audio": "voice",
+    "image": "photo",
+    "cron_reminder": "scheduled_reminder",
+    "task-output": "health_check",
+    "system": "health_check",  # when type="system" from health check scripts
+}
+
+
+def normalize_message_type(msg: dict) -> dict:
+    """Return msg with the type field normalized to its canonical name.
+
+    Pure function: returns a new dict (immutable input contract); logs alias
+    resolution at DEBUG level so normalization is traceable without being noisy.
+    """
+    t = msg.get("type", "text")
+    if t in TYPE_ALIASES:
+        log.debug("normalizing type %r -> %r", t, TYPE_ALIASES[t])
+        msg = {**msg, "type": TYPE_ALIASES[t]}
+    return msg
+
+
 # Heartbeat file for health monitoring
 HEARTBEAT_FILE = _WORKSPACE / "logs" / "claude-heartbeat"
 
@@ -5429,16 +5458,7 @@ async def handle_mark_processing(args: dict) -> list[TextContent]:
     # the message (issue #635). This is the single ingest normalization point.
     msg_data = normalize_message_type(msg_data)
 
-    # Atomic claim via SQLite INSERT OR FAIL (issue #1360).
-    # This is the claim gate: one caller wins, all others get already_claimed.
-    # The filesystem rename becomes a consequence of a won claim, not the claim
-    # itself — eliminating the last-writer-wins race in concurrent dispatchers.
-    session_id = _get_current_http_session_id() or "dispatcher"
-    if not _claims_db.claim(message_id, session_id):
-        log.warning(f"mark_processing: already_claimed: {message_id}")
-        return [TextContent(type="text", text=f"Error: already_claimed: {message_id}")]
-
-    # Atomic move to processing (consequence of won claim)
+    # Atomic move to processing
     dest = PROCESSING_DIR / found.name
     found.rename(dest)
 
