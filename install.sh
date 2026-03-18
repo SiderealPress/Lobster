@@ -846,6 +846,13 @@ if [ "$CONTAINER_SETUP" = true ]; then
         fi
     done
 
+    # Create jobs.json if it doesn't exist
+    JOBS_FILE="$WORKSPACE_DIR/scheduled-jobs/jobs.json"
+    if [ ! -f "$JOBS_FILE" ]; then
+        echo '{"jobs": {}}' > "$JOBS_FILE"
+        info "  Created scheduled-jobs registry"
+    fi
+
     # sqlite-vec: verify it loads correctly
     # pyproject.toml requires >=0.1.7a1 which has correct aarch64 wheels.
     # This verification step catches any future regressions.
