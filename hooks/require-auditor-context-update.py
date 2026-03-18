@@ -17,6 +17,23 @@ Detection strategy for "is this an auditor session":
   Scan the transcript for a ReadFile tool call whose path contains
   "system-audit.context.md". The auditor definition requires reading this
   file at session start, so its presence is a reliable signal.
+
+## SubagentStop transcript handling (CC 2.1.76+)
+
+SubagentStop events in CC 2.1.76+ no longer include an inline `transcript`
+field. They only provide `agent_transcript_path` — a path to a JSONL file
+containing the subagent's conversation. This hook loads the transcript from
+that file path, falling back to the legacy inline `transcript` key for older
+CC versions.
+
+## JSONL message format
+
+Each line of the JSONL transcript file has the structure:
+    {"type": "assistant", "message": {"role": "assistant", "content": [...]}, ...}
+
+Tool use items are nested under entry["message"]["content"], NOT entry["content"].
+`_extract_tool_calls` handles both the JSONL format and the legacy inline
+format where content is directly on the message dict.
 """
 import json
 import os
@@ -39,13 +56,53 @@ AUDIT_CONTEXT_FILENAME = "system-audit.context.md"
 # ---------------------------------------------------------------------------
 
 
+def _load_transcript_from_jsonl(path: str) -> list:
+    """Load transcript messages from a JSONL file.
+
+    SubagentStop passes agent_transcript_path (a .jsonl file) rather than an
+    inline transcript list. Each line is a JSON object. Returns [] on any error.
+    """
+    try:
+        messages = []
+        with open(path) as fh:
+            for line in fh:
+                line = line.strip()
+                if line:
+                    try:
+                        messages.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        pass
+        return messages
+    except Exception:
+        return []
+
+
 def _extract_tool_calls(transcript: list) -> list[dict]:
-    """Return all tool_use blocks from the transcript."""
+    """Return all tool_use blocks from the transcript.
+
+    Handles both JSONL format (CC 2.1.76+) and legacy inline format:
+
+    JSONL format (each line is a JSONL entry):
+        {"type": "assistant", "message": {"role": "assistant", "content": [...]}, ...}
+
+    Legacy inline format (transcript is a list of messages):
+        {"role": "assistant", "content": [...]}
+
+    Both formats are tried so the hook works regardless of CC version.
+    """
     tool_calls = []
-    for msg in transcript:
-        if not isinstance(msg, dict):
+    for entry in transcript:
+        if not isinstance(entry, dict):
             continue
-        content = msg.get("content", [])
+
+        # JSONL format: content is under entry["message"]["content"]
+        # Legacy format: content is directly under entry["content"]
+        nested_msg = entry.get("message")
+        if isinstance(nested_msg, dict):
+            content = nested_msg.get("content", [])
+        else:
+            content = entry.get("content", [])
+
         if not isinstance(content, list):
             continue
         for item in content:
@@ -88,13 +145,16 @@ def _safe_word_in_transcript(tool_calls: list[dict]) -> bool:
     return False
 
 
-def _session_start_time(hook_input: dict) -> float | None:
+def _session_start_time(hook_input: dict, transcript: list) -> float | None:
     """Estimate session start time from the transcript's first message timestamp.
 
     Falls back to None if no timestamp is available (hook input varies).
+
+    Accepts the already-loaded transcript list (which may have been read from
+    a JSONL file) rather than re-reading hook_input["transcript"], which is
+    always empty in CC 2.1.76+.
     """
-    # Claude Code hook input may carry a top-level timestamp or we can parse
-    # the transcript for the earliest role='user' message timestamp.
+    # Claude Code hook input may carry a top-level timestamp.
     ts = hook_input.get("session_start_time") or hook_input.get("timestamp")
     if ts:
         try:
@@ -103,7 +163,6 @@ def _session_start_time(hook_input: dict) -> float | None:
             pass
 
     # Try to find the minimum timestamp inside transcript messages.
-    transcript = hook_input.get("transcript", [])
     min_ts = None
     for msg in transcript:
         if not isinstance(msg, dict):
@@ -147,7 +206,15 @@ def main() -> None:
     except Exception:
         sys.exit(0)  # Unreadable input — never block
 
-    transcript = hook_input.get("transcript", [])
+    # CC 2.1.76+: SubagentStop passes the transcript as a JSONL file at
+    # agent_transcript_path rather than inline. Load from the file path,
+    # falling back to the legacy inline key for older CC versions.
+    transcript_path = hook_input.get("agent_transcript_path", "")
+    if transcript_path:
+        transcript = _load_transcript_from_jsonl(transcript_path)
+    else:
+        transcript = hook_input.get("transcript", [])
+
     tool_calls = _extract_tool_calls(transcript)
 
     # Fast path: not an auditor session — pass through.
@@ -157,7 +224,7 @@ def main() -> None:
     # --- Auditor session detected ---
 
     # Condition 1: context file was updated during this session.
-    session_start = _session_start_time(hook_input)
+    session_start = _session_start_time(hook_input, transcript)
     if _context_file_updated_since(session_start):
         sys.exit(0)
 
