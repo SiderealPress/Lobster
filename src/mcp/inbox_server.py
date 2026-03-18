@@ -4974,7 +4974,11 @@ async def handle_write_observation(args: dict) -> list[TextContent]:
     # write above always happens first regardless of debug mode.
     # Visibility is "mcp-only": this fires at the MCP layer before the dispatcher
     # picks up the inbox message, so the dispatcher has not yet seen it.
-    if _DEBUG_MODE:
+    #
+    # system_context observations are internal routing decisions — never forward
+    # to Telegram (noisy, not actionable). Only system_error warrants real-time
+    # visibility; user_context is also forwarded as it may affect dispatcher behavior.
+    if _DEBUG_MODE and category != "system_context":
         emitter = f"task:{task_id}" if task_id else "unknown"
         _emit_debug_observation(text, category=category, visibility="mcp-only", emitter=emitter)
 
