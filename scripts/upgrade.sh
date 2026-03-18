@@ -1385,7 +1385,7 @@ with open(path, 'w') as f:
         migrated=$((migrated + 1))
     fi
 
-    # Migration 14: Add stop_reason column to agent_sessions SQLite table
+    # Migration 23: Add stop_reason column to agent_sessions SQLite table
     # Existing rows will have NULL for stop_reason (nullable, backward-compatible).
     local DB_PATH="${LOBSTER_MESSAGES:-$HOME/messages}/config/agent_sessions.db"
     if [ -f "$DB_PATH" ]; then
@@ -1394,6 +1394,34 @@ with open(path, 'w') as f:
             sqlite3 "$DB_PATH" "ALTER TABLE agent_sessions ADD COLUMN stop_reason TEXT;" 2>/dev/null && \
                 success "stop_reason column added to agent_sessions" || \
                 warn "Failed to add stop_reason column (may already exist)"
+            migrated=$((migrated + 1))
+        fi
+    fi
+
+    # Migration 24: Increase on-compact hook timeout from 5s to 30s in settings.json
+    # The hook makes a synchronous Telegram HTTP call (urlopen) which was frequently
+    # exceeding the 5-second process timeout, killing the hook before it could write
+    # compaction-state.json. The missing file was the corroborating evidence.
+    # Fix: patch the timeout field on the compact-matcher SessionStart hook entry.
+    if [ -f "$CLAUDE_SETTINGS" ] && command -v jq >/dev/null 2>&1; then
+        local compact_timeout
+        compact_timeout=$(jq -r '
+            [.hooks.SessionStart[]?
+             | select(.matcher == "compact")
+             | .hooks[]?.timeout // 0]
+            | first // 0
+        ' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
+        if [ "${compact_timeout}" = "5" ]; then
+            TMP_SETTINGS=$(mktemp)
+            jq '
+                .hooks.SessionStart = [
+                    .hooks.SessionStart[]?
+                    | if .matcher == "compact" then
+                        .hooks = [.hooks[]? | if .timeout == 5 then .timeout = 30 else . end]
+                      else . end
+                ]
+            ' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+            substep "Increased on-compact hook timeout from 5s to 30s (fixes Telegram call being killed)"
             migrated=$((migrated + 1))
         fi
     fi
