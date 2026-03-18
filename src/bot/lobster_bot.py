@@ -1463,14 +1463,27 @@ async def sweep_outbox():
                     await handler.process_reply(fname)
                     _outbox_fail_counts.pop(fname, None)
                 except Exception as e:
-                    _outbox_fail_counts[fname] = _outbox_fail_counts.get(fname, 0) + 1
-                    count = _outbox_fail_counts[fname]
-                    log.error(f"Sweep: failed to process {filepath.name} (attempt {count}/5): {e}")
-                    if count >= 5:
+                    from telegram.error import TimedOut as TelegramTimedOut
+                    if isinstance(e, TelegramTimedOut):
+                        # TimedOut means the HTTP request was dispatched but the response
+                        # was lost. Telegram almost certainly received and delivered the
+                        # message. Retrying would send a duplicate. Dead-letter immediately.
                         dest = DEAD_LETTER_DIR / filepath.name
                         shutil.move(fname, str(dest))
                         _outbox_fail_counts.pop(fname, None)
-                        log.error(f"Moved to dead-letter after 5 failures: {filepath.name}")
+                        _processing_files.discard(fname)
+                        log.error(
+                            f"Dead-lettered after TimedOut (likely delivered): {filepath.name}"
+                        )
+                    else:
+                        _outbox_fail_counts[fname] = _outbox_fail_counts.get(fname, 0) + 1
+                        count = _outbox_fail_counts[fname]
+                        log.error(f"Sweep: failed to process {filepath.name} (attempt {count}/5): {e}")
+                        if count >= 5:
+                            dest = DEAD_LETTER_DIR / filepath.name
+                            shutil.move(fname, str(dest))
+                            _outbox_fail_counts.pop(fname, None)
+                            log.error(f"Moved to dead-letter after 5 failures: {filepath.name}")
         except Exception as e:
             log.error(f"Outbox sweep error: {e}")
 
@@ -1504,7 +1517,7 @@ async def run_bot():
     log.info("Watching outbox for replies...")
 
     # Create bot application
-    bot_app = Application.builder().token(BOT_TOKEN).build()
+    bot_app = Application.builder().token(BOT_TOKEN).write_timeout(30).build()
 
     # Add handlers
     bot_app.add_handler(CommandHandler("start", start_command))
