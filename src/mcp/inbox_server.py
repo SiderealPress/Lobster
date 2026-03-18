@@ -15,6 +15,7 @@ import json
 import logging
 from logging.handlers import RotatingFileHandler
 import os
+import re
 import socket
 import sys
 import time
@@ -60,7 +61,6 @@ import agents.session_store as _session_store
 from skill_manager import (
     list_available_skills as _list_available_skills,
     get_skill_context as _get_skill_context,
-    get_active_skills as _get_active_skills,
     activate_skill as _activate_skill,
     deactivate_skill as _deactivate_skill,
     get_skill_preferences as _get_skill_preferences,
@@ -354,9 +354,7 @@ def _emit_debug_observation(
 # ---------------------------------------------------------------------------
 # User model context injection heuristic
 # ---------------------------------------------------------------------------
-import re as _re
-
-_USER_CONTEXT_TRIGGERS = _re.compile(
+_USER_CONTEXT_TRIGGERS = re.compile(
     r'(?i)(?:'
     r'(?:what|where)\s+should\s+i'             # "what should I focus on"
     r'|priorit(?:y|ies|ize)'                    # priorities
@@ -4528,8 +4526,7 @@ async def handle_fetch_page(args: dict) -> list[TextContent]:
             # Clean up the text
             if text_content:
                 # Remove excessive whitespace/newlines
-                import re as re_mod
-                text_content = re_mod.sub(r'\n{3,}', '\n\n', text_content)
+                text_content = re.sub(r'\n{3,}', '\n\n', text_content)
                 text_content = text_content.strip()
 
                 # Truncate if very long
@@ -4558,7 +4555,6 @@ async def handle_fetch_page(args: dict) -> list[TextContent]:
 # =============================================================================
 
 import subprocess
-import re
 
 
 def load_scheduled_jobs() -> dict:
@@ -5868,7 +5864,6 @@ async def handle_get_brain_dump_status(args: dict) -> list[TextContent]:
     for comment in comments:
         body = comment.get("body", "")
         # Look for patterns like "Action item created: #123" or "#{number}"
-        import re
         matches = re.findall(r"Action item created: #(\d+)", body)
         action_items.extend([int(m) for m in matches])
 
