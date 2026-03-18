@@ -1043,7 +1043,7 @@ async def _emit_reaction_signal(
         try:
             await bot_app.bot.send_message(
                 chat_id=chat_id,
-                text=f"Reaction received: {emoji}",
+                text="📨 Message received. Processing...",
             )
         except Exception as e:
             log.warning(f"Failed to send reaction ack: {e}")
