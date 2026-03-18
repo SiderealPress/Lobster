@@ -1007,6 +1007,15 @@ async def list_tools() -> list[Tool]:
                         "description": "Maximum number of messages to return. Default 10.",
                         "default": 10,
                     },
+                    "since_ts": {
+                        "type": "string",
+                        "description": (
+                            "ISO 8601 UTC timestamp (e.g. '2026-01-01T12:00:00Z'). "
+                            "When provided, only messages with a timestamp >= since_ts are returned. "
+                            "Applies to processed/ and inbox/ directories. "
+                            "Useful for catch-up agents that need to scan history after compaction."
+                        ),
+                    },
                 },
             },
         ),
@@ -3130,47 +3139,119 @@ def _enqueue_recovery_notification(msg: dict) -> None:
         log.error(f"subagent_recovered: failed to enqueue recovery notification: {exc}", exc_info=True)
 
 
+def _parse_iso_timestamp(ts: str) -> float | None:
+    """
+    Parse an ISO 8601 UTC timestamp string to a Unix epoch float.
+
+    Accepts formats like '2026-01-01T12:00:00Z', '2026-01-01T12:00:00+00:00',
+    and '2026-01-01T12:00:00.000000'. Returns None if parsing fails.
+    """
+    if not ts:
+        return None
+    # Normalise: replace trailing Z with +00:00 for fromisoformat compat
+    normalised = ts.strip().replace("Z", "+00:00")
+    # If no timezone offset is present, assume UTC
+    if "+" not in normalised and normalised.count("-") < 3:
+        normalised = normalised + "+00:00"
+    try:
+        from datetime import datetime, timezone as _tz
+        dt = datetime.fromisoformat(normalised)
+        # Ensure timezone-aware; treat naive as UTC
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=_tz.utc)
+        return dt.timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
 async def handle_check_inbox(args: dict) -> list[TextContent]:
-    """Check for new messages in inbox."""
+    """Check for new messages in inbox.
+
+    When since_ts is provided, scans both inbox/ and processed/ directories
+    for messages with timestamp >= since_ts. This mode is designed for catch-up
+    agents that need to recover context after compaction. The limit still applies
+    to the combined result set.
+    """
     source_filter = args.get("source", "").lower()
     limit = args.get("limit", 10)
+    since_ts_str = args.get("since_ts", "")
+    since_epoch = _parse_iso_timestamp(since_ts_str) if since_ts_str else None
 
     messages = []
-    for f in sorted(INBOX_DIR.glob("*.json")):
-        try:
-            with open(f) as fp:
-                msg = json.load(fp)
+
+    if since_epoch is not None:
+        # Historical scan mode: read from both processed/ and inbox/, sorted by timestamp.
+        # Skip dispatcher-internal system subtypes that are not useful for catch-up context.
+        _CATCHUP_EXCLUDED_SUBTYPES = frozenset({
+            "self_check",
+            "compact-reminder",
+            "compact_catchup",
+            "subagent_notification",
+        })
+
+        all_files = sorted(
+            list(PROCESSED_DIR.glob("*.json")) + list(INBOX_DIR.glob("*.json"))
+        )
+        for f in all_files:
+            try:
+                with open(f) as fp:
+                    msg = json.load(fp)
+                ts_str = msg.get("timestamp", "")
+                msg_epoch = _parse_iso_timestamp(ts_str)
+                if msg_epoch is None or msg_epoch < since_epoch:
+                    continue
                 if source_filter and msg.get("source", "").lower() != source_filter:
                     continue
-                # /report slash command pre-processor: handle automatically without
-                # surfacing the raw message to the main dispatcher loop.
-                msg_text = msg.get("text", "")
-                if _is_report_command(msg_text):
-                    try:
-                        await _handle_report_slash_command(msg, f)
-                    except Exception as exc:
-                        log.error(f"check_inbox: /report pre-processor error: {exc}", exc_info=True)
-                    continue  # skip — already handled
-                # subagent_recovered pre-processor: enqueue an owner notification so the
-                # user is informed about the failed agent. The raw recovery message still
-                # flows through to the dispatcher (with a dispatcher_hint) so it can call
-                # mark_processed — but the salvaged dump is never relayed directly.
-                if msg.get("type") == "subagent_recovered":
-                    try:
-                        _enqueue_recovery_notification(msg)
-                    except Exception as exc:
-                        log.error(f"check_inbox: subagent_recovered pre-processor error: {exc}", exc_info=True)
+                if msg.get("subtype") in _CATCHUP_EXCLUDED_SUBTYPES:
+                    continue
                 msg["_filename"] = f.name
+                msg["_directory"] = f.parent.name  # "inbox" or "processed"
                 messages.append(msg)
                 if len(messages) >= limit:
                     break
-        except Exception as e:
-            continue
+            except Exception:
+                continue
 
-    if not messages:
-        return [TextContent(type="text", text="📭 No new messages in inbox.")]
+        if not messages:
+            return [TextContent(type="text", text=f"📭 No messages found since {since_ts_str}.")]
 
-    log.info(f"check_inbox returning {len(messages)} message(s)")
+        log.info(f"check_inbox (since_ts={since_ts_str!r}) returning {len(messages)} message(s)")
+    else:
+        for f in sorted(INBOX_DIR.glob("*.json")):
+            try:
+                with open(f) as fp:
+                    msg = json.load(fp)
+                    if source_filter and msg.get("source", "").lower() != source_filter:
+                        continue
+                    # /report slash command pre-processor: handle automatically without
+                    # surfacing the raw message to the main dispatcher loop.
+                    msg_text = msg.get("text", "")
+                    if _is_report_command(msg_text):
+                        try:
+                            await _handle_report_slash_command(msg, f)
+                        except Exception as exc:
+                            log.error(f"check_inbox: /report pre-processor error: {exc}", exc_info=True)
+                        continue  # skip — already handled
+                    # subagent_recovered pre-processor: enqueue an owner notification so the
+                    # user is informed about the failed agent. The raw recovery message still
+                    # flows through to the dispatcher (with a dispatcher_hint) so it can call
+                    # mark_processed — but the salvaged dump is never relayed directly.
+                    if msg.get("type") == "subagent_recovered":
+                        try:
+                            _enqueue_recovery_notification(msg)
+                        except Exception as exc:
+                            log.error(f"check_inbox: subagent_recovered pre-processor error: {exc}", exc_info=True)
+                    msg["_filename"] = f.name
+                    messages.append(msg)
+                    if len(messages) >= limit:
+                        break
+            except Exception as e:
+                continue
+
+        if not messages:
+            return [TextContent(type="text", text="📭 No new messages in inbox.")]
+
+        log.info(f"check_inbox returning {len(messages)} message(s)")
 
     # Format messages nicely
     output = f"📬 **{len(messages)} new message(s):**\n\n"

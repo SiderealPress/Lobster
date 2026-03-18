@@ -16,6 +16,8 @@ notification reaches the user per compaction event.
 
 State: always writes compacted_at to lobster-state.json so that the health
 check can suppress stale-inbox false-positives during the compaction pause.
+Also writes last_compaction_ts to compaction-state.json so that the catch-up
+subagent knows which window of history to recover after compaction.
 
 Dispatcher-only: exits immediately for subagent sessions (detected via
 session_role.is_dispatcher()). Subagent compactions must not write compact-
@@ -42,6 +44,13 @@ STATE_FILE = Path(
         os.path.expanduser("~/messages/config/lobster-state.json"),
     )
 )
+# Compaction state: records last_compaction_ts for catch-up subagent windowing.
+COMPACTION_STATE_FILE = Path(
+    os.environ.get(
+        "LOBSTER_COMPACTION_STATE_FILE_OVERRIDE",
+        os.path.expanduser("~/lobster-workspace/data/compaction-state.json"),
+    )
+)
 
 REMINDER_TEXT = (
     "COMPACT REMINDER \u2014 RE-ORIENT NOW\n\n"
@@ -55,7 +64,9 @@ REMINDER_TEXT = (
     "  \u2190 dispatcher instructions, main loop, 7-second rule\n"
     "2. ~/lobster-user-config/memory/canonical/handoff.md\n"
     "  \u2190 active projects, key people, priorities\n\n"
-    "After reading: resume your main loop by calling wait_for_messages()."
+    "After reading: spawn the compact_catchup subagent to recover context from the\n"
+    "last ~30 minutes (see sys.dispatcher.bootup.md \u2192 'Handling compact-reminder').\n"
+    "Then resume your main loop by calling wait_for_messages()."
 )
 
 SENTINEL_FILE = Path(os.path.expanduser("~/messages/config/compact-pending"))
@@ -122,6 +133,33 @@ def write_sentinel() -> None:
     try:
         SENTINEL_FILE.parent.mkdir(parents=True, exist_ok=True)
         SENTINEL_FILE.touch()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def write_compaction_state() -> None:
+    """
+    Write last_compaction_ts to compaction-state.json.
+
+    This timestamp is used by the compact_catchup subagent to determine the
+    query window: it fetches messages since max(last_compaction_ts,
+    last_restart_ts, last_catchup_ts) to avoid duplicating history across
+    multiple rapid compaction or restart events.
+
+    Silent on any failure — must never crash the hook.
+    """
+    try:
+        COMPACTION_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        state: dict = {}
+        if COMPACTION_STATE_FILE.exists():
+            try:
+                state = json.loads(COMPACTION_STATE_FILE.read_text())
+            except (json.JSONDecodeError, OSError):
+                state = {}
+        state["last_compaction_ts"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        tmp_path = COMPACTION_STATE_FILE.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(state, indent=2) + "\n")
+        tmp_path.replace(COMPACTION_STATE_FILE)  # atomic on Linux (same filesystem)
     except Exception:  # noqa: BLE001
         pass
 
@@ -242,6 +280,11 @@ def main() -> None:
     # compactions.  The health check reads this to suppress false-positive
     # "stale inbox" restarts during any compaction pause window.
     write_compacted_at()
+
+    # Always record last_compaction_ts for the catch-up subagent, regardless
+    # of whether this is a dispatcher or subagent compaction.  The catch-up
+    # subagent uses this to define its query window on next spawn.
+    write_compaction_state()
 
     # Always send the Telegram notification for any compaction (dispatcher or
     # subagent).  This must fire even for the dispatcher compact, where
