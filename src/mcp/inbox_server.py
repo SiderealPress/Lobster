@@ -5559,6 +5559,65 @@ async def handle_mark_processing(args: dict) -> list[TextContent]:
             # this is the common case and emitting on every no-match is pure noise.
             pass
 
+    # Stamp _processing_started_at so stale detection uses actual claim time, not file mtime.
+    try:
+        msg_data["_processing_started_at"] = datetime.now(timezone.utc).isoformat()
+        atomic_write_json(dest, msg_data)
+    except Exception:
+        pass  # non-fatal; stale recovery falls back to mtime
+
+    log.info(f"Message claimed for processing: {message_id}")
+    return [TextContent(type="text", text=f"Message claimed: {message_id}{context_block}")]
+
+
+async def handle_claim_and_ack(args: dict) -> list[TextContent]:
+    """Atomically claim a message for processing and send an acknowledgement reply.
+
+    Combines mark_processing + send_reply in a single call, eliminating the
+    window between claiming a message and notifying the user. If the claim step
+    fails (message not found or already claimed), the ack is never sent.
+    If the ack fails after claiming, the message remains in processing/ and
+    stale recovery handles it.
+    """
+    message_id = validate_message_id(args.get("message_id", ""))
+
+    # --- Step 1: Claim the message (must succeed before sending ack) ---
+    found = _find_message_file(INBOX_DIR, message_id)
+    if not found:
+        return [TextContent(type="text", text=f"Error: Message not found in inbox: {message_id}")]
+
+    # Read message content before moving (for observation queue + timestamp)
+    try:
+        msg_data = json.loads(found.read_text())
+    except Exception:
+        msg_data = {}
+
+    # Stamp actual processing start time so stale detection uses it
+    msg_data["_processing_started_at"] = datetime.now(timezone.utc).isoformat()
+
+    # Atomic move to processing/
+    dest = PROCESSING_DIR / found.name
+    found.rename(dest)
+
+    # Write the updated JSON (with timestamp) to the processing file
+    try:
+        atomic_write_json(dest, msg_data)
+    except Exception:
+        pass  # non-fatal; stale recovery falls back to mtime
+
+    # Queue background observation (non-blocking, best-effort)
+    msg_text = msg_data.get("text", "") or msg_data.get("transcription", "")
+    msg_type = msg_data.get("type", "")
+    _SKIP_OBSERVATION_TYPES = (
+        "subagent_result", "subagent_error", "self_check", "subagent_observation"
+    )
+    if msg_text and msg_type not in _SKIP_OBSERVATION_TYPES:
+        _queue_observation(
+            msg_text, message_id,
+            source=msg_data.get("source"),
+            ts=msg_data.get("timestamp"),
+        )
+
     log.info(f"claim_and_ack: message claimed: {message_id}")
 
     # --- Step 2: Send the ack reply ---
