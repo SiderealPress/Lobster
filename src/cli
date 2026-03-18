@@ -122,6 +122,18 @@ cmd_stop() {
     pkill -u lobster -f 'claude-persistent.sh' 2>/dev/null || true
     pkill -u lobster -f 'claude-wrapper.exp' 2>/dev/null || true
 
+    # Clear the dispatcher session ID marker so the next SessionStart hook
+    # recognises the new dispatcher session as fresh rather than treating it as
+    # a subagent for the ~25-minute window before transcript evidence accumulates.
+    # Guard against MESSAGES_DIR being empty to avoid targeting /config/dispatcher-session-id.
+    if [[ -n "$MESSAGES_DIR" ]]; then
+        local dispatcher_session_file="$MESSAGES_DIR/config/dispatcher-session-id"
+        if [[ -f "$dispatcher_session_file" ]]; then
+            rm -f "$dispatcher_session_file"
+            echo -e "Dispatcher session marker cleared"
+        fi
+    fi
+
     # Set maintenance flag so health check doesn't restart services
     mkdir -p "$(dirname "$MAINTENANCE_FLAG")"
     echo "stopped_at=$(date -Iseconds) stopped_by=$(whoami)" > "$MAINTENANCE_FLAG"
@@ -168,6 +180,11 @@ cmd_restart() {
             echo -e "${YELLOW}not running${NC}"
         fi
     done
+
+    # Clear dispatcher session ID so the next start is recognised as a fresh
+    # dispatcher (same reasoning as in cmd_stop).
+    # Guard against MESSAGES_DIR being empty to avoid targeting /config/dispatcher-session-id.
+    [[ -n "$MESSAGES_DIR" ]] && rm -f "$MESSAGES_DIR/config/dispatcher-session-id" 2>/dev/null || true
 
     echo ""
     echo -e "${GREEN}Services stopped. Start scheduled in ~2s (lobster-restart-oneshot).${NC}"
