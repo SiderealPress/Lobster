@@ -1324,6 +1324,56 @@ with open(path, 'w') as f:
         fi
     fi
 
+    # Migration 21: Register missing system-file-protect and require-auditor-context-update hooks
+    # install.sh used a fragile matcher-equality check (.matcher == "Edit|Write|NotebookEdit")
+    # to detect if the hook was already installed. This check matched on the matcher string
+    # rather than the command, so the hook was silently skipped on installs where settings.json
+    # was created by Claude Code after install.sh ran. Both hooks are absent from live settings.json
+    # on affected systems. Add them now if missing.
+    if [ -f "$CLAUDE_SETTINGS" ] && command -v jq >/dev/null 2>&1; then
+        # Add system-file-protect PreToolUse hook if missing
+        local has_file_protect
+        has_file_protect=$(jq -r '
+            [.hooks.PreToolUse[]?.hooks[]?.command // empty]
+            | map(select(contains("system-file-protect")))
+            | length
+        ' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
+        if [ "${has_file_protect:-0}" = "0" ] || [ "${has_file_protect:-0}" = "" ]; then
+            TMP_SETTINGS=$(mktemp)
+            jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+                "matcher": "Edit|Write|NotebookEdit",
+                "hooks": [{
+                    "type": "command",
+                    "command": "python3 '"$INSTALL_DIR"'/hooks/system-file-protect.py",
+                    "timeout": 5
+                }]
+            }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+            substep "Registered missing system-file-protect PreToolUse hook"
+            migrated=$((migrated + 1))
+        fi
+
+        # Add require-auditor-context-update SubagentStop hook if missing
+        local has_auditor
+        has_auditor=$(jq -r '
+            [.hooks.SubagentStop[]?.hooks[]?.command // empty]
+            | map(select(contains("require-auditor-context-update")))
+            | length
+        ' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
+        if [ "${has_auditor:-0}" = "0" ] || [ "${has_auditor:-0}" = "" ]; then
+            TMP_SETTINGS=$(mktemp)
+            jq '.hooks.SubagentStop = (.hooks.SubagentStop // []) + [{
+                "matcher": "",
+                "hooks": [{
+                    "type": "command",
+                    "command": "python3 '"$INSTALL_DIR"'/hooks/require-auditor-context-update.py",
+                    "timeout": 10
+                }]
+            }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+            substep "Registered missing require-auditor-context-update SubagentStop hook"
+            migrated=$((migrated + 1))
+        fi
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
