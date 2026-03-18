@@ -27,7 +27,7 @@ INBOX_USER_TYPES: frozenset[str] = frozenset({
     "sticker",    # sticker message
     "location",   # location pin
     "callback",   # inline keyboard button press
-    "reaction",   # Telegram emoji reaction (fields: emoji, signal, reacted_to_text, telegram_message_id)
+    "reaction",   # Telegram emoji reaction (fields: emoji, reacted_to_text, telegram_message_id)
 })
 
 # ---------------------------------------------------------------------------
