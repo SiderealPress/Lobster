@@ -845,6 +845,7 @@ _SESSION_GUARDED_TOOLS = frozenset({
     "mark_processed",
     "mark_processing",
     "mark_failed",
+    "claim_and_ack",
 })
 
 
@@ -1167,6 +1168,68 @@ async def list_tools() -> list[Tool]:
                     },
                 },
                 "required": ["message_id"],
+            },
+        ),
+        Tool(
+            name="claim_and_ack",
+            description=(
+                "Atomically claim a message for processing and send an acknowledgement reply. "
+                "Preferred over separate mark_processing + send_reply calls for long-running tasks: "
+                "the user is notified in the same operation as the claim, so a crash after this call "
+                "means the user already received the ack. "
+                "If the message is not found in inbox/ (already claimed or missing), returns an error "
+                "without sending the ack. If the ack send fails after claiming, the message stays in "
+                "processing/ and stale recovery handles it."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "message_id": {
+                        "type": "string",
+                        "description": "The message ID to claim (must be in inbox/).",
+                    },
+                    "ack_text": {
+                        "type": "string",
+                        "description": "The acknowledgement text to send to the user (e.g. 'On it.').",
+                    },
+                    "chat_id": {
+                        "oneOf": [
+                            {"type": "integer"},
+                            {"type": "string"},
+                        ],
+                        "description": "The chat/channel ID to send the ack to (from the original message).",
+                    },
+                    "source": {
+                        "type": "string",
+                        "description": "The source to reply via (telegram, slack, etc.). Default: telegram.",
+                        "default": "telegram",
+                    },
+                    "reply_to_message_id": {
+                        "type": "integer",
+                        "description": "Telegram message ID to thread the ack against (Telegram only).",
+                    },
+                    "buttons": {
+                        "type": "array",
+                        "description": "Optional inline keyboard buttons (Telegram only). Same format as send_reply.",
+                        "items": {
+                            "type": "array",
+                            "items": {
+                                "oneOf": [
+                                    {"type": "string"},
+                                    {
+                                        "type": "object",
+                                        "properties": {
+                                            "text": {"type": "string"},
+                                            "callback_data": {"type": "string"},
+                                        },
+                                        "required": ["text"],
+                                    },
+                                ]
+                            },
+                        },
+                    },
+                },
+                "required": ["message_id", "ack_text", "chat_id"],
             },
         ),
         Tool(
@@ -2497,6 +2560,8 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
         return await handle_mark_processed(arguments)
     elif name == "mark_processing":
         return await handle_mark_processing(arguments)
+    elif name == "claim_and_ack":
+        return await handle_claim_and_ack(arguments)
     elif name == "mark_failed":
         return await handle_mark_failed(arguments)
     elif name == "list_sources":
@@ -3564,8 +3629,100 @@ async def handle_mark_processing(args: dict) -> list[TextContent]:
             # this is the common case and emitting on every no-match is pure noise.
             pass
 
+    # Stamp _processing_started_at so stale detection uses actual claim time, not file mtime.
+    try:
+        msg_data["_processing_started_at"] = datetime.now(timezone.utc).isoformat()
+        atomic_write_json(dest, msg_data)
+    except Exception:
+        pass  # non-fatal; stale recovery falls back to mtime
+
     log.info(f"Message claimed for processing: {message_id}")
     return [TextContent(type="text", text=f"Message claimed: {message_id}{context_block}")]
+
+
+async def handle_claim_and_ack(args: dict) -> list[TextContent]:
+    """Atomically claim a message for processing and send an acknowledgement reply.
+
+    Combines mark_processing + send_reply in a single call, eliminating the
+    window between claiming a message and notifying the user. If the claim step
+    fails (message not found or already claimed), the ack is never sent.
+    If the ack fails after claiming, the message remains in processing/ and
+    stale recovery handles it.
+    """
+    message_id = validate_message_id(args.get("message_id", ""))
+
+    # --- Step 1: Claim the message (must succeed before sending ack) ---
+    found = _find_message_file(INBOX_DIR, message_id)
+    if not found:
+        return [TextContent(type="text", text=f"Error: Message not found in inbox: {message_id}")]
+
+    # Read message content before moving (for observation queue + timestamp)
+    try:
+        msg_data = json.loads(found.read_text())
+    except Exception:
+        msg_data = {}
+
+    # Stamp actual processing start time so stale detection uses it
+    msg_data["_processing_started_at"] = datetime.now(timezone.utc).isoformat()
+
+    # Atomic move to processing/
+    dest = PROCESSING_DIR / found.name
+    found.rename(dest)
+
+    # Write the updated JSON (with timestamp) to the processing file
+    try:
+        atomic_write_json(dest, msg_data)
+    except Exception:
+        pass  # non-fatal; stale recovery falls back to mtime
+
+    # Queue background observation (non-blocking, best-effort)
+    msg_text = msg_data.get("text", "") or msg_data.get("transcription", "")
+    msg_type = msg_data.get("type", "")
+    _SKIP_OBSERVATION_TYPES = (
+        "subagent_result", "subagent_error", "self_check", "subagent_observation"
+    )
+    if msg_text and msg_type not in _SKIP_OBSERVATION_TYPES:
+        _queue_observation(
+            msg_text, message_id,
+            source=msg_data.get("source"),
+            ts=msg_data.get("timestamp"),
+        )
+
+    log.info(f"claim_and_ack: message claimed: {message_id}")
+
+    # --- Step 2: Send the ack reply ---
+    ack_args = {
+        "chat_id": args["chat_id"],
+        "text": args["ack_text"],
+        "source": args.get("source", "telegram"),
+    }
+    if args.get("reply_to_message_id") is not None:
+        ack_args["reply_to_message_id"] = args["reply_to_message_id"]
+    if args.get("buttons") is not None:
+        ack_args["buttons"] = args["buttons"]
+
+    try:
+        ack_result = await handle_send_reply(ack_args)
+        ack_text_preview = args["ack_text"][:100]
+        ack_suffix = "..." if len(args["ack_text"]) > 100 else ""
+        log.info(f"claim_and_ack: ack sent to chat {args['chat_id']}")
+        return [TextContent(
+            type="text",
+            text=(
+                f"Claimed and acked: {message_id}\n\n"
+                f"Ack: {ack_text_preview}{ack_suffix}"
+            ),
+        )]
+    except Exception as e:
+        # Ack failed — message stays in processing/, stale recovery handles it
+        log.warning(f"claim_and_ack: ack failed (message stays in processing/): {e}")
+        return [TextContent(
+            type="text",
+            text=(
+                f"Warning: message claimed but ack send failed: {e}\n"
+                f"Message {message_id} remains in processing/. Stale recovery will handle it."
+            ),
+        )]
 
 
 async def handle_mark_failed(args: dict) -> list[TextContent]:
