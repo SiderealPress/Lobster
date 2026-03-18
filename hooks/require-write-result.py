@@ -436,6 +436,7 @@ def _write_synthetic_inbox_message(
         pass  # Never block exit on fallback emit failure
 
 
+
 def main():
     try:
         data = json.load(sys.stdin)
