@@ -9,9 +9,19 @@ to be shared across multiple services, scripts, and CLI tools on the same machin
 ~/lobster-config/global.env
 ```
 
-This file lives in your personal Lobster config directory (`$LOBSTER_CONFIG_DIR`,
+This file lives in your private Lobster config directory (`$LOBSTER_CONFIG_DIR`,
 which defaults to `~/lobster-config/`). It is **never committed to any repository**
 and should have restricted file permissions (`600`).
+
+> **Directory layout note:** Lobster uses two separate directories with distinct purposes:
+>
+> - `~/lobster-config/` (`$LOBSTER_CONFIG_DIR`) — Private credentials and config overlay.
+>   Contains `global.env` (API tokens), `config.env` (Lobster service config), and any
+>   private overrides applied during install.
+> - `~/lobster-user-config/` (`$LOBSTER_USER_CONFIG`) — User-visible behavioral config.
+>   Contains agent bootup files, memory, and context files that shape how Lobster behaves.
+>
+> `global.env` belongs in `~/lobster-config/`, not `~/lobster-user-config/`.
 
 ## Format
 
