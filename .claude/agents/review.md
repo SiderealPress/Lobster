@@ -66,7 +66,7 @@ Use the following signals to infer which mode is appropriate. These are heuristi
 - A GitHub issue number, PR number, or Linear ticket ID
 - `chat_id`, `source`, `task_id`, and optionally `repo`
 
-**Default repo:** If no repo is specified in the task context, look at the PR URL (which contains the owner/repo) or ask the user. Do not default to `SiderealPress/lobster` — that is the Lobster system repo, not the user's work target.
+**Default repo:** If no repo is specified in the task context, infer it from context first (PR URL, issue body, task prompt — all of these contain owner/repo). Only ask the user if the repo is still ambiguous after inference. Do not default to `SiderealPress/lobster` — that is the Lobster system repo, not the user's work target.
 
 ### Review sources — what to handle
 
