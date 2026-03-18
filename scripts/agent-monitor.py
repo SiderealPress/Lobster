@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Ghost agent detector — finds agents that may have died without calling write_result.
+"""Agent monitor — detects stale, dead, and stuck agents that never called write_result.
 
 A "ghost agent" is a background subagent registered in agent_sessions.db with
 status=running that never completed (never called write_result). This tool
@@ -15,12 +15,12 @@ called. These are reported but NOT corrected — if they appear, it means the
 SubagentStop hook (PR #418) isn't working. Auto-correcting would hide the bug.
 
 Usage:
-    uv run scripts/ghost-detector.py
-    uv run scripts/ghost-detector.py --threshold-minutes 60
-    uv run scripts/ghost-detector.py --output-file-threshold-minutes 5
-    uv run scripts/ghost-detector.py --alert
-    uv run scripts/ghost-detector.py --mark-failed
-    uv run scripts/ghost-detector.py --no-fs-scan
+    uv run scripts/agent-monitor.py
+    uv run scripts/agent-monitor.py --threshold-minutes 60
+    uv run scripts/agent-monitor.py --output-file-threshold-minutes 5
+    uv run scripts/agent-monitor.py --alert
+    uv run scripts/agent-monitor.py --mark-failed
+    uv run scripts/agent-monitor.py --no-fs-scan
 
 Exit codes:
     0 — no GHOST_CONFIRMED or UNREGISTERED agents found
@@ -568,7 +568,7 @@ def send_alert(
     alert_text = (
         "Ghost agent alert:\n\n"
         + "\n\n".join(parts)
-        + "\n\nRun `uv run scripts/ghost-detector.py` for full report."
+        + "\n\nRun `uv run scripts/agent-monitor.py` for full report."
     )
 
     # The MCP server is not available as a subprocess; use the lobster-inbox
@@ -649,7 +649,7 @@ def mark_agent_completed(db_path: Path, agent_id: str) -> None:
     try:
         conn.execute(
             "UPDATE agent_sessions SET status='completed', result_summary=? WHERE id=?",
-            ("auto-corrected by ghost-detector: transcript confirmed write_result was called", agent_id),
+            ("auto-corrected by agent-monitor: transcript confirmed write_result was called", agent_id),
         )
         conn.commit()
     finally:
@@ -662,7 +662,7 @@ def mark_agent_failed(db_path: Path, agent_id: str) -> None:
     try:
         conn.execute(
             "UPDATE agent_sessions SET status='failed', result_summary=? WHERE id=?",
-            ("marked failed by ghost-detector --mark-failed", agent_id),
+            ("marked failed by agent-monitor --mark-failed", agent_id),
         )
         conn.commit()
     finally:
@@ -712,7 +712,7 @@ def build_mark_failed_inbox_message(agent: ClassifiedAgent) -> dict:
         "text": (
             f"Ghost agent detected and marked failed: '{desc}'\n"
             f"Agent age: {age_str} | Last output: {file_age_str} ago\n"
-            f"Detected by ghost-detector.py. Dispatcher should decide whether to re-queue."
+            f"Detected by agent-monitor.py. Dispatcher should decide whether to re-queue."
         ),
         "task_id": f"ghost-mark-failed-{short_id}",
         "agent_id": agent_id,
@@ -765,7 +765,7 @@ def build_unregistered_mark_failed_payload(agent: UnregisteredAgent) -> dict:
         "source": "system",
         "chat_id": 0,
         "text": (
-            f"Unregistered dead agent {agent.agent_id} detected by ghost-detector.py. "
+            f"Unregistered dead agent {agent.agent_id} detected by agent-monitor.py. "
             f"Output file last modified {agent.output_file_age_minutes:.0f}m ago. "
             f"This agent was never registered in agent_sessions.db — likely a registration failure."
         ),
@@ -849,7 +849,7 @@ def mark_failed_unregistered_dead(unregistered: list[UnregisteredAgent]) -> None
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Detect ghost agents — running sessions that never called write_result.",
+        description="Agent monitor — detect stale, dead, and stuck agents that never called write_result.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
