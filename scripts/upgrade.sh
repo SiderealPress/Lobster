@@ -1191,7 +1191,7 @@ run_migrations() {
         migrated=$((migrated + 1))
     fi
 
-    # Migration 14: Remove orphan agents.db files — stale empty files not used by any code
+    # Migration 15: Remove orphan agents.db files — stale empty files not used by any code
     # (real session store is agent_sessions.db in ~/messages/config/ and ~/lobster-workspace/data/)
     if [ -f "$MESSAGES_DIR/config/agents.db" ]; then
         rm -f "$MESSAGES_DIR/config/agents.db"
@@ -1204,7 +1204,7 @@ run_migrations() {
         migrated=$((migrated + 1))
     fi
 
-    # Migration 15: Ensure messages/config/ directory exists for lobster-state.json
+    # Migration 16: Ensure messages/config/ directory exists for lobster-state.json
     # lobster-state.json lives in messages/config/ and is used by multiple features
     # (compaction suppression, boot grace period). This directory is created by
     # Migration 4 on new installs, but this step ensures it exists on any install
@@ -1216,7 +1216,7 @@ run_migrations() {
         migrated=$((migrated + 1))
     fi
 
-    # Migration 16: Ensure lobster-state.json has a booted_at field.
+    # Migration 17: Ensure lobster-state.json has a booted_at field.
     # Fresh installs before this fix never wrote an initial lobster-state.json,
     # so is_boot_grace_period() in health-check-v3.sh always returned false on
     # first start — the grace window never applied and the health check fired
@@ -1259,7 +1259,7 @@ with open(path, 'w') as f:
         migrated=$((migrated + 1))
     fi
 
-    # Migration 14: Ensure periodic-self-check.sh cron entry exists
+    # Migration 18: Ensure periodic-self-check.sh cron entry exists
     # The cron entry was added to install.sh in commit 420903e but was never
     # backfilled as a migration. Existing installs are missing the entry,
     # so the self-check system (background agent completion checks) never fires.
@@ -1274,7 +1274,7 @@ with open(path, 'w') as f:
         migrated=$((migrated + 1))
     fi
 
-    # Migration 17: Remove require-write-result.py from the Stop hook in settings.json
+    # Migration 19: Remove require-write-result.py from the Stop hook in settings.json
     # The Stop event fires for the dispatcher main session; SubagentStop fires for
     # Task-spawned subagents — they are mutually exclusive. The hook was incorrectly
     # registered under Stop (which hit the dispatcher) as well as SubagentStop.
@@ -1301,6 +1301,25 @@ with open(path, 'w') as f:
             ' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
             substep "Removed require-write-result.py from Stop hook (was mis-registered; SubagentStop entry kept)"
             migrated=$((migrated + 1))
+        fi
+    fi
+
+    # Migration 20: Fix sqlite-vec aarch64 ELFCLASS32 bug (0.1.6 ships a 32-bit ARM .so)
+    # sqlite-vec 0.1.6 manylinux_aarch64 wheel incorrectly bundles a 32-bit ARM binary.
+    # Installs that ran `uv sync` before this fix will have the broken wheel. Detect the
+    # failure and reinstall to >=0.1.7a1 which ships a proper 64-bit aarch64 binary.
+    if ! "$VENV_DIR/bin/python" -c \
+        "import sqlite3, sqlite_vec; c=sqlite3.connect(':memory:'); c.enable_load_extension(True); sqlite_vec.load(c)" \
+        2>/dev/null; then
+        substep "sqlite-vec fails to load — reinstalling (fixes aarch64 ELFCLASS32 regression in 0.1.6)..."
+        uv pip install --quiet "sqlite-vec>=0.1.7a1" 2>/dev/null || true
+        if "$VENV_DIR/bin/python" -c \
+            "import sqlite3, sqlite_vec; c=sqlite3.connect(':memory:'); c.enable_load_extension(True); sqlite_vec.load(c)" \
+            2>/dev/null; then
+            success "sqlite-vec reinstalled and loads correctly (semantic memory restored)"
+            migrated=$((migrated + 1))
+        else
+            warn "sqlite-vec reinstall failed — semantic memory search will be unavailable"
         fi
     fi
 
