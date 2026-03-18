@@ -310,8 +310,11 @@ class TestBuildUnregisteredMarkFailedPayload:
             is_active=False,
         )
         payload = gd.build_unregistered_mark_failed_payload(agent)
-        assert payload["type"] == "subagent_result"
-        assert payload["forward"] is True
+        # issue #669: must use agent_failed (not subagent_result) routed to dispatcher
+        assert payload["type"] == "agent_failed"
+        assert payload["source"] == "system"
+        assert payload["chat_id"] == 0
+        assert payload.get("forward") is not True  # must not be forwarded to user directly
         assert "abc123def456" in payload["text"]
         assert payload["task_id"].startswith("ghost-unregistered-")
         assert "id" in payload

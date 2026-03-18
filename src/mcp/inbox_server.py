@@ -6677,13 +6677,118 @@ async def handle_list_reports(args: dict) -> list[TextContent]:
     return [TextContent(type="text", text=json.dumps(reports))]
 
 
-def _enqueue_reconciler_notification(session: dict, outcome: str) -> None:
-    """Write a synthetic subagent_result/subagent_error message to the inbox.
+def _read_last_output(output_file: str | None, max_chars: int = 500) -> str | None:
+    """Return the last `max_chars` characters of an agent output file, or None.
 
-    This triggers the dispatcher's normal message-handling loop to deliver a
-    Telegram notification to the user. Using the inbox (rather than calling
-    Telegram directly) keeps the Telegram send logic in one place and ensures
-    the notification survives a dispatcher restart (inbox is durable on disk).
+    Pure function except for filesystem read. Used to enrich agent_failed
+    notifications with enough context for the dispatcher to decide whether
+    to re-queue, escalate, or drop silently.
+    """
+    if not output_file:
+        return None
+    try:
+        path = Path(output_file).resolve()
+        if not path.exists():
+            return None
+        size = path.stat().st_size
+        with open(path, "rb") as f:
+            if size > max_chars:
+                f.seek(-max_chars, 2)
+            raw = f.read(max_chars)
+        return raw.decode("utf-8", errors="replace").strip() or None
+    except OSError:
+        return None
+
+
+def _build_reconciler_message(
+    session: dict,
+    outcome: str,
+    now: datetime,
+) -> dict:
+    """Return the inbox message payload for a reconciler notification (pure).
+
+    For 'completed' outcomes: routes to the originating chat_id so the
+    dispatcher can relay the result to the user.
+
+    For 'dead' outcomes: routes to chat_id=0 with type='agent_failed' so the
+    dispatcher treats it as an internal system event — never forwarded to the
+    user directly. The dispatcher decides whether to re-queue, escalate, or drop.
+
+    Args:
+        session: Session dict from get_active_sessions() or get_unnotified_completed().
+        outcome: 'completed' or 'dead'.
+        now:     Current UTC datetime (injected for testability).
+    """
+    agent_id = session.get("id", "")
+    description = session.get("description", "unknown task")
+    task_id = session.get("task_id") or agent_id
+    input_summary = session.get("input_summary")
+    output_file = session.get("output_file")
+
+    elapsed_raw = session.get("elapsed_seconds")
+    try:
+        elapsed = int(elapsed_raw) if elapsed_raw is not None else 0
+    except (TypeError, ValueError):
+        elapsed = 0
+    elapsed_min = elapsed // 60
+
+    ts_ms = int(now.timestamp() * 1000)
+    safe_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in agent_id)[:40]
+    message_id = f"{ts_ms}_reconciler_{safe_id}"
+
+    if outcome == "completed":
+        # Route completed notifications to the originating chat so the user sees the result.
+        return {
+            "id": message_id,
+            "type": "subagent_result",
+            "source": session.get("source", "telegram"),
+            "chat_id": session.get("chat_id", ""),
+            "text": (
+                f"Agent completed: {description}\n"
+                f"(reconciler-detected via stop_reason=end_turn, {elapsed_min}m elapsed)"
+            ),
+            "task_id": task_id,
+            "agent_id": agent_id,
+            "status": "success",
+            "sent_reply_to_user": False,
+            "timestamp": now.isoformat(),
+        }
+    else:
+        # Route failure notifications to chat_id=0 (dispatcher-internal).
+        # The dispatcher sees type='agent_failed' and decides whether to re-queue,
+        # escalate to the user, or drop silently. Never relay raw failure noise to
+        # the user's Telegram.
+        last_output = _read_last_output(output_file)
+        return {
+            "id": message_id,
+            "type": "agent_failed",
+            "source": "system",
+            "chat_id": 0,
+            "text": (
+                f"Agent failed/disappeared: {description}\n"
+                f"(no output file after {elapsed_min}m — marked dead)"
+            ),
+            "task_id": task_id,
+            "agent_id": agent_id,
+            "original_chat_id": session.get("chat_id", ""),
+            "original_prompt": input_summary,
+            "last_output": last_output,
+            "status": "error",
+            "sent_reply_to_user": False,
+            "timestamp": now.isoformat(),
+        }
+
+
+def _enqueue_reconciler_notification(session: dict, outcome: str) -> None:
+    """Write a structured inbox message for a reconciler-detected session transition.
+
+    For completed agents: routes to the originating chat so the dispatcher can
+    relay the result to the user.
+
+    For dead/failed agents: routes to chat_id=0 with type='agent_failed' so the
+    dispatcher handles it internally. Raw failure noise is never forwarded to
+    the user's Telegram — the dispatcher decides whether to re-queue, escalate,
+    or drop silently.
 
     Also marks the session as notified_at to prevent duplicate notifications
     on the next reconciler cycle.
@@ -6697,57 +6802,17 @@ def _enqueue_reconciler_notification(session: dict, outcome: str) -> None:
         return
 
     agent_id = session.get("id", "")
-    chat_id = session.get("chat_id", "")
-    description = session.get("description", "unknown task")
-    elapsed_raw = session.get("elapsed_seconds")
-    try:
-        elapsed = int(elapsed_raw) if elapsed_raw is not None else 0
-    except (TypeError, ValueError):
-        elapsed = 0
-    elapsed_min = elapsed // 60
-    source = session.get("source", "telegram")
-
-    if outcome == "completed":
-        text = (
-            f"Agent completed: {description}\n"
-            f"(reconciler-detected via stop_reason=end_turn, {elapsed_min}m elapsed)"
-        )
-        msg_type = "subagent_result"
-        status = "success"
-    else:
-        text = (
-            f"Agent timed out / disappeared: {description}\n"
-            f"(no output file after {elapsed_min}m — marked dead)"
-        )
-        msg_type = "subagent_error"
-        status = "error"
-
     now = datetime.now(timezone.utc)
-    ts_ms = int(now.timestamp() * 1000)
-    safe_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in agent_id)[:40]
-    message_id = f"{ts_ms}_reconciler_{safe_id}"
-
-    message = {
-        "id": message_id,
-        "type": msg_type,
-        "source": source,
-        "chat_id": chat_id,
-        "text": text,
-        "task_id": agent_id,
-        "agent_id": agent_id,
-        "status": status,
-        "sent_reply_to_user": False,  # reconciler hasn't sent anything directly
-        "timestamp": now.isoformat(),
-    }
+    message = _build_reconciler_message(session, outcome, now)
 
     try:
-        inbox_file = INBOX_DIR / f"{message_id}.json"
+        inbox_file = INBOX_DIR / f"{message['id']}.json"
         atomic_write_json(inbox_file, message)
         # Mark notified so duplicate notification is not sent on next cycle
         _session_store.set_notified(agent_id)
         log.info(
             f"[reconciler] Enqueued notification for agent {agent_id!r} "
-            f"(outcome={outcome!r}, inbox={message_id!r})"
+            f"(outcome={outcome!r}, type={message['type']!r}, inbox={message['id']!r})"
         )
     except Exception as exc:
         log.error(

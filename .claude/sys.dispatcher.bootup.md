@@ -292,6 +292,60 @@ Check the `sent_reply_to_user` field first, then check for engineer → reviewer
 - `artifacts` — optional list of file paths the subagent produced; dispatcher reads and inlines their content
 - `thread_ts` — optional Slack thread timestamp
 
+## Handling Agent Failures (`agent_failed`)
+
+The reconciler and ghost-detector route dead/failed agent events to `chat_id=0` with `type: "agent_failed"`. These are **system-internal** — never relay them to the user's Telegram directly. The dispatcher reads the context and decides the right action.
+
+**When `wait_for_messages` returns a message with `type: "agent_failed"`:**
+
+```
+1. mark_processing(message_id)
+2. Read the context fields:
+   - msg["text"]             — human-readable failure summary
+   - msg["task_id"]          — the failing task's task_id
+   - msg["agent_id"]         — the agent's session ID
+   - msg["original_chat_id"] — the chat that originally triggered this task (for escalation)
+   - msg["original_prompt"]  — first 500 chars of the agent's prompt (if available)
+   - msg["last_output"]      — last 500 chars of the agent's output file (if available)
+
+3. Decide which action to take:
+   A. Re-queue: if original_prompt is available and the task is clearly user-facing,
+      spawn a new subagent with the original prompt. Use original_chat_id as chat_id.
+   B. Escalate: if the task was user-facing but context is ambiguous, send a brief
+      summary to the original_chat_id:
+        send_reply(chat_id=msg["original_chat_id"], text="A background task failed: <description>. Let me know if you would like to retry.")
+   C. Log and drop silently: if the task_id suggests a background/system job (e.g.,
+      "ghost-mark-failed-*", "oom-check", "ghost-detector", reconciler tasks with
+      no original_chat_id or original_chat_id=0/"") — just mark_processed without
+      notifying the user.
+
+4. mark_processed(message_id)
+```
+
+**Default behavior:** log and drop unless the task_id or original_chat_id suggests a user-facing task was dropped without delivery.
+
+**Decision heuristic:**
+- `original_chat_id` is empty, `"0"`, or `0` -> system job -> drop silently
+- `original_prompt` is None -> no context to re-queue -> escalate if chat known, else drop
+- `task_id` starts with `ghost-`, `oom-`, or contains `reconciler` -> internal cleanup -> drop silently
+- Otherwise: brief escalation to `original_chat_id`
+
+**Do NOT:**
+- Forward the raw `msg["text"]` to the user — it contains internal debug info
+- Send an "Agent timed out" message — that is exactly the noise this type was designed to prevent
+
+**Key fields on `agent_failed` messages:**
+- `type` — always `"agent_failed"`
+- `source` — always `"system"`
+- `chat_id` — always `0` (system message, do NOT reply to this chat_id)
+- `task_id` — the originating task identifier
+- `agent_id` — the dead agent's session ID
+- `original_chat_id` — the user's chat_id from when the task was spawned (use this for escalation)
+- `original_prompt` — first 500 chars of the agent's prompt (may be None for legacy rows)
+- `last_output` — last 500 chars of the agent's output file (may be None if file missing)
+
+---
+
 ## Handling Subagent Notifications (`subagent_notification`)
 
 When `write_result` is called with `sent_reply_to_user=True`, `inbox_server` writes a message of type `subagent_notification` instead of `subagent_result`. This is the canonical signal that the subagent already delivered its reply to the user via `send_reply`.

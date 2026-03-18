@@ -196,6 +196,7 @@ def insert_agent_session(
     source: str,
     session_id: str,
     output_file: str | None,
+    input_summary: str | None,
 ) -> None:
     """Insert a 'running' row into agent_sessions.db.
 
@@ -243,10 +244,10 @@ def insert_agent_session(
             """
             INSERT OR IGNORE INTO agent_sessions
                 (id, task_id, agent_type, description, chat_id, source,
-                 status, output_file, spawned_at)
+                 status, output_file, input_summary, spawned_at)
             VALUES
                 (?, ?, 'subagent', 'auto-registered by PostToolUse hook', ?, ?,
-                 'running', ?, ?)
+                 'running', ?, ?, ?)
             """,
             (
                 agent_id,
@@ -254,6 +255,7 @@ def insert_agent_session(
                 chat_id if chat_id is not None else "0",
                 source,
                 output_file,
+                input_summary,
                 now,
             ),
         )
@@ -292,6 +294,10 @@ def main() -> None:
             # No agent ID in response -- nothing to register
             sys.exit(0)
 
+        # Store first 500 chars of the prompt as input_summary so ghost-detector
+        # and the dispatcher can reconstruct context if the agent fails.
+        input_summary = prompt[:500] if prompt else None
+
         insert_agent_session(
             agent_id=agent_id,
             task_id=metadata["task_id"],
@@ -299,6 +305,7 @@ def main() -> None:
             source=metadata["source"],
             session_id=session_id,
             output_file=output_file,
+            input_summary=input_summary,
         )
 
     except Exception as exc:  # noqa: BLE001
