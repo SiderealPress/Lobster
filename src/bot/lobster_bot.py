@@ -29,7 +29,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyParameters
+from telegram import Update, InlineKeyboardMarkup, ReplyParameters
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, MessageReactionHandler, filters, ContextTypes
 from collections import deque
 
