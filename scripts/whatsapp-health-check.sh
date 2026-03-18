@@ -24,7 +24,7 @@ if [ "$BRIDGE_STATUS" != "active" ]; then
 {
   "id": "${MSG_ID}",
   "source": "system",
-  "type": "system",
+  "type": "health_check",
   "subtype": "bridge_down",
   "chat_id": "system",
   "user_id": "system",
@@ -54,7 +54,7 @@ if [ "$BRIDGE_STATUS" = "active" ] && [ -f "$HEARTBEAT_FILE" ]; then
 {
   "id": "${MSG_ID}",
   "source": "system",
-  "type": "system",
+  "type": "health_check",
   "subtype": "bridge_stale",
   "chat_id": "system",
   "user_id": "system",
