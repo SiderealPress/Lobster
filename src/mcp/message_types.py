@@ -17,16 +17,17 @@ from this module; nothing else should define its own ad-hoc type strings.
 # ---------------------------------------------------------------------------
 INBOX_USER_TYPES: frozenset[str] = frozenset({
     "text",       # plain text message
-    "message",    # generic message (alias used by some connectors)
+    "message",    # DEPRECATED alias — normalizes to "text" on ingest
     "photo",      # image/photo attachment
-    "image",      # image (alias)
+    "image",      # DEPRECATED alias — normalizes to "photo" on ingest (Slack producer)
     "voice",      # voice/audio message (needs transcription)
-    "audio",      # audio attachment (alias)
+    "audio",      # DEPRECATED alias — normalizes to "voice" on ingest
     "video",      # video attachment
     "document",   # file/document attachment
     "sticker",    # sticker message
     "location",   # location pin
     "callback",   # inline keyboard button press
+    "reaction",   # Telegram emoji reaction (fields: emoji, signal, reacted_to_text, telegram_message_id)
 })
 
 # ---------------------------------------------------------------------------
@@ -36,18 +37,22 @@ INBOX_SYSTEM_TYPES: frozenset[str] = frozenset({
     "self_check",             # periodic health/reminder injection
     "subagent_result",        # subagent completed work (fields: task_id, payload, artifacts?)
     "subagent_error",         # subagent failed (fields: task_id, error, retry_count)
-    "subagent_notification",  # subagent already sent reply via send_reply (no re-delivery)
+    "subagent_ack",           # subagent already sent reply via send_reply (no re-delivery); canonical name
+    "subagent_notification",  # DEPRECATED alias — use subagent_ack; kept for backward compat
     "subagent_observation",   # subagent noticed something in passing (debug/context)
     "subagent_stale_check",   # dispatch registry found agent with stale heartbeat
     "subagent_recovered",     # subagent fallback recovery event (chat_id unknown; dispatcher handles, never relay directly)
     "compact_group",          # grouped compact messages (internal, produced by check_inbox)
     "compact_reminder",       # on-compact hook reminder (hooks/on-compact.py)
-    "cron_reminder",          # scheduled reminder (scheduled-tasks/post-reminder.sh)
-    "scheduled_reminder",     # scheduled reminder (scripts/post-reminder.sh)
+    "cron_reminder",          # DEPRECATED alias — normalizes to "scheduled_reminder" on ingest
+    "scheduled_reminder",     # scheduled reminder (scripts/post-reminder.sh, scheduled-tasks/post-reminder.sh)
     "update_notification",    # system update available (scripts/daily-update-check.sh)
     "consolidation",          # nightly consolidation result
     "observation",            # OOM-monitor or similar system observation
-    "system",                 # generic system message (whatsapp health check, etc.)
+    "health_check",           # health check output (replaces "task-output" and "system" from health check scripts)
+    "system",                 # DEPRECATED alias — normalizes to "health_check" on ingest (from health check scripts)
+    "task-output",            # DEPRECATED alias — normalizes to "health_check" on ingest (scripts/daily-health-check.sh)
+    "debug_observation",      # debug output from inbox_server.py internals; excluded from skill processing
 })
 
 # ---------------------------------------------------------------------------
