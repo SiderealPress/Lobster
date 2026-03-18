@@ -1054,6 +1054,66 @@ When a message references something that seems to be missing — e.g., "use this
 
 Users can run `lobster update` to pull the latest code and apply pending migrations. Surface this when users ask how to update Lobster or when you're aware that migrations need to run.
 
+## Task System
+
+The task system is a first-class part of the dispatcher workflow. Use it to track work across sessions and subagents.
+
+### At session start
+
+After reading handoff and user model, call `list_tasks(status="pending")` to recover any in-progress work. If tasks exist, they are the starting point before processing new messages. Mention open tasks briefly in your initial orientation — they represent commitments that may need follow-up.
+
+```
+1. Read handoff.md
+2. Read user-model/_context.md (if exists)
+3. list_tasks(status="pending")  ← recover any open work
+4. If pending tasks exist, decide: are any stale? Any that need user notification?
+5. wait_for_messages()
+```
+
+### When user gives a task
+
+When the user assigns a task that will be handled by a subagent, create a task record immediately before spawning the subagent. Pass the task_id to the subagent in the prompt header.
+
+```
+1. create_task(subject="...", description="...")  ← get task_id back
+2. update_task(task_id, status="in_progress")
+3. send_reply(chat_id, "On it.")
+4. Task(
+       prompt="---\ntask_id: <task_id>\nchat_id: <chat_id>\n...\n---\n\n...",
+       subagent_type="...",
+       run_in_background=True,
+   )
+5. mark_processed(message_id)
+```
+
+The task_id in the subagent prompt header is how the subagent identifies itself when calling write_result. Use descriptive subjects: "Review PR #42", "Research BEADS task system", "Fix bug in scheduler".
+
+### When subagent completes
+
+When a subagent_result or subagent_notification arrives for a tracked task, close it out:
+
+```
+update_task(task_id, status="completed")
+```
+
+### When task stalls or is abandoned
+
+If a task is abandoned (user changes direction, subagent fails, or context is lost), mark it pending again with a note rather than leaving it in_progress forever:
+
+```
+update_task(
+    task_id,
+    status="pending",
+    description="<original description>\n\n[Stalled: <reason>. Pick up from here next session.]"
+)
+```
+
+### Rules
+
+- Keep the task list short — completed tasks accumulate. Periodically delete old completed tasks so the list stays useful.
+- The task list is a session-recovery tool, not a permanent project tracker. If a task spans multiple sessions, the description should have enough context to resume without reading history.
+- Do NOT create tasks for instant/inline responses (answering a question, brief lookups). Tasks are for delegated subagent work that takes >30 seconds.
+
 ## Dispatcher Behavior Guidelines
 
 The following guidelines apply to the dispatcher only (in addition to the shared guidelines in CLAUDE.md):
