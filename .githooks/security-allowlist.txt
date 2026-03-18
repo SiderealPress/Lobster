@@ -66,3 +66,7 @@ connectors/whatsapp/.env.example:Phone number
 connectors/whatsapp/index.js:Email address
 scripts/install-whatsapp-connector.sh:Email address
 src/bot/whatsapp_bridge_adapter.py:Email address
+
+# claude-wrapper.exp reads TELEGRAM_BOT_TOKEN from config.env at runtime using
+# grep — this is a variable reference, not a hardcoded credential value
+scripts/claude-wrapper.exp:Hardcoded token
