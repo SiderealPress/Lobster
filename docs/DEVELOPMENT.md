@@ -95,8 +95,9 @@ This is what caused the post-compact-enforcement incident.
 
 After pulling updates on the VPS (`git pull` + `uv pip install -e .`):
 
-1. **Fix file permissions**: `chmod +x scripts/claude-persistent.sh scripts/claude-wrapper.sh`
+1. **Fix file permissions**: `chmod +x scripts/claude-persistent.sh`
    - `git pull` can change file modes (755→644), which silently breaks the tmux launch
+   - Note: `claude-wrapper.sh` is superseded by `claude-persistent.sh` and no longer used
 2. **Verify auth**: Test that Claude can authenticate — see `docs/REMOTE-AUTH.md`
 3. **Restart services**: `systemctl restart lobster-claude && lobster restart`
 4. **Verify startup**: `tail -f /home/lobster/lobster-workspace/logs/claude-persistent.log`
