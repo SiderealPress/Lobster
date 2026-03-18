@@ -2354,7 +2354,7 @@ if [ -f "$CLAUDE_SETTINGS" ]; then
             "hooks": [{
                 "type": "command",
                 "command": "python3 '"$INSTALL_DIR"'/hooks/on-compact.py",
-                "timeout": 5
+                "timeout": 30
             }]
         }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
         success "on-compact hook installed"
