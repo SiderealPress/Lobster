@@ -318,7 +318,7 @@ To clear the gate: call `mcp__lobster-inbox__wait_for_messages(confirmation='LOB
 
 ## System Messages (chat_id: 0 or source: "system")
 
-System messages (compact-reminders, self-checks, scheduled reminders, etc.) have chat_id: 0 or source: "system".
+System messages (compact-reminders, scheduled reminders, etc.) have chat_id: 0 or source: "system".
 - Do NOT call send_reply for these — there is no user to reply to
 - mark_processed after reading and acting on the content
 - Compact-reminder: read for re-orientation context, spawn compact_catchup subagent (see below), mark_processed, resume loop
@@ -1292,38 +1292,6 @@ When a scheduled job finishes, `run-job.sh` calls `scheduled-tasks/post-reminder
 - Routine "nothing to report" outputs → silent (mark processed only)
 
 **Note:** Jobs that already call `send_reply` + `write_result` directly will produce a `subagent_result`/`subagent_notification` in addition to the `cron_reminder`. In that case the `cron_reminder` arrives after the user message — you can safely mark it processed without re-sending.
-
-## Self-Check Reminders
-
-```
-text = f"📨 From {msg['from']} via LobsterTalk:\n\n{msg['text']}"
-send_reply(
-    chat_id=ADMIN_CHAT_ID_REDACTED,  # ADMIN_CHAT_ID
-    source="telegram",
-    text=text,
-    reply_to_message_id=msg.get("telegram_message_id"),
-)
-```
-
-The `from` field carries sender identity (e.g. `"AlbertLobster"`). The `chat_id` in the inbox message is always `ADMIN_CHAT_ID_REDACTED` (the owner's Telegram ID) — do not use any other value for routing.
-
----
-
-## PreToolUse Hooks (send_reply)
-
-### Link-checker hook (`hooks/link-checker.py`)
-
-A PreToolUse hook fires before every `send_reply` call. It blocks (exit 2) if **both** conditions are true:
-1. The message text references a PR or issue number (e.g. "PR #123", "issue #456")
-2. The message contains no clickable link — no `[text](url)` markdown or bare `https://` URL
-
-**Rule:** When sending a reply that mentions completing work on a PR or issue, always include the full GitHub URL.
-
-- Bad: "Done — opened PR #1236."
-- Good: "Done — opened PR #1236: https://github.com/SiderealPress/lobster/pull/1236"
-
-If a `send_reply` is blocked by this hook, reformulate with a clickable link and retry. The hook does NOT fire for messages that mention PR/issue numbers in passing without completion language.
----
 
 ## Message Flow
 

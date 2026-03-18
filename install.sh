@@ -2016,27 +2016,8 @@ chmod +x "$INSTALL_DIR/scripts/post-reminder.sh" || true
 
 success "post-reminder.sh installed"
 
-#===============================================================================
-# Ghost Detector (agent-monitor)
-#===============================================================================
-
-step "Setting up ghost detector cron..."
-
-# agent-monitor.py runs every 5 minutes, checks for stale/dead agent sessions,
-# sends a Telegram alert if GHOST_CONFIRMED or UNREGISTERED agents are found,
-# and marks ghost sessions as failed in agent_sessions.db. No LLM involved.
-"$INSTALL_DIR/scripts/cron-manage.sh" add "# LOBSTER-GHOST-DETECTOR" \
-    "*/5 * * * * cd $HOME && uv run $INSTALL_DIR/scripts/agent-monitor.py --alert --mark-failed >> $HOME/lobster-workspace/logs/agent-monitor.log 2>&1 # LOBSTER-GHOST-DETECTOR"
-
-success "Ghost detector configured (runs every 5 minutes)"
-
-#===============================================================================
-# OOM Monitor
-#===============================================================================
-
-# Add periodic self-check to crontab (runs every 3 minutes)
-"$INSTALL_DIR/scripts/cron-manage.sh" add "# LOBSTER-SELF-CHECK" \
-    "*/3 * * * * $INSTALL_DIR/scripts/periodic-self-check.sh # LOBSTER-SELF-CHECK"
+# Ensure any lingering self-check cron entry is removed on fresh installs
+{ crontab -l 2>/dev/null | grep -v "# LOBSTER-SELF-CHECK" | grep -v "periodic-self-check" || true; } | crontab -
 
 # oom-monitor.py runs every 10 minutes, scans the kernel journal for OOM kills
 # affecting Lobster/Claude processes, and writes an inbox message for the
