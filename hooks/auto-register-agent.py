@@ -294,7 +294,7 @@ def main() -> None:
             # No agent ID in response -- nothing to register
             sys.exit(0)
 
-        # Store first 500 chars of the prompt as input_summary so ghost-detector
+        # Store first 500 chars of the prompt as input_summary so agent-monitor
         # and the dispatcher can reconstruct context if the agent fails.
         input_summary = prompt[:500] if prompt else None
 
