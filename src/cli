@@ -460,15 +460,86 @@ cmd_ps() {
 }
 
 cmd_env() {
-    local install_dir="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
-    local env_script="$install_dir/scripts/lobster-env.sh"
+    local config_dir="${LOBSTER_CONFIG_DIR:-$HOME/lobster-user-config}"
+    local env_file="$config_dir/global.env"
+    local subcmd="${1:-}"
 
-    if [ ! -f "$env_script" ]; then
-        echo -e "${RED}Error: lobster-env script not found at $env_script${NC}"
-        exit 1
-    fi
-
-    exec "$env_script" "$@"
+    case "$subcmd" in
+        set)
+            local key="$2"
+            local value="$3"
+            if [ -z "$key" ] || [ -z "$value" ]; then
+                echo "Usage: lobster env set KEY VALUE"
+                exit 1
+            fi
+            mkdir -p "$config_dir"
+            touch "$env_file" && chmod 600 "$env_file"
+            # Update existing key in place, or append if not present
+            if grep -qF "^${key}=" "$env_file" 2>/dev/null; then
+                # Use a temp file to avoid sed -i portability issues
+                local tmp
+                tmp=$(mktemp)
+                chmod 600 "$tmp"
+                grep -vF "^${key}=" "$env_file" > "$tmp"
+                echo "${key}=${value}" >> "$tmp"
+                mv "$tmp" "$env_file"
+                echo -e "${GREEN}Updated${NC} $key"
+            else
+                echo "${key}=${value}" >> "$env_file"
+                echo -e "${GREEN}Set${NC} $key"
+            fi
+            ;;
+        get)
+            local key="$2"
+            if [ -z "$key" ]; then
+                echo "Usage: lobster env get KEY"
+                exit 1
+            fi
+            if [ ! -f "$env_file" ]; then
+                echo -e "${RED}No env file found at $env_file${NC}"
+                exit 1
+            fi
+            # Check key existence first (separate from value extraction) so that
+            # an empty value is not misreported as "key not found"
+            if ! grep -qF "^${key}=" "$env_file" 2>/dev/null; then
+                echo -e "${RED}Key not found: $key${NC}"
+                exit 1
+            fi
+            local val
+            val=$(grep -F "^${key}=" "$env_file" | cut -d= -f2-)
+            echo "$val"
+            ;;
+        list)
+            if [ ! -f "$env_file" ]; then
+                echo "(no env file at $env_file)"
+                exit 0
+            fi
+            echo -e "${CYAN}Stored keys in $env_file:${NC}"
+            grep -v '^\s*#' "$env_file" | grep -v '^\s*$' | cut -d= -f1 | sed 's/^/  /' || echo "  (empty)"
+            ;;
+        edit)
+            local editor="${EDITOR:-vi}"
+            "$editor" "$env_file"
+            ;;
+        path)
+            echo "$env_file"
+            ;;
+        "")
+            echo "Usage: lobster env <set|get|list|edit|path>"
+            echo ""
+            echo "  set KEY VALUE   Store a token or credential"
+            echo "  get KEY         Print the value of a stored key"
+            echo "  list            List all stored key names (values hidden)"
+            echo "  edit            Open the env file in \$EDITOR"
+            echo "  path            Print path to the env file"
+            exit 1
+            ;;
+        *)
+            echo "Unknown env subcommand: $subcmd"
+            echo "Usage: lobster env <set|get|list|edit|path>"
+            exit 1
+            ;;
+    esac
 }
 
 cmd_update() {
