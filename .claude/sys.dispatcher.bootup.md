@@ -102,63 +102,28 @@ Before spawning a subagent, decide whether to send the dispatcher ack based on e
 ```
 1. Generate a short task_id (e.g. "fix-pr-475", "upstream-check", or a short slug describing the task)
 2. [If task will take >4s]: send_reply(chat_id, "On it.")   # brief ack, 1-3 words
-3. task_result = Task(
+3. Task(
        prompt="---\ntask_id: <task_id>\nchat_id: <chat_id>\nsource: <source>\n---\n\n...<rest of prompt>...",
        subagent_type="...",
        run_in_background=true
    )
-4. agent_id = extract agentId from task_result text (look for "agentId: <id>")
-5. output_file = extract output file path from task_result text (look for a /tmp/... path ending in .output)
-6. register_agent(
-       agent_id=agent_id,
-       task_id=task_id,           # REQUIRED — enables reliable DB matching in SubagentStop
-       description="Brief what/why + chat_id",
-       chat_id=chat_id,
-       source=msg.get("source", "telegram"),
-       output_file=output_file,
-       timeout_minutes=30,
-   )
-7. mark_processed(message_id)
-8. Return to wait_for_messages() IMMEDIATELY
+4. mark_processed(message_id)
+5. Return to wait_for_messages() IMMEDIATELY
 ```
+
+Agent registration is fully automatic — a PostToolUse hook fires immediately after each Task call and inserts a 'running' row into agent_sessions.db. You do not need to call register_agent or extract agentId/output_file.
 
 **Closing the loop when write_result arrives:**
 ```
 When wait_for_messages() returns a subagent_result/subagent_error:
 1. mark_processing(message_id)
-2. # Note: write_result auto-unregisters the agent server-side — no manual unregister_agent call needed.
-   # The tracker is updated atomically when write_result is called.
-3. ... relay or drop based on sent_reply_to_user field as usual ...
-4. mark_processed(message_id)
+2. ... relay or drop based on sent_reply_to_user field as usual ...
+3. mark_processed(message_id)
 ```
 
-**Agent tracking — why it matters:**
-
-`register_agent` writes to the SQLite agent session store (`~/messages/config/agent_sessions.db`) via `tracker.py`. Sessions survive restarts, accumulate full history (running, completed, failed), and are queryable at any time. Unlike the old JSON file, SQLite WAL mode prevents corruption and allows concurrent reads from the dashboard without blocking.
+The tracker is updated atomically when write_result is called — no dispatcher action required.
 
 Use `get_active_sessions` to answer "what agents are running?" at any time — it returns accurate data even across restarts and context compactions.
-
-When a subagent calls `write_result`, the inbox server **automatically marks** that agent as 'completed' in the session store — so the tracker stays accurate without any dispatcher action required.
-
-**Extracting the agentId from a Task result:**
-
-The Task tool returns text containing "agentId: <uuid>". Parse it with a simple search:
-```python
-import re
-match = re.search(r'agentId[:\s]+([a-f0-9\-]{8,})', task_result or "", re.IGNORECASE)
-agent_id = match.group(1) if match else f"agent-{int(time.time())}"
-```
-If the pattern does not match, fall back to a synthetic timestamp-based ID — the record is still useful for human review even without the real agent UUID.
-
-**Extracting the output_file path from a Task result:**
-
-The Task tool result text contains the path to the agent's live output file. Parse it:
-```python
-import re
-match = re.search(r'(/tmp/[^\s]+\.output)', task_result or "")
-output_file = match.group(1) if match else None
-```
-Pass this to `register_agent` as `output_file`. It enables future liveness detection — the self-check handler can stat the file's mtime to determine whether the agent is still active or has gone silent.
 
 ---
 
@@ -263,11 +228,6 @@ Check the `sent_reply_to_user` field first, then check for engineer → reviewer
        if pr_url_match and msg.get("sent_reply_to_user") != True:
            pr_url = pr_url_match.group(0)
            # Spawn a separate reviewer — do NOT relay engineer text to user
-           agent_id = register_agent(
-               name="pr-reviewer",
-               task_id=f"review-{msg.get('task_id', 'unknown')}",
-               chat_id=msg["chat_id"],
-           )
            Task(
                subagent_type="general-purpose",
                run_in_background=True,
@@ -739,7 +699,7 @@ The routing logic lives in the `subagent_result` handler above — when a GitHub
 
 Summary of the flow:
 1. Engineer's `write_result` arrives as `subagent_result` with a GitHub PR URL in `text`
-2. Dispatcher detects the URL, calls `register_agent(...)`, spawns reviewer via `Task(...)`, marks processed
+2. Dispatcher detects the URL, spawns reviewer via `Task(...)`, marks processed
 3. Reviewer reads the PR, posts findings with `gh pr review <N> --repo SiderealPress/lobster --comment --body "PASS/NEEDS-WORK/FAIL: ..."` (never `--approve` or `--request-changes` — same token = self-review error)
 4. Reviewer calls `write_result` with a short verdict (1–3 sentences)
 5. Dispatcher receives that `subagent_result`, relays the short verdict to the user
