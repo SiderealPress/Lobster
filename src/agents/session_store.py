@@ -457,42 +457,39 @@ def cleanup_stale_running_sessions(
     server_start_time: datetime,
     path: Path | None = None,
 ) -> list[str]:
-    """Mark pre-existing 'running' rows as 'dead' on server startup.
+    """Reconcile pre-existing 'running' rows on server startup.
 
-    After a force-restart, agents that were mid-execution have their last
-    ``stop_reason`` stuck at ``tool_use``.  The reconciler's liveness check
-    returns ``"running"`` for those files, so the normal dead-threshold logic
-    never fires.  This function closes that gap by inspecting every
-    ``status='running'`` row **before** the reconciler loop begins.
+    After a restart, agents whose output files have ``stop_reason=end_turn``
+    are marked completed.  Agents whose output files are missing are marked
+    dead.  Agents whose output files exist with ``stop_reason=tool_use`` (or
+    no stop_reason yet) are left running — Claude Code agents are independent
+    processes that survive MCP server restarts.
 
-    A session is declared dead at startup if ANY of these is true:
+    Previous versions of this function used an mtime heuristic: if the output
+    file's mtime predated the server start time, the agent was assumed dead.
+    That assumption is incorrect — Claude Code agents are NOT child processes
+    of the MCP server and can outlive a restart.  Using mtime caused false
+    positives where healthy agents were killed immediately after every server
+    restart.
 
-    1. Its ``output_file`` does not exist on disk — the file was cleaned up,
-       so no live agent can be writing to it.
-    2. Its ``output_file`` exists but its mtime predates ``server_start_time``
-       — the file was last touched before this server instance started, so it
-       cannot belong to an agent from the current run.
-    3. (Fallback) ``output_file`` is absent from the DB row AND elapsed time
-       since ``spawned_at`` exceeds ``timeout_minutes`` (or a generous default
-       of 120 minutes) — best-effort cleanup for unregistered output files.
+    Decision rules for each ``status='running'`` row:
 
-    **Assumption:** subagents cannot outlive a server restart. Claude Code
-    subagents run as child processes of the MCP server; when the server is
-    killed (e.g. ``systemctl restart``), all subagents are killed with it.
-    This means any ``status='running'`` row found at startup time cannot
-    belong to a genuinely live agent — it is always safe to mark it dead.
-
-    All matched rows are marked ``status='dead'`` with a ``completed_at``
-    timestamp of ``server_start_time`` so callers know when the cleanup ran.
+    1. ``output_file`` is set and target JSONL is missing on disk → dead
+       (file was cleaned up or never created; no live agent can be writing it)
+    2. ``output_file`` is set and ``stop_reason=end_turn`` → completed
+       (agent finished before or during the restart window)
+    3. ``output_file`` is set and ``stop_reason=tool_use`` (or empty) → leave running
+       (agent may still be alive; normal reconciler loop will time it out if needed)
+    4. ``output_file`` absent, elapsed > timeout → dead (fallback heuristic)
+    5. ``output_file`` absent, elapsed ≤ timeout → leave running
 
     Args:
-        server_start_time: The UTC datetime when the current server process
-                           started.  Any output file with mtime < this value
-                           cannot belong to a live agent from this session.
+        server_start_time: UTC datetime when the current server process started
+                           (kept for logging; no longer used for mtime comparison).
         path:              DB path override (for tests).
 
     Returns:
-        List of agent IDs that were marked dead.
+        List of agent IDs that were marked dead or completed.
     """
     resolved = path if path is not None else _DEFAULT_DB_PATH
     conn = _get_connection(resolved)
@@ -506,7 +503,7 @@ def cleanup_stale_running_sessions(
     )
     rows = cursor.fetchall()
 
-    dead_ids: list[str] = []
+    changed_ids: list[str] = []
     completed_at = server_start_time.isoformat()
 
     for row in rows:
@@ -515,28 +512,65 @@ def cleanup_stale_running_sessions(
         spawned_at_raw: str | None = row["spawned_at"]
         timeout_minutes: int | None = row["timeout_minutes"]
 
-        should_kill = False
-        reason = ""
-
         if output_file:
-            output_path = Path(output_file)
-            try:
-                real_path = output_path.resolve()
-                if not real_path.exists():
-                    should_kill = True
-                    reason = "output_file missing at startup"
-                else:
-                    mtime_ts = real_path.stat().st_mtime
-                    file_mtime = datetime.fromtimestamp(mtime_ts, tz=timezone.utc)
-                    if file_mtime < server_start_time:
-                        should_kill = True
-                        reason = (
-                            f"output_file mtime ({file_mtime.isoformat()}) "
-                            f"predates server start ({server_start_time.isoformat()})"
-                        )
-            except OSError:
-                should_kill = True
-                reason = "output_file unreadable at startup"
+            # Read the stop_reason from the output file to determine liveness.
+            # "missing" → file gone, safe to mark dead.
+            # "done"    → agent finished, mark completed.
+            # "running" → agent may still be alive, leave it running.
+            file_status = _read_stop_reason_from_path(Path(output_file))
+
+            if file_status == "missing":
+                conn.execute(
+                    """
+                    UPDATE agent_sessions
+                    SET status = 'dead',
+                        completed_at = ?,
+                        result_summary = ?
+                    WHERE id = ? AND status = 'running'
+                    """,
+                    (
+                        completed_at,
+                        "Marked dead at startup: output_file missing",
+                        agent_id,
+                    ),
+                )
+                changed_ids.append(agent_id)
+                log.warning(
+                    "[startup-cleanup] session %r marked dead: output_file missing",
+                    agent_id,
+                )
+
+            elif file_status == "done":
+                conn.execute(
+                    """
+                    UPDATE agent_sessions
+                    SET status = 'completed',
+                        completed_at = ?,
+                        result_summary = ?
+                    WHERE id = ? AND status = 'running'
+                    """,
+                    (
+                        completed_at,
+                        "Marked completed at startup: stop_reason=end_turn",
+                        agent_id,
+                    ),
+                )
+                changed_ids.append(agent_id)
+                log.info(
+                    "[startup-cleanup] session %r marked completed: stop_reason=end_turn",
+                    agent_id,
+                )
+
+            else:
+                # file_status == "running": output file exists with tool_use or
+                # no stop_reason yet. Agent may still be alive. Leave it running
+                # so the reconciler's normal liveness loop handles it.
+                log.debug(
+                    "[startup-cleanup] session %r left running: output_file exists "
+                    "with stop_reason=tool_use (agent may still be alive)",
+                    agent_id,
+                )
+
         else:
             # No output_file registered — fall back to elapsed-time heuristic
             if spawned_at_raw:
@@ -547,10 +581,30 @@ def cleanup_stale_running_sessions(
                     elapsed_minutes = (server_start_time - spawned_dt).total_seconds() / 60
                     limit_minutes = timeout_minutes if timeout_minutes else 120
                     if elapsed_minutes > limit_minutes:
-                        should_kill = True
-                        reason = (
-                            f"no output_file and elapsed {elapsed_minutes:.0f}m "
-                            f"exceeds limit {limit_minutes}m"
+                        conn.execute(
+                            """
+                            UPDATE agent_sessions
+                            SET status = 'dead',
+                                completed_at = ?,
+                                result_summary = ?
+                            WHERE id = ? AND status = 'running'
+                            """,
+                            (
+                                completed_at,
+                                (
+                                    f"Marked dead at startup: no output_file and "
+                                    f"elapsed {elapsed_minutes:.0f}m exceeds limit {limit_minutes}m"
+                                ),
+                                agent_id,
+                            ),
+                        )
+                        changed_ids.append(agent_id)
+                        log.warning(
+                            "[startup-cleanup] session %r marked dead: no output_file, "
+                            "elapsed %.0fm > limit %dm",
+                            agent_id,
+                            elapsed_minutes,
+                            limit_minutes,
                         )
                 except (ValueError, TypeError):
                     pass
@@ -566,23 +620,10 @@ def cleanup_stale_running_sessions(
                     agent_id,
                 )
 
-        if should_kill:
-            conn.execute(
-                """
-                UPDATE agent_sessions
-                SET status = 'dead',
-                    completed_at = ?,
-                    result_summary = ?
-                WHERE id = ? AND status IN ('running', 'starting')
-                """,
-                (completed_at, f"Marked dead at startup: {reason}", agent_id),
-            )
-            dead_ids.append(agent_id)
-
-    if dead_ids:
+    if changed_ids:
         conn.commit()
 
-    return dead_ids
+    return changed_ids
 
 
 def get_unnotified_completed(
