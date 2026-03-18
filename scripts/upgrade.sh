@@ -1340,11 +1340,12 @@ with open(path, 'w') as f:
         ' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
         if [ "${has_file_protect:-0}" = "0" ] || [ "${has_file_protect:-0}" = "" ]; then
             TMP_SETTINGS=$(mktemp)
-            jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+            jq --arg cmd "python3 $INSTALL_DIR/hooks/system-file-protect.py" \
+               '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
                 "matcher": "Edit|Write|NotebookEdit",
                 "hooks": [{
                     "type": "command",
-                    "command": "python3 '"$INSTALL_DIR"'/hooks/system-file-protect.py",
+                    "command": $cmd,
                     "timeout": 5
                 }]
             }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
@@ -1361,11 +1362,12 @@ with open(path, 'w') as f:
         ' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
         if [ "${has_auditor:-0}" = "0" ] || [ "${has_auditor:-0}" = "" ]; then
             TMP_SETTINGS=$(mktemp)
-            jq '.hooks.SubagentStop = (.hooks.SubagentStop // []) + [{
+            jq --arg cmd "python3 $INSTALL_DIR/hooks/require-auditor-context-update.py" \
+               '.hooks.SubagentStop = (.hooks.SubagentStop // []) + [{
                 "matcher": "",
                 "hooks": [{
                     "type": "command",
-                    "command": "python3 '"$INSTALL_DIR"'/hooks/require-auditor-context-update.py",
+                    "command": $cmd,
                     "timeout": 10
                 }]
             }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
