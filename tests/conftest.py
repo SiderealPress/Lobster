@@ -142,8 +142,6 @@ def isolate_inbox_server_paths(tmp_path: Path):
         "scheduled_jobs_file": sched / "jobs.json",
         "scheduled_tasks_dir": sched / "tasks",
         "scheduled_tasks_logs": sched / "logs",
-        # BIS-165 Slice 4: redirected DB path for tests that write to messages.db
-        "messages_db": messages / "messages.db",
     }
 
     # Ensure the module is in sys.modules before patching.  patch.multiple
@@ -159,17 +157,9 @@ def isolate_inbox_server_paths(tmp_path: Path):
         yield dirs_result
         return
 
-    # Build a per-test in-memory AtomicClaimDB so tests never share claim state.
-    # This is equivalent to the per-test path isolation above — each test gets a
-    # fresh SQLite :memory: DB so SQLite claim rows don't bleed between tests.
     try:
-        from src.mcp.claims import AtomicClaimDB
-        _test_claims_db = AtomicClaimDB(path=messages / "config" / "agent_sessions.db")
-    except Exception:
-        _test_claims_db = None  # degrade gracefully if claims module unavailable
-
-    try:
-        patch_kwargs = dict(
+        with patch.multiple(
+            _INBOX_SERVER_MODULE,
             BASE_DIR=messages,
             INBOX_DIR=messages / "inbox",
             OUTBOX_DIR=messages / "outbox",
@@ -190,15 +180,7 @@ def isolate_inbox_server_paths(tmp_path: Path):
             SCHEDULED_JOBS_FILE=sched / "jobs.json",
             SCHEDULED_TASKS_TASKS_DIR=sched / "tasks",
             SCHEDULED_TASKS_LOGS_DIR=sched / "logs",
-            # BIS-165 Slice 4: isolate DB path so tests never touch production messages.db
-            MESSAGES_DB_PATH=messages / "messages.db",
-        )
-        if _test_claims_db is not None:
-            # Issue #1360: isolate claim DB so SQLite claim rows don't bleed
-            # between tests. Each test gets a fresh DB backed by tmp_path.
-            patch_kwargs["_claims_db"] = _test_claims_db
-
-        with patch.multiple(_INBOX_SERVER_MODULE, **patch_kwargs):
+        ):
             yield dirs_result
     except Exception:
         # Fallback: yield without patching so tests that don't need

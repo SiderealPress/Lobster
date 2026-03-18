@@ -1010,9 +1010,7 @@ log.setLevel(logging.INFO)
 # production.  The RotatingFileHandler is added only when the server is started
 # as __main__ (via setup_logging()), so importing this module in tests does NOT
 # create or write to the production mcp-server.log file.
-_stream_handler = logging.StreamHandler()
-_stream_handler.setFormatter(JsonFormatter("inbox_server"))
-log.addHandler(_stream_handler)
+log.addHandler(logging.StreamHandler())
 
 
 def setup_logging() -> None:
@@ -1020,16 +1018,19 @@ def setup_logging() -> None:
 
     Called only from main() so that importing inbox_server in tests does not
     create or write to the production log file at LOG_DIR / "mcp-server.log".
-    Calling this function more than once is idempotent — configure_file_handler
-    checks whether a RotatingFileHandler is already attached before adding
-    another.
+    Calling this function more than once is idempotent — it checks whether a
+    RotatingFileHandler is already attached before adding another.
     """
-    configure_file_handler(
-        log,
-        component="inbox_server",
-        log_dir=LOG_DIR,
-        filename="mcp-server.log",
+    for handler in log.handlers:
+        if isinstance(handler, RotatingFileHandler):
+            return  # already set up
+    _file_handler = RotatingFileHandler(
+        LOG_DIR / "mcp-server.log",
+        maxBytes=5 * 1024 * 1024,  # 5MB
+        backupCount=3,
     )
+    _file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    log.addHandler(_file_handler)
 
 # Seed canonical templates on startup (idempotent — only copies missing files)
 def _seed_canonical_templates():
