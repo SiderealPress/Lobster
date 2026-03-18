@@ -3,9 +3,9 @@
 
 Fires after every Agent tool call. Extracts structured metadata from the
 agent prompt (YAML frontmatter or legacy "task_id is:" text), then inserts
-a 'starting' row into agent_sessions.db so the spawned agent is visible to
-the ghost detector and status queries without requiring the dispatcher to call
-register_agent manually.
+a 'running' row into agent_sessions.db so the spawned agent is immediately
+visible to the ghost detector and status queries. No intermediate 'starting'
+state is used — the agent IS running at the point this hook fires.
 
 ## Frontmatter format (preferred)
 
@@ -197,10 +197,14 @@ def insert_agent_session(
     session_id: str,
     output_file: str | None,
 ) -> None:
-    """Insert a 'starting' row into agent_sessions.db.
+    """Insert a 'running' row into agent_sessions.db.
 
-    Uses INSERT OR IGNORE so that a richer row written by register_agent
+    Uses INSERT OR IGNORE so that a richer row written by session_start
     (which may arrive concurrently) is left untouched.
+
+    The agent IS running at the point this PostToolUse hook fires — the Agent
+    tool was just called and the subagent process is live. There is no need for
+    a provisional 'starting' state.
 
     Raises on DB errors so the caller can log and swallow.
     """
@@ -242,7 +246,7 @@ def insert_agent_session(
                  status, output_file, spawned_at)
             VALUES
                 (?, ?, 'subagent', 'auto-registered by PostToolUse hook', ?, ?,
-                 'starting', ?, ?)
+                 'running', ?, ?)
             """,
             (
                 agent_id,
