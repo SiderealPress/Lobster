@@ -295,6 +295,12 @@ Lobster uses a tiered model strategy to balance cost and quality. Each subagent 
 
 - **Python:** Always use `uv run` not `python` or `python3`.
 
+- **Crontab changes:** Never write `echo "..." | crontab -` directly — this overwrites the entire crontab and destroys unrelated entries. Always use `~/lobster/scripts/cron-manage.sh add/remove` instead:
+  ```bash
+  ~/lobster/scripts/cron-manage.sh add "# LOBSTER-MY-MARKER" "*/5 * * * * /path/to/script.sh # LOBSTER-MY-MARKER"
+  ~/lobster/scripts/cron-manage.sh remove "# LOBSTER-MY-MARKER"
+  ```
+
 ## PR and Issue Body: Always Canonical
 
 The body of a PR or issue is the canonical state of that work — not just the opening post. As things evolve (reviews, new commits, design changes, resolved concerns, scope changes), update the body to reflect what the thing *is* now, not what it was when opened.
