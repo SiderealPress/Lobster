@@ -1,11 +1,10 @@
 """
-Unit tests for Telegram reaction signal handling.
+Unit tests for Telegram reaction handling.
 
 Tests cover:
-- REACTION_SIGNALS mapping correctness
 - _lookup_reacted_to_text against _sent_message_buffer
-- _emit_reaction_signal writes the correct inbox JSON
-- handle_reaction: known emoji is buffered, unknown emoji is ignored
+- _emit_reaction_signal writes the correct inbox JSON (no signal field)
+- handle_reaction: all emoji are buffered (no allowlist)
 - handle_reaction: undo cancels pending task before inbox write
 - handle_reaction: unauthorized user is ignored
 """
@@ -58,30 +57,13 @@ def _make_reaction_update(
 # ---------------------------------------------------------------------------
 
 
-class TestReactionSignals:
-    """REACTION_SIGNALS dict maps the expected emoji to the expected signal."""
+class TestReactionSignalsRemoved:
+    """REACTION_SIGNALS dict must no longer exist in the module."""
 
-    def test_thumbs_up_is_yes(self, bot_module):
-        assert bot_module.REACTION_SIGNALS["\U0001f44d"] == "yes"
-
-    def test_thumbs_down_is_no(self, bot_module):
-        assert bot_module.REACTION_SIGNALS["\U0001f44e"] == "no"
-
-    def test_check_mark_is_yes(self, bot_module):
-        assert bot_module.REACTION_SIGNALS["\u2705"] == "yes"
-
-    def test_ok_hand_is_yes(self, bot_module):
-        assert bot_module.REACTION_SIGNALS["\U0001f44c"] == "yes"
-
-    def test_cross_mark_is_no(self, bot_module):
-        assert bot_module.REACTION_SIGNALS["\u274c"] == "no"
-
-    def test_no_entry_is_cancel(self, bot_module):
-        assert bot_module.REACTION_SIGNALS["\U0001f6ab"] == "cancel"
-
-    def test_heart_not_in_signals(self, bot_module):
-        # ❤️ is not mapped — it's ambiguous
-        assert "\u2764" not in bot_module.REACTION_SIGNALS
+    def test_reaction_signals_not_present(self, bot_module):
+        assert not hasattr(bot_module, "REACTION_SIGNALS"), (
+            "REACTION_SIGNALS was removed — the dispatcher now interprets emoji contextually"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -126,7 +108,7 @@ class TestEmitReactionSignal:
             patch.object(bot_module, "REACTION_UNDO_WINDOW_SECS", 0),
             patch.object(bot_module, "INBOX_DIR", inbox),
         ):
-            await bot_module._emit_reaction_signal(123456, 99, "\U0001f44d", "yes")
+            await bot_module._emit_reaction_signal(123456, 99, "\U0001f44d")
 
         files = list(inbox.glob("*.json"))
         assert len(files) == 1
@@ -137,7 +119,7 @@ class TestEmitReactionSignal:
         assert data["chat_id"] == 123456
         assert data["telegram_message_id"] == 99
         assert data["emoji"] == "\U0001f44d"
-        assert data["signal"] == "yes"
+        assert "signal" not in data, "signal field must be absent from reaction inbox entry"
         assert data["reacted_to_text"] == "Should I merge PR #42?"
         assert "timestamp" in data
         assert "[Reaction:" in data["text"]
@@ -153,7 +135,7 @@ class TestEmitReactionSignal:
             patch.object(bot_module, "REACTION_UNDO_WINDOW_SECS", 0),
             patch.object(bot_module, "INBOX_DIR", inbox),
         ):
-            await bot_module._emit_reaction_signal(111, 55, "\u2705", "yes")
+            await bot_module._emit_reaction_signal(111, 55, "\u2705")
 
         files = list(inbox.glob("*.json"))
         assert len(files) == 1
@@ -169,7 +151,7 @@ class TestEmitReactionSignal:
 class TestHandleReaction:
     @pytest.mark.asyncio
     async def test_known_emoji_creates_pending_task(self, bot_module):
-        """A known reaction emoji should create a pending task."""
+        """A reaction emoji should create a pending task."""
         bot_module._pending_reactions.clear()
         update = _make_reaction_update(
             user_id=123456,
@@ -188,20 +170,25 @@ class TestHandleReaction:
         bot_module._pending_reactions.pop(key).cancel()
 
     @pytest.mark.asyncio
-    async def test_unknown_emoji_is_ignored(self, bot_module):
-        """An emoji not in REACTION_SIGNALS must not create a pending task."""
+    async def test_unknown_emoji_is_delivered(self, bot_module):
+        """An emoji that was previously unknown must now create a pending task."""
         bot_module._pending_reactions.clear()
         update = _make_reaction_update(
             user_id=123456,
             chat_id=123456,
             msg_id=20,
-            new_emojis=["\U0001f600"],  # 😀 — not in REACTION_SIGNALS
+            new_emojis=["\U0001f600"],  # 😀 — previously silently dropped
         )
         context = MagicMock()
 
-        await bot_module.handle_reaction(update, context)
+        with patch.object(bot_module, "REACTION_UNDO_WINDOW_SECS", 60):
+            await bot_module.handle_reaction(update, context)
 
-        assert (123456, 20) not in bot_module._pending_reactions
+        key = (123456, 20)
+        assert key in bot_module._pending_reactions, (
+            "All emoji reactions should be delivered — no allowlist filtering"
+        )
+        bot_module._pending_reactions.pop(key).cancel()
 
     @pytest.mark.asyncio
     async def test_unauthorized_user_is_ignored(self, bot_module):
@@ -261,10 +248,10 @@ class TestHandleReaction:
         assert len(files) == 0
 
     @pytest.mark.asyncio
-    async def test_reaction_signal_written_after_undo_window(
+    async def test_reaction_written_after_undo_window(
         self, bot_module, temp_messages_dir
     ):
-        """After the undo window, the signal must be written to inbox."""
+        """After the undo window, the reaction must be written to inbox without signal field."""
         inbox = temp_messages_dir / "inbox"
         bot_module._pending_reactions.clear()
         bot_module._sent_message_buffer.clear()
@@ -284,7 +271,7 @@ class TestHandleReaction:
         files = list(inbox.glob("*.json"))
         assert len(files) == 1
         data = json.loads(files[0].read_text())
-        assert data["signal"] == "no"
+        assert "signal" not in data, "signal field must be absent"
         assert data["emoji"] == "\U0001f44e"
 
     @pytest.mark.asyncio
