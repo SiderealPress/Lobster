@@ -3513,12 +3513,7 @@ async def handle_mark_processing(args: dict) -> list[TextContent]:
 
     # Queue background observation (non-blocking, best-effort)
     msg_text = msg_data.get("text", "") or msg_data.get("transcription", "")
-    _SKIP_OBSERVATION_TYPES = (
-        "subagent_result", "subagent_error", "self_check", "subagent_observation",
-        "subagent_recovered",  # recovery events are system-internal; salvaged text is not user content
-        "debug_observation",  # never run tier 1 on our own debug output (would loop)
-    )
-    if msg_text and msg_type not in _SKIP_OBSERVATION_TYPES:
+    if msg_text and msg_type in USER_FACING_TYPES:
         _queue_observation(
             msg_text, message_id,
             source=msg_data.get("source"),
@@ -3528,11 +3523,7 @@ async def handle_mark_processing(args: dict) -> list[TextContent]:
     # Conditionally inject user model context for messages that would benefit
     context_block = ""
     short_msg_id = message_id[:20] if len(message_id) > 20 else message_id
-    _SKIP_CONTEXT_TYPES = (
-        "subagent_result", "subagent_error", "self_check", "callback", "system",
-        "subagent_observation", "subagent_recovered", "debug_observation",  # internal messages — not real user content
-    )
-    if _user_model is not None and msg_text and msg_type not in _SKIP_CONTEXT_TYPES:
+    if _user_model is not None and msg_text and msg_type in USER_FACING_TYPES:
         if _should_inject_user_context(msg_text):
             try:
                 ctx = _user_model.get_context()
