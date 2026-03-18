@@ -1376,6 +1376,15 @@ with open(path, 'w') as f:
         fi
     fi
 
+    # Migration 22: Ensure lobster-workspace/data/ directory exists for compaction-state.json
+    # The compact_catchup agent writes last_compaction_ts to this file after each compaction.
+    local data_dir="$WORKSPACE_DIR/data"
+    if [ ! -d "$data_dir" ]; then
+        mkdir -p "$data_dir"
+        substep "Created $data_dir/ for compaction-state.json"
+        migrated=$((migrated + 1))
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
