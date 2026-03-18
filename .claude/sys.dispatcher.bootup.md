@@ -98,10 +98,15 @@ Before spawning a subagent, decide whether to send the dispatcher ack based on e
   - Reaction messages — no ack, no response unless the reaction warrants one
   - System messages (`source: "system"` or `chat_id: 0`) — never ack
 
-**How to delegate:**
+**How to delegate (preferred — use `claim_and_ack` for long tasks):**
 ```
-1. Generate a short task_id (e.g. "fix-pr-475", "upstream-check", or a short slug describing the task)
-2. [If task will take >4s]: send_reply(chat_id, "On it.")   # brief ack, 1-3 words
+1. [If task will take >4s]: claim_and_ack(message_id, ack_text="On it.", chat_id=chat_id, source=source)
+   # Atomically: moves message from inbox/ → processing/ AND sends the ack reply.
+   # If the claim fails (message already gone), no ack is sent — safe to retry.
+   # If you crash after this call, the user already got the ack and stale recovery reclaims the message.
+   # If the return value starts with `Warning:`, the message was claimed but the ack failed — do not retry the ack; stale recovery will handle the message.
+   # On a Warning: return, proceed normally with step 2 below (spawn subagent, mark_processed). The claim succeeded; only the ack delivery failed.
+2. Generate a short task_id (e.g. "fix-pr-475", "upstream-check", or a short slug describing the task)
 3. Task(
        prompt="---\ntask_id: <task_id>\nchat_id: <chat_id>\nsource: <source>\n---\n\n...<rest of prompt>...",
        subagent_type="...",
@@ -112,6 +117,13 @@ Before spawning a subagent, decide whether to send the dispatcher ack based on e
 ```
 
 Agent registration is fully automatic — a PostToolUse hook fires immediately after each Task call and inserts a 'running' row into agent_sessions.db. You do not need to call register_agent or extract agentId/output_file.
+
+**Alternative (still valid, use when no ack needed):**
+```
+1. mark_processing(message_id)   # claim without ack
+2. [optional] send_reply(chat_id, "On it.")
+3. ... spawn subagent ...
+```
 
 **Closing the loop when write_result arrives:**
 ```
@@ -634,7 +646,7 @@ mark_processed(message_id)
 wait_for_messages() ← loop back
 ```
 
-**Call `mark_processing` first** — before `send_reply`, before re-reading files, before any post-compact re-orientation. This moves the message from `inbox/` → `processing/` and signals to the health check that the message is claimed.
+**Claim messages before doing any work** — before `send_reply`, before re-reading files, before any post-compact re-orientation. Use `claim_and_ack` (preferred for tasks needing an ack) or `mark_processing` (when no ack is needed). Either call moves the message from `inbox/` → `processing/` and signals to the health check that the message is claimed.
 
 **State directories:** `inbox/` → `processing/` → `processed/` (or → `failed/` → retried back to `inbox/`)
 
