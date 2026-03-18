@@ -155,12 +155,12 @@ WhatsApp delivers the reply
 
 ## Why Baileys instead of whatsapp-web.js
 
-The Lobster health check script (`~/lobster/scripts/health-check-v3.sh`) automatically monitors the bridge:
+The WhatsApp health check script (`~/lobster/scripts/whatsapp-health-check.sh`) monitors the bridge:
 
 - If `lobster-whatsapp-bridge` is not `active`, an alert is written to the Lobster inbox so Lobster can notify you.
-- If no WhatsApp messages have been received for more than 1 hour (based on the heartbeat file at `~/lobster-workspace/logs/whatsapp-heartbeat`), a warning is logged.
+- If no WhatsApp messages have been received for more than 10 minutes (based on the heartbeat file at `~/lobster-workspace/logs/whatsapp-heartbeat`), a warning is logged.
 
-The health check runs every 4 minutes via cron.
+Run this script manually or wire it to your cron schedule to enable monitoring.
 
 ---
 
