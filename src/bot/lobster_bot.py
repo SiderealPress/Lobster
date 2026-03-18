@@ -125,17 +125,6 @@ CLAUDE_WAKE_SCRIPT = _REPO_DIR / "scripts" / "start-lobster.sh"
 TELEGRAM_HARD_LIMIT = 4096
 TELEGRAM_MAX_LENGTH = 4000
 
-# Reaction signal mapping: emoji -> structured signal understood by the dispatcher.
-# Unknown reactions are silently ignored — only map the unambiguous ones.
-REACTION_SIGNALS: dict[str, str] = {
-    "\U0001f44d": "yes",    # 👍 thumbs up
-    "\U0001f44e": "no",     # 👎 thumbs down
-    "\u2705": "yes",        # ✅ check mark button
-    "\U0001f44c": "yes",    # 👌 OK hand
-    "\u274c": "no",         # ❌ cross mark
-    "\U0001f6ab": "cancel", # 🚫 no entry sign
-}
-
 # Reactions undone within this window (seconds) are treated as cancelled and ignored.
 REACTION_UNDO_WINDOW_SECS: float = 5.0
 
@@ -144,7 +133,7 @@ REACTION_UNDO_WINDOW_SECS: float = 5.0
 _pending_reactions: dict[tuple[int, int], asyncio.Task] = {}
 
 # Rolling ring buffer of sent messages: tg_msg_id -> text snippet.
-# Populated in OutboxHandler.process_reply so reaction signals can include
+# Populated in OutboxHandler.process_reply so reactions can include
 # the text of the message that was reacted to.
 _sent_message_buffer: deque[tuple[int, str]] = deque(maxlen=50)
 
@@ -1027,7 +1016,6 @@ async def _emit_reaction_signal(
     chat_id: int,
     tg_msg_id: int,
     emoji: str,
-    signal: str,
 ) -> None:
     """Write a reaction inbox entry after the undo window has elapsed.
 
@@ -1047,15 +1035,24 @@ async def _emit_reaction_signal(
         "chat_id": chat_id,
         "telegram_message_id": tg_msg_id,
         "emoji": emoji,
-        "signal": signal,
         "reacted_to_text": reacted_to_text,
-        "text": f"[Reaction: {emoji} ({signal}) on message {tg_msg_id}]",
+        "text": f"[Reaction: {emoji} on message {tg_msg_id}]",
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
 
     inbox_file = INBOX_DIR / f"{msg_id}.json"
     atomic_write_json(inbox_file, msg_data)
-    log.info(f"Wrote reaction signal to inbox: {msg_id} emoji={emoji} signal={signal}")
+    log.info(f"Wrote reaction to inbox: {msg_id} emoji={emoji}")
+
+    # Send acknowledgment (same pattern as text/image messages)
+    if bot_app:
+        try:
+            await bot_app.bot.send_message(
+                chat_id=chat_id,
+                text=f"Reaction received: {emoji}",
+            )
+        except Exception as e:
+            log.warning(f"Failed to send reaction ack: {e}")
 
     # Clean up the pending entry
     _pending_reactions.pop((chat_id, tg_msg_id), None)
@@ -1068,8 +1065,7 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     - New reactions are buffered for REACTION_UNDO_WINDOW_SECS before being
       written to the inbox.  If the user removes the reaction within the window,
       the pending task is cancelled and nothing is written.
-    - Only reactions listed in REACTION_SIGNALS are delivered; unknown emojis
-      are silently ignored.
+    - All emoji reactions are delivered — the dispatcher interprets them in context.
     - Reaction removals (new_reaction is empty) cancel any pending task for that
       message, preventing spurious signals when the user quickly toggles.
     """
@@ -1100,23 +1096,18 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         log.debug(f"Reaction cancelled for chat={chat_id} msg={tg_msg_id}")
 
     for emoji in added:
-        signal = REACTION_SIGNALS.get(emoji)
-        if signal is None:
-            log.debug(f"Unknown reaction emoji={emoji!r} — ignored")
-            continue
-
         # Cancel any existing pending task for this (chat, message) pair
         existing = _pending_reactions.pop(pending_key, None)
         if existing:
             existing.cancel()
 
-        # Schedule signal delivery after the undo window
+        # Schedule delivery after the undo window
         task = asyncio.create_task(
-            _emit_reaction_signal(chat_id, tg_msg_id, emoji, signal)
+            _emit_reaction_signal(chat_id, tg_msg_id, emoji)
         )
         _pending_reactions[pending_key] = task
         log.info(
-            f"Reaction buffered: emoji={emoji} signal={signal} "
+            f"Reaction buffered: emoji={emoji} "
             f"chat={chat_id} msg={tg_msg_id}"
         )
 
