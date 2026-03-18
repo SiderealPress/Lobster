@@ -42,7 +42,7 @@ INBOX_SYSTEM_TYPES: frozenset[str] = frozenset({
     "subagent_observation",   # subagent noticed something in passing (debug/context)
     "subagent_stale_check",   # dispatch registry found agent with stale heartbeat
     "subagent_recovered",     # subagent fallback recovery event (chat_id unknown; dispatcher handles, never relay directly)
-    "agent_failed",           # reconciler/ghost-detector detected dead agent (chat_id=0; dispatcher decides re-queue vs escalate vs drop)
+    "agent_failed",           # reconciler/agent-monitor detected dead agent (chat_id=0; dispatcher decides re-queue vs escalate vs drop)
     "compact_group",          # grouped compact messages (internal, produced by check_inbox)
     "compact_reminder",       # on-compact hook reminder (hooks/on-compact.py)
     "cron_reminder",          # DEPRECATED alias — normalizes to "scheduled_reminder" on ingest
