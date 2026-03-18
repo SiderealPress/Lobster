@@ -9,9 +9,10 @@ reminder to re-read CLAUDE.md and re-orient from handoff/memory context.
 The script is idempotent: if a compact-reminder message already exists in the
 inbox it skips writing a duplicate.
 
-Dev mode: if LOBSTER_DEBUG=true (or set in config.env), also sends a Telegram
-message directly to the owner's chat ID so the developer is immediately notified
-that a compaction occurred.
+Notification: always sends a Telegram message directly to the owner's chat ID
+so the user is immediately notified that a compaction occurred.  The health
+check suppresses its own alerts during the compaction window so exactly one
+notification reaches the user per compaction event.
 
 State: always writes compacted_at to lobster-state.json so that the health
 check can suppress stale-inbox false-positives during the compaction pause.
@@ -59,7 +60,7 @@ REMINDER_TEXT = (
 
 SENTINEL_FILE = Path(os.path.expanduser("~/messages/config/compact-pending"))
 
-DEV_TELEGRAM_MESSAGE = "\u26a0\ufe0f [DEV] Context compacted. Re-orienting from CLAUDE.md + handoff."
+COMPACTION_TELEGRAM_MESSAGE = "\u267b\ufe0f Context compacted. Re-orienting..."
 
 
 def already_pending() -> bool:
@@ -172,24 +173,15 @@ def _parse_config_env() -> dict:
     return config
 
 
-def _is_debug_mode(config: dict) -> bool:
-    """Return True if LOBSTER_DEBUG is 'true' in the environment or config.env."""
-    env_val = os.environ.get("LOBSTER_DEBUG", "").lower()
-    if env_val == "true":
-        return True
-    config_val = config.get("LOBSTER_DEBUG", "").lower()
-    return config_val == "true"
-
-
-def _send_telegram_dev_notify(bot_token: str, chat_id: str) -> None:
+def _send_telegram_notify(bot_token: str, chat_id: str, text: str) -> None:
     """
-    Send DEV_TELEGRAM_MESSAGE to chat_id via the Telegram Bot API.
+    Send text to chat_id via the Telegram Bot API.
     Logs to stderr on failure so the cause is visible in Claude hook output.
     Never raises — must not crash the hook.
     """
     try:
         url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-        payload = json.dumps({"chat_id": chat_id, "text": DEV_TELEGRAM_MESSAGE}).encode()
+        payload = json.dumps({"chat_id": chat_id, "text": text}).encode()
         req = urllib.request.Request(
             url,
             data=payload,
@@ -217,15 +209,16 @@ def _send_telegram_dev_notify(bot_token: str, chat_id: str) -> None:
         print(f"[on-compact] Telegram notify failed: {type(exc).__name__}: {exc}", file=sys.stderr)
 
 
-def maybe_send_dev_telegram_notify() -> None:
+def send_compaction_notify() -> None:
     """
-    If LOBSTER_DEBUG is true and credentials are available, send a Telegram
-    notification to the owner that a context compaction occurred.
+    Send a Telegram notification to the owner that a context compaction occurred.
+
+    Always fires when credentials are available — not gated on LOBSTER_DEBUG.
+    This is the single canonical notification for a compaction event; the
+    health-check suppresses its own alerts during the compaction window so
+    exactly one notification reaches the user per compaction.
     """
     config = _parse_config_env()
-
-    if not _is_debug_mode(config):
-        return
 
     bot_token = config.get("TELEGRAM_BOT_TOKEN", "").strip()
     allowed_users = config.get("TELEGRAM_ALLOWED_USERS", "").strip()
@@ -236,7 +229,7 @@ def maybe_send_dev_telegram_notify() -> None:
     # Take the first user ID from a comma- or space-separated list.
     first_chat_id = allowed_users.replace(",", " ").split()[0]
 
-    _send_telegram_dev_notify(bot_token, first_chat_id)
+    _send_telegram_notify(bot_token, first_chat_id, COMPACTION_TELEGRAM_MESSAGE)
 
 
 def main() -> None:
@@ -250,13 +243,17 @@ def main() -> None:
     # "stale inbox" restarts during any compaction pause window.
     write_compacted_at()
 
-    # Always send the debug Telegram notification when LOBSTER_DEBUG=true.
-    # This must fire even for the dispatcher compact, where is_dispatcher() would
-    # return False because context compaction assigns a new session_id that no
-    # longer matches the stored dispatcher-session-id marker file.
-    # NOTE: In debug mode this also fires for subagent compactions (rare), which
-    # is acceptable — the notification is informational.
-    maybe_send_dev_telegram_notify()
+    # Always send the Telegram notification for any compaction (dispatcher or
+    # subagent).  This must fire even for the dispatcher compact, where
+    # is_dispatcher() would return False because context compaction assigns a
+    # new session_id that no longer matches the stored dispatcher-session-id
+    # marker file.  Subagent compactions are rare and the notification is still
+    # informational.
+    #
+    # The health-check suppresses its own Telegram alerts during the compaction
+    # window (COMPACTION_SUPPRESS_SECONDS), so exactly one notification reaches
+    # the user per compaction event.
+    send_compaction_notify()
 
     # Guard the inbox reminder and sentinel writes to the dispatcher only.
     # Subagent compactions must not inject compact-reminders into the shared
