@@ -1217,7 +1217,7 @@ do_restart() {
     if [[ "$active_subagents" -gt 0 ]]; then
         log_warn "SUBAGENT GUARD: Skipping restart ($active_subagents active subagent(s) running) — will re-evaluate next check"
         if [[ "$suppress_alert" != "true" ]]; then
-            send_telegram_alert_deduped "subagent-guard" "Health check deferred restart: $active_subagents active subagent(s) in flight.
+            send_telegram_alert "Health check deferred restart: $active_subagents active subagent(s) in flight.
 
 Reason that triggered restart: $reason
 
@@ -1412,7 +1412,8 @@ Status: Restarted, but new stale messages detected post-restart"
 
         log_info "Restart successful"
         write_boot_timestamp
-        send_telegram_alert "System recovered automatically.
+        if [[ "$suppress_alert" != "true" ]]; then
+            send_telegram_alert "System recovered automatically.
 
 Reason: $reason
 Status: Restarted successfully"
