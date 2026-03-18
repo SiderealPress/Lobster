@@ -15,6 +15,7 @@ import json
 import logging
 from logging.handlers import RotatingFileHandler
 import os
+import re
 import socket
 import sys
 import time
@@ -7194,21 +7195,127 @@ async def handle_fetch_page(args: dict) -> list[TextContent]:
 # Scheduled Jobs Handlers (systemd timer backend)
 # =============================================================================
 
-from systemd_jobs import (
-    validate_name as _sj_validate_name,
-    validate_command as _sj_validate_command,
-    validate_schedule as _sj_validate_schedule,
-    normalize_schedule as _sj_normalize_schedule,
-    create_job as _sj_create_job,
-    list_jobs as _sj_list_jobs,
-    update_job as _sj_update_job,
-    delete_job as _sj_delete_job,
-    get_scaffold as _sj_get_scaffold,
-    _timer_path as _sj_timer_path,
-    _service_path as _sj_service_path,
-    _read_unit_field as _sj_read_unit_field,
-    _is_lobster_unit as _sj_is_lobster_unit,
-)
+import subprocess
+
+
+def load_scheduled_jobs() -> dict:
+    """Load scheduled jobs from file."""
+    try:
+        with open(SCHEDULED_JOBS_FILE, "r") as f:
+            return json.load(f)
+    except:
+        return {"jobs": {}}
+
+
+def save_scheduled_jobs(data: dict) -> None:
+    """Save scheduled jobs to file atomically (crash-safe)."""
+    atomic_write_json(SCHEDULED_JOBS_FILE, data)
+
+
+def validate_cron_schedule(schedule: str) -> tuple[bool, str]:
+    """Validate a cron schedule expression. Returns (is_valid, error_message)."""
+    parts = schedule.strip().split()
+    if len(parts) != 5:
+        return False, f"Cron schedule must have 5 parts (minute hour day month weekday), got {len(parts)}"
+
+    # Basic validation for each field
+    field_names = ["minute", "hour", "day", "month", "weekday"]
+    field_ranges = [(0, 59), (0, 23), (1, 31), (1, 12), (0, 7)]
+
+    for i, (part, name, (min_val, max_val)) in enumerate(zip(parts, field_names, field_ranges)):
+        # Allow *, */n, n, n-m, n,m,o patterns
+        if part == "*":
+            continue
+        if part.startswith("*/"):
+            try:
+                step = int(part[2:])
+                if step < 1:
+                    return False, f"Invalid step value in {name}: {part}"
+            except ValueError:
+                return False, f"Invalid step value in {name}: {part}"
+            continue
+
+        # Handle comma-separated values and ranges
+        for subpart in part.split(","):
+            if "-" in subpart:
+                try:
+                    start, end = subpart.split("-")
+                    start, end = int(start), int(end)
+                    if not (min_val <= start <= max_val and min_val <= end <= max_val):
+                        return False, f"Range out of bounds in {name}: {subpart}"
+                except ValueError:
+                    return False, f"Invalid range in {name}: {subpart}"
+            else:
+                try:
+                    val = int(subpart)
+                    if not (min_val <= val <= max_val):
+                        return False, f"Value out of range in {name}: {val} (must be {min_val}-{max_val})"
+                except ValueError:
+                    return False, f"Invalid value in {name}: {subpart}"
+
+    return True, ""
+
+
+def cron_to_human(schedule: str) -> str:
+    """Convert cron schedule to human-readable format."""
+    parts = schedule.strip().split()
+    if len(parts) != 5:
+        return schedule
+
+    minute, hour, day, month, weekday = parts
+
+    # Common patterns
+    if schedule == "* * * * *":
+        return "Every minute"
+    if minute.startswith("*/"):
+        mins = minute[2:]
+        if hour == "*" and day == "*" and month == "*" and weekday == "*":
+            return f"Every {mins} minutes"
+    if hour.startswith("*/"):
+        hrs = hour[2:]
+        if minute == "0" and day == "*" and month == "*" and weekday == "*":
+            return f"Every {hrs} hours"
+    if day == "*" and month == "*" and weekday == "*":
+        if minute != "*" and hour != "*":
+            return f"Daily at {hour}:{minute.zfill(2)}"
+    if weekday != "*" and day == "*" and month == "*":
+        days = {"0": "Sun", "1": "Mon", "2": "Tue", "3": "Wed", "4": "Thu", "5": "Fri", "6": "Sat", "7": "Sun"}
+        day_name = days.get(weekday, weekday)
+        if minute != "*" and hour != "*":
+            return f"Every {day_name} at {hour}:{minute.zfill(2)}"
+
+    return schedule
+
+
+def validate_job_name(name: str) -> tuple[bool, str]:
+    """Validate a job name. Returns (is_valid, error_message)."""
+    if not name:
+        return False, "Job name cannot be empty"
+    if not re.match(r'^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$', name):
+        return False, "Job name must be lowercase alphanumeric with hyphens, cannot start/end with hyphen"
+    if len(name) > 50:
+        return False, "Job name must be 50 characters or less"
+    return True, ""
+
+
+def sync_crontab() -> tuple[bool, str]:
+    """Sync jobs.json to crontab. Returns (success, message)."""
+    sync_script = _REPO_DIR / "scheduled-tasks" / "sync-crontab.sh"
+    try:
+        result = subprocess.run(
+            [str(sync_script)],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        if result.returncode == 0:
+            return True, result.stdout
+        else:
+            return False, result.stderr or "Sync failed"
+    except subprocess.TimeoutExpired:
+        return False, "Sync script timed out"
+    except Exception as e:
+        return False, str(e)
 
 
 async def handle_create_scheduled_job(args: dict) -> list[TextContent]:
