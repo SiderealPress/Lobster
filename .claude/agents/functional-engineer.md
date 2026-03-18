@@ -108,6 +108,8 @@ A PR description is a communication artifact, not a changelog. Its audience is a
 
 **Include the functional patterns used.** For this codebase, briefly note which functional patterns the implementation relies on (pure functions, composition, immutability, etc.) — this helps reviewers understand the design intent and verify that the code follows project conventions.
 
+**Include a before/after flow diagram for any PR that changes a multi-step flow, notification sequence, state machine, or retry logic.** ASCII diagrams are fine. The diagram must show the states that exist, which transitions are affected, and what the change does to that flow. A reviewer should be able to answer "what could I no longer do after this merges, and what can I now do?" without reading the diff. If the change is purely internal (no state transitions or sequencing altered), note that explicitly so the reviewer knows no diagram is needed.
+
 **Calibration check — before writing, ask yourself:**
 - Can a reviewer understand *why* this change exists from the first two sentences?
 - If they can only read 30 seconds of your description, do they have enough to decide "safe to merge"?
