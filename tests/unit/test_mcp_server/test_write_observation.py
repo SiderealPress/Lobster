@@ -363,8 +363,12 @@ class TestHandleWriteObservation:
     # Debug mode: automatic routing (LOBSTER_DEBUG=true)
     # ------------------------------------------------------------------
 
-    def test_system_context_writes_inbox_and_mirrors_in_debug_mode(self, inbox_dir: Path):
-        """system_context observations write to inbox AND emit a debug mirror when LOBSTER_DEBUG=true."""
+    def test_system_context_writes_inbox_but_not_mirrored_in_debug_mode(self, inbox_dir: Path):
+        """system_context observations write to inbox but are NOT forwarded to Telegram even when LOBSTER_DEBUG=true.
+
+        system_context is an internal routing decision — noisy and not actionable.
+        Only system_error and user_context warrant real-time debug visibility.
+        """
         emitted: list[dict] = []
 
         def fake_emit(
@@ -392,11 +396,8 @@ class TestHandleWriteObservation:
         # Inbox file written — dispatcher still sees it (additive, not bypass)
         files = list(inbox_dir.glob("*.json"))
         assert len(files) == 1
-        # Debug mirror also emitted directly to Telegram with mcp-only visibility
-        assert len(emitted) == 1
-        assert emitted[0]["category"] == "system_context"
-        assert emitted[0]["visibility"] == "mcp-only"
-        assert "Config drift detected." in emitted[0]["text"]
+        # No direct Telegram delivery — system_context is muted even in debug mode
+        assert emitted == []
         assert "Observation queued" in result[0].text
 
     def test_system_error_writes_inbox_and_mirrors_in_debug_mode(self, inbox_dir: Path):
@@ -504,7 +505,11 @@ class TestHandleWriteObservation:
         assert "Observation queued" in result[0].text
 
     def test_debug_mirror_includes_task_id_as_emitter(self, inbox_dir: Path):
-        """In debug mode, task_id is passed as the emitter to _emit_debug_observation."""
+        """In debug mode, task_id is passed as the emitter to _emit_debug_observation.
+
+        Uses system_error category (forwarded in debug mode) to verify the emitter field.
+        system_context is suppressed and cannot be used to test the emitter path.
+        """
         emitted: list[dict] = []
 
         def fake_emit(
@@ -525,8 +530,8 @@ class TestHandleWriteObservation:
             from src.mcp.inbox_server import handle_write_observation
             asyncio.run(handle_write_observation({
                 "chat_id": 123,
-                "text": "Something happened.",
-                "category": "system_context",
+                "text": "Something went wrong.",
+                "category": "system_error",
                 "task_id": "task-42",
             }))
 
