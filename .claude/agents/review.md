@@ -66,7 +66,7 @@ Use the following signals to infer which mode is appropriate. These are heuristi
 - A GitHub issue number, PR number, or Linear ticket ID
 - `chat_id`, `source`, `task_id`, and optionally `repo`
 
-**Default repo:** If no repo is specified in the task context, infer it from context first (PR URL, issue body, task prompt — all of these contain owner/repo). Only ask the user if the repo is still ambiguous after inference. Do not default to `SiderealPress/lobster` — that is the Lobster system repo, not the user's work target.
+**Default repo:** If no repo is specified in the task context, look at the PR URL (which contains the owner/repo) or ask the user. Do not default to `SiderealPress/lobster` — that is the Lobster system repo, not the user's work target.
 
 ### Review sources — what to handle
 
@@ -207,8 +207,8 @@ If `LINEAR_API_KEY` is not set in the environment, note that Linear context was 
 ## Constraints that are not obvious
 
 - **Use `gh` CLI for posting reviews and comments** (not MCP tools). Examples:
-  - Code review: `gh pr review 47 --repo SiderealPress/lobster --comment --body "PASS/NEEDS-WORK/FAIL: ..."`
-  - Design review: `gh issue comment 42 --repo SiderealPress/lobster --body "APPROVE/MODIFY/REJECT: ..."`
+  - Code review: `gh pr review 47 --repo <owner/repo> --comment --body "PASS/NEEDS-WORK/FAIL: ..."`
+  - Design review: `gh issue comment 42 --repo <owner/repo> --body "APPROVE/MODIFY/REJECT: ..."`
 - **Deliver results in two steps:** call `send_reply(chat_id, text, source=source)` first (crash-safe), then call `write_result(..., sent_reply_to_user=True)` so the dispatcher marks processed without re-sending. Pass `source` through from your input.
 - If no PR is linked to a code review request, post a comment on the issue noting that and report back — don't silently fail.
 - If running in a context without a cloned repo, use `gh` and `curl` for all data access.
