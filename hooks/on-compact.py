@@ -355,148 +355,6 @@ def send_compaction_notify() -> None:
     _send_telegram_notify(bot_token, first_chat_id, COMPACTION_TELEGRAM_MESSAGE)
 
 
-def _stored_dispatcher_session_alive() -> bool:
-    """Return True if the stored dispatcher session's JSONL file still exists on disk.
-
-    Used as a compaction fallback: if the stored session JSONL is present, the
-    session hasn't ended cleanly.  For a compaction event this means the dispatcher's
-    context was just compacted — the old JSONL is retained by CC on disk.
-
-    Returns False if the marker file is absent, or the JSONL glob finds nothing.
-    Fails open (returns True) on unexpected errors so we don't skip a real
-    dispatcher compaction due to filesystem issues.
-    """
-    stored = _read_dispatcher_session_id()
-    if not stored:
-        return False
-    try:
-        projects_dir = Path(os.path.expanduser("~/.claude/projects"))
-        if not projects_dir.is_dir():
-            return True  # can't determine — assume alive (conservative)
-        for _ in projects_dir.glob(f"*/{stored}.jsonl"):
-            return True
-        return False
-    except Exception:  # noqa: BLE001
-        return True  # conservative fallback
-
-
-def _is_dispatcher_compact(data: dict) -> bool:
-    """Return True if this compaction event belongs to the dispatcher session.
-
-    Layered strategy:
-
-    1. Primary: session_role.is_dispatcher() — works when the session_id in the
-       hook input matches the stored marker file (fresh compaction of a session
-       whose ID hasn't changed yet, or when the MCP state file is current).
-
-    2. Fallback: LOBSTER_MAIN_SESSION=1 + stored session JSONL alive.
-       Context compaction assigns a NEW session_id to the post-compact session,
-       so the hook input's session_id won't match the stored dispatcher ID even
-       though this is the dispatcher's own compaction.  In that case:
-       - If LOBSTER_MAIN_SESSION=1 (set by claude-persistent.sh for the
-         dispatcher and inherited by its subagents), AND
-       - The stored dispatcher session's JSONL still exists on disk (meaning the
-         previous session hasn't ended — it was just compacted),
-       then this is very likely the dispatcher's compaction.
-
-       Edge case: a subagent that compacts will also have LOBSTER_MAIN_SESSION=1
-       and the dispatcher's JSONL will also still be alive.  In that rare case a
-       false-positive compact-reminder would be written.  This is low-cost: the
-       dispatcher will receive an extra compact-reminder in its inbox, which is
-       harmless (it will re-orient and spawn catchup, then resume normally).
-       Subagent compactions are rare enough that this trade-off is acceptable.
-
-    When the fallback fires, this function also updates the dispatcher marker
-    file (~/messages/config/dispatcher-session-id) to the new session_id so
-    that subsequent is_dispatcher() calls within the same session return True.
-    """
-    if is_dispatcher(data):
-        return True
-
-    # Fallback: LOBSTER_MAIN_SESSION + stored session alive
-    if os.environ.get("LOBSTER_MAIN_SESSION", "") != "1":
-        return False
-
-    if not _stored_dispatcher_session_alive():
-        return False
-
-    # This looks like a dispatcher compaction.  Update both the hook marker
-    # file (tertiary) and the primary MCP Claude UUID state file so all
-    # subsequent hook calls in this session recognise the new session_id.
-    # Note: inject-bootup-context.py now uses the startup flag (not UUID),
-    # so writing the primary Claude UUID file (dispatcher-claude-session-id)
-    # is no longer needed here (issue #1908).
-    new_session_id = data.get("session_id", "").strip()
-    if new_session_id:
-        write_dispatcher_session_id(new_session_id)
-        print(
-            f"[on-compact] compaction fallback: updated dispatcher-session-id "
-            f"to {new_session_id}",
-            file=sys.stderr,
-        )
-
-    return True
-
-
-def _schedule_reflection_prompt(trigger: str) -> None:
-    """In debug mode, write a reflection-prompt message to the inbox.
-
-    When LOBSTER_DEBUG=true, drops a message asking the dispatcher to reflect
-    on the bootup/compaction experience and file GitHub issues with observations.
-    Written immediately — the dispatcher processes inbox messages in order so it
-    will reach this after handling the compact-reminder and catching up.
-
-    Silent on any failure — must never crash the hook.
-    """
-    if os.environ.get("LOBSTER_DEBUG", "false").lower() != "true":
-        return
-
-    try:
-        INBOX_DIR.mkdir(parents=True, exist_ok=True)
-
-        ts = time.time()
-        msg_id = f"reflection_{trigger}_{int(ts)}"
-        timestamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + ".000000"
-
-        content = (
-            f"[Debug] {trigger.capitalize()} reflection prompt:\n\n"
-            "How was the experience? Were there friction points, gaps, or improvements "
-            "worth capturing?\n\n"
-            "If you have observations: file or update GitHub issues in SiderealPress/lobster, "
-            "or open PRs for straightforward fixes. Capture it while it's fresh."
-        )
-
-        msg = {
-            "id": msg_id,
-            "source": "system",
-            "chat_id": 0,
-            "user_id": 0,
-            "username": "lobster-system",
-            "user_name": "System",
-            "type": "reflection_prompt",
-            "trigger": trigger,
-            "text": content,
-            "timestamp": timestamp,
-        }
-
-        # Use current epoch_ms so this sorts after the compact-reminder (ts_ms=0)
-        # and after any queued user messages, but before future messages.
-        ts_ms = int(ts * 1000)
-        msg_path = INBOX_DIR / f"{ts_ms}_reflection_{trigger}.json"
-        tmp_path = msg_path.with_suffix(".tmp")
-        tmp_path.write_text(json.dumps(msg, indent=2) + "\n")
-        tmp_path.rename(msg_path)
-        print(
-            f"[on-compact] debug: wrote reflection prompt to {msg_path}",
-            file=sys.stderr,
-        )
-    except Exception as exc:  # noqa: BLE001
-        print(
-            f"[on-compact] debug: failed to write reflection prompt: {exc}",
-            file=sys.stderr,
-        )
-
-
 def main() -> None:
     try:
         data = json.load(sys.stdin)
@@ -508,13 +366,17 @@ def main() -> None:
     # "stale inbox" restarts during any compaction pause window.
     write_compacted_at()
 
-    # Always send the debug Telegram notification when LOBSTER_DEBUG=true.
-    # This must fire even for the dispatcher compact, where is_dispatcher() would
-    # return False because context compaction assigns a new session_id that no
-    # longer matches the stored dispatcher-session-id marker file.
-    # NOTE: In debug mode this also fires for subagent compactions (rare), which
-    # is acceptable — the notification is informational.
-    maybe_send_dev_telegram_notify()
+    # Always send the Telegram notification for any compaction (dispatcher or
+    # subagent).  This must fire even for the dispatcher compact, where
+    # is_dispatcher() would return False because context compaction assigns a
+    # new session_id that no longer matches the stored dispatcher-session-id
+    # marker file.  Subagent compactions are rare and the notification is still
+    # informational.
+    #
+    # The health-check suppresses its own Telegram alerts during the compaction
+    # window (COMPACTION_SUPPRESS_SECONDS), so exactly one notification reaches
+    # the user per compaction event.
+    send_compaction_notify()
 
     # Guard the inbox reminder and sentinel writes to the dispatcher only.
     # Subagent compactions must not inject compact-reminders into the shared
