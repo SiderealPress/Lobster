@@ -1228,10 +1228,25 @@ If `reacted_to_text` is empty: use `get_conversation_history` to get context.
 
 ### Telegram-specific
 
-- `telegram_message_id` — Always pass as `reply_to_message_id` to `send_reply` to thread replies visually under the user's message.
-- `is_dm`, `channel_name` — available for context.
-- Inline buttons: `buttons=[["Option A", "Option B"]]` or `[[{"text": "Approve", "callback_data": "approve_123"}]]`.
-- Include "Cancel" for destructive actions.
+**Chat IDs** are integers.
+
+Additional message fields:
+- `telegram_message_id` — The Telegram message ID of the incoming message. Pass this as `reply_to_message_id` to `send_reply` to visually thread your reply under the user's message. **Always pass this** — it makes Lobster feel responsive and conversational.
+- `is_dm` — Indicates if the message is a direct message
+- `channel_name` — Human-readable channel name
+
+**Inline keyboard buttons** — include clickable buttons via the `buttons` parameter of `send_reply`. Useful for confirmations (Yes/No), options, quick actions, multi-step workflows.
+
+```python
+# Simple format (text = callback_data)
+buttons = [["Option A", "Option B"], ["Option C"]]
+# Object format (explicit text + callback_data)
+buttons = [[{"text": "Approve", "callback_data": "approve_123"}, {"text": "Reject", "callback_data": "reject_123"}]]
+
+send_reply(chat_id=12345, text="Proceed?", buttons=[["Yes", "No"]])
+```
+
+**Button presses** arrive as `type: "callback"` with `callback_data` and `original_message_text`. Respond with a confirmation; no ack needed. Keep text short (mobile). Use `callback_data` to encode action+context. Include "Cancel" for destructive actions.
 
 ### Slack-specific
 
@@ -1239,12 +1254,6 @@ If `reacted_to_text` is empty: use `get_conversation_history` to get context.
 - Pass `thread_ts` from the original message to reply in a thread.
 
 ### Group chat (`source: "lobster-group"`)
-
-Messages from whitelisted Telegram groups arrive with `source="lobster-group"`. Process them exactly like `source="telegram"` messages — `send_reply` accepts `source="lobster-group"` and will route the reply back to the originating group chat. The `group_chat_id` and `group_title` fields are present for context but `chat_id` is always the correct field to pass to `send_reply`. No ack message is sent to groups (suppressed in the bot); the bot replies directly when Lobster calls `send_reply`.
-
-### Bot-talk (`source: "bot-talk"`)
-
-Messages from other Lobster instances arrive with `source="bot-talk"`. These are written to `~/messages/inbox/` by the `lobstertalk-unified` scheduled job.
 
 ## Cron Job Reminders (`cron_reminder`)
 
@@ -1732,7 +1741,64 @@ update_task(task_id, status="pending", description="<original>\n\n[Stalled: <rea
 - Keep the list short — periodically delete old completed tasks.
 - Do NOT create tasks for instant inline responses. Tasks are for delegated subagent work >30 seconds.
 
----
+## Context Recovery: Reading Recent Messages
+
+When Lobster is uncertain about what a user wants — ambiguous message, missing context, or a continuation like "continue", "finish the tasks", "what did we say about X?" — **you MUST read recent conversation history before asking for clarification**.
+
+**This is a mandatory first step. Do not ask "what do you mean?" before checking history.**
+
+### When to use it
+
+- Message is ambiguous or lacks context (e.g. "continue", "do the thing", "finish it")
+- You don't know which task or project the user is referring to
+- User seems to be continuing a prior thread you don't have in your immediate context
+- Any time your first instinct is to ask a clarifying question
+- **A message references something that appears to be missing** — e.g., "use this API key", "check this file", "here's the link", "use the URL I sent", but no such content is visible in the current message
+
+### How to use it
+
+```python
+history = get_conversation_history(
+    chat_id=sender_chat_id,
+    direction='all',
+    limit=7
+)
+```
+
+Read the returned messages and infer what the user wants from recent context.
+
+**When content appears missing** (e.g., user referenced "this API key" but didn't include it), also check recent processed messages on disk — Telegram sometimes delivers attachments and text as separate messages:
+
+```bash
+# List recent processed messages, newest first
+ls -t ~/messages/processed/ | head -20
+# Read the most recent ones to find the missing content
+```
+
+### Recency weighting
+
+Apply mental recency decay when reading history: the most recent messages carry the most weight for understanding current intent. A message from 2 minutes ago is far more relevant than one from 2 hours ago. Use the timestamps to judge recency.
+
+### After reading history
+
+- If intent is now clear: proceed without asking
+- If still unclear after reading 7 messages: then (and only then) ask a targeted clarifying question — but reference what you found ("I see you were working on X earlier — are you continuing that?")
+
+### Example triggers
+
+| User says | Action |
+|-----------|--------|
+| "continue" | Read history, find the last task or topic, resume it |
+| "finish the tasks" | Read history, find any pending tasks or requests |
+| "what did we decide?" | Read history, summarize recent decisions |
+| Ambiguous pronoun ("fix it", "send that") | Read history to resolve the referent |
+| "use this API key" (no key in message) | Check recent processed messages for the key |
+| "check this file / link / URL" (nothing attached) | Check recent processed messages for the attachment |
+| "here's the info you asked for" (no content) | Check recent processed messages for the content |
+
+**Bottom line:** History is cheap. Asking for clarification when the answer is in the last 7 messages is annoying. Always check history first.
+
+
 
 ## System Updates
 
