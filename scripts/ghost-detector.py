@@ -687,25 +687,37 @@ def build_mark_failed_alert_text(agent: ClassifiedAgent) -> str:
 
 
 def build_mark_failed_inbox_message(agent: ClassifiedAgent) -> dict:
-    """Return the inbox JSON payload for a ghost mark-failed notification (pure)."""
+    """Return the inbox JSON payload for a ghost mark-failed notification (pure).
+
+    Routes to chat_id=0 (dispatcher-internal) with type='agent_failed' so the
+    dispatcher decides whether to re-queue, escalate, or drop silently. This
+    message is never forwarded directly to the user's Telegram.
+    """
     agent_id = agent.row.agent_id
     desc = agent.row.description
     short_id = agent_id[:8]
     ts = datetime.now(timezone.utc).isoformat()
     msg_id = f"{int(time.time() * 1000)}_ghost-mark-failed-{short_id}"
+    age_str = f"{agent.age_minutes:.0f}m"
+    file_age_str = (
+        f"{agent.output_file_age_minutes:.0f}m"
+        if agent.output_file_age_minutes is not None
+        else "unknown"
+    )
     return {
         "id": msg_id,
-        "type": "subagent_result",
-        "chat_id": RELAUNCH_CHAT_ID,
+        "type": "agent_failed",
+        "source": "system",
+        "chat_id": 0,
         "text": (
-            f"Ghost agent '{desc}' was detected by ghost-detector.py. "
-            f"Agent {agent_id} has been marked failed in the DB. "
-            f"The dispatcher has been notified \u2014 manual re-spawn may be needed."
+            f"Ghost agent detected and marked failed: '{desc}'\n"
+            f"Agent age: {age_str} | Last output: {file_age_str} ago\n"
+            f"Detected by ghost-detector.py. Dispatcher should decide whether to re-queue."
         ),
-        "forward": True,
         "task_id": f"ghost-mark-failed-{short_id}",
+        "agent_id": agent_id,
+        "original_chat_id": agent.row.chat_id,
         "timestamp": ts,
-        "source": "telegram",
     }
 
 
@@ -721,54 +733,46 @@ def mark_failed_ghost(agent: ClassifiedAgent, db_path: Path) -> None:
     """Execute all mark-failed side effects for one confirmed ghost agent.
 
     Side-effect sequence (isolated at this boundary):
-      1. Write Telegram alert to inbox — dispatcher forwards to user
-      2. Mark agent failed in DB
-      3. Write mark-failed notification to inbox — dispatcher forwards result
+      1. Mark agent failed in DB
+      2. Write agent_failed notification to inbox — dispatcher decides action
+         (re-queue, escalate, or drop silently; never forwarded to user directly)
     """
     agent_id = agent.row.agent_id
 
-    # 1. Immediate Telegram alert
-    alert_text = build_mark_failed_alert_text(agent)
-    alert_msg_id = f"{int(time.time() * 1000)}_ghost-alert-{agent_id[:8]}"
-    alert_payload = {
-        "id": alert_msg_id,
-        "type": "outbound",
-        "chat_id": RELAUNCH_CHAT_ID,
-        "text": alert_text,
-        "source": "telegram",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    }
-    drop_inbox_message(alert_payload)
-    print(f"  [mark-failed] Alert dropped to inbox for agent {agent_id[:16]}...")
-
-    # 2. Mark failed in DB
+    # 1. Mark failed in DB
     mark_agent_failed(db_path, agent_id)
     print(f"  [mark-failed] Marked agent {agent_id[:16]}... as failed in DB")
 
-    # 3. Drop subagent_result notification (dispatcher forwards to user)
+    # 2. Drop agent_failed notification (dispatcher decides: re-queue / escalate / drop)
     result_payload = build_mark_failed_inbox_message(agent)
     drop_inbox_message(result_payload)
     print(f"  [mark-failed] Notification queued (task_id: {result_payload['task_id']})")
 
 
 def build_unregistered_mark_failed_payload(agent: UnregisteredAgent) -> dict:
-    """Return an inbox JSON payload for a dead unregistered agent notification (pure)."""
+    """Return an inbox JSON payload for a dead unregistered agent notification (pure).
+
+    Routes to chat_id=0 (dispatcher-internal) with type='agent_failed'. Unregistered
+    agents have no chat_id or task context, so the dispatcher can only log and drop —
+    there is nothing to re-queue without a known originating chat.
+    """
     short_id = agent.agent_id[:8]
     ts = datetime.now(timezone.utc).isoformat()
     msg_id = f"{int(time.time() * 1000)}_ghost-unregistered-{short_id}"
     return {
         "id": msg_id,
-        "type": "subagent_result",
-        "chat_id": RELAUNCH_CHAT_ID,
+        "type": "agent_failed",
+        "source": "system",
+        "chat_id": 0,
         "text": (
             f"Unregistered dead agent {agent.agent_id} detected by ghost-detector.py. "
-            f"Output file last modified {agent.output_file_age_minutes:.0f}m ago: {agent.output_file}. "
+            f"Output file last modified {agent.output_file_age_minutes:.0f}m ago. "
             f"This agent was never registered in agent_sessions.db — likely a registration failure."
         ),
-        "forward": True,
         "task_id": f"ghost-unregistered-{short_id}",
+        "agent_id": agent.agent_id,
+        "original_chat_id": None,
         "timestamp": ts,
-        "source": "telegram",
     }
 
 
