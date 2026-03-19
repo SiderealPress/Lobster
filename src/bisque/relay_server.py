@@ -43,6 +43,7 @@ from bisque.protocol import (
     frame_auth_error,
     frame_auth_success,
     frame_error,
+    frame_hello,
     frame_pong,
     frame_snapshot,
     validate_client_frame,
@@ -187,11 +188,66 @@ class BisqueRelayServer:
     # --- WebSocket handler ---
 
     async def _ws_handler(self, request: web.Request) -> web.WebSocketResponse:
-        """Handle WebSocket connections via aiohttp."""
+        """Handle WebSocket connections via aiohttp.
+
+        Auth is accepted via two paths (in order of preference):
+
+        1. Query-param auth (bisque-chat clients): the session token is passed as
+           ``?token=<value>`` in the WS URL.  The connection is marked authenticated
+           as soon as ``ws.onopen`` fires — no first-frame handshake required.
+           On success the server sends ``{type:"hello"}`` followed by a snapshot.
+
+        2. Frame auth (legacy / programmatic clients): the first frame must be
+           ``{type:"auth", token:"<value>"}``.  On success the server sends
+           ``auth_success`` followed by a snapshot.
+
+        Both paths perform the same session-token validation via the token store.
+        """
         ws = web.WebSocketResponse()
         await ws.prepare(request)
         remote = request.remote
 
+        # --- Fix 1 / Fix 4: Query-param auth path ---
+        qp_token = request.rel_url.query.get("token", "")
+        if qp_token:
+            valid, email = self._token_store.validate_session(qp_token)
+            if not valid:
+                log.warning("Rejected invalid query-param session from %s", remote)
+                await ws.send_str(frame_auth_error("Invalid session token"))
+                await ws.close(code=4401, message=b"Unauthorized")
+                return ws
+
+            self._token_store.touch_session(qp_token)
+            log.info("Authenticated bisque client (query-param): %s (%s)", remote, email)
+            self._clients.add(ws)
+            self._client_emails[id(ws)] = email
+
+            try:
+                # Fix 4: Send hello frame immediately (clients expect this on ws.onopen)
+                await ws.send_str(frame_hello())
+
+                # Send snapshot (no last_event_id available via query-param path)
+                await self._send_initial_state(ws, None)
+
+                # Client message loop
+                async for msg in ws:
+                    if msg.type == aiohttp.WSMsgType.TEXT:
+                        await self._handle_client_message(ws, email, msg.data)
+                    elif msg.type == aiohttp.WSMsgType.BINARY:
+                        await ws.send_str(frame_error("Binary frames not supported"))
+                    elif msg.type == aiohttp.WSMsgType.ERROR:
+                        log.error("WS error for %s: %s", email, ws.exception())
+
+            except Exception as exc:
+                log.error("Error in handler for %s: %s", email, exc)
+            finally:
+                self._clients.discard(ws)
+                self._client_emails.pop(id(ws), None)
+                log.info("Bisque client disconnected: %s (%s)", remote, email)
+
+            return ws
+
+        # --- Legacy frame-auth path ---
         # Auth handshake: wait up to 5 seconds for auth frame
         try:
             msg = await asyncio.wait_for(ws.receive(), timeout=5.0)
@@ -235,12 +291,12 @@ class BisqueRelayServer:
         # Touch session
         self._token_store.touch_session(token)
 
-        log.info("Authenticated bisque client: %s (%s)", remote, email)
+        log.info("Authenticated bisque client (frame-auth): %s (%s)", remote, email)
         self._clients.add(ws)
         self._client_emails[id(ws)] = email
 
         try:
-            # Send auth_success
+            # Send auth_success (legacy path)
             await ws.send_str(frame_auth_success(email))
 
             # Replay or snapshot
@@ -326,7 +382,8 @@ class BisqueRelayServer:
         if envelope.type == "ping":
             await ws.send_str(frame_pong())
 
-        elif envelope.type == "send_message":
+        elif envelope.type in ("send_message", "message"):
+            # Fix 3: "message" is accepted as an alias for "send_message"
             text = str(envelope.payload.get("text", "")).strip()
             if not text:
                 await ws.send_str(frame_error("Empty message text"))
