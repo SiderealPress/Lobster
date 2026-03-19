@@ -418,6 +418,54 @@ _INSTANCE_ID: str = os.environ.get("LOBSTER_OBSERVABILITY_TOKEN") or socket.geth
 _recent_replies: dict[str, float] = {}
 _REPLY_TRACK_MAX = 100
 
+
+# ---------------------------------------------------------------------------
+# Timezone utility — reads owner timezone from owner.toml for display
+# ---------------------------------------------------------------------------
+
+def _get_display_tz():
+    """Return the owner's local timezone for display purposes.
+
+    Reads the 'timezone' field from owner.toml (e.g. 'America/Los_Angeles').
+    Falls back to UTC if not set or if zoneinfo cannot load the zone.
+    Always returns a zoneinfo.ZoneInfo-compatible object.
+    """
+    import zoneinfo as _zoneinfo
+    try:
+        from user_model.owner import get_owner_timezone as _get_owner_tz
+        tz_name = _get_owner_tz()
+        return _zoneinfo.ZoneInfo(tz_name)
+    except Exception:
+        return _zoneinfo.ZoneInfo("UTC")
+
+
+def _format_display_ts(dt: "datetime", fmt: str = "%Y-%m-%d %I:%M %p %Z") -> str:
+    """Convert a datetime to the owner's local timezone and format it for display.
+
+    Args:
+        dt:  A datetime object (naive datetimes are assumed UTC).
+        fmt: strftime format string. Default produces e.g. '2026-03-19 02:18 AM PST'.
+
+    Returns a formatted string in the owner's local time.
+    """
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    local_dt = dt.astimezone(_get_display_tz())
+    return local_dt.strftime(fmt)
+
+
+def _format_iso_for_display(iso_str: str, fmt: str = "%Y-%m-%d %I:%M %p %Z") -> str:
+    """Parse an ISO 8601 string and format it in the owner's local timezone.
+
+    Falls back to the raw string if parsing fails.
+    """
+    try:
+        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+        return _format_display_ts(dt, fmt)
+    except Exception:
+        return iso_str
+
+
 def _track_reply(chat_id: Any) -> None:
     """Record that a reply was sent to chat_id."""
     global _recent_replies
@@ -4044,13 +4092,9 @@ async def handle_get_conversation_history(args: dict) -> list[TextContent]:
         ts = msg.get("timestamp", "")
         text = msg.get("text", "(no text)")
 
-        # Format timestamp nicely
+        # Format timestamp nicely in owner's local timezone
         try:
-            if "+" in ts or ts.endswith("Z"):
-                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-            else:
-                dt = datetime.fromisoformat(ts)
-            ts_display = dt.strftime("%Y-%m-%d %H:%M")
+            ts_display = _format_iso_for_display(ts, "%Y-%m-%d %I:%M %p %Z")
         except (ValueError, TypeError):
             ts_display = ts
 
@@ -4743,7 +4787,7 @@ async def handle_create_scheduled_job(args: dict) -> list[TextContent]:
 
 **Job**: {name}
 **Schedule**: {schedule_human} (`{schedule}`)
-**Created**: {now.strftime('%Y-%m-%d %H:%M UTC')}
+**Created**: {_format_display_ts(now)}
 
 ## Context
 
@@ -4805,9 +4849,7 @@ async def handle_list_scheduled_jobs(args: dict) -> list[TextContent]:
 
         if last_run and last_run != "never":
             try:
-                # Parse and format nicely
-                dt = datetime.fromisoformat(last_run.replace("Z", "+00:00"))
-                last_run = dt.strftime("%Y-%m-%d %H:%M")
+                last_run = _format_iso_for_display(last_run, "%Y-%m-%d %I:%M %p %Z")
             except:
                 pass
 
@@ -4838,12 +4880,18 @@ async def handle_get_scheduled_job(args: dict) -> list[TextContent]:
     if task_file.exists():
         task_content = task_file.read_text()
 
+    _fmt = "%Y-%m-%d %I:%M %p %Z"
+    created_disp = _format_iso_for_display(job.get("created_at", ""), _fmt) if job.get("created_at") else "N/A"
+    updated_disp = _format_iso_for_display(job.get("updated_at", ""), _fmt) if job.get("updated_at") else "N/A"
+    last_run_raw = job.get("last_run") or ""
+    last_run_disp = _format_iso_for_display(last_run_raw, _fmt) if last_run_raw else "never"
+
     output = f"**Job: {name}**\n\n"
     output += f"**Schedule**: {job.get('schedule_human', '')} (`{job.get('schedule', '')}`)\n"
     output += f"**Enabled**: {'Yes' if job.get('enabled', True) else 'No'}\n"
-    output += f"**Created**: {job.get('created_at', 'N/A')}\n"
-    output += f"**Updated**: {job.get('updated_at', 'N/A')}\n"
-    output += f"**Last Run**: {job.get('last_run', 'never')}\n"
+    output += f"**Created**: {created_disp}\n"
+    output += f"**Updated**: {updated_disp}\n"
+    output += f"**Last Run**: {last_run_disp}\n"
     output += f"**Last Status**: {job.get('last_status', '-')}\n\n"
     output += f"---\n\n**Task File** (`{task_file}`):\n\n```markdown\n{task_content}\n```"
 
@@ -4887,12 +4935,13 @@ async def handle_update_scheduled_job(args: dict) -> list[TextContent]:
 
         # Rewrite task file
         now = datetime.now(timezone.utc)
+        created_disp = _format_iso_for_display(job.get("created_at", "")) if job.get("created_at") else "N/A"
         task_content = f"""# {name.replace('-', ' ').title()}
 
 **Job**: {name}
 **Schedule**: {job.get('schedule_human', '')} (`{job.get('schedule', '')}`)
-**Created**: {job.get('created_at', 'N/A')}
-**Updated**: {now.strftime('%Y-%m-%d %H:%M UTC')}
+**Created**: {created_disp}
+**Updated**: {_format_display_ts(now)}
 
 ## Context
 
@@ -5021,10 +5070,9 @@ async def handle_check_task_outputs(args: dict) -> list[TextContent]:
         status_icon = "" if status == "success" else ""
         duration_str = f" ({duration}s)" if duration else ""
 
-        # Format timestamp nicely
+        # Format timestamp nicely in owner's local timezone
         try:
-            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-            ts = dt.strftime("%Y-%m-%d %H:%M")
+            ts = _format_iso_for_display(ts, "%Y-%m-%d %I:%M %p %Z")
         except:
             pass
 
@@ -5639,7 +5687,7 @@ async def handle_triage_brain_dump(args: dict) -> list[TextContent]:
 
     comment_lines.append("")
     comment_lines.append("---")
-    comment_lines.append(f"*Triaged at {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}*")
+    comment_lines.append(f"*Triaged at {_format_display_ts(datetime.now(timezone.utc))}*")
 
     comment_body = "\n".join(comment_lines)
 
@@ -5812,7 +5860,7 @@ async def handle_close_brain_dump(args: dict) -> list[TextContent]:
         comment_lines.append("")
 
     comment_lines.append("---")
-    comment_lines.append(f"*Closed at {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}*")
+    comment_lines.append(f"*Closed at {_format_display_ts(datetime.now(timezone.utc))}*")
 
     comment_body = "\n".join(comment_lines)
 
@@ -6016,7 +6064,7 @@ async def handle_memory_search(arguments: dict[str, Any]) -> list[TextContent]:
 
     lines = [f"**Memory Search Results** ({len(results)} found for \"{query}\"):"]
     for i, event in enumerate(results, 1):
-        ts = event.timestamp.strftime("%Y-%m-%d %H:%M") if event.timestamp else "?"
+        ts = _format_display_ts(event.timestamp, "%Y-%m-%d %I:%M %p %Z") if event.timestamp else "?"
         proj = f" [{event.project}]" if event.project else ""
         eid = f"#{event.id}" if event.id else ""
         # Truncate content for display
@@ -6043,7 +6091,7 @@ async def handle_memory_recent(arguments: dict[str, Any]) -> list[TextContent]:
 
         lines = [f"**Recent Events** ({len(results)} in last {hours}h):"]
         for event in results:
-            ts = event.timestamp.strftime("%Y-%m-%d %H:%M") if event.timestamp else "?"
+            ts = _format_display_ts(event.timestamp, "%Y-%m-%d %I:%M %p %Z") if event.timestamp else "?"
             proj = f" [{event.project}]" if event.project else ""
             eid = f"#{event.id}" if event.id else ""
             consolidated = " [consolidated]" if event.consolidated else ""
