@@ -65,6 +65,7 @@ _install_node22() {
         exit 1
     fi
     curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+    sudo apt-get update -qq
     sudo apt-get install -y nodejs
 }
 
