@@ -291,7 +291,9 @@ Check the `sent_reply_to_user` field first, then check for engineer → reviewer
            pr_url = pr_url_match.group(0)
            # Dedup check: skip if a reviewer is already running for this PR.
            # This prevents double-reviews caused by restarts or re-processed results.
-           pr_number = pr_url.rstrip("/").split("/")[-1]
+           pr_url_parts = pr_url.rstrip("/").split("/")
+           pr_number = pr_url_parts[-1]
+           pr_repo = f"{pr_url_parts[-4]}/{pr_url_parts[-3]}"  # owner/repo from URL
            active_sessions = get_active_sessions()
            reviewer_task_id = f"review-{msg.get('task_id', 'unknown')}"
            already_running = any(
@@ -314,7 +316,7 @@ Check the `sent_reply_to_user` field first, then check for engineer → reviewer
                        f"source: {msg.get('source', 'telegram')}\n"
                        f"---\n\n"
                        f"Review PR {pr_url} and post your findings using:\n"
-                       f"  gh pr review <N> --repo SiderealPress/lobster --comment --body \"PASS/NEEDS-WORK/FAIL: ...\"\n"
+                       f"  gh pr review <N> --repo {pr_repo} --comment --body \"PASS/NEEDS-WORK/FAIL: ...\"\n"
                        f"Use --comment only (never --approve or --request-changes — same token = self-review error).\n\n"
                        f"After posting, call write_result with a short verdict summary (1–3 sentences).\n\n"
                        f"Engineer's briefing:\n{msg['text']}"
