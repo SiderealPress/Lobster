@@ -6553,56 +6553,67 @@ async def handle_get_bisque_connection_url(arguments: dict[str, Any]) -> list[Te
 async def handle_generate_bisque_login_token(arguments: dict[str, Any]) -> list[TextContent]:
     """Generate a bisque-chat login token for the given email.
 
-    Calls the bisque-chat Next.js app's /api/auth/generate-login-token endpoint
-    (running locally on port 3000 by default, or the URL configured in
-    BISQUE_CHAT_URL env var).
+    Calls the relay server's POST /auth/admin/token endpoint (running locally on
+    port 9101 by default, or the HTTP URL derived from BISQUE_RELAY_URL).
 
-    The token is a base64url-encoded JSON: { url: <relay_ws_url>, token: <bootstrap> }.
-    Users paste this into the bisque app login screen.
+    The returned loginToken is a base64url-encoded JSON:
+        { url: <relay_ws_url>, token: <bootstrap> }
+    Users paste this into the bisque-chat login screen.
     """
+    import urllib.request
+    import urllib.error
+
     email = arguments.get("email", "").strip()
     if not email or "@" not in email:
         return [TextContent(type="text", text="Error: a valid email address is required.")]
 
-    # Read config
+    # Read config from file
     config_file = _CONFIG_DIR / "config.env"
-    bisque_chat_url = "http://localhost:3000"
-    relay_url_override = ""
     admin_secret = ""
+    relay_url = ""  # WebSocket URL (wss://...)
+    relay_http_url = ""  # HTTP base URL for the relay API
 
     if config_file.exists():
         for line in config_file.read_text().splitlines():
             stripped = line.strip()
-            if stripped.startswith("BISQUE_CHAT_URL="):
-                bisque_chat_url = stripped.split("=", 1)[1].strip().strip('"').strip("'")
-            elif stripped.startswith("NEXT_PUBLIC_LOBSTER_RELAY_URL="):
-                relay_url_override = stripped.split("=", 1)[1].strip().strip('"').strip("'")
-            elif stripped.startswith("ADMIN_SECRET="):
+            if stripped.startswith("BISQUE_ADMIN_SECRET="):
                 admin_secret = stripped.split("=", 1)[1].strip().strip('"').strip("'")
+            elif stripped.startswith("ADMIN_SECRET=") and not admin_secret:
+                admin_secret = stripped.split("=", 1)[1].strip().strip('"').strip("'")
+            elif stripped.startswith("BISQUE_RELAY_URL="):
+                relay_url = stripped.split("=", 1)[1].strip().strip('"').strip("'")
+            elif stripped.startswith("BISQUE_RELAY_HTTP_URL="):
+                relay_http_url = stripped.split("=", 1)[1].strip().strip('"').strip("'")
 
-    # Also check environment variables directly
+    # Fall back to environment variables
     if not admin_secret:
-        admin_secret = os.environ.get("ADMIN_SECRET", "")
-    if not relay_url_override:
-        relay_url_override = os.environ.get("NEXT_PUBLIC_LOBSTER_RELAY_URL", "")
+        admin_secret = os.environ.get("BISQUE_ADMIN_SECRET", "") or os.environ.get("ADMIN_SECRET", "")
+    if not relay_url:
+        relay_url = os.environ.get("BISQUE_RELAY_URL", "")
+    if not relay_http_url:
+        relay_http_url = os.environ.get("BISQUE_RELAY_HTTP_URL", "")
 
     if not admin_secret:
         return [TextContent(type="text", text=(
-            "ADMIN_SECRET is not configured. Add it to ~/lobster-config/config.env:\n"
-            "  ADMIN_SECRET=<your-secret>\n\n"
-            "This secret must match the ADMIN_SECRET set when running bisque-chat."
+            "BISQUE_ADMIN_SECRET is not configured. Add it to ~/lobster-config/config.env:\n"
+            "  BISQUE_ADMIN_SECRET=<your-secret>\n\n"
+            "This secret must match the BISQUE_ADMIN_SECRET used by the relay server."
         ))]
 
-    endpoint = f"{bisque_chat_url.rstrip('/')}/api/auth/generate-login-token"
+    # Derive the HTTP base URL for the relay.
+    # If not explicitly set, default to localhost:9101 (where the relay runs).
+    if not relay_http_url:
+        relay_http_url = "http://localhost:9101"
+
+    endpoint = f"{relay_http_url.rstrip('/')}/auth/admin/token"
 
     payload: dict[str, str] = {"email": email}
+    # Pass relayUrl override only if explicitly provided by the caller
+    relay_url_override = arguments.get("relayUrl", "").strip()
     if relay_url_override:
         payload["relayUrl"] = relay_url_override
 
     try:
-        import urllib.request
-        import urllib.error
-
         req_body = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
             endpoint,
@@ -6621,16 +6632,21 @@ async def handle_generate_bisque_login_token(arguments: dict[str, Any]) -> list[
             err_msg = err_body.get("error", str(exc))
         except Exception:
             err_msg = str(exc)
-        return [TextContent(type="text", text=f"Failed to generate token: {err_msg}")]
+        return [TextContent(type="text", text=f"Failed to generate token via relay: {err_msg}")]
     except Exception as exc:
         return [TextContent(type="text", text=(
-            f"Could not reach bisque-chat at {bisque_chat_url}: {exc}\n\n"
-            "Make sure bisque-chat is running and BISQUE_CHAT_URL is set correctly in ~/lobster-config/config.env."
+            f"Could not reach bisque relay at {relay_http_url}: {exc}\n\n"
+            "Make sure the relay is running and BISQUE_ADMIN_SECRET is set in ~/lobster-config/config.env."
         ))]
 
     login_token = resp_body.get("loginToken", "")
-    instructions = resp_body.get("instructions", f"Login token: {login_token}")
+    returned_email = resp_body.get("email", email)
 
+    instructions = (
+        f"Login token for {returned_email}:\n\n"
+        f"{login_token}\n\n"
+        "Paste this token into the bisque-chat login screen."
+    )
     return [TextContent(type="text", text=instructions)]
 
 
