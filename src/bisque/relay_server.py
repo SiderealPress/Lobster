@@ -138,6 +138,32 @@ _RELAY_URL: str = os.environ.get("BISQUE_RELAY_URL", "")
 # Inbox injection
 # ---------------------------------------------------------------------------
 
+def _resolve_voice_local_path(attachment_url: str) -> Path | None:
+    """Resolve a voice attachment URL to its local file path in UPLOADS_DIR.
+
+    The relay server stores files at UPLOADS_DIR/<uuid>.<ext> and serves them at
+    /files/<uuid>.<ext> (or /bisque-relay/files/<uuid>.<ext>).  Given the public
+    URL we strip the path prefix and return the corresponding local Path.
+
+    Returns None if the URL cannot be resolved to a local file.
+    """
+    if not attachment_url:
+        return None
+    # Accept both absolute URLs (https://host/files/foo.webm) and relative paths (/files/foo.webm)
+    for prefix in ("/bisque-relay/files/", "/files/"):
+        idx = attachment_url.find(prefix)
+        if idx != -1:
+            filename = attachment_url[idx + len(prefix):]
+            # Strip any query-string / fragment
+            filename = filename.split("?")[0].split("#")[0]
+            # Safety: reject path traversal
+            if filename and "/" not in filename and not filename.startswith("."):
+                candidate = UPLOADS_DIR / filename
+                if candidate.exists():
+                    return candidate
+    return None
+
+
 def _inject_into_inbox(
     inbox_dir: Path,
     email: str,
@@ -170,6 +196,17 @@ def _inject_into_inbox(
         payload["reply_to"] = reply_to_context
     if attachments:
         payload["attachments"] = attachments
+
+    # For voice messages: resolve the attachment URL to a local file path so that
+    # the MCP transcribe_audio tool (which looks for audio_file) can find the file.
+    if msg_type == "voice" and attachments:
+        voice_url = attachments[0].get("url", "")
+        local_path = _resolve_voice_local_path(voice_url)
+        if local_path:
+            payload["audio_file"] = str(local_path)
+            log.info("Resolved voice attachment to local path: %s", local_path)
+        else:
+            log.warning("Could not resolve voice URL to local path: %s", voice_url)
     dest = inbox_dir / f"{msg_id}.json"
     tmp = inbox_dir / f".{msg_id}.tmp"
     try:

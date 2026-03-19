@@ -4436,8 +4436,10 @@ async def handle_transcribe_audio(args: dict) -> list[TextContent]:
 
     # Local whisper.cpp transcription
     try:
-        # Convert OGG to WAV if needed
-        if audio_path.suffix.lower() in [".ogg", ".oga", ".opus"]:
+        # whisper.cpp requires 16 kHz mono WAV. Convert any non-WAV format.
+        # This handles .ogg, .opus, .webm (Chrome MediaRecorder), .mp4, .m4a, etc.
+        _NON_WAV_EXTS = {".ogg", ".oga", ".opus", ".webm", ".mp4", ".m4a", ".aac", ".flac", ".mp3"}
+        if audio_path.suffix.lower() in _NON_WAV_EXTS:
             wav_path = audio_path.with_suffix(".wav")
             if not wav_path.exists():
                 success = await convert_ogg_to_wav(audio_path, wav_path)
