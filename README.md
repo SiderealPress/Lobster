@@ -213,6 +213,20 @@ lobster test       # Create test message
 lobster help       # Show help
 ```
 
+## Telegram Slash Commands
+
+Commands you can send directly in the Telegram chat:
+
+| Command | Description |
+|---------|-------------|
+| `/report <description>` | File a bug report or feedback. Creates a record in Lobster's report store that can be reviewed with `list_reports`. |
+
+## Telegram Reactions
+
+React to any Lobster message with an emoji to send a signal. Reactions are buffered for 5 seconds — removing the reaction within that window cancels it.
+
+Reactions arrive as inbox messages with `type: "reaction"` and include the raw emoji. The dispatcher decides what to do with it.
+
 ## Directory Structure
 
 ```

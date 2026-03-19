@@ -105,6 +105,25 @@ After pulling updates on the VPS (`git pull` + `uv pip install -e .`):
 
 ---
 
+## YAML Frontmatter in Subagent Prompts
+
+The `auto-register-agent.py` PostToolUse hook reads structured metadata from subagent prompts using YAML frontmatter. New subagents should use this format instead of the legacy text pattern:
+
+```yaml
+---
+task_id: my-task-123
+chat_id: 8305714125
+source: telegram
+reply_to_message_id: 10924
+---
+```
+
+The hook uses this to register the subagent in `agent_sessions.db` immediately upon spawn. Recognized fields: `task_id`, `chat_id`, `source`, `reply_to_message_id`.
+
+Legacy format (still supported for backward compat): `Your task_id is: my-task-123`
+
+See `hooks/auto-register-agent.py` for full details.
+
 ## Related documentation
 
 - `.claude/sys.dispatcher.bootup.md` — runtime behavior and the worktree constraint from the dispatcher's perspective
