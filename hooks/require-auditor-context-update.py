@@ -34,11 +34,38 @@ Each line of the JSONL transcript file has the structure:
 Tool use items are nested under entry["message"]["content"], NOT entry["content"].
 `_extract_tool_calls` handles both the JSONL format and the legacy inline
 format where content is directly on the message dict.
+
+## Circuit breaker (MAX_HOOK_FIRES)
+
+If the auditor agent cannot satisfy the exit conditions and the hook keeps
+blocking (e.g. turn exhaustion, crash loop), the hook would fire indefinitely.
+To prevent runaway sessions, after MAX_HOOK_FIRES fires without the condition
+being met the hook logs a loud system_error entry and allows the exit (exit 0).
+
+MAX_HOOK_FIRES = 3 (lower than require-write-result's 5) because repeated
+firing here means the auditor ran, read the context file, but never satisfied
+the post-condition — a serious signal that something is structurally wrong with
+the auditor agent or its environment.
+
+Fire count is tracked in /tmp/lobster-auditor-hook-fires-{agent_key} as JSON:
+    {"count": N, "first_fire_ts": <unix timestamp>}
+
+The file is cleaned up after a successful exit (either condition met) or after
+the circuit breaker trips.
+
+## suppressOutput
+
+This hook exits silently (no stdout/stderr) on all exit-0 paths.
+require-write-result.py (which runs first for the same SubagentStop event)
+already emits {"suppressOutput": true} and covers the event. Emitting a
+second suppressOutput here causes CC to surface it as feedback content
+rather than suppress it.
 """
 import json
 import os
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 def _exit_ok() -> None:
@@ -61,6 +88,13 @@ SAFE_WORD = "AUDIT_CONTEXT_UNCHANGED"
 
 # Path fragment used to detect auditor sessions in the transcript.
 AUDIT_CONTEXT_FILENAME = "system-audit.context.md"
+
+# Maximum hook fires before the circuit breaker trips and allows exit.
+# Lower than require-write-result's 5 because exhaustion here is a serious signal.
+MAX_HOOK_FIRES = 3
+
+# Log file for system-level errors (circuit breaker trips, etc.)
+_OBSERVATIONS_LOG = Path(os.path.expanduser("~/lobster-workspace/logs/observations.log"))
 
 
 # ---------------------------------------------------------------------------
@@ -208,6 +242,102 @@ def _context_file_updated_since(since: float | None) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Circuit breaker: fire-count tracking
+# ---------------------------------------------------------------------------
+
+
+def _agent_key(hook_input: dict) -> str:
+    """Return a stable key for the fire-count temp file.
+
+    Prefer agent_id (SubagentStop) over session_id (Stop). Falls back to
+    a constant so the temp file path is always well-defined.
+    """
+    agent_id = hook_input.get("agent_id") or ""
+    session_id = hook_input.get("session_id") or ""
+    key = agent_id or session_id or "unknown"
+    # Sanitise: keep only alphanumeric, dash, dot, and underscore characters.
+    return "".join(c if c.isalnum() or c in "-._" else "_" for c in key)
+
+
+def _fire_count_path(agent_key: str) -> Path:
+    """Return the Path of the temp file tracking hook fires for this agent."""
+    return Path(f"/tmp/lobster-auditor-hook-fires-{agent_key}")
+
+
+def _read_fire_state(path: Path) -> tuple[int, float]:
+    """Read (fire_count, first_fire_ts) from the temp file.
+
+    Returns (0, 0.0) if the file is absent or unreadable.
+    """
+    try:
+        state = json.loads(path.read_text())
+        count = int(state.get("count", 0))
+        first_ts = float(state.get("first_fire_ts", 0.0))
+        return count, first_ts
+    except Exception:
+        return 0, 0.0
+
+
+def _write_fire_state(path: Path, count: int, first_fire_ts: float) -> None:
+    """Write (count, first_fire_ts) to the temp file. Best-effort."""
+    try:
+        path.write_text(json.dumps({"count": count, "first_fire_ts": first_fire_ts}))
+    except Exception:
+        pass
+
+
+def _cleanup_fire_state(path: Path) -> None:
+    """Remove the fire-count temp file. Best-effort."""
+    try:
+        path.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def _increment_fire_count(hook_input: dict) -> tuple[int, float]:
+    """Increment the fire count for this agent and return (new_count, first_fire_ts).
+
+    On the first fire, records the current timestamp as first_fire_ts.
+    """
+    key = _agent_key(hook_input)
+    path = _fire_count_path(key)
+    count, first_fire_ts = _read_fire_state(path)
+
+    now = time.time()
+    count += 1
+    if count == 1:
+        first_fire_ts = now
+
+    _write_fire_state(path, count, first_fire_ts)
+    return count, first_fire_ts
+
+
+def _write_circuit_breaker_error(hook_input: dict) -> None:
+    """Append a system_error observation to observations.log when the breaker trips.
+
+    Written as a single JSON line matching the observations.log format.
+    Best-effort: any failure is silently swallowed so the hook always exits 0.
+    """
+    try:
+        _OBSERVATIONS_LOG.parent.mkdir(parents=True, exist_ok=True)
+        agent_id = hook_input.get("agent_id") or hook_input.get("session_id") or "unknown"
+        entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "category": "system_error",
+            "task_id": agent_id,
+            "text": (
+                f"CIRCUIT BREAKER TRIPPED: require-auditor-context-update.py exhausted "
+                f"MAX_HOOK_FIRES={MAX_HOOK_FIRES}. Agent exited without completing context "
+                f"update. This indicates a serious problem — investigate immediately."
+            ),
+        }
+        with open(_OBSERVATIONS_LOG, "a") as fh:
+            fh.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass  # Never block exit on log failure
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -238,19 +368,38 @@ def main() -> None:
     # Condition 1: context file was updated during this session.
     session_start = _session_start_time(hook_input, transcript)
     if _context_file_updated_since(session_start):
+        # Success path — clean up any fire-count state and allow exit.
+        key = _agent_key(hook_input)
+        _cleanup_fire_state(_fire_count_path(key))
         _exit_ok()
 
     # Condition 2: transcript contains the explicit safe word.
     if _safe_word_in_transcript(tool_calls):
+        # Success path — clean up any fire-count state and allow exit.
+        key = _agent_key(hook_input)
+        _cleanup_fire_state(_fire_count_path(key))
         _exit_ok()
 
-    # Neither condition met — block exit.
+    # Neither condition met — increment fire count and check circuit breaker.
+    fire_count, _first_fire_ts = _increment_fire_count(hook_input)
+
+    if fire_count >= MAX_HOOK_FIRES:
+        # Circuit breaker tripped: log a loud error and allow exit.
+        # Continuing to block after MAX fires would trap the agent forever.
+        _write_circuit_breaker_error(hook_input)
+        key = _agent_key(hook_input)
+        _cleanup_fire_state(_fire_count_path(key))
+        _exit_ok()
+
+    # Still within the retry window — block exit with a reminder.
+    fires_remaining = MAX_HOOK_FIRES - fire_count
     print(
         "Error: lobster-auditor session ended without updating "
         "system-audit.context.md. "
         "Either update the file with your findings, or include "
         f"{SAFE_WORD!r} as the first line of your write_result call "
-        "if nothing new was found."
+        "if nothing new was found. "
+        f"({fires_remaining} attempt(s) remaining before the circuit breaker trips.)"
     )
     sys.exit(2)
 
