@@ -41,6 +41,17 @@ import sys
 import time
 from pathlib import Path
 
+# JSON to emit on every successful (allow) exit — suppresses the
+# "Stop hook feedback: No stderr output" injection that CC 2.1.76+ produces
+# even when the hook exits 0 with no output.
+_SILENT_OK = json.dumps({"suppressOutput": True})
+
+
+def _exit_ok() -> None:
+    """Exit 0 with JSON that suppresses CC feedback injection."""
+    print(_SILENT_OK)
+    sys.exit(0)
+
 CONTEXT_FILE = Path(os.path.expanduser(
     "~/lobster-user-config/agents/system-audit.context.md"
 ))
@@ -204,7 +215,7 @@ def main() -> None:
     try:
         hook_input = json.load(sys.stdin)
     except Exception:
-        sys.exit(0)  # Unreadable input — never block
+        _exit_ok()  # Unreadable input — never block
 
     # CC 2.1.76+: SubagentStop passes the transcript as a JSONL file at
     # agent_transcript_path rather than inline. Load from the file path,
@@ -219,18 +230,18 @@ def main() -> None:
 
     # Fast path: not an auditor session — pass through.
     if not _is_auditor_session(tool_calls):
-        sys.exit(0)
+        _exit_ok()
 
     # --- Auditor session detected ---
 
     # Condition 1: context file was updated during this session.
     session_start = _session_start_time(hook_input, transcript)
     if _context_file_updated_since(session_start):
-        sys.exit(0)
+        _exit_ok()
 
     # Condition 2: transcript contains the explicit safe word.
     if _safe_word_in_transcript(tool_calls):
-        sys.exit(0)
+        _exit_ok()
 
     # Neither condition met — block exit.
     print(
