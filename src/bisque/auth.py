@@ -14,32 +14,6 @@ from typing import Any
 
 log = logging.getLogger("lobster-bisque-relay")
 
-
-@contextmanager
-def _locked_file(path: Path, mode: str = "r+"):
-    """Open a file with an exclusive flock, creating it if needed.
-
-    P1.2: Prevents concurrent writes from corrupting the token store.
-    The lock is held for the duration of the context and released on exit.
-    Falls back silently on platforms that do not support fcntl.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # Create the file if it does not exist (needed before first write)
-    if not path.exists():
-        path.write_text("{}", encoding="utf-8")
-    with path.open(mode, encoding="utf-8") as fh:
-        try:
-            fcntl.flock(fh, fcntl.LOCK_EX)
-        except (OSError, AttributeError):
-            pass  # Non-POSIX platforms — best-effort
-        try:
-            yield fh
-        finally:
-            try:
-                fcntl.flock(fh, fcntl.LOCK_UN)
-            except (OSError, AttributeError):
-                pass
-
 # Default session TTL: 365 days (long-lived — avoids constant re-auth)
 _DEFAULT_SESSION_TTL = 365 * 24 * 60 * 60
 
@@ -57,10 +31,6 @@ class TokenStore:
         self._session_ttl = session_ttl
         # session_token -> {email, created_at, last_seen}
         self._sessions: dict[str, dict[str, Any]] = {}
-        # P3.7: Debounced session persistence — dirty flag + 5s flush timer
-        self._dirty = False
-        self._flush_timer: threading.Timer | None = None
-        self._flush_lock = threading.Lock()
         self._load_sessions()
 
     # ------------------------------------------------------------------
@@ -135,32 +105,23 @@ class TokenStore:
     def _persist_sessions(self) -> None:
         """Write the current in-memory session map back to the token file.
 
-        P1.2 + P3.7: Uses an exclusive flock to prevent concurrent writes from
-        corrupting the store. Merges with existing file content so bootstrap
-        tokens are not lost.
-
-        Callers that trigger this on every connect (e.g., touch_session) should
-        use _schedule_persist() instead for debounced writes.
+        Merges with existing file content so bootstrap tokens are not lost.
         """
         try:
-            with _locked_file(self._tokens_file) as fh:
-                fh.seek(0)
-                try:
-                    store: dict[str, Any] = json.loads(fh.read())
-                except (json.JSONDecodeError, ValueError):
-                    store = {}
+            raw = self._tokens_file.read_text(encoding="utf-8")
+            store: dict[str, Any] = json.loads(raw)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            store = {}
 
-                store["sessionTokens"] = {
-                    tok: {
-                        "email": sess["email"],
-                        "created_at": sess["created_at"],
-                        "last_seen": sess["last_seen"],
-                    }
-                    for tok, sess in self._sessions.items()
-                }
-                self._write_token_store(store)
-        except OSError as exc:
-            log.error("Error persisting sessions: %s", exc)
+        store["sessionTokens"] = {
+            tok: {
+                "email": sess["email"],
+                "created_at": sess["created_at"],
+                "last_seen": sess["last_seen"],
+            }
+            for tok, sess in self._sessions.items()
+        }
+        self._write_token_store(store)
 
     def validate_bootstrap_token(self, token: str) -> tuple[bool, str]:
         """Validate and consume a bootstrap token.
@@ -298,15 +259,11 @@ class TokenStore:
             log.error("Debounced session flush failed: %s", exc)
 
     def touch_session(self, token: str) -> None:
-        """Update last_seen timestamp for a session.
-
-        P3.7: Uses debounced write — schedules a persist in 5s rather than
-        writing synchronously on every WebSocket connection.
-        """
+        """Update last_seen timestamp for a session and persist to disk."""
         session = self._sessions.get(token)
         if session:
             session["last_seen"] = time.time()
-            self._schedule_persist()
+            self._persist_sessions()
 
     def revoke_session(self, token: str) -> None:
         """Revoke (delete) a session and remove it from disk."""
