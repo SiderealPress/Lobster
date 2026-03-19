@@ -1405,31 +1405,12 @@ try:
 except Exception as _ss_err:
     log.warning(f"Agent session store init failed (non-fatal): {_ss_err}")
 
-# Startup cleanup: mark stale 'running' rows as 'dead' before reconciler loop begins.
-# After a force-restart, agents killed mid-run leave their output files with
-# stop_reason=tool_use, which the reconciler treats as still-running. We fix this
-# here by checking file existence and mtime against the server start time — any
-# output file that predates this process startup cannot belong to a live agent.
-#
-# Note on asymmetric notification: this sweep intentionally does NOT enqueue user
-# notifications for the sessions it marks dead. This is a bulk-cleanup pass, not a
-# live event. Any sessions that were completed/dead before this restart but not yet
-# notified are handled by the reconciler's _startup_sweep(), which fires immediately
-# after the reconciler loop starts and handles the notification backlog. Separating
-# the two concerns keeps this code path simple and idempotent.
-try:
-    _dead_ids = _session_store.cleanup_stale_running_sessions(
-        server_start_time=_SERVER_START_TIME
-    )
-    if _dead_ids:
-        log.warning(
-            f"[startup] Marked {len(_dead_ids)} stale 'running' session(s) as dead "
-            f"(pre-existing from before this server start): {_dead_ids}"
-        )
-    else:
-        log.info("[startup] No stale 'running' sessions found at startup")
-except Exception as _cleanup_err:
-    log.warning(f"[startup] Stale session cleanup failed (non-fatal): {_cleanup_err}")
+# NOTE: Startup cleanup (cleanup_stale_running_sessions) is intentionally NOT
+# called here at module level. This module is imported by inbox_server_http.py
+# (the HTTP bridge) which may be run as a separate process. Running the cleanup
+# at import time would incorrectly mark running agents as dead every time the
+# HTTP server restarts. The cleanup runs inside main() so it only fires when
+# inbox_server.py is the actual stdio MCP server entry point.
 
 # ---------------------------------------------------------------------------
 # Wire server notification — event-driven SSE push (<40ms latency)
@@ -10173,24 +10154,6 @@ async def main():
     """Run the MCP server."""
     setup_logging()
     _ensure_observation_worker()
-
-    # Clear the dispatcher state file on startup so a stale session ID from a
-    # previous run cannot linger and mislead hooks into thinking the old session
-    # is still active.  The file is re-written by _tag_dispatcher_session() once
-    # the dispatcher identifies itself via Options A, B, or C.
-    _clear_dispatcher_state_file()
-
-    # Write a session-lost-reminder to the inbox so the dispatcher knows to
-    # re-orient after reconnecting.  Skipped for mid-session MCP reconnects.
-    # See _write_session_lost_reminder() for full rationale.
-    _write_session_lost_reminder()
-
-    # Initialize the event bus singleton with standard listeners.
-    # JsonlFileListener writes all events to logs/events.jsonl.
-    # TelegramOutboxListener delivers debug events to Telegram when LOBSTER_DEBUG=true.
-    # This is a no-op if called more than once (idempotent).
-    from event_bus import init_event_bus
-    init_event_bus()
 
     # Startup cleanup: mark stale 'running' rows as 'dead' before reconciler loop begins.
     # After a force-restart, agents killed mid-run leave their output files with
