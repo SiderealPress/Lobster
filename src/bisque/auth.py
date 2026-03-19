@@ -332,42 +332,31 @@ class TokenStore:
         return len(self._sessions)
 
 
-def create_bootstrap_token(email: str, store: TokenStore, ttl_seconds: float = 24 * 60 * 60) -> str:
+def create_bootstrap_token(email: str, store: TokenStore) -> str:
     """Create and persist a one-time bootstrap token for the given email.
-
-    P1.4: Writes the canonical schema shared with bisque-chat TypeScript:
-      {email, createdAt (ISO string), expiresAt (ISO string), used: false}
 
     The token is written to the token file (bootstrapTokens dict) so the relay
     can issue it independently of the bisque-chat Next.js app.
 
     Returns the raw bootstrap token string.
     """
-    from datetime import datetime, timezone
-
     token = secrets.token_urlsafe(32)
-    now_dt = datetime.now(timezone.utc)
-    created_at = now_dt.isoformat()
-    expires_at = datetime.fromtimestamp(now_dt.timestamp() + ttl_seconds, tz=timezone.utc).isoformat()
+    now = time.time()
 
-    # P1.2: Hold exclusive lock while writing to prevent concurrent corruption
-    with _locked_file(store._tokens_file) as fh:
-        fh.seek(0)
-        try:
-            store_data: dict[str, Any] = json.loads(fh.read())
-        except (json.JSONDecodeError, ValueError):
-            store_data = {}
+    try:
+        raw = store._tokens_file.read_text(encoding="utf-8")
+        store_data: dict[str, Any] = json.loads(raw)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        store_data = {}
 
-        bootstrap = store_data.setdefault("bootstrapTokens", {})
-        bootstrap[token] = {
-            "email": email,
-            "createdAt": created_at,
-            "expiresAt": expires_at,
-            "used": False,
-        }
-        store._write_token_store(store_data)
+    bootstrap = store_data.setdefault("bootstrapTokens", {})
+    bootstrap[token] = {
+        "email": email,
+        "created_at": now,
+    }
+    store._write_token_store(store_data)
 
-    log.info("Bootstrap token created for %s (expires %s)", email, expires_at)
+    log.info("Bootstrap token created for %s", email)
     return token
 
 

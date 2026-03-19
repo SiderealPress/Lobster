@@ -21,7 +21,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
-import collections
 import json
 import logging
 import logging.handlers
@@ -182,64 +181,6 @@ _file_handler.setFormatter(_JsonFormatter())
 log.addHandler(_file_handler)
 # Console handler keeps human-readable format
 log.addHandler(logging.StreamHandler())
-
-
-# ---------------------------------------------------------------------------
-# P3.6: Rate limiter — token bucket per IP, applied to auth and upload endpoints
-# ---------------------------------------------------------------------------
-
-class _RateLimiter:
-    """Token-bucket rate limiter keyed by remote IP.
-
-    Each IP gets `capacity` tokens that refill at `rate` tokens/second.
-    A call to ``is_allowed(ip)`` consumes one token and returns True if the
-    bucket was non-empty, False if the IP should be throttled.
-
-    Uses a lazy-refill strategy: tokens are added proportional to elapsed
-    time since the last request, capped at `capacity`.  This avoids a
-    background thread while still being accurate.
-
-    Thread-safety note: the relay is asyncio-based (single-threaded event
-    loop), so plain dict access is safe without a mutex.
-    """
-
-    def __init__(self, rate: float = 5.0, capacity: float = 10.0) -> None:
-        """
-        Args:
-            rate:     Tokens refilled per second (default 5 — 5 req/s steady state).
-            capacity: Maximum burst size (default 10).
-        """
-        self._rate = rate
-        self._capacity = capacity
-        # ip -> (tokens: float, last_refill_ts: float)
-        self._buckets: dict[str, tuple[float, float]] = {}
-
-    def is_allowed(self, ip: str) -> bool:
-        """Consume one token for `ip`. Returns True if allowed, False if throttled."""
-        now = time.monotonic()
-        tokens, last_ts = self._buckets.get(ip, (self._capacity, now))
-        # Refill proportional to elapsed time
-        elapsed = now - last_ts
-        tokens = min(self._capacity, tokens + elapsed * self._rate)
-        if tokens < 1.0:
-            self._buckets[ip] = (tokens, now)
-            return False
-        self._buckets[ip] = (tokens - 1.0, now)
-        return True
-
-    def purge_old(self, max_age: float = 300.0) -> int:
-        """Remove buckets that have been idle for `max_age` seconds. Returns count removed."""
-        now = time.monotonic()
-        stale = [ip for ip, (_, ts) in self._buckets.items() if now - ts > max_age]
-        for ip in stale:
-            del self._buckets[ip]
-        return len(stale)
-
-
-# Auth endpoints: 5 req/s steady, burst 10
-_AUTH_RATE_LIMITER = _RateLimiter(rate=5.0, capacity=10.0)
-# Upload endpoint: 2 req/s steady, burst 5 (uploads are heavier)
-_UPLOAD_RATE_LIMITER = _RateLimiter(rate=2.0, capacity=5.0)
 
 
 # ---------------------------------------------------------------------------
@@ -489,16 +430,6 @@ class BisqueRelayServer:
             "Access-Control-Allow-Headers": "Content-Type, Authorization",
         }
 
-        # P3.6: rate limit admin token creation
-        remote_ip = request.remote or "unknown"
-        if not _AUTH_RATE_LIMITER.is_allowed(remote_ip):
-            log.warning("Rate limit hit on /auth/admin/token from %s", remote_ip)
-            return web.json_response(
-                {"error": "Too many requests — please wait a moment"},
-                status=429,
-                headers={**_cors_headers, "Retry-After": "1"},
-            )
-
         # Check admin secret is configured
         if not _ADMIN_SECRET:
             log.error("POST /auth/admin/token called but BISQUE_ADMIN_SECRET/ADMIN_SECRET is not set")
@@ -574,156 +505,6 @@ class BisqueRelayServer:
                 "Access-Control-Allow-Origin": "*",
                 "Access-Control-Allow-Methods": "POST, OPTIONS",
                 "Access-Control-Allow-Headers": "Content-Type, Authorization",
-            },
-        )
-
-    # --- HTTP handler: POST /upload (BIS-119 voice/file upload) ---
-
-    async def _http_upload(self, request: web.Request) -> web.Response:
-        """Accept a multipart or raw binary upload and store it under a UUID filename.
-
-        Authentication: session token required in Authorization header or ?token= query param.
-
-        Request (multipart/form-data):
-            POST /upload
-            Authorization: Bearer <session_token>
-            Content-Type: multipart/form-data; boundary=...
-            file=<binary>
-
-        Request (raw binary, content-type = audio/webm etc.):
-            POST /upload
-            Authorization: Bearer <session_token>
-            Content-Type: audio/webm
-            <raw bytes>
-
-        Response:
-            {"url": "/files/<uuid>.<ext>", "filename": "<uuid>.<ext>"}
-        """
-        _cors = {
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "POST, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type, Authorization",
-        }
-
-        # --- P3.6: Rate limit uploads per IP (2 req/s, burst 5) ---
-        remote_ip = request.remote or "unknown"
-        if not _UPLOAD_RATE_LIMITER.is_allowed(remote_ip):
-            log.warning("Rate limit hit on /upload from %s", remote_ip)
-            return web.json_response(
-                {"error": "Too many requests — please wait a moment"},
-                status=429,
-                headers={**_cors, "Retry-After": "1"},
-            )
-
-        # --- Auth ---
-        token = request.rel_url.query.get("token", "")
-        if not token:
-            auth_header = request.headers.get("Authorization", "")
-            if auth_header.startswith("Bearer "):
-                token = auth_header[len("Bearer "):]
-        if not token:
-            return web.json_response({"error": "Unauthorized"}, status=401, headers=_cors)
-        valid, email = self._token_store.validate_session(token)
-        if not valid:
-            return web.json_response({"error": "Invalid session token"}, status=401, headers=_cors)
-
-        # --- Read body ---
-        content_type = request.content_type or ""
-        file_data: bytes
-        original_ext = ".bin"
-
-        if content_type.startswith("multipart/"):
-            try:
-                reader = await request.multipart()
-                field = await reader.next()
-                if field is None:
-                    return web.json_response({"error": "Empty multipart body"}, status=400, headers=_cors)
-                # Use the submitted filename extension if available
-                if field.filename:
-                    original_ext = Path(field.filename).suffix or ".bin"
-                file_data = await field.read(decode=True)
-            except Exception as exc:
-                log.warning("Upload multipart read error: %s", exc)
-                return web.json_response({"error": "Failed to read upload"}, status=400, headers=_cors)
-        else:
-            # Raw binary body — derive extension from Content-Type
-            ext_from_mime = _mime_to_ext(content_type)
-            if ext_from_mime:
-                original_ext = ext_from_mime
-            try:
-                file_data = await request.read()
-            except Exception as exc:
-                log.warning("Upload raw read error: %s", exc)
-                return web.json_response({"error": "Failed to read upload"}, status=400, headers=_cors)
-
-        if len(file_data) == 0:
-            return web.json_response({"error": "Empty file"}, status=400, headers=_cors)
-        if len(file_data) > MAX_UPLOAD_BYTES:
-            return web.json_response(
-                {"error": f"File too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB)"},
-                status=413,
-                headers=_cors,
-            )
-
-        # --- Store file ---
-        UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
-        file_uuid = uuid.uuid4().hex
-        filename = f"{file_uuid}{original_ext}"
-        dest = UPLOADS_DIR / filename
-        try:
-            dest.write_bytes(file_data)
-        except OSError as exc:
-            log.error("Upload write error: %s", exc)
-            return web.json_response({"error": "Storage error"}, status=500, headers=_cors)
-
-        log.info("Stored upload %s (%d bytes) for %s", filename, len(file_data), email)
-        return web.json_response(
-            {"url": f"/files/{filename}", "filename": filename},
-            headers=_cors,
-        )
-
-    async def _http_upload_options(self, request: web.Request) -> web.Response:
-        """Handle CORS preflight for /upload."""
-        return web.Response(
-            status=204,
-            headers={
-                "Access-Control-Allow-Origin": "*",
-                "Access-Control-Allow-Methods": "POST, OPTIONS",
-                "Access-Control-Allow-Headers": "Content-Type, Authorization",
-            },
-        )
-
-    # --- HTTP handler: GET /files/{filename} (BIS-119 file serving) ---
-
-    async def _http_serve_file(self, request: web.Request) -> web.Response:
-        """Serve a previously uploaded file.
-
-        No auth required (URLs are unguessable UUIDs). Files are served inline
-        when the MIME type is audio/*, image/*, or video/*; otherwise as attachment.
-        """
-        filename = request.match_info.get("filename", "")
-        # Safety: reject path traversal attempts
-        if not filename or "/" in filename or "\\" in filename or filename.startswith("."):
-            return web.Response(status=404)
-
-        path = UPLOADS_DIR / filename
-        if not path.exists() or not path.is_file():
-            return web.Response(status=404)
-
-        mime_type, _ = mimetypes.guess_type(filename)
-        if not mime_type:
-            mime_type = "application/octet-stream"
-
-        is_inline = any(mime_type.startswith(p) for p in _INLINE_MIME_PREFIXES)
-        disposition = "inline" if is_inline else f'attachment; filename="{filename}"'
-
-        return web.Response(
-            body=path.read_bytes(),
-            content_type=mime_type,
-            headers={
-                "Content-Disposition": disposition,
-                "Access-Control-Allow-Origin": "*",
-                "Cache-Control": "public, max-age=86400",
             },
         )
 
@@ -1326,19 +1107,6 @@ class BisqueRelayServer:
         app.router.add_route("OPTIONS", "/auth/exchange", self._http_options)
         app.router.add_post("/auth/admin/token", self._http_admin_create_token)
         app.router.add_route("OPTIONS", "/auth/admin/token", self._http_options_admin_token)
-        # Nginx-prefixed aliases (nginx may forward /bisque-relay/auth/... without stripping prefix)
-        app.router.add_post("/bisque-relay/auth/exchange", self._http_auth_exchange)
-        app.router.add_route("OPTIONS", "/bisque-relay/auth/exchange", self._http_options)
-        app.router.add_post("/bisque-relay/auth/admin/token", self._http_admin_create_token)
-        app.router.add_route("OPTIONS", "/bisque-relay/auth/admin/token", self._http_options_admin_token)
-        # File upload/serve (BIS-119)
-        app.router.add_post("/upload", self._http_upload)
-        app.router.add_route("OPTIONS", "/upload", self._http_upload_options)
-        app.router.add_get("/files/{filename}", self._http_serve_file)
-        # Nginx-prefixed aliases for upload/files endpoints
-        app.router.add_post("/bisque-relay/upload", self._http_upload)
-        app.router.add_route("OPTIONS", "/bisque-relay/upload", self._http_upload_options)
-        app.router.add_get("/bisque-relay/files/{filename}", self._http_serve_file)
         app.router.add_get("/", self._ws_handler)
         # Catch-all for WS connections on any path
         app.router.add_get("/{path:.*}", self._ws_handler)
