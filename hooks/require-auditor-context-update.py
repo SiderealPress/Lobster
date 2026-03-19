@@ -42,16 +42,15 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-def _exit_ok() -> None:
-    """Exit 0 silently.
+# JSON to emit on every successful (allow) exit — suppresses the
+# "Stop hook feedback: No stderr output" injection that CC 2.1.76+ produces
+# even when the hook exits 0 with no output.
+_SILENT_OK = json.dumps({"suppressOutput": True})
 
-    Intentionally produces no stdout or stderr output. For SubagentStop hooks,
-    suppressOutput in stdout is not reliably honoured by CC when multiple hooks
-    are registered for the same event — the first hook (require-write-result.py)
-    already emits suppressOutput and covers the event. Adding a second
-    suppressOutput from this hook causes CC to report it as feedback rather than
-    suppress it. Silence is the correct behaviour here.
-    """
+
+def _exit_ok() -> None:
+    """Exit 0 with JSON that suppresses CC feedback injection."""
+    print(_SILENT_OK)
     sys.exit(0)
 
 CONTEXT_FILE = Path(os.path.expanduser(
@@ -328,15 +327,6 @@ def main() -> None:
     else:
         transcript = hook_input.get("transcript", [])
 
-    # CC 2.1.76+: SubagentStop passes the transcript as a JSONL file at
-    # agent_transcript_path rather than inline. Load from the file path,
-    # falling back to the legacy inline key for older CC versions.
-    transcript_path = hook_input.get("agent_transcript_path", "")
-    if transcript_path:
-        transcript = _load_transcript_from_jsonl(transcript_path)
-    else:
-        transcript = hook_input.get("transcript", [])
-
     tool_calls = _extract_tool_calls(transcript)
 
     # Fast path: not an auditor session — pass through.
@@ -348,16 +338,10 @@ def main() -> None:
     # Condition 1: context file was updated during this session.
     session_start = _session_start_time(hook_input, transcript)
     if _context_file_updated_since(session_start):
-        # Success path — clean up any fire-count state and allow exit.
-        key = _agent_key(hook_input)
-        _cleanup_fire_state(_fire_count_path(key))
         _exit_ok()
 
     # Condition 2: transcript contains the explicit safe word.
     if _safe_word_in_transcript(tool_calls):
-        # Success path — clean up any fire-count state and allow exit.
-        key = _agent_key(hook_input)
-        _cleanup_fire_state(_fire_count_path(key))
         _exit_ok()
 
     # Neither condition met — increment fire count and check circuit breaker.
