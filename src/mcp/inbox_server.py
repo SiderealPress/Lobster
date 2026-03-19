@@ -300,10 +300,13 @@ def _emit_debug_observation(
     never sees these messages and no dispatcher tokens are burned.
 
     When debug mode is off, this function is a no-op.
+    When category is "system_context", this function is always a no-op — per the
+    dispatcher bootup doc, system_context observations must be stored silently and
+    never forwarded to the user, even in debug mode.
 
     Args:
         text: The observation body text.
-        category: "system_context", "system_error", or "user_context".
+        category: "system_context" (always suppressed), "system_error", or "user_context".
         visibility: "mcp-only" if the MCP layer is emitting this directly (dispatcher
             has not seen it yet), or "dispatcher" if the dispatcher's main loop is
             emitting this after processing the message through its inbox.
@@ -311,10 +314,17 @@ def _emit_debug_observation(
             Falls back to "unknown" if not provided.
 
     Label format: [debug|{visibility}] {category} from {emitter}
-    Example: [debug|mcp-only] system_context from task:linear-digest
+    Example: [debug|mcp-only] system_error from task:linear-digest
 
     Never raises — must be safe to call from any context including threads.
     """
+    # system_context observations are internal routing decisions — never forward
+    # to Telegram. The dispatcher bootup doc is explicit: system_context must be
+    # stored silently (memory_store), do NOT send_reply, even in debug mode.
+    # This mirrors the suppression already present in handle_write_observation().
+    if category == "system_context":
+        return
+
     # Fast path: skip I/O if debug alerts have been resolved and are disabled.
     if _DEBUG_RESOLVED and not _DEBUG_ALERTS_ENABLED:
         return
