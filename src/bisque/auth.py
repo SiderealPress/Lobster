@@ -149,6 +149,34 @@ class TokenStore:
         return len(self._sessions)
 
 
+def create_bootstrap_token(email: str, store: TokenStore) -> str:
+    """Create and persist a one-time bootstrap token for the given email.
+
+    The token is written to the token file (bootstrapTokens dict) so the relay
+    can issue it independently of the bisque-chat Next.js app.
+
+    Returns the raw bootstrap token string.
+    """
+    token = secrets.token_urlsafe(32)
+    now = time.time()
+
+    try:
+        raw = store._tokens_file.read_text(encoding="utf-8")
+        store_data: dict[str, Any] = json.loads(raw)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        store_data = {}
+
+    bootstrap = store_data.setdefault("bootstrapTokens", {})
+    bootstrap[token] = {
+        "email": email,
+        "created_at": now,
+    }
+    store._write_token_store(store_data)
+
+    log.info("Bootstrap token created for %s", email)
+    return token
+
+
 def handle_auth_exchange(body: dict[str, Any], store: TokenStore) -> tuple[int, dict[str, Any]]:
     """Handle the HTTP POST /auth/exchange endpoint.
 

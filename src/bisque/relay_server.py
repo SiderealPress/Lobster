@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import json
 import logging
 import logging.handlers
@@ -34,7 +35,7 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-from bisque.auth import TokenStore, handle_auth_exchange
+from bisque.auth import TokenStore, create_bootstrap_token, handle_auth_exchange
 from bisque.event_bus import EventBus, OutboxEventSource, FileSystemEventSource
 from bisque.event_log import EventLog
 from bisque.protocol import (
@@ -83,6 +84,19 @@ _file_handler = logging.handlers.RotatingFileHandler(
 _file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
 log.addHandler(_file_handler)
 log.addHandler(logging.StreamHandler())
+
+
+# ---------------------------------------------------------------------------
+# Admin configuration (read from environment at startup)
+# ---------------------------------------------------------------------------
+
+# Secret used to protect the POST /auth/admin/token endpoint.
+# Reads BISQUE_ADMIN_SECRET first, falls back to ADMIN_SECRET.
+_ADMIN_SECRET: str = os.environ.get("BISQUE_ADMIN_SECRET", "") or os.environ.get("ADMIN_SECRET", "")
+
+# Public relay URL embedded in login tokens so the browser knows where to connect.
+# Example: wss://178.104.15.109.nip.io/bisque-relay
+_RELAY_URL: str = os.environ.get("BISQUE_RELAY_URL", "")
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +196,109 @@ class BisqueRelayServer:
                 "Access-Control-Allow-Origin": "*",
                 "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
                 "Access-Control-Allow-Headers": "Content-Type",
+            },
+        )
+
+    # --- HTTP handler: POST /auth/admin/token ---
+
+    async def _http_admin_create_token(self, request: web.Request) -> web.Response:
+        """Create a bootstrap token and return an encoded login token.
+
+        Protected by the BISQUE_ADMIN_SECRET / ADMIN_SECRET environment variable.
+
+        Request:
+            POST /auth/admin/token
+            Authorization: Bearer <admin_secret>
+            Content-Type: application/json
+            {"email": "user@example.com"}
+
+        Response:
+            {"loginToken": "<base64url-encoded>", "bootstrapToken": "<raw>", "email": "..."}
+
+        The loginToken is base64url(JSON.stringify({"url": <relay_url>, "token": <bootstrap>})).
+        Users paste this token into the bisque-chat login screen.
+        """
+        _cors_headers = {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization",
+        }
+
+        # Check admin secret is configured
+        if not _ADMIN_SECRET:
+            log.error("POST /auth/admin/token called but BISQUE_ADMIN_SECRET/ADMIN_SECRET is not set")
+            return web.json_response(
+                {"error": "Admin secret not configured on this server"},
+                status=500,
+                headers=_cors_headers,
+            )
+
+        # Validate Authorization header
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            return web.json_response(
+                {"error": "Missing or malformed Authorization header"},
+                status=401,
+                headers=_cors_headers,
+            )
+
+        provided_secret = auth_header[len("Bearer "):]
+        if provided_secret != _ADMIN_SECRET:
+            log.warning("POST /auth/admin/token: invalid admin secret from %s", request.remote)
+            return web.json_response(
+                {"error": "Invalid admin secret"},
+                status=403,
+                headers=_cors_headers,
+            )
+
+        # Parse request body
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, Exception):
+            return web.json_response({"error": "Invalid JSON body"}, status=400, headers=_cors_headers)
+
+        email = (body.get("email") or "").strip()
+        if not email or "@" not in email:
+            return web.json_response(
+                {"error": "Missing or invalid 'email' field"},
+                status=400,
+                headers=_cors_headers,
+            )
+
+        # Determine relay URL (body override > env var)
+        relay_url = (body.get("relayUrl") or "").strip() or _RELAY_URL
+        if not relay_url:
+            return web.json_response(
+                {"error": "BISQUE_RELAY_URL is not configured on this server"},
+                status=500,
+                headers=_cors_headers,
+            )
+
+        # Create bootstrap token (writes to disk so /auth/exchange can consume it)
+        bootstrap_token = create_bootstrap_token(email, self._token_store)
+
+        # Encode login token: base64url(JSON.stringify({url, token}))
+        payload_json = json.dumps({"url": relay_url, "token": bootstrap_token}, separators=(",", ":"))
+        login_token = base64.urlsafe_b64encode(payload_json.encode("utf-8")).decode("ascii").rstrip("=")
+
+        log.info("Admin created login token for %s", email)
+        return web.json_response(
+            {
+                "loginToken": login_token,
+                "bootstrapToken": bootstrap_token,
+                "email": email,
+            },
+            headers=_cors_headers,
+        )
+
+    async def _http_options_admin_token(self, request: web.Request) -> web.Response:
+        """Handle CORS preflight for /auth/admin/token."""
+        return web.Response(
+            status=204,
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "POST, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type, Authorization",
             },
         )
 
@@ -471,6 +588,8 @@ class BisqueRelayServer:
         app = web.Application()
         app.router.add_post("/auth/exchange", self._http_auth_exchange)
         app.router.add_route("OPTIONS", "/auth/exchange", self._http_options)
+        app.router.add_post("/auth/admin/token", self._http_admin_create_token)
+        app.router.add_route("OPTIONS", "/auth/admin/token", self._http_options_admin_token)
         app.router.add_get("/", self._ws_handler)
         # Catch-all for WS connections on any path
         app.router.add_get("/{path:.*}", self._ws_handler)
