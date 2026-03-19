@@ -98,6 +98,38 @@ def _mime_to_ext(mime_type: str) -> str:
     return _MIME_EXT_MAP.get(base_type, "")
 
 
+# Maximum file upload size: 50 MB
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+
+# MIME types we serve inline (images, video); everything else is an attachment
+_INLINE_MIME_PREFIXES = ("image/", "video/", "audio/")
+
+# Map content-type prefixes to file extensions for raw binary uploads
+_MIME_EXT_MAP: dict[str, str] = {
+    "audio/webm": ".webm",
+    "audio/ogg": ".ogg",
+    "audio/mp4": ".m4a",
+    "audio/mpeg": ".mp3",
+    "audio/wav": ".wav",
+    "audio/x-wav": ".wav",
+    "audio/aac": ".aac",
+    "audio/flac": ".flac",
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+    "video/mp4": ".mp4",
+    "video/webm": ".webm",
+}
+
+
+def _mime_to_ext(mime_type: str) -> str:
+    """Return a file extension for a MIME type, or empty string if unknown."""
+    # Strip parameters like ;codecs=opus
+    base_type = mime_type.split(";")[0].strip().lower()
+    return _MIME_EXT_MAP.get(base_type, "")
+
+
 # P1.3: Token store lives outside the repo at ~/messages/config/bisque-tokens.json.
 # Fall back to the legacy in-repo path for environments that have not yet migrated.
 _EXTERNAL_TOKENS_FILE = _MESSAGES / "config" / "bisque-tokens.json"
@@ -200,32 +232,6 @@ _RELAY_URL: str = os.environ.get("BISQUE_RELAY_URL", "")
 # Inbox injection
 # ---------------------------------------------------------------------------
 
-def _resolve_voice_local_path(attachment_url: str) -> Path | None:
-    """Resolve a voice attachment URL to its local file path in UPLOADS_DIR.
-
-    The relay server stores files at UPLOADS_DIR/<uuid>.<ext> and serves them at
-    /files/<uuid>.<ext> (or /bisque-relay/files/<uuid>.<ext>).  Given the public
-    URL we strip the path prefix and return the corresponding local Path.
-
-    Returns None if the URL cannot be resolved to a local file.
-    """
-    if not attachment_url:
-        return None
-    # Accept both absolute URLs (https://host/files/foo.webm) and relative paths (/files/foo.webm)
-    for prefix in ("/bisque-relay/files/", "/files/"):
-        idx = attachment_url.find(prefix)
-        if idx != -1:
-            filename = attachment_url[idx + len(prefix):]
-            # Strip any query-string / fragment
-            filename = filename.split("?")[0].split("#")[0]
-            # Safety: reject path traversal
-            if filename and "/" not in filename and not filename.startswith("."):
-                candidate = UPLOADS_DIR / filename
-                if candidate.exists():
-                    return candidate
-    return None
-
-
 def _inject_into_inbox(
     inbox_dir: Path,
     email: str,
@@ -258,17 +264,6 @@ def _inject_into_inbox(
         payload["reply_to"] = reply_to_context
     if attachments:
         payload["attachments"] = attachments
-
-    # For voice messages: resolve the attachment URL to a local file path so that
-    # the MCP transcribe_audio tool (which looks for audio_file) can find the file.
-    if msg_type == "voice" and attachments:
-        voice_url = attachments[0].get("url", "")
-        local_path = _resolve_voice_local_path(voice_url)
-        if local_path:
-            payload["audio_file"] = str(local_path)
-            log.info("Resolved voice attachment to local path: %s", local_path)
-        else:
-            log.warning("Could not resolve voice URL to local path: %s", voice_url)
     dest = inbox_dir / f"{msg_id}.json"
     tmp = inbox_dir / f".{msg_id}.tmp"
     try:
@@ -323,14 +318,8 @@ class BisqueRelayServer:
         self._client_emails: dict[int, str] = {}  # ws id -> email
         # In-memory message cache for reply context lookup (id -> {text, sender})
         # Bounded to the most recent 500 messages to avoid unbounded growth.
-        # P4.25: use collections.deque for O(1) FIFO eviction
-        import collections
         self._message_cache: dict[str, dict[str, str]] = {}
-        self._message_cache_order: collections.deque = collections.deque()
-        # P3.2: track startup time for /health uptime reporting
-        self._start_time: float = time.time()
-        # P3.2: track last event timestamp
-        self._last_event_ts: float | None = None
+        self._message_cache_order: list[str] = []
         # Event sources
         self._outbox_source: OutboxEventSource | None = None
         self._fs_source: FileSystemEventSource | None = None
@@ -505,6 +494,146 @@ class BisqueRelayServer:
                 "Access-Control-Allow-Origin": "*",
                 "Access-Control-Allow-Methods": "POST, OPTIONS",
                 "Access-Control-Allow-Headers": "Content-Type, Authorization",
+            },
+        )
+
+    # --- HTTP handler: POST /upload (BIS-119 voice/file upload) ---
+
+    async def _http_upload(self, request: web.Request) -> web.Response:
+        """Accept a multipart or raw binary upload and store it under a UUID filename.
+
+        Authentication: session token required in Authorization header or ?token= query param.
+
+        Request (multipart/form-data):
+            POST /upload
+            Authorization: Bearer <session_token>
+            Content-Type: multipart/form-data; boundary=...
+            file=<binary>
+
+        Request (raw binary, content-type = audio/webm etc.):
+            POST /upload
+            Authorization: Bearer <session_token>
+            Content-Type: audio/webm
+            <raw bytes>
+
+        Response:
+            {"url": "/files/<uuid>.<ext>", "filename": "<uuid>.<ext>"}
+        """
+        _cors = {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization",
+        }
+
+        # --- Auth ---
+        token = request.rel_url.query.get("token", "")
+        if not token:
+            auth_header = request.headers.get("Authorization", "")
+            if auth_header.startswith("Bearer "):
+                token = auth_header[len("Bearer "):]
+        if not token:
+            return web.json_response({"error": "Unauthorized"}, status=401, headers=_cors)
+        valid, email = self._token_store.validate_session(token)
+        if not valid:
+            return web.json_response({"error": "Invalid session token"}, status=401, headers=_cors)
+
+        # --- Read body ---
+        content_type = request.content_type or ""
+        file_data: bytes
+        original_ext = ".bin"
+
+        if content_type.startswith("multipart/"):
+            try:
+                reader = await request.multipart()
+                field = await reader.next()
+                if field is None:
+                    return web.json_response({"error": "Empty multipart body"}, status=400, headers=_cors)
+                # Use the submitted filename extension if available
+                if field.filename:
+                    original_ext = Path(field.filename).suffix or ".bin"
+                file_data = await field.read(decode=True)
+            except Exception as exc:
+                log.warning("Upload multipart read error: %s", exc)
+                return web.json_response({"error": "Failed to read upload"}, status=400, headers=_cors)
+        else:
+            # Raw binary body — derive extension from Content-Type
+            ext_from_mime = _mime_to_ext(content_type)
+            if ext_from_mime:
+                original_ext = ext_from_mime
+            try:
+                file_data = await request.read()
+            except Exception as exc:
+                log.warning("Upload raw read error: %s", exc)
+                return web.json_response({"error": "Failed to read upload"}, status=400, headers=_cors)
+
+        if len(file_data) == 0:
+            return web.json_response({"error": "Empty file"}, status=400, headers=_cors)
+        if len(file_data) > MAX_UPLOAD_BYTES:
+            return web.json_response(
+                {"error": f"File too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB)"},
+                status=413,
+                headers=_cors,
+            )
+
+        # --- Store file ---
+        UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+        file_uuid = uuid.uuid4().hex
+        filename = f"{file_uuid}{original_ext}"
+        dest = UPLOADS_DIR / filename
+        try:
+            dest.write_bytes(file_data)
+        except OSError as exc:
+            log.error("Upload write error: %s", exc)
+            return web.json_response({"error": "Storage error"}, status=500, headers=_cors)
+
+        log.info("Stored upload %s (%d bytes) for %s", filename, len(file_data), email)
+        return web.json_response(
+            {"url": f"/files/{filename}", "filename": filename},
+            headers=_cors,
+        )
+
+    async def _http_upload_options(self, request: web.Request) -> web.Response:
+        """Handle CORS preflight for /upload."""
+        return web.Response(
+            status=204,
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "POST, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type, Authorization",
+            },
+        )
+
+    # --- HTTP handler: GET /files/{filename} (BIS-119 file serving) ---
+
+    async def _http_serve_file(self, request: web.Request) -> web.Response:
+        """Serve a previously uploaded file.
+
+        No auth required (URLs are unguessable UUIDs). Files are served inline
+        when the MIME type is audio/*, image/*, or video/*; otherwise as attachment.
+        """
+        filename = request.match_info.get("filename", "")
+        # Safety: reject path traversal attempts
+        if not filename or "/" in filename or "\\" in filename or filename.startswith("."):
+            return web.Response(status=404)
+
+        path = UPLOADS_DIR / filename
+        if not path.exists() or not path.is_file():
+            return web.Response(status=404)
+
+        mime_type, _ = mimetypes.guess_type(filename)
+        if not mime_type:
+            mime_type = "application/octet-stream"
+
+        is_inline = any(mime_type.startswith(p) for p in _INLINE_MIME_PREFIXES)
+        disposition = "inline" if is_inline else f'attachment; filename="{filename}"'
+
+        return web.Response(
+            body=path.read_bytes(),
+            content_type=mime_type,
+            headers={
+                "Content-Disposition": disposition,
+                "Access-Control-Allow-Origin": "*",
+                "Cache-Control": "public, max-age=86400",
             },
         )
 
@@ -684,17 +813,14 @@ class BisqueRelayServer:
     _MESSAGE_CACHE_LIMIT = 500
 
     def _cache_message(self, msg_id: str, text: str, sender: str) -> None:
-        """Store a message in the bounded in-memory cache for reply lookups.
-
-        P4.25: Uses deque.popleft() for O(1) FIFO eviction instead of list.pop(0).
-        """
+        """Store a message in the bounded in-memory cache for reply lookups."""
         if msg_id in self._message_cache:
             return
         self._message_cache[msg_id] = {"text": text, "sender": sender}
         self._message_cache_order.append(msg_id)
         # Evict oldest entries once the cache exceeds the limit
         while len(self._message_cache_order) > self._MESSAGE_CACHE_LIMIT:
-            oldest = self._message_cache_order.popleft()
+            oldest = self._message_cache_order.pop(0)
             self._message_cache.pop(oldest, None)
 
     def _resolve_reply_context(
@@ -709,112 +835,7 @@ class BisqueRelayServer:
         return None
 
     def _load_recent_messages(self, limit: int = 50) -> list[dict[str, Any]]:
-        """Load recent conversation history for the snapshot frame.
-
-        Primary path (when LOBSTER_USE_DB=1): query the messages.db SQLite
-        database which is the authoritative store after the BIS-159 cutover.
-        The bisque_events table holds both user (inbound) and assistant
-        (outbound) messages with source='bisque'.
-
-        Fallback path: scan JSON files in sent/ and processed/ directories.
-        Used when the DB is unavailable or returns no results.
-
-        Results are sorted chronologically so history renders oldest-first.
-        """
-        use_db = os.environ.get("LOBSTER_USE_DB", "0").strip() == "1"
-
-        if use_db:
-            db_messages = self._load_recent_messages_from_db(limit)
-            if db_messages:
-                return db_messages
-            # DB returned nothing — fall through to filesystem scan
-            log.info("DB returned no bisque history; falling back to filesystem scan")
-
-        return self._load_recent_messages_from_fs(limit)
-
-    def _load_recent_messages_from_db(self, limit: int) -> list[dict[str, Any]]:
-        """Load recent bisque conversation from messages.db (SQLite).
-
-        Reads from the bisque_events table which stores both user messages
-        (source='bisque', inbound) and assistant replies (source='bisque',
-        outbound).  Rows are ordered by timestamp ascending so the snapshot
-        presents history in chronological order.
-
-        Returns an empty list if the DB is unavailable or has no rows.
-        """
-        db_path_env = os.environ.get("LOBSTER_MESSAGES_DB", "")
-        db_path = Path(db_path_env) if db_path_env else _HOME / "messages" / "messages.db"
-
-        if not db_path.exists():
-            return []
-
-        try:
-            import sqlite3
-            conn = sqlite3.connect(str(db_path))
-            conn.row_factory = sqlite3.Row
-            try:
-                # bisque_events stores user inbound AND assistant outbound messages.
-                # The 'id' prefix convention is:
-                #   bisque_<ts>_<hex>  — user messages (inbound)
-                #   <ts>_bisque        — assistant replies (outbound)
-                # We derive role from the id prefix pattern.
-                rows = conn.execute(
-                    """
-                    SELECT id, chat_id, type, text, reply_to_id, reply_to, timestamp
-                    FROM bisque_events
-                    WHERE text IS NOT NULL AND text != ''
-                    ORDER BY timestamp DESC
-                    LIMIT ?
-                    """,
-                    (limit,),
-                ).fetchall()
-            finally:
-                conn.close()
-        except Exception as exc:
-            log.warning("Failed to load bisque history from DB: %s", exc)
-            return []
-
-        if not rows:
-            return []
-
-        messages: list[dict[str, Any]] = []
-        for row in rows:
-            msg_id = row["id"] or ""
-            # Determine role from message ID prefix convention:
-            #   IDs starting with 'bisque_' are inbound (user → Lobster)
-            #   IDs ending with '_bisque' or containing '_bisque' outbound are assistant
-            if msg_id.startswith("bisque_"):
-                role = "user"
-            else:
-                role = "assistant"
-
-            entry: dict[str, Any] = {
-                "id": msg_id,
-                "role": role,
-                "text": row["text"],
-                "timestamp": row["timestamp"] or "",
-            }
-
-            # Include reply context if present
-            reply_to_raw = row["reply_to"]
-            if reply_to_raw:
-                try:
-                    import json as _json
-                    if isinstance(reply_to_raw, str):
-                        entry["reply_to"] = _json.loads(reply_to_raw)
-                    else:
-                        entry["reply_to"] = reply_to_raw
-                except (ValueError, TypeError):
-                    pass
-
-            messages.append(entry)
-
-        # Reverse to chronological order (we fetched DESC for the LIMIT)
-        messages.reverse()
-        return messages
-
-    def _load_recent_messages_from_fs(self, limit: int) -> list[dict[str, Any]]:
-        """Load recent bisque conversation from JSON files (filesystem fallback).
+        """Load recent conversation history from sent/ and processed/ directories.
 
         Combines Lobster's outgoing messages (sent/) and user messages (processed/)
         to reconstruct the full conversation. Only bisque messages are included.
@@ -973,7 +994,27 @@ class BisqueRelayServer:
     async def _on_event(self, event_id: str, frame: str) -> None:
         """Called by the event bus when a new event is available."""
         self._event_log.append(event_id, frame)
-        self._last_event_ts = time.time()  # P3.2: track for /health + heartbeat
+
+        # Parse once for both BIS-118 and BIS-122 side-effects.
+        try:
+            data = json.loads(frame)
+            if data.get("type") == "message":
+                # BIS-118: cache assistant messages so reply context is available
+                # for future reply_to_id lookups.
+                msg_id = data.get("message_id") or data.get("id")
+                text = data.get("text", "")
+                role = data.get("role", "assistant")
+                if msg_id and text:
+                    sender = "assistant" if role == "assistant" else "user"
+                    self._cache_message(msg_id=msg_id, text=text, sender=sender)
+
+                # BIS-122: send is_typing=false before the message frame so the
+                # typing indicator dismisses immediately when a reply arrives.
+                await self._fan_out(self._make_typing_frame(False))
+        except (json.JSONDecodeError, Exception):
+            pass
+
+        await self._fan_out(frame)
 
         # Parse once for both BIS-118 and BIS-122 side-effects.
         target_email: str | None = None
@@ -1107,6 +1148,19 @@ class BisqueRelayServer:
         app.router.add_route("OPTIONS", "/auth/exchange", self._http_options)
         app.router.add_post("/auth/admin/token", self._http_admin_create_token)
         app.router.add_route("OPTIONS", "/auth/admin/token", self._http_options_admin_token)
+        # Nginx-prefixed aliases (nginx may forward /bisque-relay/auth/... without stripping prefix)
+        app.router.add_post("/bisque-relay/auth/exchange", self._http_auth_exchange)
+        app.router.add_route("OPTIONS", "/bisque-relay/auth/exchange", self._http_options)
+        app.router.add_post("/bisque-relay/auth/admin/token", self._http_admin_create_token)
+        app.router.add_route("OPTIONS", "/bisque-relay/auth/admin/token", self._http_options_admin_token)
+        # File upload/serve (BIS-119)
+        app.router.add_post("/upload", self._http_upload)
+        app.router.add_route("OPTIONS", "/upload", self._http_upload_options)
+        app.router.add_get("/files/{filename}", self._http_serve_file)
+        # Nginx-prefixed aliases for upload/files endpoints
+        app.router.add_post("/bisque-relay/upload", self._http_upload)
+        app.router.add_route("OPTIONS", "/bisque-relay/upload", self._http_upload_options)
+        app.router.add_get("/bisque-relay/files/{filename}", self._http_serve_file)
         app.router.add_get("/", self._ws_handler)
         # Catch-all for WS connections on any path
         app.router.add_get("/{path:.*}", self._ws_handler)
