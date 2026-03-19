@@ -24,8 +24,10 @@ import base64
 import json
 import logging
 import logging.handlers
+import mimetypes
 import os
 import signal
+import tempfile
 import time
 import uuid
 from datetime import datetime, timezone
@@ -62,6 +64,39 @@ INBOX_DIR = _MESSAGES / "inbox"
 BISQUE_OUTBOX_DIR = _MESSAGES / "bisque-outbox"
 WIRE_EVENTS_DIR = _MESSAGES / "wire-events"
 SENT_DIR = _MESSAGES / "sent"
+UPLOADS_DIR = _MESSAGES / "bisque-uploads"
+
+# Maximum file upload size: 50 MB
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+
+# MIME types we serve inline (images, video); everything else is an attachment
+_INLINE_MIME_PREFIXES = ("image/", "video/", "audio/")
+
+# Map content-type prefixes to file extensions for raw binary uploads
+_MIME_EXT_MAP: dict[str, str] = {
+    "audio/webm": ".webm",
+    "audio/ogg": ".ogg",
+    "audio/mp4": ".m4a",
+    "audio/mpeg": ".mp3",
+    "audio/wav": ".wav",
+    "audio/x-wav": ".wav",
+    "audio/aac": ".aac",
+    "audio/flac": ".flac",
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+    "video/mp4": ".mp4",
+    "video/webm": ".webm",
+}
+
+
+def _mime_to_ext(mime_type: str) -> str:
+    """Return a file extension for a MIME type, or empty string if unknown."""
+    # Strip parameters like ;codecs=opus
+    base_type = mime_type.split(";")[0].strip().lower()
+    return _MIME_EXT_MAP.get(base_type, "")
+
 
 _BISQUE_CHAT_PROJECT = _WORKSPACE / "projects" / "bisque-chat"
 _TOKENS_FILE = _BISQUE_CHAT_PROJECT / "data" / "tokens.json"
@@ -103,17 +138,38 @@ _RELAY_URL: str = os.environ.get("BISQUE_RELAY_URL", "")
 # Inbox injection
 # ---------------------------------------------------------------------------
 
-def _inject_into_inbox(inbox_dir: Path, email: str, text: str) -> str:
+def _inject_into_inbox(
+    inbox_dir: Path,
+    email: str,
+    text: str,
+    reply_to_id: str | None = None,
+    reply_to_context: dict[str, Any] | None = None,
+    attachments: list[dict[str, Any]] | None = None,
+) -> str:
     """Write a bisque message into Lobster's inbox. Returns message ID."""
     msg_id = f"bisque_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
-    payload = {
+
+    # Determine message type from attachments (first attachment wins)
+    msg_type = "text"
+    if attachments:
+        first_type = attachments[0].get("type", "file")
+        if first_type in ("image", "video", "file", "voice"):
+            msg_type = first_type
+
+    payload: dict[str, Any] = {
         "id": msg_id,
         "source": "bisque",
         "chat_id": email,
         "text": text,
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "type": "text",
+        "type": msg_type,
     }
+    if reply_to_id:
+        payload["reply_to_id"] = reply_to_id
+    if reply_to_context:
+        payload["reply_to"] = reply_to_context
+    if attachments:
+        payload["attachments"] = attachments
     dest = inbox_dir / f"{msg_id}.json"
     tmp = inbox_dir / f".{msg_id}.tmp"
     try:
@@ -166,6 +222,10 @@ class BisqueRelayServer:
         self._running = True
         self._clients: set[web.WebSocketResponse] = set()
         self._client_emails: dict[int, str] = {}  # ws id -> email
+        # In-memory message cache for reply context lookup (id -> {text, sender})
+        # Bounded to the most recent 500 messages to avoid unbounded growth.
+        self._message_cache: dict[str, dict[str, str]] = {}
+        self._message_cache_order: list[str] = []
         # Event sources
         self._outbox_source: OutboxEventSource | None = None
         self._fs_source: FileSystemEventSource | None = None
@@ -299,6 +359,146 @@ class BisqueRelayServer:
                 "Access-Control-Allow-Origin": "*",
                 "Access-Control-Allow-Methods": "POST, OPTIONS",
                 "Access-Control-Allow-Headers": "Content-Type, Authorization",
+            },
+        )
+
+    # --- HTTP handler: POST /upload (BIS-119 voice/file upload) ---
+
+    async def _http_upload(self, request: web.Request) -> web.Response:
+        """Accept a multipart or raw binary upload and store it under a UUID filename.
+
+        Authentication: session token required in Authorization header or ?token= query param.
+
+        Request (multipart/form-data):
+            POST /upload
+            Authorization: Bearer <session_token>
+            Content-Type: multipart/form-data; boundary=...
+            file=<binary>
+
+        Request (raw binary, content-type = audio/webm etc.):
+            POST /upload
+            Authorization: Bearer <session_token>
+            Content-Type: audio/webm
+            <raw bytes>
+
+        Response:
+            {"url": "/files/<uuid>.<ext>", "filename": "<uuid>.<ext>"}
+        """
+        _cors = {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization",
+        }
+
+        # --- Auth ---
+        token = request.rel_url.query.get("token", "")
+        if not token:
+            auth_header = request.headers.get("Authorization", "")
+            if auth_header.startswith("Bearer "):
+                token = auth_header[len("Bearer "):]
+        if not token:
+            return web.json_response({"error": "Unauthorized"}, status=401, headers=_cors)
+        valid, email = self._token_store.validate_session(token)
+        if not valid:
+            return web.json_response({"error": "Invalid session token"}, status=401, headers=_cors)
+
+        # --- Read body ---
+        content_type = request.content_type or ""
+        file_data: bytes
+        original_ext = ".bin"
+
+        if content_type.startswith("multipart/"):
+            try:
+                reader = await request.multipart()
+                field = await reader.next()
+                if field is None:
+                    return web.json_response({"error": "Empty multipart body"}, status=400, headers=_cors)
+                # Use the submitted filename extension if available
+                if field.filename:
+                    original_ext = Path(field.filename).suffix or ".bin"
+                file_data = await field.read(decode=True)
+            except Exception as exc:
+                log.warning("Upload multipart read error: %s", exc)
+                return web.json_response({"error": "Failed to read upload"}, status=400, headers=_cors)
+        else:
+            # Raw binary body — derive extension from Content-Type
+            ext_from_mime = _mime_to_ext(content_type)
+            if ext_from_mime:
+                original_ext = ext_from_mime
+            try:
+                file_data = await request.read()
+            except Exception as exc:
+                log.warning("Upload raw read error: %s", exc)
+                return web.json_response({"error": "Failed to read upload"}, status=400, headers=_cors)
+
+        if len(file_data) == 0:
+            return web.json_response({"error": "Empty file"}, status=400, headers=_cors)
+        if len(file_data) > MAX_UPLOAD_BYTES:
+            return web.json_response(
+                {"error": f"File too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB)"},
+                status=413,
+                headers=_cors,
+            )
+
+        # --- Store file ---
+        UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+        file_uuid = uuid.uuid4().hex
+        filename = f"{file_uuid}{original_ext}"
+        dest = UPLOADS_DIR / filename
+        try:
+            dest.write_bytes(file_data)
+        except OSError as exc:
+            log.error("Upload write error: %s", exc)
+            return web.json_response({"error": "Storage error"}, status=500, headers=_cors)
+
+        log.info("Stored upload %s (%d bytes) for %s", filename, len(file_data), email)
+        return web.json_response(
+            {"url": f"/files/{filename}", "filename": filename},
+            headers=_cors,
+        )
+
+    async def _http_upload_options(self, request: web.Request) -> web.Response:
+        """Handle CORS preflight for /upload."""
+        return web.Response(
+            status=204,
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "POST, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type, Authorization",
+            },
+        )
+
+    # --- HTTP handler: GET /files/{filename} (BIS-119 file serving) ---
+
+    async def _http_serve_file(self, request: web.Request) -> web.Response:
+        """Serve a previously uploaded file.
+
+        No auth required (URLs are unguessable UUIDs). Files are served inline
+        when the MIME type is audio/*, image/*, or video/*; otherwise as attachment.
+        """
+        filename = request.match_info.get("filename", "")
+        # Safety: reject path traversal attempts
+        if not filename or "/" in filename or "\\" in filename or filename.startswith("."):
+            return web.Response(status=404)
+
+        path = UPLOADS_DIR / filename
+        if not path.exists() or not path.is_file():
+            return web.Response(status=404)
+
+        mime_type, _ = mimetypes.guess_type(filename)
+        if not mime_type:
+            mime_type = "application/octet-stream"
+
+        is_inline = any(mime_type.startswith(p) for p in _INLINE_MIME_PREFIXES)
+        disposition = "inline" if is_inline else f'attachment; filename="{filename}"'
+
+        return web.Response(
+            body=path.read_bytes(),
+            content_type=mime_type,
+            headers={
+                "Content-Disposition": disposition,
+                "Access-Control-Allow-Origin": "*",
+                "Cache-Control": "public, max-age=86400",
             },
         )
 
@@ -456,36 +656,119 @@ class BisqueRelayServer:
         recent_messages = self._load_recent_messages()
         last_event_id = self._event_log.get_latest_id()
 
+        # Populate message cache from snapshot history so reply lookups work
+        # immediately after a reconnect without waiting for new messages.
+        for msg in recent_messages:
+            self._cache_message(
+                msg_id=msg["id"],
+                text=msg.get("text", ""),
+                sender=msg.get("role", "user"),
+            )
+
         return frame_snapshot(
             status="idle",
             recent_messages=recent_messages,
             last_event_id=last_event_id,
         )
 
-    def _load_recent_messages(self, limit: int = 20) -> list[dict[str, Any]]:
-        """Load recent messages from the sent/ directory."""
-        messages = []
+    # ---------------------------------------------------------------------------
+    # Message cache helpers (BIS-118)
+    # ---------------------------------------------------------------------------
+
+    _MESSAGE_CACHE_LIMIT = 500
+
+    def _cache_message(self, msg_id: str, text: str, sender: str) -> None:
+        """Store a message in the bounded in-memory cache for reply lookups."""
+        if msg_id in self._message_cache:
+            return
+        self._message_cache[msg_id] = {"text": text, "sender": sender}
+        self._message_cache_order.append(msg_id)
+        # Evict oldest entries once the cache exceeds the limit
+        while len(self._message_cache_order) > self._MESSAGE_CACHE_LIMIT:
+            oldest = self._message_cache_order.pop(0)
+            self._message_cache.pop(oldest, None)
+
+    def _resolve_reply_context(
+        self, reply_to_id: str | None
+    ) -> dict[str, Any] | None:
+        """Return reply context dict for a given message ID, or None if unknown."""
+        if not reply_to_id:
+            return None
+        cached = self._message_cache.get(reply_to_id)
+        if cached:
+            return {"id": reply_to_id, "text": cached["text"], "sender": cached["sender"]}
+        return None
+
+    def _load_recent_messages(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Load recent conversation history from sent/ and processed/ directories.
+
+        Combines Lobster's outgoing messages (sent/) and user messages (processed/)
+        to reconstruct the full conversation. Only bisque messages are included.
+        Results are sorted by timestamp so history is in chronological order.
+        """
+        raw: list[dict[str, Any]] = []
+
+        # Load sent messages (Lobster → user), role = "assistant"
         try:
-            sent_files = sorted(
-                self._sent_dir.glob("*.json"),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )[:limit]
-            for path in reversed(sent_files):
+            for path in self._sent_dir.glob("*.json"):
                 try:
                     data = json.loads(path.read_text(encoding="utf-8"))
-                    messages.append({
+                    # Only include bisque messages
+                    if data.get("source") != "bisque":
+                        continue
+                    text = data.get("text", "")
+                    if not text:
+                        continue
+                    raw.append({
                         "id": data.get("id", path.stem),
-                        "text": data.get("text", ""),
-                        "source": data.get("source", ""),
-                        "chat_id": data.get("chat_id", ""),
+                        "role": "assistant",
+                        "text": text,
                         "timestamp": data.get("timestamp", ""),
+                        "_sort_key": data.get("timestamp", ""),
                     })
                 except (json.JSONDecodeError, OSError):
                     continue
         except OSError:
             pass
-        return messages
+
+        # Load processed messages (user → Lobster), role = "user"
+        # Use the processed/ directory for user messages
+        processed_dir = _MESSAGES / "processed"
+        try:
+            for path in processed_dir.glob("*.json"):
+                try:
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                    # Only include bisque source messages with text content
+                    if data.get("source") != "bisque":
+                        continue
+                    # Skip subagent results and notifications (type != "text")
+                    msg_type = data.get("type", "text")
+                    if msg_type not in ("text", ""):
+                        continue
+                    text = data.get("text", "")
+                    if not text:
+                        continue
+                    raw.append({
+                        "id": data.get("id", path.stem),
+                        "role": "user",
+                        "text": text,
+                        "timestamp": data.get("timestamp", ""),
+                        "_sort_key": data.get("timestamp", ""),
+                    })
+                except (json.JSONDecodeError, OSError):
+                    continue
+        except OSError:
+            pass
+
+        # Sort by timestamp (ISO strings sort lexicographically), take most recent `limit`
+        raw.sort(key=lambda m: m["_sort_key"])
+        recent = raw[-limit:] if len(raw) > limit else raw
+
+        # Strip internal sort key before returning
+        return [
+            {k: v for k, v in m.items() if k != "_sort_key"}
+            for m in recent
+        ]
 
     async def _handle_client_message(self, ws: web.WebSocketResponse, email: str, raw: str) -> None:
         """Dispatch a single client message."""
@@ -502,23 +785,44 @@ class BisqueRelayServer:
         elif envelope.type in ("send_message", "message"):
             # Fix 3: "message" is accepted as an alias for "send_message"
             text = str(envelope.payload.get("text", "")).strip()
-            if not text:
-                await ws.send_str(frame_error("Empty message text"))
+            # BIS-120: attachments are optional; text may be empty when sending a file
+            attachments: list[dict[str, Any]] | None = envelope.payload.get("attachments") or None
+            if not text and not attachments:
+                await ws.send_str(frame_error("Empty message"))
                 return
             if len(text) > 32_000:
                 await ws.send_str(frame_error("Message too long (max 32000 chars)"))
                 return
 
-            msg_id = _inject_into_inbox(self._inbox_dir, email, text)
-            ack_frame = json.dumps({
+            # BIS-118: Extract optional reply reference from client frame
+            reply_to_id: str | None = envelope.payload.get("reply_to_id") or None
+            reply_context = self._resolve_reply_context(reply_to_id)
+
+            msg_id = _inject_into_inbox(
+                self._inbox_dir,
+                email,
+                text,
+                reply_to_id=reply_to_id,
+                reply_to_context=reply_context,
+                attachments=attachments,
+            )
+
+            # Cache the user's outgoing message for future reply lookups
+            self._cache_message(msg_id=msg_id, text=text, sender="user")
+
+            ack_payload: dict[str, Any] = {
                 "v": 2,
                 "id": str(uuid.uuid4()),
                 "ts": datetime.now(timezone.utc).isoformat(),
                 "type": "ack",
                 "message_id": msg_id,
                 "status": "received",
-            })
-            await ws.send_str(ack_frame)
+            }
+            # Echo reply context back in the ack so the PWA can render it immediately
+            if reply_context:
+                ack_payload["reply_to"] = reply_context
+
+            await ws.send_str(json.dumps(ack_payload))
             log.debug("Queued message from %s: %r", email, text[:80])
 
         elif envelope.type == "ack":
@@ -527,11 +831,54 @@ class BisqueRelayServer:
         else:
             await ws.send_str(frame_error(f"Unknown message type: {envelope.type!r}"))
 
+    # ---------------------------------------------------------------------------
+    # Typing indicator helpers (BIS-122)
+    # ---------------------------------------------------------------------------
+
+    def _make_typing_frame(self, is_typing: bool) -> str:
+        """Build a serialized typing indicator frame."""
+        return json.dumps({
+            "v": 2,
+            "id": str(uuid.uuid4()),
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "type": "typing",
+            "is_typing": is_typing,
+        })
+
+    async def broadcast_typing(self, is_typing: bool) -> None:
+        """Broadcast a typing indicator to all connected clients.
+
+        Called externally when the AI starts (is_typing=True) or finishes
+        (is_typing=False) generating a response.
+        """
+        frame = self._make_typing_frame(is_typing)
+        await self._fan_out(frame)
+
     # --- Event bus callback ---
 
     async def _on_event(self, event_id: str, frame: str) -> None:
         """Called by the event bus when a new event is available."""
         self._event_log.append(event_id, frame)
+
+        # Parse once for both BIS-118 and BIS-122 side-effects.
+        try:
+            data = json.loads(frame)
+            if data.get("type") == "message":
+                # BIS-118: cache assistant messages so reply context is available
+                # for future reply_to_id lookups.
+                msg_id = data.get("message_id") or data.get("id")
+                text = data.get("text", "")
+                role = data.get("role", "assistant")
+                if msg_id and text:
+                    sender = "assistant" if role == "assistant" else "user"
+                    self._cache_message(msg_id=msg_id, text=text, sender=sender)
+
+                # BIS-122: send is_typing=false before the message frame so the
+                # typing indicator dismisses immediately when a reply arrives.
+                await self._fan_out(self._make_typing_frame(False))
+        except (json.JSONDecodeError, Exception):
+            pass
+
         await self._fan_out(frame)
 
     async def _fan_out(self, frame: str) -> None:
@@ -555,7 +902,7 @@ class BisqueRelayServer:
 
     async def run(self) -> None:
         """Start the HTTP/WS server and event sources."""
-        for d in [self._inbox_dir, self._outbox_dir, self._wire_events_dir, self._sent_dir]:
+        for d in [self._inbox_dir, self._outbox_dir, self._wire_events_dir, self._sent_dir, UPLOADS_DIR]:
             d.mkdir(parents=True, exist_ok=True)
 
         log.info("Starting Lobster Bisque Relay v2 on %s:%s", self.host, self._requested_port)
@@ -590,6 +937,19 @@ class BisqueRelayServer:
         app.router.add_route("OPTIONS", "/auth/exchange", self._http_options)
         app.router.add_post("/auth/admin/token", self._http_admin_create_token)
         app.router.add_route("OPTIONS", "/auth/admin/token", self._http_options_admin_token)
+        # Nginx-prefixed aliases (nginx may forward /bisque-relay/auth/... without stripping prefix)
+        app.router.add_post("/bisque-relay/auth/exchange", self._http_auth_exchange)
+        app.router.add_route("OPTIONS", "/bisque-relay/auth/exchange", self._http_options)
+        app.router.add_post("/bisque-relay/auth/admin/token", self._http_admin_create_token)
+        app.router.add_route("OPTIONS", "/bisque-relay/auth/admin/token", self._http_options_admin_token)
+        # File upload/serve (BIS-119)
+        app.router.add_post("/upload", self._http_upload)
+        app.router.add_route("OPTIONS", "/upload", self._http_upload_options)
+        app.router.add_get("/files/{filename}", self._http_serve_file)
+        # Nginx-prefixed aliases for upload/files endpoints
+        app.router.add_post("/bisque-relay/upload", self._http_upload)
+        app.router.add_route("OPTIONS", "/bisque-relay/upload", self._http_upload_options)
+        app.router.add_get("/bisque-relay/files/{filename}", self._http_serve_file)
         app.router.add_get("/", self._ws_handler)
         # Catch-all for WS connections on any path
         app.router.add_get("/{path:.*}", self._ws_handler)
