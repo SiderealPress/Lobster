@@ -1351,6 +1351,28 @@ async def list_tools() -> list[Tool]:
                 },
             },
         ),
+        # Telegram Message Lookup Tool
+        Tool(
+            name="get_message_by_telegram_id",
+            description="Look up a specific message by its Telegram message ID (the integer ID like 12824). Searches across all message directories (processed, inbox, processing, failed) and returns the full message object. Useful when the dispatcher needs to retrieve original message content for a known Telegram message ID.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "telegram_message_id": {
+                        "type": "integer",
+                        "description": "The Telegram message ID (integer) to look up.",
+                    },
+                    "chat_id": {
+                        "oneOf": [
+                            {"type": "integer"},
+                            {"type": "string"},
+                        ],
+                        "description": "Optional: filter by chat ID to disambiguate when the same Telegram message ID might appear in multiple chats.",
+                    },
+                },
+                "required": ["telegram_message_id"],
+            },
+        ),
         # Task Management Tools
         Tool(
             name="list_tasks",
@@ -2640,6 +2662,8 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
         return await handle_get_stats(arguments)
     elif name == "get_conversation_history":
         return await handle_get_conversation_history(arguments)
+    elif name == "get_message_by_telegram_id":
+        return await handle_get_message_by_telegram_id(arguments)
     elif name == "list_tasks":
         return await handle_list_tasks(arguments)
     elif name == "create_task":
@@ -4108,6 +4132,92 @@ async def handle_get_conversation_history(args: dict) -> list[TextContent]:
         output += f"---\n*More messages available. Use `offset={next_offset}` to see the next page.*\n"
 
     return [TextContent(type="text", text=output)]
+
+
+async def handle_get_message_by_telegram_id(args: dict) -> list[TextContent]:
+    """Look up a specific message by its Telegram message ID."""
+    tg_id = args.get("telegram_message_id")
+    if tg_id is None:
+        return [TextContent(type="text", text="Error: telegram_message_id is required.")]
+
+    tg_id = int(tg_id)
+    chat_id_filter = args.get("chat_id")
+    chat_id_str = str(chat_id_filter) if chat_id_filter is not None else None
+
+    # Search order: processed first (most common), then inbox, processing, failed
+    search_dirs = [
+        (PROCESSED_DIR, "processed"),
+        (INBOX_DIR, "inbox"),
+        (PROCESSING_DIR, "processing"),
+        (FAILED_DIR, "failed"),
+    ]
+
+    for directory, dir_label in search_dirs:
+        for f in directory.glob("*.json"):
+            try:
+                with open(f) as fp:
+                    msg = json.load(fp)
+            except Exception:
+                continue
+
+            if msg.get("telegram_message_id") != tg_id:
+                continue
+
+            if chat_id_str is not None and str(msg.get("chat_id", "")) != chat_id_str:
+                continue
+
+            # Found a match — format the full message as output
+            source = msg.get("source", "unknown").upper()
+            chat_id = msg.get("chat_id", "")
+            ts = msg.get("timestamp", "")
+            text = msg.get("text", "(no text)")
+            msg_type = msg.get("type", "text")
+            user = msg.get("user_name", msg.get("username", "Unknown"))
+
+            try:
+                if "+" in ts or ts.endswith("Z"):
+                    dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                else:
+                    dt = datetime.fromisoformat(ts)
+                ts_display = dt.strftime("%Y-%m-%d %H:%M UTC")
+            except (ValueError, TypeError):
+                ts_display = ts
+
+            output = f"**Message found** (in `{dir_label}/`):\n\n"
+            output += f"Telegram Message ID: `{tg_id}`\n"
+            output += f"Lobster Message ID: `{msg.get('id', '?')}`\n"
+            output += f"Source: {source} | Chat ID: `{chat_id}` | Type: `{msg_type}`\n"
+            output += f"From: **{user}**\n"
+            output += f"Time: {ts_display}\n\n"
+            output += f"**Text:**\n> {text}\n"
+
+            reply_to = msg.get("reply_to")
+            if reply_to:
+                reply_text = reply_to.get("reply_to_text") or reply_to.get("text", "")
+                reply_from = reply_to.get("reply_to_from_user") or reply_to.get("from_user", "")
+                reply_msg_id = reply_to.get("reply_to_message_id") or reply_to.get("message_id", "")
+                output += f"\n**Reply to** (TG ID `{reply_msg_id}`, from {reply_from}):\n> {reply_text[:300]}{'...' if len(reply_text) > 300 else ''}\n"
+
+            # Surface any attached file paths
+            for field in ("image_file", "file_path", "audio_file"):
+                val = msg.get(field)
+                if val:
+                    output += f"\n**Attached file** (`{field}`): `{val}`\n"
+            image_files = msg.get("image_files")
+            if image_files:
+                output += f"\n**Image files:**\n"
+                for img in image_files:
+                    output += f"  - `{img}`\n"
+
+            return [TextContent(type="text", text=output)]
+
+    # No match found across all directories
+    filter_note = f" in chat `{chat_id_filter}`" if chat_id_filter is not None else ""
+    return [TextContent(
+        type="text",
+        text=f"No message found with Telegram message ID `{tg_id}`{filter_note}. "
+             f"Searched: processed, inbox, processing, failed directories.",
+    )]
 
 
 # =============================================================================
