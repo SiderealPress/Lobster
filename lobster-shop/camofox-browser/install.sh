@@ -54,16 +54,37 @@ echo ""
 step "Checking prerequisites"
 
 # Check Node.js
+# Note: Node 21+ is required because the camofox-browser server's dependencies
+# use the "import ... with" syntax (import attributes), which was introduced in
+# Node.js 21. Earlier versions will fail at startup with a SyntaxError.
+# We install Node 22 LTS (the current LTS line that meets this requirement).
+_install_node22() {
+    info "Installing Node.js 22 LTS via NodeSource..."
+    if ! command -v curl &>/dev/null; then
+        error "curl is required to install Node.js automatically. Install curl and retry."
+        exit 1
+    fi
+    curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+    sudo apt-get update -qq
+    sudo apt-get install -y nodejs
+}
+
 if ! command -v node &>/dev/null; then
-    error "Node.js is required but not installed."
-    echo "  Install with: curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - && sudo apt install -y nodejs"
-    exit 1
+    warn "Node.js is not installed. Installing Node 22 LTS automatically..."
+    _install_node22
 fi
 
 NODE_VERSION=$(node --version | sed 's/v//' | cut -d. -f1)
-if [ "$NODE_VERSION" -lt 18 ]; then
-    error "Node.js >= 18 required, found $(node --version)"
-    exit 1
+if [ "$NODE_VERSION" -lt 21 ]; then
+    warn "Node.js >= 21 required (found $(node --version)). Installing Node 22 LTS automatically..."
+    _install_node22
+    # Refresh NODE_VERSION after upgrade
+    NODE_VERSION=$(node --version | sed 's/v//' | cut -d. -f1)
+    if [ "$NODE_VERSION" -lt 21 ]; then
+        error "Node.js upgrade failed. Please install Node 22 LTS manually:"
+        echo "  curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt install -y nodejs"
+        exit 1
+    fi
 fi
 success "Node.js found: $(node --version)"
 
