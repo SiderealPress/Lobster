@@ -1,0 +1,41 @@
+[skill]
+name = "desloppify"
+version = "0.9.10"
+description = "Codebase health scanner and technical debt tracker. Use when the user asks about code quality, technical debt, dead code, large files, god classes, duplicate functions, code smells, naming issues, import cycles, or coupling problems. Also use when asked for a health score, what to fix next, or to create a cleanup plan. Supports 29 languages."
+author = "peteromallet (packaged for Lobster)"
+category = "tool"
+
+[activation]
+mode = "triggered"
+triggers = ["/desloppify", "/codehealth", "/debt"]
+context_patterns = [
+    "when user asks to desloppify",
+    "when user asks about code quality",
+    "when user asks about technical debt",
+    "when user asks for a health score",
+    "when user asks what to fix next in the codebase",
+    "when user asks about dead code or code smells",
+    "when user asks to clean up a codebase",
+    "when user asks about duplicate code or import cycles",
+]
+
+[layering]
+priority = 50
+merge_strategy = "append"
+
+[provides]
+mcp_tools = []
+bot_commands = ["/desloppify", "/codehealth", "/debt"]
+
+[compatibility]
+enhances = []
+conflicts = []
+
+[dependencies]
+pip = ["desloppify[full]>=0.9.10"]
+npm = []
+system = []
+api_keys = []
+
+[dependencies.runtime]
+python = ">=3.11"
