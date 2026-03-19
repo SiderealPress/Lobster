@@ -157,6 +157,12 @@ cmd_restart() {
     # During a restart that flag is wrong — we WANT the services back up.
     # cmd_start already removes the flag, but only if it runs; by scheduling
     # start before stop we guarantee it runs even if this process dies.
+    # Clear any failed state from a previous lobster-restart-oneshot unit.
+    # systemd-run rejects a new transient unit with the same name if a prior
+    # instance is still in failed/loaded state. Without this, the restart
+    # silently stops services but never starts them.
+    sudo systemctl reset-failed lobster-restart-oneshot.service 2>/dev/null || true
+
     echo "Scheduling start via systemd-run in 2s..."
     if ! sudo systemd-run --system --on-active=2s --unit=lobster-restart-oneshot \
             /bin/bash -c "rm -f '${MAINTENANCE_FLAG}'; systemctl start lobster-router lobster-claude" \
