@@ -41,15 +41,16 @@ import sys
 import time
 from pathlib import Path
 
-# JSON to emit on every successful (allow) exit — suppresses the
-# "Stop hook feedback: No stderr output" injection that CC 2.1.76+ produces
-# even when the hook exits 0 with no output.
-_SILENT_OK = json.dumps({"suppressOutput": True})
-
-
 def _exit_ok() -> None:
-    """Exit 0 with JSON that suppresses CC feedback injection."""
-    print(_SILENT_OK)
+    """Exit 0 silently.
+
+    Intentionally produces no stdout or stderr output. For SubagentStop hooks,
+    suppressOutput in stdout is not reliably honoured by CC when multiple hooks
+    are registered for the same event — the first hook (require-write-result.py)
+    already emits suppressOutput and covers the event. Adding a second
+    suppressOutput from this hook causes CC to report it as feedback rather than
+    suppress it. Silence is the correct behaviour here.
+    """
     sys.exit(0)
 
 CONTEXT_FILE = Path(os.path.expanduser(
