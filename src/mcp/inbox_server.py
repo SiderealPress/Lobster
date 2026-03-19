@@ -418,6 +418,54 @@ _INSTANCE_ID: str = os.environ.get("LOBSTER_OBSERVABILITY_TOKEN") or socket.geth
 _recent_replies: dict[str, float] = {}
 _REPLY_TRACK_MAX = 100
 
+
+# ---------------------------------------------------------------------------
+# Timezone utility — reads owner timezone from owner.toml for display
+# ---------------------------------------------------------------------------
+
+def _get_display_tz():
+    """Return the owner's local timezone for display purposes.
+
+    Reads the 'timezone' field from owner.toml (e.g. 'America/Los_Angeles').
+    Falls back to UTC if not set or if zoneinfo cannot load the zone.
+    Always returns a zoneinfo.ZoneInfo-compatible object.
+    """
+    import zoneinfo as _zoneinfo
+    try:
+        from user_model.owner import get_owner_timezone as _get_owner_tz
+        tz_name = _get_owner_tz()
+        return _zoneinfo.ZoneInfo(tz_name)
+    except Exception:
+        return _zoneinfo.ZoneInfo("UTC")
+
+
+def _format_display_ts(dt: "datetime", fmt: str = "%Y-%m-%d %I:%M %p %Z") -> str:
+    """Convert a datetime to the owner's local timezone and format it for display.
+
+    Args:
+        dt:  A datetime object (naive datetimes are assumed UTC).
+        fmt: strftime format string. Default produces e.g. '2026-03-19 02:18 AM PST'.
+
+    Returns a formatted string in the owner's local time.
+    """
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    local_dt = dt.astimezone(_get_display_tz())
+    return local_dt.strftime(fmt)
+
+
+def _format_iso_for_display(iso_str: str, fmt: str = "%Y-%m-%d %I:%M %p %Z") -> str:
+    """Parse an ISO 8601 string and format it in the owner's local timezone.
+
+    Falls back to the raw string if parsing fails.
+    """
+    try:
+        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+        return _format_display_ts(dt, fmt)
+    except Exception:
+        return iso_str
+
+
 def _track_reply(chat_id: Any) -> None:
     """Record that a reply was sent to chat_id."""
     global _recent_replies
@@ -4044,13 +4092,9 @@ async def handle_get_conversation_history(args: dict) -> list[TextContent]:
         ts = msg.get("timestamp", "")
         text = msg.get("text", "(no text)")
 
-        # Format timestamp nicely
+        # Format timestamp nicely in owner's local timezone
         try:
-            if "+" in ts or ts.endswith("Z"):
-                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-            else:
-                dt = datetime.fromisoformat(ts)
-            ts_display = dt.strftime("%Y-%m-%d %H:%M")
+            ts_display = _format_iso_for_display(ts, "%Y-%m-%d %I:%M %p %Z")
         except (ValueError, TypeError):
             ts_display = ts
 
@@ -4392,8 +4436,10 @@ async def handle_transcribe_audio(args: dict) -> list[TextContent]:
 
     # Local whisper.cpp transcription
     try:
-        # Convert OGG to WAV if needed
-        if audio_path.suffix.lower() in [".ogg", ".oga", ".opus"]:
+        # whisper.cpp requires 16 kHz mono WAV. Convert any non-WAV format.
+        # This handles .ogg, .opus, .webm (Chrome MediaRecorder), .mp4, .m4a, etc.
+        _NON_WAV_EXTS = {".ogg", ".oga", ".opus", ".webm", ".mp4", ".m4a", ".aac", ".flac", ".mp3"}
+        if audio_path.suffix.lower() in _NON_WAV_EXTS:
             wav_path = audio_path.with_suffix(".wav")
             if not wav_path.exists():
                 success = await convert_ogg_to_wav(audio_path, wav_path)
@@ -4743,7 +4789,7 @@ async def handle_create_scheduled_job(args: dict) -> list[TextContent]:
 
 **Job**: {name}
 **Schedule**: {schedule_human} (`{schedule}`)
-**Created**: {now.strftime('%Y-%m-%d %H:%M UTC')}
+**Created**: {_format_display_ts(now)}
 
 ## Context
 
@@ -4805,9 +4851,7 @@ async def handle_list_scheduled_jobs(args: dict) -> list[TextContent]:
 
         if last_run and last_run != "never":
             try:
-                # Parse and format nicely
-                dt = datetime.fromisoformat(last_run.replace("Z", "+00:00"))
-                last_run = dt.strftime("%Y-%m-%d %H:%M")
+                last_run = _format_iso_for_display(last_run, "%Y-%m-%d %I:%M %p %Z")
             except:
                 pass
 
@@ -4838,12 +4882,18 @@ async def handle_get_scheduled_job(args: dict) -> list[TextContent]:
     if task_file.exists():
         task_content = task_file.read_text()
 
+    _fmt = "%Y-%m-%d %I:%M %p %Z"
+    created_disp = _format_iso_for_display(job.get("created_at", ""), _fmt) if job.get("created_at") else "N/A"
+    updated_disp = _format_iso_for_display(job.get("updated_at", ""), _fmt) if job.get("updated_at") else "N/A"
+    last_run_raw = job.get("last_run") or ""
+    last_run_disp = _format_iso_for_display(last_run_raw, _fmt) if last_run_raw else "never"
+
     output = f"**Job: {name}**\n\n"
     output += f"**Schedule**: {job.get('schedule_human', '')} (`{job.get('schedule', '')}`)\n"
     output += f"**Enabled**: {'Yes' if job.get('enabled', True) else 'No'}\n"
-    output += f"**Created**: {job.get('created_at', 'N/A')}\n"
-    output += f"**Updated**: {job.get('updated_at', 'N/A')}\n"
-    output += f"**Last Run**: {job.get('last_run', 'never')}\n"
+    output += f"**Created**: {created_disp}\n"
+    output += f"**Updated**: {updated_disp}\n"
+    output += f"**Last Run**: {last_run_disp}\n"
     output += f"**Last Status**: {job.get('last_status', '-')}\n\n"
     output += f"---\n\n**Task File** (`{task_file}`):\n\n```markdown\n{task_content}\n```"
 
@@ -4887,12 +4937,13 @@ async def handle_update_scheduled_job(args: dict) -> list[TextContent]:
 
         # Rewrite task file
         now = datetime.now(timezone.utc)
+        created_disp = _format_iso_for_display(job.get("created_at", "")) if job.get("created_at") else "N/A"
         task_content = f"""# {name.replace('-', ' ').title()}
 
 **Job**: {name}
 **Schedule**: {job.get('schedule_human', '')} (`{job.get('schedule', '')}`)
-**Created**: {job.get('created_at', 'N/A')}
-**Updated**: {now.strftime('%Y-%m-%d %H:%M UTC')}
+**Created**: {created_disp}
+**Updated**: {_format_display_ts(now)}
 
 ## Context
 
@@ -5021,10 +5072,9 @@ async def handle_check_task_outputs(args: dict) -> list[TextContent]:
         status_icon = "" if status == "success" else ""
         duration_str = f" ({duration}s)" if duration else ""
 
-        # Format timestamp nicely
+        # Format timestamp nicely in owner's local timezone
         try:
-            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-            ts = dt.strftime("%Y-%m-%d %H:%M")
+            ts = _format_iso_for_display(ts, "%Y-%m-%d %I:%M %p %Z")
         except:
             pass
 
@@ -5639,7 +5689,7 @@ async def handle_triage_brain_dump(args: dict) -> list[TextContent]:
 
     comment_lines.append("")
     comment_lines.append("---")
-    comment_lines.append(f"*Triaged at {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}*")
+    comment_lines.append(f"*Triaged at {_format_display_ts(datetime.now(timezone.utc))}*")
 
     comment_body = "\n".join(comment_lines)
 
@@ -5812,7 +5862,7 @@ async def handle_close_brain_dump(args: dict) -> list[TextContent]:
         comment_lines.append("")
 
     comment_lines.append("---")
-    comment_lines.append(f"*Closed at {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}*")
+    comment_lines.append(f"*Closed at {_format_display_ts(datetime.now(timezone.utc))}*")
 
     comment_body = "\n".join(comment_lines)
 
@@ -6016,7 +6066,7 @@ async def handle_memory_search(arguments: dict[str, Any]) -> list[TextContent]:
 
     lines = [f"**Memory Search Results** ({len(results)} found for \"{query}\"):"]
     for i, event in enumerate(results, 1):
-        ts = event.timestamp.strftime("%Y-%m-%d %H:%M") if event.timestamp else "?"
+        ts = _format_display_ts(event.timestamp, "%Y-%m-%d %I:%M %p %Z") if event.timestamp else "?"
         proj = f" [{event.project}]" if event.project else ""
         eid = f"#{event.id}" if event.id else ""
         # Truncate content for display
@@ -6043,7 +6093,7 @@ async def handle_memory_recent(arguments: dict[str, Any]) -> list[TextContent]:
 
         lines = [f"**Recent Events** ({len(results)} in last {hours}h):"]
         for event in results:
-            ts = event.timestamp.strftime("%Y-%m-%d %H:%M") if event.timestamp else "?"
+            ts = _format_display_ts(event.timestamp, "%Y-%m-%d %I:%M %p %Z") if event.timestamp else "?"
             proj = f" [{event.project}]" if event.project else ""
             eid = f"#{event.id}" if event.id else ""
             consolidated = " [consolidated]" if event.consolidated else ""
@@ -6505,56 +6555,67 @@ async def handle_get_bisque_connection_url(arguments: dict[str, Any]) -> list[Te
 async def handle_generate_bisque_login_token(arguments: dict[str, Any]) -> list[TextContent]:
     """Generate a bisque-chat login token for the given email.
 
-    Calls the bisque-chat Next.js app's /api/auth/generate-login-token endpoint
-    (running locally on port 3000 by default, or the URL configured in
-    BISQUE_CHAT_URL env var).
+    Calls the relay server's POST /auth/admin/token endpoint (running locally on
+    port 9101 by default, or the HTTP URL derived from BISQUE_RELAY_URL).
 
-    The token is a base64url-encoded JSON: { url: <relay_ws_url>, token: <bootstrap> }.
-    Users paste this into the bisque app login screen.
+    The returned loginToken is a base64url-encoded JSON:
+        { url: <relay_ws_url>, token: <bootstrap> }
+    Users paste this into the bisque-chat login screen.
     """
+    import urllib.request
+    import urllib.error
+
     email = arguments.get("email", "").strip()
     if not email or "@" not in email:
         return [TextContent(type="text", text="Error: a valid email address is required.")]
 
-    # Read config
+    # Read config from file
     config_file = _CONFIG_DIR / "config.env"
-    bisque_chat_url = "http://localhost:3000"
-    relay_url_override = ""
     admin_secret = ""
+    relay_url = ""  # WebSocket URL (wss://...)
+    relay_http_url = ""  # HTTP base URL for the relay API
 
     if config_file.exists():
         for line in config_file.read_text().splitlines():
             stripped = line.strip()
-            if stripped.startswith("BISQUE_CHAT_URL="):
-                bisque_chat_url = stripped.split("=", 1)[1].strip().strip('"').strip("'")
-            elif stripped.startswith("NEXT_PUBLIC_LOBSTER_RELAY_URL="):
-                relay_url_override = stripped.split("=", 1)[1].strip().strip('"').strip("'")
-            elif stripped.startswith("ADMIN_SECRET="):
+            if stripped.startswith("BISQUE_ADMIN_SECRET="):
                 admin_secret = stripped.split("=", 1)[1].strip().strip('"').strip("'")
+            elif stripped.startswith("ADMIN_SECRET=") and not admin_secret:
+                admin_secret = stripped.split("=", 1)[1].strip().strip('"').strip("'")
+            elif stripped.startswith("BISQUE_RELAY_URL="):
+                relay_url = stripped.split("=", 1)[1].strip().strip('"').strip("'")
+            elif stripped.startswith("BISQUE_RELAY_HTTP_URL="):
+                relay_http_url = stripped.split("=", 1)[1].strip().strip('"').strip("'")
 
-    # Also check environment variables directly
+    # Fall back to environment variables
     if not admin_secret:
-        admin_secret = os.environ.get("ADMIN_SECRET", "")
-    if not relay_url_override:
-        relay_url_override = os.environ.get("NEXT_PUBLIC_LOBSTER_RELAY_URL", "")
+        admin_secret = os.environ.get("BISQUE_ADMIN_SECRET", "") or os.environ.get("ADMIN_SECRET", "")
+    if not relay_url:
+        relay_url = os.environ.get("BISQUE_RELAY_URL", "")
+    if not relay_http_url:
+        relay_http_url = os.environ.get("BISQUE_RELAY_HTTP_URL", "")
 
     if not admin_secret:
         return [TextContent(type="text", text=(
-            "ADMIN_SECRET is not configured. Add it to ~/lobster-config/config.env:\n"
-            "  ADMIN_SECRET=<your-secret>\n\n"
-            "This secret must match the ADMIN_SECRET set when running bisque-chat."
+            "BISQUE_ADMIN_SECRET is not configured. Add it to ~/lobster-config/config.env:\n"
+            "  BISQUE_ADMIN_SECRET=<your-secret>\n\n"
+            "This secret must match the BISQUE_ADMIN_SECRET used by the relay server."
         ))]
 
-    endpoint = f"{bisque_chat_url.rstrip('/')}/api/auth/generate-login-token"
+    # Derive the HTTP base URL for the relay.
+    # If not explicitly set, default to localhost:9101 (where the relay runs).
+    if not relay_http_url:
+        relay_http_url = "http://localhost:9101"
+
+    endpoint = f"{relay_http_url.rstrip('/')}/auth/admin/token"
 
     payload: dict[str, str] = {"email": email}
+    # Pass relayUrl override only if explicitly provided by the caller
+    relay_url_override = arguments.get("relayUrl", "").strip()
     if relay_url_override:
         payload["relayUrl"] = relay_url_override
 
     try:
-        import urllib.request
-        import urllib.error
-
         req_body = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
             endpoint,
@@ -6573,16 +6634,21 @@ async def handle_generate_bisque_login_token(arguments: dict[str, Any]) -> list[
             err_msg = err_body.get("error", str(exc))
         except Exception:
             err_msg = str(exc)
-        return [TextContent(type="text", text=f"Failed to generate token: {err_msg}")]
+        return [TextContent(type="text", text=f"Failed to generate token via relay: {err_msg}")]
     except Exception as exc:
         return [TextContent(type="text", text=(
-            f"Could not reach bisque-chat at {bisque_chat_url}: {exc}\n\n"
-            "Make sure bisque-chat is running and BISQUE_CHAT_URL is set correctly in ~/lobster-config/config.env."
+            f"Could not reach bisque relay at {relay_http_url}: {exc}\n\n"
+            "Make sure the relay is running and BISQUE_ADMIN_SECRET is set in ~/lobster-config/config.env."
         ))]
 
     login_token = resp_body.get("loginToken", "")
-    instructions = resp_body.get("instructions", f"Login token: {login_token}")
+    returned_email = resp_body.get("email", email)
 
+    instructions = (
+        f"Login token for {returned_email}:\n\n"
+        f"{login_token}\n\n"
+        "Paste this token into the bisque-chat login screen."
+    )
     return [TextContent(type="text", text=instructions)]
 
 
