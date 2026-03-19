@@ -112,7 +112,7 @@ The `auto-register-agent.py` PostToolUse hook reads structured metadata from sub
 ```yaml
 ---
 task_id: my-task-123
-chat_id: ADMIN_CHAT_ID_REDACTED
+chat_id: 8305714125
 source: telegram
 reply_to_message_id: 10924
 ---
@@ -123,8 +123,6 @@ The hook uses this to register the subagent in `agent_sessions.db` immediately u
 Legacy format (still supported for backward compat): `Your task_id is: my-task-123`
 
 See `hooks/auto-register-agent.py` for full details.
-
----
 
 ## Related documentation
 
