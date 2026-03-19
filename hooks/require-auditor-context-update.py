@@ -191,6 +191,33 @@ def _safe_word_in_transcript(tool_calls: list[dict]) -> bool:
     return False
 
 
+def _parse_timestamp(t: str | int | float | None) -> float | None:
+    """Parse a timestamp value to a Unix float.
+
+    Accepts:
+      - int/float: returned as float directly
+      - str: tried as ISO-8601 first (CC 2.1.76+ format), then as a numeric string
+
+    Returns None if the value cannot be parsed or if t is None.
+    """
+    if t is None:
+        return None
+    if isinstance(t, (int, float)):
+        return float(t)
+    if isinstance(t, str):
+        # ISO-8601 (CC 2.1.76+): e.g. "2026-03-19T16:52:01.657Z"
+        try:
+            return datetime.fromisoformat(t.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            pass
+        # Numeric string fallback (older CC versions)
+        try:
+            return float(t)
+        except ValueError:
+            pass
+    return None
+
+
 def _session_start_time(hook_input: dict, transcript: list) -> float | None:
     """Estimate session start time from the transcript's first message timestamp.
 
@@ -396,7 +423,8 @@ def main() -> None:
         "Either update the file with your findings, or include "
         f"{SAFE_WORD!r} as the first line of your write_result call "
         "if nothing new was found. "
-        f"({fires_remaining} attempt(s) remaining before the circuit breaker trips.)"
+        f"({fires_remaining} attempt(s) remaining before the circuit breaker trips.)",
+        file=sys.stderr,
     )
     sys.exit(2)
 
