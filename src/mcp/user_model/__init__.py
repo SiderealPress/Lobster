@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .db import open_db, set_metadata_value
-from .owner import get_owner_id, ensure_owner_toml
+from .owner import get_owner_id, ensure_owner_toml, get_owner_timezone
 from .tools import USER_MODEL_TOOL_DEFINITIONS, dispatch
 from .markdown_sync import sync_all
 from .observation import observe_message
