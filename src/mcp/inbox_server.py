@@ -788,31 +788,12 @@ try:
 except Exception as _ss_err:
     log.warning(f"Agent session store init failed (non-fatal): {_ss_err}")
 
-# Startup cleanup: mark stale 'running' rows as 'dead' before reconciler loop begins.
-# After a force-restart, agents killed mid-run leave their output files with
-# stop_reason=tool_use, which the reconciler treats as still-running. We fix this
-# here by checking file existence and mtime against the server start time — any
-# output file that predates this process startup cannot belong to a live agent.
-#
-# Note on asymmetric notification: this sweep intentionally does NOT enqueue user
-# notifications for the sessions it marks dead. This is a bulk-cleanup pass, not a
-# live event. Any sessions that were completed/dead before this restart but not yet
-# notified are handled by the reconciler's _startup_sweep(), which fires immediately
-# after the reconciler loop starts and handles the notification backlog. Separating
-# the two concerns keeps this code path simple and idempotent.
-try:
-    _dead_ids = _session_store.cleanup_stale_running_sessions(
-        server_start_time=_SERVER_START_TIME
-    )
-    if _dead_ids:
-        log.warning(
-            f"[startup] Marked {len(_dead_ids)} stale 'running' session(s) as dead "
-            f"(pre-existing from before this server start): {_dead_ids}"
-        )
-    else:
-        log.info("[startup] No stale 'running' sessions found at startup")
-except Exception as _cleanup_err:
-    log.warning(f"[startup] Stale session cleanup failed (non-fatal): {_cleanup_err}")
+# NOTE: Startup cleanup (cleanup_stale_running_sessions) is intentionally NOT
+# called here at module level. This module is imported by inbox_server_http.py
+# (the HTTP bridge) which may be run as a separate process. Running the cleanup
+# at import time would incorrectly mark running agents as dead every time the
+# HTTP server restarts. The cleanup runs inside main() so it only fires when
+# inbox_server.py is the actual stdio MCP server entry point.
 
 # ---------------------------------------------------------------------------
 # Wire server notification — event-driven SSE push (<40ms latency)
@@ -7335,6 +7316,35 @@ async def main():
     """Run the MCP server."""
     setup_logging()
     _ensure_observation_worker()
+
+    # Startup cleanup: mark stale 'running' rows as 'dead' before reconciler loop begins.
+    # After a force-restart, agents killed mid-run leave their output files with
+    # stop_reason=tool_use, which the reconciler treats as still-running. We fix this
+    # here by checking file existence and stop_reason against the server start time.
+    #
+    # This runs here (inside main) rather than at module level so that importing
+    # this module from inbox_server_http.py does NOT trigger the cleanup.  A
+    # crash-looping HTTP bridge would otherwise incorrectly kill every running
+    # agent on every restart.
+    #
+    # Note on asymmetric notification: this sweep intentionally does NOT enqueue
+    # user notifications for the sessions it marks dead. Any sessions completed or
+    # dead before this restart but not yet notified are handled by the reconciler's
+    # _startup_sweep(), which fires immediately after the reconciler loop starts.
+    try:
+        _dead_ids = _session_store.cleanup_stale_running_sessions(
+            server_start_time=_SERVER_START_TIME
+        )
+        if _dead_ids:
+            log.warning(
+                f"[startup] Marked {len(_dead_ids)} stale 'running' session(s) as dead "
+                f"(pre-existing from before this server start): {_dead_ids}"
+            )
+        else:
+            log.info("[startup] No stale 'running' sessions found at startup")
+    except Exception as _cleanup_err:
+        log.warning(f"[startup] Stale session cleanup failed (non-fatal): {_cleanup_err}")
+
     asyncio.create_task(reconcile_agent_sessions())
     async with stdio_server() as (read_stream, write_stream):
         await server.run(read_stream, write_stream, server.create_initialization_options())
