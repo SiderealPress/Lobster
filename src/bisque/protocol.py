@@ -40,7 +40,8 @@ class FrameType(str, Enum):
     ACK = "ack"
     PING = "ping"
 
-    # Server -> Client (15)
+    # Server -> Client (16)
+    HELLO = "hello"
     AUTH_SUCCESS = "auth_success"
     AUTH_ERROR = "auth_error"
     SNAPSHOT = "snapshot"
@@ -61,11 +62,14 @@ class FrameType(str, Enum):
 CLIENT_FRAME_TYPES: set[str] = {
     FrameType.AUTH.value,
     FrameType.SEND_MESSAGE.value,
+    # "message" is accepted as a client-compat alias for "send_message"
+    FrameType.MESSAGE.value,
     FrameType.ACK.value,
     FrameType.PING.value,
 }
 
 SERVER_FRAME_TYPES: set[str] = {
+    FrameType.HELLO.value,
     FrameType.AUTH_SUCCESS.value,
     FrameType.AUTH_ERROR.value,
     FrameType.SNAPSHOT.value,
@@ -157,13 +161,12 @@ def deserialize(raw: str) -> Envelope:
     if not isinstance(data, dict):
         raise ProtocolError("Expected JSON object")
 
-    if "v" not in data:
-        raise ProtocolError("Missing required field: v")
     if "type" not in data:
         raise ProtocolError("Missing required field: type")
 
     # Extract envelope-level fields; everything else is payload.
-    v = data.pop("v")
+    # v is optional for client compat — default to 2 if absent.
+    v = data.pop("v", 2)
     envelope_id = data.pop("id", str(uuid.uuid4()))
     ts = data.pop("ts", datetime.now(timezone.utc).isoformat())
     frame_type = data.pop("type")
@@ -179,6 +182,8 @@ def deserialize(raw: str) -> Envelope:
 _CLIENT_REQUIRED_FIELDS: Dict[str, List[str]] = {
     FrameType.AUTH.value: ["token"],
     FrameType.SEND_MESSAGE.value: ["text"],
+    # "message" is a client-compat alias for "send_message" — same required fields
+    FrameType.MESSAGE.value: ["text"],
     FrameType.ACK.value: ["event_id"],
     FrameType.PING.value: [],
 }
@@ -208,6 +213,11 @@ def validate_client_frame(envelope: Envelope) -> None:
 # ---------------------------------------------------------------------------
 # Server frame convenience builders
 # ---------------------------------------------------------------------------
+
+
+def frame_hello() -> str:
+    """Build a serialized ``hello`` frame (sent to clients on connect)."""
+    return serialize(make_envelope(FrameType.HELLO.value))
 
 
 def frame_auth_success(email: str) -> str:
