@@ -71,6 +71,7 @@ READONLY_TOOLS = frozenset({
     "list_sources",
     "get_stats",
     "get_conversation_history",
+    "get_message_by_telegram_id",
     # Task reading
     "list_tasks",
     "get_task",
