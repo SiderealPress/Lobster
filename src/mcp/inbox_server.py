@@ -605,37 +605,21 @@ _REPLY_TRACK_MAX = 100
 
 
 # ---------------------------------------------------------------------------
-# Timezone utility — delegates to utils.timezone for all display/conversion
+# Timezone utility — reads owner timezone from owner.toml for display
 # ---------------------------------------------------------------------------
-#
-# The canonical implementation lives in utils/timezone.py.  Local wrappers
-# are kept here for backwards-compatibility with existing call sites inside
-# this file so that no other lines need to change.
-#
-# _format_ts_with_et has been renamed to _format_ts_for_user and now uses
-# the owner's configured timezone instead of hardcoding Eastern Time.
-# ---------------------------------------------------------------------------
-
-try:
-    from utils.timezone import (
-        format_for_user as _tz_format_for_user,
-        format_iso_for_user as _tz_format_iso_for_user,
-        format_with_utc_and_local as _tz_format_with_utc_and_local,
-        get_owner_zoneinfo as _tz_get_owner_zoneinfo,
-    )
-    _TZ_UTIL_AVAILABLE = True
-except ImportError:
-    _TZ_UTIL_AVAILABLE = False
-
 
 def _get_display_tz():
-    """Return the owner's local timezone (ZoneInfo) for display purposes."""
-    if _TZ_UTIL_AVAILABLE:
-        return _tz_get_owner_zoneinfo()
+    """Return the owner's local timezone for display purposes.
+
+    Reads the 'timezone' field from owner.toml (e.g. 'America/Los_Angeles').
+    Falls back to UTC if not set or if zoneinfo cannot load the zone.
+    Always returns a zoneinfo.ZoneInfo-compatible object.
+    """
     import zoneinfo as _zoneinfo
     try:
         from user_model.owner import get_owner_timezone as _get_owner_tz
-        return _zoneinfo.ZoneInfo(_get_owner_tz())
+        tz_name = _get_owner_tz()
+        return _zoneinfo.ZoneInfo(tz_name)
     except Exception:
         return _zoneinfo.ZoneInfo("UTC")
 
@@ -643,45 +627,28 @@ def _get_display_tz():
 def _format_display_ts(dt: "datetime", fmt: str = "%Y-%m-%d %I:%M %p %Z") -> str:
     """Convert a datetime to the owner's local timezone and format it for display.
 
-    Naive datetimes are assumed UTC.
+    Args:
+        dt:  A datetime object (naive datetimes are assumed UTC).
+        fmt: strftime format string. Default produces e.g. '2026-03-19 02:18 AM PST'.
+
+    Returns a formatted string in the owner's local time.
     """
-    if _TZ_UTIL_AVAILABLE:
-        return _tz_format_for_user(dt, fmt=fmt)
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(_get_display_tz()).strftime(fmt)
+    local_dt = dt.astimezone(_get_display_tz())
+    return local_dt.strftime(fmt)
 
 
 def _format_iso_for_display(iso_str: str, fmt: str = "%Y-%m-%d %I:%M %p %Z") -> str:
-    """Parse an ISO 8601 string and format it in the owner's local timezone."""
-    if _TZ_UTIL_AVAILABLE:
-        return _tz_format_iso_for_user(iso_str, fmt=fmt)
+    """Parse an ISO 8601 string and format it in the owner's local timezone.
+
+    Falls back to the raw string if parsing fails.
+    """
     try:
         dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
         return _format_display_ts(dt, fmt)
     except Exception:
         return iso_str
-
-
-def _format_ts_with_et(ts_str: str) -> str:
-    """Format a timestamp as 'YYYY-MM-DDTHH:MM:SS UTC (H:MM AM/PM <owner-tz>)'.
-
-    Previously hardcoded to Eastern Time; now uses the owner's configured
-    timezone from owner.toml so display matches the owner's actual locale.
-    Falls back to the raw string if parsing fails.
-    """
-    if _TZ_UTIL_AVAILABLE:
-        return _tz_format_with_utc_and_local(ts_str)
-    try:
-        dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        utc_str = dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S UTC")
-        local_dt = dt.astimezone(_get_display_tz())
-        local_str = local_dt.strftime("%I:%M %p %Z").lstrip("0")
-        return f"{utc_str} ({local_str})"
-    except Exception:
-        return ts_str
 
 
 def _track_reply(chat_id: Any) -> None:
@@ -5920,6 +5887,7 @@ def _format_history_output(
         ts = msg.get("timestamp", "")
         text = msg.get("text", "(no text)")
 
+        # Format timestamp nicely in owner's local timezone
         try:
             ts_display = _format_iso_for_display(ts, "%Y-%m-%d %I:%M %p %Z")
         except (ValueError, TypeError):
@@ -7347,13 +7315,52 @@ async def handle_create_scheduled_job(args: dict) -> list[TextContent]:
     if result.status == "already_exists":
         return [TextContent(type="text", text=f"Job '{name}' already exists with the same schedule and command (no changes made).")]
 
-    return [TextContent(type="text", text=(
-        f"Created scheduled job '{name}'\n"
-        f"Schedule: {schedule}\n"
-        f"Command: {command}\n"
-        f"Timer: /etc/systemd/system/lobster-{name}.timer\n"
-        f"Service: /etc/systemd/system/lobster-{name}.service"
-    ))]
+    task_content = f"""# {name.replace('-', ' ').title()}
+
+**Job**: {name}
+**Schedule**: {schedule_human} (`{schedule}`)
+**Created**: {_format_display_ts(now)}
+
+## Context
+
+You are running as a scheduled task. The main Lobster instance created this job.
+
+## Instructions
+
+{context}
+
+## Output
+
+When you complete your task, call `write_task_output` with:
+- job_name: "{name}"
+- output: Your results/summary
+- status: "success" or "failed"
+
+Keep output concise. The main Lobster instance will review this later.
+"""
+
+    task_file.write_text(task_content)
+
+    # Add to jobs.json
+    data["jobs"][name] = {
+        "name": name,
+        "schedule": schedule,
+        "schedule_human": schedule_human,
+        "task_file": f"tasks/{name}.md",
+        "created_at": now.isoformat(),
+        "updated_at": now.isoformat(),
+        "enabled": True,
+        "last_run": None,
+        "last_status": None,
+    }
+    save_scheduled_jobs(data)
+
+    # Sync to crontab
+    success, msg = sync_crontab()
+    if not success:
+        return [TextContent(type="text", text=f"Job created but crontab sync failed: {msg}")]
+
+    return [TextContent(type="text", text=f"Created scheduled job '{name}'\nSchedule: {schedule_human} (`{schedule}`)\nTask file: {task_file}")]
 
 
 async def handle_list_scheduled_jobs(args: dict) -> list[TextContent]:
@@ -7376,8 +7383,24 @@ async def handle_list_scheduled_jobs(args: dict) -> list[TextContent]:
         lines.append(f"  Next run: {job.next_run or 'unknown'}")
         lines.append("")
 
-    lines.append(f"---\nTotal: {len(jobs)} job(s)")
-    return [TextContent(type="text", text="\n".join(lines))]
+    for name, job in sorted(jobs.items()):
+        status_icon = "" if job.get("enabled", True) else " (disabled)"
+        schedule = job.get("schedule_human", job.get("schedule", ""))
+        last_run = job.get("last_run", "never")
+        last_status = job.get("last_status", "-")
+
+        if last_run and last_run != "never":
+            try:
+                last_run = _format_iso_for_display(last_run, "%Y-%m-%d %I:%M %p %Z")
+            except:
+                pass
+
+        output += f"**{name}**{status_icon}\n"
+        output += f"  Schedule: {schedule}\n"
+        output += f"  Last run: {last_run} ({last_status})\n\n"
+
+    output += f"---\nTotal: {len(jobs)} job(s)"
+    return [TextContent(type="text", text=output)]
 
 
 async def handle_get_scheduled_job(args: dict) -> list[TextContent]:
@@ -7396,22 +7419,20 @@ async def handle_get_scheduled_job(args: dict) -> list[TextContent]:
     schedule = _sj_read_unit_field(timer, "OnCalendar") or "(unknown)"
     command = _sj_read_unit_field(service, "ExecStart") or "(unknown)"
 
+    _fmt = "%Y-%m-%d %I:%M %p %Z"
+    created_disp = _format_iso_for_display(job.get("created_at", ""), _fmt) if job.get("created_at") else "N/A"
+    updated_disp = _format_iso_for_display(job.get("updated_at", ""), _fmt) if job.get("updated_at") else "N/A"
+    last_run_raw = job.get("last_run") or ""
+    last_run_disp = _format_iso_for_display(last_run_raw, _fmt) if last_run_raw else "never"
+
     output = f"**Job: {name}**\n\n"
-    output += f"**Schedule**: {schedule}\n"
-    output += f"**Command**: {command}\n"
-    output += f"**Timer unit**: /etc/systemd/system/lobster-{name}.timer\n"
-    output += f"**Service unit**: /etc/systemd/system/lobster-{name}.service\n\n"
-    output += "---\n\n**Timer unit contents:**\n\n```ini\n"
-    try:
-        output += timer.read_text()
-    except OSError:
-        output += "(unable to read)"
-    output += "\n```\n\n**Service unit contents:**\n\n```ini\n"
-    try:
-        output += service.read_text()
-    except OSError:
-        output += "(unable to read)"
-    output += "\n```"
+    output += f"**Schedule**: {job.get('schedule_human', '')} (`{job.get('schedule', '')}`)\n"
+    output += f"**Enabled**: {'Yes' if job.get('enabled', True) else 'No'}\n"
+    output += f"**Created**: {created_disp}\n"
+    output += f"**Updated**: {updated_disp}\n"
+    output += f"**Last Run**: {last_run_disp}\n"
+    output += f"**Last Status**: {job.get('last_status', '-')}\n\n"
+    output += f"---\n\n**Task File** (`{task_file}`):\n\n```markdown\n{task_content}\n```"
 
     return [TextContent(type="text", text=output)]
 
@@ -7454,9 +7475,52 @@ async def handle_update_scheduled_job(args: dict) -> list[TextContent]:
     if not result.updated_fields:
         return [TextContent(type="text", text="No changes specified. Provide schedule, command, or enabled.")]
 
-    return [TextContent(type="text", text=(
-        f"Updated job '{name}':\n- " + "\n- ".join(result.updated_fields)
-    ))]
+    # Update context if provided
+    if "context" in args and args["context"]:
+        new_context = args["context"].strip()
+        task_file = SCHEDULED_TASKS_TASKS_DIR / f"{name}.md"
+
+        # Rewrite task file
+        now = datetime.now(timezone.utc)
+        created_disp = _format_iso_for_display(job.get("created_at", "")) if job.get("created_at") else "N/A"
+        task_content = f"""# {name.replace('-', ' ').title()}
+
+**Job**: {name}
+**Schedule**: {job.get('schedule_human', '')} (`{job.get('schedule', '')}`)
+**Created**: {created_disp}
+**Updated**: {_format_display_ts(now)}
+
+## Context
+
+You are running as a scheduled task. The main Lobster instance created this job.
+
+## Instructions
+
+{new_context}
+
+## Output
+
+When you complete your task, call `write_task_output` with:
+- job_name: "{name}"
+- output: Your results/summary
+- status: "success" or "failed"
+
+Keep output concise. The main Lobster instance will review this later.
+"""
+        task_file.write_text(task_content)
+        updated.append("context (task file rewritten)")
+
+    if not updated:
+        return [TextContent(type="text", text="No changes specified. Provide schedule, context, or enabled.")]
+
+    job["updated_at"] = datetime.now(timezone.utc).isoformat()
+    save_scheduled_jobs(data)
+
+    # Sync to crontab
+    success, msg = sync_crontab()
+    sync_status = "" if success else f"\n(Warning: crontab sync failed: {msg})"
+
+    return [TextContent(type="text", text=f"Updated job '{name}':\n- " + "\n- ".join(updated) + sync_status)]
 
 
 async def handle_delete_scheduled_job(args: dict) -> list[TextContent]:
@@ -7567,7 +7631,7 @@ async def handle_check_task_outputs(args: dict) -> list[TextContent]:
         # Format timestamp nicely in owner's local timezone
         try:
             ts = _format_iso_for_display(ts, "%Y-%m-%d %I:%M %p %Z")
-        except (ValueError, TypeError):
+        except:
             pass
 
         result += f"---\n"
@@ -8693,7 +8757,7 @@ async def handle_memory_search(arguments: dict[str, Any]) -> list[TextContent]:
 
     lines = [f"**Memory Search Results** ({len(results)} found for \"{query}\"):"]
     for i, event in enumerate(results, 1):
-        ts = event.timestamp.strftime("%Y-%m-%d %H:%M") if event.timestamp else "?"
+        ts = _format_display_ts(event.timestamp, "%Y-%m-%d %I:%M %p %Z") if event.timestamp else "?"
         proj = f" [{event.project}]" if event.project else ""
         eid = f"#{event.id}" if event.id else ""
         # Truncate content for display
