@@ -34,6 +34,32 @@ Each line of the JSONL transcript file has the structure:
 Tool use items are nested under entry["message"]["content"], NOT entry["content"].
 `_extract_tool_calls` handles both the JSONL format and the legacy inline
 format where content is directly on the message dict.
+
+## Circuit breaker (MAX_HOOK_FIRES)
+
+If the auditor agent cannot satisfy the exit conditions and the hook keeps
+blocking (e.g. turn exhaustion, crash loop), the hook would fire indefinitely.
+To prevent runaway sessions, after MAX_HOOK_FIRES fires without the condition
+being met the hook logs a loud system_error entry and allows the exit (exit 0).
+
+MAX_HOOK_FIRES = 3 (lower than require-write-result's 5) because repeated
+firing here means the auditor ran, read the context file, but never satisfied
+the post-condition — a serious signal that something is structurally wrong with
+the auditor agent or its environment.
+
+Fire count is tracked in /tmp/lobster-auditor-hook-fires-{agent_key} as JSON:
+    {"count": N, "first_fire_ts": <unix timestamp>}
+
+The file is cleaned up after a successful exit (either condition met) or after
+the circuit breaker trips.
+
+## suppressOutput
+
+This hook exits silently (no stdout/stderr) on all exit-0 paths.
+require-write-result.py (which runs first for the same SubagentStop event)
+already emits {"suppressOutput": true} and covers the event. Emitting a
+second suppressOutput here causes CC to surface it as feedback content
+rather than suppress it.
 """
 import json
 import os
@@ -339,10 +365,16 @@ def main() -> None:
     # Condition 1: context file was updated during this session.
     session_start = _session_start_time(hook_input, transcript)
     if _context_file_updated_since(session_start):
+        # Success path — clean up any fire-count state and allow exit.
+        key = _agent_key(hook_input)
+        _cleanup_fire_state(_fire_count_path(key))
         _exit_ok()
 
     # Condition 2: transcript contains the explicit safe word.
     if _safe_word_in_transcript(tool_calls):
+        # Success path — clean up any fire-count state and allow exit.
+        key = _agent_key(hook_input)
+        _cleanup_fire_state(_fire_count_path(key))
         _exit_ok()
 
     # Neither condition met — increment fire count and check circuit breaker.
@@ -364,8 +396,7 @@ def main() -> None:
         "Either update the file with your findings, or include "
         f"{SAFE_WORD!r} as the first line of your write_result call "
         "if nothing new was found. "
-        f"({fires_remaining} attempt(s) remaining before the circuit breaker trips.)",
-        file=sys.stderr,
+        f"({fires_remaining} attempt(s) remaining before the circuit breaker trips.)"
     )
     sys.exit(2)
 
