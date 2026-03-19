@@ -682,7 +682,7 @@ file; default to 30 minutes ago if absent), call check_inbox(since_ts=<window_st
 summarise what happened (user messages, subagent results, notable system events), update
 last_catchup_ts in compaction-state.json, then call write_result.
 
-Note: this is a startup catchup (not post-compaction). Deliver the summary to the user via send_reply — do NOT skip delivery because chat_id is non-zero.
+Note: this is a startup catchup (not post-compaction). Deliver the summary to the user via send_reply — do NOT skip delivery because chat_id is non-zero. Then call write_result with sent_reply_to_user=True.
 ```
 
 **Startup vs. post-compaction catchup — key distinction:**
@@ -694,7 +694,7 @@ Note: this is a startup catchup (not post-compaction). Deliver the summary to th
 | Delivery | `send_reply` to user — always | Internal context only — never relay |
 | Purpose | User wants to know what happened during the restart gap | Dispatcher recovers situational awareness silently |
 
-**When the startup `compact-catchup` result arrives** (as `subagent_result` with `task_id: "startup-catchup"` and `chat_id: 8305714125`): the normal `subagent_result` handler delivers it to the user. No special handling needed — it routes correctly via `chat_id`.
+**When the startup `compact-catchup` result arrives** (as `subagent_notification` with `task_id: "startup-catchup"` and `chat_id: 8305714125`): the normal `subagent_notification` handler marks it processed. No special handling needed — the subagent already delivered via send_reply.
 
 **Why triage at startup?** A dangerous message (e.g. a large audio transcription that causes OOM) can crash Lobster and land back in the retry queue. On the next boot, Lobster hits it again — crash loop. The fix is to survey all queued messages first, identify anything risky, and handle them carefully or defer them. Part of the failsafe is looking at the full picture before acting.
 
