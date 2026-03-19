@@ -381,6 +381,12 @@ git_pull() {
         fi
     fi
 
+    # Abort if health-check script has syntax errors
+    if ! bash -n scripts/health-check-v3.sh; then
+        echo "ERROR: scripts/health-check-v3.sh failed syntax check — aborting upgrade" >&2
+        exit 1
+    fi
+
     log_to_file "Git updated: $PREVIOUS_COMMIT -> $CURRENT_COMMIT"
 }
 
