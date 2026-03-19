@@ -11,16 +11,16 @@ from typing import Any
 
 log = logging.getLogger("lobster-bisque-relay")
 
-# Default session TTL: 7 days
-_DEFAULT_SESSION_TTL = 7 * 24 * 60 * 60
+# Default session TTL: 365 days (long-lived — avoids constant re-auth)
+_DEFAULT_SESSION_TTL = 365 * 24 * 60 * 60
 
 
 class TokenStore:
-    """Manages bootstrap tokens (from bisque-chat) and in-memory session tokens.
+    """Manages bootstrap tokens (from bisque-chat) and disk-persisted session tokens.
 
     Bootstrap tokens are read from disk (the bisque-chat token file).
-    Session tokens are generated and held in memory only — on server restart
-    clients must re-authenticate.
+    Session tokens are persisted under the ``sessionTokens`` key of the same file
+    so that relay restarts do not invalidate existing authenticated sessions.
     """
 
     def __init__(self, tokens_file: Path, session_ttl: float = _DEFAULT_SESSION_TTL) -> None:
@@ -28,6 +28,7 @@ class TokenStore:
         self._session_ttl = session_ttl
         # session_token -> {email, created_at, last_seen}
         self._sessions: dict[str, dict[str, Any]] = {}
+        self._load_sessions()
 
     # ------------------------------------------------------------------
     # Bootstrap tokens (disk-backed, one-time use)
@@ -54,6 +55,66 @@ class TokenStore:
             tmp.rename(self._tokens_file)
         except OSError as exc:
             log.error("Error writing token file: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Session persistence helpers
+    # ------------------------------------------------------------------
+
+    def _load_sessions(self) -> None:
+        """Load persisted session tokens from disk into memory.
+
+        Reads the ``sessionTokens`` dict from the token file and populates
+        ``self._sessions``, discarding any entries that are already expired
+        so stale sessions don't accumulate across restarts.
+        """
+        try:
+            raw = self._tokens_file.read_text(encoding="utf-8")
+            store = json.loads(raw)
+        except (FileNotFoundError, json.JSONDecodeError, OSError) as exc:
+            log.warning("Could not load sessions from disk: %s", exc)
+            return
+
+        now = time.time()
+        loaded = 0
+        skipped = 0
+        for tok, sess in store.get("sessionTokens", {}).items():
+            # Only accept entries that have the fields we write
+            if not isinstance(sess, dict) or "email" not in sess or "last_seen" not in sess:
+                skipped += 1
+                continue
+            # Discard already-expired sessions
+            if now - sess["last_seen"] > self._session_ttl:
+                skipped += 1
+                continue
+            self._sessions[tok] = {
+                "email": sess["email"],
+                "created_at": sess.get("created_at", now),
+                "last_seen": sess["last_seen"],
+            }
+            loaded += 1
+
+        log.info("Loaded %d active session(s) from disk (%d expired/skipped)", loaded, skipped)
+
+    def _persist_sessions(self) -> None:
+        """Write the current in-memory session map back to the token file.
+
+        Merges with existing file content so bootstrap tokens are not lost.
+        """
+        try:
+            raw = self._tokens_file.read_text(encoding="utf-8")
+            store: dict[str, Any] = json.loads(raw)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            store = {}
+
+        store["sessionTokens"] = {
+            tok: {
+                "email": sess["email"],
+                "created_at": sess["created_at"],
+                "last_seen": sess["last_seen"],
+            }
+            for tok, sess in self._sessions.items()
+        }
+        self._write_token_store(store)
 
     def validate_bootstrap_token(self, token: str) -> tuple[bool, str]:
         """Validate and consume a bootstrap token.
@@ -92,7 +153,7 @@ class TokenStore:
     # ------------------------------------------------------------------
 
     def create_session(self, email: str) -> str:
-        """Create a new session token for the given email."""
+        """Create a new session token for the given email and persist it to disk."""
         token = secrets.token_urlsafe(48)
         now = time.time()
         self._sessions[token] = {
@@ -101,12 +162,14 @@ class TokenStore:
             "last_seen": now,
         }
         log.info("Session created for %s", email)
+        self._persist_sessions()
         return token
 
     def validate_session(self, token: str) -> tuple[bool, str]:
         """Validate a session token.
 
         Returns (True, email) if valid and not expired, (False, "") otherwise.
+        Expired sessions are removed from memory and disk on detection.
         """
         if not token:
             return False, ""
@@ -118,22 +181,25 @@ class TokenStore:
         # Check TTL
         if time.time() - session["last_seen"] > self._session_ttl:
             del self._sessions[token]
+            self._persist_sessions()
             return False, ""
 
         return True, session["email"]
 
     def touch_session(self, token: str) -> None:
-        """Update last_seen timestamp for a session."""
+        """Update last_seen timestamp for a session and persist to disk."""
         session = self._sessions.get(token)
         if session:
             session["last_seen"] = time.time()
+            self._persist_sessions()
 
     def revoke_session(self, token: str) -> None:
-        """Revoke (delete) a session."""
+        """Revoke (delete) a session and remove it from disk."""
         self._sessions.pop(token, None)
+        self._persist_sessions()
 
     def cleanup_expired(self) -> int:
-        """Remove all expired sessions. Returns count of removed sessions."""
+        """Remove all expired sessions and persist the result. Returns count removed."""
         now = time.time()
         expired = [
             tok for tok, sess in self._sessions.items()
@@ -141,6 +207,8 @@ class TokenStore:
         ]
         for tok in expired:
             del self._sessions[tok]
+        if expired:
+            self._persist_sessions()
         return len(expired)
 
     @property
