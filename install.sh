@@ -463,20 +463,17 @@ if [ "$(id -u)" = "0" ]; then
     else
         warn "docker group not found — skipping docker group membership (install Docker first)."
     fi
+    # Copy script to /tmp so lobster user can read it regardless of working directory
+    INSTALL_SCRIPT="$(readlink -f "$0")"
+    TMP_SCRIPT="$(mktemp /tmp/lobster-install.XXXXXX.sh)"
+    cp "$INSTALL_SCRIPT" "$TMP_SCRIPT"
+    chmod 755 "$TMP_SCRIPT"
+    LOBSTER_HOME="$(getent passwd lobster | cut -d: -f6)"
+
     echo ""
-    info "User 'lobster' is ready."
+    info "Re-running installer as 'lobster' user..."
     echo ""
-    echo -e "${BOLD}Next step: SSH in as the lobster user and run the installer again:${NC}"
-    echo ""
-    echo -e "  ${CYAN}ssh lobster@$(hostname -f 2>/dev/null || hostname)${NC}"
-    echo -e "  ${CYAN}bash install.sh${NC}"
-    echo ""
-    echo "Or, if install.sh is not present in the lobster home directory, download and run:"
-    echo -e "  ${CYAN}curl -fsSL https://raw.githubusercontent.com/SiderealPress/lobster/main/install.sh | bash${NC}"
-    echo ""
-    echo "Your SSH authorized_keys have been copied to the lobster user."
-    echo "Installation as root is complete. The rest must run as 'lobster'."
-    exit 0
+    exec sudo -u lobster HOME="$LOBSTER_HOME" bash "$TMP_SCRIPT" "$@"
 fi
 
 # Check if running interactively
