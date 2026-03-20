@@ -197,6 +197,8 @@ mcp__lobster-inbox__write_observation(
 | `system_context` | Internal system info worth storing silently | Stored to memory, no user message |
 | `system_error` | Error or anomaly to log | Written to `observations.log`, no user message |
 
+**`system_error` is durable:** `write_observation(category="system_error")` appends to `observations.log` directly at the MCP layer (belt-and-suspenders), independently of whether the dispatcher processes the inbox message. Use it for unexpected failures — it reaches the operator log even if the dispatcher is restarting or compacting. This is different from `write_result(status="error")`, which delivers the final answer to the user via the dispatcher; both serve different purposes and should both be called on task failure.
+
 **Rules:**
 
 - Call `write_observation` before or after `write_result` — order doesn't matter
