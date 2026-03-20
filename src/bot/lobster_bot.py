@@ -29,7 +29,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
-from telegram import Update, InlineKeyboardMarkup, ReplyParameters
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyParameters
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, MessageReactionHandler, filters, ContextTypes
 from collections import deque
 
@@ -1292,6 +1292,29 @@ async def process_reply(chat_id: int, text: str, reply_markup=None, thread_ts=No
                 log.error(f"Plain text fallback also failed: {e2}")
 
 
+def build_inline_keyboard(buttons: list) -> InlineKeyboardMarkup:
+    """Build a Telegram InlineKeyboardMarkup from a nested list of button labels.
+
+    Each inner list represents a row of buttons.  Each element in the row is
+    either a plain string label (callback_data == label) or a [label, data]
+    two-element list where data is the callback_data payload.
+
+    Pure function: no side effects.
+    """
+    keyboard = []
+    for row in buttons:
+        keyboard_row = []
+        for item in row:
+            if isinstance(item, (list, tuple)) and len(item) == 2:
+                label, data = item
+            else:
+                label = str(item)
+                data = str(item)
+            keyboard_row.append(InlineKeyboardButton(text=label, callback_data=data))
+        keyboard.append(keyboard_row)
+    return InlineKeyboardMarkup(keyboard)
+
+
 class OutboxHandler(FileSystemEventHandler):
     """Watches outbox for reply files and sends them via Telegram."""
 
@@ -1318,8 +1341,16 @@ class OutboxHandler(FileSystemEventHandler):
     async def process_reply(self, filepath):
         try:
             await asyncio.sleep(0.5)  # Delay to ensure file write is complete
-            with open(filepath, 'r') as f:
-                reply = json.load(f)
+            try:
+                with open(filepath, 'r') as f:
+                    reply = json.load(f)
+            except (json.JSONDecodeError, OSError) as exc:
+                log.error(f"process_reply: failed to parse {filepath}: {exc}")
+                try:
+                    os.remove(filepath)
+                except OSError:
+                    pass
+                return
 
             chat_id = reply.get('chat_id')
             text = reply.get('text', '')

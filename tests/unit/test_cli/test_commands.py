@@ -120,6 +120,10 @@ class TestInboxCommand:
 
         env = os.environ.copy()
         env["HOME"] = str(temp_messages_dir.parent)
+        # LOBSTER_MESSAGES overrides $HOME/messages in the CLI.  Unset it so
+        # the CLI falls back to $HOME/messages (our temp dir) rather than
+        # pointing at the live /home/lobster/messages directory.
+        env.pop("LOBSTER_MESSAGES", None)
 
         result = subprocess.run(
             ["bash", str(cli_path), "inbox"],

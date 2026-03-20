@@ -2,6 +2,12 @@
 Tests for Telegram Bot Authorization
 
 Tests user authorization and access control.
+
+Note: The is_authorized() function was removed from lobster_bot.py — authorization
+is now performed inline via `user.id not in ALLOWED_USERS` in each handler, using
+the module-level ALLOWED_USERS list.  Tests have been updated to:
+  1. Verify the ALLOWED_USERS list is populated correctly from the env var.
+  2. Test handler-level authorization behavior (the end effect is the same).
 """
 
 import pytest
@@ -9,11 +15,11 @@ from unittest.mock import patch, MagicMock, AsyncMock
 import os
 
 
-class TestIsAuthorized:
-    """Tests for is_authorized function."""
+class TestAllowedUsersConfig:
+    """Tests for ALLOWED_USERS configuration from environment."""
 
-    def test_authorized_user_returns_true(self):
-        """Test that authorized user returns True."""
+    def test_allowed_users_populated_from_env(self):
+        """ALLOWED_USERS is built from TELEGRAM_ALLOWED_USERS env var."""
         with patch.dict(
             os.environ,
             {
@@ -21,16 +27,15 @@ class TestIsAuthorized:
                 "TELEGRAM_ALLOWED_USERS": "123456,789012",
             },
         ):
-            # Need to reimport to pick up env change
             import importlib
             import src.bot.lobster_bot as bot_module
             importlib.reload(bot_module)
 
-            assert bot_module.is_authorized(123456) is True
-            assert bot_module.is_authorized(789012) is True
+            assert 123456 in bot_module.ALLOWED_USERS
+            assert 789012 in bot_module.ALLOWED_USERS
 
-    def test_unauthorized_user_returns_false(self):
-        """Test that unauthorized user returns False."""
+    def test_unauthorized_user_not_in_allowed_users(self):
+        """A user not in TELEGRAM_ALLOWED_USERS is absent from ALLOWED_USERS."""
         with patch.dict(
             os.environ,
             {
@@ -42,10 +47,10 @@ class TestIsAuthorized:
             import src.bot.lobster_bot as bot_module
             importlib.reload(bot_module)
 
-            assert bot_module.is_authorized(999999) is False
+            assert 999999 not in bot_module.ALLOWED_USERS
 
-    def test_single_user_authorization(self):
-        """Test authorization with single allowed user."""
+    def test_single_user_in_allowed_users(self):
+        """Single allowed user is correctly parsed."""
         with patch.dict(
             os.environ,
             {
@@ -57,8 +62,8 @@ class TestIsAuthorized:
             import src.bot.lobster_bot as bot_module
             importlib.reload(bot_module)
 
-            assert bot_module.is_authorized(123456) is True
-            assert bot_module.is_authorized(654321) is False
+            assert 123456 in bot_module.ALLOWED_USERS
+            assert 654321 not in bot_module.ALLOWED_USERS
 
 
 class TestStartCommand:
@@ -118,4 +123,5 @@ class TestStartCommand:
 
             mock_update.message.reply_text.assert_called_once()
             call_args = mock_update.message.reply_text.call_args[0][0]
-            assert "Unauthorized" in call_args
+            # The rejection message uses "not authorized" (case-insensitive match)
+            assert "not authorized" in call_args.lower() or "unauthorized" in call_args.lower()
