@@ -1393,6 +1393,23 @@ chmod +x "$INSTALL_DIR/scripts/nightly-consolidation.sh" || true
 success "Nightly consolidation configured (runs at 03:00 nightly)"
 
 #===============================================================================
+# GWS Credential Sync
+#===============================================================================
+
+step "Setting up gws credential sync..."
+
+chmod +x "$INSTALL_DIR/scripts/sync-gws-credentials.py" || true
+
+# Add gws credential sync to crontab (runs daily at 04:00)
+# gws auth login writes fresh tokens to credentials.enc but does not update
+# credentials.json. Without this sync, API calls read the stale refresh token
+# and fail with invalid_grant after a re-auth.
+"$INSTALL_DIR/scripts/cron-manage.sh" add "# LOBSTER-GWS-CREDENTIAL-SYNC" \
+    "0 4 * * * cd $INSTALL_DIR && uv run scripts/sync-gws-credentials.py # LOBSTER-GWS-CREDENTIAL-SYNC"
+
+success "GWS credential sync configured (runs at 04:00 daily)"
+
+#===============================================================================
 # Cron-to-Inbox Reminder System (post-reminder.sh)
 #===============================================================================
 

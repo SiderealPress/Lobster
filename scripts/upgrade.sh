@@ -1456,6 +1456,22 @@ with open(path, 'w') as f:
         fi
     fi
 
+    # Migration 27: Add gws credential sync cron entry
+    # gws auth login writes new tokens to credentials.enc but does not update
+    # credentials.json. Without this sync, API calls read the stale refresh token
+    # from credentials.json and fail with invalid_grant after a re-auth.
+    # The daily cron calls sync-gws-credentials.py which copies the refresh_token
+    # from the encrypted store into credentials.json only when it differs.
+    local GWS_SYNC_MARKER="# LOBSTER-GWS-CREDENTIAL-SYNC"
+    if ! crontab -l 2>/dev/null | grep -q "$GWS_SYNC_MARKER"; then
+        local gws_sync_script="$LOBSTER_DIR/scripts/sync-gws-credentials.py"
+        chmod +x "$gws_sync_script" 2>/dev/null || true
+        "$LOBSTER_DIR/scripts/cron-manage.sh" add "$GWS_SYNC_MARKER" \
+            "0 4 * * * cd $LOBSTER_DIR && uv run scripts/sync-gws-credentials.py $GWS_SYNC_MARKER"
+        substep "Added gws credential sync cron entry (daily at 04:00)"
+        migrated=$((migrated + 1))
+    fi
+
 
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
