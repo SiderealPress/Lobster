@@ -2,12 +2,20 @@
 Tests for Daemon Session Management
 
 Tests session ID creation, persistence, and resume functionality.
+
+NOTE: The src.daemon.daemon module was removed when the daemon loop was absorbed
+into the MCP inbox_server (src/mcp/inbox_server.py).  These tests are skipped
+until they are rewritten against the new architecture.
 """
 
 import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 import uuid
+
+pytestmark = pytest.mark.skip(
+    reason="src.daemon.daemon module removed — daemon loop now lives in src.mcp.inbox_server"
+)
 
 
 class TestSessionManagement:

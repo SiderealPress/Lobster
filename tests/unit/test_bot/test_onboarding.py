@@ -161,7 +161,8 @@ class TestOnboardingCommand:
             await bot_module.onboarding_command(mock_update, mock_context)
 
             call_args = mock_update.message.reply_text.call_args[0][0]
-            assert "Unauthorized" in call_args
+            # The rejection message uses "not authorized" rather than "Unauthorized"
+            assert "not authorized" in call_args.lower() or "unauthorized" in call_args.lower()
 
 
 class TestFirstMessageDetection:
