@@ -12,6 +12,7 @@ import pytest
 from pathlib import Path
 from unittest.mock import patch
 from datetime import datetime, timezone
+from reliability import ValidationError
 
 
 class TestMarkProcessing:
@@ -64,7 +65,7 @@ class TestMarkProcessing:
             assert "not found" in result[0].text.lower()
 
     def test_requires_message_id(self, setup_dirs):
-        """Test that message_id is required."""
+        """Test that message_id is required — raises ValidationError when absent."""
         inbox, processing = setup_dirs
 
         with patch.multiple(
@@ -75,9 +76,8 @@ class TestMarkProcessing:
             import asyncio
             from src.mcp.inbox_server import handle_mark_processing
 
-            result = asyncio.run(handle_mark_processing({}))
-
-            assert "Error" in result[0].text
+            with pytest.raises(ValidationError):
+                asyncio.run(handle_mark_processing({}))
 
 
 class TestMarkProcessedUpdated:
@@ -305,7 +305,7 @@ class TestMarkFailed:
             assert abs(failed_msg["_retry_at"] - (now + 120)) < 5
 
     def test_requires_message_id(self, setup_dirs):
-        """Test that message_id is required."""
+        """Test that message_id is required — raises ValidationError when absent."""
         inbox, processing, failed = setup_dirs
 
         with patch.multiple(
@@ -317,9 +317,8 @@ class TestMarkFailed:
             import asyncio
             from src.mcp.inbox_server import handle_mark_failed
 
-            result = asyncio.run(handle_mark_failed({}))
-
-            assert "Error" in result[0].text
+            with pytest.raises(ValidationError):
+                asyncio.run(handle_mark_failed({}))
 
     def test_finds_in_inbox_fallback(self, setup_dirs, message_generator):
         """Test that mark_failed can find messages in inbox/ too."""
@@ -377,7 +376,7 @@ class TestStaleRecovery:
         ):
             from src.mcp.inbox_server import _recover_stale_processing
 
-            _recover_stale_processing(max_age_seconds=300)
+            _recover_stale_processing()
 
             assert not (processing / f"{msg_id}.json").exists()
             assert (inbox / f"{msg_id}.json").exists()
@@ -398,7 +397,7 @@ class TestStaleRecovery:
         ):
             from src.mcp.inbox_server import _recover_stale_processing
 
-            _recover_stale_processing(max_age_seconds=300)
+            _recover_stale_processing()
 
             # Should still be in processing
             assert (processing / f"{msg_id}.json").exists()

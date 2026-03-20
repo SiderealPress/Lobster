@@ -57,6 +57,23 @@ async def _close(session, ws):
     await session.close()
 
 
+async def _receive_frame_of_type(ws, frame_type: str, timeout: float = 10) -> Any:
+    """Receive frames until one with the given type is found.
+
+    The relay server may send interstitial frames (e.g. typing indicators) before
+    the expected frame. This helper skips those and returns the first matching frame.
+    """
+    deadline = asyncio.get_event_loop().time() + timeout
+    while True:
+        remaining = deadline - asyncio.get_event_loop().time()
+        if remaining <= 0:
+            raise asyncio.TimeoutError(f"Timed out waiting for frame type '{frame_type}'")
+        msg = await asyncio.wait_for(ws.receive(), timeout=remaining)
+        data = json.loads(msg.data)
+        if data["type"] == frame_type:
+            return data
+
+
 # =============================================================================
 # HTTP auth exchange
 # =============================================================================
@@ -259,9 +276,9 @@ class TestEventDelivery:
             }
             (dirs["bisque_outbox"] / "out-1.json").write_text(json.dumps(msg_data))
 
-            msg = await asyncio.wait_for(ws.receive(), timeout=10)
-            data = json.loads(msg.data)
-            assert data["type"] == "message"
+            # The server sends a typing=false indicator before the message frame
+            # (BIS-122). Skip interstitial frames and wait for the message.
+            data = await _receive_frame_of_type(ws, "message", timeout=10)
             assert data["text"] == "Reply from Lobster"
             assert data["role"] == "assistant"
         finally:
@@ -299,10 +316,12 @@ class TestEventDelivery:
             msg_data = {"id": "fan-1", "text": "Broadcast", "chat_id": "x"}
             (dirs["bisque_outbox"] / "fan-1.json").write_text(json.dumps(msg_data))
 
-            m1 = await asyncio.wait_for(ws1.receive(), timeout=10)
-            m2 = await asyncio.wait_for(ws2.receive(), timeout=10)
-            assert json.loads(m1.data)["type"] == "message"
-            assert json.loads(m2.data)["type"] == "message"
+            # Skip interstitial typing frames (BIS-122) and assert both clients
+            # receive the message frame.
+            d1 = await _receive_frame_of_type(ws1, "message", timeout=10)
+            d2 = await _receive_frame_of_type(ws2, "message", timeout=10)
+            assert d1["type"] == "message"
+            assert d2["type"] == "message"
         finally:
             await _close(s1, ws1)
             await _close(s2, ws2)
@@ -476,7 +495,9 @@ class TestStress:
 
             for _, ws in connections:
                 received = []
-                for _ in range(20):
+                # Each message is now preceded by a typing=false frame (BIS-122),
+                # so double the read budget to collect 20 messages from 40 frames.
+                for _ in range(40):
                     try:
                         msg = await asyncio.wait_for(ws.receive(), timeout=15)
                         data = json.loads(msg.data)
