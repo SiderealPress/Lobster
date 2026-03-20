@@ -1489,6 +1489,21 @@ with open(path, 'w') as f:
         migrated=$((migrated + 1))
     fi
 
+    # Migration 29: Restore gws OAuth client secret from lobster-config
+    # install.sh previously set up the gws credential sync cron job but did not
+    # restore the client_secret.json. Without it, gws auth login fails with
+    # "No OAuth client configured." on any reinstall.
+    # If the user has stored the secret at ~/lobster-config/gws-client-secret.json
+    # (the canonical location for private credentials), copy it into place now.
+    local GWS_SECRET_SRC="$HOME/lobster-config/gws-client-secret.json"
+    local GWS_SECRET_DEST="$HOME/.config/gws/client_secret.json"
+    if [ -f "$GWS_SECRET_SRC" ] && [ ! -f "$GWS_SECRET_DEST" ]; then
+        mkdir -p "$HOME/.config/gws"
+        cp "$GWS_SECRET_SRC" "$GWS_SECRET_DEST"
+        substep "Restored gws OAuth client secret from lobster-config"
+        migrated=$((migrated + 1))
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
