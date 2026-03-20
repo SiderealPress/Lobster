@@ -464,9 +464,19 @@ if [ "$(id -u)" = "0" ]; then
         warn "docker group not found — skipping docker group membership (install Docker first)."
     fi
     echo ""
-    info "Next time, SSH directly as: lobster@$(hostname)"
+    info "User 'lobster' is ready."
     echo ""
-    exec sudo -u lobster bash "$0" "$@"
+    echo -e "${BOLD}Next step: SSH in as the lobster user and run the installer again:${NC}"
+    echo ""
+    echo -e "  ${CYAN}ssh lobster@$(hostname -f 2>/dev/null || hostname)${NC}"
+    echo -e "  ${CYAN}bash install.sh${NC}"
+    echo ""
+    echo "Or, if install.sh is not present in the lobster home directory, download and run:"
+    echo -e "  ${CYAN}curl -fsSL https://raw.githubusercontent.com/SiderealPress/lobster/main/install.sh | bash${NC}"
+    echo ""
+    echo "Your SSH authorized_keys have been copied to the lobster user."
+    echo "Installation as root is complete. The rest must run as 'lobster'."
+    exit 0
 fi
 
 # Check if running interactively
