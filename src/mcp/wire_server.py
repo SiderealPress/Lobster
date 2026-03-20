@@ -46,6 +46,7 @@ import json
 import logging
 import os
 import sqlite3
+import sys
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -112,8 +113,16 @@ def _broadcast_change() -> None:
         for ev in _sse_subscribers:
             ev.set()
 
-logging.basicConfig(level=logging.INFO)
+_src_dir = str(Path(__file__).resolve().parent)
+if _src_dir not in sys.path:
+    sys.path.insert(0, _src_dir)
+from log_utils import JsonFormatter, configure_file_handler as _configure_file_handler
+
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+_stream_handler = logging.StreamHandler()
+_stream_handler.setFormatter(JsonFormatter("wire_server"))
+logger.addHandler(_stream_handler)
 
 # ---------------------------------------------------------------------------
 # Persistent DB connection (Issue 3: single connection shared across all polls)
@@ -417,6 +426,9 @@ app = CORSMiddleware(
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    _log_dir = Path(os.environ.get("LOBSTER_WORKSPACE", Path.home() / "lobster-workspace")) / "logs"
+    _configure_file_handler(logger, component="wire_server", log_dir=_log_dir)
+
     logger.info(
         "Starting Lobster wire server on port %d "
         "(CORS: %s, auth: %s, redact_pii: %s, history: %gh, db: %s)",
