@@ -17,6 +17,9 @@ class TestCheckForUpdates:
 
     def _make_manager(self, tmp_path):
         from src.mcp.update_manager import UpdateManager
+        # Create a .git directory so UpdateManager treats this as a git install,
+        # ensuring the git code path (not the tarball/GitHub API path) is used.
+        (tmp_path / ".git").mkdir()
         return UpdateManager(repo_path=tmp_path)
 
     @patch("src.mcp.update_manager.subprocess.run")
@@ -86,6 +89,7 @@ class TestGenerateChangelog:
 
     def _make_manager(self, tmp_path):
         from src.mcp.update_manager import UpdateManager
+        (tmp_path / ".git").mkdir()
         return UpdateManager(repo_path=tmp_path)
 
     @patch("src.mcp.update_manager.subprocess.run")
@@ -165,6 +169,7 @@ class TestAnalyzeCompatibility:
 
     def _make_manager(self, tmp_path):
         from src.mcp.update_manager import UpdateManager
+        (tmp_path / ".git").mkdir()
         return UpdateManager(repo_path=tmp_path)
 
     @patch("src.mcp.update_manager.subprocess.run")
@@ -322,6 +327,7 @@ class TestCreateUpgradePlan:
 
     def _make_manager(self, tmp_path):
         from src.mcp.update_manager import UpdateManager
+        (tmp_path / ".git").mkdir()
         return UpdateManager(repo_path=tmp_path)
 
     @patch("src.mcp.update_manager.subprocess.run")
