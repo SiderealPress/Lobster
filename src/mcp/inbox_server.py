@@ -26,6 +26,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+# Ensure src/mcp/ is on sys.path so log_utils (a sibling module) can be
+# imported when this script is run directly (same guard used by
+# observability_server.py and wire_server.py).
+_MCP_SRC_DIR = str(Path(__file__).resolve().parent)
+if _MCP_SRC_DIR not in sys.path:
+    sys.path.insert(0, _MCP_SRC_DIR)
+from log_utils import JsonFormatter, configure_file_handler
+
 # Ensure the parent src/ directory is on sys.path so that sibling packages
 # (e.g. integrations, utils, bot) can be imported when this script is run
 # directly via `python inbox_server.py` (which only adds src/mcp/ to sys.path).
@@ -712,7 +720,9 @@ log.setLevel(logging.INFO)
 # production.  The RotatingFileHandler is added only when the server is started
 # as __main__ (via setup_logging()), so importing this module in tests does NOT
 # create or write to the production mcp-server.log file.
-log.addHandler(logging.StreamHandler())
+_stream_handler = logging.StreamHandler()
+_stream_handler.setFormatter(JsonFormatter("inbox_server"))
+log.addHandler(_stream_handler)
 
 
 def setup_logging() -> None:
@@ -720,19 +730,16 @@ def setup_logging() -> None:
 
     Called only from main() so that importing inbox_server in tests does not
     create or write to the production log file at LOG_DIR / "mcp-server.log".
-    Calling this function more than once is idempotent — it checks whether a
-    RotatingFileHandler is already attached before adding another.
+    Calling this function more than once is idempotent — configure_file_handler
+    checks whether a RotatingFileHandler is already attached before adding
+    another.
     """
-    for handler in log.handlers:
-        if isinstance(handler, RotatingFileHandler):
-            return  # already set up
-    _file_handler = RotatingFileHandler(
-        LOG_DIR / "mcp-server.log",
-        maxBytes=5 * 1024 * 1024,  # 5MB
-        backupCount=3,
+    configure_file_handler(
+        log,
+        component="inbox_server",
+        log_dir=LOG_DIR,
+        filename="mcp-server.log",
     )
-    _file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-    log.addHandler(_file_handler)
 
 # Seed canonical templates on startup (idempotent — only copies missing files)
 def _seed_canonical_templates():
