@@ -338,7 +338,7 @@ class TestMarkFailedGhostNoUserAlert:
           1. type='agent_failed' to chat_id=0 (dispatcher-internal only)
         """
         inbox_dir = tmp_path / "messages" / "inbox"
-        inbox_dir.mkdir(parents=True)
+        inbox_dir.mkdir(parents=True, exist_ok=True)
 
         # Patch the inbox dir and DB path
         monkeypatch.setattr(_gd, "DB_PATH", tmp_path / "agent_sessions.db")

@@ -361,7 +361,7 @@ class TestDispatcherExemption:
 
         # Write the dispatcher session marker file.
         config_dir = tmp_path / "messages" / "config"
-        config_dir.mkdir(parents=True)
+        config_dir.mkdir(parents=True, exist_ok=True)
         (config_dir / "dispatcher-session-id").write_text("dispatcher-sess-001")
 
         # Write a transcript file with no write_result (dispatcher never calls it).
@@ -471,7 +471,7 @@ class TestFallbackAfterNFires:
         monkeypatch.setattr(mod, "_fire_count_path", lambda key: fire_path)
 
         inbox_dir = tmp_path / "messages" / "inbox"
-        inbox_dir.mkdir(parents=True)
+        inbox_dir.mkdir(parents=True, exist_ok=True)
         monkeypatch.setenv("HOME", str(tmp_path))
 
         # Fire MAX_HOOK_FIRES times — should all block.
@@ -498,7 +498,7 @@ class TestFallbackAfterNFires:
         monkeypatch.setattr(mod, "_fire_count_path", lambda key: fire_path)
 
         inbox_dir = tmp_path / "messages" / "inbox"
-        inbox_dir.mkdir(parents=True)
+        inbox_dir.mkdir(parents=True, exist_ok=True)
         monkeypatch.setenv("HOME", str(tmp_path))
 
         for _ in range(mod.MAX_HOOK_FIRES):
@@ -528,7 +528,7 @@ class TestFallbackAfterNFires:
         monkeypatch.setattr(mod, "_fire_count_path", lambda key: fire_path)
 
         inbox_dir = tmp_path / "messages" / "inbox"
-        inbox_dir.mkdir(parents=True)
+        inbox_dir.mkdir(parents=True, exist_ok=True)
         monkeypatch.setenv("HOME", str(tmp_path))
 
         for _ in range(mod.MAX_HOOK_FIRES):
@@ -540,7 +540,7 @@ class TestFallbackAfterNFires:
         assert len(inbox_files) == 1, f"Expected 1 inbox file, got {len(inbox_files)}"
 
         msg = json.loads(inbox_files[0].read_text())
-        assert msg["type"] == "subagent_result"
+        assert msg["type"] == "subagent_recovered"
         assert msg["status"] == "recovered"
         assert msg.get("recovered") is True
         assert "write_result" in msg["text"] or "recovered" in msg["text"].lower()
@@ -566,7 +566,7 @@ class TestFallbackAfterNFires:
         monkeypatch.setattr(mod, "_fire_count_path", lambda key: fire_path)
 
         inbox_dir = tmp_path / "messages" / "inbox"
-        inbox_dir.mkdir(parents=True)
+        inbox_dir.mkdir(parents=True, exist_ok=True)
         monkeypatch.setenv("HOME", str(tmp_path))
 
         for _ in range(mod.MAX_HOOK_FIRES):
@@ -605,7 +605,7 @@ class TestFallbackAfterNFires:
         monkeypatch.setattr(mod, "_fire_count_path", lambda key: fire_path)
 
         inbox_dir = tmp_path / "messages" / "inbox"
-        inbox_dir.mkdir(parents=True)
+        inbox_dir.mkdir(parents=True, exist_ok=True)
         monkeypatch.setenv("HOME", str(tmp_path))
 
         # Simulate first fire at the expected timestamp.
@@ -671,7 +671,7 @@ class TestFallbackAfterNFires:
         monkeypatch.setattr(mod, "_fire_count_path", lambda key: fire_path)
 
         inbox_dir = tmp_path / "messages" / "inbox"
-        inbox_dir.mkdir(parents=True)
+        inbox_dir.mkdir(parents=True, exist_ok=True)
         monkeypatch.setenv("HOME", str(tmp_path))
 
         for _ in range(mod.MAX_HOOK_FIRES + 1):
