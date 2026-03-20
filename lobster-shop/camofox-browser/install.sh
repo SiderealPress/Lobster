@@ -136,6 +136,15 @@ step "Installing Node.js dependencies"
 
 cd "$SERVER_DIR"
 npm install --production 2>&1 | tail -5
+
+# Rebuild native addons (better-sqlite3) from source to match the current Node
+# binary. Pre-built binaries for better-sqlite3 are compiled against the Ubuntu
+# system libnode (libnode.so.109, i.e. Node 18), which does not exist when Node
+# is installed from NodeSource as a static binary. Building from source compiles
+# against the installed node headers with static linkage, so no libnode.so is
+# required at runtime.
+info "Rebuilding native addons from source for Node $(node --version)..."
+npm rebuild better-sqlite3 --build-from-source 2>&1 | tail -5
 success "Node.js dependencies installed"
 
 info "Fetching Camoufox browser engine (this may take a minute on first run)..."
