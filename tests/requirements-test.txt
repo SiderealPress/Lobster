@@ -17,6 +17,9 @@ docker>=7.0.0
 aioresponses>=0.7.6
 responses>=0.24.0
 
+# System utilities (required by test_memory.py)
+psutil>=5.9.0
+
 # General utilities
 faker>=22.0.0
 freezegun>=1.2.0
