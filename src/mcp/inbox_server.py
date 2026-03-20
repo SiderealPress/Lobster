@@ -7337,8 +7337,11 @@ async def reconcile_agent_sessions() -> None:
       - Session in DB with status='running', scanner says 'done'
         → call session_end(..., status='completed'), enqueue Telegram notification
       - Session in DB with status='running', output file missing AND session
-        is older than 25 minutes → call session_end(..., status='dead'),
-        enqueue Telegram notification
+        is older than its registered timeout_minutes (default 30 min) →
+        call session_end(..., status='dead'), enqueue Telegram notification
+      - Session in DB with status='running', file shows stop_reason=tool_use AND
+        session is older than its registered timeout_minutes (default 120 min) →
+        call session_end(..., status='dead'), enqueue Telegram notification
       - Sessions found by scanner but not in DB: 'running' orphans are logged;
         'done' orphans are logged at WARNING level (no chat_id, cannot notify)
 
@@ -7363,8 +7366,8 @@ async def reconcile_agent_sessions() -> None:
     """
     from agents.session_store import check_output_file_status
 
-    DEAD_THRESHOLD_SECONDS = 25 * 60   # 25 minutes — for missing output files
-    DEAD_THRESHOLD_RUNNING_SECONDS = 60 * 60  # 60 minutes — for stuck tool_use files
+    DEFAULT_DEAD_THRESHOLD_SECONDS = 30 * 60   # 30 minutes — fallback for missing output files
+    DEFAULT_DEAD_THRESHOLD_RUNNING_SECONDS = 120 * 60  # 120 minutes — fallback for stuck tool_use files
     GRACE_PERIOD_SECONDS = 30          # Newly spawned agents get grace before DEAD
 
     # Startup sweep: re-send notifications for sessions that completed while down
@@ -7385,6 +7388,24 @@ async def reconcile_agent_sessions() -> None:
                     elapsed = int(elapsed_raw) if elapsed_raw is not None else 0
                 except (TypeError, ValueError):
                     elapsed = 0
+
+                # Derive per-session thresholds from registered timeout_minutes.
+                # Mirrors the pattern used in session_store.cleanup_stale_running_sessions().
+                timeout_minutes_raw = session.get("timeout_minutes")
+                try:
+                    timeout_minutes = int(timeout_minutes_raw) if timeout_minutes_raw is not None else None
+                except (TypeError, ValueError):
+                    timeout_minutes = None
+
+                if timeout_minutes is not None:
+                    dead_threshold_running = timeout_minutes * 60
+                    # For the "missing file" branch use the same registered timeout,
+                    # but floor it at the default so very-short registrations don't
+                    # cause premature kills before the grace period expires.
+                    dead_threshold_missing = max(timeout_minutes * 60, DEFAULT_DEAD_THRESHOLD_SECONDS)
+                else:
+                    dead_threshold_running = DEFAULT_DEAD_THRESHOLD_RUNNING_SECONDS
+                    dead_threshold_missing = DEFAULT_DEAD_THRESHOLD_SECONDS
 
                 # Check this agent's output file directly using the path stored in DB.
                 # This avoids the directory-scan approach that relied on a hardcoded
@@ -7412,10 +7433,11 @@ async def reconcile_agent_sessions() -> None:
                     if elapsed < GRACE_PERIOD_SECONDS:
                         # Agent just spawned — output file not yet created. Normal.
                         pass
-                    elif elapsed > DEAD_THRESHOLD_SECONDS:
+                    elif elapsed > dead_threshold_missing:
                         log.warning(
                             f"[reconciler] Agent {agent_id!r} output file missing after "
-                            f"{elapsed}s — marking dead (output_file={output_file!r})"
+                            f"{elapsed}s (>{dead_threshold_missing}s) "
+                            f"— marking dead (output_file={output_file!r})"
                         )
                         _session_store.session_end(
                             id_or_task_id=agent_id,
@@ -7439,10 +7461,10 @@ async def reconcile_agent_sessions() -> None:
                     # agent has almost certainly been killed (e.g. mid-restart). The
                     # startup cleanup handles the common case; this branch catches any
                     # that slip through (e.g. output file mtime was updated after restart).
-                    if elapsed > DEAD_THRESHOLD_RUNNING_SECONDS:
+                    if elapsed > dead_threshold_running:
                         log.warning(
                             f"[reconciler] Agent {agent_id!r} output stuck at tool_use "
-                            f"after {elapsed}s (>{DEAD_THRESHOLD_RUNNING_SECONDS}s) "
+                            f"after {elapsed}s (>{dead_threshold_running}s) "
                             f"— marking dead (output_file={output_file!r})"
                         )
                         _session_store.session_end(
