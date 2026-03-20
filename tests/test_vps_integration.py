@@ -12,12 +12,10 @@ Covers:
 """
 
 import asyncio
-import importlib.util
 import json
 import os
 import shutil
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -25,63 +23,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 # ---------------------------------------------------------------------------
-# Import the MCP module under test
+# Import the MCP module under test via canonical package path.
+# No sys.path hacks or sys.modules pollution — all real deps are available
+# in the test venv.
 # ---------------------------------------------------------------------------
 
-MCP_DIR = Path(__file__).parent.parent / "src" / "mcp"
-sys.path.insert(0, str(MCP_DIR))
-
-# We import the specific functions we want to test. Because inbox_server.py
-# has heavy imports (mcp SDK, watchdog, reliability, etc.), we mock those at
-# import time so the test suite stays fast and dependency-free.
-
-_MOCK_MODULES = {
-    "mcp": MagicMock(),
-    "mcp.server": MagicMock(),
-    "mcp.server.stdio": MagicMock(),
-    "mcp.types": MagicMock(),
-    "watchdog": MagicMock(),
-    "watchdog.observers": MagicMock(),
-    "watchdog.events": MagicMock(),
-    "reliability": MagicMock(),
-    "update_manager": MagicMock(),
-    "memory": MagicMock(),
-    "httpx": MagicMock(),
-}
-
-# Patch sys.modules before importing inbox_server
-for mod_name, mock_mod in _MOCK_MODULES.items():
-    if mod_name not in sys.modules:
-        sys.modules[mod_name] = mock_mod
-
-# Make the mocked reliability module expose the names used at import
-_rel = sys.modules["reliability"]
-_rel.atomic_write_json = MagicMock()
-_rel.validate_send_reply_args = MagicMock()
-_rel.validate_message_id = MagicMock()
-_rel.ValidationError = type("ValidationError", (Exception,), {})
-_rel.init_audit_log = MagicMock()
-_rel.audit_log = MagicMock()
-_rel.IdempotencyTracker = MagicMock
-_rel.CircuitBreaker = MagicMock
-
-# Make mcp.types expose TextContent
-_types = sys.modules["mcp.types"]
-_types.Tool = type("Tool", (), {"__init__": lambda self, **kw: None})
-_types.TextContent = type("TextContent", (), {"__init__": lambda self, **kw: setattr(self, "__dict__", kw) or None})
-
-# Make mcp.server expose Server
-_server_mod = sys.modules["mcp.server"]
-_mock_server_instance = MagicMock()
-_mock_server_instance.list_tools = MagicMock(return_value=lambda f: f)
-_mock_server_instance.call_tool = MagicMock(return_value=lambda f: f)
-_server_mod.Server = MagicMock(return_value=_mock_server_instance)
-
-# Make update_manager expose UpdateManager
-sys.modules["update_manager"].UpdateManager = MagicMock
-
-# Now we can import the functions we want to test
-from inbox_server import (
+from src.mcp.inbox_server import (
     load_sync_repos,
     parse_branch_info,
     parse_compare_info,
@@ -164,7 +111,7 @@ class TestLoadSyncRepos:
 
     def test_loads_enabled_repos(self, sync_config_file):
         """Only enabled repos are returned."""
-        with patch("inbox_server.SYNC_REPOS_CONFIG", sync_config_file):
+        with patch("src.mcp.inbox_server.SYNC_REPOS_CONFIG", sync_config_file):
             repos = load_sync_repos()
 
         assert len(repos) == 2
@@ -173,7 +120,7 @@ class TestLoadSyncRepos:
 
     def test_filter_by_full_name(self, sync_config_file):
         """Filtering by owner/name returns only that repo."""
-        with patch("inbox_server.SYNC_REPOS_CONFIG", sync_config_file):
+        with patch("src.mcp.inbox_server.SYNC_REPOS_CONFIG", sync_config_file):
             repos = load_sync_repos("SiderealPress/Lobster")
 
         assert len(repos) == 1
@@ -181,7 +128,7 @@ class TestLoadSyncRepos:
 
     def test_filter_by_name_only(self, sync_config_file):
         """Filtering by just name (no slash) matches on name field."""
-        with patch("inbox_server.SYNC_REPOS_CONFIG", sync_config_file):
+        with patch("src.mcp.inbox_server.SYNC_REPOS_CONFIG", sync_config_file):
             repos = load_sync_repos("OtherRepo")
 
         assert len(repos) == 1
@@ -189,20 +136,20 @@ class TestLoadSyncRepos:
 
     def test_filter_case_insensitive(self, sync_config_file):
         """Repo filtering is case-insensitive."""
-        with patch("inbox_server.SYNC_REPOS_CONFIG", sync_config_file):
+        with patch("src.mcp.inbox_server.SYNC_REPOS_CONFIG", sync_config_file):
             repos = load_sync_repos("sideralpress/lobster")
         # Should match despite casing difference ('Sidereal' vs 'sidereal')
         # -- exact spelling must match though
         # Actually "SiderealPress" vs "sideralpress" is a misspelling not a
         # case change.  Let's test true case insensitivity.
-        with patch("inbox_server.SYNC_REPOS_CONFIG", sync_config_file):
+        with patch("src.mcp.inbox_server.SYNC_REPOS_CONFIG", sync_config_file):
             repos = load_sync_repos("siderealpress/lobster")
         assert len(repos) == 1
         assert repos[0]["name"] == "Lobster"
 
     def test_filter_no_match(self, sync_config_file):
         """Filtering for a non-existent repo returns empty list."""
-        with patch("inbox_server.SYNC_REPOS_CONFIG", sync_config_file):
+        with patch("src.mcp.inbox_server.SYNC_REPOS_CONFIG", sync_config_file):
             repos = load_sync_repos("NonExistent/Repo")
 
         assert repos == []
@@ -210,7 +157,7 @@ class TestLoadSyncRepos:
     def test_missing_config_returns_empty(self, temp_dir):
         """If config file doesn't exist, return empty list."""
         missing = temp_dir / "does-not-exist.json"
-        with patch("inbox_server.SYNC_REPOS_CONFIG", missing):
+        with patch("src.mcp.inbox_server.SYNC_REPOS_CONFIG", missing):
             repos = load_sync_repos()
 
         assert repos == []
@@ -219,14 +166,14 @@ class TestLoadSyncRepos:
         """Malformed JSON in config returns empty list."""
         bad_file = temp_dir / "bad.json"
         bad_file.write_text("not json{{{")
-        with patch("inbox_server.SYNC_REPOS_CONFIG", bad_file):
+        with patch("src.mcp.inbox_server.SYNC_REPOS_CONFIG", bad_file):
             repos = load_sync_repos()
 
         assert repos == []
 
     def test_disabled_repos_excluded(self, sync_config_file):
         """Disabled repos should not appear in results."""
-        with patch("inbox_server.SYNC_REPOS_CONFIG", sync_config_file):
+        with patch("src.mcp.inbox_server.SYNC_REPOS_CONFIG", sync_config_file):
             repos = load_sync_repos()
 
         names = [r["name"] for r in repos]
@@ -382,13 +329,13 @@ class TestFetchSyncBranch:
     @pytest.fixture(autouse=True)
     def import_handler(self):
         """Import the async function under test."""
-        from inbox_server import fetch_sync_branch
+        from src.mcp.inbox_server import fetch_sync_branch
         self.fetch_sync_branch = fetch_sync_branch
 
     @pytest.mark.asyncio
     async def test_branch_not_found(self):
         """Returns error dict when lobster-sync branch doesn't exist."""
-        with patch("inbox_server.run_gh_command", new_callable=AsyncMock) as mock_gh:
+        with patch("src.mcp.inbox_server.run_gh_command", new_callable=AsyncMock) as mock_gh:
             mock_gh.return_value = (False, "", "HTTP 404: Not Found")
 
             result = await self.fetch_sync_branch("owner", "repo")
@@ -416,7 +363,7 @@ class TestFetchSyncBranch:
                 return (True, branch_json, "")
             return (True, compare_json, "")
 
-        with patch("inbox_server.run_gh_command", side_effect=mock_gh):
+        with patch("src.mcp.inbox_server.run_gh_command", side_effect=mock_gh):
             result = await self.fetch_sync_branch("SiderealPress", "Lobster")
 
         assert result["repo"] == "SiderealPress/Lobster"
@@ -427,7 +374,7 @@ class TestFetchSyncBranch:
     @pytest.mark.asyncio
     async def test_api_error(self):
         """Returns error dict on unexpected API failure."""
-        with patch("inbox_server.run_gh_command", new_callable=AsyncMock) as mock_gh:
+        with patch("src.mcp.inbox_server.run_gh_command", new_callable=AsyncMock) as mock_gh:
             mock_gh.return_value = (False, "", "HTTP 500: Internal Server Error")
 
             result = await self.fetch_sync_branch("owner", "repo")
@@ -450,7 +397,7 @@ class TestFetchSyncBranch:
                 return (True, branch_json, "")
             return (False, "", "compare failed")
 
-        with patch("inbox_server.run_gh_command", side_effect=mock_gh):
+        with patch("src.mcp.inbox_server.run_gh_command", side_effect=mock_gh):
             result = await self.fetch_sync_branch("SiderealPress", "Lobster")
 
         assert result["sha"] == "abc12345"
@@ -469,14 +416,14 @@ class TestHandleCheckLocalSync:
     @pytest.fixture(autouse=True)
     def import_handler(self):
         """Import the handler under test."""
-        from inbox_server import handle_check_local_sync
+        from src.mcp.inbox_server import handle_check_local_sync
         self.handler = handle_check_local_sync
 
     @pytest.mark.asyncio
     async def test_no_repos_configured(self, temp_dir):
         """Returns helpful message when no repos configured."""
         missing = temp_dir / "missing.json"
-        with patch("inbox_server.SYNC_REPOS_CONFIG", missing):
+        with patch("src.mcp.inbox_server.SYNC_REPOS_CONFIG", missing):
             result = await self.handler({})
 
         text = result[0].__dict__.get("text", str(result[0]))
@@ -485,7 +432,7 @@ class TestHandleCheckLocalSync:
     @pytest.mark.asyncio
     async def test_repo_filter_not_found(self, sync_config_file):
         """Returns error message when filtered repo doesn't exist in config."""
-        with patch("inbox_server.SYNC_REPOS_CONFIG", sync_config_file):
+        with patch("src.mcp.inbox_server.SYNC_REPOS_CONFIG", sync_config_file):
             result = await self.handler({"repo": "NonExistent/Repo"})
 
         text = result[0].__dict__.get("text", str(result[0]))
