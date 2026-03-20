@@ -5431,6 +5431,29 @@ async def handle_write_observation(args: dict) -> list[TextContent]:
     inbox_file = INBOX_DIR / f"{message_id}.json"
     atomic_write_json(inbox_file, message)
 
+    # Belt-and-suspenders: for system_error, also append directly to observations.log
+    # at the MCP layer. The inbox write above is the primary path — the dispatcher
+    # picks it up and writes to the log as part of routing. This direct append is a
+    # durability fallback: if the dispatcher is restarting or compacting at the moment
+    # the observation arrives, the error is still recorded. The source field
+    # "mcp-direct" distinguishes these entries from dispatcher-written ones.
+    # Worst case: two log entries for one event (acceptable — no deduplication needed).
+    if category == "system_error":
+        obs_log = LOG_DIR / "observations.log"
+        log_entry: dict = {
+            "ts": now.isoformat(),
+            "category": category,
+            "content": text,
+            "source": "mcp-direct",
+        }
+        if task_id:
+            log_entry["task_id"] = task_id
+        try:
+            with obs_log.open("a") as f:
+                f.write(json.dumps(log_entry) + "\n")
+        except OSError as exc:
+            log.warning(f"Failed to write observation to {obs_log}: {exc}")
+
     # When LOBSTER_DEBUG=true, also enqueue a debug inbox message so the user
     # sees what the dispatcher sees in real time. This is additive — the inbox
     # write above always happens first regardless of debug mode.
