@@ -1409,6 +1409,16 @@ chmod +x "$INSTALL_DIR/scripts/sync-gws-credentials.py" || true
 
 success "GWS credential sync configured (runs at 04:00 daily)"
 
+# Add daily log-export to crontab (runs at 03:00 UTC)
+# export-logs.py archives observations.log, lobster.log, and audit.jsonl to a
+# date-stamped directory under ~/lobster-workspace/logs/archive/ and writes a
+# summary to ~/messages/task-outputs/ (readable via check_task_outputs).
+chmod +x "$INSTALL_DIR/scheduled-tasks/export-logs.py" 2>/dev/null || true
+"$INSTALL_DIR/scripts/cron-manage.sh" add "# LOBSTER-LOG-EXPORT" \
+    "0 3 * * * cd $INSTALL_DIR && uv run scheduled-tasks/export-logs.py # LOBSTER-LOG-EXPORT"
+
+success "Log export configured (runs at 03:00 UTC daily)"
+
 #===============================================================================
 # Cron-to-Inbox Reminder System (post-reminder.sh)
 #===============================================================================
