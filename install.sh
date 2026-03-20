@@ -980,15 +980,19 @@ if [ "$(id -u)" = "0" ]; then
     LOBSTER_HOME="$(getent passwd lobster | cut -d: -f6)"
 
     echo ""
-    info "Re-running installer as 'lobster' user..."
+    info "User 'lobster' is ready."
     echo ""
-    # Pass Telegram credentials through the re-exec so non-interactive install can write them
-    TELEGRAM_CRED_VARS=()
-    [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && TELEGRAM_CRED_VARS+=("TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}")
-    [ -n "${TELEGRAM_ALLOWED_USERS:-}" ] && TELEGRAM_CRED_VARS+=("TELEGRAM_ALLOWED_USERS=${TELEGRAM_ALLOWED_USERS}")
-    [ -n "${TELEGRAM_USER_ID:-}" ] && TELEGRAM_CRED_VARS+=("TELEGRAM_USER_ID=${TELEGRAM_USER_ID}")
-    [ -n "${LOBSTER_ADMIN_CHAT_ID:-}" ] && TELEGRAM_CRED_VARS+=("LOBSTER_ADMIN_CHAT_ID=${LOBSTER_ADMIN_CHAT_ID}")
-    exec sudo -u lobster HOME="$LOBSTER_HOME" env "${TELEGRAM_CRED_VARS[@]}" bash "$TMP_SCRIPT" "$@"
+    echo -e "${BOLD}Next step: SSH in as the lobster user and run the installer again:${NC}"
+    echo ""
+    echo -e "  ${CYAN}ssh lobster@$(hostname -f 2>/dev/null || hostname)${NC}"
+    echo -e "  ${CYAN}bash install.sh${NC}"
+    echo ""
+    echo "Or, if install.sh is not present in the lobster home directory, download and run:"
+    echo -e "  ${CYAN}curl -fsSL https://raw.githubusercontent.com/SiderealPress/lobster/main/install.sh | bash${NC}"
+    echo ""
+    echo "Your SSH authorized_keys have been copied to the lobster user."
+    echo "Installation as root is complete. The rest must run as 'lobster'."
+    exit 0
 fi
 
 # Check if running interactively
