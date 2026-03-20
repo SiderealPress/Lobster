@@ -10168,8 +10168,8 @@ async def reconcile_agent_sessions() -> None:
     """
     from agents.session_store import check_output_file_status, get_output_file_mtime
 
-    DEAD_THRESHOLD_SECONDS = 25 * 60   # 25 minutes — for missing output files
-    DEAD_THRESHOLD_RUNNING_SECONDS = 60 * 60  # 60 minutes — for stuck tool_use files
+    DEFAULT_DEAD_THRESHOLD_SECONDS = 30 * 60   # 30 minutes — fallback for missing output files
+    DEFAULT_DEAD_THRESHOLD_RUNNING_SECONDS = 120 * 60  # 120 minutes — fallback for stuck tool_use files
     GRACE_PERIOD_SECONDS = 30          # Newly spawned agents get grace before DEAD
 
     # Startup sweep: re-send notifications for sessions that completed while down
@@ -10275,10 +10275,10 @@ async def reconcile_agent_sessions() -> None:
                     # agent has almost certainly been killed (e.g. mid-restart). The
                     # startup cleanup handles the common case; this branch catches any
                     # that slip through (e.g. output file mtime was updated after restart).
-                    if elapsed > DEAD_THRESHOLD_RUNNING_SECONDS:
+                    if elapsed > dead_threshold_running:
                         log.warning(
                             f"[reconciler] Agent {agent_id!r} output stuck at tool_use "
-                            f"after {elapsed}s (>{DEAD_THRESHOLD_RUNNING_SECONDS}s) "
+                            f"after {elapsed}s (>{dead_threshold_running}s) "
                             f"— marking dead (output_file={output_file!r})"
                         )
                         _session_store.session_end(
