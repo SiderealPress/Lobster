@@ -60,7 +60,9 @@ class TestAtomicWriteJson:
         path = tmp_path / "test.json"
         atomic_write_json(path, {"clean": True})
 
-        files = list(tmp_path.iterdir())
+        # Filter to non-directory entries only — the autouse isolate_inbox_server_paths
+        # fixture creates messages/ and workspace/ subdirs in tmp_path for every test.
+        files = [f for f in tmp_path.iterdir() if not f.is_dir()]
         assert len(files) == 1
         assert files[0].name == "test.json"
 

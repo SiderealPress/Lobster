@@ -404,6 +404,14 @@ class TestLoadToken:
 
 # ---------------------------------------------------------------------------
 # get_valid_token
+#
+# NOTE: The token_store module was refactored to use a myownlobster.ai proxy for
+# token refresh instead of calling the Google OAuth API directly.  The old
+# `refresh_access_token` function (from oauth.py) is no longer called from
+# token_store.py.  The internal helper is now `_refresh_token_via_proxy`.
+# Tests that previously patched `refresh_access_token` now patch
+# `_refresh_token_via_proxy` instead.  The `credentials` kwarg to
+# `get_valid_token` is still accepted (for API compatibility) but is ignored.
 # ---------------------------------------------------------------------------
 
 
@@ -423,19 +431,18 @@ class TestGetValidToken:
         expired = _make_expired_token()
         save_token("user1", expired, token_dir=tmp_path)
         new_access = "ya29.refreshed-access-token"
-        refreshed_token = TokenData(
+        # The proxy returns a partial TokenData (no refresh_token, scope="")
+        proxy_result = TokenData(
             access_token=new_access,
             expires_at=_FUTURE_EXPIRES,
-            scope=_FAKE_SCOPE,
-            refresh_token=None,  # Google often omits this
+            scope="",
+            refresh_token=None,
         )
         with patch(
-            "integrations.google_calendar.token_store.refresh_access_token",
-            return_value=refreshed_token,
+            "integrations.google_calendar.token_store._refresh_token_via_proxy",
+            return_value=proxy_result,
         ):
-            result = get_valid_token(
-                "user1", token_dir=tmp_path, credentials=_FAKE_CREDENTIALS
-            )
+            result = get_valid_token("user1", token_dir=tmp_path)
         assert result is not None
         assert result.access_token == new_access
 
@@ -443,17 +450,17 @@ class TestGetValidToken:
         expired = _make_expired_token()
         save_token("user1", expired, token_dir=tmp_path)
         new_access = "ya29.refreshed-token"
-        refreshed_token = TokenData(
+        proxy_result = TokenData(
             access_token=new_access,
             expires_at=_FUTURE_EXPIRES,
-            scope=_FAKE_SCOPE,
+            scope="",
             refresh_token=None,
         )
         with patch(
-            "integrations.google_calendar.token_store.refresh_access_token",
-            return_value=refreshed_token,
+            "integrations.google_calendar.token_store._refresh_token_via_proxy",
+            return_value=proxy_result,
         ):
-            get_valid_token("user1", token_dir=tmp_path, credentials=_FAKE_CREDENTIALS)
+            get_valid_token("user1", token_dir=tmp_path)
         # Now load directly from disk to confirm it was persisted
         stored = load_token("user1", token_dir=tmp_path)
         assert stored is not None
@@ -463,45 +470,30 @@ class TestGetValidToken:
         original_refresh = "1//original-refresh-token"
         expired = _make_expired_token(refresh_token=original_refresh)
         save_token("user1", expired, token_dir=tmp_path)
-        # Refreshed response has no refresh_token
-        refreshed_token = TokenData(
+        # Proxy response has no refresh_token; get_valid_token must preserve the original
+        proxy_result = TokenData(
             access_token="<REDACTED_SECRET>",
             expires_at=_FUTURE_EXPIRES,
-            scope=_FAKE_SCOPE,
+            scope="",
             refresh_token=None,
         )
         with patch(
-            "integrations.google_calendar.token_store.refresh_access_token",
-            return_value=refreshed_token,
+            "integrations.google_calendar.token_store._refresh_token_via_proxy",
+            return_value=proxy_result,
         ):
-            result = get_valid_token(
-                "user1", token_dir=tmp_path, credentials=_FAKE_CREDENTIALS
-            )
+            result = get_valid_token("user1", token_dir=tmp_path)
         assert result is not None
         assert result.refresh_token == original_refresh
 
-    def test_returns_none_when_refresh_fails_with_oauth_error(self, tmp_path: Path) -> None:
+    def test_returns_none_when_refresh_proxy_returns_none(self, tmp_path: Path) -> None:
+        """When the refresh proxy returns None (any failure), get_valid_token returns None."""
         expired = _make_expired_token()
         save_token("user1", expired, token_dir=tmp_path)
         with patch(
-            "integrations.google_calendar.token_store.refresh_access_token",
-            side_effect=OAuthTokenError("invalid_grant", "Token revoked."),
+            "integrations.google_calendar.token_store._refresh_token_via_proxy",
+            return_value=None,
         ):
-            result = get_valid_token(
-                "user1", token_dir=tmp_path, credentials=_FAKE_CREDENTIALS
-            )
-        assert result is None
-
-    def test_returns_none_when_refresh_fails_with_network_error(self, tmp_path: Path) -> None:
-        expired = _make_expired_token()
-        save_token("user1", expired, token_dir=tmp_path)
-        with patch(
-            "integrations.google_calendar.token_store.refresh_access_token",
-            side_effect=OAuthNetworkError("timeout"),
-        ):
-            result = get_valid_token(
-                "user1", token_dir=tmp_path, credentials=_FAKE_CREDENTIALS
-            )
+            result = get_valid_token("user1", token_dir=tmp_path)
         assert result is None
 
     def test_returns_none_when_token_expired_and_no_refresh_token(
@@ -516,25 +508,24 @@ class TestGetValidToken:
         valid = _make_valid_token()
         save_token("user1", valid, token_dir=tmp_path)
         with patch(
-            "integrations.google_calendar.token_store.refresh_access_token",
-        ) as mock_refresh:
+            "integrations.google_calendar.token_store._refresh_token_via_proxy",
+        ) as mock_proxy:
             get_valid_token("user1", token_dir=tmp_path)
-        mock_refresh.assert_not_called()
+        mock_proxy.assert_not_called()
 
-    def test_passes_credentials_to_refresh(self, tmp_path: Path) -> None:
-        expired = _make_expired_token()
+    def test_proxy_called_with_refresh_token(self, tmp_path: Path) -> None:
+        """The proxy is called with the stored refresh_token string."""
+        expired = _make_expired_token(refresh_token=_FAKE_REFRESH_TOKEN)
         save_token("user1", expired, token_dir=tmp_path)
-        refreshed = TokenData(
+        proxy_result = TokenData(
             access_token="<REDACTED_SECRET>",
             expires_at=_FUTURE_EXPIRES,
-            scope=_FAKE_SCOPE,
+            scope="",
+            refresh_token=None,
         )
         with patch(
-            "integrations.google_calendar.token_store.refresh_access_token",
-            return_value=refreshed,
-        ) as mock_refresh:
-            get_valid_token(
-                "user1", token_dir=tmp_path, credentials=_FAKE_CREDENTIALS
-            )
-        _, kwargs = mock_refresh.call_args
-        assert kwargs.get("credentials") == _FAKE_CREDENTIALS
+            "integrations.google_calendar.token_store._refresh_token_via_proxy",
+            return_value=proxy_result,
+        ) as mock_proxy:
+            get_valid_token("user1", token_dir=tmp_path)
+        mock_proxy.assert_called_once_with(_FAKE_REFRESH_TOKEN)
