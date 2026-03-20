@@ -538,3 +538,206 @@ class TestHandleWriteObservation:
         assert len(emitted) == 1
         assert emitted[0]["emitter"] == "task:task-42"
         assert emitted[0]["visibility"] == "mcp-only"
+
+    def test_debug_bypass_includes_task_id_in_emitted_text(self, inbox_dir: Path):
+        """In debug mode, system_error emitter contains task_id prefix 'task:'."""
+        emitted: list[dict] = []
+
+        def fake_emit(
+            text: str,
+            category: str = "system_context",
+            visibility: str = "mcp-only",
+            emitter: str | None = None,
+        ) -> None:
+            emitted.append({"text": text, "emitter": emitter})
+
+        with patch.multiple(
+            "src.mcp.inbox_server",
+            INBOX_DIR=inbox_dir,
+            _DEBUG_MODE=True,
+            _DEBUG_RESOLVED=True,
+            _emit_debug_observation=fake_emit,
+        ):
+            from src.mcp.inbox_server import handle_write_observation
+            asyncio.run(handle_write_observation({
+                "chat_id": 123,
+                "text": "Disk nearly full.",
+                "category": "system_error",
+                "task_id": "disk-check-99",
+            }))
+
+        assert len(emitted) == 1
+        assert emitted[0]["emitter"] == "task:disk-check-99"
+
+
+class TestHandleWriteObservationLogWrite:
+    """Tests for the belt-and-suspenders direct observations.log write."""
+
+    def _run_with_dirs(self, args: dict, inbox_dir: Path, log_dir: Path) -> list:
+        with patch.multiple(
+            "src.mcp.inbox_server",
+            INBOX_DIR=inbox_dir,
+            LOG_DIR=log_dir,
+            _DEBUG_MODE=False,
+            _DEBUG_RESOLVED=True,
+        ):
+            from src.mcp.inbox_server import handle_write_observation
+            return asyncio.run(handle_write_observation(args))
+
+    @pytest.fixture
+    def inbox_dir(self, temp_messages_dir: Path) -> Path:
+        return temp_messages_dir / "inbox"
+
+    @pytest.fixture
+    def log_dir(self, tmp_path: Path) -> Path:
+        d = tmp_path / "logs"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    # ------------------------------------------------------------------
+    # system_error appends to observations.log
+    # ------------------------------------------------------------------
+
+    def test_system_error_appends_json_line_to_observations_log(
+        self, inbox_dir: Path, log_dir: Path
+    ):
+        """system_error observation writes a JSON line directly to observations.log."""
+        self._run_with_dirs(
+            {
+                "chat_id": 123,
+                "text": "API call failed unexpectedly.",
+                "category": "system_error",
+            },
+            inbox_dir,
+            log_dir,
+        )
+
+        obs_log = log_dir / "observations.log"
+        assert obs_log.exists(), "observations.log should be created"
+        lines = [ln for ln in obs_log.read_text().splitlines() if ln.strip()]
+        assert len(lines) == 1
+
+        entry = json.loads(lines[0])
+        assert entry["category"] == "system_error"
+        assert entry["content"] == "API call failed unexpectedly."
+        assert entry["source"] == "mcp-direct"
+        assert "ts" in entry
+
+    def test_system_error_log_entry_includes_task_id_when_provided(
+        self, inbox_dir: Path, log_dir: Path
+    ):
+        """When task_id is supplied, the log entry includes it."""
+        self._run_with_dirs(
+            {
+                "chat_id": 123,
+                "text": "DB connection lost.",
+                "category": "system_error",
+                "task_id": "task-db-99",
+            },
+            inbox_dir,
+            log_dir,
+        )
+
+        obs_log = log_dir / "observations.log"
+        entry = json.loads(obs_log.read_text().strip())
+        assert entry.get("task_id") == "task-db-99"
+
+    def test_system_error_log_entry_omits_task_id_when_absent(
+        self, inbox_dir: Path, log_dir: Path
+    ):
+        """When task_id is not supplied, it is absent from the log entry."""
+        self._run_with_dirs(
+            {
+                "chat_id": 123,
+                "text": "Unexpected state detected.",
+                "category": "system_error",
+            },
+            inbox_dir,
+            log_dir,
+        )
+
+        obs_log = log_dir / "observations.log"
+        entry = json.loads(obs_log.read_text().strip())
+        assert "task_id" not in entry
+
+    def test_multiple_system_errors_append_multiple_lines(
+        self, inbox_dir: Path, log_dir: Path
+    ):
+        """Successive system_error calls each append a new line (not overwrite)."""
+        for i in range(3):
+            self._run_with_dirs(
+                {
+                    "chat_id": 123,
+                    "text": f"Error #{i}",
+                    "category": "system_error",
+                },
+                inbox_dir,
+                log_dir,
+            )
+
+        obs_log = log_dir / "observations.log"
+        lines = [ln for ln in obs_log.read_text().splitlines() if ln.strip()]
+        assert len(lines) == 3
+        texts = [json.loads(ln)["content"] for ln in lines]
+        assert texts == ["Error #0", "Error #1", "Error #2"]
+
+    # ------------------------------------------------------------------
+    # Non-system_error categories do NOT write to observations.log
+    # ------------------------------------------------------------------
+
+    def test_user_context_does_not_write_to_observations_log(
+        self, inbox_dir: Path, log_dir: Path
+    ):
+        """user_context observations skip the direct log write."""
+        self._run_with_dirs(
+            {
+                "chat_id": 123,
+                "text": "User prefers dark mode.",
+                "category": "user_context",
+            },
+            inbox_dir,
+            log_dir,
+        )
+
+        obs_log = log_dir / "observations.log"
+        assert not obs_log.exists(), "observations.log should not be created for user_context"
+
+    def test_system_context_does_not_write_to_observations_log(
+        self, inbox_dir: Path, log_dir: Path
+    ):
+        """system_context observations skip the direct log write."""
+        self._run_with_dirs(
+            {
+                "chat_id": 123,
+                "text": "Config drift detected.",
+                "category": "system_context",
+            },
+            inbox_dir,
+            log_dir,
+        )
+
+        obs_log = log_dir / "observations.log"
+        assert not obs_log.exists(), "observations.log should not be created for system_context"
+
+    def test_system_error_also_writes_inbox_message(
+        self, inbox_dir: Path, log_dir: Path
+    ):
+        """The log write is additive — the inbox message is still written for dispatcher routing."""
+        self._run_with_dirs(
+            {
+                "chat_id": 123,
+                "text": "Service unreachable.",
+                "category": "system_error",
+            },
+            inbox_dir,
+            log_dir,
+        )
+
+        inbox_files = list(inbox_dir.glob("*.json"))
+        assert len(inbox_files) == 1, "Inbox message must still be written"
+        content = json.loads(inbox_files[0].read_text())
+        assert content["type"] == "subagent_observation"
+        assert content["category"] == "system_error"
+
+        obs_log = log_dir / "observations.log"
+        assert obs_log.exists(), "observations.log must also be written"
