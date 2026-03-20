@@ -1473,6 +1473,22 @@ with open(path, 'w') as f:
     fi
 
 
+    # Migration 28: Add daily log-export cron entry
+    # export-logs.py copies observations.log, lobster.log, and audit.jsonl to a
+    # date-stamped archive under ~/lobster-workspace/logs/archive/ and writes a
+    # summary to ~/messages/task-outputs/ (readable via check_task_outputs).
+    # Provides an off-process durable copy of high-signal logs and a foundation
+    # for future remote forwarding (see issue #730).
+    local LOG_EXPORT_MARKER="# LOBSTER-LOG-EXPORT"
+    if ! crontab -l 2>/dev/null | grep -q "$LOG_EXPORT_MARKER"; then
+        local log_export_script="$LOBSTER_DIR/scheduled-tasks/export-logs.py"
+        chmod +x "$log_export_script" 2>/dev/null || true
+        "$LOBSTER_DIR/scripts/cron-manage.sh" add "$LOG_EXPORT_MARKER" \
+            "0 3 * * * cd $LOBSTER_DIR && uv run scheduled-tasks/export-logs.py $LOG_EXPORT_MARKER"
+        substep "Added daily log-export cron entry (03:00 UTC, archives observations.log + audit.jsonl)"
+        migrated=$((migrated + 1))
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
