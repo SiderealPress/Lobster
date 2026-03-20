@@ -1430,6 +1430,32 @@ with open(path, 'w') as f:
         migrated=$((migrated + 1))
     fi
 
+    # Migration 26: Register secret-scanner PreToolUse hook in Claude Code settings
+    # New installs get this via install.sh; existing installs need this migration.
+    if [ -f "$CLAUDE_SETTINGS" ] && command -v jq >/dev/null 2>&1; then
+        local has_secret_scanner
+        has_secret_scanner=$(jq -r '
+            [.hooks.PreToolUse[]?.hooks[]?.command // empty]
+            | map(select(contains("secret-scanner")))
+            | length
+        ' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
+        if [ "${has_secret_scanner:-0}" = "0" ] || [ "${has_secret_scanner:-0}" = "" ]; then
+            chmod +x "$INSTALL_DIR/hooks/secret-scanner.py" 2>/dev/null || true
+            TMP_SETTINGS=$(mktemp)
+            jq --arg cmd "python3 $INSTALL_DIR/hooks/secret-scanner.py" \
+               '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+                "matcher": "mcp__lobster-inbox__send_reply|mcp__github__add_issue_comment|mcp__github__issue_write|mcp__github__create_pull_request|mcp__github__update_pull_request|mcp__github__pull_request_review_write|mcp__github__add_reply_to_pull_request_comment|mcp__github__create_or_update_file|mcp__github__push_files|mcp__github__merge_pull_request|mcp__github__add_comment_to_pending_review|mcp__github__create_pull_request_with_copilot|mcp__github__delete_file|Bash",
+                "hooks": [{
+                    "type": "command",
+                    "command": $cmd,
+                    "timeout": 5
+                }]
+            }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+            substep "Registered secret-scanner hook in Claude Code settings (warn mode)"
+            migrated=$((migrated + 1))
+        fi
+    fi
+
 
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
