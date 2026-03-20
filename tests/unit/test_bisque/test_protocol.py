@@ -74,8 +74,8 @@ class TestEnvelope:
 
 
 class TestFrameType:
-    def test_all_19_frame_types(self):
-        assert len(FrameType) == 19
+    def test_all_20_frame_types(self):
+        assert len(FrameType) == 20
 
     def test_client_types(self):
         for t in ["auth", "send_message", "ack", "ping"]:
@@ -90,8 +90,13 @@ class TestFrameType:
         ]:
             assert t in SERVER_FRAME_TYPES
 
-    def test_client_server_disjoint(self):
-        assert CLIENT_FRAME_TYPES & SERVER_FRAME_TYPES == set()
+    def test_client_server_disjoint_except_message_alias(self):
+        # "message" is intentionally in both sets as a client-compat alias for
+        # "send_message" (see CLIENT_FRAME_TYPES comment in protocol.py).
+        overlap = CLIENT_FRAME_TYPES & SERVER_FRAME_TYPES
+        assert overlap == {"message"}, (
+            f"Expected only 'message' in the overlap, got: {overlap}"
+        )
 
 
 # =============================================================================
@@ -136,9 +141,11 @@ class TestSerialization:
             deserialize("not json {")
 
     def test_deserialize_missing_v(self):
+        # v is optional for client compat — defaults to 2 if absent, no error raised.
         raw = json.dumps({"type": "pong", "id": "x", "ts": "t"})
-        with pytest.raises(ProtocolError):
-            deserialize(raw)
+        env = deserialize(raw)
+        assert env.v == 2
+        assert env.type == "pong"
 
     def test_deserialize_missing_type(self):
         raw = json.dumps({"v": 2, "id": "x", "ts": "t"})

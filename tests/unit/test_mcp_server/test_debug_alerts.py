@@ -468,24 +468,19 @@ class TestWriteResultDebugAlert:
         )
         assert "True" in emitted[0]["text"]
 
-    def test_debug_alert_includes_text_preview(self, inbox_dir: Path):
-        """The alert includes a preview of the result text (first 60 chars)."""
+    def test_debug_alert_does_not_include_text_content(self, inbox_dir: Path):
+        """The alert is a compact routing summary — result text is NOT inlined.
+
+        Text preview was removed from the alert format. The full result text
+        appears in the inbox message body, not in the debug alert.
+        """
         _, emitted = self._run(
             {"task_id": "t7", "chat_id": 1, "text": "Short message."},
             inbox_dir,
         )
-        assert "Short message." in emitted[0]["text"]
-
-    def test_text_preview_truncated_at_60_chars(self, inbox_dir: Path):
-        """Text longer than 60 chars is truncated with an ellipsis in the alert."""
-        long_text = "A" * 80
-        _, emitted = self._run(
-            {"task_id": "t8", "chat_id": 1, "text": long_text},
-            inbox_dir,
-        )
-        assert "A" * 60 in emitted[0]["text"]
-        assert "\u2026" in emitted[0]["text"]  # ellipsis
-        assert "A" * 61 not in emitted[0]["text"]
+        # Alert must contain task_id but must NOT inline the payload text.
+        assert "t7" in emitted[0]["text"]
+        assert "Short message." not in emitted[0]["text"]
 
     def test_debug_alert_emitter_includes_task_id(self, inbox_dir: Path):
         """The emitter passed to _emit_debug_observation is task:<task_id>."""
@@ -564,7 +559,7 @@ class TestEmitDebugObservationOutboxDelivery:
         outbox_dir: Path,
         inbox_dir: Path,
         text: str = "debug text",
-        category: str = "system_context",
+        category: str = "system_error",
         visibility: str = "mcp-only",
         emitter: str | None = "test-emitter",
     ) -> None:
