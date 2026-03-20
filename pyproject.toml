@@ -16,6 +16,7 @@ dependencies = [
     "fastembed>=0.3.0",
     "twilio>=9.0.0",
     "websockets>=13.0",
+    "cryptography>=42.0.0",
 ]
 
 [project.optional-dependencies]
