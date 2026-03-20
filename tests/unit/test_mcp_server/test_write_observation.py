@@ -237,58 +237,44 @@ class TestHandleWriteObservation:
     # observation_type parameter (Change 1)
     # ------------------------------------------------------------------
 
-    def test_observation_type_default_is_preference(self, inbox_dir: Path):
-        """When observation_type is omitted, user model dispatch uses 'preference'."""
-        dispatched: list[dict] = []
-
-        class FakeUserModel:
-            def dispatch(self, tool_name: str, args: dict) -> str:
-                dispatched.append({"tool": tool_name, "args": args})
-                return "{}"
-
+    def test_user_context_observation_writes_to_inbox(self, inbox_dir: Path):
+        """user_context observations are written to the inbox regardless of user model state."""
         with patch.multiple(
             "src.mcp.inbox_server",
             INBOX_DIR=inbox_dir,
-            _user_model=FakeUserModel(),
+            _user_model=None,
         ):
             from src.mcp.inbox_server import handle_write_observation
-            asyncio.run(handle_write_observation({
+            result = asyncio.run(handle_write_observation({
                 "chat_id": 123,
                 "text": "User prefers morning meetings.",
                 "category": "user_context",
             }))
 
-        assert len(dispatched) == 1
-        call = dispatched[0]
-        assert call["tool"] == "model_observe"
-        assert call["args"]["observation_type"] == "preference"
-        assert call["args"]["observation"] == "User prefers morning meetings."
-        assert call["args"]["confidence"] == 0.75
+        assert "Observation queued" in result[0].text
+        files = list(inbox_dir.glob("*.json"))
+        assert len(files) == 1
+        msg = json.loads(files[0].read_text())
+        assert msg["category"] == "user_context"
+        assert msg["text"] == "User prefers morning meetings."
 
-    def test_observation_type_explicit_value_forwarded(self, inbox_dir: Path):
-        """When observation_type is supplied, it is forwarded to user model dispatch."""
-        dispatched: list[dict] = []
-
-        class FakeUserModel:
-            def dispatch(self, tool_name: str, args: dict) -> str:
-                dispatched.append({"tool": tool_name, "args": args})
-                return "{}"
-
+    def test_user_context_observation_chat_id_preserved(self, inbox_dir: Path):
+        """The chat_id passed to write_observation is preserved in the inbox message."""
         with patch.multiple(
             "src.mcp.inbox_server",
             INBOX_DIR=inbox_dir,
-            _user_model=FakeUserModel(),
+            _user_model=None,
         ):
             from src.mcp.inbox_server import handle_write_observation
             asyncio.run(handle_write_observation({
                 "chat_id": 123,
                 "text": "User seems energized this morning.",
                 "category": "user_context",
-                "observation_type": "energy",
             }))
 
-        assert len(dispatched) == 1
-        assert dispatched[0]["args"]["observation_type"] == "energy"
+        files = list(inbox_dir.glob("*.json"))
+        msg = json.loads(files[0].read_text())
+        assert msg["chat_id"] == 123
 
     def test_user_context_without_user_model_still_writes_file(self, inbox_dir: Path):
         """When _user_model is None, user_context observation still writes to inbox."""
