@@ -958,20 +958,6 @@ if [ "$(id -u)" = "0" ]; then
         # Docker not installed — this is the normal case on a fresh machine, not a warning
         info "Docker not installed — skipping docker group setup. Install Docker later to enable Docker features."
     fi
-    # Add lobster user to the crontab group so sync-crontab.sh works under NoNewPrivs.
-    # Claude Code sets PR_SET_NO_NEW_PRIVS on the MCP server process, which propagates to
-    # child processes and suppresses setgid bits. The `crontab` binary is setgid-crontab —
-    # that privilege is what lets it write to /var/spool/cron/crontabs/. Without it,
-    # `crontab -` fails with "mkstemp: Permission denied". Group membership lets the
-    # lobster user write directly to /var/spool/cron/crontabs/ (group-writable) without
-    # needing the setgid bit.
-    if getent group crontab &>/dev/null; then
-        usermod -aG crontab lobster
-        success "Added 'lobster' to the crontab group (fixes NoNewPrivs crontab permission error)."
-        warn "Group membership takes effect at next login. Run 'newgrp crontab' or restart after install to apply."
-    else
-        warn "The 'crontab' group does not exist — scheduled job syncing may fail. Run: sudo groupadd crontab && sudo usermod -aG crontab lobster"
-    fi
     # Copy script to /tmp so lobster user can read it regardless of working directory
     INSTALL_SCRIPT="$(readlink -f "$0")"
     TMP_SCRIPT="$(mktemp /tmp/lobster-install.XXXXXX.sh)"
@@ -980,19 +966,9 @@ if [ "$(id -u)" = "0" ]; then
     LOBSTER_HOME="$(getent passwd lobster | cut -d: -f6)"
 
     echo ""
-    info "User 'lobster' is ready."
+    info "Re-running installer as 'lobster' user..."
     echo ""
-    echo -e "${BOLD}Next step: SSH in as the lobster user and run the installer again:${NC}"
-    echo ""
-    echo -e "  ${CYAN}ssh lobster@$(hostname -f 2>/dev/null || hostname)${NC}"
-    echo -e "  ${CYAN}bash install.sh${NC}"
-    echo ""
-    echo "Or, if install.sh is not present in the lobster home directory, download and run:"
-    echo -e "  ${CYAN}curl -fsSL https://raw.githubusercontent.com/SiderealPress/lobster/main/install.sh | bash${NC}"
-    echo ""
-    echo "Your SSH authorized_keys have been copied to the lobster user."
-    echo "Installation as root is complete. The rest must run as 'lobster'."
-    exit 0
+    exec sudo -u lobster HOME="$LOBSTER_HOME" bash "$TMP_SCRIPT" "$@"
 fi
 
 # Check if running interactively
