@@ -34,8 +34,16 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
-logging.basicConfig(level=logging.INFO)
+_src_dir = str(Path(__file__).resolve().parent)
+if _src_dir not in sys.path:
+    sys.path.insert(0, _src_dir)
+from log_utils import JsonFormatter, configure_file_handler as _configure_file_handler
+
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+_stream_handler = logging.StreamHandler()
+_stream_handler.setFormatter(JsonFormatter("observability_server"))
+logger.addHandler(_stream_handler)
 
 # ---------------------------------------------------------------------------
 # Directory constants — mirrors inbox_server.py
@@ -548,6 +556,9 @@ if __name__ == "__main__":
     port = 8742
     if "--port" in sys.argv:
         port = int(sys.argv[sys.argv.index("--port") + 1])
+
+    _log_dir = Path(os.environ.get("LOBSTER_WORKSPACE", Path.home() / "lobster-workspace")) / "logs"
+    _configure_file_handler(logger, component="observability_server", log_dir=_log_dir)
 
     logger.info(
         "Starting Lobster observability server on port %d "
