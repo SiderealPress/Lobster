@@ -307,6 +307,18 @@ Check the `sent_reply_to_user` field first, then check for engineer → reviewer
        # Subagent already called send_reply — nothing to deliver
        mark_processed(message_id)
    else:
+       # --- SILENT DROP: scheduled job no-op results ---
+       # If task_id starts with "scheduled-job-" AND text signals nothing happened,
+       # drop immediately without relaying. Do not deliberate — if in doubt, drop it.
+       # These are routine background poll results; only relay when there is actionable content.
+       NOOP_PHRASES = ["no action taken", "nothing to do", "no new", "no findings", "nothing to report"]
+       is_scheduled_job = str(msg.get("task_id", "")).startswith("scheduled-job-")
+       text_lower = msg.get("text", "").lower()
+       is_noop = any(phrase in text_lower for phrase in NOOP_PHRASES)
+       if is_scheduled_job and is_noop:
+           mark_processed(message_id)
+           continue  # Return to wait_for_messages() — nothing to relay
+       # --- END SILENT DROP ---
        # Check if this is an engineer briefing (contains a GitHub PR URL)
        pr_url_match = re.search(r"https://github\.com/.*/pull/\d+", msg["text"])
        if pr_url_match and msg.get("sent_reply_to_user") != True:
