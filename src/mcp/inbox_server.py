@@ -76,6 +76,20 @@ from skill_manager import (
 )
 _update_manager = UpdateManager()
 
+# BIS-163 Slice 2: Live DB write path — persist messages to messages.db
+# Imported lazily so the server starts even if src/db is not on sys.path yet.
+_db_persist_message = None
+_db_persist_outbound = None
+_db_persist_agent_event = None
+try:
+    from db.message_store import (
+        persist_message as _db_persist_message,
+        persist_outbound as _db_persist_outbound,
+        persist_agent_event as _db_persist_agent_event,
+    )
+except Exception as _db_import_err:
+    print(f"[WARN] messages.db write path unavailable: {_db_import_err}", file=sys.stderr)
+
 # Memory system (optional — gracefully degrades to static file search)
 _memory_provider = None
 try:
@@ -3522,6 +3536,10 @@ async def handle_send_reply(args: dict) -> list[TextContent]:
     sent_file = SENT_DIR / f"{reply_id}.json"
     atomic_write_json(sent_file, reply_data)
 
+    # BIS-163: Persist outbound reply to messages.db (additive — JSON is source of truth)
+    if _db_persist_outbound is not None:
+        _db_persist_outbound(reply_data)
+
     # Track reply for mark_processed guard
     _track_reply(chat_id)
 
@@ -3551,6 +3569,13 @@ async def handle_send_reply(args: dict) -> list[TextContent]:
                 found.rename(dest)
                 mark_info = f" | message {mid} marked processed"
                 log.info(f"Atomic mark_processed via send_reply: {mid}")
+                # BIS-163: Persist the inbound message to messages.db now it is processed
+                if _db_persist_message is not None:
+                    try:
+                        inbound_record = json.loads(dest.read_text())
+                        _db_persist_message(inbound_record, "in")
+                    except Exception as _db_exc:
+                        log.warning(f"[BIS-163] DB persist failed for {mid}: {_db_exc}")
             else:
                 mark_info = f" | ⚠️ message {mid} not found for mark_processed"
                 log.warning(f"Atomic mark_processed: message not found: {mid}")
@@ -3598,6 +3623,10 @@ async def handle_send_whatsapp_reply(args: dict) -> list[TextContent]:
     sent_file = SENT_DIR / f"{reply_id}.json"
     atomic_write_json(sent_file, reply_data)
 
+    # BIS-163: Persist outbound WhatsApp reply to messages.db
+    if _db_persist_outbound is not None:
+        _db_persist_outbound(reply_data)
+
     _track_reply(chat_id)
     _record_direct_send(chat_id, text)
 
@@ -3631,6 +3660,10 @@ async def handle_send_sms_reply(args: dict) -> list[TextContent]:
 
     sent_file = SENT_DIR / f"{reply_id}.json"
     atomic_write_json(sent_file, reply_data)
+
+    # BIS-163: Persist outbound SMS reply to messages.db
+    if _db_persist_outbound is not None:
+        _db_persist_outbound(reply_data)
 
     _track_reply(chat_id)
     _record_direct_send(chat_id, text)
@@ -3716,6 +3749,10 @@ async def handle_mark_processed(args: dict) -> list[TextContent]:
                         sent_file = SENT_DIR / f"{fallback_id}.json"
                         atomic_write_json(sent_file, fallback_data)
 
+                        # BIS-163: Persist the auto-reply fallback to messages.db
+                        if _db_persist_outbound is not None:
+                            _db_persist_outbound(fallback_data)
+
                         _track_reply(chat_id)
                         log.warning(f"Auto-reply fallback triggered for message {message_id} (chat {chat_id})")
         except (json.JSONDecodeError, OSError):
@@ -3724,6 +3761,16 @@ async def handle_mark_processed(args: dict) -> list[TextContent]:
     # Move to processed
     dest = PROCESSED_DIR / found.name
     found.rename(dest)
+
+    # BIS-163: Persist inbound message to messages.db now that it is fully processed.
+    # Read from the destination path for the canonical final state (including
+    # _processing_started_at if mark_processing stamped it earlier).
+    if _db_persist_message is not None:
+        try:
+            inbound_record = json.loads(dest.read_text())
+            _db_persist_message(inbound_record, "in")
+        except Exception as _db_exc:
+            log.warning(f"[BIS-163] DB persist failed for {message_id}: {_db_exc}")
 
     log.info(f"Message processed: {message_id}")
     return [TextContent(type="text", text=f"✅ Message marked as processed: {message_id}")]
@@ -5320,6 +5367,14 @@ async def handle_write_result(args: dict) -> list[TextContent]:
 
     inbox_file = INBOX_DIR / f"{message_id}.json"
     atomic_write_json(inbox_file, message)
+
+    # BIS-163: Persist agent event to messages.db immediately on write_result.
+    # Agent events land in INBOX_DIR and are later moved to PROCESSED_DIR by the
+    # dispatcher; we persist at write time so the DB is populated even if the
+    # dispatcher crashes before mark_processed runs.  INSERT OR IGNORE makes any
+    # subsequent mark_processed DB persist a no-op (idempotent).
+    if _db_persist_agent_event is not None:
+        _db_persist_agent_event(message)
 
     # Auto-unregister: mark this agent session as completed in the SQLite store.
     # The task_id passed to write_result matches the agent_id or task_id registered by the dispatcher.
