@@ -319,6 +319,7 @@ if [ "$CONTAINER_SETUP" = true ]; then
 
     # Create runtime directories (same as full install)
     mkdir -p "$WORKSPACE_DIR"/{logs,data,scheduled-jobs/{logs,tasks}}
+    mkdir -p "$WORKSPACE_DIR/reports"
     mkdir -p "$MESSAGES_DIR"/{inbox,outbox,processed,processing,failed,config,audio,task-outputs}
     mkdir -p "$CONFIG_DIR"
     mkdir -p "$PROJECTS_DIR"
@@ -986,6 +987,7 @@ fi
 step "Creating directories..."
 
 mkdir -p "$WORKSPACE_DIR"/{logs,data,scheduled-jobs/{logs,tasks}}
+mkdir -p "$WORKSPACE_DIR/reports"
 mkdir -p "$MESSAGES_DIR"/{inbox,outbox,processed,processing,failed,config,audio,task-outputs}
 mkdir -p "$CONFIG_DIR"
 mkdir -p "$PROJECTS_DIR"
