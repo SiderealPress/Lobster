@@ -40,7 +40,7 @@ import uvicorn
 # ---------------------------------------------------------------------------
 import sys as _sys
 _sys.path.insert(0, str(Path(__file__).parent.parent))
-from channels.outbox import OutboxFileHandler, OutboxWatcher, drain_outbox  # noqa: E402
+from channels.outbox import OutboxFileHandler, drain_outbox  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Canonical atomic filesystem helper (src/utils/fs.py)
@@ -132,8 +132,7 @@ def _get_validator() -> RequestValidator:
 
 # ---------------------------------------------------------------------------
 # Pure helpers
-# ---------------------------------------------------------------------------
-
+# 
 
 
 def _normalize_whatsapp_number(raw: str) -> str:
@@ -475,7 +474,7 @@ def main() -> None:
     # Start outbox watcher thread
     observer = Observer()
     observer.schedule(
-        OutboxWatcher(source="whatsapp", send_fn=_send_whatsapp_reply, log=log),
+        OutboxFileHandler(source="whatsapp", send_fn=_send_whatsapp_reply, log=log),
         str(OUTBOX_DIR),
         recursive=False,
     )

@@ -29,41 +29,6 @@ from utils.fs import atomic_write_json  # noqa: E402
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
-# multiplayer-telegram-bot skill — soft import; enables group whitelist management
-# and group management commands.  Three levels up from src/bot/lobster_bot.py
-# lands at the repo root (~/lobster/), then lobster-shop/ is a subdirectory there.
-_SKILL_DIR = str(Path(__file__).resolve().parent.parent.parent /
-                 "lobster-shop" / "multiplayer-telegram-bot" / "src")
-if _SKILL_DIR not in _sys.path:
-    _sys.path.insert(0, _SKILL_DIR)
-try:
-    from multiplayer_telegram_bot.whitelist import load_whitelist, enable_group, add_allowed_user, save_whitelist  # noqa: E402
-    from multiplayer_telegram_bot.gating import gate_message, GatingAction  # noqa: E402
-    from multiplayer_telegram_bot.router import get_source_for_chat  # noqa: E402
-    from multiplayer_telegram_bot.commands import (  # noqa: E402
-        handle_enable_group_bot,
-        handle_whitelist,
-        handle_unwhitelist,
-    )
-    from multiplayer_telegram_bot.session import (  # noqa: E402
-        get_active_session,
-        open_session,
-        close_session,
-        refresh_session,
-        is_closure_signal,
-    )
-    _GROUP_GATING_ENABLED = True
-    _GROUP_COMMANDS_ENABLED = True
-    _GROUP_SESSION_ENABLED = True
-except ImportError:
-    _GROUP_GATING_ENABLED = False
-    _GROUP_COMMANDS_ENABLED = False
-    _GROUP_SESSION_ENABLED = False
-    import logging as _logging
-    _logging.getLogger(__name__).warning(
-        "multiplayer-telegram-bot skill not available — group gating and management commands disabled"
-    )
-
 # ChannelAdapter Protocol — soft import; lobster_bot satisfies it structurally
 # but keeps its own async OutboxHandler rather than using OutboxFileHandler.
 try:
@@ -796,7 +761,6 @@ def wake_claude_if_hibernating() -> None:
             log.error(f"wake_claude: systemctl restart failed ({e}) — wait_for_wake() will recover")
     finally:
         _wake_lock.release()
-
 
 
 
