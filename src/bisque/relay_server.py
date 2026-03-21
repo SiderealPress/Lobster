@@ -737,7 +737,112 @@ class BisqueRelayServer:
         return None
 
     def _load_recent_messages(self, limit: int = 50) -> list[dict[str, Any]]:
-        """Load recent conversation history from sent/ and processed/ directories.
+        """Load recent conversation history for the snapshot frame.
+
+        Primary path (when LOBSTER_USE_DB=1): query the messages.db SQLite
+        database which is the authoritative store after the BIS-159 cutover.
+        The bisque_events table holds both user (inbound) and assistant
+        (outbound) messages with source='bisque'.
+
+        Fallback path: scan JSON files in sent/ and processed/ directories.
+        Used when the DB is unavailable or returns no results.
+
+        Results are sorted chronologically so history renders oldest-first.
+        """
+        use_db = os.environ.get("LOBSTER_USE_DB", "0").strip() == "1"
+
+        if use_db:
+            db_messages = self._load_recent_messages_from_db(limit)
+            if db_messages:
+                return db_messages
+            # DB returned nothing — fall through to filesystem scan
+            log.info("DB returned no bisque history; falling back to filesystem scan")
+
+        return self._load_recent_messages_from_fs(limit)
+
+    def _load_recent_messages_from_db(self, limit: int) -> list[dict[str, Any]]:
+        """Load recent bisque conversation from messages.db (SQLite).
+
+        Reads from the bisque_events table which stores both user messages
+        (source='bisque', inbound) and assistant replies (source='bisque',
+        outbound).  Rows are ordered by timestamp ascending so the snapshot
+        presents history in chronological order.
+
+        Returns an empty list if the DB is unavailable or has no rows.
+        """
+        db_path_env = os.environ.get("LOBSTER_MESSAGES_DB", "")
+        db_path = Path(db_path_env) if db_path_env else _HOME / "messages" / "messages.db"
+
+        if not db_path.exists():
+            return []
+
+        try:
+            import sqlite3
+            conn = sqlite3.connect(str(db_path))
+            conn.row_factory = sqlite3.Row
+            try:
+                # bisque_events stores user inbound AND assistant outbound messages.
+                # The 'id' prefix convention is:
+                #   bisque_<ts>_<hex>  — user messages (inbound)
+                #   <ts>_bisque        — assistant replies (outbound)
+                # We derive role from the id prefix pattern.
+                rows = conn.execute(
+                    """
+                    SELECT id, chat_id, type, text, reply_to_id, reply_to, timestamp
+                    FROM bisque_events
+                    WHERE text IS NOT NULL AND text != ''
+                    ORDER BY timestamp DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+            finally:
+                conn.close()
+        except Exception as exc:
+            log.warning("Failed to load bisque history from DB: %s", exc)
+            return []
+
+        if not rows:
+            return []
+
+        messages: list[dict[str, Any]] = []
+        for row in rows:
+            msg_id = row["id"] or ""
+            # Determine role from message ID prefix convention:
+            #   IDs starting with 'bisque_' are inbound (user → Lobster)
+            #   IDs ending with '_bisque' or containing '_bisque' outbound are assistant
+            if msg_id.startswith("bisque_"):
+                role = "user"
+            else:
+                role = "assistant"
+
+            entry: dict[str, Any] = {
+                "id": msg_id,
+                "role": role,
+                "text": row["text"],
+                "timestamp": row["timestamp"] or "",
+            }
+
+            # Include reply context if present
+            reply_to_raw = row["reply_to"]
+            if reply_to_raw:
+                try:
+                    import json as _json
+                    if isinstance(reply_to_raw, str):
+                        entry["reply_to"] = _json.loads(reply_to_raw)
+                    else:
+                        entry["reply_to"] = reply_to_raw
+                except (ValueError, TypeError):
+                    pass
+
+            messages.append(entry)
+
+        # Reverse to chronological order (we fetched DESC for the LIMIT)
+        messages.reverse()
+        return messages
+
+    def _load_recent_messages_from_fs(self, limit: int) -> list[dict[str, Any]]:
+        """Load recent bisque conversation from JSON files (filesystem fallback).
 
         Combines Lobster's outgoing messages (sent/) and user messages (processed/)
         to reconstruct the full conversation. Only bisque messages are included.
