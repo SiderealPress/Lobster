@@ -30,6 +30,11 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+import sys as _sys
+_SRC_DIR = str(Path(__file__).resolve().parent.parent)
+if _SRC_DIR not in _sys.path:
+    _sys.path.insert(0, _SRC_DIR)
+from utils.fs import atomic_write_json  # noqa: E402
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
@@ -102,23 +107,6 @@ def compute_timeout(audio_duration: float) -> int:
         return max(MIN_TIMEOUT_S, int(audio_duration * TIMEOUT_MULTIPLIER))
     return TRANSCRIPTION_TIMEOUT_S
 
-
-def atomic_write_json(path: Path, data: dict, indent: int = 2) -> None:
-    """Atomically write JSON to path (temp-then-rename, same semantics as bot)."""
-    content = json.dumps(data, indent=indent)
-    fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write(content)
-            f.flush()
-            os.fsync(f.fileno())
-        os.rename(tmp_path, str(path))
-    except BaseException:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
 
 
 async def convert_ogg_to_wav(ogg_path: Path, wav_path: Path, timeout_s: int = TRANSCRIPTION_TIMEOUT_S) -> bool:
