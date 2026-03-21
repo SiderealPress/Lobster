@@ -114,19 +114,40 @@ from skill_manager import (
 )
 _update_manager = UpdateManager()
 
-# BIS-163 Slice 2: Live DB write path — persist messages to messages.db
-# Imported lazily so the server starts even if src/db is not on sys.path yet.
-_db_persist_message = None
+# DB read layer (BIS-164 Slice 3) — optional, graceful degradation
+_db_get_conversation_history = None
+_db_count_conversation_history = None
+_db_get_message_by_telegram_id_fn = None
+_db_get_message_stats = None
+_db_open_messages_db = None
+try:
+    from db import reader as _db_reader_mod
+    from db.connection import open_messages_db as _db_open_messages_db
+    _db_get_conversation_history = _db_reader_mod.get_conversation_history
+    _db_count_conversation_history = _db_reader_mod.count_conversation_history
+    _db_get_message_by_telegram_id_fn = _db_reader_mod.get_message_by_telegram_id
+    _db_get_message_stats = _db_reader_mod.get_message_stats
+    print('[DB] db.reader loaded — DB reads available', file=sys.stderr)
+except Exception as _db_reader_import_err:
+    print(f'[WARN] DB reader module unavailable: {_db_reader_import_err}', file=sys.stderr)
+
+# BIS-167 Slice 6: Live DB write path — persist messages to messages.db
+_db_persist_inbound = None
 _db_persist_outbound = None
 _db_persist_agent_event = None
 try:
     from db.message_store import (
-        persist_message as _db_persist_message,
+        persist_inbound as _db_persist_inbound,
         persist_outbound as _db_persist_outbound,
         persist_agent_event as _db_persist_agent_event,
     )
+    _db_flag = os.environ.get("LOBSTER_USE_DB", "0")
+    _db_status = "ENABLED" if _db_flag == "1" else "DISABLED (set LOBSTER_USE_DB=1 to enable)"
+    print(f"[DB] message_store loaded — DB writes {_db_status}", file=sys.stderr)
+    del _db_flag, _db_status
 except Exception as _db_import_err:
     print(f"[WARN] messages.db write path unavailable: {_db_import_err}", file=sys.stderr)
+
 
 # Memory system (optional — gracefully degrades to static file search)
 _memory_provider = None
@@ -5097,7 +5118,7 @@ async def handle_send_reply(args: dict) -> list[TextContent]:
     sent_file = SENT_DIR / f"{reply_id}.json"
     atomic_write_json(sent_file, reply_data)
 
-    # BIS-163: Persist outbound reply to messages.db (additive — JSON is source of truth)
+    # BIS-167 Slice 6: persist outbound reply to messages.db (no-op when LOBSTER_USE_DB!=1)
     if _db_persist_outbound is not None:
         _db_persist_outbound(reply_data)
 
@@ -5148,13 +5169,12 @@ async def handle_send_reply(args: dict) -> list[TextContent]:
                 found.rename(dest)
                 mark_info = f" | message {mid} marked processed"
                 log.info(f"Atomic mark_processed via send_reply: {mid}")
-                # BIS-163: Persist the inbound message to messages.db now it is processed
-                if _db_persist_message is not None:
+                # BIS-167 Slice 6: persist the inbound message now that it is processed
+                if _db_persist_inbound is not None:
                     try:
-                        inbound_record = json.loads(dest.read_text())
-                        _db_persist_message(inbound_record, "in")
+                        _db_persist_inbound(json.loads(dest.read_text()))
                     except Exception as _db_exc:
-                        log.warning(f"[BIS-163] DB persist failed for {mid}: {_db_exc}")
+                        log.warning(f"[DB] inbound persist failed for {mid}: {_db_exc}")
             else:
                 mark_info = f" | ⚠️ message {mid} not found for mark_processed"
                 log.warning(f"Atomic mark_processed: message not found: {mid}")
@@ -5202,7 +5222,7 @@ async def handle_send_whatsapp_reply(args: dict) -> list[TextContent]:
     sent_file = SENT_DIR / f"{reply_id}.json"
     atomic_write_json(sent_file, reply_data)
 
-    # BIS-163: Persist outbound WhatsApp reply to messages.db
+    # BIS-167 Slice 6: persist outbound reply to messages.db
     if _db_persist_outbound is not None:
         _db_persist_outbound(reply_data)
 
@@ -5240,7 +5260,7 @@ async def handle_send_sms_reply(args: dict) -> list[TextContent]:
     sent_file = SENT_DIR / f"{reply_id}.json"
     atomic_write_json(sent_file, reply_data)
 
-    # BIS-163: Persist outbound SMS reply to messages.db
+    # BIS-167 Slice 6: persist outbound reply to messages.db
     if _db_persist_outbound is not None:
         _db_persist_outbound(reply_data)
 
@@ -5334,10 +5354,6 @@ async def handle_mark_processed(args: dict) -> list[TextContent]:
                         sent_file = SENT_DIR / f"{fallback_id}.json"
                         atomic_write_json(sent_file, fallback_data)
 
-                        # BIS-163: Persist the auto-reply fallback to messages.db
-                        if _db_persist_outbound is not None:
-                            _db_persist_outbound(fallback_data)
-
                         _track_reply(chat_id)
                         log.warning(f"Auto-reply fallback triggered for message {message_id} (chat {chat_id})")
         except (json.JSONDecodeError, OSError):
@@ -5347,15 +5363,12 @@ async def handle_mark_processed(args: dict) -> list[TextContent]:
     dest = PROCESSED_DIR / found.name
     found.rename(dest)
 
-    # BIS-163: Persist inbound message to messages.db now that it is fully processed.
-    # Read from the destination path for the canonical final state (including
-    # _processing_started_at if mark_processing stamped it earlier).
-    if _db_persist_message is not None:
+    # BIS-167 Slice 6: persist inbound message to messages.db now that it is fully processed.
+    if _db_persist_inbound is not None:
         try:
-            inbound_record = json.loads(dest.read_text())
-            _db_persist_message(inbound_record, "in")
+            _db_persist_inbound(json.loads(dest.read_text()))
         except Exception as _db_exc:
-            log.warning(f"[BIS-163] DB persist failed for {message_id}: {_db_exc}")
+            log.warning(f"[DB] inbound persist failed for {message_id}: {_db_exc}")
 
     log.info(f"Message processed: {message_id}")
     return [TextContent(type="text", text=f"✅ Message marked as processed: {message_id}")]
@@ -5761,41 +5774,6 @@ def _scan_json_dirs_for_history(direction: str) -> list[dict]:
     return messages
 
 
-def _apply_sender_type_filter(messages: list[dict], sender_type: str | None) -> list[dict]:
-    """Return only messages matching the given sender_type.
-
-    Pure function: does not mutate the input list.
-
-    sender_type semantics mirror the SQL layer in db/reader.py:
-      'user'         — inbound (_direction='received') messages whose type is in
-                       INBOX_USER_TYPES (real user messages, no system/cron noise)
-      'lobster'      — outbound (_direction='sent') messages
-      'conversation' — union of user and lobster (both, but no system noise)
-      None / other   — all messages unchanged
-    """
-    if not sender_type or sender_type == "all":
-        return messages
-
-    if sender_type == "user":
-        return [
-            m for m in messages
-            if m.get("_direction") == "received" and m.get("type", "text") in INBOX_USER_TYPES
-        ]
-
-    if sender_type == "lobster":
-        return [m for m in messages if m.get("_direction") == "sent"]
-
-    if sender_type == "conversation":
-        return [
-            m for m in messages
-            if m.get("_direction") == "sent"
-            or (m.get("_direction") == "received" and m.get("type", "text") in INBOX_USER_TYPES)
-        ]
-
-    # Unknown value — degrade gracefully
-    return messages
-
-
 def _apply_filters_and_paginate(
     messages: list[dict],
     *,
@@ -5804,10 +5782,8 @@ def _apply_filters_and_paginate(
     search_text: str,
     limit: int,
     offset: int,
-    sender_type: str | None = None,
 ) -> tuple[list[dict], int]:
-    """Apply chat_id / source / search / sender_type filters, sort by timestamp, then paginate.
-
+    """Apply chat_id / source / search filters, sort by timestamp, then paginate.
 
     Returns (paginated_slice, total_count_before_pagination).
     All filtering and sorting is performed in-memory. This is the legacy
@@ -5823,9 +5799,6 @@ def _apply_filters_and_paginate(
             return datetime.min.replace(tzinfo=timezone.utc)
 
     filtered = messages
-
-    if sender_type:
-        filtered = _apply_sender_type_filter(filtered, sender_type)
 
     if chat_id_filter is not None:
         chat_id_str = str(chat_id_filter)
@@ -5844,9 +5817,6 @@ def _apply_filters_and_paginate(
     return filtered[offset: offset + limit], total
 
 
-_HISTORY_TEXT_DISPLAY_LIMIT = 4000  # Max chars shown per message in get_conversation_history
-
-
 def _format_history_output(
     paginated: list[dict],
     total_count: int,
@@ -5857,8 +5827,6 @@ def _format_history_output(
 
     Each dict must have _direction set to 'received' or 'sent'.
     Fields source, chat_id, timestamp, text, user_name, username are optional.
-    Messages longer than _HISTORY_TEXT_DISPLAY_LIMIT chars are shown with a
-    [truncated] suffix so the caller knows the content was cut.
     """
     showing_end = min(offset + limit, total_count)
     output = f"**Conversation History** (showing {offset + 1}-{showing_end} of {total_count}):\n\n"
@@ -5871,14 +5839,12 @@ def _format_history_output(
         ts = msg.get("timestamp", "")
         text = msg.get("text", "(no text)")
 
-        # Format timestamp nicely in owner's local timezone
         try:
             ts_display = _format_iso_for_display(ts, "%Y-%m-%d %I:%M %p %Z")
         except (ValueError, TypeError):
             ts_display = ts
 
-        was_truncated = len(text) > _HISTORY_TEXT_DISPLAY_LIMIT
-        truncated = text[:_HISTORY_TEXT_DISPLAY_LIMIT] + (" [truncated]" if was_truncated else "")
+        truncated = text[:500] + ("..." if len(text) > 500 else "")
         if msg["_direction"] == "received":
             user = msg.get("user_name", msg.get("username", "Unknown"))
             output += "---\n"
@@ -5912,7 +5878,6 @@ async def handle_get_conversation_history(args: dict) -> list[TextContent]:
     offset = args.get("offset", 0)
     direction = args.get("direction", "all").lower()
     source_filter = args.get("source", "").lower().strip()
-    sender_type = args.get("sender_type") or None  # None when omitted or empty string
 
     paginated: list[dict] = []
     total_count: int = 0
@@ -5931,7 +5896,6 @@ async def handle_get_conversation_history(args: dict) -> list[TextContent]:
                     source=source_filter or None,
                     search=search_text or None,
                     direction=direction,
-                    sender_type=sender_type,
                     limit=limit,
                     offset=offset,
                 )
@@ -5941,7 +5905,6 @@ async def handle_get_conversation_history(args: dict) -> list[TextContent]:
                     source=source_filter or None,
                     search=search_text or None,
                     direction=direction,
-                    sender_type=sender_type,
                 )
                 used_db = True
                 log.debug(
@@ -5972,7 +5935,6 @@ async def handle_get_conversation_history(args: dict) -> list[TextContent]:
             search_text=search_text,
             limit=limit,
             offset=offset,
-            sender_type=sender_type,
         )
 
     # ------------------------------------------------------------------
@@ -5984,12 +5946,10 @@ async def handle_get_conversation_history(args: dict) -> list[TextContent]:
             filter_info.append(f"chat_id={chat_id_filter}")
         if search_text:
             filter_info.append(f"search='{search_text}'")
-        if direction != "all" and not sender_type:
+        if direction != "all":
             filter_info.append(f"direction={direction}")
         if source_filter:
             filter_info.append(f"source={source_filter}")
-        if sender_type:
-            filter_info.append(f"sender_type={sender_type}")
         filter_str = f" (filters: {', '.join(filter_info)})" if filter_info else ""
         return [TextContent(type="text", text=f"No messages found{filter_str}.")]
 
@@ -6131,92 +6091,6 @@ async def handle_get_message_by_telegram_id(args: dict) -> list[TextContent]:
         type="text",
         text=f"No message found with Telegram message ID `{tg_id}`{filter_note}. "
              f"Searched: messages.db (if available), processed, inbox, processing, failed directories.",
-    )]
-
-
-async def handle_get_message_by_telegram_id(args: dict) -> list[TextContent]:
-    """Look up a specific message by its Telegram message ID."""
-    tg_id = args.get("telegram_message_id")
-    if tg_id is None:
-        return [TextContent(type="text", text="Error: telegram_message_id is required.")]
-
-    tg_id = int(tg_id)
-    chat_id_filter = args.get("chat_id")
-    chat_id_str = str(chat_id_filter) if chat_id_filter is not None else None
-
-    # Search order: processed first (most common), then inbox, processing, failed
-    search_dirs = [
-        (PROCESSED_DIR, "processed"),
-        (INBOX_DIR, "inbox"),
-        (PROCESSING_DIR, "processing"),
-        (FAILED_DIR, "failed"),
-    ]
-
-    for directory, dir_label in search_dirs:
-        for f in directory.glob("*.json"):
-            try:
-                with open(f) as fp:
-                    msg = json.load(fp)
-            except Exception:
-                continue
-
-            if msg.get("telegram_message_id") != tg_id:
-                continue
-
-            if chat_id_str is not None and str(msg.get("chat_id", "")) != chat_id_str:
-                continue
-
-            # Found a match — format the full message as output
-            source = msg.get("source", "unknown").upper()
-            chat_id = msg.get("chat_id", "")
-            ts = msg.get("timestamp", "")
-            text = msg.get("text", "(no text)")
-            msg_type = msg.get("type", "text")
-            user = msg.get("user_name", msg.get("username", "Unknown"))
-
-            try:
-                if "+" in ts or ts.endswith("Z"):
-                    dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                else:
-                    dt = datetime.fromisoformat(ts)
-                ts_display = dt.strftime("%Y-%m-%d %H:%M UTC")
-            except (ValueError, TypeError):
-                ts_display = ts
-
-            output = f"**Message found** (in `{dir_label}/`):\n\n"
-            output += f"Telegram Message ID: `{tg_id}`\n"
-            output += f"Lobster Message ID: `{msg.get('id', '?')}`\n"
-            output += f"Source: {source} | Chat ID: `{chat_id}` | Type: `{msg_type}`\n"
-            output += f"From: **{user}**\n"
-            output += f"Time: {ts_display}\n\n"
-            output += f"**Text:**\n> {text}\n"
-
-            reply_to = msg.get("reply_to")
-            if reply_to:
-                reply_text = reply_to.get("reply_to_text") or reply_to.get("text", "")
-                reply_from = reply_to.get("reply_to_from_user") or reply_to.get("from_user", "")
-                reply_msg_id = reply_to.get("reply_to_message_id") or reply_to.get("message_id", "")
-                output += f"\n**Reply to** (TG ID `{reply_msg_id}`, from {reply_from}):\n> {reply_text[:300]}{'...' if len(reply_text) > 300 else ''}\n"
-
-            # Surface any attached file paths
-            for field in ("image_file", "file_path", "audio_file"):
-                val = msg.get(field)
-                if val:
-                    output += f"\n**Attached file** (`{field}`): `{val}`\n"
-            image_files = msg.get("image_files")
-            if image_files:
-                output += f"\n**Image files:**\n"
-                for img in image_files:
-                    output += f"  - `{img}`\n"
-
-            return [TextContent(type="text", text=output)]
-
-    # No match found across all directories
-    filter_note = f" in chat `{chat_id_filter}`" if chat_id_filter is not None else ""
-    return [TextContent(
-        type="text",
-        text=f"No message found with Telegram message ID `{tg_id}`{filter_note}. "
-             f"Searched: processed, inbox, processing, failed directories.",
     )]
 
 
@@ -7852,11 +7726,8 @@ async def handle_write_result(args: dict) -> list[TextContent]:
     inbox_file = INBOX_DIR / f"{message_id}.json"
     atomic_write_json(inbox_file, message)
 
-    # BIS-163: Persist agent event to messages.db immediately on write_result.
-    # Agent events land in INBOX_DIR and are later moved to PROCESSED_DIR by the
-    # dispatcher; we persist at write time so the DB is populated even if the
-    # dispatcher crashes before mark_processed runs.  INSERT OR IGNORE makes any
-    # subsequent mark_processed DB persist a no-op (idempotent).
+    # BIS-167 Slice 6: persist agent event immediately on write_result.
+    # Before auto-unregister so the record is in the DB even if the dispatcher crashes.
     if _db_persist_agent_event is not None:
         _db_persist_agent_event(message)
 
@@ -7974,6 +7845,10 @@ async def handle_write_observation(args: dict) -> list[TextContent]:
 
     inbox_file = INBOX_DIR / f"{message_id}.json"
     atomic_write_json(inbox_file, message)
+
+    # BIS-167 Slice 6: persist observation as agent event immediately
+    if _db_persist_agent_event is not None:
+        _db_persist_agent_event(message)
 
     # Belt-and-suspenders: for system_error, also append directly to observations.log
     # at the MCP layer. The inbox write above is the primary path — the dispatcher
