@@ -7278,7 +7278,7 @@ def load_scheduled_jobs() -> dict:
     try:
         with open(SCHEDULED_JOBS_FILE, "r") as f:
             return json.load(f)
-    except:
+    except (OSError, json.JSONDecodeError):
         return {"jobs": {}}
 
 
@@ -7498,7 +7498,7 @@ async def handle_list_scheduled_jobs(args: dict) -> list[TextContent]:
         if last_run and last_run != "never":
             try:
                 last_run = _format_iso_for_display(last_run, "%Y-%m-%d %I:%M %p %Z")
-            except:
+            except (ValueError, TypeError):
                 pass
 
         output += f"**{name}**{status_icon}\n"
@@ -7737,7 +7737,7 @@ async def handle_check_task_outputs(args: dict) -> list[TextContent]:
         # Format timestamp nicely in owner's local timezone
         try:
             ts = _format_iso_for_display(ts, "%Y-%m-%d %I:%M %p %Z")
-        except:
+        except (ValueError, TypeError):
             pass
 
         result += f"---\n"
