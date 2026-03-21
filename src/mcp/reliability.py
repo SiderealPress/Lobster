@@ -14,73 +14,24 @@ Design principles:
 """
 
 import json
-import os
-import tempfile
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+# ---------------------------------------------------------------------------
+# Re-export atomic filesystem helpers from the canonical location.
+# ---------------------------------------------------------------------------
+# The canonical implementations live in utils/fs.py.  We re-export them here
+# so that existing callers of `from reliability import atomic_write_json`
+# continue to work without change.
 
-# =============================================================================
-# Atomic File Operations
-# =============================================================================
-# Problem: json.dump to a file is not atomic. If the process crashes mid-write,
-# the file is corrupted. This is the #1 cause of "agent systems failing quietly"
-# (Composio issue #9).
-#
-# Solution: Write to a temp file in the same directory, then os.rename().
-# On POSIX systems, rename() is atomic within the same filesystem.
-# =============================================================================
+_SRC_DIR = str(Path(__file__).resolve().parent.parent)
+if _SRC_DIR not in sys.path:
+    sys.path.insert(0, _SRC_DIR)
 
-def atomic_write_json(path: Path, data: Any, indent: int = 2) -> None:
-    """Atomically write JSON data to a file.
-
-    Uses write-to-temp-then-rename pattern. On POSIX, rename() within the
-    same filesystem is atomic, so readers never see a partial file.
-
-    Args:
-        path: Target file path.
-        data: JSON-serializable data.
-        indent: JSON indentation level.
-
-    Raises:
-        OSError: If the write or rename fails.
-        TypeError: If data is not JSON-serializable.
-    """
-    # Serialize first (fail fast if not serializable)
-    content = json.dumps(data, indent=indent)
-
-    # Write to temp file in same directory (same filesystem = atomic rename)
-    dir_path = str(path.parent)
-    fd, tmp_path = tempfile.mkstemp(dir=dir_path, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write(content)
-            f.flush()
-            os.fsync(f.fileno())  # Force to disk before rename
-        os.rename(tmp_path, str(path))
-    except BaseException:
-        # Clean up temp file on any failure
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
-
-
-def safe_move(src: Path, dest: Path) -> bool:
-    """Safely move a file, ensuring source exists before moving.
-
-    Returns True if moved, False if source was already gone (idempotent).
-    Raises OSError on other failures.
-    """
-    try:
-        src.rename(dest)
-        return True
-    except FileNotFoundError:
-        # Source already moved (concurrent processing) - idempotent
-        return False
+from utils.fs import atomic_write_json, safe_move  # noqa: E402, F401
 
 
 # =============================================================================

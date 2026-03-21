@@ -20,6 +20,11 @@ import os
 import time
 from datetime import datetime
 from pathlib import Path
+import sys as _sys
+_SRC_DIR = str(Path(__file__).resolve().parent.parent)
+if _SRC_DIR not in _sys.path:
+    _sys.path.insert(0, _SRC_DIR)
+from utils.fs import atomic_write_json  # noqa: E402
 from threading import Thread
 
 from twilio.request_validator import RequestValidator
@@ -127,6 +132,7 @@ def _get_validator() -> RequestValidator:
 # ---------------------------------------------------------------------------
 # Pure helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_msg_id() -> str:
     return f"{int(time.time() * 1000)}_sms"
