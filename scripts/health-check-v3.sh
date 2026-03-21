@@ -26,6 +26,16 @@
 #   a compacted_at timestamp to lobster-state.json, and the stale-inbox check
 #   is skipped for COMPACTION_SUPPRESS_SECONDS after that timestamp.
 #
+# Catchup suppression:
+#   After a compaction or restart, the dispatcher spawns a catchup subagent to
+#   recover situational awareness. This subagent can take 10-12 minutes. During
+#   this window the dispatcher IS calling wait_for_messages() but the catchup
+#   subagent delays return from the main loop. The dispatcher writes
+#   catchup_started_at to lobster-state.json before spawning the subagent, and
+#   catchup_finished_at when the result arrives. The WFM freshness check is
+#   suppressed for CATCHUP_SUPPRESS_SECONDS (15 min) after catchup_started_at,
+#   or immediately when catchup_finished_at is written.
+#
 # Boot grace period:
 #   After any restart (health-check-initiated or manual), the new Claude session
 #   needs ~60-90s to initialize and begin draining the inbox. During this window
@@ -69,6 +79,7 @@ RESTART_WINDOW_BUFFER_SECONDS=120    # Pre-mark messages within this window of t
 MAINTENANCE_EXPIRY_SECONDS=3600      # 1 hour - stale maintenance flag is auto-cleared and checks resume
 
 COMPACTION_SUPPRESS_SECONDS=300      # 5 minutes - skip stale-inbox check after a compaction event
+CATCHUP_SUPPRESS_SECONDS=900         # 15 minutes - skip WFM freshness check while catchup subagent is running
 RESTART_COOLDOWN_SUPPRESS_SECONDS=240 # 4 minutes - suppress stale-inbox RED after a recent restart
 
 BOOT_GRACE_SECONDS=90                # 90s - skip stale-inbox, WFM, and process checks after a restart
@@ -333,6 +344,65 @@ except Exception:
         return 0
     fi
     return 1
+}
+
+# Check if a catchup subagent is actively running (or recently started).
+# Returns 0 (true) if the WFM freshness check should be suppressed, 1 otherwise.
+#
+# The dispatcher writes catchup_started_at to lobster-state.json before spawning
+# either the startup-catchup or compact-catchup subagent, and writes
+# catchup_finished_at when the subagent result arrives.  If catchup_finished_at
+# is absent or older than catchup_started_at, the catchup is still in flight.
+#
+# Suppression window: CATCHUP_SUPPRESS_SECONDS from catchup_started_at.
+# This caps suppression even if catchup_finished_at is never written (e.g. the
+# subagent crashed), preventing permanent suppression.
+is_catchup_active() {
+    if [[ ! -f "$LOBSTER_STATE_FILE" ]]; then
+        return 1
+    fi
+    local started_at finished_at
+    started_at=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('$LOBSTER_STATE_FILE'))
+    print(d.get('catchup_started_at', ''))
+except Exception:
+    print('')
+" 2>/dev/null)
+    if [[ -z "$started_at" ]]; then
+        return 1
+    fi
+    local started_epoch
+    started_epoch=$(date -d "$started_at" +%s 2>/dev/null) || return 1
+    local now
+    now=$(date +%s)
+    local age=$((now - started_epoch))
+    # Hard cap: don't suppress longer than CATCHUP_SUPPRESS_SECONDS even if
+    # catchup_finished_at was never written (subagent crash, etc.)
+    if [[ $age -gt $CATCHUP_SUPPRESS_SECONDS ]]; then
+        log_info "Catchup suppression expired: started ${age}s ago (cap: ${CATCHUP_SUPPRESS_SECONDS}s)"
+        return 1
+    fi
+    # Check if catchup has already finished
+    finished_at=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('$LOBSTER_STATE_FILE'))
+    print(d.get('catchup_finished_at', ''))
+except Exception:
+    print('')
+" 2>/dev/null)
+    if [[ -n "$finished_at" ]]; then
+        local finished_epoch
+        finished_epoch=$(date -d "$finished_at" +%s 2>/dev/null) || { log_warn "WARN: failed to parse finished_epoch from finished_at=${finished_at} — treating catchup as still in flight"; true; }
+        if [[ -n "$finished_epoch" && "$finished_epoch" -ge "$started_epoch" ]]; then
+            log_info "Catchup complete: finished_at=$finished_at — WFM suppression lifted"
+            return 1
+        fi
+    fi
+    log_info "Catchup in flight: started ${age}s ago (cap: ${CATCHUP_SUPPRESS_SECONDS}s) — WFM freshness suppressed"
+    return 0
 }
 
 # Check if a boot/restart occurred within the last BOOT_GRACE_SECONDS.
@@ -1630,8 +1700,10 @@ main() {
     # --- wait_for_messages freshness check ---
     # Suppressed during hibernation (dispatcher isn't running), transient
     # lifecycle states where Claude hasn't started yet (starting, restarting,
-    # waking, backoff, stopped), and during the compaction grace period (tool
-    # calls pause while Claude compacts context).
+    # waking, backoff, stopped), during the compaction grace period (tool
+    # calls pause while Claude compacts context), and while a catchup subagent
+    # is running (dispatcher may not call wait_for_messages for 10-12 minutes
+    # during startup-catchup or compact-catchup generation).
 
     if is_hibernating; then
         log_info "WFM freshness suppressed (hibernating)"
@@ -1643,6 +1715,8 @@ main() {
         log_info "WFM freshness suppressed (boot grace period)"
     elif [[ "$compaction_recent" == "true" ]]; then
         log_info "WFM freshness suppressed (recent compaction)"
+    elif is_catchup_active; then
+        log_info "WFM freshness suppressed (catchup subagent in flight)"
     else
         check_wfm_freshness
         local wfm_rc=$?
