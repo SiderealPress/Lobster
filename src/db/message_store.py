@@ -319,6 +319,23 @@ INSERT OR IGNORE INTO agent_events (
 # ---------------------------------------------------------------------------
 
 
+import re as _re
+_PARAM_RE = _re.compile(r":(\w+)")
+
+
+def _fill_defaults(sql: str, row: dict) -> dict:
+    """Return a copy of *row* with None defaults for any named :param in *sql*.
+
+    sqlite3 raises 'did not supply a value for binding parameter :X' when a
+    named parameter appears in the SQL but is absent from the row dict.
+    This pure helper ensures every named parameter has at least a None value.
+
+    Pure function — does not mutate *row*.
+    """
+    params = frozenset(_PARAM_RE.findall(sql))
+    return {k: row.get(k) for k in params} | row
+
+
 def _write_to_db(sql: str, row: dict) -> None:
     """
     Execute *sql* with *row* bindings against messages.db.
@@ -329,13 +346,13 @@ def _write_to_db(sql: str, row: dict) -> None:
 
     Args:
         sql: Parameterised INSERT statement (named :param style).
-        row: Dict of column values to bind.
+        row: Dict of column values to bind.  Missing params default to None.
     """
     try:
         conn = _open_conn()
         try:
             _ensure_schema(conn)
-            conn.execute(sql, row)
+            conn.execute(sql, _fill_defaults(sql, row))
             conn.commit()
         finally:
             conn.close()
