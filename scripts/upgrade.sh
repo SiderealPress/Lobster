@@ -1505,6 +1505,16 @@ with open(path, 'w') as f:
         migrated=$((migrated + 1))
     fi
 
+    # Migration 30: Create ~/lobster-workspace/reports/ for artifact-based large result delivery.
+    # Subagents write large outputs (reports, diffs, analysis) to this directory and pass the
+    # path in write_result artifacts=[...]. The dispatcher reads and inlines the content rather
+    # than bloating the inbox message or the dispatcher's context window (see issue #746).
+    if [ ! -d "$WORKSPACE_DIR/reports" ]; then
+        mkdir -p "$WORKSPACE_DIR/reports"
+        substep "Created $WORKSPACE_DIR/reports/ for subagent artifact storage"
+        migrated=$((migrated + 1))
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else

@@ -2596,23 +2596,13 @@ async def list_tools() -> list[Tool]:
                     "text": {
                         "type": "string",
                         "description": (
-                            "Dispatcher-internal summary of this result. "
-                            "Kept short (ideally under ~500 words) so the dispatcher's context does not grow. "
-                            "Not shown to the user when reply_text is provided. "
+                            "The result text to deliver to the user. "
+                            "Keep this to a concise summary (ideally under ~4KB / ~500 words). "
                             "For large outputs — reports, diffs, full analysis — write the content "
                             "to ~/lobster-workspace/reports/<task_id>.md and pass the path in "
-                            "`artifacts` instead."
-                        ),
-                    },
-                    "reply_text": {
-                        "type": "string",
-                        "description": (
-                            "Optional user-facing reply text. When provided and "
-                            "sent_reply_to_user is False, the dispatcher sends this to the user "
-                            "instead of text. Use this to keep text as a terse internal summary "
-                            "while sending a richer or differently-phrased message to the user. "
-                            "Omit if text is already the right user-facing message. "
-                            "Do not include raw file paths — use relative paths or descriptions instead."
+                            "`artifacts` instead. The dispatcher reads artifact files and inlines "
+                            "their content in the reply. Never put raw file paths in text — they "
+                            "are server-side references that are useless to mobile users."
                         ),
                     },
                     "source": {
