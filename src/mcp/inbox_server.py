@@ -1700,7 +1700,15 @@ async def list_tools() -> list[Tool]:
                     },
                     "text": {
                         "type": "string",
-                        "description": "The result text to deliver to the user.",
+                        "description": (
+                            "The result text to deliver to the user. "
+                            "Keep this to a concise summary (ideally under ~4KB / ~500 words). "
+                            "For large outputs — reports, diffs, full analysis — write the content "
+                            "to ~/lobster-workspace/reports/<task_id>.md and pass the path in "
+                            "`artifacts` instead. The dispatcher reads artifact files and inlines "
+                            "their content in the reply. Never put raw file paths in text — they "
+                            "are server-side references that are useless to mobile users."
+                        ),
                     },
                     "source": {
                         "type": "string",

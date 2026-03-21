@@ -634,6 +634,7 @@ create_new_directories() {
         "$WORKSPACE_DIR/scheduled-jobs/tasks"
         "$WORKSPACE_DIR/data"
         "$WORKSPACE_DIR/scheduled-jobs/logs"
+        "$WORKSPACE_DIR/reports"
         "$USER_CONFIG_DIR/memory/canonical/people"
         "$USER_CONFIG_DIR/memory/canonical/projects"
         "$USER_CONFIG_DIR/memory/archive/digests"
@@ -1501,6 +1502,16 @@ with open(path, 'w') as f:
         mkdir -p "$HOME/.config/gws"
         cp "$GWS_SECRET_SRC" "$GWS_SECRET_DEST"
         substep "Restored gws OAuth client secret from lobster-config"
+        migrated=$((migrated + 1))
+    fi
+
+    # Migration 30: Create ~/lobster-workspace/reports/ for artifact-based large result delivery.
+    # Subagents write large outputs (reports, diffs, analysis) to this directory and pass the
+    # path in write_result artifacts=[...]. The dispatcher reads and inlines the content rather
+    # than bloating the inbox message or the dispatcher's context window (see issue #746).
+    if [ ! -d "$WORKSPACE_DIR/reports" ]; then
+        mkdir -p "$WORKSPACE_DIR/reports"
+        substep "Created $WORKSPACE_DIR/reports/ for subagent artifact storage"
         migrated=$((migrated + 1))
     fi
 
