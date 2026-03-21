@@ -28,6 +28,12 @@ from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
+# ---------------------------------------------------------------------------
+# Shared outbox handler (src/channels/outbox.py)
+# ---------------------------------------------------------------------------
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).parent.parent))
+from channels.outbox import OutboxFileHandler, drain_outbox  # noqa: E402
 
 # Configuration from environment
 SLACK_BOT_TOKEN = os.environ.get("LOBSTER_SLACK_BOT_TOKEN", "")
@@ -332,73 +338,35 @@ def download_slack_file(file_info: dict, msg_id: str, msg_data: dict) -> None:
     log.info(f"Downloaded file to: {save_path}")
 
 
-class OutboxHandler(FileSystemEventHandler):
-    """Watches outbox for reply files and sends them via Slack."""
+def _send_slack_reply(reply: dict) -> bool:
+    """Pure send function for the shared OutboxFileHandler.
 
-    def on_created(self, event):
-        if event.is_directory:
-            return
-        if event.src_path.endswith('.json'):
-            # Process in a separate thread to avoid blocking
-            Thread(target=self.process_reply_sync, args=(event.src_path,)).start()
+    Handles optional thread replies by passing ``thread_ts`` from the reply
+    dict to ``chat_postMessage``.
+    """
+    channel_id = reply.get("chat_id", "")
+    text = reply.get("text", "")
+    thread_ts = reply.get("thread_ts")
 
-    def process_reply_sync(self, filepath):
-        """Process a reply file synchronously."""
-        try:
-            time.sleep(0.1)  # Brief delay to ensure file is written
-            with open(filepath, 'r') as f:
-                reply = json.load(f)
-
-            # Only process Slack replies
-            if reply.get('source', '').lower() != 'slack':
-                return
-
-            channel_id = reply.get('chat_id')
-            text = reply.get('text', '')
-            thread_ts = reply.get('thread_ts')
-
-            if not channel_id or not text:
-                log.warning(f"Invalid Slack reply: missing channel_id or text")
-                os.remove(filepath)
-                return
-
-            # Send the message
-            try:
-                kwargs = {
-                    "channel": channel_id,
-                    "text": text,
-                }
-
-                # Reply in thread if specified
-                if thread_ts:
-                    kwargs["thread_ts"] = thread_ts
-
-                client.chat_postMessage(**kwargs)
-                log.info(f"Sent Slack reply to {channel_id}: {text[:50]}...")
-
-            except SlackApiError as e:
-                log.error(f"Error sending Slack message: {e}")
-
-            # Remove processed file
-            os.remove(filepath)
-
-        except Exception as e:
-            log.error(f"Error processing reply {filepath}: {e}")
+    try:
+        kwargs: dict = {"channel": channel_id, "text": text}
+        if thread_ts:
+            kwargs["thread_ts"] = thread_ts
+        client.chat_postMessage(**kwargs)
+        log.info("Sent Slack reply to %s: %s...", channel_id, text[:50])
+        return True
+    except SlackApiError as exc:
+        log.error("Error sending Slack message: %s", exc)
+        return False
 
 
-def process_existing_outbox():
+# Backward-compatible alias -- code that imports OutboxHandler directly still works.
+OutboxHandler = OutboxFileHandler
+
+
+def process_existing_outbox() -> None:
     """Process any Slack outbox files that exist on startup."""
-    handler = OutboxHandler()
-    existing_files = list(OUTBOX_DIR.glob("*.json"))
-
-    for filepath in existing_files:
-        try:
-            with open(filepath, 'r') as f:
-                reply = json.load(f)
-            if reply.get('source', '').lower() == 'slack':
-                handler.process_reply_sync(str(filepath))
-        except Exception as e:
-            log.error(f"Error processing existing outbox file {filepath}: {e}")
+    drain_outbox(OUTBOX_DIR, source="slack", send_fn=_send_slack_reply, log=log)
 
 
 def main():
@@ -416,12 +384,16 @@ def main():
 
     # Set up outbox watcher
     observer = Observer()
-    observer.schedule(OutboxHandler(), str(OUTBOX_DIR), recursive=False)
+    observer.schedule(
+        OutboxFileHandler(source="slack", send_fn=_send_slack_reply, log=log),
+        str(OUTBOX_DIR),
+        recursive=False,
+    )
     observer.start()
     log.info("Watching outbox for Slack replies...")
 
     # Process any existing outbox files
-    process_existing_outbox()
+    drain_outbox(OUTBOX_DIR, source="slack", send_fn=_send_slack_reply, log=log)
 
     # Start Socket Mode handler
     handler = SocketModeHandler(app, SLACK_APP_TOKEN)
