@@ -1,209 +1,75 @@
 """
-Shared outbox watchdog handler for synchronous (non-async) Lobster channel routers.
+src/channels/outbox.py — OutboxFileHandler channel adapter (BIS-159 Slice 5).
 
-All sync routers (Slack, SMS, WhatsApp/Twilio) share the same file-watching loop:
+Concrete ChannelAdapter implementation that writes reply dicts as JSON files
+to a configurable outbox directory.  The file watcher process (bot/lobster_bot.py
+or equivalent) picks them up and dispatches them to the correct transport.
 
-1. A JSON file appears in ``~/messages/outbox/``.
-2. The handler checks whether ``reply["source"]`` matches this channel.
-3. If it matches, the handler calls ``send_fn(reply)`` to deliver the message.
-4. On success the file is removed; on failure it is left for inspection.
+This is the primary delivery mechanism for all channels: Telegram, WhatsApp,
+SMS, Bisque relay, and Slack all read from a shared outbox directory (or
+channel-specific subdirectories) and dispatch based on the ``source`` field.
 
-Usage
------
-::
-
-    from src.channels.outbox import OutboxFileHandler
-
-    def send_sms(reply: dict) -> bool:
-        to   = reply["chat_id"]
-        text = reply["text"]
-        return twilio_client.messages.create(from_=SMS_NUMBER, to=to, body=text) is not None
-
-    handler = OutboxFileHandler(source="sms", send_fn=send_sms, log=log)
-    observer = Observer()
-    observer.schedule(handler, str(OUTBOX_DIR), recursive=False)
-    observer.start()
-
-Notes
------
-- ``send_fn`` receives the full decoded reply dict and returns ``True`` on
-  success, ``False`` on failure.
-- Each file is processed in a daemon thread so the watchdog callback returns
-  immediately and the observer is never blocked.
-- A short ``sleep(READ_DELAY_SECS)`` before reading guards against a
-  partially-written file appearing on ``on_created``.
-- ``on_moved`` is also handled so that atomic writes (temp-file -> rename) are
-  caught correctly -- this matches the ``atomic_write_json`` pattern used by
-  the MCP inbox server.
+Design:
+  - Satisfies ChannelAdapter via structural subtyping (no explicit base class).
+  - Uses atomic_write_json (write-to-temp + rename) so the watcher never sees
+    a partial file.
+  - Immutable after construction: the outbox_dir path is set at init time.
+  - Thread-safe: atomic_write_json is re-entrant (each call creates its own
+    tempfile in the same directory).
 """
 
 from __future__ import annotations
 
-import json
-import logging
-import os
-import time
-from collections.abc import Callable
 from pathlib import Path
-from threading import Thread
-from typing import Any
 
-from watchdog.events import FileSystemEventHandler
-
-# How long to wait after a file event before attempting to read.
-# Guards against partially-written files landing on on_created.
-READ_DELAY_SECS: float = 0.1
+from utils.fs import atomic_write_json
 
 
-class OutboxFileHandler(FileSystemEventHandler):
-    """Watchdog handler that routes outbox reply files to a send function.
+class OutboxFileHandler:
+    """Write reply dicts atomically to an outbox directory.
 
-    Parameters
-    ----------
-    source:
-        The channel source string to match (e.g. ``"slack"``, ``"sms"``,
-        ``"whatsapp"``).  Only files whose ``reply["source"]`` equals this
-        value (case-insensitive) are processed.
-    send_fn:
-        Pure callable that accepts a decoded reply dict and returns ``True``
-        on successful delivery, ``False`` otherwise.  Side effects (API
-        calls, network I/O) live here.
-    log:
-        Logger instance; if ``None``, a module-level logger is used.
-    read_delay:
-        Seconds to sleep before reading a newly appeared file.  Override
-        for tests (set to 0).
+    The file watcher polls the directory and dispatches files whose ``source``
+    field matches a registered transport handler.
+
+    Args:
+        outbox_dir: Path to the directory where reply JSON files are written.
+                    Must exist and be writable; created lazily on first write
+                    if it does not exist.
+
+    Example:
+        handler = OutboxFileHandler(outbox_dir=Path("/home/admin/messages/outbox"))
+        handler.write({"id": "12345_telegram", "chat_id": ADMIN_CHAT_ID_REDACTED, "text": "Hi"})
+        # Writes /home/admin/messages/outbox/12345_telegram.json atomically.
     """
 
-    def __init__(
-        self,
-        source: str,
-        send_fn: Callable[[dict[str, Any]], bool],
-        log: logging.Logger | None = None,
-        read_delay: float = READ_DELAY_SECS,
-    ) -> None:
-        super().__init__()
-        self._source = source.lower()
-        self._send_fn = send_fn
-        self._log = log or logging.getLogger(__name__)
-        self._read_delay = read_delay
+    def __init__(self, outbox_dir: Path) -> None:
+        self._outbox_dir = outbox_dir
 
-    # ------------------------------------------------------------------
-    # Watchdog callbacks
-    # ------------------------------------------------------------------
+    @property
+    def outbox_dir(self) -> Path:
+        """The outbox directory this handler writes to."""
+        return self._outbox_dir
 
-    def on_created(self, event) -> None:
-        if event.is_directory or not event.src_path.endswith(".json"):
-            return
-        self._dispatch(event.src_path)
+    def write(self, reply: dict) -> None:
+        """Write *reply* as a JSON file in the outbox directory.
 
-    def on_moved(self, event) -> None:
-        """Handle atomic writes: temp file renamed to .json."""
-        if event.is_directory or not event.dest_path.endswith(".json"):
-            return
-        self._dispatch(event.dest_path)
+        The filename is ``{reply['id']}.json``.  If ``reply`` has no ``id``
+        field, raises ``KeyError``.
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
+        Uses write-to-temp-then-rename so the file watcher never observes a
+        partial write.  The parent directory is created if absent.
 
-    def _dispatch(self, filepath: str) -> None:
-        """Spawn a daemon thread to process *filepath*."""
-        Thread(target=self._process, args=(filepath,), daemon=True).start()
+        Args:
+            reply: Reply dict.  Must have an ``id`` key.
 
-    def _process(self, filepath: str) -> None:
-        """Read the outbox file and deliver it if it belongs to this channel.
-
-        This is the single shared implementation that previously lived
-        (duplicated) inside each router's ``OutboxHandler._process`` method.
+        Raises:
+            KeyError:  If ``reply`` does not contain an ``id`` field.
+            OSError:   If the atomic write or directory creation fails.
         """
-        try:
-            if self._read_delay:
-                time.sleep(self._read_delay)
+        reply_id = reply["id"]  # Intentional KeyError if missing
+        self._outbox_dir.mkdir(parents=True, exist_ok=True)
+        dest = self._outbox_dir / f"{reply_id}.json"
+        atomic_write_json(dest, reply)
 
-            try:
-                with open(filepath, "r") as f:
-                    reply = json.load(f)
-            except (json.JSONDecodeError, OSError) as exc:
-                self._log.error("Failed to read outbox file %s: %s", filepath, exc)
-                return
-
-            # Skip files that belong to a different channel.
-            if reply.get("source", "").lower() != self._source:
-                return
-
-            chat_id = reply.get("chat_id", "")
-            text = reply.get("text", "")
-
-            if not chat_id or not text:
-                self._log.warning(
-                    "Invalid %s reply %s: missing chat_id or text",
-                    self._source,
-                    filepath,
-                )
-                _safe_remove(filepath, self._log)
-                return
-
-            if self._send_fn(reply):
-                _safe_remove(filepath, self._log)
-            else:
-                self._log.error(
-                    "Failed to deliver %s reply from %s -- leaving for retry",
-                    self._source,
-                    filepath,
-                )
-
-        except Exception as exc:
-            self._log.error("Error processing outbox file %s: %s", filepath, exc)
-
-
-# ---------------------------------------------------------------------------
-# Startup helper
-# ---------------------------------------------------------------------------
-
-
-def drain_outbox(
-    outbox_dir: Path,
-    source: str,
-    send_fn: Callable[[dict[str, Any]], bool],
-    log: logging.Logger | None = None,
-) -> None:
-    """Process any reply files already present in *outbox_dir* at startup.
-
-    Call this once before starting the watchdog observer to avoid missing
-    files that queued up while the router was offline.
-
-    Parameters
-    ----------
-    outbox_dir:
-        Directory to scan (``~/messages/outbox/``).
-    source:
-        Channel source string to match.
-    send_fn:
-        Same callable passed to :class:`OutboxFileHandler`.
-    log:
-        Logger; if ``None``, the module logger is used.
-    """
-    _log = log or logging.getLogger(__name__)
-    handler = OutboxFileHandler(source=source, send_fn=send_fn, log=_log, read_delay=0)
-    for filepath in sorted(outbox_dir.glob("*.json")):
-        try:
-            with open(filepath, "r") as f:
-                reply = json.load(f)
-            if reply.get("source", "").lower() == source.lower():
-                handler._process(str(filepath))
-        except Exception as exc:
-            _log.error("Error draining outbox file %s: %s", filepath, exc)
-
-
-# ---------------------------------------------------------------------------
-# Private utilities
-# ---------------------------------------------------------------------------
-
-
-def _safe_remove(filepath: str, log: logging.Logger) -> None:
-    """Remove *filepath*, logging a warning on failure instead of raising."""
-    try:
-        os.remove(filepath)
-    except OSError as exc:
-        log.warning("Could not remove outbox file %s: %s", filepath, exc)
+    def __repr__(self) -> str:
+        return f"OutboxFileHandler(outbox_dir={self._outbox_dir!r})"
