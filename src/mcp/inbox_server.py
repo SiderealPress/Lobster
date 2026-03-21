@@ -114,40 +114,19 @@ from skill_manager import (
 )
 _update_manager = UpdateManager()
 
-# DB read layer (BIS-164 Slice 3) — optional, graceful degradation
-_db_get_conversation_history = None
-_db_count_conversation_history = None
-_db_get_message_by_telegram_id_fn = None
-_db_get_message_stats = None
-_db_open_messages_db = None
-try:
-    from db import reader as _db_reader_mod
-    from db.connection import open_messages_db as _db_open_messages_db
-    _db_get_conversation_history = _db_reader_mod.get_conversation_history
-    _db_count_conversation_history = _db_reader_mod.count_conversation_history
-    _db_get_message_by_telegram_id_fn = _db_reader_mod.get_message_by_telegram_id
-    _db_get_message_stats = _db_reader_mod.get_message_stats
-    _startup_log.info('[DB] db.reader loaded — DB reads available')
-except Exception as _db_reader_import_err:
-    _startup_log.warning('DB reader module unavailable: %s', _db_reader_import_err)
-
-# BIS-167 Slice 6: Live DB write path — persist messages to messages.db
-_db_persist_inbound = None
+# BIS-163 Slice 2: Live DB write path — persist messages to messages.db
+# Imported lazily so the server starts even if src/db is not on sys.path yet.
+_db_persist_message = None
 _db_persist_outbound = None
 _db_persist_agent_event = None
 try:
     from db.message_store import (
-        persist_inbound as _db_persist_inbound,
+        persist_message as _db_persist_message,
         persist_outbound as _db_persist_outbound,
         persist_agent_event as _db_persist_agent_event,
     )
-    _db_flag = os.environ.get("LOBSTER_USE_DB", "0")
-    _db_status = "ENABLED" if _db_flag == "1" else "DISABLED (set LOBSTER_USE_DB=1 to enable)"
-    _startup_log.info('[DB] message_store loaded — DB writes %s', _db_status)
-    del _db_flag, _db_status
 except Exception as _db_import_err:
-    _startup_log.warning('messages.db write path unavailable: %s', _db_import_err)
-
+    print(f"[WARN] messages.db write path unavailable: {_db_import_err}", file=sys.stderr)
 
 # Memory system (optional — gracefully degrades to static file search)
 _memory_provider = None
@@ -5118,7 +5097,7 @@ async def handle_send_reply(args: dict) -> list[TextContent]:
     sent_file = SENT_DIR / f"{reply_id}.json"
     atomic_write_json(sent_file, reply_data)
 
-    # BIS-167 Slice 6: persist outbound reply to messages.db (no-op when LOBSTER_USE_DB!=1)
+    # BIS-163: Persist outbound reply to messages.db (additive — JSON is source of truth)
     if _db_persist_outbound is not None:
         _db_persist_outbound(reply_data)
 
@@ -5169,18 +5148,13 @@ async def handle_send_reply(args: dict) -> list[TextContent]:
                 found.rename(dest)
                 mark_info = f" | message {mid} marked processed"
                 log.info(f"Atomic mark_processed via send_reply: {mid}")
-                # BIS-167 Slice 6: persist the inbound message now that it is processed
-                if _db_persist_inbound is not None:
+                # BIS-163: Persist the inbound message to messages.db now it is processed
+                if _db_persist_message is not None:
                     try:
-                        _db_persist_inbound(json.loads(dest.read_text()))
+                        inbound_record = json.loads(dest.read_text())
+                        _db_persist_message(inbound_record, "in")
                     except Exception as _db_exc:
-                        log.warning(f"[DB] inbound persist failed for {mid}: {_db_exc}")
-                # Per-message WFM heartbeat: reset the WFM staleness clock so
-                # a long message batch does not exhaust the suppression window
-                # and trigger a spurious health-check restart (issue #694).
-                _update_lobster_state_fields(
-                    {"last_processed_at": datetime.now(timezone.utc).isoformat()}
-                )
+                        log.warning(f"[BIS-163] DB persist failed for {mid}: {_db_exc}")
             else:
                 mark_info = f" | ⚠️ message {mid} not found for mark_processed"
                 log.warning(f"Atomic mark_processed: message not found: {mid}")
@@ -5228,7 +5202,7 @@ async def handle_send_whatsapp_reply(args: dict) -> list[TextContent]:
     sent_file = SENT_DIR / f"{reply_id}.json"
     atomic_write_json(sent_file, reply_data)
 
-    # BIS-167 Slice 6: persist outbound reply to messages.db
+    # BIS-163: Persist outbound WhatsApp reply to messages.db
     if _db_persist_outbound is not None:
         _db_persist_outbound(reply_data)
 
@@ -5266,7 +5240,7 @@ async def handle_send_sms_reply(args: dict) -> list[TextContent]:
     sent_file = SENT_DIR / f"{reply_id}.json"
     atomic_write_json(sent_file, reply_data)
 
-    # BIS-167 Slice 6: persist outbound reply to messages.db
+    # BIS-163: Persist outbound SMS reply to messages.db
     if _db_persist_outbound is not None:
         _db_persist_outbound(reply_data)
 
@@ -5360,6 +5334,10 @@ async def handle_mark_processed(args: dict) -> list[TextContent]:
                         sent_file = SENT_DIR / f"{fallback_id}.json"
                         atomic_write_json(sent_file, fallback_data)
 
+                        # BIS-163: Persist the auto-reply fallback to messages.db
+                        if _db_persist_outbound is not None:
+                            _db_persist_outbound(fallback_data)
+
                         _track_reply(chat_id)
                         log.warning(f"Auto-reply fallback triggered for message {message_id} (chat {chat_id})")
         except (json.JSONDecodeError, OSError):
@@ -5369,29 +5347,15 @@ async def handle_mark_processed(args: dict) -> list[TextContent]:
     dest = PROCESSED_DIR / found.name
     found.rename(dest)
 
-    # Update claim status to 'processed' (issue #1360).
-    # No-op on rows that predate this migration (message_id absent from table).
-    _claims_db.update_status(message_id, "processed")
-
-    # BIS-167 Slice 6: persist inbound message to messages.db now that it is fully processed.
-    if _db_persist_inbound is not None:
+    # BIS-163: Persist inbound message to messages.db now that it is fully processed.
+    # Read from the destination path for the canonical final state (including
+    # _processing_started_at if mark_processing stamped it earlier).
+    if _db_persist_message is not None:
         try:
-            _db_persist_inbound(json.loads(dest.read_text()))
+            inbound_record = json.loads(dest.read_text())
+            _db_persist_message(inbound_record, "in")
         except Exception as _db_exc:
-            log.warning(f"[DB] inbound persist failed for {message_id}: {_db_exc}")
-
-    # Write a per-message heartbeat so the health check can distinguish a
-    # dispatcher that is actively draining a long message batch from one that
-    # is genuinely stuck.  The WFM freshness check uses the more recent of the
-    # WFM heartbeat file and this timestamp, so a burst of 20+ cron pings
-    # processed without returning to wait_for_messages does not exhaust the
-    # suppression window and trigger a spurious restart (issue #694).
-    _update_lobster_state_fields(
-        {"last_processed_at": datetime.now(timezone.utc).isoformat()}
-    )
-
-    # Emit inbox.processed to EventBus for audit trail (issue #1352).
-    _emit_mcp_event("inbox.processed", {"message_id": message_id})
+            log.warning(f"[BIS-163] DB persist failed for {message_id}: {_db_exc}")
 
     log.info(f"Message processed: {message_id}")
     return [TextContent(type="text", text=f"✅ Message marked as processed: {message_id}")]
@@ -7888,8 +7852,11 @@ async def handle_write_result(args: dict) -> list[TextContent]:
     inbox_file = INBOX_DIR / f"{message_id}.json"
     atomic_write_json(inbox_file, message)
 
-    # BIS-167 Slice 6: persist agent event immediately on write_result.
-    # Before auto-unregister so the record is in the DB even if the dispatcher crashes.
+    # BIS-163: Persist agent event to messages.db immediately on write_result.
+    # Agent events land in INBOX_DIR and are later moved to PROCESSED_DIR by the
+    # dispatcher; we persist at write time so the DB is populated even if the
+    # dispatcher crashes before mark_processed runs.  INSERT OR IGNORE makes any
+    # subsequent mark_processed DB persist a no-op (idempotent).
     if _db_persist_agent_event is not None:
         _db_persist_agent_event(message)
 
