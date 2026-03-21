@@ -20,11 +20,9 @@ The webhook must be registered in the Twilio console at:
 import json
 import logging
 import os
-import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
-from threading import Thread
 
 from twilio.request_validator import RequestValidator
 from twilio.rest import Client as TwilioClient
@@ -37,6 +35,21 @@ from starlette.requests import Request
 from starlette.responses import Response
 from starlette.routing import Route
 import uvicorn
+# ---------------------------------------------------------------------------
+# Shared outbox handler (src/channels/outbox.py)
+# ---------------------------------------------------------------------------
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).parent.parent))
+from channels.outbox import OutboxFileHandler, drain_outbox  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# Canonical atomic filesystem helper (src/utils/fs.py)
+# ---------------------------------------------------------------------------
+import sys as _sys
+_SRC_DIR = str(Path(__file__).resolve().parent.parent)
+if _SRC_DIR not in _sys.path:
+    _sys.path.insert(0, _SRC_DIR)
+from utils.fs import atomic_write_json  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -119,24 +132,7 @@ def _get_validator() -> RequestValidator:
 
 # ---------------------------------------------------------------------------
 # Pure helpers
-# ---------------------------------------------------------------------------
-
-def atomic_write_json(path: Path, data: dict, indent: int = 2) -> None:
-    """Atomically write JSON via temp-file + rename (POSIX guarantee)."""
-    content = json.dumps(data, indent=indent)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write(content)
-            f.flush()
-            os.fsync(f.fileno())
-        os.rename(tmp, str(path))
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+# 
 
 
 def _normalize_whatsapp_number(raw: str) -> str:
@@ -366,52 +362,22 @@ def send_whatsapp_message(to: str, text: str) -> bool:
         return False
 
 
-class OutboxHandler(FileSystemEventHandler):
-    """Watches outbox dir and delivers files with source='whatsapp' via Twilio."""
+def _send_whatsapp_reply(reply: dict) -> bool:
+    """Pure send function for the shared OutboxFileHandler.
 
-    def on_created(self, event):
-        if event.is_directory or not event.src_path.endswith(".json"):
-            return
-        Thread(target=self._process, args=(event.src_path,), daemon=True).start()
+    Extracts ``chat_id`` and ``text`` from *reply* and delegates to the
+    existing :func:`send_whatsapp_message` helper.
+    """
+    return send_whatsapp_message(reply["chat_id"], reply["text"])
 
-    def _process(self, filepath: str) -> None:
-        try:
-            time.sleep(0.1)  # Wait for atomic write to complete
-            with open(filepath, "r") as f:
-                reply = json.load(f)
 
-            if reply.get("source", "").lower() != "whatsapp":
-                return
-
-            to = reply.get("chat_id", "")
-            text = reply.get("text", "")
-
-            if not to or not text:
-                log.warning(f"Invalid WhatsApp reply {filepath}: missing chat_id or text")
-                os.remove(filepath)
-                return
-
-            if send_whatsapp_message(to, text):
-                os.remove(filepath)
-            else:
-                log.error(f"Failed to send WhatsApp reply from {filepath}")
-
-        except Exception as e:
-            log.error(f"Error processing outbox file {filepath}: {e}")
+# Backward-compatible alias -- code that imports OutboxHandler directly still works.
+OutboxHandler = OutboxFileHandler
 
 
 def process_existing_outbox() -> None:
     """Deliver any WhatsApp outbox files that piled up before startup."""
-    handler = OutboxHandler()
-    for filepath in sorted(OUTBOX_DIR.glob("*.json")):
-        try:
-            with open(filepath, "r") as f:
-                reply = json.load(f)
-            if reply.get("source", "").lower() == "whatsapp":
-                handler._process(str(filepath))
-        except Exception as e:
-            log.error(f"Error draining outbox file {filepath}: {e}")
-
+    drain_outbox(OUTBOX_DIR, source="whatsapp", send_fn=_send_whatsapp_reply, log=log)
 
 # ---------------------------------------------------------------------------
 # Starlette webhook endpoint
@@ -507,13 +473,17 @@ def main() -> None:
 
     # Start outbox watcher thread
     observer = Observer()
-    observer.schedule(OutboxHandler(), str(OUTBOX_DIR), recursive=False)
+    observer.schedule(
+        OutboxFileHandler(source="whatsapp", send_fn=_send_whatsapp_reply, log=log),
+        str(OUTBOX_DIR),
+        recursive=False,
+    )
     observer.daemon = True
     observer.start()
     log.info("Watching outbox for WhatsApp replies...")
 
     # Drain any replies that queued up before we started
-    process_existing_outbox()
+    drain_outbox(OUTBOX_DIR, source="whatsapp", send_fn=_send_whatsapp_reply, log=log)
 
     # Start HTTP server
     app = create_app()
