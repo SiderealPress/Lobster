@@ -1,5 +1,5 @@
 """
-Filesystem utility functions for Lobster.
+src/utils/fs.py — Filesystem utility functions for Lobster.
 
 Canonical implementations of atomic file operations used across the codebase.
 All functions are pure in the sense that they have no hidden dependencies —
