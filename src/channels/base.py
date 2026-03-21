@@ -1,64 +1,58 @@
 """
-ChannelAdapter Protocol — structural interface for Lobster channel routers.
+src/channels/base.py — ChannelAdapter Protocol (BIS-159 Slice 5).
 
-Every channel router (Telegram, Slack, SMS, WhatsApp, ...) must satisfy this
-Protocol so that shared infrastructure can treat them uniformly.
+Defines the structural Protocol that all channel adapters must satisfy.
+A "channel adapter" is responsible for delivering a reply dict to its
+transport (Telegram bot, WhatsApp/Twilio, SMS, Slack, Bisque relay, etc.)
+by writing it to the appropriate outbox directory.
 
-Usage
------
-::
+Design principles:
+  - Protocol (structural subtyping) — no inheritance required.
+  - Pure interface: adapters own no state beyond the path they write to.
+  - Callers are agnostic to transport details; they hand off a reply dict
+    and the adapter handles directory routing.
 
-    from src.channels.base import ChannelAdapter
+Usage:
+    def send(adapter: ChannelAdapter, reply: dict) -> None:
+        adapter.write(reply)
 
-    def uses_adapter(adapter: ChannelAdapter) -> None:
-        adapter.start()
-        ...
-
-Because the Protocol is ``@runtime_checkable``, you can use
-``isinstance(obj, ChannelAdapter)`` for duck-type checks at runtime.
-
-Note: The async Telegram router (``lobster_bot.py``) satisfies this protocol
-structurally but is intentionally kept separate because its outbox handler
-requires an asyncio event loop.
+    # Concrete adapter
+    adapter = OutboxFileHandler(outbox_dir=Path("~/messages/outbox"))
+    send(adapter, {"id": "...", "text": "Hello", "chat_id": 123})
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 
 @runtime_checkable
 class ChannelAdapter(Protocol):
-    """Structural interface that all channel routers must satisfy.
+    """Structural protocol for channel adapters.
 
-    Attributes
-    ----------
-    source:
-        The channel name (e.g. ``"slack"``, ``"sms"``, ``"whatsapp"``).
-        Used to match outbox reply files by ``reply["source"]``.
+    Any object implementing ``write(reply)`` satisfies this protocol.
+    No base class or explicit registration is needed.
+
+    Methods:
+        write: Deliver *reply* to the channel's transport.  Implementations
+               must be idempotent with respect to duplicate calls for the
+               same reply id.
     """
 
-    source: str
+    def write(self, reply: dict) -> None:
+        """Deliver *reply* to the underlying transport.
 
-    def process_outbox_reply(self, reply: dict) -> bool:
-        """Deliver one decoded outbox reply dict.
+        Args:
+            reply: A reply dict that must contain at minimum:
+                   - ``id`` (str): Unique message identifier.
+                   - ``chat_id`` (int|str): Destination chat/user.
+                   - ``text`` (str): Reply body.
+                   Additional fields are transport-specific and may be
+                   ignored by adapters that do not support them.
 
-        Parameters
-        ----------
-        reply:
-            The decoded JSON dict from an outbox file.
-
-        Returns
-        -------
-        bool
-            ``True`` on successful delivery, ``False`` on failure.
+        Raises:
+            OSError: If the underlying write fails (e.g., directory does
+                     not exist or is not writable).
         """
-        ...
-
-    def start(self) -> None:
-        """Start the router (connect to service, begin watching outbox, etc.)."""
-        ...
-
-    def stop(self) -> None:
-        """Gracefully stop the router and release resources."""
-        ...
+        ...  # pragma: no cover
