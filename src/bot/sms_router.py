@@ -144,6 +144,7 @@ def _get_validator() -> RequestValidator:
 # Pure helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_msg_id() -> str:
     return f"{int(time.time() * 1000)}_sms"
 

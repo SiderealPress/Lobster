@@ -14,7 +14,6 @@ Design principles:
 """
 
 import json
-import logging
 import sys
 import time
 from datetime import datetime, timezone
@@ -24,8 +23,6 @@ except ImportError:
     from log_utils import GzipRotatingFileHandler  # type: ignore[no-redef]
 from pathlib import Path
 from typing import Any
-
-log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Re-export atomic filesystem helpers from the canonical location.

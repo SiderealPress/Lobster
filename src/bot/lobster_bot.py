@@ -765,6 +765,7 @@ def wake_claude_if_hibernating() -> None:
 
 
 
+
 def extract_reply_to_context(message) -> dict | None:
     """Extract reply-to context from a Telegram message, if it's a reply.
 
