@@ -17,13 +17,26 @@ from logging.handlers import RotatingFileHandler
 import os
 import shutil
 import subprocess
-import tempfile
 import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+import sys as _sys
+_SRC_DIR = str(Path(__file__).resolve().parent.parent)
+if _SRC_DIR not in _sys.path:
+    _sys.path.insert(0, _SRC_DIR)
+from utils.fs import atomic_write_json  # noqa: E402
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+
+# ChannelAdapter Protocol — soft import; lobster_bot satisfies it structurally
+# but keeps its own async OutboxHandler rather than using OutboxFileHandler.
+try:
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).parent.parent))
+    from channels.base import ChannelAdapter  # noqa: F401
+except ImportError:
+    pass  # channels package not yet installed; type hint only
 
 import re
 from dataclasses import dataclass, field
@@ -603,26 +616,6 @@ def wake_claude_if_hibernating() -> None:
         _wake_lock.release()
 
 
-def atomic_write_json(path: Path, data: dict, indent: int = 2) -> None:
-    """Atomically write JSON to a file (write-to-temp-then-rename).
-
-    On POSIX systems, rename() within the same filesystem is atomic,
-    so readers never see a partial file.
-    """
-    content = json.dumps(data, indent=indent)
-    fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write(content)
-            f.flush()
-            os.fsync(f.fileno())
-        os.rename(tmp_path, str(path))
-    except BaseException:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
 
 
 def extract_reply_to_context(message) -> dict | None:
@@ -1316,7 +1309,24 @@ def build_inline_keyboard(buttons: list) -> InlineKeyboardMarkup:
 
 
 class OutboxHandler(FileSystemEventHandler):
-    """Watches outbox for reply files and sends them via Telegram."""
+    """Watches outbox for reply files and sends them via Telegram.
+
+    Note: Unlike the sync routers (Slack, SMS, WhatsApp), which all delegate
+    to the shared ``src.channels.outbox.OutboxFileHandler``, the Telegram
+    handler is intentionally kept here as a custom async implementation.
+
+    Reasons for the async divergence:
+
+    - Sending Telegram messages requires ``await bot.send_message()``, which
+      must run on the bot's asyncio event loop (``main_loop``).
+    - The handler also manages photo sends, Markdown->HTML conversion,
+      multi-chunk long-message splitting, and inline keyboard markup —
+      concerns that are Telegram-specific and not portable to the generic
+      ``OutboxFileHandler`` interface.
+
+    The handler satisfies the ``ChannelAdapter`` Protocol structurally
+    (duck typing) even though it does not inherit from it.
+    """
 
     def _schedule_processing(self, filepath):
         if filepath.endswith('.json') and not filepath.endswith('.tmp'):
