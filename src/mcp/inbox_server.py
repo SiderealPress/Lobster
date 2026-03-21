@@ -3999,7 +3999,7 @@ async def handle_get_stats(args: dict) -> list[TextContent]:
                 msg = json.load(fp)
                 src = msg.get("source", "unknown")
                 source_counts[src] = source_counts.get(src, 0) + 1
-        except:
+        except (OSError, json.JSONDecodeError):
             continue
 
     output = "📊 **Inbox Statistics:**\n\n"
@@ -4236,7 +4236,7 @@ def load_tasks() -> dict:
     try:
         with open(TASKS_FILE, "r") as f:
             return json.load(f)
-    except:
+    except (OSError, json.JSONDecodeError):
         return {"tasks": [], "next_id": 1}
 
 
@@ -4486,7 +4486,7 @@ async def handle_transcribe_audio(args: dict) -> list[TextContent]:
                     msg_file = f
                     msg_data = data
                     break
-        except:
+        except (OSError, json.JSONDecodeError):
             continue
 
     if not msg_file:
@@ -4502,7 +4502,7 @@ async def handle_transcribe_audio(args: dict) -> list[TextContent]:
                         msg_file = f
                         msg_data = data
                         break
-            except:
+            except (OSError, json.JSONDecodeError):
                 continue
 
     if not msg_file:
@@ -4518,7 +4518,7 @@ async def handle_transcribe_audio(args: dict) -> list[TextContent]:
                         msg_file = f
                         msg_data = data
                         break
-            except:
+            except (OSError, json.JSONDecodeError):
                 continue
 
     if not msg_file:
@@ -4749,7 +4749,7 @@ def load_scheduled_jobs() -> dict:
     try:
         with open(SCHEDULED_JOBS_FILE, "r") as f:
             return json.load(f)
-    except:
+    except (OSError, json.JSONDecodeError):
         return {"jobs": {}}
 
 
@@ -4960,7 +4960,7 @@ async def handle_list_scheduled_jobs(args: dict) -> list[TextContent]:
         if last_run and last_run != "never":
             try:
                 last_run = _format_iso_for_display(last_run, "%Y-%m-%d %I:%M %p %Z")
-            except:
+            except (ValueError, TypeError):
                 pass
 
         output += f"**{name}**{status_icon}\n"
@@ -5130,7 +5130,7 @@ async def handle_check_task_outputs(args: dict) -> list[TextContent]:
     if since:
         try:
             since_dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
-        except:
+        except (ValueError, TypeError):
             pass
 
     for f in output_files:
@@ -5151,7 +5151,7 @@ async def handle_check_task_outputs(args: dict) -> list[TextContent]:
                     output_dt = datetime.fromisoformat(data.get("timestamp", "").replace("Z", "+00:00"))
                     if output_dt < since_dt:
                         continue
-                except:
+                except (ValueError, TypeError):
                     pass
 
             data["_filename"] = f.name
@@ -5183,7 +5183,7 @@ async def handle_check_task_outputs(args: dict) -> list[TextContent]:
         # Format timestamp nicely in owner's local timezone
         try:
             ts = _format_iso_for_display(ts, "%Y-%m-%d %I:%M %p %Z")
-        except:
+        except (ValueError, TypeError):
             pass
 
         result += f"---\n"
