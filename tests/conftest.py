@@ -134,6 +134,8 @@ def isolate_inbox_server_paths(tmp_path: Path):
         "scheduled_jobs_file": sched / "jobs.json",
         "scheduled_tasks_dir": sched / "tasks",
         "scheduled_tasks_logs": sched / "logs",
+        # BIS-165 Slice 4: redirected DB path for tests that write to messages.db
+        "messages_db": messages / "messages.db",
     }
 
     # Ensure the module is in sys.modules before patching.  patch.multiple
@@ -172,6 +174,8 @@ def isolate_inbox_server_paths(tmp_path: Path):
             SCHEDULED_JOBS_FILE=sched / "jobs.json",
             SCHEDULED_TASKS_TASKS_DIR=sched / "tasks",
             SCHEDULED_TASKS_LOGS_DIR=sched / "logs",
+            # BIS-165 Slice 4: isolate DB path so tests never touch production messages.db
+            MESSAGES_DB_PATH=messages / "messages.db",
         ):
             yield dirs_result
     except Exception:
