@@ -7523,13 +7523,6 @@ def _build_reconciler_message(
         # the user's Telegram.
         last_output = _read_last_output(output_file)
         original_chat_id = session.get("chat_id", "")
-        # should_drop=True when original_chat_id is 0/""/None — the session was
-        # never associated with a real user request (ghost session, dispatcher
-        # mis-registered as subagent, etc.).  The dispatcher fast-exits on this
-        # field: mark_processing + mark_processed with no LLM deliberation.
-        # This is a deterministic code-level decision, not an LLM heuristic.
-        _oci_str = str(original_chat_id).strip() if original_chat_id is not None else ""
-        should_drop = _oci_str in ("0", "", "None")
         return {
             "id": message_id,
             "type": "agent_failed",
@@ -7544,7 +7537,6 @@ def _build_reconciler_message(
             "original_chat_id": original_chat_id,
             "original_prompt": input_summary,
             "last_output": last_output,
-            "should_drop": should_drop,
             "status": "error",
             "sent_reply_to_user": False,
             "timestamp": now.isoformat(),
@@ -7572,6 +7564,22 @@ def _enqueue_reconciler_notification(session: dict, outcome: str) -> None:
     # Idempotency guard — if already notified, skip
     if session.get("notified_at"):
         return
+
+    # Issue #781 Fix 1: Ghost sessions (original_chat_id is 0/""/None) are
+    # never associated with a real user request.  Don't emit any inbox message
+    # for them — there is no user to notify and no action to take.  This guard
+    # is evaluated once at emission time; the reconciler skip (Fix 2, agent_type
+    # == 'dispatcher') handles the other class of ghost sessions upstream.
+    if outcome == "dead":
+        _oci = session.get("chat_id")
+        _oci_str = str(_oci).strip() if _oci is not None else ""
+        if _oci_str in ("0", "", "None"):
+            agent_id = session.get("id", "")
+            log.debug(
+                f"[reconciler] Skipping dead notification for ghost session "
+                f"{agent_id!r} (chat_id={_oci!r} — no real user)"
+            )
+            return
 
     agent_id = session.get("id", "")
     now = datetime.now(timezone.utc)

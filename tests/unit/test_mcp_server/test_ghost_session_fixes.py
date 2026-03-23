@@ -9,9 +9,11 @@ Two bugs caused cascading WFM stale restarts:
 
 This module tests the fixes:
 
-  Fix 1: _build_reconciler_message() now adds `should_drop: True` to
-         agent_failed messages whose original_chat_id is 0/"" (ghost sessions).
-         The dispatcher bootup doc is updated to short-circuit on this field.
+  Fix 1: _enqueue_reconciler_notification() now skips emitting any inbox
+         message when outcome == "dead" and original_chat_id is 0/"" (ghost
+         sessions).  No message is written — the dispatcher never sees these
+         events.  The `should_drop` field has been removed from
+         _build_reconciler_message().
 
   Fix 2: reconcile_agent_sessions() now skips sessions with
          agent_type == "dispatcher" — preventing the reconciler from ever
@@ -90,12 +92,12 @@ _DISPATCHER_SESSION: dict = {
 
 
 # ---------------------------------------------------------------------------
-# Fixture: load _build_reconciler_message from inbox_server
+# Fixture: load inbox_server functions for integration tests
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(scope="module")
-def build_reconciler_message(tmp_path_factory):
-    """Load _build_reconciler_message from inbox_server with minimal patching."""
+def inbox_server_module(tmp_path_factory):
+    """Load inbox_server with minimal patching."""
     import os
 
     tmp = tmp_path_factory.mktemp("messages")
@@ -106,87 +108,71 @@ def build_reconciler_message(tmp_path_factory):
         if "inbox_server" in sys.modules:
             del sys.modules["inbox_server"]
         import inbox_server as _is
-        return _is._build_reconciler_message
+        return _is
     except Exception:
         pytest.skip("inbox_server not importable in this test environment")
 
 
+@pytest.fixture(scope="module")
+def build_reconciler_message(inbox_server_module):
+    """Return _build_reconciler_message from inbox_server."""
+    return inbox_server_module._build_reconciler_message
+
+
 # ---------------------------------------------------------------------------
-# Bug 1 fix tests: should_drop field on agent_failed messages
+# Bug 1 fix tests: _build_reconciler_message no longer has should_drop field
 # ---------------------------------------------------------------------------
 
-class TestShouldDropFieldOnGhostSessions:
-    """_build_reconciler_message adds should_drop=True for ghost dead sessions.
+class TestNoShouldDropFieldInMessages:
+    """_build_reconciler_message no longer emits should_drop.
 
-    A "ghost" dead session is one whose original_chat_id is 0 or "".
-    The dispatcher bootup doc fast-exits on this field — no LLM deliberation.
+    Ghost sessions (chat_id=0/"") are now suppressed before the message is
+    built — _enqueue_reconciler_notification() returns early without writing
+    to the inbox.  should_drop has been removed from _build_reconciler_message
+    entirely.
     """
 
-    def test_ghost_session_has_should_drop_true(self, build_reconciler_message):
-        """Ghost session (chat_id=0) must produce should_drop=True."""
+    def test_dead_message_has_no_should_drop(self, build_reconciler_message):
+        """Dead messages no longer carry a should_drop field."""
         msg = build_reconciler_message(_GHOST_SESSION, "dead", NOW)
-        assert msg.get("should_drop") is True, (
-            "Expected should_drop=True for ghost dead session (chat_id='0'), "
+        assert "should_drop" not in msg, (
+            "should_drop field was removed — it must not appear in any message, "
             f"got should_drop={msg.get('should_drop')!r}"
         )
 
-    def test_real_subagent_does_not_have_should_drop(self, build_reconciler_message):
-        """Real subagent (chat_id != 0) must NOT have should_drop=True."""
+    def test_real_subagent_dead_has_no_should_drop(self, build_reconciler_message):
+        """Real subagent dead messages also have no should_drop field."""
         msg = build_reconciler_message(_REAL_SUBAGENT_SESSION, "dead", NOW)
-        # should_drop should be False or absent for real users
-        assert not msg.get("should_drop"), (
-            "Expected should_drop=False/absent for real subagent session, "
-            f"got should_drop={msg.get('should_drop')!r}"
+        assert "should_drop" not in msg, (
+            "should_drop field must be absent for all dead messages"
         )
 
-    def test_empty_chat_id_has_should_drop_true(self, build_reconciler_message):
-        """Empty string chat_id also triggers should_drop=True."""
-        session = dict(_GHOST_SESSION, chat_id="")
-        msg = build_reconciler_message(session, "dead", NOW)
-        assert msg.get("should_drop") is True
+    def test_completed_message_has_no_should_drop(self, build_reconciler_message):
+        """Completed messages never had should_drop and still don't."""
+        msg = build_reconciler_message(_REAL_SUBAGENT_SESSION, "completed", NOW)
+        assert "should_drop" not in msg
 
-    def test_none_chat_id_has_should_drop_true(self, build_reconciler_message):
-        """None chat_id (missing) also triggers should_drop=True."""
-        session = dict(_GHOST_SESSION, chat_id=None)
-        msg = build_reconciler_message(session, "dead", NOW)
-        assert msg.get("should_drop") is True
-
-    def test_zero_int_chat_id_has_should_drop_true(self, build_reconciler_message):
-        """Integer 0 chat_id also triggers should_drop=True."""
-        session = dict(_GHOST_SESSION, chat_id=0)
-        msg = build_reconciler_message(session, "dead", NOW)
-        assert msg.get("should_drop") is True
-
-    def test_completed_outcome_never_has_should_drop(self, build_reconciler_message):
-        """Completed outcomes are never dropped — should_drop absent or False."""
-        session = dict(_REAL_SUBAGENT_SESSION)
-        msg = build_reconciler_message(session, "completed", NOW)
-        assert not msg.get("should_drop"), (
-            "Completed outcomes must not have should_drop=True"
-        )
-
-    def test_should_drop_field_present_on_all_dead_messages(self, build_reconciler_message):
-        """All dead messages must include the should_drop key (True or False)."""
-        for session in [_GHOST_SESSION, _REAL_SUBAGENT_SESSION]:
-            msg = build_reconciler_message(session, "dead", NOW)
-            assert "should_drop" in msg, (
-                f"should_drop field missing from dead message for session {session['id']}"
-            )
+    def test_dead_message_still_has_original_chat_id(self, build_reconciler_message):
+        """original_chat_id is still present so dispatcher can decide action."""
+        msg = build_reconciler_message(_REAL_SUBAGENT_SESSION, "dead", NOW)
+        assert "original_chat_id" in msg
+        assert msg["original_chat_id"] == _REAL_SUBAGENT_SESSION["chat_id"]
 
 
 # ---------------------------------------------------------------------------
-# Bug 1 fix tests: should_drop pure logic (deterministic, no inbox_server needed)
+# Bug 1 fix tests: ghost-session no-emit pure logic (deterministic)
 # ---------------------------------------------------------------------------
 
-def _compute_should_drop(chat_id) -> bool:
-    """Pure function mirroring the should_drop logic added to _build_reconciler_message.
+def _is_ghost_chat_id(chat_id) -> bool:
+    """Pure function mirroring the no-emit guard added to _enqueue_reconciler_notification.
 
     A dead agent's failure is a ghost/internal event if its chat_id is 0, "",
     or None — meaning the session was never associated with a real user request.
-    The dispatcher must not deliberate on these; it marks them processed immediately.
+    The reconciler skips emitting any inbox message for these — the dispatcher
+    never sees them.
 
-    This function is extracted here for unit testing in isolation. The same logic
-    must be present in _build_reconciler_message() in inbox_server.py.
+    This function is extracted here for unit testing in isolation. The same
+    logic must be present in _enqueue_reconciler_notification() in inbox_server.py.
     """
     if chat_id is None:
         return True
@@ -194,10 +180,10 @@ def _compute_should_drop(chat_id) -> bool:
     return str_id in ("0", "", "None")
 
 
-class TestShouldDropPureLogic:
-    """should_drop is a pure deterministic function of chat_id."""
+class TestGhostChatIdNoEmitLogic:
+    """Ghost chat_id detection is a pure deterministic function."""
 
-    @pytest.mark.parametrize("chat_id,expected", [
+    @pytest.mark.parametrize("chat_id,expected_is_ghost", [
         ("0", True),
         (0, True),
         ("", True),
@@ -207,15 +193,23 @@ class TestShouldDropPureLogic:
         ("12345", False),
         ("-100123456", False),   # Telegram group chats have negative IDs
     ])
-    def test_parametrized(self, chat_id, expected):
-        assert _compute_should_drop(chat_id) == expected
+    def test_parametrized(self, chat_id, expected_is_ghost):
+        assert _is_ghost_chat_id(chat_id) == expected_is_ghost
 
     def test_deterministic_same_input_same_output(self):
         """Pure function: same inputs always produce same outputs."""
         for chat_id in ("0", "8305714125", "", None):
-            a = _compute_should_drop(chat_id)
-            b = _compute_should_drop(chat_id)
+            a = _is_ghost_chat_id(chat_id)
+            b = _is_ghost_chat_id(chat_id)
             assert a == b
+
+    def test_ghost_session_chat_id_is_detected(self):
+        """_GHOST_SESSION fixture has chat_id that is classified as ghost."""
+        assert _is_ghost_chat_id(_GHOST_SESSION["chat_id"]) is True
+
+    def test_real_subagent_chat_id_is_not_ghost(self):
+        """_REAL_SUBAGENT_SESSION fixture chat_id is not a ghost."""
+        assert _is_ghost_chat_id(_REAL_SUBAGENT_SESSION["chat_id"]) is False
 
 
 # ---------------------------------------------------------------------------
@@ -248,8 +242,9 @@ class TestReconcilerSkipsDispatcherSessions:
     def test_ghost_session_without_type_is_not_skipped(self):
         """Ghost sessions without agent_type are NOT skipped by this guard.
 
-        They are handled by Bug 1 fix (should_drop field). Two independent
-        guards — each catches a different failure mode.
+        They are handled by Bug 1 fix (no-emit guard in
+        _enqueue_reconciler_notification). Two independent guards — each
+        catches a different failure mode.
         """
         assert _should_reconciler_skip(_GHOST_SESSION) is False
 
@@ -392,21 +387,22 @@ class TestGhostSessionCascadePrevented:
     This test documents the full causal chain that these fixes break.
     """
 
-    def test_dispatcher_session_never_triggers_should_drop_path(self):
-        """Dispatcher sessions should be caught by the reconciler skip, not should_drop.
+    def test_dispatcher_session_caught_by_reconciler_skip_not_by_no_emit_guard(self):
+        """Dispatcher sessions should be caught by the reconciler skip, not the no-emit guard.
 
-        The should_drop path is for real sessions that happen to have chat_id=0
+        The no-emit guard is for real sessions that happen to have chat_id=0
         (e.g. old ghost rows from before Bug 2 was fixed). The reconciler skip
         is the primary fix for Bug 2.
         """
         # The reconciler skips dispatcher sessions entirely before ever calling
-        # _build_reconciler_message(), so should_drop is never computed for them.
+        # _enqueue_reconciler_notification(), so the no-emit guard is never
+        # reached for them.
         assert _should_reconciler_skip(_DISPATCHER_SESSION) is True
-        # Ghost sessions (pre-fix, no agent_type) are handled by should_drop
+        # Ghost sessions (pre-fix, no agent_type) are handled by the no-emit guard
         assert _should_reconciler_skip(_GHOST_SESSION) is False
-        assert _compute_should_drop(_GHOST_SESSION["chat_id"]) is True
+        assert _is_ghost_chat_id(_GHOST_SESSION["chat_id"]) is True
 
     def test_real_subagent_failure_still_reaches_dispatcher(self):
         """Real subagent failures (chat_id != 0) are NOT dropped or skipped."""
         assert not _should_reconciler_skip(_REAL_SUBAGENT_SESSION)
-        assert not _compute_should_drop(_REAL_SUBAGENT_SESSION["chat_id"])
+        assert not _is_ghost_chat_id(_REAL_SUBAGENT_SESSION["chat_id"])
