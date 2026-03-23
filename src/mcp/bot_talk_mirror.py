@@ -31,13 +31,14 @@ This module writes sender="SaharLobster", so there is no echo loop.
 Filtering
 ---------
 Only real user messages and outbound replies reach bot-talk.
-Internal system subtypes (self_check, subagent_*, compact_*, scheduler_*) are
+Internal system subtypes (self_check, subagent_*, compact-reminder, compact_catchup, scheduler_*) are
 excluded so Albert's Lobster isn't spammed with Lobster-internal chatter.
 """
 
 import json
 import logging
 import os
+import shlex
 import subprocess
 import threading
 import time
@@ -178,7 +179,7 @@ def _try_ssh(log_line: str) -> bool:
         result = subprocess.run(
             ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes",
              BOT_TALK_SSH_HOST,
-             f"echo {json.dumps(log_line)} >> {BOT_TALK_SSH_LOG}"],
+             f"echo {shlex.quote(log_line)} >> {BOT_TALK_SSH_LOG}"],
             timeout=10,
             capture_output=True,
         )
