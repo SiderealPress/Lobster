@@ -402,16 +402,15 @@ Output: Enriched GitHub Issue + User confirmation
 
 ---
 
-## GitHub MCP Tools Used
+## GitHub CLI Commands Used
 
-| Task | Tool |
-|------|------|
-| Check repo exists | `mcp__github__get_file_contents` on repo root |
-| Create repo | `mcp__github__create_repository` |
-| Create issue | `mcp__github__issue_write` with method `create` |
-| Search issues | `mcp__github__search_issues` |
-| Get issue details | `mcp__github__issue_read` |
-| Add comment | `mcp__github__add_issue_comment` |
+| Task | Command |
+|------|---------|
+| Check repo exists | `gh api repos/<owner>/<repo>` |
+| Create issue | `gh issue create --repo <owner>/<repo> --title "..." --body "..."` |
+| Search issues | `gh issue list --repo <owner>/<repo> --search "..."` |
+| Get issue details | `gh issue view <number> --repo <owner>/<repo>` |
+| Add comment | `gh issue comment <number> --repo <owner>/<repo> --body "..."` |
 
 **Reading context files:**
 Use the `Read` tool to read from `${LOBSTER_CONTEXT_DIR}/*.md` paths.
