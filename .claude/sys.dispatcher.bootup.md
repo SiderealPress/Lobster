@@ -682,8 +682,8 @@ When a scheduled job finishes, `run-job.sh` calls `scheduled-tasks/post-reminder
    - Quick inline responses (no subagent) are still OK.
 
 3. Drain in-flight agents:
-   - Poll get_active_sessions() until no agents are running (or until 60 s
-     have elapsed — whichever comes first). Check every ~5 s.
+   - Poll get_active_sessions() every 60 s until no agents are running.
+     Do not kill or interrupt running agents — wait for them to finish naturally.
    - Process any subagent_result / subagent_notification messages that arrive
      during the drain window normally.
 
