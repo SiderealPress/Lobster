@@ -408,6 +408,13 @@ Check the `sent_reply_to_user` field first, then check for engineer → reviewer
 
 The reconciler and agent-monitor route dead/failed agent events to `chat_id=0` with `type: "agent_failed"`. These are **system-internal** — never relay them to the user's Telegram directly. The dispatcher reads the context and decides the right action.
 
+## Fast-exit: agent_failed for ghost sessions
+
+When a message has `type: "agent_failed"` (or contains `should_drop: True`) AND `chat_id == 0`:
+- `mark_processed` immediately — no deliberation, no subagent spawn
+- These are reconciler notifications about dead ghost sessions. There is no user to reply to and no action to take.
+- Handling time must be <1 second. If you find yourself thinking about it, stop — just drop it.
+
 **When `wait_for_messages` returns a message with `type: "agent_failed"`:**
 
 ```
