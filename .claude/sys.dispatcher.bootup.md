@@ -291,7 +291,7 @@ REMINDER_ROUTING = {
 
 **Rules:**
 - Never call `send_reply` for scheduled reminders (chat_id: 0, source: "system")
-- The subagent should call `write_result` with `chat_id=0` if there is nothing actionable, or send a user-facing alert via `send_reply` to the admin chat_id if it finds a real problem
+- The subagent should always call `write_result` — never `send_reply`. For actionable findings, call `write_result` with `chat_id=ADMIN_CHAT_ID` and `sent_reply_to_user=False`; the dispatcher will relay it. For no-ops, call `write_result` with `chat_id=0`.
 - Do not ack these — they are background system tasks, not user requests
 
 ## Handling Subagent Results (`subagent_result` / `subagent_error`)
@@ -383,16 +383,13 @@ Check the `sent_reply_to_user` field first, then check for engineer → reviewer
                        + "\n".join(f"- {p}" for p in msg["artifacts"]) +
                        f"\n\nSteps:\n"
                        f"1. Read each artifact file.\n"
-                       f"2. Compose a reply: start with the summary text, then append each "
+                       f"2. Compose the full reply text: start with the summary text, then append each "
                        f"artifact's content (separated by ---). Never include raw file paths.\n"
-                       f"3. send_reply(chat_id={msg['chat_id']}, text=<composed reply>, "
-                       f"source='{msg.get('source', 'telegram')}'"
-                       + (f", thread_ts='{msg['thread_ts']}'" if msg.get('thread_ts') else "")
-                       + (f", reply_to_message_id={msg['telegram_message_id']}" if msg.get('telegram_message_id') else "")
-                       + f")\n"
-                       f"4. write_result(task_id='relay-{msg.get('task_id', 'result')}', "
-                       f"chat_id={msg['chat_id']}, text='Delivered.', "
-                       f"source='{msg.get('source', 'telegram')}', sent_reply_to_user=True)"
+                       f"3. Call write_result only — do NOT call send_reply directly.\n"
+                       f"   write_result(task_id='relay-{msg.get('task_id', 'result')}', "
+                       f"chat_id={msg['chat_id']}, text=<composed reply>, "
+                       f"source='{msg.get('source', 'telegram')}', sent_reply_to_user=False)\n"
+                       f"   The dispatcher will relay the text to the user."
                    ),
                )
            else:
@@ -407,7 +404,7 @@ Check the `sent_reply_to_user` field first, then check for engineer → reviewer
            mark_processed(message_id)
 ```
 
-**IMPORTANT — never relay raw file paths to the user.** File paths like `~/lobster-workspace/reports/foo.md` are server-side references that are useless on mobile. When a `subagent_result` contains `artifacts`, delegate their reading to a background subagent (as shown above) — do not call `Read` inline. The subagent reads the files and sends the composed reply directly.
+**IMPORTANT — never relay raw file paths to the user.** File paths like `~/lobster-workspace/reports/foo.md` are server-side references that are useless on mobile. When a `subagent_result` contains `artifacts`, delegate their reading to a background subagent (as shown above) — do not call `Read` inline. The subagent reads the files, composes the full reply, and passes it to `write_result`; the dispatcher then relays it to the user.
 
 **When type is `subagent_error`:**
 
@@ -685,19 +682,19 @@ When a scheduled job finishes, `run-job.sh` calls `scheduled-tasks/post-reminder
            f"Steps:\n"
            f"1. Call check_task_outputs(job_name='{job_name}', limit=1) to read the latest output.\n"
            f"2. Apply the triage heuristic below.\n"
-           f"3. Call write_result(task_id='{triage_task_id}', chat_id=0, "
-           f"text=<summary>, source='system', "
-           f"sent_reply_to_user=<True if you called send_reply, else False>).\n\n"
-           f"Triage heuristic:\n"
-           f"- FAILURES: always relay — send_reply(chat_id=ADMIN_CHAT_ID, ...) with a concise summary\n"
-           f"- SUCCESSES with findings, alerts, or actionable content: relay via send_reply\n"
+           f"3. Call write_result with ALL the information — do NOT call send_reply directly.\n"
+           f"   The dispatcher will decide whether to relay to the user.\n\n"
+           f"   - FAILURES or actionable findings: write_result(task_id='{triage_task_id}', "
+           f"chat_id=ADMIN_CHAT_ID, text=<concise summary>, source='system', sent_reply_to_user=False)\n"
+           f"   - No-op (nothing to report, routine success, empty output): "
+           f"write_result(task_id='{triage_task_id}', chat_id=0, text=<brief note>, source='system', sent_reply_to_user=False)\n\n"
+           f"Triage heuristic (determines which chat_id to pass to write_result):\n"
+           f"- FAILURES: always use chat_id=ADMIN_CHAT_ID — dispatcher will relay\n"
+           f"- SUCCESSES with findings, alerts, or actionable content: use chat_id=ADMIN_CHAT_ID\n"
            f"- SUCCESSES where the output says 'nothing to report', 'no action taken', 'no new', "
-           f"'no findings', or any equivalent no-op phrase: silent — write_result only, no send_reply\n"
-           f"- If the output is empty or missing: treat as no-op — write_result only, no send_reply\n"
-           f"Do NOT attempt to detect whether a prior subagent already relayed this output. "
-           f"Judge solely on the content of the output: if it has actionable information, relay it; "
-           f"if it is a no-op, drop it. The dispatcher's dedup logic handles any duplicate "
-           f"subagent_result messages structurally."
+           f"'no findings', or any equivalent no-op phrase: use chat_id=0 (silent)\n"
+           f"- If the output is empty or missing: treat as no-op — use chat_id=0 (silent)\n"
+           f"Never call send_reply. The dispatcher is the sole point of user communication."
        ),
    )
 
@@ -719,7 +716,7 @@ When a scheduled job finishes, `run-job.sh` calls `scheduled-tasks/post-reminder
 - For successes, relay if the output contains findings, alerts, or explicit user-relevant content
 - Routine "nothing to report" outputs → silent (write_result with chat_id=0, no send_reply)
 
-**Note:** Jobs that already call `send_reply` + `write_result` directly produce a `subagent_result`/`subagent_notification` in addition to the `cron_reminder`. The triage subagent handles this correctly — it reads the output content and drops no-op or already-empty results silently. Any genuine duplicate relay is caught structurally by the dispatcher's `subagent_result` dedup logic (the `sent_reply_to_user` field).
+**Note:** The triage subagent never calls `send_reply`. It reads the output, applies the heuristic, and calls `write_result` with the appropriate `chat_id` (ADMIN_CHAT_ID for actionable content, 0 for no-ops). The dispatcher's `subagent_result` handler then decides whether to relay or silently drop based on `chat_id` and `sent_reply_to_user`.
 
 ## Message Flow
 
