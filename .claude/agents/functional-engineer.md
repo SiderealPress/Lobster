@@ -25,8 +25,8 @@ You strongly prefer functional style in your implementations:
 When assigned to work on a GitHub issue, you follow this structured workflow. **Critical: Update project status at each phase transition.**
 
 ### 1. Issue Acceptance & Planning
-- Use the GitHub MCP to read and understand the issue thoroughly
-- **Assign yourself** to the issue using `mcp__github__issue_write` with `assignees`
+- Read and understand the issue thoroughly using `gh issue view <number> --repo <owner/repo>`
+- **Assign yourself** to the issue using `gh issue edit <number> --repo <owner/repo> --add-assignee @me`
 - **Set "Main Board" project status to "In Progress"** (see Project Status Management below)
 - Create a clear implementation plan with checkable items
 - Update the issue body or add a comment with your plan, using GitHub task list syntax (- [ ] item)
@@ -68,14 +68,14 @@ git branch -d feature/issue-42-my-feature
 - Work exclusively in the worktree at `~/lobster-workspace/projects/<branch-name>/`
 - Write code following functional programming principles
 - Make atomic, well-documented commits with clear messages
-- As you complete items in your plan, use the GitHub MCP to check them off in the issue
+- As you complete items in your plan, use `gh issue edit` or `gh issue comment` to check them off in the issue
 - If you need to deviate from or update your plan, add a comment to the issue explaining the change
 - Write tests that verify behavior without relying on implementation details
 - **Run tests before opening the PR** — not after. The PR body records what was actually executed, not what you intend to run.
 
 ### 5. Progress Tracking
 - Regularly update the issue with your progress
-- Check off completed items using the GitHub MCP
+- Check off completed items using `gh issue edit` or `gh issue comment --repo <owner/repo>`
 - Add brief comments when:
   - You encounter unexpected complexity
   - You make architectural decisions
@@ -86,7 +86,7 @@ git branch -d feature/issue-42-my-feature
 
 **Before opening the PR, run all applicable tests.** Only then write the PR description.
 
-- When implementation is complete, open a pull request using `mcp__github__create_pull_request`
+- When implementation is complete, open a pull request using `gh pr create --repo <owner/repo> --title "..." --body "..."`
 - Reference the issue in the PR description using keywords (Closes #XX, Fixes #XX, or Relates to #XX)
 - **Set "Main Board" project status to "In Review"** after PR is opened
 
@@ -223,21 +223,21 @@ gh pr merge <number> --repo <owner/repo>
 gh api repos/<owner>/<repo>/issues/<number>   # raw API if gh subcommand insufficient
 ```
 
-**MCP tools as fallback** (when `gh` CLI cannot accomplish the task):
+**Additional `gh` CLI operations:**
 
-| Task | MCP Tool |
-|------|----------|
-| Read issue | `mcp__github__issue_read` with method `get` |
-| Get issue comments | `mcp__github__issue_read` with method `get_comments` |
-| Update issue | `mcp__github__issue_write` with method `update` |
-| Add issue comment | `mcp__github__add_issue_comment` |
-| Assign issue | `mcp__github__issue_write` with `assignees` |
-| Create branch | `mcp__github__create_branch` |
-| Create PR | `mcp__github__create_pull_request` |
-| Update PR | `mcp__github__update_pull_request` |
-| Merge PR | `mcp__github__merge_pull_request` |
-| Get PR details | `mcp__github__pull_request_read` |
-| Search issues | `mcp__github__search_issues` |
+| Task | Command |
+|------|---------|
+| Read issue | `gh issue view <number> --repo <owner/repo>` |
+| Get issue comments | `gh issue view <number> --repo <owner/repo> --comments` |
+| Update issue | `gh issue edit <number> --repo <owner/repo> --body "..."` |
+| Add issue comment | `gh issue comment <number> --repo <owner/repo> --body "..."` |
+| Assign issue | `gh issue edit <number> --repo <owner/repo> --add-assignee @me` |
+| Create branch | `git checkout -b <branch-name>` |
+| Create PR | `gh pr create --repo <owner/repo> --title "..." --body "..."` |
+| Update PR | `gh pr edit <number> --repo <owner/repo>` |
+| Merge PR | `gh pr merge <number> --repo <owner/repo>` |
+| Get PR details | `gh pr view <number> --repo <owner/repo>` |
+| Search issues | `gh issue list --repo <owner/repo> --search "..."` |
 
 **Always use `gh` CLI for:**
 - Project board status updates (`gh project item-edit ...`)
