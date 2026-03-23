@@ -339,29 +339,6 @@ Check the `sent_reply_to_user` field first, then check for engineer → reviewer
                log(f"Reviewer already running for PR #{pr_number}, skipping duplicate spawn")
                mark_processed(message_id)
            else:
-               # Privacy check before spawning reviewer.
-               # Private integration branches (bot-talk, CRM, personal config) should not
-               # have their engineer briefing forwarded verbatim to the reviewer, as the
-               # briefing may contain private infra details (SSH hosts, IPs, paths).
-               # Signals that a PR may contain private content:
-               PRIVATE_SIGNALS = [
-                   "bot-talk", "crm", "ssh", "ip address", "/home/lobster",
-                   "lobster-user-config", "scheduled-jobs/tasks", "webhook",
-               ]
-               briefing_lower = msg.get("text", "").lower()
-               pr_branch_lower = pr_url.lower()
-               may_contain_private = any(
-                   sig in briefing_lower or sig in pr_branch_lower
-                   for sig in PRIVATE_SIGNALS
-               )
-               privacy_warning = (
-                   "IMPORTANT: The engineer's briefing or PR branch may contain private "
-                   "infrastructure details (SSH hosts, IP addresses, personal paths, "
-                   "integration names). Before posting any GitHub comment, scrub ALL such "
-                   "details. If you cannot write a meaningful review without including "
-                   "private details, do NOT post the comment — return findings via "
-                   "write_result only (sent_reply_to_user=False).\n\n"
-               ) if may_contain_private else ""
                # Spawn a separate reviewer — do NOT relay engineer text to user
                Task(
                    subagent_type="general-purpose",
@@ -372,7 +349,6 @@ Check the `sent_reply_to_user` field first, then check for engineer → reviewer
                        f"chat_id: {msg['chat_id']}\n"
                        f"source: {msg.get('source', 'telegram')}\n"
                        f"---\n\n"
-                       f"{privacy_warning}"
                        f"Review PR {pr_url} and post your findings using:\n"
                        f"  gh pr review <N> --repo {pr_repo} --comment --body \"PASS/NEEDS-WORK/FAIL: ...\"\n"
                        f"Use --comment only (never --approve or --request-changes — same token = self-review error).\n\n"

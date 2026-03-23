@@ -285,21 +285,14 @@ Lobster uses a tiered model strategy to balance cost and quality. Each subagent 
   - Merge a PR: `gh pr merge <number> --squash --repo <owner/repo>`
   - Create an issue: `gh issue create --title "..." --body "..." --repo <owner/repo>`
 
-- **Privacy classification gate — REQUIRED before opening any PR to `SiderealPress/lobster`:**
+- **When to open a GitHub PR — REQUIRED check before any PR:**
 
-  Before opening any PR to the public `SiderealPress/lobster` repo, classify whether the change is appropriate for a public repo. The following are NEVER PR'd to the public repo — deploy as local-only runtime changes only:
+  Only open a GitHub PR if the change is intended for that upstream repo. Ask: "Is this change meant to improve the shared codebase, or is it a local configuration, personal integration, or runtime fix?"
 
-  | Change type | Examples | Action |
-  |-------------|----------|--------|
-  | Runtime task files | `~/lobster-workspace/scheduled-jobs/tasks/*.md` | Local change only — no PR |
-  | Bot-talk / CRM config | Bot-talk SSH fallback, CRM connection details | Local change only — no PR |
-  | Personal integrations | Personal Telegram bot tokens, webhook URLs, integration credentials | Local change only — no PR |
-  | Private infra details | SSH hosts, IP addresses, internal hostnames | Local change only — no PR |
-  | User-config files | `~/lobster-user-config/agents/*.md` | Local change only — no PR |
+  - **If local** (personal config, runtime task files, private integrations, user-specific setup) → apply the change locally only. No PR, no GitHub. Do not post it even to a private repo branch.
+  - **If upstream** (code improvements, bug fixes, bootup file enhancements, new features for all users) → a PR is appropriate.
 
-  Changes that DO belong in a PR to `SiderealPress/lobster`: code changes, prompt/bootup file improvements, bug fixes, new features, documentation that does not contain private details.
-
-  If you are unsure whether a change is public-repo-appropriate, do NOT open the PR. Apply the change locally and report back describing what you did and why no PR was opened.
+  When in doubt, apply locally and report back describing what you did and why no PR was opened. The test is intent, not content: a change belongs on GitHub only if it's meant to improve the shared system for everyone.
 
 - **Privacy scrub — REQUIRED before posting any GitHub comment to a public repo:**
 
