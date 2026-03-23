@@ -504,8 +504,9 @@ if ! sudo true 2>/dev/null; then
 fi
 success "Sudo access confirmed"
 
-# Check internet (skip when source is already present — dev mode or existing install)
-if [ -d "$INSTALL_DIR/.git" ] || $DEV_MODE; then
+# Check internet (skip when source is already present — dev mode, existing install, or
+# pre-copied source in non-interactive mode, matching the git clone skip condition).
+if [ -d "$INSTALL_DIR/.git" ] || $DEV_MODE || { [ -f "$INSTALL_DIR/install.sh" ] && [ "$NON_INTERACTIVE" = true ]; }; then
     info "Skipping internet check (source already present)"
 elif ! curl -s --connect-timeout 5 https://api.github.com >/dev/null; then
     error "No internet connection (required for fresh install)"
@@ -2104,6 +2105,8 @@ elif [ -n "${GITHUB_PAT:-}" ]; then
     echo "$GITHUB_PAT" | gh auth login --with-token 2>/dev/null && \
         success "GitHub CLI authenticated via PAT" || \
         warn "GitHub CLI auth via PAT failed. Authenticate later with: gh auth login"
+elif [ "$NON_INTERACTIVE" = true ]; then
+    info "GitHub CLI not authenticated — skipping (non-interactive mode). Authenticate later with: gh auth login"
 else
     echo ""
     echo "GitHub CLI (gh) is not authenticated."
