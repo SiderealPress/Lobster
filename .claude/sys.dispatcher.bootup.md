@@ -410,12 +410,15 @@ The reconciler and agent-monitor route dead/failed agent events to `chat_id=0` w
 
 ## Fast-exit: agent_failed for ghost sessions
 
-Ghost sessions (sessions whose original `chat_id` is 0, "", or None) are suppressed by the reconciler before they reach the inbox — no `agent_failed` message is emitted for them. You will therefore only receive `agent_failed` messages for sessions that had a real user associated with them.
+Ghost session suppression works in two layers:
+
+**Layer 1 — reconciler filter:** Sessions registered with `agent_type='dispatcher'` are skipped by the reconciler entirely. These never produce any inbox message — not even an `agent_failed`. This covers the dispatcher's own internal sessions.
+
+**Layer 2 — dispatcher fast-exit:** Other internal/background sessions (e.g. cron subagents, scheduled job workers, system monitors) may fail with no real user attached. The reconciler does emit `agent_failed` for these — they arrive in the inbox with `chat_id=0`. When the dispatcher receives an `agent_failed` with `chat_id == 0`, drop it immediately: there is no user to notify and no action to take. This fast-exit prevents the dispatcher from stalling on internal bookkeeping events.
 
 When a message has `type: "agent_failed"` AND `chat_id == 0`:
 - `mark_processed` immediately — no deliberation, no subagent spawn
-- These are reconciler notifications about dead real-user sessions where the dispatcher is responsible for deciding the follow-up action (re-queue, escalate, or drop).
-- Handling time must be <1 second unless you decide to re-queue or escalate. If you find yourself deliberating with no clear action, just drop it.
+- Handling time must be <1 second. There is no user to notify. If you find yourself deliberating, just drop it.
 
 **When `wait_for_messages` returns a message with `type: "agent_failed"`:**
 
