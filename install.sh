@@ -807,8 +807,10 @@ if [ "$CLAUDE_INSTALLED" = false ]; then
 
     curl -fsSL https://claude.ai/install.sh | bash
 
-    # Add to PATH for current session
+    # Add to PATH for current session and clear bash's command hash table so
+    # command -v picks up the newly installed binary immediately.
     export PATH="$HOME/.local/bin:$PATH"
+    hash -r 2>/dev/null || true
 
     # Persist ~/.local/bin to PATH in shell config files
     PATH_LINE="export PATH=\"\$HOME/.local/bin:\$PATH\""
@@ -821,7 +823,7 @@ if [ "$CLAUDE_INSTALLED" = false ]; then
         fi
     done
 
-    if command -v claude &>/dev/null; then
+    if command -v claude &>/dev/null || [ -x "$HOME/.local/bin/claude" ]; then
         success "Claude Code installed"
     else
         error "Claude Code installation failed"
