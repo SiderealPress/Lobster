@@ -869,20 +869,23 @@ fi
 #===============================================================================
 
 # Detect install mode: --dev flag, existing .git, or git clone (default)
-# Tarball mode was removed as the default because the release tarball gets stale
-# (scripts added after the last release tag are missing, causing install failures).
-# All fresh installs now use git clone from main, which is always current.
+# Tarball is kept as a last-resort fallback only when git is not available.
 # See: https://github.com/SiderealPress/lobster/issues/787
 if [ -d "$INSTALL_DIR/.git" ]; then
     INSTALL_MODE="git"
     info "Existing git install detected"
 else
-    # Both --dev mode and fresh installs use git clone
-    INSTALL_MODE="git"
-    if $DEV_MODE; then
-        info "Developer mode: using git clone"
+    # Both --dev mode and fresh installs use git clone when available
+    if command -v git >/dev/null 2>&1; then
+        INSTALL_MODE="git"
+        if $DEV_MODE; then
+            info "Developer mode: using git clone"
+        else
+            info "Fresh install: using git clone from main (always current)"
+        fi
     else
-        info "Fresh install: using git clone from main (always current)"
+        INSTALL_MODE="tarball"
+        warn "git not found — falling back to tarball install"
     fi
 fi
 
@@ -1127,8 +1130,8 @@ done
 
 success "Global env store configured"
 info "  File: $GLOBAL_ENV_FILE"
-info "  Use 'lobster env set KEY VALUE' to store API tokens"
-info "  Use 'lobster env list' to see stored keys"
+info "  Edit directly: $GLOBAL_ENV_FILE"
+info "  (Use 'lobster env set KEY VALUE' after install to update tokens)"
 info "  See docs/GLOBAL-ENV.md for full documentation"
 
 #===============================================================================
@@ -2073,6 +2076,52 @@ EOF
 fi
 
 #===============================================================================
+# GitHub Personal Access Token
+#===============================================================================
+
+step "Checking GitHub Personal Access Token..."
+
+# Load global.env if not already done so we can check for an existing token
+if [ -f "$GLOBAL_ENV_FILE" ]; then
+    set -a
+    # shellcheck disable=SC1090
+    . "$GLOBAL_ENV_FILE"
+    set +a
+fi
+
+if [ -z "${GITHUB_TOKEN:-}" ] || [ "$GITHUB_TOKEN" = "your_github_pat_here" ]; then
+    if [ "$NON_INTERACTIVE" = false ]; then
+        echo ""
+        echo -e "${BOLD}GitHub Personal Access Token${NC}"
+        echo ""
+        echo "Required for: PR creation, issue tracking, repo operations"
+        echo "Create one at: https://github.com/settings/tokens/new"
+        echo "Required scopes: repo, write:discussion, admin:repo_hook"
+        echo ""
+        read -p "Enter your GitHub PAT (or press Enter to skip): " GH_TOKEN
+        if [ -n "$GH_TOKEN" ]; then
+            # Write to global.env, replacing any existing commented-out GITHUB_TOKEN line
+            if grep -q "^# GITHUB_TOKEN=" "$GLOBAL_ENV_FILE" 2>/dev/null; then
+                sed -i "s|^# GITHUB_TOKEN=.*|GITHUB_TOKEN=$GH_TOKEN|" "$GLOBAL_ENV_FILE"
+            elif grep -q "^GITHUB_TOKEN=" "$GLOBAL_ENV_FILE" 2>/dev/null; then
+                sed -i "s|^GITHUB_TOKEN=.*|GITHUB_TOKEN=$GH_TOKEN|" "$GLOBAL_ENV_FILE"
+            else
+                echo "" >> "$GLOBAL_ENV_FILE"
+                echo "GITHUB_TOKEN=$GH_TOKEN" >> "$GLOBAL_ENV_FILE"
+            fi
+            success "GitHub token saved to $GLOBAL_ENV_FILE"
+        else
+            warn "Skipped — set GITHUB_TOKEN in $GLOBAL_ENV_FILE later"
+        fi
+    else
+        info "Skipping GitHub token prompt (non-interactive mode)"
+        info "Set GITHUB_TOKEN in $GLOBAL_ENV_FILE when ready"
+    fi
+else
+    success "GitHub token already configured"
+fi
+
+#===============================================================================
 # Generate LOBSTER_INTERNAL_SECRET (required for Google Calendar token refresh)
 #===============================================================================
 
@@ -2774,6 +2823,11 @@ DONE
 echo -e "${NC}"
 
 echo "Test it by sending a message to your Telegram bot!"
+echo ""
+echo -e "${BOLD}Required post-install steps:${NC}"
+echo "  1. Set your GitHub PAT:    lobster env set GITHUB_TOKEN <your-token>"
+echo "  2. Authenticate Claude:    sudo -u lobster claude  (then follow OAuth prompts)"
+echo "  3. Start services:         sudo systemctl start lobster-claude lobster-mcp lobster-router"
 echo ""
 echo -e "${BOLD}Commands:${NC}"
 echo "  lobster status    Check service status"
