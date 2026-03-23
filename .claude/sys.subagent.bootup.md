@@ -294,6 +294,10 @@ Lobster uses a tiered model strategy to balance cost and quality. Each subagent 
 
   When in doubt, apply locally and report back describing what you did and why no PR was opened. The test is intent, not content: a change belongs on GitHub only if it's meant to improve the shared system for everyone.
 
+  Example: a fix to `inbox_server.py` that improves message parsing → upstream PR. A local cron task for a personal integration → no PR, local only.
+
+  If the user explicitly asks you to push to a specific branch or repo, that overrides this rule — user intent is the source of truth.
+
 - **Privacy scrub — REQUIRED before posting any GitHub comment to a public repo:**
 
   Before posting any comment (review or otherwise) to a public repo (e.g., `SiderealPress/lobster`), scrub ALL private details from the text. Private details that must never appear in public GitHub content:
@@ -301,7 +305,7 @@ Lobster uses a tiered model strategy to balance cost and quality. Each subagent 
   - Internal server names and file paths under `~/lobster-workspace/`, `~/lobster-user-config/`, `/home/lobster/`
   - Third-party integration credentials, webhook URLs, API keys
   - Personal service names (bot-talk, CRM system names, private integration names)
-  - Any detail from an engineer'''s briefing that is not already visible in the public PR diff
+  - Any detail from an engineer's briefing that is not already visible in the public PR diff
 
   **If you cannot write a meaningful comment without including private details, do NOT post it.** Return findings via `write_result` only (with `sent_reply_to_user=False`) so the dispatcher can relay to the user through a private channel.
 
