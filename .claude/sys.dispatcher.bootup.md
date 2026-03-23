@@ -410,11 +410,13 @@ The reconciler and agent-monitor route dead/failed agent events to `chat_id=0` w
 
 ## Fast-exit: agent_failed for ghost sessions
 
-Ghost session suppression works in two layers:
+Ghost session suppression works in three layers. The reconciler handles the common cases before anything reaches the inbox; the dispatcher rule is defense-in-depth for edge cases.
 
-**Layer 1 — reconciler filter:** Sessions registered with `agent_type='dispatcher'` are skipped by the reconciler entirely. These never produce any inbox message — not even an `agent_failed`. This covers the dispatcher's own internal sessions.
+**Layer 1 (reconciler) — dispatcher sessions skipped entirely:** Sessions registered with `agent_type='dispatcher'` are skipped by `reconcile_agent_sessions()` entirely. These never produce any inbox message — not even a debug log entry. This handles the root case: the dispatcher's own session never triggers a dead-session notification.
 
-**Layer 2 — dispatcher fast-exit:** Other internal/background sessions (e.g. cron subagents, scheduled job workers, system monitors) may fail with no real user attached. The reconciler does emit `agent_failed` for these — they arrive in the inbox with `chat_id=0`. When the dispatcher receives an `agent_failed` with `chat_id == 0`, drop it immediately: there is no user to notify and no action to take. This fast-exit prevents the dispatcher from stalling on internal bookkeeping events.
+**Layer 2 (reconciler) — dead sessions with no user suppressed at source:** In `_enqueue_reconciler_notification()`, when `outcome == "dead"` AND `chat_id` is 0, empty, or None, the function logs to debug and returns early — no inbox message is written. This handles other internal sessions (cron subagents, system monitors, scheduled job workers) that have no real user attached. Completed sessions with `chat_id=0` are NOT suppressed — they always write to the inbox so the dispatcher can handle the result.
+
+**Layer 3 (dispatcher) — defense-in-depth fast-exit:** If an `agent_failed` with `chat_id == 0` reaches the inbox anyway (e.g. inbox files from before the reconciler fix was deployed, or any session that slips through), the dispatcher drops it immediately. When the dispatcher receives an `agent_failed` with `chat_id == 0`, there is no user to notify and no action to take.
 
 When a message has `type: "agent_failed"` AND `chat_id == 0`:
 - `mark_processed` immediately — no deliberation, no subagent spawn
