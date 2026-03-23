@@ -76,48 +76,17 @@ services:
       - lobster-test
 
   # Fresh installation test
+  #
+  # Runs install.sh --non-interactive against the pre-copied source tree, then
+  # verifies that the lobster CLI is installed and responds correctly.
+  #
+  # The LOBSTER_INSTALL_DIR env var tells install.sh to use the pre-copied
+  # source at /home/testuser/lobster rather than cloning from GitHub.
   install-test:
     build:
       context: ../..
       dockerfile: tests/docker/Dockerfile.test
-    command: ["bash", "-c", "
-      echo '=== Testing Lobster Installation ===' &&
-      cd /home/testuser/lobster &&
-
-      # Test directory creation
-      mkdir -p /home/testuser/messages/{inbox,outbox,processed,config,audio,task-outputs} &&
-      mkdir -p /home/testuser/lobster-workspace/logs &&
-
-      # Test Python environment setup
-      python3 -m venv .venv &&
-      .venv/bin/pip install --upgrade pip &&
-      .venv/bin/pip install mcp python-telegram-bot watchdog python-dotenv &&
-
-      # Test config file creation
-      mkdir -p config &&
-      echo 'TELEGRAM_BOT_TOKEN=test_token' > config/config.env &&
-      echo 'TELEGRAM_ALLOWED_USERS=123456' >> config/config.env &&
-
-      # Test scheduled tasks setup
-      mkdir -p scheduled-tasks/{tasks,logs} &&
-      echo '{\"jobs\": {}}' > scheduled-tasks/jobs.json &&
-      chmod +x scheduled-tasks/run-job.sh 2>/dev/null || true &&
-      chmod +x scheduled-tasks/sync-crontab.sh 2>/dev/null || true &&
-
-      # Test imports
-      .venv/bin/python -c 'from mcp.server import Server; print(\"MCP import OK\")' &&
-      .venv/bin/python -c 'from telegram import Bot; print(\"Telegram import OK\")' &&
-      .venv/bin/python -c 'from watchdog.observers import Observer; print(\"Watchdog import OK\")' &&
-
-      # Verify GitHub MCP configuration exists in setup.sh
-      grep -q 'GitHub MCP Server' setup.sh && echo 'GitHub MCP step found in setup.sh' &&
-
-      # Run installation-specific tests
-      .venv/bin/pip install pytest pytest-asyncio &&
-      .venv/bin/pytest tests/integration/test_installation.py -v 2>/dev/null || echo 'Installation tests passed (basic)' &&
-
-      echo '=== Installation Test Complete ==='
-    "]
+    command: ["bash", "/home/testuser/lobster/tests/docker/run-install-test.sh"]
     networks:
       - lobster-test
 
