@@ -402,6 +402,311 @@ Output: ~/lobster-workspace/brain-dumps/{filename}.md
 
 ---
 
+## GitHub CLI Commands Used
+
+| Task | Command |
+|------|---------|
+| Check repo exists | `gh api repos/<owner>/<repo>` |
+| Create issue | `gh issue create --repo <owner>/<repo> --title "..." --body "..."` |
+| Search issues | `gh issue list --repo <owner>/<repo> --search "..."` |
+| Get issue details | `gh issue view <number> --repo <owner>/<repo>` |
+| Add comment | `gh issue comment <number> --repo <owner>/<repo> --body "..."` |
+
+**Reading context files:**
+Use the `Read` tool to read from `${LOBSTER_CONTEXT_DIR}/*.md` paths.
+
+---
+
+## Deterministic Triage Workflow
+
+After creating the initial brain dump issue, use the **triage tools** to process it through a deterministic workflow. These tools ensure consistent, reliable processing without requiring LLM judgment for each step.
+
+### Workflow Overview
+
+```
+1. Brain Dump Created (label: raw)
+         │
+         ▼
+2. triage_brain_dump() ─── Analyze & list action items
+         │                  (label: raw → triaged)
+         ▼
+3. create_action_item() ─── Create issue per action
+         │                   (linked to parent)
+         ▼
+4. link_action_to_brain_dump() ─── Update parent with links
+         │
+         ▼
+5. close_brain_dump() ─── Summary & close
+                          (label: triaged → actioned, state: closed)
+```
+
+### Triage Tools Reference
+
+#### `triage_brain_dump`
+
+Mark a brain dump as triaged and list extracted action items.
+
+**Inputs:**
+- `owner` (required): Repository owner
+- `repo` (required): Repository name
+- `issue_number` (required): Brain dump issue number
+- `action_items` (required): Array of `{title, description?}` objects
+- `triage_notes` (optional): Additional context/patterns noticed
+
+**Effects:**
+- Adds triage comment with action items list
+- Removes `raw` label
+- Adds `triaged` label
+
+**Example:**
+```python
+triage_brain_dump(
+    owner="myuser",
+    repo="brain-dumps",
+    issue_number=42,
+    action_items=[
+        {"title": "Research OAuth providers", "description": "Compare Auth0, Okta, Firebase Auth"},
+        {"title": "Call Mike about hiking trip"}
+    ],
+    triage_notes="Matches ProjectX from active projects"
+)
+```
+
+#### `create_action_item`
+
+Create a new issue as an action item from a brain dump.
+
+**Inputs:**
+- `owner` (required): Repository owner
+- `repo` (required): Repository name
+- `brain_dump_issue` (required): Parent brain dump issue number
+- `title` (required): Action item title
+- `body` (optional): Detailed description
+- `labels` (optional): Additional labels
+
+**Effects:**
+- Creates new issue with `action-item` label
+- Includes reference to parent brain dump in body
+- Returns the new issue number
+
+**Example:**
+```python
+create_action_item(
+    owner="myuser",
+    repo="brain-dumps",
+    brain_dump_issue=42,
+    title="Research OAuth providers for ProjectX",
+    body="Compare Auth0, Okta, Firebase Auth for the authentication system.",
+    labels=["project:projectx", "tech"]
+)
+```
+
+#### `link_action_to_brain_dump`
+
+Add a linking comment to the brain dump for traceability.
+
+**Inputs:**
+- `owner` (required): Repository owner
+- `repo` (required): Repository name
+- `brain_dump_issue` (required): Brain dump issue number
+- `action_issue` (required): Action item issue number to link
+- `action_title` (required): Title of the action item
+
+**Effects:**
+- Adds comment to brain dump: "Action item created: #N: Title"
+
+**Example:**
+```python
+link_action_to_brain_dump(
+    owner="myuser",
+    repo="brain-dumps",
+    brain_dump_issue=42,
+    action_issue=43,
+    action_title="Research OAuth providers for ProjectX"
+)
+```
+
+#### `close_brain_dump`
+
+Close the brain dump with a summary after all actions are created.
+
+**Inputs:**
+- `owner` (required): Repository owner
+- `repo` (required): Repository name
+- `issue_number` (required): Brain dump issue number
+- `summary` (required): Summary of processing
+- `action_issues` (optional): Array of action issue numbers created
+
+**Effects:**
+- Adds closure comment with summary and action links
+- Removes `triaged` label
+- Adds `actioned` label
+- Closes the issue with reason "completed"
+
+**Example:**
+```python
+close_brain_dump(
+    owner="myuser",
+    repo="brain-dumps",
+    issue_number=42,
+    summary="Processed authentication thoughts. Created 2 action items for OAuth research and hiking coordination.",
+    action_issues=[43, 44]
+)
+```
+
+#### `get_brain_dump_status`
+
+Check the current status of a brain dump.
+
+**Inputs:**
+- `owner` (required): Repository owner
+- `repo` (required): Repository name
+- `issue_number` (required): Brain dump issue number
+
+**Returns:**
+- Title, state, labels
+- Workflow status (raw/triaged/completed)
+- List of linked action items
+
+### Label Workflow Summary
+
+| Stage | Labels | State |
+|-------|--------|-------|
+| New brain dump | `raw` | open |
+| After triage | `triaged` | open |
+| All actions created | `actioned` | closed |
+
+### Full Triage Example
+
+After creating a brain dump issue, process it deterministically:
+
+```python
+# Step 1: Triage the brain dump
+triage_brain_dump(
+    owner="myuser",
+    repo="brain-dumps",
+    issue_number=42,
+    action_items=[
+        {"title": "Research OAuth providers"},
+        {"title": "Call Mike about hiking"}
+    ]
+)
+
+# Step 2: Create action items
+# Returns issue #43
+create_action_item(
+    owner="myuser", repo="brain-dumps",
+    brain_dump_issue=42,
+    title="Research OAuth providers",
+    body="Compare Auth0, Okta, Firebase Auth"
+)
+
+link_action_to_brain_dump(
+    owner="myuser", repo="brain-dumps",
+    brain_dump_issue=42,
+    action_issue=43,
+    action_title="Research OAuth providers"
+)
+
+# Returns issue #44
+create_action_item(
+    owner="myuser", repo="brain-dumps",
+    brain_dump_issue=42,
+    title="Call Mike about hiking"
+)
+
+link_action_to_brain_dump(
+    owner="myuser", repo="brain-dumps",
+    brain_dump_issue=42,
+    action_issue=44,
+    action_title="Call Mike about hiking"
+)
+
+# Step 3: Close the brain dump
+close_brain_dump(
+    owner="myuser", repo="brain-dumps",
+    issue_number=42,
+    summary="Processed: 2 action items created for OAuth research and hiking coordination.",
+    action_issues=[43, 44]
+)
+```
+
+### Why Deterministic?
+
+The triage tools are designed for **determinism**:
+
+1. **Explicit inputs**: Each tool takes exactly what it needs - no LLM interpretation
+2. **Predictable outputs**: Same inputs always produce same effects
+3. **Atomic operations**: Each tool does one thing well
+4. **Clear state transitions**: Labels track workflow progress unambiguously
+5. **Auditable**: Comments provide full audit trail
+
+This allows the brain-dumps agent to reliably process dumps without variance in behavior.
+
+---
+
+## Reporting Results Back to the User
+
+Deliver results in two steps (crash-safe pattern). When the brain dump is fully processed:
+
+```python
+# Step 1: deliver directly to the user (crash-safe)
+mcp__lobster-inbox__send_reply(
+    chat_id=chat_id,          # from the Task prompt
+    text=(
+        f"Brain dump captured! Issue #{issue_number} created.\n\n"
+        f"{context_summary}"  # e.g. "Matched: ProjectX · Mike (hiking buddy)"
+    ),
+    source=source,            # from the Task prompt, default "telegram"
+)
+
+# Step 2: signal dispatcher to mark processed without re-sending
+mcp__lobster-inbox__write_result(
+    task_id=f"brain-dump-{issue_number}",
+    chat_id=chat_id,
+    text=f"Brain dump captured! Issue #{issue_number} created.",
+    source=source,
+    status="success",
+    sent_reply_to_user=True,  # already delivered via send_reply above
+)
+
+# On failure — e.g. issue creation failed (errors go via write_result alone,
+# dispatcher will relay and add context):
+mcp__lobster-inbox__write_result(
+    task_id="brain-dump-failed",
+    chat_id=chat_id,
+    text=(
+        "I couldn't save your brain dump to GitHub. "
+        "Here's the transcription so nothing is lost:\n\n"
+        f"{transcription}"
+    ),
+    source=source,
+    status="error",
+    # sent_reply_to_user=False (default) — dispatcher will relay and prepend error context
+)
+```
+
+The `chat_id` and `source` values are passed in the Task prompt from the main thread.
+
+## Error Handling
+
+- **Context files missing**: Skip context matching, proceed with basic processing
+- **Repo creation fails**: Call `write_result` with `status="error"`, include transcription in text
+- **Issue creation fails**: Call `write_result` with `status="error"`, include transcription so content is not lost
+- **Context matching fails**: Log warning, continue without context enrichment, still call `write_result` on completion
+
+---
+
+## Privacy Considerations
+
+- Brain dumps are stored in a **private** repository by default
+- Context files contain personal information - stored in private config repo
+- Audio files are referenced but stored locally (not uploaded to GitHub)
+- Users can delete issues directly from GitHub
+- Context update suggestions require explicit user approval
+
+---
+
 ## Example Invocation
 
 The dispatcher spawns this agent when a voice message looks like a brain dump:
