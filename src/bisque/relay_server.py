@@ -98,8 +98,26 @@ def _mime_to_ext(mime_type: str) -> str:
     return _MIME_EXT_MAP.get(base_type, "")
 
 
+# P1.3: Token store lives outside the repo at ~/messages/config/bisque-tokens.json.
+# Fall back to the legacy in-repo path for environments that have not yet migrated.
+_EXTERNAL_TOKENS_FILE = _MESSAGES / "config" / "bisque-tokens.json"
 _BISQUE_CHAT_PROJECT = _WORKSPACE / "projects" / "bisque-chat"
-_TOKENS_FILE = _BISQUE_CHAT_PROJECT / "data" / "tokens.json"
+_LEGACY_TOKENS_FILE = _BISQUE_CHAT_PROJECT / "data" / "tokens.json"
+
+
+def _resolve_tokens_file() -> Path:
+    """Return the active token-store path, migrating the legacy file if needed."""
+    config_dir = _MESSAGES / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    # Migrate legacy in-repo file to new location on first run
+    if _LEGACY_TOKENS_FILE.exists() and not _EXTERNAL_TOKENS_FILE.exists():
+        import shutil
+        shutil.copy2(_LEGACY_TOKENS_FILE, _EXTERNAL_TOKENS_FILE)
+        log.info("Migrated token store from %s to %s", _LEGACY_TOKENS_FILE, _EXTERNAL_TOKENS_FILE)
+    return _EXTERNAL_TOKENS_FILE
+
+
+_TOKENS_FILE = _resolve_tokens_file()
 
 # ---------------------------------------------------------------------------
 # Logging
