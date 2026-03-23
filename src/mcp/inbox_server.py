@@ -7565,22 +7565,6 @@ def _enqueue_reconciler_notification(session: dict, outcome: str) -> None:
     if session.get("notified_at"):
         return
 
-    # Issue #781 Fix 1: Ghost sessions (original_chat_id is 0/""/None) are
-    # never associated with a real user request.  Don't emit any inbox message
-    # for them — there is no user to notify and no action to take.  This guard
-    # is evaluated once at emission time; the reconciler skip (Fix 2, agent_type
-    # == 'dispatcher') handles the other class of ghost sessions upstream.
-    if outcome == "dead":
-        _oci = session.get("chat_id")
-        _oci_str = str(_oci).strip() if _oci is not None else ""
-        if _oci_str in ("0", "", "None"):
-            agent_id = session.get("id", "")
-            log.debug(
-                f"[reconciler] Skipping dead notification for ghost session "
-                f"{agent_id!r} (chat_id={_oci!r} — no real user)"
-            )
-            return
-
     agent_id = session.get("id", "")
     now = datetime.now(timezone.utc)
     message = _build_reconciler_message(session, outcome, now)

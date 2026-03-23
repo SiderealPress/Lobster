@@ -7,19 +7,18 @@ Two bugs caused cascading WFM stale restarts:
   Bug 2: SessionStart hook creates ghost sessions on crash-restart because
          _stored_session_is_alive() misclassifies the new dispatcher.
 
-This module tests the fixes:
+This module tests the fix:
 
-  Fix 1: _enqueue_reconciler_notification() now skips emitting any inbox
-         message when outcome == "dead" and original_chat_id is 0/"" (ghost
-         sessions).  No message is written — the dispatcher never sees these
-         events.  The `should_drop` field has been removed from
-         _build_reconciler_message().
-
-  Fix 2: reconcile_agent_sessions() now skips sessions with
+  Fix 2 (the targeted fix): reconcile_agent_sessions() now skips sessions with
          agent_type == "dispatcher" — preventing the reconciler from ever
          emitting an agent_failed for the dispatcher's own session row.
          write-dispatcher-session-id.py now also registers the dispatcher
          session in agent_sessions.db with agent_type='dispatcher'.
+
+  Note: The `should_drop` field has been removed from _build_reconciler_message().
+        The overly-broad chat_id=0 early-return guard (Fix 1) was removed because
+        it suppressed failure notifications for legitimate cron subagents with no
+        user — only the dispatcher-type skip (Fix 2) is kept.
 
 All tests operate on pure functions or minimal fixtures — no inbox_server
 startup needed.
@@ -157,59 +156,6 @@ class TestNoShouldDropFieldInMessages:
         msg = build_reconciler_message(_REAL_SUBAGENT_SESSION, "dead", NOW)
         assert "original_chat_id" in msg
         assert msg["original_chat_id"] == _REAL_SUBAGENT_SESSION["chat_id"]
-
-
-# ---------------------------------------------------------------------------
-# Bug 1 fix tests: ghost-session no-emit pure logic (deterministic)
-# ---------------------------------------------------------------------------
-
-def _is_ghost_chat_id(chat_id) -> bool:
-    """Pure function mirroring the no-emit guard added to _enqueue_reconciler_notification.
-
-    A dead agent's failure is a ghost/internal event if its chat_id is 0, "",
-    or None — meaning the session was never associated with a real user request.
-    The reconciler skips emitting any inbox message for these — the dispatcher
-    never sees them.
-
-    This function is extracted here for unit testing in isolation. The same
-    logic must be present in _enqueue_reconciler_notification() in inbox_server.py.
-    """
-    if chat_id is None:
-        return True
-    str_id = str(chat_id).strip()
-    return str_id in ("0", "", "None")
-
-
-class TestGhostChatIdNoEmitLogic:
-    """Ghost chat_id detection is a pure deterministic function."""
-
-    @pytest.mark.parametrize("chat_id,expected_is_ghost", [
-        ("0", True),
-        (0, True),
-        ("", True),
-        (None, True),
-        ("None", True),
-        ("8305714125", False),
-        ("12345", False),
-        ("-100123456", False),   # Telegram group chats have negative IDs
-    ])
-    def test_parametrized(self, chat_id, expected_is_ghost):
-        assert _is_ghost_chat_id(chat_id) == expected_is_ghost
-
-    def test_deterministic_same_input_same_output(self):
-        """Pure function: same inputs always produce same outputs."""
-        for chat_id in ("0", "8305714125", "", None):
-            a = _is_ghost_chat_id(chat_id)
-            b = _is_ghost_chat_id(chat_id)
-            assert a == b
-
-    def test_ghost_session_chat_id_is_detected(self):
-        """_GHOST_SESSION fixture has chat_id that is classified as ghost."""
-        assert _is_ghost_chat_id(_GHOST_SESSION["chat_id"]) is True
-
-    def test_real_subagent_chat_id_is_not_ghost(self):
-        """_REAL_SUBAGENT_SESSION fixture chat_id is not a ghost."""
-        assert _is_ghost_chat_id(_REAL_SUBAGENT_SESSION["chat_id"]) is False
 
 
 # ---------------------------------------------------------------------------
@@ -384,25 +330,15 @@ class TestGhostSessionCascadePrevented:
     """Integration: dispatcher session tagged 'dispatcher' → reconciler skips it
     → no agent_failed emitted → dispatcher not stalled → no WFM restart.
 
-    This test documents the full causal chain that these fixes break.
+    This test documents the full causal chain that Fix 2 breaks.
     """
 
-    def test_dispatcher_session_caught_by_reconciler_skip_not_by_no_emit_guard(self):
-        """Dispatcher sessions should be caught by the reconciler skip, not the no-emit guard.
-
-        The no-emit guard is for real sessions that happen to have chat_id=0
-        (e.g. old ghost rows from before Bug 2 was fixed). The reconciler skip
-        is the primary fix for Bug 2.
-        """
-        # The reconciler skips dispatcher sessions entirely before ever calling
-        # _enqueue_reconciler_notification(), so the no-emit guard is never
-        # reached for them.
+    def test_dispatcher_session_caught_by_reconciler_skip(self):
+        """Dispatcher sessions are skipped by the reconciler before any notification is emitted."""
         assert _should_reconciler_skip(_DISPATCHER_SESSION) is True
-        # Ghost sessions (pre-fix, no agent_type) are handled by the no-emit guard
+        # Ghost sessions (pre-fix, no agent_type) are not caught by the dispatcher skip
         assert _should_reconciler_skip(_GHOST_SESSION) is False
-        assert _is_ghost_chat_id(_GHOST_SESSION["chat_id"]) is True
 
     def test_real_subagent_failure_still_reaches_dispatcher(self):
-        """Real subagent failures (chat_id != 0) are NOT dropped or skipped."""
+        """Real subagent failures are NOT skipped — they reach the dispatcher."""
         assert not _should_reconciler_skip(_REAL_SUBAGENT_SESSION)
-        assert not _is_ghost_chat_id(_REAL_SUBAGENT_SESSION["chat_id"])
