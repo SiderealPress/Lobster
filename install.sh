@@ -2329,7 +2329,7 @@ if [ -f "$CLAUDE_SETTINGS" ]; then
     if ! jq -e '.hooks.PreToolUse[]? | select(.hooks[]?.command | test("secret-scanner"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
         TMP_SETTINGS=$(mktemp)
         jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
-            "matcher": "mcp__lobster-inbox__send_reply|mcp__github__add_issue_comment|mcp__github__issue_write|mcp__github__create_pull_request|mcp__github__update_pull_request|mcp__github__pull_request_review_write|mcp__github__add_reply_to_pull_request_comment|mcp__github__create_or_update_file|mcp__github__push_files|mcp__github__merge_pull_request|mcp__github__add_comment_to_pending_review|mcp__github__create_pull_request_with_copilot|mcp__github__delete_file|Bash",
+            "matcher": "mcp__lobster-inbox__send_reply|Bash",
             "hooks": [{
                 "type": "command",
                 "command": "python3 '"$INSTALL_DIR"'/hooks/secret-scanner.py",
@@ -2776,55 +2776,6 @@ if [ -f "$CONFIG_FILE" ]; then
     else
         success "LOBSTER_INTERNAL_SECRET already set"
     fi
-fi
-
-#===============================================================================
-# Set LOBSTER_INSTANCE_URL (required for Google OAuth consent-link flow)
-#===============================================================================
-
-if [ -f "$CONFIG_FILE" ]; then
-    source "$CONFIG_FILE"
-    if [ -z "${LOBSTER_INSTANCE_URL:-}" ]; then
-        step "Setting LOBSTER_INSTANCE_URL..."
-        # Attempt to auto-detect the public IP and build an https URL.
-        # The user can update this later if the auto-detected value is wrong.
-        DETECTED_IP=$(curl -s --max-time 5 https://api.ipify.org 2>/dev/null || true)
-        if [ -n "$DETECTED_IP" ]; then
-            INSTANCE_URL="https://${DETECTED_IP}"
-            warn "Auto-detected LOBSTER_INSTANCE_URL=${INSTANCE_URL}"
-            warn "Update this in config.env if your domain name differs from the IP."
-        else
-            INSTANCE_URL=""
-            warn "Could not auto-detect public IP. Set LOBSTER_INSTANCE_URL in config.env manually."
-        fi
-        echo "" >> "$CONFIG_FILE"
-        echo "# Public base URL of this Lobster VPS (used by generate_consent_link for Google OAuth)" >> "$CONFIG_FILE"
-        echo "# Update to your actual domain, e.g. https://vps.example.com" >> "$CONFIG_FILE"
-        echo "LOBSTER_INSTANCE_URL=${INSTANCE_URL}" >> "$CONFIG_FILE"
-        success "LOBSTER_INSTANCE_URL written to config.env"
-    else
-        success "LOBSTER_INSTANCE_URL already set"
-    fi
-fi
-
-#===============================================================================
-# Developer Mode: Enable LOBSTER_DEBUG
-#===============================================================================
-
-if $DEV_MODE && [ -f "$CONFIG_FILE" ]; then
-    step "Developer mode: enabling LOBSTER_DEBUG..."
-    # Remove any existing LOBSTER_DEBUG line (set or commented), then append the live value.
-    # This is idempotent — safe to run on reinstall.
-    if grep -q "^#\{0,1\}LOBSTER_DEBUG=" "$CONFIG_FILE" 2>/dev/null; then
-        # Replace in-place using a temp file (sed -i is not portable across macOS/Linux)
-        TMP_CONFIG=$(mktemp)
-        grep -v "^#\{0,1\}LOBSTER_DEBUG=" "$CONFIG_FILE" > "$TMP_CONFIG"
-        mv "$TMP_CONFIG" "$CONFIG_FILE"
-    fi
-    echo "" >> "$CONFIG_FILE"
-    echo "# Enabled by --dev flag at install time" >> "$CONFIG_FILE"
-    echo "LOBSTER_DEBUG=true" >> "$CONFIG_FILE"
-    success "LOBSTER_DEBUG=true written to $CONFIG_FILE"
 fi
 
 #===============================================================================
