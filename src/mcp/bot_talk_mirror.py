@@ -14,9 +14,14 @@ delivered normally.
 
 Resilience chain
 ----------------
-1. POST http://46.224.41.108:4242/message  (3-second timeout, 2 retries)
-2. SSH fallback: append a log line to /home/shared/bot-talk/log.txt on sharedLobster
+1. HTTP POST to BOT_TALK_HTTP_URL (3-second timeout, 2 retries)
+2. SSH fallback: append a log line to the remote log file via BOT_TALK_SSH_HOST
 3. Local log: ~/lobster-workspace/logs/bot-talk-mirror.log
+
+Configuration (all overridable via environment variables):
+  BOT_TALK_HTTP_URL      - Full URL to the bot-talk /message endpoint
+  BOT_TALK_SSH_HOST      - SSH host alias for the fallback log write
+  BOT_TALK_SSH_LOG_PATH  - Remote log file path on the SSH host
 
 Anti-duplication
 ----------------
@@ -32,6 +37,7 @@ excluded so Albert's Lobster isn't spammed with Lobster-internal chatter.
 
 import json
 import logging
+import os
 import subprocess
 import threading
 import time
@@ -43,12 +49,49 @@ import httpx
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Configuration
+# Configuration — all values overridable via environment variables.
+# Falls back to reading config.env (same pattern as inbox_server.py / OPENAI_API_KEY).
+# If BOT_TALK_HTTP_URL is empty after all lookups, HTTP mirroring is silently
+# disabled (SSH fallback still applies if sharedLobster is reachable).
 # ---------------------------------------------------------------------------
 
-BOT_TALK_HTTP_URL = "http://46.224.41.108:4242/message"
-BOT_TALK_SSH_HOST = "sharedLobster"
-BOT_TALK_SSH_LOG = "/home/shared/bot-talk/log.txt"
+def _read_config_env(key: str) -> str:
+    """Read a single key from ~/messages/config/config.env or the default config.env.
+
+    Returns the value as a string, or "" if not found.
+    """
+    _messages = Path(os.environ.get("LOBSTER_MESSAGES", Path.home() / "messages"))
+    search_paths = [
+        _messages / "config" / "config.env",
+        Path.home() / "messages" / "config" / "config.env",
+    ]
+    for config_path in search_paths:
+        if config_path.exists():
+            try:
+                for line in config_path.read_text().splitlines():
+                    line = line.strip()
+                    if line.startswith(f"{key}="):
+                        return line.split("=", 1)[1].strip().strip('"').strip("'")
+            except Exception:
+                pass
+    return ""
+
+
+BOT_TALK_HTTP_URL: str = (
+    os.environ.get("BOT_TALK_HTTP_URL")
+    or _read_config_env("BOT_TALK_HTTP_URL")
+    or ""
+)
+BOT_TALK_SSH_HOST: str = (
+    os.environ.get("BOT_TALK_SSH_HOST")
+    or _read_config_env("BOT_TALK_SSH_HOST")
+    or "sharedLobster"
+)
+BOT_TALK_SSH_LOG: str = (
+    os.environ.get("BOT_TALK_SSH_LOG_PATH")
+    or _read_config_env("BOT_TALK_SSH_LOG_PATH")
+    or "/home/shared/bot-talk/log.txt"
+)
 BOT_TALK_HTTP_TIMEOUT = 3.0   # seconds
 BOT_TALK_HTTP_RETRIES = 2
 BOT_TALK_SENDER = "SaharLobster"
@@ -107,9 +150,11 @@ def _build_ssh_log_line(content: str, genre: str) -> str:
 def _try_http(payload: dict) -> bool:
     """Attempt to POST payload to the bot-talk HTTP server.
 
-    Returns True on success, False on any failure.
+    Returns True on success, False on any failure (including empty URL).
     Pure in the sense that it has no state — each call is independent.
     """
+    if not BOT_TALK_HTTP_URL:
+        return False
     for attempt in range(BOT_TALK_HTTP_RETRIES + 1):
         try:
             with httpx.Client(timeout=BOT_TALK_HTTP_TIMEOUT) as client:

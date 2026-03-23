@@ -71,11 +71,15 @@ class TestBuildSshLogLine:
 # HTTP attempt logic
 # ---------------------------------------------------------------------------
 
+_FAKE_HTTP_URL = "http://test-bot-talk:4242/message"
+
+
 class TestTryHttp:
     def test_returns_true_on_201(self):
         mock_response = MagicMock()
         mock_response.status_code = 201
-        with patch("bot_talk_mirror.httpx.Client") as mock_client_cls:
+        with patch.object(btm, "BOT_TALK_HTTP_URL", _FAKE_HTTP_URL), \
+             patch("bot_talk_mirror.httpx.Client") as mock_client_cls:
             mock_client = MagicMock()
             mock_client.__enter__ = MagicMock(return_value=mock_client)
             mock_client.__exit__ = MagicMock(return_value=False)
@@ -89,7 +93,8 @@ class TestTryHttp:
     def test_returns_true_on_200(self):
         mock_response = MagicMock()
         mock_response.status_code = 200
-        with patch("bot_talk_mirror.httpx.Client") as mock_client_cls:
+        with patch.object(btm, "BOT_TALK_HTTP_URL", _FAKE_HTTP_URL), \
+             patch("bot_talk_mirror.httpx.Client") as mock_client_cls:
             mock_client = MagicMock()
             mock_client.__enter__ = MagicMock(return_value=mock_client)
             mock_client.__exit__ = MagicMock(return_value=False)
@@ -100,10 +105,19 @@ class TestTryHttp:
 
         assert result is True
 
+    def test_returns_false_when_url_empty(self):
+        """When BOT_TALK_HTTP_URL is empty, _try_http returns False immediately."""
+        with patch.object(btm, "BOT_TALK_HTTP_URL", ""), \
+             patch("bot_talk_mirror.httpx.Client") as mock_client_cls:
+            result = btm._try_http({})
+        assert result is False
+        mock_client_cls.assert_not_called()
+
     def test_returns_false_on_500(self):
         mock_response = MagicMock()
         mock_response.status_code = 500
-        with patch("bot_talk_mirror.httpx.Client") as mock_client_cls, \
+        with patch.object(btm, "BOT_TALK_HTTP_URL", _FAKE_HTTP_URL), \
+             patch("bot_talk_mirror.httpx.Client") as mock_client_cls, \
              patch("bot_talk_mirror.time.sleep"):
             mock_client = MagicMock()
             mock_client.__enter__ = MagicMock(return_value=mock_client)
@@ -116,7 +130,8 @@ class TestTryHttp:
         assert result is False
 
     def test_returns_false_on_connection_error(self):
-        with patch("bot_talk_mirror.httpx.Client") as mock_client_cls, \
+        with patch.object(btm, "BOT_TALK_HTTP_URL", _FAKE_HTTP_URL), \
+             patch("bot_talk_mirror.httpx.Client") as mock_client_cls, \
              patch("bot_talk_mirror.time.sleep"):
             mock_client = MagicMock()
             mock_client.__enter__ = MagicMock(return_value=mock_client)
@@ -137,7 +152,8 @@ class TestTryHttp:
             call_count += 1
             raise Exception("fail")
 
-        with patch("bot_talk_mirror.httpx.Client") as mock_client_cls, \
+        with patch.object(btm, "BOT_TALK_HTTP_URL", _FAKE_HTTP_URL), \
+             patch("bot_talk_mirror.httpx.Client") as mock_client_cls, \
              patch("bot_talk_mirror.time.sleep"):
             mock_client = MagicMock()
             mock_client.__enter__ = MagicMock(return_value=mock_client)
