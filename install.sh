@@ -38,12 +38,10 @@ error() { echo -e "${RED}[ERROR]${NC} $1"; }
 step() { echo -e "\n${CYAN}${BOLD}▶ $1${NC}"; }
 
 # Parse install mode from arguments
-DEV_MODE=false
 NON_INTERACTIVE=false
 CONTAINER_SETUP=false
 for arg in "$@"; do
     case "$arg" in
-        --dev) DEV_MODE=true ;;
         --non-interactive|--skip-config) NON_INTERACTIVE=true ;;
         --container-setup)
             CONTAINER_SETUP=true
@@ -2089,6 +2087,7 @@ if [ -f "$GLOBAL_ENV_FILE" ]; then
     set +a
 fi
 
+GITHUB_TOKEN_SET=false
 if [ -z "${GITHUB_TOKEN:-}" ] || [ "$GITHUB_TOKEN" = "your_github_pat_here" ]; then
     if [ "$NON_INTERACTIVE" = false ]; then
         echo ""
@@ -2100,15 +2099,15 @@ if [ -z "${GITHUB_TOKEN:-}" ] || [ "$GITHUB_TOKEN" = "your_github_pat_here" ]; t
         echo ""
         read -p "Enter your GitHub PAT (or press Enter to skip): " GH_TOKEN
         if [ -n "$GH_TOKEN" ]; then
-            # Write to global.env, replacing any existing commented-out GITHUB_TOKEN line
-            if grep -q "^# GITHUB_TOKEN=" "$GLOBAL_ENV_FILE" 2>/dev/null; then
-                sed -i "s|^# GITHUB_TOKEN=.*|GITHUB_TOKEN=$GH_TOKEN|" "$GLOBAL_ENV_FILE"
-            elif grep -q "^GITHUB_TOKEN=" "$GLOBAL_ENV_FILE" 2>/dev/null; then
-                sed -i "s|^GITHUB_TOKEN=.*|GITHUB_TOKEN=$GH_TOKEN|" "$GLOBAL_ENV_FILE"
+            # Write to global.env, replacing any existing GITHUB_TOKEN line (commented or not)
+            if grep -q "^#\? *GITHUB_TOKEN=" "$GLOBAL_ENV_FILE" 2>/dev/null; then
+                awk -v token="$GH_TOKEN" \
+                    '/^#? *GITHUB_TOKEN=/ { print "GITHUB_TOKEN=" token; next } { print }' \
+                    "$GLOBAL_ENV_FILE" > "$GLOBAL_ENV_FILE.tmp" && mv "$GLOBAL_ENV_FILE.tmp" "$GLOBAL_ENV_FILE"
             else
-                echo "" >> "$GLOBAL_ENV_FILE"
-                echo "GITHUB_TOKEN=$GH_TOKEN" >> "$GLOBAL_ENV_FILE"
+                printf '\nGITHUB_TOKEN=%s\n' "$GH_TOKEN" >> "$GLOBAL_ENV_FILE"
             fi
+            GITHUB_TOKEN_SET=true
             success "GitHub token saved to $GLOBAL_ENV_FILE"
         else
             warn "Skipped — set GITHUB_TOKEN in $GLOBAL_ENV_FILE later"
@@ -2118,6 +2117,7 @@ if [ -z "${GITHUB_TOKEN:-}" ] || [ "$GITHUB_TOKEN" = "your_github_pat_here" ]; t
         info "Set GITHUB_TOKEN in $GLOBAL_ENV_FILE when ready"
     fi
 else
+    GITHUB_TOKEN_SET=true
     success "GitHub token already configured"
 fi
 
@@ -2825,9 +2825,14 @@ echo -e "${NC}"
 echo "Test it by sending a message to your Telegram bot!"
 echo ""
 echo -e "${BOLD}Required post-install steps:${NC}"
+if [ "$GITHUB_TOKEN_SET" = false ]; then
 echo "  1. Set your GitHub PAT:    lobster env set GITHUB_TOKEN <your-token>"
 echo "  2. Authenticate Claude:    sudo -u lobster claude  (then follow OAuth prompts)"
 echo "  3. Start services:         sudo systemctl start lobster-claude lobster-mcp lobster-router"
+else
+echo "  1. Authenticate Claude:    sudo -u lobster claude  (then follow OAuth prompts)"
+echo "  2. Start services:         sudo systemctl start lobster-claude lobster-mcp lobster-router"
+fi
 echo ""
 echo -e "${BOLD}Commands:${NC}"
 echo "  lobster status    Check service status"
