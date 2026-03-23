@@ -1712,7 +1712,7 @@ if [ -f "$CLAUDE_SETTINGS" ]; then
     if ! jq -e '.hooks.PreToolUse[]? | select(.hooks[]?.command | test("secret-scanner"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
         TMP_SETTINGS=$(mktemp)
         jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
-            "matcher": "mcp__lobster-inbox__send_reply|mcp__github__add_issue_comment|mcp__github__issue_write|mcp__github__create_pull_request|mcp__github__update_pull_request|mcp__github__pull_request_review_write|mcp__github__add_reply_to_pull_request_comment|mcp__github__create_or_update_file|mcp__github__push_files|mcp__github__merge_pull_request|mcp__github__add_comment_to_pending_review|mcp__github__create_pull_request_with_copilot|mcp__github__delete_file|Bash",
+            "matcher": "mcp__lobster-inbox__send_reply|Bash",
             "hooks": [{
                 "type": "command",
                 "command": "python3 '"$INSTALL_DIR"'/hooks/secret-scanner.py",
@@ -2065,84 +2065,6 @@ if [ -f "$CONFIG_FILE" ]; then
         success "LOBSTER_INTERNAL_SECRET already set"
     fi
 fi
-
-#===============================================================================
-# GitHub MCP Server (Optional)
-#===============================================================================
-
-step "GitHub Integration (Optional)..."
-
-# Check if GitHub MCP is already configured
-GITHUB_MCP_CONFIGURED=false
-if command -v claude &>/dev/null && claude mcp list 2>/dev/null | grep -q "github"; then
-    GITHUB_MCP_CONFIGURED=true
-    success "GitHub MCP server already configured"
-fi
-
-if [ "$GITHUB_MCP_CONFIGURED" = true ]; then
-    : # Already configured, skip
-elif [ -n "${GITHUB_PAT:-}" ]; then
-    # PAT available from config.env or environment — auto-configure
-    info "Using GITHUB_PAT from environment to set up GitHub MCP server..."
-    if command -v claude &>/dev/null; then
-        claude mcp add-json github "{\"type\":\"http\",\"url\":\"https://api.githubcopilot.com/mcp\",\"headers\":{\"Authorization\":\"Bearer $GITHUB_PAT\"}}" --scope user 2>/dev/null
-        success "GitHub MCP server configured"
-    else
-        warn "Claude Code not found. Configure GitHub MCP manually after install."
-    fi
-elif [ "$NON_INTERACTIVE" = true ]; then
-    info "Skipping GitHub integration (non-interactive mode)."
-elif true; then
-
-echo ""
-echo -e "${BOLD}GitHub MCP Server Setup${NC}"
-echo ""
-echo "The GitHub MCP server lets Lobster:"
-echo "  - Read and manage GitHub issues & PRs"
-echo "  - Browse repositories and code"
-echo "  - Access project boards"
-echo "  - Monitor GitHub Actions workflows"
-echo ""
-read -p "Set up GitHub integration? [y/N] " -n 1 -r
-echo
-
-if [[ $REPLY =~ ^[Yy]$ ]]; then
-    echo ""
-    echo "You need a GitHub Personal Access Token (PAT)."
-    echo ""
-    echo "To create one:"
-    echo "  1. Go to https://github.com/settings/tokens"
-    echo "  2. Click 'Generate new token (classic)'"
-    echo "  3. Select scopes: repo, read:org, read:project"
-    echo "  4. Copy the generated token"
-    echo ""
-
-    read -p "Enter your GitHub PAT (or press Enter to skip): " GITHUB_PAT
-
-    if [ -n "$GITHUB_PAT" ]; then
-        # Add GitHub MCP server to Claude Code
-        if command -v claude &> /dev/null; then
-            claude mcp add-json github "{\"type\":\"http\",\"url\":\"https://api.githubcopilot.com/mcp\",\"headers\":{\"Authorization\":\"Bearer $GITHUB_PAT\"}}" --scope user 2>/dev/null
-            success "GitHub MCP server configured"
-
-            # Save PAT to config (optional, for reference)
-            if [ -f "$CONFIG_FILE" ]; then
-                echo "" >> "$CONFIG_FILE"
-                echo "# GitHub Integration" >> "$CONFIG_FILE"
-                echo "GITHUB_PAT_CONFIGURED=true" >> "$CONFIG_FILE"
-            fi
-        else
-            warn "Claude Code not found. Configure GitHub MCP manually after install:"
-            echo "  claude mcp add-json github '{\"type\":\"http\",\"url\":\"https://api.githubcopilot.com/mcp\",\"headers\":{\"Authorization\":\"Bearer YOUR_PAT\"}}'"
-        fi
-    else
-        info "Skipped GitHub integration. You can set it up later:"
-        echo "  claude mcp add-json github '{\"type\":\"http\",\"url\":\"https://api.githubcopilot.com/mcp\",\"headers\":{\"Authorization\":\"Bearer YOUR_PAT\"}}'"
-    fi
-else
-    info "Skipped GitHub integration. You can set it up later - see README.md"
-fi
-fi  # end non-interactive guard for GitHub integration
 
 #===============================================================================
 # GitHub CLI Authentication

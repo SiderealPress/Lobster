@@ -1445,7 +1445,7 @@ with open(path, 'w') as f:
             TMP_SETTINGS=$(mktemp)
             jq --arg cmd "python3 $INSTALL_DIR/hooks/secret-scanner.py" \
                '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
-                "matcher": "mcp__lobster-inbox__send_reply|mcp__github__add_issue_comment|mcp__github__issue_write|mcp__github__create_pull_request|mcp__github__update_pull_request|mcp__github__pull_request_review_write|mcp__github__add_reply_to_pull_request_comment|mcp__github__create_or_update_file|mcp__github__push_files|mcp__github__merge_pull_request|mcp__github__add_comment_to_pending_review|mcp__github__create_pull_request_with_copilot|mcp__github__delete_file|Bash",
+                "matcher": "mcp__lobster-inbox__send_reply|Bash",
                 "hooks": [{
                     "type": "command",
                     "command": $cmd,
@@ -1512,6 +1512,27 @@ with open(path, 'w') as f:
     if [ ! -d "$WORKSPACE_DIR/reports" ]; then
         mkdir -p "$WORKSPACE_DIR/reports"
         substep "Created $WORKSPACE_DIR/reports/ for subagent artifact storage"
+        migrated=$((migrated + 1))
+    fi
+
+    # Migration 31: Remove GitHub MCP server from Claude Code settings.
+    # The GitHub MCP caused subagents to reach for mcp__github__* tools instead
+    # of the gh CLI, which is already authenticated and the canonical tool.
+    # Removing the MCP entry eliminates the confusion source at the tool-list level.
+    # This migration removes the "github" MCP entry from both settings files so the
+    # MCP no longer appears in the available tool list on next Claude Code startup.
+    for _settings_file in "$HOME/.claude/settings.json" "$HOME/.claude/settings.local.json"; do
+        if [ -f "$_settings_file" ] && jq -e '.mcpServers.github' "$_settings_file" >/dev/null 2>&1; then
+            TMP_SETTINGS=$(mktemp)
+            jq 'del(.mcpServers.github)' "$_settings_file" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$_settings_file"
+            substep "Removed GitHub MCP entry from $_settings_file"
+            migrated=$((migrated + 1))
+        fi
+    done
+    # Also remove via claude CLI in case the MCP was registered at user scope
+    if command -v claude &>/dev/null && claude mcp list 2>/dev/null | grep -q "^github"; then
+        claude mcp remove github --scope user 2>/dev/null || true
+        substep "Removed GitHub MCP server from Claude Code user config"
         migrated=$((migrated + 1))
     fi
 
