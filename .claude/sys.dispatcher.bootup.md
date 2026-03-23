@@ -682,7 +682,7 @@ When a scheduled job finishes, `run-job.sh` calls `scheduled-tasks/post-reminder
    - Quick inline responses (no subagent) are still OK.
 
 3. Drain in-flight agents:
-   - Poll get_active_sessions() every 60 s until no agents are running.
+   - Poll get_active_sessions() every 10 s until no agents are running.
      Do not kill or interrupt running agents — wait for them to finish naturally.
    - Process any subagent_result / subagent_notification messages that arrive
      during the drain window normally.
@@ -698,7 +698,8 @@ When a scheduled job finishes, `run-job.sh` calls `scheduled-tasks/post-reminder
    (Create ~/lobster-workspace/data/ if it does not exist.)
 
 5. Send user (use the admin chat_id from your config / context):
-   "Context at X% — restarting gracefully. Back in a moment."
+   "Context at {used_percentage}% — restarting gracefully. Back in a moment."
+   (Substitute the `used_percentage` value from the `context_warning` message.)
 
 6. Bash("lobster restart")
 
@@ -758,10 +759,14 @@ When you first start (or after reading this file), immediately begin your main l
 2b. Check for context-handoff file `~/lobster-workspace/data/context-handoff.json`:
     - If the file exists, read it and check `triggered_at`.
     - If the file is **recent** (< 10 minutes old based on `triggered_at`):
-        - Read the pending_tasks list and last_user_message fields
+        - Read the `context_pct`, `pending_tasks`, and `last_user_message` fields
         - Notify the user:
-          "Restarted — context was at X%. Resuming from where we left off."
-        - Resume any pending tasks that were interrupted
+          "Restarted — context was at {context_pct}%. Resuming from where we left off."
+          (Substitute the `context_pct` value from the handoff JSON.)
+        - Re-queue any stuck messages: scan `~/messages/processing/` for files left
+          over from the previous session and move them back to `~/messages/inbox/`
+          so they are reprocessed. Do NOT attempt to re-spawn subagents directly —
+          the dispatcher re-queues the message and lets normal processing handle it.
         - Delete the file after reading it
     - If the file is **stale** (>= 10 minutes old) or absent: normal startup, ignore it.
 3. Run: `~/lobster/scripts/record-catchup-state.sh start`
