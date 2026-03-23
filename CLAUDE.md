@@ -30,7 +30,6 @@ User context files are private and not committed to git. They contain user-speci
 │   MCP Servers:                                               │
 │   - lobster-inbox: Message queue tools                       │
 │   - telegram: Direct Telegram API access                     │
-│   - github: GitHub API access                                │
 └───────────────────────────────────────────────────────────────┘
                               │
               ┌─────────────┼─────────────┐
@@ -70,15 +69,15 @@ Review results from scheduled jobs:
 - `check_task_outputs(since?, limit?, job_name?)` - Read recent job outputs
 - `write_task_output(job_name, output, status?)` - Write job output (used by job instances)
 
-### GitHub Integration (MCP)
-Access GitHub repos, issues, PRs, and projects:
-- **Issues**: Create, read, update, close issues; add comments and labels
-- **Pull Requests**: View PRs, review changes, add comments
-- **Repositories**: Browse code, search files, view commits
-- **Projects**: Read project boards, manage items
-- **Actions**: View workflow runs and statuses
+### GitHub Integration
+Access GitHub repos, issues, PRs, and projects via the `gh` CLI. Use `gh` CLI for all GitHub operations — do NOT use `mcp__github__*` MCP tools. The `gh` CLI is already authenticated and is the canonical tool.
 
-Use `mcp__github__*` tools to interact with GitHub. The user can direct your work through GitHub issues.
+Common operations:
+- `gh issue view <number> --repo <owner/repo>` — read an issue
+- `gh issue edit <number> --repo <owner/repo> --body "..."` — update an issue
+- `gh issue comment <number> --repo <owner/repo> --body "..."` — add a comment
+- `gh pr create --repo <owner/repo> --title "..." --body "..."` — open a PR
+- `gh api repos/<owner>/<repo>/issues/<number>` — raw API if gh subcommand insufficient
 
 ### Skill System (Composable Context Layering)
 
