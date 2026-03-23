@@ -235,10 +235,9 @@ Reactions arrive as inbox messages with `type: "reaction"` and include the raw e
 │   ├── bot/lobster_bot.py     # Telegram bot
 │   ├── mcp/inbox_server.py    # MCP server
 │   └── cli                    # CLI tool
-├── scripts/
+├── scripts/                   # 30+ utility scripts for operations
 │   └── claude-wrapper.exp     # Expect script for Claude startup
 ├── scheduled-tasks/           # Scheduled jobs system
-│   ├── jobs.json              # Job registry
 │   ├── tasks/                 # Task markdown files
 │   ├── logs/                  # Execution logs
 │   ├── run-job.sh             # Task executor
@@ -256,6 +255,8 @@ Reactions arrive as inbox messages with `type: "reaction"` and include the raw e
 
 ~/lobster-workspace/           # Claude workspace (the brain)
 ├── CLAUDE.md                  # System context
+├── scheduled-jobs/            # Scheduled job configuration
+│   └── jobs.json              # Job registry
 ├── projects/                  # All Lobster-managed projects
 │   └── [project-name]/        # Each project in its own directory
 └── logs/                      # Log files
@@ -407,8 +408,8 @@ Manual control:
 sudo systemctl status lobster-router
 sudo systemctl status lobster-slack-router  # if Slack enabled
 sudo systemctl status lobster-claude
-tmux -L lobster list-sessions          # Check tmux session
-lobster attach                          # Attach to Claude session
+tmux -L lobster list-sessions              # Check tmux session
+lobster attach                              # Attach to Claude session
 ```
 
 ## Upgrading
@@ -421,12 +422,9 @@ git pull origin main
 ./install.sh
 ```
 
-The installer is idempotent — it updates scripts and services without touching
-your existing config, tokens, or message history.
+The installer is idempotent — it updates scripts and services without touching your existing config, tokens, or message history.
 
-For a full step-by-step guide including lobster-watcher redeployment, DB
-migration verification, and rollback instructions, see
-[docs/upgrading.md](docs/upgrading.md).
+For a full step-by-step guide including lobster-watcher redeployment, DB migration verification, and rollback instructions, see [docs/upgrading.md](docs/upgrading.md).
 
 ## Slack Integration
 
@@ -434,8 +432,8 @@ To add Slack as a message source, see [docs/SLACK-SETUP.md](docs/SLACK-SETUP.md)
 
 ## Security
 
-- 🔐 Bot restricted to allowed user IDs only
-- 🔒 Credentials stored in config.env (gitignored)
+- 🔒 Bot restricted to allowed user IDs only
+- 🔐 Credentials stored in config.env (gitignored)
 - 🛡️ No hardcoded secrets in code
 - 🦞 Hard shell, soft on the inside
 
