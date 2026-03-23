@@ -7565,6 +7565,21 @@ def _enqueue_reconciler_notification(session: dict, outcome: str) -> None:
     if session.get("notified_at"):
         return
 
+    # Dead sessions with no real user don't need dispatcher action — route to
+    # debug log only, not the inbox. The dispatcher cannot notify a user
+    # (no chat_id) or take any meaningful action. Logging preserves observability.
+    if outcome == "dead":
+        _chat_id = session.get("chat_id")
+        _chat_id_str = str(_chat_id).strip() if _chat_id is not None else ""
+        if _chat_id_str in ("0", "", "None"):
+            _agent_id = session.get("id", "")
+            log.debug(
+                "[reconciler] Dead session %r has no real user (chat_id=%r) — "
+                "skipping inbox notification (logged to debug only)",
+                _agent_id, _chat_id,
+            )
+            return
+
     agent_id = session.get("id", "")
     now = datetime.now(timezone.utc)
     message = _build_reconciler_message(session, outcome, now)
