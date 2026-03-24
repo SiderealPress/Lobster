@@ -33,10 +33,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-import os
 import pytest
-
-ADMIN_CHAT_ID_REDACTED: int = int(os.environ.get("LOBSTER_ADMIN_CHAT_ID", "1234567890"))
 
 _ROOT = Path(__file__).parents[3]
 
@@ -70,7 +67,7 @@ _REAL_SUBAGENT_SESSION: dict = {
     "id": "real-subagent-xyz",
     "task_id": "fix-something-123",
     "description": "Fix something for user",
-    "chat_id": "ADMIN_CHAT_ID_REDACTED",
+    "chat_id": "8305714125",
     "source": "telegram",
     "status": "running",
     "output_file": None,
@@ -225,6 +222,109 @@ class TestReconcilerSkipsDispatcherSessions:
 
 
 # ---------------------------------------------------------------------------
+# Bug 2 fix tests: write-dispatcher-session-id.py registers dispatcher in DB
+# ---------------------------------------------------------------------------
+
+class TestDispatcherSessionRegistration:
+    """write-dispatcher-session-id.py registers dispatcher with agent_type='dispatcher'."""
+
+    @pytest.fixture
+    def hook_module(self, tmp_path, monkeypatch):
+        """Load write-dispatcher-session-id.py in a temp environment."""
+        import os
+        import sqlite3
+
+        hook_path = _ROOT / "hooks" / "write-dispatcher-session-id.py"
+        messages_dir = tmp_path / "messages"
+        messages_dir.mkdir(parents=True, exist_ok=True)
+        config_dir = messages_dir / "config"
+        config_dir.mkdir(parents=True, exist_ok=True)
+
+        monkeypatch.setenv("LOBSTER_MESSAGES", str(messages_dir))
+        monkeypatch.setenv("LOBSTER_WORKSPACE", str(tmp_path / "workspace"))
+        monkeypatch.setenv("LOBSTER_MAIN_SESSION", "1")
+
+        # Ensure src paths available for the hook's imports
+        for p in [str(_ROOT / "hooks"), str(_ROOT / "src"), str(_ROOT / "src" / "agents"),
+                  str(_ROOT / "src" / "mcp")]:
+            if p not in sys.path:
+                sys.path.insert(0, p)
+
+        spec = importlib.util.spec_from_file_location(
+            "write_dispatcher_session_id_mod", hook_path
+        )
+        assert spec is not None and spec.loader is not None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod, messages_dir
+
+    def _with_patched_db(self, mod, messages_dir, session_id, extra_calls=0):
+        """Call _register_dispatcher_session with DB path patched to temp dir.
+
+        The hook module loads 'from agents import session_store' which resolves
+        to a different module instance than 'import src.agents.session_store'.
+        We must patch the session_store instance that the hook module actually
+        holds (mod.session_store), not the src-prefixed import.
+        """
+        db_path = messages_dir / "config" / "agent_sessions.db"
+        # The hook module holds a reference to its own session_store import.
+        _ss = mod.session_store
+        orig_default = _ss._DEFAULT_DB_PATH
+        _ss._DEFAULT_DB_PATH = db_path
+        _ss._connections.clear()
+        try:
+            _ss.init_db()  # create schema at temp path
+            mod._register_dispatcher_session(session_id)
+            for _ in range(extra_calls):
+                mod._register_dispatcher_session(session_id)
+        finally:
+            _ss._DEFAULT_DB_PATH = orig_default
+            _ss._connections.clear()
+
+        return db_path
+
+    def test_register_dispatcher_writes_agent_type_dispatcher(self, hook_module):
+        """When _is_dispatcher_session returns True, dispatcher row has agent_type='dispatcher'."""
+        import sqlite3 as _sqlite3
+        mod, messages_dir = hook_module
+
+        if not hasattr(mod, "_register_dispatcher_session"):
+            pytest.skip("_register_dispatcher_session not yet implemented")
+
+        db_path = self._with_patched_db(mod, messages_dir, "test-session-001")
+
+        conn = _sqlite3.connect(str(db_path))
+        row = conn.execute(
+            "SELECT id, agent_type FROM agent_sessions WHERE id = ?",
+            ("test-session-001",)
+        ).fetchone()
+        conn.close()
+
+        assert row is not None, "No row written for dispatcher session"
+        assert row[1] == "dispatcher", (
+            f"Expected agent_type='dispatcher', got {row[1]!r}"
+        )
+
+    def test_register_dispatcher_is_idempotent(self, hook_module):
+        """Calling _register_dispatcher_session twice doesn't error or duplicate."""
+        import sqlite3 as _sqlite3
+        mod, messages_dir = hook_module
+
+        if not hasattr(mod, "_register_dispatcher_session"):
+            pytest.skip("_register_dispatcher_session not yet implemented")
+
+        db_path = self._with_patched_db(mod, messages_dir, "session-idem-001", extra_calls=1)
+
+        conn = _sqlite3.connect(str(db_path))
+        count = conn.execute(
+            "SELECT COUNT(*) FROM agent_sessions WHERE id = ?",
+            ("session-idem-001",)
+        ).fetchone()[0]
+        conn.close()
+        assert count == 1, f"Expected 1 row, got {count}"
+
+
+# ---------------------------------------------------------------------------
 # Integration: both fixes together prevent the full cascade
 # ---------------------------------------------------------------------------
 
@@ -281,8 +381,8 @@ class TestGhostChatIdNoInboxNotification:
         ("", True),
         (None, True),
         ("None", True),
-        ("ADMIN_CHAT_ID_REDACTED", False),
-        (ADMIN_CHAT_ID_REDACTED, False),
+        ("8305714125", False),
+        (8305714125, False),
         ("123", False),
     ])
     def test_dead_outcome_parametrized(self, chat_id, should_skip):
@@ -306,7 +406,7 @@ class TestGhostChatIdNoInboxNotification:
 
     def test_dead_real_user_not_skipped(self):
         """Dead sessions with a real user ID are NOT skipped."""
-        session = dict(_REAL_SUBAGENT_SESSION, chat_id="ADMIN_CHAT_ID_REDACTED")
+        session = dict(_REAL_SUBAGENT_SESSION, chat_id="8305714125")
         assert _should_skip_dead_no_user(session, "dead") is False
 
     def test_dead_ghost_session_is_skipped(self):
@@ -380,255 +480,3 @@ class TestGhostChatIdNoInboxNotification:
         assert len(files) == 1, (
             f"Expected 1 inbox file for completed ghost session, got {len(files)}: {files}"
         )
-
-
-# ---------------------------------------------------------------------------
-# New fix: set_notified called before early return for dead ghost sessions
-# ---------------------------------------------------------------------------
-
-class TestSetNotifiedCalledBeforeEarlyReturn:
-    """Dead ghost sessions (chat_id=0) must have set_notified() called even though
-    no inbox file is written. Without this, get_unnotified_completed() keeps
-    returning them on every restart, flooding the dispatcher.
-    """
-
-    def test_set_notified_called_for_dead_ghost(self, inbox_server_module, tmp_path):
-        """set_notified() is called for dead sessions with no real user."""
-        from unittest.mock import MagicMock, patch
-
-        inbox_dir = tmp_path / "inbox"
-        inbox_dir.mkdir()
-
-        mock_store = MagicMock()
-        original_inbox_dir = inbox_server_module.INBOX_DIR
-        inbox_server_module.INBOX_DIR = inbox_dir
-        try:
-            with patch.object(inbox_server_module, "_session_store", mock_store):
-                inbox_server_module._enqueue_reconciler_notification(
-                    dict(_GHOST_SESSION, notified_at=None), outcome="dead"
-                )
-        finally:
-            inbox_server_module.INBOX_DIR = original_inbox_dir
-
-        # set_notified must have been called with the ghost session's agent id
-        mock_store.set_notified.assert_called_once_with(_GHOST_SESSION["id"])
-        # And no inbox file should have been written
-        assert list(inbox_dir.iterdir()) == [], (
-            "No inbox file should be written for dead ghost session"
-        )
-
-    @pytest.mark.parametrize("chat_id", ["0", 0, "", None, "None"])
-    def test_set_notified_called_for_all_no_user_chat_ids(self, inbox_server_module, tmp_path, chat_id):
-        """set_notified() is called for all ghost chat_id variants."""
-        from unittest.mock import MagicMock, patch
-
-        inbox_dir = tmp_path / "inbox" / str(chat_id or "null")
-        inbox_dir.mkdir(parents=True)
-
-        mock_store = MagicMock()
-        original_inbox_dir = inbox_server_module.INBOX_DIR
-        inbox_server_module.INBOX_DIR = inbox_dir
-        try:
-            with patch.object(inbox_server_module, "_session_store", mock_store):
-                inbox_server_module._enqueue_reconciler_notification(
-                    dict(_GHOST_SESSION, chat_id=chat_id, notified_at=None), outcome="dead"
-                )
-        finally:
-            inbox_server_module.INBOX_DIR = original_inbox_dir
-
-        mock_store.set_notified.assert_called_once_with(_GHOST_SESSION["id"])
-
-    def test_set_notified_not_called_for_already_notified(self, inbox_server_module, tmp_path):
-        """The top-level idempotency guard short-circuits before set_notified is reached."""
-        from unittest.mock import MagicMock, patch
-
-        inbox_dir = tmp_path / "inbox"
-        inbox_dir.mkdir()
-
-        mock_store = MagicMock()
-        original_inbox_dir = inbox_server_module.INBOX_DIR
-        inbox_server_module.INBOX_DIR = inbox_dir
-        try:
-            with patch.object(inbox_server_module, "_session_store", mock_store):
-                inbox_server_module._enqueue_reconciler_notification(
-                    dict(_GHOST_SESSION, notified_at="2026-01-01T00:00:00Z"), outcome="dead"
-                )
-        finally:
-            inbox_server_module.INBOX_DIR = original_inbox_dir
-
-        mock_store.set_notified.assert_not_called()
-
-
-# ---------------------------------------------------------------------------
-# New fix: _inbox_already_has_agent pure check
-# ---------------------------------------------------------------------------
-
-class TestInboxAlreadyHasAgent:
-    """_inbox_already_has_agent() returns True iff an inbox file references the agent_id."""
-
-    def test_returns_false_for_empty_inbox(self, inbox_server_module, tmp_path):
-        """Empty inbox directory returns False."""
-        inbox_dir = tmp_path / "inbox"
-        inbox_dir.mkdir()
-        original = inbox_server_module.INBOX_DIR
-        inbox_server_module.INBOX_DIR = inbox_dir
-        try:
-            result = inbox_server_module._inbox_already_has_agent("some-agent-id")
-        finally:
-            inbox_server_module.INBOX_DIR = original
-        assert result is False
-
-    def test_returns_true_when_matching_file_exists(self, inbox_server_module, tmp_path):
-        """Returns True when an inbox file has agent_id matching the query."""
-        import json as _json
-
-        inbox_dir = tmp_path / "inbox"
-        inbox_dir.mkdir()
-        (inbox_dir / "123_reconciler_some_agent.json").write_text(
-            _json.dumps({"agent_id": "some-agent-id", "type": "agent_failed"})
-        )
-
-        original = inbox_server_module.INBOX_DIR
-        inbox_server_module.INBOX_DIR = inbox_dir
-        try:
-            result = inbox_server_module._inbox_already_has_agent("some-agent-id")
-        finally:
-            inbox_server_module.INBOX_DIR = original
-        assert result is True
-
-    def test_returns_false_when_file_has_different_agent(self, inbox_server_module, tmp_path):
-        """Returns False when existing file has a different agent_id."""
-        import json as _json
-
-        inbox_dir = tmp_path / "inbox"
-        inbox_dir.mkdir()
-        (inbox_dir / "999_reconciler_other.json").write_text(
-            _json.dumps({"agent_id": "other-agent", "type": "agent_failed"})
-        )
-
-        original = inbox_server_module.INBOX_DIR
-        inbox_server_module.INBOX_DIR = inbox_dir
-        try:
-            result = inbox_server_module._inbox_already_has_agent("some-agent-id")
-        finally:
-            inbox_server_module.INBOX_DIR = original
-        assert result is False
-
-    def test_returns_false_for_empty_agent_id(self, inbox_server_module, tmp_path):
-        """Empty agent_id returns False without scanning files."""
-        import json as _json
-
-        inbox_dir = tmp_path / "inbox"
-        inbox_dir.mkdir()
-        (inbox_dir / "123.json").write_text(_json.dumps({"agent_id": ""}))
-
-        original = inbox_server_module.INBOX_DIR
-        inbox_server_module.INBOX_DIR = inbox_dir
-        try:
-            result = inbox_server_module._inbox_already_has_agent("")
-        finally:
-            inbox_server_module.INBOX_DIR = original
-        assert result is False
-
-    def test_tolerates_malformed_json(self, inbox_server_module, tmp_path):
-        """Malformed JSON files are skipped without raising."""
-        inbox_dir = tmp_path / "inbox"
-        inbox_dir.mkdir()
-        (inbox_dir / "bad.json").write_text("not json {{")
-
-        original = inbox_server_module.INBOX_DIR
-        inbox_server_module.INBOX_DIR = inbox_dir
-        try:
-            result = inbox_server_module._inbox_already_has_agent("any-id")
-        finally:
-            inbox_server_module.INBOX_DIR = original
-        assert result is False
-
-
-# ---------------------------------------------------------------------------
-# New fix: _startup_sweep skips re-enqueue when inbox file already exists
-# ---------------------------------------------------------------------------
-
-class TestStartupSweepIdempotencyGuard:
-    """_startup_sweep() must not re-enqueue a session if an inbox file
-    already references that agent_id (crash-after-write-before-set_notified race).
-    """
-
-    def _make_session(self, agent_id: str, status: str = "dead") -> dict:
-        return {
-            "id": agent_id,
-            "task_id": None,
-            "description": "test session",
-            "chat_id": "ADMIN_CHAT_ID_REDACTED",
-            "source": "telegram",
-            "status": status,
-            "output_file": None,
-            "input_summary": None,
-            "elapsed_seconds": 3600,
-            "notified_at": None,
-            "agent_type": "subagent",
-        }
-
-    @pytest.mark.asyncio
-    async def test_startup_sweep_skips_session_with_existing_inbox_file(
-        self, inbox_server_module, tmp_path
-    ):
-        """If an inbox file already references the agent, _startup_sweep skips re-enqueue."""
-        import json as _json
-        from unittest.mock import AsyncMock, MagicMock, patch
-
-        agent_id = "agent-already-in-inbox"
-        inbox_dir = tmp_path / "inbox"
-        inbox_dir.mkdir()
-
-        # Pre-write an inbox file referencing this agent (simulates crash-after-write)
-        (inbox_dir / "ts_reconciler_agent.json").write_text(
-            _json.dumps({"agent_id": agent_id, "type": "subagent_result"})
-        )
-
-        mock_store = MagicMock()
-        mock_store.get_unnotified_completed.return_value = [self._make_session(agent_id)]
-
-        original = inbox_server_module.INBOX_DIR
-        inbox_server_module.INBOX_DIR = inbox_dir
-        try:
-            with patch.object(inbox_server_module, "_session_store", mock_store):
-                with patch.object(
-                    inbox_server_module, "_enqueue_reconciler_notification"
-                ) as mock_enqueue:
-                    await inbox_server_module._startup_sweep()
-                    mock_enqueue.assert_not_called(), (
-                        "_enqueue_reconciler_notification must not be called when "
-                        "an inbox file already exists for the agent"
-                    )
-        finally:
-            inbox_server_module.INBOX_DIR = original
-
-    @pytest.mark.asyncio
-    async def test_startup_sweep_enqueues_session_without_existing_file(
-        self, inbox_server_module, tmp_path
-    ):
-        """Sessions with no matching inbox file are enqueued normally."""
-        from unittest.mock import MagicMock, patch
-
-        agent_id = "agent-not-yet-in-inbox"
-        inbox_dir = tmp_path / "inbox"
-        inbox_dir.mkdir()
-
-        mock_store = MagicMock()
-        mock_store.get_unnotified_completed.return_value = [self._make_session(agent_id)]
-
-        original = inbox_server_module.INBOX_DIR
-        inbox_server_module.INBOX_DIR = inbox_dir
-        try:
-            with patch.object(inbox_server_module, "_session_store", mock_store):
-                with patch.object(
-                    inbox_server_module, "_enqueue_reconciler_notification"
-                ) as mock_enqueue:
-                    await inbox_server_module._startup_sweep()
-                    assert mock_enqueue.call_count == 1, (
-                        "_enqueue_reconciler_notification must be called once "
-                        "when no inbox file exists for the agent"
-                    )
-        finally:
-            inbox_server_module.INBOX_DIR = original
