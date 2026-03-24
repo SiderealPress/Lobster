@@ -126,9 +126,25 @@ if [[ -z "${LOBSTER_DEBUG:-}" && -f "$CONFIG_ENV" ]]; then
 fi
 LOBSTER_DEBUG="${LOBSTER_DEBUG:-false}"
 
+# Read LOBSTER_ENV from config.env (if not already in environment)
+if [[ -z "${LOBSTER_ENV:-}" && -f "$CONFIG_ENV" ]]; then
+    LOBSTER_ENV=$(grep '^LOBSTER_ENV=' "$CONFIG_ENV" 2>/dev/null | cut -d'=' -f2- | tr -d '[:space:]"' || echo "production")
+fi
+LOBSTER_ENV="${LOBSTER_ENV:-production}"
+
 # Ensure log directory exists
 mkdir -p "$(dirname "$LOG_FILE")"
 mkdir -p "$(dirname "$RESTART_STATE_FILE")"
+
+# Lifecycle gate: skip monitoring and restart loop in non-production environments.
+# Resource checks (disk/memory/auth) do not run either — the service is intentionally
+# idle and alerting on its resource state would be noise. The cron entry still fires
+# so that flipping back to production takes effect within 4 minutes with no manual step.
+if [[ "$LOBSTER_ENV" != "production" ]]; then
+    mkdir -p "$(dirname "$LOG_FILE")"
+    echo "[$(date -Iseconds)] [INFO] LOBSTER_ENV=$LOBSTER_ENV — health check skipped in non-production mode" >> "$LOG_FILE"
+    exit 0
+fi
 
 #===============================================================================
 # Logging
