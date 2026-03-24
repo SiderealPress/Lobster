@@ -341,7 +341,7 @@ if [ "$CONTAINER_SETUP" = true ]; then
     # applies immediately on first start. Without this, is_boot_grace_period() returns
     # false (missing field) and the health check fires within seconds of first launch,
     # triggering a restart loop before Claude has had time to initialize.
-    local state_file="$MESSAGES_DIR/config/lobster-state.json"
+    state_file="$MESSAGES_DIR/config/lobster-state.json"
     if [ ! -f "$state_file" ]; then
         echo '{"mode": "active", "booted_at": "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' > "$state_file"
         info "  Seeded lobster-state.json with initial booted_at timestamp"
