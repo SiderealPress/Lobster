@@ -36,11 +36,15 @@ INBOX_DIR="$MESSAGES_DIR/inbox"
 LOBSTER_STATE_FILE="$MESSAGES_DIR/config/lobster-state.json"
 STALE_THRESHOLD_SECONDS=90               # Interrupt if any message older than this
 RATE_LIMIT_SECONDS=120                   # Minimum time between interrupts
+ALERT_THRESHOLD_SECONDS=300              # Telegram alert if still stale 5min after first interrupt
 
 STATE_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}/.state"
 STATE_FILE="$STATE_DIR/watchdog-last-interrupt"
+ALERT_STATE_FILE="$STATE_DIR/watchdog-last-alert"
+ALERT_RATE_LIMIT_SECONDS=600             # Minimum time between Telegram alerts
 LOCK_FILE="/tmp/lobster-inbox-watchdog.lock"
 LOG_FILE="$WORKSPACE_DIR/logs/watchdog.log"
+CONFIG_ENV="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}/config.env"
 
 # Ensure directories exist
 mkdir -p "$STATE_DIR"
@@ -122,6 +126,64 @@ claude_alive() {
 }
 
 #===============================================================================
+# Telegram Alert (direct curl — bypasses outbox and MCP entirely)
+#===============================================================================
+send_telegram_alert() {
+    local message="$1"
+
+    local bot_token=""
+    local chat_id=""
+
+    if [[ -f "$CONFIG_ENV" ]]; then
+        bot_token=$(grep '^TELEGRAM_BOT_TOKEN=' "$CONFIG_ENV" 2>/dev/null | cut -d'=' -f2-)
+        chat_id=$(grep '^TELEGRAM_ALLOWED_USERS=' "$CONFIG_ENV" 2>/dev/null | cut -d'=' -f2- | cut -d',' -f1)
+    fi
+
+    if [[ -z "$bot_token" || -z "$chat_id" ]]; then
+        log_error "Cannot send Telegram alert: missing bot token or chat ID in config.env"
+        return 1
+    fi
+
+    # Rate limit alerts to prevent flooding
+    if [[ -f "$ALERT_STATE_FILE" ]]; then
+        local last_alert
+        last_alert=$(cat "$ALERT_STATE_FILE" 2>/dev/null)
+        if [[ -n "$last_alert" ]]; then
+            local now
+            now=$(date +%s)
+            local elapsed=$((now - last_alert))
+            if [[ $elapsed -lt $ALERT_RATE_LIMIT_SECONDS ]]; then
+                log_info "Alert rate limited: last alert ${elapsed}s ago (limit: ${ALERT_RATE_LIMIT_SECONDS}s)"
+                return 0
+            fi
+        fi
+    fi
+
+    local full_message
+    full_message=$(printf '⚠️ *Lobster Inbox Watchdog*
+
+%s
+
+_%s_' "$message" "$(date '+%Y-%m-%d %H:%M:%S %Z')")
+
+    curl -s -X POST \
+        "https://api.telegram.org/bot${bot_token}/sendMessage" \
+        --data-urlencode "chat_id=${chat_id}" \
+        --data-urlencode "text=${full_message}" \
+        --data-urlencode "parse_mode=Markdown" \
+        --max-time 10 \
+        > /dev/null 2>&1
+
+    local rc=$?
+    if [[ $rc -eq 0 ]]; then
+        date +%s > "$ALERT_STATE_FILE"
+        log_warn "Telegram alert sent to $chat_id"
+    else
+        log_error "Telegram alert failed (curl exit $rc)"
+    fi
+}
+
+#===============================================================================
 # Core watchdog logic
 #===============================================================================
 do_watchdog_check() {
@@ -165,6 +227,12 @@ do_watchdog_check() {
 
     # Rate limit check
     if ! check_rate_limit; then
+        # Watchdog already interrupted recently but messages are still stale.
+        # If they have been stale long enough, escalate with a Telegram alert.
+        if [[ $oldest_age -gt $ALERT_THRESHOLD_SECONDS ]]; then
+            log_warn "Inbox stale ${oldest_age}s — escalating to Telegram alert"
+            send_telegram_alert "Inbox stale for ${oldest_age}s (threshold: ${ALERT_THRESHOLD_SECONDS}s). ${stale_count} message(s) unprocessed. Dispatcher may be stuck."
+        fi
         return 0
     fi
 
