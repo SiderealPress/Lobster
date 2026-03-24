@@ -1554,6 +1554,28 @@ EOF
         migrated=$((migrated + 1))
     fi
 
+    # Migration 33: Register require-wait-for-messages Stop hook in settings.json
+    # This hook fires on every Stop event and nudges the dispatcher to call
+    # wait_for_messages when it stalls without doing so, cutting the recovery window
+    # from ~12 minutes (health check) to one turn. Subagent sessions are exempted
+    # via is_dispatcher() — the hook is a no-op for anything that is not the dispatcher.
+    if [ -f "$CLAUDE_SETTINGS" ]; then
+        if ! jq -e '.hooks.Stop[]? | select(.hooks[]?.command | contains("require-wait-for-messages"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+            chmod +x "$INSTALL_DIR/hooks/require-wait-for-messages.py" 2>/dev/null || true
+            TMP_SETTINGS=$(mktemp)
+            jq '.hooks.Stop = (.hooks.Stop // []) + [{
+                "matcher": "",
+                "hooks": [{
+                    "type": "command",
+                    "command": "python3 '"$INSTALL_DIR"'/hooks/require-wait-for-messages.py",
+                    "timeout": 10
+                }]
+            }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+            substep "Registered require-wait-for-messages Stop hook in settings.json"
+            migrated=$((migrated + 1))
+        fi
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
