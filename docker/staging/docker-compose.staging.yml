@@ -34,6 +34,9 @@ services:
     # tokens. config.staging.env must NOT contain the production TELEGRAM_BOT_TOKEN.
     # See config/config.staging.env.example for the template.
     env_file:
+      # LOBSTER_CONFIG_DIR defaults to /home/lobster/lobster-config — the standard
+      # single-user install path. Override this env var before running compose if
+      # your config lives elsewhere (e.g. export LOBSTER_CONFIG_DIR=/custom/path).
       - ${LOBSTER_CONFIG_DIR:-/home/lobster/lobster-config}/config.staging.env
     environment:
       # GitHub PAT for gh CLI access inside staging container.

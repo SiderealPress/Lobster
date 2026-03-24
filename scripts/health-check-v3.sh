@@ -141,6 +141,7 @@ mkdir -p "$(dirname "$RESTART_STATE_FILE")"
 # idle and alerting on its resource state would be noise. The cron entry still fires
 # so that flipping back to production takes effect within 4 minutes with no manual step.
 if [[ "$LOBSTER_ENV" != "production" ]]; then
+    mkdir -p "$(dirname "$LOG_FILE")"
     echo "[$(date -Iseconds)] [INFO] LOBSTER_ENV=$LOBSTER_ENV — health check skipped in non-production mode" >> "$LOG_FILE"
     exit 0
 fi
