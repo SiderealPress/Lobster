@@ -994,9 +994,9 @@ if ! sudo true 2>/dev/null; then
 fi
 success "Sudo access confirmed"
 
-# Check internet (skip when source is already present — dev mode, existing install, or
+# Check internet (skip when source is already present — existing install, or
 # pre-copied source in non-interactive mode, matching the git clone skip condition).
-if [ -d "$INSTALL_DIR/.git" ] || $DEV_MODE || { [ -f "$INSTALL_DIR/install.sh" ] && [ "$NON_INTERACTIVE" = true ]; }; then
+if [ -d "$INSTALL_DIR/.git" ] || { [ -f "$INSTALL_DIR/install.sh" ] && [ "$NON_INTERACTIVE" = true ]; }; then
     info "Skipping internet check (source already present)"
 elif ! curl -s --connect-timeout 5 https://api.github.com >/dev/null; then
     error "No internet connection (required for fresh install)"
@@ -1358,21 +1358,33 @@ fi
 # Install Lobster Code
 #===============================================================================
 
-# Detect install mode: --dev flag, existing .git, or git clone (default)
-# Tarball mode was removed as the default because the release tarball gets stale
-# (scripts added after the last release tag are missing, causing install failures).
-# All fresh installs now use git clone from main, which is always current.
+# Detect install mode.
+#
+# Priority:
+#   1. Existing .git dir       → git update (always wins; no flag can override an existing repo)
+#   2. --stable flag           → tarball of the latest GitHub release (opt-in, pinned)
+#   3. default / --dev flag    → git clone from main (always current)
+#   4. git not available       → tarball fallback (last resort)
+#
 # See: https://github.com/SiderealPress/lobster/issues/787
 if [ -d "$INSTALL_DIR/.git" ]; then
     INSTALL_MODE="git"
     info "Existing git install detected"
+elif $STABLE_MODE; then
+    INSTALL_MODE="tarball"
+    info "Stable mode: using latest release tarball"
 else
-    # Both --dev mode and fresh installs use git clone
-    INSTALL_MODE="git"
-    if $DEV_MODE; then
-        info "Developer mode: using git clone"
+    # Default and --dev: git clone when available
+    if command -v git >/dev/null 2>&1; then
+        INSTALL_MODE="git"
+        if $DEV_MODE; then
+            info "Developer mode: using git clone (LOBSTER_DEBUG will be enabled)"
+        else
+            info "Fresh install: using git clone from main (always current)"
+        fi
     else
-        info "Fresh install: using git clone from main (always current)"
+        INSTALL_MODE="tarball"
+        warn "git not found — falling back to tarball install"
     fi
 fi
 
@@ -1672,8 +1684,9 @@ for _rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
     fi
 done
 
-success "Credential store configured"
-info "  Canonical file: $CONFIG_FILE"
+success "Global env store configured"
+info "  File: $GLOBAL_ENV_FILE"
+info "  Edit directly: $GLOBAL_ENV_FILE"
 info "  (Use 'lobster env set KEY VALUE' after install to update tokens)"
 info "  See docs/GLOBAL-ENV.md for full documentation"
 
@@ -2699,7 +2712,7 @@ fi
 
 step "Checking GitHub Personal Access Token..."
 
-# Load legacy global.env if present (pre-#1785 installs store GITHUB_TOKEN there)
+# Load global.env if not already done so we can check for an existing token
 if [ -f "$GLOBAL_ENV_FILE" ]; then
     set -a
     # shellcheck disable=SC1090
@@ -2719,28 +2732,24 @@ if [ -z "${GITHUB_TOKEN:-}" ] || [ "$GITHUB_TOKEN" = "your_github_pat_here" ]; t
         echo ""
         read -p "Enter your GitHub PAT (or press Enter to skip): " GH_TOKEN
         if [ -n "$GH_TOKEN" ]; then
-            # Write to config.env (canonical credential file after issue #1785).
-            # Also update global.env if it exists (backward compat for pre-migration installs).
-            if grep -q "^#\{0,1\} *GITHUB_TOKEN=" "$CONFIG_FILE" 2>/dev/null; then
-                GH_TOKEN="$GH_TOKEN" awk \
-                    '/^#? *GITHUB_TOKEN=/ { print "GITHUB_TOKEN=" ENVIRON["GH_TOKEN"]; next } { print }' \
-                    "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
-            else
-                printf '\nGITHUB_TOKEN=%s\n' "$GH_TOKEN" >> "$CONFIG_FILE"
-            fi
-            if [ -f "$GLOBAL_ENV_FILE" ] && grep -q "^#\{0,1\} *GITHUB_TOKEN=" "$GLOBAL_ENV_FILE" 2>/dev/null; then
+            # Write to global.env, replacing any existing GITHUB_TOKEN line (commented or not)
+            if grep -q "^#\{0,1\} *GITHUB_TOKEN=" "$GLOBAL_ENV_FILE" 2>/dev/null; then
+                # Use ENVIRON to avoid backslash mangling that -v causes with tokens
+                # containing backslash sequences (e.g. \n, \t in a PAT value).
                 GH_TOKEN="$GH_TOKEN" awk \
                     '/^#? *GITHUB_TOKEN=/ { print "GITHUB_TOKEN=" ENVIRON["GH_TOKEN"]; next } { print }' \
                     "$GLOBAL_ENV_FILE" > "$GLOBAL_ENV_FILE.tmp" && mv "$GLOBAL_ENV_FILE.tmp" "$GLOBAL_ENV_FILE"
+            else
+                printf '\nGITHUB_TOKEN=%s\n' "$GH_TOKEN" >> "$GLOBAL_ENV_FILE"
             fi
             GITHUB_TOKEN_SET=true
-            success "GitHub token saved to $CONFIG_FILE"
+            success "GitHub token saved to $GLOBAL_ENV_FILE"
         else
-            warn "Skipped — set GITHUB_TOKEN in $CONFIG_FILE later"
+            warn "Skipped — set GITHUB_TOKEN in $GLOBAL_ENV_FILE later"
         fi
     else
         info "Skipping GitHub token prompt (non-interactive mode)"
-        info "Set GITHUB_TOKEN in $CONFIG_FILE when ready"
+        info "Set GITHUB_TOKEN in $GLOBAL_ENV_FILE when ready"
     fi
 else
     GITHUB_TOKEN_SET=true
@@ -2765,6 +2774,26 @@ if [ -f "$CONFIG_FILE" ]; then
     else
         success "LOBSTER_INTERNAL_SECRET already set"
     fi
+fi
+
+#===============================================================================
+# Developer Mode: Enable LOBSTER_DEBUG
+#===============================================================================
+
+if $DEV_MODE && [ -f "$CONFIG_FILE" ]; then
+    step "Developer mode: enabling LOBSTER_DEBUG..."
+    # Remove any existing LOBSTER_DEBUG line (set or commented), then append the live value.
+    # This is idempotent — safe to run on reinstall.
+    if grep -q "^#\{0,1\}LOBSTER_DEBUG=" "$CONFIG_FILE" 2>/dev/null; then
+        # Replace in-place using a temp file (sed -i is not portable across macOS/Linux)
+        TMP_CONFIG=$(mktemp)
+        grep -v "^#\{0,1\}LOBSTER_DEBUG=" "$CONFIG_FILE" > "$TMP_CONFIG"
+        mv "$TMP_CONFIG" "$CONFIG_FILE"
+    fi
+    echo "" >> "$CONFIG_FILE"
+    echo "# Enabled by --dev flag at install time" >> "$CONFIG_FILE"
+    echo "LOBSTER_DEBUG=true" >> "$CONFIG_FILE"
+    success "LOBSTER_DEBUG=true written to $CONFIG_FILE"
 fi
 
 #===============================================================================
@@ -3511,10 +3540,10 @@ echo -e "${BOLD}Required post-install steps:${NC}"
 if [ "$GITHUB_TOKEN_SET" = false ]; then
 echo "  1. Set your GitHub PAT:    lobster env set GITHUB_TOKEN <your-token>"
 echo "  2. Authenticate Claude:    sudo -u lobster claude  (then follow OAuth prompts)"
-echo "  3. Start services:         sudo systemctl start lobster-mcp-local lobster-claude lobster-router"
+echo "  3. Start services:         sudo systemctl start lobster-claude lobster-mcp lobster-router"
 else
 echo "  1. Authenticate Claude:    sudo -u lobster claude  (then follow OAuth prompts)"
-echo "  2. Start services:         sudo systemctl start lobster-mcp-local lobster-claude lobster-router"
+echo "  2. Start services:         sudo systemctl start lobster-claude lobster-mcp lobster-router"
 fi
 echo ""
 echo -e "${BOLD}Commands:${NC}"
