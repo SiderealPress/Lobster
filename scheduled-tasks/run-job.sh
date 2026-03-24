@@ -26,15 +26,21 @@ fi
 
 REPO_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
 
-# Load config.env so env vars like LOBSTER_ADMIN_CHAT_ID are available when
-# running from cron (which does not inherit the systemd EnvironmentFile).
-CONFIG_ENV="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}/config.env"
-if [ -f "$CONFIG_ENV" ]; then
-    # shellcheck source=/dev/null
-    set -a
-    source "$CONFIG_ENV"
-    set +a
-fi
+# Load env files so tokens like LOBSTER_ADMIN_CHAT_ID and GITHUB_TOKEN are
+# available when running from cron (which does not inherit the systemd
+# EnvironmentFile entries). Source both files in the same order as the
+# systemd services: config.env first, then global.env so that global.env
+# values can override config.env when needed.
+CONFIG_DIR="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}"
+for _env_file in "$CONFIG_DIR/config.env" "$CONFIG_DIR/global.env"; do
+    if [ -f "$_env_file" ]; then
+        # shellcheck source=/dev/null
+        set -a
+        source "$_env_file"
+        set +a
+    fi
+done
+unset _env_file
 WORKSPACE="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
 TASK_FILE="$WORKSPACE/scheduled-jobs/tasks/${JOB_NAME}.md"
 OUTPUT_DIR="$HOME/messages/task-outputs"
