@@ -241,9 +241,13 @@ last_catchup_ts in compaction-state.json, then call write_result.
 
 ## Handling Scheduled Reminders (`type: "scheduled_reminder"`)
 
-Scheduled reminders are injected by `scripts/post-reminder.sh`, called from cron. They replace the old `claude -p` approach and arrive as normal inbox messages — no special source or auth needed.
+Scheduled reminders arrive from two sources:
+- `scripts/post-reminder.sh` — system cron jobs (uses `reminder_type` field directly)
+- `scheduled-tasks/post-reminder.sh` — user-created scheduled jobs (uses `job_name` field; also sets `reminder_type = job_name` as of the dispatcher-reliability fix)
 
-**Message shape:**
+Both produce `type: "scheduled_reminder"` messages. The handler below works for both.
+
+**Message shape (system cron job):**
 ```json
 {
   "type": "scheduled_reminder",
@@ -255,10 +259,40 @@ Scheduled reminders are injected by `scripts/post-reminder.sh`, called from cron
 }
 ```
 
-**Routing table** — maps `reminder_type` to the subagent and prompt to use. Fallback for unknown types: `lobster-generalist`. Extend this table to add new reminder types without touching dispatch logic.
+**Message shape (user scheduled job, e.g. lobster-plans-poller):**
+```json
+{
+  "type": "scheduled_reminder",
+  "reminder_type": "lobster-plans-poller",
+  "job_name": "lobster-plans-poller",
+  "source": "system",
+  "chat_id": 0,
+  "text": "[Cron] Job 'lobster-plans-poller' finished (success, 42s)",
+  "timestamp": "2026-01-01T00:00:00+00:00"
+}
+```
+
+**Routing table** — maps `reminder_type` to the subagent and prompt to use. A `None` value is a **fast-exit sentinel**: call `mark_processed` immediately, no subagent, no inline work. The concrete fallback for any unknown type is `fallback_lobster_generalist`.
+
+> **CRITICAL — read this before adding new entries:**
+> User-created scheduled jobs (those that call `send_reply` + `write_result` directly from `run-job.sh`) already deliver their own results. Their `scheduled_reminder` is a redundant completion signal. Always add them with `None` (fast-exit). Only assign a subagent route for types that do NOT self-deliver results.
 
 ```
+# Concrete fallback — used for any reminder_type not in the table below.
+# Surfaces that an unknown reminder fired; does NOT read output files inline.
+fallback_lobster_generalist = {
+  "subagent_type": "lobster-generalist",
+  "prompt": (
+    "---\ntask_id: unknown-reminder\nchat_id: 0\nsource: system\n---\n\n"
+    "A scheduled_reminder arrived with an unrecognised reminder_type: '{reminder_type}'. "
+    "Do NOT read any output files or check_task_outputs inline. "
+    "Call write_result(task_id='unknown-reminder', chat_id=0, "
+    "text='Unknown reminder type: {reminder_type}') and return immediately."
+  ),
+}
+
 REMINDER_ROUTING = {
+  # --- System cron jobs (do NOT self-deliver; subagent handles output) ---
   "ghost_detector": {
     "subagent_type": "lobster-generalist",
     "prompt": "---\ntask_id: agent-monitor\nchat_id: 0\nsource: system\n---\n\n"
@@ -272,7 +306,25 @@ REMINDER_ROUTING = {
               "Run it with uv run ~/lobster/scripts/oom-monitor.py --since-minutes 10 "
               "and report findings.",
   },
-  # Add new reminder types here. Fallback for unknown types: lobster-generalist.
+
+  # --- User scheduled jobs (self-deliver via send_reply + write_result) ---
+  # These jobs always deliver their own results directly: they call send_reply to
+  # surface content to the user AND write_result to signal completion. The
+  # scheduled_reminder written by post-reminder.sh is a job-finished ping, NOT
+  # a content delivery — the content was already sent. Fast-exit on the ping.
+  #
+  # NOTE: If a job gains conditional logic where it only writes to the inbox when
+  # it has real content (not always), move it to a subagent dict entry instead.
+  # The contract for None entries: the job unconditionally self-delivers all results;
+  # its scheduled_reminder carries no content the dispatcher needs to act on.
+  "lobster-plans-poller": None,   # always self-delivers via send_reply + write_result
+  "bot-talk-poller": None,        # always self-delivers via send_reply + write_result
+
+  # Add new reminder types here.
+  # Use None for jobs that ALWAYS self-deliver (send_reply + write_result) — their
+  #   scheduled_reminder ping carries no content; drop it immediately.
+  # Use a subagent dict for jobs that do NOT self-deliver and need the dispatcher
+  #   to read output and decide whether to surface it to the user.
 }
 ```
 
@@ -280,19 +332,39 @@ REMINDER_ROUTING = {
 
 ```
 1. mark_processing(message_id)
-2. reminder_type = msg["reminder_type"]
+
+2. # Field resolution: reminder_type takes precedence; fall back to job_name.
+   # (scheduled-tasks/post-reminder.sh sets both fields; scripts/post-reminder.sh sets reminder_type only.)
+   reminder_type = msg.get("reminder_type") or msg.get("job_name")
+
 3. route = REMINDER_ROUTING.get(reminder_type, fallback_lobster_generalist)
-4. Spawn subagent (run_in_background=True):
+
+4. # FAST-EXIT SENTINEL: if route is None, drop immediately — no subagent, no inline work.
+   if route is None:
+       mark_processed(message_id)
+       # THE VERY NEXT ACTION MUST BE wait_for_messages() — see WFM-always-next rule below
+       continue
+
+5. # Known route with a subagent.
+   Spawn subagent (run_in_background=True):
    - subagent_type: route["subagent_type"]
    - prompt: route["prompt"]
-5. mark_processed(message_id)
-6. Return to wait_for_messages() immediately — no ack, no send_reply
+
+6. mark_processed(message_id)
+   # THE VERY NEXT ACTION MUST BE wait_for_messages() — see WFM-always-next rule below
 ```
+
+**WFM-always-next rule (applies to ALL message types, not just scheduled reminders):**
+
+> After any `mark_processed` call that is NOT immediately followed by a `Task(...)` subagent spawn, the very next action is `wait_for_messages()`. No exceptions. No state assessment. No "what should I do now?" deliberation. WFM.
+>
+> The most common stall pattern is inline deliberation after processing a batch of system messages. If you find yourself thinking after `mark_processed`, you are violating this rule. Call WFM.
 
 **Rules:**
 - Never call `send_reply` for scheduled reminders (chat_id: 0, source: "system")
 - The subagent should always call `write_result` — never `send_reply`. For actionable findings, call `write_result` with `chat_id=ADMIN_CHAT_ID` and `sent_reply_to_user=False`; the dispatcher will relay it. For no-ops, call `write_result` with `chat_id=0`.
 - Do not ack these — they are background system tasks, not user requests
+- When in doubt about a new job name, add it to REMINDER_ROUTING as `None` (fast-exit)
 
 ## Handling Subagent Results (`subagent_result` / `subagent_error`)
 
