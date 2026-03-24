@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-SessionStart hook: write the dispatcher session ID to the marker file,
-and auto-register subagent sessions into agent_sessions.db.
+SessionStart hook: write the dispatcher session ID to the marker file.
 
 Fires on SessionStart (non-compact) for ALL sessions that inherit
 LOBSTER_MAIN_SESSION=1 (the dispatcher and all subagents it spawns).
+Only the dispatcher path performs any action; subagent sessions are
+silently ignored.
 
 ## Dispatcher path
 
@@ -15,17 +16,14 @@ session_id to ~/messages/config/dispatcher-session-id. This file is the
 primary signal that other hooks use to distinguish the dispatcher from
 subagents.
 
-## Subagent path
+## Subagent sessions
 
-When the marker file exists, the current session_id does NOT match the stored
-dispatcher ID, AND the stored session is still alive (its .jsonl file exists),
-this session is a subagent. In that case, a minimal stub record is written to
-agent_sessions.db with status='running'. This ensures subagents are visible to
-the ghost detector even when the dispatcher forgets to call register_agent
-(e.g. after context compaction). The stub uses INSERT OR IGNORE so a racing
-register_agent call that writes a richer row first is preserved untouched. DB
-write failures are logged to stderr but never block session start (always
-exits 0).
+Subagent sessions are not acted on by this hook. The correct discipline is for
+the dispatcher to call `register_agent` before spawning via `Task()`. A
+SessionStart-based stub cannot know the real `chat_id` — it would always write
+`chat_id='0'`, which is useless for notification and creates ghost session rows
+that cause reconciler noise. The ghost detector (`agent-monitor.py`) can find
+unregistered sessions via the filesystem without needing a DB stub.
 
 ## Dispatcher DB registration (issue #781)
 
@@ -159,37 +157,6 @@ def _register_dispatcher_session(session_id: str) -> None:
         )
 
 
-def _auto_register_subagent(session_id: str) -> None:
-    """Write a minimal stub 'running' record to agent_sessions.db.
-
-    Uses INSERT OR IGNORE so a racing register_agent call that writes a richer
-    row first is left untouched. init_db() ensures the schema exists; the
-    INSERT then uses the module's connection pool without duplicating DDL.
-    Failures are logged and silently swallowed.
-    """
-    from datetime import datetime, timezone
-
-    try:
-        session_store.init_db()
-        conn = session_store._get_connection(session_store._DEFAULT_DB_PATH)
-        now = datetime.now(timezone.utc).isoformat()
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO agent_sessions
-                (id, description, chat_id, status, agent_type, spawned_at)
-            VALUES
-                (?, 'auto-registered by SessionStart hook', '0', 'running', 'subagent', ?)
-            """,
-            (session_id, now),
-        )
-        conn.commit()
-    except Exception as exc:  # noqa: BLE001
-        print(
-            f"[write-dispatcher-session-id] subagent auto-register failed: {exc}",
-            file=sys.stderr,
-        )
-
-
 def main() -> None:
     # Only run for sessions that inherit LOBSTER_MAIN_SESSION=1.
     # This env var is set by claude-persistent.sh for the dispatcher process;
@@ -212,8 +179,6 @@ def main() -> None:
         # Issue #781 Fix 2: also tag this session in agent_sessions.db as
         # 'dispatcher' so the reconciler never emits agent_failed for it.
         _register_dispatcher_session(session_id)
-    else:
-        _auto_register_subagent(session_id)
 
     sys.exit(0)
 
