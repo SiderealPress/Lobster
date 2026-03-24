@@ -2101,8 +2101,10 @@ if [ -z "${GITHUB_TOKEN:-}" ] || [ "$GITHUB_TOKEN" = "your_github_pat_here" ]; t
         if [ -n "$GH_TOKEN" ]; then
             # Write to global.env, replacing any existing GITHUB_TOKEN line (commented or not)
             if grep -q "^#\? *GITHUB_TOKEN=" "$GLOBAL_ENV_FILE" 2>/dev/null; then
-                awk -v token="$GH_TOKEN" \
-                    '/^#? *GITHUB_TOKEN=/ { print "GITHUB_TOKEN=" token; next } { print }' \
+                # Use ENVIRON to avoid backslash mangling that -v causes with tokens
+                # containing backslash sequences (e.g. \n, \t in a PAT value).
+                GH_TOKEN="$GH_TOKEN" awk \
+                    '/^#? *GITHUB_TOKEN=/ { print "GITHUB_TOKEN=" ENVIRON["GH_TOKEN"]; next } { print }' \
                     "$GLOBAL_ENV_FILE" > "$GLOBAL_ENV_FILE.tmp" && mv "$GLOBAL_ENV_FILE.tmp" "$GLOBAL_ENV_FILE"
             else
                 printf '\nGITHUB_TOKEN=%s\n' "$GH_TOKEN" >> "$GLOBAL_ENV_FILE"
