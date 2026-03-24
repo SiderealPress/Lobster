@@ -38,10 +38,12 @@ error() { echo -e "${RED}[ERROR]${NC} $1"; }
 step() { echo -e "\n${CYAN}${BOLD}▶ $1${NC}"; }
 
 # Parse install mode from arguments
+DEV_MODE=false  # accepted for backwards compat; git clone is now the default for all fresh installs
 NON_INTERACTIVE=false
 CONTAINER_SETUP=false
 for arg in "$@"; do
     case "$arg" in
+        --dev) DEV_MODE=true ;;  # no-op: same as default (git clone); kept for script compatibility
         --non-interactive|--skip-config) NON_INTERACTIVE=true ;;
         --container-setup)
             CONTAINER_SETUP=true
