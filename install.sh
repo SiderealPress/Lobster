@@ -1846,6 +1846,31 @@ else
     info "Skipping inject-debug-bootup hook (settings.json not yet created)"
 fi
 
+# Set up Claude Code Stop hook to enforce wait_for_messages in dispatcher sessions.
+# Stop fires when the dispatcher's main Claude Code session considers stopping.
+# The hook detects the dispatcher via session_role.is_dispatcher() and injects a
+# reminder if wait_for_messages was not called — preventing the 12-minute stall
+# window that the health check otherwise needs to catch.
+chmod +x "$INSTALL_DIR/hooks/require-wait-for-messages.py" || true
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '.hooks.Stop[]? | select(.hooks[]?.command | contains("require-wait-for-messages"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq '.hooks.Stop = (.hooks.Stop // []) + [{
+            "matcher": "",
+            "hooks": [{
+                "type": "command",
+                "command": "python3 '"$INSTALL_DIR"'/hooks/require-wait-for-messages.py",
+                "timeout": 10
+            }]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "require-wait-for-messages Stop hook installed"
+    else
+        info "require-wait-for-messages Stop hook already configured in Claude Code settings"
+    fi
+else
+    info "Skipping require-wait-for-messages Stop hook (settings.json not yet created)"
+fi
+
 # Set up Claude Code SubagentStop hook to enforce write_result in subagent sessions
 # SubagentStop fires when a background sidechain session considers stopping — this is
 # the hook that actually catches subagents, whereas Stop only fires for the main session.
