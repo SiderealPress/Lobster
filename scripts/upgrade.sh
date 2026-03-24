@@ -1536,6 +1536,24 @@ with open(path, 'w') as f:
         migrated=$((migrated + 1))
     fi
 
+    # Migration 32: Add LOBSTER_ENV=production to existing config.env files
+    # New installs write LOBSTER_ENV=production into config.env during setup.
+    # Existing installs that predate this change will not have the variable, which
+    # is safe (both scripts default to "production" when the variable is absent),
+    # but the explicit entry makes the knob discoverable and easy to flip for dev work.
+    # We only append if LOBSTER_ENV is completely absent — no existing line is modified.
+    if [ -f "$CONFIG_FILE" ] && ! grep -q '^LOBSTER_ENV=' "$CONFIG_FILE"; then
+        cat >> "$CONFIG_FILE" << 'EOF'
+
+# Environment mode: production | dev | test
+# Set to "dev" to make the persistent session and health check inert while doing
+# interactive SSH work. Revert to "production" (or remove this line) to resume.
+LOBSTER_ENV=production
+EOF
+        substep "Added LOBSTER_ENV=production to $CONFIG_FILE (existing install backfill)"
+        migrated=$((migrated + 1))
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
