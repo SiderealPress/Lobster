@@ -99,3 +99,56 @@ This is only safe to call during a controlled restart sequence where the old ser
 **What to look for:** `rm -f *.sock` or `rm -f /run/*/socket` in scripts that do not also kill or stop the server in the same operation, or that kill the server *after* the unlink.
 
 **Fix:** Stop the server first, then unlink the socket. Or use a pattern where the new server atomically replaces the socket (e.g., bind to a temp path and `mv` it into place).
+
+---
+
+## Dollar-Sign Mangling in Shell Strings (bcrypt hashes, Postgres passwords)
+
+**Pattern:** A script or ad-hoc command passes a bcrypt hash (or any string containing `$`) to `psql` or another DB tool using double quotes or unquoted shell substitution.
+
+**Why it matters:** bcrypt hashes start with `$2b$10$` and contain multiple `$` characters throughout. In double-quoted bash strings, `$` triggers variable expansion. `$2b` expands to the empty string (no such variable). `$10` expands to the 10th positional argument (also empty in most contexts). The result is a silently truncated and corrupted hash that is stored without error but will never match any password.
+
+This is particularly insidious because: (1) the `psql` UPDATE command succeeds with exit code 0, (2) there is no warning in the output, and (3) the corruption is only discovered when a login attempt fails.
+
+**What to look for:**
+```bash
+# Dangerous — $2b, $10, and other $ sequences will be expanded:
+psql -c "UPDATE users SET password_hash = '$HASH' WHERE ..."
+psql -c "UPDATE users SET password_hash = \"$HASH\" WHERE ..."
+HASH='$2b$10$...'  # single-quoted assignment is fine
+psql -c "UPDATE users SET password_hash = '$HASH' ..."  # but double-quoted interpolation is NOT
+```
+
+**Fix:** Use single quotes in the SQL literal, or pass the value via a heredoc with quoting:
+
+```bash
+# Safe option 1: single-quoted psql -c (no variable expansion inside SQL string)
+HASH='$2b$10$abc123...'
+psql -c "UPDATE users SET password_hash = '$HASH' WHERE email = 'user@example.com';"
+# WARNING: this only works if HASH is assigned with single quotes AND the psql -c string
+# uses double quotes for the outer shell string. Shell expands $HASH once, then psql
+# receives the literal hash. But if HASH contains single quotes this breaks.
+
+# Safe option 2: use psql with a heredoc (no risk of shell expansion of the hash value)
+psql <<'EOF'
+UPDATE users SET password_hash = '$2b$10$abc123...' WHERE email = 'user@example.com';
+EOF
+
+# Safe option 3: use psql -v to pass the value as a psql variable (safest for scripts)
+HASH='$2b$10$abc123...'
+psql -v hash="$HASH" -c "UPDATE users SET password_hash = :'hash' WHERE email = 'user@example.com';"
+
+# Safe option 4: use node/python inside the container to generate AND apply the hash
+# (avoids the shell layer entirely — preferred for one-time admin operations)
+docker exec -it <container> node -e "
+  const bcrypt = require('bcrypt');
+  bcrypt.hash('mypassword', 10).then(h => console.log(h));
+"
+```
+
+**Checklist for review:**
+- Does any shell script pass a bcrypt hash, JWT secret, or other `$`-containing string to `psql -c "..."`?
+- Is the outer shell string double-quoted? If so, flag it.
+- Is the inner SQL string single-quoted? That helps but does not fully protect if the variable was expanded before substitution.
+
+**Historical note:** This exact bug corrupted the Twenty CRM admin password hash during initial setup on 2026-03-23. The psql UPDATE succeeded silently; the corruption was discovered on first login attempt. Recovery required running `bcrypt.hash()` inside the Twenty Docker container and re-running the UPDATE.
