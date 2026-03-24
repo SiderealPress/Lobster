@@ -64,6 +64,11 @@ msg = {
     "username": "lobster-cron",
     "user_name": "Cron",
     "text": f"[Cron] Job '{job_name}' finished ({status}, {duration_seconds}s)",
+    # reminder_type is set to job_name so the dispatcher's REMINDER_ROUTING table
+    # can look up by reminder_type regardless of whether the message came from
+    # scripts/post-reminder.sh (which sets reminder_type directly) or this script
+    # (scheduled-tasks/post-reminder.sh, which uses job_name as the primary key).
+    "reminder_type": job_name,
     "job_name": job_name,
     "exit_code": exit_code,
     "duration_seconds": duration_seconds,
