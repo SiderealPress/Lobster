@@ -2037,6 +2037,11 @@ TELEGRAM_ALLOWED_USERS=
 # Admin chat ID (Telegram numeric user ID for the primary admin user).
 # Used by run-job.sh (scheduled tasks) and alert.sh to deliver messages.
 LOBSTER_ADMIN_CHAT_ID=
+
+# Environment mode: production | dev | test
+# Set to "dev" to make the persistent session and health check inert while doing
+# interactive SSH work. Revert to "production" (or remove this line) to resume.
+LOBSTER_ENV=production
 EOF
     fi
     NEED_CONFIG=false
@@ -2096,6 +2101,11 @@ TELEGRAM_ALLOWED_USERS=$USER_ID
 # Admin chat ID (Telegram numeric user ID for the primary admin user).
 # Used by run-job.sh (scheduled tasks) and alert.sh to deliver messages.
 LOBSTER_ADMIN_CHAT_ID=$USER_ID
+
+# Environment mode: production | dev | test
+# Set to "dev" to make the persistent session and health check inert while doing
+# interactive SSH work. Revert to "production" (or remove this line) to resume.
+LOBSTER_ENV=production
 EOF
 
     success "Telegram configuration saved"
