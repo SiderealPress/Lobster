@@ -27,6 +27,15 @@ register_agent call that writes a richer row first is preserved untouched. DB
 write failures are logged to stderr but never block session start (always
 exits 0).
 
+## Dispatcher DB registration (issue #781)
+
+When the hook determines the current session IS the dispatcher, it also writes
+a row to agent_sessions.db with agent_type='dispatcher'. This row is permanent
+insurance: even if a future crash causes _is_dispatcher_session() to
+misclassify a restart as a subagent, the reconciler's dispatcher-type skip
+guard (added in the same issue) will still prevent agent_failed from being
+emitted for any session tagged 'dispatcher'.
+
 ## Stale marker recovery
 
 If the dispatcher crashes or is killed without a clean `lobster stop`, the
@@ -118,6 +127,38 @@ def _is_dispatcher_session(session_id: str) -> bool:
     return not _stored_session_is_alive(stored)
 
 
+def _register_dispatcher_session(session_id: str) -> None:
+    """Write a 'running' row to agent_sessions.db tagged as agent_type='dispatcher'.
+
+    The reconciler skips sessions with agent_type='dispatcher', so this row
+    prevents any future ghost-session cascade even if the marker-file check
+    mis-fires.  Uses INSERT OR IGNORE so a richer row written by a concurrent
+    caller (rare) is left untouched.  Failures are logged and silently swallowed.
+    """
+    from datetime import datetime, timezone
+
+    try:
+        session_store.init_db()
+        conn = session_store._get_connection(session_store._DEFAULT_DB_PATH)
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO agent_sessions
+                (id, description, chat_id, status, agent_type, spawned_at)
+            VALUES
+                (?, 'Lobster dispatcher (registered by SessionStart hook)', '0',
+                 'running', 'dispatcher', ?)
+            """,
+            (session_id, now),
+        )
+        conn.commit()
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"[write-dispatcher-session-id] dispatcher register failed: {exc}",
+            file=sys.stderr,
+        )
+
+
 def _auto_register_subagent(session_id: str) -> None:
     """Write a minimal stub 'running' record to agent_sessions.db.
 
@@ -168,6 +209,9 @@ def main() -> None:
 
     if _is_dispatcher_session(session_id):
         session_role.write_dispatcher_session_id(session_id)
+        # Issue #781 Fix 2: also tag this session in agent_sessions.db as
+        # 'dispatcher' so the reconciler never emits agent_failed for it.
+        _register_dispatcher_session(session_id)
     else:
         _auto_register_subagent(session_id)
 

@@ -9821,6 +9821,7 @@ def _build_reconciler_message(
         # escalate to the user, or drop silently. Never relay raw failure noise to
         # the user's Telegram.
         last_output = _read_last_output(output_file)
+        original_chat_id = session.get("chat_id", "")
         return {
             "id": message_id,
             "type": "agent_failed",
@@ -9832,7 +9833,7 @@ def _build_reconciler_message(
             ),
             "task_id": task_id,
             "agent_id": agent_id,
-            "original_chat_id": session.get("chat_id", ""),
+            "original_chat_id": original_chat_id,
             "original_prompt": input_summary,
             "last_output": last_output,
             "status": "error",
@@ -9876,16 +9877,6 @@ def _enqueue_reconciler_notification(session: dict, outcome: str) -> None:
                 "skipping inbox notification (logged to debug only)",
                 _agent_id, _chat_id,
             )
-            # Mark as notified so this session is not re-enqueued on every
-            # restart. The early return skips inbox delivery (intentional —
-            # there is no user to notify), but bookkeeping must still happen.
-            try:
-                _session_store.set_notified(_agent_id)
-            except Exception as _exc:
-                log.error(
-                    "[reconciler] Failed to set_notified for no-user dead session %r: %s",
-                    _agent_id, _exc,
-                )
             return
 
     agent_id = session.get("id", "")
