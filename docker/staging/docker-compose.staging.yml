@@ -4,6 +4,11 @@
 # dedicated test bot token. Isolated from production via a separate
 # messages volume and workspace.
 #
+# Credential setup (one-time):
+#   cp ~/lobster/config/config.staging.env.example ~/lobster-config/config.staging.env
+#   # Fill in TELEGRAM_BOT_TOKEN (test bot), TELEGRAM_ALLOWED_USERS, etc.
+#   # NEVER put the production TELEGRAM_BOT_TOKEN in config.staging.env.
+#
 # Usage:
 #   cd ~/lobster
 #   sudo docker compose -f docker/staging/docker-compose.staging.yml up -d
@@ -24,11 +29,20 @@ services:
       dockerfile: docker/staging/Dockerfile.staging
     container_name: lobster-staging
     restart: unless-stopped
+    # Scoped credentials: reads ONLY from config.staging.env, never from config.env.
+    # This is the credential boundary that prevents staging from inheriting production
+    # tokens. config.staging.env must NOT contain the production TELEGRAM_BOT_TOKEN.
+    # See config/config.staging.env.example for the template.
+    env_file:
+      # LOBSTER_CONFIG_DIR defaults to /home/lobster/lobster-config — the standard
+      # single-user install path. Override this env var before running compose if
+      # your config lives elsewhere (e.g. export LOBSTER_CONFIG_DIR=/custom/path).
+      - ${LOBSTER_CONFIG_DIR:-/home/lobster/lobster-config}/config.staging.env
     environment:
-      # Test bot token - safe to use in staging
-      TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN}"
-      TELEGRAM_ALLOWED_USERS: "${TELEGRAM_ALLOWED_USERS}"
-      LOBSTER_DEBUG: "false"
+      # GitHub PAT for gh CLI access inside staging container.
+      # Sourced from the host environment so it doesn't need to live in
+      # config.staging.env (which is committed-adjacent and more exposed).
+      GITHUB_TOKEN: "${GITHUB_TOKEN:-}"
     volumes:
       # Mount host Claude credentials (read-only auth, but settings.json needs write)
       # We mount the whole .claude dir so credentials are available
