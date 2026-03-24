@@ -307,13 +307,23 @@ REMINDER_ROUTING = {
   },
 
   # --- User scheduled jobs (self-deliver via send_reply + write_result) ---
-  # Their scheduled_reminder is redundant — fast-exit immediately.
-  "lobster-plans-poller": None,   # delivers own results via write_result
-  "bot-talk-poller": None,        # delivers own results via write_result
+  # These jobs always deliver their own results directly: they call send_reply to
+  # surface content to the user AND write_result to signal completion. The
+  # scheduled_reminder written by post-reminder.sh is a job-finished ping, NOT
+  # a content delivery — the content was already sent. Fast-exit on the ping.
+  #
+  # NOTE: If a job gains conditional logic where it only writes to the inbox when
+  # it has real content (not always), move it to a subagent dict entry instead.
+  # The contract for None entries: the job unconditionally self-delivers all results;
+  # its scheduled_reminder carries no content the dispatcher needs to act on.
+  "lobster-plans-poller": None,   # always self-delivers via send_reply + write_result
+  "bot-talk-poller": None,        # always self-delivers via send_reply + write_result
 
   # Add new reminder types here.
-  # Use None for jobs that call send_reply + write_result themselves (fast-exit).
-  # Use a subagent dict for jobs that need the dispatcher to check their output.
+  # Use None for jobs that ALWAYS self-deliver (send_reply + write_result) — their
+  #   scheduled_reminder ping carries no content; drop it immediately.
+  # Use a subagent dict for jobs that do NOT self-deliver and need the dispatcher
+  #   to read output and decide whether to surface it to the user.
 }
 ```
 
