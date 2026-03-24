@@ -38,12 +38,21 @@ error() { echo -e "${RED}[ERROR]${NC} $1"; }
 step() { echo -e "\n${CYAN}${BOLD}▶ $1${NC}"; }
 
 # Parse install mode from arguments
+#
+# Flags:
+#   (default)         git clone from main — always current
+#   --stable          download latest GitHub release tarball (pinned, reproducible)
+#   --dev             git clone from main + write LOBSTER_DEBUG=true to config.env
+#   --non-interactive skip interactive prompts (CI / Docker)
+#   --container-setup implies --non-interactive; for container-specific setup
 DEV_MODE=false
+STABLE_MODE=false
 NON_INTERACTIVE=false
 CONTAINER_SETUP=false
 for arg in "$@"; do
     case "$arg" in
         --dev) DEV_MODE=true ;;
+        --stable) STABLE_MODE=true ;;
         --non-interactive|--skip-config) NON_INTERACTIVE=true ;;
         --container-setup)
             CONTAINER_SETUP=true
@@ -504,9 +513,9 @@ if ! sudo true 2>/dev/null; then
 fi
 success "Sudo access confirmed"
 
-# Check internet (skip when source is already present — dev mode, existing install, or
+# Check internet (skip when source is already present — existing install, or
 # pre-copied source in non-interactive mode, matching the git clone skip condition).
-if [ -d "$INSTALL_DIR/.git" ] || $DEV_MODE || { [ -f "$INSTALL_DIR/install.sh" ] && [ "$NON_INTERACTIVE" = true ]; }; then
+if [ -d "$INSTALL_DIR/.git" ] || { [ -f "$INSTALL_DIR/install.sh" ] && [ "$NON_INTERACTIVE" = true ]; }; then
     info "Skipping internet check (source already present)"
 elif ! curl -s --connect-timeout 5 https://api.github.com >/dev/null; then
     error "No internet connection (required for fresh install)"
@@ -868,21 +877,33 @@ fi
 # Install Lobster Code
 #===============================================================================
 
-# Detect install mode: --dev flag, existing .git, or git clone (default)
-# Tarball mode was removed as the default because the release tarball gets stale
-# (scripts added after the last release tag are missing, causing install failures).
-# All fresh installs now use git clone from main, which is always current.
+# Detect install mode.
+#
+# Priority:
+#   1. Existing .git dir       → git update (always wins; no flag can override an existing repo)
+#   2. --stable flag           → tarball of the latest GitHub release (opt-in, pinned)
+#   3. default / --dev flag    → git clone from main (always current)
+#   4. git not available       → tarball fallback (last resort)
+#
 # See: https://github.com/SiderealPress/lobster/issues/787
 if [ -d "$INSTALL_DIR/.git" ]; then
     INSTALL_MODE="git"
     info "Existing git install detected"
+elif $STABLE_MODE; then
+    INSTALL_MODE="tarball"
+    info "Stable mode: using latest release tarball"
 else
-    # Both --dev mode and fresh installs use git clone
-    INSTALL_MODE="git"
-    if $DEV_MODE; then
-        info "Developer mode: using git clone"
+    # Default and --dev: git clone when available
+    if command -v git >/dev/null 2>&1; then
+        INSTALL_MODE="git"
+        if $DEV_MODE; then
+            info "Developer mode: using git clone (LOBSTER_DEBUG will be enabled)"
+        else
+            info "Fresh install: using git clone from main (always current)"
+        fi
     else
-        info "Fresh install: using git clone from main (always current)"
+        INSTALL_MODE="tarball"
+        warn "git not found — falling back to tarball install"
     fi
 fi
 
@@ -928,6 +949,10 @@ else
     LATEST_TAG=$(echo "$RELEASE_JSON" | jq -r '.tag_name // empty' 2>/dev/null || true)
 
     if [ -z "$LATEST_TAG" ]; then
+        if ! command -v git >/dev/null 2>&1; then
+            error "No release tag found and git is not available. Cannot install."
+            exit 1
+        fi
         info "No release found, falling back to git clone..."
         git clone --quiet --branch "$REPO_BRANCH" "$REPO_URL" "$INSTALL_DIR"
         cd "$INSTALL_DIR"
@@ -943,6 +968,10 @@ else
         fi
 
         if [ -z "$TARBALL_URL" ]; then
+            if ! command -v git >/dev/null 2>&1; then
+                error "No release tag found and git is not available. Cannot install."
+                exit 1
+            fi
             error "No tarball found in release. Falling back to git clone..."
             git clone --quiet --branch "$REPO_BRANCH" "$REPO_URL" "$INSTALL_DIR"
             cd "$INSTALL_DIR"
@@ -1127,8 +1156,8 @@ done
 
 success "Global env store configured"
 info "  File: $GLOBAL_ENV_FILE"
-info "  Use 'lobster env set KEY VALUE' to store API tokens"
-info "  Use 'lobster env list' to see stored keys"
+info "  Edit directly: $GLOBAL_ENV_FILE"
+info "  (Use 'lobster env set KEY VALUE' after install to update tokens)"
 info "  See docs/GLOBAL-ENV.md for full documentation"
 
 #===============================================================================
@@ -2073,6 +2102,56 @@ EOF
 fi
 
 #===============================================================================
+# GitHub Personal Access Token
+#===============================================================================
+
+step "Checking GitHub Personal Access Token..."
+
+# Load global.env if not already done so we can check for an existing token
+if [ -f "$GLOBAL_ENV_FILE" ]; then
+    set -a
+    # shellcheck disable=SC1090
+    . "$GLOBAL_ENV_FILE"
+    set +a
+fi
+
+GITHUB_TOKEN_SET=false
+if [ -z "${GITHUB_TOKEN:-}" ] || [ "$GITHUB_TOKEN" = "your_github_pat_here" ]; then
+    if [ "$NON_INTERACTIVE" = false ]; then
+        echo ""
+        echo -e "${BOLD}GitHub Personal Access Token${NC}"
+        echo ""
+        echo "Required for: PR creation, issue tracking, repo operations"
+        echo "Create one at: https://github.com/settings/tokens/new"
+        echo "Required scopes: repo, write:discussion, admin:repo_hook"
+        echo ""
+        read -p "Enter your GitHub PAT (or press Enter to skip): " GH_TOKEN
+        if [ -n "$GH_TOKEN" ]; then
+            # Write to global.env, replacing any existing GITHUB_TOKEN line (commented or not)
+            if grep -q "^#\{0,1\} *GITHUB_TOKEN=" "$GLOBAL_ENV_FILE" 2>/dev/null; then
+                # Use ENVIRON to avoid backslash mangling that -v causes with tokens
+                # containing backslash sequences (e.g. \n, \t in a PAT value).
+                GH_TOKEN="$GH_TOKEN" awk \
+                    '/^#? *GITHUB_TOKEN=/ { print "GITHUB_TOKEN=" ENVIRON["GH_TOKEN"]; next } { print }' \
+                    "$GLOBAL_ENV_FILE" > "$GLOBAL_ENV_FILE.tmp" && mv "$GLOBAL_ENV_FILE.tmp" "$GLOBAL_ENV_FILE"
+            else
+                printf '\nGITHUB_TOKEN=%s\n' "$GH_TOKEN" >> "$GLOBAL_ENV_FILE"
+            fi
+            GITHUB_TOKEN_SET=true
+            success "GitHub token saved to $GLOBAL_ENV_FILE"
+        else
+            warn "Skipped — set GITHUB_TOKEN in $GLOBAL_ENV_FILE later"
+        fi
+    else
+        info "Skipping GitHub token prompt (non-interactive mode)"
+        info "Set GITHUB_TOKEN in $GLOBAL_ENV_FILE when ready"
+    fi
+else
+    GITHUB_TOKEN_SET=true
+    success "GitHub token already configured"
+fi
+
+#===============================================================================
 # Generate LOBSTER_INTERNAL_SECRET (required for Google Calendar token refresh)
 #===============================================================================
 
@@ -2090,6 +2169,26 @@ if [ -f "$CONFIG_FILE" ]; then
     else
         success "LOBSTER_INTERNAL_SECRET already set"
     fi
+fi
+
+#===============================================================================
+# Developer Mode: Enable LOBSTER_DEBUG
+#===============================================================================
+
+if $DEV_MODE && [ -f "$CONFIG_FILE" ]; then
+    step "Developer mode: enabling LOBSTER_DEBUG..."
+    # Remove any existing LOBSTER_DEBUG line (set or commented), then append the live value.
+    # This is idempotent — safe to run on reinstall.
+    if grep -q "^#\{0,1\}LOBSTER_DEBUG=" "$CONFIG_FILE" 2>/dev/null; then
+        # Replace in-place using a temp file (sed -i is not portable across macOS/Linux)
+        TMP_CONFIG=$(mktemp)
+        grep -v "^#\{0,1\}LOBSTER_DEBUG=" "$CONFIG_FILE" > "$TMP_CONFIG"
+        mv "$TMP_CONFIG" "$CONFIG_FILE"
+    fi
+    echo "" >> "$CONFIG_FILE"
+    echo "# Enabled by --dev flag at install time" >> "$CONFIG_FILE"
+    echo "LOBSTER_DEBUG=true" >> "$CONFIG_FILE"
+    success "LOBSTER_DEBUG=true written to $CONFIG_FILE"
 fi
 
 #===============================================================================
@@ -2774,6 +2873,16 @@ DONE
 echo -e "${NC}"
 
 echo "Test it by sending a message to your Telegram bot!"
+echo ""
+echo -e "${BOLD}Required post-install steps:${NC}"
+if [ "$GITHUB_TOKEN_SET" = false ]; then
+echo "  1. Set your GitHub PAT:    lobster env set GITHUB_TOKEN <your-token>"
+echo "  2. Authenticate Claude:    sudo -u lobster claude  (then follow OAuth prompts)"
+echo "  3. Start services:         sudo systemctl start lobster-claude lobster-mcp lobster-router"
+else
+echo "  1. Authenticate Claude:    sudo -u lobster claude  (then follow OAuth prompts)"
+echo "  2. Start services:         sudo systemctl start lobster-claude lobster-mcp lobster-router"
+fi
 echo ""
 echo -e "${BOLD}Commands:${NC}"
 echo "  lobster status    Check service status"
