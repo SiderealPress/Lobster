@@ -38,12 +38,21 @@ error() { echo -e "${RED}[ERROR]${NC} $1"; }
 step() { echo -e "\n${CYAN}${BOLD}▶ $1${NC}"; }
 
 # Parse install mode from arguments
-DEV_MODE=false  # accepted for backwards compat; git clone is now the default for all fresh installs
+#
+# Flags:
+#   (default)         git clone from main — always current
+#   --stable          download latest GitHub release tarball (pinned, reproducible)
+#   --dev             git clone from main + write LOBSTER_DEBUG=true to config.env
+#   --non-interactive skip interactive prompts (CI / Docker)
+#   --container-setup implies --non-interactive; for container-specific setup
+DEV_MODE=false
+STABLE_MODE=false
 NON_INTERACTIVE=false
 CONTAINER_SETUP=false
 for arg in "$@"; do
     case "$arg" in
-        --dev) DEV_MODE=true ;;  # no-op: same as default (git clone); kept for script compatibility
+        --dev) DEV_MODE=true ;;
+        --stable) STABLE_MODE=true ;;
         --non-interactive|--skip-config) NON_INTERACTIVE=true ;;
         --container-setup)
             CONTAINER_SETUP=true
@@ -504,9 +513,9 @@ if ! sudo true 2>/dev/null; then
 fi
 success "Sudo access confirmed"
 
-# Check internet (skip when source is already present — dev mode, existing install, or
+# Check internet (skip when source is already present — existing install, or
 # pre-copied source in non-interactive mode, matching the git clone skip condition).
-if [ -d "$INSTALL_DIR/.git" ] || $DEV_MODE || { [ -f "$INSTALL_DIR/install.sh" ] && [ "$NON_INTERACTIVE" = true ]; }; then
+if [ -d "$INSTALL_DIR/.git" ] || { [ -f "$INSTALL_DIR/install.sh" ] && [ "$NON_INTERACTIVE" = true ]; }; then
     info "Skipping internet check (source already present)"
 elif ! curl -s --connect-timeout 5 https://api.github.com >/dev/null; then
     error "No internet connection (required for fresh install)"
@@ -868,18 +877,27 @@ fi
 # Install Lobster Code
 #===============================================================================
 
-# Detect install mode: --dev flag, existing .git, or git clone (default)
-# Tarball is kept as a last-resort fallback only when git is not available.
+# Detect install mode.
+#
+# Priority:
+#   1. Existing .git dir       → git update (always wins; no flag can override an existing repo)
+#   2. --stable flag           → tarball of the latest GitHub release (opt-in, pinned)
+#   3. default / --dev flag    → git clone from main (always current)
+#   4. git not available       → tarball fallback (last resort)
+#
 # See: https://github.com/SiderealPress/lobster/issues/787
 if [ -d "$INSTALL_DIR/.git" ]; then
     INSTALL_MODE="git"
     info "Existing git install detected"
+elif $STABLE_MODE; then
+    INSTALL_MODE="tarball"
+    info "Stable mode: using latest release tarball"
 else
-    # Both --dev mode and fresh installs use git clone when available
+    # Default and --dev: git clone when available
     if command -v git >/dev/null 2>&1; then
         INSTALL_MODE="git"
         if $DEV_MODE; then
-            info "Developer mode: using git clone"
+            info "Developer mode: using git clone (LOBSTER_DEBUG will be enabled)"
         else
             info "Fresh install: using git clone from main (always current)"
         fi
@@ -2143,6 +2161,26 @@ if [ -f "$CONFIG_FILE" ]; then
     else
         success "LOBSTER_INTERNAL_SECRET already set"
     fi
+fi
+
+#===============================================================================
+# Developer Mode: Enable LOBSTER_DEBUG
+#===============================================================================
+
+if $DEV_MODE && [ -f "$CONFIG_FILE" ]; then
+    step "Developer mode: enabling LOBSTER_DEBUG..."
+    # Remove any existing LOBSTER_DEBUG line (set or commented), then append the live value.
+    # This is idempotent — safe to run on reinstall.
+    if grep -q "^#\{0,1\}LOBSTER_DEBUG=" "$CONFIG_FILE" 2>/dev/null; then
+        # Replace in-place using a temp file (sed -i is not portable across macOS/Linux)
+        TMP_CONFIG=$(mktemp)
+        grep -v "^#\{0,1\}LOBSTER_DEBUG=" "$CONFIG_FILE" > "$TMP_CONFIG"
+        mv "$TMP_CONFIG" "$CONFIG_FILE"
+    fi
+    echo "" >> "$CONFIG_FILE"
+    echo "# Enabled by --dev flag at install time" >> "$CONFIG_FILE"
+    echo "LOBSTER_DEBUG=true" >> "$CONFIG_FILE"
+    success "LOBSTER_DEBUG=true written to $CONFIG_FILE"
 fi
 
 #===============================================================================
