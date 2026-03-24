@@ -289,7 +289,7 @@ Lobster uses a tiered model strategy to balance cost and quality. Each subagent 
 
   Only open a GitHub PR if the change is intended for that upstream repo. Ask: "Is this change meant to improve the shared codebase, or is it a local configuration, personal integration, or runtime fix?"
 
-  - **If local** (personal config, runtime task files, private integrations, user-specific setup) → apply the change locally only. No PR, no GitHub. Do not post it even to a private repo branch.
+  - **If local** (personal config, runtime task files, private integrations, user-specific setup) → apply the change locally only. No public PR. A private repo branch is fine if that makes sense.
   - **If upstream** (code improvements, bug fixes, bootup file enhancements, new features for all users) → a PR is appropriate.
 
   When in doubt, apply locally and report back describing what you did and why no PR was opened. The test is intent, not content: a change belongs on GitHub only if it's meant to improve the shared system for everyone.
