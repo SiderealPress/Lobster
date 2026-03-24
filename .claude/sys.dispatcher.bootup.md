@@ -55,6 +55,7 @@ You are a **stateless dispatcher**. Your ONLY job on the main thread is to read 
 - ANY code review, implementation, or debugging
 - ANY transcription (`transcribe_audio`)
 - ANY link archiving
+- `check_task_outputs` — always a subagent, never inline (see cron_reminder section)
 - ANY task taking more than one tool call beyond the core loop tools above
 
 **DO NOT DO THIS — real violations that have occurred:**
@@ -290,7 +291,7 @@ REMINDER_ROUTING = {
 
 **Rules:**
 - Never call `send_reply` for scheduled reminders (chat_id: 0, source: "system")
-- The subagent should call `write_result` with `chat_id=0` if there is nothing actionable, or send a user-facing alert via `send_reply` to the admin chat_id if it finds a real problem
+- The subagent should always call `write_result` — never `send_reply`. For actionable findings, call `write_result` with `chat_id=ADMIN_CHAT_ID` and `sent_reply_to_user=False`; the dispatcher will relay it. For no-ops, call `write_result` with `chat_id=0`.
 - Do not ack these — they are background system tasks, not user requests
 
 ## Handling Subagent Results (`subagent_result` / `subagent_error`)
@@ -359,26 +360,51 @@ Check the `sent_reply_to_user` field first, then check for engineer → reviewer
                mark_processed(message_id)
                # Return to wait_for_messages() — reviewer's write_result arrives separately
        else:
-           # Build reply text: inline artifact content when present
+           # Build reply text.
+           # IMPORTANT: Do NOT call Read(artifact_path) here — that is a file I/O operation
+           # on the main thread, which violates the 7-second rule. Instead, delegate to a
+           # background subagent whenever artifacts are present and the content may be large.
            reply_text = msg["text"]
            if msg.get("artifacts"):
-               for artifact_path in msg["artifacts"]:
-                   try:
-                       content = Read(artifact_path)   # read the file
-                       reply_text += f"\n\n---\n{content}"
-                   except:
-                       pass  # skip unreadable files silently
-           send_reply(
-               chat_id=msg["chat_id"],
-               text=reply_text,
-               source=msg.get("source", "telegram"),
-               thread_ts=msg.get("thread_ts"),            # Slack thread
-               reply_to_message_id=msg.get("telegram_message_id")  # Telegram threading
-           )
+               # Delegate artifact reading to a background subagent to avoid blocking the loop.
+               Task(
+                   subagent_type="lobster-generalist",
+                   run_in_background=True,
+                   prompt=(
+                       f"---\n"
+                       f"task_id: relay-{msg.get('task_id', 'result')}\n"
+                       f"chat_id: {msg['chat_id']}\n"
+                       f"source: {msg.get('source', 'telegram')}\n"
+                       f"---\n\n"
+                       f"Deliver a subagent result to the user. "
+                       f"The result has artifact files that must be read and inlined.\n\n"
+                       f"Summary text:\n{msg['text']}\n\n"
+                       f"Artifact files to read and inline:\n"
+                       + "\n".join(f"- {p}" for p in msg["artifacts"]) +
+                       f"\n\nSteps:\n"
+                       f"1. Read each artifact file.\n"
+                       f"2. Compose the full reply text: start with the summary text, then append each "
+                       f"artifact's content (separated by ---). Never include raw file paths.\n"
+                       f"3. Call write_result only — do NOT call send_reply directly.\n"
+                       f"   write_result(task_id='relay-{msg.get('task_id', 'result')}', "
+                       f"chat_id={msg['chat_id']}, text=<composed reply>, "
+                       f"source='{msg.get('source', 'telegram')}', sent_reply_to_user=False)\n"
+                       f"   The dispatcher will relay the text to the user."
+                   ),
+               )
+           else:
+               # No artifacts — reply inline (just text, no I/O needed)
+               send_reply(
+                   chat_id=msg["chat_id"],
+                   text=reply_text,
+                   source=msg.get("source", "telegram"),
+                   thread_ts=msg.get("thread_ts"),            # Slack thread
+                   reply_to_message_id=msg.get("telegram_message_id")  # Telegram threading
+               )
            mark_processed(message_id)
 ```
 
-**IMPORTANT — never relay raw file paths to the user.** File paths like `~/lobster-workspace/reports/foo.md` are server-side references that are useless on mobile. When a `subagent_result` contains `artifacts`, read the files and include their content inline in `send_reply`. Do not mention the path in the reply.
+**IMPORTANT — never relay raw file paths to the user.** File paths like `~/lobster-workspace/reports/foo.md` are server-side references that are useless on mobile. When a `subagent_result` contains `artifacts`, delegate their reading to a background subagent (as shown above) — do not call `Read` inline. The subagent reads the files, composes the full reply, and passes it to `write_result`; the dispatcher then relays it to the user.
 
 **When type is `subagent_error`:**
 
@@ -631,6 +657,16 @@ Additional message fields:
 
 When a scheduled job finishes, `run-job.sh` calls `scheduled-tasks/post-reminder.sh`, which writes a `cron_reminder` message to the inbox. These are system messages (`source: "system"`, `chat_id: 0`) — they signal that job output is available to review.
 
+> **WARNING: `check_task_outputs` ALWAYS goes to a background subagent — never inline.**
+>
+> Calling `check_task_outputs` on the main thread is a 7-second rule violation. It involves I/O and can take arbitrarily long. The dispatcher must never call it directly. Always delegate to a background subagent.
+>
+> **Violation pattern (never do this):**
+> ```
+> # WRONG: dispatcher calling check_task_outputs on the main thread
+> check_task_outputs(job_name=job_name, limit=1)    # VIOLATION
+> ```
+
 **When `wait_for_messages` returns a message with `type: "cron_reminder"`:**
 
 ```
@@ -639,31 +675,62 @@ When a scheduled job finishes, `run-job.sh` calls `scheduled-tasks/post-reminder
 3. status = msg["status"]          # "success" or "failed"
 4. duration = msg["duration_seconds"]
 
-5. Call check_task_outputs(job_name=job_name, limit=1) to read the latest output
+5. Always spawn a background subagent to read and triage the output — never call
+   check_task_outputs inline. The subagent is cheap; the inline I/O is not.
 
-6. if output exists AND is noteworthy (non-trivial content, failure, or actionable finding):
-       send_reply(chat_id=ADMIN_CHAT_ID, text=<concise summary>, source="telegram")
-   else:
-       # Silent — routine success with no news is not worth interrupting the user
+   triage_task_id = f"cron-triage-{msg['id']}"
 
-7. mark_processed(message_id)
+   Task(
+       subagent_type="lobster-generalist",
+       run_in_background=True,
+       prompt=(
+           f"---\n"
+           f"task_id: {triage_task_id}\n"
+           f"chat_id: 0\n"
+           f"source: system\n"
+           f"---\n\n"
+           f"A cron job just finished. Read its output and decide whether to alert the user.\n\n"
+           f"Job: {job_name}\n"
+           f"Status: {status}\n"
+           f"Duration: {duration}s\n\n"
+           f"Steps:\n"
+           f"1. Call check_task_outputs(job_name='{job_name}', limit=1) to read the latest output.\n"
+           f"2. Apply the triage heuristic below.\n"
+           f"3. Call write_result with ALL the information — do NOT call send_reply directly.\n"
+           f"   The dispatcher will decide whether to relay to the user.\n\n"
+           f"   - FAILURES or actionable findings: write_result(task_id='{triage_task_id}', "
+           f"chat_id=ADMIN_CHAT_ID, text=<concise summary>, source='system', sent_reply_to_user=False)\n"
+           f"   - No-op (nothing to report, routine success, empty output): "
+           f"write_result(task_id='{triage_task_id}', chat_id=0, text=<brief note>, source='system', sent_reply_to_user=False)\n\n"
+           f"Triage heuristic (determines which chat_id to pass to write_result):\n"
+           f"- FAILURES: always use chat_id=ADMIN_CHAT_ID — dispatcher will relay\n"
+           f"- SUCCESSES with findings, alerts, or actionable content: use chat_id=ADMIN_CHAT_ID\n"
+           f"- SUCCESSES where the output says 'nothing to report', 'no action taken', 'no new', "
+           f"'no findings', or any equivalent no-op phrase: use chat_id=0 (silent)\n"
+           f"- If the output is empty or missing: treat as no-op — use chat_id=0 (silent)\n"
+           f"Never call send_reply. The dispatcher is the sole point of user communication."
+       ),
+   )
+
+6. mark_processed(message_id)
+   # Return to wait_for_messages() immediately — the triage subagent handles the rest
 ```
 
 **Key fields:**
 - `type` — always `"cron_reminder"`
 - `source` — always `"system"` (do NOT call send_reply to the chat_id, which is 0)
 - `chat_id` — always `0` (system message, no user to reply to directly)
-- `job_name` — the name of the job that just ran (use for `check_task_outputs`)
+- `job_name` — the name of the job that just ran
 - `exit_code` — raw shell exit code (0 = success)
 - `duration_seconds` — how long the job ran
 - `status` — `"success"` or `"failed"` (derived from exit_code)
 
-**Triage heuristic:**
+**Triage heuristic (applied by the subagent, not the dispatcher):**
 - Always relay **failures** (`status: "failed"`) with the job output or "no output recorded"
 - For successes, relay if the output contains findings, alerts, or explicit user-relevant content
-- Routine "nothing to report" outputs → silent (mark processed only)
+- Routine "nothing to report" outputs → silent (write_result with chat_id=0, no send_reply)
 
-**Note:** Jobs that already call `send_reply` + `write_result` directly will produce a `subagent_result`/`subagent_notification` in addition to the `cron_reminder`. In that case the `cron_reminder` arrives after the user message — you can safely mark it processed without re-sending.
+**Note:** The triage subagent never calls `send_reply`. It reads the output, applies the heuristic, and calls `write_result` with the appropriate `chat_id` (ADMIN_CHAT_ID for actionable content, 0 for no-ops). The dispatcher's `subagent_result` handler then decides whether to relay or silently drop based on `chat_id` and `sent_reply_to_user`.
 
 ## Message Flow
 
