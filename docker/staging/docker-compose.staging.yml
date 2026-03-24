@@ -4,25 +4,13 @@
 # dedicated test bot token. Isolated from production via a separate
 # messages volume and workspace.
 #
-# ── Required secrets / env vars ─────────────────────────────────────────────
-# All values go in config.staging.env (copy from config.staging.env.example).
-#
-#   TELEGRAM_BOT_TOKEN       Staging bot token (from @BotFather). NEVER use the
-#                            production token here — this is the credential boundary.
-#   TELEGRAM_ALLOWED_USERS   Comma-separated Telegram user IDs allowed to message
-#                            the bot (e.g. your own chat_id).
-#   LOBSTER_ADMIN_CHAT_ID    Chat ID for admin notifications (defaults to the first
-#                            value in TELEGRAM_ALLOWED_USERS if not set).
-#   LOBSTER_ENV              Must be "production" — the dispatcher exits immediately
-#                            if it is anything else (safety check).
-#   LOBSTER_DEBUG            Set to "true" to enable debug mode (optional).
-#   GITHUB_TOKEN             Personal access token with repo scope. Required for
-#                            gh CLI and GitHub subagent operations inside the
-#                            container. Not inherited from the host environment.
-#
-# ── Credential setup (one-time) ─────────────────────────────────────────────
+# Credential setup (one-time):
 #   cp ~/lobster/config/config.staging.env.example ~/lobster-config/config.staging.env
-#   # Fill in the values above, then:
+#   # Fill in TELEGRAM_BOT_TOKEN (test bot), TELEGRAM_ALLOWED_USERS, etc.
+#   # NEVER put the production TELEGRAM_BOT_TOKEN in config.staging.env.
+#
+# Usage:
+#   cd ~/lobster
 #   sudo docker compose -f docker/staging/docker-compose.staging.yml up -d
 #
 # ── Usage ────────────────────────────────────────────────────────────────────
@@ -48,14 +36,20 @@ services:
       dockerfile: docker/staging/Dockerfile.staging
     container_name: lobster-staging
     restart: unless-stopped
-    # systemd requires privileged mode and /sys/fs/cgroup from the host.
-    # Without privileged mode, cgroups are read-only and systemd cannot
-    # manage service resource accounting or lifecycle properly.
-    privileged: true
-    # cgroup: host is required when Docker's cgroup driver is "systemd" (cgroup v2).
-    # Without it, Docker creates a private cgroup namespace and systemd cannot
-    # write to the cgroup root (fails with exit 255 on boot).
-    cgroup: host
+    # Scoped credentials: reads ONLY from config.staging.env, never from config.env.
+    # This is the credential boundary that prevents staging from inheriting production
+    # tokens. config.staging.env must NOT contain the production TELEGRAM_BOT_TOKEN.
+    # See config/config.staging.env.example for the template.
+    env_file:
+      # LOBSTER_CONFIG_DIR defaults to /home/lobster/lobster-config — the standard
+      # single-user install path. Override this env var before running compose if
+      # your config lives elsewhere (e.g. export LOBSTER_CONFIG_DIR=/custom/path).
+      - ${LOBSTER_CONFIG_DIR:-/home/lobster/lobster-config}/config.staging.env
+    environment:
+      # GitHub PAT for gh CLI access inside staging container.
+      # Sourced from the host environment so it doesn't need to live in
+      # config.staging.env (which is committed-adjacent and more exposed).
+      GITHUB_TOKEN: "${GITHUB_TOKEN:-}"
     volumes:
       # systemd cgroup hierarchy — required for systemd to function as PID 1.
       # Must be rw: Ubuntu 22.04 with cgroup v2 requires write access so systemd
