@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Stop hook: ensure the dispatcher calls wait_for_messages before ending a turn.
+Stop hook: warn the dispatcher if it ends a turn without calling wait_for_messages.
 
 The dispatcher's main loop is: process messages → call wait_for_messages →
 repeat. When the dispatcher stalls — typically after processing a batch of
@@ -10,8 +10,8 @@ window with missed messages.
 
 This hook fires on every Stop event (dispatcher or subagent). Subagent sessions
 are immediately exempted via session_role.is_dispatcher(). For the dispatcher,
-the hook scans the transcript: if wait_for_messages was not called, it exits
-with code 2 and injects a reminder into the next Claude turn.
+the hook scans the transcript: if wait_for_messages was not called, it prints
+a warning to stderr and exits 0 (warn-only — the stop is never blocked).
 
 ## Transcript handling
 
@@ -34,10 +34,12 @@ the hook outputs JSON with {"suppressOutput": true} on all success paths.
 ## Exemptions
 
 The hook does NOT fire for:
+- Sessions without LOBSTER_MAIN_SESSION=1 (non-Lobster Claude Code sessions)
 - Subagent sessions (is_dispatcher() returns False)
 - Any session where wait_for_messages was called at least once in the transcript
 """
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -64,8 +66,12 @@ def _exit_ok() -> None:
     sys.exit(0)
 
 
-def _load_transcript_from_jsonl(path: str) -> list:
-    """Load transcript entries from a JSONL file. Returns [] on any error."""
+def _load_transcript_from_jsonl(path: str) -> list | None:
+    """Load transcript entries from a JSONL file.
+
+    Returns a list of entries on success (may be empty if the file is empty),
+    or None on any I/O or OS error (distinguishes read failure from empty file).
+    """
     try:
         messages = []
         with open(path) as fh:
@@ -78,7 +84,7 @@ def _load_transcript_from_jsonl(path: str) -> list:
                         pass
         return messages
     except Exception:
-        return []
+        return None
 
 
 def _collect_tool_names(transcript: list) -> list[str]:
@@ -109,12 +115,17 @@ def _collect_tool_names(transcript: list) -> list[str]:
 
 
 def main() -> None:
+    # Only run for sessions started by Lobster (LOBSTER_MAIN_SESSION=1).
+    # This guards against firing in a developer's personal Claude Code session.
+    if os.environ.get("LOBSTER_MAIN_SESSION", "") != "1":
+        _exit_ok()
+
     try:
         data = json.load(sys.stdin)
     except Exception:
         _exit_ok()  # If we can't read input, don't block.
 
-    # Only enforce on the dispatcher session.
+    # Only warn for the dispatcher session.
     if not is_dispatcher(data):
         _exit_ok()
 
@@ -122,6 +133,15 @@ def main() -> None:
     transcript_path = data.get("transcript_path", "")
     if transcript_path:
         transcript = _load_transcript_from_jsonl(transcript_path)
+        if transcript is None:
+            # I/O error reading the transcript — can't determine whether
+            # wait_for_messages was called, so warn and allow stop.
+            print(
+                "[require-wait-for-messages] WARNING: could not read transcript "
+                f"at {transcript_path!r} — skipping wait_for_messages check.",
+                file=sys.stderr,
+            )
+            _exit_ok()
     else:
         transcript = data.get("transcript", [])
 
@@ -130,9 +150,10 @@ def main() -> None:
     if _WFM_TOOL in tool_names:
         _exit_ok()
 
-    # wait_for_messages was not called — inject a reminder.
+    # wait_for_messages was not called — print a warning and allow the stop.
+    # This is warn-only: exit 0 so the stop is never blocked.
     print(_REMINDER, file=sys.stderr)
-    sys.exit(2)
+    _exit_ok()
 
 
 if __name__ == "__main__":
