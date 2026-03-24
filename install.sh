@@ -461,8 +461,12 @@ if [ "$(id -u)" = "0" ]; then
     if getent group docker &>/dev/null; then
         usermod -aG docker lobster
         success "Added 'lobster' to the docker group."
+    elif command -v docker &>/dev/null; then
+        # Docker is installed but the group doesn't exist — that's unusual and worth flagging
+        warn "Docker is installed but the 'docker' group doesn't exist — run 'sudo groupadd docker && sudo usermod -aG docker lobster' to fix."
     else
-        warn "docker group not found — skipping docker group membership (install Docker first)."
+        # Docker not installed — this is the normal case on a fresh machine, not a warning
+        info "Docker not installed — skipping docker group setup. Install Docker later to enable Docker features."
     fi
     # Copy script to /tmp so lobster user can read it regardless of working directory
     INSTALL_SCRIPT="$(readlink -f "$0")"
@@ -500,12 +504,16 @@ if ! sudo true 2>/dev/null; then
 fi
 success "Sudo access confirmed"
 
-# Check internet
-if ! curl -s --connect-timeout 5 https://api.github.com >/dev/null; then
-    error "No internet connection"
+# Check internet (skip when source is already present — dev mode, existing install, or
+# pre-copied source in non-interactive mode, matching the git clone skip condition).
+if [ -d "$INSTALL_DIR/.git" ] || $DEV_MODE || { [ -f "$INSTALL_DIR/install.sh" ] && [ "$NON_INTERACTIVE" = true ]; }; then
+    info "Skipping internet check (source already present)"
+elif ! curl -s --connect-timeout 5 https://api.github.com >/dev/null; then
+    error "No internet connection (required for fresh install)"
     exit 1
+else
+    success "Internet connectivity confirmed"
 fi
-success "Internet connectivity confirmed"
 
 # Check Python
 if ! command -v python3 &>/dev/null; then
@@ -803,31 +811,36 @@ fi
 #===============================================================================
 
 if [ "$CLAUDE_INSTALLED" = false ]; then
-    step "Installing Claude Code..."
-
-    curl -fsSL https://claude.ai/install.sh | bash
-
-    # Add to PATH for current session and clear bash's command hash table so
-    # command -v picks up the newly installed binary immediately.
-    export PATH="$HOME/.local/bin:$PATH"
-    hash -r 2>/dev/null || true
-
-    # Persist ~/.local/bin to PATH in shell config files
-    PATH_LINE="export PATH=\"\$HOME/.local/bin:\$PATH\""
-    for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
-        if [ -f "$rc" ] && ! grep -q '\.local/bin' "$rc"; then
-            echo "" >> "$rc"
-            echo "# Added by Lobster installer" >> "$rc"
-            echo "$PATH_LINE" >> "$rc"
-            info "Added ~/.local/bin to PATH in $rc"
-        fi
-    done
-
-    if command -v claude &>/dev/null || [ -x "$HOME/.local/bin/claude" ]; then
-        success "Claude Code installed"
+    if [ "$NON_INTERACTIVE" = true ]; then
+        warn "Claude Code not found — skipping installation (non-interactive mode)."
+        info "Run the installer interactively or install Claude Code manually: curl -fsSL https://claude.ai/install.sh | bash"
     else
-        error "Claude Code installation failed"
-        exit 1
+        step "Installing Claude Code..."
+
+        curl -fsSL https://claude.ai/install.sh | bash
+
+        # Add to PATH for current session and clear bash's command hash table so
+        # command -v picks up the newly installed binary immediately.
+        export PATH="$HOME/.local/bin:$PATH"
+        hash -r 2>/dev/null || true
+
+        # Persist ~/.local/bin to PATH in shell config files
+        PATH_LINE="export PATH=\"\$HOME/.local/bin:\$PATH\""
+        for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
+            if [ -f "$rc" ] && ! grep -q '\.local/bin' "$rc"; then
+                echo "" >> "$rc"
+                echo "# Added by Lobster installer" >> "$rc"
+                echo "$PATH_LINE" >> "$rc"
+                info "Added ~/.local/bin to PATH in $rc"
+            fi
+        done
+
+        if command -v claude &>/dev/null || [ -x "$HOME/.local/bin/claude" ]; then
+            success "Claude Code installed"
+        else
+            error "Claude Code installation failed"
+            exit 1
+        fi
     fi
 fi
 
@@ -855,16 +868,22 @@ fi
 # Install Lobster Code
 #===============================================================================
 
-# Detect install mode: --dev flag, existing .git, or tarball
+# Detect install mode: --dev flag, existing .git, or git clone (default)
+# Tarball mode was removed as the default because the release tarball gets stale
+# (scripts added after the last release tag are missing, causing install failures).
+# All fresh installs now use git clone from main, which is always current.
+# See: https://github.com/SiderealPress/lobster/issues/787
 if [ -d "$INSTALL_DIR/.git" ]; then
     INSTALL_MODE="git"
     info "Existing git install detected"
-elif $DEV_MODE; then
-    INSTALL_MODE="git"
-    info "Developer mode requested"
 else
-    INSTALL_MODE="tarball"
-    info "Tarball install mode"
+    # Both --dev mode and fresh installs use git clone
+    INSTALL_MODE="git"
+    if $DEV_MODE; then
+        info "Developer mode: using git clone"
+    else
+        info "Fresh install: using git clone from main (always current)"
+    fi
 fi
 
 if [ "$INSTALL_MODE" = "git" ]; then
@@ -876,6 +895,11 @@ if [ "$INSTALL_MODE" = "git" ]; then
         git fetch --quiet
         git checkout --quiet "$REPO_BRANCH"
         git pull --quiet origin "$REPO_BRANCH"
+    elif [ -f "$INSTALL_DIR/install.sh" ] && [ "$NON_INTERACTIVE" = true ]; then
+        # Source is already present (e.g. Docker test environment with COPY'd source).
+        # In non-interactive mode, trust the pre-populated directory and skip the clone.
+        info "Source already present at $INSTALL_DIR — skipping git clone (non-interactive mode)"
+        cd "$INSTALL_DIR"
     else
         info "Cloning repository from $REPO_URL (branch: $REPO_BRANCH)..."
         git clone --quiet --branch "$REPO_BRANCH" "$REPO_URL" "$INSTALL_DIR"
@@ -884,11 +908,13 @@ if [ "$INSTALL_MODE" = "git" ]; then
 
     success "Repository ready at $INSTALL_DIR (branch: $REPO_BRANCH)"
 
-    step "Configuring distributed git hooks..."
-    cd "$INSTALL_DIR"
-    git config --local core.hooksPath .githooks
-    chmod +x .githooks/pre-push .githooks/post-checkout .githooks/pre-commit .githooks/post-merge .githooks/post-rewrite 2>/dev/null || true
-    success "Git hooks configured (core.hooksPath -> .githooks)"
+    if [ -d "$INSTALL_DIR/.git" ]; then
+        step "Configuring distributed git hooks..."
+        cd "$INSTALL_DIR"
+        git config --local core.hooksPath .githooks
+        chmod +x .githooks/pre-push .githooks/post-checkout .githooks/pre-commit .githooks/post-merge .githooks/post-rewrite 2>/dev/null || true
+        success "Git hooks configured (core.hooksPath -> .githooks)"
+    fi
 
 else
     step "Downloading latest Lobster release..."
@@ -2079,6 +2105,8 @@ elif [ -n "${GITHUB_PAT:-}" ]; then
     echo "$GITHUB_PAT" | gh auth login --with-token 2>/dev/null && \
         success "GitHub CLI authenticated via PAT" || \
         warn "GitHub CLI auth via PAT failed. Authenticate later with: gh auth login"
+elif [ "$NON_INTERACTIVE" = true ]; then
+    info "GitHub CLI not authenticated — skipping (non-interactive mode). Authenticate later with: gh auth login"
 else
     echo ""
     echo "GitHub CLI (gh) is not authenticated."
@@ -2511,30 +2539,35 @@ fi
 
 step "Installing systemd services..."
 
-sudo cp "$INSTALL_DIR/services/lobster-router.service" /etc/systemd/system/
-sudo cp "$INSTALL_DIR/services/lobster-claude.service" /etc/systemd/system/
+# Check whether systemd is running (skip service install in containers/Docker where systemd is absent)
+if ! pidof systemd >/dev/null 2>&1 && ! systemctl is-system-running >/dev/null 2>&1; then
+    warn "systemd not running — skipping service installation (container environment?)"
+    info "Service files have been generated in $INSTALL_DIR/services/ — install them manually when running on a systemd host."
+else
+    sudo cp "$INSTALL_DIR/services/lobster-router.service" /etc/systemd/system/
+    sudo cp "$INSTALL_DIR/services/lobster-claude.service" /etc/systemd/system/
 
-# Install Slack router service if generated
-if [ -f "$INSTALL_DIR/services/lobster-slack-router.service" ]; then
-    sudo cp "$INSTALL_DIR/services/lobster-slack-router.service" /etc/systemd/system/
-    info "Slack router service installed (enable manually with: sudo systemctl enable lobster-slack-router)"
+    # Install Slack router service if generated
+    if [ -f "$INSTALL_DIR/services/lobster-slack-router.service" ]; then
+        sudo cp "$INSTALL_DIR/services/lobster-slack-router.service" /etc/systemd/system/
+        info "Slack router service installed (enable manually with: sudo systemctl enable lobster-slack-router)"
+    fi
+
+    # Install MCP HTTP bridge service if generated
+    if [ -f "$INSTALL_DIR/services/lobster-mcp.service" ]; then
+        sudo cp "$INSTALL_DIR/services/lobster-mcp.service" /etc/systemd/system/
+        info "MCP HTTP bridge service installed (enable manually with: sudo systemctl enable lobster-mcp)"
+    fi
+
+    # Install observability service if generated
+    if [ -f "$INSTALL_DIR/services/lobster-observability.service" ]; then
+        sudo cp "$INSTALL_DIR/services/lobster-observability.service" /etc/systemd/system/
+        info "Observability server service installed (enable manually with: sudo systemctl enable lobster-observability)"
+    fi
+
+    sudo systemctl daemon-reload
+    success "Services installed"
 fi
-
-# Install MCP HTTP bridge service if generated
-if [ -f "$INSTALL_DIR/services/lobster-mcp.service" ]; then
-    sudo cp "$INSTALL_DIR/services/lobster-mcp.service" /etc/systemd/system/
-    info "MCP HTTP bridge service installed (enable manually with: sudo systemctl enable lobster-mcp)"
-fi
-
-# Install observability service if generated
-if [ -f "$INSTALL_DIR/services/lobster-observability.service" ]; then
-    sudo cp "$INSTALL_DIR/services/lobster-observability.service" /etc/systemd/system/
-    info "Observability server service installed (enable manually with: sudo systemctl enable lobster-observability)"
-fi
-
-sudo systemctl daemon-reload
-
-success "Services installed"
 
 #===============================================================================
 # Pre-seed ~/.claude.json
@@ -2595,7 +2628,7 @@ sudo chmod +x /usr/local/bin/lobster
 success "CLI installed"
 
 # Install git pre-commit hook (enforces execute bits on scripts/ and hooks/)
-if [ -f "$INSTALL_DIR/hooks/pre-commit" ]; then
+if [ -f "$INSTALL_DIR/hooks/pre-commit" ] && [ -d "$INSTALL_DIR/.git" ]; then
     cp "$INSTALL_DIR/hooks/pre-commit" "$INSTALL_DIR/.git/hooks/pre-commit"
     chmod +x "$INSTALL_DIR/.git/hooks/pre-commit"
     success "Pre-commit hook installed (.git/hooks/pre-commit)"
