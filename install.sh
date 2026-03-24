@@ -949,6 +949,10 @@ else
     LATEST_TAG=$(echo "$RELEASE_JSON" | jq -r '.tag_name // empty' 2>/dev/null || true)
 
     if [ -z "$LATEST_TAG" ]; then
+        if ! command -v git >/dev/null 2>&1; then
+            error "No release tag found and git is not available. Cannot install."
+            exit 1
+        fi
         info "No release found, falling back to git clone..."
         git clone --quiet --branch "$REPO_BRANCH" "$REPO_URL" "$INSTALL_DIR"
         cd "$INSTALL_DIR"
@@ -964,6 +968,10 @@ else
         fi
 
         if [ -z "$TARBALL_URL" ]; then
+            if ! command -v git >/dev/null 2>&1; then
+                error "No release tag found and git is not available. Cannot install."
+                exit 1
+            fi
             error "No tarball found in release. Falling back to git clone..."
             git clone --quiet --branch "$REPO_BRANCH" "$REPO_URL" "$INSTALL_DIR"
             cd "$INSTALL_DIR"
@@ -2120,7 +2128,7 @@ if [ -z "${GITHUB_TOKEN:-}" ] || [ "$GITHUB_TOKEN" = "your_github_pat_here" ]; t
         read -p "Enter your GitHub PAT (or press Enter to skip): " GH_TOKEN
         if [ -n "$GH_TOKEN" ]; then
             # Write to global.env, replacing any existing GITHUB_TOKEN line (commented or not)
-            if grep -q "^#\? *GITHUB_TOKEN=" "$GLOBAL_ENV_FILE" 2>/dev/null; then
+            if grep -q "^#\{0,1\} *GITHUB_TOKEN=" "$GLOBAL_ENV_FILE" 2>/dev/null; then
                 # Use ENVIRON to avoid backslash mangling that -v causes with tokens
                 # containing backslash sequences (e.g. \n, \t in a PAT value).
                 GH_TOKEN="$GH_TOKEN" awk \
