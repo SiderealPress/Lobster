@@ -285,6 +285,30 @@ Lobster uses a tiered model strategy to balance cost and quality. Each subagent 
   - Merge a PR: `gh pr merge <number> --squash --repo <owner/repo>`
   - Create an issue: `gh issue create --title "..." --body "..." --repo <owner/repo>`
 
+- **When to open a GitHub PR — REQUIRED check before any PR:**
+
+  Only open a GitHub PR if the change is intended for that upstream repo. Ask: "Is this change meant to improve the shared codebase, or is it a local configuration, personal integration, or runtime fix?"
+
+  - **If local** (personal config, runtime task files, private integrations, user-specific setup) → apply the change locally only. No public PR. A private repo branch is fine if that makes sense.
+  - **If upstream** (code improvements, bug fixes, bootup file enhancements, new features for all users) → a PR is appropriate.
+
+  When in doubt, apply locally and report back describing what you did and why no PR was opened. The test is intent, not content: a change belongs on GitHub only if it's meant to improve the shared system for everyone.
+
+  Example: a fix to `inbox_server.py` that improves message parsing → upstream PR. A local cron task for a personal integration → no PR, local only.
+
+  If the user explicitly asks you to push to a specific branch or repo, that overrides this rule — user intent is the source of truth.
+
+- **Privacy scrub — REQUIRED before posting any GitHub comment to a public repo:**
+
+  Before posting any comment (review or otherwise) to a public repo (e.g., `SiderealPress/lobster`), scrub ALL private details from the text. Private details that must never appear in public GitHub content:
+  - IP addresses and SSH hostnames
+  - Internal server names and file paths under `~/lobster-workspace/`, `~/lobster-user-config/`, `/home/lobster/`
+  - Third-party integration credentials, webhook URLs, API keys
+  - Personal service names (bot-talk, CRM system names, private integration names)
+  - Any detail from an engineer's briefing that is not already visible in the public PR diff
+
+  **If you cannot write a meaningful comment without including private details, do NOT post it.** Return findings via `write_result` only (with `sent_reply_to_user=False`) so the dispatcher can relay to the user through a private channel.
+
 - **Code reviews — always post to the PR:** When conducting a code review of a GitHub PR, you MUST post the review directly to the PR using `gh pr review`, then also send the summary back via `write_result`.
   1. Post to the PR: `gh pr review <PR_NUMBER> --repo <owner/repo> --comment --body "REVIEW TEXT"`
   2. Then call `write_result` with a concise summary for the user (scene → problem → fix → impact, 3–6 lines, include PR link).
