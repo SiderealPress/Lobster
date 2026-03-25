@@ -1457,22 +1457,7 @@ with open(path, 'w') as f:
         fi
     fi
 
-    # Migration 27: Add gws credential sync cron entry
-    # gws auth login writes new tokens to credentials.enc but does not update
-    # credentials.json. Without this sync, API calls read the stale refresh token
-    # from credentials.json and fail with invalid_grant after a re-auth.
-    # The daily cron calls sync-gws-credentials.py which copies the refresh_token
-    # from the encrypted store into credentials.json only when it differs.
-    local GWS_SYNC_MARKER="# LOBSTER-GWS-CREDENTIAL-SYNC"
-    if ! crontab -l 2>/dev/null | grep -q "$GWS_SYNC_MARKER"; then
-        local gws_sync_script="$LOBSTER_DIR/scripts/sync-gws-credentials.py"
-        chmod +x "$gws_sync_script" 2>/dev/null || true
-        "$LOBSTER_DIR/scripts/cron-manage.sh" add "$GWS_SYNC_MARKER" \
-            "0 4 * * * cd $LOBSTER_DIR && uv run scripts/sync-gws-credentials.py $GWS_SYNC_MARKER"
-        substep "Added gws credential sync cron entry (daily at 04:00)"
-        migrated=$((migrated + 1))
-    fi
-
+    # Migration 27: Add gws credential sync cron entry — superseded by Migration 34 (removed)
 
     # Migration 28: Add daily log-export cron entry
     # export-logs.py copies observations.log, lobster.log, and audit.jsonl to a
@@ -1490,20 +1475,7 @@ with open(path, 'w') as f:
         migrated=$((migrated + 1))
     fi
 
-    # Migration 29: Restore gws OAuth client secret from lobster-config
-    # install.sh previously set up the gws credential sync cron job but did not
-    # restore the client_secret.json. Without it, gws auth login fails with
-    # "No OAuth client configured." on any reinstall.
-    # If the user has stored the secret at ~/lobster-config/gws-client-secret.json
-    # (the canonical location for private credentials), copy it into place now.
-    local GWS_SECRET_SRC="$HOME/lobster-config/gws-client-secret.json"
-    local GWS_SECRET_DEST="$HOME/.config/gws/client_secret.json"
-    if [ -f "$GWS_SECRET_SRC" ] && [ ! -f "$GWS_SECRET_DEST" ]; then
-        mkdir -p "$HOME/.config/gws"
-        cp "$GWS_SECRET_SRC" "$GWS_SECRET_DEST"
-        substep "Restored gws OAuth client secret from lobster-config"
-        migrated=$((migrated + 1))
-    fi
+    # Migration 29: Restore gws OAuth client secret from lobster-config — superseded by Migration 34 (removed)
 
     # Migration 30: Create ~/lobster-workspace/reports/ for artifact-based large result delivery.
     # Subagents write large outputs (reports, diffs, analysis) to this directory and pass the
@@ -1574,6 +1546,17 @@ EOF
             substep "Registered require-wait-for-messages Stop hook in settings.json"
             migrated=$((migrated + 1))
         fi
+    fi
+
+    # Migration 34: Remove gws credential sync cron entry from existing installs.
+    # gws (third-party Gmail CLI) is broken (OAuth 401 errors) and has been removed
+    # from Lobster's install/setup. The daily cron entry it added must be cleaned
+    # from existing installs so it no longer runs sync-gws-credentials.py.
+    local GWS_SYNC_MARKER="# LOBSTER-GWS-CREDENTIAL-SYNC"
+    if crontab -l 2>/dev/null | grep -q "$GWS_SYNC_MARKER"; then
+        "$LOBSTER_DIR/scripts/cron-manage.sh" remove "$GWS_SYNC_MARKER" 2>/dev/null || true
+        substep "Removed gws credential sync cron entry (gws integration discontinued)"
+        migrated=$((migrated + 1))
     fi
 
     if [ "$migrated" -eq 0 ]; then
