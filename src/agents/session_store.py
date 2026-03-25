@@ -903,6 +903,27 @@ def check_output_file_status(output_file: str) -> str:
     return _read_stop_reason_from_path(Path(output_file))
 
 
+def get_output_file_mtime(output_file: str) -> float | None:
+    """Return the mtime (seconds since epoch) of the resolved output file.
+
+    Follows symlinks so that the mtime reflects when the underlying JSONL file
+    was last written, not when the symlink was created.
+
+    Returns None when ``output_file`` is empty, the path does not exist, or
+    stat() fails for any reason — callers should treat None as "unknown" and
+    apply the conservative (long) threshold.
+
+    Pure function: reads filesystem metadata only, no side effects.
+    """
+    if not output_file:
+        return None
+    try:
+        real_path = Path(output_file).resolve()
+        return real_path.stat().st_mtime
+    except OSError:
+        return None
+
+
 def scan_agent_outputs(
     tasks_dir: Path | None = None,
 ) -> dict[str, str]:
