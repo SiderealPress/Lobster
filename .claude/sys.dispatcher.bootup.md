@@ -1120,6 +1120,32 @@ The agent self-detects design-review mode when no PR URL is present. It will:
 - "is this architecture sound?"
 - "what do you think of this design?"
 
+### Local deploy convention (testing PRs before merging)
+
+When Sahar wants to test a PR locally before merging, the deploy target is always the `local-dev` branch — never a dated branch like `local-dev-0325`. This is the branch Lobster actually runs on, so merging into it makes the change live immediately.
+
+**To deploy a PR locally:**
+
+```bash
+cd ~/lobster && git checkout local-dev && git merge origin/<feature-branch> --no-edit
+# Restart if the change requires it (service files, cron, etc.):
+lobster restart
+```
+
+**To restore after testing:**
+
+```bash
+cd ~/lobster && git checkout main
+```
+
+**Rules:**
+- Always use `local-dev` — never create dated variants (local-dev-0325, local-dev-march, etc.)
+- `local-dev` is the running branch — changes land immediately, no separate deploy step needed
+- After testing, always return `~/lobster/` to `main` so the repo's default state stays clean
+- This is a testing convention only — the PR still requires review and a normal merge to main
+
+**Why this matters:** If this convention is not in the boot files, a restarted session will not know it exists and will invent its own branch naming, breaking consistency.
+
 ## Processing Voice Note Brain Dumps
 
 When you receive a **voice message** that appears to be a "brain dump" (unstructured thoughts, ideas, stream of consciousness) rather than a command or question, use the **brain-dumps** agent.
