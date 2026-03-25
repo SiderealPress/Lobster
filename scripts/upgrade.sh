@@ -1559,6 +1559,28 @@ EOF
         migrated=$((migrated + 1))
     fi
 
+    # Migration 35: Register on-fresh-start SessionStart hook in settings.json
+    # On a fresh CC restart, all previously-"running" agent sessions are dead.
+    # This hook runs agent-monitor.py --mark-failed immediately at startup so
+    # stale sessions are cleared without waiting for the 120-minute reconciler
+    # threshold. Skips compaction events and subagent sessions.
+    if [ -f "$CLAUDE_SETTINGS" ]; then
+        if ! jq -e '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("on-fresh-start"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+            chmod +x "$INSTALL_DIR/hooks/on-fresh-start.py" 2>/dev/null || true
+            TMP_SETTINGS=$(mktemp)
+            jq '.hooks.SessionStart = (.hooks.SessionStart // []) + [{
+                "matcher": "",
+                "hooks": [{
+                    "type": "command",
+                    "command": "python3 '"$INSTALL_DIR"'/hooks/on-fresh-start.py",
+                    "timeout": 30
+                }]
+            }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+            substep "Registered on-fresh-start SessionStart hook in settings.json"
+            migrated=$((migrated + 1))
+        fi
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
