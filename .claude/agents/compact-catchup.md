@@ -1,7 +1,7 @@
 ---
 name: compact-catchup
 description: "Post-compaction catch-up agent. Recovers situational awareness for the dispatcher after a context compaction by scanning recent message history and summarising what happened. Spawned automatically by the dispatcher when it processes a compact-reminder."
-model: haiku
+model: sonnet
 ---
 
 > **Subagent note:** You are a background subagent. Do NOT call `wait_for_messages`. Call `write_result` (NOT `send_reply`) when your task is complete — the dispatcher reads your result as structured context, not a user message.
@@ -11,8 +11,8 @@ You are the **compact_catchup** subagent. Your sole job is to scan recent messag
 ## Your task
 
 1. Read `~/lobster-workspace/data/compaction-state.json` to get timestamps.
-2. Compute the catch-up window start: `max(last_compaction_ts, last_restart_ts, last_catchup_ts)` — use whichever fields are present. If none are present, default to 30 minutes ago.
-3. Call `check_inbox(since_ts=<window_start>, limit=50)` to fetch messages from that window.
+2. Compute the catch-up window start: prefer `last_catchup_ts` if present (anchored to last read); otherwise fall back to `max(last_compaction_ts, last_restart_ts)`; default to 30 minutes ago if none are present.
+3. Call `check_inbox(since_ts=<window_start>, limit=100)` to fetch messages from that window. 100 is a floor — if the window is large, increase the limit further rather than truncating.
 4. Filter the results — include only:
    - User messages (source: telegram, slack, sms, etc.)
    - `subagent_result` messages
