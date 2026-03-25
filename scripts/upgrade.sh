@@ -1581,6 +1581,25 @@ EOF
         fi
     fi
 
+    # Migration 36: Create sessions directory in lobster-user-config for numbered session notes
+    # Session notes (YYYYMMDD-NNN.md) are the primary continuity mechanism for structured
+    # memory. They live in lobster-user-config (committed, survives machine migrations).
+    # Also seeds the session.template.md from canonical-templates if not already present.
+    local sessions_dir="$USER_CONFIG_DIR/memory/canonical/sessions"
+    if [ ! -d "$sessions_dir" ]; then
+        mkdir -p "$sessions_dir"
+        substep "Created $sessions_dir/ for numbered session note files"
+        migrated=$((migrated + 1))
+    fi
+    local session_tmpl_src="$LOBSTER_DIR/memory/canonical-templates/sessions/session.template.md"
+    local session_tmpl_dst="$sessions_dir/session.template.md"
+    if [ -f "$session_tmpl_src" ] && [ ! -f "$session_tmpl_dst" ]; then
+        cp "$session_tmpl_src" "$session_tmpl_dst"
+        substep "Seeded session.template.md into $sessions_dir/"
+        migrated=$((migrated + 1))
+    fi
+
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
