@@ -1488,36 +1488,6 @@ chmod +x "$INSTALL_DIR/scripts/nightly-consolidation.sh" || true
 
 success "Nightly consolidation configured (runs at 03:00 nightly)"
 
-#===============================================================================
-# GWS Credential Sync
-#===============================================================================
-
-step "Setting up gws credential sync..."
-
-# Restore gws OAuth client secret from user config if present.
-# The client_secret.json is created once via Google Cloud Console and stored in
-# ~/lobster-config/ so reinstalls automatically restore gws auth capability.
-GWS_CLIENT_SECRET_SRC="$HOME/lobster-config/gws-client-secret.json"
-GWS_CONFIG_DIR="$HOME/.config/gws"
-if [ -f "$GWS_CLIENT_SECRET_SRC" ]; then
-    mkdir -p "$GWS_CONFIG_DIR"
-    cp "$GWS_CLIENT_SECRET_SRC" "$GWS_CONFIG_DIR/client_secret.json"
-    success "gws OAuth client secret restored from lobster-config"
-else
-    warn "No gws-client-secret.json found in ~/lobster-config/ — run 'gws auth setup' or copy client_secret.json manually"
-fi
-
-chmod +x "$INSTALL_DIR/scripts/sync-gws-credentials.py" || true
-
-# Add gws credential sync to crontab (runs daily at 04:00)
-# gws auth login writes fresh tokens to credentials.enc but does not update
-# credentials.json. Without this sync, API calls read the stale refresh token
-# and fail with invalid_grant after a re-auth.
-"$INSTALL_DIR/scripts/cron-manage.sh" add "# LOBSTER-GWS-CREDENTIAL-SYNC" \
-    "0 4 * * * cd $INSTALL_DIR && uv run scripts/sync-gws-credentials.py # LOBSTER-GWS-CREDENTIAL-SYNC"
-
-success "GWS credential sync configured (runs at 04:00 daily)"
-
 # Add daily log-export to crontab (runs at 03:00 UTC)
 # export-logs.py archives observations.log, lobster.log, and audit.jsonl to a
 # date-stamped directory under ~/lobster-workspace/logs/archive/ and writes a
@@ -1874,6 +1844,31 @@ if [ -f "$CLAUDE_SETTINGS" ]; then
     fi
 else
     info "Skipping inject-debug-bootup hook (settings.json not yet created)"
+fi
+
+# Set up Claude Code SessionStart hook to mark stale agent sessions as failed on fresh restart.
+# On a fresh CC restart, all previously-"running" sessions are dead. This hook runs
+# agent-monitor.py --mark-failed immediately at startup (before wait_for_messages) so dead
+# sessions are cleared without waiting for the normal 120-minute reconciler threshold.
+# The hook skips compaction events (subagents are still alive on compact) and subagent sessions.
+chmod +x "$INSTALL_DIR/hooks/on-fresh-start.py" || true
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("on-fresh-start"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq '.hooks.SessionStart = (.hooks.SessionStart // []) + [{
+            "matcher": "",
+            "hooks": [{
+                "type": "command",
+                "command": "python3 '"$INSTALL_DIR"'/hooks/on-fresh-start.py",
+                "timeout": 30
+            }]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "on-fresh-start hook installed"
+    else
+        info "on-fresh-start hook already configured in Claude Code settings"
+    fi
+else
+    info "Skipping on-fresh-start hook (settings.json not yet created)"
 fi
 
 # Set up Claude Code Stop hook to enforce wait_for_messages in dispatcher sessions.
