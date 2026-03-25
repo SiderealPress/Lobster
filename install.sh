@@ -332,7 +332,7 @@ if [ "$CONTAINER_SETUP" = true ]; then
     mkdir -p "$MESSAGES_DIR"/{inbox,outbox,processed,processing,failed,config,audio,task-outputs}
     mkdir -p "$CONFIG_DIR"
     mkdir -p "$PROJECTS_DIR"
-    mkdir -p "$USER_CONFIG_DIR/memory"/{canonical/{people,projects},archive/digests}
+    mkdir -p "$USER_CONFIG_DIR/memory"/{canonical/{people,projects,sessions},archive/digests}
     mkdir -p "$USER_CONFIG_DIR/agents/subagents"
     # Safety: remove orphan agents.db if it was created (real store is agent_sessions.db)
     rm -f "$MESSAGES_DIR/config/agents.db" "$WORKSPACE_DIR/data/agents.db"
@@ -359,6 +359,21 @@ if [ "$CONTAINER_SETUP" = true ]; then
                 cp "$tmpl" "$dest"
                 info "  Seeded canonical template: $base"
             fi
+        done
+        # Seed subdirectory templates (e.g. sessions/session.template.md)
+        for subdir in "$TEMPLATES_DIR"/*/; do
+            [ -d "$subdir" ] || continue
+            subdir_name=$(basename "$subdir")
+            mkdir -p "$USER_CONFIG_DIR/memory/canonical/$subdir_name"
+            for tmpl in "$subdir"*.md; do
+                [ -f "$tmpl" ] || continue
+                base=$(basename "$tmpl")
+                dest="$USER_CONFIG_DIR/memory/canonical/$subdir_name/$base"
+                if [ ! -f "$dest" ]; then
+                    cp "$tmpl" "$dest"
+                    info "  Seeded canonical template: $subdir_name/$base"
+                fi
+            done
         done
     fi
 
@@ -1048,7 +1063,7 @@ mkdir -p "$WORKSPACE_DIR/reports"
 mkdir -p "$MESSAGES_DIR"/{inbox,outbox,processed,processing,failed,config,audio,task-outputs}
 mkdir -p "$CONFIG_DIR"
 mkdir -p "$PROJECTS_DIR"
-mkdir -p "$USER_CONFIG_DIR/memory"/{canonical/{people,projects},archive/digests}
+mkdir -p "$USER_CONFIG_DIR/memory"/{canonical/{people,projects,sessions},archive/digests}
 mkdir -p "$USER_CONFIG_DIR/agents/subagents"
 # Safety: remove orphan agents.db if it was created (real store is agent_sessions.db)
 rm -f "$MESSAGES_DIR/config/agents.db" "$WORKSPACE_DIR/data/agents.db"
@@ -1077,6 +1092,21 @@ if [ -d "$TEMPLATES_DIR" ]; then
             cp "$tmpl" "$dest"
             info "  Seeded canonical template: $base"
         fi
+    done
+    # Seed subdirectory templates (e.g. sessions/session.template.md)
+    for subdir in "$TEMPLATES_DIR"/*/; do
+        [ -d "$subdir" ] || continue
+        subdir_name=$(basename "$subdir")
+        mkdir -p "$USER_CONFIG_DIR/memory/canonical/$subdir_name"
+        for tmpl in "$subdir"*.md; do
+            [ -f "$tmpl" ] || continue
+            base=$(basename "$tmpl")
+            dest="$USER_CONFIG_DIR/memory/canonical/$subdir_name/$base"
+            if [ ! -f "$dest" ]; then
+                cp "$tmpl" "$dest"
+                info "  Seeded canonical template: $subdir_name/$base"
+            fi
+        done
     done
 fi
 
