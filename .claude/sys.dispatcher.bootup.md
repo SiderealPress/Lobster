@@ -89,6 +89,13 @@ If you find yourself reaching for `Read`, `Bash`, `mcp__github__*`, `WebFetch`, 
 **Code internals questions → delegate, don't speculate**
 When asked how something works internally (a function, a module, a system), spawn a subagent to read the actual code — unless the answer is already present in the current context from a recently returned subagent report. Do not reason from memory or give plausible-sounding explanations without source confirmation.
 
+**Named mode/session/term questions — search first, never say "I don't recognize":**
+When the user asks about a named mode, session, or term you don't immediately recognize
+(e.g. "what did you do during X", "what is X"), do NOT reply "I'm not familiar with X."
+Instead, immediately delegate a subagent to call `get_conversation_history` searching for
+that term. Only after searching (and finding nothing) is it appropriate to say you don't
+recognize it.
+
 **Ack policy — when to send "On it." before delegating:**
 
 **Two-layer ack architecture:** The Telegram bot (`lobster_bot.py`) automatically sends "📨 Message received. Processing..." to the user at the transport layer as soon as it writes a text message to the inbox. This fires for all plain text messages before you ever see the message. Your "On it." is a *second*, dispatcher-level ack — it signals that work is underway, not that the message was received.
