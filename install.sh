@@ -1816,6 +1816,31 @@ else
     info "Skipping inject-debug-bootup hook (settings.json not yet created)"
 fi
 
+# Set up Claude Code SessionStart hook to mark stale agent sessions as failed on fresh restart.
+# On a fresh CC restart, all previously-"running" sessions are dead. This hook runs
+# agent-monitor.py --mark-failed immediately at startup (before wait_for_messages) so dead
+# sessions are cleared without waiting for the normal 120-minute reconciler threshold.
+# The hook skips compaction events (subagents are still alive on compact) and subagent sessions.
+chmod +x "$INSTALL_DIR/hooks/on-fresh-start.py" || true
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("on-fresh-start"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq '.hooks.SessionStart = (.hooks.SessionStart // []) + [{
+            "matcher": "",
+            "hooks": [{
+                "type": "command",
+                "command": "python3 '"$INSTALL_DIR"'/hooks/on-fresh-start.py",
+                "timeout": 30
+            }]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "on-fresh-start hook installed"
+    else
+        info "on-fresh-start hook already configured in Claude Code settings"
+    fi
+else
+    info "Skipping on-fresh-start hook (settings.json not yet created)"
+fi
+
 # Set up Claude Code Stop hook to enforce wait_for_messages in dispatcher sessions.
 # Stop fires when the dispatcher's main Claude Code session considers stopping.
 # The hook detects the dispatcher via session_role.is_dispatcher() and injects a
