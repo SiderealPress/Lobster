@@ -97,7 +97,7 @@ _BLOCK_MESSAGE = (
     "Call mcp__lobster-inbox__wait_for_messages NOW. Do not do anything else first.\n\n"
     "If this is a legitimate graceful exit (hibernation complete or context restart), "
     "write the bypass flag and then exit:\n"
-    "    open('/tmp/lobster-graceful-exit', 'w').close()"
+    f"    open({_GRACEFUL_EXIT_FLAG!r}, 'w').close()"
 )
 
 
