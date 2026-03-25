@@ -9,6 +9,9 @@ Tests cover:
 - Missing transcript_path (I/O error): exits 0 to avoid false-positive block
 - Success exit outputs JSON with suppressOutput=true to prevent feedback injection
 - Block message references wait_for_messages to guide dispatcher behavior
+- Graceful exit bypass: /tmp/lobster-graceful-exit flag allows stop without WFM
+- Graceful exit flag is consumed (deleted) on use
+- Block message documents the bypass mechanism
 """
 
 import importlib.util
@@ -244,3 +247,81 @@ def test_non_lobster_session_outputs_suppress_json(monkeypatch, tmp_path):
     _, stdout, _ = _run_hook(mod, hook_input)
     output = json.loads(stdout)
     assert output.get("suppressOutput") is True
+
+
+# ---------------------------------------------------------------------------
+# Tests: graceful exit bypass
+# ---------------------------------------------------------------------------
+
+
+def test_graceful_exit_flag_allows_stop(monkeypatch, tmp_path):
+    """Dispatcher without WFM is allowed to stop when graceful exit flag is present."""
+    mod = _load_hook(monkeypatch, tmp_path, is_dispatcher_result=True)
+    tf = _make_jsonl_transcript(["mcp__lobster-inbox__mark_processed"], tmp_path)
+
+    flag_path = tmp_path / "lobster-graceful-exit"
+    flag_path.touch()
+
+    monkeypatch.setattr(mod, "_GRACEFUL_EXIT_FLAG", str(flag_path))
+
+    hook_input = {
+        "hook_event_name": "Stop",
+        "session_id": "dispatcher-session",
+        "transcript_path": tf,
+    }
+    code, stdout, _ = _run_hook(mod, hook_input)
+    assert code == 0
+    assert json.loads(stdout).get("suppressOutput") is True
+
+
+def test_graceful_exit_flag_is_consumed(monkeypatch, tmp_path):
+    """Graceful exit flag file is deleted after use (single-use bypass)."""
+    mod = _load_hook(monkeypatch, tmp_path, is_dispatcher_result=True)
+    tf = _make_jsonl_transcript(["mcp__lobster-inbox__mark_processed"], tmp_path)
+
+    flag_path = tmp_path / "lobster-graceful-exit"
+    flag_path.touch()
+    assert flag_path.exists()
+
+    monkeypatch.setattr(mod, "_GRACEFUL_EXIT_FLAG", str(flag_path))
+
+    hook_input = {
+        "hook_event_name": "Stop",
+        "session_id": "dispatcher-session",
+        "transcript_path": tf,
+    }
+    _run_hook(mod, hook_input)
+    assert not flag_path.exists(), "Flag file should be deleted after use"
+
+
+def test_no_graceful_exit_flag_still_blocks(monkeypatch, tmp_path):
+    """Without the flag file, dispatcher still gets blocked (exit 2)."""
+    mod = _load_hook(monkeypatch, tmp_path, is_dispatcher_result=True)
+    tf = _make_jsonl_transcript(["mcp__lobster-inbox__mark_processed"], tmp_path)
+
+    # Point at a path that definitely doesn't exist.
+    monkeypatch.setattr(mod, "_GRACEFUL_EXIT_FLAG", str(tmp_path / "no-such-flag"))
+
+    hook_input = {
+        "hook_event_name": "Stop",
+        "session_id": "dispatcher-session",
+        "transcript_path": tf,
+    }
+    code, _, _ = _run_hook(mod, hook_input)
+    assert code == 2
+
+
+def test_block_message_documents_bypass(monkeypatch, tmp_path):
+    """Block message includes instructions for writing the graceful exit flag."""
+    mod = _load_hook(monkeypatch, tmp_path, is_dispatcher_result=True)
+    tf = _make_jsonl_transcript(["mcp__lobster-inbox__mark_processed"], tmp_path)
+
+    monkeypatch.setattr(mod, "_GRACEFUL_EXIT_FLAG", str(tmp_path / "no-such-flag"))
+
+    hook_input = {
+        "hook_event_name": "Stop",
+        "session_id": "dispatcher-session",
+        "transcript_path": tf,
+    }
+    _, _, stderr = _run_hook(mod, hook_input)
+    assert "lobster-graceful-exit" in stderr

@@ -44,6 +44,25 @@ Claude Code injects a "Stop hook feedback: ... No stderr output" system message
 even when the hook exits 0. To prevent this from triggering a new turn,
 the hook outputs JSON with {"suppressOutput": true} on all success paths.
 
+## Graceful exit bypass
+
+Two legitimate cases require the dispatcher to exit without calling
+wait_for_messages again:
+
+1. **Hibernation**: wait_for_messages(hibernate_on_timeout=True) returned a
+   message containing "Hibernating" or "EXIT" — the dispatcher must exit. Calling
+   WFM again would be wrong.
+2. **Context restart**: After writing the handoff and calling `lobster restart`,
+   the dispatcher should exit. It already called WFM earlier in the same session;
+   forcing another call would cause a loop.
+
+In these cases, the dispatcher writes an empty file at /tmp/lobster-graceful-exit
+immediately before exiting. The hook checks for this file: if present, it deletes
+the file and exits 0 (allowing the turn to end). The file is consumed on first use.
+
+The block message itself documents this bypass mechanism so the dispatcher can act
+on it without consulting external docs.
+
 ## Exemptions
 
 The hook does NOT fire for:
@@ -51,6 +70,7 @@ The hook does NOT fire for:
 - Subagent sessions (is_dispatcher() returns False)
 - Any session where wait_for_messages was called at least once in the transcript
 - Transcript read failures (I/O error → allow stop rather than false-positive block)
+- Graceful exit bypass: /tmp/lobster-graceful-exit file present (consumed on use)
 """
 import json
 import os
@@ -68,11 +88,16 @@ _SILENT_OK = json.dumps({"suppressOutput": True})
 
 _WFM_TOOL = "mcp__lobster-inbox__wait_for_messages"
 
+_GRACEFUL_EXIT_FLAG = "/tmp/lobster-graceful-exit"
+
 _BLOCK_MESSAGE = (
-    "STOP: You are the Lobster dispatcher. You ended this turn without calling "
+    "BLOCKED: You are the Lobster dispatcher. You ended this turn without calling "
     "wait_for_messages. The main loop requires wait_for_messages as the very next "
     "action after mark_processed — no deliberation, no state assessment.\n\n"
-    "Call mcp__lobster-inbox__wait_for_messages NOW. Do not do anything else first."
+    "Call mcp__lobster-inbox__wait_for_messages NOW. Do not do anything else first.\n\n"
+    "If this is a legitimate graceful exit (hibernation complete or context restart), "
+    "write the bypass flag and then exit:\n"
+    "    open('/tmp/lobster-graceful-exit', 'w').close()"
 )
 
 
@@ -167,9 +192,20 @@ def main() -> None:
     if _WFM_TOOL in tool_names:
         _exit_ok()
 
-    # wait_for_messages was not called — block the stop (exit 2).
-    # Claude gets a new turn with _BLOCK_MESSAGE injected and must call
-    # wait_for_messages before the next stop attempt succeeds.
+    # wait_for_messages was not called. Check for the graceful exit bypass before
+    # blocking — the dispatcher writes this flag when intentionally exiting without
+    # WFM (hibernation complete, context restart).
+    flag = Path(_GRACEFUL_EXIT_FLAG)
+    if flag.exists():
+        try:
+            flag.unlink()
+        except OSError:
+            pass  # Already deleted by a concurrent process — still honour the bypass.
+        _exit_ok()
+
+    # No bypass flag — block the stop (exit 2). Claude gets a new turn with
+    # _BLOCK_MESSAGE injected and must call wait_for_messages (or write the bypass
+    # flag) before the next stop attempt succeeds.
     print(_BLOCK_MESSAGE, file=sys.stderr)
     sys.exit(2)
 
