@@ -1698,6 +1698,27 @@ else
     info "Skipping system-file-protect hook (settings.json not yet created)"
 fi
 
+# Set up Claude Code PreToolUse hook to block `claude -p` in agent-generated code
+chmod +x "$INSTALL_DIR/hooks/block-claude-p.py" || true
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '.hooks.PreToolUse[]? | select(.hooks[]?.command | contains("block-claude-p"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+            "matcher": "Bash|Write|Edit|NotebookEdit",
+            "hooks": [{
+                "type": "command",
+                "command": "python3 '"$INSTALL_DIR"'/hooks/block-claude-p.py",
+                "timeout": 5
+            }]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "block-claude-p hook installed"
+    else
+        info "block-claude-p hook already configured in Claude Code settings"
+    fi
+else
+    info "Skipping block-claude-p hook (settings.json not yet created)"
+fi
+
 # Set up Claude Code PostToolUse hook to restore execute bit after Edit/Write
 chmod +x "$INSTALL_DIR/hooks/restore-exec-bit.py" || true
 if [ -f "$CLAUDE_SETTINGS" ]; then
@@ -2224,7 +2245,24 @@ if $DEV_MODE && [ -f "$CONFIG_FILE" ]; then
     echo "# Enabled by --dev flag at install time" >> "$CONFIG_FILE"
     echo "LOBSTER_DEBUG=true" >> "$CONFIG_FILE"
     success "LOBSTER_DEBUG=true written to $CONFIG_FILE"
+
+    # Install claude -p process monitor (debug/dev machines only)
+    step "Developer mode: installing claude -p process monitor..."
+    chmod +x "$INSTALL_DIR/scripts/claude-process-monitor.sh" || true
+    "$INSTALL_DIR/scripts/cron-manage.sh" add "# LOBSTER-CLAUDE-P-MONITOR" \
+        "*/2 * * * * $INSTALL_DIR/scripts/claude-process-monitor.sh >> $WORKSPACE/logs/claude-process-monitor.log 2>&1 # LOBSTER-CLAUDE-P-MONITOR"
+    success "claude -p process monitor cron installed (every 2 minutes)"
 fi
+
+#===============================================================================
+# Bot-talk poller (lightweight, no claude -p)
+#===============================================================================
+
+step "Setting up bot-talk poller (direct HTTP, no LLM)..."
+chmod +x "$INSTALL_DIR/scripts/bot-talk-poll.py" || true
+"$INSTALL_DIR/scripts/cron-manage.sh" add "# LOBSTER-BOT-TALK-POLL" \
+    "*/2 * * * * $INSTALL_DIR/.venv/bin/python $INSTALL_DIR/scripts/bot-talk-poll.py >> $WORKSPACE/logs/bot-talk-poll.log 2>&1 # LOBSTER-BOT-TALK-POLL"
+success "bot-talk poller configured (every 2 minutes, direct HTTP — no claude -p)"
 
 #===============================================================================
 # GitHub CLI Authentication
