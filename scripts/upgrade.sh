@@ -1826,6 +1826,191 @@ EOF
             fi
         fi
     fi
+    # Migration 50: Seed bot-talk-poller-fast task and register the */2 cron job
+    # The adaptive polling feature (issue #851) splits bot-talk polling into two jobs:
+    #   - bot-talk-poller (hourly): baseline poll + hot_mode state management
+    #   - bot-talk-poller-fast (*/2 * * * *): fast-exit unless hot_mode=true
+    # This migration seeds the task file and registers the fast job in jobs.json.
+    local fast_task_file="$WORKSPACE_DIR/scheduled-jobs/tasks/bot-talk-poller-fast.md"
+    local btp_jobs_file="$WORKSPACE_DIR/scheduled-jobs/jobs.json"
+    if [ ! -f "$fast_task_file" ] && [ -f "$btp_jobs_file" ]; then
+        cat > "$fast_task_file" << 'TASK_EOF'
+# Bot Talk Poller (Fast / Hot Mode)
+
+**Job**: bot-talk-poller-fast
+**Schedule**: Every 2 minutes (`*/2 * * * *`)
+
+## Context
+
+You are running as a scheduled task. This is the fast-polling companion to `bot-talk-poller`.
+It runs every 2 minutes but does real work only when `hot_mode=true` in the state file.
+When `hot_mode=false`, exit immediately without polling, notifying, or calling any APIs.
+
+## State File
+
+Read `~/lobster-workspace/data/bot-talk-state.json` before doing anything else.
+
+Schema:
+```json
+{
+  "last_message_ts": "2026-03-25T15:00:00Z",
+  "hot_mode": false,
+  "consecutive_empty_polls": 0,
+  "hot_mode_activated_at": null
+}
+```
+
+## Fast-Exit Rule
+
+**If `hot_mode` is `false` (or the file does not exist): call `write_task_output` with
+`status="success"` and `output="hot_mode=false, skipping"`, then stop. Do not poll the API.**
+
+This is the common case. Most 2-minute ticks will fast-exit with no network calls.
+
+## Authentication
+
+Read the token from `~/lobster-workspace/data/bot-talk-token.txt`:
+
+```python
+token = open(os.path.expanduser("~/lobster-workspace/data/bot-talk-token.txt")).read().strip()
+headers = {"X-Bot-Token": token}
+```
+
+If the token file is missing and hot_mode is true, log an error, call write_task_output
+with status="failed", and stop.
+
+## Instructions (hot mode only)
+
+When `hot_mode=true`:
+
+1. Poll `http://46.224.41.108:4242/messages` for messages from AlbertLobster newer than
+   `last_message_ts` in the state file (use the same tracking as `bot-talk-poller`).
+
+2. **If new messages found:**
+   - Post GitHub comments and send Telegram notification to Sahar (chat_id=8305714125)
+     following the same rules as `bot-talk-poller`
+   - Update `last_message_ts` in state file to the latest seen message timestamp
+   - Reset `consecutive_empty_polls` to 0 in state file
+   - Keep `hot_mode=true`
+
+3. **If no new messages:**
+   - Increment `consecutive_empty_polls` in state file
+   - If `consecutive_empty_polls >= 3`: set `hot_mode=false`
+   - Do NOT notify Sahar (no-op cycle)
+
+4. Write the updated state file back to disk atomically (write to a `.tmp` file, then
+   rename to the final path).
+
+5. Call `write_task_output` with the result.
+
+## Cooldown Logic
+
+```
+consecutive_empty_polls=0 → reset when new message seen
+consecutive_empty_polls=1 → still hot, keep polling
+consecutive_empty_polls=2 → still hot, keep polling
+consecutive_empty_polls=3 → set hot_mode=false, return to hourly cadence
+```
+
+Three consecutive empty 2-minute polls = 6 minutes of silence before cooldown.
+
+## Telegram Notification Rules
+
+Same as `bot-talk-poller`: only notify Sahar when there is genuinely new content.
+Never send "nothing new" messages. No-op cycles call write_task_output only.
+
+## Output
+
+When you complete your task, call `write_task_output` with:
+- job_name: "bot-talk-poller-fast"
+- output: Your results/summary (e.g., "hot_mode=false, skipped" or "2 new messages, notified")
+- status: "success" or "failed"
+TASK_EOF
+        substep "Seeded bot-talk-poller-fast.md task file"
+        migrated=$((migrated + 1))
+
+        # Register job in jobs.json if not already present
+        if command -v python3 &>/dev/null; then
+            python3 - "$btp_jobs_file" << 'PYEOF'
+import json, sys, os
+from datetime import datetime, timezone
+
+path = sys.argv[1]
+with open(path) as f:
+    data = json.load(f)
+
+if "bot-talk-poller-fast" not in data.get("jobs", {}):
+    now = datetime.now(timezone.utc).isoformat()
+    data.setdefault("jobs", {})["bot-talk-poller-fast"] = {
+        "name": "bot-talk-poller-fast",
+        "schedule": "*/2 * * * *",
+        "schedule_human": "Every 2 minutes",
+        "task_file": "tasks/bot-talk-poller-fast.md",
+        "created_at": now,
+        "updated_at": now,
+        "enabled": True,
+        "last_run": None,
+        "last_status": None,
+    }
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, path)
+PYEOF
+            substep "Registered bot-talk-poller-fast in jobs.json (*/2 * * * *)"
+            migrated=$((migrated + 1))
+
+            # Sync crontab so the new entry takes effect immediately
+            local sync_script="$LOBSTER_DIR/scheduled-tasks/sync-crontab.sh"
+            if [ -f "$sync_script" ]; then
+                bash "$sync_script" 2>/dev/null && substep "Crontab synced (bot-talk-poller-fast active)" || true
+            fi
+        fi
+    fi
+
+    # Migration 51: Update bot-talk-poller schedule to hourly if still at */2
+    # The adaptive polling split means the baseline poller only needs hourly cadence;
+    # the fast companion handles 2-minute ticks when hot_mode=true.
+    if [ -f "$btp_jobs_file" ] && command -v python3 &>/dev/null; then
+        local current_btp_schedule
+        current_btp_schedule=$(python3 -c "
+import json
+try:
+    d = json.load(open('$btp_jobs_file'))
+    print(d.get('jobs', {}).get('bot-talk-poller', {}).get('schedule', ''))
+except Exception:
+    print('')
+" 2>/dev/null)
+        if [ "$current_btp_schedule" = "*/2 * * * *" ]; then
+            python3 - "$btp_jobs_file" << 'PYEOF'
+import json, sys, os
+from datetime import datetime, timezone
+
+path = sys.argv[1]
+with open(path) as f:
+    data = json.load(f)
+
+job = data.get("jobs", {}).get("bot-talk-poller")
+if job and job.get("schedule") == "*/2 * * * *":
+    job["schedule"] = "0 * * * *"
+    job["schedule_human"] = "0 * * * *"
+    job["updated_at"] = datetime.now(timezone.utc).isoformat()
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, path)
+PYEOF
+            substep "Updated bot-talk-poller schedule from */2 to hourly (0 * * * *)"
+            migrated=$((migrated + 1))
+
+            local sync_script="$LOBSTER_DIR/scheduled-tasks/sync-crontab.sh"
+            if [ -f "$sync_script" ]; then
+                bash "$sync_script" 2>/dev/null && substep "Crontab synced (bot-talk-poller now hourly)" || true
+            fi
+        fi
+    fi
 
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
