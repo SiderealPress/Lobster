@@ -11,7 +11,8 @@ SessionStart). Filters itself to:
 1. Sessions that inherit LOBSTER_MAIN_SESSION=1 (Lobster-managed sessions only).
 2. The dispatcher session, not subagent sessions (detected via session_role).
 3. Fresh restarts only — NOT context compaction events. Compaction is
-   identified by the `hook_name` field containing "compact". On compaction,
+   identified by checking whether ``on-compact.py`` recently updated
+   ``compaction-state.json`` (within the last 60 seconds). On compaction,
    background subagents are still running; marking them failed would be wrong.
 
 ## Why this is needed
@@ -33,10 +34,13 @@ dispatcher enters its main loop.
 
 ## Distinguishing restart from compact
 
-The `hook_name` field in the SessionStart hook JSON contains "compact" for
-compaction events and is absent (or empty) for fresh starts. We check for this
-and exit early on compaction so that legitimately running subagents are not
-incorrectly marked failed.
+On every compaction, ``on-compact.py`` atomically writes
+``last_compaction_ts`` to ``~/lobster-workspace/data/compaction-state.json``.
+We detect a compaction restart by checking whether that file was modified
+within the last 60 seconds.  This is reliable regardless of whether Claude
+Code populates ``hook_name`` in the SessionStart payload (it does not always
+do so).  If the file is absent or older than 60 seconds, we treat the
+SessionStart as a genuine fresh restart and run ``--mark-failed``.
 
 ## settings.json configuration
 
@@ -62,6 +66,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 # Allow imports from the hooks directory (session_role).
@@ -71,19 +76,43 @@ import session_role  # noqa: E402 — path insert must precede this
 
 AGENT_MONITOR = Path(os.path.expanduser("~/lobster/scripts/agent-monitor.py"))
 
+# on-compact.py writes last_compaction_ts to this file on every compaction.
+COMPACTION_STATE_FILE = Path(
+    os.environ.get(
+        "LOBSTER_COMPACTION_STATE_FILE_OVERRIDE",
+        os.path.expanduser("~/lobster-workspace/data/compaction-state.json"),
+    )
+)
 
-def _is_compact_event(data: dict) -> bool:
+# If the compaction state file was written within this window, treat the
+# current SessionStart as a compaction restart rather than a fresh restart.
+COMPACTION_RECENCY_SECONDS = 60
+
+
+def _is_compact_event(data: dict) -> bool:  # noqa: ARG001 — data unused; kept for API compat
     """Return True if the hook input indicates a context compaction event.
 
-    Claude Code passes `hook_name` in the SessionStart payload; for compaction
-    events the value contains "compact". Fresh starts either have this field
-    absent or set to a non-compact value.
+    Rather than relying on a ``hook_name`` field in the SessionStart payload
+    (which Claude Code does not reliably populate), we check whether
+    ``on-compact.py`` recently updated the compaction state file.  That file is
+    written atomically by the companion hook on every compaction, so its mtime
+    is the authoritative signal.
 
-    Falls back to False (treat as fresh start) when the field is absent, which
-    is the safe default — running --mark-failed on a fresh start is harmless.
+    If the compaction state file was modified within COMPACTION_RECENCY_SECONDS
+    (60 s), we treat this SessionStart as a compaction restart — subagents are
+    still alive, so ``--mark-failed`` must not run.
+
+    Falls back to False (treat as fresh start) when the file is absent or
+    unreadable, which is the safe default — running --mark-failed on a genuine
+    fresh start is correct and harmless.
     """
-    hook_name = data.get("hook_name", "")
-    return "compact" in str(hook_name).lower()
+    try:
+        mtime = COMPACTION_STATE_FILE.stat().st_mtime
+        age_seconds = time.time() - mtime
+        return age_seconds <= COMPACTION_RECENCY_SECONDS
+    except OSError:
+        # File absent or unreadable — no recent compaction, treat as fresh start.
+        return False
 
 
 def _mark_all_running_failed() -> None:
