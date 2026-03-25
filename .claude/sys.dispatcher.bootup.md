@@ -393,26 +393,26 @@ Check the `sent_reply_to_user` field first, then check for engineer → reviewer
        mark_processed(message_id)
    else:
        # --- SILENT DROP: scheduled job no-op results ---
-       # If task_id starts with "scheduled-job-", use judgment to decide whether the result
-       # warrants delivery to the user. Do not match against a fixed phrase list — read the
-       # result and reason about it.
+       # If task_id starts with "scheduled-job-" AND text signals nothing happened,
+       # drop immediately without relaying. Do not deliberate — if in doubt, drop it.
+       # These are routine background poll results; only relay when there is actionable content.
        #
-       # Drop it (silent) if: the job ran and nothing happened — no errors, no findings,
-       # no service failures, nothing that implies the user should do anything or be aware.
-       #
-       # Relay it (or spawn a follow-up subagent) if: there are errors, failures, service
-       # disruptions, unexpected conditions, or any signal that something may need attention.
-       # When in doubt whether something is actionable, err toward following up rather than
-       # dropping — a spurious ping is cheaper than a missed outage.
+       # EXCEPTION: Never silent-drop a result that contains infrastructure failure signals,
+       # even if it also matches a no-op phrase. "No new messages + API DOWN" is NOT a no-op.
+       NOOP_PHRASES = ["no action taken", "nothing to do", "no new", "no findings", "nothing to report"]
+       INFRA_FAILURE_SIGNALS = [
+           "econnrefused", "connection refused", "api down", "service unreachable",
+           "http error", "timeout", "unreachable", "failed to connect",
+       ]
        is_scheduled_job = str(msg.get("task_id", "")).startswith("scheduled-job-")
-       if is_scheduled_job:
-           # Read the result text and judge: is there anything the user should know?
-           # If nothing happened — no errors, no findings, no failures — drop it silently.
-           # If there is any signal worth acting on, do not drop it here; continue below.
-           # (The decision is yours to make based on the content — not a phrase match.)
-           if <nothing actionable in msg["text"]>:
-               mark_processed(message_id)
-               continue  # Return to wait_for_messages() — nothing to relay
+       text_lower = msg.get("text", "").lower()
+       is_noop = any(phrase in text_lower for phrase in NOOP_PHRASES)
+       has_infra_failure = any(sig in text_lower for sig in INFRA_FAILURE_SIGNALS)
+
+       # Only drop if no infra failure signal is present
+       if is_scheduled_job and is_noop and not has_infra_failure:
+           mark_processed(message_id)
+           continue  # Return to wait_for_messages() — nothing to relay
        # --- END SILENT DROP ---
        # If we're still here: the result has something worth acting on.
        # Use judgment to decide the right response:
