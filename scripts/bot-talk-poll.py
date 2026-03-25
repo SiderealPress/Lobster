@@ -28,13 +28,13 @@ HOME = Path.home()
 WORKSPACE = HOME / "lobster-workspace"
 CONFIG_ENV = HOME / "lobster-config" / "config.env"
 
-BOT_TALK_API = "http://46.224.41.108:4242"
 TOKEN_FILE = WORKSPACE / "data" / "bot-talk-token.txt"
 STATE_FILE = WORKSPACE / "data" / "bot-talk-state.json"
 LOG_FILE = WORKSPACE / "logs" / "bot-talk-poll.log"
 
 SAHAR_CHAT_ID = "8305714125"
 REQUEST_TIMEOUT = 10  # seconds
+DEFAULT_BOT_TALK_API = "http://bot-talk-api:4242"  # override via BOT_TALK_API_URL in config.env
 
 
 def load_config() -> dict:
@@ -114,6 +114,7 @@ def format_message(msg: dict) -> str:
 def main() -> None:
     cfg = load_config()
     bot_token = cfg.get("TELEGRAM_BOT_TOKEN", "")
+    bot_talk_api = os.environ.get("BOT_TALK_API_URL") or cfg.get("BOT_TALK_API_URL") or DEFAULT_BOT_TALK_API
     if not bot_token:
         log("ERROR: TELEGRAM_BOT_TOKEN not found in config.env")
         sys.exit(1)
@@ -136,7 +137,7 @@ def main() -> None:
         params["since"] = last_ts
 
     try:
-        r = httpx.get(f"{BOT_TALK_API}/messages", headers=headers, params=params, timeout=REQUEST_TIMEOUT)
+        r = httpx.get(f"{bot_talk_api}/messages", headers=headers, params=params, timeout=REQUEST_TIMEOUT)
     except Exception as e:
         log(f"API error: {e}")
         sys.exit(0)
