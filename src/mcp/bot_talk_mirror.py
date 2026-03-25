@@ -2,6 +2,11 @@
 """
 Bot-talk mirroring module.
 
+DEPRECATED: This module has been migrated to sayhar/blue-lobster (src/bot_talk/mirror.py).
+This copy remains in place while the import in inbox_server.py is redirected.
+See: https://github.com/SiderealPress/lobster/pull/[PR] and
+     https://github.com/sayhar/project-lobstertalk/issues/18
+
 Mirrors Lobster's inbound and outbound messages to the shared bot-talk channel
 so Albert's Lobster can observe what Sahar's Lobster is doing.
 

@@ -1,6 +1,10 @@
 """
 Unit tests for bot_talk_mirror module.
 
+DEPRECATED: These tests have been migrated to sayhar/blue-lobster
+(tests/unit/test_bot_talk/test_mirror.py). This copy remains until
+src/mcp/bot_talk_mirror.py is removed. All 33 tests still pass here.
+
 Tests cover:
 - Payload and log-line builders (pure functions)
 - HTTP attempt logic (mock httpx)
