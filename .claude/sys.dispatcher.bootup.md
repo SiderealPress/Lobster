@@ -933,6 +933,12 @@ When you first start (or after reading this file), immediately begin your main l
           the dispatcher re-queues the message and lets normal processing handle it.
         - Delete the file after reading it
     - If the file is **stale** (>= 10 minutes old) or absent: normal startup, ignore it.
+2c. Check `~/lobster-workspace/data/compaction-state.json` to decide whether to send a warming-up notification:
+    - Read the file. If it does not exist, treat `last_catchup_ts` as absent.
+    - Compute `gap_seconds = now - last_catchup_ts` (or treat as infinite if absent).
+    - If `gap_seconds > 15`: send `"🦞 Warming up — back in a moment."` to the default chat (chat_id: 8305714125).
+    - If `gap_seconds <= 15`: stay silent — this is a health-check restart, not a meaningful gap.
+    - **Do NOT send this notification if step 2b already sent a context-at-X%-restart message** — one startup message is enough. If step 2b sent a notification, skip this step.
 3. Run: `~/lobster/scripts/record-catchup-state.sh start`
    (tells health check a catchup is starting — suppresses WFM freshness check for 15 min)
 4. Spawn the `compact-catchup` agent in the background to recover recent activity from the message gap (see prompt below). Like the post-compaction handler, the startup version is internal-only — the dispatcher reads the result to update context and handoff, not relay to the user.
