@@ -1458,36 +1458,6 @@ chmod +x "$INSTALL_DIR/scripts/nightly-consolidation.sh" || true
 
 success "Nightly consolidation configured (runs at 03:00 nightly)"
 
-#===============================================================================
-# GWS Credential Sync
-#===============================================================================
-
-step "Setting up gws credential sync..."
-
-# Restore gws OAuth client secret from user config if present.
-# The client_secret.json is created once via Google Cloud Console and stored in
-# ~/lobster-config/ so reinstalls automatically restore gws auth capability.
-GWS_CLIENT_SECRET_SRC="$HOME/lobster-config/gws-client-secret.json"
-GWS_CONFIG_DIR="$HOME/.config/gws"
-if [ -f "$GWS_CLIENT_SECRET_SRC" ]; then
-    mkdir -p "$GWS_CONFIG_DIR"
-    cp "$GWS_CLIENT_SECRET_SRC" "$GWS_CONFIG_DIR/client_secret.json"
-    success "gws OAuth client secret restored from lobster-config"
-else
-    warn "No gws-client-secret.json found in ~/lobster-config/ — run 'gws auth setup' or copy client_secret.json manually"
-fi
-
-chmod +x "$INSTALL_DIR/scripts/sync-gws-credentials.py" || true
-
-# Add gws credential sync to crontab (runs daily at 04:00)
-# gws auth login writes fresh tokens to credentials.enc but does not update
-# credentials.json. Without this sync, API calls read the stale refresh token
-# and fail with invalid_grant after a re-auth.
-"$INSTALL_DIR/scripts/cron-manage.sh" add "# LOBSTER-GWS-CREDENTIAL-SYNC" \
-    "0 4 * * * cd $INSTALL_DIR && uv run scripts/sync-gws-credentials.py # LOBSTER-GWS-CREDENTIAL-SYNC"
-
-success "GWS credential sync configured (runs at 04:00 daily)"
-
 # Add daily log-export to crontab (runs at 03:00 UTC)
 # export-logs.py archives observations.log, lobster.log, and audit.jsonl to a
 # date-stamped directory under ~/lobster-workspace/logs/archive/ and writes a
