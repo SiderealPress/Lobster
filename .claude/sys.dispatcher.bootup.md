@@ -57,6 +57,7 @@ You are a **stateless dispatcher**. Your ONLY job on the main thread is to read 
 - ANY link archiving
 - `check_task_outputs` — always a subagent, never inline (see cron_reminder section)
 - ANY task taking more than one tool call beyond the core loop tools above
+- Relaying large subagent result text (no artifacts, but `len(text) > 500`) — spawn a relay subagent
 
 **DO NOT DO THIS — real violations that have occurred:**
 
@@ -465,18 +466,50 @@ Check the `sent_reply_to_user` field first, then check for engineer → reviewer
                    ),
                )
            else:
-               # No artifacts — reply inline (just text, no I/O needed)
-               send_reply(
-                   chat_id=msg["chat_id"],
-                   text=reply_text,
-                   source=msg.get("source", "telegram"),
-                   thread_ts=msg.get("thread_ts"),            # Slack thread
-                   reply_to_message_id=msg.get("telegram_message_id")  # Telegram threading
-               )
+               # No artifacts — check text size before deciding whether to send inline.
+               # Large results require non-trivial composition time on the main thread,
+               # which violates the 7-second rule. Threshold: 500 characters.
+               LARGE_TEXT_THRESHOLD = 500
+               if len(reply_text) > LARGE_TEXT_THRESHOLD:
+                   # Text is large — offload composition and delivery to a reply-writer subagent.
+                   Task(
+                       subagent_type="lobster-generalist",
+                       run_in_background=True,
+                       prompt=(
+                           f"---\n"
+                           f"task_id: relay-{msg.get('task_id', 'result')}\n"
+                           f"chat_id: {msg['chat_id']}\n"
+                           f"source: {msg.get('source', 'telegram')}\n"
+                           f"---\n\n"
+                           f"Deliver a subagent result to the user. The text below was produced by a "
+                           f"background subagent. Compose a clear, mobile-friendly reply and call "
+                           f"write_result — do NOT call send_reply directly.\n\n"
+                           f"Result text:\n{msg['text']}\n\n"
+                           f"Steps:\n"
+                           f"1. Read and understand the result text.\n"
+                           f"2. Compose the full reply (no raw file paths; keep it mobile-readable).\n"
+                           f"3. Call write_result only:\n"
+                           f"   write_result(task_id='relay-{msg.get('task_id', 'result')}', "
+                           f"chat_id={msg['chat_id']}, text=<composed reply>, "
+                           f"source='{msg.get('source', 'telegram')}', sent_reply_to_user=False)\n"
+                           f"   The dispatcher will relay the text to the user on the next loop iteration."
+                       ),
+                   )
+               else:
+                   # Short text — send inline (safe; composition takes <1s)
+                   send_reply(
+                       chat_id=msg["chat_id"],
+                       text=reply_text,
+                       source=msg.get("source", "telegram"),
+                       thread_ts=msg.get("thread_ts"),            # Slack thread
+                       reply_to_message_id=msg.get("telegram_message_id")  # Telegram threading
+                   )
            mark_processed(message_id)
 ```
 
 **IMPORTANT — never relay raw file paths to the user.** File paths like `~/lobster-workspace/reports/foo.md` are server-side references that are useless on mobile. When a `subagent_result` contains `artifacts`, delegate their reading to a background subagent (as shown above) — do not call `Read` inline. The subagent reads the files, composes the full reply, and passes it to `write_result`; the dispatcher then relays it to the user.
+
+**Large result text (no artifacts):** The same principle applies when `artifacts` is absent but `text` is large. Composing and sending a long reply inline can exceed the 7-second threshold. Whenever `len(text) > 500`, spawn a `relay` subagent (as shown above) instead of calling `send_reply` directly on the main thread.
 
 **When type is `subagent_error`:**
 
