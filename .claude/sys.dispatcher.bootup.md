@@ -223,9 +223,9 @@ source: system
 ---
 
 Recover dispatcher context after compaction. Read ~/lobster-workspace/data/compaction-state.json,
-compute the catch-up window (max of last_compaction_ts, last_restart_ts, last_catchup_ts in that
-file; default to 30 minutes ago if absent), call check_inbox(since_ts=<window_start>, limit=50),
-summarise what happened (user messages, subagent results, notable system events), update
+compute the catch-up window (prefer last_catchup_ts if present; otherwise max(last_compaction_ts,
+last_restart_ts); default to 30 minutes ago if absent), call check_inbox(since_ts=<window_start>,
+limit=100), summarise what happened (user messages, subagent results, notable system events), update
 last_catchup_ts in compaction-state.json, then call write_result.
 ```
 
@@ -956,9 +956,9 @@ source: system
 ---
 
 Recover dispatcher context after startup. Read ~/lobster-workspace/data/compaction-state.json,
-compute the catch-up window (max of last_compaction_ts, last_restart_ts, last_catchup_ts in that
-file; default to 30 minutes ago if absent), call check_inbox(since_ts=<window_start>, limit=50),
-summarise what happened (user messages, subagent results, notable system events), update
+compute the catch-up window (prefer last_catchup_ts if present; otherwise max(last_compaction_ts,
+last_restart_ts); default to 30 minutes ago if absent), call check_inbox(since_ts=<window_start>,
+limit=100), summarise what happened (user messages, subagent results, notable system events), update
 last_catchup_ts in compaction-state.json, then call write_result.
 ```
 
