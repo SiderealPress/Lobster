@@ -7674,11 +7674,17 @@ async def reconcile_agent_sessions() -> None:
     that does not exist on this system — and even if fixed, Claude Code places
     output symlinks in project-specific subdirectories, not a flat tasks dir.
     """
-    from agents.session_store import check_output_file_status
+    from agents.session_store import check_output_file_status, get_output_file_mtime
 
     DEFAULT_DEAD_THRESHOLD_SECONDS = 30 * 60   # 30 minutes — fallback for missing output files
     DEFAULT_DEAD_THRESHOLD_RUNNING_SECONDS = 120 * 60  # 120 minutes — fallback for stuck tool_use files
     GRACE_PERIOD_SECONDS = 30          # Newly spawned agents get grace before DEAD
+    # Mtime staleness gate (issue #868): if output file hasn't been written to in
+    # this many seconds, treat the agent as interrupted rather than actively running.
+    # An active agent updates its JSONL output continuously; an interrupted one stops
+    # immediately. 15 minutes gives ample margin to avoid false positives during slow
+    # tool calls, while cutting the misclassification window from 120 min → 30 min.
+    MTIME_STALE_THRESHOLD_SECONDS = 15 * 60    # 15 minutes
 
     # Startup sweep: re-send notifications for sessions that completed while down
     await _startup_sweep()
@@ -7778,23 +7784,46 @@ async def reconcile_agent_sessions() -> None:
                             f"elapsed {elapsed}s — within window, waiting"
                         )
                 elif file_status == "running":
-                    # File exists with stop_reason=tool_use. This is normal for live
-                    # agents, but if elapsed exceeds the generous running threshold the
-                    # agent has almost certainly been killed (e.g. mid-restart). The
-                    # startup cleanup handles the common case; this branch catches any
-                    # that slip through (e.g. output file mtime was updated after restart).
-                    if elapsed > dead_threshold_running:
+                    # File exists but no stop_reason=end_turn (either tool_use or
+                    # no stop_reason at all — both return "running" from the scanner).
+                    # This is normal for live agents, but two failure modes land here:
+                    #   1. Agent killed mid-turn (no stop_reason written) — file mtime
+                    #      stops updating immediately; detectable within 15 minutes.
+                    #   2. Legitimately slow tool call — mtime keeps ticking; leave alone.
+                    #
+                    # Mtime gate (issue #868): if the output file has been idle for
+                    # MTIME_STALE_THRESHOLD_SECONDS, use the short threshold (same as
+                    # the "missing file" branch) rather than the generous 120-minute cap.
+                    # This closes the gap where interrupted agents are misclassified as
+                    # "still running" for up to 120 minutes.
+                    output_mtime = get_output_file_mtime(output_file)
+                    now_ts = time.time()
+                    file_is_stale = (
+                        output_mtime is not None
+                        and (now_ts - output_mtime) > MTIME_STALE_THRESHOLD_SECONDS
+                    )
+                    effective_running_threshold = (
+                        dead_threshold_missing if file_is_stale else dead_threshold_running
+                    )
+
+                    if elapsed > effective_running_threshold:
+                        stale_note = (
+                            f", file idle {int(now_ts - output_mtime)}s (mtime gate active)"
+                            if file_is_stale
+                            else ""
+                        )
                         log.warning(
                             f"[reconciler] Agent {agent_id!r} output stuck at tool_use "
-                            f"after {elapsed}s (>{dead_threshold_running}s) "
+                            f"after {elapsed}s (>{effective_running_threshold}s{stale_note}) "
                             f"— marking dead (output_file={output_file!r})"
                         )
                         _session_store.session_end(
                             id_or_task_id=agent_id,
                             status="dead",
                             result_summary=(
-                                f"Auto-closed by reconciler: stop_reason=tool_use "
+                                f"Auto-closed by reconciler: output idle "
                                 f"after {elapsed}s"
+                                + (f" (mtime stale {int(now_ts - output_mtime)}s)" if file_is_stale else "")
                             ),
                         )
                         _enqueue_reconciler_notification(session, outcome="dead")
