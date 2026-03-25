@@ -75,3 +75,8 @@ scripts/claude-wrapper.exp:Hardcoded token
 # throughout the codebase (scheduled-tasks/tasks/bot-talk-poller*.md). The default
 # value is a fallback when BOT_TALK_API_URL env var is unset — not a secret.
 scheduled-tasks/bot-talk-check-dispatch.sh:IP address
+
+# upgrade.sh Migration 34 embeds the bot-talk server address (46.224.41.108) inline
+# as task file content. This is a server hostname (not a credential); the same address
+# is already present in the workspace task file bot-talk-poller.md (not committed).
+scripts/upgrade.sh:IP address
