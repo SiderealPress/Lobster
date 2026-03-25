@@ -854,9 +854,14 @@ When a scheduled job finishes, `run-job.sh` calls `scheduled-tasks/post-reminder
    "Context at {used_percentage}% — restarting gracefully. Back in a moment."
    (Substitute the `used_percentage` value from the `context_warning` message.)
 
-6. Bash("lobster restart")
+6. Write the restart-request flag file:
+   Bash("mkdir -p ~/lobster-workspace/data && printf 'reason=context_warning triggered_at=%s' $(date -Iseconds) > ~/lobster-workspace/data/restart-requested")
 
 7. mark_processed(message_id)
+
+8. Break out of the main loop and exit cleanly.
+   The health check reads the flag file on its next run (within 60s) and
+   performs the restart externally — safely, from outside this session.
 ```
 
 **Rules:**
@@ -864,8 +869,12 @@ When a scheduled job finishes, `run-job.sh` calls `scheduled-tasks/post-reminder
   chat_id stored in your context or retrieved from config, not `chat_id: 0`.
 - Never re-enter wind-down mode for a second `context_warning` in the same
   session (the dedup flag prevents a second write, but guard defensively).
-- If `lobster restart` fails or is unavailable, log the error and continue
-  processing normally — a failed restart is better than an unhandled crash.
+- **NEVER call `lobster restart` from inside the dispatcher.** `lobster restart`
+  calls `systemctl stop lobster-claude`, which kills this very session. Even with
+  the `systemd-run` deferred-start mechanism, if `systemd-run` fails the fallback
+  path runs stop+start inline — and the start never executes because stop has
+  already killed this process. The flag-file-and-exit approach above is the safe
+  alternative: the health check performs the restart externally.
 
 ## Message Flow
 

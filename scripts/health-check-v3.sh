@@ -70,6 +70,7 @@ WORKSPACE_DIR="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
 
 INBOX_DIR="$MESSAGES_DIR/inbox"
 MAINTENANCE_FLAG="$MESSAGES_DIR/config/lobster-maintenance"
+RESTART_REQUESTED_FLAG="$WORKSPACE_DIR/data/restart-requested"
 LOBSTER_STATE_FILE="${LOBSTER_STATE_FILE_OVERRIDE:-$MESSAGES_DIR/config/lobster-state.json}"
 DISPATCHER_PID_FILE="$MESSAGES_DIR/config/dispatcher.pid"
 STALE_THRESHOLD_SECONDS=240          # 4 minutes - RED if any message older (watchdog handles soft recovery at 90s)
@@ -1436,6 +1437,19 @@ main() {
             log_warn "Maintenance flag is stale (${flag_age}s old, limit ${MAINTENANCE_EXPIRY_SECONDS}s) — auto-clearing and resuming checks"
             rm -f "$MAINTENANCE_FLAG"
         fi
+    fi
+
+    # Dispatcher-requested restart: the dispatcher writes this flag when it needs
+    # to restart but cannot safely call "lobster restart" from inside itself
+    # (doing so would kill the session before the start command can execute).
+    # We consume the flag here and perform the restart externally.
+    if [[ -f "$RESTART_REQUESTED_FLAG" ]]; then
+        local flag_content
+        flag_content=$(cat "$RESTART_REQUESTED_FLAG" 2>/dev/null || true)
+        log_warn "Dispatcher-requested restart detected: $flag_content"
+        rm -f "$RESTART_REQUESTED_FLAG"
+        do_restart "dispatcher-requested: $flag_content" false
+        exit 0
     fi
 
     log_info "=== Health check v3 starting ==="
