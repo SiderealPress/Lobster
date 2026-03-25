@@ -1,21 +1,14 @@
 #!/bin/bash
-# Lobster Scheduled Task Executor
-# Runs a scheduled job in a fresh Claude instance
+# Lobster Scheduled Task Dispatcher
+# Writes a scheduled_reminder to the dispatcher inbox so the dispatcher
+# spawns a subagent for the job. Does NOT call claude -p.
+#
+# Usage: run-job.sh <job-name>
 
 set -e
 
-# Ensure Claude is in PATH (cron doesn't inherit user PATH)
+# Ensure uv and other tools are in PATH (cron doesn't inherit user PATH)
 export PATH="$HOME/.local/bin:$PATH"
-
-# Prevent "cannot launch inside another Claude Code session" error.
-# CLAUDECODE leaks when run-job.sh is manually tested from a Claude session.
-unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT 2>/dev/null || true
-
-# Allow scheduled jobs to call send_reply and other session-guarded MCP tools.
-# Without this, inbox_server.py's session guard blocks send_reply silently
-# because cron-launched processes are not descendants of the lobster tmux session.
-# See issue #571.
-export LOBSTER_MAIN_SESSION=1
 
 JOB_NAME="$1"
 
@@ -26,11 +19,8 @@ fi
 
 REPO_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
 
-# Load env files so tokens like LOBSTER_ADMIN_CHAT_ID and GITHUB_TOKEN are
-# available when running from cron (which does not inherit the systemd
-# EnvironmentFile entries). Source both files in the same order as the
-# systemd services: config.env first, then global.env so that global.env
-# values can override config.env when needed.
+# Load env files so tokens and config are available when running from cron.
+# Source config.env first, then global.env (global overrides config).
 CONFIG_DIR="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}"
 for _env_file in "$CONFIG_DIR/config.env" "$CONFIG_DIR/global.env"; do
     if [ -f "$_env_file" ]; then
@@ -41,93 +31,120 @@ for _env_file in "$CONFIG_DIR/config.env" "$CONFIG_DIR/global.env"; do
     fi
 done
 unset _env_file
+
 WORKSPACE="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
-TASK_FILE="$WORKSPACE/scheduled-jobs/tasks/${JOB_NAME}.md"
-OUTPUT_DIR="$HOME/messages/task-outputs"
-LOG_DIR="$WORKSPACE/scheduled-jobs/logs"
-TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 JOBS_FILE="$WORKSPACE/scheduled-jobs/jobs.json"
+TASK_FILE="$WORKSPACE/scheduled-jobs/tasks/${JOB_NAME}.md"
+LOG_DIR="$WORKSPACE/scheduled-jobs/logs"
+INBOX_DIR="${LOBSTER_MESSAGES:-$HOME/messages}/inbox"
+TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+START_ISO=$(date -Iseconds)
 
-# Ensure directories exist
-mkdir -p "$OUTPUT_DIR" "$LOG_DIR"
+# Ensure log directory exists
+mkdir -p "$LOG_DIR" "$INBOX_DIR"
 
-# Check task file exists
+LOG_FILE="$LOG_DIR/${JOB_NAME}-${TIMESTAMP}.log"
+
+# --- Check enabled flag ---
+# If the job is marked enabled=false in jobs.json, exit silently.
+# This is the primary guard: when a job is disabled via update_scheduled_job,
+# sync-crontab.sh removes its cron entry. But if an old cron entry fires
+# before the sync takes effect, this check ensures it does nothing.
+if [ -f "$JOBS_FILE" ]; then
+    ENABLED=$(python3 -c "
+import json, sys
+try:
+    with open('$JOBS_FILE') as f:
+        data = json.load(f)
+    job = data.get('jobs', {}).get('$JOB_NAME', {})
+    # Default to true if job exists but has no enabled field
+    print(str(job.get('enabled', True)).lower())
+except Exception:
+    print('true')
+" 2>/dev/null)
+    if [ "$ENABLED" = "false" ]; then
+        echo "[$START_ISO] Job '$JOB_NAME' is disabled — skipping" >> "$LOG_FILE" 2>&1 || true
+        exit 0
+    fi
+fi
+
+echo "[$START_ISO] Posting reminder for job: $JOB_NAME" | tee "$LOG_FILE"
+
+# --- Check task file exists ---
 if [ ! -f "$TASK_FILE" ]; then
-    echo "Error: Task file not found: $TASK_FILE"
+    echo "[$START_ISO] Error: Task file not found: $TASK_FILE" | tee -a "$LOG_FILE"
     exit 1
 fi
 
-# Read task content
-TASK_CONTENT=$(cat "$TASK_FILE")
+# --- Write scheduled_reminder to inbox ---
+# Embed the task content so the dispatcher can pass it directly to the
+# subagent without needing to read the file on the main thread.
+EPOCH_MS=$(date +%s%3N)
+MSG_ID="${EPOCH_MS}_scheduled_${JOB_NAME}"
 
-# Log file for this execution
-LOG_FILE="$LOG_DIR/${JOB_NAME}-${TIMESTAMP}.log"
+uv run - \
+    "${INBOX_DIR}/${MSG_ID}.json" \
+    "${MSG_ID}" \
+    "${START_ISO}" \
+    "${JOB_NAME}" \
+    "${TASK_FILE}" \
+    << 'PYEOF'
+import json, sys, os
 
-# Record start time
-START_TIME=$(date +%s)
-START_ISO=$(date -Iseconds)
+out_path   = sys.argv[1]
+msg_id     = sys.argv[2]
+timestamp  = sys.argv[3]
+job_name   = sys.argv[4]
+task_file  = sys.argv[5]
 
-echo "[$START_ISO] Starting job: $JOB_NAME" | tee "$LOG_FILE"
+with open(task_file) as f:
+    task_content = f.read()
 
-# Run Claude with the task
-# The task instructions tell Claude to deliver results via send_reply + write_result
-claude -p "$TASK_CONTENT
+msg = {
+    "id": msg_id,
+    "source": "system",
+    "type": "scheduled_reminder",
+    "chat_id": 0,
+    "user_id": 0,
+    "username": "lobster-cron",
+    "user_name": "Cron",
+    "text": f"[Cron] Dispatch job '{job_name}'",
+    "reminder_type": job_name,
+    "job_name": job_name,
+    "task_content": task_content,
+    "timestamp": timestamp,
+}
 
----
+tmp_path = out_path + ".tmp"
+with open(tmp_path, "w") as f:
+    json.dump(msg, f, ensure_ascii=False, indent=2)
+    f.flush()
 
-IMPORTANT: You are running as a scheduled task. When you complete your task:
-1. Call send_reply(chat_id=${LOBSTER_ADMIN_CHAT_ID}, text=<your digest>, source=\"telegram\") to deliver results directly to the user
-2. Call write_result(task_id=\"scheduled-job-$JOB_NAME\", chat_id=${LOBSTER_ADMIN_CHAT_ID}, text=<same text>, forward=False) to notify the dispatcher that the job completed
-3. Keep output concise - the user is on mobile
-4. Exit after writing output - do not start a loop
+os.replace(tmp_path, out_path)
+print(f"Reminder posted: {out_path}")
+PYEOF
 
-Both calls are required. send_reply delivers the digest immediately to Telegram; write_result(forward=False) signals the dispatcher that the job is done without double-sending." \
-    --dangerously-skip-permissions \
-    --max-turns 25 \
-    2>&1 | tee -a "$LOG_FILE"
+echo "[$START_ISO] Reminder posted for job: $JOB_NAME — dispatcher will spawn subagent" | tee -a "$LOG_FILE"
 
-EXIT_CODE=$?
-
-# Record end time
-END_TIME=$(date +%s)
-END_ISO=$(date -Iseconds)
-DURATION=$((END_TIME - START_TIME))
-
-echo "" | tee -a "$LOG_FILE"
-echo "[$END_ISO] Job completed in ${DURATION}s with exit code: $EXIT_CODE" | tee -a "$LOG_FILE"
-
-# Update jobs.json with last_run info
+# Update jobs.json last_run to reflect when the job was dispatched
 if [ -f "$JOBS_FILE" ]; then
-    # Use jq if available, otherwise use Python
     if command -v jq &> /dev/null; then
-        STATUS="success"
-        [ $EXIT_CODE -ne 0 ] && STATUS="failed"
-
         TMP_FILE=$(mktemp)
         jq --arg name "$JOB_NAME" \
-           --arg last_run "$END_ISO" \
-           --arg status "$STATUS" \
-           '.jobs[$name].last_run = $last_run | .jobs[$name].last_status = $status' \
+           --arg last_run "$START_ISO" \
+           'if .jobs[$name] then .jobs[$name].last_run = $last_run else . end' \
            "$JOBS_FILE" > "$TMP_FILE" && mv "$TMP_FILE" "$JOBS_FILE"
     else
         python3 -c "
 import json
-import sys
-with open('$JOBS_FILE', 'r') as f:
+with open('$JOBS_FILE') as f:
     data = json.load(f)
 if '$JOB_NAME' in data.get('jobs', {}):
-    data['jobs']['$JOB_NAME']['last_run'] = '$END_ISO'
-    data['jobs']['$JOB_NAME']['last_status'] = 'success' if $EXIT_CODE == 0 else 'failed'
+    data['jobs']['$JOB_NAME']['last_run'] = '$START_ISO'
     with open('$JOBS_FILE', 'w') as f:
         json.dump(data, f, indent=2)
-"
+" 2>/dev/null || true
     fi
 fi
 
-# Post a reminder to the dispatcher inbox so it learns the job completed
-POST_REMINDER="$REPO_DIR/scheduled-tasks/post-reminder.sh"
-if [ -f "$POST_REMINDER" ]; then
-    bash "$POST_REMINDER" "$JOB_NAME" "$EXIT_CODE" "$DURATION" 2>&1 | tee -a "$LOG_FILE" || true
-fi
-
-exit $EXIT_CODE
+exit 0
