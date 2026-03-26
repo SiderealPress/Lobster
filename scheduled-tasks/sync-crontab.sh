@@ -7,7 +7,7 @@ set -e
 WORKSPACE="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
 REPO_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
 JOBS_FILE="$WORKSPACE/scheduled-jobs/jobs.json"
-RUNNER="$REPO_DIR/scheduled-tasks/run-job.sh"
+RUNNER="$REPO_DIR/scheduled-tasks/dispatch-job.sh"
 
 # Check if crontab is available
 if ! command -v crontab &> /dev/null; then
