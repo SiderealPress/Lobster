@@ -47,6 +47,34 @@ from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQu
 from collections import deque
 
 
+# URLs longer than this are copy-paste targets (e.g. OAuth flows).  Telegram
+# hides the raw URL when it is embedded in an <a> tag, so we render them as
+# plain text instead — label on the first line, URL on the next — so the user
+# can long-press and copy without hunting through a menu.
+_LONG_URL_THRESHOLD = 200
+
+
+def _link_to_html(link_text: str, url: str) -> str:
+    """Convert a single [text](url) Markdown link to HTML.
+
+    Short URLs (≤ _LONG_URL_THRESHOLD chars) become a normal <a> tag so
+    Telegram renders them as a tappable hyperlink.
+
+    Long URLs (> _LONG_URL_THRESHOLD chars) are expanded to two lines of plain
+    text:
+        <b>link_text</b>
+        <pre>url</pre>
+
+    The <pre> wrapper prevents Telegram from collapsing the URL and makes it
+    easy to long-press and copy on mobile.
+    """
+    if len(url) > _LONG_URL_THRESHOLD:
+        # Escape HTML entities in the URL (it may contain & params already escaped)
+        escaped_url = url.replace('&amp;', '&').replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+        return f"<b>{link_text}</b>\n<pre>{escaped_url}</pre>"
+    return f'<a href="{url}">{link_text}</a>'
+
+
 def md_to_html(text: str) -> str:
     """Convert Telegram-flavored Markdown to HTML for reliable rendering.
 
