@@ -17,6 +17,7 @@ dependencies = [
     "twilio>=9.0.0",
     "websockets>=13.0",
     "cryptography>=42.0.0",
+    "blue-lobster @ git+https://github.com/sayhar/blue-lobster.git",
 ]
 
 [project.optional-dependencies]
