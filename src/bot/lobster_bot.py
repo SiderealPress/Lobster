@@ -47,12 +47,44 @@ from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQu
 from collections import deque
 
 
+# URLs longer than this are copy-paste targets (e.g. OAuth flows).  Telegram
+# hides the raw URL when it is embedded in an <a> tag, so we render them as
+# plain text instead — label on the first line, URL on the next — so the user
+# can long-press and copy without hunting through a menu.
+_LONG_URL_THRESHOLD = 200
+
+
+def _link_to_html(link_text: str, url: str) -> str:
+    """Convert a single [text](url) Markdown link to HTML.
+
+    Short URLs (≤ _LONG_URL_THRESHOLD chars) become a normal <a> tag so
+    Telegram renders them as a tappable hyperlink.
+
+    Long URLs (> _LONG_URL_THRESHOLD chars) are expanded to two lines of plain
+    text:
+        <b>link_text</b>
+        <pre>url</pre>
+
+    The <pre> wrapper prevents Telegram from collapsing the URL and makes it
+    easy to long-press and copy on mobile.
+    """
+    if len(url) > _LONG_URL_THRESHOLD:
+        # Escape HTML entities in the URL (it may contain & params already escaped)
+        escaped_url = url.replace('&amp;', '&').replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+        return f"<b>{link_text}</b>\n<pre>{escaped_url}</pre>"
+    return f'<a href="{url}">{link_text}</a>'
+
+
 def md_to_html(text: str) -> str:
     """Convert Telegram-flavored Markdown to HTML for reliable rendering.
 
     Handles: [text](url) links, `code`, ```code blocks```, **bold**, *bold*, _italic_,
     ## headings, ### headings, --- horizontal rules.
     Escapes &, <, > in non-HTML portions.
+
+    Long URLs (> _LONG_URL_THRESHOLD chars) are rendered as plain text rather
+    than hyperlinks — Telegram hides embedded URLs from users who need to
+    copy-paste them (e.g. OAuth flows).
     """
     # Split on code blocks first to avoid formatting inside them
     parts = re.split(r'(```[\s\S]*?```|`[^`\n]+`)', text)
@@ -79,8 +111,12 @@ def md_to_html(text: str) -> str:
             p = re.sub(r'(?m)^---+\s*$', '', p)
             # Headers: ### or ## or # at start of line → <b>text</b>
             p = re.sub(r'(?m)^#{1,6}\s+(.+)$', r'<b>\1</b>', p)
-            # Links: [text](url)
-            p = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2">\1</a>', p)
+            # Links: [text](url) — long URLs rendered as plain text for copy-paste
+            p = re.sub(
+                r'\[([^\]]+)\]\(([^)]+)\)',
+                lambda m: _link_to_html(m.group(1), m.group(2)),
+                p,
+            )
             # Bold: **text**
             p = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', p)
             # Italic: _text_ (single, not double)
