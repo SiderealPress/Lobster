@@ -1617,6 +1617,23 @@ EOF
         migrated=$((migrated + 1))
     fi
 
+    # Migration 37: Remove run-job.sh cron entries and make dispatch-job.sh executable.
+    # run-job.sh (which invoked claude -p directly) has been replaced by dispatch-job.sh
+    # (which posts a scheduled_reminder to the inbox for the dispatcher to handle).
+    # Remove any lingering LOBSTER-SCHEDULED cron entries that still reference run-job.sh.
+    if crontab -l 2>/dev/null | grep -q 'run-job.sh.*# LOBSTER-SCHEDULED'; then
+        { crontab -l 2>/dev/null | grep -v 'run-job.sh.*# LOBSTER-SCHEDULED' || true; } | crontab -
+        substep "Removed run-job.sh cron entries (superseded by dispatch-job.sh inbox dispatch)"
+        migrated=$((migrated + 1))
+    fi
+    # Make dispatch-job.sh executable if present
+    local dispatch_script="$LOBSTER_DIR/scheduled-tasks/dispatch-job.sh"
+    if [ -f "$dispatch_script" ] && [ ! -x "$dispatch_script" ]; then
+        chmod +x "$dispatch_script"
+        substep "Made dispatch-job.sh executable"
+        migrated=$((migrated + 1))
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
