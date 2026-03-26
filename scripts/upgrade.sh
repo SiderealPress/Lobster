@@ -1827,8 +1827,7 @@ EOF
         fi
     fi
 
-    # Migration 48: Add idempotency column to agent_sessions
-    # The idempotency column enables safe orphan recovery after restarts (#866).
+    # Migration 48: Add idempotency column to agent_sessions    # The idempotency column enables safe orphan recovery after restarts (#866).
     # Sessions classified as 'safe' can be re-run automatically; 'unsafe'/'unknown'
     # sessions surface a user notification instead. The column is also used by the
     # session_start and register_agent MCP tools so the dispatcher can classify
