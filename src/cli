@@ -407,11 +407,11 @@ cmd_ps() {
         if echo "$cmd" | grep -q -- '--max-turns'; then
             role="scheduled"
         fi
-        # Check if parent is run-job.sh
+        # Check if parent is dispatch-job.sh
         local ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
         if [ -n "$ppid" ]; then
             local parent_cmd=$(ps -o args= -p "$ppid" 2>/dev/null || true)
-            if echo "$parent_cmd" | grep -q 'run-job.sh'; then
+            if echo "$parent_cmd" | grep -qE 'run-job.sh|dispatch-job.sh'; then
                 role="scheduled"
             fi
         fi
