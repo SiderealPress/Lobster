@@ -100,11 +100,11 @@ This is a test job that should complete quickly.
         }
 
     def test_run_job_script_syntax(self):
-        """Test that run-job.sh has valid bash syntax."""
-        run_job = Path(__file__).parent.parent.parent / "scheduled-tasks" / "run-job.sh"
+        """Test that dispatch-job.sh has valid bash syntax."""
+        run_job = Path(__file__).parent.parent.parent / "scheduled-tasks" / "dispatch-job.sh"
 
         if not run_job.exists():
-            pytest.skip("run-job.sh not found")
+            pytest.skip("dispatch-job.sh not found")
 
         # Check syntax with bash -n
         result = subprocess.run(
@@ -116,11 +116,11 @@ This is a test job that should complete quickly.
         assert result.returncode == 0, f"Syntax error: {result.stderr}"
 
     def test_run_job_requires_job_name(self):
-        """Test that run-job.sh requires job name argument."""
-        run_job = Path(__file__).parent.parent.parent / "scheduled-tasks" / "run-job.sh"
+        """Test that dispatch-job.sh requires job name argument."""
+        run_job = Path(__file__).parent.parent.parent / "scheduled-tasks" / "dispatch-job.sh"
 
         if not run_job.exists():
-            pytest.skip("run-job.sh not found")
+            pytest.skip("dispatch-job.sh not found")
 
         result = subprocess.run(
             ["bash", str(run_job)],
