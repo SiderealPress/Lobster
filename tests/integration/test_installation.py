@@ -125,11 +125,11 @@ class TestScriptExecutability:
             content = cli_path.read_text()
             assert content.startswith("#!/bin/bash"), "CLI should be a bash script"
 
-    def test_run_job_script_exists(self, lobster_dir: Path):
-        """Test that run-job.sh exists."""
-        script = lobster_dir / "scheduled-tasks" / "run-job.sh"
+    def test_dispatch_job_script_exists(self, lobster_dir: Path):
+        """Test that dispatch-job.sh exists."""
+        script = lobster_dir / "scheduled-tasks" / "dispatch-job.sh"
         if script.exists():
-            assert os.access(script, os.X_OK), "run-job.sh should be executable"
+            assert os.access(script, os.X_OK), "dispatch-job.sh should be executable"
 
     def test_sync_crontab_script_exists(self, lobster_dir: Path):
         """Test that sync-crontab.sh exists."""
