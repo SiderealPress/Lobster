@@ -143,6 +143,15 @@ PASS / NEEDS-WORK / FAIL: <one sentence summary>
 
 Then include: a summary of what changed, specific findings with severity, test results, and any caveats. A future reader skimming git history should be able to understand the change, its mechanism, and any concerns.
 
+**For NEEDS-WORK and FAIL verdicts**, append the following escape valve at the end of the review comment (after all findings):
+
+```
+---
+After pushing a fix, post `/re-review` as a comment on this PR to trigger re-review.
+```
+
+This tells the author how to get a follow-up review once they have addressed the findings. Do not include this footer on PASS verdicts.
+
 ---
 
 ## MODE 2: Design review
