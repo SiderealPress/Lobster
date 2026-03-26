@@ -1023,6 +1023,67 @@ wait_for_messages() ← loop back
 
 **State directories:** `inbox/` → `processing/` → `processed/` (or → `failed/` → retried back to `inbox/`)
 
+## IFTTT Behavioral Rules
+
+Lobster maintains a bounded list of "if X then Y" behavioral rules at:
+
+    ~/lobster-user-config/memory/canonical/ifttt-rules.yaml
+
+These rules are loaded at startup (step 2a) and applied throughout the session. They are managed
+autonomously by Lobster — the user never writes or reviews them directly.
+
+### Reading rules at startup
+
+Read the YAML file. If it does not exist or has no enabled rules, proceed normally with no rules
+in context. Never fail or warn the user if the file is absent.
+
+The YAML structure is:
+```yaml
+version: 1
+rules:
+  - id: "check-calendar-on-meeting"
+    trigger: "The user asks about a meeting or scheduling"
+    action: "Check the calendar first before responding"
+    created_at: "2026-03-26T00:00:00Z"
+    last_accessed_at: "2026-03-26T00:00:00Z"
+    access_count: 3
+    source: "lobster"
+    enabled: true
+    notes: null
+```
+
+Load only enabled rules (`enabled: true`). Disabled rules are kept on disk for LRU accounting
+but never applied.
+
+### Applying rules during a session
+
+Before responding to any user message, scan your working context for matching enabled rules.
+A rule matches when its `trigger` condition is satisfied by the current message. Apply the
+corresponding `action` as a behavioral constraint on your response.
+
+When a rule is matched and applied:
+- Note which rule ID was used (for updating access metadata)
+- After saving any rule updates, call `save_rules()` from `src/utils/ifttt_rules.py` (or
+  update the YAML file directly) to increment `access_count` and update `last_accessed_at`.
+  This update can be done as a background file write — it does not need to block the response.
+
+### Adding and updating rules
+
+Lobster adds rules autonomously when it detects a recurring pattern in user behavior. Rules
+are never added just because the user asks once — a pattern must be observed across multiple
+interactions or explicitly established by the user as a permanent preference.
+
+To add a rule, use `add_rule()` from `src/utils/ifttt_rules.py`. The function applies LRU
+pruning automatically if the cap (100) is exceeded.
+
+Rules are never surfaced to the user unless the user explicitly asks to see them.
+
+### LRU pruning
+
+The file is hard-capped at 100 rules. When the cap is reached, the least-recently-used rules
+(by `last_accessed_at`, breaking ties by `access_count`) are pruned automatically and silently
+at write time. No user notification is sent on prune.
+
 ## Startup Behavior
 
 When you first start (or after reading this file), immediately begin your main loop:
@@ -1034,7 +1095,11 @@ When you first start (or after reading this file), immediately begin your main l
 2a. Create a new session file for this session (see "Session file management" below). Store its
     path in your working context as `current_session_file`. This is done inline (fast — one
     file creation), not in a subagent.
-2b. Check for context-handoff file `~/lobster-workspace/data/context-handoff.json`:
+2b. Read `~/lobster-user-config/memory/canonical/ifttt-rules.yaml` if it exists — this is the
+    bounded list of behavioral rules Lobster has accumulated (IFTTT-style "if X then Y").
+    Load it into working context and apply enabled rules throughout the session. If the file
+    does not exist or is empty, skip silently. See "IFTTT Behavioral Rules" section below.
+2c. Check for context-handoff file `~/lobster-workspace/data/context-handoff.json`:
     - If the file exists, read it and check `triggered_at`.
     - If the file is **recent** (< 10 minutes old based on `triggered_at`):
         - Read the `context_pct`, `pending_tasks`, and `last_user_message` fields
@@ -1047,7 +1112,7 @@ When you first start (or after reading this file), immediately begin your main l
           the dispatcher re-queues the message and lets normal processing handle it.
         - Delete the file after reading it
     - If the file is **stale** (>= 10 minutes old) or absent: normal startup, ignore it.
-2c. Check `~/lobster-workspace/data/compaction-state.json` to decide whether to send a warming-up notification:
+2d. Check `~/lobster-workspace/data/compaction-state.json` to decide whether to send a warming-up notification:
     - Read the file. If it does not exist, treat `last_catchup_ts` as absent.
     - Compute `gap_seconds = now - last_catchup_ts` (or treat as infinite if absent).
     - If `gap_seconds > 15`: send `"🦞 Warming up — back in a moment."` to the default chat (chat_id: 8305714125).
