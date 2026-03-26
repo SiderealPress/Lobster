@@ -1599,7 +1599,7 @@ EOF
         migrated=$((migrated + 1))
     fi
 
-    # Migration 37: Add idempotency column to agent_sessions
+    # Migration 38: Add idempotency column to agent_sessions
     # The idempotency column enables safe orphan recovery after restarts (#866).
     # Sessions classified as 'safe' can be re-run automatically; 'unsafe'/'unknown'
     # sessions surface a user notification instead. The column is also used by the
