@@ -7840,6 +7840,13 @@ async def main():
     setup_logging()
     _ensure_observation_worker()
 
+    # Initialize the event bus singleton with standard listeners.
+    # JsonlFileListener writes all events to logs/events.jsonl.
+    # TelegramOutboxListener delivers debug events to Telegram when LOBSTER_DEBUG=true.
+    # This is a no-op if called more than once (idempotent).
+    from event_bus import init_event_bus
+    init_event_bus()
+
     # Startup cleanup: mark stale 'running' rows as 'dead' before reconciler loop begins.
     # After a force-restart, agents killed mid-run leave their output files with
     # stop_reason=tool_use, which the reconciler treats as still-running. We fix this
