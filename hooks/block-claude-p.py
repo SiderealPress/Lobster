@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""
+r"""
 PreToolUse hook: detect and log/block `claude -p` / `claude --print` Bash invocations.
 
 Background: `claude -p` (non-interactive print mode) is sometimes used as a
