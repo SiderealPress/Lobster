@@ -1634,6 +1634,35 @@ EOF
         migrated=$((migrated + 1))
     fi
 
+    # Migration 40: Register block-claude-p.py PreToolUse hook in Claude Code settings
+    # This hook detects and logs (warn mode) or blocks (block mode) `claude -p` /
+    # `claude --print` invocations in Bash tool calls. Deploying in warn mode first
+    # validates zero false positives before switching to hard-block. Mode is
+    # controlled by LOBSTER_BLOCK_CLAUDE_P_MODE env var (default: warn).
+    if [ -f "$CLAUDE_SETTINGS" ] && command -v jq >/dev/null 2>&1; then
+        local has_block_claude_p
+        has_block_claude_p=$(jq -r '
+            [.hooks.PreToolUse[]?.hooks[]?.command // empty]
+            | map(select(contains("block-claude-p")))
+            | length
+        ' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
+        if [ "${has_block_claude_p:-0}" = "0" ] || [ "${has_block_claude_p:-0}" = "" ]; then
+            chmod +x "$INSTALL_DIR/hooks/block-claude-p.py" 2>/dev/null || true
+            TMP_SETTINGS=$(mktemp)
+            jq --arg cmd "python3 $INSTALL_DIR/hooks/block-claude-p.py" \
+               '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+                "matcher": "Bash",
+                "hooks": [{
+                    "type": "command",
+                    "command": $cmd,
+                    "timeout": 5
+                }]
+            }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+            substep "Registered block-claude-p hook in Claude Code settings (warn mode, Bash-only)"
+            migrated=$((migrated + 1))
+        fi
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
