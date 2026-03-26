@@ -1202,187 +1202,8 @@ if [ ! -f "$JOBS_FILE" ]; then
     echo '{"jobs": {}}' > "$JOBS_FILE"
 fi
 
-# Create run-job.sh
-cat > "$INSTALL_DIR/scheduled-tasks/run-job.sh" << 'RUNJOB'
-#!/bin/bash
-# Lobster Scheduled Task Executor
-# Runs a scheduled job in a fresh Claude instance
-
-set -e
-
-# Ensure Claude is in PATH (cron doesn't inherit user PATH)
-export PATH="$HOME/.local/bin:$PATH"
-
-# Prevent "cannot launch inside another Claude Code session" error.
-# CLAUDECODE leaks when run-job.sh is manually tested from a Claude session.
-unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT 2>/dev/null || true
-
-JOB_NAME="$1"
-
-if [ -z "$JOB_NAME" ]; then
-    echo "Usage: $0 <job-name>"
-    exit 1
-fi
-
-REPO_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
-WORKSPACE="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
-TASK_FILE="$WORKSPACE/scheduled-jobs/tasks/${JOB_NAME}.md"
-OUTPUT_DIR="$HOME/messages/task-outputs"
-LOG_DIR="$WORKSPACE/scheduled-jobs/logs"
-TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-JOBS_FILE="$WORKSPACE/scheduled-jobs/jobs.json"
-
-mkdir -p "$OUTPUT_DIR" "$LOG_DIR"
-
-if [ ! -f "$TASK_FILE" ]; then
-    echo "Error: Task file not found: $TASK_FILE"
-    exit 1
-fi
-
-TASK_CONTENT=$(cat "$TASK_FILE")
-LOG_FILE="$LOG_DIR/${JOB_NAME}-${TIMESTAMP}.log"
-
-START_TIME=$(date +%s)
-START_ISO=$(date -Iseconds)
-
-echo "[$START_ISO] Starting job: $JOB_NAME" | tee "$LOG_FILE"
-
-claude -p "$TASK_CONTENT
-
----
-
-IMPORTANT: You are running as a scheduled task. When you complete your task:
-1. Call write_task_output() with your results summary
-2. Keep output concise - the main Lobster instance will review this later
-3. Exit after writing output - do not start a loop" \
-    --dangerously-skip-permissions \
-    --max-turns 15 \
-    2>&1 | tee -a "$LOG_FILE"
-
-EXIT_CODE=$?
-
-END_TIME=$(date +%s)
-END_ISO=$(date -Iseconds)
-DURATION=$((END_TIME - START_TIME))
-
-echo "" | tee -a "$LOG_FILE"
-echo "[$END_ISO] Job completed in ${DURATION}s with exit code: $EXIT_CODE" | tee -a "$LOG_FILE"
-
-if [ -f "$JOBS_FILE" ]; then
-    # Use jq if available, otherwise use Python
-    if command -v jq &> /dev/null; then
-        STATUS="success"
-        [ $EXIT_CODE -ne 0 ] && STATUS="failed"
-
-        TMP_FILE=$(mktemp)
-        jq --arg name "$JOB_NAME" \
-           --arg last_run "$END_ISO" \
-           --arg status "$STATUS" \
-           '.jobs[$name].last_run = $last_run | .jobs[$name].last_status = $status' \
-           "$JOBS_FILE" > "$TMP_FILE" && mv "$TMP_FILE" "$JOBS_FILE"
-    else
-        python3 -c "
-import json
-import sys
-with open('$JOBS_FILE', 'r') as f:
-    data = json.load(f)
-if '$JOB_NAME' in data.get('jobs', {}):
-    data['jobs']['$JOB_NAME']['last_run'] = '$END_ISO'
-    data['jobs']['$JOB_NAME']['last_status'] = 'success' if $EXIT_CODE == 0 else 'failed'
-    with open('$JOBS_FILE', 'w') as f:
-        json.dump(data, f, indent=2)
-"
-    fi
-fi
-
-# Post a reminder to the dispatcher inbox so it learns the job completed
-POST_REMINDER="$REPO_DIR/scheduled-tasks/post-reminder.sh"
-if [ -f "$POST_REMINDER" ]; then
-    bash "$POST_REMINDER" "$JOB_NAME" "$EXIT_CODE" "$DURATION" 2>&1 | tee -a "$LOG_FILE" || true
-fi
-
-exit $EXIT_CODE
-RUNJOB
-chmod +x "$INSTALL_DIR/scheduled-tasks/run-job.sh" || true
-
-# Create post-reminder.sh
-cat > "$INSTALL_DIR/scheduled-tasks/post-reminder.sh" << 'POSTREMINDER'
-#!/bin/bash
-# Cron Job Post-Reminder
-# Called by run-job.sh after each scheduled job. Writes a cron_reminder message
-# to the Lobster inbox so the dispatcher is notified that output is available.
-#
-# Usage: post-reminder.sh <job-name> <exit-code> <duration-seconds>
-
-set -e
-
-JOB_NAME="$1"
-EXIT_CODE="${2:-0}"
-DURATION_SECONDS="${3:-0}"
-
-if [ -z "$JOB_NAME" ]; then
-    echo "Usage: $0 <job-name> <exit-code> <duration-seconds>"
-    exit 1
-fi
-
-INBOX_DIR="${LOBSTER_MESSAGES:-$HOME/messages}/inbox"
-mkdir -p "$INBOX_DIR"
-
-if [ "$EXIT_CODE" -eq 0 ]; then
-    STATUS="success"
-else
-    STATUS="failed"
-fi
-
-TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%S.%6N)
-EPOCH_MS=$(date +%s%3N)
-MSG_ID="${EPOCH_MS}_cron_${JOB_NAME}"
-
-python3 - \
-    "${INBOX_DIR}/${MSG_ID}.json" \
-    "${MSG_ID}" \
-    "${TIMESTAMP}" \
-    "${JOB_NAME}" \
-    "${EXIT_CODE}" \
-    "${DURATION_SECONDS}" \
-    "${STATUS}" \
-    << 'PYEOF'
-import json, sys, os
-out_path = sys.argv[1]
-msg_id = sys.argv[2]
-timestamp = sys.argv[3]
-job_name = sys.argv[4]
-exit_code = int(sys.argv[5])
-duration_seconds = int(sys.argv[6])
-status = sys.argv[7]
-
-msg = {
-    "id": msg_id,
-    "source": "system",
-    "type": "cron_reminder",
-    "chat_id": 0,
-    "user_id": 0,
-    "username": "lobster-cron",
-    "user_name": "Cron",
-    "text": f"[Cron] Job '{job_name}' finished ({status}, {duration_seconds}s)",
-    "job_name": job_name,
-    "exit_code": exit_code,
-    "duration_seconds": duration_seconds,
-    "status": status,
-    "timestamp": timestamp,
-}
-
-tmp_path = out_path + ".tmp"
-with open(tmp_path, "w") as f:
-    json.dump(msg, f, ensure_ascii=False, indent=2)
-    f.flush()
-
-os.replace(tmp_path, out_path)
-PYEOF
-
-echo "Reminder posted for job: $JOB_NAME (status=$STATUS, duration=${DURATION_SECONDS}s)"
-POSTREMINDER
-chmod +x "$INSTALL_DIR/scheduled-tasks/post-reminder.sh" || true
+# Install dispatch-job.sh (posts scheduled_reminder to inbox; no direct Claude invocation)
+chmod +x "$INSTALL_DIR/scheduled-tasks/dispatch-job.sh" || true
 
 # Create sync-crontab.sh
 cat > "$INSTALL_DIR/scheduled-tasks/sync-crontab.sh" << 'SYNCCRON'
@@ -1394,7 +1215,7 @@ set -e
 WORKSPACE="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
 REPO_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
 JOBS_FILE="$WORKSPACE/scheduled-jobs/jobs.json"
-RUNNER="$REPO_DIR/scheduled-tasks/run-job.sh"
+RUNNER="$REPO_DIR/scheduled-tasks/dispatch-job.sh"
 
 if ! command -v crontab &> /dev/null; then
     echo "Warning: crontab not found. Install cron to enable scheduled tasks."
@@ -1416,7 +1237,20 @@ if command -v jq &> /dev/null; then
         "\(.value.schedule) \($runner) \(.key) \($marker)"
     ' "$JOBS_FILE" 2>/dev/null || echo "")
 else
-    CRON_ENTRIES=""
+    CRON_ENTRIES=$(python3 -c "
+import json
+import sys
+try:
+    with open('$JOBS_FILE', 'r') as f:
+        data = json.load(f)
+    for name, job in data.get('jobs', {}).items():
+        if job.get('enabled', True):
+            schedule = job.get('schedule', '')
+            if schedule:
+                print(f\"{schedule} $RUNNER {name} $MARKER\")
+except Exception as e:
+    sys.stderr.write(f'Error: {e}\n')
+" 2>/dev/null || echo "")
 fi
 
 {
@@ -1497,16 +1331,6 @@ chmod +x "$INSTALL_DIR/scheduled-tasks/export-logs.py" 2>/dev/null || true
     "0 3 * * * cd $INSTALL_DIR && uv run scheduled-tasks/export-logs.py # LOBSTER-LOG-EXPORT"
 
 success "Log export configured (runs at 03:00 UTC daily)"
-
-#===============================================================================
-# Cron-to-Inbox Reminder System (post-reminder.sh)
-#===============================================================================
-
-step "Installing post-reminder.sh..."
-
-chmod +x "$INSTALL_DIR/scripts/post-reminder.sh" || true
-
-success "post-reminder.sh installed"
 
 # Ensure any lingering self-check cron entry is removed on fresh installs
 { crontab -l 2>/dev/null | grep -v "# LOBSTER-SELF-CHECK" | grep -v "periodic-self-check" || true; } | crontab -
@@ -2085,7 +1909,7 @@ TELEGRAM_BOT_TOKEN=your_bot_token_here
 TELEGRAM_ALLOWED_USERS=
 
 # Admin chat ID (Telegram numeric user ID for the primary admin user).
-# Used by run-job.sh (scheduled tasks) and alert.sh to deliver messages.
+# Used by dispatch-job.sh (scheduled tasks) and alert.sh to deliver messages.
 LOBSTER_ADMIN_CHAT_ID=
 
 # Environment mode: production | dev | test
@@ -2149,7 +1973,7 @@ TELEGRAM_BOT_TOKEN=$BOT_TOKEN
 TELEGRAM_ALLOWED_USERS=$USER_ID
 
 # Admin chat ID (Telegram numeric user ID for the primary admin user).
-# Used by run-job.sh (scheduled tasks) and alert.sh to deliver messages.
+# Used by dispatch-job.sh (scheduled tasks) and alert.sh to deliver messages.
 LOBSTER_ADMIN_CHAT_ID=$USER_ID
 
 # Environment mode: production | dev | test

@@ -1,9 +1,10 @@
 #!/bin/bash
-# Lobster Scheduled Task Dispatcher
-# Writes a scheduled_reminder to the dispatcher inbox so the dispatcher
-# spawns a subagent for the job. Does NOT call claude -p.
+# Lobster Scheduled Job Dispatcher
 #
-# Usage: run-job.sh <job-name>
+# Writes a scheduled_reminder message into the Lobster inbox so the dispatcher
+# spawns a subagent for the job. Does NOT invoke Claude directly.
+#
+# Usage: dispatch-job.sh <job-name>
 
 set -e
 
@@ -16,8 +17,6 @@ if [ -z "$JOB_NAME" ]; then
     echo "Usage: $0 <job-name>"
     exit 1
 fi
-
-REPO_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
 
 # Load env files so tokens and config are available when running from cron.
 # Source config.env first, then global.env (global overrides config).
@@ -47,9 +46,6 @@ LOG_FILE="$LOG_DIR/${JOB_NAME}-${TIMESTAMP}.log"
 
 # --- Check enabled flag ---
 # If the job is marked enabled=false in jobs.json, exit silently.
-# This is the primary guard: when a job is disabled via update_scheduled_job,
-# sync-crontab.sh removes its cron entry. But if an old cron entry fires
-# before the sync takes effect, this check ensures it does nothing.
 if [ -f "$JOBS_FILE" ]; then
     ENABLED=$(python3 -c "
 import json, sys
@@ -57,7 +53,6 @@ try:
     with open('$JOBS_FILE') as f:
         data = json.load(f)
     job = data.get('jobs', {}).get('$JOB_NAME', {})
-    # Default to true if job exists but has no enabled field
     print(str(job.get('enabled', True)).lower())
 except Exception:
     print('true')
@@ -68,7 +63,7 @@ except Exception:
     fi
 fi
 
-echo "[$START_ISO] Posting reminder for job: $JOB_NAME" | tee "$LOG_FILE"
+echo "[$START_ISO] Posting dispatch for job: $JOB_NAME" | tee "$LOG_FILE"
 
 # --- Check task file exists ---
 if [ ! -f "$TASK_FILE" ]; then
@@ -121,10 +116,10 @@ with open(tmp_path, "w") as f:
     f.flush()
 
 os.replace(tmp_path, out_path)
-print(f"Reminder posted: {out_path}")
+print(f"Dispatch posted: {out_path}")
 PYEOF
 
-echo "[$START_ISO] Reminder posted for job: $JOB_NAME — dispatcher will spawn subagent" | tee -a "$LOG_FILE"
+echo "[$START_ISO] Dispatch posted for job: $JOB_NAME — dispatcher will spawn subagent" | tee -a "$LOG_FILE"
 
 # Update jobs.json last_run to reflect when the job was dispatched
 if [ -f "$JOBS_FILE" ]; then

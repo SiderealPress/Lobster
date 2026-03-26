@@ -240,7 +240,7 @@ Reactions arrive as inbox messages with `type: "reaction"` and include the raw e
 ├── scheduled-tasks/           # Scheduled jobs system
 │   ├── tasks/                 # Task markdown files
 │   ├── logs/                  # Execution logs
-│   ├── run-job.sh             # Task executor
+│   ├── dispatch-job.sh        # Task dispatcher (posts to inbox)
 │   └── sync-crontab.sh        # Crontab synchronizer
 ├── services/                  # systemd units
 ├── config/                    # Configuration

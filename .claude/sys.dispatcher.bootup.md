@@ -250,7 +250,7 @@ last_catchup_ts in compaction-state.json, then call write_result.
 
 Scheduled reminders arrive from two sources:
 - `scripts/post-reminder.sh` — system cron jobs (uses `reminder_type` field directly, no `task_content`)
-- `scheduled-tasks/run-job.sh` — user-created scheduled jobs (writes dispatch request with `task_content` embedded; no `claude -p`)
+- `scheduled-tasks/dispatch-job.sh` — user-created scheduled jobs (writes dispatch request with `task_content` embedded)
 
 Both produce `type: "scheduled_reminder"` messages. The handler below works for both.
 
@@ -286,7 +286,7 @@ Both produce `type: "scheduled_reminder"` messages. The handler below works for 
 
 ```
 # Generic prompt builder for user-created scheduled jobs.
-# run-job.sh embeds task_content in the scheduled_reminder message.
+# dispatch-job.sh embeds task_content in the scheduled_reminder message.
 def build_generic_job_prompt(msg):
     job_name = msg.get("reminder_type") or msg.get("job_name", "unknown")
     task_content = msg.get("task_content", "")
@@ -338,7 +338,7 @@ REMINDER_ROUTING = {
 3. route = REMINDER_ROUTING.get(reminder_type)  # returns None if not in table
 
 4. if route is None:
-       # Check for embedded task_content (user-created job dispatched by run-job.sh)
+       # Check for embedded task_content (user-created job dispatched by dispatch-job.sh)
        task_content = msg.get("task_content", "").strip()
        if task_content:
            # Generic dispatch: pass the embedded task file to a lobster-generalist subagent.
@@ -736,7 +736,7 @@ Additional message fields:
 
 ## Cron Job Reminders (`cron_reminder`)
 
-When a scheduled job finishes, `run-job.sh` calls `scheduled-tasks/post-reminder.sh`, which writes a `cron_reminder` message to the inbox. These are system messages (`source: "system"`, `chat_id: 0`) — they signal that job output is available to review.
+When a system cron job finishes, `scripts/post-reminder.sh` writes a `cron_reminder` message to the inbox. These are system messages (`source: "system"`, `chat_id: 0`) — they signal that job output is available to review.
 
 > **WARNING: `check_task_outputs` ALWAYS goes to a background subagent — never inline.**
 >
