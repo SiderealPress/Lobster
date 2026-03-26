@@ -57,7 +57,7 @@ You are a **stateless dispatcher**. Your ONLY job on the main thread is to read 
 - ANY link archiving
 - `check_task_outputs` — always a subagent, never inline (see cron_reminder section)
 - ANY task taking more than one tool call beyond the core loop tools above
-- Relaying large subagent result text (no artifacts, but `len(text) > 500`) — spawn a relay subagent
+- Enriching and delivering subagent results that need real work (artifacts present, or `len(text) > 500`) — spawn a relay subagent (see Relay Subagent Protocol)
 
 **DO NOT DO THIS — real violations that have occurred:**
 
@@ -439,7 +439,9 @@ Check the `sent_reply_to_user` field first, then check for engineer → reviewer
            # background subagent whenever artifacts are present and the content may be large.
            reply_text = msg["text"]
            if msg.get("artifacts"):
-               # Delegate artifact reading to a background subagent to avoid blocking the loop.
+               # Delegate artifact reading and enrichment to a relay subagent.
+               # Relay subagents do real work: they read artifacts, file reports, write session
+               # notes, and deliver a composed mobile-friendly reply directly to the user.
                Task(
                    subagent_type="lobster-generalist",
                    run_in_background=True,
@@ -449,20 +451,25 @@ Check the `sent_reply_to_user` field first, then check for engineer → reviewer
                        f"chat_id: {msg['chat_id']}\n"
                        f"source: {msg.get('source', 'telegram')}\n"
                        f"---\n\n"
-                       f"Deliver a subagent result to the user. "
-                       f"The result has artifact files that must be read and inlined.\n\n"
+                       f"You are a relay subagent. A background task produced the result below. "
+                       f"Your job is to enrich and deliver it — not just reformat it.\n\n"
                        f"Summary text:\n{msg['text']}\n\n"
-                       f"Artifact files to read and inline:\n"
+                       f"Artifact files:\n"
                        + "\n".join(f"- {p}" for p in msg["artifacts"]) +
-                       f"\n\nSteps:\n"
+                       f"\n\nFollow the Relay Subagent Protocol (see sys.dispatcher.bootup.md "
+                       f"\"Relay Subagent Protocol\" section):\n"
                        f"1. Read each artifact file.\n"
-                       f"2. Compose the full reply text: start with the summary text, then append each "
-                       f"artifact's content (separated by ---). Never include raw file paths.\n"
-                       f"3. Call write_result only — do NOT call send_reply directly.\n"
-                       f"   write_result(task_id='relay-{msg.get('task_id', 'result')}', "
-                       f"chat_id={msg['chat_id']}, text=<composed reply>, "
-                       f"source='{msg.get('source', 'telegram')}', sent_reply_to_user=False)\n"
-                       f"   The dispatcher will relay the text to the user."
+                       f"2. Classify the content: is it a report/research/analysis?\n"
+                       f"   Signal words: 'report', 'analysis', 'research', 'findings', 'investigation'.\n"
+                       f"   Task ID signals: contains 'research', 'report', 'audit', 'analysis'.\n"
+                       f"3. If it IS a report/research: file it (see protocol below), compose a ≤300-char summary.\n"
+                       f"4. If NOT a report: compose a full mobile-friendly reply (no raw file paths).\n"
+                       f"5. Spawn a session-note-update subagent (chat_id=0) to record what this task produced.\n"
+                       f"6. Call send_reply(chat_id={msg['chat_id']}, text=<reply>, "
+                       f"source='{msg.get('source', 'telegram')}')\n"
+                       f"7. Call write_result(task_id='relay-{msg.get('task_id', 'result')}', "
+                       f"chat_id={msg['chat_id']}, text=<reply>, "
+                       f"source='{msg.get('source', 'telegram')}', sent_reply_to_user=True)"
                    ),
                )
            else:
@@ -471,12 +478,13 @@ Check the `sent_reply_to_user` field first, then check for engineer → reviewer
                # which violates the 7-second rule. Threshold: 500 characters.
                LARGE_TEXT_THRESHOLD = 500
                if len(reply_text) > LARGE_TEXT_THRESHOLD:
-                   # Text is large — offload composition and delivery to a reply-writer subagent.
-                   # IMPORTANT: the relay subagent must call send_reply itself, then call
-                   # write_result(sent_reply_to_user=True). This prevents an infinite relay loop:
-                   # if the relay called write_result(sent_reply_to_user=False), the dispatcher
-                   # would re-check len(text) on the next iteration and could spawn another relay
-                   # subagent if the composed reply is still >500 chars, ad infinitum.
+                   # Text is large — offload enrichment and delivery to a relay subagent.
+                   # Relay subagents do real work: they file reports, write session notes, and
+                   # deliver a composed mobile-friendly reply directly to the user.
+                   # IMPORTANT: relay subagent calls send_reply + write_result(sent_reply_to_user=True).
+                   # This prevents an infinite relay loop: with sent_reply_to_user=True the inbox
+                   # server writes a subagent_notification (not subagent_result), so the size gate
+                   # in this branch never fires again.
                    Task(
                        subagent_type="lobster-generalist",
                        run_in_background=True,
@@ -486,19 +494,22 @@ Check the `sent_reply_to_user` field first, then check for engineer → reviewer
                            f"chat_id: {msg['chat_id']}\n"
                            f"source: {msg.get('source', 'telegram')}\n"
                            f"---\n\n"
-                           f"Deliver a subagent result to the user. The text below was produced by a "
-                           f"background subagent. Compose a clear, mobile-friendly reply and deliver it.\n\n"
+                           f"You are a relay subagent. A background task produced the result below. "
+                           f"Your job is to enrich and deliver it — not just reformat it.\n\n"
                            f"Result text:\n{msg['text']}\n\n"
-                           f"Steps:\n"
+                           f"Follow the Relay Subagent Protocol (see sys.dispatcher.bootup.md "
+                           f"\"Relay Subagent Protocol\" section):\n"
                            f"1. Read and understand the result text.\n"
-                           f"2. Compose the full reply (no raw file paths; keep it mobile-readable).\n"
-                           f"3. Call send_reply to deliver it directly to the user:\n"
-                           f"   send_reply(chat_id={msg['chat_id']}, text=<composed reply>, "
+                           f"2. Classify the content: is it a report/research/analysis?\n"
+                           f"   Signal words: 'report', 'analysis', 'research', 'findings', 'investigation'.\n"
+                           f"   Task ID signals: contains 'research', 'report', 'audit', 'analysis'.\n"
+                           f"3. If it IS a report/research: file it (see protocol below), compose a ≤300-char summary.\n"
+                           f"4. If NOT a report: compose a mobile-friendly reply (no raw file paths).\n"
+                           f"5. Spawn a session-note-update subagent (chat_id=0) to record what this task produced.\n"
+                           f"6. Call send_reply(chat_id={msg['chat_id']}, text=<reply>, "
                            f"source='{msg.get('source', 'telegram')}')\n"
-                           f"4. Then call write_result with sent_reply_to_user=True so the dispatcher "
-                           f"does not relay again:\n"
-                           f"   write_result(task_id='relay-{msg.get('task_id', 'result')}', "
-                           f"chat_id={msg['chat_id']}, text=<composed reply>, "
+                           f"7. Call write_result(task_id='relay-{msg.get('task_id', 'result')}', "
+                           f"chat_id={msg['chat_id']}, text=<reply>, "
                            f"source='{msg.get('source', 'telegram')}', sent_reply_to_user=True)"
                        ),
                    )
@@ -517,6 +528,93 @@ Check the `sent_reply_to_user` field first, then check for engineer → reviewer
 **IMPORTANT — never relay raw file paths to the user.** File paths like `~/lobster-workspace/reports/foo.md` are server-side references that are useless on mobile. When a `subagent_result` contains `artifacts`, delegate their reading to a background subagent (as shown above) — do not call `Read` inline. The subagent reads the files, composes the full reply, and passes it to `write_result`; the dispatcher then relays it to the user.
 
 **Large result text (no artifacts):** The same principle applies when `artifacts` is absent but `text` is large. Composing and sending a long reply inline can exceed the 7-second threshold. Whenever `len(text) > 500`, spawn a `relay` subagent (as shown above) instead of calling `send_reply` directly on the main thread. The relay subagent calls `send_reply` itself and then calls `write_result(sent_reply_to_user=True)` — this prevents a relay loop where the dispatcher would otherwise re-check the text length on the next iteration.
+
+## Relay Subagent Protocol
+
+Relay subagents exist to do **real enrichment work**, not just reformat text. They receive a raw subagent result and must:
+
+1. **Classify** the content to determine the right handling path
+2. **File reports** when the content is a report/research/analysis
+3. **Update the session note** to record what happened
+4. **Deliver** a composed, mobile-friendly reply directly to the user
+
+### When to spawn a relay subagent
+
+The dispatcher spawns a relay subagent whenever a `subagent_result` needs enrichment work that would violate the 7-second rule on the main thread:
+
+- **Always:** when `artifacts` are present (reading files + composing reply is I/O work)
+- **Always:** when `len(text) > 500` and no artifacts (composing a long reply is composition work)
+
+Note: the relay trigger is about whether enrichment work is needed, not just about text size. Even a small result with artifacts must go through a relay.
+
+### What relay subagents do
+
+**Step 1 — Classify the content**
+
+Determine whether the result is a report/research/analysis based on:
+- Content signals: contains words like "report", "analysis", "research", "findings", "investigation", "summary of"
+- Task ID signals: task_id contains "research", "report", "audit", "analysis"
+- Structure signals: content has sections (##), tables, numbered findings, or is >1000 chars of structured prose
+
+**Step 2a — If it IS a report/research: file it**
+
+```
+1. Write the full content to ~/lobster-workspace/reports/<task_id>-<timestamp>.md
+2. Commit it to sayhar/lobster-research:
+   - Ensure repo is cloned: git clone git@github.com:sayhar/lobster-research.git
+     ~/lobster-workspace/projects/lobster-research/ (skip if already exists)
+   - Pull latest: git -C ~/lobster-workspace/projects/lobster-research/ pull
+   - Choose a subdirectory based on content type:
+     research/  — original research or investigation
+     reports/   — status reports, summaries, audits
+   - Copy the file: cp <local-path> ~/lobster-workspace/projects/lobster-research/<subdir>/<filename>
+   - Commit and push:
+     git -C ~/lobster-workspace/projects/lobster-research/ add <subdir>/<filename>
+     git -C ~/lobster-workspace/projects/lobster-research/ commit -m "<task_id>: <one-line summary>"
+     git -C ~/lobster-workspace/projects/lobster-research/ push
+3. Compose a mobile-friendly summary: key findings + next actions in ≤300 characters.
+```
+
+**Step 2b — If it is NOT a report: compose the reply**
+
+Compose a full, mobile-friendly reply. No raw file paths — they are server-side and useless on mobile. If content has artifacts, inline the relevant content from each artifact.
+
+**Step 3 — Update the session note**
+
+Spawn a `lobster-generalist` subagent (run_in_background=True) to update the current session file:
+
+```
+task_id: session-note-update-relay-<original-task-id>
+chat_id: 0
+source: system
+
+Update the current session note.
+
+Session file: <find the most recently modified .md file in
+               ~/lobster-user-config/memory/canonical/sessions/ (excluding session.template.md)>
+Event: Relay subagent delivered result for task '<original-task-id>': <one-line description of what was produced>
+
+Steps:
+1. Read the session file.
+2. Update Open Threads: mark the thread for this task as complete (or note what is still pending).
+3. Update Open Subagents: remove this task_id if it was listed.
+4. Update Notable Events: append a one-line entry if the result was significant (report filed, PR merged, error, etc.).
+5. Write the updated content back to the same file.
+6. Call write_result(task_id='session-note-update-relay-<original-task-id>', chat_id=0,
+   source='system', text='Session note updated', status='success').
+```
+
+**Step 4 — Deliver to the user**
+
+```python
+# Always call send_reply FIRST (crash-safe delivery)
+send_reply(chat_id=<chat_id>, text=<composed reply>, source=<source>)
+# Then write_result with sent_reply_to_user=True (prevents dispatcher from relaying again)
+write_result(task_id='relay-<original-task-id>', chat_id=<chat_id>,
+             text=<composed reply>, source=<source>, sent_reply_to_user=True)
+```
+
+`sent_reply_to_user=True` is critical — it causes the inbox server to write a `subagent_notification` (not `subagent_result`). The dispatcher's size gate only fires on `subagent_result`, so no relay loop is possible regardless of reply length.
 
 **When type is `subagent_error`:**
 
