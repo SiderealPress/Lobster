@@ -1,5 +1,5 @@
 """
-Tests for scheduled-tasks/run-job.sh
+Tests for scheduled-tasks/dispatch-job.sh
 
 Verifies:
 1. Disabled jobs exit 0 silently without writing any inbox message
@@ -17,11 +17,11 @@ from pathlib import Path
 import pytest
 
 REPO_DIR = Path(__file__).parent.parent.parent
-RUN_JOB = REPO_DIR / "scheduled-tasks" / "run-job.sh"
+RUN_JOB = REPO_DIR / "scheduled-tasks" / "dispatch-job.sh"
 
 
 def _make_env(workspace: Path, config_dir: Path, messages_dir: Path) -> dict:
-    """Build a minimal environment for run-job.sh."""
+    """Build a minimal environment for dispatch-job.sh."""
     env = os.environ.copy()
     env["LOBSTER_WORKSPACE"] = str(workspace)
     env["LOBSTER_CONFIG_DIR"] = str(config_dir)
@@ -274,7 +274,7 @@ class TestRunJobShMissingTaskFile:
 
 
 class TestRunJobShNoClaude:
-    """run-job.sh must never invoke claude -p under any condition."""
+    """dispatch-job.sh must never invoke claude -p under any condition."""
 
     def test_script_does_not_exec_claude(self):
         """The script source must not exec 'claude' as a subprocess (e.g. claude -p ...)."""
@@ -291,7 +291,7 @@ class TestRunJobShNoClaude:
                 continue
             # Check for claude being called as a program
             if re.search(r'(?<![/#"])claude\s+-', stripped):
-                msg = "run-job.sh invokes claude as a command on line: " + repr(stripped)
+                msg = "dispatch-job.sh invokes claude as a command on line: " + repr(stripped)
                 pytest.fail(msg + " -- jobs must be dispatched via inbox reminders")
 
     def test_no_claude_invocation_on_enabled_job(self, tmp_path):
@@ -303,7 +303,7 @@ class TestRunJobShNoClaude:
 
         # Intercept any 'claude' calls by shadowing it with a script that fails loudly
         fake_claude = tmp_path / "claude"
-        fake_claude.write_text("#!/bin/bash\necho 'ERROR: claude was called from run-job.sh' >&2\nexit 99\n")
+        fake_claude.write_text("#!/bin/bash\necho 'ERROR: claude was called from dispatch-job.sh' >&2\nexit 99\n")
         fake_claude.chmod(0o755)
         env["PATH"] = str(tmp_path) + ":" + env["PATH"]
 
