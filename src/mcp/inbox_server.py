@@ -1310,6 +1310,10 @@ async def list_tools() -> list[Tool]:
                         "description": "Filter by status: pending, in_progress, completed, or all (default).",
                         "default": "all",
                     },
+                    "chat_id": {
+                        "type": "string",
+                        "description": "Optional: filter to tasks owned by this chat_id (legacy tasks without chat_id are always included).",
+                    },
                 },
             },
         ),
@@ -1326,6 +1330,10 @@ async def list_tools() -> list[Tool]:
                     "description": {
                         "type": "string",
                         "description": "Detailed description of what needs to be done.",
+                    },
+                    "chat_id": {
+                        "type": "string",
+                        "description": "Optional: chat_id of the user who owns this task.",
                     },
                 },
                 "required": ["subject"],
@@ -1442,6 +1450,10 @@ async def list_tools() -> list[Tool]:
                     "context": {
                         "type": "string",
                         "description": "Instructions for the job. Describe what the scheduled task should do.",
+                    },
+                    "chat_id": {
+                        "type": "string",
+                        "description": "Optional: chat_id of the user who owns this job. Notifications route to this user.",
                     },
                 },
                 "required": ["name", "schedule", "context"],
@@ -1876,7 +1888,12 @@ async def list_tools() -> list[Tool]:
             ),
             inputSchema={
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "chat_id": {
+                        "type": "string",
+                        "description": "Optional: filter to sessions for this chat_id only.",
+                    },
+                },
             },
         ),
         Tool(
@@ -2121,6 +2138,10 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Optional subagent task identifier. Included in debug alerts when LOBSTER_DEBUG=true so the caller is visible in the memory write notification.",
                     },
+                    "chat_id": {
+                        "type": "string",
+                        "description": "Optional: chat_id of the user storing this memory. Embedded as source_chat_id in metadata for attribution.",
+                    },
                 },
                 "required": ["content"],
             },
@@ -2148,6 +2169,10 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Optional subagent task identifier. Included in debug alerts when LOBSTER_DEBUG=true so the caller is visible in the memory search notification.",
                     },
+                    "chat_id": {
+                        "type": "string",
+                        "description": "Optional: filter results to memories attributed to this chat_id (plus unattributed legacy memories).",
+                    },
                 },
                 "required": ["query"],
             },
@@ -2166,6 +2191,10 @@ async def list_tools() -> list[Tool]:
                     "project": {
                         "type": "string",
                         "description": "Optional project filter.",
+                    },
+                    "chat_id": {
+                        "type": "string",
+                        "description": "Optional: filter results to memories attributed to this chat_id (plus unattributed legacy memories).",
                     },
                 },
             },
@@ -4417,8 +4446,13 @@ def save_tasks(data: dict) -> None:
 async def handle_list_tasks(args: dict) -> list[TextContent]:
     """List all tasks."""
     status_filter = args.get("status", "all").lower()
+    chat_id = args.get("chat_id")
     data = load_tasks()
     tasks = data.get("tasks", [])
+
+    # Filter by chat_id: show tasks owned by this user + legacy tasks (no chat_id)
+    if chat_id is not None:
+        tasks = [t for t in tasks if t.get("chat_id") == chat_id or "chat_id" not in t]
 
     if status_filter != "all":
         tasks = [t for t in tasks if t.get("status", "").lower() == status_filter]
@@ -4460,6 +4494,7 @@ async def handle_create_task(args: dict) -> list[TextContent]:
     """Create a new task."""
     subject = args.get("subject", "").strip()
     description = args.get("description", "").strip()
+    chat_id = args.get("chat_id")
 
     if not subject:
         return [TextContent(type="text", text="Error: subject is required.")]
@@ -4475,6 +4510,8 @@ async def handle_create_task(args: dict) -> list[TextContent]:
         "created_at": datetime.now(timezone.utc).isoformat(),
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
+    if chat_id is not None:
+        task["chat_id"] = chat_id
 
     data["tasks"].append(task)
     data["next_id"] = task_id + 1
@@ -5089,7 +5126,7 @@ Keep output concise. The main Lobster instance will review this later.
     task_file.write_text(task_content)
 
     # Add to jobs.json
-    data["jobs"][name] = {
+    job_record = {
         "name": name,
         "schedule": schedule,
         "schedule_human": schedule_human,
@@ -5100,6 +5137,10 @@ Keep output concise. The main Lobster instance will review this later.
         "last_run": None,
         "last_status": None,
     }
+    chat_id = args.get("chat_id")
+    if chat_id is not None:
+        job_record["chat_id"] = chat_id
+    data["jobs"][name] = job_record
     save_scheduled_jobs(data)
 
     # Sync to crontab
@@ -5846,7 +5887,8 @@ async def handle_session_end(args: dict) -> list[TextContent]:
 async def handle_get_active_sessions(args: dict) -> list[TextContent]:
     """Return all currently running agent sessions from the SQLite store."""
     try:
-        sessions = _session_store.get_active_sessions()
+        chat_id = args.get("chat_id")
+        sessions = _session_store.get_active_sessions(chat_id=chat_id)
     except Exception as exc:
         log.error(f"get_active_sessions failed: {exc}", exc_info=True)
         return [TextContent(type="text", text=f"Error querying active sessions: {exc}")]
@@ -6303,6 +6345,11 @@ async def handle_memory_store(arguments: dict[str, Any]) -> list[TextContent]:
     if not content:
         return [TextContent(type="text", text="Error: content is required.")]
 
+    metadata = {"tags": arguments.get("tags", [])}
+    chat_id = arguments.get("chat_id")
+    if chat_id is not None:
+        metadata["source_chat_id"] = chat_id
+
     event = MemoryEvent(
         id=None,
         timestamp=datetime.now(timezone.utc),
@@ -6310,7 +6357,7 @@ async def handle_memory_store(arguments: dict[str, Any]) -> list[TextContent]:
         source=arguments.get("source", "internal"),
         project=arguments.get("project"),
         content=content,
-        metadata={"tags": arguments.get("tags", [])},
+        metadata=metadata,
     )
 
     try:
@@ -6359,6 +6406,15 @@ async def handle_memory_search(arguments: dict[str, Any]) -> list[TextContent]:
         log.error(f"memory_search failed: {e}", exc_info=True)
         return [TextContent(type="text", text=f"Error searching memory: {e}")]
 
+    # Post-filter by chat_id if provided (attribution-based filtering)
+    chat_id = arguments.get("chat_id")
+    if chat_id is not None and results:
+        results = [
+            e for e in results
+            if e.metadata.get("source_chat_id") == chat_id
+            or "source_chat_id" not in e.metadata
+        ]
+
     # Debug alert: best-effort, isolated so a failure here never affects the search result.
     # system_context events are suppressed by TelegramOutboxListener — no manual gate needed.
     try:
@@ -6403,6 +6459,15 @@ async def handle_memory_recent(arguments: dict[str, Any]) -> list[TextContent]:
 
     try:
         results = _memory_provider.recent(hours=hours, project=project)
+
+        # Post-filter by chat_id if provided (attribution-based filtering)
+        chat_id = arguments.get("chat_id")
+        if chat_id is not None and results:
+            results = [
+                e for e in results
+                if e.metadata.get("source_chat_id") == chat_id
+                or "source_chat_id" not in e.metadata
+            ]
 
         if not results:
             return [TextContent(type="text", text=f"No events in the last {hours} hours.")]
