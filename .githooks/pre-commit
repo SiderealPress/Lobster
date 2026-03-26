@@ -40,6 +40,7 @@ BLOCKED_EXTENSIONS=(
 # Allowlisted patterns (templates and examples are fine)
 ALLOWLIST_PATTERNS=(
     "memory/canonical-templates/"
+    "scheduled-tasks/tasks/"
     "*.example"
 )
 

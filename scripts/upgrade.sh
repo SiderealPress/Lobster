@@ -1599,6 +1599,23 @@ EOF
         migrated=$((migrated + 1))
     fi
 
+    # Migration 39: Update bot-talk poller task files to mirror both sides of conversation
+    # The poller previously only forwarded AlbertLobster messages to Sahar. The updated
+    # task files instruct the poller to collect both SaharLobster and AlbertLobster
+    # messages, sort them chronologically, and send a single conversation block to Sahar.
+    local bt_poller_src="$INSTALL_DIR/scheduled-tasks/tasks/bot-talk-poller.md"
+    local bt_fast_src="$INSTALL_DIR/scheduled-tasks/tasks/bot-talk-poller-fast.md"
+    local bt_tasks_dir="$WORKSPACE_DIR/scheduled-jobs/tasks"
+    if [ -f "$bt_poller_src" ] && [ -d "$bt_tasks_dir" ]; then
+        cp "$bt_poller_src" "$bt_tasks_dir/bot-talk-poller.md"
+        substep "Updated bot-talk-poller.md to mirror both conversation sides"
+        migrated=$((migrated + 1))
+    fi
+    if [ -f "$bt_fast_src" ] && [ -d "$bt_tasks_dir" ]; then
+        cp "$bt_fast_src" "$bt_tasks_dir/bot-talk-poller-fast.md"
+        substep "Updated bot-talk-poller-fast.md to mirror both conversation sides"
+        migrated=$((migrated + 1))
+    fi
 
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
