@@ -1137,6 +1137,61 @@ The agent self-detects design-review mode when no PR URL is present. It will:
 - "is this architecture sound?"
 - "what do you think of this design?"
 
+### `/re-review` command — manual re-review trigger
+
+When a PR has a NEEDS-WORK or FAIL verdict, the review comment instructs the author to post `/re-review` once they have pushed a fix. The dispatcher handles this command when the user types it in Telegram.
+
+**Routing rule:** If the user message starts with `/re-review`, extract the PR URL or number and spawn a reviewer:
+
+```
+if msg["text"].strip().lower().startswith("/re-review"):
+    # Extract PR reference — may be a full GitHub URL or a bare number
+    parts = msg["text"].strip().split(None, 1)
+    pr_ref = parts[1].strip() if len(parts) > 1 else ""
+
+    # PR URL form: https://github.com/owner/repo/pull/123
+    pr_url_match = re.search(r"https://github\.com/([^/]+/[^/]+)/pull/(\d+)", pr_ref)
+    # Bare number form: /re-review 47
+    pr_num_only = re.match(r"^\d+$", pr_ref) if not pr_url_match else None
+
+    if pr_url_match:
+        pr_url = pr_url_match.group(0)
+        pr_repo = pr_url_match.group(1)
+        pr_number = pr_url_match.group(2)
+    elif pr_num_only:
+        pr_number = pr_ref
+        pr_repo = None  # reviewer will infer from context
+        pr_url = f"PR #{pr_number}"
+    else:
+        send_reply(msg["chat_id"], "Usage: /re-review <PR URL> or /re-review <PR number>", source=source)
+        mark_processed(message_id)
+        continue
+
+    task_id = f"re-review-pr-{pr_number}"
+    Task(
+        subagent_type="review",
+        run_in_background=True,
+        prompt=(
+            f"---\n"
+            f"task_id: {task_id}\n"
+            f"chat_id: {msg['chat_id']}\n"
+            f"source: {msg.get('source', 'telegram')}\n"
+            f"---\n\n"
+            f"Re-review requested for {pr_url}.\n\n"
+            f"The author has pushed a fix since the last NEEDS-WORK or FAIL verdict. "
+            f"Review the current state of the PR and post a fresh verdict.\n\n"
+            + (f"Repo: {pr_repo}\n" if pr_repo else "")
+        ),
+    )
+    send_reply(chat_id=msg["chat_id"], text=f"On it — reviewing {pr_url}.", source=msg.get("source", "telegram"))
+    mark_processed(message_id)
+    continue
+```
+
+**Deduplication:** The existing reviewer dedup check (scanning `get_active_sessions()` for a running reviewer with the same PR number) applies here too — the reviewer itself skips re-review if no new commits have landed since the last PASS verdict, so there is no need for the dispatcher to gate on this.
+
+**Webhook coverage note:** This rule handles `/re-review` typed by the user in Telegram. A separate path — where the author posts `/re-review` as a comment directly on the GitHub PR — is not yet wired. GitHub PR comments are not currently delivered to the dispatcher inbox via webhook. That path requires webhook infrastructure and is tracked in issue #885. Until that lands, authors must relay the `/re-review` command via Telegram.
+
 ## Processing Voice Note Brain Dumps
 
 When you receive a **voice message** that appears to be a "brain dump" (unstructured thoughts, ideas, stream of consciousness) rather than a command or question, use the **brain-dumps** agent.
