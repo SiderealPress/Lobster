@@ -1004,23 +1004,24 @@ check_outbox_drain() {
     fi
 }
 
-# Check 6: Dispatcher heartbeat sentinel (issue #1483 simplification)
+# Check 6: wait_for_messages freshness
+# The dispatcher is considered "fresh" if EITHER:
+#   (a) the claude-heartbeat file was touched recently — inbox_server.py touches
+#       it at the start of every wait_for_messages call, OR
+#   (b) last_processed_at in lobster-state.json was updated recently — written
+#       by inbox_server.py on every successful mark_processed call (issue #694).
 #
-# The dispatcher is considered alive if hooks/thinking-heartbeat.py has written
-# to DISPATCHER_HEARTBEAT_FILE within the last DISPATCHER_HEARTBEAT_STALE_SECONDS.
-# The hook fires on every PostToolUse event — any tool call resets the clock.
+# Using both signals prevents a spurious restart when the dispatcher is actively
+# processing a long batch of messages (e.g. 20 cron pings) without returning to
+# wait_for_messages.  Before this fix, a long batch could exhaust the suppression
+# window mid-batch, triggering a false-positive health-check restart even though
+# the dispatcher was busy and healthy.
 #
-# This single-file check replaces the previous multi-signal approach
-# (claude-heartbeat file + last_processed_at + last_thinking_at in
-# lobster-state.json). The 20-minute threshold naturally covers:
-#   - Context compaction pause (1-3 minutes with no tool calls)
-#   - Startup catchup subagent (up to 10-12 minutes)
-#   - Boot grace period (60-90 seconds)
+# The effective freshness timestamp is max(wfm_heartbeat_mtime, last_processed_at).
 #
-# No suppression logic needed — the threshold does the work.
-#
-# Gracefully skips the check if the heartbeat file does not exist (fresh install
-# or first run before the hook has fired).
+# Gracefully skips the check if the heartbeat file does not exist (fresh install).
+# Gracefully ignores a missing or unparseable last_processed_at (field absent on
+# older installs before this change was deployed).
 #
 # Returns: 0=GREEN (fresh or skipped), 2=RED (stale)
 check_dispatcher_heartbeat() {
@@ -1036,43 +1037,43 @@ check_dispatcher_heartbeat() {
         return 0
     fi
 
+    # Read the per-message heartbeat written by mark_processed (issue #694).
+    # Use whichever signal is more recent as the effective freshness epoch.
+    local last_processed_epoch=0
+    if [[ -f "$LOBSTER_STATE_FILE" ]]; then
+        local last_processed_at
+        last_processed_at=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('$LOBSTER_STATE_FILE'))
+    print(d.get('last_processed_at', ''))
+except Exception:
+    print('')
+" 2>/dev/null)
+        if [[ -n "$last_processed_at" ]]; then
+            last_processed_epoch=$(date -d "$last_processed_at" +%s 2>/dev/null) || last_processed_epoch=0
+        fi
+    fi
+
+    # Effective freshness = most recent of the two signals
+    local effective_last
+    if [[ "$last_processed_epoch" -gt "$last_heartbeat" ]]; then
+        effective_last="$last_processed_epoch"
+        log_info "WFM freshness: using last_processed_at signal (more recent than WFM heartbeat)"
+    else
+        effective_last="$last_heartbeat"
+    fi
+
     local now age
     now=$(date +%s)
-    age=$(( now - raw_ts ))
+    age=$(( now - effective_last ))
 
-    if [[ $age -gt $DISPATCHER_HEARTBEAT_STALE_SECONDS ]]; then
-        # Heartbeat is stale — check the WFM-active signal before declaring RED.
-        # When the dispatcher is blocked in wait_for_messages, PostToolUse hooks
-        # do not fire so the heartbeat goes stale. inbox_server.py writes
-        # DISPATCHER_WFM_ACTIVE_FILE with a fresh epoch timestamp every 60s while
-        # WFM is blocking. A fresh WFM-active file means the dispatcher is alive
-        # and simply idle — not frozen or dead. (issue #1713 / #949)
-        #
-        # Fix 1 (issue #1730 TOCTOU): Use cat-only read, no -f existence gate.
-        # A two-step -f / cat sequence has a race window: the MCP server's
-        # finally block can write the tombstone between the -f check and the cat,
-        # making cat return empty and this function fall through to RED.
-        # cat 2>/dev/null is a single atomic read: empty result = absent or
-        # unreadable; non-empty integer = WFM active; non-integer = tombstone
-        # (WFM exited cleanly). The integer guard below handles all three cases
-        # without any race window.
-        local wfm_active_ts=""
-        wfm_active_ts=$(cat "$DISPATCHER_WFM_ACTIVE_FILE" 2>/dev/null | tr -d '[:space:]')
-        if [[ -n "$wfm_active_ts" ]] && [[ "$wfm_active_ts" =~ ^[0-9]+$ ]]; then
-            local wfm_age=$(( now - wfm_active_ts ))
-            if [[ $wfm_age -le $WFM_ACTIVE_STALE_SECONDS ]]; then
-                log_info "Dispatcher heartbeat stale (${age}s) but WFM-active is fresh (${wfm_age}s) — dispatcher alive in wait_for_messages, skipping RED"
-                return 0
-            else
-                log_error "RED: dispatcher heartbeat stale (${age}s) and WFM-active also stale (${wfm_age}s, threshold: ${WFM_ACTIVE_STALE_SECONDS}s) — dispatcher appears frozen"
-                return 2
-            fi
-        fi
-        log_error "RED: dispatcher heartbeat stale — last tool use ${age}s ago (threshold: ${DISPATCHER_HEARTBEAT_STALE_SECONDS}s)"
+    if [[ $age -gt $WFM_STALE_SECONDS ]]; then
+        log_error "RED: dispatcher stale — last activity ${age}s ago (threshold: ${WFM_STALE_SECONDS}s, wfm=${last_heartbeat}, last_processed=${last_processed_epoch})"
         return 2
     fi
 
-    log_info "Dispatcher heartbeat OK: last tool use ${age}s ago (threshold: ${DISPATCHER_HEARTBEAT_STALE_SECONDS}s)"
+    log_info "WFM freshness OK: last dispatcher activity ${age}s ago"
     return 0
 }
 
