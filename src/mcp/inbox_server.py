@@ -667,38 +667,6 @@ _TRANSIENT_MODES = {"hibernate", "starting", "restarting", "waking"}
 _RECONNECT_GRACE_SECONDS = 30 * 60  # 30 minutes
 
 
-def _is_dispatcher_alive() -> bool:
-    """Return True if the dispatcher process recorded in dispatcher.pid is alive.
-
-    Reads DISPATCHER_PID_FILE (written by claude-persistent.sh via exec-replace).
-    Uses kill -0 to test liveness without sending a signal.
-
-    Returns False when:
-    - The file is absent (first boot, or cleaned up on clean exit)
-    - The file is empty or contains a non-numeric value (corrupt)
-    - The PID is 0 or negative (invalid)
-    - kill -0 raises PermissionError or ProcessLookupError (dead process)
-
-    A True return means the claude process is still alive → this MCP restart
-    is a mid-session reconnect, NOT a real session loss.
-
-    A False return means the dispatcher is dead → write the session-lost-reminder.
-    """
-    try:
-        if not DISPATCHER_PID_FILE.exists():
-            return False
-        raw = DISPATCHER_PID_FILE.read_text().strip()
-        if not raw:
-            return False
-        pid = int(raw)
-        if pid <= 0:
-            return False
-        os.kill(pid, 0)  # kill -0: raises if process does not exist
-        return True
-    except (ValueError, ProcessLookupError, OSError):
-        return False
-
-
 def _reset_state_on_startup():
     try:
         if LOBSTER_STATE_FILE.exists():
