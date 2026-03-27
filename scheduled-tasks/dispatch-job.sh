@@ -95,12 +95,23 @@ task_file  = sys.argv[5]
 with open(task_file) as f:
     task_content = f.read()
 
+jobs_file = os.environ.get("LOBSTER_WORKSPACE", os.path.expanduser("~/lobster-workspace")) + "/scheduled-jobs/jobs.json"
+job_chat_id = 0
+try:
+    import json as _json
+    with open(jobs_file) as _jf:
+        _jobs_data = _json.load(_jf)
+    _job_record = _jobs_data.get("jobs", {}).get(job_name, {})
+    job_chat_id = _job_record.get("chat_id", 0)
+except Exception:
+    pass
+
 msg = {
     "id": msg_id,
     "source": "system",
     "type": "scheduled_reminder",
-    "chat_id": 0,
-    "user_id": 0,
+    "chat_id": job_chat_id,
+    "user_id": job_chat_id,
     "username": "lobster-cron",
     "user_name": "Cron",
     "text": f"[Cron] Dispatch job '{job_name}'",

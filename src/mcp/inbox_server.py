@@ -2279,6 +2279,10 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Optional human-readable description for the systemd unit.",
                     },
+                    "chat_id": {
+                        "type": "string",
+                        "description": "Optional: chat_id of the user who owns this job. Notifications route to this user.",
+                    },
                 },
                 "required": ["name", "schedule", "command"],
             },
@@ -3084,6 +3088,10 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Optional subagent task identifier. Included in debug alerts when LOBSTER_DEBUG=true so the caller is visible in the memory write notification.",
                     },
+                    "chat_id": {
+                        "type": "string",
+                        "description": "Optional: chat_id of the user storing this memory. Embedded as source_chat_id in metadata for attribution.",
+                    },
                 },
                 "required": ["content"],
             },
@@ -3110,6 +3118,10 @@ async def list_tools() -> list[Tool]:
                     "task_id": {
                         "type": "string",
                         "description": "Optional subagent task identifier. Included in debug alerts when LOBSTER_DEBUG=true so the caller is visible in the memory search notification.",
+                    },
+                    "chat_id": {
+                        "type": "string",
+                        "description": "Optional: filter results to memories attributed to this chat_id (plus unattributed legacy memories).",
                     },
                 },
                 "required": ["query"],
@@ -7140,7 +7152,7 @@ Keep output concise. The main Lobster instance will review this later.
     task_file.write_text(task_content)
 
     # Add to jobs.json
-    data["jobs"][name] = {
+    job_record = {
         "name": name,
         "schedule": schedule,
         "schedule_human": schedule_human,
@@ -7151,6 +7163,10 @@ Keep output concise. The main Lobster instance will review this later.
         "last_run": None,
         "last_status": None,
     }
+    chat_id = args.get("chat_id")
+    if chat_id is not None:
+        job_record["chat_id"] = chat_id
+    data["jobs"][name] = job_record
     save_scheduled_jobs(data)
 
     # Sync to crontab
@@ -8553,6 +8569,15 @@ async def handle_memory_search(arguments: dict[str, Any]) -> list[TextContent]:
     except Exception as e:
         log.error(f"memory_search failed: {e}", exc_info=True)
         return [TextContent(type="text", text=f"Error searching memory: {e}")]
+
+    # Post-filter by chat_id if provided (attribution-based filtering)
+    chat_id = arguments.get("chat_id")
+    if chat_id is not None and results:
+        results = [
+            e for e in results
+            if e.metadata.get("source_chat_id") == chat_id
+            or "source_chat_id" not in e.metadata
+        ]
 
     # Debug alert: best-effort, isolated so a failure here never affects the search result.
     # system_context events are suppressed by TelegramOutboxListener — no manual gate needed.

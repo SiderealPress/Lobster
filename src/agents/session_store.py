@@ -705,13 +705,24 @@ def get_active_sessions(
     resolved = path if path is not None else _DEFAULT_DB_PATH
     conn = _get_connection(resolved)
 
-    cursor = conn.execute(
-        """
-        SELECT * FROM agent_sessions
-        WHERE status IN ('running', 'starting')
-        ORDER BY spawned_at ASC
-        """
-    )
+    if chat_id is not None:
+        cursor = conn.execute(
+            """
+            SELECT * FROM agent_sessions
+            WHERE status IN ('running', 'starting')
+              AND chat_id = ?
+            ORDER BY spawned_at ASC
+            """,
+            (chat_id,),
+        )
+    else:
+        cursor = conn.execute(
+            """
+            SELECT * FROM agent_sessions
+            WHERE status IN ('running', 'starting')
+            ORDER BY spawned_at ASC
+            """
+        )
     rows = cursor.fetchall()
     now = datetime.now(timezone.utc)
 
