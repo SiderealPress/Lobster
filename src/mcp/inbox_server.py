@@ -5592,6 +5592,41 @@ def _scan_json_dirs_for_history(direction: str) -> list[dict]:
     return messages
 
 
+def _apply_sender_type_filter(messages: list[dict], sender_type: str | None) -> list[dict]:
+    """Return only messages matching the given sender_type.
+
+    Pure function: does not mutate the input list.
+
+    sender_type semantics mirror the SQL layer in db/reader.py:
+      'user'         — inbound (_direction='received') messages whose type is in
+                       INBOX_USER_TYPES (real user messages, no system/cron noise)
+      'lobster'      — outbound (_direction='sent') messages
+      'conversation' — union of user and lobster (both, but no system noise)
+      None / other   — all messages unchanged
+    """
+    if not sender_type or sender_type == "all":
+        return messages
+
+    if sender_type == "user":
+        return [
+            m for m in messages
+            if m.get("_direction") == "received" and m.get("type", "text") in INBOX_USER_TYPES
+        ]
+
+    if sender_type == "lobster":
+        return [m for m in messages if m.get("_direction") == "sent"]
+
+    if sender_type == "conversation":
+        return [
+            m for m in messages
+            if m.get("_direction") == "sent"
+            or (m.get("_direction") == "received" and m.get("type", "text") in INBOX_USER_TYPES)
+        ]
+
+    # Unknown value — degrade gracefully
+    return messages
+
+
 def _apply_filters_and_paginate(
     messages: list[dict],
     *,
@@ -5600,8 +5635,9 @@ def _apply_filters_and_paginate(
     search_text: str,
     limit: int,
     offset: int,
+    sender_type: str | None = None,
 ) -> tuple[list[dict], int]:
-    """Apply chat_id / source / search filters, sort by timestamp, then paginate.
+    """Apply chat_id / source / search / sender_type filters, sort by timestamp, then paginate.
 
     Returns (paginated_slice, total_count_before_pagination).
     All filtering and sorting is performed in-memory. This is the legacy
@@ -5617,6 +5653,9 @@ def _apply_filters_and_paginate(
             return datetime.min.replace(tzinfo=timezone.utc)
 
     filtered = messages
+
+    if sender_type:
+        filtered = _apply_sender_type_filter(filtered, sender_type)
 
     if chat_id_filter is not None:
         chat_id_str = str(chat_id_filter)
@@ -5696,6 +5735,7 @@ async def handle_get_conversation_history(args: dict) -> list[TextContent]:
     offset = args.get("offset", 0)
     direction = args.get("direction", "all").lower()
     source_filter = args.get("source", "").lower().strip()
+    sender_type = args.get("sender_type") or None  # None when omitted or empty string
 
     paginated: list[dict] = []
     total_count: int = 0
@@ -5714,6 +5754,7 @@ async def handle_get_conversation_history(args: dict) -> list[TextContent]:
                     source=source_filter or None,
                     search=search_text or None,
                     direction=direction,
+                    sender_type=sender_type,
                     limit=limit,
                     offset=offset,
                 )
@@ -5723,6 +5764,7 @@ async def handle_get_conversation_history(args: dict) -> list[TextContent]:
                     source=source_filter or None,
                     search=search_text or None,
                     direction=direction,
+                    sender_type=sender_type,
                 )
                 used_db = True
                 log.debug(
@@ -5753,6 +5795,7 @@ async def handle_get_conversation_history(args: dict) -> list[TextContent]:
             search_text=search_text,
             limit=limit,
             offset=offset,
+            sender_type=sender_type,
         )
 
     # ------------------------------------------------------------------
@@ -5764,10 +5807,12 @@ async def handle_get_conversation_history(args: dict) -> list[TextContent]:
             filter_info.append(f"chat_id={chat_id_filter}")
         if search_text:
             filter_info.append(f"search='{search_text}'")
-        if direction != "all":
+        if direction != "all" and not sender_type:
             filter_info.append(f"direction={direction}")
         if source_filter:
             filter_info.append(f"source={source_filter}")
+        if sender_type:
+            filter_info.append(f"sender_type={sender_type}")
         filter_str = f" (filters: {', '.join(filter_info)})" if filter_info else ""
         return [TextContent(type="text", text=f"No messages found{filter_str}.")]
 
