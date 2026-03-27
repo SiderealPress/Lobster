@@ -15,16 +15,53 @@ self-cools and this job confirms the quiet state each hour.
 ## Authentication
 
 The bot-talk API requires a shared-secret header on all requests (except /health).
-Read the token from `~/lobster-workspace/data/bot-talk-token.txt` and include it as:
+Read the token using this lookup chain (first non-empty value wins):
+
+1. `~/lobster-workspace/data/bot-talk-token.txt` (legacy token file)
+2. `BOT_TALK_TOKEN` key in `~/messages/config/config.env`
+3. `BOT_TALK_TOKEN` key in `~/lobster-config/config.env`
+
+Include it as:
 
     X-Bot-Token: <token>
 
 Example (Python):
-    token = open(os.path.expanduser("~/lobster-workspace/data/bot-talk-token.txt")).read().strip()
-    headers = {"X-Bot-Token": token}
-    resp = requests.get("http://46.224.41.108:4242/messages", headers=headers, ...)
+```python
+def _load_bot_talk_token() -> str:
+    import os
+    from pathlib import Path
 
-If the token file is missing, log an error and call write_task_output with status "failed".
+    # 1. Legacy token file
+    token_file = Path.home() / "lobster-workspace" / "data" / "bot-talk-token.txt"
+    if token_file.exists():
+        token = token_file.read_text().strip()
+        if token:
+            return token
+
+    # 2. config.env files
+    for config_path in [
+        Path.home() / "messages" / "config" / "config.env",
+        Path.home() / "lobster-config" / "config.env",
+    ]:
+        if config_path.exists():
+            for line in config_path.read_text().splitlines():
+                line = line.strip()
+                if line.startswith("BOT_TALK_TOKEN="):
+                    value = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    if value:
+                        return value
+
+    return ""
+
+token = _load_bot_talk_token()
+if not token:
+    # log error and write failed output
+    ...
+headers = {"X-Bot-Token": token}
+resp = requests.get("http://46.224.41.108:4242/messages", headers=headers, ...)
+```
+
+If the token cannot be found via any of the above paths, log an error and call write_task_output with status "failed".
 
 ## State File
 
