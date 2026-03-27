@@ -54,6 +54,11 @@ log = logging.getLogger(__name__)
 # Falls back to reading config.env (same pattern as inbox_server.py / OPENAI_API_KEY).
 # If BOT_TALK_HTTP_URL is empty after all lookups, HTTP mirroring is silently
 # disabled (SSH fallback still applies if sharedLobster is reachable).
+#
+# IMPORTANT: The bot-talk service runs plain HTTP on port 4242 — there is no
+# TLS on this endpoint (TLS was intentionally removed).  Always use http://
+# (never https://) when constructing or configuring BOT_TALK_HTTP_URL.
+# Using https:// causes an SSL handshake failure on every request.
 # ---------------------------------------------------------------------------
 
 def _read_config_env(key: str) -> str:
