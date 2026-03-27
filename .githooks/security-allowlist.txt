@@ -70,3 +70,8 @@ src/bot/whatsapp_bridge_adapter.py:Email address
 # claude-wrapper.exp reads TELEGRAM_BOT_TOKEN from config.env at runtime using
 # grep — this is a variable reference, not a hardcoded credential value
 scripts/claude-wrapper.exp:Hardcoded token
+
+# bot-talk-check-dispatch.sh uses the same bot-talk API IP that already appears
+# throughout the codebase (scheduled-tasks/tasks/bot-talk-poller*.md). The default
+# value is a fallback when BOT_TALK_API_URL env var is unset — not a secret.
+scheduled-tasks/bot-talk-check-dispatch.sh:IP address
