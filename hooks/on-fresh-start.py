@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 SessionStart hook: on a fresh dispatcher restart, immediately mark all
-"running" agent sessions as failed.
+"running" agent sessions as failed and ensure a compact-reminder is queued
+if the catchup state is stale.
 
 ## When it fires
 
@@ -41,6 +42,24 @@ within the last 60 seconds.  This is reliable regardless of whether Claude
 Code populates ``hook_name`` in the SessionStart payload (it does not always
 do so).  If the file is absent or older than 60 seconds, we treat the
 SessionStart as a genuine fresh restart and run ``--mark-failed``.
+
+## Stale-catchup compact-reminder injection
+
+Issue #909: the dispatcher may exit after a compaction without spawning
+compact-catchup (e.g. it reads the compact-reminder via check_inbox but then
+exits before calling wait_for_messages again). On the next boot, the startup
+protocol already always spawns compact-catchup, but only if the dispatcher
+correctly follows the instructions.
+
+To provide a code-level safety net: on fresh restart, if ``last_catchup_ts``
+in compaction-state.json is more than STALE_CATCHUP_THRESHOLD_SECONDS old and
+no compact-reminder is already queued in the inbox, this hook writes one.
+This guarantees the dispatcher sees a compact-reminder in its WFM queue even
+if the post-compaction compact-reminder was consumed without catchup running.
+
+The injected message uses the same format as on-compact.py and sorts before
+real user messages (ts_ms=1 rather than ts_ms=0, which is reserved for the
+on-compact.py reminder).
 
 ## settings.json configuration
 
@@ -84,9 +103,35 @@ COMPACTION_STATE_FILE = Path(
     )
 )
 
+INBOX_DIR = Path(os.path.expanduser("~/messages/inbox"))
+
 # If the compaction state file was written within this window, treat the
 # current SessionStart as a compaction restart rather than a fresh restart.
 COMPACTION_RECENCY_SECONDS = 60
+
+# If last_catchup_ts is older than this, inject a compact-reminder on startup
+# so the dispatcher is forced to run compact-catchup via its WFM handler.
+# This is the code-level safety net for issue #909.
+STALE_CATCHUP_THRESHOLD_SECONDS = 30 * 60  # 30 minutes
+
+STARTUP_COMPACT_REMINDER_TEXT = (
+    "COMPACT REMINDER \u2014 RE-ORIENT NOW (injected by on-fresh-start.py)\n\n"
+    "A previous session ended without completing compact-catchup. "
+    "Your catchup state is stale.\n\n"
+    "You are Lobster, the always-on dispatcher. Your role has not changed.\n\n"
+    "Identity check:\n"
+    "- You run in an infinite main loop: wait_for_messages() \u2192 process each message \u2192 repeat\n"
+    "- You NEVER exit. You NEVER stop calling wait_for_messages.\n"
+    "- You are a stateless dispatcher. Anything >7 seconds goes to a background subagent.\n\n"
+    "Read these files now to restore full context:\n"
+    "1. ~/lobster-workspace/.claude/sys.dispatcher.bootup.md\n"
+    "  \u2190 dispatcher instructions, main loop, 7-second rule\n"
+    "2. ~/lobster-user-config/memory/canonical/handoff.md\n"
+    "  \u2190 active projects, key people, priorities\n\n"
+    "After reading: spawn the compact_catchup subagent to recover context from the\n"
+    "last session (see sys.dispatcher.bootup.md \u2192 'Handling compact-reminder').\n"
+    "Then resume your main loop by calling wait_for_messages(timeout=1800, hibernate_on_timeout=True)."
+)
 
 
 def _is_compact_event(data: dict) -> bool:  # noqa: ARG001 — data unused; kept for API compat
@@ -113,6 +158,102 @@ def _is_compact_event(data: dict) -> bool:  # noqa: ARG001 — data unused; kept
     except OSError:
         # File absent or unreadable — no recent compaction, treat as fresh start.
         return False
+
+
+def _is_catchup_stale() -> bool:
+    """Return True if last_catchup_ts in compaction-state.json is older than
+    STALE_CATCHUP_THRESHOLD_SECONDS, or if the field is absent.
+
+    When stale, the dispatcher may be starting up without having run
+    compact-catchup after the last compaction — a safety-net compact-reminder
+    should be injected into the inbox.
+    """
+    try:
+        data = json.loads(COMPACTION_STATE_FILE.read_text())
+        ts_str = data.get("last_catchup_ts")
+        if not ts_str:
+            return True
+        # Parse ISO 8601 UTC timestamp (Z suffix).
+        ts_str_clean = ts_str.rstrip("Z").replace("+00:00", "")
+        import datetime
+        ts = datetime.datetime.fromisoformat(ts_str_clean).replace(
+            tzinfo=datetime.timezone.utc
+        )
+        age_seconds = time.time() - ts.timestamp()
+        return age_seconds > STALE_CATCHUP_THRESHOLD_SECONDS
+    except (OSError, KeyError, ValueError, AttributeError):
+        # File absent, unreadable, or field missing — treat as stale.
+        return True
+
+
+def _compact_reminder_already_queued() -> bool:
+    """Return True if a compact-reminder message is already in the inbox."""
+    try:
+        if not INBOX_DIR.exists():
+            return False
+        for path in INBOX_DIR.iterdir():
+            if path.suffix != ".json":
+                continue
+            try:
+                data = json.loads(path.read_text())
+                if data.get("subtype") == "compact-reminder":
+                    return True
+            except (json.JSONDecodeError, OSError):
+                continue
+    except OSError:
+        pass
+    return False
+
+
+def _inject_compact_reminder() -> None:
+    """Write a startup-injected compact-reminder into the inbox.
+
+    Uses ts_ms=1 so it sorts after the on-compact.py reminder (ts_ms=0) but
+    before any real user message (ts_ms = current epoch milliseconds).
+    Idempotent: skips if a compact-reminder is already queued.
+    Silent on any failure — must not crash the hook.
+    """
+    if _compact_reminder_already_queued():
+        print(
+            "[on-fresh-start] compact-reminder already queued — skipping injection",
+            file=sys.stderr,
+        )
+        return
+
+    try:
+        INBOX_DIR.mkdir(parents=True, exist_ok=True)
+        # Use ts_ms=0 so the filename sorts before any real user message
+        # (same convention as on-compact.py's "0_compact.json").
+        # A distinct message_id avoids clobbering the on-compact.py reminder
+        # if both happen to coexist.
+        ts_ms = 0
+        message_id = f"{ts_ms}_startup_compact"
+        timestamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + ".000000"
+
+        message = {
+            "id": message_id,
+            "source": "system",
+            "chat_id": 0,
+            "user_id": 0,
+            "username": "lobster-system",
+            "user_name": "System",
+            "type": "text",
+            "subtype": "compact-reminder",
+            "text": STARTUP_COMPACT_REMINDER_TEXT,
+            "timestamp": timestamp,
+        }
+
+        dest = INBOX_DIR / f"{message_id}.json"
+        dest.write_text(json.dumps(message, indent=2) + "\n")
+        print(
+            f"[on-fresh-start] injected stale-catchup compact-reminder: {dest}",
+            file=sys.stderr,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"[on-fresh-start] failed to inject compact-reminder: {exc}",
+            file=sys.stderr,
+        )
 
 
 def _mark_all_running_failed() -> None:
@@ -186,6 +327,15 @@ def main() -> None:
         sys.exit(0)
 
     _mark_all_running_failed()
+
+    # Safety net for issue #909: if catchup state is stale (last_catchup_ts is
+    # > 30 min old or absent), inject a compact-reminder into the inbox. This
+    # guarantees the dispatcher will process a compact-reminder via
+    # wait_for_messages — even if a previous session consumed the original
+    # compact-reminder without running compact-catchup and then exited.
+    if _is_catchup_stale():
+        _inject_compact_reminder()
+
     sys.exit(0)
 
 
