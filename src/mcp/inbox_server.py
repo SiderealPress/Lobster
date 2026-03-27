@@ -1047,15 +1047,26 @@ def _read_lobster_state(state_file: Path = None) -> str:
 def _write_lobster_state(state_file: Path = None, mode: str = "active") -> None:
     """Atomically write Lobster state to state file.
 
+    Reads existing state first and merges new fields in so that caller-supplied
+    fields (compacted_at, booted_at, last_restart_at, catchup_started_at, etc.)
+    are never clobbered — the bug tracked in #825.  Only ``mode`` and
+    ``updated_at`` are unconditionally overwritten; all other fields survive.
+
     Uses write-to-temp-then-rename so readers never see a partial file.
     """
     if state_file is None:
         state_file = LOBSTER_STATE_FILE
-    data = {
+    # Read existing state so we preserve fields we are not updating (#825).
+    existing: dict = {}
+    try:
+        existing = json.loads(state_file.read_text())
+    except Exception:
+        pass
+    existing.update({
         "mode": mode,
         "updated_at": datetime.now(timezone.utc).isoformat(),
-    }
-    content = json.dumps(data, indent=2)
+    })
+    content = json.dumps(existing, indent=2)
     tmp = state_file.parent / f".lobster-state-{os.getpid()}.tmp"
     try:
         tmp.write_text(content)
