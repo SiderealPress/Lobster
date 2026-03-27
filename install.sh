@@ -1564,7 +1564,35 @@ else
     info "Skipping auto-register-agent hook (settings.json not yet created)"
 fi
 
-# Set up Claude Code PreToolUse hook to block tool use after compaction without context reload
+# Set up Claude Code PostToolUse hook to monitor context window usage and write a
+# context_warning to inbox when usage crosses 70%.  Scoped to mcp__lobster-inbox__ and Agent
+# tool calls only — these are the high-token events where context growth is most likely.
+# Skipping Read/Edit/Write/Bash PostToolUse reduces spawns by ~65% with no meaningful loss
+# of monitoring coverage.
+chmod +x "$INSTALL_DIR/hooks/context-monitor.py" || true
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '.hooks.PostToolUse[]? | select(.hooks[]?.command | contains("context-monitor"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq '.hooks.PostToolUse = (.hooks.PostToolUse // []) + [{
+            "matcher": "mcp__lobster-inbox__|Agent",
+            "hooks": [{
+                "type": "command",
+                "command": "python3 '"$INSTALL_DIR"'/hooks/context-monitor.py",
+                "timeout": 5
+            }]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "context-monitor hook installed (mcp__lobster-inbox__|Agent)"
+    else
+        info "context-monitor hook already configured in Claude Code settings"
+    fi
+else
+    info "Skipping context-monitor hook (settings.json not yet created)"
+fi
+
+# Set up Claude Code PreToolUse hook to block tool use after compaction without context reload.
+# Uses a shell wrapper so Python is only spawned when the sentinel file exists (~1% of calls).
+# On the 99%+ of calls where the sentinel is absent, `test ! -f ...` exits in ~1ms with no
+# Python startup overhead (~50ms saved per tool call).
 chmod +x "$INSTALL_DIR/hooks/post-compact-gate.py" || true
 if [ -f "$CLAUDE_SETTINGS" ]; then
     if ! jq -e '.hooks.PreToolUse[]? | select(.matcher == "")' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
@@ -1573,11 +1601,11 @@ if [ -f "$CLAUDE_SETTINGS" ]; then
             "matcher": "",
             "hooks": [{
                 "type": "command",
-                "command": "python3 '"$INSTALL_DIR"'/hooks/post-compact-gate.py",
+                "command": "test ! -f /home/lobster/messages/config/compact-pending || python3 '"$INSTALL_DIR"'/hooks/post-compact-gate.py",
                 "timeout": 5
             }]
         }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
-        success "post-compact-gate hook installed"
+        success "post-compact-gate hook installed (shell wrapper)"
     else
         info "post-compact-gate hook already configured in Claude Code settings"
     fi
