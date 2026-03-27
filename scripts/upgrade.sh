@@ -1665,7 +1665,7 @@ EOF
 
     # Migration 41: Switch MCP transport from stdio to HTTP (issue #960).
     # The lobster-mcp-local systemd service now runs inbox_server.py as a
-    # persistent HTTP server on localhost:8765.  Claude Code must be registered
+    # persistent HTTP server on localhost:8766.  Claude Code must be registered
     # to connect via "url" instead of a stdio command so that CC auto-updates
     # no longer kill the MCP server (they would close the stdio pipe).
     #
