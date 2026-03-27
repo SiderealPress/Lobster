@@ -92,3 +92,27 @@ When you complete your task, call `write_task_output` with:
 - status: "success" or "failed"
 
 Keep output concise. The main Lobster instance will review this later.
+
+Then call `write_result` to close the subagent task:
+
+**If skipped (hot_mode=false) or no new messages (no-op run):**
+```python
+mcp__lobster-inbox__write_result(
+    task_id="bot-talk-poller-fast",
+    chat_id=0,  # silently dropped by dispatcher — no tokens burned
+    text="no new activity",
+    source="telegram",
+    sent_reply_to_user=True,
+)
+```
+
+**If new messages were found and sent to Sahar:**
+```python
+mcp__lobster-inbox__write_result(
+    task_id="bot-talk-poller-fast",
+    chat_id=8305714125,
+    text="<summary of new messages delivered>",
+    source="telegram",
+    sent_reply_to_user=True,  # already sent via send_reply above
+)
+```
