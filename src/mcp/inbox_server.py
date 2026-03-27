@@ -716,6 +716,102 @@ if not SCHEDULED_JOBS_FILE.exists():
 # to distinguish output files from the current run vs a previous (dead) run.
 _SERVER_START_TIME = datetime.now(timezone.utc)
 
+# ---------------------------------------------------------------------------
+# HTTP session identity — dispatcher session tagging (Options A and B)
+# ---------------------------------------------------------------------------
+#
+# When running in HTTP transport mode, multiple Claude Code sessions can
+# connect simultaneously (dispatcher + subagents). The server needs to know
+# which session is the dispatcher so that:
+#   - guarded tools (wait_for_messages, send_reply, etc.) are allowed only
+#     for the dispatcher session
+#   - health checks and the reconciler can verify the dispatcher is connected
+#
+# Session ID propagation:
+#   Each HTTP request carries an "mcp-session-id" header (set by the MCP
+#   client after the initial handshake).  The MCP library stores the raw
+#   Starlette Request object in the per-request RequestContext
+#   (request_ctx.get().request).  Tool handlers running inside the session
+#   task can retrieve the session ID by reading that header:
+#
+#     _get_current_http_session_id()  →  request_ctx.get().request.headers[...]
+#
+#   This works because request_ctx is a ContextVar set in the session task
+#   itself (by mcp.server.lowlevel.server._handle_request) before the tool
+#   handler is called.
+#
+# Option A — tag-on-first-use:
+#   The first call to wait_for_messages (dispatcher-exclusive) records the
+#   current session ID as the dispatcher session.  On CC reconnect after a
+#   restart, the tag is updated automatically so the new session is tracked.
+#
+# Option B — explicit declaration:
+#   When a session calls session_start(agent_type="dispatcher", ...) the
+#   current session ID is immediately recorded.  This is explicit and robust
+#   — it fires before any guarded tool is needed.
+#
+# Both layers coexist; whichever fires first wins.  A subsequent call from
+# either path updates the tag (CC restart recovery).
+#
+# _dispatcher_session_id: module-level str, set by Option A or B
+# _http_session_manager: reference to the StreamableHTTPSessionManager
+#   instance (set in main() when HTTP mode is active).  Non-None iff in HTTP
+#   mode.  Used by /dispatcher-session endpoint and by _dispatch_tool to
+#   select the correct guard path.
+# ---------------------------------------------------------------------------
+
+_dispatcher_session_id: str | None = None
+_http_session_manager = None  # Set to StreamableHTTPSessionManager in main() when HTTP mode is active
+
+
+def _get_current_http_session_id() -> str | None:
+    """Return the MCP session ID for the current tool call request.
+
+    Reads the 'mcp-session-id' header from the Starlette Request object
+    stored in the MCP request context.  Returns None if:
+      - not running in HTTP mode
+      - called outside of an active MCP request (e.g. during startup)
+      - the header is absent (first initialise request has no session ID)
+    """
+    try:
+        from mcp.server.lowlevel.server import request_ctx
+        req_ctx = request_ctx.get()
+        raw_request = req_ctx.request  # Starlette Request or None
+        if raw_request is None:
+            return None
+        return raw_request.headers.get("mcp-session-id")
+    except LookupError:
+        # request_ctx not set — called outside a request context
+        return None
+    except Exception:
+        return None
+
+
+def _tag_dispatcher_session(session_id: str) -> None:
+    """Record session_id as the privileged dispatcher session.
+
+    Called by Option A (handle_wait_for_messages) and Option B
+    (handle_session_start with agent_type="dispatcher").  Whichever fires
+    first wins; both paths update on reconnect.
+    """
+    global _dispatcher_session_id
+    if session_id and session_id != _dispatcher_session_id:
+        _dispatcher_session_id = session_id
+        log.info(f"[session-tag] Dispatcher session tagged: {session_id}")
+
+
+def _is_main_http_session() -> bool:
+    """Return True if the current HTTP session is the tagged dispatcher session.
+
+    Only meaningful when running in HTTP transport mode (_http_session_manager
+    is not None).  Fails closed: returns False if no session is tagged or if
+    the current session ID cannot be determined.
+    """
+    if _dispatcher_session_id is None:
+        return False
+    current = _get_current_http_session_id()
+    return current is not None and current == _dispatcher_session_id
+
 # Initialize SQLite agent session store (idempotent, runs JSON migration on first boot)
 try:
     _session_store.init_db()
@@ -2564,12 +2660,31 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
 async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     """Dispatch tool calls to handlers."""
-    # Session guard: block inbox-monitoring and outbox-write tools for any
-    # Claude process that is not a descendant of the lobster tmux session
-    # (primary check) or does not have LOBSTER_MAIN_SESSION=1 (fallback).
-    if name in _SESSION_GUARDED_TOOLS and not _is_main_session():
-        log.warning(f"Session guard blocked '{name}' — not in lobster tmux session")
-        return _session_guard_error(name)
+    # Session guard: block inbox-monitoring and outbox-write tools for
+    # any session that is not the designated dispatcher session.
+    #
+    # In HTTP transport mode: use per-session tagging (_is_main_http_session).
+    #   - A session becomes the dispatcher by calling wait_for_messages (Option A)
+    #     or session_start(agent_type="dispatcher") (Option B).
+    #   - All other sessions are blocked from guarded tools.
+    #
+    # In stdio transport mode: use the legacy tmux ancestry / env-var check
+    #   (_is_main_session).  This path is unchanged.
+    if name in _SESSION_GUARDED_TOOLS:
+        if _http_session_manager is not None:
+            # HTTP mode: per-session guard.  wait_for_messages is exempted from
+            # the guard check because it IS the tagging call (Option A) — the
+            # session won't be tagged yet when the first WFM call arrives.
+            if name != "wait_for_messages" and not _is_main_http_session():
+                log.warning(
+                    f"Session guard blocked '{name}' — HTTP session "
+                    f"{_get_current_http_session_id()!r} is not the dispatcher "
+                    f"(dispatcher={_dispatcher_session_id!r})"
+                )
+                return _session_guard_error(name)
+        elif not _is_main_session():
+            log.warning(f"Session guard blocked '{name}' — not in lobster tmux session")
+            return _session_guard_error(name)
 
     if name == "wait_for_messages":
         return await handle_wait_for_messages(arguments)
@@ -2823,6 +2938,14 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
     """Block until new messages arrive in inbox, or return immediately if messages exist."""
     timeout = args.get("timeout", 72000)
     hibernate_on_timeout = args.get("hibernate_on_timeout", False)
+
+    # Option A: tag-on-first-use.  wait_for_messages is dispatcher-exclusive,
+    # so the session calling it is the dispatcher.  Tag it now so subsequent
+    # guarded tool calls from this same session are allowed.
+    if _http_session_manager is not None:
+        session_id = _get_current_http_session_id()
+        if session_id is not None:
+            _tag_dispatcher_session(session_id)
 
     # Touch heartbeat at start - signals Claude is alive and waiting for messages
     touch_heartbeat()
@@ -5800,6 +5923,17 @@ async def handle_session_start(args: dict) -> list[TextContent]:
         return [TextContent(type="text", text=f"Error starting session: {exc}")]
 
     log.info(f"Session started: agent_id={agent_id!r} agent_type={agent_type!r} chat_id={chat_id}")
+
+    # Option B: explicit dispatcher declaration.
+    # If the caller declares itself as the dispatcher, tag its MCP session ID
+    # immediately.  This is more robust than Option A (tag-on-first-use via
+    # wait_for_messages) because it fires during session_start, before any
+    # guarded tools are called.  Both options coexist; whichever fires first wins.
+    if agent_type == "dispatcher" and _http_session_manager is not None:
+        http_session_id = _get_current_http_session_id()
+        if http_session_id is not None:
+            _tag_dispatcher_session(http_session_id)
+
     # Notify wire server so SSE clients update within 40ms
     asyncio.create_task(_notify_wire_server())
     return [TextContent(
@@ -7767,8 +7901,98 @@ async def main():
         log.warning(f"[startup] Stale session cleanup failed (non-fatal): {_cleanup_err}")
 
     asyncio.create_task(reconcile_agent_sessions())
-    async with stdio_server() as (read_stream, write_stream):
-        await server.run(read_stream, write_stream, server.create_initialization_options())
+
+    # Transport selection: HTTP (streamable-http) or stdio.
+    #
+    # HTTP mode is activated by --http flag or MCP_TRANSPORT=http env var.
+    # In HTTP mode the server binds to localhost:PORT (default 8766) and
+    # Claude Code connects via "url": "http://localhost:PORT/mcp" in settings.json.
+    # The server process is managed by the lobster-mcp-local systemd service, so
+    # its lifetime is decoupled from the Claude Code process — CC restarts no
+    # longer kill the MCP server.
+    #
+    # stdio mode is the legacy default; it remains available for local dev and
+    # fallback scenarios.
+    use_http = (
+        "--http" in sys.argv
+        or os.environ.get("MCP_TRANSPORT", "").lower() == "http"
+    )
+
+    if use_http:
+        import contextlib
+        import uvicorn
+        from starlette.applications import Starlette
+        from starlette.requests import Request
+        from starlette.responses import Response
+        from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+
+        # Determine port (--port N or MCP_HTTP_PORT env, default 8766)
+        port = int(os.environ.get("MCP_HTTP_PORT", 8766))
+        if "--port" in sys.argv:
+            try:
+                port = int(sys.argv[sys.argv.index("--port") + 1])
+            except (ValueError, IndexError):
+                pass
+
+        session_manager = StreamableHTTPSessionManager(app=server, stateless=False)
+
+        # Publish the session_manager reference so tool handlers (and /dispatcher-session)
+        # can inspect live session state without importing from main().
+        global _http_session_manager
+        _http_session_manager = session_manager
+
+        @contextlib.asynccontextmanager
+        async def _lifespan(app: Starlette):
+            async with session_manager.run():
+                log.info(f"[http-transport] Lobster MCP server listening on http://localhost:{port}/mcp")
+                yield
+
+        async def _mcp_handler(scope, receive, send):
+            request = Request(scope, receive)
+            path = request.url.path
+            if path == "/health":
+                response = Response('{"ok":true}', status_code=200, media_type="application/json")
+                await response(scope, receive, send)
+            elif path == "/mcp":
+                await session_manager.handle_request(scope, receive, send)
+            elif path == "/dispatcher-session":
+                # Returns the currently tagged dispatcher session ID and whether
+                # that session is still active in the session manager.
+                # Used by health checks and the reconciler to verify the dispatcher
+                # is connected.  Returns 200 with JSON payload in all cases;
+                # callers should check the "active" field.
+                dsid = _dispatcher_session_id
+                active = (
+                    dsid is not None
+                    and dsid in getattr(session_manager, "_server_instances", {})
+                )
+                payload = json.dumps({"session_id": dsid, "active": active})
+                response = Response(payload, status_code=200, media_type="application/json")
+                await response(scope, receive, send)
+            else:
+                response = Response("Not Found", status_code=404)
+                await response(scope, receive, send)
+
+        _inner_app = Starlette(lifespan=_lifespan)
+
+        async def _asgi_app(scope, receive, send):
+            if scope["type"] == "lifespan":
+                await _inner_app(scope, receive, send)
+            elif scope["type"] == "http":
+                await _mcp_handler(scope, receive, send)
+
+        config = uvicorn.Config(
+            _asgi_app,
+            host="127.0.0.1",
+            port=port,
+            log_level="warning",
+            access_log=False,
+        )
+        http_server = uvicorn.Server(config)
+        await http_server.serve()
+    else:
+        async with stdio_server() as (read_stream, write_stream):
+            await server.run(read_stream, write_stream, server.create_initialization_options())
 
 
 if __name__ == "__main__":
