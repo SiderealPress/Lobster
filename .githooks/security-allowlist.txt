@@ -70,3 +70,7 @@ src/bot/whatsapp_bridge_adapter.py:Email address
 # claude-wrapper.exp reads TELEGRAM_BOT_TOKEN from config.env at runtime using
 # grep — this is a variable reference, not a hardcoded credential value
 scripts/claude-wrapper.exp:Hardcoded token
+
+# scripts/upgrade.sh contains pre-existing migration comments written before the
+# name-block hook was added. These are historical references, not new additions.
+scripts/upgrade.sh:Personal name (sahar)
