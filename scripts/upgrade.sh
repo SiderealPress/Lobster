@@ -1789,8 +1789,8 @@ PYEOF
     # The poller previously only forwarded AlbertLobster messages to Sahar. The updated
     # task files instruct the poller to collect both SaharLobster and AlbertLobster
     # messages, sort them chronologically, and send a single conversation block to Sahar.
-    local bt_poller_src="$INSTALL_DIR/scheduled-tasks/tasks/bot-talk-poller.md"
-    local bt_fast_src="$INSTALL_DIR/scheduled-tasks/tasks/bot-talk-poller-fast.md"
+    local bt_poller_src="$LOBSTER_DIR/scheduled-tasks/tasks/bot-talk-poller.md"
+    local bt_fast_src="$LOBSTER_DIR/scheduled-tasks/tasks/bot-talk-poller-fast.md"
     local bt_tasks_dir="$WORKSPACE_DIR/scheduled-jobs/tasks"
     if [ -f "$bt_poller_src" ] && [ -d "$bt_tasks_dir" ]; then
         cp "$bt_poller_src" "$bt_tasks_dir/bot-talk-poller.md"
@@ -1833,9 +1833,9 @@ PYEOF
             | length
         ' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
         if [ "${has_block_claude_p:-0}" = "0" ] || [ "${has_block_claude_p:-0}" = "" ]; then
-            chmod +x "$INSTALL_DIR/hooks/block-claude-p.py" 2>/dev/null || true
+            chmod +x "$LOBSTER_DIR/hooks/block-claude-p.py" 2>/dev/null || true
             TMP_SETTINGS=$(mktemp)
-            jq --arg cmd "python3 $INSTALL_DIR/hooks/block-claude-p.py" \
+            jq --arg cmd "python3 $LOBSTER_DIR/hooks/block-claude-p.py" \
                '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
                 "matcher": "Bash",
                 "hooks": [{
