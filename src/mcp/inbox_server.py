@@ -1044,6 +1044,46 @@ def _write_lobster_state(state_file: Path = None, mode: str = "active") -> None:
             pass
 
 
+def _update_lobster_state_fields(fields: dict, state_file: Path = None) -> None:
+    """Atomically merge one or more fields into lobster-state.json.
+
+    Reads the current state, updates the given fields, and writes back via
+    temp-then-rename so readers always see a consistent snapshot.  Other
+    fields (mode, compacted_at, catchup_started_at, etc.) are preserved.
+
+    This is a non-destructive merge — callers supply only the keys they want
+    to update.  Unlike _write_lobster_state, which replaces the entire file,
+    this function is safe to call from any context that must not clobber
+    concurrently-written lifecycle fields.
+
+    Failures are logged but not raised — the caller (mark_processed) must
+    not fail just because the heartbeat write failed.
+    """
+    if state_file is None:
+        state_file = LOBSTER_STATE_FILE
+    try:
+        existing: dict = {}
+        if state_file.exists():
+            try:
+                existing = json.loads(state_file.read_text())
+            except (json.JSONDecodeError, OSError):
+                existing = {}
+        existing.update(fields)
+        content = json.dumps(existing, indent=2) + "\n"
+        tmp = state_file.parent / f".lobster-state-{os.getpid()}.tmp"
+        try:
+            tmp.write_text(content)
+            tmp.rename(state_file)
+        except Exception as e:
+            log.error(f"Failed to update lobster state fields {list(fields)}: {e}")
+            try:
+                tmp.unlink()
+            except Exception:
+                pass
+    except Exception as e:
+        log.error(f"_update_lobster_state_fields unexpected error: {e}")
+
+
 @server.list_tools()
 async def list_tools() -> list[Tool]:
     """List available tools."""
@@ -3627,6 +3667,12 @@ async def handle_send_reply(args: dict) -> list[TextContent]:
                         _db_persist_inbound(json.loads(dest.read_text()))
                     except Exception as _db_exc:
                         log.warning(f"[DB] inbound persist failed for {mid}: {_db_exc}")
+                # Per-message WFM heartbeat: reset the WFM staleness clock so
+                # a long message batch does not exhaust the suppression window
+                # and trigger a spurious health-check restart (issue #694).
+                _update_lobster_state_fields(
+                    {"last_processed_at": datetime.now(timezone.utc).isoformat()}
+                )
             else:
                 mark_info = f" | ⚠️ message {mid} not found for mark_processed"
                 log.warning(f"Atomic mark_processed: message not found: {mid}")
@@ -3815,6 +3861,16 @@ async def handle_mark_processed(args: dict) -> list[TextContent]:
             _db_persist_inbound(json.loads(dest.read_text()))
         except Exception as _db_exc:
             log.warning(f"[DB] inbound persist failed for {message_id}: {_db_exc}")
+
+    # Write a per-message heartbeat so the health check can distinguish a
+    # dispatcher that is actively draining a long message batch from one that
+    # is genuinely stuck.  The WFM freshness check uses the more recent of the
+    # WFM heartbeat file and this timestamp, so a burst of 20+ cron pings
+    # processed without returning to wait_for_messages does not exhaust the
+    # suppression window and trigger a spurious restart (issue #694).
+    _update_lobster_state_fields(
+        {"last_processed_at": datetime.now(timezone.utc).isoformat()}
+    )
 
     log.info(f"Message processed: {message_id}")
     return [TextContent(type="text", text=f"✅ Message marked as processed: {message_id}")]
