@@ -495,7 +495,7 @@ main() {
 
     # Lifecycle gate: only run in production mode.
     # When LOBSTER_ENV is set to anything other than "production" (e.g. "dev" or
-    # "test"), the persistent session exits immediately. This lets Sahar do SSH
+    # "test"), the persistent session exits immediately. This lets the owner do SSH
     # dev work without the production session health-checking and auto-restarting
     # in the background. systemd starts the script but the script exits cleanly
     # (exit 0), so the service stays in RemainAfterExit=yes without restart loops.

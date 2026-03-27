@@ -176,7 +176,7 @@ def _compute_tension_v2(node_a: PreferenceNode, node_b: PreferenceNode) -> float
 
 ## Structured User State Summary
 
-`model_reflect` now produces a `user_state_summary` — a structured natural language summary of Drew's current state. This is written to `user_state.md` in the file layer.
+`model_reflect` now produces a `user_state_summary` — a structured natural language summary of the user's current state. This is written to `user_state.md` in the file layer.
 
 ```python
 def produce_user_state_summary(conn: sqlite3.Connection) -> str:

@@ -131,7 +131,7 @@ gh pr review <PR_NUMBER> --repo <owner/repo> --comment --body "Your review text 
 Substitute the actual PR number and repo as appropriate. Use `--repo owner/repo` explicitly if the working directory is not inside the target repo.
 
 - **Always use `--comment`, never `--request-changes`.** GitHub blocks `REQUEST_CHANGES` when reviewer equals author. Use `--comment` to keep reviews collaborative.
-- **For doc PRs about system behavior**, go beyond form: verify that (1) the documented behavior is actually in the system code/config, not just in user-config files (`~/lobster-user-config/`), (2) the behavior applies to all Lobster users (not Sahar-specific), (3) claims about defaults are true on a fresh install. A well-written doc PR that documents the wrong thing is a FAIL.
+- **For doc PRs about system behavior**, go beyond form: verify that (1) the documented behavior is actually in the system code/config, not just in user-config files (`~/lobster-user-config/`), (2) the behavior applies to all Lobster users (not owner-specific), (3) claims about defaults are true on a fresh install. A well-written doc PR that documents the wrong thing is a FAIL.
 
 ### Code review verdict format
 

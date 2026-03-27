@@ -802,7 +802,7 @@ def format_active_sessions_block(sessions: list[dict]) -> str:
     Produces output like:
         [2 agents running]
         - functional-engineer: "Implement GSD phase plan for BIS-51" (chat: OWNER_CHAT_ID_PLACEHOLDER, 12m ago)
-        - general-purpose: "Archive link for Drew" (chat: OWNER_CHAT_ID_PLACEHOLDER, 2m ago)
+        - general-purpose: "Archive link for the user" (chat: OWNER_CHAT_ID_PLACEHOLDER, 2m ago)
 
     Returns an empty string if sessions is empty.
     """

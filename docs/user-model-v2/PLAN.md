@@ -57,25 +57,25 @@ The User Model v1 — implemented in `src/mcp/user_model/` — is a complete, we
 The v1 system has excellent bones. What it lacks is **depth of signal capture**, **temporal modeling**, **predictive inference**, and **behavioral pattern learning**. Specifically:
 
 ### 1. Observation Gaps
-- **No response latency tracking.** How quickly Drew replies is a strong signal of interest/urgency. Currently ignored.
+- **No response latency tracking.** How quickly the user replies is a strong signal of interest/urgency. Currently ignored.
 - **No message length as signal.** Short replies = disengagement; long replies = deep engagement. Not captured.
-- **No follow-up detection.** When Drew asks a follow-up within minutes, that topic scored high interest. Not tracked.
+- **No follow-up detection.** When the user asks a follow-up within minutes, that topic scored high interest. Not tracked.
 - **No topic shift tracking.** Moving from one topic to another mid-conversation tells us about cognitive load or frustration.
 - **No explicit vs. implicit preference separation in storage.** Stated preferences vs. behavioral patterns both go into `um_observations` without distinguishing their inferential weight.
 - **Tier 2 (embedding) and Tier 3 (LLM background) extraction stubs are not implemented.** The PRD specified a 3-tier extraction pipeline; only Tier 1 exists.
 
 ### 2. Temporal Modeling Gaps
-- **No temporal snapshots.** There is no way to query "what were Drew's values 3 months ago?" The model overwrites in-place.
+- **No temporal snapshots.** There is no way to query "what were the user's values 3 months ago?" The model overwrites in-place.
 - **No drift detection.** Week-over-week changes in preference strengths are not computed or surfaced.
 - **No recency weighting in queries.** All observations are treated equally regardless of age in most queries.
-- **No activity rhythm tracking.** When is Drew most active? Most responsive? Most likely to make decisions? Not modeled.
+- **No activity rhythm tracking.** When is the user most active? Most responsive? Most likely to make decisions? Not modeled.
 - **Decay is uniform.** Every node decays at the same rate. High-confidence stated values should decay much slower than low-confidence inferences.
 
 ### 3. Prediction & Inference Gaps
-- **No `model_infer` tool.** The PRD specified scenario modeling — given current context, predict Drew's likely reaction, desired response length, probable next request. This does not exist.
+- **No `model_infer` tool.** The PRD specified scenario modeling — given current context, predict the user's likely reaction, desired response length, probable next request. This does not exist.
 - **Attention scoring is static.** It doesn't incorporate time-of-day, recent emotional state, or active project momentum.
-- **No response style prediction.** "Drew is in a high-urgency state right now — give shorter, more direct responses" is not surfaced to the main loop.
-- **No value alignment scoring for tasks.** When Drew is deciding between tasks, the model can't score which ones align better with his values.
+- **No response style prediction.** "The user is in a high-urgency state right now — give shorter, more direct responses" is not surfaced to the main loop.
+- **No value alignment scoring for tasks.** When the user is deciding between tasks, the model can't score which ones align better with their values.
 
 ### 4. Synthesis Gaps
 - **`model_reflect` is heuristic-only.** Contradiction detection is keyword-based (e.g., "concise" vs "detail"). It can't detect semantic contradictions.
@@ -161,7 +161,7 @@ Changes:
 - Seeding: first-run bootstrap from `owner.toml` values + optional setup interview
 
 ### Phase 3: Inference Engine
-**Goal:** Build `model_infer` — context-aware prediction of Drew's current state and likely needs.
+**Goal:** Build `model_infer` — context-aware prediction of the user's current state and likely needs.
 Sub-plan: [phase-3-inference-engine.md](phase-3-inference-engine.md)
 
 New function `model_infer`:
@@ -241,7 +241,7 @@ CREATE TABLE um_inference_cache (
 ```sql
 -- um_observations: add behavioral metadata columns
 ALTER TABLE um_observations ADD COLUMN latency_ms INTEGER;  -- response latency
-ALTER TABLE um_observations ADD COLUMN reply_length INTEGER; -- Drew's message character count
+ALTER TABLE um_observations ADD COLUMN reply_length INTEGER; -- user's message character count
 ALTER TABLE um_observations ADD COLUMN is_followup INTEGER NOT NULL DEFAULT 0; -- boolean
 ALTER TABLE um_observations ADD COLUMN source_specificity TEXT; -- 'explicit'|'behavioral'|'heuristic'
 
