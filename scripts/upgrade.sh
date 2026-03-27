@@ -1849,6 +1849,29 @@ PYEOF
         fi
     fi
 
+    # Migration 42: Add idempotency column to agent_sessions
+    # The idempotency column enables safe orphan recovery after restarts (#866).
+    # Sessions classified as 'safe' can be re-run automatically; 'unsafe'/'unknown'
+    # sessions surface a user notification instead.
+    if command -v python3 &>/dev/null; then
+        python3 -c "
+import sqlite3, os
+db_path = os.path.expanduser('~/messages/config/agent_sessions.db')
+if os.path.exists(db_path):
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(\"ALTER TABLE agent_sessions ADD COLUMN idempotency TEXT DEFAULT 'unknown'\")
+        conn.commit()
+        print('idempotency column added')
+    except sqlite3.OperationalError:
+        print('idempotency column already exists')
+    finally:
+        conn.close()
+else:
+    print('agent_sessions.db not found — will be created on next server start')
+" 2>/dev/null && substep "agent_sessions.idempotency column present (fresh or migrated)" && migrated=$((migrated + 1)) || true
+    fi
+
     # Migration 41: Add inbox-staleness-warn.sh cron entry
     # Injects a scheduled_reminder into the inbox when the oldest unprocessed
     # user message has been waiting for 3+ minutes. Gives the dispatcher an
