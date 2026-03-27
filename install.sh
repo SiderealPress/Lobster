@@ -1837,6 +1837,13 @@ else
     success "Python venv already exists"
 fi
 
+# Ensure pip binaries in the venv are executable (uv venv may create them
+# without the execute bit set on some platforms, causing "permission denied"
+# warnings during upgrade checks).
+chmod +x .venv/bin/pip .venv/bin/pip3 2>/dev/null || true
+# Also fix any versioned pip binary (e.g. pip3.12)
+chmod +x .venv/bin/pip3.* 2>/dev/null || true
+
 # Activate venv for uv pip commands
 export VIRTUAL_ENV="$INSTALL_DIR/.venv"
 export PATH="$INSTALL_DIR/.venv/bin:$PATH"
