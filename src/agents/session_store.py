@@ -830,9 +830,9 @@ def format_active_sessions_block(sessions: list[dict]) -> str:
     that do not correspond to a user conversation in the IDE panel.
 
     Produces output like:
-        [1 agent running, 1 system]
-        - functional-engineer: "Implement GSD phase plan" (chat: ADMIN_CHAT_ID_REDACTED, 12m ago)
-        - subagent: "startup-catchup" (system, 3m ago)
+        [2 agents running]
+        - functional-engineer: "Implement GSD phase plan for BIS-51" (chat: OWNER_CHAT_ID_PLACEHOLDER, 12m ago)
+        - general-purpose: "Archive link for the user" (chat: OWNER_CHAT_ID_PLACEHOLDER, 2m ago)
 
     Returns an empty string if sessions is empty.
     """
