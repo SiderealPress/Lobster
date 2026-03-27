@@ -1744,6 +1744,26 @@ EOF
         fi
     fi
 
+    # Migration 44: Switch bot-talk-poller cron entry to use bot-talk-check-dispatch.sh.
+    # The pre-check wrapper queries the bot-talk API before writing to the inbox,
+    # so no LLM subagent is spawned on empty polls. The runner field in jobs.json
+    # drives this via sync-crontab.sh; this migration re-syncs the crontab so the
+    # change takes effect on existing installs without a manual sync.
+    local BOT_TALK_CHECK_SCRIPT="$INSTALL_DIR/scheduled-tasks/bot-talk-check-dispatch.sh"
+    if [ -f "$BOT_TALK_CHECK_SCRIPT" ]; then
+        if ! crontab -l 2>/dev/null | grep -q "bot-talk-check-dispatch.sh"; then
+            chmod +x "$BOT_TALK_CHECK_SCRIPT" 2>/dev/null || true
+            # Re-run sync-crontab.sh to rebuild the crontab from jobs.json, picking up
+            # the new runner field for bot-talk-poller.
+            if [ -f "$INSTALL_DIR/scheduled-tasks/sync-crontab.sh" ]; then
+                chmod +x "$INSTALL_DIR/scheduled-tasks/sync-crontab.sh" 2>/dev/null || true
+                "$INSTALL_DIR/scheduled-tasks/sync-crontab.sh" 2>/dev/null || true
+                substep "Crontab re-synced: bot-talk-poller now uses bot-talk-check-dispatch.sh"
+                migrated=$((migrated + 1))
+            fi
+        fi
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
