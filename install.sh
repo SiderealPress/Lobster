@@ -375,6 +375,16 @@ if [ "$CONTAINER_SETUP" = true ]; then
                 fi
             done
         done
+        # Seed YAML templates (e.g. ifttt-rules.yaml)
+        for tmpl in "$TEMPLATES_DIR"/*.yaml; do
+            [ -f "$tmpl" ] || continue
+            base=$(basename "$tmpl")
+            dest="$USER_CONFIG_DIR/memory/canonical/$base"
+            if [ ! -f "$dest" ]; then
+                cp "$tmpl" "$dest"
+                info "  Seeded canonical template: $base"
+            fi
+        done
     fi
 
     # Create stub user-config agent files if they don't exist
@@ -1107,6 +1117,16 @@ if [ -d "$TEMPLATES_DIR" ]; then
                 info "  Seeded canonical template: $subdir_name/$base"
             fi
         done
+    done
+    # Seed YAML templates (e.g. ifttt-rules.yaml)
+    for tmpl in "$TEMPLATES_DIR"/*.yaml; do
+        [ -f "$tmpl" ] || continue
+        base=$(basename "$tmpl")
+        dest="$USER_CONFIG_DIR/memory/canonical/$base"
+        if [ ! -f "$dest" ]; then
+            cp "$tmpl" "$dest"
+            info "  Seeded canonical template: $base"
+        fi
     done
 fi
 
