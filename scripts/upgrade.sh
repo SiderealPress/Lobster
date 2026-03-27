@@ -1663,6 +1663,51 @@ EOF
         fi
     fi
 
+    # Migration 41: Replace bare Python post-compact-gate.py command with a shell wrapper
+    # that short-circuits before starting Python when the compact-pending sentinel is absent.
+    # The sentinel is absent during normal operation (99%+ of calls), so every PreToolUse
+    # hook fire previously paid ~50ms Python startup cost for nothing. The shell `test`
+    # exits in ~1ms, eliminating that overhead on the common path. See issue #964.
+    if [ -f "$CLAUDE_SETTINGS" ] && command -v jq >/dev/null 2>&1; then
+        local has_bare_compact_gate
+        has_bare_compact_gate=$(jq -r '
+            [.hooks.PreToolUse[]? | select(.matcher == "") | .hooks[]?.command // empty]
+            | map(select(startswith("python3") and contains("post-compact-gate")))
+            | length
+        ' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
+        if [ "${has_bare_compact_gate:-0}" != "0" ] && [ "${has_bare_compact_gate:-0}" != "" ]; then
+            TMP_SETTINGS=$(mktemp)
+            jq --arg old_cmd "python3 $INSTALL_DIR/hooks/post-compact-gate.py" \
+               --arg new_cmd "test ! -f ~/messages/config/compact-pending || python3 $INSTALL_DIR/hooks/post-compact-gate.py" \
+               '(.hooks.PreToolUse[]? | select(.matcher == "") | .hooks[]? | select(.command == $old_cmd) | .command) = $new_cmd' \
+               "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+            substep "Wrapped post-compact-gate.py in shell short-circuit (Migration 41)"
+            migrated=$((migrated + 1))
+        fi
+    fi
+
+    # Migration 42: Narrow context-monitor.py PostToolUse matcher from "" (every tool)
+    # to "mcp__lobster-inbox__|Agent". Context window tracking is only meaningful after
+    # MCP inbox calls and Agent spawns — where the most tokens are consumed or received.
+    # Skipping Read/Edit/Write/Bash PostToolUse events reduces hook spawns by ~65-70%
+    # per message cycle with no meaningful loss of monitoring coverage. See issue #964.
+    if [ -f "$CLAUDE_SETTINGS" ] && command -v jq >/dev/null 2>&1; then
+        local has_empty_context_monitor
+        has_empty_context_monitor=$(jq -r '
+            [.hooks.PostToolUse[]? | select(.matcher == "") | .hooks[]?.command // empty]
+            | map(select(contains("context-monitor")))
+            | length
+        ' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
+        if [ "${has_empty_context_monitor:-0}" != "0" ] && [ "${has_empty_context_monitor:-0}" != "" ]; then
+            TMP_SETTINGS=$(mktemp)
+            jq --arg cmd "$INSTALL_DIR/hooks/context-monitor.py" \
+               '(.hooks.PostToolUse[]? | select(.matcher == "" and (.hooks[]?.command | contains("context-monitor"))) | .matcher) = "mcp__lobster-inbox__|Agent"' \
+               "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+            substep "Narrowed context-monitor.py matcher to mcp__lobster-inbox__|Agent (Migration 42)"
+            migrated=$((migrated + 1))
+        fi
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
