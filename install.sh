@@ -3193,10 +3193,17 @@ else
         info "Slack router service installed (enable manually with: sudo systemctl enable lobster-slack-router)"
     fi
 
-    # Install MCP HTTP bridge service if generated
+    # Install MCP HTTP bridge service if generated (remote read-only bridge)
     if [ -f "$INSTALL_DIR/services/lobster-mcp.service" ]; then
         sudo cp "$INSTALL_DIR/services/lobster-mcp.service" /etc/systemd/system/
         info "MCP HTTP bridge service installed (enable manually with: sudo systemctl enable lobster-mcp)"
+    fi
+
+    # Install MCP local HTTP server service (full-access, localhost only)
+    if [ -f "$INSTALL_DIR/services/lobster-mcp-local.service" ]; then
+        sudo cp "$INSTALL_DIR/services/lobster-mcp-local.service" /etc/systemd/system/
+        sudo systemctl enable lobster-mcp-local 2>/dev/null || true
+        success "MCP local HTTP server service installed and enabled (lobster-mcp-local)"
     fi
 
     # Install observability service if generated
@@ -3242,17 +3249,6 @@ fi
 #===============================================================================
 
 step "Registering MCP server with Claude..."
-
-# Remove any legacy stdio mcpServers.lobster-inbox entry from settings.json if present.
-# The claude mcp add/remove CLI stores entries in ~/.claude.json, not settings.json,
-# but defensive cleanup costs nothing and handles any manual or legacy configs.
-if [ -f "$CLAUDE_SETTINGS" ] && command -v jq >/dev/null 2>&1; then
-    if jq -e '.mcpServers."lobster-inbox"' "$CLAUDE_SETTINGS" >/dev/null 2>&1; then
-        TMP_SETTINGS=$(mktemp)
-        jq 'del(.mcpServers."lobster-inbox")' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
-        info "Removed legacy mcpServers.lobster-inbox entry from settings.json"
-    fi
-fi
 
 # Remove existing registration if present (handles both stdio and http registrations)
 claude mcp remove lobster-inbox 2>/dev/null || true
@@ -3435,10 +3431,10 @@ echo -e "${BOLD}Required post-install steps:${NC}"
 if [ "$GITHUB_TOKEN_SET" = false ]; then
 echo "  1. Set your GitHub PAT:    lobster env set GITHUB_TOKEN <your-token>"
 echo "  2. Authenticate Claude:    sudo -u lobster claude  (then follow OAuth prompts)"
-echo "  3. Start services:         sudo systemctl start lobster-claude lobster-mcp lobster-router"
+echo "  3. Start services:         sudo systemctl start lobster-mcp-local lobster-claude lobster-router"
 else
 echo "  1. Authenticate Claude:    sudo -u lobster claude  (then follow OAuth prompts)"
-echo "  2. Start services:         sudo systemctl start lobster-claude lobster-mcp lobster-router"
+echo "  2. Start services:         sudo systemctl start lobster-mcp-local lobster-claude lobster-router"
 fi
 echo ""
 echo -e "${BOLD}Commands:${NC}"

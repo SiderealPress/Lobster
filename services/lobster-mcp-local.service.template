@@ -26,6 +26,7 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=lobster-mcp-local
 
+NoNewPrivileges=true
 PrivateTmp=true
 
 [Install]

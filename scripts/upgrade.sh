@@ -1744,6 +1744,69 @@ EOF
         fi
     fi
 
+    # Migration 43: Switch MCP transport from stdio to HTTP (issue #960).
+    # The lobster-mcp-local systemd service now runs inbox_server.py as a
+    # persistent HTTP server on localhost:8766.  Claude Code must be registered
+    # to connect via "url" instead of a stdio command so that CC auto-updates
+    # no longer kill the MCP server (they would close the stdio pipe).
+    #
+    # This migration:
+    #   a) Installs (or updates) the lobster-mcp-local systemd service.
+    #   b) Re-registers the lobster-inbox MCP server using HTTP transport.
+    #
+    # Idempotent: skipped if the HTTP registration already exists.
+    local mcp_http_already_registered
+    mcp_http_already_registered=$(claude mcp list 2>/dev/null | grep -c "localhost:8766" || echo "0")
+    if [ "${mcp_http_already_registered:-0}" = "0" ]; then
+        # Install / refresh the lobster-mcp-local service
+        local mcp_local_template="$LOBSTER_DIR/services/lobster-mcp-local.service.template"
+        local mcp_local_service="$LOBSTER_DIR/services/lobster-mcp-local.service"
+
+        if [ -f "$mcp_local_template" ] && command -v jq >/dev/null 2>&1; then
+            # Render template (reuse generate_from_template if available, else sed directly)
+            if declare -f generate_from_template >/dev/null 2>&1; then
+                generate_from_template "$mcp_local_template" "$mcp_local_service"
+            else
+                # Minimal inline rendering matching install.sh variable names
+                local _user _group _config_dir _messages_dir _workspace_dir _user_config_dir
+                _user=$(whoami)
+                _group=$(id -gn)
+                _config_dir="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}"
+                _messages_dir="${LOBSTER_MESSAGES:-$HOME/messages}"
+                _workspace_dir="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
+                _user_config_dir="${LOBSTER_USER_CONFIG:-$HOME/lobster-user-config}"
+                sed \
+                    -e "s|{{USER}}|$_user|g" \
+                    -e "s|{{GROUP}}|$_group|g" \
+                    -e "s|{{INSTALL_DIR}}|$LOBSTER_DIR|g" \
+                    -e "s|{{CONFIG_DIR}}|$_config_dir|g" \
+                    -e "s|{{MESSAGES_DIR}}|$_messages_dir|g" \
+                    -e "s|{{WORKSPACE_DIR}}|$_workspace_dir|g" \
+                    -e "s|{{USER_CONFIG_DIR}}|$_user_config_dir|g" \
+                    "$mcp_local_template" > "$mcp_local_service"
+            fi
+        fi
+
+        if [ -f "$mcp_local_service" ] && pidof systemd >/dev/null 2>&1; then
+            sudo cp "$mcp_local_service" /etc/systemd/system/
+            sudo systemctl daemon-reload
+            sudo systemctl enable lobster-mcp-local 2>/dev/null || true
+            sudo systemctl restart lobster-mcp-local 2>/dev/null || true
+            substep "lobster-mcp-local service installed and (re)started"
+            # Wait briefly for the server to come up before re-registering
+            sleep 3
+        fi
+
+        # Re-register MCP server using HTTP transport
+        claude mcp remove lobster-inbox 2>/dev/null || true
+        if claude mcp add --transport http lobster-inbox -s user "http://localhost:8766/mcp" 2>/dev/null; then
+            substep "lobster-inbox re-registered with HTTP transport (http://localhost:8766/mcp)"
+            migrated=$((migrated + 1))
+        else
+            warn "Migration 43: MCP HTTP re-registration may have failed. Run: claude mcp list"
+        fi
+    fi
+
     # Migration 44: Switch bot-talk-poller cron entry to use bot-talk-check-dispatch.sh.
     # The pre-check wrapper queries the bot-talk API before writing to the inbox,
     # so no LLM subagent is spawned on empty polls. The runner field in jobs.json
