@@ -8013,8 +8013,79 @@ async def main():
         log.warning(f"[startup] Stale session cleanup failed (non-fatal): {_cleanup_err}")
 
     asyncio.create_task(reconcile_agent_sessions())
-    async with stdio_server() as (read_stream, write_stream):
-        await server.run(read_stream, write_stream, server.create_initialization_options())
+
+    # Transport selection: HTTP (streamable-http) or stdio.
+    #
+    # HTTP mode is activated by --http flag or MCP_TRANSPORT=http env var.
+    # In HTTP mode the server binds to localhost:PORT (default 8765) and
+    # Claude Code connects via "url": "http://localhost:PORT/mcp" in settings.json.
+    # The server process is managed by the lobster-mcp-local systemd service, so
+    # its lifetime is decoupled from the Claude Code process — CC restarts no
+    # longer kill the MCP server.
+    #
+    # stdio mode is the legacy default; it remains available for local dev and
+    # fallback scenarios.
+    use_http = (
+        "--http" in sys.argv
+        or os.environ.get("MCP_TRANSPORT", "").lower() == "http"
+    )
+
+    if use_http:
+        import contextlib
+        import uvicorn
+        from starlette.applications import Starlette
+        from starlette.requests import Request
+        from starlette.responses import Response
+        from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+
+        # Determine port (--port N or MCP_HTTP_PORT env, default 8765)
+        port = int(os.environ.get("MCP_HTTP_PORT", 8765))
+        if "--port" in sys.argv:
+            try:
+                port = int(sys.argv[sys.argv.index("--port") + 1])
+            except (ValueError, IndexError):
+                pass
+
+        session_manager = StreamableHTTPSessionManager(app=server, stateless=False)
+
+        @contextlib.asynccontextmanager
+        async def _lifespan(app: Starlette):
+            async with session_manager.run():
+                log.info(f"[http-transport] Lobster MCP server listening on http://localhost:{port}/mcp")
+                yield
+
+        async def _mcp_handler(scope, receive, send):
+            request = Request(scope, receive)
+            path = request.url.path
+            if path == "/health":
+                response = Response('{"ok":true}', status_code=200, media_type="application/json")
+                await response(scope, receive, send)
+            elif path == "/mcp":
+                await session_manager.handle_request(scope, receive, send)
+            else:
+                response = Response("Not Found", status_code=404)
+                await response(scope, receive, send)
+
+        _inner_app = Starlette(lifespan=_lifespan)
+
+        async def _asgi_app(scope, receive, send):
+            if scope["type"] == "lifespan":
+                await _inner_app(scope, receive, send)
+            elif scope["type"] == "http":
+                await _mcp_handler(scope, receive, send)
+
+        config = uvicorn.Config(
+            _asgi_app,
+            host="127.0.0.1",
+            port=port,
+            log_level="warning",
+            access_log=False,
+        )
+        http_server = uvicorn.Server(config)
+        await http_server.serve()
+    else:
+        async with stdio_server() as (read_stream, write_stream):
+            await server.run(read_stream, write_stream, server.create_initialization_options())
 
 
 if __name__ == "__main__":
