@@ -1600,9 +1600,9 @@ EOF
     fi
 
     # Migration 39: Update bot-talk poller task files to mirror both sides of conversation
-    # The poller previously only forwarded AlbertLobster messages to Sahar. The updated
+    # The poller previously only forwarded AlbertLobster messages to the owner. The updated
     # task files instruct the poller to collect both SaharLobster and AlbertLobster
-    # messages, sort them chronologically, and send a single conversation block to Sahar.
+    # messages, sort them chronologically, and send a single conversation block to the owner.
     local bt_poller_src="$INSTALL_DIR/scheduled-tasks/tasks/bot-talk-poller.md"
     local bt_fast_src="$INSTALL_DIR/scheduled-tasks/tasks/bot-talk-poller-fast.md"
     local bt_tasks_dir="$WORKSPACE_DIR/scheduled-jobs/tasks"
