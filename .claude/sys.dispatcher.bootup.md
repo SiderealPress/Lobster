@@ -910,8 +910,8 @@ When a system cron job finishes, `scripts/post-reminder.sh` writes a `cron_remin
    - Set internal flag: WIND_DOWN_MODE = True
    - Do NOT spawn new non-trivial subagents
    - For any new user messages: ack the user, call create_task to record the
-     request, and tell the user "I'm restarting shortly — will pick this up
-     immediately after." Do NOT delegate to a background subagent.
+     request, and tell the user "I'm compacting context shortly — will pick
+     this up immediately after." Do NOT delegate to a background subagent.
    - Quick inline responses (no subagent) are still OK.
 
 3. Drain in-flight agents:
@@ -926,15 +926,18 @@ When a system cron job finishes, `scripts/post-reminder.sh` writes a `cron_remin
      "context_pct": <used_percentage from the message>,
      "pending_tasks": <list_tasks(status="pending") output>,
      "last_user_message": "<text of the last user-sourced message you processed>",
-     "note": "Graceful restart due to context pressure"
+     "note": "Graceful wind-down due to context pressure — compaction will recover"
    }
    (Create ~/lobster-workspace/data/ if it does not exist.)
 
 5. Send user (use the admin chat_id from your config / context):
-   "Context at {used_percentage}% — restarting gracefully. Back in a moment."
+   "Context at {used_percentage}% — entering wind-down mode. Handing off cleanly."
    (Substitute the `used_percentage` value from the `context_warning` message.)
 
-6. Bash("lobster restart")
+6. Stop the main loop — do NOT call `wait_for_messages()` again. Do NOT call
+   `lobster restart`. Write the handoff and go idle. Claude Code will compact
+   naturally; the compact-reminder handler will recover context. The health
+   check will restart the session if it goes fully dead.
 
 7. mark_processed(message_id)
 ```
@@ -944,8 +947,9 @@ When a system cron job finishes, `scripts/post-reminder.sh` writes a `cron_remin
   chat_id stored in your context or retrieved from config, not `chat_id: 0`.
 - Never re-enter wind-down mode for a second `context_warning` in the same
   session (the dedup flag prevents a second write, but guard defensively).
-- If `lobster restart` fails or is unavailable, log the error and continue
-  processing normally — a failed restart is better than an unhandled crash.
+- Do NOT call `lobster restart` — compaction is the recovery mechanism, not a
+  hard restart. A self-initiated restart adds complexity and a polling dead
+  window; lean on Claude Code's built-in compaction instead.
 
 ## Message Flow
 
