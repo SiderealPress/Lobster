@@ -14,8 +14,7 @@ and send Sahar a Telegram summary.
 
 - **Gmail**: use `gws` CLI (already authenticated)
 - **Twenty CRM API**: POST to `https://honest-navy-moose.twenty.com/graphql`
-  - API key: read `TWENTY_API_KEY` from `~/lobster-config/config.env`; if missing,
-    use hardcoded fallback `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJjYTIwNGQxMC0yNTc5LTRkN2YtYTY3Ny1iNWUyNTkwMGMyNzQiLCJ0eXBlIjoiQVBJX0tFWSIsIndvcmtzcGFjZUlkIjoiY2EyMDRkMTAtMjU3OS00ZDdmLWE2NzctYjVlMjU5MDBjMjc0IiwiaWF0IjoxNzc0NjQ1NzExLCJleHAiOjQ5MjgyNDkzMTAsImp0aSI6IjAwOWNlMjQyLTUyN2EtNGM5ZC1hNTZjLWFjMGMwZmFmYTRlNSJ9.bTQytwTqdPJAEFrvOPREC93cjavQXAXXKiuCNvmIfiA`
+  - API key: read `TWENTY_API_KEY` from `~/lobster-config/config.env`; if missing, skip Twenty enrichment and log a warning
 - **Bot-talk**: POST to `http://46.224.41.108:4242/message`
   - Token lookup chain: `~/lobster-workspace/data/bot-talk-token.txt`, then
     `BOT_TALK_TOKEN` in `~/messages/config/config.env`, then
