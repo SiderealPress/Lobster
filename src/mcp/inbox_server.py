@@ -7058,22 +7058,29 @@ def validate_job_name(name: str) -> tuple[bool, str]:
     return True, ""
 
 
-def sync_crontab() -> tuple[bool, str]:
-    """Sync jobs.json to crontab. Returns (success, message)."""
+async def sync_crontab() -> tuple[bool, str]:
+    """Sync jobs.json to crontab. Returns (success, message).
+
+    Uses asyncio.create_subprocess_exec so the event loop remains responsive
+    while the crontab subprocess runs (fixes: sync was blocking for up to 10s).
+    """
     sync_script = _REPO_DIR / "scheduled-tasks" / "sync-crontab.sh"
     try:
-        result = subprocess.run(
-            [str(sync_script)],
-            capture_output=True,
-            text=True,
-            timeout=10
+        proc = await asyncio.create_subprocess_exec(
+            str(sync_script),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
-        if result.returncode == 0:
-            return True, result.stdout
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.communicate()
+            return False, "Sync script timed out"
+        if proc.returncode == 0:
+            return True, stdout.decode()
         else:
-            return False, result.stderr or "Sync failed"
-    except subprocess.TimeoutExpired:
-        return False, "Sync script timed out"
+            return False, stderr.decode() or "Sync failed"
     except Exception as e:
         return False, str(e)
 
@@ -7147,7 +7154,7 @@ Keep output concise. The main Lobster instance will review this later.
     save_scheduled_jobs(data)
 
     # Sync to crontab
-    success, msg = sync_crontab()
+    success, msg = await sync_crontab()
     if not success:
         return [TextContent(type="text", text=f"Job created but crontab sync failed: {msg}")]
 
@@ -7308,7 +7315,7 @@ Keep output concise. The main Lobster instance will review this later.
     save_scheduled_jobs(data)
 
     # Sync to crontab
-    success, msg = sync_crontab()
+    success, msg = await sync_crontab()
     sync_status = "" if success else f"\n(Warning: crontab sync failed: {msg})"
 
     return [TextContent(type="text", text=f"Updated job '{name}':\n- " + "\n- ".join(updated) + sync_status)]
@@ -7333,6 +7340,9 @@ async def handle_delete_scheduled_job(args: dict) -> list[TextContent]:
 
     return [TextContent(type="text", text=f"Deleted job '{name}' (timer stopped, disabled, unit files removed).")]
 
+    # Sync to crontab
+    success, msg = await sync_crontab()
+    sync_status = "" if success else f"\n(Warning: crontab sync failed: {msg})"
 
 async def handle_get_job_scaffold(args: dict) -> list[TextContent]:
     """Return a starter script template for a lobster scheduled job."""
