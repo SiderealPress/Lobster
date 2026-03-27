@@ -112,7 +112,7 @@ def extract_followup_signal(
     """
     Detect follow-up messages: same topic continuation within 5 minutes.
 
-    A follow-up is strong evidence that the topic matters to Drew.
+    A follow-up is strong evidence that the topic matters to the user.
     Three consecutive follow-ups on a topic should reinforce a preference node.
     """
 ```
@@ -179,7 +179,7 @@ First-run bootstrap is critical — the model starts empty. `seed.py` handles in
 
 ```toml
 [owner]
-name = "Drew"
+name = "OWNER_NAME_PLACEHOLDER"
 telegram_chat_id = "OWNER_CHAT_ID_PLACEHOLDER"
 
 [values]
