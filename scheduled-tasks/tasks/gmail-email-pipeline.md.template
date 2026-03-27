@@ -7,7 +7,7 @@
 
 You are running as a scheduled task. Poll Gmail for new unread emails, apply a
 sensitivity filter, look up senders in Twenty CRM, create/update contacts,
-draft suggested replies, notify via bot-talk when the configured remote identity is
+draft suggested replies using Drive context, notify via bot-talk when the configured remote identity is
 mentioned, and send the owner a Telegram summary.
 
 ## Configuration
@@ -23,6 +23,9 @@ mentioned, and send the owner a Telegram summary.
 - **Processed emails tracker**: `~/lobster-workspace/data/gmail-processed.json`
 - **Remote identity to watch for mentions**: `{{REMOTE_LOBSTER_IDENTITY}}`
   (set `BOT_TALK_REMOTE_IDENTITY` in config.env)
+- **Drive file index**: `~/lobster-workspace/data/drive-file-index.json`
+- **Debug mode**: step-by-step Telegram updates are sent only when `LOBSTER_DEBUG=true`
+  is set in the environment. Check: `os.environ.get("LOBSTER_DEBUG", "").lower() == "true"`
 
 ## Sensitivity Filter
 
@@ -51,7 +54,44 @@ Read `~/lobster-workspace/data/gmail-processed.json`. If missing, treat as empty
 {"processed_ids": []}
 ```
 
-### Step 2: Poll Gmail for unread inbox emails
+### Step 2: Sync Drive file name index
+
+Fetch the names and view links of all non-trashed files in Google Drive and write
+them to the local index at `~/lobster-workspace/data/drive-file-index.json`.
+
+This replaces the per-email Drive keyword search. The index is rebuilt on every
+pipeline run so it stays current without a separate cron job.
+
+```bash
+gws drive files list --params '{"q": "trashed=false", "fields": "nextPageToken,files(id,name,webViewLink)", "pageSize": 1000}'
+```
+
+Paginate using `nextPageToken` until exhausted. Build a list of objects:
+```json
+[
+  {"id": "FILE_ID", "name": "File Name Here", "webViewLink": "https://drive.google.com/file/d/.../view"},
+  ...
+]
+```
+
+Write atomically (write to `.tmp`, then rename):
+```python
+index_path = Path.home() / "lobster-workspace" / "data" / "drive-file-index.json"
+tmp_path = index_path.with_suffix(".json.tmp")
+tmp_path.write_text(json.dumps({"files": file_list, "synced_at": time.time()}))
+tmp_path.rename(index_path)
+```
+
+If `gws drive` fails, log a warning and continue with an empty file list (Drive
+context will be absent from drafts this run, but the rest of the pipeline should proceed).
+
+**Debug step update** (only if `LOBSTER_DEBUG=true`): after syncing the index,
+write a Telegram step message:
+```
+[gmail-pipeline] Drive index synced: {N} files indexed
+```
+
+### Step 3: Poll Gmail for unread inbox emails
 
 ```bash
 gws gmail users messages list --params '{"userId": "me", "q": "is:unread in:inbox", "maxResults": 10}'
@@ -59,7 +99,7 @@ gws gmail users messages list --params '{"userId": "me", "q": "is:unread in:inbo
 
 Parse the response. For each message ID that is NOT in the processed_ids list:
 
-### Step 3: Fetch full email content
+### Step 4: Fetch full email content
 
 ```bash
 gws gmail users messages get --params '{"userId": "me", "id": "<MSG_ID>", "format": "full"}'
@@ -74,12 +114,17 @@ Extract:
 
 Parse sender email from the `From` header (e.g., `"Jane Doe <jane@example.com>"` → `jane@example.com`).
 
-### Step 4: Apply sensitivity filter
+**Debug step update** (only if `LOBSTER_DEBUG=true`): after fetching each email, write:
+```
+[gmail-pipeline] Email fetched: {sender_email} — "{subject}"
+```
+
+### Step 5: Apply sensitivity filter
 
 Using the rules above, decide: is this email professional/business? If personal, skip it
 (add to processed_ids so it won't be re-evaluated next run, but do not act on it).
 
-### Step 5: Look up sender in Twenty CRM
+### Step 6: Look up sender in Twenty CRM
 
 Query Twenty CRM for the sender email:
 
@@ -104,9 +149,14 @@ POST to `{{TWENTY_CRM_API_URL}}` with:
 - Header: `Content-Type: application/json`
 - Body: `{"query": "<query>", "variables": {"email": "<sender_email>"}}`
 
-### Step 6: Create or update contact in Twenty
+**Debug step update** (only if `LOBSTER_DEBUG=true`): after CRM lookup, write:
+```
+[gmail-pipeline] CRM checked: {found in Twenty / not found} for {sender_email}
+```
 
-If the person was NOT found in Step 5, create them:
+### Step 7: Create or update contact in Twenty
+
+If the person was NOT found in Step 6, create them:
 
 ```graphql
 mutation CreatePerson($input: PersonCreateInput!) {
@@ -126,12 +176,48 @@ With input variables built from the email headers. Only include business context
 
 If the person was found and has no company set, try to update with detected company.
 
-### Step 7: Draft a suggested reply
+### Step 8: Find relevant Drive files using the local index
 
-Compose a short suggested reply (2-4 sentences) appropriate to the email subject and
-body. The reply should be professional and concise. Label it clearly as a draft suggestion.
+Load `~/lobster-workspace/data/drive-file-index.json`. If the file is missing or
+empty, skip this step (no Drive links in the draft).
 
-### Step 8: Check for remote identity mention
+Given the list of file names, use an LLM prompt (or fuzzy string matching) to
+identify which files are relevant to this email. A file is relevant if its name
+suggests it relates to the sender's company, the email's topic, or the sender's
+name. Be conservative — only include files that are clearly relevant, not
+incidentally matching common words.
+
+**Matching approach** — use whichever is available:
+
+Option A (LLM skim — preferred): Build a prompt:
+```
+You are helping draft a reply to an email.
+Sender: {sender_name} <{sender_email}> ({sender_domain})
+Subject: {subject}
+Body excerpt: {first 300 chars of body}
+
+Here is a list of Google Drive file names. Identify any that are clearly relevant
+to this sender, their company, or the email topic. Return only the file names that
+are relevant, one per line. If none are relevant, return an empty response.
+
+Files:
+{newline-separated list of file names}
+```
+
+Option B (fuzzy match fallback): Use `difflib.get_close_matches` or simple
+substring matching against `sender_name`, `sender_domain`, and key words from
+`subject` against each file name.
+
+From the matched file names, look up their `id` and `webViewLink` in the index.
+Construct named links in the format: `{file_name}: {webViewLink}` (view link only,
+never an edit link — `/view` not `/edit`).
+
+**Debug step update** (only if `LOBSTER_DEBUG=true`): after matching, write:
+```
+[gmail-pipeline] Drive matched: {N} file(s) for {sender_email}
+```
+
+### Step 9: Check for remote identity mention
 
 Scan the email subject and body for any mention of the configured remote identity
 (`{{REMOTE_LOBSTER_IDENTITY}}`, case-insensitive, and common variations).
@@ -149,7 +235,25 @@ headers = {"X-Bot-Token": token}
 requests.post("{{LOBSTERTALK_HOST}}/message", json=payload, headers=headers, timeout=5)
 ```
 
-### Step 9: Send Telegram summary to owner
+### Step 10: Draft a suggested reply
+
+Compose a short suggested reply (2-4 sentences) appropriate to the email subject and
+body. The reply should be professional and concise.
+
+If Drive files were matched in Step 8, include them as named read-only links in the
+draft body, introduced with a line such as:
+```
+Relevant files: {file_name_1}: {link_1} | {file_name_2}: {link_2}
+```
+
+Label the full draft clearly as a draft suggestion.
+
+**Debug step update** (only if `LOBSTER_DEBUG=true`): after composing the draft, write:
+```
+[gmail-pipeline] Draft composed for {sender_email} ({N} Drive file(s) included)
+```
+
+### Step 11: Send Telegram summary to owner
 
 Write a message file to `~/messages/inbox/` in this format:
 
@@ -178,6 +282,7 @@ Gmail pipeline: {N} new email(s) processed
 From: {sender_name} <{sender_email}>
 Subject: {subject}
 CRM: {found in Twenty / created in Twenty}
+Drive files: {N matched, names listed — or "none"}
 Remote mention: {yes/no}
 
 Suggested reply:
@@ -188,7 +293,7 @@ If multiple emails were processed, include one block per email.
 
 If zero emails were processed (all skipped or no new mail), do NOT send a Telegram message.
 
-### Step 10: Save processed email IDs
+### Step 12: Save processed email IDs
 
 Add all processed message IDs (including skipped personal ones) to `~/lobster-workspace/data/gmail-processed.json`.
 
@@ -199,10 +304,50 @@ Keep at most the last 1000 IDs to prevent unbounded growth:
 processed_ids = (existing_ids + new_ids)[-1000:]
 ```
 
+## Debug Step Updates
+
+Step-by-step Telegram updates are gated on `LOBSTER_DEBUG=true`. When debug mode is
+active, write interim step messages using the same inbox file format as the final
+summary, but with `"subtype": "pipeline_step"`. Use a unique filename per step:
+`gmail-step-{uuid}.json`.
+
+When `LOBSTER_DEBUG` is not set or is any value other than `"true"`, skip all step
+writes entirely. The final per-email summary (Step 11) is always sent regardless of
+debug mode (subject to the "zero emails processed" rule).
+
+```python
+import os
+
+DEBUG = os.environ.get("LOBSTER_DEBUG", "").lower() == "true"
+
+def debug_step(text: str) -> None:
+    """Write a step update to the Telegram inbox — only in debug mode."""
+    if not DEBUG:
+        return
+    import json, uuid, time
+    from pathlib import Path
+    msg = {
+        "id": str(uuid.uuid4()),
+        "source": "gmail-pipeline",
+        "chat_id": 8305714125,
+        "type": "text",
+        "subtype": "pipeline_step",
+        "text": text,
+        "timestamp": time.time(),
+    }
+    inbox = Path.home() / "messages" / "inbox"
+    inbox.mkdir(parents=True, exist_ok=True)
+    (inbox / f"gmail-step-{msg['id']}.json").write_text(json.dumps(msg))
+```
+
+Call `debug_step(...)` at each major step transition (Drive sync, email fetch, CRM
+check, Drive match, draft composed). Never call it unconditionally.
+
 ## Error Handling
 
 - If `gws` command fails (not installed, auth error): log the error, write task output
   with status "failed", and exit.
+- If Drive index sync fails: log a warning and continue with an empty file list.
 - If Twenty CRM request fails: log the error but continue (CRM lookup is non-blocking).
 - If bot-talk ping fails: log the error but continue.
 - If Telegram write fails: log the error but continue.
@@ -212,13 +357,13 @@ processed_ids = (existing_ids + new_ids)[-1000:]
 
 When you complete your task, call `write_task_output` with:
 - job_name: "gmail-email-pipeline"
-- output: Summary of emails processed, skipped, CRM actions taken
+- output: Summary of emails processed, skipped, CRM actions taken, Drive files matched
 - status: "success" or "failed"
 
 Example output:
 ```
-Processed 2 emails, skipped 1 (personal).
-Email 1: sender@example-company.com "Q4 proposal" — created CRM contact, no remote mention, reply drafted.
-Email 2: vendor@supplier-example.com "Invoice #123" — found existing CRM contact, no remote mention, reply drafted.
+Processed 2 emails, skipped 1 (personal). Drive index: 142 files.
+Email 1: sender@example-company.com "Q4 proposal" — created CRM contact, 2 Drive files matched, no remote mention, reply drafted.
+Email 2: vendor@supplier-example.com "Invoice #123" — found existing CRM contact, 0 Drive files matched, no remote mention, reply drafted.
 Skipped: contact@personal-example.com (personal topic).
 ```
