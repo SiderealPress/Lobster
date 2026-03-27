@@ -70,3 +70,8 @@ src/bot/whatsapp_bridge_adapter.py:Email address
 # claude-wrapper.exp reads TELEGRAM_BOT_TOKEN from config.env at runtime using
 # grep — this is a variable reference, not a hardcoded credential value
 scripts/claude-wrapper.exp:Hardcoded token
+
+# upgrade.sh Migration 34 embeds the bot-talk server address (46.224.41.108) inline
+# as task file content. This is a server hostname (not a credential); the same address
+# is already present in the workspace task file bot-talk-poller.md (not committed).
+scripts/upgrade.sh:IP address
