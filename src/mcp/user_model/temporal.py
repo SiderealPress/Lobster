@@ -2,8 +2,8 @@
 Temporal Modeling: weekly snapshots and drift detection.
 
 Captures weekly state of the preference graph and detects meaningful changes
-over time. This is the foundation for understanding how Drew's values and
-preferences evolve — and for surfacing those changes back to him.
+over time. This is the foundation for understanding how the user's values and
+preferences evolve — and for surfacing those changes back to them.
 
 Depends on: schema.py, db.py only.
 """
