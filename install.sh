@@ -2650,6 +2650,17 @@ fi
 
 step "Registering MCP server with Claude..."
 
+# Remove any legacy stdio mcpServers.lobster-inbox entry from settings.json if present.
+# The claude mcp add/remove CLI stores entries in ~/.claude.json, not settings.json,
+# but defensive cleanup costs nothing and handles any manual or legacy configs.
+if [ -f "$CLAUDE_SETTINGS" ] && command -v jq >/dev/null 2>&1; then
+    if jq -e '.mcpServers."lobster-inbox"' "$CLAUDE_SETTINGS" >/dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq 'del(.mcpServers."lobster-inbox")' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        info "Removed legacy mcpServers.lobster-inbox entry from settings.json"
+    fi
+fi
+
 # Remove existing registration if present (handles both stdio and http registrations)
 claude mcp remove lobster-inbox 2>/dev/null || true
 

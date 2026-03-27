@@ -1762,7 +1762,7 @@ EOF
         local mcp_local_template="$LOBSTER_DIR/services/lobster-mcp-local.service.template"
         local mcp_local_service="$LOBSTER_DIR/services/lobster-mcp-local.service"
 
-        if [ -f "$mcp_local_template" ] && command -v jq >/dev/null 2>&1; then
+        if [ -f "$mcp_local_template" ]; then
             # Render template (reuse generate_from_template if available, else sed directly)
             if declare -f generate_from_template >/dev/null 2>&1; then
                 generate_from_template "$mcp_local_template" "$mcp_local_service"
@@ -1795,6 +1795,17 @@ EOF
             substep "lobster-mcp-local service installed and (re)started"
             # Wait briefly for the server to come up before re-registering
             sleep 3
+        fi
+
+        # Remove any legacy mcpServers.lobster-inbox entry from settings.json if present.
+        # The claude mcp CLI stores entries in ~/.claude.json, not settings.json,
+        # but defensive cleanup costs nothing and handles any manual or legacy configs.
+        if [ -f "$CLAUDE_SETTINGS" ] && command -v jq >/dev/null 2>&1; then
+            if jq -e '.mcpServers."lobster-inbox"' "$CLAUDE_SETTINGS" >/dev/null 2>&1; then
+                TMP_SETTINGS=$(mktemp)
+                jq 'del(.mcpServers."lobster-inbox")' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+                substep "Removed legacy mcpServers.lobster-inbox entry from settings.json"
+            fi
         fi
 
         # Re-register MCP server using HTTP transport
