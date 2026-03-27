@@ -1186,6 +1186,102 @@ def _is_main_http_session() -> bool:
 # to distinguish output files from the current run vs a previous (dead) run.
 _SERVER_START_TIME = datetime.now(timezone.utc)
 
+# ---------------------------------------------------------------------------
+# HTTP session identity — dispatcher session tagging (Options A and B)
+# ---------------------------------------------------------------------------
+#
+# When running in HTTP transport mode, multiple Claude Code sessions can
+# connect simultaneously (dispatcher + subagents). The server needs to know
+# which session is the dispatcher so that:
+#   - guarded tools (wait_for_messages, send_reply, etc.) are allowed only
+#     for the dispatcher session
+#   - health checks and the reconciler can verify the dispatcher is connected
+#
+# Session ID propagation:
+#   Each HTTP request carries an "mcp-session-id" header (set by the MCP
+#   client after the initial handshake).  The MCP library stores the raw
+#   Starlette Request object in the per-request RequestContext
+#   (request_ctx.get().request).  Tool handlers running inside the session
+#   task can retrieve the session ID by reading that header:
+#
+#     _get_current_http_session_id()  →  request_ctx.get().request.headers[...]
+#
+#   This works because request_ctx is a ContextVar set in the session task
+#   itself (by mcp.server.lowlevel.server._handle_request) before the tool
+#   handler is called.
+#
+# Option A — tag-on-first-use:
+#   The first call to wait_for_messages (dispatcher-exclusive) records the
+#   current session ID as the dispatcher session.  On CC reconnect after a
+#   restart, the tag is updated automatically so the new session is tracked.
+#
+# Option B — explicit declaration:
+#   When a session calls session_start(agent_type="dispatcher", ...) the
+#   current session ID is immediately recorded.  This is explicit and robust
+#   — it fires before any guarded tool is needed.
+#
+# Both layers coexist; whichever fires first wins.  A subsequent call from
+# either path updates the tag (CC restart recovery).
+#
+# _dispatcher_session_id: module-level str, set by Option A or B
+# _http_session_manager: reference to the StreamableHTTPSessionManager
+#   instance (set in main() when HTTP mode is active).  Non-None iff in HTTP
+#   mode.  Used by /dispatcher-session endpoint and by _dispatch_tool to
+#   select the correct guard path.
+# ---------------------------------------------------------------------------
+
+_dispatcher_session_id: str | None = None
+_http_session_manager = None  # Set to StreamableHTTPSessionManager in main() when HTTP mode is active
+
+
+def _get_current_http_session_id() -> str | None:
+    """Return the MCP session ID for the current tool call request.
+
+    Reads the 'mcp-session-id' header from the Starlette Request object
+    stored in the MCP request context.  Returns None if:
+      - not running in HTTP mode
+      - called outside of an active MCP request (e.g. during startup)
+      - the header is absent (first initialise request has no session ID)
+    """
+    try:
+        from mcp.server.lowlevel.server import request_ctx
+        req_ctx = request_ctx.get()
+        raw_request = req_ctx.request  # Starlette Request or None
+        if raw_request is None:
+            return None
+        return raw_request.headers.get("mcp-session-id")
+    except LookupError:
+        # request_ctx not set — called outside a request context
+        return None
+    except Exception:
+        return None
+
+
+def _tag_dispatcher_session(session_id: str) -> None:
+    """Record session_id as the privileged dispatcher session.
+
+    Called by Option A (handle_wait_for_messages) and Option B
+    (handle_session_start with agent_type="dispatcher").  Whichever fires
+    first wins; both paths update on reconnect.
+    """
+    global _dispatcher_session_id
+    if session_id and session_id != _dispatcher_session_id:
+        _dispatcher_session_id = session_id
+        log.info(f"[session-tag] Dispatcher session tagged: {session_id}")
+
+
+def _is_main_http_session() -> bool:
+    """Return True if the current HTTP session is the tagged dispatcher session.
+
+    Only meaningful when running in HTTP transport mode (_http_session_manager
+    is not None).  Fails closed: returns False if no session is tagged or if
+    the current session ID cannot be determined.
+    """
+    if _dispatcher_session_id is None:
+        return False
+    current = _get_current_http_session_id()
+    return current is not None and current == _dispatcher_session_id
+
 # Initialize SQLite agent session store (idempotent, runs JSON migration on first boot)
 try:
     _session_store.init_db()
@@ -3493,37 +3589,17 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
     # any session that is not the designated dispatcher session.
     #
     # In HTTP transport mode: use per-session tagging (_is_main_http_session).
-    #   - A session becomes the dispatcher by calling wait_for_messages (Option A),
-    #     session_start(agent_type="dispatcher") (Option B), or any guarded tool
-    #     when no dispatcher is currently tagged (Option C — restart recovery).
+    #   - A session becomes the dispatcher by calling wait_for_messages (Option A)
+    #     or session_start(agent_type="dispatcher") (Option B).
     #   - All other sessions are blocked from guarded tools.
-    #
-    # Option C — restart recovery (no-dispatcher-tagged auto-tag):
-    #   When _dispatcher_session_id is None the MCP server has just restarted and
-    #   has no record of any dispatcher session.  The first session to call any
-    #   guarded tool must be the new dispatcher — subagents cannot be running yet
-    #   because they require the dispatcher to spawn them.  Auto-tagging here closes
-    #   the window between server start and the dispatcher's first WFM or
-    #   session_start call, which is when backlog send_reply calls would otherwise
-    #   be blocked.
     #
     # In stdio transport mode: use the legacy tmux ancestry / env-var check
     #   (_is_main_session).  This path is unchanged.
     if name in _SESSION_GUARDED_TOOLS:
         if _http_session_manager is not None:
-            # HTTP mode: per-session guard.  wait_for_messages is always exempted
-            # (Option A tagging).  When no dispatcher is tagged yet (Option C),
-            # auto-tag the calling session before the guard check so the call
-            # proceeds — this handles the restart race where the dispatcher calls
-            # send_reply or check_inbox before its first WFM/session_start fires.
-            if _dispatcher_session_id is None:
-                session_id = _get_current_http_session_id()
-                if session_id is not None:
-                    log.info(
-                        f"[session-tag] Option C: no dispatcher tagged, auto-tagging "
-                        f"on '{name}' call — session {session_id!r}"
-                    )
-                    _tag_dispatcher_session(session_id)
+            # HTTP mode: per-session guard.  wait_for_messages is exempted from
+            # the guard check because it IS the tagging call (Option A) — the
+            # session won't be tagged yet when the first WFM call arrives.
             if name != "wait_for_messages" and not _is_main_http_session():
                 log.warning(
                     f"Session guard blocked '{name}' — HTTP session "
@@ -3824,37 +3900,6 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
         session_id = _get_current_http_session_id()
         if session_id is not None:
             _tag_dispatcher_session(session_id)
-
-    # Phase 2: SQLite dispatcher lock — enforce single-dispatcher structurally.
-    # Take (or replace stale) dispatcher lock so a second concurrent loop cannot
-    # run alongside this one.  We check whether the existing lock holder is still
-    # an active HTTP session before taking over; if it is, we log a warning and
-    # proceed anyway (fail-open) rather than blocking the dispatcher entirely.
-    if _http_session_manager is not None:
-        session_id = _get_current_http_session_id()
-        if session_id is not None:
-            existing_lock = _claims_db.get_dispatcher_lock()
-            if existing_lock is not None and existing_lock["session_id"] != session_id:
-                # Another session holds the lock — check whether it is still active.
-                old_session_id = existing_lock["session_id"]
-                lock_holder_active = False
-                try:
-                    lock_holder_active = _http_session_manager.has_session(old_session_id)
-                except Exception:
-                    lock_holder_active = False
-                if lock_holder_active:
-                    log.warning(
-                        f"[dispatcher-lock] Second dispatcher detected: "
-                        f"session {session_id!r} called wait_for_messages while "
-                        f"{old_session_id!r} holds an active lock. "
-                        "Allowing takeover to unblock the main loop."
-                    )
-                else:
-                    log.info(
-                        f"[dispatcher-lock] Stale lock from {old_session_id!r} — "
-                        f"taking over for {session_id!r}"
-                    )
-            _claims_db.force_replace_dispatcher_lock(session_id)
 
     # Touch heartbeat at start - signals Claude is alive and waiting for messages
     touch_heartbeat()
@@ -7889,13 +7934,6 @@ async def handle_session_start(args: dict) -> list[TextContent]:
         return [TextContent(type="text", text=f"Error starting session: {exc}")]
 
     log.info(f"Session started: agent_id={agent_id!r} agent_type={agent_type!r} chat_id={chat_id}")
-    _emit_event(
-        text=f"agent.spawn: agent_id={agent_id!r} agent_type={agent_type!r} description={description!r}",
-        event_type="agent.spawn",
-        severity="info",
-        task_id=task_id,
-        chat_id=chat_id if isinstance(chat_id, (int, str)) else None,
-    )
 
     # Option B: explicit dispatcher declaration.
     # If the caller declares itself as the dispatcher, tag its MCP session ID
@@ -7906,14 +7944,6 @@ async def handle_session_start(args: dict) -> list[TextContent]:
         http_session_id = _get_current_http_session_id()
         if http_session_id is not None:
             _tag_dispatcher_session(http_session_id)
-
-    # Write the Claude session UUID when the dispatcher provides it.
-    # SessionStart hooks receive the Claude UUID (hook_input["session_id"]),
-    # which is a different ID space from the HTTP transport session ID written
-    # above by _tag_dispatcher_session().  Having a dedicated file for the
-    # Claude UUID allows hooks to match correctly without any ID-format conversion.
-    if agent_type == "dispatcher" and claude_session_id:
-        _write_dispatcher_claude_session_file(claude_session_id)
 
     # Notify wire server so SSE clients update within 40ms
     asyncio.create_task(_notify_wire_server())
