@@ -2666,7 +2666,7 @@ step "Registering MCP server with Claude..."
 claude mcp remove lobster-inbox 2>/dev/null || true
 
 # Register MCP server using HTTP transport (streamable-http).
-# Claude Code connects to the locally-running lobster-mcp-local service on port 8765.
+# Claude Code connects to the locally-running lobster-mcp-local service on port 8766.
 # This decouples the MCP server lifetime from the Claude Code process, so CC
 # auto-updates no longer cause a stdio pipe drop / stuck wait_for_messages call.
 MCP_LOCAL_URL="http://localhost:8766/mcp"

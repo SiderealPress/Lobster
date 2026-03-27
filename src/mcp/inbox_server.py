@@ -8017,7 +8017,7 @@ async def main():
     # Transport selection: HTTP (streamable-http) or stdio.
     #
     # HTTP mode is activated by --http flag or MCP_TRANSPORT=http env var.
-    # In HTTP mode the server binds to localhost:PORT (default 8765) and
+    # In HTTP mode the server binds to localhost:PORT (default 8766) and
     # Claude Code connects via "url": "http://localhost:PORT/mcp" in settings.json.
     # The server process is managed by the lobster-mcp-local systemd service, so
     # its lifetime is decoupled from the Claude Code process — CC restarts no
@@ -8038,8 +8038,8 @@ async def main():
         from starlette.responses import Response
         from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
-        # Determine port (--port N or MCP_HTTP_PORT env, default 8765)
-        port = int(os.environ.get("MCP_HTTP_PORT", 8765))
+        # Determine port (--port N or MCP_HTTP_PORT env, default 8766)
+        port = int(os.environ.get("MCP_HTTP_PORT", 8766))
         if "--port" in sys.argv:
             try:
                 port = int(sys.argv[sys.argv.index("--port") + 1])
