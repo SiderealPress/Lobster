@@ -2544,6 +2544,14 @@ if [ -f "$MCP_TEMPLATE" ]; then
         "$INSTALL_DIR/services/lobster-mcp.service"
 fi
 
+# Generate MCP local HTTP server service if template exists
+MCP_LOCAL_TEMPLATE="$INSTALL_DIR/services/lobster-mcp-local.service.template"
+if [ -f "$MCP_LOCAL_TEMPLATE" ]; then
+    generate_from_template \
+        "$MCP_LOCAL_TEMPLATE" \
+        "$INSTALL_DIR/services/lobster-mcp-local.service"
+fi
+
 # Generate observability server service if template exists
 OBSERVABILITY_TEMPLATE="$INSTALL_DIR/services/lobster-observability.service.template"
 if [ -f "$OBSERVABILITY_TEMPLATE" ]; then
@@ -2572,10 +2580,17 @@ else
         info "Slack router service installed (enable manually with: sudo systemctl enable lobster-slack-router)"
     fi
 
-    # Install MCP HTTP bridge service if generated
+    # Install MCP HTTP bridge service if generated (remote read-only bridge)
     if [ -f "$INSTALL_DIR/services/lobster-mcp.service" ]; then
         sudo cp "$INSTALL_DIR/services/lobster-mcp.service" /etc/systemd/system/
         info "MCP HTTP bridge service installed (enable manually with: sudo systemctl enable lobster-mcp)"
+    fi
+
+    # Install MCP local HTTP server service (full-access, localhost only)
+    if [ -f "$INSTALL_DIR/services/lobster-mcp-local.service" ]; then
+        sudo cp "$INSTALL_DIR/services/lobster-mcp-local.service" /etc/systemd/system/
+        sudo systemctl enable lobster-mcp-local 2>/dev/null || true
+        success "MCP local HTTP server service installed and enabled (lobster-mcp-local)"
     fi
 
     # Install observability service if generated
@@ -2622,13 +2637,16 @@ fi
 
 step "Registering MCP server with Claude..."
 
-# Remove existing registration if present
+# Remove existing registration if present (handles both stdio and http registrations)
 claude mcp remove lobster-inbox 2>/dev/null || true
 
-# Add new registration
-PYTHON_PATH="$INSTALL_DIR/.venv/bin/python"
-if claude mcp add lobster-inbox -s user -- "$PYTHON_PATH" "$INSTALL_DIR/src/mcp/inbox_server.py" 2>/dev/null; then
-    success "MCP server registered"
+# Register MCP server using HTTP transport (streamable-http).
+# Claude Code connects to the locally-running lobster-mcp-local service on port 8766.
+# This decouples the MCP server lifetime from the Claude Code process, so CC
+# auto-updates no longer cause a stdio pipe drop / stuck wait_for_messages call.
+MCP_LOCAL_URL="http://localhost:8766/mcp"
+if claude mcp add --transport http lobster-inbox -s user "$MCP_LOCAL_URL" 2>/dev/null; then
+    success "MCP server registered (HTTP transport: $MCP_LOCAL_URL)"
 else
     warn "MCP server registration may have failed. Check with: claude mcp list"
 fi
@@ -2798,10 +2816,10 @@ echo -e "${BOLD}Required post-install steps:${NC}"
 if [ "$GITHUB_TOKEN_SET" = false ]; then
 echo "  1. Set your GitHub PAT:    lobster env set GITHUB_TOKEN <your-token>"
 echo "  2. Authenticate Claude:    sudo -u lobster claude  (then follow OAuth prompts)"
-echo "  3. Start services:         sudo systemctl start lobster-claude lobster-mcp lobster-router"
+echo "  3. Start services:         sudo systemctl start lobster-mcp-local lobster-claude lobster-router"
 else
 echo "  1. Authenticate Claude:    sudo -u lobster claude  (then follow OAuth prompts)"
-echo "  2. Start services:         sudo systemctl start lobster-claude lobster-mcp lobster-router"
+echo "  2. Start services:         sudo systemctl start lobster-mcp-local lobster-claude lobster-router"
 fi
 echo ""
 echo -e "${BOLD}Commands:${NC}"
