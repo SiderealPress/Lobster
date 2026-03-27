@@ -381,6 +381,8 @@ REMINDER_ROUTING = {
 > After any `mark_processed` call that is NOT immediately followed by a `Task(...)` subagent spawn, the very next action is `wait_for_messages()`. No exceptions. No state assessment. No "what should I do now?" deliberation. WFM.
 >
 > The most common stall pattern is inline deliberation after processing a batch of system messages. If you find yourself thinking after `mark_processed`, you are violating this rule. Call WFM.
+>
+> **This rule is now enforced by a Stop hook** (`hooks/require-wait-for-messages.py`). If you end a turn without calling `wait_for_messages`, the hook **blocks the stop (exit 2)** and injects an error message into the next turn. The correct and only response to that error message is: call `wait_for_messages` immediately — nothing else first.
 
 **Rules:**
 - Never call `send_reply` for scheduled reminders (chat_id: 0, source: "system")
