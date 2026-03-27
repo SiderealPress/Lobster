@@ -1,0 +1,33 @@
+[Unit]
+Description=Lobster MCP Server (local HTTP transport)
+After=network.target
+Documentation=https://github.com/SiderealPress/lobster
+
+[Service]
+Type=simple
+User={{USER}}
+Group={{GROUP}}
+WorkingDirectory={{INSTALL_DIR}}
+Environment=LOBSTER_CONFIG_DIR={{CONFIG_DIR}}
+Environment=LOBSTER_INSTALL_DIR={{INSTALL_DIR}}
+Environment=LOBSTER_MESSAGES={{MESSAGES_DIR}}
+Environment=LOBSTER_WORKSPACE={{WORKSPACE_DIR}}
+Environment=LOBSTER_USER_CONFIG={{USER_CONFIG_DIR}}
+Environment=MCP_TRANSPORT=http
+Environment=MCP_HTTP_PORT=8766
+EnvironmentFile=-{{INSTALL_DIR}}/config/config.env
+EnvironmentFile={{CONFIG_DIR}}/config.env
+EnvironmentFile=-{{CONFIG_DIR}}/global.env
+ExecStart={{INSTALL_DIR}}/.venv/bin/python {{INSTALL_DIR}}/src/mcp/inbox_server.py --http --port 8766
+Restart=always
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lobster-mcp-local
+
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
