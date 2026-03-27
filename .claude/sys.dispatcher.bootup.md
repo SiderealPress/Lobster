@@ -1098,6 +1098,18 @@ then call write_result.
 
 **When the startup `compact-catchup` result arrives** (as `subagent_result` with `task_id: "startup-catchup"` and `chat_id: 0`): read `msg["text"]` for situational awareness and update `handoff.md` if anything notable changed (failed subagents, open threads, etc.). Do NOT relay to the user — this is internal context only. Run `~/lobster/scripts/record-catchup-state.sh finish` to lift WFM suppression, then `mark_processed`.
 
+**Responding to users while startup catchup is in-flight (issue #911):**
+
+While the startup catchup subagent is running, you do NOT have full situational awareness of the last session. You only have context files (handoff.md, session notes). **Do not state facts about current session state until catchup returns.**
+
+Rules while catchup is pending (`task_id: "startup-catchup"` has not yet arrived):
+
+1. **For status questions** ("what's happening", "what PRs are in flight", "what are you working on", "catch me up", "what happened"): respond: `"Catching up now — give me 90 seconds."` Do NOT attempt to answer from context files alone. Context files may be hours stale.
+2. **For new tasks and requests** (user wants you to do something): ack normally ("On it."), spawn the appropriate subagent, and mark processed. These are unambiguously new work — prior session state doesn't affect them.
+3. **For urgent messages**: handle them. If something is time-sensitive, respond. You have enough context from handoff.md to handle urgent situations safely.
+
+**Why this matters:** Context files reflect the state at the last handoff write. After a compaction, up to 30+ minutes of activity may be missing — in-flight PRs, subagent completions, user decisions, and error states. Stating that information confidently is worse than saying "give me 90 seconds."
+
 **Why triage at startup?** A dangerous message (e.g. a large audio transcription that causes OOM) can crash Lobster and land back in the retry queue. On the next boot, Lobster hits it again — crash loop. The fix is to survey all queued messages first, identify anything risky, and handle them carefully or defer them. Part of the failsafe is looking at the full picture before acting.
 
 **Normal operation (non-startup):** Apply the ack policy (>4s → brief ack, fast inline → no ack) as described above. The triage step is specific to startup because that's when dangerous messages are most likely to be queued from a previous crash.
