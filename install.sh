@@ -343,7 +343,10 @@ if [ "$CONTAINER_SETUP" = true ]; then
     # triggering a restart loop before Claude has had time to initialize.
     state_file="$MESSAGES_DIR/config/lobster-state.json"
     if [ ! -f "$state_file" ]; then
-        echo '{"mode": "active", "booted_at": "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' > "$state_file"
+        # Write atomically via tmp+rename to prevent a truncated file on interrupt (#924)
+        _state_tmp="${state_file}.tmp.$$"
+        printf '{"mode": "active", "booted_at": "%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$_state_tmp"
+        mv "$_state_tmp" "$state_file"
         info "  Seeded lobster-state.json with initial booted_at timestamp"
     fi
     success "Directories created"
@@ -1074,7 +1077,10 @@ rm -f "$MESSAGES_DIR/config/agents.db" "$WORKSPACE_DIR/data/agents.db"
 # triggering a restart loop before Claude has had time to initialize.
 STATE_FILE="$MESSAGES_DIR/config/lobster-state.json"
 if [ ! -f "$STATE_FILE" ]; then
-    echo '{"mode": "active", "booted_at": "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' > "$STATE_FILE"
+    # Write atomically via tmp+rename to prevent a truncated file on interrupt (#924)
+    _STATE_TMP="${STATE_FILE}.tmp.$$"
+    printf '{"mode": "active", "booted_at": "%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$_STATE_TMP"
+    mv "$_STATE_TMP" "$STATE_FILE"
     info "  Seeded lobster-state.json with initial booted_at timestamp"
 fi
 

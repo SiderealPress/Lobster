@@ -615,9 +615,20 @@ def wake_claude_if_hibernating() -> None:
         # This prevents restart storms: even if spawn fails, the state is no longer
         # "hibernate", so the health check won't skip its safety net.
         try:
-            state_data = {"mode": "active", "woke_at": datetime.now(timezone.utc).isoformat()}
+            # Read existing state first so we preserve fields like compacted_at,
+            # booted_at, and last_restart_at — same pattern as _write_lobster_state()
+            # in inbox_server.py. Overwriting with a bare dict was bug #923.
+            existing: dict = {}
+            try:
+                existing = json.loads(LOBSTER_STATE_FILE.read_text())
+            except Exception:
+                pass
+            existing.update({
+                "mode": "active",
+                "woke_at": datetime.now(timezone.utc).isoformat(),
+            })
             tmp = LOBSTER_STATE_FILE.parent / f".lobster-state-wake-{os.getpid()}.tmp"
-            tmp.write_text(json.dumps(state_data, indent=2))
+            tmp.write_text(json.dumps(existing, indent=2))
             tmp.rename(LOBSTER_STATE_FILE)
             log.info("wake_claude: reset state to 'active'")
         except Exception as e:
