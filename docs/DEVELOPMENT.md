@@ -124,6 +124,43 @@ Legacy format (still supported for backward compat): `Your task_id is: my-task-1
 
 See `hooks/auto-register-agent.py` for full details.
 
+---
+
+## Convention 4: The Dogfooding Gate
+
+**Every PR that touches runtime code must be cleared through the dogfooding gate before merging to main.** This is a hard prerequisite alongside code review and smoke testing.
+
+### What the gate is
+
+The dogfooding gate is the formal signal that a PR has been running long enough on the local integration branch (`local-dev`) to be trusted. It closes the gap between "merged to local-dev for testing" and "ready to ship to main."
+
+### Soak period
+
+A PR must run on `local-dev` for **at least 2 hours** without incident before it can be cleared. An incident is any error, regression, or behavior change caused by the branch that required action (restart, revert, workaround). Unrelated system failures do not count.
+
+**Exceptions:**
+- Doc/prompt-only PRs (no code changes): soak not required.
+- Infrastructure/install changes tested via Docker: Docker run substitutes for local soak.
+
+### Clearing the gate
+
+After the soak period, the operator clears the PR with `/dogfooded <PR-number>`. This is an explicit human acknowledgment that the branch has been observed in production without incident.
+
+Until the `/dogfooded` command is fully implemented (see [issue #917](https://github.com/SiderealPress/lobster/issues/917)), clearance is handled by the dispatcher as a verbal confirmation from the user, recorded in the PR walkthrough notes.
+
+### Gate status in PR walkthroughs
+
+When presenting a PR for merge consideration, always include dogfooding status:
+- "Not yet deployed to local-dev" — gate is not started
+- "In soak since [time] — [elapsed]h / 2h minimum" — gate is running
+- "Cleared by /dogfooded at [time]" — gate is passed
+
+### Why this gate exists
+
+The informal "used in practice" requirement had no forcing function. There was no moment where anyone consciously declared a PR ready. The dogfooding gate creates that moment.
+
+---
+
 ## Related documentation
 
 - `.claude/sys.dispatcher.bootup.md` — runtime behavior and the worktree constraint from the dispatcher's perspective
