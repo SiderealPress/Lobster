@@ -495,6 +495,13 @@ if [ "$(id -u)" = "0" ]; then
         # Docker not installed — this is the normal case on a fresh machine, not a warning
         info "Docker not installed — skipping docker group setup. Install Docker later to enable Docker features."
     fi
+    # Add lobster user to the crontab group so it can manage cron jobs without sudo
+    if getent group crontab &>/dev/null; then
+        usermod -aG crontab lobster
+        success "Added 'lobster' to the crontab group."
+    else
+        info "crontab group does not exist — skipping. Cron management may require sudo on this system."
+    fi
     # Copy script to /tmp so lobster user can read it regardless of working directory
     INSTALL_SCRIPT="$(readlink -f "$0")"
     TMP_SCRIPT="$(mktemp /tmp/lobster-install.XXXXXX.sh)"

@@ -1827,6 +1827,18 @@ EOF
         fi
     fi
 
+    # Migration 45: Add lobster user to the crontab OS group
+    # Required so the lobster user can invoke `crontab` without sudo.
+    # Cron job management (sync-crontab.sh, cron-manage.sh) was silently failing
+    # on systems where the crontab binary is mode 2755 crontab:crontab.
+    if getent group crontab &>/dev/null; then
+        if ! groups lobster 2>/dev/null | grep -q crontab; then
+            usermod -aG crontab lobster
+            substep "Added lobster to the crontab group"
+            migrated=$((migrated + 1))
+        fi
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
