@@ -35,7 +35,7 @@ from .schema import (
     TemporalSnapshot,
 )
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +50,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
         _apply_v1(conn)
     if current < 2:
         _apply_v2(conn)
+    if current < 3:
+        _apply_v3(conn)
     _set_schema_version(conn, CURRENT_SCHEMA_VERSION)
 
 
@@ -284,6 +286,41 @@ def _apply_v2(conn: sqlite3.Connection) -> None:
     _add_column_if_missing("um_preference_nodes", "decay_rate_override", "REAL")
     _add_column_if_missing("um_preference_nodes", "temporal_weight", "REAL NOT NULL DEFAULT 1.0")
 
+
+def _apply_v3(conn: sqlite3.Connection) -> None:
+    """Apply version 3 schema — add user_id column for multi-user isolation.
+
+    Existing rows get user_id='default' (the original/primary user).
+    """
+    def _add_column_if_missing(table: str, column: str, col_def: str) -> None:
+        cols = [row[1] for row in conn.execute(f"PRAGMA table_info({table})")]
+        if column not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_def}")
+
+    tables_to_update = [
+        "um_observations",
+        "um_preference_nodes",
+        "um_emotional_states",
+        "um_blind_spots",
+        "um_attention_items",
+        "um_inference_cache",
+    ]
+
+    for table in tables_to_update:
+        _add_column_if_missing(table, "user_id", "TEXT NOT NULL DEFAULT 'default'")
+
+    conn.commit()
+
+    # Add indexes on user_id for each table
+    for table in tables_to_update:
+        idx_name = f"um_{table.replace('um_', '')}_user_id"
+        conn.execute(
+            f"CREATE INDEX IF NOT EXISTS {idx_name} ON {table}(user_id)"
+        )
+
+    conn.commit()
+
+
 # ---------------------------------------------------------------------------
 # Helper utilities
 # ---------------------------------------------------------------------------
@@ -306,14 +343,14 @@ def _parse_dt(s: str | None) -> datetime | None:
 # Observation CRUD
 # ---------------------------------------------------------------------------
 
-def insert_observation(conn: sqlite3.Connection, obs: Observation) -> str:
+def insert_observation(conn: sqlite3.Connection, obs: Observation, user_id: str = "default") -> str:
     """Insert an observation and return its ID."""
     obs_id = _new_id()
     conn.execute(
         """INSERT INTO um_observations
            (id, message_id, signal_type, content, confidence, context,
-            metadata, observed_at, processed)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            metadata, observed_at, processed, user_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             obs_id,
             obs.message_id,
@@ -324,6 +361,7 @@ def insert_observation(conn: sqlite3.Connection, obs: Observation) -> str:
             json.dumps(obs.metadata),
             obs.observed_at.isoformat(),
             1 if obs.processed else 0,
+            user_id,
         ),
     )
     conn.commit()

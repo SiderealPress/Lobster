@@ -79,6 +79,10 @@ USER_MODEL_TOOL_DEFINITIONS = [
                     "description": "Confidence in the observation (0.0–1.0). Default: 0.7",
                     "default": 0.7,
                 },
+                "chat_id": {
+                    "type": "string",
+                    "description": "Optional: chat_id of the user being observed. Stored as user_id for multi-user isolation.",
+                },
             },
             "required": ["message_text", "message_id"],
         },
@@ -107,6 +111,10 @@ USER_MODEL_TOOL_DEFINITIONS = [
                     "description": "Maximum results to return. Default: 20.",
                     "default": 20,
                 },
+                "chat_id": {
+                    "type": "string",
+                    "description": "Optional: filter results to this user's data only.",
+                },
             },
             "required": ["query_type"],
         },
@@ -133,6 +141,10 @@ USER_MODEL_TOOL_DEFINITIONS = [
                     "description": "Minimum confidence threshold (0.0–1.0). Default: 0.5",
                     "default": 0.5,
                 },
+                "chat_id": {
+                    "type": "string",
+                    "description": "Optional: filter preferences to this user only.",
+                },
             },
         },
     },
@@ -154,6 +166,10 @@ USER_MODEL_TOOL_DEFINITIONS = [
                     "type": "boolean",
                     "description": "If true, also sync the markdown file layer. Default: true.",
                     "default": True,
+                },
+                "chat_id": {
+                    "type": "string",
+                    "description": "Optional: user_id scope for reflection.",
                 },
             },
         },
@@ -180,6 +196,10 @@ USER_MODEL_TOOL_DEFINITIONS = [
                     "type": "number",
                     "description": "Optional: new strength value (0.0–1.0).",
                 },
+                "chat_id": {
+                    "type": "string",
+                    "description": "Optional: user_id scope for the correction.",
+                },
             },
             "required": ["node_id", "corrected_description"],
         },
@@ -202,6 +222,10 @@ USER_MODEL_TOOL_DEFINITIONS = [
                     "type": "string",
                     "description": "Type of entity: preference (default).",
                     "default": "preference",
+                },
+                "chat_id": {
+                    "type": "string",
+                    "description": "Optional: user_id scope for inspection.",
                 },
             },
             "required": ["entity_id"],
@@ -227,6 +251,10 @@ USER_MODEL_TOOL_DEFINITIONS = [
                     "type": "integer",
                     "description": "Maximum items to return. Default: 10.",
                     "default": 10,
+                },
+                "chat_id": {
+                    "type": "string",
+                    "description": "Optional: filter attention items to this user only.",
                 },
             },
         },
@@ -260,6 +288,10 @@ USER_MODEL_TOOL_DEFINITIONS = [
                     "description": "If true, bypass cache and recompute. Default: false.",
                     "default": False,
                 },
+                "chat_id": {
+                    "type": "string",
+                    "description": "Optional: user_id scope for inference.",
+                },
             },
         },
     },
@@ -277,6 +309,10 @@ USER_MODEL_TOOL_DEFINITIONS = [
                     "type": "boolean",
                     "description": "If true, return full profile data. Default: false.",
                     "default": False,
+                },
+                "chat_id": {
+                    "type": "string",
+                    "description": "Optional: user_id scope for context retrieval.",
                 },
             },
         },
@@ -296,6 +332,8 @@ def handle_model_observe(conn: sqlite3.Connection, args: dict, workspace_path: s
     explicit_observation = args.get("observation")
     observation_type = args.get("observation_type", "preference")
     confidence = float(args.get("confidence", 0.7))
+
+    user_id = args.get("chat_id", "default")
 
     if not message_text or not message_id:
         return json.dumps({"error": "message_text and message_id are required"})
@@ -325,7 +363,7 @@ def handle_model_observe(conn: sqlite3.Connection, args: dict, workspace_path: s
             context=context,
             observed_at=datetime.utcnow(),
         )
-        obs_id = insert_observation(conn, obs)
+        obs_id = insert_observation(conn, obs, user_id=user_id)
         result = {"success": True, "mode": "explicit", "obs_id": obs_id, "signal_type": observation_type}
     else:
         # Auto-extract signals from message text
