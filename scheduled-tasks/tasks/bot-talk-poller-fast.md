@@ -15,11 +15,17 @@ conversation in near-real-time.
 ## Authentication
 
 The bot-talk API requires a shared-secret header on all requests (except /health).
-Read the token from `~/lobster-workspace/data/bot-talk-token.txt` and include it as:
+Read the token using this lookup chain (first non-empty value wins):
+
+1. `~/lobster-workspace/data/bot-talk-token.txt` (legacy token file)
+2. `BOT_TALK_TOKEN` key in `~/messages/config/config.env`
+3. `BOT_TALK_TOKEN` key in `~/lobster-config/config.env`
+
+Include it as:
 
     X-Bot-Token: <token>
 
-If the token file is missing, call write_task_output with status "failed" and exit.
+If the token cannot be found via any of the above paths, call write_task_output with status "failed" and exit.
 
 ## State File
 
