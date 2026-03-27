@@ -68,6 +68,27 @@ class TestBuildSshLogLine:
 
 
 # ---------------------------------------------------------------------------
+# Auth header builder
+# ---------------------------------------------------------------------------
+
+class TestBuildAuthHeaders:
+    def test_includes_token_when_configured(self):
+        with patch.object(btm, "BOT_TALK_TOKEN", "mytoken123"):
+            headers = btm._build_auth_headers()
+        assert headers == {"X-Bot-Token": "mytoken123"}
+
+    def test_returns_empty_dict_when_token_empty(self):
+        with patch.object(btm, "BOT_TALK_TOKEN", ""):
+            headers = btm._build_auth_headers()
+        assert headers == {}
+
+    def test_does_not_include_other_headers(self):
+        with patch.object(btm, "BOT_TALK_TOKEN", "tok"):
+            headers = btm._build_auth_headers()
+        assert set(headers.keys()) == {"X-Bot-Token"}
+
+
+# ---------------------------------------------------------------------------
 # HTTP attempt logic
 # ---------------------------------------------------------------------------
 
@@ -164,6 +185,42 @@ class TestTryHttp:
             btm._try_http({})
 
         assert call_count == btm.BOT_TALK_HTTP_RETRIES + 1
+
+    def test_passes_auth_header_when_token_set(self):
+        """Verifies that X-Bot-Token header is included in POST requests."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        with patch.object(btm, "BOT_TALK_HTTP_URL", _FAKE_HTTP_URL), \
+             patch.object(btm, "BOT_TALK_TOKEN", "test-token-abc"), \
+             patch("bot_talk_mirror.httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.post.return_value = mock_response
+            mock_client_cls.return_value = mock_client
+
+            btm._try_http({"content": "x"})
+
+        _, call_kwargs = mock_client.post.call_args
+        assert call_kwargs.get("headers", {}).get("X-Bot-Token") == "test-token-abc"
+
+    def test_no_auth_header_when_token_empty(self):
+        """When BOT_TALK_TOKEN is empty, X-Bot-Token header is not included."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        with patch.object(btm, "BOT_TALK_HTTP_URL", _FAKE_HTTP_URL), \
+             patch.object(btm, "BOT_TALK_TOKEN", ""), \
+             patch("bot_talk_mirror.httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.post.return_value = mock_response
+            mock_client_cls.return_value = mock_client
+
+            btm._try_http({"content": "x"})
+
+        _, call_kwargs = mock_client.post.call_args
+        assert "X-Bot-Token" not in call_kwargs.get("headers", {})
 
 
 # ---------------------------------------------------------------------------
