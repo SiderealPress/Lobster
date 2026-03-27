@@ -1827,6 +1827,27 @@ EOF
         fi
     fi
 
+    # Migration 46: Add lobster user to the `crontab` group.
+    # The MCP server process runs under PR_SET_NO_NEW_PRIVS (NoNewPrivs=1), which
+    # suppresses setgid bits on child processes. The `crontab` binary is setgid-crontab,
+    # so `crontab -` fails with "mkstemp: Permission denied" when called from the MCP
+    # server. Fix: add the lobster user to the crontab group so sync-crontab.sh can
+    # write directly to /var/spool/cron/crontabs/$USER (group-writable directory) without
+    # needing the setgid bit. Requires sudo; warns and skips if sudo is unavailable.
+    local CRONTAB_DIR="/var/spool/cron/crontabs"
+    if [ -d "$CRONTAB_DIR" ] && ! id -nG "$USER" | grep -qw "crontab"; then
+        if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+            sudo usermod -aG crontab "$USER" 2>/dev/null && {
+                substep "Added $USER to the crontab group (fixes NoNewPrivs crontab permission error)"
+                migrated=$((migrated + 1))
+                warn "Group membership change takes effect at next login. Run 'newgrp crontab' or restart the Lobster service to apply immediately."
+            } || warn "Failed to add $USER to crontab group — run: sudo usermod -aG crontab $USER"
+        else
+            warn "Cannot add $USER to crontab group (sudo unavailable). Run manually: sudo usermod -aG crontab $USER"
+            warn "Until this is done, create_scheduled_job/update_scheduled_job/delete_scheduled_job will fail to sync crontab."
+        fi
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
