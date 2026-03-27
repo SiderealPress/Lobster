@@ -615,7 +615,7 @@ All session objects (in both `snapshot` and individual events) share this shape,
 | `last_seen_at` | string\|null | ISO-8601 UTC timestamp of last heartbeat |
 | `trigger_message_id` | string\|null | ID of the inbox message that triggered this session. **PII-sensitive**. |
 | `reply_message_ids` | string\|null | JSON-encoded list of outgoing message IDs sent in reply |
-| `notified_at` | string\|null | ISO-8601 UTC timestamp when Drew was notified of completion |
+| `notified_at` | string\|null | ISO-8601 UTC timestamp when the user was notified of completion |
 | `trigger_snippet` | string\|null | Short snippet of the triggering message text. **PII-sensitive**. |
 
 **Note:** `elapsed_seconds` was removed in an earlier iteration (unused by frontend, wastes bandwidth).

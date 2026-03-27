@@ -57,7 +57,7 @@ class TestSessionExpiredHandling:
         assert is_system_event(evt) is True
 
     def test_session_expired_is_routable(self):
-        """Session expired events must reach Lobster so Drew can be notified."""
+        """Session expired events must reach Lobster so the user can be notified."""
         evt = {
             "type": "system",
             "subtype": "session_expired",

@@ -734,10 +734,10 @@ class TestOwner:
         """ensure_owner_toml should create the file if missing."""
         from user_model.owner import ensure_owner_toml, read_owner
         path = tmp_path / "owner.toml"
-        data = ensure_owner_toml(name="Drew", owner_file=path)
+        data = ensure_owner_toml(name="TestUser", owner_file=path)
         assert path.exists()
         read_back = read_owner(path)
-        assert read_back.get("owner", {}).get("name") == "Drew"
+        assert read_back.get("owner", {}).get("name") == "TestUser"
 
 
 # ---------------------------------------------------------------------------
@@ -1125,9 +1125,9 @@ class TestProfileFiles:
         """Should write and read profile with YAML front matter."""
         from user_model.profile import write_profile_file, read_profile_file
         path = tmp_path / "test.md"
-        write_profile_file(path, {"name": "Drew", "tz": "PST"}, "# Hello\nBody text.")
+        write_profile_file(path, {"name": "TestUser", "tz": "PST"}, "# Hello\nBody text.")
         result = read_profile_file(path)
-        assert result["meta"]["name"] == "Drew"
+        assert result["meta"]["name"] == "TestUser"
         assert "Body text" in result["body"]
 
     def test_get_compact_context(self):
@@ -1137,7 +1137,7 @@ class TestProfileFiles:
         # Profile files were created in Phase 3b, so this should work
         assert isinstance(ctx, str)
         if ctx:  # May be empty in CI
-            assert "Drew" in ctx
+            assert ctx  # non-empty string check; owner name is not hardcoded
 
     def test_read_all_profiles(self):
         """read_all_profiles should return dict with expected keys."""

@@ -113,7 +113,7 @@ while IFS= read -r agent_id; do
   "user_id": 0,
   "username": "lobster-system",
   "user_name": "Agent Relay",
-  "text": "Agent relay check: ${SAFE_ID} output file appears complete. Check task-notifications and relay results to Drew.",
+  "text": "Agent relay check: ${SAFE_ID} output file appears complete. Check task-notifications and relay results to the user.",
   "timestamp": "${TIMESTAMP}"
 }
 EOF
