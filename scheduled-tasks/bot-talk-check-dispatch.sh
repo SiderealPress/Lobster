@@ -81,6 +81,7 @@ BOT_TALK_API_URL="${BOT_TALK_API_URL:-http://46.224.41.108:4242}"
 HAS_NEW_MESSAGES=0
 API_ERROR=0
 
+ENCODED_TS=""
 if [ -n "$LAST_TS" ]; then
     # URL-encode the timestamp for the query string
     ENCODED_TS=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "$LAST_TS" 2>/dev/null || echo "")
@@ -100,20 +101,32 @@ if [ "$HAS_NEW_MESSAGES" -eq 0 ] && [ -n "$ENCODED_TS" ]; then
         exec "$SCRIPT_DIR/dispatch-job.sh" "$JOB_NAME"
     fi
 
-    # Count messages in the response array
+    # Count messages in the response array.
+    # On JSON parse failure, fall through to dispatch (fail-safe: err on the side of running the job).
+    # set -e is disabled around this call so we can inspect the exit code ourselves.
+    set +e
     MSG_COUNT=$(python3 -c "
 import json, sys
+data_str = sys.argv[1]
 try:
-    data = json.loads(sys.argv[1])
-    # API returns either a list directly or {\"messages\": [...]}
-    if isinstance(data, list):
-        msgs = data
-    else:
-        msgs = data.get('messages', [])
-    print(len(msgs))
-except Exception:
-    print(0)
-" "$RESPONSE" 2>/dev/null || echo "0")
+    data = json.loads(data_str)
+except json.JSONDecodeError:
+    # Invalid JSON from API — signal parse failure so caller falls through to dispatch
+    sys.exit(2)
+# API returns either a list directly or {\"messages\": [...]}
+if isinstance(data, list):
+    msgs = data
+else:
+    msgs = data.get('messages', [])
+print(len(msgs))
+" "$RESPONSE" 2>/dev/null)
+    PARSE_EXIT=$?
+    set -e
+
+    if [ "$PARSE_EXIT" -ne 0 ]; then
+        echo "[$START_ISO] WARNING: bot-talk API returned invalid JSON — dispatching to let job handle it" | tee "$LOG_FILE"
+        exec "$SCRIPT_DIR/dispatch-job.sh" "$JOB_NAME"
+    fi
 
     if [ "$MSG_COUNT" -gt 0 ]; then
         HAS_NEW_MESSAGES=1
