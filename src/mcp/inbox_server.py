@@ -588,13 +588,36 @@ LOBSTER_STATE_FILE = CONFIG_DIR / "lobster-state.json"
 # - This prevents the health-check from triggering a restart loop when the state
 #   file is left in a transient mode (e.g. when using claude-wrapper.exp which
 #   does not itself write the state file).
+#
+# Guard: skip the reset if state is already "active" and the file was written
+# within the last 30 minutes.  That pattern indicates a mid-session MCP
+# reconnect (e.g. Claude Code auto-updating), not a fresh boot.  Without this
+# guard, the reconnect path re-writes booted_at/woke_at, confusing the health
+# check about session age and causing unnecessary restarts (issue #910).
 _TRANSIENT_MODES = {"hibernate", "starting", "restarting", "waking"}
+_RECONNECT_GRACE_SECONDS = 30 * 60  # 30 minutes
+
 
 def _reset_state_on_startup():
     try:
         if LOBSTER_STATE_FILE.exists():
             data = json.loads(LOBSTER_STATE_FILE.read_text())
-            if data.get("mode") in _TRANSIENT_MODES:
+            mode = data.get("mode", "active")
+
+            # Skip reset for reconnects: if mode is already "active" and the
+            # state file is fresh (< 30 min old), this is a mid-session MCP
+            # restart, not a fresh dispatcher boot.  Rewriting booted_at/woke_at
+            # would make the health check think this is a brand-new session and
+            # apply incorrect freshness thresholds.
+            if mode not in _TRANSIENT_MODES:
+                try:
+                    file_age = time.time() - LOBSTER_STATE_FILE.stat().st_mtime
+                    if file_age < _RECONNECT_GRACE_SECONDS:
+                        return  # Mid-session reconnect — leave state untouched
+                except OSError:
+                    pass  # Can't stat — fall through to normal reset
+
+            if mode in _TRANSIENT_MODES:
                 data["mode"] = "active"
                 data["woke_at"] = datetime.now(timezone.utc).isoformat()
                 tmp = LOBSTER_STATE_FILE.parent / f".lobster-state-{os.getpid()}.tmp"
@@ -602,6 +625,7 @@ def _reset_state_on_startup():
                 tmp.rename(LOBSTER_STATE_FILE)
     except Exception:
         pass  # If we can't reset, _read_lobster_state defaults to "active" anyway
+
 
 _reset_state_on_startup()
 
