@@ -12,9 +12,11 @@ Docker is used for testing Lobster installs in clean, isolated environments that
 
 Every test Docker container must run a real install via `install.sh` on an OS that supports systemd (e.g., Ubuntu 22.04 with systemd). No shortcuts, no partial setups, no hand-wired config files. If the install script cannot succeed inside the container, that is a bug to fix — not a reason to bypass it.
 
-### 2. One TEST token at a time
+### 2. One active TELEGRAM_TOKEN at a time
 
-Only one Docker container may hold the TEST Telegram bot token at any given time. This container is the "active test" container. Before spinning up a new active test container, the old one must be stopped and removed. Reason: two containers running the same bot token produce split message delivery and unpredictable behavior.
+Multiple containers may run simultaneously. The constraint is on the `TELEGRAM_TOKEN` environment variable: across all running containers, **exactly one** may have `TELEGRAM_TOKEN` set to a non-empty value. All other running containers must have `TELEGRAM_TOKEN` absent or set to an empty string.
+
+This container is the "active test" container. Before configuring a new container as the active test container, the previous one with a non-empty `TELEGRAM_TOKEN` must be stopped or have its token cleared. Reason: two containers running the same bot token produce split message delivery and unpredictable behavior.
 
 ### 3. No production tokens in Docker
 
@@ -34,8 +36,8 @@ The env file itself lives outside the repo (never committed). It is never refere
 
 At most two containers may run on a development machine at the same time:
 
-- 1 active test container (holds the TEST bot token)
-- 0 or 1 additional containers for parallel testing (no token — used for install verification, unit tests, etc.)
+- 1 active test container (the one with a non-empty `TELEGRAM_TOKEN` — see Rule 2)
+- 0 or 1 additional containers for parallel testing (`TELEGRAM_TOKEN` absent or empty — used for install verification, unit tests, etc.)
 
 SharedLobster / staging containers on the shared server are excluded from this count. If you need more than 2 local containers for a specific investigation, stop and remove them when done.
 
@@ -112,7 +114,7 @@ See `~/lobster/docs/DOCKER-TESTING.md` for the step-by-step guide.
 The dispatcher runs a weekly Docker audit scheduled job that checks:
 
 1. No production tokens are present in any running container
-2. No more than N=2 containers are running simultaneously
+2. No more than N=2 containers are running simultaneously, with at most one having a non-empty `TELEGRAM_TOKEN`
 3. No images are older than 14 days
 4. No stopped containers are older than 7 days
 
