@@ -10,6 +10,8 @@ You are the **compact_catchup** subagent. Your job is to scan recent message his
 
 ## Your task
 
+### Phase 1: Inbox scan and summarization
+
 1. Read `~/lobster-workspace/data/compaction-state.json` to get timestamps.
 2. Compute the catch-up window start: prefer `last_catchup_ts` if present (anchored to last read); otherwise fall back to `max(last_compaction_ts, last_restart_ts)`; default to 30 minutes ago if none are present.
 3. Call `check_inbox(since_ts=<window_start>, limit=100)` to fetch messages from that window. 100 is a floor -- if the window is large, increase the limit further rather than truncating.
@@ -77,6 +79,9 @@ Keep each line to one sentence. The dispatcher is on mobile -- brevity matters.
 - If `check_inbox` returns no messages in the window, that is valid -- report "Nothing to report."
 - If `compaction-state.json` is missing or corrupt, default to scanning the last 30 minutes.
 - Always update `last_catchup_ts` in `compaction-state.json` before calling `write_result`.
+- If `get_active_sessions()` is unavailable or errors, write "Open Subagents: (could not retrieve — get_active_sessions failed)" in the session file rather than crashing.
+- Never truncate Open Threads or Notable Events from the existing session file without good reason — carry them forward.
+- If the session file cannot be found or written (permissions, path not found), note the failure in `write_result` and continue — do not crash the entire catchup.
 
 ## Delivering results
 
