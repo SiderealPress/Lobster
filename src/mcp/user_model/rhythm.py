@@ -1,7 +1,7 @@
 """
 Activity Rhythm: track hourly/daily message patterns.
 
-Builds a model of when Drew is most active, most responsive, and most engaged.
+Builds a model of when the user is most active, most responsive, and most engaged.
 This is used by the inference engine to adjust attention scoring and response
 style hints based on time-of-day context.
 

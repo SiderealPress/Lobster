@@ -107,7 +107,7 @@ def is_routable(event: dict, lobster_jid: str = "") -> bool:
 
     Rules:
     - fromMe messages are never routed
-    - System events are always routed (bridge notifications to Drew)
+    - System events are always routed (bridge notifications to the user)
     - DMs (non-group) are always routed
     - Group messages are routed only if mentions_lobster is True
     """

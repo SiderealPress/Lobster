@@ -55,15 +55,15 @@ final path.
 3. **If new messages found:**
    - Format each message with a directional prefix:
      - SaharLobster messages: `📤 SaharLobster → Albert: <content>`
-     - AlbertLobster messages: `📥 AlbertLobster → Sahar: <content>`
-   - Send a single Telegram notification to Sahar (chat_id=ADMIN_CHAT_ID_REDACTED) with the full
+     - AlbertLobster messages: `📥 AlbertLobster → the owner: <content>`
+   - Send a single Telegram notification to the owner (chat_id=ADMIN_CHAT_ID_REDACTED) with the full
      conversation block, e.g.:
 
      ```
      New bot-talk activity:
 
      📤 SaharLobster → Albert: Hello!
-     📥 AlbertLobster → Sahar: Hi back!
+     📥 AlbertLobster → the owner: Hi back!
      ```
 
    - Update `last_message_ts` to the latest timestamp across both senders.
