@@ -416,6 +416,12 @@ main_loop = None
 # Tracks files currently being processed to prevent duplicate sends
 _processing_files: set[str] = set()
 
+# Lock serialising the _processing_files check-and-add in _schedule_processing.
+# Without this, two watchdog events for the same file (e.g. IN_MOVED_TO and
+# IN_MODIFY arriving close together) could both pass the `not in` guard before
+# either has added the path, causing duplicate Telegram delivery (#922).
+_processing_files_lock = threading.Lock()
+
 # Lock to prevent concurrent wake attempts (race condition: two simultaneous
 # incoming messages while hibernating should only trigger one Claude spawn)
 _wake_lock = threading.Lock()
@@ -1379,12 +1385,17 @@ class OutboxHandler(FileSystemEventHandler):
     def _schedule_processing(self, filepath):
         if filepath.endswith('.json') and not filepath.endswith('.tmp'):
             if bot_app and main_loop and main_loop.is_running():
-                if filepath not in _processing_files:
+                # Hold the lock for the full check-and-add so two watchdog
+                # events for the same file cannot both pass the guard before
+                # either has added the path (TOCTOU — fixes #922).
+                with _processing_files_lock:
+                    if filepath in _processing_files:
+                        return
                     _processing_files.add(filepath)
-                    asyncio.run_coroutine_threadsafe(
-                        self.process_reply(filepath),
-                        main_loop
-                    )
+                asyncio.run_coroutine_threadsafe(
+                    self.process_reply(filepath),
+                    main_loop
+                )
 
     def on_created(self, event):
         if event.is_directory:
