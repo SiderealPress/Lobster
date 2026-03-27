@@ -11,6 +11,7 @@ Provides tools for Claude Code to interact with the message queue:
 """
 
 import asyncio
+import contextvars
 import json
 import logging
 from logging.handlers import RotatingFileHandler
@@ -715,6 +716,34 @@ if not SCHEDULED_JOBS_FILE.exists():
 # Record the moment this server process started. Used by stale-session cleanup
 # to distinguish output files from the current run vs a previous (dead) run.
 _SERVER_START_TIME = datetime.now(timezone.utc)
+
+# ---------------------------------------------------------------------------
+# HTTP session identity — dispatcher session tagging (Option A)
+# ---------------------------------------------------------------------------
+#
+# When running in HTTP transport mode, multiple Claude Code sessions can
+# connect simultaneously (dispatcher + subagents). The server needs to know
+# which session is the dispatcher so health checks and the reconciler can
+# verify the dispatcher is alive.
+#
+# Strategy: tag-on-first-use. When wait_for_messages is called (a
+# dispatcher-exclusive tool), the current MCP session ID is recorded as the
+# dispatcher session. The session ID is propagated to tool handlers via a
+# contextvars.ContextVar set in the ASGI request handler before dispatching
+# to session_manager.handle_request.
+#
+# _current_http_session_id: ContextVar populated per-request in _mcp_handler
+# _dispatcher_session_id: module-level str, set on first wait_for_messages call
+# _http_session_manager: reference to the StreamableHTTPSessionManager instance
+#   (set in main() when HTTP mode is active), used by /dispatcher-session to
+#   check whether the tagged session is still alive in _server_instances.
+# ---------------------------------------------------------------------------
+
+_current_http_session_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "_current_http_session_id", default=None
+)
+_dispatcher_session_id: str | None = None
+_http_session_manager = None  # Set to StreamableHTTPSessionManager in main() when HTTP mode is active
 
 # Initialize SQLite agent session store (idempotent, runs JSON migration on first boot)
 try:
@@ -2821,8 +2850,19 @@ def _prepend_sessions_prefix(prefix: str, results: list[TextContent]) -> list[Te
 
 async def handle_wait_for_messages(args: dict) -> list[TextContent]:
     """Block until new messages arrive in inbox, or return immediately if messages exist."""
+    global _dispatcher_session_id
     timeout = args.get("timeout", 72000)
     hibernate_on_timeout = args.get("hibernate_on_timeout", False)
+
+    # Tag the calling HTTP session as the dispatcher session (Option A).
+    # wait_for_messages is dispatcher-exclusive, so the first caller that reaches
+    # this point owns the dispatcher role for this server lifetime.  We only set
+    # the tag once: if the dispatcher reconnects with a new session ID after a CC
+    # restart, subsequent calls will update the tag so the new session is tracked.
+    session_id = _current_http_session_id.get()
+    if session_id is not None and session_id != _dispatcher_session_id:
+        _dispatcher_session_id = session_id
+        log.info(f"[session-tag] Dispatcher session tagged: {session_id}")
 
     # Touch heartbeat at start - signals Claude is alive and waiting for messages
     touch_heartbeat()
@@ -7802,6 +7842,11 @@ async def main():
 
         session_manager = StreamableHTTPSessionManager(app=server, stateless=False)
 
+        # Publish the session_manager reference so tool handlers (and /dispatcher-session)
+        # can inspect live session state without importing from main().
+        global _http_session_manager
+        _http_session_manager = session_manager
+
         @contextlib.asynccontextmanager
         async def _lifespan(app: Starlette):
             async with session_manager.run():
@@ -7815,7 +7860,32 @@ async def main():
                 response = Response('{"ok":true}', status_code=200, media_type="application/json")
                 await response(scope, receive, send)
             elif path == "/mcp":
-                await session_manager.handle_request(scope, receive, send)
+                # Propagate the MCP session ID into the per-request context so
+                # tool handlers can read it via _current_http_session_id.get().
+                # The header is set by the client on all requests after the
+                # initial handshake (the first request has no session ID yet,
+                # which is fine — wait_for_messages is never the first call).
+                incoming_session_id = request.headers.get("mcp-session-id")
+                token = _current_http_session_id.set(incoming_session_id)
+                try:
+                    await session_manager.handle_request(scope, receive, send)
+                finally:
+                    _current_http_session_id.reset(token)
+            elif path == "/dispatcher-session":
+                # Returns the currently tagged dispatcher session ID and whether
+                # that session is still active in the session manager.
+                # Used by health checks and the reconciler to verify the dispatcher
+                # is connected.  Returns 200 with JSON payload in all cases;
+                # callers should check the "active" field.
+                dsid = _dispatcher_session_id
+                active = (
+                    dsid is not None
+                    and dsid in getattr(session_manager, "_server_instances", {})
+                )
+                import json as _json
+                payload = _json.dumps({"session_id": dsid, "active": active})
+                response = Response(payload, status_code=200, media_type="application/json")
+                await response(scope, receive, send)
             else:
                 response = Response("Not Found", status_code=404)
                 await response(scope, receive, send)
