@@ -1231,10 +1231,14 @@ MARKER="# LOBSTER-SCHEDULED"
 EXISTING=$(crontab -l 2>/dev/null | grep -v "$MARKER" | grep -v "$RUNNER" || true)
 
 if command -v jq &> /dev/null; then
-    CRON_ENTRIES=$(jq -r --arg runner "$RUNNER" --arg marker "$MARKER" '
+    CRON_ENTRIES=$(jq -r --arg runner "$RUNNER" --arg marker "$MARKER" \
+        --arg repo_dir "$REPO_DIR" '
         .jobs | to_entries[] |
         select(.value.enabled == true) |
-        "\(.value.schedule) \($runner) \(.key) \($marker)"
+        (.value.runner // $runner) as $job_runner |
+        # Expand $REPO_DIR placeholder so per-job runners can reference the install dir
+        ($job_runner | gsub("\\$REPO_DIR"; $repo_dir)) as $resolved_runner |
+        "\(.value.schedule) \($resolved_runner) \(.key) \($marker)"
     ' "$JOBS_FILE" 2>/dev/null || echo "")
 else
     CRON_ENTRIES=$(python3 -c "
@@ -1243,11 +1247,15 @@ import sys
 try:
     with open('$JOBS_FILE', 'r') as f:
         data = json.load(f)
+    repo_dir = '$REPO_DIR'
+    default_runner = '$RUNNER'
     for name, job in data.get('jobs', {}).items():
         if job.get('enabled', True):
             schedule = job.get('schedule', '')
             if schedule:
-                print(f\"{schedule} $RUNNER {name} $MARKER\")
+                runner = job.get('runner', default_runner)
+                runner = runner.replace('\$REPO_DIR', repo_dir)
+                print(f\"{schedule} {runner} {name} $MARKER\")
 except Exception as e:
     sys.stderr.write(f'Error: {e}\n')
 " 2>/dev/null || echo "")
