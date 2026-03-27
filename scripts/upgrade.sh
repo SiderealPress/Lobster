@@ -1334,7 +1334,7 @@ with open(path, 'w') as f:
         ' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
         if [ "${has_file_protect:-0}" = "0" ] || [ "${has_file_protect:-0}" = "" ]; then
             TMP_SETTINGS=$(mktemp)
-            jq --arg cmd "python3 $INSTALL_DIR/hooks/system-file-protect.py" \
+            jq --arg cmd "python3 $LOBSTER_DIR/hooks/system-file-protect.py" \
                '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
                 "matcher": "Edit|Write|NotebookEdit",
                 "hooks": [{
@@ -1356,7 +1356,7 @@ with open(path, 'w') as f:
         ' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
         if [ "${has_auditor:-0}" = "0" ] || [ "${has_auditor:-0}" = "" ]; then
             TMP_SETTINGS=$(mktemp)
-            jq --arg cmd "python3 $INSTALL_DIR/hooks/require-auditor-context-update.py" \
+            jq --arg cmd "python3 $LOBSTER_DIR/hooks/require-auditor-context-update.py" \
                '.hooks.SubagentStop = (.hooks.SubagentStop // []) + [{
                 "matcher": "",
                 "hooks": [{
@@ -1441,9 +1441,9 @@ with open(path, 'w') as f:
             | length
         ' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
         if [ "${has_secret_scanner:-0}" = "0" ] || [ "${has_secret_scanner:-0}" = "" ]; then
-            chmod +x "$INSTALL_DIR/hooks/secret-scanner.py" 2>/dev/null || true
+            chmod +x "$LOBSTER_DIR/hooks/secret-scanner.py" 2>/dev/null || true
             TMP_SETTINGS=$(mktemp)
-            jq --arg cmd "python3 $INSTALL_DIR/hooks/secret-scanner.py" \
+            jq --arg cmd "python3 $LOBSTER_DIR/hooks/secret-scanner.py" \
                '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
                 "matcher": "mcp__lobster-inbox__send_reply|Bash",
                 "hooks": [{
@@ -1533,13 +1533,13 @@ EOF
     # via is_dispatcher() — the hook is a no-op for anything that is not the dispatcher.
     if [ -f "$CLAUDE_SETTINGS" ]; then
         if ! jq -e '.hooks.Stop[]? | select(.hooks[]?.command | contains("require-wait-for-messages"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
-            chmod +x "$INSTALL_DIR/hooks/require-wait-for-messages.py" 2>/dev/null || true
+            chmod +x "$LOBSTER_DIR/hooks/require-wait-for-messages.py" 2>/dev/null || true
             TMP_SETTINGS=$(mktemp)
             jq '.hooks.Stop = (.hooks.Stop // []) + [{
                 "matcher": "",
                 "hooks": [{
                     "type": "command",
-                    "command": "python3 '"$INSTALL_DIR"'/hooks/require-wait-for-messages.py",
+                    "command": "python3 '"$LOBSTER_DIR"'/hooks/require-wait-for-messages.py",
                     "timeout": 10
                 }]
             }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
@@ -1566,13 +1566,13 @@ EOF
     # threshold. Skips compaction events and subagent sessions.
     if [ -f "$CLAUDE_SETTINGS" ]; then
         if ! jq -e '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("on-fresh-start"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
-            chmod +x "$INSTALL_DIR/hooks/on-fresh-start.py" 2>/dev/null || true
+            chmod +x "$LOBSTER_DIR/hooks/on-fresh-start.py" 2>/dev/null || true
             TMP_SETTINGS=$(mktemp)
             jq '.hooks.SessionStart = (.hooks.SessionStart // []) + [{
                 "matcher": "",
                 "hooks": [{
                     "type": "command",
-                    "command": "python3 '"$INSTALL_DIR"'/hooks/on-fresh-start.py",
+                    "command": "python3 '"$LOBSTER_DIR"'/hooks/on-fresh-start.py",
                     "timeout": 30
                 }]
             }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
