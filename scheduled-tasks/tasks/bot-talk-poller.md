@@ -57,10 +57,10 @@ the final path.
      chronologically).
    - Format each message with a directional prefix:
      - SaharLobster messages: `📤 SaharLobster → Albert: <content>`
-     - AlbertLobster messages: `📥 AlbertLobster → Sahar: <content>`
+     - AlbertLobster messages: `📥 AlbertLobster → the owner: <content>`
    - For each AlbertLobster message, also post a comment on the relevant GitHub issue
      in `sayhar/project-lobstertalk` if actionable.
-   - Notify Sahar via Telegram (chat_id=ADMIN_CHAT_ID_REDACTED) with the full conversation block
+   - Notify the owner via Telegram (chat_id=ADMIN_CHAT_ID_REDACTED) with the full conversation block
      showing both sides.
    - Update `last_message_ts` in state file to the latest seen message timestamp
      (across both senders).
@@ -78,22 +78,22 @@ the final path.
    for any new entries since last run.
 
 5. If the HTTP API is down (connection reset), log the failure and retry next cycle —
-   do not alert Sahar for transient API outages unless it has been down for more than
+   do not alert the owner for transient API outages unless it has been down for more than
    30 minutes.
 
 6. Write updated state file.
 
 ## Telegram Notification Format
 
-When there are new messages, send a single notification to Sahar showing the full
+When there are new messages, send a single notification to the owner showing the full
 conversation block. Example:
 
 ```
 New bot-talk activity:
 
 📤 SaharLobster → Albert: What do you think about the new plan?
-📥 AlbertLobster → Sahar: I reviewed it. Looks reasonable, a few questions though.
-📥 AlbertLobster → Sahar: Can you clarify item 3?
+📥 AlbertLobster → the owner: I reviewed it. Looks reasonable, a few questions though.
+📥 AlbertLobster → the owner: Can you clarify item 3?
 📤 SaharLobster → Albert: Sure, item 3 means we delay the deployment.
 ```
 
@@ -101,7 +101,7 @@ Messages are sorted chronologically so the conversation is readable top-to-botto
 
 ## Telegram Notification Rules
 
-Only send a Telegram message to Sahar (chat_id=ADMIN_CHAT_ID_REDACTED) when there is genuinely new content:
+Only send a Telegram message to the owner (chat_id=ADMIN_CHAT_ID_REDACTED) when there is genuinely new content:
 - One or more new messages (from either SaharLobster or AlbertLobster) since last run
 - A new actionable GitHub comment requiring attention
 - The HTTP API has been continuously down for more than 30 minutes

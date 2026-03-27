@@ -6,7 +6,7 @@
 
 ## Goal
 
-Build `model_infer`: a context-aware prediction function that estimates Drew's current state and likely needs, given the current context. Results are cached for 30 minutes to avoid redundant computation.
+Build `model_infer`: a context-aware prediction function that estimates the user's current state and likely needs, given the current context. Results are cached for 30 minutes to avoid redundant computation.
 
 ## What `model_infer` Predicts
 
@@ -16,7 +16,7 @@ Produces:
 1. **Mood estimate** — VAD state inferred from recent observations + emotional baseline
 2. **Response style hint** — preferred length, tone, and detail level for this interaction
 3. **Likely next request type** — follow-up, new topic, action request, or information request
-4. **Value alignment score** — if a task is provided, how well it aligns with Drew's values
+4. **Value alignment score** — if a task is provided, how well it aligns with the user's values
 
 All predictions carry confidence scores. Low confidence is reported honestly rather than fabricated.
 
@@ -118,7 +118,7 @@ def infer_response_style(
     1. Active preference nodes for 'response_style', 'concise', 'detail'
     2. Current mood (high arousal → prefer brief; high dominance → prefer direct)
     3. Time-of-day (morning/late night → prefer brief; afternoon → more receptive to detail)
-    4. Activity rhythm (is Drew in a normally active period? → more engaged)
+    4. Activity rhythm (is the user in a normally active period? → more engaged)
 
     Default: brief + direct (matches observed behavior from owner.toml defaults)
 
@@ -144,7 +144,7 @@ def predict_next_request(
 ) -> LikelyNextRequest:
     """
     Predict likely next request type from:
-    1. Recent follow-up observations (is Drew in a follow-up pattern?)
+    1. Recent follow-up observations (is the user in a follow-up pattern?)
     2. Recent topic observations (what was just discussed?)
     3. Time since last message (long gap → more likely new topic)
     4. High-energy observations (urgency signals → likely action request)
@@ -168,7 +168,7 @@ def score_value_alignment(
     contexts: list[str] | None = None,
 ) -> ValueAlignmentScore:
     """
-    Score how well a task aligns with Drew's values.
+    Score how well a task aligns with the user's values.
 
     Algorithm:
     1. Get all value nodes (NodeType.VALUE) with confidence > 0.5

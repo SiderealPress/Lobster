@@ -3,7 +3,7 @@
 Bot-talk mirroring module.
 
 Mirrors Lobster's inbound and outbound messages to the shared bot-talk channel
-so Albert's Lobster can observe what Sahar's Lobster is doing.
+so Albert's Lobster can observe what the owner's Lobster is doing.
 
 Architecture
 ------------
