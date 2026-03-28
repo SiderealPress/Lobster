@@ -218,7 +218,7 @@ When you complete your task, call `write_task_output` with:
 Example output:
 ```
 Processed 2 emails, skipped 1 (personal).
-Email 1: jane@acme.com "Q4 proposal" — created CRM contact, no remote mention, reply drafted.
-Email 2: bob@supplier.com "Invoice #123" — found existing CRM contact, no remote mention, reply drafted.
-Skipped: personal@gmail.com (personal topic).
+Email 1: sender@example-company.com "Q4 proposal" — created CRM contact, no remote mention, reply drafted.
+Email 2: vendor@supplier-example.com "Invoice #123" — found existing CRM contact, no remote mention, reply drafted.
+Skipped: contact@personal-example.com (personal topic).
 ```
