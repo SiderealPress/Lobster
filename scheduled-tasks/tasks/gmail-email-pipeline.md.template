@@ -7,20 +7,22 @@
 
 You are running as a scheduled task. Poll Gmail for new unread emails, apply a
 sensitivity filter, look up senders in Twenty CRM, create/update contacts,
-draft suggested replies, notify via bot-talk when Albert Alexander is mentioned,
-and send Sahar a Telegram summary.
+draft suggested replies, notify via bot-talk when the configured remote identity is
+mentioned, and send the owner a Telegram summary.
 
 ## Configuration
 
 - **Gmail**: use `gws` CLI (already authenticated)
-- **Twenty CRM API**: POST to `https://honest-navy-moose.twenty.com/graphql`
+- **Twenty CRM API**: POST to `{{TWENTY_CRM_API_URL}}`
   - API key: read `TWENTY_API_KEY` from `~/lobster-config/config.env`; if missing, skip Twenty enrichment and log a warning
-- **Bot-talk**: POST to `http://46.224.41.108:4242/message`
+- **Bot-talk**: POST to `{{LOBSTERTALK_HOST}}/message`
   - Token lookup chain: `~/lobster-workspace/data/bot-talk-token.txt`, then
     `BOT_TALK_TOKEN` in `~/messages/config/config.env`, then
     `BOT_TALK_TOKEN` in `~/lobster-config/config.env`
-- **Sahar's Telegram chat_id**: `ADMIN_CHAT_ID_REDACTED`
+- **Owner's Telegram chat_id**: `{{TELEGRAM_CHAT_ID}}`
 - **Processed emails tracker**: `~/lobster-workspace/data/gmail-processed.json`
+- **Remote identity to watch for mentions**: `{{REMOTE_LOBSTER_IDENTITY}}`
+  (set `BOT_TALK_REMOTE_IDENTITY` in config.env)
 
 ## Sensitivity Filter
 
@@ -97,7 +99,7 @@ query FindPerson($email: String!) {
 }
 ```
 
-POST to `https://honest-navy-moose.twenty.com/graphql` with:
+POST to `{{TWENTY_CRM_API_URL}}` with:
 - Header: `Authorization: Bearer <TWENTY_API_KEY>`
 - Header: `Content-Type: application/json`
 - Body: `{"query": "<query>", "variables": {"email": "<sender_email>"}}`
@@ -129,25 +131,25 @@ If the person was found and has no company set, try to update with detected comp
 Compose a short suggested reply (2-4 sentences) appropriate to the email subject and
 body. The reply should be professional and concise. Label it clearly as a draft suggestion.
 
-### Step 8: Check for Albert Alexander mention
+### Step 8: Check for remote identity mention
 
-Scan the email subject and body for any mention of "Albert", "Albert Alexander",
-"AlbertLobster", or "albert@" (case-insensitive).
+Scan the email subject and body for any mention of the configured remote identity
+(`{{REMOTE_LOBSTER_IDENTITY}}`, case-insensitive, and common variations).
 
 If found, send a bot-talk message:
 
 ```python
 payload = {
-    "sender": "SaharLobster",
+    "sender": "{{LOCAL_LOBSTER_IDENTITY}}",
     "tier": "TIER-0",
     "genre": "status-update",
-    "content": f"[Gmail Pipeline] Email from {sender_email} mentions Albert. Subject: {subject[:100]}"
+    "content": f"[Gmail Pipeline] Email from {sender_email} mentions remote identity. Subject: {subject[:100]}"
 }
 headers = {"X-Bot-Token": token}
-requests.post("http://46.224.41.108:4242/message", json=payload, headers=headers, timeout=5)
+requests.post("{{LOBSTERTALK_HOST}}/message", json=payload, headers=headers, timeout=5)
 ```
 
-### Step 9: Send Telegram summary to Sahar
+### Step 9: Send Telegram summary to owner
 
 Write a message file to `~/messages/inbox/` in this format:
 
@@ -158,7 +160,7 @@ from pathlib import Path
 msg = {
     "id": str(uuid.uuid4()),
     "source": "gmail-pipeline",
-    "chat_id": ADMIN_CHAT_ID_REDACTED,
+    "chat_id": {{TELEGRAM_CHAT_ID}},
     "type": "text",
     "subtype": "scheduler_tick",
     "text": summary_text,
@@ -176,7 +178,7 @@ Gmail pipeline: {N} new email(s) processed
 From: {sender_name} <{sender_email}>
 Subject: {subject}
 CRM: {found in Twenty / created in Twenty}
-Albert mention: {yes/no}
+Remote mention: {yes/no}
 
 Suggested reply:
 {draft_reply}
@@ -216,7 +218,7 @@ When you complete your task, call `write_task_output` with:
 Example output:
 ```
 Processed 2 emails, skipped 1 (personal).
-Email 1: jane@acme.com "Q4 proposal" — created CRM contact, no Albert mention, reply drafted.
-Email 2: bob@supplier.com "Invoice #123" — found existing CRM contact, no Albert mention, reply drafted.
+Email 1: jane@acme.com "Q4 proposal" — created CRM contact, no remote mention, reply drafted.
+Email 2: bob@supplier.com "Invoice #123" — found existing CRM contact, no remote mention, reply drafted.
 Skipped: personal@gmail.com (personal topic).
 ```
