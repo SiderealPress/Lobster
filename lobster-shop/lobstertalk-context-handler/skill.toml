@@ -1,0 +1,37 @@
+[skill]
+name = "lobstertalk-context-handler"
+version = "1.0.0"
+description = "Handles incoming LobsterTalk context queries from AlbertLobster: looks up Drive, Gmail, and CRM then replies via bot-talk"
+author = "Sahar"
+category = "integration"
+
+[activation]
+mode = "triggered"
+triggers = ["/lobstertalk", "/botquery"]
+context_patterns = [
+    "when user asks about incoming bot-talk queries",
+    "when user wants to check lobstertalk handler status",
+    "when user asks what Albert's lobster asked about",
+    "when user asks about the context handler job",
+]
+
+[layering]
+priority = 50
+merge_strategy = "append"
+
+[provides]
+mcp_tools = []
+bot_commands = ["/lobstertalk", "/botquery"]
+
+[compatibility]
+enhances = []
+conflicts = []
+
+[dependencies]
+pip = []
+npm = []
+system = ["gws"]
+api_keys = []
+
+[dependencies.runtime]
+python = ">=3.11"
