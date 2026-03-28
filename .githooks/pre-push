@@ -5,6 +5,7 @@
 # Scans files being pushed for:
 #   - PII (emails, phone numbers, SSNs, credit cards, IP addresses)
 #   - Security issues (API keys, tokens, credentials, private keys)
+#   - Personal names: "sahar" and "drew" (as standalone names)
 #
 # IMPORTANT: This hook NEVER modifies files. It only reports violations and
 # blocks the push. The developer must fix issues manually. Silent file
@@ -16,6 +17,12 @@
 #   - Documentation: .md, .mdx, .rst, .txt, .adoc (examples/placeholders by design)
 #   - Binary files: detected by extension or git's binary check
 #   - Files in the allowlist: .githooks/security-allowlist.txt
+#
+# Name check allowlisted non-name occurrences:
+#   - "sayhar" (GitHub username) — allowed
+#   - "andrew" — allowed (drew as part of a larger name/word is ignored)
+#   - "withdrew", etc. — allowed (drew embedded in longer words)
+#   - Lines containing '# noname' — suppressed
 #
 # Allowlist: .githooks/security-allowlist.txt
 #   Format: filepath:pattern_description (one per line)
@@ -214,6 +221,19 @@ BLOCKED_FILES=(
 # Known false-positive email patterns to ignore
 EMAIL_ALLOWLIST='noreply@anthropic\.com|noreply@github\.com|example\.com|example\.org|test\.com|localhost'
 
+# Personal name patterns — block standalone name usage
+# Format: name@@regex@@description@@allowlist_regex
+# The allowlist_regex is checked AFTER the main match; if it matches the line,
+# the match is suppressed (allowed).
+#
+# "sahar": block as a standalone word; allow "sayhar" (GitHub username)
+# "drew":  block as a standalone word; allow when part of a larger word
+#          like "andrew", "withdrew", "outdrewn"
+NAME_PATTERNS=(
+    'sahar@@(?<![a-z])sahar(?![a-z])@@Personal name (sahar)@@sayhar'
+    'drew@@(?<![a-z])drew(?![a-z])@@Personal name (drew)@@andrew|withdrew|outdrewn'
+)
+
 #===============================================================================
 # Scanning Logic
 #===============================================================================
@@ -225,10 +245,11 @@ scan_file() {
     basename="$(basename "$filepath")"
     local ext="${basename##*.}"
 
-    # Skip this hook and the allowlist file
-    if [[ "$filepath" == ".githooks/security-allowlist.txt" || "$filepath" == ".githooks/pre-push" ]]; then
-        return 0
-    fi
+    # Skip hook files themselves and the allowlist (they may contain the patterns
+    # as legitimate documentation/regex strings)
+    case "$filepath" in
+        .githooks/*) return 0 ;;
+    esac
 
     # Apply file-level exclusions (test dirs, .md, binary extensions)
     if should_skip_file "$filepath"; then
@@ -371,6 +392,50 @@ scan_file() {
             echo "       Line: $line"
         done
         echo "       Fix: remove the secret, use env vars or a secret manager"
+        echo "       If false positive: add to .githooks/security-allowlist.txt"
+    done
+
+    # Scan personal name patterns
+    for pattern_def in "${NAME_PATTERNS[@]}"; do
+        local name regex desc allowlist_re
+        IFS= read -r name <<< "$(echo "$pattern_def" | awk -F'@@' '{print $1}')"
+        IFS= read -r regex <<< "$(echo "$pattern_def" | awk -F'@@' '{print $2}')"
+        IFS= read -r desc <<< "$(echo "$pattern_def" | awk -F'@@' '{print $3}')"
+        IFS= read -r allowlist_re <<< "$(echo "$pattern_def" | awk -F'@@' '{print $4}')"
+
+        # Case-insensitive match
+        local matches
+        matches="$(echo "$file_content" | grep -Pni -e "$regex" 2>/dev/null || true)"
+
+        if [ -z "$matches" ]; then
+            continue
+        fi
+
+        # Skip lines with inline suppression
+        matches="$(echo "$matches" | grep -Pv '#\s*noname\b' || true)"
+        if [ -z "$matches" ]; then
+            continue
+        fi
+
+        # Apply per-pattern allowlist (non-name words containing the pattern)
+        if [ -n "$allowlist_re" ]; then
+            matches="$(echo "$matches" | grep -Piv "$allowlist_re" || true)"
+            if [ -z "$matches" ]; then
+                continue
+            fi
+        fi
+
+        if is_allowlisted "$filepath" "$desc"; then
+            continue
+        fi
+
+        ISSUES_FOUND=$((ISSUES_FOUND + 1))
+        block "$filepath -> $desc"
+        echo "$matches" | head -3 | while read -r line; do
+            echo "       Line: $line"
+        done
+        echo "       Fix: replace the personal name with a role, alias, or initials"
+        echo "       Inline suppress: add '# noname' to the line"
         echo "       If false positive: add to .githooks/security-allowlist.txt"
     done
 }
