@@ -44,6 +44,15 @@ exists and correctly classifies the new session as the replacement dispatcher.
 The primary defence against this scenario is `lobster stop` (and `restart`)
 clearing the marker file; this check is a secondary safety net.
 
+## Stale JSONL file fix (issue #1009)
+
+`_stored_session_is_alive()` previously returned True for any existing JSONL
+file, even ones from sessions that ended weeks ago. This caused the hook to
+misclassify a fresh dispatcher restart as a subagent whenever the stale JSONL
+file happened to still exist on disk (Claude Code does not automatically delete
+old session files). The fix adds an age check: JSONL files older than 7 days
+are treated as dead regardless of whether they exist on disk.
+
 ## settings.json configuration
 
 Add this to ~/.claude/settings.json under "hooks" → "SessionStart":
@@ -67,6 +76,7 @@ via a "compact" matcher — the two hooks can coexist safely.
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 # Allow imports from both the hooks directory (session_role) and src/agents (session_store).
@@ -79,15 +89,27 @@ import session_role  # noqa: E402 — path insert must precede this
 from agents import session_store  # noqa: E402
 
 
+_MAX_SESSION_AGE_DAYS = 7  # JSONL files older than this are treated as dead sessions.
+
+
 def _stored_session_is_alive(stored_session_id: str) -> bool:
-    """Return True if the stored dispatcher session's JSONL file still exists.
+    """Return True if the stored dispatcher session's JSONL file still exists
+    and is recent enough to belong to a live session.
 
     Claude Code stores each session's conversation as
     ~/.claude/projects/<workspace-slug>/<session-id>.jsonl. If the file is
     gone, the session has ended and can no longer be the active dispatcher.
 
+    Age check (fix for issue #1009): JSONL files that exist but are older than
+    _MAX_SESSION_AGE_DAYS are treated as dead. Without this check, stale JSONL
+    files from sessions that ended weeks ago cause _is_dispatcher_session() to
+    misidentify the current session as a subagent — because the stored session
+    ID differs from the new session's ID, and _stored_session_is_alive() returns
+    True (file exists), so the new session is classified as a subagent rather
+    than the replacement dispatcher.
+
     Falls back to True (conservative / assume alive) if the project directory
-    cannot be determined or the JSONL file is not found via glob.
+    cannot be determined or file stat fails.
     """
     try:
         projects_dir = Path(os.path.expanduser("~/.claude/projects"))
@@ -95,6 +117,13 @@ def _stored_session_is_alive(stored_session_id: str) -> bool:
             return True  # can't determine — assume alive (conservative)
         # Search all workspace subdirectories for the session file.
         for jsonl in projects_dir.glob(f"*/{stored_session_id}.jsonl"):
+            # File exists — check its age before declaring it alive.
+            try:
+                age_days = (time.time() - jsonl.stat().st_mtime) / 86400
+                if age_days > _MAX_SESSION_AGE_DAYS:
+                    return False  # stale file — treat stored session as dead
+            except OSError:
+                pass  # stat failed — assume alive (conservative)
             return True
         # No JSONL file found anywhere — the stored session ended.
         return False
