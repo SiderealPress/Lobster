@@ -1847,6 +1847,20 @@ EOF
         fi
     fi
 
+    # Migration 47: Seed ifttt-rules.yaml in lobster-user-config/memory/canonical/
+    # Introduces the IFTTT-style behavioral rules store (issue #853). The file is
+    # machine-readable YAML, bounded to 100 rules, and managed autonomously by Lobster.
+    # Existing installs that predate this change need the file seeded so the dispatcher
+    # can load rules at startup without errors. The file starts empty (rules: []) so
+    # no behavioral change occurs on upgrade — rules accumulate over time.
+    local ifttt_src="$LOBSTER_DIR/memory/canonical-templates/ifttt-rules.yaml"
+    local ifttt_dst="$USER_CONFIG_DIR/memory/canonical/ifttt-rules.yaml"
+    if [ -f "$ifttt_src" ] && [ ! -f "$ifttt_dst" ]; then
+        cp "$ifttt_src" "$ifttt_dst"
+        substep "Seeded ifttt-rules.yaml into $USER_CONFIG_DIR/memory/canonical/"
+        migrated=$((migrated + 1))
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
