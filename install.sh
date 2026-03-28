@@ -1211,6 +1211,12 @@ fi
 # Install dispatch-job.sh (posts scheduled_reminder to inbox; no direct Claude invocation)
 chmod +x "$INSTALL_DIR/scheduled-tasks/dispatch-job.sh" || true
 
+# Install pre-check Layer 1 polling scripts (exit 0 when nothing new; no LLM cost)
+chmod +x "$INSTALL_DIR/scheduled-tasks/bot-talk-check-dispatch.sh" 2>/dev/null || true
+chmod +x "$INSTALL_DIR/scheduled-tasks/lobstertalk-incoming-check.sh" 2>/dev/null || true
+chmod +x "$INSTALL_DIR/scheduled-tasks/lobster-plans-check-dispatch.sh" 2>/dev/null || true
+chmod +x "$INSTALL_DIR/scheduled-tasks/gmail-check-dispatch.sh" 2>/dev/null || true
+
 # Create sync-crontab.sh
 cat > "$INSTALL_DIR/scheduled-tasks/sync-crontab.sh" << 'SYNCCRON'
 #!/bin/bash

@@ -1827,6 +1827,132 @@ EOF
         fi
     fi
 
+    # Migration 45: Wire two-layer polling architecture (issue #1059).
+    #
+    # What this does:
+    #   - Removes unified-channel-poller (silently failing, no task file)
+    #   - Re-enables 5 disabled polling jobs with correct schedules and runner fields
+    #   - Sets runner fields so sync-crontab.sh uses pre-check scripts where available
+    #   - Makes new pre-check scripts (lobster-plans-check-dispatch.sh,
+    #     gmail-check-dispatch.sh) executable
+    #   - Re-syncs crontab so all changes take effect
+    #
+    # After this migration:
+    #   bot-talk-poller          → bot-talk-check-dispatch.sh, */5 * * * *
+    #   lobstertalk-incoming-handler → lobstertalk-incoming-check.sh, */2 * * * *
+    #   lobstertalk-poller       → dispatch-job.sh, */30 * * * *
+    #   lobster-plans-poller     → lobster-plans-check-dispatch.sh, */30 * * * *
+    #   gmail-email-pipeline     → gmail-check-dispatch.sh, */30 * * * *
+    local JOBS_FILE_MIG45="$WORKSPACE_DIR/scheduled-jobs/jobs.json"
+    local PLANS_CHECK_SCRIPT="$INSTALL_DIR/scheduled-tasks/lobster-plans-check-dispatch.sh"
+    local GMAIL_CHECK_SCRIPT="$INSTALL_DIR/scheduled-tasks/gmail-check-dispatch.sh"
+    local LBTALK_INCOMING_SCRIPT="$INSTALL_DIR/scheduled-tasks/lobstertalk-incoming-check.sh"
+
+    if [ -f "$JOBS_FILE_MIG45" ]; then
+        local _mig45_needed=0
+        # Check if unified-channel-poller still exists or any of the 5 jobs are disabled
+        if python3 -c "
+import json, sys
+with open('$JOBS_FILE_MIG45') as f:
+    d = json.load(f)
+jobs = d.get('jobs', {})
+needs = (
+    'unified-channel-poller' in jobs or
+    not jobs.get('bot-talk-poller', {}).get('enabled', False) or
+    not jobs.get('lobstertalk-incoming-handler', {}).get('enabled', False) or
+    not jobs.get('lobstertalk-poller', {}).get('enabled', False) or
+    not jobs.get('lobster-plans-poller', {}).get('enabled', False) or
+    not jobs.get('gmail-email-pipeline', {}).get('enabled', False)
+)
+sys.exit(0 if needs else 1)
+" 2>/dev/null; then
+            _mig45_needed=1
+        fi
+
+        if [ "$_mig45_needed" -eq 1 ]; then
+            # Make new pre-check scripts executable if they exist
+            [ -f "$PLANS_CHECK_SCRIPT" ] && chmod +x "$PLANS_CHECK_SCRIPT" 2>/dev/null || true
+            [ -f "$GMAIL_CHECK_SCRIPT" ] && chmod +x "$GMAIL_CHECK_SCRIPT" 2>/dev/null || true
+            [ -f "$LBTALK_INCOMING_SCRIPT" ] && chmod +x "$LBTALK_INCOMING_SCRIPT" 2>/dev/null || true
+
+            python3 - "$JOBS_FILE_MIG45" "$INSTALL_DIR" << 'PYEOF_45'
+import json, os, sys
+
+jobs_file = sys.argv[1]
+install_dir = sys.argv[2]
+
+with open(jobs_file) as f:
+    data = json.load(f)
+
+jobs = data.setdefault('jobs', {})
+
+# Remove unified-channel-poller
+jobs.pop('unified-channel-poller', None)
+
+# Helper to resolve a pre-check script path using $REPO_DIR placeholder
+def runner_path(script_name):
+    return f"$REPO_DIR/scheduled-tasks/{script_name}"
+
+# Re-enable and reconfigure the 5 polling jobs
+updates = {
+    'bot-talk-poller': {
+        'enabled': True,
+        'schedule': '*/5 * * * *',
+        'schedule_human': 'Every 5 minutes',
+        'runner': runner_path('bot-talk-check-dispatch.sh'),
+    },
+    'lobstertalk-incoming-handler': {
+        'enabled': True,
+        'schedule': '*/2 * * * *',
+        'schedule_human': 'Every 2 minutes',
+        'runner': runner_path('lobstertalk-incoming-check.sh'),
+    },
+    'lobstertalk-poller': {
+        'enabled': True,
+        'schedule': '*/30 * * * *',
+        'schedule_human': 'Every 30 minutes',
+        # No runner field: uses default dispatch-job.sh (has internal no-op logic)
+    },
+    'lobster-plans-poller': {
+        'enabled': True,
+        'schedule': '*/30 * * * *',
+        'schedule_human': 'Every 30 minutes',
+        'runner': runner_path('lobster-plans-check-dispatch.sh'),
+    },
+    'gmail-email-pipeline': {
+        'enabled': True,
+        'schedule': '*/30 * * * *',
+        'schedule_human': 'Every 30 minutes',
+        'runner': runner_path('gmail-check-dispatch.sh'),
+    },
+}
+
+for job_name, fields in updates.items():
+    if job_name in jobs:
+        jobs[job_name].update(fields)
+        # Remove runner key for lobstertalk-poller (should use default)
+        if job_name == 'lobstertalk-poller':
+            jobs[job_name].pop('runner', None)
+
+tmp = jobs_file + '.tmp.' + str(os.getpid())
+with open(tmp, 'w') as f:
+    json.dump(data, f, indent=4)
+os.replace(tmp, jobs_file)
+print("jobs.json updated")
+PYEOF_45
+            substep "Migration 45: Re-enabled 5 polling jobs, removed unified-channel-poller, set runner fields"
+
+            # Re-sync crontab so the new schedules and runners take effect
+            if [ -f "$INSTALL_DIR/scheduled-tasks/sync-crontab.sh" ]; then
+                chmod +x "$INSTALL_DIR/scheduled-tasks/sync-crontab.sh" 2>/dev/null || true
+                "$INSTALL_DIR/scheduled-tasks/sync-crontab.sh" 2>/dev/null || true
+                substep "Migration 45: Crontab re-synced with two-layer polling architecture"
+            fi
+
+            migrated=$((migrated + 1))
+        fi
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
