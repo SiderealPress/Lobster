@@ -1,10 +1,12 @@
 ## Email Autoresponder — Behavior
 
-This skill manages a scheduled Gmail auto-draft job (`gmail-auto-draft`). It runs every 5 minutes, scans the inbox, and creates draft replies — never sending them.
+This skill manages two scheduled jobs:
+- **`gmail-auto-draft`** — runs every 5 minutes, scans the inbox, and creates draft replies (never sends them)
+- **`lobstertalk-incoming-handler`** — runs every 5 minutes, answers "what do you know about X?" context queries from AlbertLobster via bot-talk
 
 ---
 
-### Toggle commands
+### Email autoresponder toggle commands
 
 When the user says "/autoresponder", "/autodraft", or "/email" — or asks about enabling/disabling email auto-drafting — check the current state and guide them.
 
@@ -57,23 +59,65 @@ Task(prompt="Call check_task_outputs with job_name='gmail-auto-draft', limit=5. 
 
 ---
 
+### LobsterTalk context handler toggle commands
+
+When the user says "/lobstertalk", "/botquery", or asks about the incoming handler status:
+
+#### Check current status
+
+```python
+# Use get_scheduled_job("lobstertalk-incoming-handler")
+# Report: enabled/disabled, last run time, last status
+```
+
+#### Enable the handler
+
+```python
+# Call update_scheduled_job(name="lobstertalk-incoming-handler", enabled=True)
+reply = "LobsterTalk context handler is now ON. I'll check for incoming queries every 5 minutes."
+```
+
+#### Disable the handler
+
+```python
+# Call update_scheduled_job(name="lobstertalk-incoming-handler", enabled=False)
+reply = "LobsterTalk context handler is now OFF."
+```
+
+---
+
+### Checking recent LobsterTalk query results
+
+When the user asks "what did Albert ask?", "show lobstertalk results", "what queries came in":
+
+```
+send_reply(chat_id, "Checking recent LobsterTalk query activity...")
+Task(prompt="Call check_task_outputs with job_name='lobstertalk-incoming-handler', limit=5. Summarize what queries were received and how they were answered. Send to chat_id X.", subagent_type="general-purpose")
+```
+
+---
+
 ### Natural language patterns to recognize
 
 | Pattern | Intent |
 |---------|--------|
-| "turn on/off email autoresponder" | Toggle the job |
-| "enable/disable auto-drafting" | Toggle the job |
-| "start/stop email drafts" | Toggle the job |
-| "is the autoresponder running?" | Status check |
-| "what emails did you draft?" | Show recent results |
-| "show email autoresponder results" | Show recent results |
-| "/autoresponder", "/autodraft", "/email" | Show status + toggle options |
+| "turn on/off email autoresponder" | Toggle gmail-auto-draft |
+| "enable/disable auto-drafting" | Toggle gmail-auto-draft |
+| "start/stop email drafts" | Toggle gmail-auto-draft |
+| "is the autoresponder running?" | Status check (gmail-auto-draft) |
+| "what emails did you draft?" | Show recent email results |
+| "show email autoresponder results" | Show recent email results |
+| "/autoresponder", "/autodraft", "/email" | Show email status + toggle options |
+| "/lobstertalk", "/botquery" | Show lobstertalk status + toggle options |
+| "what did Albert ask?" | Show recent lobstertalk results |
+| "enable/disable the context handler" | Toggle lobstertalk-incoming-handler |
+| "is the lobstertalk handler running?" | Status check (lobstertalk-incoming-handler) |
 
 ---
 
 ### Response format
 
-Keep replies concise (mobile-first). For status:
+Keep replies concise (mobile-first). For email status:
 
 ```
 Email autoresponder: ON
@@ -85,11 +129,25 @@ Commands:
 - See results: "show email drafts"
 ```
 
+For lobstertalk status:
+
+```
+LobsterTalk context handler: ON
+Last run: 2 minutes ago (success)
+Schedule: every 5 minutes
+
+Commands:
+- Turn off: "disable lobstertalk handler"
+- See results: "what did Albert ask?"
+```
+
 ---
 
 ### Important rules
 
 - NEVER trigger or run the email processing logic directly — it runs as a scheduled job
 - NEVER send emails on behalf of the user — the job only creates drafts
-- NEVER re-enable the job without the user asking — respect their toggle
-- Always confirm the toggle with a clear on/off status message
+- NEVER re-enable either job without the user asking — respect their toggle
+- NEVER trigger the context lookup logic directly — it runs as a scheduled job
+- NEVER send bot-talk messages on behalf of the user — the job handles replies
+- Always confirm any toggle with a clear on/off status message
