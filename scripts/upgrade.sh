@@ -1827,77 +1827,44 @@ EOF
         fi
     fi
 
-    # Migration 45: Atomic crontab transition — wire Kind 1 pre-check scripts, disable
+    # Migration 45: Crontab transition — wire Kind 1 pre-check scripts, drop
     # unified-channel-poller, clean up stale LOBSTER-TEMP-REVERT entry.
     #
     # Background: unified-channel-poller was firing hourly via dispatch-job.sh (spawning
     # an LLM subagent every hour even with nothing to do). The correct architecture uses
     # dedicated Kind 1 pre-check scripts that poll cheap APIs first and only dispatch to
-    # the LLM inbox when there is something to process. Migration 44 attempted to wire
-    # bot-talk-check-dispatch.sh but was broken by design: bot-talk-poller had
-    # enabled=false in jobs.json, so sync-crontab.sh skipped it. Migration 45 fixes
-    # the preconditions and uses the correct tool split:
+    # the LLM inbox when there is something to process. This migration uses the correct
+    # tool split:
     #   - sync-crontab.sh owns # LOBSTER-SCHEDULED entries (drops unified-channel-poller)
     #   - cron-manage.sh owns # LOBSTER-<NAME> entries (adds Kind 1 pre-check entries)
+    #
+    # Note: jobs.json updates (enabling bot-talk-poller, lobstertalk-incoming-handler
+    # with runner=cron-script) are instance-specific and must be done separately via
+    # MCP tools or a user-config script — they are not part of this generic migration.
     #
     # Idempotency guard: skip the whole migration if both Kind 1 entries already exist.
     if ! crontab -l 2>/dev/null | grep -q "LOBSTER-BOT-TALK-CHECK" || \
        ! crontab -l 2>/dev/null | grep -q "LOBSTER-LOBSTERTALK-CHECK"; then
 
-        local JOBS_FILE_M45="$WORKSPACE/scheduled-jobs/jobs.json"
         local LOG_DIR_M45="$WORKSPACE/scheduled-jobs/logs"
 
-        # Step 1: Update jobs.json atomically via flock + tmp+rename.
-        #   - unified-channel-poller: enabled=false (removes it from # LOBSTER-SCHEDULED)
-        #   - bot-talk-poller: enabled=true, runner="cron-script" (sentinel — prevents
-        #     sync-crontab.sh from generating a # LOBSTER-SCHEDULED entry with trailing
-        #     job-name arg that bot-talk-check-dispatch.sh does not accept)
-        #   - lobstertalk-incoming-handler: enabled=true, runner="cron-script" (same reason)
-        if [ -f "$JOBS_FILE_M45" ]; then
-            local JOBS_LOCK_M45="${JOBS_FILE_M45}.lock"
-            (
-                flock -x 9
-                uv run - "$JOBS_FILE_M45" << 'PYEOF'
-import json, os, sys
-jobs_file = sys.argv[1]
-with open(jobs_file) as f:
-    data = json.load(f)
-jobs = data.get('jobs', {})
-if 'unified-channel-poller' in jobs:
-    jobs['unified-channel-poller']['enabled'] = False
-if 'bot-talk-poller' in jobs:
-    jobs['bot-talk-poller']['enabled'] = True
-    jobs['bot-talk-poller']['runner'] = 'cron-script'
-if 'lobstertalk-incoming-handler' in jobs:
-    jobs['lobstertalk-incoming-handler']['enabled'] = True
-    jobs['lobstertalk-incoming-handler']['runner'] = 'cron-script'
-tmp = jobs_file + '.tmp.' + str(os.getpid())
-with open(tmp, 'w') as f:
-    json.dump(data, f, indent=2)
-os.replace(tmp, jobs_file)
-print("jobs.json updated")
-PYEOF
-            ) 9>"$JOBS_LOCK_M45" 2>/dev/null || true
-            substep "Migration 45: jobs.json updated (unified-channel-poller disabled, Kind 1 jobs enabled with runner=cron-script)"
-        fi
-
-        # Step 2: Run sync-crontab.sh to drop the unified-channel-poller # LOBSTER-SCHEDULED
+        # Step 1: Run sync-crontab.sh to drop the unified-channel-poller # LOBSTER-SCHEDULED
         # entry. sync-crontab.sh regenerates all # LOBSTER-SCHEDULED lines from jobs.json;
-        # unified-channel-poller is now enabled=false so it will be omitted.
+        # any job with enabled=false will be omitted, including unified-channel-poller.
         if [ -f "$INSTALL_DIR/scheduled-tasks/sync-crontab.sh" ]; then
             chmod +x "$INSTALL_DIR/scheduled-tasks/sync-crontab.sh" 2>/dev/null || true
             "$INSTALL_DIR/scheduled-tasks/sync-crontab.sh" 2>/dev/null || true
             substep "Migration 45: crontab re-synced — unified-channel-poller # LOBSTER-SCHEDULED entry removed"
         fi
 
-        # Step 3: Remove stale LOBSTER-TEMP-REVERT entry (/tmp/revert-polls.sh one-shot
+        # Step 2: Remove stale LOBSTER-TEMP-REVERT entry (/tmp/revert-polls.sh one-shot
         # that fired 2026-03-28 and is now dead weight).
         if crontab -l 2>/dev/null | grep -q "# LOBSTER-TEMP-REVERT"; then
             "$INSTALL_DIR/scripts/cron-manage.sh" remove "# LOBSTER-TEMP-REVERT" 2>/dev/null || true
             substep "Migration 45: removed stale # LOBSTER-TEMP-REVERT cron entry"
         fi
 
-        # Step 4: Add Kind 1 crontab entries via cron-manage.sh with distinct markers.
+        # Step 3: Add Kind 1 crontab entries via cron-manage.sh with distinct markers.
         # cron-manage.sh add is idempotent — it replaces an existing entry with the same
         # marker rather than duplicating it. Kind 1 entries are NOT managed by
         # sync-crontab.sh (which would append the job name as a trailing argument,
