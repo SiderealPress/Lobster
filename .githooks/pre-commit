@@ -132,17 +132,34 @@ fi
 
 NAME_VIOLATIONS=0
 
-# scan_staged_diff_for_names: grep the cached diff for personal name matches.
-# We scan the diff (added lines only, prefixed with +) rather than full file
-# content so that pre-existing lines in unchanged files don't cause false
-# positives during unrelated commits.
+# Load blocked names from user config, falling back to built-in defaults.
 #
-# Patterns explained:
-#   sahar  — matched as a whole word; "sayhar" is excluded by negative lookbehind
-#            on the preceding character (no [y] allowed before "sahar")
-#   drew   — matched as a whole word; excluded when immediately preceded by
-#            letters (e.g. "andrew", "withdrew") via \b word-boundary rules and
-#            an explicit negative lookbehind for common prefixes
+# Config file: ${LOBSTER_USER_CONFIG_DIR:-~/lobster-user-config}/blocked-names.txt
+# Format (one entry per line):
+#   name@@allowlist_regex
+#   - name: the word to block (matched case-insensitively as a whole word)
+#   - allowlist_regex: PCRE — if the full line matches this, the block is suppressed
+#   Lines starting with # are comments; empty lines are ignored.
+#
+# Example:
+#   sahar@@sayhar
+#   drew@@andrew|withdrew|outdrewn
+_NAMES_CONFIG="${LOBSTER_USER_CONFIG_DIR:-$HOME/lobster-user-config}/blocked-names.txt"
+declare -a _BLOCKED_NAMES=()
+if [ -f "$_NAMES_CONFIG" ]; then
+    while IFS= read -r _nc_line; do
+        [[ "$_nc_line" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "${_nc_line// }" ]] && continue
+        _BLOCKED_NAMES+=("$_nc_line")
+    done < "$_NAMES_CONFIG"
+fi
+# Fallback built-in defaults when no config file exists or it is empty
+if [ "${#_BLOCKED_NAMES[@]}" -eq 0 ]; then
+    _BLOCKED_NAMES=(
+        'sahar@@sayhar'
+        'drew@@andrew|withdrew|outdrewn'
+    )
+fi
 
 scan_staged_diff_for_names() {
     local diff_output
@@ -175,42 +192,35 @@ scan_staged_diff_for_names() {
         # Skip lines with inline suppression
         echo "$content" | grep -qP '#\s*noname\b' && continue
 
-        # Check for "sahar" as a name:
-        #   \bsahar\b — whole word
-        #   Exclude: "sayhar" (preceded by 'y' before 'sahar' is impossible with
-        #   \b, but "sayhar" contains "sahar" — we check by requiring no [a-z]
-        #   directly before the match that would make it part of a longer word)
-        if echo "$content" | grep -qiP '(?<![a-z])sahar(?![a-z])' 2>/dev/null; then
-            # Allow if it's part of "sayhar" (GitHub username)
-            if ! echo "$content" | grep -qiP 'sayhar' 2>/dev/null; then
+        # Check each blocked name entry
+        for _nc_entry in "${_BLOCKED_NAMES[@]}"; do
+            local _nc_name="${_nc_entry%%@@*}"
+            local _nc_allow=""
+            [[ "$_nc_entry" == *"@@"* ]] && _nc_allow="${_nc_entry#*@@}"
+
+            if echo "$content" | grep -qiP "(?<![a-z])${_nc_name}(?![a-z])" 2>/dev/null; then
+                # Apply allowlist: if line matches the allowlist pattern, suppress
+                if [ -n "$_nc_allow" ] && echo "$content" | grep -qiP "$_nc_allow" 2>/dev/null; then
+                    continue
+                fi
                 violations="${violations}${file_context}: ${content}\n"
                 NAME_VIOLATIONS=$((NAME_VIOLATIONS + 1))
             fi
-        fi
-
-        # Check for "drew" as a name:
-        #   Must appear as a whole word boundary
-        #   Exclude: preceded by letters (andrew, withdrew, outdrewn, etc.)
-        #   Exclude: followed by letters that make it a non-name (drewn, etc.)
-        #   We use a negative lookbehind for common prefixes and a strict word boundary
-        if echo "$content" | grep -qiP '(?<![a-z])drew(?![a-z])' 2>/dev/null; then
-            violations="${violations}${file_context}: ${content}\n"
-            NAME_VIOLATIONS=$((NAME_VIOLATIONS + 1))
-        fi
-
+        done
     done <<< "$diff_output"
 
     if [ "$NAME_VIOLATIONS" -gt 0 ]; then
         echo ""
         echo -e "${RED}${BOLD}Name check failed: staged changes contain personal names.${NC}"
         echo ""
-        echo "The following lines match restricted name patterns (sahar/drew):"
+        echo "The following lines match restricted name patterns:"
         echo -e "$violations" | head -10
         echo ""
         echo "These names must not appear in committed code."
         echo "  - Use aliases, roles, or initials instead"
         echo "  - If this is a legitimate non-name use, add '# noname' to the line"
         echo "  - To bypass entirely: git commit --no-verify"
+        echo "  - To configure blocked names: edit ~/lobster-user-config/blocked-names.txt"
         echo ""
         exit 1
     fi
