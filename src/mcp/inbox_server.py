@@ -571,6 +571,52 @@ def normalize_message_type(msg: dict) -> dict:
     return msg
 
 
+# ---------------------------------------------------------------------------
+# Inbox priority queue (issue #1079)
+#
+# Messages are returned in priority order so the dispatcher always handles
+# the highest-value work first, regardless of arrival time.  Priority is
+# derived at read-time from the message content — nothing is stored on disk.
+#
+# P0 — Dispatcher housekeeping (compact-reminder, self_check): zero-cost, must
+#       run before anything else to keep the context window healthy.
+# P1 — Direct user messages (text, voice, photo, …): human in the loop,
+#       latency-sensitive.
+# P2 — Subagent results / errors: completing in-flight work.
+# P3 — Agent-failure notifications: error recovery.
+# P4 — Scheduled reminders, health checks, and everything else: background work.
+#
+# Within each tier messages are ordered by timestamp (ascending, FIFO).
+# ---------------------------------------------------------------------------
+
+_PRIORITY_P0_TYPES: frozenset[str] = frozenset({"compact_reminder", "self_check"})
+_PRIORITY_P0_SUBTYPES: frozenset[str] = frozenset({"compact-reminder", "compact_reminder", "self_check"})
+_PRIORITY_P1_TYPES: frozenset[str] = INBOX_USER_TYPES  # text, voice, photo, document, …
+_PRIORITY_P2_TYPES: frozenset[str] = frozenset({"subagent_result", "subagent_error", "subagent_ack", "subagent_notification"})
+_PRIORITY_P3_TYPES: frozenset[str] = frozenset({"agent_failed", "subagent_recovered"})
+
+
+def _inbox_priority(msg: dict) -> int:
+    """Return the priority tier (0=highest … 4=lowest) for an inbox message.
+
+    Pure function.  Safe to call on any dict; returns 4 (lowest) on error.
+    """
+    try:
+        msg_type = msg.get("type", "") or ""
+        subtype = msg.get("subtype", "") or ""
+        if msg_type in _PRIORITY_P0_TYPES or subtype in _PRIORITY_P0_SUBTYPES:
+            return 0
+        if msg_type in _PRIORITY_P1_TYPES:
+            return 1
+        if msg_type in _PRIORITY_P2_TYPES:
+            return 2
+        if msg_type in _PRIORITY_P3_TYPES:
+            return 3
+        return 4
+    except Exception:
+        return 4
+
+
 # Heartbeat file for health monitoring
 HEARTBEAT_FILE = _WORKSPACE / "logs" / "claude-heartbeat"
 
@@ -3505,37 +3551,57 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
 
         log.info(f"check_inbox (since_ts={since_ts_str!r}) returning {len(messages)} message(s)")
     else:
-        for f in sorted(INBOX_DIR.glob("*.json")):
+        # Phase 1: load all inbox files and sort by (priority_tier, timestamp) so
+        # the dispatcher always sees the highest-value messages first, regardless
+        # of arrival order.  Unparseable files are assigned lowest priority (4)
+        # and sorted to the end; they are not dropped.
+        _candidates: list[tuple[int, str, Path, dict]] = []
+        for f in INBOX_DIR.glob("*.json"):
             try:
                 with open(f) as fp:
                     msg = json.load(fp)
-                    if source_filter and msg.get("source", "").lower() != source_filter:
-                        continue
-                    # /report slash command pre-processor: handle automatically without
-                    # surfacing the raw message to the main dispatcher loop.
-                    msg_text = msg.get("text", "")
-                    if _is_report_command(msg_text):
-                        try:
-                            await _handle_report_slash_command(msg, f)
-                        except Exception as exc:
-                            log.error(f"check_inbox: /report pre-processor error: {exc}", exc_info=True)
-                        continue  # skip — already handled
-                    # subagent_recovered pre-processor: enqueue an owner notification so the
-                    # user is informed about the failed agent. The raw recovery message still
-                    # flows through to the dispatcher (with a dispatcher_hint) so it can call
-                    # mark_processed — but the salvaged dump is never relayed directly.
-                    if msg.get("type") == "subagent_recovered":
-                        try:
-                            _enqueue_recovery_notification(msg)
-                        except Exception as exc:
-                            log.error(f"check_inbox: subagent_recovered pre-processor error: {exc}", exc_info=True)
-                    msg["_filename"] = f.name
-                    messages.append(msg)
-                    # Mirror real inbound user messages to bot-talk (fire-and-forget)
-                    _mirror_inbound(msg)
-                    if len(messages) >= limit:
-                        break
-            except Exception as e:
+                priority = _inbox_priority(msg)
+                ts = msg.get("timestamp", "")
+                _candidates.append((priority, ts, f, msg))
+            except Exception:
+                # Unreadable file: use lowest priority, empty ts (sorts last within P4)
+                _candidates.append((4, "", f, {}))
+        _candidates.sort(key=lambda x: (x[0], x[1]))
+
+        for _priority, _ts, f, msg in _candidates:
+            try:
+                if not msg:
+                    # Unparseable file — skip silently (it was already appended to
+                    # _candidates so it won't be lost; the dispatcher will see it on
+                    # the next check_inbox call once it's legible or removed)
+                    continue
+                if source_filter and msg.get("source", "").lower() != source_filter:
+                    continue
+                # /report slash command pre-processor: handle automatically without
+                # surfacing the raw message to the main dispatcher loop.
+                msg_text = msg.get("text", "")
+                if _is_report_command(msg_text):
+                    try:
+                        await _handle_report_slash_command(msg, f)
+                    except Exception as exc:
+                        log.error(f"check_inbox: /report pre-processor error: {exc}", exc_info=True)
+                    continue  # skip — already handled
+                # subagent_recovered pre-processor: enqueue an owner notification so the
+                # user is informed about the failed agent. The raw recovery message still
+                # flows through to the dispatcher (with a dispatcher_hint) so it can call
+                # mark_processed — but the salvaged dump is never relayed directly.
+                if msg.get("type") == "subagent_recovered":
+                    try:
+                        _enqueue_recovery_notification(msg)
+                    except Exception as exc:
+                        log.error(f"check_inbox: subagent_recovered pre-processor error: {exc}", exc_info=True)
+                msg["_filename"] = f.name
+                messages.append(msg)
+                # Mirror real inbound user messages to bot-talk (fire-and-forget)
+                _mirror_inbound(msg)
+                if len(messages) >= limit:
+                    break
+            except Exception:
                 continue
 
         if not messages:
