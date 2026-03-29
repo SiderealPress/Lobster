@@ -8,9 +8,9 @@
 You are running as a scheduled task. The main Lobster instance created this job.
 
 This is the **hourly baseline poller**. It also manages the hot-mode state that drives
-`bot-talk-poller-fast` (the 2-minute fast poller). When AlbertLobster is active, set
-`hot_mode=true` so the fast poller takes over. When activity stops, the fast poller
-self-cools and this job confirms the quiet state each hour.
+`bot-talk-poller-fast` (the 2-minute fast poller). When {{REMOTE_LOBSTER_IDENTITY}} is
+active, set `hot_mode=true` so the fast poller takes over. When activity stops, the fast
+poller self-cools and this job confirms the quiet state each hour.
 
 ## Authentication
 
@@ -58,7 +58,7 @@ if not token:
     # log error and write failed output
     ...
 headers = {"X-Bot-Token": token}
-resp = requests.get("http://46.224.41.108:4242/messages", headers=headers, ...)
+resp = requests.get("{{LOBSTERTALK_HOST}}/messages", headers=headers, ...)
 ```
 
 If the token cannot be found via any of the above paths, log an error and call write_task_output with status "failed".
@@ -70,7 +70,7 @@ Read and write `~/lobster-workspace/data/bot-talk-state.json`. Create it if it d
 Schema:
 ```json
 {
-  "last_message_ts": "2026-03-25T15:00:00Z",
+  "last_message_ts": "2026-01-01T00:00:00Z",
   "hot_mode": false,
   "consecutive_empty_polls": 0,
   "hot_mode_activated_at": null
@@ -82,22 +82,22 @@ the final path.
 
 ## Instructions
 
-1. Poll `http://46.224.41.108:4242/messages` for new messages from **both** SaharLobster
-   and AlbertLobster.
+1. Poll `{{LOBSTERTALK_HOST}}/messages` for new messages from **both** {{LOCAL_LOBSTER_IDENTITY}}
+   and {{REMOTE_LOBSTER_IDENTITY}}.
    Track last-seen message timestamp using `last_message_ts` in the state file
    (fall back to `~/lobster-workspace/data/bot-talk-last-seen.txt` for legacy compat).
 
 2. **If new messages found (from either sender):**
-   - Collect ALL new messages (both `sender=SaharLobster` and `sender=AlbertLobster`)
+   - Collect ALL new messages (both `sender={{LOCAL_LOBSTER_IDENTITY}}` and `sender={{REMOTE_LOBSTER_IDENTITY}}`)
      with timestamp > last_message_ts.
    - Sort them by timestamp (ascending — oldest first, so the conversation reads
      chronologically).
    - Format each message with a directional prefix:
-     - SaharLobster messages: `📤 SaharLobster → Albert: <content>`
-     - AlbertLobster messages: `📥 AlbertLobster → the owner: <content>`
-   - For each AlbertLobster message, also post a comment on the relevant GitHub issue
-     in `sayhar/project-lobstertalk` if actionable.
-   - Notify the owner via Telegram (chat_id=ADMIN_CHAT_ID_REDACTED) with the full conversation block
+     - {{LOCAL_LOBSTER_IDENTITY}} messages: `📤 {{LOCAL_LOBSTER_IDENTITY}} → remote: <content>`
+     - {{REMOTE_LOBSTER_IDENTITY}} messages: `📥 {{REMOTE_LOBSTER_IDENTITY}} → the owner: <content>`
+   - For each {{REMOTE_LOBSTER_IDENTITY}} message, also post a comment on the relevant GitHub issue
+     if actionable (configure repo in `BOT_TALK_GITHUB_REPO` env var if used).
+   - Notify the owner via Telegram (chat_id={{TELEGRAM_CHAT_ID}}) with the full conversation block
      showing both sides.
    - Update `last_message_ts` in state file to the latest seen message timestamp
      (across both senders).
@@ -111,14 +111,11 @@ the final path.
    - Otherwise: leave `hot_mode` as-is (fast poller manages its own cooldown; this is
      just the hourly safety reset).
 
-4. Also try SSH layer: `ssh sharedLobster cat /home/shared/bot-talk/log.txt` to check
-   for any new entries since last run.
-
-5. If the HTTP API is down (connection reset), log the failure and retry next cycle —
+4. If the HTTP API is down (connection reset), log the failure and retry next cycle —
    do not alert the owner for transient API outages unless it has been down for more than
    30 minutes.
 
-6. Write updated state file.
+5. Write updated state file.
 
 ## Telegram Notification Format
 
@@ -128,18 +125,18 @@ conversation block. Example:
 ```
 New bot-talk activity:
 
-📤 SaharLobster → Albert: What do you think about the new plan?
-📥 AlbertLobster → the owner: I reviewed it. Looks reasonable, a few questions though.
-📥 AlbertLobster → the owner: Can you clarify item 3?
-📤 SaharLobster → Albert: Sure, item 3 means we delay the deployment.
+📤 {{LOCAL_LOBSTER_IDENTITY}} → remote: What do you think about the new plan?
+📥 {{REMOTE_LOBSTER_IDENTITY}} → the owner: I reviewed it. Looks reasonable, a few questions though.
+📥 {{REMOTE_LOBSTER_IDENTITY}} → the owner: Can you clarify item 3?
+📤 {{LOCAL_LOBSTER_IDENTITY}} → remote: Sure, item 3 means we delay the deployment.
 ```
 
 Messages are sorted chronologically so the conversation is readable top-to-bottom.
 
 ## Telegram Notification Rules
 
-Only send a Telegram message to the owner (chat_id=ADMIN_CHAT_ID_REDACTED) when there is genuinely new content:
-- One or more new messages (from either SaharLobster or AlbertLobster) since last run
+Only send a Telegram message to the owner (chat_id={{TELEGRAM_CHAT_ID}}) when there is genuinely new content:
+- One or more new messages (from either sender) since last run
 - A new actionable GitHub comment requiring attention
 - The HTTP API has been continuously down for more than 30 minutes
 
