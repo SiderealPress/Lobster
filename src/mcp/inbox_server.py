@@ -1615,28 +1615,39 @@ async def list_tools() -> list[Tool]:
                 "required": ["url"],
             },
         ),
-        # Scheduled Jobs Tools
+        # Scheduled Jobs Tools (backed by systemd timers)
         Tool(
             name="create_scheduled_job",
-            description="Create a new scheduled job that runs automatically via cron. Jobs run in separate Claude instances and write outputs to the task-outputs inbox.",
+            description=(
+                "Create a new scheduled job backed by a systemd timer. "
+                "Registers lobster-<name>.timer + lobster-<name>.service unit files and enables them immediately. "
+                "The command must be an absolute path or 'uv run /absolute/path'. "
+                "Idempotent: returns success without recreating if the timer already matches."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "Unique name for the job (lowercase, hyphens allowed, e.g., 'morning-weather').",
+                        "description": "Unique slug for the job (lowercase, hyphens allowed, e.g., 'morning-weather').",
                     },
                     "schedule": {
                         "type": "string",
-                        "description": "Cron schedule expression (e.g., '0 9 * * *' for 9am daily, '*/30 * * * *' for every 30 mins).",
+                        "description": (
+                            "Systemd OnCalendar= expression, e.g. '*-*-* *:00/5:00' for every 5 minutes, "
+                            "'*-*-* 09:00:00' for 9am daily, 'Mon *-*-* 08:00:00' for Monday mornings."
+                        ),
                     },
                     "context": {
                         "type": "string",
-                        "description": "Instructions for the job. Describe what the scheduled task should do.",
+                        "description": (
+                            "Absolute path to the script to run, or 'uv run /path/to/script.py'. "
+                            "Must be an absolute path. Use get_job_scaffold to get a starter template."
+                        ),
                     },
-                    "chat_id": {
+                    "description": {
                         "type": "string",
-                        "description": "Optional: chat_id of the user who owns this job. Notifications route to this user.",
+                        "description": "Optional human-readable description of what this job does.",
                     },
                 },
                 "required": ["name", "schedule", "context"],
@@ -1644,7 +1655,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="list_scheduled_jobs",
-            description="List all scheduled jobs with their status and schedules.",
+            description="List all lobster-managed systemd timers (units prefixed with 'lobster-') with their schedules and last-run status.",
             inputSchema={
                 "type": "object",
                 "properties": {},
@@ -1652,7 +1663,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="get_scheduled_job",
-            description="Get detailed information about a specific scheduled job.",
+            description="Get detailed status for a specific lobster-managed systemd timer, including last exit code, last run time, and next scheduled run.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1666,7 +1677,11 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="update_scheduled_job",
-            description="Update an existing scheduled job's schedule, context, or enabled status.",
+            description=(
+                "Update an existing scheduled job. "
+                "Supports changing the schedule (OnCalendar expression), the command (context field), "
+                "or enabling/disabling the timer. Recreates unit files when schedule or command changes."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1676,15 +1691,15 @@ async def list_tools() -> list[Tool]:
                     },
                     "schedule": {
                         "type": "string",
-                        "description": "New cron schedule (optional).",
+                        "description": "New systemd OnCalendar= schedule (optional).",
                     },
                     "context": {
                         "type": "string",
-                        "description": "New instructions for the job (optional).",
+                        "description": "New command (absolute path or 'uv run /...') to run (optional).",
                     },
                     "enabled": {
                         "type": "boolean",
-                        "description": "Enable or disable the job (optional).",
+                        "description": "Enable or disable the timer (optional).",
                     },
                 },
                 "required": ["name"],
@@ -1692,7 +1707,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="delete_scheduled_job",
-            description="Delete a scheduled job and remove it from crontab.",
+            description="Stop, disable, and remove a lobster-managed systemd timer and its associated service unit.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1702,6 +1717,24 @@ async def list_tools() -> list[Tool]:
                     },
                 },
                 "required": ["name"],
+            },
+        ),
+        Tool(
+            name="get_job_scaffold",
+            description=(
+                "Return a starter template for a Lobster code-first poller script. "
+                "Copy the output to a new .py file, fill in the placeholders, "
+                "then call create_scheduled_job with the file path as the command."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "kind": {
+                        "type": "string",
+                        "description": "Template kind. Currently only 'poller' is supported.",
+                        "default": "poller",
+                    },
+                },
             },
         ),
         Tool(
@@ -2863,7 +2896,7 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
     # Headless Browser Fetch
     elif name == "fetch_page":
         return await handle_fetch_page(arguments)
-    # Scheduled Jobs Tools
+    # Scheduled Jobs Tools (systemd-backed)
     elif name == "create_scheduled_job":
         return await handle_create_scheduled_job(arguments)
     elif name == "list_scheduled_jobs":
@@ -2874,6 +2907,8 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
         return await handle_update_scheduled_job(arguments)
     elif name == "delete_scheduled_job":
         return await handle_delete_scheduled_job(arguments)
+    elif name == "get_job_scaffold":
+        return await handle_get_job_scaffold(arguments)
     elif name == "check_task_outputs":
         return await handle_check_task_outputs(arguments)
     elif name == "write_task_output":
@@ -5235,24 +5270,199 @@ async def handle_fetch_page(args: dict) -> list[TextContent]:
 
 
 # =============================================================================
-# Scheduled Jobs Handlers
+# Scheduled Jobs Handlers (systemd-backed)
 # =============================================================================
+#
+# All lobster-managed systemd units carry the prefix "lobster-" and include a
+# "# LOBSTER-MANAGED" comment in the unit file so they can be identified and
+# cleaned up safely.  The lobster user runs with passwordless sudo, so all
+# systemctl calls use "sudo systemctl" (system mode, not --user).
+#
+# Name validation mirrors validate_job_name() — lowercase alphanumeric + hyphens.
+# This prevents path traversal via unit file names.
 
-import subprocess
+_SYSTEMD_UNIT_DIR = Path("/etc/systemd/system")
+_LOBSTER_UNIT_PREFIX = "lobster-"
 
 
-def load_scheduled_jobs() -> dict:
-    """Load scheduled jobs from file."""
+# ---------------------------------------------------------------------------
+# Private systemd helper functions — NOT exposed as MCP tools
+# ---------------------------------------------------------------------------
+
+def _validate_timer_name(name: str) -> tuple[bool, str]:
+    """Validate a timer/job slug.  Returns (is_valid, error_message)."""
+    if not name:
+        return False, "Job name cannot be empty"
+    if not re.match(r'^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$', name):
+        return False, (
+            "Job name must be lowercase alphanumeric with hyphens, "
+            "cannot start or end with hyphen"
+        )
+    if len(name) > 50:
+        return False, "Job name must be 50 characters or less"
+    return True, ""
+
+
+def _unit_name(name: str, suffix: str) -> str:
+    """Return the full systemd unit filename, e.g. 'lobster-foo.timer'."""
+    return f"{_LOBSTER_UNIT_PREFIX}{name}{suffix}"
+
+
+def _timer_unit_content(name: str, schedule: str, description: str) -> str:
+    """Return the .timer unit file content (pure function — no side effects)."""
+    return f"""# LOBSTER-MANAGED — do not edit by hand; use delete_scheduled_job / create_scheduled_job MCP tools
+[Unit]
+Description={description}
+Requires={_unit_name(name, ".service")}
+
+[Timer]
+OnCalendar={schedule}
+AccuracySec=10s
+Persistent=true
+Unit={_unit_name(name, ".service")}
+
+[Install]
+WantedBy=timers.target
+"""
+
+
+def _service_unit_content(name: str, command: str, description: str) -> str:
+    """Return the .service unit file content (pure function — no side effects)."""
+    return f"""# LOBSTER-MANAGED — do not edit by hand; use delete_scheduled_job / create_scheduled_job MCP tools
+[Unit]
+Description={description} (service)
+
+[Service]
+Type=oneshot
+ExecStart={command}
+User={os.environ.get('USER', 'lobster')}
+StandardOutput=journal
+StandardError=journal
+"""
+
+
+async def _run_systemctl(*args: str) -> tuple[int, str, str]:
+    """Run a systemctl command with sudo.  Returns (returncode, stdout, stderr)."""
+    cmd = ["sudo", "systemctl"] + list(args)
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
     try:
-        with open(SCHEDULED_JOBS_FILE, "r") as f:
-            return json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return {"jobs": {}}
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.communicate()
+        return -1, "", "systemctl command timed out"
+    return proc.returncode, stdout.decode(), stderr.decode()
 
 
-def save_scheduled_jobs(data: dict) -> None:
-    """Save scheduled jobs to file atomically (crash-safe)."""
-    atomic_write_json(SCHEDULED_JOBS_FILE, data)
+async def _create_systemd_timer(name: str, schedule: str, command: str, description: str) -> tuple[bool, str]:
+    """Write unit files and enable the timer.  Returns (success, message).
+
+    Pure orchestration: builds content via pure helpers, writes via sudo tee,
+    calls systemctl daemon-reload + enable --now.
+    """
+    timer_file = _SYSTEMD_UNIT_DIR / _unit_name(name, ".timer")
+    service_file = _SYSTEMD_UNIT_DIR / _unit_name(name, ".service")
+
+    new_timer_content = _timer_unit_content(name, schedule, description)
+    new_service_content = _service_unit_content(name, command, description)
+
+    # Idempotency: if unit files already exist and match, return success
+    if timer_file.exists() and service_file.exists():
+        try:
+            if (timer_file.read_text() == new_timer_content and
+                    service_file.read_text() == new_service_content):
+                return True, f"already_exists"
+        except OSError:
+            pass  # fall through and recreate
+
+    # Write unit files (sudo tee writes to /etc/systemd/system/)
+    for file_path, content in [(timer_file, new_timer_content), (service_file, new_service_content)]:
+        proc = await asyncio.create_subprocess_exec(
+            "sudo", "tee", str(file_path),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _, stderr = await asyncio.wait_for(
+                proc.communicate(input=content.encode()), timeout=10
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.communicate()
+            return False, f"timed out writing {file_path}"
+        if proc.returncode != 0:
+            return False, f"failed writing {file_path}: {stderr.decode()}"
+
+    # Reload daemon so systemd picks up the new unit files
+    rc, _, stderr = await _run_systemctl("daemon-reload")
+    if rc != 0:
+        return False, f"daemon-reload failed: {stderr}"
+
+    # Enable and start the timer
+    rc, _, stderr = await _run_systemctl("enable", "--now", _unit_name(name, ".timer"))
+    if rc != 0:
+        return False, f"enable --now failed: {stderr}"
+
+    return True, "created"
+
+
+async def _delete_systemd_timer(name: str) -> tuple[bool, str]:
+    """Stop, disable, and remove unit files for a lobster-managed timer.
+
+    Returns (success, message).  Idempotent: returns success if not found.
+    """
+    timer_unit = _unit_name(name, ".timer")
+    service_unit = _unit_name(name, ".service")
+    timer_file = _SYSTEMD_UNIT_DIR / timer_unit
+    service_file = _SYSTEMD_UNIT_DIR / service_unit
+
+    if not timer_file.exists() and not service_file.exists():
+        return True, "not_found"
+
+    # Stop and disable (errors here are non-fatal — unit may already be stopped)
+    await _run_systemctl("stop", timer_unit)
+    await _run_systemctl("disable", timer_unit)
+
+    # Remove unit files
+    removed = []
+    errors = []
+    for file_path in [timer_file, service_file]:
+        if file_path.exists():
+            proc = await asyncio.create_subprocess_exec(
+                "sudo", "rm", str(file_path),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                _, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.communicate()
+                errors.append(f"timed out removing {file_path}")
+                continue
+            if proc.returncode == 0:
+                removed.append(file_path.name)
+            else:
+                errors.append(f"failed to remove {file_path}: {stderr.decode()}")
+
+    # Reload daemon to clear the removed units
+    await _run_systemctl("daemon-reload")
+
+    if errors:
+        return False, f"partial: removed={removed}, errors={errors}"
+
+    return True, f"removed: {', '.join(removed)}"
+
+
+# Kept for backward compatibility — validate_job_name is referenced by tests
+def validate_job_name(name: str) -> tuple[bool, str]:
+    """Validate a job name. Returns (is_valid, error_message)."""
+    return _validate_timer_name(name)
 
 
 def validate_cron_schedule(schedule: str) -> tuple[bool, str]:
@@ -5330,295 +5540,268 @@ def cron_to_human(schedule: str) -> str:
     return schedule
 
 
-def validate_job_name(name: str) -> tuple[bool, str]:
-    """Validate a job name. Returns (is_valid, error_message)."""
-    if not name:
-        return False, "Job name cannot be empty"
-    if not re.match(r'^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$', name):
-        return False, "Job name must be lowercase alphanumeric with hyphens, cannot start/end with hyphen"
-    if len(name) > 50:
-        return False, "Job name must be 50 characters or less"
-    return True, ""
-
-
-async def sync_crontab() -> tuple[bool, str]:
-    """Sync jobs.json to crontab. Returns (success, message).
-
-    Uses asyncio.create_subprocess_exec so the event loop remains responsive
-    while the crontab subprocess runs (fixes: sync was blocking for up to 10s).
-    """
-    sync_script = _REPO_DIR / "scheduled-tasks" / "sync-crontab.sh"
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            str(sync_script),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.communicate()
-            return False, "Sync script timed out"
-        if proc.returncode == 0:
-            return True, stdout.decode()
-        else:
-            return False, stderr.decode() or "Sync failed"
-    except Exception as e:
-        return False, str(e)
-
-
 async def handle_create_scheduled_job(args: dict) -> list[TextContent]:
-    """Create a new scheduled job."""
+    """Create a new scheduled job backed by a systemd timer.
+
+    The 'context' parameter is the command to run (absolute path or 'uv run /...').
+    Internally calls _create_systemd_timer — the systemd layer is not exposed as
+    separate MCP tools.
+    """
     name = args.get("name", "").strip().lower()
     schedule = args.get("schedule", "").strip()
-    context = args.get("context", "").strip()
+    command = args.get("context", "").strip()
+    description = args.get("description", f"Lobster scheduled job: {name}").strip()
 
-    # Validate name
-    valid, error = validate_job_name(name)
+    valid, error = _validate_timer_name(name)
     if not valid:
         return [TextContent(type="text", text=f"Error: {error}")]
 
-    # Validate schedule
-    valid, error = validate_cron_schedule(schedule)
-    if not valid:
-        return [TextContent(type="text", text=f"Error: Invalid cron schedule - {error}")]
+    if not schedule:
+        return [TextContent(type="text", text="Error: schedule is required")]
+    if not command:
+        return [TextContent(type="text", text="Error: context (command) is required")]
 
-    if not context:
-        return [TextContent(type="text", text="Error: context is required")]
+    # Require an absolute path to prevent accidental relative-path commands
+    if not (command.startswith("/") or command.startswith("uv run /")):
+        return [TextContent(type="text", text=(
+            "Error: context must be an absolute path (e.g. '/home/lobster/scripts/my-script.py') "
+            "or start with 'uv run /' (e.g. 'uv run /home/lobster/scripts/my-script.py')"
+        ))]
 
-    # Check if job already exists
-    data = load_scheduled_jobs()
-    if name in data.get("jobs", {}):
-        return [TextContent(type="text", text=f"Error: Job '{name}' already exists. Use update_scheduled_job to modify it.")]
-
-    # Create task markdown file
-    now = datetime.now(timezone.utc)
-    task_file = SCHEDULED_TASKS_TASKS_DIR / f"{name}.md"
-    schedule_human = cron_to_human(schedule)
-
-    task_content = f"""# {name.replace('-', ' ').title()}
-
-**Job**: {name}
-**Schedule**: {schedule_human} (`{schedule}`)
-**Created**: {_format_display_ts(now)}
-
-## Context
-
-You are running as a scheduled task. The main Lobster instance created this job.
-
-## Instructions
-
-{context}
-
-## Output
-
-When you complete your task, call `write_task_output` with:
-- job_name: "{name}"
-- output: Your results/summary
-- status: "success" or "failed"
-
-Keep output concise. The main Lobster instance will review this later.
-"""
-
-    task_file.write_text(task_content)
-
-    # Add to jobs.json
-    job_record = {
-        "name": name,
-        "schedule": schedule,
-        "schedule_human": schedule_human,
-        "task_file": f"tasks/{name}.md",
-        "created_at": now.isoformat(),
-        "updated_at": now.isoformat(),
-        "enabled": True,
-        "last_run": None,
-        "last_status": None,
-    }
-    chat_id = args.get("chat_id")
-    if chat_id is not None:
-        job_record["chat_id"] = chat_id
-    data["jobs"][name] = job_record
-    save_scheduled_jobs(data)
-
-    # Sync to crontab
-    success, msg = await sync_crontab()
+    success, result = await _create_systemd_timer(name, schedule, command, description)
     if not success:
-        return [TextContent(type="text", text=f"Job created but crontab sync failed: {msg}")]
+        return [TextContent(type="text", text=f"Error creating job '{name}': {result}")]
 
-    return [TextContent(type="text", text=f"Created scheduled job '{name}'\nSchedule: {schedule_human} (`{schedule}`)\nTask file: {task_file}")]
+    if result == "already_exists":
+        return [TextContent(type="text", text=(
+            f"Job '{name}' already exists with the same configuration — no changes made.\n"
+            f"Unit: {_unit_name(name, '.timer')}"
+        ))]
+
+    # Retrieve next run time for confirmation
+    rc, stdout, _ = await _run_systemctl(
+        "list-timers", "--no-pager", "--no-legend", _unit_name(name, ".timer")
+    )
+    next_run = "unknown"
+    if rc == 0 and stdout.strip():
+        parts = stdout.strip().split()
+        if len(parts) >= 2:
+            next_run = f"{parts[0]} {parts[1]}"
+
+    return [TextContent(type="text", text=(
+        f"Created scheduled job '{name}'.\n"
+        f"Units: {_unit_name(name, '.timer')} + {_unit_name(name, '.service')}\n"
+        f"Schedule: {schedule}\n"
+        f"Command: {command}\n"
+        f"Next run: {next_run}"
+    ))]
 
 
 async def handle_list_scheduled_jobs(args: dict) -> list[TextContent]:
-    """List all scheduled jobs."""
-    data = load_scheduled_jobs()
-    jobs = data.get("jobs", {})
+    """List all lobster-managed systemd timers."""
+    rc, stdout, stderr = await _run_systemctl(
+        "list-timers", "--all", "--no-pager", "--no-legend"
+    )
+    if rc != 0:
+        return [TextContent(type="text", text=f"Error listing scheduled jobs: {stderr}")]
 
-    if not jobs:
-        return [TextContent(type="text", text="No scheduled jobs configured.\n\nUse `create_scheduled_job` to create one.")]
+    lobster_lines = [
+        line for line in stdout.splitlines()
+        if _LOBSTER_UNIT_PREFIX in line
+    ]
 
-    output = "**Scheduled Jobs:**\n\n"
+    if not lobster_lines:
+        return [TextContent(type="text", text=(
+            "No lobster-managed scheduled jobs found.\n\n"
+            "Use `create_scheduled_job` to register a code-first polling script."
+        ))]
 
-    for name, job in sorted(jobs.items()):
-        status_icon = "" if job.get("enabled", True) else " (disabled)"
-        schedule = job.get("schedule_human", job.get("schedule", ""))
-        last_run = job.get("last_run", "never")
-        last_status = job.get("last_status", "-")
+    output = "**Lobster scheduled jobs (systemd timers):**\n\n"
+    # systemd list-timers columns: NEXT LEFT LAST PASSED UNIT ACTIVATES
+    for line in lobster_lines:
+        parts = line.split()
+        unit_name_part = next(
+            (p for p in parts if p.startswith(_LOBSTER_UNIT_PREFIX) and p.endswith(".timer")),
+            parts[-2] if len(parts) >= 2 else ""
+        )
+        slug = unit_name_part.removeprefix(_LOBSTER_UNIT_PREFIX).removesuffix(".timer")
+        output += f"**{slug}** (`{unit_name_part}`)\n"
+        output += f"  {line.strip()}\n\n"
 
-        if last_run and last_run != "never":
-            try:
-                last_run = _format_iso_for_display(last_run, "%Y-%m-%d %I:%M %p %Z")
-            except (ValueError, TypeError):
-                pass
-
-        output += f"**{name}**{status_icon}\n"
-        output += f"  Schedule: {schedule}\n"
-        output += f"  Last run: {last_run} ({last_status})\n\n"
-
-    output += f"---\nTotal: {len(jobs)} job(s)"
+    output += f"---\nTotal: {len(lobster_lines)} job(s)"
     return [TextContent(type="text", text=output)]
 
 
 async def handle_get_scheduled_job(args: dict) -> list[TextContent]:
-    """Get details of a scheduled job."""
+    """Get detailed status for a lobster-managed systemd timer."""
     name = args.get("name", "").strip().lower()
 
     if not name:
         return [TextContent(type="text", text="Error: name is required")]
 
-    data = load_scheduled_jobs()
-    job = data.get("jobs", {}).get(name)
+    valid, error = _validate_timer_name(name)
+    if not valid:
+        return [TextContent(type="text", text=f"Error: {error}")]
 
-    if not job:
-        return [TextContent(type="text", text=f"Error: Job '{name}' not found")]
+    timer_unit = _unit_name(name, ".timer")
 
-    # Read task file content
-    task_file = SCHEDULED_TASKS_TASKS_DIR / f"{name}.md"
-    task_content = ""
-    if task_file.exists():
-        task_content = task_file.read_text()
+    # systemctl status — exit code 3 means unit exists but is stopped (not an error for us)
+    rc, stdout, stderr = await _run_systemctl("status", "--no-pager", timer_unit)
+    if rc not in (0, 3):
+        return [TextContent(type="text", text=(
+            f"Error: job 'lobster-{name}' not found or status unavailable.\n{stderr}"
+        ))]
 
-    _fmt = "%Y-%m-%d %I:%M %p %Z"
-    created_disp = _format_iso_for_display(job.get("created_at", ""), _fmt) if job.get("created_at") else "N/A"
-    updated_disp = _format_iso_for_display(job.get("updated_at", ""), _fmt) if job.get("updated_at") else "N/A"
-    last_run_raw = job.get("last_run") or ""
-    last_run_disp = _format_iso_for_display(last_run_raw, _fmt) if last_run_raw else "never"
+    # Also fetch last journal lines for the service
+    service_unit = _unit_name(name, ".service")
+    journal_proc = await asyncio.create_subprocess_exec(
+        "sudo", "journalctl", "--no-pager", "-n", "10", "-u", service_unit,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        j_stdout, _ = await asyncio.wait_for(journal_proc.communicate(), timeout=10)
+        journal_output = j_stdout.decode().strip()
+    except asyncio.TimeoutError:
+        journal_proc.kill()
+        await journal_proc.communicate()
+        journal_output = "(journal query timed out)"
 
-    output = f"**Job: {name}**\n\n"
-    output += f"**Schedule**: {job.get('schedule_human', '')} (`{job.get('schedule', '')}`)\n"
-    output += f"**Enabled**: {'Yes' if job.get('enabled', True) else 'No'}\n"
-    output += f"**Created**: {created_disp}\n"
-    output += f"**Updated**: {updated_disp}\n"
-    output += f"**Last Run**: {last_run_disp}\n"
-    output += f"**Last Status**: {job.get('last_status', '-')}\n\n"
-    output += f"---\n\n**Task File** (`{task_file}`):\n\n```markdown\n{task_content}\n```"
+    output = f"**Job: lobster-{name}**\n\n"
+    output += f"```\n{stdout.strip()}\n```\n\n"
+    if journal_output:
+        output += f"**Last 10 service journal lines:**\n```\n{journal_output}\n```"
 
     return [TextContent(type="text", text=output)]
 
 
 async def handle_update_scheduled_job(args: dict) -> list[TextContent]:
-    """Update a scheduled job."""
+    """Update a scheduled job's schedule, command, or enabled state."""
     name = args.get("name", "").strip().lower()
 
     if not name:
         return [TextContent(type="text", text="Error: name is required")]
 
-    data = load_scheduled_jobs()
-    job = data.get("jobs", {}).get(name)
+    valid, error = _validate_timer_name(name)
+    if not valid:
+        return [TextContent(type="text", text=f"Error: {error}")]
 
-    if not job:
-        return [TextContent(type="text", text=f"Error: Job '{name}' not found")]
+    # Check the timer exists
+    timer_file = _SYSTEMD_UNIT_DIR / _unit_name(name, ".timer")
+    service_file = _SYSTEMD_UNIT_DIR / _unit_name(name, ".service")
+    if not timer_file.exists():
+        return [TextContent(type="text", text=f"Error: Job '{name}' not found (no systemd timer unit)")]
 
     updated = []
 
-    # Update schedule if provided
-    if "schedule" in args and args["schedule"]:
-        new_schedule = args["schedule"].strip()
-        valid, error = validate_cron_schedule(new_schedule)
-        if not valid:
-            return [TextContent(type="text", text=f"Error: Invalid cron schedule - {error}")]
-        job["schedule"] = new_schedule
-        job["schedule_human"] = cron_to_human(new_schedule)
-        updated.append(f"schedule -> {new_schedule}")
+    new_schedule = args.get("schedule", "").strip()
+    new_command = args.get("context", "").strip()
+    enabled = args.get("enabled")
 
-    # Update enabled if provided
-    if "enabled" in args:
-        job["enabled"] = bool(args["enabled"])
-        updated.append(f"enabled -> {job['enabled']}")
+    # If schedule or command changed, recreate unit files
+    if new_schedule or new_command:
+        # Read current values from existing unit files for fields not being changed
+        current_schedule = new_schedule
+        current_command = new_command
 
-    # Update context if provided
-    if "context" in args and args["context"]:
-        new_context = args["context"].strip()
-        task_file = SCHEDULED_TASKS_TASKS_DIR / f"{name}.md"
+        if not current_schedule:
+            # Parse current OnCalendar= from existing timer file
+            try:
+                for line in timer_file.read_text().splitlines():
+                    if line.startswith("OnCalendar="):
+                        current_schedule = line.partition("=")[2].strip()
+                        break
+            except OSError:
+                return [TextContent(type="text", text=f"Error: could not read existing timer unit for '{name}'")]
 
-        # Rewrite task file
-        now = datetime.now(timezone.utc)
-        created_disp = _format_iso_for_display(job.get("created_at", "")) if job.get("created_at") else "N/A"
-        task_content = f"""# {name.replace('-', ' ').title()}
+        if not current_command:
+            # Parse current ExecStart= from existing service file
+            try:
+                for line in service_file.read_text().splitlines():
+                    if line.startswith("ExecStart="):
+                        current_command = line.partition("=")[2].strip()
+                        break
+            except OSError:
+                return [TextContent(type="text", text=f"Error: could not read existing service unit for '{name}'")]
 
-**Job**: {name}
-**Schedule**: {job.get('schedule_human', '')} (`{job.get('schedule', '')}`)
-**Created**: {created_disp}
-**Updated**: {_format_display_ts(now)}
+        if new_command and not (new_command.startswith("/") or new_command.startswith("uv run /")):
+            return [TextContent(type="text", text=(
+                "Error: context must be an absolute path or start with 'uv run /'"
+            ))]
 
-## Context
+        description = f"Lobster scheduled job: {name}"
+        success, result = await _create_systemd_timer(name, current_schedule, current_command, description)
+        if not success:
+            return [TextContent(type="text", text=f"Error updating job '{name}': {result}")]
 
-You are running as a scheduled task. The main Lobster instance created this job.
+        if new_schedule:
+            updated.append(f"schedule -> {new_schedule}")
+        if new_command:
+            updated.append(f"command -> {new_command}")
 
-## Instructions
-
-{new_context}
-
-## Output
-
-When you complete your task, call `write_task_output` with:
-- job_name: "{name}"
-- output: Your results/summary
-- status: "success" or "failed"
-
-Keep output concise. The main Lobster instance will review this later.
-"""
-        task_file.write_text(task_content)
-        updated.append("context (task file rewritten)")
+    # Enable or disable
+    if enabled is not None:
+        if bool(enabled):
+            rc, _, stderr = await _run_systemctl("enable", "--now", _unit_name(name, ".timer"))
+            if rc != 0:
+                return [TextContent(type="text", text=f"Error enabling timer: {stderr}")]
+            updated.append("enabled -> True")
+        else:
+            rc, _, stderr = await _run_systemctl("disable", "--now", _unit_name(name, ".timer"))
+            if rc != 0:
+                return [TextContent(type="text", text=f"Error disabling timer: {stderr}")]
+            updated.append("enabled -> False")
 
     if not updated:
         return [TextContent(type="text", text="No changes specified. Provide schedule, context, or enabled.")]
 
-    job["updated_at"] = datetime.now(timezone.utc).isoformat()
-    save_scheduled_jobs(data)
-
-    # Sync to crontab
-    success, msg = await sync_crontab()
-    sync_status = "" if success else f"\n(Warning: crontab sync failed: {msg})"
-
-    return [TextContent(type="text", text=f"Updated job '{name}':\n- " + "\n- ".join(updated) + sync_status)]
+    return [TextContent(type="text", text=f"Updated job '{name}':\n- " + "\n- ".join(updated))]
 
 
 async def handle_delete_scheduled_job(args: dict) -> list[TextContent]:
-    """Delete a scheduled job."""
+    """Stop, disable, and remove a lobster-managed systemd timer."""
     name = args.get("name", "").strip().lower()
 
     if not name:
         return [TextContent(type="text", text="Error: name is required")]
 
-    data = load_scheduled_jobs()
-    if name not in data.get("jobs", {}):
-        return [TextContent(type="text", text=f"Error: Job '{name}' not found")]
+    valid, error = _validate_timer_name(name)
+    if not valid:
+        return [TextContent(type="text", text=f"Error: {error}")]
 
-    # Remove from jobs.json
-    del data["jobs"][name]
-    save_scheduled_jobs(data)
+    success, result = await _delete_systemd_timer(name)
 
-    # Delete task file
-    task_file = SCHEDULED_TASKS_TASKS_DIR / f"{name}.md"
-    if task_file.exists():
-        task_file.unlink()
+    if result == "not_found":
+        return [TextContent(type="text", text=f"Job '{name}' does not exist — nothing to delete.")]
 
-    # Sync to crontab
-    success, msg = await sync_crontab()
-    sync_status = "" if success else f"\n(Warning: crontab sync failed: {msg})"
+    if not success:
+        return [TextContent(type="text", text=f"Error deleting job '{name}': {result}")]
 
-    return [TextContent(type="text", text=f"Deleted job '{name}'" + sync_status)]
+    return [TextContent(type="text", text=f"Deleted job '{name}'. {result}")]
+
+
+async def handle_get_job_scaffold(args: dict) -> list[TextContent]:
+    """Return starter template content for a code-first poller script."""
+    kind = args.get("kind", "poller").strip().lower()
+
+    if kind != "poller":
+        return [TextContent(type="text", text=f"Error: unknown scaffold kind '{kind}'. Only 'poller' is supported.")]
+
+    template_path = _REPO_DIR / "scheduled-tasks" / "templates" / "poller.py.template"
+    if not template_path.exists():
+        return [TextContent(type="text", text=(
+            f"Error: template not found at {template_path}. "
+            "Run git pull to update the repository."
+        ))]
+
+    content = template_path.read_text()
+    return [TextContent(type="text", text=(
+        f"**Poller script template** (`{template_path}`):\n\n"
+        f"```python\n{content}\n```\n\n"
+        "Copy this to a new .py file, fill in the REPLACE_WITH_YOUR_JOB_NAME "
+        "placeholders and the fetch/format logic, then call:\n"
+        "`create_scheduled_job(name=..., schedule=..., context='uv run /absolute/path/to/script.py')`"
+    ))]
 
 
 async def handle_check_task_outputs(args: dict) -> list[TextContent]:

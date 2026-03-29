@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""
+REPLACE_WITH_YOUR_JOB_NAME — Lobster Kind 1 code-first poller script.
+
+Run by a systemd timer (lobster-REPLACE_WITH_YOUR_JOB_NAME.timer).
+Write to inbox only when there is something actionable.
+Exit 0 in all cases — systemd retries are not useful for pollers.
+
+Usage:
+    uv run REPLACE_WITH_YOUR_JOB_NAME.py
+
+Create the timer (run this once to install):
+    mcp: create_timer(
+        name="REPLACE_WITH_YOUR_JOB_NAME",
+        schedule="*-*-* *:00/15:00",   # every 15 minutes
+        command="uv run /path/to/REPLACE_WITH_YOUR_JOB_NAME.py",
+        description="Short description of what this does"
+    )
+"""
+
+import json
+import sys
+from pathlib import Path
+
+# Import shared utilities (available after install — see scheduled-tasks/lobster_script_utils.py)
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from lobster_script_utils import get_config, log_result, write_to_inbox
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+JOB_NAME = "REPLACE_WITH_YOUR_JOB_NAME"
+
+# Where to remember the last-seen watermark between runs
+STATE_FILE = Path.home() / "lobster-workspace" / "scheduled-jobs" / f"{JOB_NAME}-state.json"
+
+# The user to notify when something is found
+CHAT_ID = get_config("TELEGRAM_ALLOWED_USERS")
+
+
+# ---------------------------------------------------------------------------
+# State helpers — pure functions; side effects only at call sites
+# ---------------------------------------------------------------------------
+
+def load_state() -> dict:
+    """Load watermark state from disk.  Returns empty dict if not found."""
+    try:
+        return json.loads(STATE_FILE.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def save_state(state: dict) -> None:
+    """Persist watermark state atomically."""
+    tmp = STATE_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, indent=2))
+    tmp.rename(STATE_FILE)
+
+
+# ---------------------------------------------------------------------------
+# Polling logic — pure, no I/O side effects
+# ---------------------------------------------------------------------------
+
+def fetch_new_items(last_check_ts: str | None) -> list[dict]:
+    """Return items newer than last_check_ts.
+
+    Replace this function with your actual API call or data source query.
+    Return an empty list when there is nothing actionable.
+    """
+    # TODO: implement your polling logic here
+    # Example pattern:
+    #   response = requests.get("https://api.example.com/items", params={"since": last_check_ts})
+    #   return response.json().get("items", [])
+    return []
+
+
+def format_notification(items: list[dict]) -> str:
+    """Format the list of new items into a human-readable notification string."""
+    # TODO: format items for the user
+    lines = [f"Found {len(items)} new item(s):"]
+    for item in items[:10]:  # cap at 10 to avoid overly long messages
+        lines.append(f"  - {item}")
+    if len(items) > 10:
+        lines.append(f"  ... and {len(items) - 10} more")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Main — orchestrates I/O; calls pure functions for logic
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    state = load_state()
+    last_check_ts = state.get("last_check_ts")
+
+    try:
+        new_items = fetch_new_items(last_check_ts)
+    except Exception as exc:
+        log_result(JOB_NAME, "failed", f"fetch failed: {exc}")
+        # Exit 0 so systemd does not mark the unit as failed for retriable errors.
+        # If the failure is persistent, the lack of output will surface it naturally.
+        sys.exit(0)
+
+    if new_items:
+        try:
+            write_to_inbox(format_notification(new_items), CHAT_ID, JOB_NAME)
+        except Exception as exc:
+            log_result(JOB_NAME, "failed", f"inbox write failed: {exc}")
+            sys.exit(0)
+        log_result(JOB_NAME, "success", f"{len(new_items)} new items delivered to inbox")
+    else:
+        log_result(JOB_NAME, "success", "no new items")
+
+    # Advance the watermark AFTER successfully writing to inbox.
+    # If we advanced before writing and then crashed, items would be silently lost.
+    from datetime import datetime, timezone
+    state["last_check_ts"] = datetime.now(timezone.utc).isoformat()
+    save_state(state)
+
+
+if __name__ == "__main__":
+    main()
