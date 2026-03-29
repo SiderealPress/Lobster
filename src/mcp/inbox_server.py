@@ -5607,8 +5607,12 @@ async def handle_check_task_outputs(args: dict) -> list[TextContent]:
     limit = args.get("limit", 10)
     job_name_filter = args.get("job_name", "").strip().lower()
 
-    # Get all output files
-    output_files = sorted(TASK_OUTPUTS_DIR.glob("*.json"), reverse=True)
+    # Get all output files, sorted by mtime descending (newest first).
+    # Sorting by filename is unreliable: non-date-prefixed files (e.g. old
+    # write_result artifacts) sort lexicographically ahead of date-prefixed
+    # write_task_output files and would dominate every result page.
+    all_files = list(TASK_OUTPUTS_DIR.glob("*.json"))
+    output_files = sorted(all_files, key=lambda p: p.stat().st_mtime, reverse=True)
 
     if not output_files:
         return [TextContent(type="text", text="No task outputs yet.\n\nOutputs will appear here when scheduled jobs complete.")]
@@ -5628,6 +5632,13 @@ async def handle_check_task_outputs(args: dict) -> list[TextContent]:
         try:
             with open(f) as fp:
                 data = json.load(fp)
+
+            # Skip files that are not write_task_output records.  The task-outputs
+            # directory may contain stale write_result artifacts (schema: task_id/text)
+            # from an older code path.  These have no job_name or output fields and
+            # would render as "unknown" / "(no output)".  Silently skip them.
+            if "job_name" not in data:
+                continue
 
             # Filter by job name
             if job_name_filter and data.get("job_name", "").lower() != job_name_filter:
