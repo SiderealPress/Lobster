@@ -277,3 +277,69 @@ class TestSubagentSynchronousAgent:
             f"Missing marker file should default to subagent (allow), got exit {exit_code}. "
             f"stderr={stderr!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# "Task" tool name (older CC versions use Task instead of Agent)
+# ---------------------------------------------------------------------------
+
+
+class TestTaskToolName:
+    """CC older versions use "Task" as the tool name for spawning subagents.
+
+    The hook must treat "Task" identically to "Agent".
+    """
+
+    def test_task_tool_dispatcher_sync_exits_2(self, monkeypatch, tmp_path):
+        """Dispatcher calling Task (old CC) without run_in_background is hard-blocked."""
+        _setup_dispatcher_marker(tmp_path, "dispatcher-sess-001")
+        import session_role
+        monkeypatch.setattr(
+            session_role, "DISPATCHER_SESSION_FILE",
+            tmp_path / "messages" / "config" / "dispatcher-session-id",
+        )
+        hook_input = _make_hook_input(
+            "Task",
+            {"prompt": "do work"},
+            session_id="dispatcher-sess-001",
+        )
+        exit_code, stdout, stderr = _run_hook(hook_input)
+        assert exit_code == 2, (
+            f"Dispatcher calling Task without run_in_background should be hard-blocked, "
+            f"got exit {exit_code}. stderr={stderr!r}"
+        )
+
+    def test_task_tool_dispatcher_background_true_exits_0(self, monkeypatch, tmp_path):
+        """Dispatcher calling Task with run_in_background=True is allowed."""
+        _setup_dispatcher_marker(tmp_path, "dispatcher-sess-001")
+        import session_role
+        monkeypatch.setattr(
+            session_role, "DISPATCHER_SESSION_FILE",
+            tmp_path / "messages" / "config" / "dispatcher-session-id",
+        )
+        hook_input = _make_hook_input(
+            "Task",
+            {"prompt": "do work", "run_in_background": True},
+            session_id="dispatcher-sess-001",
+        )
+        exit_code, _, _ = _run_hook(hook_input)
+        assert exit_code == 0
+
+    def test_task_tool_subagent_sync_exits_0(self, monkeypatch, tmp_path):
+        """Subagent calling Task synchronously is allowed (not the dispatcher)."""
+        _setup_dispatcher_marker(tmp_path, "dispatcher-sess-001")
+        import session_role
+        monkeypatch.setattr(
+            session_role, "DISPATCHER_SESSION_FILE",
+            tmp_path / "messages" / "config" / "dispatcher-session-id",
+        )
+        hook_input = _make_hook_input(
+            "Task",
+            {"prompt": "do nested work"},
+            session_id="subagent-sess-999",
+        )
+        exit_code, stdout, stderr = _run_hook(hook_input)
+        assert exit_code == 0, (
+            f"Subagent should be allowed to call Task synchronously, got exit {exit_code}. "
+            f"stderr={stderr!r}"
+        )
