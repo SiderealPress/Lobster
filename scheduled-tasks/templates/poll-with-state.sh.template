@@ -1,0 +1,144 @@
+#!/bin/bash
+# poll-with-state.sh.template — Polling pre-check with state tracking
+#
+# Pattern: cron fires frequently; script checks a source and compares against
+# last-seen state. If nothing new: log a no-op, exit 0 (no LLM spawned).
+# If new data is found: write to inbox and update the state file.
+#
+# This is Layer 1 in the two-layer scheduling model. It must never invoke
+# Claude directly. All LLM work happens in Layer 2 (a subagent spawned by
+# the dispatcher after this script writes to the inbox).
+#
+# Usage: cron calls this script directly at your desired polling cadence.
+#   Example crontab entry:
+#     */5 * * * * ~/lobster/scheduled-tasks/YOUR_JOB_NAME-check.sh
+#
+# Fill in all variables marked YOUR_* before using.
+#
+# Flow:
+#   new data found → dispatch-job.sh YOUR_JOB_NAME → inbox write → LLM
+#   nothing new    → log no-op → exit 0
+
+set -euo pipefail
+
+export PATH="$HOME/.local/bin:$PATH"
+
+# --- Configuration (fill in these values) ---
+JOB_NAME="YOUR_JOB_NAME"                            # matches task file in scheduled-jobs/tasks/
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# --- Load env files (same pattern as dispatch-job.sh) ---
+CONFIG_DIR="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}"
+for _env_file in "$CONFIG_DIR/config.env" "$CONFIG_DIR/global.env"; do
+    if [ -f "$_env_file" ]; then
+        # shellcheck source=/dev/null
+        set -a
+        source "$_env_file"
+        set +a
+    fi
+done
+unset _env_file
+
+WORKSPACE="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
+LOG_DIR="$WORKSPACE/scheduled-jobs/logs"
+TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+START_ISO=$(date -Iseconds)
+
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/${JOB_NAME}-precheck-${TIMESTAMP}.log"
+
+# --- State file (tracks what was last seen) ---
+# Convention: ~/lobster-workspace/data/<job-name>-state.json
+STATE_FILE="$WORKSPACE/data/${JOB_NAME}-state.json"
+LAST_SEEN=""
+if [ -f "$STATE_FILE" ]; then
+    LAST_SEEN=$(python3 -c "
+import json
+try:
+    with open('$STATE_FILE') as f:
+        d = json.load(f)
+    print(d.get('last_seen', ''))
+except Exception:
+    pass
+" 2>/dev/null || true)
+fi
+
+# --- Token file (if your source requires auth) ---
+# Convention: ~/lobster-workspace/data/<job-name>-token.txt
+TOKEN_FILE="$WORKSPACE/data/${JOB_NAME}-token.txt"
+if [ ! -f "$TOKEN_FILE" ]; then
+    echo "[$START_ISO] ERROR: token file not found: $TOKEN_FILE — dispatching to let job handle it" | tee "$LOG_FILE"
+    exec "$SCRIPT_DIR/dispatch-job.sh" "$JOB_NAME"
+fi
+TOKEN=$(python3 -c "print(open('$TOKEN_FILE').read().strip())" 2>/dev/null)
+
+# --- Check the source (replace with your actual check) ---
+# The goal: determine whether there is new data since LAST_SEEN.
+# Keep this lightweight — a single HTTP call, a file stat, a git rev-parse, etc.
+HAS_NEW_DATA=0
+
+if [ -z "$LAST_SEEN" ]; then
+    # No recorded state — treat as new so the job runs at least once
+    HAS_NEW_DATA=1
+else
+    # Example: HTTP check against YOUR_API_URL with a ?since= parameter
+    YOUR_API_URL="https://YOUR_API_URL/endpoint"
+    ENCODED_SINCE=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "$LAST_SEEN" 2>/dev/null || echo "")
+    CHECK_URL="${YOUR_API_URL}?since=${ENCODED_SINCE}"
+
+    set +e
+    RESPONSE=$(curl -sf --max-time 10 \
+        -H "Authorization: Bearer $TOKEN" \
+        "$CHECK_URL" 2>/dev/null)
+    CURL_EXIT=$?
+    set -e
+
+    if [ "$CURL_EXIT" -ne 0 ]; then
+        echo "[$START_ISO] WARNING: source unreachable (curl exit $CURL_EXIT) — dispatching to let job handle outage logic" | tee "$LOG_FILE"
+        exec "$SCRIPT_DIR/dispatch-job.sh" "$JOB_NAME"
+    fi
+
+    # Parse the response — count items, or check a version hash, etc.
+    set +e
+    ITEM_COUNT=$(python3 -c "
+import json, sys
+try:
+    data = json.loads(sys.argv[1])
+    # Adjust this for your API's response shape:
+    items = data if isinstance(data, list) else data.get('items', data.get('results', []))
+    print(len(items))
+except (json.JSONDecodeError, KeyError):
+    sys.exit(2)  # parse failure — fall through to dispatch
+" "$RESPONSE" 2>/dev/null)
+    PARSE_EXIT=$?
+    set -e
+
+    if [ "$PARSE_EXIT" -ne 0 ]; then
+        echo "[$START_ISO] WARNING: unexpected response format — dispatching to let job handle it" | tee "$LOG_FILE"
+        exec "$SCRIPT_DIR/dispatch-job.sh" "$JOB_NAME"
+    fi
+
+    if [ "${ITEM_COUNT:-0}" -gt 0 ]; then
+        HAS_NEW_DATA=1
+    fi
+fi
+
+# --- Decision ---
+if [ "$HAS_NEW_DATA" -eq 1 ]; then
+    echo "[$START_ISO] New data found — dispatching $JOB_NAME" | tee "$LOG_FILE"
+    exec "$SCRIPT_DIR/dispatch-job.sh" "$JOB_NAME"
+else
+    echo "[$START_ISO] No new data since $LAST_SEEN — skipping dispatch for $JOB_NAME" | tee "$LOG_FILE"
+    exit 0
+fi
+
+# --- NOTE: State updates ---
+# The Layer 2 subagent (spawned by dispatch-job.sh) is responsible for
+# updating the state file after it processes the data. This keeps state
+# accurate: only advance the cursor after successful processing, not after
+# a successful poll.
+#
+# In the subagent task file (scheduled-jobs/tasks/YOUR_JOB_NAME.md),
+# instruct the agent to write:
+#   ~/lobster-workspace/data/YOUR_JOB_NAME-state.json
+# with the new cursor value (e.g., latest timestamp, last-seen ID).

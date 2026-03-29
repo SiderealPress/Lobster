@@ -70,7 +70,7 @@ from reliability import (
 from update_manager import UpdateManager
 
 # Bot-talk mirroring — fire-and-forget relay to the shared SaharLobster/AlbertLobster channel
-from bot_talk.mirror import mirror_outbound as _mirror_outbound, mirror_inbound as _mirror_inbound
+from bot_talk_mirror import mirror_outbound as _mirror_outbound, mirror_inbound as _mirror_inbound
 
 # Pending agent tracker (thin adapter over session_store)
 from agents.tracker import add_pending_agent as _add_pending_agent, remove_pending_agent as _remove_pending_agent
@@ -2780,17 +2780,37 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
     # any session that is not the designated dispatcher session.
     #
     # In HTTP transport mode: use per-session tagging (_is_main_http_session).
-    #   - A session becomes the dispatcher by calling wait_for_messages (Option A)
-    #     or session_start(agent_type="dispatcher") (Option B).
+    #   - A session becomes the dispatcher by calling wait_for_messages (Option A),
+    #     session_start(agent_type="dispatcher") (Option B), or any guarded tool
+    #     when no dispatcher is currently tagged (Option C — restart recovery).
     #   - All other sessions are blocked from guarded tools.
+    #
+    # Option C — restart recovery (no-dispatcher-tagged auto-tag):
+    #   When _dispatcher_session_id is None the MCP server has just restarted and
+    #   has no record of any dispatcher session.  The first session to call any
+    #   guarded tool must be the new dispatcher — subagents cannot be running yet
+    #   because they require the dispatcher to spawn them.  Auto-tagging here closes
+    #   the window between server start and the dispatcher's first WFM or
+    #   session_start call, which is when backlog send_reply calls would otherwise
+    #   be blocked.
     #
     # In stdio transport mode: use the legacy tmux ancestry / env-var check
     #   (_is_main_session).  This path is unchanged.
     if name in _SESSION_GUARDED_TOOLS:
         if _http_session_manager is not None:
-            # HTTP mode: per-session guard.  wait_for_messages is exempted from
-            # the guard check because it IS the tagging call (Option A) — the
-            # session won't be tagged yet when the first WFM call arrives.
+            # HTTP mode: per-session guard.  wait_for_messages is always exempted
+            # (Option A tagging).  When no dispatcher is tagged yet (Option C),
+            # auto-tag the calling session before the guard check so the call
+            # proceeds — this handles the restart race where the dispatcher calls
+            # send_reply or check_inbox before its first WFM/session_start fires.
+            if _dispatcher_session_id is None:
+                session_id = _get_current_http_session_id()
+                if session_id is not None:
+                    log.info(
+                        f"[session-tag] Option C: no dispatcher tagged, auto-tagging "
+                        f"on '{name}' call — session {session_id!r}"
+                    )
+                    _tag_dispatcher_session(session_id)
             if name != "wait_for_messages" and not _is_main_http_session():
                 log.warning(
                     f"Session guard blocked '{name}' — HTTP session "
@@ -5607,8 +5627,12 @@ async def handle_check_task_outputs(args: dict) -> list[TextContent]:
     limit = args.get("limit", 10)
     job_name_filter = args.get("job_name", "").strip().lower()
 
-    # Get all output files
-    output_files = sorted(TASK_OUTPUTS_DIR.glob("*.json"), reverse=True)
+    # Get all output files, sorted by mtime descending (newest first).
+    # Sorting by filename is unreliable: non-date-prefixed files (e.g. old
+    # write_result artifacts) sort lexicographically ahead of date-prefixed
+    # write_task_output files and would dominate every result page.
+    all_files = list(TASK_OUTPUTS_DIR.glob("*.json"))
+    output_files = sorted(all_files, key=lambda p: p.stat().st_mtime, reverse=True)
 
     if not output_files:
         return [TextContent(type="text", text="No task outputs yet.\n\nOutputs will appear here when scheduled jobs complete.")]
@@ -5628,6 +5652,13 @@ async def handle_check_task_outputs(args: dict) -> list[TextContent]:
         try:
             with open(f) as fp:
                 data = json.load(fp)
+
+            # Skip files that are not write_task_output records.  The task-outputs
+            # directory may contain stale write_result artifacts (schema: task_id/text)
+            # from an older code path.  These have no job_name or output fields and
+            # would render as "unknown" / "(no output)".  Silently skip them.
+            if "job_name" not in data:
+                continue
 
             # Filter by job name
             if job_name_filter and data.get("job_name", "").lower() != job_name_filter:

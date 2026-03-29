@@ -1599,23 +1599,11 @@ EOF
         migrated=$((migrated + 1))
     fi
 
-    # Migration 39: Update bot-talk poller task files to mirror both sides of conversation
-    # The poller previously only forwarded AlbertLobster messages to the owner. The updated
-    # task files instruct the poller to collect both SaharLobster and AlbertLobster
-    # messages, sort them chronologically, and send a single conversation block to the owner.
-    local bt_poller_src="$INSTALL_DIR/scheduled-tasks/tasks/bot-talk-poller.md"
-    local bt_fast_src="$INSTALL_DIR/scheduled-tasks/tasks/bot-talk-poller-fast.md"
-    local bt_tasks_dir="$WORKSPACE_DIR/scheduled-jobs/tasks"
-    if [ -f "$bt_poller_src" ] && [ -d "$bt_tasks_dir" ]; then
-        cp "$bt_poller_src" "$bt_tasks_dir/bot-talk-poller.md"
-        substep "Updated bot-talk-poller.md to mirror both conversation sides"
-        migrated=$((migrated + 1))
-    fi
-    if [ -f "$bt_fast_src" ] && [ -d "$bt_tasks_dir" ]; then
-        cp "$bt_fast_src" "$bt_tasks_dir/bot-talk-poller-fast.md"
-        substep "Updated bot-talk-poller-fast.md to mirror both conversation sides"
-        migrated=$((migrated + 1))
-    fi
+    # Migration 39: (removed) Previously copied bot-talk-poller.md and bot-talk-poller-fast.md
+    # from scheduled-tasks/tasks/ into the workspace. Those files contained hardcoded instance
+    # data (IP addresses, chat_ids, identity names) and have been removed from the public repo.
+    # Instance-specific task files belong in ~/lobster-workspace/scheduled-jobs/tasks/ and are
+    # created via MCP tools (create_scheduled_job) or user-config hooks — not pushed from the repo.
 
     # Migration 37: Remove run-job.sh cron entries and make dispatch-job.sh executable.
     # run-job.sh (which invoked claude -p directly) has been replaced by dispatch-job.sh
@@ -1762,7 +1750,7 @@ EOF
         local mcp_local_template="$LOBSTER_DIR/services/lobster-mcp-local.service.template"
         local mcp_local_service="$LOBSTER_DIR/services/lobster-mcp-local.service"
 
-        if [ -f "$mcp_local_template" ] && command -v jq >/dev/null 2>&1; then
+        if [ -f "$mcp_local_template" ]; then
             # Render template (reuse generate_from_template if available, else sed directly)
             if declare -f generate_from_template >/dev/null 2>&1; then
                 generate_from_template "$mcp_local_template" "$mcp_local_service"
@@ -1797,6 +1785,17 @@ EOF
             sleep 3
         fi
 
+        # Remove any legacy mcpServers.lobster-inbox entry from settings.json if present.
+        # The claude mcp CLI stores entries in ~/.claude.json, not settings.json,
+        # but defensive cleanup costs nothing and handles any manual or legacy configs.
+        if [ -f "$CLAUDE_SETTINGS" ] && command -v jq >/dev/null 2>&1; then
+            if jq -e '.mcpServers."lobster-inbox"' "$CLAUDE_SETTINGS" >/dev/null 2>&1; then
+                TMP_SETTINGS=$(mktemp)
+                jq 'del(.mcpServers."lobster-inbox")' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+                substep "Removed legacy mcpServers.lobster-inbox entry from settings.json"
+            fi
+        fi
+
         # Re-register MCP server using HTTP transport
         claude mcp remove lobster-inbox 2>/dev/null || true
         if claude mcp add --transport http lobster-inbox -s user "http://localhost:8766/mcp" 2>/dev/null; then
@@ -1824,6 +1823,27 @@ EOF
                 substep "Crontab re-synced: bot-talk-poller now uses bot-talk-check-dispatch.sh"
                 migrated=$((migrated + 1))
             fi
+        fi
+    fi
+
+    # Migration 46: Add lobster user to the `crontab` group.
+    # The MCP server process runs under PR_SET_NO_NEW_PRIVS (NoNewPrivs=1), which
+    # suppresses setgid bits on child processes. The `crontab` binary is setgid-crontab,
+    # so `crontab -` fails with "mkstemp: Permission denied" when called from the MCP
+    # server. Fix: add the lobster user to the crontab group so sync-crontab.sh can
+    # write directly to /var/spool/cron/crontabs/$USER (group-writable directory) without
+    # needing the setgid bit. Requires sudo; warns and skips if sudo is unavailable.
+    local CRONTAB_DIR="/var/spool/cron/crontabs"
+    if [ -d "$CRONTAB_DIR" ] && ! id -nG "$USER" | grep -qw "crontab"; then
+        if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+            sudo usermod -aG crontab "$USER" 2>/dev/null && {
+                substep "Added $USER to the crontab group (fixes NoNewPrivs crontab permission error)"
+                migrated=$((migrated + 1))
+                warn "Group membership change takes effect at next login. Run 'newgrp crontab' or restart the Lobster service to apply immediately."
+            } || warn "Failed to add $USER to crontab group — run: sudo usermod -aG crontab $USER"
+        else
+            warn "Cannot add $USER to crontab group (sudo unavailable). Run manually: sudo usermod -aG crontab $USER"
+            warn "Until this is done, create_scheduled_job/update_scheduled_job/delete_scheduled_job will fail to sync crontab."
         fi
     fi
 
