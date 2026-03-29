@@ -1704,6 +1704,92 @@ async def list_tools() -> list[Tool]:
                 "required": ["name"],
             },
         ),
+        # Systemd Timer Tools
+        Tool(
+            name="create_timer",
+            description=(
+                "Create a systemd timer that runs a script on a schedule. "
+                "Creates lobster-<name>.timer and lobster-<name>.service unit files, "
+                "then enables and starts the timer. Idempotent: returns success without "
+                "recreating if the timer already exists with the same schedule and command."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": (
+                            "Unique slug for the timer (lowercase, hyphens allowed). "
+                            "The systemd units will be named lobster-<name>.timer and lobster-<name>.service."
+                        ),
+                    },
+                    "schedule": {
+                        "type": "string",
+                        "description": (
+                            "Systemd OnCalendar= expression, e.g. '*-*-* *:00/5:00' for every 5 minutes, "
+                            "'*-*-* 09:00:00' for 9am daily, 'Mon *-*-* 08:00:00' for Monday mornings."
+                        ),
+                    },
+                    "command": {
+                        "type": "string",
+                        "description": (
+                            "Absolute path to the script to run, or 'uv run /path/to/script.py'. "
+                            "Must be an absolute path."
+                        ),
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Optional human-readable description of what this timer does.",
+                    },
+                },
+                "required": ["name", "schedule", "command"],
+            },
+        ),
+        Tool(
+            name="delete_timer",
+            description=(
+                "Stop, disable, and remove a lobster-managed systemd timer and its associated service unit. "
+                "Idempotent: returns success if the timer does not exist."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "The timer slug (the part after 'lobster-' in the unit name).",
+                    },
+                },
+                "required": ["name"],
+            },
+        ),
+        Tool(
+            name="list_timers",
+            description=(
+                "List all lobster-managed systemd timers (units prefixed with 'lobster-'). "
+                "Returns name, schedule, last run, next run, and active status for each."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
+        Tool(
+            name="get_timer_status",
+            description=(
+                "Get detailed status for a specific lobster-managed systemd timer, "
+                "including last exit code, last run time, and next scheduled run."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "The timer slug (the part after 'lobster-' in the unit name).",
+                    },
+                },
+                "required": ["name"],
+            },
+        ),
         Tool(
             name="check_task_outputs",
             description="Check recent outputs from scheduled tasks. Use this to review what your scheduled jobs have done.",
@@ -2854,6 +2940,15 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
         return await handle_update_scheduled_job(arguments)
     elif name == "delete_scheduled_job":
         return await handle_delete_scheduled_job(arguments)
+    # Systemd Timer Tools
+    elif name == "create_timer":
+        return await handle_create_timer(arguments)
+    elif name == "delete_timer":
+        return await handle_delete_timer(arguments)
+    elif name == "list_timers":
+        return await handle_list_timers(arguments)
+    elif name == "get_timer_status":
+        return await handle_get_timer_status(arguments)
     elif name == "check_task_outputs":
         return await handle_check_task_outputs(arguments)
     elif name == "write_task_output":
@@ -5710,6 +5805,307 @@ async def handle_write_task_output(args: dict) -> list[TextContent]:
         json.dump(output_data, f, indent=2)
 
     return [TextContent(type="text", text=f"Output recorded for job '{job_name}'")]
+
+
+# =============================================================================
+# Systemd Timer Tools
+# =============================================================================
+#
+# All lobster-managed systemd units carry the prefix "lobster-" and include a
+# "# LOBSTER-MANAGED" comment in the unit file so they can be identified and
+# cleaned up safely.  The lobster user runs with passwordless sudo, so all
+# systemctl calls use "sudo systemctl" (system mode, not --user).
+#
+# Name validation mirrors validate_job_name() — lowercase alphanumeric + hyphens.
+# This prevents path traversal via unit file names.
+
+_SYSTEMD_UNIT_DIR = Path("/etc/systemd/system")
+_LOBSTER_UNIT_PREFIX = "lobster-"
+
+
+def _validate_timer_name(name: str) -> tuple[bool, str]:
+    """Validate a timer slug.  Returns (is_valid, error_message)."""
+    if not name:
+        return False, "Timer name cannot be empty"
+    if not re.match(r'^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$', name):
+        return False, (
+            "Timer name must be lowercase alphanumeric with hyphens, "
+            "cannot start or end with hyphen"
+        )
+    if len(name) > 50:
+        return False, "Timer name must be 50 characters or less"
+    return True, ""
+
+
+def _unit_name(name: str, suffix: str) -> str:
+    """Return the full systemd unit filename, e.g. 'lobster-foo.timer'."""
+    return f"{_LOBSTER_UNIT_PREFIX}{name}{suffix}"
+
+
+def _timer_unit_content(name: str, schedule: str, description: str) -> str:
+    """Return the .timer unit file content."""
+    return f"""# LOBSTER-MANAGED — do not edit by hand; use delete_timer / create_timer MCP tools
+[Unit]
+Description={description}
+Requires={_unit_name(name, ".service")}
+
+[Timer]
+OnCalendar={schedule}
+AccuracySec=10s
+Persistent=true
+Unit={_unit_name(name, ".service")}
+
+[Install]
+WantedBy=timers.target
+"""
+
+
+def _service_unit_content(name: str, command: str, description: str) -> str:
+    """Return the .service unit file content."""
+    return f"""# LOBSTER-MANAGED — do not edit by hand; use delete_timer / create_timer MCP tools
+[Unit]
+Description={description} (service)
+
+[Service]
+Type=oneshot
+ExecStart={command}
+User={os.environ.get('USER', 'lobster')}
+StandardOutput=journal
+StandardError=journal
+"""
+
+
+async def _run_systemctl(*args: str) -> tuple[int, str, str]:
+    """Run a systemctl command with sudo.  Returns (returncode, stdout, stderr)."""
+    cmd = ["sudo", "systemctl"] + list(args)
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.communicate()
+        return -1, "", "systemctl command timed out"
+    return proc.returncode, stdout.decode(), stderr.decode()
+
+
+async def handle_create_timer(args: dict) -> list[TextContent]:
+    """Create a lobster-managed systemd timer + service unit pair."""
+    name = args.get("name", "").strip().lower()
+    schedule = args.get("schedule", "").strip()
+    command = args.get("command", "").strip()
+    description = args.get("description", f"Lobster scheduled task: {name}").strip()
+
+    # Validate name
+    valid, error = _validate_timer_name(name)
+    if not valid:
+        return [TextContent(type="text", text=f"Error: {error}")]
+
+    if not schedule:
+        return [TextContent(type="text", text="Error: schedule is required")]
+    if not command:
+        return [TextContent(type="text", text="Error: command is required")]
+
+    # Require an absolute path to prevent accidental relative-path commands
+    if not (command.startswith("/") or command.startswith("uv run /")):
+        return [TextContent(type="text", text=(
+            "Error: command must be an absolute path (e.g. '/home/lobster/scripts/my-script.py') "
+            "or start with 'uv run /' (e.g. 'uv run /home/lobster/scripts/my-script.py')"
+        ))]
+
+    timer_file = _SYSTEMD_UNIT_DIR / _unit_name(name, ".timer")
+    service_file = _SYSTEMD_UNIT_DIR / _unit_name(name, ".service")
+
+    new_timer_content = _timer_unit_content(name, schedule, description)
+    new_service_content = _service_unit_content(name, command, description)
+
+    # Idempotency: if unit files already exist and match, return success
+    if timer_file.exists() and service_file.exists():
+        try:
+            existing_timer = timer_file.read_text()
+            existing_service = service_file.read_text()
+            if existing_timer == new_timer_content and existing_service == new_service_content:
+                return [TextContent(type="text", text=(
+                    f"Timer '{name}' already exists with the same configuration — no changes made.\n"
+                    f"Unit: {_unit_name(name, '.timer')}"
+                ))]
+        except OSError:
+            pass  # fall through and recreate
+
+    # Write unit files (sudo tee is the simplest path for /etc/systemd/system/ writes)
+    for file_path, content in [(timer_file, new_timer_content), (service_file, new_service_content)]:
+        proc = await asyncio.create_subprocess_exec(
+            "sudo", "tee", str(file_path),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _, stderr = await asyncio.wait_for(
+                proc.communicate(input=content.encode()), timeout=10
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.communicate()
+            return [TextContent(type="text", text=f"Error: timed out writing {file_path}")]
+        if proc.returncode != 0:
+            return [TextContent(type="text", text=f"Error writing {file_path}: {stderr.decode()}")]
+
+    # Reload daemon so systemd picks up the new unit files
+    rc, _, stderr = await _run_systemctl("daemon-reload")
+    if rc != 0:
+        return [TextContent(type="text", text=f"Error reloading systemd daemon: {stderr}")]
+
+    # Enable and start the timer
+    rc, _, stderr = await _run_systemctl("enable", "--now", _unit_name(name, ".timer"))
+    if rc != 0:
+        return [TextContent(type="text", text=f"Error enabling timer: {stderr}")]
+
+    # Retrieve next run time for confirmation
+    rc, stdout, _ = await _run_systemctl(
+        "list-timers", "--no-pager", "--no-legend", _unit_name(name, ".timer")
+    )
+    next_run = "unknown"
+    if rc == 0 and stdout.strip():
+        parts = stdout.strip().split()
+        if len(parts) >= 2:
+            next_run = f"{parts[0]} {parts[1]}"
+
+    return [TextContent(type="text", text=(
+        f"Created timer '{name}'.\n"
+        f"Units: {_unit_name(name, '.timer')} + {_unit_name(name, '.service')}\n"
+        f"Schedule: {schedule}\n"
+        f"Command: {command}\n"
+        f"Next run: {next_run}"
+    ))]
+
+
+async def handle_delete_timer(args: dict) -> list[TextContent]:
+    """Stop, disable, and remove a lobster-managed systemd timer."""
+    name = args.get("name", "").strip().lower()
+
+    valid, error = _validate_timer_name(name)
+    if not valid:
+        return [TextContent(type="text", text=f"Error: {error}")]
+
+    timer_unit = _unit_name(name, ".timer")
+    service_unit = _unit_name(name, ".service")
+    timer_file = _SYSTEMD_UNIT_DIR / timer_unit
+    service_file = _SYSTEMD_UNIT_DIR / service_unit
+
+    if not timer_file.exists() and not service_file.exists():
+        return [TextContent(type="text", text=f"Timer '{name}' does not exist — nothing to delete.")]
+
+    # Stop and disable (errors here are non-fatal — unit may already be stopped)
+    await _run_systemctl("stop", timer_unit)
+    await _run_systemctl("disable", timer_unit)
+
+    # Remove unit files
+    removed = []
+    errors = []
+    for file_path in [timer_file, service_file]:
+        if file_path.exists():
+            proc = await asyncio.create_subprocess_exec(
+                "sudo", "rm", str(file_path),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                _, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.communicate()
+                errors.append(f"timed out removing {file_path}")
+                continue
+            if proc.returncode == 0:
+                removed.append(file_path.name)
+            else:
+                errors.append(f"failed to remove {file_path}: {stderr.decode()}")
+
+    # Reload daemon to clear the removed units
+    await _run_systemctl("daemon-reload")
+
+    if errors:
+        return [TextContent(type="text", text=f"Partial deletion of '{name}':\nRemoved: {removed}\nErrors: {errors}")]
+
+    return [TextContent(type="text", text=f"Deleted timer '{name}'. Removed: {', '.join(removed)}")]
+
+
+async def handle_list_timers(args: dict) -> list[TextContent]:
+    """List all lobster-managed systemd timers."""
+    rc, stdout, stderr = await _run_systemctl(
+        "list-timers", "--all", "--no-pager", "--no-legend"
+    )
+    if rc != 0:
+        return [TextContent(type="text", text=f"Error listing timers: {stderr}")]
+
+    lobster_lines = [
+        line for line in stdout.splitlines()
+        if _LOBSTER_UNIT_PREFIX in line
+    ]
+
+    if not lobster_lines:
+        return [TextContent(type="text", text=(
+            "No lobster-managed timers found.\n\n"
+            "Use `create_timer` to register a code-first polling script."
+        ))]
+
+    output = "**Lobster-managed systemd timers:**\n\n"
+    # systemd list-timers columns: NEXT LEFT LAST PASSED UNIT ACTIVATES
+    for line in lobster_lines:
+        parts = line.split()
+        if len(parts) >= 5:
+            unit_name_part = next((p for p in parts if p.startswith(_LOBSTER_UNIT_PREFIX) and p.endswith(".timer")), parts[-2] if len(parts) >= 2 else "")
+            slug = unit_name_part.removeprefix(_LOBSTER_UNIT_PREFIX).removesuffix(".timer")
+            # Reconstruct readable columns — format is variable so just show raw line
+            output += f"**{slug}** (`{unit_name_part}`)\n"
+            output += f"  {line.strip()}\n\n"
+        else:
+            output += f"  {line.strip()}\n\n"
+
+    output += f"---\nTotal: {len(lobster_lines)} timer(s)"
+    return [TextContent(type="text", text=output)]
+
+
+async def handle_get_timer_status(args: dict) -> list[TextContent]:
+    """Get detailed status for a lobster-managed systemd timer."""
+    name = args.get("name", "").strip().lower()
+
+    valid, error = _validate_timer_name(name)
+    if not valid:
+        return [TextContent(type="text", text=f"Error: {error}")]
+
+    timer_unit = _unit_name(name, ".timer")
+
+    # systemctl status — exit code 3 means unit exists but is stopped (not an error for us)
+    rc, stdout, stderr = await _run_systemctl("status", "--no-pager", timer_unit)
+    if rc not in (0, 3):
+        return [TextContent(type="text", text=f"Error: timer 'lobster-{name}' not found or status unavailable.\n{stderr}")]
+
+    # Also fetch last journal lines for the service
+    service_unit = _unit_name(name, ".service")
+    journal_proc = await asyncio.create_subprocess_exec(
+        "sudo", "journalctl", "--no-pager", "-n", "10", "-u", service_unit,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        j_stdout, _ = await asyncio.wait_for(journal_proc.communicate(), timeout=10)
+        journal_output = j_stdout.decode().strip()
+    except asyncio.TimeoutError:
+        journal_proc.kill()
+        await journal_proc.communicate()
+        journal_output = "(journal query timed out)"
+
+    output = f"**Timer: lobster-{name}**\n\n"
+    output += f"```\n{stdout.strip()}\n```\n\n"
+    if journal_output:
+        output += f"**Last 10 service journal lines:**\n```\n{journal_output}\n```"
+
+    return [TextContent(type="text", text=output)]
 
 
 # =============================================================================
