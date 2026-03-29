@@ -230,6 +230,51 @@ except Exception:
 }
 
 #===============================================================================
+# Wall-clock timeout configuration
+#
+# Kill the Claude worker + its entire process group after this many seconds.
+# Covers hung workers and orphaned node MCP servers.
+# Set LOBSTER_WORKER_TIMEOUT_SECS=0 to disable the timeout.
+#===============================================================================
+LOBSTER_WORKER_TIMEOUT_SECS="${LOBSTER_WORKER_TIMEOUT_SECS:-600}"  # 10 minutes
+
+#===============================================================================
+# Kill entire process group by PGID
+#
+# Sends SIGTERM to every process in the group, waits for a grace period, then
+# sends SIGKILL to any survivors. This ensures node MCP server children are
+# cleaned up alongside the claude worker.
+#===============================================================================
+kill_process_group() {
+    local pgid="$1"
+    local label="${2:-pgid=$pgid}"
+
+    if [[ -z "$pgid" ]] || [[ "$pgid" == "0" ]]; then
+        log "PGKILL: Invalid PGID '$pgid' for $label -- skipping"
+        return 0
+    fi
+
+    # Check if any process in the group still exists
+    if ! kill -0 "-$pgid" 2>/dev/null; then
+        log "PGKILL: Process group $pgid ($label) already gone"
+        return 0
+    fi
+
+    log "PGKILL: Sending SIGTERM to process group $pgid ($label)"
+    kill -TERM "-$pgid" 2>/dev/null || true
+
+    # Grace period: give MCP servers time to flush and exit
+    sleep 5
+
+    if kill -0 "-$pgid" 2>/dev/null; then
+        log "PGKILL: Process group $pgid ($label) still alive after SIGTERM -- sending SIGKILL"
+        kill -KILL "-$pgid" 2>/dev/null || true
+    else
+        log "PGKILL: Process group $pgid ($label) exited cleanly after SIGTERM"
+    fi
+}
+
+#===============================================================================
 # Orphan Process Cleanup
 #
 # Kill stale `claude --dangerously-skip-permissions` processes that are NOT
@@ -250,8 +295,49 @@ except Exception:
 #   - SIGTERM first, SIGKILL only after a 3-second grace period
 #   - SIGKILL is only sent to PIDs that previously received SIGTERM (not the
 #     full original list), preventing accidental kills due to PID reuse
+#   - When a stale PID file exists with a PGID, kills the entire process group
+#     (catches orphaned node MCP servers as well as the claude process)
 #===============================================================================
 kill_orphaned_claude_processes() {
+    # -------------------------------------------------------------------------
+    # Stale worker detection: if a PID file from a previous run exists, check
+    # whether that worker is still alive. If it is (same PID, same pattern),
+    # kill its entire process group before launching a new one.
+    # This catches the case where a previous claude-persistent.sh launch hung
+    # and was never cleaned up -- including any node MCP servers it spawned.
+    # -------------------------------------------------------------------------
+    local dispatcher_pid_file="${MESSAGES_DIR}/config/dispatcher.pid"
+    local dispatcher_pgid_file="${MESSAGES_DIR}/config/dispatcher.pgid"
+    if [[ -f "$dispatcher_pid_file" ]]; then
+        local stale_pid
+        stale_pid=$(cat "$dispatcher_pid_file" 2>/dev/null | tr -d '[:space:]' || true)
+        if [[ -n "$stale_pid" ]] && kill -0 "$stale_pid" 2>/dev/null; then
+            local stale_cmd
+            stale_cmd=$(ps -o args= -p "$stale_pid" 2>/dev/null || true)
+            if echo "$stale_cmd" | grep -q "claude"; then
+                log "CLEANUP: Stale worker detected (PID=$stale_pid) -- killing before new launch"
+                # Try to kill by process group first (cleans up node MCP servers)
+                local stale_pgid=""
+                if [[ -f "$dispatcher_pgid_file" ]]; then
+                    stale_pgid=$(cat "$dispatcher_pgid_file" 2>/dev/null | tr -d '[:space:]' || true)
+                fi
+                if [[ -n "$stale_pgid" ]] && [[ "$stale_pgid" != "0" ]]; then
+                    log "CLEANUP: Killing stale process group PGID=$stale_pgid"
+                    kill_process_group "$stale_pgid" "stale dispatcher"
+                else
+                    # No PGID file -- fall back to killing just the PID
+                    log "CLEANUP: No PGID file -- killing stale PID $stale_pid (SIGTERM)"
+                    kill -TERM "$stale_pid" 2>/dev/null || true
+                    sleep 3
+                    if kill -0 "$stale_pid" 2>/dev/null; then
+                        kill -KILL "$stale_pid" 2>/dev/null || true
+                    fi
+                fi
+            fi
+        fi
+        rm -f "$dispatcher_pid_file" "$dispatcher_pgid_file" 2>/dev/null || true
+    fi
+
     # Use -a to list panes across ALL sessions and windows, not just the
     # default window. Without -a, Claude running in a non-default tmux window
     # would not appear in the pane list and would be misclassified as an orphan.
@@ -290,7 +376,7 @@ kill_orphaned_claude_processes() {
                 local ppid
                 ppid=$(ps -o ppid= -p "$check_pid" 2>/dev/null | tr -d ' ')
                 if [[ -z "$ppid" || "$ppid" == "1" ]]; then
-                    # Reached init — orphan
+                    # Reached init -- orphan
                     break
                 fi
                 if echo "$tmux_panes" | grep -qw "$ppid"; then
@@ -302,12 +388,22 @@ kill_orphaned_claude_processes() {
         fi
 
         if [[ "$is_ours" == "true" ]]; then
-            log "CLEANUP: PID $pid is a current-session descendant — skipping"
+            log "CLEANUP: PID $pid is a current-session descendant -- skipping"
             skipped=$((skipped + 1))
         else
-            log "CLEANUP: Killing orphaned Claude PID $pid (SIGTERM)"
-            if kill -TERM "$pid" 2>/dev/null; then
+            # If this orphaned claude is a process group leader (PID == PGID),
+            # kill the entire group to sweep up orphaned node MCP servers too.
+            local orphan_pgid
+            orphan_pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')
+            if [[ "$orphan_pgid" == "$pid" ]]; then
+                log "CLEANUP: Killing orphaned Claude process group PGID=$orphan_pgid (SIGTERM)"
+                kill -TERM "-$orphan_pgid" 2>/dev/null || true
                 sigterm_pids+=("$pid")
+            else
+                log "CLEANUP: Killing orphaned Claude PID $pid (SIGTERM)"
+                if kill -TERM "$pid" 2>/dev/null; then
+                    sigterm_pids+=("$pid")
+                fi
             fi
             killed=$((killed + 1))
         fi
@@ -316,12 +412,20 @@ kill_orphaned_claude_processes() {
     # Give processes a brief grace period to exit cleanly
     if [[ $killed -gt 0 ]]; then
         sleep 3
-        # SIGKILL only the PIDs we sent SIGTERM to — not the full original list.
+        # SIGKILL only the PIDs we sent SIGTERM to -- not the full original list.
         # This avoids killing unrelated processes that may have been assigned
         # one of the recycled PIDs during the 3-second grace window.
         for pid in "${sigterm_pids[@]}"; do
-            if kill -0 "$pid" 2>/dev/null; then
-                log "CLEANUP: PID $pid still alive after SIGTERM — sending SIGKILL"
+            local pgid_check
+            pgid_check=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')
+            if [[ "$pgid_check" == "$pid" ]]; then
+                # Still alive and still a group leader -- SIGKILL the group
+                if kill -0 "-$pid" 2>/dev/null; then
+                    log "CLEANUP: Process group $pid still alive after SIGTERM -- sending SIGKILL"
+                    kill -KILL "-$pid" 2>/dev/null || true
+                fi
+            elif kill -0 "$pid" 2>/dev/null; then
+                log "CLEANUP: PID $pid still alive after SIGTERM -- sending SIGKILL"
                 kill -KILL "$pid" 2>/dev/null || true
             fi
         done
@@ -360,7 +464,7 @@ launch_claude() {
     #
     # Fix: strip these from both the shell environment AND tmux's global
     # environment before every launch attempt. LOBSTER_MAIN_SESSION (our own
-    # session isolation guard) is unaffected — it lives in the MCP server and
+    # session isolation guard) is unaffected -- it lives in the MCP server and
     # checks a different variable.
     # -------------------------------------------------------------------------
     unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT 2>/dev/null || true
@@ -377,7 +481,7 @@ launch_claude() {
     # Why: --continue resumes the previous session's context. If that session
     # was mid-task (e.g. deep in a subagent chain), Claude resumes the old
     # work instead of re-entering the message loop. The dispatcher is stateless
-    # by design — it reads CLAUDE.md, enters the loop, and processes messages.
+    # by design -- it reads CLAUDE.md, enters the loop, and processes messages.
     # Any persistent state lives in canonical memory files, not conversation history.
     local claude_exit_code=0
     log "Starting fresh session (attempt $attempt)..."
@@ -394,24 +498,107 @@ launch_claude() {
     # exec-replaces itself with claude. After exec, the running claude process
     # has the same PID that was written to the file. $$ would give the *parent*
     # shell's PID in bash, so $BASHPID is required here.
+    #
+    # Process group isolation (fix for issue #1108):
+    # setsid puts the subshell into a NEW process session (and process group).
+    # All child processes spawned by claude (node MCP servers, helper scripts)
+    # inherit this process group. On timeout or cleanup we can kill the entire
+    # group with kill -- -$PGID, ensuring no orphaned node processes are left.
     local dispatcher_pid_file="$MESSAGES_DIR/config/dispatcher.pid"
+    local dispatcher_pgid_file="$MESSAGES_DIR/config/dispatcher.pgid"
     mkdir -p "$(dirname "$dispatcher_pid_file")"
 
-    (
-        echo "$BASHPID" > "$dispatcher_pid_file"
-        exec claude --dangerously-skip-permissions \
-            --model sonnet \
-            --max-turns 150 \
-            -p "$init_prompt"
-    ) 2>&1 | tee -a "$LOG_DIR/claude-session.log" || claude_exit_code=$?
+    # Launch claude in a new process session via setsid so it becomes the
+    # leader of a new process group. We capture the PID of the setsid'd
+    # subshell; after exec the claude process inherits that PID and PGID.
+    #
+    # The setsid'd bash subshell writes its own PID (= its PGID) to both files
+    # before exec-ing claude. We then:
+    #  1. Read the PGID from the file
+    #  2. Start the wall-clock watchdog in the background
+    #  3. Wait for claude to exit (blocking via wait on the background job)
+    #  4. Cancel the watchdog on normal exit
+    local claude_pgid=""
+    local watchdog_pid=""
+    local claude_bg_pid=""
 
-    # Clean up PID file on exit — the process is gone, the file is stale.
+    # Run claude in background so we can start the watchdog concurrently.
+    # Enable pipefail in the subshell so the pipeline exit code reflects claude's
+    # exit code rather than tee's (tee almost always exits 0).
+    # stdout/stderr piped to tee for logging.
+    (
+        set -o pipefail
+        setsid bash -c "
+            echo \$\$ > \"$dispatcher_pid_file\"
+            echo \$\$ > \"$dispatcher_pgid_file\"
+            exec claude --dangerously-skip-permissions \\
+                --model sonnet \\
+                --max-turns 150 \\
+                -p \"$init_prompt\"
+        " 2>&1 | tee -a "$LOG_DIR/claude-session.log"
+    ) &
+    claude_bg_pid=$!
+
+    # Wait briefly for setsid'd subshell to write the PGID file
+    local pgid_wait=0
+    while [[ ! -s "$dispatcher_pgid_file" ]] && [[ $pgid_wait -lt 10 ]]; do
+        sleep 0.5
+        pgid_wait=$((pgid_wait + 1))
+    done
+    claude_pgid=$(cat "$dispatcher_pgid_file" 2>/dev/null | tr -d '[:space:]' || true)
+
+    # -------------------------------------------------------------------------
+    # Wall-clock timeout watchdog (fix for issue #1108)
+    #
+    # Spawns a background subshell that sleeps for LOBSTER_WORKER_TIMEOUT_SECS,
+    # then kills the entire process group if Claude is still running.
+    # Set LOBSTER_WORKER_TIMEOUT_SECS=0 to disable.
+    # -------------------------------------------------------------------------
+    if [[ "${LOBSTER_WORKER_TIMEOUT_SECS:-600}" -gt 0 ]] && [[ -n "$claude_pgid" ]]; then
+        local _pgid="$claude_pgid"
+        local _pgid_file="$dispatcher_pgid_file"
+        local _timeout="$LOBSTER_WORKER_TIMEOUT_SECS"
+        local _log="$LOG_DIR/claude-persistent.log"
+        (
+            sleep "$_timeout"
+            # Only fire if the PGID file still holds our PGID -- guards against
+            # the rare case where a new session reused the same PGID.
+            local current_pgid
+            current_pgid=$(cat "$_pgid_file" 2>/dev/null | tr -d '[:space:]' || true)
+            if [[ "$current_pgid" == "$_pgid" ]] && kill -0 "-$_pgid" 2>/dev/null; then
+                echo "[$(date -Iseconds)] TIMEOUT: Claude worker PGID=$_pgid exceeded ${_timeout}s wall-clock limit -- killing process group" >> "$_log"
+                kill -TERM "-$_pgid" 2>/dev/null || true
+                sleep 5
+                kill -KILL "-$_pgid" 2>/dev/null || true
+            fi
+        ) &
+        watchdog_pid=$!
+        log "TIMEOUT: Watchdog started (pid=$watchdog_pid, timeout=${LOBSTER_WORKER_TIMEOUT_SECS}s, pgid=$claude_pgid)"
+    fi
+
+    # Block until the claude pipeline finishes
+    wait "$claude_bg_pid" 2>/dev/null || claude_exit_code=$?
+
+    # Cancel the watchdog -- normal exit, no need to force-kill.
+    if [[ -n "$watchdog_pid" ]]; then
+        kill "$watchdog_pid" 2>/dev/null || true
+        wait "$watchdog_pid" 2>/dev/null || true
+        log "TIMEOUT: Watchdog cancelled (normal exit, exit_code=$claude_exit_code)"
+    fi
+
+    # Clean up process group and PID/PGID files on exit.
+    # Kill any residual children (node MCP servers) that claude left behind.
+    if [[ -n "$claude_pgid" ]] && kill -0 "-$claude_pgid" 2>/dev/null; then
+        log "CLEANUP: Killing residual process group PGID=$claude_pgid after claude exit"
+        kill_process_group "$claude_pgid" "post-exit cleanup"
+    fi
+
+    # Clean up PID/PGID files on exit -- the process is gone, the files are stale.
     # Note: if claude-persistent.sh's parent is SIGKILLed, this cleanup won't run,
-    # leaving a stale PID file. On next launch, the health check reads it, finds the
-    # PID dead via kill -0, treats any kill as no-op, and self-heals when the new PID
-    # overwrites the file at launch start.
-    rm -f "$dispatcher_pid_file" 2>/dev/null || true
-    log "Claude exited (exit_code=$claude_exit_code), PID file removed"
+    # leaving stale files. On next launch, kill_orphaned_claude_processes() reads
+    # them, finds the PIDs dead or alive, and cleans up before a new session starts.
+    rm -f "$dispatcher_pid_file" "$dispatcher_pgid_file" 2>/dev/null || true
+    log "Claude exited (exit_code=$claude_exit_code), PID/PGID files removed"
 
     return $claude_exit_code
 }
@@ -434,7 +621,7 @@ handle_exit() {
             # This can happen when --max-turns is exhausted
             log "Claude exited cleanly (code 0) but not in hibernate mode. Will restart."
             write_state "restarting" "clean exit, max-turns likely exhausted"
-            # Reset auth failure tracking — a clean exit means auth is working
+            # Reset auth failure tracking -- a clean exit means auth is working
             AUTH_FAIL_COUNT=0
             AUTH_FAIL_ALERTED=false
             return 1
@@ -448,12 +635,12 @@ handle_exit() {
             AUTH_FAIL_COUNT=$((AUTH_FAIL_COUNT + 1))
             if [[ $AUTH_FAIL_COUNT -ge 3 ]] && [[ "$AUTH_FAIL_ALERTED" != "true" ]]; then
                 AUTH_FAIL_ALERTED=true
-                send_telegram_alert "🔴 *Lobster Auth Failure*
+                send_telegram_alert "*Lobster Auth Failure*
 
 Claude cannot authenticate after $AUTH_FAIL_COUNT attempts.
-Check \`/home/lobster/.claude/.credentials.json\` — OAuth token may be expired.
+Check /home/lobster/.claude/.credentials.json -- OAuth token may be expired.
 
-See \`docs/REMOTE-AUTH.md\` for re-authentication steps."
+See docs/REMOTE-AUTH.md for re-authentication steps."
                 log "AUTH ALERT: Sent Telegram notification after $AUTH_FAIL_COUNT auth failures"
             fi
         fi
@@ -503,7 +690,7 @@ main() {
     # the service (or unsetting the var, since "production" is the default).
     LOBSTER_ENV="${LOBSTER_ENV:-production}"
     if [[ "$LOBSTER_ENV" != "production" ]]; then
-        log "LOBSTER_ENV=$LOBSTER_ENV — persistent session is disabled in non-production mode. Exiting."
+        log "LOBSTER_ENV=$LOBSTER_ENV -- persistent session is disabled in non-production mode. Exiting."
         exit 0
     fi
 
@@ -514,7 +701,7 @@ main() {
     # expecting a running Claude process or a drained inbox.
     write_boot_stamp
 
-    send_telegram_alert "🔄 *Lobster Starting*
+    send_telegram_alert "*Lobster Starting*
 Claude persistent session initializing."
 
     local attempt=0
