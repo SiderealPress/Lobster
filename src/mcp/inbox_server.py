@@ -2780,17 +2780,37 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
     # any session that is not the designated dispatcher session.
     #
     # In HTTP transport mode: use per-session tagging (_is_main_http_session).
-    #   - A session becomes the dispatcher by calling wait_for_messages (Option A)
-    #     or session_start(agent_type="dispatcher") (Option B).
+    #   - A session becomes the dispatcher by calling wait_for_messages (Option A),
+    #     session_start(agent_type="dispatcher") (Option B), or any guarded tool
+    #     when no dispatcher is currently tagged (Option C — restart recovery).
     #   - All other sessions are blocked from guarded tools.
+    #
+    # Option C — restart recovery (no-dispatcher-tagged auto-tag):
+    #   When _dispatcher_session_id is None the MCP server has just restarted and
+    #   has no record of any dispatcher session.  The first session to call any
+    #   guarded tool must be the new dispatcher — subagents cannot be running yet
+    #   because they require the dispatcher to spawn them.  Auto-tagging here closes
+    #   the window between server start and the dispatcher's first WFM or
+    #   session_start call, which is when backlog send_reply calls would otherwise
+    #   be blocked.
     #
     # In stdio transport mode: use the legacy tmux ancestry / env-var check
     #   (_is_main_session).  This path is unchanged.
     if name in _SESSION_GUARDED_TOOLS:
         if _http_session_manager is not None:
-            # HTTP mode: per-session guard.  wait_for_messages is exempted from
-            # the guard check because it IS the tagging call (Option A) — the
-            # session won't be tagged yet when the first WFM call arrives.
+            # HTTP mode: per-session guard.  wait_for_messages is always exempted
+            # (Option A tagging).  When no dispatcher is tagged yet (Option C),
+            # auto-tag the calling session before the guard check so the call
+            # proceeds — this handles the restart race where the dispatcher calls
+            # send_reply or check_inbox before its first WFM/session_start fires.
+            if _dispatcher_session_id is None:
+                session_id = _get_current_http_session_id()
+                if session_id is not None:
+                    log.info(
+                        f"[session-tag] Option C: no dispatcher tagged, auto-tagging "
+                        f"on '{name}' call — session {session_id!r}"
+                    )
+                    _tag_dispatcher_session(session_id)
             if name != "wait_for_messages" and not _is_main_http_session():
                 log.warning(
                     f"Session guard blocked '{name}' — HTTP session "
