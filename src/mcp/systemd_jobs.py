@@ -193,16 +193,34 @@ def _is_lobster_unit(path: Path) -> bool:
         return False
 
 
+def _sudo_write(path: Path, content: str) -> None:
+    """Write content to a path owned by root, using sudo tee."""
+    result = subprocess.run(
+        ["sudo", "tee", str(path)],
+        input=content.encode(),
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise PermissionError(
+            f"sudo tee {path} failed: {result.stderr.decode().strip()}"
+        )
+
+
+def _sudo_remove(path: Path) -> None:
+    """Remove a file owned by root, using sudo rm -f."""
+    subprocess.run(["sudo", "rm", "-f", str(path)], check=True, capture_output=True)
+
+
 def _write_units(name: str, schedule: str, command: str, description: str) -> None:
-    """Write timer and service unit files to /etc/systemd/system/."""
-    _timer_path(name).write_text(_timer_unit(name, schedule, description))
-    _service_path(name).write_text(_service_unit(name, command, description))
+    """Write timer and service unit files to /etc/systemd/system/ via sudo."""
+    _sudo_write(_timer_path(name), _timer_unit(name, schedule, description))
+    _sudo_write(_service_path(name), _service_unit(name, command, description))
 
 
 def _remove_units(name: str) -> None:
     """Remove timer and service unit files (ignore if missing)."""
     for p in [_timer_path(name), _service_path(name)]:
-        p.unlink(missing_ok=True)
+        _sudo_remove(p)
 
 
 def _read_unit_field(path: Path, field: str) -> Optional[str]:

@@ -202,10 +202,19 @@ def mock_systemctl():
 
 @pytest.fixture
 def systemd_dir(tmp_path):
-    """Redirect SYSTEMD_DIR to a temp path."""
+    """Redirect SYSTEMD_DIR to a temp path and stub out sudo file I/O."""
     d = tmp_path / "systemd_system"
     d.mkdir()
-    with patch.object(sj, "SYSTEMD_DIR", d):
+
+    def _fake_sudo_write(path: Path, content: str) -> None:
+        path.write_text(content)
+
+    def _fake_sudo_remove(path: Path) -> None:
+        path.unlink(missing_ok=True)
+
+    with patch.object(sj, "SYSTEMD_DIR", d), \
+         patch.object(sj, "_sudo_write", _fake_sudo_write), \
+         patch.object(sj, "_sudo_remove", _fake_sudo_remove):
         yield d
 
 
