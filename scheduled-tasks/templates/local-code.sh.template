@@ -1,0 +1,76 @@
+#!/bin/bash
+# local-code.sh.template — Self-contained scheduled task (no dispatch, no LLM)
+#
+# Pattern: cron fires, runs a local command or script, logs the result.
+# Does NOT write to the inbox. There is no subagent, no LLM invocation.
+#
+# Use this pattern for:
+# - Log rotation and cleanup (rm old files, gzip archives)
+# - Database maintenance (vacuum, backup)
+# - Health checks that write their own output files
+# - Any task where the work is entirely local and deterministic
+#
+# This pattern is appropriate when:
+# - The task requires no intelligence or judgment
+# - Output is a local artifact (file, log entry, DB write)
+# - Failure should alert via exit code (cron mails on nonzero exit)
+#
+# Fill in all variables marked YOUR_* before using.
+#
+# Example crontab entry:
+#   0 3 * * * ~/lobster/scheduled-tasks/YOUR_JOB_NAME.sh >> ~/lobster-workspace/scheduled-jobs/logs/YOUR_JOB_NAME-cron.log 2>&1
+
+set -euo pipefail
+
+export PATH="$HOME/.local/bin:$PATH"
+
+# --- Configuration (fill in these values) ---
+JOB_NAME="YOUR_JOB_NAME"
+
+# --- Load env files ---
+CONFIG_DIR="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}"
+for _env_file in "$CONFIG_DIR/config.env" "$CONFIG_DIR/global.env"; do
+    if [ -f "$_env_file" ]; then
+        # shellcheck source=/dev/null
+        set -a
+        source "$_env_file"
+        set +a
+    fi
+done
+unset _env_file
+
+WORKSPACE="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
+LOG_DIR="$WORKSPACE/scheduled-jobs/logs"
+TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+START_ISO=$(date -Iseconds)
+
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/${JOB_NAME}-${TIMESTAMP}.log"
+
+echo "[$START_ISO] Starting $JOB_NAME" | tee "$LOG_FILE"
+
+# --- Your task here ---
+# Replace the example below with your actual work.
+#
+# Example: delete log files older than 30 days
+# find "$LOG_DIR" -name "*.log" -mtime +30 -delete
+#
+# Example: backup a SQLite database
+# cp "$WORKSPACE/data/memory.db" "$WORKSPACE/data/memory.db.$(date +%Y%m%d)"
+#
+# Example: rotate a state file
+# if [ -f "$WORKSPACE/data/YOUR_STATE_FILE.json" ]; then
+#     mv "$WORKSPACE/data/YOUR_STATE_FILE.json" "$WORKSPACE/data/YOUR_STATE_FILE-${TIMESTAMP}.json.bak"
+# fi
+
+echo "YOUR TASK COMMAND HERE" | tee -a "$LOG_FILE"
+TASK_EXIT=$?
+
+# --- Result ---
+END_ISO=$(date -Iseconds)
+if [ "$TASK_EXIT" -eq 0 ]; then
+    echo "[$END_ISO] $JOB_NAME completed successfully" | tee -a "$LOG_FILE"
+else
+    echo "[$END_ISO] $JOB_NAME failed with exit code $TASK_EXIT" | tee -a "$LOG_FILE"
+    exit "$TASK_EXIT"
+fi
