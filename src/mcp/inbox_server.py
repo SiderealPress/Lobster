@@ -5089,13 +5089,7 @@ _SESSION_SUMMARY_BOILERPLATE = "<1-3 sentence summary"
 
 def _resolve_sessions_dir() -> Path:
     """Return the sessions directory, creating it if absent."""
-    user_config = Path(
-        os.environ.get(
-            "LOBSTER_USER_CONFIG",
-            Path.home() / "lobster-user-config",
-        )
-    )
-    sessions_dir = user_config / "memory" / "canonical" / "sessions"
+    sessions_dir = _USER_CONFIG / "memory" / "canonical" / "sessions"
     sessions_dir.mkdir(parents=True, exist_ok=True)
     return sessions_dir
 
@@ -5152,7 +5146,7 @@ def _resolve_current_session_path(sessions_dir: Path) -> Path | None:
 def _extract_section_content(text: str, section_name: str) -> str | None:
     """Return the body text of a named H2 section, or None if not found."""
     pattern = re.compile(
-        rf"^## {re.escape(section_name)}\s*\n(.*?)(?=^## |\Z)",
+        rf"^## {re.escape(section_name)}\s*\n(.*?)(?=\Z|^## )",
         re.MULTILINE | re.DOTALL,
     )
     m = pattern.search(text)
@@ -5166,7 +5160,7 @@ def _replace_section_content(text: str, section_name: str, new_body: str) -> str
     Returns the updated full text, or None if the section was not found.
     """
     pattern = re.compile(
-        rf"(^## {re.escape(section_name)}\s*\n)(.*?)(?=^## |\Z)",
+        rf"(^## {re.escape(section_name)}\s*\n)(.*?)(?=\Z|^## )",
         re.MULTILINE | re.DOTALL,
     )
     if not pattern.search(text):
@@ -5213,7 +5207,7 @@ async def handle_create_session_file(args: dict) -> list[TextContent]:
         )
 
     _atomic_write(file_path, content)
-    _SESSION_POINTER_FILE.write_text(str(file_path))
+    _atomic_write(_SESSION_POINTER_FILE, str(file_path))
 
     import json as _json
     result = _json.dumps({"path": str(file_path), "session_id": session_id})
