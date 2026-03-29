@@ -335,6 +335,108 @@ class TestDeleteJob:
 
 
 # ---------------------------------------------------------------------------
+# list_jobs — active field via is-active
+# ---------------------------------------------------------------------------
+
+class TestListJobs:
+    """Tests for list_jobs(), focusing on the active field fix.
+
+    systemctl list-timers --output=json does not emit an "active" key, so
+    list_jobs() must call `systemctl is-active <unit>` per timer to populate
+    the active field. These tests verify that behavior.
+    """
+
+    def _make_timer_entry(self, name: str) -> dict:
+        return {
+            "unit": f"lobster-{name}.timer",
+            "next": 1743258600000000,
+            "last": 1743172200000000,
+            "left": None,
+            "passed": None,
+            "activates": f"lobster-{name}.service",
+        }
+
+    def test_active_true_when_is_active_returns_zero(self, systemd_dir):
+        """active=True when `systemctl is-active` exits 0."""
+        import json
+
+        timer = systemd_dir / "lobster-test-job.timer"
+        service = systemd_dir / "lobster-test-job.service"
+        timer.write_text(sj._timer_unit("test-job", "daily", ""))
+        service.write_text(sj._service_unit("test-job", "/bin/echo hi", ""))
+
+        timer_json = json.dumps([self._make_timer_entry("test-job")])
+
+        # First call (list-timers) returns the JSON; second call (is-active) returns rc=0.
+        call_count = {"n": 0}
+
+        async def fake_run(*args, **kwargs):
+            call_count["n"] += 1
+            if "list-timers" in args:
+                return (0, timer_json, "")
+            # is-active call
+            return (0, "active", "")
+
+        with patch.object(sj, "_run_systemctl", side_effect=fake_run):
+            jobs = asyncio.run(sj.list_jobs())
+
+        assert len(jobs) == 1
+        assert jobs[0].active is True
+
+    def test_active_false_when_is_active_returns_nonzero(self, systemd_dir):
+        """active=False when `systemctl is-active` exits non-zero."""
+        import json
+
+        timer = systemd_dir / "lobster-test-job.timer"
+        service = systemd_dir / "lobster-test-job.service"
+        timer.write_text(sj._timer_unit("test-job", "daily", ""))
+        service.write_text(sj._service_unit("test-job", "/bin/echo hi", ""))
+
+        timer_json = json.dumps([self._make_timer_entry("test-job")])
+
+        async def fake_run(*args, **kwargs):
+            if "list-timers" in args:
+                return (0, timer_json, "")
+            # is-active returns 3 (inactive)
+            return (3, "inactive", "")
+
+        with patch.object(sj, "_run_systemctl", side_effect=fake_run):
+            jobs = asyncio.run(sj.list_jobs())
+
+        assert len(jobs) == 1
+        assert jobs[0].active is False
+
+    def test_skips_non_lobster_units(self, systemd_dir):
+        """Units without the LOBSTER-MANAGED marker are excluded."""
+        import json
+
+        # Write a timer without the marker
+        (systemd_dir / "lobster-foreign.timer").write_text("[Unit]\nDescription=Not ours\n")
+
+        timer_json = json.dumps([self._make_timer_entry("foreign")])
+
+        async def fake_run(*args, **kwargs):
+            if "list-timers" in args:
+                return (0, timer_json, "")
+            return (0, "active", "")
+
+        with patch.object(sj, "_run_systemctl", side_effect=fake_run):
+            jobs = asyncio.run(sj.list_jobs())
+
+        assert jobs == []
+
+    def test_empty_when_list_timers_fails(self):
+        """Returns empty list when list-timers exits non-zero."""
+        async def fake_run(*args, **kwargs):
+            return (1, "", "no timers found")
+
+        with patch.object(sj, "_run_systemctl", side_effect=fake_run):
+            jobs = asyncio.run(sj.list_jobs())
+
+        assert jobs == []
+
+
+# ---------------------------------------------------------------------------
 # Scaffold
 # ---------------------------------------------------------------------------
 

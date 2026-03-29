@@ -292,8 +292,13 @@ async def list_jobs() -> list[JobInfo]:
         # Parse timing fields from the JSON entry
         last_trigger = entry.get("last") or entry.get("last_trigger")
         next_trigger = entry.get("next") or entry.get("next_trigger")
-        active_str = entry.get("active") or ""
-        active = str(active_str).lower() not in ("inactive", "failed", "")
+
+        # systemctl list-timers --output=json does not emit an "active" key.
+        # Query the real active state per unit via "systemctl is-active".
+        rc_active, _, _ = await _run_systemctl(
+            "is-active", f"{_unit_name(bare_name)}.timer", check=False
+        )
+        active = (rc_active == 0)
 
         jobs.append(JobInfo(
             name=bare_name,
