@@ -21,25 +21,11 @@ services:
     build:
       context: ../..
       dockerfile: tests/docker/Dockerfile.integration
-    command: [".venv/bin/python", "-c", "
-      import asyncio
-      import sys
-      sys.path.insert(0, '/home/testuser/lobster')
-      from tests.mocks.mock_telegram import MockTelegramServer
-
-      async def run():
-          server = MockTelegramServer(port=8081)
-          await server.start()
-          print('Mock Telegram server running on port 8081')
-          while True:
-              await asyncio.sleep(3600)
-
-      asyncio.run(run())
-    "]
+    command: [".venv/bin/python", "/home/testuser/lobster/tests/docker/mock_telegram_runner.py"]
     ports:
       - "8081:8081"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8081/bot_test/getMe"]
+      test: ["CMD", "curl", "-f", "http://localhost:8081/bottest_token/getMe"]
       interval: 5s
       timeout: 3s
       retries: 3
