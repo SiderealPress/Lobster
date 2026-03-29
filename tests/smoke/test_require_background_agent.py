@@ -124,6 +124,9 @@ def test_dispatcher_foreground_agent_explicit_false_blocked():
     assert BLOCK_FRAGMENT in result.stderr, (
         f"Block message must appear on stderr.\nGot stderr: {result.stderr!r}"
     )
+    assert result.stdout == "", (
+        f"Expected empty stdout on block, got: {result.stdout!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +154,9 @@ def test_dispatcher_foreground_agent_field_absent_blocked():
     )
     assert BLOCK_FRAGMENT in result.stderr, (
         f"Block message must appear on stderr.\nGot stderr: {result.stderr!r}"
+    )
+    assert result.stdout == "", (
+        f"Expected empty stdout on block, got: {result.stdout!r}"
     )
 
 
@@ -231,4 +237,7 @@ def test_dispatcher_task_tool_sync_blocked():
     )
     assert BLOCK_FRAGMENT in result.stderr, (
         f"Block message must appear on stderr.\nGot stderr: {result.stderr!r}"
+    )
+    assert result.stdout == "", (
+        f"Expected empty stdout on block, got: {result.stdout!r}"
     )
