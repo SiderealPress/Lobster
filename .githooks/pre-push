@@ -221,18 +221,36 @@ BLOCKED_FILES=(
 # Known false-positive email patterns to ignore
 EMAIL_ALLOWLIST='noreply@anthropic\.com|noreply@github\.com|example\.com|example\.org|test\.com|localhost'
 
-# Personal name patterns — block standalone name usage
-# Format: name@@regex@@description@@allowlist_regex
-# The allowlist_regex is checked AFTER the main match; if it matches the line,
-# the match is suppressed (allowed).
+# Personal name patterns — loaded from user config, falling back to built-in defaults.
 #
-# "sahar": block as a standalone word; allow "sayhar" (GitHub username)
-# "drew":  block as a standalone word; allow when part of a larger word
-#          like "andrew", "withdrew", "outdrewn"
-NAME_PATTERNS=(
-    'sahar@@(?<![a-z])sahar(?![a-z])@@Personal name (sahar)@@sayhar'
-    'drew@@(?<![a-z])drew(?![a-z])@@Personal name (drew)@@andrew|withdrew|outdrewn'
-)
+# Config file: ${LOBSTER_USER_CONFIG_DIR:-~/lobster-user-config}/blocked-names.txt
+# Format (one entry per line):
+#   name@@allowlist_regex
+#   - name: the word to block (matched case-insensitively as a whole word)
+#   - allowlist_regex: PCRE — if the full line matches, the match is suppressed
+#   Lines starting with # are comments; empty lines are ignored.
+#
+# The hook derives the match regex as (?<![a-z])name(?![a-z]) — a whole-word
+# boundary check that excludes names embedded in longer words.
+_PP_NAMES_CONFIG="${LOBSTER_USER_CONFIG_DIR:-$HOME/lobster-user-config}/blocked-names.txt"
+NAME_PATTERNS=()
+if [ -f "$_PP_NAMES_CONFIG" ]; then
+    while IFS= read -r _pp_line; do
+        [[ "$_pp_line" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "${_pp_line// }" ]] && continue
+        _pp_name="${_pp_line%%@@*}"
+        _pp_allow=""
+        [[ "$_pp_line" == *"@@"* ]] && _pp_allow="${_pp_line#*@@}"
+        NAME_PATTERNS+=("${_pp_name}@@(?<![a-z])${_pp_name}(?![a-z])@@Personal name (${_pp_name})@@${_pp_allow}")
+    done < "$_PP_NAMES_CONFIG"
+fi
+# Fallback built-in defaults when no config file exists or it is empty
+if [ "${#NAME_PATTERNS[@]}" -eq 0 ]; then
+    NAME_PATTERNS=(
+        'sahar@@(?<![a-z])sahar(?![a-z])@@Personal name (sahar)@@sayhar'
+        'drew@@(?<![a-z])drew(?![a-z])@@Personal name (drew)@@andrew|withdrew|outdrewn'
+    )
+fi
 
 #===============================================================================
 # Scanning Logic

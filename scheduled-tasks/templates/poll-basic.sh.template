@@ -1,0 +1,72 @@
+#!/bin/bash
+# poll-basic.sh.template — Polling without state tracking (always dispatch if reachable)
+#
+# Pattern: cron fires, checks whether the source is reachable and has data,
+# then dispatches unconditionally. No state cursor — the subagent decides
+# whether there is anything new to act on.
+#
+# Use this pattern when:
+# - No-op detection belongs in the LLM layer (e.g., the agent compares against
+#   its own memory rather than a state file)
+# - The source always returns fresh data and the subagent filters it
+# - The cadence is slow enough that LLM invocations are cheap per-call
+#
+# Prefer poll-with-state.sh.template when the job fires frequently (< 15 min)
+# or when the source produces high-volume data with a clear cursor.
+#
+# Usage: cron calls this script directly.
+#   Example crontab entry:
+#     0 * * * * ~/lobster/scheduled-tasks/YOUR_JOB_NAME-check.sh
+#
+# Fill in all variables marked YOUR_* before using.
+#
+# Flow:
+#   source reachable → dispatch-job.sh YOUR_JOB_NAME → inbox write → LLM
+#   source unreachable → log warning → exit 1
+
+set -euo pipefail
+
+export PATH="$HOME/.local/bin:$PATH"
+
+# --- Configuration (fill in these values) ---
+JOB_NAME="YOUR_JOB_NAME"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# --- Load env files ---
+CONFIG_DIR="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}"
+for _env_file in "$CONFIG_DIR/config.env" "$CONFIG_DIR/global.env"; do
+    if [ -f "$_env_file" ]; then
+        # shellcheck source=/dev/null
+        set -a
+        source "$_env_file"
+        set +a
+    fi
+done
+unset _env_file
+
+WORKSPACE="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
+LOG_DIR="$WORKSPACE/scheduled-jobs/logs"
+TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+START_ISO=$(date -Iseconds)
+
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/${JOB_NAME}-precheck-${TIMESTAMP}.log"
+
+# --- Reachability check (replace with your actual check) ---
+# Keep this minimal: just confirm the source exists and is accessible.
+# The subagent will handle all content inspection.
+YOUR_CHECK_URL="https://YOUR_API_URL/health"
+
+set +e
+curl -sf --max-time 10 "$YOUR_CHECK_URL" > /dev/null 2>&1
+CURL_EXIT=$?
+set -e
+
+if [ "$CURL_EXIT" -ne 0 ]; then
+    echo "[$START_ISO] WARNING: $YOUR_CHECK_URL unreachable (curl exit $CURL_EXIT) — skipping dispatch" | tee "$LOG_FILE"
+    exit 1
+fi
+
+# --- Dispatch unconditionally ---
+echo "[$START_ISO] Source reachable — dispatching $JOB_NAME" | tee "$LOG_FILE"
+exec "$SCRIPT_DIR/dispatch-job.sh" "$JOB_NAME"

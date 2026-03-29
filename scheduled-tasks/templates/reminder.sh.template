@@ -1,0 +1,67 @@
+#!/bin/bash
+# reminder.sh.template — Non-polling scheduled task (always dispatch)
+#
+# Pattern: cron fires at a specific time; the script dispatches unconditionally.
+# No source check, no state. The subagent is expected to always have meaningful
+# work to do at this scheduled time.
+#
+# Use this pattern for:
+# - Morning briefings and daily digests
+# - Periodic reminders (check priorities, review queue)
+# - Mode-switches (start work mode, end work mode)
+# - Any job where "nothing new" is not a valid state — the job is the event
+#
+# This pattern is essentially a thin wrapper around dispatch-job.sh.
+# For the simplest cases, call dispatch-job.sh directly from cron instead:
+#   0 8 * * * ~/lobster/scheduled-tasks/dispatch-job.sh YOUR_JOB_NAME
+#
+# Use this script when you need env loading, custom logging, or a pre-check
+# (e.g., confirm a required file exists) before dispatching.
+#
+# Usage: cron calls this script at the desired time.
+#   Example crontab entries:
+#     0 8 * * 1-5  ~/lobster/scheduled-tasks/YOUR_JOB_NAME.sh   # weekdays at 8am
+#     30 22 * * *  ~/lobster/scheduled-tasks/YOUR_JOB_NAME.sh   # nightly at 10:30pm
+#
+# Fill in all variables marked YOUR_* before using.
+
+set -euo pipefail
+
+export PATH="$HOME/.local/bin:$PATH"
+
+# --- Configuration (fill in these values) ---
+JOB_NAME="YOUR_JOB_NAME"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# --- Load env files ---
+CONFIG_DIR="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}"
+for _env_file in "$CONFIG_DIR/config.env" "$CONFIG_DIR/global.env"; do
+    if [ -f "$_env_file" ]; then
+        # shellcheck source=/dev/null
+        set -a
+        source "$_env_file"
+        set +a
+    fi
+done
+unset _env_file
+
+WORKSPACE="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
+LOG_DIR="$WORKSPACE/scheduled-jobs/logs"
+TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+START_ISO=$(date -Iseconds)
+
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/${JOB_NAME}-${TIMESTAMP}.log"
+
+# --- Optional: pre-condition check ---
+# Uncomment and adapt if you need to verify a precondition before dispatching.
+# If the condition isn't met, exit 0 silently (no dispatch, no error).
+#
+# if [ ! -f "$WORKSPACE/data/YOUR_REQUIRED_FILE" ]; then
+#     echo "[$START_ISO] Pre-condition not met — skipping dispatch for $JOB_NAME" | tee "$LOG_FILE"
+#     exit 0
+# fi
+
+# --- Dispatch ---
+echo "[$START_ISO] Dispatching scheduled job: $JOB_NAME" | tee "$LOG_FILE"
+exec "$SCRIPT_DIR/dispatch-job.sh" "$JOB_NAME"
