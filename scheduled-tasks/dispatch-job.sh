@@ -132,25 +132,41 @@ PYEOF
 
 echo "[$START_ISO] Dispatch posted for job: $JOB_NAME — dispatcher will spawn subagent" | tee -a "$LOG_FILE"
 
-# Update jobs.json last_run to reflect when the job was dispatched
+# Update jobs.json last_run to reflect when the job was dispatched.
+# Uses a lock file to serialise concurrent cron fires and always writes via
+# tmp+rename so an interrupted write never leaves jobs.json truncated (#920).
 if [ -f "$JOBS_FILE" ]; then
-    if command -v jq &> /dev/null; then
-        TMP_FILE=$(mktemp)
-        jq --arg name "$JOB_NAME" \
-           --arg last_run "$START_ISO" \
-           'if .jobs[$name] then .jobs[$name].last_run = $last_run else . end' \
-           "$JOBS_FILE" > "$TMP_FILE" && mv "$TMP_FILE" "$JOBS_FILE"
-    else
-        python3 -c "
-import json
-with open('$JOBS_FILE') as f:
+    JOBS_LOCK="${JOBS_FILE}.lock"
+    (
+        # Acquire exclusive lock (fd 9) — releases automatically when subshell exits
+        flock -x 9
+        if command -v jq &> /dev/null; then
+            TMP_FILE=$(mktemp)
+            jq --arg name "$JOB_NAME" \
+               --arg last_run "$START_ISO" \
+               'if .jobs[$name] then .jobs[$name].last_run = $last_run else . end' \
+               "$JOBS_FILE" > "$TMP_FILE" && mv "$TMP_FILE" "$JOBS_FILE"
+        else
+            uv run - \
+                "$JOBS_FILE" \
+                "$JOB_NAME" \
+                "$START_ISO" \
+                << 'PYEOF'
+import json, os, sys
+jobs_file = sys.argv[1]
+job_name  = sys.argv[2]
+last_run  = sys.argv[3]
+with open(jobs_file) as f:
     data = json.load(f)
-if '$JOB_NAME' in data.get('jobs', {}):
-    data['jobs']['$JOB_NAME']['last_run'] = '$START_ISO'
-    with open('$JOBS_FILE', 'w') as f:
+if job_name in data.get('jobs', {}):
+    data['jobs'][job_name]['last_run'] = last_run
+    tmp = jobs_file + '.tmp.' + str(os.getpid())
+    with open(tmp, 'w') as f:
         json.dump(data, f, indent=2)
-" 2>/dev/null || true
-    fi
+    os.replace(tmp, jobs_file)
+PYEOF
+        fi
+    ) 9>"$JOBS_LOCK" 2>/dev/null || true
 fi
 
 exit 0

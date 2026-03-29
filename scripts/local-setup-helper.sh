@@ -103,7 +103,13 @@ echo ""
 step "Step 1/4: Installing system dependencies"
 #-------------------------------------------------------------------------------
 sudo apt update
-sudo apt install -y curl git
+sudo apt install -y curl git cron
+# Add the current user to the crontab group so sync-crontab.sh can write
+# directly to /var/spool/cron/crontabs/ under NoNewPrivs=1 (set by Claude Code).
+if [ -d "/var/spool/cron/crontabs" ] && ! id -nG "$USER" | grep -qw "crontab"; then
+    sudo usermod -aG crontab "$USER"
+    info "Added $USER to the crontab group (required for scheduled job sync under Claude Code)"
+fi
 success "Dependencies installed"
 
 #-------------------------------------------------------------------------------
