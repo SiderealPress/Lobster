@@ -73,7 +73,12 @@ fi
 BOT_TOKEN=$(python3 -c "print(open('$TOKEN_FILE').read().strip())" 2>/dev/null)
 
 # --- Determine API URL ---
-BOT_TALK_API_URL="${BOT_TALK_API_URL:-http://46.224.41.108:4242}"
+# Must be set in config.env as BOT_TALK_API_URL (e.g. http://your-server:4242).
+# No hardcoded default — fail-safe dispatch if unset.
+if [ -z "$BOT_TALK_API_URL" ]; then
+    echo "[$START_ISO] WARNING: BOT_TALK_API_URL not set — dispatching to let job handle it" | tee "$LOG_FILE"
+    exec "$SCRIPT_DIR/dispatch-job.sh" "$JOB_NAME"
+fi
 
 # --- Check for new messages ---
 # A single HTTP request with ?since=<last_ts> returns only messages after that point.

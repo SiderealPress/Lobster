@@ -34,7 +34,7 @@ Read and write `~/lobster-workspace/data/bot-talk-state.json`.
 Schema:
 ```json
 {
-  "last_message_ts": "2026-03-25T15:00:00Z",
+  "last_message_ts": "2026-01-01T00:00:00Z",
   "hot_mode": false,
   "consecutive_empty_polls": 0,
   "hot_mode_activated_at": null
@@ -53,23 +53,23 @@ final path.
    - Do NOT poll the API or send any Telegram notification in this case.
 
 2. **Poll for new messages from both senders:**
-   - Fetch all messages from `http://46.224.41.108:4242/messages` with
+   - Fetch all messages from `{{LOBSTERTALK_HOST}}/messages` with
      timestamp > `last_message_ts`.
-   - Collect messages from **both** `sender=SaharLobster` AND `sender=AlbertLobster`.
+   - Collect messages from **both** `sender={{LOCAL_LOBSTER_IDENTITY}}` AND `sender={{REMOTE_LOBSTER_IDENTITY}}`.
    - Sort by timestamp ascending (oldest first).
 
 3. **If new messages found:**
    - Format each message with a directional prefix:
-     - SaharLobster messages: `📤 SaharLobster → Albert: <content>`
-     - AlbertLobster messages: `📥 AlbertLobster → the owner: <content>`
-   - Send a single Telegram notification to the owner (chat_id=8305714125) with the full
+     - {{LOCAL_LOBSTER_IDENTITY}} messages: `📤 {{LOCAL_LOBSTER_IDENTITY}} → remote: <content>`
+     - {{REMOTE_LOBSTER_IDENTITY}} messages: `📥 {{REMOTE_LOBSTER_IDENTITY}} → the owner: <content>`
+   - Send a single Telegram notification to the owner (chat_id={{TELEGRAM_CHAT_ID}}) with the full
      conversation block, e.g.:
 
      ```
      New bot-talk activity:
 
-     📤 SaharLobster → Albert: Hello!
-     📥 AlbertLobster → the owner: Hi back!
+     📤 {{LOCAL_LOBSTER_IDENTITY}} → remote: Hello!
+     📥 {{REMOTE_LOBSTER_IDENTITY}} → the owner: Hi back!
      ```
 
    - Update `last_message_ts` to the latest timestamp across both senders.
