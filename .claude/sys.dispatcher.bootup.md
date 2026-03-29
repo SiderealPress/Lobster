@@ -331,7 +331,9 @@ Both produce `type: "scheduled_reminder"` messages. The handler below works for 
 
 **Routing table** — maps `reminder_type` to the subagent and prompt to use. A `None` value is a **fast-exit sentinel**: call `mark_processed` immediately, no subagent, no inline work.
 
-**Generic dispatch (new as of issue #858):** User-created scheduled jobs carry a `task_content` field in the `scheduled_reminder` message — the contents of their task file. The dispatcher reads this field directly from the message (no file I/O on the main thread) and spawns `lobster-generalist` with it as the prompt. No REMINDER_ROUTING entry is needed for user-created jobs. Only add an entry for system jobs that do NOT carry task_content (ghost_detector, oom_check).
+**Generic dispatch (new as of issue #858):** User-created scheduled jobs carry a `task_content` field in the `scheduled_reminder` message — the contents of their task file. The dispatcher reads this field directly from the message (no file I/O on the main thread) and spawns `lobster-generalist` with it as the prompt. No REMINDER_ROUTING entry is needed for user-created jobs.
+
+> **Note on ghost_detector and oom_check:** These were previously routed through REMINDER_ROUTING to spawn LLM subagents. As of this change, both run as pure cron scripts — `agent-monitor.py --alert --mark-failed` (every 5 minutes) and `oom-monitor.py --since-minutes 10` (every 10 minutes) — with no inbox message and no LLM involvement. If a `ghost_detector` or `oom_check` scheduled_reminder arrives (e.g. from a legacy install still running `post-reminder.sh`), it will fall through to the unknown-reminder fallback below and be logged and dropped.
 
 ```
 # Generic prompt builder for user-created scheduled jobs.
@@ -360,19 +362,9 @@ fallback_unknown_reminder = {
 REMINDER_ROUTING = {
   # --- System cron jobs only (no task_content embedded; subagent handles output) ---
   # Do NOT add user-created jobs here — they are handled generically via task_content.
-  "ghost_detector": {
-    "subagent_type": "lobster-generalist",
-    "prompt": "---\ntask_id: agent-monitor\nchat_id: 0\nsource: system\n---\n\n"
-              "Run the agent monitor check. Script is at ~/lobster/scripts/agent-monitor.py. "
-              "Run it with uv run ~/lobster/scripts/agent-monitor.py and report findings.",
-  },
-  "oom_check": {
-    "subagent_type": "lobster-generalist",
-    "prompt": "---\ntask_id: oom-check\nchat_id: 0\nsource: system\n---\n\n"
-              "Run the OOM monitor check. Script is at ~/lobster/scripts/oom-monitor.py. "
-              "Run it with uv run ~/lobster/scripts/oom-monitor.py --since-minutes 10 "
-              "and report findings.",
-  },
+  # ghost_detector and oom_check were removed — both scripts now run directly from
+  # cron (LOBSTER-GHOST-DETECTOR and LOBSTER-OOM-CHECK entries) and alert/write
+  # to the inbox themselves. No LLM subagent is needed for either.
 }
 ```
 
@@ -404,7 +396,7 @@ REMINDER_ROUTING = {
        mark_processed(message_id)
        # THE VERY NEXT ACTION MUST BE wait_for_messages() — see WFM-always-next rule below
    else:
-       # Known static route (system jobs: ghost_detector, oom_check).
+       # Known static route (system job with explicit REMINDER_ROUTING entry).
        Spawn subagent (run_in_background=True):
        - subagent_type: route["subagent_type"]
        - prompt: route["prompt"]
