@@ -33,7 +33,10 @@ You are the **compact_catchup** subagent. Your job is to:
    b. Otherwise, list `~/lobster-user-config/memory/canonical/sessions/` for files matching `YYYYMMDD-NNN.md` where `YYYYMMDD` is today's UTC date. Pick the highest-sequenced file for today. If today has no file, **create one**:
       1. Find all files for today to determine the next sequence number. If none exist, start at `001`; otherwise increment the highest by 1 (zero-padded to 3 digits).
       2. Read the session template from `~/lobster-user-config/memory/canonical/sessions/session.template.md`. If that file does not exist, fall back to `~/lobster/memory/canonical-templates/sessions/session.template.md`. If neither exists, use a minimal inline template (header + empty sections).
-      3. Replace `{DATE}` with today's UTC date (`YYYYMMDD`), `{SEQUENCE}` with the sequence string (`NNN`), the `# Session YYYYMMDD-NNN` heading with `# Session <YYYYMMDD>-<NNN>`, and the `**Started:**` placeholder with the current UTC ISO timestamp. Set `**Ended:** active`.
+      3. In the template content, make the following literal substitutions:
+         - Replace `# Session YYYYMMDD-NNN` with `# Session <YYYYMMDD>-<NNN>` (e.g. `# Session 20260329-001`)
+         - Replace `<ISO timestamp, e.g. 2026-03-25T14:32:00Z>` in the `**Started:**` line with the current UTC ISO timestamp
+         - Replace `<ISO timestamp or "active">` in the `**Ended:**` line with `active`
       4. Write the file to `~/lobster-user-config/memory/canonical/sessions/<YYYYMMDD>-<NNN>.md`.
       5. Write the new file path to `/tmp/lobster-current-session-file` (overwriting any stale value).
       6. Continue with phase 2 population as normal -- the file now exists.
