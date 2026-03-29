@@ -70,7 +70,7 @@ from reliability import (
 from update_manager import UpdateManager
 
 # Bot-talk mirroring — fire-and-forget relay to the shared SaharLobster/AlbertLobster channel
-from bot_talk.mirror import mirror_outbound as _mirror_outbound, mirror_inbound as _mirror_inbound
+from bot_talk_mirror import mirror_outbound as _mirror_outbound, mirror_inbound as _mirror_inbound
 
 # Pending agent tracker (thin adapter over session_store)
 from agents.tracker import add_pending_agent as _add_pending_agent, remove_pending_agent as _remove_pending_agent
