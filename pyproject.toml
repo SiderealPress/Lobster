@@ -17,7 +17,6 @@ dependencies = [
     "twilio>=9.0.0",
     "websockets>=13.0",
     "cryptography>=42.0.0",
-    "blue-lobster @ git+https://github.com/sayhar/blue-lobster.git",
 ]
 
 [project.optional-dependencies]
@@ -46,9 +45,6 @@ build-backend = "hatchling.build"
 override-dependencies = [
     "pillow>=12.1.1",
 ]
-
-[tool.hatch.metadata]
-allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
