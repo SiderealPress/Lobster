@@ -20,8 +20,16 @@ Also writes last_compaction_ts to compaction-state.json so that the catch-up
 subagent knows which window of history to recover after compaction.
 
 Dispatcher-only: exits immediately for subagent sessions (detected via
-session_role.is_dispatcher()). Subagent compactions must not write compact-
-reminders or the sentinel — those signals are only meaningful to the dispatcher.
+_is_dispatcher_compact(), which extends session_role.is_dispatcher() with a
+LOBSTER_MAIN_SESSION + stored-JSONL fallback).  Subagent compactions must not
+write compact-reminders or the sentinel — those signals are only meaningful to
+the dispatcher.
+
+Compaction session_id change: CC assigns a NEW session_id to the post-compact
+session, so the hook input's session_id won't match the stored
+dispatcher-session-id marker even for the dispatcher's own compaction.
+_is_dispatcher_compact() handles this by checking LOBSTER_MAIN_SESSION=1 +
+whether the previous dispatcher session JSONL still exists on disk.
 """
 
 import json
@@ -33,7 +41,12 @@ from pathlib import Path
 
 # Import shared session role utility.
 sys.path.insert(0, str(Path(__file__).parent))
-from session_role import is_dispatcher
+from session_role import (
+    DISPATCHER_SESSION_FILE,
+    is_dispatcher,
+    write_dispatcher_session_id,
+    _read_dispatcher_session_id,
+)
 
 
 INBOX_DIR = Path(os.path.expanduser("~/messages/inbox"))
@@ -270,6 +283,84 @@ def send_compaction_notify() -> None:
     _send_telegram_notify(bot_token, first_chat_id, COMPACTION_TELEGRAM_MESSAGE)
 
 
+def _stored_dispatcher_session_alive() -> bool:
+    """Return True if the stored dispatcher session's JSONL file still exists on disk.
+
+    Used as a compaction fallback: if the stored session JSONL is present, the
+    session hasn't ended cleanly.  For a compaction event this means the dispatcher's
+    context was just compacted — the old JSONL is retained by CC on disk.
+
+    Returns False if the marker file is absent, or the JSONL glob finds nothing.
+    Fails open (returns True) on unexpected errors so we don't skip a real
+    dispatcher compaction due to filesystem issues.
+    """
+    stored = _read_dispatcher_session_id()
+    if not stored:
+        return False
+    try:
+        projects_dir = Path(os.path.expanduser("~/.claude/projects"))
+        if not projects_dir.is_dir():
+            return True  # can't determine — assume alive (conservative)
+        for _ in projects_dir.glob(f"*/{stored}.jsonl"):
+            return True
+        return False
+    except Exception:  # noqa: BLE001
+        return True  # conservative fallback
+
+
+def _is_dispatcher_compact(data: dict) -> bool:
+    """Return True if this compaction event belongs to the dispatcher session.
+
+    Layered strategy:
+
+    1. Primary: session_role.is_dispatcher() — works when the session_id in the
+       hook input matches the stored marker file (fresh compaction of a session
+       whose ID hasn't changed yet, or when the MCP state file is current).
+
+    2. Fallback: LOBSTER_MAIN_SESSION=1 + stored session JSONL alive.
+       Context compaction assigns a NEW session_id to the post-compact session,
+       so the hook input's session_id won't match the stored dispatcher ID even
+       though this is the dispatcher's own compaction.  In that case:
+       - If LOBSTER_MAIN_SESSION=1 (set by claude-persistent.sh for the
+         dispatcher and inherited by its subagents), AND
+       - The stored dispatcher session's JSONL still exists on disk (meaning the
+         previous session hasn't ended — it was just compacted),
+       then this is very likely the dispatcher's compaction.
+
+       Edge case: a subagent that compacts will also have LOBSTER_MAIN_SESSION=1
+       and the dispatcher's JSONL will also still be alive.  In that rare case a
+       false-positive compact-reminder would be written.  This is low-cost: the
+       dispatcher will receive an extra compact-reminder in its inbox, which is
+       harmless (it will re-orient and spawn catchup, then resume normally).
+       Subagent compactions are rare enough that this trade-off is acceptable.
+
+    When the fallback fires, this function also updates the dispatcher marker
+    file (~/messages/config/dispatcher-session-id) to the new session_id so
+    that subsequent is_dispatcher() calls within the same session return True.
+    """
+    if is_dispatcher(data):
+        return True
+
+    # Fallback: LOBSTER_MAIN_SESSION + stored session alive
+    if os.environ.get("LOBSTER_MAIN_SESSION", "") != "1":
+        return False
+
+    if not _stored_dispatcher_session_alive():
+        return False
+
+    # This looks like a dispatcher compaction.  Update the marker file to the
+    # new session_id so all subsequent hook calls in this session recognise it.
+    new_session_id = data.get("session_id", "").strip()
+    if new_session_id:
+        write_dispatcher_session_id(new_session_id)
+        print(
+            f"[on-compact] compaction fallback: updated dispatcher-session-id to {new_session_id}",
+            file=sys.stderr,
+        )
+
+    return True
+
+
 def main() -> None:
     try:
         data = json.load(sys.stdin)
@@ -287,13 +378,8 @@ def main() -> None:
     write_compaction_state()
 
     # Always send the Telegram notification for any compaction (dispatcher or
-    # subagent).  This must fire even for the dispatcher compact, where
-    # is_dispatcher() would return False because context compaction assigns a
-    # new session_id that no longer matches the stored dispatcher-session-id
-    # marker file.  Subagent compactions are rare and the notification is still
-    # informational.
-    #
-    # The health-check suppresses its own Telegram alerts during the compaction
+    # subagent).  This must fire when credentials are available.  The
+    # health-check suppresses its own Telegram alerts during the compaction
     # window (COMPACTION_SUPPRESS_SECONDS), so exactly one notification reaches
     # the user per compaction event.
     send_compaction_notify()
@@ -302,7 +388,13 @@ def main() -> None:
     # Subagent compactions must not inject compact-reminders into the shared
     # inbox or write the compact-pending sentinel, because those signals are
     # only meaningful to the dispatcher.
-    if not is_dispatcher(data):
+    #
+    # Uses _is_dispatcher_compact() instead of is_dispatcher() directly because
+    # CC assigns a NEW session_id after compaction — the hook input's session_id
+    # won't match the stored marker file even for a dispatcher compaction.
+    # _is_dispatcher_compact() adds a LOBSTER_MAIN_SESSION + stored-JSONL fallback
+    # to handle this case and updates the marker file for subsequent calls.
+    if not _is_dispatcher_compact(data):
         sys.exit(0)
 
     if already_pending():
