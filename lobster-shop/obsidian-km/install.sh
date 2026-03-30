@@ -24,6 +24,7 @@ readonly SYSTEMD_USER_DIR="${HOME}/.config/systemd/user"
 readonly COUCHDB_DATA_DIR="${HOME}/obsidian-vault/.couchdb"
 readonly COUCHDB_BIND_ADDRESS="127.0.0.1"
 readonly COUCHDB_PORT="5984"
+readonly TLS_PROXY_SCRIPT="${SCRIPT_DIR}/scripts/setup-tls-proxy.sh"
 
 # Colors for output
 readonly RED='\033[0;31m'
@@ -398,6 +399,24 @@ verify_installation() {
     echo ""
 }
 
+# Step 11: Setup TLS proxy (Caddy)
+setup_tls_proxy() {
+    log_step "Setting up TLS proxy for external access..."
+
+    if [[ ! -f "$TLS_PROXY_SCRIPT" ]]; then
+        log_error "TLS proxy setup script not found: ${TLS_PROXY_SCRIPT}"
+        return 1
+    fi
+
+    if [[ ! -x "$TLS_PROXY_SCRIPT" ]]; then
+        log_info "Making TLS proxy script executable..."
+        chmod +x "$TLS_PROXY_SCRIPT"
+    fi
+
+    log_info "Running TLS proxy setup..."
+    "$TLS_PROXY_SCRIPT"
+}
+
 # ============================================================================
 # Main Installation Flow
 # ============================================================================
@@ -449,6 +468,7 @@ main() {
         echo "  8. Enable and start user service"
         echo "  9. Enable linger for boot persistence"
         echo " 10. Verify installation"
+        echo " 11. Setup TLS proxy (Caddy) for HTTPS access"
         exit 0
     fi
 
@@ -465,6 +485,7 @@ main() {
     enable_and_start_service
     enable_linger
     verify_installation
+    setup_tls_proxy
 
     log_info "Installation complete!"
 }

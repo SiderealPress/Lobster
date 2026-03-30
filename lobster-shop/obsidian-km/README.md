@@ -20,6 +20,15 @@ Self-hosted CouchDB instance for Obsidian LiveSync:
 - **Data**: `~/obsidian-vault/.couchdb/`
 - **Config**: `~/lobster-config/obsidian.env`
 
+### TLS Proxy (BIS-232)
+
+Caddy reverse proxy for secure external access:
+
+- **External URL**: `https://[server-ip]:6984/`
+- **Internal target**: `http://127.0.0.1:5984`
+- **TLS**: Self-signed certificate (auto-managed by Caddy)
+- **Config**: `/etc/caddy/Caddyfile.d/couchdb-proxy.caddyfile`
+
 ## Installation
 
 ### Prerequisites
@@ -41,12 +50,18 @@ The installer is idempotent - safe to run multiple times.
 ### Verify Installation
 
 ```bash
-# Check service status
+# Check CouchDB service status
 systemctl --user status couchdb
 
-# Test CouchDB response
+# Test CouchDB response (local)
 source ~/lobster-config/obsidian.env
 curl -s "http://${COUCHDB_USER}:${COUCHDB_PASSWORD}@127.0.0.1:5984/"
+
+# Check Caddy service status
+sudo systemctl status caddy
+
+# Test HTTPS proxy (replace with your server IP)
+curl -k https://YOUR_SERVER_IP:6984/
 ```
 
 ## Configuration
@@ -88,7 +103,10 @@ The installer enables `loginctl enable-linger` for the user account, ensuring th
 ## Security
 
 - CouchDB binds to `127.0.0.1` only (not exposed to the network)
-- External access should go through a TLS-terminating reverse proxy (Caddy/nginx)
+- External access goes through Caddy TLS proxy on port 6984
+- Port 5984 is blocked externally (firewall rule)
+- Port 6984 is allowed externally for HTTPS access
+- Caddy uses self-signed TLS certificates (clients must accept or trust)
 - Admin credentials are stored with `chmod 600` in `~/lobster-config/obsidian.env`
 - Anonymous access is disabled
 
@@ -99,8 +117,10 @@ lobster-shop/obsidian-km/
 ├── install.sh                    # Main installer script
 ├── README.md                     # This file
 ├── config/
-│   └── obsidian.env.template    # Config file template
-├── scripts/                      # Helper scripts (future)
+│   ├── obsidian.env.template    # Config file template
+│   └── Caddyfile.obsidian       # Caddy TLS proxy config
+├── scripts/
+│   └── setup-tls-proxy.sh       # TLS proxy setup script
 └── services/
     └── couchdb.service          # Systemd user service unit
 ```
@@ -108,7 +128,8 @@ lobster-shop/obsidian-km/
 ## Related Issues
 
 - **BIS-228**: Obsidian KM Skill (epic)
-- **BIS-230**: Install CouchDB on Lobster server (this component)
+- **BIS-230**: Install CouchDB on Lobster server
+- **BIS-232**: Set up HTTPS/TLS for CouchDB endpoint
 
 ## Troubleshooting
 
@@ -129,3 +150,17 @@ lobster-shop/obsidian-km/
 1. Check linger status: `ls /var/lib/systemd/linger/`
 2. Enable linger: `loginctl enable-linger $USER`
 3. Verify service is enabled: `systemctl --user is-enabled couchdb`
+
+### HTTPS proxy not working
+
+1. Check Caddy status: `sudo systemctl status caddy`
+2. Check Caddy logs: `sudo journalctl -u caddy -n 50`
+3. Verify port 6984 is listening: `ss -tlnp | grep 6984`
+4. Test locally: `curl -k https://127.0.0.1:6984/`
+5. Check firewall: `sudo ufw status | grep 6984`
+
+### TLS certificate issues
+
+Caddy uses self-signed certificates by default. Clients must either:
+- Accept the self-signed certificate (e.g., `curl -k`)
+- Trust the Caddy root CA (for Obsidian LiveSync, this is handled automatically)
