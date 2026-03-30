@@ -51,6 +51,7 @@ def add_pending_agent(
     timeout_minutes: int | None = None,
     trigger_message_id: str | None = None,
     trigger_snippet: str | None = None,
+    idempotency: str | None = None,
     path: Path | None = None,
 ) -> None:
     """Record a newly-spawned background agent.
@@ -68,6 +69,7 @@ def add_pending_agent(
         timeout_minutes:    Expected maximum runtime.
         trigger_message_id: Inbox message_id that caused this spawn (causality).
         trigger_snippet:    First 200 chars of the triggering message text (PII).
+        idempotency:        Re-run safety: 'safe' | 'unsafe' | 'unknown' (default).
         path:               DB path override (for testing). Accepts and ignores the
                             old JSON-path semantics — treated as SQLite DB path.
     """
@@ -81,6 +83,7 @@ def add_pending_agent(
         timeout_minutes=timeout_minutes,
         trigger_message_id=trigger_message_id,
         trigger_snippet=trigger_snippet,
+        idempotency=idempotency,
         path=path,
     )
 
