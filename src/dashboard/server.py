@@ -28,8 +28,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-import websockets
-from websockets.asyncio.server import serve
+try:
+    import websockets
+    from websockets.asyncio.server import serve
+    WEBSOCKETS_AVAILABLE = True
+except ImportError:
+    websockets = None  # type: ignore[assignment]
+    serve = None  # type: ignore[assignment]
+    WEBSOCKETS_AVAILABLE = False
 
 from collectors import collect_full_snapshot
 
@@ -231,6 +237,15 @@ class DashboardServer:
 
 
 def main() -> None:
+    if not WEBSOCKETS_AVAILABLE:
+        print(
+            "ERROR: 'websockets' package is not installed. "
+            "Install it with: pip install websockets>=13.0\n"
+            "The dashboard server cannot start without this dependency.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     parser = argparse.ArgumentParser(description="Lobster Dashboard WebSocket Server")
     parser.add_argument("--host", default="0.0.0.0", help="Bind address (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=9100, help="Port (default: 9100)")
