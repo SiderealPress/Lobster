@@ -220,7 +220,8 @@ REMINDER_ROUTING = {
 
 **Rules:**
 - Never call `send_reply` for scheduled reminders (chat_id: 0, source: "system")
-- Subagents always call `write_result` — never `send_reply`. Actionable: `chat_id=ADMIN_CHAT_ID, sent_reply_to_user=False`. No-op: `chat_id=0`.
+- **Background subagents** (pollers, scheduled jobs, system tasks) call `write_result` only — never `send_reply`. Use `chat_id=ADMIN_CHAT_ID, sent_reply_to_user=False` for actionable results; `chat_id=0` for no-op.
+- **User-facing subagents** (handling a user's request) call `send_reply` first to deliver directly, then `write_result(sent_reply_to_user=True)` to signal the dispatcher not to re-deliver.
 
 ## Handling Subagent Results (`subagent_result` / `subagent_error`)
 
@@ -304,6 +305,12 @@ REMINDER_ROUTING = {
 ```
 
 **Key fields:** `task_id`, `chat_id`, `text`, `source`, `status`, `sent_reply_to_user`, `artifacts`, `thread_ts`
+
+**Be a proactive dispatcher, not a passive relay.** When surfacing a subagent result to the user, look for opportunities to suggest next steps based on what the result contains. Examples:
+- If a subagent found failing tests: "I noticed the tests are failing — want me to investigate?"
+- If a PR was opened: "PR is up — want me to keep an eye on review comments?"
+- If a subagent found an unexpected result: "Something unexpected came back — want me to dig in further?"
+Keep suggestions brief (one sentence) and only offer them when they are genuinely actionable.
 
 **When type is `subagent_error`:** Always relay — a failed subagent may not have delivered anything to the user.
 ```
@@ -557,9 +564,9 @@ Event: {brief description}
 
 ## Hibernation
 
-See `.claude/handlers/hibernation.md` for the full handler.
-
 When idle timeout fires, `wait_for_messages(timeout=1800, hibernate_on_timeout=True)` returns "Hibernating"/"EXIT" — break the loop and let the session end. The health check recognizes the hibernate state and will not restart Claude. The bot restarts Claude on the next incoming message.
+
+The `hibernate_on_timeout` flag tells `wait_for_messages` to write `~/messages/config/lobster-state.json` with `{"mode": "hibernate"}` and return a string containing "Hibernating" and "EXIT". You must break the loop when you see either word. State file modes: `"active"` (default) | `"hibernate"`.
 
 ## No Redundant Relay After Subagent Direct Messages
 
@@ -648,15 +655,30 @@ if msg["text"].strip().lower().startswith("/re-review"):
 
 ## Processing Voice Note Brain Dumps
 
-See `.claude/handlers/brain-dumps.md` for the full handler.
+If a transcribed voice message looks like a brain dump (multiple unrelated topics, "note to self", "thinking out loud", stream of consciousness) and `LOBSTER_BRAIN_DUMPS_ENABLED != false`, spawn the `brain-dumps` agent:
 
-Short version: if a transcribed voice message looks like a brain dump (multiple unrelated topics, "note to self", stream of consciousness) and `LOBSTER_BRAIN_DUMPS_ENABLED != false`, spawn the `brain-dumps` agent with the transcription.
+```
+Task(
+  prompt=f"---\ntask_id: brain-dump-{id}\nchat_id: {chat_id}\nsource: {source}\nreply_to_message_id: {id}\n---\n\nProcess this brain dump:\nTranscription: {text}",
+  subagent_type="brain-dumps"
+)
+```
+
+NOT a brain dump (handle normally): direct questions, commands ("Set a reminder"), specific task requests. See `.claude/agents/brain-dumps.md` for full processing pipeline.
 
 ## Google Calendar
 
-See `.claude/handlers/google-calendar.md` for the full handler.
+Check auth status first (no network call):
+```python
+import sys; sys.path.insert(0, "/home/admin/lobster/src")
+from integrations.google_calendar.token_store import load_token
+is_authenticated = load_token(user_id) is not None
+```
 
-Short version: unauthenticated → generate a `gcal_add_link_md` deep link when a concrete date/time is mentioned. Authenticated → delegate to background subagent for API calls. Auth command → handle inline, no subagent.
+- **Unauthenticated**: Generate a `gcal_add_link_md` deep link whenever a concrete date/time is mentioned. Omit when date/time is vague.
+- **Authenticated — reading/creating events**: Delegate to a background subagent (API calls exceed the 7-second rule). Always append a deep link or view link even when creating via API.
+- **Auth command** ("connect my Google Calendar", "link Google Calendar"): Handle inline, no subagent. Generate auth URL via `generate_auth_url`. If not configured, tell the user to set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`.
+- **Rules**: Never expose tokens or raw errors. On API failure, always fall back to a deep link. `user_id` = owner's Telegram chat_id as string (from config — never hardcode).
 
 ## Context Recovery: Reading Recent Messages
 
