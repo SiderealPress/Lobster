@@ -1,0 +1,42 @@
+# =============================================================================
+# Obsidian KM Skill — Manifest
+# =============================================================================
+# Knowledge management skill for Lobster using Obsidian as the storage layer.
+# Part of BIS-228 epic: Obsidian-based Knowledge Management.
+
+[skill]
+name = "obsidian-km"
+version = "0.1.0"
+description = "Read and write notes to your Obsidian vault — capture ideas, archive links, and build a knowledge base"
+author = "SiderealPress"
+category = "workflow"
+
+[activation]
+mode = "always"
+triggers = []
+context_patterns = []
+
+[layering]
+priority = 50
+merge_strategy = "append"
+
+[provides]
+mcp_tools = ["note_create", "note_read", "note_search", "note_list"]
+bot_commands = ["/note", "/vault"]
+
+[compatibility]
+enhances = []
+conflicts = []
+
+[dependencies]
+pip = []
+npm = []
+system = []
+api_keys = []
+
+[dependencies.runtime]
+python = ">=3.11"
+
+[config]
+vault_dir = "~/obsidian-vault"
+default_folder = "Inbox"
