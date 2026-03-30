@@ -141,8 +141,6 @@ MAX_RESTART_ATTEMPTS=3
 RESTART_COOLDOWN_SECONDS=600         # 10 min window for counting attempts
 RESTART_STATE_FILE="$WORKSPACE_DIR/logs/health-restart-state-v3"
 
-BLACK_RENOTIFY_SECONDS=7200          # 2 hours: silent restart retry interval while in BLACK state
-
 ALERT_DEDUP_COOLDOWN_SECONDS=900     # 15 minutes between alerts for the same issue type
 ALERT_DEDUP_DIR="$WORKSPACE_DIR/logs/health-alert-dedup"
 
@@ -181,26 +179,6 @@ LOBSTER_ENV="${LOBSTER_ENV:-production}"
 mkdir -p "$(dirname "$LOG_FILE")"
 mkdir -p "$(dirname "$RESTART_STATE_FILE")"
 mkdir -p "$ALERT_DEDUP_DIR"
-mkdir -p "$(dirname "$LOCK_FILE")"
-
-# Dry-run gate: skip all real actions when LOBSTER_HEALTH_CHECK_DRY_RUN=1.
-# Used by tests to exercise parsing/reading logic without executing systemctl,
-# curl, or other external commands.
-if [[ "${LOBSTER_HEALTH_CHECK_DRY_RUN:-0}" == "1" ]]; then
-    mkdir -p "$(dirname "$LOG_FILE")"
-    echo "[$(date -Iseconds)] [INFO] LOBSTER_HEALTH_CHECK_DRY_RUN=1 — health check dry-run, skipping all actions" >> "$LOG_FILE"
-    exit 0
-fi
-
-# Lifecycle gate: skip monitoring and restart loop in non-production environments.
-# Resource checks (disk/memory/auth) do not run either — the service is intentionally
-# idle and alerting on its resource state would be noise. The cron entry still fires
-# so that flipping back to production takes effect within 4 minutes with no manual step.
-if [[ "$LOBSTER_ENV" != "production" ]]; then
-    mkdir -p "$(dirname "$LOG_FILE")"
-    echo "[$(date -Iseconds)] [INFO] LOBSTER_ENV=$LOBSTER_ENV — health check skipped in non-production mode" >> "$LOG_FILE"
-    exit 0
-fi
 
 # Lifecycle gate: skip monitoring and restart loop in non-production environments.
 # Resource checks (disk/memory/auth) do not run either — the service is intentionally
@@ -1362,7 +1340,7 @@ do_restart() {
     if [[ "$active_subagents" -gt 0 ]]; then
         log_warn "SUBAGENT GUARD: Skipping restart ($active_subagents active subagent(s) running) — will re-evaluate next check"
         if [[ "$suppress_alert" != "true" ]]; then
-            send_telegram_alert "Health check deferred restart: $active_subagents active subagent(s) in flight.
+            send_telegram_alert_deduped "subagent-guard" "Health check deferred restart: $active_subagents active subagent(s) in flight.
 
 Reason that triggered restart: $reason
 
@@ -1482,7 +1460,7 @@ Manual intervention required:
     # dispatchers running simultaneously.
     if [[ -n "$pre_restart_pid" ]] && kill -0 "$pre_restart_pid" 2>/dev/null; then
         log_error "ABORT: Could not kill pre-restart Claude PID $pre_restart_pid — refusing to start new session to prevent duplicate dispatcher"
-        send_telegram_alert "Restart aborted — could not kill existing Claude process (PID $pre_restart_pid).
+        send_telegram_alert_deduped "restart-aborted-pid" "Restart aborted — could not kill existing Claude process (PID $pre_restart_pid).
 
 Reason: $reason
 
@@ -1592,6 +1570,7 @@ Status: Restarted, but new stale messages detected post-restart"
         log_info "Restart successful"
         write_boot_timestamp
         if [[ "$suppress_alert" != "true" ]]; then
+            # "Recovered" alert: use raw send (important positive signal, not spammy)
             send_telegram_alert "System recovered automatically.
 
 Reason: $reason
@@ -1605,7 +1584,7 @@ Status: Restarted successfully"
         if [[ "$pid_changed" == false ]]; then
             # PID did not change: the old process survived the restart attempt.
             log_error "Restart failed: Claude PID $pre_restart_pid unchanged after 3 checks — old session survived"
-            send_telegram_alert "Restart failed — process still running under original PID $pre_restart_pid.
+            send_telegram_alert_deduped "restart-failed-pid" "Restart failed — process still running under original PID $pre_restart_pid.
 
 Reason: $reason
 Manual intervention may be required: \`lobster restart\`"
@@ -1620,7 +1599,7 @@ Manual intervention may be required: \`lobster restart\`"
                 not_ready_detail="tmux session missing (service is active)"
             fi
             log_warn "Restart confirmed (PID changed) but service/tmux not ready after ${svc_timeout_s}s: $not_ready_detail"
-            send_telegram_alert "Restart confirmed (PID changed) — service/tmux not yet ready after ${svc_timeout_s}s.
+            send_telegram_alert_deduped "restart-not-ready" "Restart confirmed (PID changed) — service/tmux not yet ready after ${svc_timeout_s}s.
 
 Reason: $reason
 Detail: $not_ready_detail

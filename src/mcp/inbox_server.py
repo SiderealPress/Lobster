@@ -3910,15 +3910,6 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
     # transient mode, calling wait_for_messages means Claude is up and running.
     _write_lobster_state(LOBSTER_STATE_FILE, "active")
 
-    # Write WFM-active signal so the health check can distinguish a healthy
-    # idle-blocking dispatcher from a frozen one (issue #1713 / #949).
-    # The health check treats a fresh WFM-active signal as GREEN even when
-    # dispatcher-heartbeat is stale — PostToolUse hooks don't fire during a
-    # blocking MCP call, so the heartbeat inevitably goes stale after 20 min.
-    # We clear this file in the finally block so the signal only persists while
-    # WFM is actually blocking.
-    _write_wfm_active_signal()
-
     # Recover stale processing and retryable failed messages
     _recover_stale_processing()
     _recover_retryable_messages()
