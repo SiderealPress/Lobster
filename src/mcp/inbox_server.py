@@ -2693,17 +2693,6 @@ async def list_tools() -> list[Tool]:
                         ),
                         "enum": ["safe", "unsafe", "unknown"],
                     },
-                    "task_origin": {
-                        "type": "string",
-                        "description": (
-                            "Origin of this task: 'user' | 'scheduled' | 'internal'. "
-                            "'user' — triggered by a real user message. "
-                            "'scheduled' — triggered by a scheduled job or cron. "
-                            "'internal' — system-initiated, no user involved. "
-                            "Defaults to 'user'."
-                        ),
-                        "enum": ["user", "scheduled", "internal"],
-                    },
                 },
                 "required": ["agent_id", "description", "chat_id"],
             },
@@ -2804,31 +2793,6 @@ async def list_tools() -> list[Tool]:
                             "'unknown' — caller did not classify (default; treated as unsafe for recovery)."
                         ),
                         "enum": ["safe", "unsafe", "unknown"],
-                    },
-                    "task_origin": {
-                        "type": "string",
-                        "description": (
-                            "Origin of this task: 'user' | 'scheduled' | 'internal'. "
-                            "'user' — triggered by a real user message (Telegram, Slack, etc.). "
-                            "'scheduled' — triggered by a scheduled job or cron task. "
-                            "'internal' — system-initiated, no user involved (reconciler, "
-                            "health check, session management, etc.). "
-                            "Defaults to 'user' when not specified. "
-                            "Code that previously checked chat_id==0 to detect system tasks "
-                            "should check task_origin=='internal' instead — the two conditions "
-                            "are equivalent but task_origin makes intent explicit."
-                        ),
-                        "enum": ["user", "scheduled", "internal"],
-                    },
-                    "claude_session_id": {
-                        "type": "string",
-                        "description": (
-                            "The Claude Code session UUID for this session "
-                            "(hook_input['session_id'], format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx). "
-                            "Required when agent_type='dispatcher': written to a dedicated state file "
-                            "so SessionStart hooks can correctly identify the dispatcher session. "
-                            "This is a different ID space from the MCP HTTP transport session ID."
-                        ),
                     },
                 },
                 "required": ["agent_id", "description", "chat_id"],
@@ -7792,7 +7756,6 @@ async def handle_register_agent(args: dict) -> list[TextContent]:
     output_file = args.get("output_file") or None
     timeout_minutes = args.get("timeout_minutes") or None
     idempotency = args.get("idempotency") or None
-    task_origin = args.get("task_origin") or None
 
     if not agent_id:
         return [TextContent(type="text", text="Error: agent_id is required")]
@@ -7824,7 +7787,6 @@ async def handle_register_agent(args: dict) -> list[TextContent]:
             output_file=output_file,
             timeout_minutes=timeout_minutes,
             idempotency=idempotency,
-            task_origin=task_origin,
         )
     except Exception as exc:
         log.error(f"register_agent failed: {exc}", exc_info=True)
@@ -7897,8 +7859,6 @@ async def handle_session_start(args: dict) -> list[TextContent]:
     trigger_message_id = args.get("trigger_message_id") or None
     trigger_snippet = args.get("trigger_snippet") or None
     idempotency = args.get("idempotency") or None
-    task_origin = args.get("task_origin") or None
-    claude_session_id = (args.get("claude_session_id") or "").strip() or None
 
     if not agent_id:
         return [TextContent(type="text", text="Error: agent_id is required")]
@@ -7928,7 +7888,6 @@ async def handle_session_start(args: dict) -> list[TextContent]:
             trigger_message_id=trigger_message_id,
             trigger_snippet=trigger_snippet,
             idempotency=idempotency,
-            task_origin=task_origin,
         )
     except Exception as exc:
         log.error(f"session_start failed: {exc}", exc_info=True)
