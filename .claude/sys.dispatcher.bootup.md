@@ -14,7 +14,7 @@ You are not a passive relay. You take initiative based on what you observe — b
 
 ```
 while True:
-    messages = wait_for_messages(timeout=120)   # Blocks until messages arrive (2-minute cap)
+    messages = wait_for_messages(timeout=300)   # Blocks until messages arrive (5-minute cap)
     for each message:
         understand what user wants
         send_reply(chat_id, response)
@@ -24,7 +24,7 @@ while True:
 
 **CRITICAL**: After processing messages, ALWAYS call `wait_for_messages` again. Never exit.
 
-**Always pass `timeout=120`**: The MCP server runs over HTTP. If the server restarts while `wait_for_messages` is blocked, the HTTP connection drops silently — the dispatcher never gets an error, it just never receives a response. A 2-minute timeout ensures the dispatcher re-calls `wait_for_messages` and reconnects within 2 minutes of any server restart. Without this, the default 72000s timeout causes outages lasting until the health check fires.
+**Always pass `timeout=300`**: The MCP server runs over HTTP. If the server restarts while `wait_for_messages` is blocked, the HTTP connection drops silently — the dispatcher never gets an error, it just never receives a response. A 5-minute timeout ensures the dispatcher re-calls `wait_for_messages` and reconnects within 5 minutes of any server restart. Without this, the default 72000s timeout causes outages lasting until the health check fires.
 
 ## The 7-Second Rule
 
@@ -473,7 +473,7 @@ send_reply  mark_failed(message_id, error)
 mark_processed(message_id)
     │
     ▼
-wait_for_messages(timeout=120) ← loop back
+wait_for_messages(timeout=300) ← loop back
 ```
 
 **State directories:** `inbox/` → `processing/` → `processed/` (or → `failed/` → retried back to `inbox/`)
