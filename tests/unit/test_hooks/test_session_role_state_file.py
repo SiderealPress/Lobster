@@ -1,29 +1,12 @@
 """
 Unit tests for hooks/session_role.py — state-file-based dispatcher detection.
 
-Issue #1908 split dispatcher detection into two APIs:
+Covers the new two-layer detection strategy introduced to replace JSONL
+transcript scanning:
 
-- is_dispatcher(hook_input): for SessionStart hooks — uses startup flag file only.
-  State-file tests for is_dispatcher() are in test_startup_flag_dispatcher_detection.py.
-
-- is_dispatcher_session(hook_input): for PreToolUse hooks — uses state files + process tree.
-  This file tests the state-file paths for is_dispatcher_session().
-
-Covers the three-layer detection strategy used by is_dispatcher_session():
-
-1. Claude UUID state file (primary):  $LOBSTER_WORKSPACE/data/dispatcher-claude-session-id
-   Written by MCP server when session_start(agent_type='dispatcher',
-   claude_session_id=<uuid>) is called.  This UUID matches hook_input["session_id"].
-
-2. MCP HTTP session state file (secondary):  $LOBSTER_WORKSPACE/data/dispatcher-session-id
-   Written by _tag_dispatcher_session() with the HTTP transport session ID (32-char hex).
-   Different format from Claude UUID — present file conclusively identifies subagents
-   (mismatch), absent file falls through.
-
-3. Hook marker file (tertiary): ~/messages/config/dispatcher-session-id
-   Written by on-compact.py (formerly write-dispatcher-session-id.py).
-
-4. Default: False (conservative/subagent)
+1. MCP state file (primary):  $LOBSTER_WORKSPACE/data/dispatcher-session-id
+2. Hook marker file (secondary): ~/messages/config/dispatcher-session-id
+3. Default: False (conservative/subagent)
 
 Also covers:
 - Fail-open: OSError on file read → True (dispatcher)
@@ -31,12 +14,10 @@ Also covers:
 - _check_state_file() contract
 - _read_dispatcher_session_id() backwards-compat shim
 - write_dispatcher_session_id() atomic write
-- The core bug fix: Claude UUID (hook_input) vs HTTP session ID mismatch
 """
 
 from __future__ import annotations
 
-import importlib
 import os
 import sys
 from pathlib import Path
@@ -49,6 +30,7 @@ _HOOKS_DIR = Path(__file__).parents[3] / "hooks"
 if str(_HOOKS_DIR) not in sys.path:
     sys.path.insert(0, str(_HOOKS_DIR))
 
+import importlib
 import session_role as _sr_module  # noqa: E402 — path insert must precede
 
 # ---------------------------------------------------------------------------
@@ -60,6 +42,7 @@ def _reload_session_role(monkeypatch, workspace: Path) -> object:
     """Reload session_role with LOBSTER_WORKSPACE pointing to workspace."""
     monkeypatch.setenv("LOBSTER_WORKSPACE", str(workspace))
     # Force reimport so _get_mcp_session_state_file() picks up the new env.
+    import importlib
     return importlib.reload(_sr_module)
 
 
@@ -155,259 +138,61 @@ class TestCheckStateFile:
 
 
 # ---------------------------------------------------------------------------
-# is_dispatcher_session — Claude UUID state file (PRIMARY, the bug fix)
-#
-# NOTE: is_dispatcher() was simplified in issue #1908 to use startup flag only.
-# The state-file-based detection below is tested via is_dispatcher_session(),
-# which is the API used by PreToolUse hooks during active processing.
-# ---------------------------------------------------------------------------
-
-
-class TestIsDispatcherClaudeUUIDFile:
-    """Tests for the primary detection path: the Claude UUID state file.
-
-    This is the fix for the session ID space mismatch bug (#1253).
-    The hook receives a Claude UUID (hook_input["session_id"]) but the old
-    primary check compared against the HTTP session ID — they never matched.
-    The new primary file stores the Claude UUID and comparison works correctly.
-
-    These tests use is_dispatcher_session() (PreToolUse context) rather than
-    is_dispatcher() (SessionStart context).  After issue #1908, is_dispatcher()
-    uses startup flag only; state-file logic lives in is_dispatcher_session().
-    """
-
-    def test_claude_uuid_match_returns_true(self, monkeypatch, tmp_path):
-        """Primary: Claude UUID file matches → dispatcher detected (PreToolUse context)."""
-        sr = _reload_session_role(monkeypatch, tmp_path)
-        data_dir = tmp_path / "data"
-        data_dir.mkdir()
-        claude_uuid = "756633a5-4802-4327-ab98-684243d5fc2a"
-        (data_dir / "dispatcher-claude-session-id").write_text(claude_uuid)
-
-        assert sr.is_dispatcher_session(_hook_input(claude_uuid)) is True
-
-    def test_claude_uuid_mismatch_falls_through_to_process_tree(
-        self, monkeypatch, tmp_path
-    ):
-        """Primary file mismatch does NOT short-circuit — falls through to process-tree.
-
-        A mismatch means "this session is not the one stored in the file," but it
-        does not mean "this session is definitively a subagent."  The file may be
-        stale (previous session's ID).  The process-tree check is the authoritative
-        discriminator.  This test patches process-tree to return False (non-dispatcher
-        process context) to isolate state-file layer behavior.
-        """
-        sr = _reload_session_role(monkeypatch, tmp_path)
-        data_dir = tmp_path / "data"
-        data_dir.mkdir()
-        dispatcher_uuid = "756633a5-4802-4327-ab98-684243d5fc2a"
-        subagent_uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
-        (data_dir / "dispatcher-claude-session-id").write_text(dispatcher_uuid)
-
-        # Process-tree returns False → subagent confirmed.
-        with patch.object(sr, "_is_dispatcher_by_process_tree", return_value=False):
-            assert sr.is_dispatcher_session(_hook_input(subagent_uuid)) is False
-
-    def test_stale_state_file_falls_through_to_process_tree_dispatcher(
-        self, monkeypatch, tmp_path
-    ):
-        """Stale state file (previous session's ID) does not block new dispatcher.
-
-        Root cause of the fallthrough bug (issue #1908): after a normal restart,
-        DISPATCHER_SESSION_FILE holds the PREVIOUS session's ID.  The new dispatcher
-        session gets _check_state_file() → False (ID mismatch), which previously
-        caused is_dispatcher_session() to return False immediately, bypassing the
-        process-tree fallback.  The new dispatcher was incorrectly treated as a
-        subagent.
-
-        Fix: False from state file is not authoritative — only True short-circuits.
-        The process-tree check correctly identifies the new dispatcher session.
-        """
-        sr = _reload_session_role(monkeypatch, tmp_path)
-        monkeypatch.setenv("HOME", str(tmp_path))
-        sr = importlib.reload(sr)
-        data_dir = tmp_path / "data"
-        data_dir.mkdir()
-
-        # State file holds the PREVIOUS (stale) dispatcher session ID.
-        stale_uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
-        (data_dir / "dispatcher-claude-session-id").write_text(stale_uuid)
-
-        # The NEW dispatcher session has a different UUID.
-        new_dispatcher_uuid = "756633a5-4802-4327-ab98-684243d5fc2a"
-
-        # Process-tree returns True — confirms this IS the dispatcher process.
-        with patch.object(sr, "_is_dispatcher_by_process_tree", return_value=True):
-            # Before the fix: _check_state_file() returns False (stale mismatch)
-            # → is_dispatcher_session() returned False immediately.
-            # After the fix: False falls through to process-tree → correctly True.
-            assert sr.is_dispatcher_session(_hook_input(new_dispatcher_uuid)) is True
-
-    def test_bug_1253_http_session_id_does_not_match_claude_uuid(
-        self, monkeypatch, tmp_path
-    ):
-        """Regression test for the core bug: HTTP session ID vs Claude UUID mismatch.
-
-        Before the fix, the MCP server wrote the HTTP session ID (32-char hex,
-        e.g. '43e178fa975741eb9f6c1cb9f328d52b') to the state file, but the hook
-        received the Claude UUID (e.g. '756633a5-4802-4327-ab98-684243d5fc2a').
-        These IDs are different formats and NEVER match.
-
-        After the fix: the HTTP session ID is still written to dispatcher-session-id
-        (secondary) but the Claude UUID is written to dispatcher-claude-session-id
-        (primary).  The hook compares the Claude UUID file first and gets a match.
-        """
-        sr = _reload_session_role(monkeypatch, tmp_path)
-        data_dir = tmp_path / "data"
-        data_dir.mkdir()
-
-        # Simulate the MCP server state: HTTP session ID in the old file.
-        http_session_id = "43e178fa975741eb9f6c1cb9f328d52b"
-        (data_dir / "dispatcher-session-id").write_text(http_session_id)
-
-        # Simulate what the hook receives: a Claude UUID.
-        claude_uuid = "756633a5-4802-4327-ab98-684243d5fc2a"
-
-        # Without the fix (only checking dispatcher-session-id): mismatch → subagent.
-        # Verify the old file does NOT match the Claude UUID (confirming the bug was real).
-        assert http_session_id != claude_uuid, "IDs should be different formats"
-
-        # Now write the Claude UUID to the new primary file (what the fix does).
-        (data_dir / "dispatcher-claude-session-id").write_text(claude_uuid)
-
-        # With the fix: primary Claude UUID file matches → dispatcher correctly identified.
-        assert sr.is_dispatcher_session(_hook_input(claude_uuid)) is True
-
-    def test_claude_uuid_file_absent_with_only_http_file_returns_false(
-        self, monkeypatch, tmp_path
-    ):
-        """Primary absent, only HTTP session file present → secondary skipped, tertiary absent.
-
-        State-file layers return no definitive answer; the result depends on
-        the process-tree fallback.  This test patches the fallback to return
-        False (non-dispatcher process context) to isolate state-file behavior.
-        """
-        sr = _reload_session_role(monkeypatch, tmp_path)
-        monkeypatch.setenv("HOME", str(tmp_path))
-        sr = importlib.reload(sr)
-        data_dir = tmp_path / "data"
-        data_dir.mkdir()
-
-        # Only the HTTP session file is present (older MCP version or race window).
-        # The secondary check is intentionally skipped (format mismatch — see
-        # session_role.py), and the tertiary hook marker file is also absent.
-        http_session_id = "43e178fa975741eb9f6c1cb9f328d52b"
-        claude_uuid = "756633a5-4802-4327-ab98-684243d5fc2a"
-        (data_dir / "dispatcher-session-id").write_text(http_session_id)
-
-        # Patch process-tree fallback to return False (isolates state-file layer).
-        with patch.object(sr, "_is_dispatcher_by_process_tree", return_value=False):
-            assert sr.is_dispatcher_session(_hook_input(claude_uuid)) is False
-
-    def test_claude_uuid_file_absent_falls_through_to_hook_marker(
-        self, monkeypatch, tmp_path
-    ):
-        """When both MCP state files are absent, the hook marker file is used."""
-        sr = _reload_session_role(monkeypatch, tmp_path)
-        monkeypatch.setenv("HOME", str(tmp_path))
-        sr = importlib.reload(sr)
-
-        # Only the tertiary hook marker file is present.
-        config_dir = tmp_path / "messages" / "config"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        claude_uuid = "756633a5-4802-4327-ab98-684243d5fc2a"
-        (config_dir / "dispatcher-session-id").write_text(claude_uuid)
-
-        assert sr.is_dispatcher_session(_hook_input(claude_uuid)) is True
-
-
-# ---------------------------------------------------------------------------
-# is_dispatcher_session — MCP HTTP session state file (secondary, skipped)
-#
-# The secondary file (dispatcher-session-id) stores the HTTP transport session
-# ID (32-char hex), NOT the Claude UUID. The secondary check is intentionally
-# skipped in is_dispatcher_session() because it would always return False for
-# both dispatcher and subagents (format mismatch), blocking the tertiary check.
-# These tests verify that the secondary file alone never causes a True return,
-# and that the function falls through correctly to the tertiary check.
+# is_dispatcher — MCP state file (primary)
 # ---------------------------------------------------------------------------
 
 
 class TestIsDispatcherMCPStateFile:
-    def test_mcp_file_alone_never_returns_true(self, monkeypatch, tmp_path):
-        """Secondary-only: MCP HTTP session file is skipped; tertiary absent.
-
-        Under the old code this would return True; under the fix, the secondary
-        file is skipped and the tertiary (hook marker) file is absent, so the
-        result depends on the process-tree fallback.  Patch it to return False
-        to isolate state-file layer behavior.
-        """
+    def test_mcp_file_match_returns_true(self, monkeypatch, tmp_path):
+        """Primary MCP state file matches → dispatcher."""
         sr = _reload_session_role(monkeypatch, tmp_path)
-        monkeypatch.setenv("HOME", str(tmp_path))
-        sr = importlib.reload(sr)
         mcp_dir = tmp_path / "data"
         mcp_dir.mkdir()
         (mcp_dir / "dispatcher-session-id").write_text("sess-mcp-001")
 
-        with patch.object(sr, "_is_dispatcher_by_process_tree", return_value=False):
-            assert sr.is_dispatcher_session(_hook_input("sess-mcp-001")) is False
+        assert sr.is_dispatcher(_hook_input("sess-mcp-001")) is True
 
-    def test_mcp_file_present_falls_through_to_tertiary(self, monkeypatch, tmp_path):
-        """Secondary file present but skipped → tertiary hook marker file decides."""
+    def test_mcp_file_mismatch_returns_false(self, monkeypatch, tmp_path):
+        """Primary MCP state file contains a different session → subagent."""
         sr = _reload_session_role(monkeypatch, tmp_path)
-        monkeypatch.setenv("HOME", str(tmp_path))
-        sr = importlib.reload(sr)
         mcp_dir = tmp_path / "data"
         mcp_dir.mkdir()
-        # Write secondary with a hex value (typical real-world content).
-        http_session_id = "43e178fa975741eb9f6c1cb9f328d52b"
-        (mcp_dir / "dispatcher-session-id").write_text(http_session_id)
+        (mcp_dir / "dispatcher-session-id").write_text("dispatcher-session")
 
-        # Write tertiary with the matching Claude UUID.
-        claude_uuid = "756633a5-4802-4327-ab98-684243d5fc2a"
-        config_dir = tmp_path / "messages" / "config"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "dispatcher-session-id").write_text(claude_uuid)
+        assert sr.is_dispatcher(_hook_input("subagent-session")) is False
 
-        # Secondary is skipped; tertiary matches → dispatcher.
-        assert sr.is_dispatcher_session(_hook_input(claude_uuid)) is True
-
-    def test_mcp_file_absent_falls_through_to_tertiary(self, monkeypatch, tmp_path):
-        """Both MCP files absent → falls through to hook marker file."""
+    def test_mcp_file_absent_falls_through_to_secondary(self, monkeypatch, tmp_path):
+        """Primary absent → falls through to hook marker file."""
         sr = _reload_session_role(monkeypatch, tmp_path)
-        # Set HOME so tertiary hook marker file resolves under tmp_path.
+        # Set HOME so secondary hook marker file resolves under tmp_path.
         monkeypatch.setenv("HOME", str(tmp_path))
         # Reload to pick up new HOME for DISPATCHER_SESSION_FILE.
         sr = importlib.reload(sr)
 
-        # Write only the tertiary (hook marker) file.
+        # Write only the secondary (hook marker) file.
         config_dir = tmp_path / "messages" / "config"
         config_dir.mkdir(parents=True, exist_ok=True)
         (config_dir / "dispatcher-session-id").write_text("sess-hook-001")
 
-        assert sr.is_dispatcher_session(_hook_input("sess-hook-001")) is True
+        assert sr.is_dispatcher(_hook_input("sess-hook-001")) is True
 
     def test_mcp_file_absent_no_secondary_returns_false(self, monkeypatch, tmp_path):
-        """All files absent → falls through to process-tree fallback.
-
-        Patch process-tree to return False to isolate state-file layer behavior.
-        """
+        """Both files absent → default False."""
         sr = _reload_session_role(monkeypatch, tmp_path)
         monkeypatch.setenv("HOME", str(tmp_path))
         sr = importlib.reload(sr)
 
-        with patch.object(sr, "_is_dispatcher_by_process_tree", return_value=False):
-            assert sr.is_dispatcher_session(_hook_input("any-session")) is False
+        assert sr.is_dispatcher(_hook_input("any-session")) is False
 
 
 # ---------------------------------------------------------------------------
-# is_dispatcher_session — hook marker file (tertiary)
+# is_dispatcher — hook marker file (secondary)
 # ---------------------------------------------------------------------------
 
 
 class TestIsDispatcherHookMarkerFile:
     def test_hook_file_match_when_mcp_absent(self, monkeypatch, tmp_path):
-        """Tertiary hook marker file used when both MCP files are absent."""
+        """Secondary hook marker file used when primary MCP file is absent."""
         sr = _reload_session_role(monkeypatch, tmp_path)
         monkeypatch.setenv("HOME", str(tmp_path))
         sr = importlib.reload(sr)
@@ -416,17 +201,10 @@ class TestIsDispatcherHookMarkerFile:
         config_dir.mkdir(parents=True, exist_ok=True)
         (config_dir / "dispatcher-session-id").write_text("hook-dispatcher-sess")
 
-        assert sr.is_dispatcher_session(_hook_input("hook-dispatcher-sess")) is True
+        assert sr.is_dispatcher(_hook_input("hook-dispatcher-sess")) is True
 
-    def test_hook_file_mismatch_falls_through_to_process_tree(
-        self, monkeypatch, tmp_path
-    ):
-        """Hook file present but non-matching → falls through to process-tree.
-
-        A mismatch is not authoritative — the file may be stale.  The process-tree
-        check is the final discriminator.  This test patches process-tree to return
-        False (non-dispatcher process context) to isolate state-file layer behavior.
-        """
+    def test_hook_file_mismatch_when_mcp_absent(self, monkeypatch, tmp_path):
+        """Hook file present but non-matching → subagent."""
         sr = _reload_session_role(monkeypatch, tmp_path)
         monkeypatch.setenv("HOME", str(tmp_path))
         sr = importlib.reload(sr)
@@ -435,8 +213,7 @@ class TestIsDispatcherHookMarkerFile:
         config_dir.mkdir(parents=True, exist_ok=True)
         (config_dir / "dispatcher-session-id").write_text("dispatcher-session")
 
-        with patch.object(sr, "_is_dispatcher_by_process_tree", return_value=False):
-            assert sr.is_dispatcher_session(_hook_input("subagent-session")) is False
+        assert sr.is_dispatcher(_hook_input("subagent-session")) is False
 
 
 # ---------------------------------------------------------------------------
@@ -454,101 +231,17 @@ class TestIsDispatcherDefault:
         assert sr.is_dispatcher(_hook_input("any-session")) is False
 
     def test_no_session_id_in_hook_input_returns_false(self, monkeypatch, tmp_path):
-        """No session_id in hook input → all file checks return None → False."""
+        """No session_id in hook input → both file checks return None → False."""
         sr = _reload_session_role(monkeypatch, tmp_path)
         monkeypatch.setenv("HOME", str(tmp_path))
         sr = importlib.reload(sr)
 
-        # Write a file to ensure it's the missing session_id causing the result.
+        # Write both files to ensure it's the missing session_id causing the result.
         mcp_dir = tmp_path / "data"
         mcp_dir.mkdir()
-        (mcp_dir / "dispatcher-claude-session-id").write_text("some-dispatcher-uuid")
+        (mcp_dir / "dispatcher-session-id").write_text("some-dispatcher-sess")
 
         assert sr.is_dispatcher({}) is False  # no session_id key
-
-
-# ---------------------------------------------------------------------------
-# Regression: secondary check format mismatch blocked tertiary fallback
-#
-# Bug: when the secondary file (dispatcher-session-id) existed with a 32-char
-# hex HTTP session ID, _check_state_file() returned False (mismatch).  The
-# early-exit `if secondary_result is not None: return secondary_result` then
-# returned False immediately, preventing the tertiary check from running.
-# The tertiary file (~/messages/config/dispatcher-session-id) stores a Claude
-# UUID and WOULD have returned True — but was never reached.
-#
-# Fix: remove the secondary early-exit entirely.  The secondary file stores an
-# incompatible format and is not a reliable discriminator for either session
-# type.  The function falls through to the tertiary check in all cases.
-# ---------------------------------------------------------------------------
-
-
-class TestIsDispatcherSecondaryCheckSkipped:
-    def test_secondary_hex_does_not_block_tertiary_uuid_match(
-        self, monkeypatch, tmp_path
-    ):
-        """Core regression: primary absent, secondary has hex, tertiary has UUID → True.
-
-        This is the exact failure mode that triggered the bug report.  After
-        compaction, the Claude UUID state file (primary) may be absent.  The
-        secondary file exists with a 32-char hex HTTP session ID.  The tertiary
-        hook marker file has the correct Claude UUID.
-
-        Before the fix: secondary returned False (mismatch) → early exit →
-        is_dispatcher_session() returned False for the dispatcher.
-
-        After the fix: secondary is skipped → tertiary check runs → True.
-        """
-        sr = _reload_session_role(monkeypatch, tmp_path)
-        monkeypatch.setenv("HOME", str(tmp_path))
-        sr = importlib.reload(sr)
-
-        # Primary file absent (simulates post-compaction state).
-
-        # Secondary: MCP HTTP session ID (32-char hex) — real content in production.
-        data_dir = tmp_path / "data"
-        data_dir.mkdir()
-        http_session_id = "43e178fa975741eb9f6c1cb9f328d52b"
-        (data_dir / "dispatcher-session-id").write_text(http_session_id)
-
-        # Tertiary: hook marker file with the correct Claude UUID.
-        claude_uuid = "756633a5-4802-4327-ab98-684243d5fc2a"
-        config_dir = tmp_path / "messages" / "config"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "dispatcher-session-id").write_text(claude_uuid)
-
-        # Must return True — the dispatcher is correctly identified via the
-        # tertiary check, which is now reached because the secondary is skipped.
-        assert sr.is_dispatcher_session(_hook_input(claude_uuid)) is True
-
-    def test_secondary_skipped_tertiary_mismatch_falls_through_to_process_tree(
-        self, monkeypatch, tmp_path
-    ):
-        """Secondary skipped, tertiary mismatch → falls through to process-tree.
-
-        A tertiary mismatch does NOT short-circuit (may be a stale entry).  The
-        process-tree check is patched to return False to isolate state-file layer
-        behavior and confirm that a subagent is correctly identified.
-        """
-        sr = _reload_session_role(monkeypatch, tmp_path)
-        monkeypatch.setenv("HOME", str(tmp_path))
-        sr = importlib.reload(sr)
-
-        data_dir = tmp_path / "data"
-        data_dir.mkdir()
-        http_session_id = "43e178fa975741eb9f6c1cb9f328d52b"
-        (data_dir / "dispatcher-session-id").write_text(http_session_id)
-
-        # Tertiary has the dispatcher UUID.
-        dispatcher_uuid = "756633a5-4802-4327-ab98-684243d5fc2a"
-        subagent_uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
-        config_dir = tmp_path / "messages" / "config"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "dispatcher-session-id").write_text(dispatcher_uuid)
-
-        # State files cannot confirm dispatcher (no match) → process-tree decides.
-        with patch.object(sr, "_is_dispatcher_by_process_tree", return_value=False):
-            assert sr.is_dispatcher_session(_hook_input(subagent_uuid)) is False
 
 
 # ---------------------------------------------------------------------------
@@ -616,26 +309,3 @@ class TestReadDispatcherSessionIdShim:
         # Reload again to pick up new DISPATCHER_SESSION_FILE path.
         sr = importlib.reload(sr)
         assert sr._read_dispatcher_session_id() == "stored-sess-001"
-
-
-# ---------------------------------------------------------------------------
-# _get_mcp_claude_session_file — path resolution
-# ---------------------------------------------------------------------------
-
-
-class TestGetMCPClaudeSessionFile:
-    def test_resolves_under_lobster_workspace(self, monkeypatch, tmp_path):
-        """_get_mcp_claude_session_file() respects LOBSTER_WORKSPACE env var."""
-        monkeypatch.setenv("LOBSTER_WORKSPACE", str(tmp_path))
-        sr = importlib.reload(_sr_module)
-        expected = tmp_path / "data" / "dispatcher-claude-session-id"
-        assert sr._get_mcp_claude_session_file() == expected
-
-    def test_default_path_under_home(self, monkeypatch, tmp_path):
-        """Without LOBSTER_WORKSPACE, defaults to ~/lobster-workspace/data/..."""
-        monkeypatch.delenv("LOBSTER_WORKSPACE", raising=False)
-        sr = importlib.reload(_sr_module)
-        result = sr._get_mcp_claude_session_file()
-        assert result.name == "dispatcher-claude-session-id"
-        assert "lobster-workspace" in str(result)
-        assert "data" in str(result)
