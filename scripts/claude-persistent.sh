@@ -536,13 +536,7 @@ launch_claude() {
     # The MCP server's _reset_state_on_startup() and handle_wait_for_messages()
     # will also write "active" once Claude is truly running, but this belt-and-
     # suspenders write ensures the state transitions even if those paths are slow.
-    #
-    # Fix B (2026-04-03): Guard against the hibernation→active state race.
-    # If Claude exits into hibernation before the 5-second sleep completes,
-    # the background write would overwrite "hibernate" with "active", causing
-    # the health check to see mode=active + no WFM heartbeat → false restart.
-    # Only write "active" if the current mode is NOT "hibernate".
-    ( sleep 5 && current_mode=$(read_state_mode 2>/dev/null || echo "unknown"); [[ "$current_mode" != "hibernate" ]] && write_state "active" "claude running, attempt=$attempt" ) &
+    ( sleep 5 && write_state "active" "claude running, attempt=$attempt" ) &
 
     # Write the dispatcher PID file so the health check can target this specific
     # process for cleanup without relying on ambiguous pgrep matches.
