@@ -1,0 +1,49 @@
+# =============================================================================
+# Lobster Skill Manifest — Obsidian KM
+# =============================================================================
+# Obsidian vault sync and read/write access via Telegram.
+# Part of BIS-228 (Obsidian KM Skill epic)
+
+[skill]
+name = "obsidian-km"
+version = "0.1.0"
+description = "Obsidian vault sync and read/write access via Telegram"
+author = "Lobster"
+category = "tool"
+
+[activation]
+mode = "triggered"
+triggers = ["/note", "/vault", "/search"]
+context_patterns = [
+    "when user asks to create a note",
+    "when user asks to search notes",
+    "when user asks about their vault",
+    "when user wants to read a note",
+]
+
+[layering]
+priority = 50
+merge_strategy = "append"
+
+[provides]
+mcp_tools = [
+    "note_create",
+    "note_read",
+    "note_search",
+    "note_append",
+    "note_list",
+]
+bot_commands = ["/note", "/vault", "/search"]
+
+[compatibility]
+enhances = []
+conflicts = []
+
+[dependencies]
+pip = ["python-frontmatter", "python-dotenv"]
+npm = []
+system = ["couchdb", "caddy", "ripgrep"]
+api_keys = []
+
+[dependencies.runtime]
+python = ">=3.11"
