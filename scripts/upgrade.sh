@@ -1836,14 +1836,14 @@ EOF
     # The Python session_store migration list also handles this idempotently — this
     # upgrade.sh entry is the documentation anchor and ensures crontab/service
     # restarts don't miss the schema change on minimal installs without uv.
-    if command -v python3 &>/dev/null; then
-        python3 -c "
+    if command -v uv &>/dev/null; then
+        uv run python -c "
 import sqlite3, os
 db_path = os.path.expanduser('~/messages/config/agent_sessions.db')
 if os.path.exists(db_path):
     conn = sqlite3.connect(db_path)
     try:
-        conn.execute("ALTER TABLE agent_sessions ADD COLUMN idempotency TEXT DEFAULT 'unknown'")
+        conn.execute(\"ALTER TABLE agent_sessions ADD COLUMN idempotency TEXT DEFAULT 'unknown'\")
         conn.commit()
         print('idempotency column added')
     except sqlite3.OperationalError:
