@@ -8,6 +8,7 @@ import json
 import os
 import re
 import subprocess
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -117,6 +118,229 @@ def extract_excerpt(content: str, query: str, context_chars: int = 100) -> str:
         excerpt = excerpt + "..."
 
     return excerpt
+
+
+def get_file_timestamps(path: Path) -> tuple[datetime | None, datetime | None]:
+    """
+    Get created and modified timestamps for a file.
+
+    Returns (created, modified) as datetime objects.
+    Falls back to mtime for created if ctime is not reliable.
+    """
+    try:
+        stat = path.stat()
+        # On Unix, st_ctime is inode change time, not creation.
+        # Use mtime as a reasonable fallback for created.
+        created = datetime.fromtimestamp(stat.st_mtime)  # Fallback
+        modified = datetime.fromtimestamp(stat.st_mtime)
+
+        # Try to get birth time if available (macOS, some Linux)
+        if hasattr(stat, 'st_birthtime'):
+            created = datetime.fromtimestamp(stat.st_birthtime)
+
+        return created, modified
+    except Exception:
+        return None, None
+
+
+# ---------------------------------------------------------------------------
+# Note Reading Functions
+# ---------------------------------------------------------------------------
+
+def read_note(
+    title_or_path: str,
+    folder: str | None = None,
+) -> dict[str, Any] | None:
+    """
+    Read a specific note by title or path.
+
+    Args:
+        title_or_path: Note title or relative path (with or without .md extension)
+        folder: Optional subfolder to restrict search
+
+    Returns:
+        Dict with keys: title, content, tags, created, modified, path
+        None if not found
+
+    Search strategy:
+    1. Exact path match (if title_or_path looks like a path)
+    2. Exact title match (case-insensitive)
+    3. Fuzzy match (case-insensitive partial title match)
+    """
+    vault_dir = get_vault_dir()
+
+    if not vault_dir.exists():
+        return None
+
+    search_dir = vault_dir / folder if folder else vault_dir
+    if not search_dir.exists():
+        return None
+
+    # Normalize the query
+    query = title_or_path.strip()
+    if not query:
+        return None
+
+    # Try exact path match first
+    note_path = _find_by_exact_path(query, search_dir, vault_dir)
+    if note_path:
+        return _read_note_file(note_path, vault_dir)
+
+    # Collect all .md files for title matching
+    candidates = _collect_note_files(search_dir)
+
+    # Try exact title match (case-insensitive)
+    note_path = _find_by_exact_title(query, candidates)
+    if note_path:
+        return _read_note_file(note_path, vault_dir)
+
+    # Fuzzy match: case-insensitive partial title match
+    note_path = _find_by_fuzzy_title(query, candidates)
+    if note_path:
+        return _read_note_file(note_path, vault_dir)
+
+    return None
+
+
+def _find_by_exact_path(
+    query: str,
+    search_dir: Path,
+    vault_dir: Path,
+) -> Path | None:
+    """
+    Find note by exact path match.
+
+    Handles paths with or without .md extension,
+    relative to vault or search_dir.
+    """
+    # Normalize: add .md if missing
+    path_query = query if query.endswith(".md") else f"{query}.md"
+
+    # Try relative to vault
+    full_path = vault_dir / path_query
+    if full_path.is_file() and _is_valid_note(full_path):
+        return full_path
+
+    # Try relative to search_dir (if different from vault)
+    if search_dir != vault_dir:
+        full_path = search_dir / path_query
+        if full_path.is_file() and _is_valid_note(full_path):
+            return full_path
+
+    return None
+
+
+def _collect_note_files(search_dir: Path) -> list[Path]:
+    """
+    Collect all .md files in search_dir, excluding hidden directories.
+    """
+    candidates: list[Path] = []
+
+    for path in search_dir.rglob("*.md"):
+        # Skip hidden directories (like .obsidian)
+        if any(part.startswith(".") for part in path.parts):
+            continue
+        candidates.append(path)
+
+    return candidates
+
+
+def _find_by_exact_title(
+    query: str,
+    candidates: list[Path],
+) -> Path | None:
+    """
+    Find note by exact title match (case-insensitive).
+
+    Checks both:
+    1. Extracted title (from frontmatter/H1/filename)
+    2. Filename stem (without extension)
+    """
+    query_lower = query.lower()
+
+    for path in candidates:
+        # Check filename stem first (fast)
+        if path.stem.lower() == query_lower:
+            return path
+
+        # Check extracted title (requires reading file)
+        try:
+            content = path.read_text(encoding="utf-8")
+            title = extract_title(path, content)
+            if title.lower() == query_lower:
+                return path
+        except Exception:
+            continue
+
+    return None
+
+
+def _find_by_fuzzy_title(
+    query: str,
+    candidates: list[Path],
+) -> Path | None:
+    """
+    Find note by fuzzy title match (case-insensitive partial match).
+
+    Returns the best match based on:
+    1. Shortest title that contains the query (most specific)
+    2. Filename stem matches preferred over extracted title matches
+    """
+    query_lower = query.lower()
+    matches: list[tuple[int, bool, Path]] = []  # (len, is_stem_match, path)
+
+    for path in candidates:
+        stem_lower = path.stem.lower()
+
+        # Check stem match
+        if query_lower in stem_lower:
+            matches.append((len(stem_lower), True, path))
+            continue
+
+        # Check extracted title match (requires reading file)
+        try:
+            content = path.read_text(encoding="utf-8")
+            title = extract_title(path, content)
+            if query_lower in title.lower():
+                matches.append((len(title), False, path))
+        except Exception:
+            continue
+
+    if not matches:
+        return None
+
+    # Sort by: stem match preferred, then shortest title
+    matches.sort(key=lambda x: (not x[1], x[0]))
+    return matches[0][2]
+
+
+def _is_valid_note(path: Path) -> bool:
+    """Check if path is a valid note file."""
+    return (
+        path.is_file()
+        and path.suffix.lower() == ".md"
+        and not any(part.startswith(".") for part in path.parts)
+    )
+
+
+def _read_note_file(path: Path, vault_dir: Path) -> dict[str, Any]:
+    """
+    Read a note file and return structured data.
+
+    Returns dict with: title, content, tags, created, modified, path
+    """
+    content = path.read_text(encoding="utf-8")
+    created, modified = get_file_timestamps(path)
+    rel_path = path.relative_to(vault_dir)
+
+    return {
+        "title": extract_title(path, content),
+        "content": content,
+        "tags": extract_tags(content),
+        "created": created.isoformat() if created else None,
+        "modified": modified.isoformat() if modified else None,
+        "path": str(rel_path),
+    }
 
 
 # ---------------------------------------------------------------------------

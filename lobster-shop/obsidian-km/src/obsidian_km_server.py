@@ -6,6 +6,7 @@ Provides note management tools for Obsidian vault access via Telegram.
 
 Tools provided:
 - note_search: Full-text search across vault notes
+- note_read: Read a specific note by title or path
 """
 
 import asyncio
@@ -83,6 +84,36 @@ async def list_tools() -> list[Tool]:
                 "required": ["query"],
             },
         ),
+        Tool(
+            name="note_read",
+            description=(
+                "Read a specific note by title or path. "
+                "Returns the full note content along with metadata (title, tags, timestamps). "
+                "Supports exact match by path, exact match by title (case-insensitive), "
+                "and fuzzy match (case-insensitive partial title match) as fallback."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "title_or_path": {
+                        "type": "string",
+                        "description": (
+                            "Note title or relative path. "
+                            "Examples: 'My Note', 'projects/project-plan', 'daily/2024-01-15.md'. "
+                            "The .md extension is optional."
+                        ),
+                    },
+                    "folder": {
+                        "type": "string",
+                        "description": (
+                            "Optional subfolder to restrict search. "
+                            "Relative to vault root (e.g., 'projects' or 'daily/2024')."
+                        ),
+                    },
+                },
+                "required": ["title_or_path"],
+            },
+        ),
     ]
 
 
@@ -92,6 +123,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     try:
         if name == "note_search":
             return await handle_note_search(arguments)
+        elif name == "note_read":
+            return await handle_note_read(arguments)
         else:
             return error_result(f"Unknown tool: {name}")
     except Exception as e:
@@ -145,6 +178,52 @@ async def handle_note_search(args: dict) -> list[TextContent]:
         "count": len(results),
         "results": results,
     })
+
+
+async def handle_note_read(args: dict) -> list[TextContent]:
+    """
+    Read a specific note by title or path.
+
+    Returns the full note content along with metadata:
+    - title: Extracted title (from frontmatter, H1, or filename)
+    - content: Full markdown content
+    - tags: List of tags (from frontmatter and inline)
+    - created: ISO timestamp of file creation
+    - modified: ISO timestamp of last modification
+    - path: Relative path from vault root
+    """
+    from vault_ops import read_note
+
+    title_or_path = str(args.get("title_or_path", "")).strip()
+    if not title_or_path:
+        return error_result("'title_or_path' is required")
+
+    folder = args.get("folder")
+    if folder is not None:
+        folder = str(folder).strip() or None
+
+    # Check vault exists
+    if not VAULT_DIR.exists():
+        return error_result(f"Vault directory not found: {VAULT_DIR}")
+
+    print(f"[INFO] Reading note: {title_or_path!r} (folder={folder})", file=sys.stderr)
+
+    # Run read in thread pool to avoid blocking
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(
+        None,
+        lambda: read_note(title_or_path=title_or_path, folder=folder),
+    )
+
+    if result is None:
+        # Provide helpful error message
+        search_location = f"folder '{folder}'" if folder else "vault"
+        return error_result(
+            f"Note not found: '{title_or_path}' in {search_location}. "
+            "Try using note_search to find available notes."
+        )
+
+    return text_result(result)
 
 
 # ---------------------------------------------------------------------------
