@@ -19,6 +19,7 @@ import asyncio
 import re
 import subprocess
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -318,14 +319,23 @@ async def list_jobs() -> list[JobInfo]:
         )
         active = (rc_active == 0)
 
+        def _us_to_iso(us: object) -> Optional[str]:
+            """Convert a microsecond-epoch integer to an ISO 8601 UTC string."""
+            if not us:
+                return None
+            try:
+                return datetime.fromtimestamp(int(us) / 1_000_000, tz=timezone.utc).isoformat()
+            except (ValueError, TypeError, OSError):
+                return None
+
         jobs.append(JobInfo(
             name=bare_name,
             schedule=schedule,
             command=command,
             description=f"Lobster job: {bare_name}",
             active=active,
-            last_run=str(last_trigger) if last_trigger else None,
-            next_run=str(next_trigger) if next_trigger else None,
+            last_run=_us_to_iso(last_trigger),
+            next_run=_us_to_iso(next_trigger),
         ))
 
     return jobs

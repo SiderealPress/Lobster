@@ -444,6 +444,65 @@ class TestListJobs:
 
         assert jobs == []
 
+    def test_timestamps_converted_to_iso8601(self, systemd_dir):
+        """last_run and next_run are ISO 8601 UTC strings, not raw integer strings."""
+        import json
+
+        timer = systemd_dir / "lobster-test-job.timer"
+        service = systemd_dir / "lobster-test-job.service"
+        timer.write_text(sj._timer_unit("test-job", "daily", ""))
+        service.write_text(sj._service_unit("test-job", "/bin/echo hi", ""))
+
+        # Use the same microsecond epoch values as _make_timer_entry
+        timer_json = json.dumps([self._make_timer_entry("test-job")])
+
+        async def fake_run(*args, **kwargs):
+            if "list-timers" in args:
+                return (0, timer_json, "")
+            return (0, "active", "")
+
+        with patch.object(sj, "_run_systemctl", side_effect=fake_run):
+            jobs = asyncio.run(sj.list_jobs())
+
+        assert len(jobs) == 1
+        job = jobs[0]
+        # Should be ISO 8601 strings, not raw integers
+        assert job.last_run is not None
+        assert job.next_run is not None
+        assert "T" in job.last_run, f"Expected ISO 8601 format, got: {job.last_run}"
+        assert "T" in job.next_run, f"Expected ISO 8601 format, got: {job.next_run}"
+        assert "+00:00" in job.last_run or job.last_run.endswith("Z"), \
+            f"Expected UTC timezone in: {job.last_run}"
+
+    def test_missing_timestamps_return_none(self, systemd_dir):
+        """last_run and next_run are None when not present in systemctl output."""
+        import json
+
+        timer = systemd_dir / "lobster-test-job.timer"
+        service = systemd_dir / "lobster-test-job.service"
+        timer.write_text(sj._timer_unit("test-job", "daily", ""))
+        service.write_text(sj._service_unit("test-job", "/bin/echo hi", ""))
+
+        entry = {
+            "unit": "lobster-test-job.timer",
+            "next": None,
+            "last": None,
+            "activates": "lobster-test-job.service",
+        }
+        timer_json = json.dumps([entry])
+
+        async def fake_run(*args, **kwargs):
+            if "list-timers" in args:
+                return (0, timer_json, "")
+            return (0, "active", "")
+
+        with patch.object(sj, "_run_systemctl", side_effect=fake_run):
+            jobs = asyncio.run(sj.list_jobs())
+
+        assert len(jobs) == 1
+        assert jobs[0].last_run is None
+        assert jobs[0].next_run is None
+
 
 # ---------------------------------------------------------------------------
 # Scaffold
