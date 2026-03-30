@@ -1,0 +1,42 @@
+# =============================================================================
+# Obsidian KM — Knowledge Management Skill for Lobster
+# =============================================================================
+# Automatically capture links, notes, and knowledge to your Obsidian vault.
+
+[skill]
+name = "obsidian-km"
+version = "1.0.0"
+description = "Capture links and knowledge to your Obsidian vault — automatically archive URLs Drew sends with metadata and page titles"
+author = "Lobster"
+category = "integration"
+
+[activation]
+mode = "always"
+triggers = ["/vault", "/obsidian", "/note"]
+context_patterns = [
+    "when user sends a URL or link",
+    "when user asks to save a link",
+    "when user asks to capture a note",
+    "when discussing link archival or bookmarks",
+]
+
+[layering]
+priority = 45
+merge_strategy = "append"
+
+[provides]
+mcp_tools = []
+bot_commands = ["/vault", "/obsidian", "/note"]
+
+[compatibility]
+enhances = ["commonbook"]
+conflicts = []
+
+[dependencies]
+pip = []
+npm = []
+system = []
+api_keys = []
+
+[dependencies.runtime]
+python = ">=3.11"

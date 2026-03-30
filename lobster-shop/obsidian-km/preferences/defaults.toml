@@ -1,0 +1,5 @@
+# Obsidian KM Default Preferences
+
+OBSIDIAN_AUTO_CAPTURE_LINKS = true
+OBSIDIAN_VAULT_PATH = "~/obsidian-vault"
+OBSIDIAN_LINKS_FOLDER = "Links"
