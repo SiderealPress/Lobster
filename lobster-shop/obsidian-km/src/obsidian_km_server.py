@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
 """
-Obsidian KM MCP Server for Lobster
+Obsidian Knowledge Management MCP Server for Lobster
 
-Provides note management tools for Obsidian vault access via Telegram.
+Provides MCP tools for interacting with an Obsidian vault:
+- note_append: Append content to an existing note
 
-Tools provided:
-- note_search: Full-text search across vault notes
-- note_read: Read a specific note by title or path
+The server reads the vault path from OBSIDIAN_VAULT_PATH environment variable.
 """
 
 import asyncio
 import json
 import os
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -20,77 +18,75 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
+from vault_ops import (
+    append_to_note,
+    resolve_note_path,
+    AppendResult,
+)
 
-# ---------------------------------------------------------------------------
+
+# =============================================================================
 # Configuration
-# ---------------------------------------------------------------------------
+# =============================================================================
 
-_HOME = Path.home()
-VAULT_DIR = Path(os.environ.get("OBSIDIAN_VAULT_DIR", _HOME / "obsidian-vault"))
+def get_vault_path() -> Path:
+    """Get the Obsidian vault path from environment."""
+    vault_path = os.environ.get("OBSIDIAN_VAULT_PATH")
+    if not vault_path:
+        raise ValueError(
+            "OBSIDIAN_VAULT_PATH environment variable not set. "
+            "Set it to your Obsidian vault directory."
+        )
+    path = Path(vault_path).expanduser().resolve()
+    if not path.is_dir():
+        raise ValueError(f"Vault path does not exist: {path}")
+    return path
 
 
-# ---------------------------------------------------------------------------
-# MCP Server
-# ---------------------------------------------------------------------------
+# =============================================================================
+# MCP Server Setup
+# =============================================================================
 
 server = Server("obsidian-km")
 
 
 def text_result(data: Any) -> list[TextContent]:
-    """Format a successful result as JSON text content."""
+    """Format a result as MCP text content."""
     if isinstance(data, str):
         return [TextContent(type="text", text=data)]
     return [TextContent(type="text", text=json.dumps(data, indent=2))]
 
 
 def error_result(msg: str) -> list[TextContent]:
-    """Format an error message as text content."""
+    """Format an error as MCP text content."""
     return [TextContent(type="text", text=f"Error: {msg}")]
 
+
+def result_to_dict(result: AppendResult) -> dict:
+    """Convert AppendResult to JSON-serializable dict."""
+    return {
+        "file_path": result.file_path,
+        "char_count": result.char_count,
+        "modified_at": result.modified_at,
+    }
+
+
+# =============================================================================
+# Tool Definitions
+# =============================================================================
 
 @server.list_tools()
 async def list_tools() -> list[Tool]:
     """List available Obsidian KM tools."""
     return [
         Tool(
-            name="note_search",
+            name="note_append",
             description=(
-                "Search notes in the Obsidian vault using full-text search (ripgrep). "
-                "Returns matching notes with title, path, excerpt, and tags. "
-                "Case-insensitive by default. Optionally restrict search to a subfolder."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Search query. Matches are case-insensitive.",
-                    },
-                    "folder": {
-                        "type": "string",
-                        "description": (
-                            "Optional subfolder to restrict search. "
-                            "Relative to vault root (e.g., 'projects' or 'daily/2024')."
-                        ),
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Maximum number of results to return. Default: 10.",
-                        "default": 10,
-                        "minimum": 1,
-                        "maximum": 100,
-                    },
-                },
-                "required": ["query"],
-            },
-        ),
-        Tool(
-            name="note_read",
-            description=(
-                "Read a specific note by title or path. "
-                "Returns the full note content along with metadata (title, tags, timestamps). "
-                "Supports exact match by path, exact match by title (case-insensitive), "
-                "and fuzzy match (case-insensitive partial title match) as fallback."
+                "Append content to an existing Obsidian note. "
+                "Preserves frontmatter and updates the 'modified' timestamp. "
+                "Returns the file path and new character count. "
+                "Use this to add journal entries, meeting notes, or any content "
+                "that should be appended to an existing note."
             ),
             inputSchema={
                 "type": "object",
@@ -98,148 +94,106 @@ async def list_tools() -> list[Tool]:
                     "title_or_path": {
                         "type": "string",
                         "description": (
-                            "Note title or relative path. "
-                            "Examples: 'My Note', 'projects/project-plan', 'daily/2024-01-15.md'. "
-                            "The .md extension is optional."
+                            "Note title (e.g., 'Daily Notes/2024-01-15') or "
+                            "relative path from vault root. The .md extension "
+                            "is added automatically if not present."
                         ),
                     },
-                    "folder": {
+                    "content": {
+                        "type": "string",
+                        "description": "Content to append to the note.",
+                    },
+                    "separator": {
                         "type": "string",
                         "description": (
-                            "Optional subfolder to restrict search. "
-                            "Relative to vault root (e.g., 'projects' or 'daily/2024')."
+                            "Separator between existing content and new content. "
+                            "Defaults to newline. Use '\\n\\n' for paragraph break, "
+                            "'\\n---\\n' for horizontal rule, etc."
                         ),
+                        "default": "\n",
                     },
                 },
-                "required": ["title_or_path"],
+                "required": ["title_or_path", "content"],
             },
         ),
     ]
 
 
+# =============================================================================
+# Tool Implementation
+# =============================================================================
+
 @server.call_tool()
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
-    """Dispatch tool calls."""
-    try:
-        if name == "note_search":
-            return await handle_note_search(arguments)
-        elif name == "note_read":
-            return await handle_note_read(arguments)
-        else:
-            return error_result(f"Unknown tool: {name}")
-    except Exception as e:
-        return error_result(f"Tool '{name}' failed: {e}")
+    """Handle tool calls."""
+
+    if name == "note_append":
+        return await handle_note_append(arguments)
+    else:
+        return error_result(f"Unknown tool: {name}")
 
 
-async def handle_note_search(args: dict) -> list[TextContent]:
-    """
-    Search notes in the Obsidian vault.
+async def handle_note_append(arguments: dict[str, Any]) -> list[TextContent]:
+    """Handle the note_append tool call."""
 
-    Uses ripgrep for fast full-text search. Returns list of matching notes
-    with title, path, excerpt (context around match), and tags.
-    """
-    from vault_ops import search_notes
+    # Validate required arguments
+    title_or_path = arguments.get("title_or_path")
+    content = arguments.get("content")
 
-    query = str(args.get("query", "")).strip()
-    if not query:
-        return error_result("'query' is required")
-
-    folder = args.get("folder")
-    if folder is not None:
-        folder = str(folder).strip() or None
-
-    limit = int(args.get("limit", 10))
-    limit = max(1, min(limit, 100))  # Clamp to 1-100
-
-    # Check vault exists
-    if not VAULT_DIR.exists():
-        return error_result(f"Vault directory not found: {VAULT_DIR}")
-
-    print(f"[INFO] Searching vault for: {query!r} (folder={folder}, limit={limit})", file=sys.stderr)
-
-    # Run search in thread pool to avoid blocking
-    loop = asyncio.get_running_loop()
-    results = await loop.run_in_executor(
-        None,
-        lambda: search_notes(query=query, folder=folder, limit=limit),
-    )
-
-    if not results:
-        return text_result({
-            "query": query,
-            "folder": folder,
-            "count": 0,
-            "results": [],
-        })
-
-    return text_result({
-        "query": query,
-        "folder": folder,
-        "count": len(results),
-        "results": results,
-    })
-
-
-async def handle_note_read(args: dict) -> list[TextContent]:
-    """
-    Read a specific note by title or path.
-
-    Returns the full note content along with metadata:
-    - title: Extracted title (from frontmatter, H1, or filename)
-    - content: Full markdown content
-    - tags: List of tags (from frontmatter and inline)
-    - created: ISO timestamp of file creation
-    - modified: ISO timestamp of last modification
-    - path: Relative path from vault root
-    """
-    from vault_ops import read_note
-
-    title_or_path = str(args.get("title_or_path", "")).strip()
     if not title_or_path:
-        return error_result("'title_or_path' is required")
+        return error_result("Missing required argument: title_or_path")
+    if not content:
+        return error_result("Missing required argument: content")
 
-    folder = args.get("folder")
-    if folder is not None:
-        folder = str(folder).strip() or None
+    separator = arguments.get("separator", "\n")
 
-    # Check vault exists
-    if not VAULT_DIR.exists():
-        return error_result(f"Vault directory not found: {VAULT_DIR}")
+    try:
+        # Get vault path
+        vault_path = get_vault_path()
 
-    print(f"[INFO] Reading note: {title_or_path!r} (folder={folder})", file=sys.stderr)
+        # Resolve note path
+        note_path = resolve_note_path(vault_path, title_or_path)
 
-    # Run read in thread pool to avoid blocking
-    loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(
-        None,
-        lambda: read_note(title_or_path=title_or_path, folder=folder),
-    )
+        # Check note exists (no create)
+        if not note_path.exists():
+            return error_result(
+                f"Note not found: {title_or_path}. "
+                f"This tool only appends to existing notes."
+            )
 
-    if result is None:
-        # Provide helpful error message
-        search_location = f"folder '{folder}'" if folder else "vault"
-        return error_result(
-            f"Note not found: '{title_or_path}' in {search_location}. "
-            "Try using note_search to find available notes."
+        # Perform append operation (runs in thread pool to avoid blocking)
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            append_to_note,
+            note_path,
+            content,
+            separator,
         )
 
-    return text_result(result)
+        return text_result(result_to_dict(result))
+
+    except ValueError as e:
+        return error_result(str(e))
+    except FileNotFoundError as e:
+        return error_result(f"Note not found: {e}")
+    except PermissionError as e:
+        return error_result(f"Permission denied: {e}")
+    except Exception as e:
+        return error_result(f"{type(e).__name__}: {e}")
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
+# =============================================================================
+# Main Entry Point
+# =============================================================================
 
 async def main():
-    print("[INFO] Obsidian KM MCP Server starting...", file=sys.stderr)
-    print(f"[INFO] Vault directory: {VAULT_DIR}", file=sys.stderr)
-    print(f"[INFO] Vault exists: {VAULT_DIR.exists()}", file=sys.stderr)
-
+    """Run the MCP server."""
     async with stdio_server() as (read_stream, write_stream):
         await server.run(
             read_stream,
             write_stream,
-            server.create_initialization_options(),
+            server.create_initialization_options()
         )
 
 

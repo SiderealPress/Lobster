@@ -1,470 +1,293 @@
 """
-Vault operations for Obsidian KM skill.
+Obsidian Vault Operations — Pure Functions for Note Manipulation
 
-Pure functions for reading, writing, and searching notes in an Obsidian vault.
+This module provides pure functions for reading, parsing, and modifying
+Obsidian markdown notes. Side effects (file I/O) are isolated at the
+boundaries via atomic write operations.
+
+Design principles:
+- Pure functions for parsing and transformation
+- Immutable data structures where practical
+- Atomic writes via write-to-temp-then-rename
+- Clear separation of frontmatter and body
 """
 
-import json
 import os
 import re
-import subprocess
-from datetime import datetime
+import tempfile
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
-
-import frontmatter
+from typing import Tuple
 
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
+# =============================================================================
+# Data Types
+# =============================================================================
 
-def get_vault_dir() -> Path:
-    """Get the vault directory from environment or default."""
-    vault_path = os.environ.get("OBSIDIAN_VAULT_DIR", str(Path.home() / "obsidian-vault"))
-    return Path(vault_path).expanduser()
+@dataclass(frozen=True)
+class ParsedNote:
+    """Immutable representation of a parsed Obsidian note."""
+    frontmatter: dict
+    body: str
+    raw_frontmatter: str  # Original YAML string (for minimal modifications)
 
 
-# ---------------------------------------------------------------------------
-# Note Metadata Extraction
-# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class AppendResult:
+    """Result of an append operation."""
+    file_path: str
+    char_count: int
+    modified_at: str
 
-def extract_title(path: Path, content: str) -> str:
+
+# =============================================================================
+# Frontmatter Parsing — Pure Functions
+# =============================================================================
+
+_FRONTMATTER_PATTERN = re.compile(
+    r"^---\s*\n(.*?)\n---\s*\n?",
+    re.DOTALL
+)
+
+
+def parse_frontmatter(content: str) -> Tuple[dict, str, str]:
+    """Parse YAML frontmatter from markdown content.
+
+    Returns (frontmatter_dict, body, raw_frontmatter_yaml).
+    If no frontmatter exists, returns ({}, content, "").
+
+    Note: Uses a simple key-value parser to avoid yaml dependency.
+    For complex nested structures, consider adding pyyaml.
     """
-    Extract title from note. Priority:
-    1. YAML frontmatter 'title' field
-    2. First H1 heading (# Title)
-    3. Filename without extension
+    match = _FRONTMATTER_PATTERN.match(content)
+    if not match:
+        return {}, content, ""
+
+    raw_yaml = match.group(1)
+    body = content[match.end():]
+    frontmatter = _parse_simple_yaml(raw_yaml)
+
+    return frontmatter, body, raw_yaml
+
+
+def _parse_simple_yaml(yaml_str: str) -> dict:
+    """Parse simple key: value YAML (no nested structures).
+
+    Handles:
+    - Simple scalars: key: value
+    - Quoted strings: key: "value" or key: 'value'
+    - Arrays: key: [a, b, c] (single line only)
+    - Multiline ignored for simplicity
     """
-    try:
-        post = frontmatter.loads(content)
-        if post.get("title"):
-            return str(post["title"])
-    except Exception:
-        pass
+    result = {}
+    for line in yaml_str.split('\n'):
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
 
-    # Try to find first H1
-    h1_match = re.search(r"^#\s+(.+)$", content, re.MULTILINE)
-    if h1_match:
-        return h1_match.group(1).strip()
+        if ':' not in line:
+            continue
 
-    # Fall back to filename
-    return path.stem
+        key, _, value = line.partition(':')
+        key = key.strip()
+        value = value.strip()
+
+        # Remove quotes if present
+        if (value.startswith('"') and value.endswith('"')) or \
+           (value.startswith("'") and value.endswith("'")):
+            value = value[1:-1]
+
+        # Parse simple arrays
+        if value.startswith('[') and value.endswith(']'):
+            items = value[1:-1].split(',')
+            value = [item.strip().strip('"').strip("'") for item in items if item.strip()]
+
+        result[key] = value
+
+    return result
 
 
-def extract_tags(content: str) -> list[str]:
+def serialize_frontmatter(frontmatter: dict) -> str:
+    """Serialize frontmatter dict back to YAML string.
+
+    Produces minimal, clean YAML output.
     """
-    Extract tags from note. Sources:
-    1. YAML frontmatter 'tags' field
-    2. Inline #tags in content
-    """
-    tags: set[str] = set()
-
-    try:
-        post = frontmatter.loads(content)
-        fm_tags = post.get("tags", [])
-        if isinstance(fm_tags, list):
-            tags.update(str(t) for t in fm_tags)
-        elif isinstance(fm_tags, str):
-            # Handle comma-separated string
-            tags.update(t.strip() for t in fm_tags.split(","))
-    except Exception:
-        pass
-
-    # Find inline #tags (but not in code blocks or links)
-    inline_tags = re.findall(r"(?<!\w)#([a-zA-Z][a-zA-Z0-9_-]*)", content)
-    tags.update(inline_tags)
-
-    return sorted(tags)
-
-
-def extract_excerpt(content: str, query: str, context_chars: int = 100) -> str:
-    """
-    Extract an excerpt around the first occurrence of the query.
-    Returns the first context_chars chars if query not found.
-    """
-    # Strip frontmatter for excerpt
-    try:
-        post = frontmatter.loads(content)
-        body = post.content
-    except Exception:
-        body = content
-
-    # Normalize whitespace
-    body = re.sub(r"\s+", " ", body).strip()
-
-    if not body:
+    if not frontmatter:
         return ""
 
-    # Find query position (case-insensitive)
-    lower_body = body.lower()
-    lower_query = query.lower()
-    pos = lower_body.find(lower_query)
+    lines = []
+    for key, value in frontmatter.items():
+        if isinstance(value, list):
+            formatted = '[' + ', '.join(f'"{v}"' if ' ' in str(v) else str(v) for v in value) + ']'
+            lines.append(f"{key}: {formatted}")
+        elif isinstance(value, str) and (' ' in value or ':' in value):
+            lines.append(f'{key}: "{value}"')
+        else:
+            lines.append(f"{key}: {value}")
 
-    if pos == -1:
-        # Query not found in body, return start of content
-        return body[:context_chars] + ("..." if len(body) > context_chars else "")
-
-    # Extract context around the match
-    start = max(0, pos - context_chars // 2)
-    end = min(len(body), pos + len(query) + context_chars // 2)
-
-    excerpt = body[start:end]
-
-    # Add ellipsis if truncated
-    if start > 0:
-        excerpt = "..." + excerpt
-    if end < len(body):
-        excerpt = excerpt + "..."
-
-    return excerpt
+    return '\n'.join(lines)
 
 
-def get_file_timestamps(path: Path) -> tuple[datetime | None, datetime | None]:
+# =============================================================================
+# Note Transformation — Pure Functions
+# =============================================================================
+
+def append_to_body(body: str, content: str, separator: str = "\n") -> str:
+    """Append content to the note body with the given separator.
+
+    Pure function: returns new string, does not mutate input.
     """
-    Get created and modified timestamps for a file.
+    if not body.strip():
+        return content
 
-    Returns (created, modified) as datetime objects.
-    Falls back to mtime for created if ctime is not reliable.
+    # Ensure body ends cleanly before appending
+    trimmed_body = body.rstrip()
+    return f"{trimmed_body}{separator}{content}"
+
+
+def update_modified_timestamp(frontmatter: dict) -> dict:
+    """Return a new frontmatter dict with updated 'modified' timestamp.
+
+    Pure function: returns new dict, does not mutate input.
+    Uses ISO 8601 format compatible with Obsidian.
     """
+    new_frontmatter = dict(frontmatter)
+    new_frontmatter['modified'] = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    return new_frontmatter
+
+
+def assemble_note(frontmatter: dict, body: str) -> str:
+    """Assemble a complete note from frontmatter and body.
+
+    Pure function: returns complete markdown string.
+    """
+    if not frontmatter:
+        return body
+
+    yaml_content = serialize_frontmatter(frontmatter)
+    return f"---\n{yaml_content}\n---\n\n{body}"
+
+
+# =============================================================================
+# File Operations — Side Effects at Boundaries
+# =============================================================================
+
+def read_note(file_path: Path) -> str:
+    """Read note content from disk.
+
+    Raises FileNotFoundError if note doesn't exist.
+    """
+    return file_path.read_text(encoding='utf-8')
+
+
+def atomic_write(file_path: Path, content: str) -> None:
+    """Atomically write content to file using temp-then-rename pattern.
+
+    This prevents data loss on crash or power failure:
+    1. Write to temp file in same directory
+    2. Sync to disk (fsync)
+    3. Rename temp to target (atomic on POSIX)
+    """
+    parent = file_path.parent
+    parent.mkdir(parents=True, exist_ok=True)
+
+    fd, tmp_path = tempfile.mkstemp(
+        dir=str(parent),
+        suffix='.tmp',
+        prefix='.note-'
+    )
+
     try:
-        stat = path.stat()
-        # On Unix, st_ctime is inode change time, not creation.
-        # Use mtime as a reasonable fallback for created.
-        created = datetime.fromtimestamp(stat.st_mtime)  # Fallback
-        modified = datetime.fromtimestamp(stat.st_mtime)
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.rename(tmp_path, str(file_path))
+    except BaseException:
+        # Clean up temp file on any failure
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
-        # Try to get birth time if available (macOS, some Linux)
-        if hasattr(stat, 'st_birthtime'):
-            created = datetime.fromtimestamp(stat.st_birthtime)
 
-        return created, modified
-    except Exception:
-        return None, None
+# =============================================================================
+# High-Level Operations — Composition of Pure Functions
+# =============================================================================
 
+def append_to_note(
+    file_path: Path,
+    content: str,
+    separator: str = "\n"
+) -> AppendResult:
+    """Append content to an existing Obsidian note.
 
-# ---------------------------------------------------------------------------
-# Note Reading Functions
-# ---------------------------------------------------------------------------
-
-def read_note(
-    title_or_path: str,
-    folder: str | None = None,
-) -> dict[str, Any] | None:
-    """
-    Read a specific note by title or path.
+    This is the main entry point for the note_append MCP tool.
 
     Args:
-        title_or_path: Note title or relative path (with or without .md extension)
-        folder: Optional subfolder to restrict search
+        file_path: Path to the note (must exist)
+        content: Content to append
+        separator: Separator between existing content and new content
 
     Returns:
-        Dict with keys: title, content, tags, created, modified, path
-        None if not found
+        AppendResult with file path, new char count, and modification timestamp
 
-    Search strategy:
-    1. Exact path match (if title_or_path looks like a path)
-    2. Exact title match (case-insensitive)
-    3. Fuzzy match (case-insensitive partial title match)
+    Raises:
+        FileNotFoundError: If the note doesn't exist
     """
-    vault_dir = get_vault_dir()
+    # Read existing note
+    existing_content = read_note(file_path)
 
-    if not vault_dir.exists():
-        return None
+    # Parse into components
+    frontmatter, body, _raw = parse_frontmatter(existing_content)
 
-    search_dir = vault_dir / folder if folder else vault_dir
-    if not search_dir.exists():
-        return None
+    # Transform (pure functions)
+    new_body = append_to_body(body, content, separator)
+    new_frontmatter = update_modified_timestamp(frontmatter)
+    new_content = assemble_note(new_frontmatter, new_body)
 
-    # Normalize the query
-    query = title_or_path.strip()
-    if not query:
-        return None
+    # Write atomically (side effect)
+    atomic_write(file_path, new_content)
 
-    # Try exact path match first
-    note_path = _find_by_exact_path(query, search_dir, vault_dir)
-    if note_path:
-        return _read_note_file(note_path, vault_dir)
-
-    # Collect all .md files for title matching
-    candidates = _collect_note_files(search_dir)
-
-    # Try exact title match (case-insensitive)
-    note_path = _find_by_exact_title(query, candidates)
-    if note_path:
-        return _read_note_file(note_path, vault_dir)
-
-    # Fuzzy match: case-insensitive partial title match
-    note_path = _find_by_fuzzy_title(query, candidates)
-    if note_path:
-        return _read_note_file(note_path, vault_dir)
-
-    return None
-
-
-def _find_by_exact_path(
-    query: str,
-    search_dir: Path,
-    vault_dir: Path,
-) -> Path | None:
-    """
-    Find note by exact path match.
-
-    Handles paths with or without .md extension,
-    relative to vault or search_dir.
-    """
-    # Normalize: add .md if missing
-    path_query = query if query.endswith(".md") else f"{query}.md"
-
-    # Try relative to vault
-    full_path = vault_dir / path_query
-    if full_path.is_file() and _is_valid_note(full_path):
-        return full_path
-
-    # Try relative to search_dir (if different from vault)
-    if search_dir != vault_dir:
-        full_path = search_dir / path_query
-        if full_path.is_file() and _is_valid_note(full_path):
-            return full_path
-
-    return None
-
-
-def _collect_note_files(search_dir: Path) -> list[Path]:
-    """
-    Collect all .md files in search_dir, excluding hidden directories.
-    """
-    candidates: list[Path] = []
-
-    for path in search_dir.rglob("*.md"):
-        # Skip hidden directories (like .obsidian)
-        if any(part.startswith(".") for part in path.parts):
-            continue
-        candidates.append(path)
-
-    return candidates
-
-
-def _find_by_exact_title(
-    query: str,
-    candidates: list[Path],
-) -> Path | None:
-    """
-    Find note by exact title match (case-insensitive).
-
-    Checks both:
-    1. Extracted title (from frontmatter/H1/filename)
-    2. Filename stem (without extension)
-    """
-    query_lower = query.lower()
-
-    for path in candidates:
-        # Check filename stem first (fast)
-        if path.stem.lower() == query_lower:
-            return path
-
-        # Check extracted title (requires reading file)
-        try:
-            content = path.read_text(encoding="utf-8")
-            title = extract_title(path, content)
-            if title.lower() == query_lower:
-                return path
-        except Exception:
-            continue
-
-    return None
-
-
-def _find_by_fuzzy_title(
-    query: str,
-    candidates: list[Path],
-) -> Path | None:
-    """
-    Find note by fuzzy title match (case-insensitive partial match).
-
-    Returns the best match based on:
-    1. Shortest title that contains the query (most specific)
-    2. Filename stem matches preferred over extracted title matches
-    """
-    query_lower = query.lower()
-    matches: list[tuple[int, bool, Path]] = []  # (len, is_stem_match, path)
-
-    for path in candidates:
-        stem_lower = path.stem.lower()
-
-        # Check stem match
-        if query_lower in stem_lower:
-            matches.append((len(stem_lower), True, path))
-            continue
-
-        # Check extracted title match (requires reading file)
-        try:
-            content = path.read_text(encoding="utf-8")
-            title = extract_title(path, content)
-            if query_lower in title.lower():
-                matches.append((len(title), False, path))
-        except Exception:
-            continue
-
-    if not matches:
-        return None
-
-    # Sort by: stem match preferred, then shortest title
-    matches.sort(key=lambda x: (not x[1], x[0]))
-    return matches[0][2]
-
-
-def _is_valid_note(path: Path) -> bool:
-    """Check if path is a valid note file."""
-    return (
-        path.is_file()
-        and path.suffix.lower() == ".md"
-        and not any(part.startswith(".") for part in path.parts)
+    return AppendResult(
+        file_path=str(file_path),
+        char_count=len(new_content),
+        modified_at=new_frontmatter.get('modified', '')
     )
 
 
-def _read_note_file(path: Path, vault_dir: Path) -> dict[str, Any]:
+def resolve_note_path(
+    vault_path: Path,
+    title_or_path: str
+) -> Path:
+    """Resolve a note title or relative path to an absolute path.
+
+    Handles:
+    - Absolute paths (returned as-is if within vault)
+    - Relative paths (resolved from vault root)
+    - Titles without .md extension (appended automatically)
+
+    Raises:
+        ValueError: If path is outside vault
     """
-    Read a note file and return structured data.
+    # If it looks like an absolute path
+    if title_or_path.startswith('/'):
+        candidate = Path(title_or_path)
+    else:
+        # Ensure .md extension
+        if not title_or_path.endswith('.md'):
+            title_or_path = f"{title_or_path}.md"
+        candidate = vault_path / title_or_path
 
-    Returns dict with: title, content, tags, created, modified, path
-    """
-    content = path.read_text(encoding="utf-8")
-    created, modified = get_file_timestamps(path)
-    rel_path = path.relative_to(vault_dir)
-
-    return {
-        "title": extract_title(path, content),
-        "content": content,
-        "tags": extract_tags(content),
-        "created": created.isoformat() if created else None,
-        "modified": modified.isoformat() if modified else None,
-        "path": str(rel_path),
-    }
-
-
-# ---------------------------------------------------------------------------
-# Search Functions
-# ---------------------------------------------------------------------------
-
-def search_notes(
-    query: str,
-    folder: str | None = None,
-    limit: int = 10,
-) -> list[dict[str, Any]]:
-    """
-    Search notes in the vault using ripgrep.
-
-    Args:
-        query: Search query (case-insensitive by default)
-        folder: Optional subfolder to restrict search
-        limit: Maximum number of results to return
-
-    Returns:
-        List of dicts with keys: title, path, excerpt, tags
-    """
-    vault_dir = get_vault_dir()
-
-    if not vault_dir.exists():
-        return []
-
-    # Determine search path
-    search_path = vault_dir / folder if folder else vault_dir
-    if not search_path.exists():
-        return []
-
-    # Skip hidden directories like .obsidian
-    # Use ripgrep with JSON output for parsing
-    cmd = [
-        "rg",
-        "--json",           # JSON output for structured parsing
-        "-i",               # Case insensitive
-        "--glob", "*.md",   # Only markdown files
-        "--glob", "!.obsidian/**",  # Exclude .obsidian directory
-        "-l",               # List files only (faster initial scan)
-        query,
-        str(search_path),
-    ]
+    # Resolve to absolute and check it's within vault
+    resolved = candidate.resolve()
+    vault_resolved = vault_path.resolve()
 
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=5,  # 5 second timeout
-        )
-    except subprocess.TimeoutExpired:
-        return []
-    except FileNotFoundError:
-        # ripgrep not installed
-        return _fallback_search(query, search_path, limit)
+        resolved.relative_to(vault_resolved)
+    except ValueError:
+        raise ValueError(f"Path '{title_or_path}' is outside vault: {vault_path}")
 
-    if result.returncode not in (0, 1):  # 1 = no matches
-        return []
-
-    # Parse JSON lines output
-    matching_files: list[Path] = []
-    for line in result.stdout.strip().split("\n"):
-        if not line:
-            continue
-        try:
-            data = json.loads(line)
-            if data.get("type") == "match":
-                file_path = data.get("data", {}).get("path", {}).get("text")
-                if file_path:
-                    matching_files.append(Path(file_path))
-        except json.JSONDecodeError:
-            continue
-
-    # Process results up to limit
-    results: list[dict[str, Any]] = []
-    for path in matching_files[:limit]:
-        try:
-            content = path.read_text(encoding="utf-8")
-            rel_path = path.relative_to(vault_dir)
-            results.append({
-                "title": extract_title(path, content),
-                "path": str(rel_path),
-                "excerpt": extract_excerpt(content, query),
-                "tags": extract_tags(content),
-            })
-        except Exception:
-            continue
-
-    return results
-
-
-def _fallback_search(
-    query: str,
-    search_path: Path,
-    limit: int,
-) -> list[dict[str, Any]]:
-    """
-    Fallback search using pure Python when ripgrep is not available.
-    Slower but functional.
-    """
-    vault_dir = get_vault_dir()
-    query_lower = query.lower()
-    results: list[dict[str, Any]] = []
-
-    for path in search_path.rglob("*.md"):
-        # Skip hidden directories
-        if any(part.startswith(".") for part in path.parts):
-            continue
-
-        try:
-            content = path.read_text(encoding="utf-8")
-            if query_lower in content.lower():
-                rel_path = path.relative_to(vault_dir)
-                results.append({
-                    "title": extract_title(path, content),
-                    "path": str(rel_path),
-                    "excerpt": extract_excerpt(content, query),
-                    "tags": extract_tags(content),
-                })
-                if len(results) >= limit:
-                    break
-        except Exception:
-            continue
-
-    return results
+    return resolved

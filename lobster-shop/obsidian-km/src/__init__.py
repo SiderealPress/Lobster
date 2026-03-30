@@ -1,1 +1,1 @@
-"""Obsidian KM MCP Server for Lobster."""
+"""Obsidian Knowledge Management MCP Server."""
