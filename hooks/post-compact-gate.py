@@ -17,20 +17,23 @@ finds a stale sentinel and the gate passes immediately. No deadlock.
 
 ## Dispatcher vs subagent detection
 
-Detection is delegated to session_role.is_dispatcher(), which uses a layered
-strategy:
+Detection is performed by is_dispatcher_session(), which uses a layered strategy:
 
-1. Marker file (primary): At dispatcher startup, write-dispatcher-session-id.py
+1. MCP state file (primary): The running MCP server writes the dispatcher
+   session ID to ~/lobster-workspace/data/dispatcher-session-id.  This file is
+   cleared on MCP server restart so stale IDs never linger.  Match → dispatcher.
+
+2. Hook marker file (secondary): At dispatcher startup, write-dispatcher-session-id.py
    (a SessionStart hook) writes the session ID to
-   ~/messages/config/dispatcher-session-id. This hook reads that file and
-   compares it to the session_id in the hook JSON input. Match → dispatcher.
+   ~/messages/config/dispatcher-session-id.  Used as fallback when the MCP
+   state file is absent.  Match → dispatcher.
 
-2. Process-tree fallback (secondary): If the marker file is absent or
-   unreadable, walk the process tree upward. Two consecutive claude-like
-   ancestors before reaching a tmux pane PID → subagent. One or fewer →
-   dispatcher. See _is_dispatcher_by_process_tree() below.
+3. Process-tree fallback: If neither state file is present or gives a definitive
+   answer, walk the process tree upward.  Two consecutive claude-like ancestors
+   before reaching a tmux pane PID → subagent.  One or fewer → dispatcher.
+   See _is_dispatcher_by_process_tree() below.
 
-3. Env-var-only fallback: If tmux is unavailable, fall back to
+4. Env-var-only fallback: If tmux is unavailable, fall back to
    LOBSTER_MAIN_SESSION=1 alone.
 
 ## Settings.json configuration
@@ -198,34 +201,40 @@ def _is_dispatcher_by_process_tree() -> bool:
 def is_dispatcher_session(hook_input: dict) -> bool:
     """Return True when this hook is running inside the dispatcher Claude.
 
-    Uses session_role.is_dispatcher() (marker-file + transcript) as the primary
-    check. Falls back to the process-tree walk when neither signal is available
-    (e.g. marker file not yet written on first boot, no transcript in PreToolUse).
+    Uses session_role state files (MCP state file + hook marker file) as the
+    primary check.  Falls back to the process-tree walk when neither file is
+    present or gives a definitive answer (e.g. very early boot before any
+    session tagging has occurred, or in PreToolUse where no transcript exists).
+
+    Note: transcript-based detection (_transcript_has_dispatcher_tool) was
+    removed in PR #1102 because JSONL transcript scanning was fragile and is
+    now superseded by the MCP state file written by the running server.
     """
-    # Primary: marker file + transcript (via session_role).
-    # session_role returns False by default when no signal is found; we need to
-    # distinguish "definitely subagent" from "no signal" to know when to apply
-    # the process-tree fallback. We probe the marker file directly here.
+    # Primary: MCP state file + hook marker file (via session_role).
+    # is_dispatcher() checks both files and returns False if neither is present
+    # or matches.  We need to distinguish "definitely subagent" (file exists,
+    # mismatch) from "no signal" (file absent) to know when to apply the
+    # process-tree fallback.  Probe both files directly.
     from session_role import (
-        _check_marker_file,
+        _check_state_file,
+        _get_mcp_session_state_file,
         get_session_id,
-        _transcript_has_dispatcher_tool,
         DISPATCHER_SESSION_FILE,
     )
 
     session_id = get_session_id(hook_input)
-    marker_result = _check_marker_file(session_id)
 
+    # Check MCP state file first (written by the running MCP server).
+    mcp_result = _check_state_file(_get_mcp_session_state_file(), session_id)
+    if mcp_result is not None:
+        return mcp_result
+
+    # Check hook marker file (written by write-dispatcher-session-id.py).
+    marker_result = _check_state_file(DISPATCHER_SESSION_FILE, session_id)
     if marker_result is not None:
-        # Marker file exists and gave a definitive answer.
         return marker_result
 
-    # Transcript fallback (Stop hooks only — transcript absent in PreToolUse).
-    transcript = hook_input.get("transcript")
-    if transcript is not None:
-        return _transcript_has_dispatcher_tool(transcript)
-
-    # No session_role signal available — fall back to process-tree.
+    # No state file signal available — fall back to process-tree.
     return _is_dispatcher_by_process_tree()
 
 
