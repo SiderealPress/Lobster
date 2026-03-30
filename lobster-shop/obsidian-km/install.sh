@@ -1,9 +1,18 @@
 #!/bin/bash
 #===============================================================================
-# Obsidian Knowledge Management Skill Installer for Lobster
+# Obsidian KM Skill Installer - CouchDB Health Check Component
 #
-# Sets up the Obsidian KM skill that lets Lobster interact with an Obsidian
-# vault — create notes, search content, and capture links.
+# Installs the CouchDB health check monitoring for the Obsidian KM skill.
+# This sets up:
+#   1. Health check script in ~/lobster/lobster-shop/obsidian-km/scripts/
+#   2. systemd user service and timer for periodic health checks
+#   3. Telegram alerting when CouchDB is unhealthy
+#
+# Prerequisites:
+#   - CouchDB running as a user service (couchdb.service)
+#   - obsidian.env configured with COUCHDB_USER and COUCHDB_PASSWORD
+#
+# Idempotent — safe to re-run for updates.
 #
 # Usage: bash ~/lobster/lobster-shop/obsidian-km/install.sh
 #===============================================================================
@@ -22,25 +31,31 @@ NC='\033[0m'
 info()    { echo -e "${BLUE}[INFO]${NC} $1"; }
 success() { echo -e "${GREEN}[OK]${NC} $1"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC} $1"; }
-error()   { echo -e "${RED}[ERROR]${NC} $1"; }
+error()   { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 step()    { echo -e "\n${CYAN}${BOLD}--- $1${NC}"; }
 
-# Paths
+# ---------------------------------------------------------------------------
+# Paths and defaults
+# ---------------------------------------------------------------------------
 LOBSTER_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
+LOBSTER_CONFIG="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}"
+LOBSTER_WORKSPACE="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
+
 SKILL_DIR="$LOBSTER_DIR/lobster-shop/obsidian-km"
-SRC_DIR="$SKILL_DIR/src"
-CONFIG_TEMPLATE="$SKILL_DIR/config/obsidian.env.template"
-VENV_DIR="$LOBSTER_DIR/.venv"
-PYTHON_PATH="$VENV_DIR/bin/python"
-CONFIG_DIR="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}"
-CONFIG_FILE="$CONFIG_DIR/obsidian.env"
+SCRIPT_SRC="$SKILL_DIR/scripts/health-check.sh"
+SERVICE_SRC="$SKILL_DIR/services/couchdb-health.service"
+TIMER_SRC="$SKILL_DIR/services/couchdb-health.timer"
+SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
+
+OBSIDIAN_ENV="$LOBSTER_CONFIG/obsidian.env"
 
 echo ""
-echo -e "${BOLD}Obsidian Knowledge Management Skill Installer${NC}"
-echo "=============================================="
+echo -e "${BOLD}Obsidian KM Skill - CouchDB Health Check Installer${NC}"
+echo "======================================================"
 echo ""
-echo "This installs the Obsidian KM skill for Lobster."
-echo "It adds vault integration tools to Claude."
+echo "  Health check script: $SCRIPT_SRC"
+echo "  Timer interval:      every 2 minutes"
+echo "  Config file:         $OBSIDIAN_ENV"
 echo ""
 
 #===============================================================================
@@ -48,141 +63,130 @@ echo ""
 #===============================================================================
 step "Checking prerequisites"
 
-# Check Python
-if [ -f "$PYTHON_PATH" ]; then
-    success "Lobster Python venv found: $PYTHON_PATH"
-elif command -v python3 &>/dev/null; then
-    PYTHON_PATH="python3"
-    success "Python 3 found: $(python3 --version)"
+# Check curl
+if ! command -v curl &>/dev/null; then
+    error "curl is required. Install: sudo apt install curl"
+fi
+success "curl available"
+
+# Check systemctl (user mode)
+if ! systemctl --user status >/dev/null 2>&1; then
+    warn "systemd user mode may not be available. Timer installation may fail."
 else
-    error "Python 3 is required but not installed."
-    exit 1
+    success "systemd user mode available"
 fi
 
-# Check Claude CLI
-if ! command -v claude &>/dev/null; then
-    error "Claude CLI is required but not installed."
-    exit 1
-fi
-success "Claude CLI found"
-
-# Check skill directory
-if [ ! -f "$SRC_DIR/obsidian_km_server.py" ]; then
-    error "Skill source not found at $SRC_DIR/obsidian_km_server.py"
-    exit 1
-fi
-success "Skill source found"
-
-#===============================================================================
-# Step 2: Install Python dependencies
-#===============================================================================
-step "Installing Python dependencies (mcp)"
-
-if [ -f "$VENV_DIR/bin/pip" ]; then
-    "$VENV_DIR/bin/pip" install --quiet "mcp>=1.0" 2>&1 || warn "pip install had issues (may already be installed)"
-    success "Python dependencies installed in Lobster venv"
+# Check for obsidian.env
+if [[ ! -f "$OBSIDIAN_ENV" ]]; then
+    warn "Config file not found: $OBSIDIAN_ENV"
+    warn "You'll need to create it with COUCHDB_USER and COUCHDB_PASSWORD before health checks work."
+    echo ""
+    echo "  Example:"
+    echo "    cat > $OBSIDIAN_ENV << 'EOF'"
+    echo "    COUCHDB_USER=admin"
+    echo "    COUCHDB_PASSWORD=your-secure-password"
+    echo "    EOF"
+    echo ""
 else
-    pip3 install --quiet "mcp>=1.0" 2>&1 || warn "pip3 install had issues"
-    success "Python dependencies installed"
-fi
-
-#===============================================================================
-# Step 3: Create configuration file
-#===============================================================================
-step "Setting up configuration"
-
-mkdir -p "$CONFIG_DIR"
-
-if [ -f "$CONFIG_FILE" ]; then
-    success "Configuration file already exists: $CONFIG_FILE"
-else
-    if [ -f "$CONFIG_TEMPLATE" ]; then
-        cp "$CONFIG_TEMPLATE" "$CONFIG_FILE"
-        success "Created configuration from template: $CONFIG_FILE"
-        echo ""
-        echo "  Please edit $CONFIG_FILE to set:"
-        echo "    OBSIDIAN_VAULT_PATH=/path/to/your/vault"
-        echo ""
+    # Verify credentials are set
+    if grep -q '^COUCHDB_USER=' "$OBSIDIAN_ENV" && grep -q '^COUCHDB_PASSWORD=' "$OBSIDIAN_ENV"; then
+        success "CouchDB credentials configured in $OBSIDIAN_ENV"
     else
-        warn "Configuration template not found: $CONFIG_TEMPLATE"
-        echo "  Create $CONFIG_FILE manually with:"
-        echo "    OBSIDIAN_VAULT_PATH=/path/to/your/vault"
+        warn "COUCHDB_USER and/or COUCHDB_PASSWORD not set in $OBSIDIAN_ENV"
     fi
 fi
 
-# Check if vault path is configured
-VAULT_PATH=""
-if [ -f "$CONFIG_FILE" ]; then
-    VAULT_PATH=$(grep "^OBSIDIAN_VAULT_PATH=" "$CONFIG_FILE" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'" || true)
-fi
-
-if [ -n "$VAULT_PATH" ] && [ -d "$VAULT_PATH" ]; then
-    success "Vault configured and accessible: $VAULT_PATH"
-elif [ -n "$VAULT_PATH" ]; then
-    warn "Vault path configured but directory not found: $VAULT_PATH"
+# Check for CouchDB service (optional - might be installed later)
+if systemctl --user is-active --quiet couchdb 2>/dev/null; then
+    success "CouchDB service is running"
+elif systemctl --user list-unit-files couchdb.service >/dev/null 2>&1; then
+    warn "CouchDB service exists but is not running"
 else
-    warn "OBSIDIAN_VAULT_PATH is not configured."
-    echo ""
-    echo "  To use this skill, edit $CONFIG_FILE and set:"
-    echo "    OBSIDIAN_VAULT_PATH=/path/to/your/obsidian/vault"
-    echo ""
+    warn "CouchDB service not found — health check will fail until CouchDB is installed"
 fi
 
 #===============================================================================
-# Step 4: Register MCP server with Claude
+# Step 2: Make scripts executable
 #===============================================================================
-step "Registering MCP server with Claude"
+step "Setting up scripts"
 
-# Remove old registration if it exists
-claude mcp remove obsidian-km 2>/dev/null || true
+if [[ ! -f "$SCRIPT_SRC" ]]; then
+    error "Health check script not found: $SCRIPT_SRC"
+fi
 
-# Register the Python MCP server
-if claude mcp add obsidian-km -s user -- "$PYTHON_PATH" "$SRC_DIR/obsidian_km_server.py" 2>/dev/null; then
-    success "MCP server registered: obsidian-km"
+chmod +x "$SCRIPT_SRC"
+success "Made $SCRIPT_SRC executable"
+
+#===============================================================================
+# Step 3: Install systemd service and timer
+#===============================================================================
+step "Installing systemd user service and timer"
+
+mkdir -p "$SYSTEMD_USER_DIR"
+
+# Copy service file
+if [[ ! -f "$SERVICE_SRC" ]]; then
+    error "Service file not found: $SERVICE_SRC"
+fi
+cp "$SERVICE_SRC" "$SYSTEMD_USER_DIR/couchdb-health.service"
+success "Installed couchdb-health.service"
+
+# Copy timer file
+if [[ ! -f "$TIMER_SRC" ]]; then
+    error "Timer file not found: $TIMER_SRC"
+fi
+cp "$TIMER_SRC" "$SYSTEMD_USER_DIR/couchdb-health.timer"
+success "Installed couchdb-health.timer"
+
+# Reload systemd
+systemctl --user daemon-reload
+success "systemd daemon reloaded"
+
+#===============================================================================
+# Step 4: Enable and start the timer
+#===============================================================================
+step "Enabling and starting health check timer"
+
+systemctl --user enable couchdb-health.timer 2>/dev/null
+success "Timer enabled"
+
+# Stop if running, then start fresh
+systemctl --user stop couchdb-health.timer 2>/dev/null || true
+systemctl --user start couchdb-health.timer
+success "Timer started"
+
+# Show timer status
+info "Timer status:"
+systemctl --user list-timers couchdb-health.timer --no-pager 2>/dev/null || true
+
+#===============================================================================
+# Step 5: Run initial health check
+#===============================================================================
+step "Running initial health check"
+
+if "$SCRIPT_SRC"; then
+    success "CouchDB health check passed"
 else
-    warn "Could not register MCP server automatically."
-    echo "  Register manually with:"
-    echo "  claude mcp add obsidian-km -s user -- $PYTHON_PATH $SRC_DIR/obsidian_km_server.py"
-fi
-
-#===============================================================================
-# Step 5: Activate the skill
-#===============================================================================
-step "Activating the skill"
-
-# Activate the skill via the skill manager if lobster is available
-ACTIVATE_SCRIPT="$LOBSTER_DIR/src/mcp"
-if [ -f "$ACTIVATE_SCRIPT/skill_manager.py" ]; then
-    "$PYTHON_PATH" -c "
-import sys; sys.path.insert(0, '$ACTIVATE_SCRIPT')
-from skill_manager import activate_skill
-result = activate_skill('obsidian-km')
-print(result)
-" 2>/dev/null && success "Skill activated in Lobster skill manager" || warn "Could not activate via skill manager (will work after restart)"
+    exit_code=$?
+    warn "Initial health check returned exit code $exit_code"
+    warn "This is expected if CouchDB is not yet running or configured."
 fi
 
 #===============================================================================
 # Done
 #===============================================================================
 echo ""
-echo -e "${GREEN}${BOLD}Obsidian KM skill installed!${NC}"
+echo -e "${GREEN}${BOLD}CouchDB Health Check installed!${NC}"
 echo ""
-echo "  Configuration: $CONFIG_FILE"
+echo "  Health check runs:   every 2 minutes"
+echo "  Logs:                $LOBSTER_WORKSPACE/logs/couchdb-health.log"
+echo "  Alerts log:          $LOBSTER_WORKSPACE/logs/alerts.log"
 echo ""
-echo "  Tools available to Lobster:"
-echo "    obsidian_create_note   - Create a note in the vault"
-echo "    obsidian_search        - Search vault content"
-echo "    obsidian_capture_link  - Archive a link to the vault"
-echo "    obsidian_get_preferences - View current settings"
+echo "  Commands:"
+echo "    View timer:        systemctl --user status couchdb-health.timer"
+echo "    View logs:         journalctl --user -u couchdb-health.service -f"
+echo "    Run manually:      $SCRIPT_SRC"
 echo ""
-echo "  Preferences (edit $CONFIG_FILE):"
-echo "    OBSIDIAN_VAULT_PATH        - Path to your Obsidian vault (required)"
-echo "    OBSIDIAN_DEFAULT_FOLDER    - Default folder for new notes (default: Inbox)"
-echo "    OBSIDIAN_LINK_FOLDER       - Folder for captured links (default: Links)"
-echo "    OBSIDIAN_AUTO_CAPTURE_LINKS - Auto-capture links (default: true)"
-echo "    OBSIDIAN_DEFAULT_TAGS      - Default tags for notes (comma-separated)"
-echo "    OBSIDIAN_MAX_SEARCH_RESULTS - Max search results (default: 10)"
-echo ""
-echo "  Restart Lobster to activate: lobster restart"
-echo "    or: systemctl --user restart lobster-claude"
+echo "  To update later, just re-run this script:"
+echo "    bash $SKILL_DIR/install.sh"
 echo ""

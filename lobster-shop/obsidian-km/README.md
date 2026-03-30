@@ -1,76 +1,54 @@
-# Obsidian KM
+# Obsidian KM Skill
 
-**Automatic link capture to your Obsidian vault.**
+Knowledge management integration using CouchDB for Lobster.
 
-When Drew sends a URL in Telegram, Lobster automatically saves it to your Obsidian vault with:
-- Page title (fetched automatically)
-- Archive.org backup
-- Original caption
-- Date captured
-- `#link` tag for easy filtering
+## Components
 
-## Features
+### CouchDB Health Check (BIS-235)
 
-- **Automatic capture** — URLs are saved without any extra commands
-- **Duplicate detection** — Skip URLs already captured this month
-- **Page title fetch** — Uses headless browser to get real page titles
-- **Archive integration** — Links are backed up on archive.org
-- **Clean markdown** — Notes use YAML frontmatter for Obsidian compatibility
+Monitors CouchDB service health and alerts via Telegram when unhealthy.
 
-## Installation
+**Files:**
+- `scripts/health-check.sh` - Health check script
+- `services/couchdb-health.service` - systemd oneshot service
+- `services/couchdb-health.timer` - systemd timer (runs every 2 minutes)
 
+**Checks performed:**
+1. CouchDB systemd service is running
+2. Port 5984 is responding
+3. Authentication is working
+
+**Installation:**
 ```bash
-bash lobster-shop/obsidian-km/install.sh
+bash ~/lobster/lobster-shop/obsidian-km/install.sh
 ```
 
-Then create your Obsidian vault:
+**Prerequisites:**
+- CouchDB running as user service (`couchdb.service`)
+- Config file at `~/lobster-config/obsidian.env` with:
+  ```
+  COUCHDB_USER=admin
+  COUCHDB_PASSWORD=your-secure-password
+  ```
+
+**Logs:**
+- Health check log: `~/lobster-workspace/logs/couchdb-health.log`
+- Alerts log: `~/lobster-workspace/logs/alerts.log`
+
+**Commands:**
 ```bash
-mkdir -p ~/obsidian-vault/Links
+# View timer status
+systemctl --user status couchdb-health.timer
+
+# View service logs
+journalctl --user -u couchdb-health.service -f
+
+# Run health check manually
+~/lobster/lobster-shop/obsidian-km/scripts/health-check.sh
 ```
 
-## Usage
+## Related Issues
 
-Just send URLs in Telegram — they're captured automatically.
-
-### Commands
-
-| Command | Description |
-|---------|-------------|
-| `/vault <url>` | Force-capture a URL (bypass duplicate check) |
-| `/vault status` | Show how many links captured this month |
-
-## Configuration
-
-Set preferences via `set_skill_preference`:
-
-| Preference | Default | Description |
-|------------|---------|-------------|
-| `OBSIDIAN_AUTO_CAPTURE_LINKS` | `true` | Enable automatic capture |
-| `OBSIDIAN_VAULT_PATH` | `~/obsidian-vault` | Path to vault |
-| `OBSIDIAN_LINKS_FOLDER` | `Links` | Folder for captured links |
-
-## Note Format
-
-```markdown
----
-title: "Article Title"
-url: https://example.com/article
-tags: [link]
-captured: 2026-03-30T14:23:00
-archived: https://web.archive.org/web/20260330/https://example.com/article
----
-
-[https://example.com/article](https://example.com/article)
-
-Saved from Telegram on 2026-03-30.
-```
-
-## Integration
-
-This skill **extends** existing Commonbook behavior:
-
-1. Archive on archive.org (Commonbook)
-2. Comment on brain-dumps issue (Commonbook)
-3. Save to Obsidian vault (this skill)
-
-All three happen for every captured link.
+- BIS-228: Obsidian KM Skill (epic)
+- BIS-230: CouchDB installation
+- BIS-235: CouchDB health monitoring (this component)
