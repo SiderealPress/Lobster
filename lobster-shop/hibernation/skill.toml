@@ -1,0 +1,36 @@
+[skill]
+name = "hibernation"
+version = "1.0.0"
+description = "Dispatcher hibernation — idle timeout behavior, state file semantics, and how to break the hibernation loop cleanly"
+author = "Lobster"
+category = "behavioral"
+
+[activation]
+mode = "contextual"
+triggers = []
+context_patterns = [
+    "when wait_for_messages returns a timeout with hibernate_on_timeout=True",
+    "when the dispatcher has been idle and the health check should not restart it",
+    "when lobster-state.json mode is set to hibernate",
+]
+
+[layering]
+priority = 30
+merge_strategy = "append"
+
+[provides]
+mcp_tools = []
+bot_commands = []
+
+[compatibility]
+enhances = []
+conflicts = []
+
+[dependencies]
+pip = []
+npm = []
+system = []
+api_keys = []
+
+[dependencies.runtime]
+python = ">=3.11"
