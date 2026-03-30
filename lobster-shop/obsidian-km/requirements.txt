@@ -1,0 +1,4 @@
+# Obsidian KM MCP Server dependencies
+mcp>=1.0.0
+python-frontmatter>=1.0.0
+python-dotenv>=1.0.0
