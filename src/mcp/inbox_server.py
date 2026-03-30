@@ -787,6 +787,40 @@ _SERVER_START_TIME = datetime.now(timezone.utc)
 _dispatcher_session_id: str | None = None
 _http_session_manager = None  # Set to StreamableHTTPSessionManager in main() when HTTP mode is active
 
+# State file: the dispatcher session ID persisted to disk so hooks can read it
+# without network calls or JSONL parsing.  Written atomically by
+# _tag_dispatcher_session(); cleared at server startup.
+_DISPATCHER_SESSION_STATE_FILE = _WORKSPACE / "data" / "dispatcher-session-id"
+
+
+def _write_dispatcher_state_file(session_id: str) -> None:
+    """Atomically write session_id to the dispatcher state file.
+
+    Uses a temp-file + os.rename() for atomicity so concurrent readers never
+    see a partial write.  Silent on any failure — must never crash the caller.
+    """
+    try:
+        _DISPATCHER_SESSION_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _DISPATCHER_SESSION_STATE_FILE.with_suffix(".tmp")
+        tmp.write_text(session_id.strip())
+        tmp.replace(_DISPATCHER_SESSION_STATE_FILE)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _clear_dispatcher_state_file() -> None:
+    """Remove the dispatcher state file on server startup.
+
+    Prevents a stale session ID from a previous run from being mistaken for
+    the current dispatcher session.  Silent on any failure.
+    """
+    try:
+        if _DISPATCHER_SESSION_STATE_FILE.exists():
+            _DISPATCHER_SESSION_STATE_FILE.unlink()
+            log.info("[session-tag] Cleared stale dispatcher-session-id state file on startup")
+    except Exception:  # noqa: BLE001
+        pass
+
 
 def _get_current_http_session_id() -> str | None:
     """Return the MCP session ID for the current tool call request.
@@ -814,14 +848,20 @@ def _get_current_http_session_id() -> str | None:
 def _tag_dispatcher_session(session_id: str) -> None:
     """Record session_id as the privileged dispatcher session.
 
-    Called by Option A (handle_wait_for_messages) and Option B
-    (handle_session_start with agent_type="dispatcher").  Whichever fires
-    first wins; both paths update on reconnect.
+    Called by Option A (handle_wait_for_messages), Option B
+    (handle_session_start with agent_type="dispatcher"), and Option C
+    (auto-tag on first guarded tool call after server restart).  Whichever
+    fires first wins; both paths update on reconnect.
+
+    Also writes the session_id to the dispatcher state file
+    (_DISPATCHER_SESSION_STATE_FILE) so hooks can read the current dispatcher
+    session without network calls or JSONL parsing.
     """
     global _dispatcher_session_id
     if session_id and session_id != _dispatcher_session_id:
         _dispatcher_session_id = session_id
         log.info(f"[session-tag] Dispatcher session tagged: {session_id}")
+        _write_dispatcher_state_file(session_id)
 
 
 def _is_main_http_session() -> bool:
@@ -8121,6 +8161,12 @@ async def main():
     """Run the MCP server."""
     setup_logging()
     _ensure_observation_worker()
+
+    # Clear the dispatcher state file on startup so a stale session ID from a
+    # previous run cannot linger and mislead hooks into thinking the old session
+    # is still active.  The file is re-written by _tag_dispatcher_session() once
+    # the dispatcher identifies itself via Options A, B, or C.
+    _clear_dispatcher_state_file()
 
     # Initialize the event bus singleton with standard listeners.
     # JsonlFileListener writes all events to logs/events.jsonl.
