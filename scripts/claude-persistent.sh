@@ -382,10 +382,13 @@ launch_claude() {
     local claude_exit_code=0
     log "Starting fresh session (attempt $attempt)..."
 
-    # Transition to active BEFORE the blocking claude call.
-    # The "starting" state above covers env cleanup and preflight.
-    # Once we hand off to claude, we're active.
-    write_state "active" "claude running, attempt=$attempt"
+    # Schedule a delayed "active" write ~5 seconds after launch so the health
+    # check sees a live signal once the MCP server has had time to initialise.
+    # This runs in the background so it does not block the claude process launch.
+    # The MCP server's _reset_state_on_startup() and handle_wait_for_messages()
+    # will also write "active" once Claude is truly running, but this belt-and-
+    # suspenders write ensures the state transitions even if those paths are slow.
+    ( sleep 5 && write_state "active" "claude running, attempt=$attempt" ) &
 
     # Write the dispatcher PID file so the health check can target this specific
     # process for cleanup without relying on ambiguous pgrep matches.
@@ -547,7 +550,6 @@ Claude persistent session initializing."
         fi
 
         # Launch Claude
-        write_state "active" "starting claude"
         launch_claude "$attempt"
         local exit_code=$?
 
