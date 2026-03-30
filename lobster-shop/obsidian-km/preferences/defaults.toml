@@ -1,0 +1,5 @@
+default_folder = "Inbox"
+link_folder = "Links"
+auto_capture_links = true
+default_tags = ""
+max_search_results = 10

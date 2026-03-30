@@ -1,0 +1,16 @@
+[Unit]
+Description=CouchDB Health Check for Obsidian KM Skill
+After=couchdb.service
+Wants=couchdb.service
+
+[Service]
+Type=oneshot
+ExecStart=%h/lobster/lobster-shop/obsidian-km/scripts/health-check.sh
+StandardOutput=journal
+StandardError=journal
+
+# Allow failure — the script handles alerting
+SuccessExitStatus=0 1 2 3
+
+[Install]
+WantedBy=default.target
