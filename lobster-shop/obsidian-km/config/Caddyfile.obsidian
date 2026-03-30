@@ -1,0 +1,35 @@
+# Caddyfile for CouchDB HTTPS/TLS Proxy
+# BIS-232: HTTPS/TLS terminating proxy for Obsidian LiveSync
+#
+# This config is used by caddy to proxy external HTTPS connections
+# to the local CouchDB instance.
+#
+# External: https://[server-ip]:6984 (TLS)
+# Internal: http://127.0.0.1:5984 (CouchDB)
+
+:6984 {
+    # Use internal (self-signed) TLS certificate
+    # Caddy auto-generates and manages this certificate
+    tls internal
+
+    # Proxy all requests to local CouchDB
+    reverse_proxy 127.0.0.1:5984 {
+        # Pass through headers for proper CouchDB operation
+        header_up Host {host}
+        header_up X-Forwarded-For {remote}
+        header_up X-Forwarded-Proto {scheme}
+
+        # CouchDB streaming support (continuous replication)
+        # Disable buffering for real-time sync
+        flush_interval -1
+    }
+
+    # Logging for debugging
+    log {
+        output file /var/log/caddy/couchdb-proxy.log {
+            roll_size 10MB
+            roll_keep 5
+        }
+        format json
+    }
+}
