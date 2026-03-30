@@ -1,0 +1,52 @@
+# CouchDB User Service for Obsidian KM Skill
+# BIS-230: CouchDB systemd user service
+#
+# Install location: ~/.config/systemd/user/couchdb.service
+#
+# Management commands:
+#   systemctl --user start couchdb
+#   systemctl --user stop couchdb
+#   systemctl --user restart couchdb
+#   systemctl --user status couchdb
+#   journalctl --user -u couchdb -f
+#
+
+[Unit]
+Description=Apache CouchDB (Obsidian KM)
+Documentation=https://docs.couchdb.org/
+After=network.target
+
+[Service]
+Type=simple
+
+# CouchDB binary location (standard apt install path)
+ExecStart=/opt/couchdb/bin/couchdb
+
+# Graceful shutdown
+ExecStop=/bin/kill -SIGTERM $MAINPID
+
+# Restart policy
+Restart=always
+RestartSec=5
+
+# Environment
+# CouchDB uses its config files, not environment variables for credentials
+# Credentials are stored in /opt/couchdb/etc/local.ini
+
+# Working directory
+WorkingDirectory=/opt/couchdb
+
+# Resource limits
+# CouchDB is relatively lightweight for personal use
+LimitNOFILE=65536
+
+# Security hardening (user service, so limited options)
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
