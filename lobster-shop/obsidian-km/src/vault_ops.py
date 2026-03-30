@@ -1,373 +1,525 @@
 """
-Obsidian Vault Operations — Pure Functions for Vault Access
+vault_ops.py — Core vault operations for Obsidian KM skill.
+
+Pure functional implementation using filesystem + python-frontmatter + ripgrep.
+All functions are pure: they take explicit parameters and return new values
+without mutating global state.
 
 Design principles:
-- Pure functions: no side effects, deterministic outputs
-- Immutability: return new data structures, never mutate
-- Composition: small functions that compose into larger operations
-- Lazy evaluation: use generators for efficient large vault handling
+- Inject vault path explicitly (default to ~/obsidian-vault/)
+- Return dicts/lists (immutable-friendly)
+- Raise specific exceptions on error
+- Compose small functions
 """
 
 from __future__ import annotations
 
-import os
+import json
 import re
-from dataclasses import dataclass
-from datetime import datetime, timezone
+import subprocess
+from datetime import datetime
 from pathlib import Path
-from typing import Callable, Iterator, Literal
+from typing import TypedDict
+
+import frontmatter
 
 
-@dataclass(frozen=True)
-class NoteMetadata:
-    """Immutable note metadata."""
+# =============================================================================
+# Types
+# =============================================================================
+
+class NoteData(TypedDict, total=False):
+    """Represents a note's data."""
     title: str
-    path: str  # Relative to vault root
-    tags: tuple[str, ...]  # Immutable tuple of tags
-    created: datetime
-    modified: datetime
-    size: int
-
-    def to_dict(self) -> dict:
-        """Convert to JSON-serializable dict."""
-        return {
-            "title": self.title,
-            "path": self.path,
-            "tags": list(self.tags),
-            "created": self.created.isoformat(),
-            "modified": self.modified.isoformat(),
-            "size": self.size,
-        }
+    content: str
+    tags: list[str]
+    created: str
+    modified: str
+    path: str
 
 
-@dataclass(frozen=True)
-class ListNotesResult:
-    """Immutable result from list_notes."""
-    notes: tuple[NoteMetadata, ...]
+class SearchMatch(TypedDict):
+    """Represents a search result."""
+    path: str
+    title: str
+    line_number: int
+    line_content: str
+
+
+class ListResult(TypedDict):
+    """Represents list_notes result."""
     total: int
-
-    def to_dict(self) -> dict:
-        """Convert to JSON-serializable dict."""
-        return {
-            "notes": [n.to_dict() for n in self.notes],
-            "total": self.total,
-        }
+    notes: list[NoteData]
 
 
 # =============================================================================
-# Pure helper functions
+# Constants
 # =============================================================================
 
-def is_markdown_file(path: Path) -> bool:
-    """Check if path is a markdown file."""
-    return path.suffix.lower() in (".md", ".markdown")
+VAULT_DIR = Path.home() / "obsidian-vault"
+
+# Characters invalid in filenames across platforms
+INVALID_FILENAME_CHARS = re.compile(r'[/\\:*?"<>|]')
 
 
-def is_hidden(path: Path) -> bool:
-    """Check if any component of the path is hidden (starts with .)."""
-    return any(part.startswith(".") for part in path.parts)
+# =============================================================================
+# Path Utilities (Pure)
+# =============================================================================
 
-
-def extract_title_from_path(path: Path) -> str:
-    """Extract note title from file path (stem without extension)."""
-    return path.stem
-
-
-def extract_frontmatter(content: str) -> dict | None:
+def resolve_vault_path(vault: Path | None = None) -> Path:
     """
-    Extract YAML frontmatter from markdown content.
+    Return the vault directory, defaulting to ~/obsidian-vault/.
 
-    Returns parsed frontmatter dict or None if not present/parseable.
-    Handles the common YAML frontmatter format:
-    ---
-    key: value
-    tags: [tag1, tag2]
-    ---
+    Pure function: returns a new Path based on input.
+
+    Args:
+        vault: Optional vault directory path. If None, uses VAULT_DIR.
+
+    Returns:
+        Resolved vault directory Path.
     """
-    if not content.startswith("---"):
-        return None
-
-    # Find closing delimiter
-    end_match = re.search(r"\n---\s*\n", content[3:])
-    if not end_match:
-        return None
-
-    yaml_content = content[3:end_match.start() + 3]
-
-    # Simple YAML parsing for common cases (avoid full YAML dependency in hot path)
-    # This handles: tags: [tag1, tag2] and tags:\n  - tag1\n  - tag2
-    result = {}
-
-    # Parse tags specifically (most common use case)
-    # Inline format: tags: [tag1, tag2] or tags: ["tag1", "tag2"]
-    inline_tags = re.search(r"^tags:\s*\[([^\]]*)\]", yaml_content, re.MULTILINE)
-    if inline_tags:
-        tag_str = inline_tags.group(1)
-        # Handle both quoted and unquoted tags
-        tags = [
-            t.strip().strip('"').strip("'").lstrip("#")
-            for t in tag_str.split(",")
-            if t.strip()
-        ]
-        result["tags"] = tags
-    else:
-        # List format: tags:\n  - tag1\n  - tag2
-        list_tags = re.search(r"^tags:\s*\n((?:\s+-\s+.+\n?)+)", yaml_content, re.MULTILINE)
-        if list_tags:
-            tag_lines = list_tags.group(1)
-            tags = [
-                line.strip().lstrip("-").strip().strip('"').strip("'").lstrip("#")
-                for line in tag_lines.split("\n")
-                if line.strip().startswith("-")
-            ]
-            result["tags"] = tags
-
-    return result if result else None
+    return vault if vault is not None else VAULT_DIR
 
 
-def extract_tags_from_content(content: str) -> tuple[str, ...]:
+def sanitize_title(title: str) -> str:
     """
-    Extract tags from note content.
+    Remove characters invalid in filenames.
 
-    Checks YAML frontmatter tags field.
-    Returns immutable tuple of tag strings (without # prefix).
+    Pure function: returns a new string.
+
+    Args:
+        title: The note title to sanitize.
+
+    Returns:
+        Sanitized title safe for use as a filename.
+
+    Examples:
+        >>> sanitize_title("My Note: A Story")
+        'My Note- A Story'
+        >>> sanitize_title("Question? Answer!")
+        'Question- Answer!'
     """
-    frontmatter = extract_frontmatter(content)
-    if frontmatter and "tags" in frontmatter:
-        return tuple(frontmatter["tags"])
-    return ()
+    return INVALID_FILENAME_CHARS.sub("-", title).strip()
 
 
-def read_frontmatter_only(path: Path, max_bytes: int = 4096) -> str:
+def _note_path(title: str, folder: str, vault: Path) -> Path:
     """
-    Read only the beginning of a file to extract frontmatter.
+    Compute the full path to a note file.
 
-    Performance optimization: don't read entire file just for tags.
+    Pure function: computes path from inputs.
     """
+    safe_title = sanitize_title(title)
+    return vault / folder / f"{safe_title}.md"
+
+
+def _is_path(title_or_path: str) -> bool:
+    """Check if input looks like a path (contains / or ends with .md)."""
+    return "/" in title_or_path or title_or_path.endswith(".md")
+
+
+def _resolve_note_path(
+    title_or_path: str,
+    folder: str | None,
+    vault: Path,
+) -> Path:
+    """
+    Resolve a title or path to a full Path.
+
+    If title_or_path looks like a path, resolve it relative to vault.
+    Otherwise, look in folder (default: search all folders).
+    """
+    if _is_path(title_or_path):
+        # It's a path - resolve relative to vault
+        candidate = vault / title_or_path
+        if candidate.exists():
+            return candidate
+        # Try with .md extension
+        if not title_or_path.endswith(".md"):
+            candidate = vault / f"{title_or_path}.md"
+            if candidate.exists():
+                return candidate
+        raise FileNotFoundError(f"Note not found: {title_or_path}")
+
+    # It's a title - search for it
+    safe_title = sanitize_title(title_or_path)
+
+    if folder:
+        # Look in specific folder
+        candidate = vault / folder / f"{safe_title}.md"
+        if candidate.exists():
+            return candidate
+        raise FileNotFoundError(f"Note '{title_or_path}' not found in {folder}")
+
+    # Search all folders
+    matches = list(vault.rglob(f"{safe_title}.md"))
+    if not matches:
+        raise FileNotFoundError(f"Note not found: {title_or_path}")
+    if len(matches) > 1:
+        # Return first match but could warn about ambiguity
+        pass
+    return matches[0]
+
+
+# =============================================================================
+# Note Operations
+# =============================================================================
+
+def create_note(
+    title: str,
+    content: str,
+    folder: str = "Inbox",
+    tags: list[str] | None = None,
+    vault: Path | None = None,
+) -> Path:
+    """
+    Create a new note in the vault.
+
+    Creates the note with YAML frontmatter containing title, tags, and timestamps.
+    Raises FileExistsError if a note with the same title already exists in the folder.
+
+    Args:
+        title: The note title (used as filename after sanitization).
+        content: The note body content.
+        folder: Folder within the vault (default: "Inbox").
+        tags: Optional list of tags for frontmatter.
+        vault: Optional vault path (default: ~/obsidian-vault/).
+
+    Returns:
+        Path to the created note.
+
+    Raises:
+        FileExistsError: If a note with this title already exists.
+
+    Example:
+        >>> path = create_note(
+        ...     title="Meeting Notes",
+        ...     content="# Meeting Notes\\n\\nDiscussed project timeline.",
+        ...     tags=["meetings", "project-x"],
+        ... )
+    """
+    vault_path = resolve_vault_path(vault)
+    note_path = _note_path(title, folder, vault_path)
+
+    if note_path.exists():
+        raise FileExistsError(f"Note already exists: {note_path}")
+
+    # Ensure folder exists
+    note_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Build frontmatter
+    now = datetime.now().isoformat()
+    metadata = {
+        "title": title,
+        "created": now,
+        "modified": now,
+    }
+    if tags:
+        metadata["tags"] = tags
+
+    # Create post with frontmatter
+    post = frontmatter.Post(content, **metadata)
+
+    # Write atomically (write to temp, then rename)
+    note_path.write_text(frontmatter.dumps(post), encoding="utf-8")
+
+    return note_path
+
+
+def read_note(
+    title_or_path: str,
+    folder: str | None = None,
+    vault: Path | None = None,
+) -> NoteData:
+    """
+    Read a note by title or path.
+
+    Returns a dict with the note's metadata and content.
+
+    Args:
+        title_or_path: Note title or relative path within vault.
+        folder: Optional folder to search in (if title given).
+        vault: Optional vault path (default: ~/obsidian-vault/).
+
+    Returns:
+        Dict with: title, content, tags, created, modified, path.
+
+    Raises:
+        FileNotFoundError: If the note doesn't exist.
+
+    Example:
+        >>> note = read_note("Meeting Notes", folder="Inbox")
+        >>> print(note["content"])
+    """
+    vault_path = resolve_vault_path(vault)
+    note_path = _resolve_note_path(title_or_path, folder, vault_path)
+
+    post = frontmatter.load(note_path)
+
+    # Get file stats for modified time if not in frontmatter
+    stat = note_path.stat()
+
+    return NoteData(
+        title=post.get("title", note_path.stem),
+        content=post.content,
+        tags=post.get("tags", []),
+        created=post.get("created", ""),
+        modified=post.get("modified", datetime.fromtimestamp(stat.st_mtime).isoformat()),
+        path=str(note_path.relative_to(vault_path)),
+    )
+
+
+def append_to_note(
+    title_or_path: str,
+    content: str,
+    separator: str = "\n",
+    vault: Path | None = None,
+) -> NoteData:
+    """
+    Append content to an existing note.
+
+    Updates the modified timestamp in frontmatter.
+
+    Args:
+        title_or_path: Note title or relative path within vault.
+        content: Content to append to the note body.
+        separator: Separator between existing content and new content.
+        vault: Optional vault path (default: ~/obsidian-vault/).
+
+    Returns:
+        Dict with the updated note data.
+
+    Raises:
+        FileNotFoundError: If the note doesn't exist.
+
+    Example:
+        >>> updated = append_to_note(
+        ...     "Meeting Notes",
+        ...     "\\n## Action Items\\n- Follow up with team",
+        ... )
+    """
+    vault_path = resolve_vault_path(vault)
+    note_path = _resolve_note_path(title_or_path, None, vault_path)
+
+    # Load existing note
+    post = frontmatter.load(note_path)
+
+    # Append content
+    post.content = post.content + separator + content
+
+    # Update modified timestamp
+    post["modified"] = datetime.now().isoformat()
+
+    # Write back
+    note_path.write_text(frontmatter.dumps(post), encoding="utf-8")
+
+    return NoteData(
+        title=post.get("title", note_path.stem),
+        content=post.content,
+        tags=post.get("tags", []),
+        created=post.get("created", ""),
+        modified=post["modified"],
+        path=str(note_path.relative_to(vault_path)),
+    )
+
+
+# =============================================================================
+# Search Operations
+# =============================================================================
+
+def search_notes(
+    query: str,
+    folder: str | None = None,
+    limit: int = 10,
+    vault: Path | None = None,
+) -> list[SearchMatch]:
+    """
+    Full-text search using ripgrep.
+
+    Searches all markdown files in the vault (or specific folder) for the query.
+
+    Args:
+        query: Search query (regex supported).
+        folder: Optional folder to limit search to.
+        limit: Maximum number of results (default: 10).
+        vault: Optional vault path (default: ~/obsidian-vault/).
+
+    Returns:
+        List of match dicts with: path, title, line_number, line_content.
+
+    Example:
+        >>> matches = search_notes("project timeline")
+        >>> for m in matches:
+        ...     print(f"{m['title']}: {m['line_content']}")
+    """
+    vault_path = resolve_vault_path(vault)
+    search_path = vault_path / folder if folder else vault_path
+
+    if not search_path.exists():
+        return []
+
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            return f.read(max_bytes)
-    except (OSError, IOError):
-        return ""
-
-
-def file_stats_to_datetime(stat_result: os.stat_result) -> tuple[datetime, datetime]:
-    """Extract created and modified times from stat result."""
-    # Use mtime for modified
-    modified = datetime.fromtimestamp(stat_result.st_mtime, tz=timezone.utc)
-
-    # For created, use birthtime if available (macOS), otherwise ctime
-    # On Linux, ctime is "change time" not "creation time", but it's the best we have
-    created_ts = getattr(stat_result, "st_birthtime", stat_result.st_ctime)
-    created = datetime.fromtimestamp(created_ts, tz=timezone.utc)
-
-    return created, modified
-
-
-# =============================================================================
-# Scanning functions (generators for lazy evaluation)
-# =============================================================================
-
-def scan_markdown_files(vault_path: Path) -> Iterator[Path]:
-    """
-    Lazily scan vault for markdown files.
-
-    Excludes hidden files/folders and .obsidian directory.
-    Uses os.scandir for performance on large vaults.
-    """
-    def scan_dir(dir_path: Path) -> Iterator[Path]:
-        try:
-            with os.scandir(dir_path) as entries:
-                for entry in entries:
-                    # Skip hidden entries
-                    if entry.name.startswith("."):
-                        continue
-
-                    if entry.is_dir(follow_symlinks=False):
-                        # Recurse into subdirectories
-                        yield from scan_dir(Path(entry.path))
-                    elif entry.is_file(follow_symlinks=False):
-                        path = Path(entry.path)
-                        if is_markdown_file(path):
-                            yield path
-        except PermissionError:
-            pass  # Skip directories we can't access
-
-    yield from scan_dir(vault_path)
-
-
-def build_note_metadata(
-    file_path: Path,
-    vault_path: Path,
-    include_tags: bool = False,
-) -> NoteMetadata | None:
-    """
-    Build NoteMetadata for a single file.
-
-    Returns None if file is inaccessible.
-    """
-    try:
-        stat = file_path.stat()
-        created, modified = file_stats_to_datetime(stat)
-
-        # Extract tags only if needed (performance optimization)
-        tags: tuple[str, ...] = ()
-        if include_tags:
-            content = read_frontmatter_only(file_path)
-            tags = extract_tags_from_content(content)
-
-        rel_path = file_path.relative_to(vault_path)
-
-        return NoteMetadata(
-            title=extract_title_from_path(file_path),
-            path=str(rel_path),
-            tags=tags,
-            created=created,
-            modified=modified,
-            size=stat.st_size,
+        # Use ripgrep with JSON output for structured results
+        result = subprocess.run(
+            [
+                "rg",
+                "--json",
+                "--max-count", str(limit * 2),  # Get more to filter
+                "--type", "md",
+                "--ignore-case",
+                query,
+                str(search_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
-    except (OSError, IOError, ValueError):
-        return None
+    except FileNotFoundError:
+        # ripgrep not installed, fall back to basic search
+        return _fallback_search(query, search_path, limit, vault_path)
+    except subprocess.TimeoutExpired:
+        return []
 
+    # Parse JSON lines output
+    matches: list[SearchMatch] = []
+    seen_files: set[str] = set()
 
-# =============================================================================
-# Filter functions (pure predicates)
-# =============================================================================
-
-def folder_filter(folder: str, vault_path: Path) -> Callable[[Path], bool]:
-    """Create a predicate that filters paths by folder prefix."""
-    folder_path = vault_path / folder
-
-    def predicate(path: Path) -> bool:
+    for line in result.stdout.strip().split("\n"):
+        if not line:
+            continue
         try:
-            path.relative_to(folder_path)
-            return True
-        except ValueError:
-            return False
+            data = json.loads(line)
+            if data.get("type") != "match":
+                continue
 
-    return predicate
+            path_str = data["data"]["path"]["text"]
+
+            # Skip if we've already included this file
+            if path_str in seen_files:
+                continue
+            seen_files.add(path_str)
+
+            path = Path(path_str)
+            rel_path = path.relative_to(vault_path) if path.is_absolute() else path
+
+            matches.append(SearchMatch(
+                path=str(rel_path),
+                title=path.stem,
+                line_number=data["data"]["line_number"],
+                line_content=data["data"]["lines"]["text"].strip(),
+            ))
+
+            if len(matches) >= limit:
+                break
+
+        except (json.JSONDecodeError, KeyError):
+            continue
+
+    return matches
 
 
-def tag_filter(tag: str) -> Callable[[NoteMetadata], bool]:
-    """Create a predicate that filters notes by tag."""
-    normalized_tag = tag.lstrip("#").lower()
-
-    def predicate(note: NoteMetadata) -> bool:
-        return any(t.lower() == normalized_tag for t in note.tags)
-
-    return predicate
-
-
-# =============================================================================
-# Sort functions (pure key extractors)
-# =============================================================================
-
-SortOrder = Literal["modified", "created", "title"]
-
-
-def get_sort_key(sort: SortOrder) -> Callable[[NoteMetadata], tuple]:
+def _fallback_search(
+    query: str,
+    search_path: Path,
+    limit: int,
+    vault_path: Path,
+) -> list[SearchMatch]:
     """
-    Get a sort key function for the given sort order.
+    Fallback search when ripgrep is unavailable.
 
-    Returns tuple keys for stable sorting with secondary criteria.
+    Uses pure Python - slower but functional.
     """
-    if sort == "modified":
-        # Most recent first, then by title
-        return lambda n: (-n.modified.timestamp(), n.title.lower())
-    elif sort == "created":
-        # Most recent first, then by title
-        return lambda n: (-n.created.timestamp(), n.title.lower())
-    else:  # title
-        # Alphabetical, case-insensitive
-        return lambda n: (n.title.lower(), -n.modified.timestamp())
+    matches: list[SearchMatch] = []
+    pattern = re.compile(query, re.IGNORECASE)
 
+    for md_file in search_path.rglob("*.md"):
+        try:
+            content = md_file.read_text(encoding="utf-8")
+            for line_num, line in enumerate(content.split("\n"), 1):
+                if pattern.search(line):
+                    matches.append(SearchMatch(
+                        path=str(md_file.relative_to(vault_path)),
+                        title=md_file.stem,
+                        line_number=line_num,
+                        line_content=line.strip(),
+                    ))
+                    break  # One match per file
 
-# =============================================================================
-# Main list_notes function
-# =============================================================================
+            if len(matches) >= limit:
+                break
+        except (UnicodeDecodeError, PermissionError):
+            continue
+
+    return matches
+
 
 def list_notes(
-    vault_path: str | Path,
     folder: str | None = None,
     tag: str | None = None,
     limit: int = 20,
-    sort: SortOrder = "modified",
-) -> ListNotesResult:
+    sort: str = "modified",
+    vault: Path | None = None,
+) -> ListResult:
     """
-    List notes in an Obsidian vault with filtering and sorting.
+    List notes with optional filters.
 
     Args:
-        vault_path: Path to the Obsidian vault root
-        folder: Optional folder filter (relative to vault root)
-        tag: Optional tag filter (checks YAML frontmatter tags field)
-        limit: Maximum number of notes to return
-        sort: Sort order — "modified", "created", or "title"
+        folder: Optional folder to list from.
+        tag: Optional tag filter (notes must have this tag).
+        limit: Maximum notes to return (default: 20).
+        sort: Sort field - "modified", "created", or "title" (default: modified).
+        vault: Optional vault path (default: ~/obsidian-vault/).
 
     Returns:
-        ListNotesResult with notes array and total count
+        Dict with: total (count), notes (list of NoteData).
 
-    Performance:
-        - Uses lazy generators to avoid loading all files into memory
-        - Only reads frontmatter when tag filtering is needed
-        - < 2 seconds for 10,000 notes typical
+    Example:
+        >>> result = list_notes(folder="Projects", tag="active", limit=5)
+        >>> print(f"Found {result['total']} notes")
+        >>> for note in result["notes"]:
+        ...     print(note["title"])
     """
-    vault = Path(vault_path).resolve()
+    vault_path = resolve_vault_path(vault)
+    search_path = vault_path / folder if folder else vault_path
 
-    if not vault.is_dir():
-        return ListNotesResult(notes=(), total=0)
+    if not search_path.exists():
+        return ListResult(total=0, notes=[])
 
-    # Scan all markdown files (lazy generator)
-    files = scan_markdown_files(vault)
+    notes: list[NoteData] = []
 
-    # Apply folder filter if specified
-    if folder:
-        filter_fn = folder_filter(folder, vault)
-        files = (f for f in files if filter_fn(f))
+    # Collect all markdown files
+    md_files = list(search_path.rglob("*.md"))
 
-    # Build metadata (tags needed if filtering by tag)
-    need_tags = tag is not None
-    notes_iter = (
-        build_note_metadata(f, vault, include_tags=need_tags)
-        for f in files
-    )
+    for md_file in md_files:
+        try:
+            post = frontmatter.load(md_file)
 
-    # Filter out None (inaccessible files)
-    notes_iter = (n for n in notes_iter if n is not None)
+            # Apply tag filter
+            if tag:
+                note_tags = post.get("tags", [])
+                if tag not in note_tags:
+                    continue
 
-    # Apply tag filter if specified
-    if tag:
-        tag_pred = tag_filter(tag)
-        notes_iter = (n for n in notes_iter if tag_pred(n))
+            stat = md_file.stat()
 
-    # Collect all matching notes for total count
-    # (We need to materialize to count and sort)
-    all_notes = list(notes_iter)
-    total = len(all_notes)
+            notes.append(NoteData(
+                title=post.get("title", md_file.stem),
+                content=post.content[:200] + "..." if len(post.content) > 200 else post.content,
+                tags=post.get("tags", []),
+                created=post.get("created", ""),
+                modified=post.get("modified", datetime.fromtimestamp(stat.st_mtime).isoformat()),
+                path=str(md_file.relative_to(vault_path)),
+            ))
+        except (UnicodeDecodeError, PermissionError, frontmatter.exceptions.YAMLException):
+            continue
 
     # Sort
-    sort_key = get_sort_key(sort)
-    all_notes.sort(key=sort_key)
+    sort_key = {
+        "modified": lambda n: n.get("modified", ""),
+        "created": lambda n: n.get("created", ""),
+        "title": lambda n: n.get("title", "").lower(),
+    }.get(sort, lambda n: n.get("modified", ""))
 
-    # Apply limit
-    limited_notes = all_notes[:limit]
+    notes.sort(key=sort_key, reverse=(sort != "title"))
 
-    # If we didn't need tags for filtering, fetch them now for the limited set
-    if not need_tags:
-        limited_notes = [
-            NoteMetadata(
-                title=n.title,
-                path=n.path,
-                tags=extract_tags_from_content(
-                    read_frontmatter_only(vault / n.path)
-                ),
-                created=n.created,
-                modified=n.modified,
-                size=n.size,
-            )
-            for n in limited_notes
-        ]
-
-    return ListNotesResult(
-        notes=tuple(limited_notes),
-        total=total,
-    )
+    total = len(notes)
+    return ListResult(total=total, notes=notes[:limit])

@@ -2,16 +2,23 @@
 """
 Obsidian KM MCP Server for Lobster
 
-Provides MCP tools for interacting with Obsidian vaults.
+Provides MCP tools for managing notes in an Obsidian vault:
+- note_create: Create a new note with optional tags
+- note_read: Read a note by title or path
+- note_search: Full-text search using ripgrep
+- note_append: Append content to an existing note
+- note_list: List notes with optional filters
 
-Tools provided:
-- note_list: List notes with folder/tag filters, sorting, and pagination
+Design: Pure functional implementation backed by vault_ops.py.
+All operations are explicit and side-effect-isolated.
 """
 
 import asyncio
 import json
+import logging
 import os
 import sys
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
@@ -19,13 +26,60 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
-# Import vault operations
-from vault_ops import list_notes, ListNotesResult, SortOrder
+# Add src directory to path for vault_ops import
+_SRC_DIR = Path(__file__).resolve().parent
+if str(_SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(_SRC_DIR))
 
-# Configuration from environment or preferences
-VAULT_PATH = os.environ.get("OBSIDIAN_VAULT_PATH", "")
-DEFAULT_LIMIT = int(os.environ.get("OBSIDIAN_DEFAULT_LIMIT", "20"))
-DEFAULT_SORT = os.environ.get("OBSIDIAN_DEFAULT_SORT", "modified")
+from vault_ops import (
+    create_note,
+    read_note,
+    append_to_note,
+    search_notes,
+    list_notes,
+    resolve_vault_path,
+)
+
+
+# =============================================================================
+# Configuration
+# =============================================================================
+
+VAULT_PATH = Path(os.environ.get("OBSIDIAN_VAULT_PATH", Path.home() / "obsidian-vault"))
+LOG_PATH = Path(os.environ.get("OBSIDIAN_KM_LOG_PATH", Path.home() / "logs" / "obsidian-km-mcp.log"))
+
+
+# =============================================================================
+# Logging Setup
+# =============================================================================
+
+def setup_logging() -> logging.Logger:
+    """Configure rotating file logger."""
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    logger = logging.getLogger("obsidian-km-mcp")
+    logger.setLevel(logging.INFO)
+
+    handler = RotatingFileHandler(
+        LOG_PATH,
+        maxBytes=5 * 1024 * 1024,  # 5MB
+        backupCount=3,
+    )
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    ))
+    logger.addHandler(handler)
+
+    return logger
+
+
+logger = setup_logging()
+
+
+# =============================================================================
+# MCP Server
+# =============================================================================
 
 server = Server("obsidian-km")
 
@@ -34,89 +88,156 @@ def text_result(data: Any) -> list[TextContent]:
     """Format a result as MCP text content."""
     if isinstance(data, str):
         return [TextContent(type="text", text=data)]
-    return [TextContent(type="text", text=json.dumps(data, indent=2))]
+    return [TextContent(type="text", text=json.dumps(data, indent=2, default=str))]
 
 
 def error_result(msg: str) -> list[TextContent]:
     """Format an error as MCP text content."""
+    logger.error(msg)
     return [TextContent(type="text", text=f"Error: {msg}")]
-
-
-def validate_vault_path(vault_path: str) -> str | None:
-    """
-    Validate vault path configuration.
-
-    Returns error message if invalid, None if valid.
-    """
-    if not vault_path:
-        return (
-            "Vault path not configured. "
-            "Set it with: /skill set obsidian-km vault_path /path/to/vault"
-        )
-
-    path = Path(vault_path)
-    if not path.exists():
-        return f"Vault path does not exist: {vault_path}"
-
-    if not path.is_dir():
-        return f"Vault path is not a directory: {vault_path}"
-
-    return None
-
-
-def validate_sort(sort: str) -> SortOrder:
-    """Validate and normalize sort parameter."""
-    valid_sorts = ("modified", "created", "title")
-    sort_lower = sort.lower()
-    if sort_lower in valid_sorts:
-        return sort_lower  # type: ignore
-    return "modified"
 
 
 @server.list_tools()
 async def list_tools() -> list[Tool]:
-    """List available obsidian-km tools."""
+    """List available Obsidian KM tools."""
     return [
+        Tool(
+            name="note_create",
+            description=(
+                "Create a new note in the Obsidian vault. "
+                "Notes are created with YAML frontmatter containing title, tags, and timestamps. "
+                "Default folder is 'Inbox'. Returns the path to the created note."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "The note title (used as filename)",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "The note body content (markdown)",
+                    },
+                    "folder": {
+                        "type": "string",
+                        "description": "Folder within the vault (default: 'Inbox')",
+                        "default": "Inbox",
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional tags for frontmatter",
+                    },
+                },
+                "required": ["title", "content"],
+            },
+        ),
+        Tool(
+            name="note_read",
+            description=(
+                "Read a note from the Obsidian vault by title or path. "
+                "Returns the note's metadata (title, tags, created, modified) and content."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "title_or_path": {
+                        "type": "string",
+                        "description": "Note title or relative path within vault (e.g., 'Meeting Notes' or 'Projects/ProjectX.md')",
+                    },
+                    "folder": {
+                        "type": "string",
+                        "description": "Optional folder to search in (when using title)",
+                    },
+                },
+                "required": ["title_or_path"],
+            },
+        ),
+        Tool(
+            name="note_search",
+            description=(
+                "Full-text search across notes in the Obsidian vault using ripgrep. "
+                "Returns matching notes with line numbers and content snippets. "
+                "Supports regex patterns."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query (regex supported)",
+                    },
+                    "folder": {
+                        "type": "string",
+                        "description": "Optional folder to limit search to",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum results (default: 10)",
+                        "default": 10,
+                    },
+                },
+                "required": ["query"],
+            },
+        ),
+        Tool(
+            name="note_append",
+            description=(
+                "Append content to an existing note in the Obsidian vault. "
+                "Updates the note's modified timestamp. "
+                "Useful for adding items to lists, logs, or daily notes."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "title_or_path": {
+                        "type": "string",
+                        "description": "Note title or relative path within vault",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Content to append",
+                    },
+                    "separator": {
+                        "type": "string",
+                        "description": "Separator between existing content and new content (default: newline)",
+                        "default": "\n",
+                    },
+                },
+                "required": ["title_or_path", "content"],
+            },
+        ),
         Tool(
             name="note_list",
             description=(
-                "List notes in an Obsidian vault with optional filtering and sorting. "
-                "Returns note metadata including title, path, tags, timestamps, and size. "
-                "Supports folder filtering, tag filtering (checks YAML frontmatter), "
-                "and sorting by modified date, created date, or title."
+                "List notes in the Obsidian vault with optional filters. "
+                "Can filter by folder and/or tag. "
+                "Returns note metadata with content previews."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "folder": {
                         "type": "string",
-                        "description": (
-                            "Filter to notes within this folder path "
-                            "(relative to vault root, e.g., 'projects/active')"
-                        ),
+                        "description": "Optional folder to list from",
                     },
                     "tag": {
                         "type": "string",
-                        "description": (
-                            "Filter to notes containing this tag "
-                            "(checks YAML frontmatter 'tags' field, e.g., 'project')"
-                        ),
+                        "description": "Optional tag filter (notes must have this tag)",
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Maximum number of notes to return",
+                        "description": "Maximum notes to return (default: 20)",
                         "default": 20,
-                        "minimum": 1,
-                        "maximum": 1000,
                     },
                     "sort": {
                         "type": "string",
-                        "description": "Sort order for results",
                         "enum": ["modified", "created", "title"],
+                        "description": "Sort field (default: 'modified')",
                         "default": "modified",
                     },
                 },
-                "required": [],
             },
         ),
     ]
@@ -124,56 +245,137 @@ async def list_tools() -> list[Tool]:
 
 @server.call_tool()
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
-    """Handle tool calls."""
+    """Handle tool calls by delegating to vault_ops functions."""
 
-    if name == "note_list":
-        # Get vault path from env or arguments
-        vault_path = arguments.get("vault_path", VAULT_PATH)
+    logger.info(f"Tool call: {name} with args: {arguments}")
 
-        # Validate vault path
-        error = validate_vault_path(vault_path)
-        if error:
-            return error_result(error)
+    try:
+        if name == "note_create":
+            title = arguments["title"]
+            content = arguments["content"]
+            folder = arguments.get("folder", "Inbox")
+            tags = arguments.get("tags")
 
-        # Extract and validate parameters
-        folder = arguments.get("folder")
-        tag = arguments.get("tag")
-        limit = arguments.get("limit", DEFAULT_LIMIT)
-        sort = validate_sort(arguments.get("sort", DEFAULT_SORT))
-
-        # Clamp limit to valid range
-        limit = max(1, min(1000, int(limit)))
-
-        try:
-            # Run the pure function (blocking I/O wrapped in executor)
-            result: ListNotesResult = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: list_notes(
-                    vault_path=vault_path,
-                    folder=folder,
-                    tag=tag,
-                    limit=limit,
-                    sort=sort,
-                ),
+            path = create_note(
+                title=title,
+                content=content,
+                folder=folder,
+                tags=tags,
+                vault=VAULT_PATH,
             )
 
-            return text_result(result.to_dict())
+            result = {
+                "status": "created",
+                "path": str(path.relative_to(VAULT_PATH)),
+                "title": title,
+                "folder": folder,
+            }
+            if tags:
+                result["tags"] = tags
 
-        except Exception as e:
-            return error_result(f"Failed to list notes: {type(e).__name__}: {str(e)}")
+            logger.info(f"Created note: {result['path']}")
+            return text_result(result)
 
-    else:
-        return error_result(f"Unknown tool: {name}")
+        elif name == "note_read":
+            title_or_path = arguments["title_or_path"]
+            folder = arguments.get("folder")
 
+            note = read_note(
+                title_or_path=title_or_path,
+                folder=folder,
+                vault=VAULT_PATH,
+            )
+
+            logger.info(f"Read note: {note['path']}")
+            return text_result(note)
+
+        elif name == "note_search":
+            query = arguments["query"]
+            folder = arguments.get("folder")
+            limit = arguments.get("limit", 10)
+
+            matches = search_notes(
+                query=query,
+                folder=folder,
+                limit=limit,
+                vault=VAULT_PATH,
+            )
+
+            result = {
+                "query": query,
+                "count": len(matches),
+                "matches": matches,
+            }
+
+            logger.info(f"Search '{query}': {len(matches)} matches")
+            return text_result(result)
+
+        elif name == "note_append":
+            title_or_path = arguments["title_or_path"]
+            content = arguments["content"]
+            separator = arguments.get("separator", "\n")
+
+            note = append_to_note(
+                title_or_path=title_or_path,
+                content=content,
+                separator=separator,
+                vault=VAULT_PATH,
+            )
+
+            result = {
+                "status": "appended",
+                "path": note["path"],
+                "title": note["title"],
+                "modified": note["modified"],
+            }
+
+            logger.info(f"Appended to note: {note['path']}")
+            return text_result(result)
+
+        elif name == "note_list":
+            folder = arguments.get("folder")
+            tag = arguments.get("tag")
+            limit = arguments.get("limit", 20)
+            sort = arguments.get("sort", "modified")
+
+            result = list_notes(
+                folder=folder,
+                tag=tag,
+                limit=limit,
+                sort=sort,
+                vault=VAULT_PATH,
+            )
+
+            logger.info(f"Listed {result['total']} notes (showing {len(result['notes'])})")
+            return text_result(result)
+
+        else:
+            return error_result(f"Unknown tool: {name}")
+
+    except FileNotFoundError as e:
+        return error_result(f"Note not found: {e}")
+    except FileExistsError as e:
+        return error_result(f"Note already exists: {e}")
+    except Exception as e:
+        logger.exception(f"Tool {name} failed")
+        return error_result(f"{type(e).__name__}: {str(e)}")
+
+
+# =============================================================================
+# Main Entry Point
+# =============================================================================
 
 async def main():
     """Run the MCP server."""
+    logger.info(f"Starting obsidian-km MCP server, vault: {VAULT_PATH}")
+
+    # Ensure vault directory exists
+    if not VAULT_PATH.exists():
+        VAULT_PATH.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Created vault directory: {VAULT_PATH}")
+
     async with stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream,
-            write_stream,
-            server.create_initialization_options(),
-        )
+        await server.run(read_stream, write_stream, server.create_initialization_options())
 
 
 if __name__ == "__main__":

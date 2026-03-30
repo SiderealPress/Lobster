@@ -1,58 +1,79 @@
 # Obsidian KM Skill
 
-Knowledge management tools for Obsidian vaults.
+Knowledge management skill for Lobster using Obsidian vaults.
 
-## Tools
+## Overview
 
-### note_list
+Pure Python vault operations using filesystem + `python-frontmatter` + ripgrep.
+No external service dependencies — works on headless servers.
 
-List notes with filtering and sorting.
+## Installation
 
-**Parameters:**
-- `folder` (optional): Filter by folder path relative to vault root
-- `tag` (optional): Filter by tag (checks YAML frontmatter)
-- `limit` (optional): Max notes to return (default: 20, max: 1000)
-- `sort` (optional): Sort by "modified" (default), "created", or "title"
-
-**Returns:**
-```json
-{
-  "notes": [
-    {
-      "title": "Project Plan",
-      "path": "projects/project-plan.md",
-      "tags": ["project", "planning"],
-      "created": "2024-01-15T10:30:00+00:00",
-      "modified": "2024-03-20T14:45:00+00:00",
-      "size": 2048
-    }
-  ],
-  "total": 150
-}
-```
-
-## Configuration
-
-Set the vault path before using:
-
-```
-/skill set obsidian-km vault_path /path/to/your/vault
-```
-
-## Performance
-
-Optimized for large vaults:
-- Uses `os.scandir()` for fast directory traversal
-- Lazy evaluation with generators
-- Only reads frontmatter (not full files) when filtering by tags
-- Target: < 2 seconds for 10,000 notes
-
-## Development
+Requires `python-frontmatter`:
 
 ```bash
-# Run tests
-cd src && uv run pytest test_vault_ops.py -v
-
-# Run server manually
-OBSIDIAN_VAULT_PATH=/path/to/vault uv run python obsidian_km_server.py
+uv pip install python-frontmatter
 ```
+
+## Usage
+
+```python
+from obsidian_km.src.vault_ops import create_note, read_note, search_notes
+
+# Create a note
+path = create_note(
+    title="Meeting Notes",
+    content="# Meeting Notes\n\nDiscussed roadmap.",
+    folder="Inbox",
+    tags=["meetings"],
+)
+
+# Read a note
+note = read_note("Meeting Notes", folder="Inbox")
+print(note["content"])
+
+# Search notes
+matches = search_notes("roadmap")
+for m in matches:
+    print(f"{m['title']}: {m['line_content']}")
+```
+
+## API Reference
+
+### Path Utilities
+
+- `resolve_vault_path(vault=None)` — Returns vault directory (default: `~/obsidian-vault/`)
+- `sanitize_title(title)` — Remove invalid filename characters
+
+### Note Operations
+
+- `create_note(title, content, folder="Inbox", tags=None, vault=None)` — Create note
+- `read_note(title_or_path, folder=None, vault=None)` — Read note by title or path
+- `append_to_note(title_or_path, content, separator="\n", vault=None)` — Append to note
+
+### Search & Discovery
+
+- `search_notes(query, folder=None, limit=10, vault=None)` — Full-text search (ripgrep)
+- `list_notes(folder=None, tag=None, limit=20, sort="modified", vault=None)` — List notes
+
+## Testing
+
+Run the proof of concept:
+
+```bash
+cd lobster-shop/obsidian-km
+python scripts/vault_poc.py
+```
+
+## Design Decisions
+
+See [docs/cli-approach.md](docs/cli-approach.md) for the technical decision document.
+
+## Part of BIS-229 Epic
+
+This module is the foundation for:
+- BIS-238: MCP tool wrappers
+- BIS-239: Template-based note creation
+- BIS-240: Daily note handling
+- BIS-241: Note linking and backlinks
+- BIS-242: Integration tests
