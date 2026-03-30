@@ -1147,6 +1147,32 @@ for stub_file in "user.base.bootup.md" "user.base.context.md" "user.dispatcher.b
     fi
 done
 
+# Seed skill configuration templates (only files that don't already exist)
+# Skills can have .env.template files in their config/ directory
+for skill_dir in "$INSTALL_DIR"/lobster-shop/*/; do
+    [ -d "$skill_dir" ] || continue
+    skill_name=$(basename "$skill_dir")
+    config_template="$skill_dir/config/${skill_name}.env.template"
+    if [ -f "$config_template" ]; then
+        # Handle special cases: obsidian-km → obsidian.env
+        env_name="${skill_name%.env.template}"
+        env_name="${env_name/-km/}"  # obsidian-km → obsidian
+        dest_file="$CONFIG_DIR/${env_name}.env"
+        if [ ! -f "$dest_file" ]; then
+            cp "$config_template" "$dest_file"
+            info "  Seeded skill config: ${env_name}.env"
+        fi
+    fi
+done
+
+# Also handle obsidian.env.template specifically (named differently from skill)
+OBSIDIAN_TEMPLATE="$INSTALL_DIR/lobster-shop/obsidian-km/config/obsidian.env.template"
+OBSIDIAN_DEST="$CONFIG_DIR/obsidian.env"
+if [ -f "$OBSIDIAN_TEMPLATE" ] && [ ! -f "$OBSIDIAN_DEST" ]; then
+    cp "$OBSIDIAN_TEMPLATE" "$OBSIDIAN_DEST"
+    info "  Seeded skill config: obsidian.env"
+fi
+
 success "Directories created"
 info "  $PROJECTS_DIR - All Lobster-managed projects"
 
