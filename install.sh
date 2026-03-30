@@ -495,6 +495,20 @@ if [ "$(id -u)" = "0" ]; then
         # Docker not installed — this is the normal case on a fresh machine, not a warning
         info "Docker not installed — skipping docker group setup. Install Docker later to enable Docker features."
     fi
+    # Add lobster user to the crontab group so sync-crontab.sh works under NoNewPrivs.
+    # Claude Code sets PR_SET_NO_NEW_PRIVS on the MCP server process, which propagates to
+    # child processes and suppresses setgid bits. The `crontab` binary is setgid-crontab —
+    # that privilege is what lets it write to /var/spool/cron/crontabs/. Without it,
+    # `crontab -` fails with "mkstemp: Permission denied". Group membership lets the
+    # lobster user write directly to /var/spool/cron/crontabs/ (group-writable) without
+    # needing the setgid bit.
+    if getent group crontab &>/dev/null; then
+        usermod -aG crontab lobster
+        success "Added 'lobster' to the crontab group (fixes NoNewPrivs crontab permission error)."
+        warn "Group membership takes effect at next login. Run 'newgrp crontab' or restart after install to apply."
+    else
+        warn "The 'crontab' group does not exist — scheduled job syncing may fail. Run: sudo groupadd crontab && sudo usermod -aG crontab lobster"
+    fi
     # Copy script to /tmp so lobster user can read it regardless of working directory
     INSTALL_SCRIPT="$(readlink -f "$0")"
     TMP_SCRIPT="$(mktemp /tmp/lobster-install.XXXXXX.sh)"
@@ -1133,6 +1147,32 @@ for stub_file in "user.base.bootup.md" "user.base.context.md" "user.dispatcher.b
     fi
 done
 
+# Seed skill configuration templates (only files that don't already exist)
+# Skills can have .env.template files in their config/ directory
+for skill_dir in "$INSTALL_DIR"/lobster-shop/*/; do
+    [ -d "$skill_dir" ] || continue
+    skill_name=$(basename "$skill_dir")
+    config_template="$skill_dir/config/${skill_name}.env.template"
+    if [ -f "$config_template" ]; then
+        # Handle special cases: obsidian-km → obsidian.env
+        env_name="${skill_name%.env.template}"
+        env_name="${env_name/-km/}"  # obsidian-km → obsidian
+        dest_file="$CONFIG_DIR/${env_name}.env"
+        if [ ! -f "$dest_file" ]; then
+            cp "$config_template" "$dest_file"
+            info "  Seeded skill config: ${env_name}.env"
+        fi
+    fi
+done
+
+# Also handle obsidian.env.template specifically (named differently from skill)
+OBSIDIAN_TEMPLATE="$INSTALL_DIR/lobster-shop/obsidian-km/config/obsidian.env.template"
+OBSIDIAN_DEST="$CONFIG_DIR/obsidian.env"
+if [ -f "$OBSIDIAN_TEMPLATE" ] && [ ! -f "$OBSIDIAN_DEST" ]; then
+    cp "$OBSIDIAN_TEMPLATE" "$OBSIDIAN_DEST"
+    info "  Seeded skill config: obsidian.env"
+fi
+
 success "Directories created"
 info "  $PROJECTS_DIR - All Lobster-managed projects"
 
@@ -1345,6 +1385,35 @@ chmod +x "$INSTALL_DIR/scheduled-tasks/export-logs.py" 2>/dev/null || true
     "0 3 * * * cd $INSTALL_DIR && uv run scheduled-tasks/export-logs.py # LOBSTER-LOG-EXPORT"
 
 success "Log export configured (runs at 03:00 UTC daily)"
+
+#===============================================================================
+# Ghost Detector (agent-monitor)
+#===============================================================================
+
+step "Setting up ghost detector cron..."
+
+# agent-monitor.py runs every 5 minutes, checks for stale/dead agent sessions,
+# sends a Telegram alert if GHOST_CONFIRMED or UNREGISTERED agents are found,
+# and marks ghost sessions as failed in agent_sessions.db. No LLM involved.
+"$INSTALL_DIR/scripts/cron-manage.sh" add "# LOBSTER-GHOST-DETECTOR" \
+    "*/5 * * * * cd $HOME && uv run $INSTALL_DIR/scripts/agent-monitor.py --alert --mark-failed >> $HOME/lobster-workspace/logs/agent-monitor.log 2>&1 # LOBSTER-GHOST-DETECTOR"
+
+success "Ghost detector configured (runs every 5 minutes)"
+
+#===============================================================================
+# OOM Monitor
+#===============================================================================
+
+step "Setting up OOM monitor cron..."
+
+# oom-monitor.py runs every 10 minutes, scans the kernel journal for OOM kills
+# affecting Lobster/Claude processes, and writes an inbox message for the
+# dispatcher when new OOM kill events are detected. No LLM involved.
+# Only active when LOBSTER_DEBUG=true (the script is a no-op otherwise).
+"$INSTALL_DIR/scripts/cron-manage.sh" add "# LOBSTER-OOM-CHECK" \
+    "*/10 * * * * cd $HOME && uv run $INSTALL_DIR/scripts/oom-monitor.py --since-minutes 10 >> $HOME/lobster-workspace/logs/oom-monitor.log 2>&1 # LOBSTER-OOM-CHECK"
+
+success "OOM monitor configured (runs every 10 minutes, active only when LOBSTER_DEBUG=true)"
 
 # Ensure any lingering self-check cron entry is removed on fresh installs
 { crontab -l 2>/dev/null | grep -v "# LOBSTER-SELF-CHECK" | grep -v "periodic-self-check" || true; } | crontab -
@@ -2649,6 +2718,17 @@ fi
 #===============================================================================
 
 step "Registering MCP server with Claude..."
+
+# Remove any legacy stdio mcpServers.lobster-inbox entry from settings.json if present.
+# The claude mcp add/remove CLI stores entries in ~/.claude.json, not settings.json,
+# but defensive cleanup costs nothing and handles any manual or legacy configs.
+if [ -f "$CLAUDE_SETTINGS" ] && command -v jq >/dev/null 2>&1; then
+    if jq -e '.mcpServers."lobster-inbox"' "$CLAUDE_SETTINGS" >/dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq 'del(.mcpServers."lobster-inbox")' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        info "Removed legacy mcpServers.lobster-inbox entry from settings.json"
+    fi
+fi
 
 # Remove existing registration if present (handles both stdio and http registrations)
 claude mcp remove lobster-inbox 2>/dev/null || true

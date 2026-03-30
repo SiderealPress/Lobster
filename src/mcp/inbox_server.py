@@ -70,7 +70,7 @@ from reliability import (
 from update_manager import UpdateManager
 
 # Bot-talk mirroring — fire-and-forget relay to the shared SaharLobster/AlbertLobster channel
-from bot_talk.mirror import mirror_outbound as _mirror_outbound, mirror_inbound as _mirror_inbound
+from bot_talk_mirror import mirror_outbound as _mirror_outbound, mirror_inbound as _mirror_inbound
 
 # Pending agent tracker (thin adapter over session_store)
 from agents.tracker import add_pending_agent as _add_pending_agent, remove_pending_agent as _remove_pending_agent
@@ -787,6 +787,40 @@ _SERVER_START_TIME = datetime.now(timezone.utc)
 _dispatcher_session_id: str | None = None
 _http_session_manager = None  # Set to StreamableHTTPSessionManager in main() when HTTP mode is active
 
+# State file: the dispatcher session ID persisted to disk so hooks can read it
+# without network calls or JSONL parsing.  Written atomically by
+# _tag_dispatcher_session(); cleared at server startup.
+_DISPATCHER_SESSION_STATE_FILE = _WORKSPACE / "data" / "dispatcher-session-id"
+
+
+def _write_dispatcher_state_file(session_id: str) -> None:
+    """Atomically write session_id to the dispatcher state file.
+
+    Uses a temp-file + os.rename() for atomicity so concurrent readers never
+    see a partial write.  Silent on any failure — must never crash the caller.
+    """
+    try:
+        _DISPATCHER_SESSION_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _DISPATCHER_SESSION_STATE_FILE.with_suffix(".tmp")
+        tmp.write_text(session_id.strip())
+        tmp.replace(_DISPATCHER_SESSION_STATE_FILE)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _clear_dispatcher_state_file() -> None:
+    """Remove the dispatcher state file on server startup.
+
+    Prevents a stale session ID from a previous run from being mistaken for
+    the current dispatcher session.  Silent on any failure.
+    """
+    try:
+        if _DISPATCHER_SESSION_STATE_FILE.exists():
+            _DISPATCHER_SESSION_STATE_FILE.unlink()
+            log.info("[session-tag] Cleared stale dispatcher-session-id state file on startup")
+    except Exception:  # noqa: BLE001
+        pass
+
 
 def _get_current_http_session_id() -> str | None:
     """Return the MCP session ID for the current tool call request.
@@ -814,14 +848,20 @@ def _get_current_http_session_id() -> str | None:
 def _tag_dispatcher_session(session_id: str) -> None:
     """Record session_id as the privileged dispatcher session.
 
-    Called by Option A (handle_wait_for_messages) and Option B
-    (handle_session_start with agent_type="dispatcher").  Whichever fires
-    first wins; both paths update on reconnect.
+    Called by Option A (handle_wait_for_messages), Option B
+    (handle_session_start with agent_type="dispatcher"), and Option C
+    (auto-tag on first guarded tool call after server restart).  Whichever
+    fires first wins; both paths update on reconnect.
+
+    Also writes the session_id to the dispatcher state file
+    (_DISPATCHER_SESSION_STATE_FILE) so hooks can read the current dispatcher
+    session without network calls or JSONL parsing.
     """
     global _dispatcher_session_id
     if session_id and session_id != _dispatcher_session_id:
         _dispatcher_session_id = session_id
         log.info(f"[session-tag] Dispatcher session tagged: {session_id}")
+        _write_dispatcher_state_file(session_id)
 
 
 def _is_main_http_session() -> bool:
@@ -2758,6 +2798,91 @@ async def list_tools() -> list[Tool]:
                 "required": [],
             },
         ),
+        # Session File Management Tools
+        Tool(
+            name="create_session_file",
+            description=(
+                "Create a new session file for today. Copies the session template, "
+                "substitutes the date/sequence/timestamps, writes the file to "
+                "~/lobster-user-config/memory/canonical/sessions/YYYYMMDD-NNN.md, "
+                "and records the path in /tmp/lobster-current-session-file. "
+                "Returns {path, session_id}."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        ),
+        Tool(
+            name="get_session_file",
+            description=(
+                "Read a session file. If session_id is 'current' (the default), "
+                "reads the pointer at /tmp/lobster-current-session-file, or finds "
+                "today's latest session. Otherwise looks up the file matching the "
+                "given YYYYMMDD-NNN session_id. "
+                "Returns {path, content, session_id}."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session ID (e.g. '20260329-001') or 'current'. Defaults to 'current'.",
+                        "default": "current",
+                    },
+                },
+                "required": [],
+            },
+        ),
+        Tool(
+            name="update_session_file",
+            description=(
+                "Update a named H2 section (e.g. '## Summary', '## Open Threads') "
+                "inside a session file. Replaces only the targeted section; all other "
+                "sections and the file header are preserved verbatim. Write is atomic "
+                "(temp-file + rename). "
+                "Returns {path, section, updated: true}."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "section": {
+                        "type": "string",
+                        "description": "Section name without the '## ' prefix, e.g. 'Summary' or 'Open Threads'.",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "New content for the section (replaces everything between the section header and the next H2 or EOF).",
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session ID (e.g. '20260329-001') or 'current'. Defaults to 'current'.",
+                        "default": "current",
+                    },
+                },
+                "required": ["section", "content"],
+            },
+        ),
+        Tool(
+            name="list_session_files",
+            description=(
+                "List session files, optionally filtered to a single date. "
+                "Returns a sorted list of {session_id, path, has_content} objects. "
+                "has_content is true when the Summary section contains more than 50 "
+                "characters of non-boilerplate text."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "date": {
+                        "type": "string",
+                        "description": "Optional YYYYMMDD date string to filter results.",
+                    },
+                },
+                "required": [],
+            },
+        ),
     ] + (
         # User Model Tools (only registered when feature flag is enabled)
         [
@@ -2802,17 +2927,37 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
     # any session that is not the designated dispatcher session.
     #
     # In HTTP transport mode: use per-session tagging (_is_main_http_session).
-    #   - A session becomes the dispatcher by calling wait_for_messages (Option A)
-    #     or session_start(agent_type="dispatcher") (Option B).
+    #   - A session becomes the dispatcher by calling wait_for_messages (Option A),
+    #     session_start(agent_type="dispatcher") (Option B), or any guarded tool
+    #     when no dispatcher is currently tagged (Option C — restart recovery).
     #   - All other sessions are blocked from guarded tools.
+    #
+    # Option C — restart recovery (no-dispatcher-tagged auto-tag):
+    #   When _dispatcher_session_id is None the MCP server has just restarted and
+    #   has no record of any dispatcher session.  The first session to call any
+    #   guarded tool must be the new dispatcher — subagents cannot be running yet
+    #   because they require the dispatcher to spawn them.  Auto-tagging here closes
+    #   the window between server start and the dispatcher's first WFM or
+    #   session_start call, which is when backlog send_reply calls would otherwise
+    #   be blocked.
     #
     # In stdio transport mode: use the legacy tmux ancestry / env-var check
     #   (_is_main_session).  This path is unchanged.
     if name in _SESSION_GUARDED_TOOLS:
         if _http_session_manager is not None:
-            # HTTP mode: per-session guard.  wait_for_messages is exempted from
-            # the guard check because it IS the tagging call (Option A) — the
-            # session won't be tagged yet when the first WFM call arrives.
+            # HTTP mode: per-session guard.  wait_for_messages is always exempted
+            # (Option A tagging).  When no dispatcher is tagged yet (Option C),
+            # auto-tag the calling session before the guard check so the call
+            # proceeds — this handles the restart race where the dispatcher calls
+            # send_reply or check_inbox before its first WFM/session_start fires.
+            if _dispatcher_session_id is None:
+                session_id = _get_current_http_session_id()
+                if session_id is not None:
+                    log.info(
+                        f"[session-tag] Option C: no dispatcher tagged, auto-tagging "
+                        f"on '{name}' call — session {session_id!r}"
+                    )
+                    _tag_dispatcher_session(session_id)
             if name != "wait_for_messages" and not _is_main_http_session():
                 log.warning(
                     f"Session guard blocked '{name}' — HTTP session "
@@ -2969,6 +3114,15 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
         return await handle_create_report(arguments)
     elif name == "list_reports":
         return await handle_list_reports(arguments)
+    # Session File Management Tools
+    elif name == "create_session_file":
+        return await handle_create_session_file(arguments)
+    elif name == "get_session_file":
+        return await handle_get_session_file(arguments)
+    elif name == "update_session_file":
+        return await handle_update_session_file(arguments)
+    elif name == "list_session_files":
+        return await handle_list_session_files(arguments)
     # User Model Tools (dispatched to user_model subsystem)
     elif name in _user_model_tool_names and _user_model is not None:
         result_json = _user_model.dispatch(name, arguments)
@@ -3087,6 +3241,12 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
 
     # Touch heartbeat at start - signals Claude is alive and waiting for messages
     touch_heartbeat()
+
+    # Write "active" state so the health check always sees a live signal when
+    # wait_for_messages is called.  This is the authoritative steady-state write:
+    # even if claude-persistent.sh left the state in "starting" or another
+    # transient mode, calling wait_for_messages means Claude is up and running.
+    _write_lobster_state(LOBSTER_STATE_FILE, "active")
 
     # Recover stale processing and retryable failed messages
     _recover_stale_processing()
@@ -4897,6 +5057,231 @@ async def handle_delete_task(args: dict) -> list[TextContent]:
 
 
 # =============================================================================
+# Session File Management Handlers
+# =============================================================================
+
+# Pointer file written/read to track the current session
+_SESSION_POINTER_FILE = Path("/tmp/lobster-current-session-file")
+
+# Boilerplate placeholder text in session template summaries
+_SESSION_SUMMARY_BOILERPLATE = "<1-3 sentence summary"
+
+
+def _resolve_sessions_dir() -> Path:
+    """Return the sessions directory, creating it if absent."""
+    sessions_dir = _USER_CONFIG / "memory" / "canonical" / "sessions"
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    return sessions_dir
+
+
+def _resolve_session_template(sessions_dir: Path) -> str | None:
+    """Return template content, or None if the template file does not exist."""
+    template_path = sessions_dir / "session.template.md"
+    if template_path.exists():
+        return template_path.read_text()
+    return None
+
+
+def _next_sequence_number(sessions_dir: Path, date_str: str) -> int:
+    """Return the next available sequence number for *date_str* (YYYYMMDD)."""
+    existing = [
+        p.stem for p in sessions_dir.glob(f"{date_str}-*.md")
+        if p.stem != "session.template"
+    ]
+    if not existing:
+        return 1
+    numbers = []
+    for stem in existing:
+        parts = stem.split("-", 1)
+        if len(parts) == 2:
+            try:
+                numbers.append(int(parts[1]))
+            except ValueError:
+                pass
+    return max(numbers) + 1 if numbers else 1
+
+
+def _session_id_to_path(sessions_dir: Path, session_id: str) -> Path | None:
+    """Return the Path for *session_id*, or None if not found."""
+    candidate = sessions_dir / f"{session_id}.md"
+    return candidate if candidate.exists() else None
+
+
+def _resolve_current_session_path(sessions_dir: Path) -> Path | None:
+    """Return the 'current' session path via pointer file or latest today."""
+    if _SESSION_POINTER_FILE.exists():
+        try:
+            pointer = Path(_SESSION_POINTER_FILE.read_text().strip())
+            if pointer.exists():
+                return pointer
+        except Exception:
+            pass
+
+    # Fall back to the latest session file for today (UTC)
+    today = datetime.now(timezone.utc).strftime("%Y%m%d")
+    candidates = sorted(sessions_dir.glob(f"{today}-*.md"))
+    return candidates[-1] if candidates else None
+
+
+def _extract_section_content(text: str, section_name: str) -> str | None:
+    """Return the body text of a named H2 section, or None if not found."""
+    pattern = re.compile(
+        rf"^## {re.escape(section_name)}\s*\n(.*?)(?=\Z|^## )",
+        re.MULTILINE | re.DOTALL,
+    )
+    m = pattern.search(text)
+    return m.group(1) if m else None
+
+
+def _replace_section_content(text: str, section_name: str, new_body: str) -> str | None:
+    """
+    Replace the body of the named H2 section with *new_body*.
+
+    Returns the updated full text, or None if the section was not found.
+    """
+    pattern = re.compile(
+        rf"(^## {re.escape(section_name)}\s*\n)(.*?)(?=\Z|^## )",
+        re.MULTILINE | re.DOTALL,
+    )
+    if not pattern.search(text):
+        return None
+    body = new_body if new_body.endswith("\n") else new_body + "\n"
+    return pattern.sub(lambda m: m.group(1) + body, text)
+
+
+def _atomic_write(path: Path, content: str) -> None:
+    """Write *content* to *path* atomically via a sibling temp file + rename."""
+    tmp_path = path.with_suffix(".tmp")
+    tmp_path.write_text(content, encoding="utf-8")
+    os.rename(tmp_path, path)
+
+
+async def handle_create_session_file(args: dict) -> list[TextContent]:
+    """Create a new session file from the template."""
+    sessions_dir = _resolve_sessions_dir()
+    today = datetime.now(timezone.utc).strftime("%Y%m%d")
+    seq = _next_sequence_number(sessions_dir, today)
+    session_id = f"{today}-{seq:03d}"
+    file_path = sessions_dir / f"{session_id}.md"
+
+    template = _resolve_session_template(sessions_dir)
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    if template:
+        content = (
+            template
+            .replace("YYYYMMDD-NNN", session_id)
+            .replace("<ISO timestamp, e.g. 2026-03-25T14:32:00Z>", now_iso)
+        )
+    else:
+        content = (
+            f"# Session {session_id}\n\n"
+            f"**Started:** {now_iso}\n"
+            f"**Ended:** active\n\n"
+            "## Summary\n\n"
+            "## Open Threads\n\n"
+            "## Open Tasks\n\n"
+            "## Open Subagents\n\n"
+            "## Communication Channels\n\n"
+            "## Notable Events\n"
+        )
+
+    _atomic_write(file_path, content)
+    _atomic_write(_SESSION_POINTER_FILE, str(file_path))
+
+    import json as _json
+    result = _json.dumps({"path": str(file_path), "session_id": session_id})
+    return [TextContent(type="text", text=result)]
+
+
+async def handle_get_session_file(args: dict) -> list[TextContent]:
+    """Read a session file by ID or return the current one."""
+    import json as _json
+
+    session_id = args.get("session_id", "current")
+    sessions_dir = _resolve_sessions_dir()
+
+    if session_id == "current":
+        path = _resolve_current_session_path(sessions_dir)
+        if path is None:
+            return [TextContent(type="text", text='{"error": "No current session file found."}')]
+        resolved_id = path.stem
+    else:
+        path = _session_id_to_path(sessions_dir, session_id)
+        if path is None:
+            return [TextContent(type="text", text=_json.dumps({"error": f"Session file not found: {session_id}"}))]
+        resolved_id = session_id
+
+    content = path.read_text(encoding="utf-8")
+    result = _json.dumps({"path": str(path), "content": content, "session_id": resolved_id})
+    return [TextContent(type="text", text=result)]
+
+
+async def handle_update_session_file(args: dict) -> list[TextContent]:
+    """Update a named H2 section in a session file."""
+    import json as _json
+
+    section = args.get("section")
+    new_content = args.get("content")
+    session_id = args.get("session_id", "current")
+
+    if not section:
+        return [TextContent(type="text", text='{"error": "section is required."}')]
+    if new_content is None:
+        return [TextContent(type="text", text='{"error": "content is required."}')]
+
+    sessions_dir = _resolve_sessions_dir()
+
+    if session_id == "current":
+        path = _resolve_current_session_path(sessions_dir)
+        if path is None:
+            return [TextContent(type="text", text='{"error": "No current session file found."}')]
+    else:
+        path = _session_id_to_path(sessions_dir, session_id)
+        if path is None:
+            return [TextContent(type="text", text=_json.dumps({"error": f"Session file not found: {session_id}"}))]
+
+    original = path.read_text(encoding="utf-8")
+    updated = _replace_section_content(original, section, new_content)
+
+    if updated is None:
+        return [TextContent(type="text", text=_json.dumps({"error": f"Section not found: {section}"}))]
+
+    _atomic_write(path, updated)
+    result = _json.dumps({"path": str(path), "section": section, "updated": True})
+    return [TextContent(type="text", text=result)]
+
+
+async def handle_list_session_files(args: dict) -> list[TextContent]:
+    """List session files, optionally filtered by date."""
+    import json as _json
+
+    date_filter = args.get("date")
+    sessions_dir = _resolve_sessions_dir()
+
+    pattern = f"{date_filter}-*.md" if date_filter else "*.md"
+    candidates = sorted(
+        p for p in sessions_dir.glob(pattern)
+        if p.stem != "session.template" and re.match(r"^\d{8}-\d{3}$", p.stem)
+    )
+
+    def _has_content(path: Path) -> bool:
+        try:
+            text = path.read_text(encoding="utf-8")
+            body = _extract_section_content(text, "Summary") or ""
+            stripped = body.strip()
+            return len(stripped) > 50 and not stripped.startswith(_SESSION_SUMMARY_BOILERPLATE)
+        except Exception:
+            return False
+
+    entries = [
+        {"session_id": p.stem, "path": str(p), "has_content": _has_content(p)}
+        for p in candidates
+    ]
+    return [TextContent(type="text", text=_json.dumps(entries))]
+
+
+# =============================================================================
 # Audio Transcription Handler (Local Whisper.cpp)
 # =============================================================================
 
@@ -5629,8 +6014,12 @@ async def handle_check_task_outputs(args: dict) -> list[TextContent]:
     limit = args.get("limit", 10)
     job_name_filter = args.get("job_name", "").strip().lower()
 
-    # Get all output files
-    output_files = sorted(TASK_OUTPUTS_DIR.glob("*.json"), reverse=True)
+    # Get all output files, sorted by mtime descending (newest first).
+    # Sorting by filename is unreliable: non-date-prefixed files (e.g. old
+    # write_result artifacts) sort lexicographically ahead of date-prefixed
+    # write_task_output files and would dominate every result page.
+    all_files = list(TASK_OUTPUTS_DIR.glob("*.json"))
+    output_files = sorted(all_files, key=lambda p: p.stat().st_mtime, reverse=True)
 
     if not output_files:
         return [TextContent(type="text", text="No task outputs yet.\n\nOutputs will appear here when scheduled jobs complete.")]
@@ -5650,6 +6039,13 @@ async def handle_check_task_outputs(args: dict) -> list[TextContent]:
         try:
             with open(f) as fp:
                 data = json.load(fp)
+
+            # Skip files that are not write_task_output records.  The task-outputs
+            # directory may contain stale write_result artifacts (schema: task_id/text)
+            # from an older code path.  These have no job_name or output fields and
+            # would render as "unknown" / "(no output)".  Silently skip them.
+            if "job_name" not in data:
+                continue
 
             # Filter by job name
             if job_name_filter and data.get("job_name", "").lower() != job_name_filter:
@@ -8110,6 +8506,12 @@ async def main():
     """Run the MCP server."""
     setup_logging()
     _ensure_observation_worker()
+
+    # Clear the dispatcher state file on startup so a stale session ID from a
+    # previous run cannot linger and mislead hooks into thinking the old session
+    # is still active.  The file is re-written by _tag_dispatcher_session() once
+    # the dispatcher identifies itself via Options A, B, or C.
+    _clear_dispatcher_state_file()
 
     # Initialize the event bus singleton with standard listeners.
     # JsonlFileListener writes all events to logs/events.jsonl.
