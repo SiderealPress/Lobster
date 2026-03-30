@@ -69,7 +69,8 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
     trigger_message_id  TEXT,
     trigger_snippet     TEXT,
     reply_message_ids   TEXT,
-    stop_reason         TEXT
+    stop_reason         TEXT,
+    idempotency         TEXT DEFAULT 'unknown'
 );
 """
 
@@ -113,6 +114,7 @@ _MIGRATION_STMTS = [
     "ALTER TABLE agent_sessions ADD COLUMN trigger_snippet TEXT",
     "ALTER TABLE agent_sessions ADD COLUMN reply_message_ids TEXT",
     "ALTER TABLE agent_sessions ADD COLUMN stop_reason TEXT",
+    "ALTER TABLE agent_sessions ADD COLUMN idempotency TEXT DEFAULT 'unknown'",
 ]
 
 # Additive migrations for the reports table (BIS-85 multi-instance prep).
@@ -238,7 +240,6 @@ def session_start(
     trigger_message_id: str | None = None,
     trigger_snippet: str | None = None,
     idempotency: str | None = None,
-    task_origin: str | None = None,
     path: Path | None = None,
 ) -> None:
     """Record a newly-spawned agent session.
@@ -265,12 +266,6 @@ def session_start(
                             'unsafe'  — task has side effects (writes, sends, posts);
                                         requires explicit user approval to re-run.
                             'unknown' — caller did not classify the task (default).
-        task_origin:        Origin of this task: 'user' | 'scheduled' | 'internal'.
-                            'user'      — triggered by a real user message (Telegram, Slack).
-                            'scheduled' — triggered by a scheduled job or cron task.
-                            'internal'  — system-initiated, no user involved (reconciler,
-                                          health check, session management, etc.).
-                            Defaults to 'user' when not specified.
         path:               DB path override (for tests).
     """
     resolved = path if path is not None else _DEFAULT_DB_PATH
@@ -278,7 +273,6 @@ def session_start(
     now = datetime.now(timezone.utc).isoformat()
     snippet = trigger_snippet[:200] if trigger_snippet else None
     idempotency_val = idempotency if idempotency in ("safe", "unsafe", "unknown") else "unknown"
-    task_origin_val = task_origin if task_origin in ("user", "scheduled", "internal") else "user"
 
     conn.execute(
         """
@@ -287,10 +281,10 @@ def session_start(
              output_file, timeout_minutes, input_summary, result_summary,
              parent_id, spawned_at, completed_at, last_seen_at,
              notified_at, trigger_message_id, trigger_snippet, reply_message_ids,
-             idempotency, task_origin)
+             idempotency)
         VALUES
             (?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, NULL, ?, ?, NULL, NULL,
-             NULL, ?, ?, NULL, ?, ?)
+             NULL, ?, ?, NULL, ?)
         """,
         (
             id,
@@ -307,7 +301,6 @@ def session_start(
             trigger_message_id,
             snippet,
             idempotency_val,
-            task_origin_val,
         ),
     )
     conn.commit()
