@@ -1847,6 +1847,33 @@ EOF
         fi
     fi
 
+    # Migration 52: Add LOBSTER-GHOST-DETECTOR cron entry.
+    # agent-monitor.py runs every 5 minutes and calls --alert --mark-failed directly,
+    # sending Telegram alerts when ghost agents are found. No LLM subagent is needed.
+    # Previously this was routed through REMINDER_ROUTING in sys.dispatcher.bootup.md
+    # which spawned a lobster-generalist just to run the script and relay its output.
+    # That LLM relay layer has been removed; the script now runs directly from cron.
+    local GHOST_DETECTOR_MARKER="# LOBSTER-GHOST-DETECTOR"
+    if ! crontab -l 2>/dev/null | grep -q "$GHOST_DETECTOR_MARKER"; then
+        "$LOBSTER_DIR/scripts/cron-manage.sh" add "$GHOST_DETECTOR_MARKER" \
+            "*/5 * * * * cd $HOME && uv run $LOBSTER_DIR/scripts/agent-monitor.py --alert --mark-failed >> $WORKSPACE_DIR/logs/agent-monitor.log 2>&1 $GHOST_DETECTOR_MARKER"
+        substep "Added ghost detector cron entry (agent-monitor.py --alert --mark-failed, every 5 min)"
+        migrated=$((migrated + 1))
+    fi
+
+    # Migration 53: Add LOBSTER-OOM-CHECK cron entry.
+    # oom-monitor.py runs every 10 minutes, scans the kernel journal for OOM kills,
+    # and writes inbox messages directly when new events are detected. No LLM needed.
+    # Previously this was routed through REMINDER_ROUTING which spawned a subagent.
+    # Only active when LOBSTER_DEBUG=true (the script exits 0 silently otherwise).
+    local OOM_CHECK_MARKER="# LOBSTER-OOM-CHECK"
+    if ! crontab -l 2>/dev/null | grep -q "$OOM_CHECK_MARKER"; then
+        "$LOBSTER_DIR/scripts/cron-manage.sh" add "$OOM_CHECK_MARKER" \
+            "*/10 * * * * cd $HOME && uv run $LOBSTER_DIR/scripts/oom-monitor.py --since-minutes 10 >> $WORKSPACE_DIR/logs/oom-monitor.log 2>&1 $OOM_CHECK_MARKER"
+        substep "Added OOM monitor cron entry (oom-monitor.py --since-minutes 10, every 10 min)"
+        migrated=$((migrated + 1))
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
