@@ -20,6 +20,15 @@ Self-hosted CouchDB instance for Obsidian LiveSync:
 - **Data**: `~/obsidian-vault/.couchdb/`
 - **Config**: `~/lobster-config/obsidian.env`
 
+### LiveSync Configuration (BIS-231)
+
+Obsidian LiveSync plugin support:
+
+- **Database**: `obsidian-livesync` (auto-created)
+- **CORS**: Enabled for all origins
+- **Settings**: `reduce_limit=false`, large document support
+- **Docs**: See `docs/livesync-setup.md` for plugin configuration
+
 ## Installation
 
 ### Prerequisites
@@ -96,11 +105,14 @@ The installer enables `loginctl enable-linger` for the user account, ensuring th
 
 ```
 lobster-shop/obsidian-km/
-├── install.sh                    # Main installer script
+├── install.sh                    # Main installer script (CouchDB + LiveSync)
 ├── README.md                     # This file
 ├── config/
 │   └── obsidian.env.template    # Config file template
-├── scripts/                      # Helper scripts (future)
+├── docs/
+│   └── livesync-setup.md        # Obsidian LiveSync plugin setup guide
+├── scripts/
+│   └── configure-couchdb.sh     # LiveSync database and CORS configuration
 └── services/
     └── couchdb.service          # Systemd user service unit
 ```
@@ -108,7 +120,10 @@ lobster-shop/obsidian-km/
 ## Related Issues
 
 - **BIS-228**: Obsidian KM Skill (epic)
-- **BIS-230**: Install CouchDB on Lobster server (this component)
+- **BIS-230**: Install CouchDB on Lobster server
+- **BIS-231**: Configure CouchDB + LiveSync database
+- **BIS-232**: HTTPS proxy for external access
+- **BIS-233**: Create vault structure
 
 ## Troubleshooting
 

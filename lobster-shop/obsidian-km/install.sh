@@ -2,6 +2,7 @@
 #
 # Obsidian KM Skill - CouchDB Installer
 # BIS-230: Install CouchDB on Lobster server (systemd service)
+# BIS-231: Configure CouchDB + LiveSync database (CORS, databases)
 #
 # This script is idempotent: safe to run multiple times without breaking
 # an existing installation.
@@ -398,6 +399,21 @@ verify_installation() {
     echo ""
 }
 
+# Step 11: Configure CouchDB for LiveSync (BIS-231)
+configure_livesync() {
+    log_step "Configuring CouchDB for Obsidian LiveSync..."
+
+    local configure_script="${SCRIPT_DIR}/scripts/configure-couchdb.sh"
+
+    if [[ ! -x "$configure_script" ]]; then
+        log_error "Configure script not found or not executable: ${configure_script}"
+        return 1
+    fi
+
+    # Run the configuration script
+    "$configure_script"
+}
+
 # ============================================================================
 # Main Installation Flow
 # ============================================================================
@@ -415,7 +431,8 @@ main() {
             --help|-h)
                 echo "Usage: $0 [--dry-run]"
                 echo ""
-                echo "Installs CouchDB as a systemd user service for the Obsidian KM skill."
+                echo "Installs CouchDB as a systemd user service for the Obsidian KM skill"
+                echo "and configures it for Obsidian LiveSync (databases, CORS, settings)."
                 echo ""
                 echo "Options:"
                 echo "  --dry-run    Show what would be done without making changes"
@@ -449,6 +466,7 @@ main() {
         echo "  8. Enable and start user service"
         echo "  9. Enable linger for boot persistence"
         echo " 10. Verify installation"
+        echo " 11. Configure CouchDB for LiveSync (CORS, database)"
         exit 0
     fi
 
@@ -465,6 +483,9 @@ main() {
     enable_and_start_service
     enable_linger
     verify_installation
+
+    # Configure CouchDB for LiveSync (BIS-231)
+    configure_livesync
 
     log_info "Installation complete!"
 }
