@@ -170,18 +170,15 @@ Scheduled reminders arrive from two sources:
 
 **Routing table** — maps `reminder_type` to subagent+prompt for system cron jobs. User-created jobs carry `task_content` and are dispatched generically; do NOT add them to REMINDER_ROUTING.
 
+> **Note on ghost_detector and oom_check:** Both run as pure cron scripts — `agent-monitor.py --alert --mark-failed` (every 5 minutes) and `oom-monitor.py --since-minutes 10` (every 10 minutes) — with no inbox message and no LLM involvement. If a `ghost_detector` or `oom_check` scheduled_reminder arrives (e.g. from a legacy install still running `post-reminder.sh`), it will fall through to the unknown-reminder fallback below and be logged and dropped.
+
 ```python
 REMINDER_ROUTING = {
-  "ghost_detector": {
-    "subagent_type": "lobster-generalist",
-    "prompt": "---\ntask_id: agent-monitor\nchat_id: 0\nsource: system\n---\n\n"
-              "Run the agent monitor: uv run ~/lobster/scripts/agent-monitor.py and report findings.",
-  },
-  "oom_check": {
-    "subagent_type": "lobster-generalist",
-    "prompt": "---\ntask_id: oom-check\nchat_id: 0\nsource: system\n---\n\n"
-              "Run the OOM monitor: uv run ~/lobster/scripts/oom-monitor.py --since-minutes 10 and report findings.",
-  },
+  # --- System cron jobs only (no task_content embedded; subagent handles output) ---
+  # Do NOT add user-created jobs here — they are handled generically via task_content.
+  # ghost_detector and oom_check were removed — both scripts now run directly from
+  # cron (LOBSTER-GHOST-DETECTOR and LOBSTER-OOM-CHECK entries) and alert/write
+  # to the inbox themselves. No LLM subagent is needed for either.
 }
 ```
 
@@ -206,10 +203,12 @@ REMINDER_ROUTING = {
                      f"text='Unknown reminder type: {reminder_type}') and return.")
        Spawn lobster-generalist (run_in_background=True) with prompt
    else:
-       Spawn subagent (run_in_background=True) with route["subagent_type"] and route["prompt"]
-
-5. mark_processed(message_id)
-   # THE VERY NEXT ACTION MUST BE wait_for_messages() — see WFM-always-next rule
+       # Known static route (system job with explicit REMINDER_ROUTING entry).
+       Spawn subagent (run_in_background=True):
+       - subagent_type: route["subagent_type"]
+       - prompt: route["prompt"]
+       mark_processed(message_id)
+       # THE VERY NEXT ACTION MUST BE wait_for_messages() — see WFM-always-next rule below
 ```
 
 **WFM-always-next rule:**
