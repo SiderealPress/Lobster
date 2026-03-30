@@ -1,42 +1,49 @@
 # =============================================================================
-# Obsidian KM Skill — Manifest
+# Lobster Skill Manifest — Obsidian KM
 # =============================================================================
-# Knowledge management skill for Lobster using Obsidian as the storage layer.
-# Part of BIS-228 epic: Obsidian-based Knowledge Management.
+# Obsidian vault sync and read/write access via Telegram.
+# Part of BIS-228 (Obsidian KM Skill epic)
 
 [skill]
 name = "obsidian-km"
 version = "0.1.0"
-description = "Read and write notes to your Obsidian vault — capture ideas, archive links, and build a knowledge base"
-author = "SiderealPress"
-category = "workflow"
+description = "Obsidian vault sync and read/write access via Telegram"
+author = "Lobster"
+category = "tool"
 
 [activation]
-mode = "always"
-triggers = []
-context_patterns = []
+mode = "triggered"
+triggers = ["/note", "/vault", "/search"]
+context_patterns = [
+    "when user asks to create a note",
+    "when user asks to search notes",
+    "when user asks about their vault",
+    "when user wants to read a note",
+]
 
 [layering]
 priority = 50
 merge_strategy = "append"
 
 [provides]
-mcp_tools = ["note_create", "note_read", "note_search", "note_list"]
-bot_commands = ["/note", "/vault"]
+mcp_tools = [
+    "note_create",
+    "note_read",
+    "note_search",
+    "note_append",
+    "note_list",
+]
+bot_commands = ["/note", "/vault", "/search"]
 
 [compatibility]
 enhances = []
 conflicts = []
 
 [dependencies]
-pip = []
+pip = ["python-frontmatter", "python-dotenv"]
 npm = []
-system = []
+system = ["couchdb", "caddy", "ripgrep"]
 api_keys = []
 
 [dependencies.runtime]
 python = ">=3.11"
-
-[config]
-vault_dir = "~/obsidian-vault"
-default_folder = "Inbox"
