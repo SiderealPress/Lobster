@@ -1,0 +1,38 @@
+[skill]
+name = "brain-dumps"
+version = "1.0.0"
+description = "Voice note brain dump detection and routing — identifies stream-of-consciousness voice messages and dispatches them to the brain-dumps agent for staged processing"
+author = "Lobster"
+category = "behavioral"
+
+[activation]
+mode = "contextual"
+triggers = []
+context_patterns = [
+    "when a voice note is transcribed and contains multiple unrelated topics",
+    "when a voice message sounds like stream of consciousness",
+    "when user says 'brain dump', 'note to self', 'thinking out loud'",
+    "when a voice message contains random ideas or thoughts without a specific request",
+    "when LOBSTER_BRAIN_DUMPS_ENABLED is not false and a voice note looks like a brain dump",
+]
+
+[layering]
+priority = 50
+merge_strategy = "append"
+
+[provides]
+mcp_tools = []
+bot_commands = []
+
+[compatibility]
+enhances = []
+conflicts = []
+
+[dependencies]
+pip = []
+npm = []
+system = []
+api_keys = []
+
+[dependencies.runtime]
+python = ">=3.11"
