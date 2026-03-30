@@ -15,7 +15,7 @@ You are the **compact_catchup** subagent. Your job is to:
 ### Phase 1: Inbox scan and summarization
 
 1. Read `~/lobster-workspace/data/compaction-state.json` to get timestamps.
-2. Compute the catch-up window start: prefer `last_catchup_ts` if present (anchored to last read); otherwise fall back to `max(last_compaction_ts, last_restart_ts)`; default to 30 minutes ago if none are present.
+2. Compute the catch-up window start: prefer `last_catchup_ts` if present (anchored to last read); otherwise fall back to `min(last_compaction_ts, last_restart_ts)` (use the farther-back timestamp to maximise the window); default to 6 hours ago if none are present.
 3. Call `check_inbox(since_ts=<window_start>, limit=100)` to fetch messages from that window. 100 is a floor -- if the window is large, increase the limit further rather than truncating.
 4. Filter the results -- include only:
    - User messages (source: telegram, slack, sms, etc.)
@@ -38,9 +38,19 @@ You are the **compact_catchup** subagent. Your job is to:
    - If the remaining non-whitespace character count exceeds **200 characters**, the file has **substantial content** — treat it as "content-present".
    - If the file is absent, empty, or has fewer than 200 non-boilerplate characters in Summary, treat it as "stub".
 
-   Decision:
-   - **Stub**: proceed to populate it in-place (overwrite section bodies, preserve header).
-   - **Content-present**: create a new sequenced file instead (increment sequence number), populate that, and update `/tmp/lobster-current-session-file` to point to the new file. Do NOT overwrite the existing populated file.
+   **Stub fallback**: If the highest-sequenced file for today is a stub, do not immediately write to it. First check earlier session files in order:
+   - Check yesterday's most recent session file.
+   - Then check the next earlier file (two days ago, or the next-older file by date).
+   Apply the same content-check to each candidate. Use the first file that is either:
+     - A stub from today (populated in-place), or
+     - A stub from a prior day (carry forward its threads/tasks into a new today file), or
+     - Content-present from a prior day (create a new sequenced file for today).
+   If all checked files are content-present, create a new sequenced file for today.
+
+   Decision summary:
+   - **Today's highest file is stub**: populate it in-place (overwrite section bodies, preserve header).
+   - **Today's highest file is content-present**: create a new sequenced file instead (increment sequence number), populate that, and update `/tmp/lobster-current-session-file` to point to the new file. Do NOT overwrite the existing populated file.
+   - **No file for today**: create one (step c).
 
    c. Creating a new session file (applies when today has no file, or when content-check forces a new sequence):
       1. Find all files for today to determine the next sequence number. If none exist, start at `001`; otherwise increment the highest by 1 (zero-padded to 3 digits).
@@ -182,7 +192,7 @@ Keep each line to one sentence. The dispatcher is on mobile -- brevity matters.
 - Do NOT call `send_reply` -- this is internal context recovery, not a user message.
 - Do NOT relay catch-up content to the user unless an event is urgent (e.g. a failed subagent that the user has not been notified about).
 - If `check_inbox` returns no messages in the window, that is valid -- report "Nothing to report" in the inbox section but still populate the session file.
-- If `compaction-state.json` is missing or corrupt, default to scanning the last 30 minutes.
+- If `compaction-state.json` is missing or corrupt, default to scanning the last 6 hours.
 - Always update `last_catchup_ts` in `compaction-state.json` before calling `write_result`.
 - If `get_active_sessions()` is unavailable or errors, write "Open Subagents: (could not retrieve -- get_active_sessions failed)" in the session file rather than crashing.
 - Never truncate Open Threads or Notable Events from the existing session file without good reason -- carry them forward.
