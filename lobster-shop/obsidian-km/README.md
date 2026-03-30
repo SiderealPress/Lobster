@@ -1,79 +1,76 @@
-# Obsidian KM Skill
+# Obsidian KM
 
-Knowledge management skill for Lobster using Obsidian vaults.
+**Automatic link capture to your Obsidian vault.**
 
-## Overview
+When Drew sends a URL in Telegram, Lobster automatically saves it to your Obsidian vault with:
+- Page title (fetched automatically)
+- Archive.org backup
+- Original caption
+- Date captured
+- `#link` tag for easy filtering
 
-Pure Python vault operations using filesystem + `python-frontmatter` + ripgrep.
-No external service dependencies — works on headless servers.
+## Features
+
+- **Automatic capture** — URLs are saved without any extra commands
+- **Duplicate detection** — Skip URLs already captured this month
+- **Page title fetch** — Uses headless browser to get real page titles
+- **Archive integration** — Links are backed up on archive.org
+- **Clean markdown** — Notes use YAML frontmatter for Obsidian compatibility
 
 ## Installation
 
-Requires `python-frontmatter`:
-
 ```bash
-uv pip install python-frontmatter
+bash lobster-shop/obsidian-km/install.sh
+```
+
+Then create your Obsidian vault:
+```bash
+mkdir -p ~/obsidian-vault/Links
 ```
 
 ## Usage
 
-```python
-from obsidian_km.src.vault_ops import create_note, read_note, search_notes
+Just send URLs in Telegram — they're captured automatically.
 
-# Create a note
-path = create_note(
-    title="Meeting Notes",
-    content="# Meeting Notes\n\nDiscussed roadmap.",
-    folder="Inbox",
-    tags=["meetings"],
-)
+### Commands
 
-# Read a note
-note = read_note("Meeting Notes", folder="Inbox")
-print(note["content"])
+| Command | Description |
+|---------|-------------|
+| `/vault <url>` | Force-capture a URL (bypass duplicate check) |
+| `/vault status` | Show how many links captured this month |
 
-# Search notes
-matches = search_notes("roadmap")
-for m in matches:
-    print(f"{m['title']}: {m['line_content']}")
+## Configuration
+
+Set preferences via `set_skill_preference`:
+
+| Preference | Default | Description |
+|------------|---------|-------------|
+| `OBSIDIAN_AUTO_CAPTURE_LINKS` | `true` | Enable automatic capture |
+| `OBSIDIAN_VAULT_PATH` | `~/obsidian-vault` | Path to vault |
+| `OBSIDIAN_LINKS_FOLDER` | `Links` | Folder for captured links |
+
+## Note Format
+
+```markdown
+---
+title: "Article Title"
+url: https://example.com/article
+tags: [link]
+captured: 2026-03-30T14:23:00
+archived: https://web.archive.org/web/20260330/https://example.com/article
+---
+
+[https://example.com/article](https://example.com/article)
+
+Saved from Telegram on 2026-03-30.
 ```
 
-## API Reference
+## Integration
 
-### Path Utilities
+This skill **extends** existing Commonbook behavior:
 
-- `resolve_vault_path(vault=None)` — Returns vault directory (default: `~/obsidian-vault/`)
-- `sanitize_title(title)` — Remove invalid filename characters
+1. Archive on archive.org (Commonbook)
+2. Comment on brain-dumps issue (Commonbook)
+3. Save to Obsidian vault (this skill)
 
-### Note Operations
-
-- `create_note(title, content, folder="Inbox", tags=None, vault=None)` — Create note
-- `read_note(title_or_path, folder=None, vault=None)` — Read note by title or path
-- `append_to_note(title_or_path, content, separator="\n", vault=None)` — Append to note
-
-### Search & Discovery
-
-- `search_notes(query, folder=None, limit=10, vault=None)` — Full-text search (ripgrep)
-- `list_notes(folder=None, tag=None, limit=20, sort="modified", vault=None)` — List notes
-
-## Testing
-
-Run the proof of concept:
-
-```bash
-cd lobster-shop/obsidian-km
-python scripts/vault_poc.py
-```
-
-## Design Decisions
-
-See [docs/cli-approach.md](docs/cli-approach.md) for the technical decision document.
-
-## Part of BIS-229 Epic
-
-This module is the foundation for:
-- BIS-238: MCP tool wrappers
-- BIS-239: Template-based note creation
-- BIS-240: Daily note handling
-- BIS-241: Note linking and backlinks
-- BIS-242: Integration tests
+All three happen for every captured link.

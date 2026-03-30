@@ -1,34 +1,77 @@
-# Obsidian KM Skill
+## Obsidian KM — Dispatcher Behavior
 
-Access and manage notes in an Obsidian vault.
+### URL Detection
 
-## Available Tools
+When processing any message, check if it contains a URL:
 
-### note_list
+```python
+from link_capture import contains_url, extract_urls
 
-List notes in the vault with optional filtering and sorting.
-
-**Parameters:**
-- `folder` (optional): Filter to notes within this folder path (relative to vault root)
-- `tag` (optional): Filter to notes containing this tag (checks YAML frontmatter `tags` field)
-- `limit` (optional, default: 20): Maximum notes to return
-- `sort` (optional, default: "modified"): Sort order — "modified", "created", or "title"
-
-**Returns:**
-- `notes`: Array of note objects with: title, path, tags, created, modified, size
-- `total`: Total count of matching notes (before limit applied)
-
-## Configuration
-
-Set the vault path using skill preferences:
-
-```
-/skill set obsidian-km vault_path /path/to/your/vault
+if contains_url(message_text):
+    urls = extract_urls(message_text)
+    # Trigger link capture for each URL
 ```
 
-## Usage Notes
+### Automatic Link Capture Flow
 
-- Tag filtering checks the `tags` field in YAML frontmatter
-- Paths are relative to the vault root
-- Hidden files/folders (starting with `.`) are excluded
-- The `.obsidian` config folder is always excluded
+1. **Detect URL** in incoming message
+2. **Acknowledge immediately**: `send_reply(chat_id, "Link saved.", message_id=message_id)`
+3. **Delegate capture** to background subagent (7-second rule)
+
+The subagent handles:
+- Preference check (`OBSIDIAN_AUTO_CAPTURE_LINKS`)
+- Duplicate detection (skip if captured this month)
+- Page title fetch via `fetch_page` MCP tool
+- Archive.org archival (existing Commonbook)
+- Vault note creation
+- Brain-dumps issue comment (existing Commonbook)
+
+### Subagent Prompt Template
+
+```
+Capture link to Obsidian vault and archive:
+
+URL: {url}
+Caption: {caption}
+Chat ID: {chat_id}
+
+Steps:
+1. Check OBSIDIAN_AUTO_CAPTURE_LINKS preference
+2. Check duplicate (skip if URL captured this month)
+3. Fetch page title: fetch_page(url="{url}")
+4. Archive: curl -s "https://web.archive.org/save/{url}"
+5. Capture to vault using link_capture module
+6. Comment on brain-dumps issue #17 with link + archive URL
+
+Use:
+```python
+import sys, os
+sys.path.insert(0, os.path.expanduser("~/lobster/lobster-shop/obsidian-km/src"))
+from link_capture import capture_link_sync
+
+result = capture_link_sync(
+    url="{url}",
+    caption="{caption}",
+    title=page_title,
+    archived_url=archive_url,
+)
+print(result.message)
+```
+
+Report only on error or skip.
+```
+
+### Manual Commands
+
+| Command | Action |
+|---------|--------|
+| `/vault <url>` | Force-capture URL (bypass duplicate check) |
+| `/vault status` | Show capture stats this month |
+| `/obsidian` | Alias for `/vault` |
+
+### Error Handling
+
+If capture fails:
+- Log error but don't interrupt user flow
+- Report to Drew only on persistent failures
+- Never expose stack traces in Telegram

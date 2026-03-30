@@ -1,10 +1,5 @@
-# Default preferences for obsidian-km skill
+# Obsidian KM Default Preferences
 
-# Path to the Obsidian vault directory
-vault_path = ""
-
-# Default limit for note_list results
-default_limit = 20
-
-# Default sort order: "modified", "created", or "title"
-default_sort = "modified"
+OBSIDIAN_AUTO_CAPTURE_LINKS = true
+OBSIDIAN_VAULT_PATH = "~/obsidian-vault"
+OBSIDIAN_LINKS_FOLDER = "Links"

@@ -1,24 +1,23 @@
-# obsidian-km: Obsidian Knowledge Management skill for Lobster
-#
-# Pure Python vault operations using filesystem + frontmatter + ripgrep.
-# See docs/cli-approach.md for design rationale.
+"""
+Obsidian KM — Knowledge Management for Lobster
 
-from .vault_ops import (
-    resolve_vault_path,
-    sanitize_title,
-    create_note,
-    read_note,
-    search_notes,
-    append_to_note,
-    list_notes,
+Automatic link capture and knowledge archival to Obsidian vault.
+"""
+
+from .link_capture import (
+    capture_link,
+    capture_link_sync,
+    contains_url,
+    extract_urls,
+    CaptureResult,
+    LinkNote,
 )
 
 __all__ = [
-    "resolve_vault_path",
-    "sanitize_title",
-    "create_note",
-    "read_note",
-    "search_notes",
-    "append_to_note",
-    "list_notes",
+    'capture_link',
+    'capture_link_sync',
+    'contains_url',
+    'extract_urls',
+    'CaptureResult',
+    'LinkNote',
 ]

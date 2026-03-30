@@ -1,19 +1,17 @@
-# Schema for obsidian-km preferences
+# Obsidian KM Preference Schema
+# Defines valid preference keys and their types
 
-[vault_path]
+[OBSIDIAN_AUTO_CAPTURE_LINKS]
+type = "boolean"
+description = "Automatically capture URLs to Obsidian vault when Drew sends them"
+default = true
+
+[OBSIDIAN_VAULT_PATH]
 type = "string"
-description = "Absolute path to the Obsidian vault directory"
-required = true
+description = "Path to Obsidian vault directory"
+default = "~/obsidian-vault"
 
-[default_limit]
-type = "integer"
-description = "Default number of notes to return from note_list"
-default = 20
-min = 1
-max = 1000
-
-[default_sort]
+[OBSIDIAN_LINKS_FOLDER]
 type = "string"
-description = "Default sort order for note_list"
-enum = ["modified", "created", "title"]
-default = "modified"
+description = "Folder within vault for captured links"
+default = "Links"
