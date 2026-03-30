@@ -564,9 +564,7 @@ Event: {brief description}
 
 ## Hibernation
 
-When idle timeout fires, `wait_for_messages(timeout=1800, hibernate_on_timeout=True)` returns "Hibernating"/"EXIT" — break the loop and let the session end. The health check recognizes the hibernate state and will not restart Claude. The bot restarts Claude on the next incoming message.
-
-The `hibernate_on_timeout` flag tells `wait_for_messages` to write `~/messages/config/lobster-state.json` with `{"mode": "hibernate"}` and return a string containing "Hibernating" and "EXIT". You must break the loop when you see either word. State file modes: `"active"` (default) | `"hibernate"`.
+For hibernation loop semantics, state file format (`~/messages/config/lobster-state.json`), and how to break the loop cleanly, see the `hibernation` skill in `lobster-shop/hibernation/`.
 
 ## No Redundant Relay After Subagent Direct Messages
 
@@ -655,30 +653,11 @@ if msg["text"].strip().lower().startswith("/re-review"):
 
 ## Processing Voice Note Brain Dumps
 
-If a transcribed voice message looks like a brain dump (multiple unrelated topics, "note to self", "thinking out loud", stream of consciousness) and `LOBSTER_BRAIN_DUMPS_ENABLED != false`, spawn the `brain-dumps` agent:
-
-```
-Task(
-  prompt=f"---\ntask_id: brain-dump-{id}\nchat_id: {chat_id}\nsource: {source}\nreply_to_message_id: {id}\n---\n\nProcess this brain dump:\nTranscription: {text}",
-  subagent_type="brain-dumps"
-)
-```
-
-NOT a brain dump (handle normally): direct questions, commands ("Set a reminder"), specific task requests. See `.claude/agents/brain-dumps.md` for full processing pipeline.
+For detection indicators, dispatcher behavior, and the Task() invocation format, see the `brain-dumps` skill in `lobster-shop/brain-dumps/`. The full processing pipeline (staged triage, context matching, enrichment, GitHub issue creation) is in `.claude/agents/brain-dumps.md`.
 
 ## Google Calendar
 
-Check auth status first (no network call):
-```python
-import sys; sys.path.insert(0, "/home/admin/lobster/src")
-from integrations.google_calendar.token_store import load_token
-is_authenticated = load_token(user_id) is not None
-```
-
-- **Unauthenticated**: Generate a `gcal_add_link_md` deep link whenever a concrete date/time is mentioned. Omit when date/time is vague.
-- **Authenticated — reading/creating events**: Delegate to a background subagent (API calls exceed the 7-second rule). Always append a deep link or view link even when creating via API.
-- **Auth command** ("connect my Google Calendar", "link Google Calendar"): Handle inline, no subagent. Generate auth URL via `generate_auth_url`. If not configured, tell the user to set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`.
-- **Rules**: Never expose tokens or raw errors. On API failure, always fall back to a deep link. `user_id` = owner's Telegram chat_id as string (from config — never hardcode).
+For auth-mode detection (unauthenticated / authenticated / auth command), per-mode routing, and the auth-check code snippet, see the `gcal-links` skill in `lobster-shop/gcal-links/`.
 
 ## Context Recovery: Reading Recent Messages
 
