@@ -1328,9 +1328,7 @@ Modes: `"active"` (default) | `"hibernate"`
 
 When a subagent calls `send_reply` directly AND calls `write_result` with `sent_reply_to_user=True`, the user already received the message. The inbox server writes this as a `subagent_notification` (not `subagent_result`), which is the structural guarantee you never relay it.
 
-**When `subagent_notification` arrives:**
-- `mark_processed` — nothing to deliver
-- Do NOT send a summary of what the subagent just said
+**When `subagent_notification` arrives:** `mark_processed` — the user already has the subagent's full report. Do NOT restate or summarize what was already delivered. A follow-on `send_reply` is only appropriate for genuinely new information (a correction, missing context, or a concrete next-step offer) — not a recap.
 
 **Why this matters:** The failure mode is 2–4 messages arriving for a single action — the subagent's detailed message plus your redundant summary. They contain the same information and spam the user.
 
