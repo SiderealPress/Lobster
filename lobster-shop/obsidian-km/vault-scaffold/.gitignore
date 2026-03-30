@@ -1,0 +1,19 @@
+# Obsidian workspace and cache files
+.obsidian/workspace
+.obsidian/workspace.json
+.obsidian/workspace-mobile.json
+.obsidian/cache
+
+# Obsidian trash
+.trash/
+
+# macOS
+.DS_Store
+
+# Editor files
+*.swp
+*.swo
+*~
+
+# Sync conflicts (if using git sync alongside CouchDB)
+*.sync-conflict-*
