@@ -2776,6 +2776,91 @@ async def list_tools() -> list[Tool]:
                 "required": [],
             },
         ),
+        # Session File Management Tools
+        Tool(
+            name="create_session_file",
+            description=(
+                "Create a new session file for today. Copies the session template, "
+                "substitutes the date/sequence/timestamps, writes the file to "
+                "~/lobster-user-config/memory/canonical/sessions/YYYYMMDD-NNN.md, "
+                "and records the path in /tmp/lobster-current-session-file. "
+                "Returns {path, session_id}."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        ),
+        Tool(
+            name="get_session_file",
+            description=(
+                "Read a session file. If session_id is 'current' (the default), "
+                "reads the pointer at /tmp/lobster-current-session-file, or finds "
+                "today's latest session. Otherwise looks up the file matching the "
+                "given YYYYMMDD-NNN session_id. "
+                "Returns {path, content, session_id}."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session ID (e.g. '20260329-001') or 'current'. Defaults to 'current'.",
+                        "default": "current",
+                    },
+                },
+                "required": [],
+            },
+        ),
+        Tool(
+            name="update_session_file",
+            description=(
+                "Update a named H2 section (e.g. '## Summary', '## Open Threads') "
+                "inside a session file. Replaces only the targeted section; all other "
+                "sections and the file header are preserved verbatim. Write is atomic "
+                "(temp-file + rename). "
+                "Returns {path, section, updated: true}."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "section": {
+                        "type": "string",
+                        "description": "Section name without the '## ' prefix, e.g. 'Summary' or 'Open Threads'.",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "New content for the section (replaces everything between the section header and the next H2 or EOF).",
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session ID (e.g. '20260329-001') or 'current'. Defaults to 'current'.",
+                        "default": "current",
+                    },
+                },
+                "required": ["section", "content"],
+            },
+        ),
+        Tool(
+            name="list_session_files",
+            description=(
+                "List session files, optionally filtered to a single date. "
+                "Returns a sorted list of {session_id, path, has_content} objects. "
+                "has_content is true when the Summary section contains more than 50 "
+                "characters of non-boilerplate text."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "date": {
+                        "type": "string",
+                        "description": "Optional YYYYMMDD date string to filter results.",
+                    },
+                },
+                "required": [],
+            },
+        ),
     ] + (
         # User Model Tools (only registered when feature flag is enabled)
         [
@@ -3007,6 +3092,15 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
         return await handle_create_report(arguments)
     elif name == "list_reports":
         return await handle_list_reports(arguments)
+    # Session File Management Tools
+    elif name == "create_session_file":
+        return await handle_create_session_file(arguments)
+    elif name == "get_session_file":
+        return await handle_get_session_file(arguments)
+    elif name == "update_session_file":
+        return await handle_update_session_file(arguments)
+    elif name == "list_session_files":
+        return await handle_list_session_files(arguments)
     # User Model Tools (dispatched to user_model subsystem)
     elif name in _user_model_tool_names and _user_model is not None:
         result_json = _user_model.dispatch(name, arguments)
@@ -4938,6 +5032,231 @@ async def handle_delete_task(args: dict) -> list[TextContent]:
 
     save_tasks(data)
     return [TextContent(type="text", text=f"🗑️ Task #{task_id} deleted.")]
+
+
+# =============================================================================
+# Session File Management Handlers
+# =============================================================================
+
+# Pointer file written/read to track the current session
+_SESSION_POINTER_FILE = Path("/tmp/lobster-current-session-file")
+
+# Boilerplate placeholder text in session template summaries
+_SESSION_SUMMARY_BOILERPLATE = "<1-3 sentence summary"
+
+
+def _resolve_sessions_dir() -> Path:
+    """Return the sessions directory, creating it if absent."""
+    sessions_dir = _USER_CONFIG / "memory" / "canonical" / "sessions"
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    return sessions_dir
+
+
+def _resolve_session_template(sessions_dir: Path) -> str | None:
+    """Return template content, or None if the template file does not exist."""
+    template_path = sessions_dir / "session.template.md"
+    if template_path.exists():
+        return template_path.read_text()
+    return None
+
+
+def _next_sequence_number(sessions_dir: Path, date_str: str) -> int:
+    """Return the next available sequence number for *date_str* (YYYYMMDD)."""
+    existing = [
+        p.stem for p in sessions_dir.glob(f"{date_str}-*.md")
+        if p.stem != "session.template"
+    ]
+    if not existing:
+        return 1
+    numbers = []
+    for stem in existing:
+        parts = stem.split("-", 1)
+        if len(parts) == 2:
+            try:
+                numbers.append(int(parts[1]))
+            except ValueError:
+                pass
+    return max(numbers) + 1 if numbers else 1
+
+
+def _session_id_to_path(sessions_dir: Path, session_id: str) -> Path | None:
+    """Return the Path for *session_id*, or None if not found."""
+    candidate = sessions_dir / f"{session_id}.md"
+    return candidate if candidate.exists() else None
+
+
+def _resolve_current_session_path(sessions_dir: Path) -> Path | None:
+    """Return the 'current' session path via pointer file or latest today."""
+    if _SESSION_POINTER_FILE.exists():
+        try:
+            pointer = Path(_SESSION_POINTER_FILE.read_text().strip())
+            if pointer.exists():
+                return pointer
+        except Exception:
+            pass
+
+    # Fall back to the latest session file for today (UTC)
+    today = datetime.now(timezone.utc).strftime("%Y%m%d")
+    candidates = sorted(sessions_dir.glob(f"{today}-*.md"))
+    return candidates[-1] if candidates else None
+
+
+def _extract_section_content(text: str, section_name: str) -> str | None:
+    """Return the body text of a named H2 section, or None if not found."""
+    pattern = re.compile(
+        rf"^## {re.escape(section_name)}\s*\n(.*?)(?=\Z|^## )",
+        re.MULTILINE | re.DOTALL,
+    )
+    m = pattern.search(text)
+    return m.group(1) if m else None
+
+
+def _replace_section_content(text: str, section_name: str, new_body: str) -> str | None:
+    """
+    Replace the body of the named H2 section with *new_body*.
+
+    Returns the updated full text, or None if the section was not found.
+    """
+    pattern = re.compile(
+        rf"(^## {re.escape(section_name)}\s*\n)(.*?)(?=\Z|^## )",
+        re.MULTILINE | re.DOTALL,
+    )
+    if not pattern.search(text):
+        return None
+    body = new_body if new_body.endswith("\n") else new_body + "\n"
+    return pattern.sub(lambda m: m.group(1) + body, text)
+
+
+def _atomic_write(path: Path, content: str) -> None:
+    """Write *content* to *path* atomically via a sibling temp file + rename."""
+    tmp_path = path.with_suffix(".tmp")
+    tmp_path.write_text(content, encoding="utf-8")
+    os.rename(tmp_path, path)
+
+
+async def handle_create_session_file(args: dict) -> list[TextContent]:
+    """Create a new session file from the template."""
+    sessions_dir = _resolve_sessions_dir()
+    today = datetime.now(timezone.utc).strftime("%Y%m%d")
+    seq = _next_sequence_number(sessions_dir, today)
+    session_id = f"{today}-{seq:03d}"
+    file_path = sessions_dir / f"{session_id}.md"
+
+    template = _resolve_session_template(sessions_dir)
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    if template:
+        content = (
+            template
+            .replace("YYYYMMDD-NNN", session_id)
+            .replace("<ISO timestamp, e.g. 2026-03-25T14:32:00Z>", now_iso)
+        )
+    else:
+        content = (
+            f"# Session {session_id}\n\n"
+            f"**Started:** {now_iso}\n"
+            f"**Ended:** active\n\n"
+            "## Summary\n\n"
+            "## Open Threads\n\n"
+            "## Open Tasks\n\n"
+            "## Open Subagents\n\n"
+            "## Communication Channels\n\n"
+            "## Notable Events\n"
+        )
+
+    _atomic_write(file_path, content)
+    _atomic_write(_SESSION_POINTER_FILE, str(file_path))
+
+    import json as _json
+    result = _json.dumps({"path": str(file_path), "session_id": session_id})
+    return [TextContent(type="text", text=result)]
+
+
+async def handle_get_session_file(args: dict) -> list[TextContent]:
+    """Read a session file by ID or return the current one."""
+    import json as _json
+
+    session_id = args.get("session_id", "current")
+    sessions_dir = _resolve_sessions_dir()
+
+    if session_id == "current":
+        path = _resolve_current_session_path(sessions_dir)
+        if path is None:
+            return [TextContent(type="text", text='{"error": "No current session file found."}')]
+        resolved_id = path.stem
+    else:
+        path = _session_id_to_path(sessions_dir, session_id)
+        if path is None:
+            return [TextContent(type="text", text=_json.dumps({"error": f"Session file not found: {session_id}"}))]
+        resolved_id = session_id
+
+    content = path.read_text(encoding="utf-8")
+    result = _json.dumps({"path": str(path), "content": content, "session_id": resolved_id})
+    return [TextContent(type="text", text=result)]
+
+
+async def handle_update_session_file(args: dict) -> list[TextContent]:
+    """Update a named H2 section in a session file."""
+    import json as _json
+
+    section = args.get("section")
+    new_content = args.get("content")
+    session_id = args.get("session_id", "current")
+
+    if not section:
+        return [TextContent(type="text", text='{"error": "section is required."}')]
+    if new_content is None:
+        return [TextContent(type="text", text='{"error": "content is required."}')]
+
+    sessions_dir = _resolve_sessions_dir()
+
+    if session_id == "current":
+        path = _resolve_current_session_path(sessions_dir)
+        if path is None:
+            return [TextContent(type="text", text='{"error": "No current session file found."}')]
+    else:
+        path = _session_id_to_path(sessions_dir, session_id)
+        if path is None:
+            return [TextContent(type="text", text=_json.dumps({"error": f"Session file not found: {session_id}"}))]
+
+    original = path.read_text(encoding="utf-8")
+    updated = _replace_section_content(original, section, new_content)
+
+    if updated is None:
+        return [TextContent(type="text", text=_json.dumps({"error": f"Section not found: {section}"}))]
+
+    _atomic_write(path, updated)
+    result = _json.dumps({"path": str(path), "section": section, "updated": True})
+    return [TextContent(type="text", text=result)]
+
+
+async def handle_list_session_files(args: dict) -> list[TextContent]:
+    """List session files, optionally filtered by date."""
+    import json as _json
+
+    date_filter = args.get("date")
+    sessions_dir = _resolve_sessions_dir()
+
+    pattern = f"{date_filter}-*.md" if date_filter else "*.md"
+    candidates = sorted(
+        p for p in sessions_dir.glob(pattern)
+        if p.stem != "session.template" and re.match(r"^\d{8}-\d{3}$", p.stem)
+    )
+
+    def _has_content(path: Path) -> bool:
+        try:
+            text = path.read_text(encoding="utf-8")
+            body = _extract_section_content(text, "Summary") or ""
+            stripped = body.strip()
+            return len(stripped) > 50 and not stripped.startswith(_SESSION_SUMMARY_BOILERPLATE)
+        except Exception:
+            return False
+
+    entries = [
+        {"session_id": p.stem, "path": str(p), "has_content": _has_content(p)}
+        for p in candidates
+    ]
+    return [TextContent(type="text", text=_json.dumps(entries))]
 
 
 # =============================================================================
