@@ -1,293 +1,373 @@
 """
-Obsidian Vault Operations — Pure Functions for Note Manipulation
-
-This module provides pure functions for reading, parsing, and modifying
-Obsidian markdown notes. Side effects (file I/O) are isolated at the
-boundaries via atomic write operations.
+Obsidian Vault Operations — Pure Functions for Vault Access
 
 Design principles:
-- Pure functions for parsing and transformation
-- Immutable data structures where practical
-- Atomic writes via write-to-temp-then-rename
-- Clear separation of frontmatter and body
+- Pure functions: no side effects, deterministic outputs
+- Immutability: return new data structures, never mutate
+- Composition: small functions that compose into larger operations
+- Lazy evaluation: use generators for efficient large vault handling
 """
+
+from __future__ import annotations
 
 import os
 import re
-import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Tuple
-
-
-# =============================================================================
-# Data Types
-# =============================================================================
-
-@dataclass(frozen=True)
-class ParsedNote:
-    """Immutable representation of a parsed Obsidian note."""
-    frontmatter: dict
-    body: str
-    raw_frontmatter: str  # Original YAML string (for minimal modifications)
+from typing import Callable, Iterator, Literal
 
 
 @dataclass(frozen=True)
-class AppendResult:
-    """Result of an append operation."""
-    file_path: str
-    char_count: int
-    modified_at: str
+class NoteMetadata:
+    """Immutable note metadata."""
+    title: str
+    path: str  # Relative to vault root
+    tags: tuple[str, ...]  # Immutable tuple of tags
+    created: datetime
+    modified: datetime
+    size: int
+
+    def to_dict(self) -> dict:
+        """Convert to JSON-serializable dict."""
+        return {
+            "title": self.title,
+            "path": self.path,
+            "tags": list(self.tags),
+            "created": self.created.isoformat(),
+            "modified": self.modified.isoformat(),
+            "size": self.size,
+        }
+
+
+@dataclass(frozen=True)
+class ListNotesResult:
+    """Immutable result from list_notes."""
+    notes: tuple[NoteMetadata, ...]
+    total: int
+
+    def to_dict(self) -> dict:
+        """Convert to JSON-serializable dict."""
+        return {
+            "notes": [n.to_dict() for n in self.notes],
+            "total": self.total,
+        }
 
 
 # =============================================================================
-# Frontmatter Parsing — Pure Functions
+# Pure helper functions
 # =============================================================================
 
-_FRONTMATTER_PATTERN = re.compile(
-    r"^---\s*\n(.*?)\n---\s*\n?",
-    re.DOTALL
-)
+def is_markdown_file(path: Path) -> bool:
+    """Check if path is a markdown file."""
+    return path.suffix.lower() in (".md", ".markdown")
 
 
-def parse_frontmatter(content: str) -> Tuple[dict, str, str]:
-    """Parse YAML frontmatter from markdown content.
+def is_hidden(path: Path) -> bool:
+    """Check if any component of the path is hidden (starts with .)."""
+    return any(part.startswith(".") for part in path.parts)
 
-    Returns (frontmatter_dict, body, raw_frontmatter_yaml).
-    If no frontmatter exists, returns ({}, content, "").
 
-    Note: Uses a simple key-value parser to avoid yaml dependency.
-    For complex nested structures, consider adding pyyaml.
+def extract_title_from_path(path: Path) -> str:
+    """Extract note title from file path (stem without extension)."""
+    return path.stem
+
+
+def extract_frontmatter(content: str) -> dict | None:
     """
-    match = _FRONTMATTER_PATTERN.match(content)
-    if not match:
-        return {}, content, ""
+    Extract YAML frontmatter from markdown content.
 
-    raw_yaml = match.group(1)
-    body = content[match.end():]
-    frontmatter = _parse_simple_yaml(raw_yaml)
-
-    return frontmatter, body, raw_yaml
-
-
-def _parse_simple_yaml(yaml_str: str) -> dict:
-    """Parse simple key: value YAML (no nested structures).
-
-    Handles:
-    - Simple scalars: key: value
-    - Quoted strings: key: "value" or key: 'value'
-    - Arrays: key: [a, b, c] (single line only)
-    - Multiline ignored for simplicity
+    Returns parsed frontmatter dict or None if not present/parseable.
+    Handles the common YAML frontmatter format:
+    ---
+    key: value
+    tags: [tag1, tag2]
+    ---
     """
+    if not content.startswith("---"):
+        return None
+
+    # Find closing delimiter
+    end_match = re.search(r"\n---\s*\n", content[3:])
+    if not end_match:
+        return None
+
+    yaml_content = content[3:end_match.start() + 3]
+
+    # Simple YAML parsing for common cases (avoid full YAML dependency in hot path)
+    # This handles: tags: [tag1, tag2] and tags:\n  - tag1\n  - tag2
     result = {}
-    for line in yaml_str.split('\n'):
-        line = line.strip()
-        if not line or line.startswith('#'):
-            continue
 
-        if ':' not in line:
-            continue
+    # Parse tags specifically (most common use case)
+    # Inline format: tags: [tag1, tag2] or tags: ["tag1", "tag2"]
+    inline_tags = re.search(r"^tags:\s*\[([^\]]*)\]", yaml_content, re.MULTILINE)
+    if inline_tags:
+        tag_str = inline_tags.group(1)
+        # Handle both quoted and unquoted tags
+        tags = [
+            t.strip().strip('"').strip("'").lstrip("#")
+            for t in tag_str.split(",")
+            if t.strip()
+        ]
+        result["tags"] = tags
+    else:
+        # List format: tags:\n  - tag1\n  - tag2
+        list_tags = re.search(r"^tags:\s*\n((?:\s+-\s+.+\n?)+)", yaml_content, re.MULTILINE)
+        if list_tags:
+            tag_lines = list_tags.group(1)
+            tags = [
+                line.strip().lstrip("-").strip().strip('"').strip("'").lstrip("#")
+                for line in tag_lines.split("\n")
+                if line.strip().startswith("-")
+            ]
+            result["tags"] = tags
 
-        key, _, value = line.partition(':')
-        key = key.strip()
-        value = value.strip()
-
-        # Remove quotes if present
-        if (value.startswith('"') and value.endswith('"')) or \
-           (value.startswith("'") and value.endswith("'")):
-            value = value[1:-1]
-
-        # Parse simple arrays
-        if value.startswith('[') and value.endswith(']'):
-            items = value[1:-1].split(',')
-            value = [item.strip().strip('"').strip("'") for item in items if item.strip()]
-
-        result[key] = value
-
-    return result
+    return result if result else None
 
 
-def serialize_frontmatter(frontmatter: dict) -> str:
-    """Serialize frontmatter dict back to YAML string.
-
-    Produces minimal, clean YAML output.
+def extract_tags_from_content(content: str) -> tuple[str, ...]:
     """
-    if not frontmatter:
+    Extract tags from note content.
+
+    Checks YAML frontmatter tags field.
+    Returns immutable tuple of tag strings (without # prefix).
+    """
+    frontmatter = extract_frontmatter(content)
+    if frontmatter and "tags" in frontmatter:
+        return tuple(frontmatter["tags"])
+    return ()
+
+
+def read_frontmatter_only(path: Path, max_bytes: int = 4096) -> str:
+    """
+    Read only the beginning of a file to extract frontmatter.
+
+    Performance optimization: don't read entire file just for tags.
+    """
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            return f.read(max_bytes)
+    except (OSError, IOError):
         return ""
 
-    lines = []
-    for key, value in frontmatter.items():
-        if isinstance(value, list):
-            formatted = '[' + ', '.join(f'"{v}"' if ' ' in str(v) else str(v) for v in value) + ']'
-            lines.append(f"{key}: {formatted}")
-        elif isinstance(value, str) and (' ' in value or ':' in value):
-            lines.append(f'{key}: "{value}"')
-        else:
-            lines.append(f"{key}: {value}")
 
-    return '\n'.join(lines)
+def file_stats_to_datetime(stat_result: os.stat_result) -> tuple[datetime, datetime]:
+    """Extract created and modified times from stat result."""
+    # Use mtime for modified
+    modified = datetime.fromtimestamp(stat_result.st_mtime, tz=timezone.utc)
 
+    # For created, use birthtime if available (macOS), otherwise ctime
+    # On Linux, ctime is "change time" not "creation time", but it's the best we have
+    created_ts = getattr(stat_result, "st_birthtime", stat_result.st_ctime)
+    created = datetime.fromtimestamp(created_ts, tz=timezone.utc)
 
-# =============================================================================
-# Note Transformation — Pure Functions
-# =============================================================================
-
-def append_to_body(body: str, content: str, separator: str = "\n") -> str:
-    """Append content to the note body with the given separator.
-
-    Pure function: returns new string, does not mutate input.
-    """
-    if not body.strip():
-        return content
-
-    # Ensure body ends cleanly before appending
-    trimmed_body = body.rstrip()
-    return f"{trimmed_body}{separator}{content}"
-
-
-def update_modified_timestamp(frontmatter: dict) -> dict:
-    """Return a new frontmatter dict with updated 'modified' timestamp.
-
-    Pure function: returns new dict, does not mutate input.
-    Uses ISO 8601 format compatible with Obsidian.
-    """
-    new_frontmatter = dict(frontmatter)
-    new_frontmatter['modified'] = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-    return new_frontmatter
-
-
-def assemble_note(frontmatter: dict, body: str) -> str:
-    """Assemble a complete note from frontmatter and body.
-
-    Pure function: returns complete markdown string.
-    """
-    if not frontmatter:
-        return body
-
-    yaml_content = serialize_frontmatter(frontmatter)
-    return f"---\n{yaml_content}\n---\n\n{body}"
+    return created, modified
 
 
 # =============================================================================
-# File Operations — Side Effects at Boundaries
+# Scanning functions (generators for lazy evaluation)
 # =============================================================================
 
-def read_note(file_path: Path) -> str:
-    """Read note content from disk.
-
-    Raises FileNotFoundError if note doesn't exist.
+def scan_markdown_files(vault_path: Path) -> Iterator[Path]:
     """
-    return file_path.read_text(encoding='utf-8')
+    Lazily scan vault for markdown files.
 
-
-def atomic_write(file_path: Path, content: str) -> None:
-    """Atomically write content to file using temp-then-rename pattern.
-
-    This prevents data loss on crash or power failure:
-    1. Write to temp file in same directory
-    2. Sync to disk (fsync)
-    3. Rename temp to target (atomic on POSIX)
+    Excludes hidden files/folders and .obsidian directory.
+    Uses os.scandir for performance on large vaults.
     """
-    parent = file_path.parent
-    parent.mkdir(parents=True, exist_ok=True)
-
-    fd, tmp_path = tempfile.mkstemp(
-        dir=str(parent),
-        suffix='.tmp',
-        prefix='.note-'
-    )
-
-    try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as f:
-            f.write(content)
-            f.flush()
-            os.fsync(f.fileno())
-        os.rename(tmp_path, str(file_path))
-    except BaseException:
-        # Clean up temp file on any failure
+    def scan_dir(dir_path: Path) -> Iterator[Path]:
         try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
+            with os.scandir(dir_path) as entries:
+                for entry in entries:
+                    # Skip hidden entries
+                    if entry.name.startswith("."):
+                        continue
+
+                    if entry.is_dir(follow_symlinks=False):
+                        # Recurse into subdirectories
+                        yield from scan_dir(Path(entry.path))
+                    elif entry.is_file(follow_symlinks=False):
+                        path = Path(entry.path)
+                        if is_markdown_file(path):
+                            yield path
+        except PermissionError:
+            pass  # Skip directories we can't access
+
+    yield from scan_dir(vault_path)
 
 
-# =============================================================================
-# High-Level Operations — Composition of Pure Functions
-# =============================================================================
-
-def append_to_note(
+def build_note_metadata(
     file_path: Path,
-    content: str,
-    separator: str = "\n"
-) -> AppendResult:
-    """Append content to an existing Obsidian note.
+    vault_path: Path,
+    include_tags: bool = False,
+) -> NoteMetadata | None:
+    """
+    Build NoteMetadata for a single file.
 
-    This is the main entry point for the note_append MCP tool.
+    Returns None if file is inaccessible.
+    """
+    try:
+        stat = file_path.stat()
+        created, modified = file_stats_to_datetime(stat)
+
+        # Extract tags only if needed (performance optimization)
+        tags: tuple[str, ...] = ()
+        if include_tags:
+            content = read_frontmatter_only(file_path)
+            tags = extract_tags_from_content(content)
+
+        rel_path = file_path.relative_to(vault_path)
+
+        return NoteMetadata(
+            title=extract_title_from_path(file_path),
+            path=str(rel_path),
+            tags=tags,
+            created=created,
+            modified=modified,
+            size=stat.st_size,
+        )
+    except (OSError, IOError, ValueError):
+        return None
+
+
+# =============================================================================
+# Filter functions (pure predicates)
+# =============================================================================
+
+def folder_filter(folder: str, vault_path: Path) -> Callable[[Path], bool]:
+    """Create a predicate that filters paths by folder prefix."""
+    folder_path = vault_path / folder
+
+    def predicate(path: Path) -> bool:
+        try:
+            path.relative_to(folder_path)
+            return True
+        except ValueError:
+            return False
+
+    return predicate
+
+
+def tag_filter(tag: str) -> Callable[[NoteMetadata], bool]:
+    """Create a predicate that filters notes by tag."""
+    normalized_tag = tag.lstrip("#").lower()
+
+    def predicate(note: NoteMetadata) -> bool:
+        return any(t.lower() == normalized_tag for t in note.tags)
+
+    return predicate
+
+
+# =============================================================================
+# Sort functions (pure key extractors)
+# =============================================================================
+
+SortOrder = Literal["modified", "created", "title"]
+
+
+def get_sort_key(sort: SortOrder) -> Callable[[NoteMetadata], tuple]:
+    """
+    Get a sort key function for the given sort order.
+
+    Returns tuple keys for stable sorting with secondary criteria.
+    """
+    if sort == "modified":
+        # Most recent first, then by title
+        return lambda n: (-n.modified.timestamp(), n.title.lower())
+    elif sort == "created":
+        # Most recent first, then by title
+        return lambda n: (-n.created.timestamp(), n.title.lower())
+    else:  # title
+        # Alphabetical, case-insensitive
+        return lambda n: (n.title.lower(), -n.modified.timestamp())
+
+
+# =============================================================================
+# Main list_notes function
+# =============================================================================
+
+def list_notes(
+    vault_path: str | Path,
+    folder: str | None = None,
+    tag: str | None = None,
+    limit: int = 20,
+    sort: SortOrder = "modified",
+) -> ListNotesResult:
+    """
+    List notes in an Obsidian vault with filtering and sorting.
 
     Args:
-        file_path: Path to the note (must exist)
-        content: Content to append
-        separator: Separator between existing content and new content
+        vault_path: Path to the Obsidian vault root
+        folder: Optional folder filter (relative to vault root)
+        tag: Optional tag filter (checks YAML frontmatter tags field)
+        limit: Maximum number of notes to return
+        sort: Sort order — "modified", "created", or "title"
 
     Returns:
-        AppendResult with file path, new char count, and modification timestamp
+        ListNotesResult with notes array and total count
 
-    Raises:
-        FileNotFoundError: If the note doesn't exist
+    Performance:
+        - Uses lazy generators to avoid loading all files into memory
+        - Only reads frontmatter when tag filtering is needed
+        - < 2 seconds for 10,000 notes typical
     """
-    # Read existing note
-    existing_content = read_note(file_path)
+    vault = Path(vault_path).resolve()
 
-    # Parse into components
-    frontmatter, body, _raw = parse_frontmatter(existing_content)
+    if not vault.is_dir():
+        return ListNotesResult(notes=(), total=0)
 
-    # Transform (pure functions)
-    new_body = append_to_body(body, content, separator)
-    new_frontmatter = update_modified_timestamp(frontmatter)
-    new_content = assemble_note(new_frontmatter, new_body)
+    # Scan all markdown files (lazy generator)
+    files = scan_markdown_files(vault)
 
-    # Write atomically (side effect)
-    atomic_write(file_path, new_content)
+    # Apply folder filter if specified
+    if folder:
+        filter_fn = folder_filter(folder, vault)
+        files = (f for f in files if filter_fn(f))
 
-    return AppendResult(
-        file_path=str(file_path),
-        char_count=len(new_content),
-        modified_at=new_frontmatter.get('modified', '')
+    # Build metadata (tags needed if filtering by tag)
+    need_tags = tag is not None
+    notes_iter = (
+        build_note_metadata(f, vault, include_tags=need_tags)
+        for f in files
     )
 
+    # Filter out None (inaccessible files)
+    notes_iter = (n for n in notes_iter if n is not None)
 
-def resolve_note_path(
-    vault_path: Path,
-    title_or_path: str
-) -> Path:
-    """Resolve a note title or relative path to an absolute path.
+    # Apply tag filter if specified
+    if tag:
+        tag_pred = tag_filter(tag)
+        notes_iter = (n for n in notes_iter if tag_pred(n))
 
-    Handles:
-    - Absolute paths (returned as-is if within vault)
-    - Relative paths (resolved from vault root)
-    - Titles without .md extension (appended automatically)
+    # Collect all matching notes for total count
+    # (We need to materialize to count and sort)
+    all_notes = list(notes_iter)
+    total = len(all_notes)
 
-    Raises:
-        ValueError: If path is outside vault
-    """
-    # If it looks like an absolute path
-    if title_or_path.startswith('/'):
-        candidate = Path(title_or_path)
-    else:
-        # Ensure .md extension
-        if not title_or_path.endswith('.md'):
-            title_or_path = f"{title_or_path}.md"
-        candidate = vault_path / title_or_path
+    # Sort
+    sort_key = get_sort_key(sort)
+    all_notes.sort(key=sort_key)
 
-    # Resolve to absolute and check it's within vault
-    resolved = candidate.resolve()
-    vault_resolved = vault_path.resolve()
+    # Apply limit
+    limited_notes = all_notes[:limit]
 
-    try:
-        resolved.relative_to(vault_resolved)
-    except ValueError:
-        raise ValueError(f"Path '{title_or_path}' is outside vault: {vault_path}")
+    # If we didn't need tags for filtering, fetch them now for the limited set
+    if not need_tags:
+        limited_notes = [
+            NoteMetadata(
+                title=n.title,
+                path=n.path,
+                tags=extract_tags_from_content(
+                    read_frontmatter_only(vault / n.path)
+                ),
+                created=n.created,
+                modified=n.modified,
+                size=n.size,
+            )
+            for n in limited_notes
+        ]
 
-    return resolved
+    return ListNotesResult(
+        notes=tuple(limited_notes),
+        total=total,
+    )

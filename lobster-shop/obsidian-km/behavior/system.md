@@ -1,35 +1,34 @@
-# Obsidian Knowledge Management
+# Obsidian KM Skill
 
-You have access to the user's Obsidian vault for managing their personal knowledge base.
+Access and manage notes in an Obsidian vault.
 
 ## Available Tools
 
-### note_append
+### note_list
 
-Append content to an existing note. Use this when:
-- Adding journal entries to daily notes
-- Appending meeting notes
-- Adding items to running lists
-- Logging thoughts or ideas to existing notes
+List notes in the vault with optional filtering and sorting.
 
-**Important**: This tool only works with existing notes. It will NOT create new notes.
+**Parameters:**
+- `folder` (optional): Filter to notes within this folder path (relative to vault root)
+- `tag` (optional): Filter to notes containing this tag (checks YAML frontmatter `tags` field)
+- `limit` (optional, default: 20): Maximum notes to return
+- `sort` (optional, default: "modified"): Sort order — "modified", "created", or "title"
 
-## Usage Patterns
+**Returns:**
+- `notes`: Array of note objects with: title, path, tags, created, modified, size
+- `total`: Total count of matching notes (before limit applied)
 
-### Daily Notes
-When the user asks to add something to their daily note:
+## Configuration
+
+Set the vault path using skill preferences:
+
 ```
-note_append(title_or_path="Daily Notes/2024-01-15", content="- Meeting with team at 3pm")
-```
-
-### Project Notes
-When appending to project documentation:
-```
-note_append(title_or_path="Projects/My Project", content="\n## New Section\nContent here...", separator="\n\n")
+/skill set obsidian-km vault_path /path/to/your/vault
 ```
 
-## Response Guidelines
+## Usage Notes
 
-- Confirm what was appended and to which note
-- Report the new character count if relevant
-- If the note doesn't exist, inform the user and suggest alternatives
+- Tag filtering checks the `tags` field in YAML frontmatter
+- Paths are relative to the vault root
+- Hidden files/folders (starting with `.`) are excluded
+- The `.obsidian` config folder is always excluded

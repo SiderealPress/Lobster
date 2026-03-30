@@ -1,58 +1,58 @@
-# Obsidian Knowledge Management
+# Obsidian KM Skill
 
-Manage your Obsidian vault directly from Lobster.
-
-## What It Does
-
-- **Append to notes** — Add content to existing notes without opening Obsidian
-- **Preserve structure** — Frontmatter and formatting are maintained
-- **Track changes** — Automatically updates the `modified` timestamp
-
-## Setup
-
-1. Set your vault path:
-   ```bash
-   export OBSIDIAN_VAULT_PATH="$HOME/Documents/MyVault"
-   ```
-
-2. Install the skill:
-   ```bash
-   bash lobster-shop/obsidian-km/install.sh
-   ```
-
-3. Activate:
-   ```
-   activate_skill("obsidian-km")
-   ```
+Knowledge management tools for Obsidian vaults.
 
 ## Tools
 
-### note_append
+### note_list
 
-Append content to an existing Obsidian note.
+List notes with filtering and sorting.
 
 **Parameters:**
-- `title_or_path` (required): Note title or relative path (e.g., "Daily Notes/2024-01-15")
-- `content` (required): Content to append
-- `separator` (optional): Separator between existing and new content (default: "\n")
+- `folder` (optional): Filter by folder path relative to vault root
+- `tag` (optional): Filter by tag (checks YAML frontmatter)
+- `limit` (optional): Max notes to return (default: 20, max: 1000)
+- `sort` (optional): Sort by "modified" (default), "created", or "title"
 
 **Returns:**
-- `file_path`: Absolute path to the note
-- `char_count`: New total character count
-- `modified_at`: ISO timestamp of modification
-
-**Example:**
 ```json
 {
-  "title_or_path": "Inbox",
-  "content": "- [ ] Review quarterly report",
-  "separator": "\n"
+  "notes": [
+    {
+      "title": "Project Plan",
+      "path": "projects/project-plan.md",
+      "tags": ["project", "planning"],
+      "created": "2024-01-15T10:30:00+00:00",
+      "modified": "2024-03-20T14:45:00+00:00",
+      "size": 2048
+    }
+  ],
+  "total": 150
 }
 ```
 
-## Technical Notes
+## Configuration
 
-- Uses atomic writes (temp file + rename) to prevent data loss
-- Preserves existing frontmatter and updates only the `modified` field
-- Note must exist — this tool does not create new notes
-- Target response time: < 500ms
+Set the vault path before using:
+
+```
+/skill set obsidian-km vault_path /path/to/your/vault
+```
+
+## Performance
+
+Optimized for large vaults:
+- Uses `os.scandir()` for fast directory traversal
+- Lazy evaluation with generators
+- Only reads frontmatter (not full files) when filtering by tags
+- Target: < 2 seconds for 10,000 notes
+
+## Development
+
+```bash
+# Run tests
+cd src && uv run pytest test_vault_ops.py -v
+
+# Run server manually
+OBSIDIAN_VAULT_PATH=/path/to/vault uv run python obsidian_km_server.py
+```

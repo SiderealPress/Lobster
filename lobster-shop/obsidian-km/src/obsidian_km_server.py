@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-Obsidian Knowledge Management MCP Server for Lobster
+Obsidian KM MCP Server for Lobster
 
-Provides MCP tools for interacting with an Obsidian vault:
-- note_append: Append content to an existing note
+Provides MCP tools for interacting with Obsidian vaults.
 
-The server reads the vault path from OBSIDIAN_VAULT_PATH environment variable.
+Tools provided:
+- note_list: List notes with folder/tag filters, sorting, and pagination
 """
 
 import asyncio
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -18,34 +19,13 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
-from vault_ops import (
-    append_to_note,
-    resolve_note_path,
-    AppendResult,
-)
+# Import vault operations
+from vault_ops import list_notes, ListNotesResult, SortOrder
 
-
-# =============================================================================
-# Configuration
-# =============================================================================
-
-def get_vault_path() -> Path:
-    """Get the Obsidian vault path from environment."""
-    vault_path = os.environ.get("OBSIDIAN_VAULT_PATH")
-    if not vault_path:
-        raise ValueError(
-            "OBSIDIAN_VAULT_PATH environment variable not set. "
-            "Set it to your Obsidian vault directory."
-        )
-    path = Path(vault_path).expanduser().resolve()
-    if not path.is_dir():
-        raise ValueError(f"Vault path does not exist: {path}")
-    return path
-
-
-# =============================================================================
-# MCP Server Setup
-# =============================================================================
+# Configuration from environment or preferences
+VAULT_PATH = os.environ.get("OBSIDIAN_VAULT_PATH", "")
+DEFAULT_LIMIT = int(os.environ.get("OBSIDIAN_DEFAULT_LIMIT", "20"))
+DEFAULT_SORT = os.environ.get("OBSIDIAN_DEFAULT_SORT", "modified")
 
 server = Server("obsidian-km")
 
@@ -62,130 +42,129 @@ def error_result(msg: str) -> list[TextContent]:
     return [TextContent(type="text", text=f"Error: {msg}")]
 
 
-def result_to_dict(result: AppendResult) -> dict:
-    """Convert AppendResult to JSON-serializable dict."""
-    return {
-        "file_path": result.file_path,
-        "char_count": result.char_count,
-        "modified_at": result.modified_at,
-    }
+def validate_vault_path(vault_path: str) -> str | None:
+    """
+    Validate vault path configuration.
+
+    Returns error message if invalid, None if valid.
+    """
+    if not vault_path:
+        return (
+            "Vault path not configured. "
+            "Set it with: /skill set obsidian-km vault_path /path/to/vault"
+        )
+
+    path = Path(vault_path)
+    if not path.exists():
+        return f"Vault path does not exist: {vault_path}"
+
+    if not path.is_dir():
+        return f"Vault path is not a directory: {vault_path}"
+
+    return None
 
 
-# =============================================================================
-# Tool Definitions
-# =============================================================================
+def validate_sort(sort: str) -> SortOrder:
+    """Validate and normalize sort parameter."""
+    valid_sorts = ("modified", "created", "title")
+    sort_lower = sort.lower()
+    if sort_lower in valid_sorts:
+        return sort_lower  # type: ignore
+    return "modified"
+
 
 @server.list_tools()
 async def list_tools() -> list[Tool]:
-    """List available Obsidian KM tools."""
+    """List available obsidian-km tools."""
     return [
         Tool(
-            name="note_append",
+            name="note_list",
             description=(
-                "Append content to an existing Obsidian note. "
-                "Preserves frontmatter and updates the 'modified' timestamp. "
-                "Returns the file path and new character count. "
-                "Use this to add journal entries, meeting notes, or any content "
-                "that should be appended to an existing note."
+                "List notes in an Obsidian vault with optional filtering and sorting. "
+                "Returns note metadata including title, path, tags, timestamps, and size. "
+                "Supports folder filtering, tag filtering (checks YAML frontmatter), "
+                "and sorting by modified date, created date, or title."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "title_or_path": {
+                    "folder": {
                         "type": "string",
                         "description": (
-                            "Note title (e.g., 'Daily Notes/2024-01-15') or "
-                            "relative path from vault root. The .md extension "
-                            "is added automatically if not present."
+                            "Filter to notes within this folder path "
+                            "(relative to vault root, e.g., 'projects/active')"
                         ),
                     },
-                    "content": {
-                        "type": "string",
-                        "description": "Content to append to the note.",
-                    },
-                    "separator": {
+                    "tag": {
                         "type": "string",
                         "description": (
-                            "Separator between existing content and new content. "
-                            "Defaults to newline. Use '\\n\\n' for paragraph break, "
-                            "'\\n---\\n' for horizontal rule, etc."
+                            "Filter to notes containing this tag "
+                            "(checks YAML frontmatter 'tags' field, e.g., 'project')"
                         ),
-                        "default": "\n",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of notes to return",
+                        "default": 20,
+                        "minimum": 1,
+                        "maximum": 1000,
+                    },
+                    "sort": {
+                        "type": "string",
+                        "description": "Sort order for results",
+                        "enum": ["modified", "created", "title"],
+                        "default": "modified",
                     },
                 },
-                "required": ["title_or_path", "content"],
+                "required": [],
             },
         ),
     ]
 
 
-# =============================================================================
-# Tool Implementation
-# =============================================================================
-
 @server.call_tool()
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     """Handle tool calls."""
 
-    if name == "note_append":
-        return await handle_note_append(arguments)
+    if name == "note_list":
+        # Get vault path from env or arguments
+        vault_path = arguments.get("vault_path", VAULT_PATH)
+
+        # Validate vault path
+        error = validate_vault_path(vault_path)
+        if error:
+            return error_result(error)
+
+        # Extract and validate parameters
+        folder = arguments.get("folder")
+        tag = arguments.get("tag")
+        limit = arguments.get("limit", DEFAULT_LIMIT)
+        sort = validate_sort(arguments.get("sort", DEFAULT_SORT))
+
+        # Clamp limit to valid range
+        limit = max(1, min(1000, int(limit)))
+
+        try:
+            # Run the pure function (blocking I/O wrapped in executor)
+            result: ListNotesResult = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: list_notes(
+                    vault_path=vault_path,
+                    folder=folder,
+                    tag=tag,
+                    limit=limit,
+                    sort=sort,
+                ),
+            )
+
+            return text_result(result.to_dict())
+
+        except Exception as e:
+            return error_result(f"Failed to list notes: {type(e).__name__}: {str(e)}")
+
     else:
         return error_result(f"Unknown tool: {name}")
 
-
-async def handle_note_append(arguments: dict[str, Any]) -> list[TextContent]:
-    """Handle the note_append tool call."""
-
-    # Validate required arguments
-    title_or_path = arguments.get("title_or_path")
-    content = arguments.get("content")
-
-    if not title_or_path:
-        return error_result("Missing required argument: title_or_path")
-    if not content:
-        return error_result("Missing required argument: content")
-
-    separator = arguments.get("separator", "\n")
-
-    try:
-        # Get vault path
-        vault_path = get_vault_path()
-
-        # Resolve note path
-        note_path = resolve_note_path(vault_path, title_or_path)
-
-        # Check note exists (no create)
-        if not note_path.exists():
-            return error_result(
-                f"Note not found: {title_or_path}. "
-                f"This tool only appends to existing notes."
-            )
-
-        # Perform append operation (runs in thread pool to avoid blocking)
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(
-            None,
-            append_to_note,
-            note_path,
-            content,
-            separator,
-        )
-
-        return text_result(result_to_dict(result))
-
-    except ValueError as e:
-        return error_result(str(e))
-    except FileNotFoundError as e:
-        return error_result(f"Note not found: {e}")
-    except PermissionError as e:
-        return error_result(f"Permission denied: {e}")
-    except Exception as e:
-        return error_result(f"{type(e).__name__}: {e}")
-
-
-# =============================================================================
-# Main Entry Point
-# =============================================================================
 
 async def main():
     """Run the MCP server."""
@@ -193,7 +172,7 @@ async def main():
         await server.run(
             read_stream,
             write_stream,
-            server.create_initialization_options()
+            server.create_initialization_options(),
         )
 
 

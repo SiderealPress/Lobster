@@ -1,0 +1,10 @@
+# Default preferences for obsidian-km skill
+
+# Path to the Obsidian vault directory
+vault_path = ""
+
+# Default limit for note_list results
+default_limit = 20
+
+# Default sort order: "modified", "created", or "title"
+default_sort = "modified"

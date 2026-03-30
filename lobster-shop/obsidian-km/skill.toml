@@ -1,29 +1,29 @@
 [skill]
 name = "obsidian-km"
 version = "0.1.0"
-description = "Manage your Obsidian vault — append to notes, search, and organize your knowledge"
+description = "Obsidian vault knowledge management — search, list, read, and write markdown notes"
 author = "Lobster Team"
 category = "tool"
 
 [activation]
-mode = "always"
-triggers = ["/note", "/obsidian"]
-context_patterns = ["when user mentions obsidian", "when user wants to add to notes"]
+mode = "triggered"
+triggers = ["/notes", "/vault", "/obsidian"]
+context_patterns = ["when user asks about notes", "when user asks about obsidian", "when user asks about vault"]
 
 [layering]
 priority = 50
 merge_strategy = "append"
 
 [provides]
-mcp_tools = ["note_append"]
-bot_commands = ["/note"]
+mcp_tools = ["note_list"]
+bot_commands = ["/notes", "/vault"]
 
 [compatibility]
 enhances = []
 conflicts = []
 
 [dependencies]
-pip = ["mcp>=1.0"]
+pip = ["mcp>=1.0", "pyyaml>=6.0"]
 npm = []
 system = []
 api_keys = []
