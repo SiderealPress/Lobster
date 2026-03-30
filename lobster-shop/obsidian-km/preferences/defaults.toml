@@ -1,5 +1,5 @@
-# Obsidian KM Default Preferences
-
-OBSIDIAN_AUTO_CAPTURE_LINKS = true
-OBSIDIAN_VAULT_PATH = "~/obsidian-vault"
-OBSIDIAN_LINKS_FOLDER = "Links"
+default_folder = "Inbox"
+link_folder = "Links"
+auto_capture_links = true
+default_tags = ""
+max_search_results = 10

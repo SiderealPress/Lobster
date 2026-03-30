@@ -1,77 +1,42 @@
-## Obsidian KM — Dispatcher Behavior
+# Obsidian Knowledge Management
 
-### URL Detection
+You have access to an Obsidian vault for knowledge management. Use these tools to help the user organize and retrieve information.
 
-When processing any message, check if it contains a URL:
+## Available Tools
 
-```python
-from link_capture import contains_url, extract_urls
+- **obsidian_create_note**: Create a new note in the vault with a title, content, optional folder, and tags
+- **obsidian_search**: Search the vault for notes matching a query (searches filenames and content)
+- **obsidian_capture_link**: Archive a URL to the vault with optional title and notes
+- **obsidian_get_preferences**: View current Obsidian KM configuration
 
-if contains_url(message_text):
-    urls = extract_urls(message_text)
-    # Trigger link capture for each URL
-```
+## Usage Guidelines
 
-### Automatic Link Capture Flow
+1. **Creating Notes**
+   - Use meaningful titles that describe the content
+   - Default folder is "Inbox" — use this for quick captures
+   - Add relevant tags to improve discoverability
+   - Use markdown formatting for content
 
-1. **Detect URL** in incoming message
-2. **Acknowledge immediately**: `send_reply(chat_id, "Link saved.", message_id=message_id)`
-3. **Delegate capture** to background subagent (7-second rule)
+2. **Searching**
+   - Search is case-insensitive
+   - Searches both filenames and note content
+   - Results are limited by the max_search_results preference
 
-The subagent handles:
-- Preference check (`OBSIDIAN_AUTO_CAPTURE_LINKS`)
-- Duplicate detection (skip if captured this month)
-- Page title fetch via `fetch_page` MCP tool
-- Archive.org archival (existing Commonbook)
-- Vault note creation
-- Brain-dumps issue comment (existing Commonbook)
+3. **Capturing Links**
+   - Automatically extracts title from URL if not provided
+   - Links are saved to the "Links" folder by default
+   - Add notes to provide context for why the link was saved
+   - Auto-capture can be disabled via preferences
 
-### Subagent Prompt Template
+4. **When to Use Each Tool**
+   - User says "save this", "remember this", "note this down" → create_note
+   - User says "find", "search", "look for" → search
+   - User shares a URL and says "save", "archive", "bookmark" → capture_link
+   - User asks about settings or configuration → get_preferences
 
-```
-Capture link to Obsidian vault and archive:
+## Behavior Notes
 
-URL: {url}
-Caption: {caption}
-Chat ID: {chat_id}
-
-Steps:
-1. Check OBSIDIAN_AUTO_CAPTURE_LINKS preference
-2. Check duplicate (skip if URL captured this month)
-3. Fetch page title: fetch_page(url="{url}")
-4. Archive: curl -s "https://web.archive.org/save/{url}"
-5. Capture to vault using link_capture module
-6. Comment on brain-dumps issue #17 with link + archive URL
-
-Use:
-```python
-import sys, os
-sys.path.insert(0, os.path.expanduser("~/lobster/lobster-shop/obsidian-km/src"))
-from link_capture import capture_link_sync
-
-result = capture_link_sync(
-    url="{url}",
-    caption="{caption}",
-    title=page_title,
-    archived_url=archive_url,
-)
-print(result.message)
-```
-
-Report only on error or skip.
-```
-
-### Manual Commands
-
-| Command | Action |
-|---------|--------|
-| `/vault <url>` | Force-capture URL (bypass duplicate check) |
-| `/vault status` | Show capture stats this month |
-| `/obsidian` | Alias for `/vault` |
-
-### Error Handling
-
-If capture fails:
-- Log error but don't interrupt user flow
-- Report to Drew only on persistent failures
-- Never expose stack traces in Telegram
+- All notes include frontmatter with title, creation date, tags, and source
+- Notes are saved as .md files in the configured vault
+- If a file with the same name exists, a timestamp is appended
+- The vault path must be configured in ~/lobster-config/obsidian.env

@@ -1,13 +1,9 @@
 #!/bin/bash
 #===============================================================================
-# Obsidian KM Skill Installer for Lobster
+# Obsidian Knowledge Management Skill Installer for Lobster
 #
-# Installs the Obsidian KM skill for managing notes in an Obsidian vault.
-# This sets up:
-#   1. Python dependencies (python-frontmatter)
-#   2. The MCP server (obsidian_km_server.py)
-#   3. A systemd user service
-#   4. Registers the MCP server with Claude
+# Sets up the Obsidian KM skill that lets Lobster interact with an Obsidian
+# vault — create notes, search content, and capture links.
 #
 # Usage: bash ~/lobster/lobster-shop/obsidian-km/install.sh
 #===============================================================================
@@ -23,28 +19,28 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-info() { echo -e "${BLUE}[INFO]${NC} $1"; }
+info()    { echo -e "${BLUE}[INFO]${NC} $1"; }
 success() { echo -e "${GREEN}[OK]${NC} $1"; }
-warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
-error() { echo -e "${RED}[ERROR]${NC} $1"; }
-step() { echo -e "\n${CYAN}${BOLD}--- $1${NC}"; }
+warn()    { echo -e "${YELLOW}[WARN]${NC} $1"; }
+error()   { echo -e "${RED}[ERROR]${NC} $1"; }
+step()    { echo -e "\n${CYAN}${BOLD}--- $1${NC}"; }
 
 # Paths
 LOBSTER_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
 SKILL_DIR="$LOBSTER_DIR/lobster-shop/obsidian-km"
 SRC_DIR="$SKILL_DIR/src"
-SERVICES_DIR="$SKILL_DIR/services"
+CONFIG_TEMPLATE="$SKILL_DIR/config/obsidian.env.template"
 VENV_DIR="$LOBSTER_DIR/.venv"
 PYTHON_PATH="$VENV_DIR/bin/python"
-LOG_DIR="$HOME/logs"
-VAULT_DIR="${OBSIDIAN_VAULT_PATH:-$HOME/obsidian-vault}"
+CONFIG_DIR="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}"
+CONFIG_FILE="$CONFIG_DIR/obsidian.env"
 
 echo ""
-echo -e "${BOLD}Obsidian KM Skill Installer${NC}"
-echo "============================"
+echo -e "${BOLD}Obsidian Knowledge Management Skill Installer${NC}"
+echo "=============================================="
 echo ""
-echo "This will install the Obsidian KM skill for Lobster."
-echo "It allows Lobster to create, read, search, and manage notes."
+echo "This installs the Obsidian KM skill for Lobster."
+echo "It adds vault integration tools to Claude."
 echo ""
 
 #===============================================================================
@@ -52,7 +48,7 @@ echo ""
 #===============================================================================
 step "Checking prerequisites"
 
-# Check Python venv
+# Check Python
 if [ -f "$PYTHON_PATH" ]; then
     success "Lobster Python venv found: $PYTHON_PATH"
 elif command -v python3 &>/dev/null; then
@@ -70,93 +66,70 @@ if ! command -v claude &>/dev/null; then
 fi
 success "Claude CLI found"
 
-# Check ripgrep (optional but recommended)
-if command -v rg &>/dev/null; then
-    success "ripgrep found: $(rg --version | head -1)"
-else
-    warn "ripgrep not found - search will use slower Python fallback"
-    info "Install with: sudo apt install ripgrep"
+# Check skill directory
+if [ ! -f "$SRC_DIR/obsidian_km_server.py" ]; then
+    error "Skill source not found at $SRC_DIR/obsidian_km_server.py"
+    exit 1
 fi
+success "Skill source found"
 
 #===============================================================================
 # Step 2: Install Python dependencies
 #===============================================================================
-step "Installing Python dependencies"
+step "Installing Python dependencies (mcp)"
 
 if [ -f "$VENV_DIR/bin/pip" ]; then
-    "$VENV_DIR/bin/pip" install --quiet python-frontmatter 2>&1 || warn "python-frontmatter install had issues"
+    "$VENV_DIR/bin/pip" install --quiet "mcp>=1.0" 2>&1 || warn "pip install had issues (may already be installed)"
     success "Python dependencies installed in Lobster venv"
 else
-    pip3 install --quiet python-frontmatter 2>&1 || warn "python-frontmatter install had issues"
+    pip3 install --quiet "mcp>=1.0" 2>&1 || warn "pip3 install had issues"
     success "Python dependencies installed"
 fi
 
 #===============================================================================
-# Step 3: Create vault and log directories
+# Step 3: Create configuration file
 #===============================================================================
-step "Setting up directories"
+step "Setting up configuration"
 
-mkdir -p "$VAULT_DIR"
-mkdir -p "$VAULT_DIR/Inbox"
-mkdir -p "$VAULT_DIR/Projects"
-mkdir -p "$VAULT_DIR/Daily"
-success "Vault directory ready: $VAULT_DIR"
+mkdir -p "$CONFIG_DIR"
 
-mkdir -p "$LOG_DIR"
-success "Log directory ready: $LOG_DIR"
-
-#===============================================================================
-# Step 4: Create systemd user service
-#===============================================================================
-step "Setting up systemd service"
-
-mkdir -p "$HOME/.config/systemd/user"
-
-cat > "$HOME/.config/systemd/user/obsidian-km-mcp.service" << EOF
-[Unit]
-Description=Obsidian KM MCP Server for Lobster
-Documentation=https://github.com/SiderealPress/Lobster
-After=network.target
-
-[Service]
-Type=simple
-WorkingDirectory=$SKILL_DIR
-Environment=OBSIDIAN_VAULT_PATH=$VAULT_DIR
-Environment=OBSIDIAN_KM_LOG_PATH=$LOG_DIR/obsidian-km-mcp.log
-ExecStart=$PYTHON_PATH $SRC_DIR/obsidian_km_server.py
-Restart=on-failure
-RestartSec=5
-StandardOutput=null
-StandardError=journal
-
-[Install]
-WantedBy=default.target
-EOF
-
-systemctl --user daemon-reload 2>/dev/null || true
-systemctl --user enable obsidian-km-mcp 2>/dev/null || true
-success "Systemd service created: obsidian-km-mcp"
-
-#===============================================================================
-# Step 5: Start the service
-#===============================================================================
-step "Starting obsidian-km-mcp service"
-
-if systemctl --user start obsidian-km-mcp 2>/dev/null; then
-    sleep 1
-    if systemctl --user is-active --quiet obsidian-km-mcp; then
-        success "Service started successfully"
-    else
-        warn "Service started but may not be active"
-        info "Check status: systemctl --user status obsidian-km-mcp"
-    fi
+if [ -f "$CONFIG_FILE" ]; then
+    success "Configuration file already exists: $CONFIG_FILE"
 else
-    warn "Could not start via systemctl (may not have user session)"
-    info "The service will start automatically after login"
+    if [ -f "$CONFIG_TEMPLATE" ]; then
+        cp "$CONFIG_TEMPLATE" "$CONFIG_FILE"
+        success "Created configuration from template: $CONFIG_FILE"
+        echo ""
+        echo "  Please edit $CONFIG_FILE to set:"
+        echo "    OBSIDIAN_VAULT_PATH=/path/to/your/vault"
+        echo ""
+    else
+        warn "Configuration template not found: $CONFIG_TEMPLATE"
+        echo "  Create $CONFIG_FILE manually with:"
+        echo "    OBSIDIAN_VAULT_PATH=/path/to/your/vault"
+    fi
+fi
+
+# Check if vault path is configured
+VAULT_PATH=""
+if [ -f "$CONFIG_FILE" ]; then
+    VAULT_PATH=$(grep "^OBSIDIAN_VAULT_PATH=" "$CONFIG_FILE" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'" || true)
+fi
+
+if [ -n "$VAULT_PATH" ] && [ -d "$VAULT_PATH" ]; then
+    success "Vault configured and accessible: $VAULT_PATH"
+elif [ -n "$VAULT_PATH" ]; then
+    warn "Vault path configured but directory not found: $VAULT_PATH"
+else
+    warn "OBSIDIAN_VAULT_PATH is not configured."
+    echo ""
+    echo "  To use this skill, edit $CONFIG_FILE and set:"
+    echo "    OBSIDIAN_VAULT_PATH=/path/to/your/obsidian/vault"
+    echo ""
 fi
 
 #===============================================================================
-# Step 6: Register MCP server with Claude
+# Step 4: Register MCP server with Claude
 #===============================================================================
 step "Registering MCP server with Claude"
 
@@ -173,25 +146,19 @@ else
 fi
 
 #===============================================================================
-# Step 7: Activate the skill in Lobster's skill manager
+# Step 5: Activate the skill
 #===============================================================================
-step "Activating skill in Lobster"
+step "Activating the skill"
 
-ACTIVATE_SCRIPT="
-import sys
-sys.path.insert(0, '$LOBSTER_DIR/src')
-try:
-    from mcp.skill_manager import activate_skill
-    result = activate_skill('obsidian-km', mode='always')
-    print(result)
-except ImportError:
-    print('Skill manager not available - skill will need manual activation')
-"
-
-if "$PYTHON_PATH" -c "$ACTIVATE_SCRIPT" 2>/dev/null; then
-    success "Skill activated: obsidian-km (mode: always)"
-else
-    warn "Could not auto-activate skill. This is OK if Lobster is not fully installed."
+# Activate the skill via the skill manager if lobster is available
+ACTIVATE_SCRIPT="$LOBSTER_DIR/src/mcp"
+if [ -f "$ACTIVATE_SCRIPT/skill_manager.py" ]; then
+    "$PYTHON_PATH" -c "
+import sys; sys.path.insert(0, '$ACTIVATE_SCRIPT')
+from skill_manager import activate_skill
+result = activate_skill('obsidian-km')
+print(result)
+" 2>/dev/null && success "Skill activated in Lobster skill manager" || warn "Could not activate via skill manager (will work after restart)"
 fi
 
 #===============================================================================
@@ -200,18 +167,22 @@ fi
 echo ""
 echo -e "${GREEN}${BOLD}Obsidian KM skill installed!${NC}"
 echo ""
-echo "  Vault:   $VAULT_DIR"
-echo "  Logs:    $LOG_DIR/obsidian-km-mcp.log"
-echo "  Service: systemctl --user status obsidian-km-mcp"
+echo "  Configuration: $CONFIG_FILE"
 echo ""
 echo "  Tools available to Lobster:"
-echo "    note_create   - Create a new note with optional tags"
-echo "    note_read     - Read a note by title or path"
-echo "    note_search   - Full-text search (ripgrep-powered)"
-echo "    note_append   - Append content to an existing note"
-echo "    note_list     - List notes with filters"
+echo "    obsidian_create_note   - Create a note in the vault"
+echo "    obsidian_search        - Search vault content"
+echo "    obsidian_capture_link  - Archive a link to the vault"
+echo "    obsidian_get_preferences - View current settings"
 echo ""
-echo "  Try it: Ask Lobster to 'create a note about our meeting'"
+echo "  Preferences (edit $CONFIG_FILE):"
+echo "    OBSIDIAN_VAULT_PATH        - Path to your Obsidian vault (required)"
+echo "    OBSIDIAN_DEFAULT_FOLDER    - Default folder for new notes (default: Inbox)"
+echo "    OBSIDIAN_LINK_FOLDER       - Folder for captured links (default: Links)"
+echo "    OBSIDIAN_AUTO_CAPTURE_LINKS - Auto-capture links (default: true)"
+echo "    OBSIDIAN_DEFAULT_TAGS      - Default tags for notes (comma-separated)"
+echo "    OBSIDIAN_MAX_SEARCH_RESULTS - Max search results (default: 10)"
 echo ""
-echo "  To restart Lobster and activate: lobster restart"
+echo "  Restart Lobster to activate: lobster restart"
+echo "    or: systemctl --user restart lobster-claude"
 echo ""
