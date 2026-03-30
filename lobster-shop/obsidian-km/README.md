@@ -1,150 +1,131 @@
-# Obsidian KM
+# Obsidian KM Skill
 
-**Sync and access your Obsidian vault from anywhere via Telegram.**
+Knowledge management integration for Lobster using Obsidian and CouchDB-powered sync.
 
-Take notes, search your knowledge base, and manage your vault without opening the app. Your notes stay in sync between your devices and are always accessible through Lobster.
+## Overview
 
-## What You Can Do
+This skill enables Lobster to:
+- Sync Obsidian vaults across devices using self-hosted CouchDB
+- Access and search knowledge base contents
+- Create and update notes from Telegram conversations
 
-- **"Create a note about my project ideas"** -- Start a new note instantly
-- **"Search my notes for machine learning"** -- Find notes by keyword
-- **"Read my meeting notes from Monday"** -- Retrieve note content
-- **"Append to my daily log: finished the API integration"** -- Add to existing notes
-- **"List my recent notes"** -- See what you've been working on
+## Components
 
-## How It Works
+### CouchDB (BIS-230)
 
-Obsidian KM uses CouchDB as a sync backend for your Obsidian vault. Notes are stored as standard Markdown files (compatible with Obsidian) and synced to CouchDB for fast search and access. A TLS proxy (Caddy) provides secure access.
+Self-hosted CouchDB instance for Obsidian LiveSync:
 
-```
-Lobster (Claude Code)
-  |
-  |-- MCP: note_create, note_read, note_search, etc.
-  |
-  v
-obsidian_km_mcp_server.py (Python MCP server)
-  |
-  |-- CouchDB queries / file operations
-  |
-  v
-CouchDB <--sync--> Obsidian Vault (~/*.md files)
-```
+- **Location**: Runs as systemd user service
+- **Port**: 5984 (localhost only)
+- **Data**: `~/obsidian-vault/.couchdb/`
+- **Config**: `~/lobster-config/obsidian.env`
 
-## Setup
+## Installation
 
-Run the installer:
+### Prerequisites
 
+- Ubuntu/Debian-based system
+- `sudo` access (for apt package installation)
+- `systemd` with user services enabled
+
+### Install CouchDB
 
 ```bash
-bash ~/lobster/lobster-shop/obsidian-km/install.sh
+cd /path/to/lobster/lobster-shop/obsidian-km
+chmod +x install.sh
+./install.sh
 ```
 
-The installer will:
+The installer is idempotent - safe to run multiple times.
 
-1. Install and configure CouchDB
-2. Create an Obsidian vault (or use existing)
-3. Set up database views for fast note lookup
-4. Configure Caddy TLS proxy
-5. Install the MCP server
-6. Register health checks
-
-### Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `OBSIDIAN_VAULT_DIR` | `~/obsidian-vault` | Path to your Obsidian vault |
-| `COUCHDB_PORT` | `5984` | CouchDB port |
-| `COUCHDB_ADMIN_USER` | `admin` | CouchDB admin username |
-| `COUCHDB_ADMIN_PASS` | (generated) | CouchDB admin password |
-| `COUCHDB_DB_NAME` | `obsidian_notes` | Database name for notes |
-| `CADDY_HTTPS_PORT` | `5985` | TLS proxy port |
-
-## Tools
-
-| Tool | What It Does |
-|------|-------------|
-| `note_create` | Create a new note with title and content |
-| `note_read` | Read an existing note by title or path |
-| `note_search` | Search notes by keyword (uses ripgrep) |
-| `note_append` | Append content to an existing note |
-| `note_list` | List recent notes, optionally filtered by tag |
-
-## Commands
-
-| Command | What It Does |
-|---------|-------------|
-| `/note` | Create or manage notes |
-| `/vault` | Vault operations (status, sync, etc.) |
-| `/search` | Search your notes |
-
-## Managing the Services
+### Verify Installation
 
 ```bash
-# Check CouchDB status
-sudo systemctl status couchdb
+# Check service status
+systemctl --user status couchdb
 
-# Check Caddy (TLS proxy) status
-sudo systemctl status caddy
-
-# Run health check
-~/lobster/config/health-checks/obsidian-km.sh
-
-# View CouchDB directly
-curl http://localhost:5984/
-
-# Access via TLS proxy
-curl -k https://localhost:5985/
+# Test CouchDB response
+source ~/lobster-config/obsidian.env
+curl -s "http://${COUCHDB_USER}:${COUCHDB_PASSWORD}@127.0.0.1:5984/"
 ```
 
-## Vault Structure
+## Configuration
 
-The skill works with standard Obsidian vault structure:
+Configuration is stored in `~/lobster-config/obsidian.env`:
+
+| Variable | Description |
+|----------|-------------|
+| `COUCHDB_USER` | CouchDB admin username |
+| `COUCHDB_PASSWORD` | CouchDB admin password |
+| `COUCHDB_HOST` | Bind address (127.0.0.1) |
+| `COUCHDB_PORT` | Port (5984) |
+| `OBSIDIAN_DATABASE` | Database name for LiveSync |
+| `OBSIDIAN_VAULT_PATH` | Local vault directory |
+
+## Service Management
+
+```bash
+# Start service
+systemctl --user start couchdb
+
+# Stop service
+systemctl --user stop couchdb
+
+# Restart service
+systemctl --user restart couchdb
+
+# View logs
+journalctl --user -u couchdb -f
+
+# Check if enabled at boot
+systemctl --user is-enabled couchdb
+```
+
+## Boot Persistence
+
+The installer enables `loginctl enable-linger` for the user account, ensuring the CouchDB service starts at boot without requiring a login session.
+
+## Security
+
+- CouchDB binds to `127.0.0.1` only (not exposed to the network)
+- External access should go through a TLS-terminating reverse proxy (Caddy/nginx)
+- Admin credentials are stored with `chmod 600` in `~/lobster-config/obsidian.env`
+- Anonymous access is disabled
+
+## Directory Structure
 
 ```
-~/obsidian-vault/
-  .obsidian/           # Obsidian settings (preserved)
-  attachments/         # Images and files
-  Welcome.md           # Created by installer
-  *.md                 # Your notes
+lobster-shop/obsidian-km/
+├── install.sh                    # Main installer script
+├── README.md                     # This file
+├── config/
+│   └── obsidian.env.template    # Config file template
+├── scripts/                      # Helper scripts (future)
+└── services/
+    └── couchdb.service          # Systemd user service unit
 ```
 
-Notes support YAML frontmatter for metadata:
+## Related Issues
 
-```yaml
----
-title: Project Ideas
-tags: [ideas, projects]
-created: 2024-01-15
----
+- **BIS-228**: Obsidian KM Skill (epic)
+- **BIS-230**: Install CouchDB on Lobster server (this component)
 
-# Project Ideas
+## Troubleshooting
 
-Your note content here...
-```
+### CouchDB won't start
 
-## Requirements
+1. Check logs: `journalctl --user -u couchdb -n 50`
+2. Verify port is free: `ss -tlnp | grep 5984`
+3. Check CouchDB config: `cat /opt/couchdb/etc/local.ini`
 
-- CouchDB 3.x
-- Caddy 2.x (for TLS proxy)
-- ripgrep (for fast search)
-- Python 3.11+
-- ~200MB disk space for CouchDB + vault
+### Authentication errors
 
-## Architecture
+1. Verify credentials in `~/lobster-config/obsidian.env`
+2. Check admin config: `sudo grep -A5 '\[admins\]' /opt/couchdb/etc/local.ini`
+3. Restart service after config changes: `systemctl --user restart couchdb`
 
-The skill is split into phases (BIS-228 epic):
+### Service not starting at boot
 
-| Issue | Component | Status |
-|-------|-----------|--------|
-| BIS-230 | CouchDB installation | In this installer |
-| BIS-231 | CouchDB configuration | In this installer |
-| BIS-232 | TLS proxy setup | In this installer |
-| BIS-233 | Vault creation | In this installer |
-| BIS-235 | Health checks | In this installer |
-| BIS-236 | Master install.sh | This file |
-| BIS-243 | MCP server | Placeholder (coming soon) |
-
-## Status
-
-**In Development** -- Core infrastructure ready, MCP server implementation pending (BIS-243).
-
+1. Check linger status: `ls /var/lib/systemd/linger/`
+2. Enable linger: `loginctl enable-linger $USER`
+3. Verify service is enabled: `systemctl --user is-enabled couchdb`
