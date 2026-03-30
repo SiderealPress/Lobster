@@ -1386,6 +1386,35 @@ chmod +x "$INSTALL_DIR/scheduled-tasks/export-logs.py" 2>/dev/null || true
 
 success "Log export configured (runs at 03:00 UTC daily)"
 
+#===============================================================================
+# Ghost Detector (agent-monitor)
+#===============================================================================
+
+step "Setting up ghost detector cron..."
+
+# agent-monitor.py runs every 5 minutes, checks for stale/dead agent sessions,
+# sends a Telegram alert if GHOST_CONFIRMED or UNREGISTERED agents are found,
+# and marks ghost sessions as failed in agent_sessions.db. No LLM involved.
+"$INSTALL_DIR/scripts/cron-manage.sh" add "# LOBSTER-GHOST-DETECTOR" \
+    "*/5 * * * * cd $HOME && uv run $INSTALL_DIR/scripts/agent-monitor.py --alert --mark-failed >> $HOME/lobster-workspace/logs/agent-monitor.log 2>&1 # LOBSTER-GHOST-DETECTOR"
+
+success "Ghost detector configured (runs every 5 minutes)"
+
+#===============================================================================
+# OOM Monitor
+#===============================================================================
+
+step "Setting up OOM monitor cron..."
+
+# oom-monitor.py runs every 10 minutes, scans the kernel journal for OOM kills
+# affecting Lobster/Claude processes, and writes an inbox message for the
+# dispatcher when new OOM kill events are detected. No LLM involved.
+# Only active when LOBSTER_DEBUG=true (the script is a no-op otherwise).
+"$INSTALL_DIR/scripts/cron-manage.sh" add "# LOBSTER-OOM-CHECK" \
+    "*/10 * * * * cd $HOME && uv run $INSTALL_DIR/scripts/oom-monitor.py --since-minutes 10 >> $HOME/lobster-workspace/logs/oom-monitor.log 2>&1 # LOBSTER-OOM-CHECK"
+
+success "OOM monitor configured (runs every 10 minutes, active only when LOBSTER_DEBUG=true)"
+
 # Ensure any lingering self-check cron entry is removed on fresh installs
 { crontab -l 2>/dev/null | grep -v "# LOBSTER-SELF-CHECK" | grep -v "periodic-self-check" || true; } | crontab -
 
