@@ -1974,6 +1974,17 @@ async def list_tools() -> list[Tool]:
                             "recent output file activity can be presumed dead. Default: 30."
                         ),
                     },
+                    "idempotency": {
+                        "type": "string",
+                        "description": (
+                            "Re-run safety classification for orphan recovery. "
+                            "'safe' — read-only/idempotent task, safe to re-run automatically after restart. "
+                            "'unsafe' — task has side effects (sends messages, modifies files, posts comments); "
+                            "requires explicit user approval to re-run. "
+                            "'unknown' — caller did not classify (default; treated as unsafe for recovery)."
+                        ),
+                        "enum": ["safe", "unsafe", "unknown"],
+                    },
                 },
                 "required": ["agent_id", "description", "chat_id"],
             },
@@ -2063,6 +2074,17 @@ async def list_tools() -> list[Tool]:
                             "only in this private repo's SQLite DB, not forwarded to wire "
                             "server unless LOBSTER_WIRE_REDACT_PII=false."
                         ),
+                    },
+                    "idempotency": {
+                        "type": "string",
+                        "description": (
+                            "Re-run safety classification for orphan recovery. "
+                            "'safe' — read-only/idempotent task, safe to re-run automatically after restart. "
+                            "'unsafe' — task has side effects (sends messages, modifies files, posts comments); "
+                            "requires explicit user approval to re-run. "
+                            "'unknown' — caller did not classify (default; treated as unsafe for recovery)."
+                        ),
+                        "enum": ["safe", "unsafe", "unknown"],
                     },
                 },
                 "required": ["agent_id", "description", "chat_id"],
@@ -6392,6 +6414,7 @@ async def handle_register_agent(args: dict) -> list[TextContent]:
     source = (args.get("source") or "telegram").strip() or "telegram"
     output_file = args.get("output_file") or None
     timeout_minutes = args.get("timeout_minutes") or None
+    idempotency = args.get("idempotency") or None
 
     if not agent_id:
         return [TextContent(type="text", text="Error: agent_id is required")]
@@ -6422,6 +6445,7 @@ async def handle_register_agent(args: dict) -> list[TextContent]:
             source=source,
             output_file=output_file,
             timeout_minutes=timeout_minutes,
+            idempotency=idempotency,
         )
     except Exception as exc:
         log.error(f"register_agent failed: {exc}", exc_info=True)
@@ -6481,6 +6505,7 @@ async def handle_session_start(args: dict) -> list[TextContent]:
     input_summary = args.get("input_summary") or None
     trigger_message_id = args.get("trigger_message_id") or None
     trigger_snippet = args.get("trigger_snippet") or None
+    idempotency = args.get("idempotency") or None
 
     if not agent_id:
         return [TextContent(type="text", text="Error: agent_id is required")]
@@ -6509,6 +6534,7 @@ async def handle_session_start(args: dict) -> list[TextContent]:
             input_summary=input_summary,
             trigger_message_id=trigger_message_id,
             trigger_snippet=trigger_snippet,
+            idempotency=idempotency,
         )
     except Exception as exc:
         log.error(f"session_start failed: {exc}", exc_info=True)
