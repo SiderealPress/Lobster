@@ -3086,6 +3086,12 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
     # Touch heartbeat at start - signals Claude is alive and waiting for messages
     touch_heartbeat()
 
+    # Write "active" state so the health check always sees a live signal when
+    # wait_for_messages is called.  This is the authoritative steady-state write:
+    # even if claude-persistent.sh left the state in "starting" or another
+    # transient mode, calling wait_for_messages means Claude is up and running.
+    _write_lobster_state(LOBSTER_STATE_FILE, "active")
+
     # Recover stale processing and retryable failed messages
     _recover_stale_processing()
     _recover_retryable_messages()
