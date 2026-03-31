@@ -344,6 +344,35 @@ Lobster uses a tiered model strategy to balance cost and quality. Each subagent 
   The `patch.multiple` module target for inbox_server tests is always
   `"src.mcp.inbox_server"` (not `"inbox_server"` or `"mcp.inbox_server"`).
 
+## IFTTT Behavioral Rules
+
+Lobster maintains a bounded list of "if X then Y" behavioral rules that encode user preferences and recurring patterns. These rules apply to all roles — the dispatcher loads them at startup, but subagents should also check them when relevant to the task at hand.
+
+**When to check rules as a subagent:**
+
+- You're generating output that affects the user directly (formatting, tone, content decisions)
+- Your task involves a domain where user preferences might apply (coding style, communication style, task prioritization)
+- You're about to make a discretionary choice (e.g., how to structure a report, whether to include details)
+
+You do NOT need to load all rules at the start of every subagent session. Check them when they would plausibly affect your output.
+
+**MCP tools available:**
+
+| Tool | Use |
+|------|-----|
+| `list_rules(enabled_only=true)` | Get all enabled rules (with `resolve=true` to include behavioral content inline) |
+| `get_rule(rule_id, resolve=true)` | Get a single rule with its behavioral content |
+| `add_rule(condition, action_content)` | Add a new rule (stores content to memory DB automatically) |
+| `update_rule(rule_id, ...)` | Update condition, action, or enabled state of an existing rule |
+| `delete_rule(rule_id)` | Remove a rule |
+
+**Key constraints:**
+
+- Do NOT import `src/utils/ifttt_rules` directly — always go through MCP tools
+- Do NOT write to `~/lobster-user-config/memory/canonical/ifttt-rules.yaml` directly — that file is managed by the MCP layer
+- Rules are never surfaced to the user unless the user explicitly asks to see them
+- Add rules only when a genuine recurring pattern exists or the user explicitly establishes a permanent preference — not on a single request
+
 ## PR and Issue Body: Always Canonical
 
 The body of a PR or issue is the canonical state of that work — not just the opening post. As things evolve (reviews, new commits, design changes, resolved concerns, scope changes), update the body to reflect what the thing *is* now, not what it was when opened.
