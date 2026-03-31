@@ -1,18 +1,35 @@
 """
 Tests for MCP Server Validation Functions
 
-Tests cron validation, job name validation, and other validators.
+Tests schedule validation, job name validation, and other validators.
+These tests target the systemd-backed scheduling API introduced in
+feature/scheduling-api-clean (PR #1105). The old cron-specific helpers
+(validate_cron_schedule, validate_job_name, cron_to_human) are gone;
+equivalent functionality lives in systemd_jobs.py and is exposed via
+the _sj_* aliases in inbox_server.
 """
 
 import pytest
+import sys
+from pathlib import Path
+
+# Ensure systemd_jobs is importable by name (tests that import it directly)
+_MCP_DIR = Path(__file__).parent.parent.parent.parent / "src" / "mcp"
+if str(_MCP_DIR) not in sys.path:
+    sys.path.insert(0, str(_MCP_DIR))
 
 
-class TestValidateCronSchedule:
-    """Tests for cron schedule validation."""
+class TestValidateSchedule:
+    """Tests for systemd schedule validation via _sj_validate_schedule.
 
-    def test_valid_simple_schedule(self):
-        """Test valid simple cron schedules."""
-        from src.mcp.inbox_server import validate_cron_schedule
+    Bug 3 fix: validate_schedule was a no-op stub that returned None for any
+    non-empty string. It now delegates to normalize_schedule so that invalid
+    expressions are caught before the unit file is written.
+    """
+
+    def test_valid_cron_schedules_pass(self):
+        """Valid cron expressions are accepted (and will be converted)."""
+        from systemd_jobs import validate_schedule
 
         valid_schedules = [
             "* * * * *",
@@ -26,152 +43,56 @@ class TestValidateCronSchedule:
         ]
 
         for schedule in valid_schedules:
-            valid, error = validate_cron_schedule(schedule)
-            assert valid, f"Schedule '{schedule}' should be valid: {error}"
+            err = validate_schedule(schedule)
+            assert err is None, f"Schedule '{schedule}' should be valid, got: {err}"
 
-    def test_invalid_part_count(self):
-        """Test that wrong number of parts is rejected."""
-        from src.mcp.inbox_server import validate_cron_schedule
+    def test_empty_schedule_is_rejected(self):
+        """Empty string must be rejected."""
+        from systemd_jobs import validate_schedule
 
-        invalid_schedules = [
-            "* * * *",  # 4 parts
-            "* * * * * *",  # 6 parts
-            "*",  # 1 part
-            "",  # empty
-        ]
+        err = validate_schedule("")
+        assert err is not None
+        assert "empty" in err.lower()
 
-        for schedule in invalid_schedules:
-            valid, error = validate_cron_schedule(schedule)
-            assert not valid, f"Schedule '{schedule}' should be invalid"
-            assert "5 parts" in error
-
-    def test_invalid_minute_range(self):
-        """Test that invalid minute values are rejected."""
-        from src.mcp.inbox_server import validate_cron_schedule
+    def test_invalid_systemd_expression_rejected(self):
+        """Strings that are neither valid cron nor valid systemd OnCalendar
+        expressions must be rejected — not silently accepted."""
+        from systemd_jobs import validate_schedule
 
         invalid = [
-            "60 * * * *",  # minute > 59
-            "-1 * * * *",  # negative
+            "not-a-schedule",
+            "garbage string here",
+            "99 99 99 99 99",   # out-of-range cron that systemd will reject
         ]
 
         for schedule in invalid:
-            valid, error = validate_cron_schedule(schedule)
-            assert not valid, f"Schedule '{schedule}' should be invalid"
+            err = validate_schedule(schedule)
+            assert err is not None, (
+                f"validate_schedule('{schedule}') returned None — "
+                "the stub was not replaced with real validation (Bug 3)"
+            )
 
-    def test_invalid_hour_range(self):
-        """Test that invalid hour values are rejected."""
-        from src.mcp.inbox_server import validate_cron_schedule
+    def test_valid_systemd_calendar_expressions_pass(self):
+        """Native systemd OnCalendar expressions pass validation."""
+        from systemd_jobs import validate_schedule
 
-        invalid = [
-            "0 24 * * *",  # hour > 23
-            "0 25 * * *",
-        ]
+        valid = ["daily", "hourly", "*-*-* 09:00:00", "*:0/30:00", "weekly"]
 
-        for schedule in invalid:
-            valid, error = validate_cron_schedule(schedule)
-            assert not valid, f"Schedule '{schedule}' should be invalid"
-
-    def test_invalid_day_range(self):
-        """Test that invalid day values are rejected."""
-        from src.mcp.inbox_server import validate_cron_schedule
-
-        invalid = [
-            "0 0 0 * *",  # day = 0 (must be 1-31)
-            "0 0 32 * *",  # day > 31
-        ]
-
-        for schedule in invalid:
-            valid, error = validate_cron_schedule(schedule)
-            assert not valid, f"Schedule '{schedule}' should be invalid"
-
-    def test_invalid_month_range(self):
-        """Test that invalid month values are rejected."""
-        from src.mcp.inbox_server import validate_cron_schedule
-
-        invalid = [
-            "0 0 * 0 *",  # month = 0 (must be 1-12)
-            "0 0 * 13 *",  # month > 12
-        ]
-
-        for schedule in invalid:
-            valid, error = validate_cron_schedule(schedule)
-            assert not valid, f"Schedule '{schedule}' should be invalid"
-
-    def test_invalid_weekday_range(self):
-        """Test that invalid weekday values are rejected."""
-        from src.mcp.inbox_server import validate_cron_schedule
-
-        invalid = [
-            "0 0 * * 8",  # weekday > 7
-        ]
-
-        for schedule in invalid:
-            valid, error = validate_cron_schedule(schedule)
-            assert not valid, f"Schedule '{schedule}' should be invalid"
-
-    def test_valid_ranges(self):
-        """Test valid range expressions."""
-        from src.mcp.inbox_server import validate_cron_schedule
-
-        valid = [
-            "0-30 * * * *",  # minute range
-            "0 9-17 * * *",  # hour range (working hours)
-            "0 0 1-15 * *",  # first half of month
-            "0 0 * * 1-5",  # weekdays
-        ]
-
-        for schedule in valid:
-            valid_result, error = validate_cron_schedule(schedule)
-            assert valid_result, f"Schedule '{schedule}' should be valid: {error}"
-
-    def test_valid_lists(self):
-        """Test valid list expressions."""
-        from src.mcp.inbox_server import validate_cron_schedule
-
-        valid = [
-            "0,30 * * * *",  # 0 and 30 minutes
-            "0 9,12,18 * * *",  # specific hours
-            "0 0 * * 1,3,5",  # Mon, Wed, Fri
-        ]
-
-        for schedule in valid:
-            valid_result, error = validate_cron_schedule(schedule)
-            assert valid_result, f"Schedule '{schedule}' should be valid: {error}"
-
-    def test_valid_step_values(self):
-        """Test valid step expressions."""
-        from src.mcp.inbox_server import validate_cron_schedule
-
-        valid = [
-            "*/5 * * * *",  # every 5 minutes
-            "0 */2 * * *",  # every 2 hours
-            "*/15 * * * *",  # every 15 minutes
-        ]
-
-        for schedule in valid:
-            valid_result, error = validate_cron_schedule(schedule)
-            assert valid_result, f"Schedule '{schedule}' should be valid: {error}"
-
-    def test_invalid_step_value(self):
-        """Test invalid step values."""
-        from src.mcp.inbox_server import validate_cron_schedule
-
-        invalid = [
-            "*/0 * * * *",  # step of 0
-            "*/-1 * * * *",  # negative step
-        ]
-
-        for schedule in invalid:
-            valid, error = validate_cron_schedule(schedule)
-            assert not valid, f"Schedule '{schedule}' should be invalid"
+        for expr in valid:
+            err = validate_schedule(expr)
+            assert err is None, f"Expression '{expr}' should be valid, got: {err}"
 
 
 class TestValidateJobName:
-    """Tests for job name validation."""
+    """Tests for job name validation via systemd_jobs.validate_name.
+
+    The old validate_job_name helper in inbox_server returned (bool, str).
+    The new validate_name in systemd_jobs returns Optional[str] (None = valid).
+    """
 
     def test_valid_job_names(self):
-        """Test valid job names."""
-        from src.mcp.inbox_server import validate_job_name
+        """Valid names return None."""
+        from systemd_jobs import validate_name
 
         valid_names = [
             "a",
@@ -183,114 +104,121 @@ class TestValidateJobName:
         ]
 
         for name in valid_names:
-            valid, error = validate_job_name(name)
-            assert valid, f"Name '{name}' should be valid: {error}"
+            err = validate_name(name)
+            assert err is None, f"Name '{name}' should be valid, got: {err}"
 
     def test_empty_name(self):
-        """Test that empty name is rejected."""
-        from src.mcp.inbox_server import validate_job_name
+        """Empty name returns an error mentioning 'empty'."""
+        from systemd_jobs import validate_name
 
-        valid, error = validate_job_name("")
-        assert not valid
-        assert "empty" in error.lower()
+        err = validate_name("")
+        assert err is not None
+        assert "empty" in err.lower()
 
     def test_uppercase_rejected(self):
-        """Test that uppercase letters are rejected."""
-        from src.mcp.inbox_server import validate_job_name
+        """Names with uppercase letters are rejected."""
+        from systemd_jobs import validate_name
 
-        invalid = ["MyJob", "UPPERCASE", "camelCase"]
-
-        for name in invalid:
-            valid, error = validate_job_name(name)
-            assert not valid, f"Name '{name}' should be invalid"
+        for name in ("MyJob", "UPPERCASE", "camelCase"):
+            err = validate_name(name)
+            assert err is not None, f"Name '{name}' should be invalid"
 
     def test_starts_with_hyphen_rejected(self):
-        """Test that names starting with hyphen are rejected."""
-        from src.mcp.inbox_server import validate_job_name
+        from systemd_jobs import validate_name
 
-        valid, error = validate_job_name("-invalid")
-        assert not valid
+        assert validate_name("-invalid") is not None
 
     def test_ends_with_hyphen_rejected(self):
-        """Test that names ending with hyphen are rejected."""
-        from src.mcp.inbox_server import validate_job_name
+        from systemd_jobs import validate_name
 
-        valid, error = validate_job_name("invalid-")
-        assert not valid
+        assert validate_name("invalid-") is not None
 
     def test_special_characters_rejected(self):
-        """Test that special characters are rejected."""
-        from src.mcp.inbox_server import validate_job_name
+        from systemd_jobs import validate_name
 
-        invalid = ["job_name", "job.name", "job/name", "job name", "job@name"]
-
-        for name in invalid:
-            valid, error = validate_job_name(name)
-            assert not valid, f"Name '{name}' should be invalid"
+        for name in ("job_name", "job.name", "job/name", "job name", "job@name"):
+            err = validate_name(name)
+            assert err is not None, f"Name '{name}' should be invalid"
 
     def test_too_long_name_rejected(self):
-        """Test that names over 50 chars are rejected."""
-        from src.mcp.inbox_server import validate_job_name
+        """Names over MAX_NAME_LEN are rejected."""
+        from systemd_jobs import validate_name, MAX_NAME_LEN
 
-        long_name = "a" * 51
-        valid, error = validate_job_name(long_name)
-        assert not valid
-        assert "50 characters" in error
+        long_name = "a" * (MAX_NAME_LEN + 1)
+        err = validate_name(long_name)
+        assert err is not None
 
 
-class TestCronToHuman:
-    """Tests for cron to human-readable conversion."""
+class TestCronToSystemdConversion:
+    """Tests for cron-to-systemd calendar conversion.
+
+    The old cron_to_human helper returned human-readable text (e.g. "every 5
+    minutes"). The new backend converts cron expressions to systemd OnCalendar
+    strings via convert_cron_to_systemd/normalize_schedule. These tests verify
+    that the conversions produce the correct systemd format (Bug 1 coverage).
+    """
 
     def test_every_minute(self):
-        """Test every minute conversion."""
-        from src.mcp.inbox_server import cron_to_human
+        """'* * * * *' converts to '*-*-* *:*:00'."""
+        from systemd_jobs import convert_cron_to_systemd
 
-        result = cron_to_human("* * * * *")
-        assert "every minute" in result.lower()
+        result = convert_cron_to_systemd("* * * * *")
+        assert result == "*-*-* *:*:00"
 
-    def test_every_n_minutes(self):
-        """Test every N minutes conversion."""
-        from src.mcp.inbox_server import cron_to_human
+    def test_every_5_minutes(self):
+        """'*/5 * * * *' converts to '*-*-* *:0/05:00'."""
+        from systemd_jobs import convert_cron_to_systemd
 
-        result = cron_to_human("*/5 * * * *")
-        assert "5 minutes" in result.lower()
+        result = convert_cron_to_systemd("*/5 * * * *")
+        assert result == "*-*-* *:0/05:00"
 
-        result = cron_to_human("*/30 * * * *")
-        assert "30 minutes" in result.lower()
+    def test_every_30_minutes(self):
+        """'*/30 * * * *' converts to '*-*-* *:0/30:00'."""
+        from systemd_jobs import convert_cron_to_systemd
 
-    def test_every_n_hours(self):
-        """Test every N hours conversion."""
-        from src.mcp.inbox_server import cron_to_human
+        result = convert_cron_to_systemd("*/30 * * * *")
+        assert result == "*-*-* *:0/30:00"
 
-        result = cron_to_human("0 */2 * * *")
-        assert "2 hours" in result.lower()
+    def test_every_2_hours(self):
+        """'0 */2 * * *' converts to '*-*-* 0/2:00:00'."""
+        from systemd_jobs import convert_cron_to_systemd
 
-    def test_daily_at_time(self):
-        """Test daily at specific time conversion."""
-        from src.mcp.inbox_server import cron_to_human
+        result = convert_cron_to_systemd("0 */2 * * *")
+        assert result == "*-*-* 0/2:00:00"
 
-        result = cron_to_human("0 9 * * *")
-        assert "daily" in result.lower() or "9:00" in result
+    def test_daily_at_9am(self):
+        """'0 9 * * *' converts to '*-*-* 09:00:00'."""
+        from systemd_jobs import convert_cron_to_systemd
 
-        result = cron_to_human("30 14 * * *")
-        assert "14:30" in result or "14" in result
+        result = convert_cron_to_systemd("0 9 * * *")
+        assert result == "*-*-* 09:00:00"
 
-    def test_weekly_schedule(self):
-        """Test weekly schedule conversion."""
-        from src.mcp.inbox_server import cron_to_human
+    def test_daily_at_2_30pm(self):
+        """'30 14 * * *' converts to a string containing '14:30'."""
+        from systemd_jobs import convert_cron_to_systemd
 
-        result = cron_to_human("0 9 * * 1")
-        # Should mention Monday or Mon
-        assert "mon" in result.lower() or "1" in result
+        result = convert_cron_to_systemd("30 14 * * *")
+        assert result is not None
+        assert "14" in result and "30" in result
 
-    def test_returns_original_for_complex(self):
-        """Test that complex schedules return original."""
-        from src.mcp.inbox_server import cron_to_human
+    def test_weekly_monday(self):
+        """'0 9 * * 1' converts to 'Mon *-*-* 09:00:00'."""
+        from systemd_jobs import convert_cron_to_systemd
 
-        complex_schedule = "0 9 1-15 1,6 *"
-        result = cron_to_human(complex_schedule)
-        # Should contain the original schedule
-        assert "9" in result
+        result = convert_cron_to_systemd("0 9 * * 1")
+        assert result == "Mon *-*-* 09:00:00"
+
+    def test_complex_expression_returns_none(self):
+        """Expressions that can't be cleanly expressed in systemd format
+        return None (caller must reject with a helpful error)."""
+        from systemd_jobs import convert_cron_to_systemd
+
+        # */15 9 * * * cannot be expressed in OnCalendar without losing
+        # the hour constraint — should return None
+        result = convert_cron_to_systemd("*/15 9 * * *")
+        assert result is None, (
+            f"Expected None for '*/15 9 * * *' (unsupported mixed step+hour), got {result!r}"
+        )
 
 
 class TestToolListing:
