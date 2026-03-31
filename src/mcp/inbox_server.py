@@ -1628,7 +1628,7 @@ async def list_tools() -> list[Tool]:
                     },
                     "schedule": {
                         "type": "string",
-                        "description": "systemd OnCalendar expression (e.g., '*-*-* 09:00:00' for 9am daily, '*:0/30' for every 30 mins). Also accepts cron-style 5-field expressions.",
+                        "description": "Schedule for the job. Accepts systemd OnCalendar expressions (e.g., '*-*-* 09:00:00' for 9am daily, '*:0/30:00' for every 30 mins, 'daily', 'hourly') or standard 5-field cron expressions (e.g., '0 9 * * *') which are auto-converted to systemd format.",
                     },
                     "command": {
                         "type": "string",
@@ -1666,7 +1666,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="update_scheduled_job",
-            description="Update an existing lobster-managed job's schedule or command. Rewrites the unit files and restarts the timer.",
+            description="Update an existing lobster-managed job's schedule, command, or enabled state. Rewrites the unit files and restarts the timer when schedule/command change.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1676,11 +1676,15 @@ async def list_tools() -> list[Tool]:
                     },
                     "schedule": {
                         "type": "string",
-                        "description": "New systemd OnCalendar schedule (optional).",
+                        "description": "New schedule (systemd OnCalendar or cron expression — auto-converted). Optional.",
                     },
                     "command": {
                         "type": "string",
                         "description": "New absolute path command (optional).",
+                    },
+                    "enabled": {
+                        "type": "boolean",
+                        "description": "Set to false to pause/disable the timer without deleting it. Set to true to re-enable it. Optional.",
                     },
                 },
                 "required": ["name"],
@@ -5254,6 +5258,7 @@ from systemd_jobs import (
     validate_name as _sj_validate_name,
     validate_command as _sj_validate_command,
     validate_schedule as _sj_validate_schedule,
+    normalize_schedule as _sj_normalize_schedule,
     create_job as _sj_create_job,
     list_jobs as _sj_list_jobs,
     update_job as _sj_update_job,
@@ -5277,7 +5282,8 @@ async def handle_create_scheduled_job(args: dict) -> list[TextContent]:
     if err:
         return [TextContent(type="text", text=f"Error: {err}")]
 
-    err = _sj_validate_schedule(schedule)
+    # Normalize converts cron expressions and validates via systemd-analyze
+    schedule, err = _sj_normalize_schedule(schedule)
     if err:
         return [TextContent(type="text", text=f"Error: {err}")]
 
@@ -5363,7 +5369,7 @@ async def handle_get_scheduled_job(args: dict) -> list[TextContent]:
 
 
 async def handle_update_scheduled_job(args: dict) -> list[TextContent]:
-    """Update schedule or command for an existing lobster job."""
+    """Update schedule, command, and/or enabled state for an existing lobster job."""
     name = args.get("name", "").strip().lower()
 
     if not name:
@@ -5371,9 +5377,17 @@ async def handle_update_scheduled_job(args: dict) -> list[TextContent]:
 
     schedule = args.get("schedule", "").strip() or None
     command = args.get("command", "").strip() or None
+    enabled_raw = args.get("enabled")
+    enabled = None  # type: bool | None
+    if enabled_raw is not None:
+        if isinstance(enabled_raw, bool):
+            enabled = enabled_raw
+        elif isinstance(enabled_raw, str):
+            enabled = enabled_raw.lower() not in ("false", "0", "no")
 
     if schedule is not None:
-        err = _sj_validate_schedule(schedule)
+        # Normalize converts cron expressions and validates via systemd-analyze
+        schedule, err = _sj_normalize_schedule(schedule)
         if err:
             return [TextContent(type="text", text=f"Error: {err}")]
 
@@ -5383,14 +5397,14 @@ async def handle_update_scheduled_job(args: dict) -> list[TextContent]:
             return [TextContent(type="text", text=f"Error: {err}")]
 
     try:
-        result = await _sj_update_job(name, schedule=schedule, command=command)
+        result = await _sj_update_job(name, schedule=schedule, command=command, enabled=enabled)
     except FileNotFoundError as exc:
         return [TextContent(type="text", text=f"Error: {exc}")]
     except Exception as exc:
         return [TextContent(type="text", text=f"Error updating job '{name}': {exc}")]
 
     if not result.updated_fields:
-        return [TextContent(type="text", text="No changes specified. Provide schedule or command.")]
+        return [TextContent(type="text", text="No changes specified. Provide schedule, command, or enabled.")]
 
     return [TextContent(type="text", text=(
         f"Updated job '{name}':\n- " + "\n- ".join(result.updated_fields)

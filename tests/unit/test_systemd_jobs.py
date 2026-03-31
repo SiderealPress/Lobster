@@ -524,3 +524,154 @@ class TestGetScaffold:
         with patch.object(Path, "home", return_value=tmp_path):
             content = sj.get_scaffold("poller")
         assert "custom template" in content
+
+
+# ---------------------------------------------------------------------------
+# Cron conversion (Bug 1)
+# ---------------------------------------------------------------------------
+
+class TestIsCronExpression:
+    def test_five_field_cron(self):
+        assert sj.is_cron_expression("0 9 * * *") is True
+
+    def test_wildcard_cron(self):
+        assert sj.is_cron_expression("* * * * *") is True
+
+    def test_step_cron(self):
+        assert sj.is_cron_expression("*/5 * * * *") is True
+
+    def test_systemd_calendar_not_cron(self):
+        assert sj.is_cron_expression("*-*-* 09:00:00") is False
+
+    def test_daily_keyword_not_cron(self):
+        assert sj.is_cron_expression("daily") is False
+
+    def test_hourly_keyword_not_cron(self):
+        assert sj.is_cron_expression("hourly") is False
+
+    def test_empty_not_cron(self):
+        assert sj.is_cron_expression("") is False
+
+
+class TestConvertCronToSystemd:
+    def test_daily_at_9am(self):
+        result = sj.convert_cron_to_systemd("0 9 * * *")
+        assert result == "*-*-* 09:00:00"
+
+    def test_every_minute(self):
+        result = sj.convert_cron_to_systemd("* * * * *")
+        assert result == "*-*-* *:*:00"
+
+    def test_every_5_minutes(self):
+        result = sj.convert_cron_to_systemd("*/5 * * * *")
+        assert result == "*-*-* *:0/05:00"
+
+    def test_every_30_minutes(self):
+        result = sj.convert_cron_to_systemd("*/30 * * * *")
+        assert result == "*-*-* *:0/30:00"
+
+    def test_every_2_hours(self):
+        result = sj.convert_cron_to_systemd("0 */2 * * *")
+        assert result == "*-*-* 0/2:00:00"
+
+    def test_monday_midnight(self):
+        result = sj.convert_cron_to_systemd("0 0 * * 1")
+        assert result == "Mon *-*-* 00:00:00"
+
+    def test_sunday_as_zero(self):
+        result = sj.convert_cron_to_systemd("0 0 * * 0")
+        assert result == "Sun *-*-* 00:00:00"
+
+    def test_sunday_as_seven(self):
+        result = sj.convert_cron_to_systemd("0 0 * * 7")
+        assert result == "Sun *-*-* 00:00:00"
+
+    def test_specific_day_of_month(self):
+        result = sj.convert_cron_to_systemd("0 9 15 * *")
+        assert result == "*-*-15 09:00:00"
+
+    def test_comma_separated_minutes(self):
+        result = sj.convert_cron_to_systemd("0,30 * * * *")
+        assert result is not None  # comma minutes are supported
+
+
+class TestNormalizeSchedule:
+    def test_cron_expr_is_converted(self):
+        normalized, err = sj.normalize_schedule("0 9 * * *")
+        assert err is None
+        assert "09:00:00" in normalized
+
+    def test_systemd_expr_passes_through(self):
+        normalized, err = sj.normalize_schedule("*-*-* 09:00:00")
+        assert err is None
+        assert normalized == "*-*-* 09:00:00"
+
+    def test_empty_returns_error(self):
+        _, err = sj.normalize_schedule("")
+        assert err is not None
+
+    def test_invalid_systemd_expr_returns_error(self):
+        _, err = sj.normalize_schedule("not-a-schedule")
+        assert err is not None
+
+    def test_daily_keyword_valid(self):
+        normalized, err = sj.normalize_schedule("daily")
+        assert err is None
+
+    def test_hourly_keyword_valid(self):
+        normalized, err = sj.normalize_schedule("hourly")
+        assert err is None
+
+
+# ---------------------------------------------------------------------------
+# validate_command — existence check (Bug 4)
+# ---------------------------------------------------------------------------
+
+class TestValidateCommandExistence:
+    def test_existing_executable_passes(self, tmp_path):
+        exe = tmp_path / "mycommand"
+        exe.write_text("#!/bin/sh\necho hi")
+        assert sj.validate_command(str(exe)) is None
+
+    def test_missing_executable_returns_error(self, tmp_path):
+        missing = tmp_path / "nonexistent-cmd"
+        err = sj.validate_command(str(missing))
+        assert err is not None
+        assert "not found" in err.lower() or "nonexistent-cmd" in err
+
+    def test_existing_with_args_passes(self, tmp_path):
+        exe = tmp_path / "mycommand"
+        exe.write_text("#!/bin/sh\necho hi")
+        assert sj.validate_command(f"{exe} --arg1 --arg2") is None
+
+
+# ---------------------------------------------------------------------------
+# update_job — enabled parameter (Bug 2)
+# ---------------------------------------------------------------------------
+
+class TestUpdateJobEnabled:
+    def _create_job_files(self, systemd_dir, name, schedule, command):
+        timer = systemd_dir / f"lobster-{name}.timer"
+        service = systemd_dir / f"lobster-{name}.service"
+        timer.write_text(sj._timer_unit(name, schedule, ""))
+        service.write_text(sj._service_unit(name, command, ""))
+
+    def test_disable_calls_stop_and_disable(self, mock_systemctl, systemd_dir):
+        self._create_job_files(systemd_dir, "test-job", "daily", "/bin/echo hi")
+        result = asyncio.run(sj.update_job("test-job", enabled=False))
+        assert "enabled" in result.updated_fields
+        calls = [call.args for call in mock_systemctl.call_args_list]
+        assert any("stop" in args for args in calls)
+        assert any("disable" in args for args in calls)
+
+    def test_enable_calls_enable_now(self, mock_systemctl, systemd_dir):
+        self._create_job_files(systemd_dir, "test-job", "daily", "/bin/echo hi")
+        result = asyncio.run(sj.update_job("test-job", enabled=True))
+        assert "enabled" in result.updated_fields
+        calls = [call.args for call in mock_systemctl.call_args_list]
+        assert any("enable" in args for args in calls)
+
+    def test_no_changes_when_only_enabled_none(self, mock_systemctl, systemd_dir):
+        self._create_job_files(systemd_dir, "test-job", "daily", "/bin/echo hi")
+        result = asyncio.run(sj.update_job("test-job"))
+        assert result.updated_fields == []

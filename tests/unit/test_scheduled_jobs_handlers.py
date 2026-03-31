@@ -82,7 +82,7 @@ class TestHandleCreateScheduledJob:
         if create_return is None:
             create_return = _CreateResult("test-job", "created")
         with patch("inbox_server._sj_validate_name", return_value=None), \
-             patch("inbox_server._sj_validate_schedule", return_value=None), \
+             patch("inbox_server._sj_normalize_schedule", return_value=("daily", None)), \
              patch("inbox_server._sj_validate_command", return_value=None), \
              patch("inbox_server._sj_create_job", new=AsyncMock(return_value=create_return)):
             from inbox_server import handle_create_scheduled_job
@@ -109,7 +109,7 @@ class TestHandleCreateScheduledJob:
 
     def test_invalid_command_returns_error(self):
         with patch("inbox_server._sj_validate_name", return_value=None), \
-             patch("inbox_server._sj_validate_schedule", return_value=None), \
+             patch("inbox_server._sj_normalize_schedule", return_value=("daily", None)), \
              patch("inbox_server._sj_validate_command", return_value="command must be an absolute path"):
             from inbox_server import handle_create_scheduled_job
             result = _run(handle_create_scheduled_job({
@@ -119,7 +119,7 @@ class TestHandleCreateScheduledJob:
 
     def test_create_job_exception_returns_error(self):
         with patch("inbox_server._sj_validate_name", return_value=None), \
-             patch("inbox_server._sj_validate_schedule", return_value=None), \
+             patch("inbox_server._sj_normalize_schedule", return_value=("daily", None)), \
              patch("inbox_server._sj_validate_command", return_value=None), \
              patch("inbox_server._sj_create_job", new=AsyncMock(side_effect=RuntimeError("systemctl failed"))):
             from inbox_server import handle_create_scheduled_job
@@ -127,6 +127,35 @@ class TestHandleCreateScheduledJob:
                 "name": "job", "schedule": "daily", "command": "/bin/echo"
             }))
         assert "Error" in _text(result)
+
+    def test_invalid_schedule_returns_error(self):
+        with patch("inbox_server._sj_validate_name", return_value=None), \
+             patch("inbox_server._sj_normalize_schedule",
+                   return_value=("bad", "Invalid schedule 'bad': ...")):
+            from inbox_server import handle_create_scheduled_job
+            result = _run(handle_create_scheduled_job({
+                "name": "job", "schedule": "bad", "command": "/bin/echo"
+            }))
+        assert "Error" in _text(result)
+
+    def test_cron_expression_is_normalized(self):
+        """Passing a cron expression should trigger normalize_schedule."""
+        captured = {}
+
+        def fake_normalize(schedule):
+            captured["schedule"] = schedule
+            return ("*-*-* 09:00:00", None)
+
+        with patch("inbox_server._sj_validate_name", return_value=None), \
+             patch("inbox_server._sj_normalize_schedule", side_effect=fake_normalize), \
+             patch("inbox_server._sj_validate_command", return_value=None), \
+             patch("inbox_server._sj_create_job",
+                   new=AsyncMock(return_value=_CreateResult("job", "created"))):
+            from inbox_server import handle_create_scheduled_job
+            _run(handle_create_scheduled_job({
+                "name": "job", "schedule": "0 9 * * *", "command": "/bin/echo"
+            }))
+        assert captured["schedule"] == "0 9 * * *"
 
     def test_output_includes_unit_file_paths(self):
         result = self._call({"name": "my-job", "schedule": "daily", "command": "/bin/echo hi"})
@@ -223,7 +252,7 @@ class TestHandleUpdateScheduledJob:
         assert "Error" in _text(result)
 
     def test_not_found_returns_error(self):
-        with patch("inbox_server._sj_validate_schedule", return_value=None), \
+        with patch("inbox_server._sj_normalize_schedule", return_value=("daily", None)), \
              patch("inbox_server._sj_update_job", new=AsyncMock(side_effect=FileNotFoundError("not found"))):
             from inbox_server import handle_update_scheduled_job
             result = _run(handle_update_scheduled_job({"name": "ghost", "schedule": "daily"}))
@@ -236,7 +265,7 @@ class TestHandleUpdateScheduledJob:
         assert "No changes" in _text(result)
 
     def test_update_schedule_success(self):
-        with patch("inbox_server._sj_validate_schedule", return_value=None), \
+        with patch("inbox_server._sj_normalize_schedule", return_value=("weekly", None)), \
              patch("inbox_server._sj_update_job",
                    new=AsyncMock(return_value=_UpdateResult("job", ["schedule"]))):
             from inbox_server import handle_update_scheduled_job
@@ -245,17 +274,45 @@ class TestHandleUpdateScheduledJob:
         assert "schedule" in _text(result)
 
     def test_invalid_schedule_returns_error(self):
-        with patch("inbox_server._sj_validate_schedule", return_value="schedule cannot be empty"):
+        with patch("inbox_server._sj_normalize_schedule",
+                   return_value=("bad", "Invalid schedule 'bad': ...")):
             from inbox_server import handle_update_scheduled_job
-            result = _run(handle_update_scheduled_job({"name": "job", "schedule": ""}))
-        # Empty schedule is stripped to None, so validation is skipped
-        # A non-empty but invalid schedule would trigger the error
+            result = _run(handle_update_scheduled_job({"name": "job", "schedule": "bad"}))
+        assert "Error" in _text(result)
 
     def test_invalid_command_returns_error(self):
         with patch("inbox_server._sj_validate_command", return_value="command must be an absolute path"):
             from inbox_server import handle_update_scheduled_job
             result = _run(handle_update_scheduled_job({"name": "job", "command": "relative"}))
         assert "Error" in _text(result)
+
+    def test_disable_job(self):
+        """enabled=False should call update_job with enabled=False."""
+        captured = {}
+
+        async def fake_update(name, schedule=None, command=None, enabled=None):
+            captured["enabled"] = enabled
+            return _UpdateResult(name, ["enabled"])
+
+        with patch("inbox_server._sj_update_job", side_effect=fake_update):
+            from inbox_server import handle_update_scheduled_job
+            result = _run(handle_update_scheduled_job({"name": "job", "enabled": False}))
+        assert "Updated" in _text(result)
+        assert captured["enabled"] is False
+
+    def test_enable_job(self):
+        """enabled=True should call update_job with enabled=True."""
+        captured = {}
+
+        async def fake_update(name, schedule=None, command=None, enabled=None):
+            captured["enabled"] = enabled
+            return _UpdateResult(name, ["enabled"])
+
+        with patch("inbox_server._sj_update_job", side_effect=fake_update):
+            from inbox_server import handle_update_scheduled_job
+            result = _run(handle_update_scheduled_job({"name": "job", "enabled": True}))
+        assert "Updated" in _text(result)
+        assert captured["enabled"] is True
 
 
 # ---------------------------------------------------------------------------

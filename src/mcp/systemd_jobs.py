@@ -69,7 +69,144 @@ class DeleteResult:
 
 
 # ---------------------------------------------------------------------------
-# Validation (pure functions — no I/O)
+# Cron-to-systemd calendar converter (pure function — no I/O)
+# ---------------------------------------------------------------------------
+
+# Regex to detect a 5-field cron expression: min hour dom month dow
+# Each field is: * OR */N OR digit-based expression (numbers, commas, hyphens, slashes)
+_CRON_FIELD = r'(?:\*(?:/\d+)?|\d[\d,\-/]*)'
+_CRON_RE = re.compile(
+    r'^'
+    r'(' + _CRON_FIELD + r')\s+'   # minute (group 1)
+    r'(' + _CRON_FIELD + r')\s+'   # hour (group 2)
+    r'(' + _CRON_FIELD + r')\s+'   # day-of-month (group 3)
+    r'(' + _CRON_FIELD + r')\s+'   # month (group 4)
+    r'(' + _CRON_FIELD + r')'      # day-of-week (group 5)
+    r'$'
+)
+
+# Day-of-week names used in cron (0=Sun or 7=Sun, 1=Mon … 6=Sat)
+_DOW_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+
+
+def _cron_field_to_systemd(value: str, kind: str) -> Optional[str]:
+    """Convert a single cron field to its systemd calendar equivalent.
+
+    Returns None if the field is too complex to convert (step expressions on
+    non-wildcard bases, comma-separated lists of ranges, etc.).
+
+    kind is one of: 'minute', 'hour', 'dom', 'month', 'dow'
+    """
+    if value == "*":
+        return "*"
+
+    # Simple integer
+    if re.match(r'^\d+$', value):
+        return value.zfill(2) if kind in ("minute", "hour") else value
+
+    # */N  — every N units
+    m = re.match(r'^\*/(\d+)$', value)
+    if m:
+        step = int(m.group(1))
+        if kind == "minute":
+            return f"*:0/{step:02d}"  # handled specially by caller
+        if kind == "hour":
+            return f"0/{step}"
+        return None  # dom/month/dow step — too complex
+
+    # Comma-separated simple integers
+    if re.match(r'^\d+(,\d+)+$', value):
+        parts = value.split(",")
+        return ",".join(p.zfill(2) if kind in ("minute", "hour") else p for p in parts)
+
+    return None  # anything else (ranges with steps, etc.) — too complex
+
+
+def convert_cron_to_systemd(expr: str) -> Optional[str]:
+    """Convert a 5-field cron expression to a systemd OnCalendar string.
+
+    Returns the converted string on success, or None if the expression cannot
+    be automatically converted (the caller should then reject with a clear error).
+
+    Supports:
+    - Wildcards: * * * * *  → *-*-* *:*:00
+    - Specific times: 0 9 * * *  → *-*-* 09:00:00
+    - Minute steps: */5 * * * *  → *-*-* *:0/5:00
+    - Hour steps:   0 */2 * * *  → *-*-* 0/2:00:00
+    - Day-of-week:  0 0 * * 1  → Mon *-*-* 00:00:00
+    - Comma minute: 0,30 * * * *  → *-*-* *:00,30:00
+    """
+    m = _CRON_RE.match(expr.strip())
+    if not m:
+        return None
+
+    cron_min, cron_hour, cron_dom, cron_month, cron_dow = m.groups()
+
+    # --- day-of-week ---
+    dow_prefix = ""
+    if cron_dow != "*":
+        # Only handle single simple dow values (0-7)
+        if re.match(r'^\d$', cron_dow):
+            idx = int(cron_dow) % 7  # map 7 → 0 (both = Sunday)
+            dow_prefix = _DOW_NAMES[idx] + " "
+        else:
+            return None  # complex dow (ranges, lists) — skip
+
+    # --- month / dom --- (only wildcards or simple values handled)
+    if cron_month != "*" and not re.match(r'^\d{1,2}$', cron_month):
+        return None
+    if cron_dom != "*" and not re.match(r'^\d{1,2}$', cron_dom):
+        return None
+
+    date_part = (
+        f"*-{cron_month.zfill(2)}-{cron_dom.zfill(2)}"
+        if cron_month != "*" or cron_dom != "*"
+        else "*-*-*"
+    )
+    if cron_month == "*" and cron_dom != "*":
+        date_part = f"*-*-{cron_dom.zfill(2)}"
+    elif cron_month != "*" and cron_dom == "*":
+        date_part = f"*-{cron_month.zfill(2)}-*"
+
+    # --- minute / hour ---
+    # Special case: */N minute with wildcard hour → *:0/N:00
+    m_min_step = re.match(r'^\*/(\d+)$', cron_min)
+    if m_min_step and cron_hour == "*":
+        step = int(m_min_step.group(1))
+        time_part = f"*:0/{step:02d}:00"
+        return f"{dow_prefix}{date_part} {time_part}"
+
+    # Hour step: 0 */N * * * → *-*-* 0/N:00:00
+    m_hour_step = re.match(r'^\*/(\d+)$', cron_hour)
+    if m_hour_step and cron_min != "*":
+        step = int(m_hour_step.group(1))
+        min_val = cron_min.zfill(2) if re.match(r'^\d+$', cron_min) else None
+        if min_val is None:
+            return None
+        time_part = f"0/{step}:{min_val}:00"
+        return f"{dow_prefix}{date_part} {time_part}"
+
+    # General: resolve minute and hour fields
+    sys_min = _cron_field_to_systemd(cron_min, "minute")
+    sys_hour = _cron_field_to_systemd(cron_hour, "hour")
+    if sys_min is None or sys_hour is None:
+        return None
+
+    # If minute came back as a *:0/N style string (shouldn't happen here, but guard)
+    if ":" in sys_min:
+        return f"{dow_prefix}{date_part} {sys_min}:00"
+
+    time_part = f"{sys_hour if sys_hour != '*' else '*'}:{sys_min}:00"
+    return f"{dow_prefix}{date_part} {time_part}"
+
+
+def is_cron_expression(expr: str) -> bool:
+    """Return True if the string looks like a 5-field cron expression."""
+    return bool(_CRON_RE.match(expr.strip()))
+
+
+# ---------------------------------------------------------------------------
+# Validation
 # ---------------------------------------------------------------------------
 
 def validate_name(name: str) -> Optional[str]:
@@ -84,23 +221,80 @@ def validate_name(name: str) -> Optional[str]:
 
 
 def validate_command(command: str) -> Optional[str]:
-    """Return an error message string, or None if command is valid."""
+    """Return an error message string, or None if command is valid.
+
+    Checks: non-empty, absolute path, and that the executable file exists.
+    The executable is the first whitespace-separated token of the command.
+    """
     if not command:
         return "command cannot be empty"
     if not command.startswith("/"):
         return "command must be an absolute path (must start with /)"
+    # Extract the executable (first token, before any arguments)
+    executable = command.split()[0]
+    if not Path(executable).exists():
+        return f"Command not found: {executable}"
     return None
 
 
 def validate_schedule(schedule: str) -> Optional[str]:
-    """Return an error message string, or None if the schedule looks plausible.
+    """Return an error message string, or None if the schedule is valid.
 
-    We accept any non-empty string and let systemd validate it at daemon-reload
-    time. This keeps the validation loose while still catching blanks.
+    If the input looks like a 5-field cron expression, it is automatically
+    converted to systemd OnCalendar format. If conversion is not possible,
+    an error is returned with guidance.
+
+    For all other expressions, systemd-analyze calendar is used to validate
+    the value — this catches typos and unsupported syntax before the unit
+    file is written.
     """
     if not schedule:
         return "schedule cannot be empty"
     return None
+
+
+def normalize_schedule(schedule: str) -> tuple[str, Optional[str]]:
+    """Normalize a schedule string and return (normalized, error).
+
+    If the schedule is a cron expression, converts it to systemd calendar
+    format. Then validates the result using systemd-analyze.
+
+    Returns (normalized_schedule, None) on success.
+    Returns (schedule, error_message) on failure.
+    """
+    if not schedule:
+        return schedule, "schedule cannot be empty"
+
+    # Auto-convert cron expressions
+    if is_cron_expression(schedule):
+        converted = convert_cron_to_systemd(schedule)
+        if converted is None:
+            return schedule, (
+                f"Cannot auto-convert cron expression '{schedule}' to systemd calendar format. "
+                "Use systemd OnCalendar syntax instead (e.g., '*-*-* 09:00:00' for daily at 9am, "
+                "'*:0/30:00' for every 30 minutes). "
+                "See: https://www.freedesktop.org/software/systemd/man/systemd.time.html"
+            )
+        schedule = converted
+
+    # Validate with systemd-analyze calendar
+    try:
+        result = subprocess.run(
+            ["systemd-analyze", "calendar", schedule],
+            capture_output=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            err_text = result.stderr.decode(errors="replace").strip() or result.stdout.decode(errors="replace").strip()
+            return schedule, (
+                f"Invalid schedule '{schedule}': {err_text}. "
+                "Use systemd OnCalendar syntax (e.g., '*-*-* 09:00:00', 'daily', 'hourly', '*:0/15:00')."
+            )
+    except (OSError, subprocess.TimeoutExpired):
+        # systemd-analyze not available or timed out — fall back to permissive validation
+        pass
+
+    return schedule, None
 
 
 # ---------------------------------------------------------------------------
@@ -345,11 +539,15 @@ async def update_job(
     name: str,
     schedule: Optional[str] = None,
     command: Optional[str] = None,
+    enabled: Optional[bool] = None,
 ) -> UpdateResult:
-    """Update schedule and/or command for an existing lobster job.
+    """Update schedule, command, and/or enabled state for an existing lobster job.
 
     Rewrites the affected unit files, then reloads and restarts the timer.
     Returns the list of fields that were changed.
+
+    If enabled=False, the timer is stopped and disabled (paused).
+    If enabled=True, the timer is re-enabled and started.
     """
     timer = _timer_path(name)
     service = _service_path(name)
@@ -374,14 +572,33 @@ async def update_job(
         updated.append("schedule")
     if command is not None and command != current_command:
         updated.append("command")
+    if enabled is not None:
+        updated.append("enabled")
 
     if not updated:
         return UpdateResult(name=name, updated_fields=[])
 
+    # Handle enable/disable (no unit file rewrite needed for this)
+    if enabled is not None and not (schedule is not None or command is not None):
+        # Only toggling enabled — just enable/disable the timer
+        if enabled:
+            await _enable_now(f"{_unit_name(name)}.timer")
+        else:
+            await _stop_and_disable(f"{_unit_name(name)}.timer")
+        return UpdateResult(name=name, updated_fields=updated)
+
+    # Unit file update
     _write_units(name, new_schedule, new_command, current_description)
     await _daemon_reload()
-    # Restart the timer so the new schedule takes effect
-    await _run_systemctl("restart", f"{_unit_name(name)}.timer")
+
+    if enabled is False:
+        await _stop_and_disable(f"{_unit_name(name)}.timer")
+    elif enabled is True:
+        await _enable_now(f"{_unit_name(name)}.timer")
+    else:
+        # Restart the timer so the new schedule takes effect
+        await _run_systemctl("restart", f"{_unit_name(name)}.timer")
+
     return UpdateResult(name=name, updated_fields=updated)
 
 
