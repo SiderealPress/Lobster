@@ -45,11 +45,20 @@ try:
         handle_whitelist,
         handle_unwhitelist,
     )
+    from multiplayer_telegram_bot.session import (  # noqa: E402
+        get_active_session,
+        open_session,
+        close_session,
+        refresh_session,
+        is_closure_signal,
+    )
     _GROUP_GATING_ENABLED = True
     _GROUP_COMMANDS_ENABLED = True
+    _GROUP_SESSION_ENABLED = True
 except ImportError:
     _GROUP_GATING_ENABLED = False
     _GROUP_COMMANDS_ENABLED = False
+    _GROUP_SESSION_ENABLED = False
     import logging as _logging
     _logging.getLogger(__name__).warning(
         "multiplayer-telegram-bot skill not available — group gating and management commands disabled"
@@ -1272,6 +1281,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         thread_root_id = _get_thread_root_id(message)
         direct_inv = _is_direct_invocation(message, bot_username)
         engaged = _is_in_engaged_thread(chat.id, thread_root_id)
+
+        # Per-user session followup check (persistent, survives restarts).
+        # In addition to thread-based engagement, check if the sending user
+        # has an active session (they invoked the bot recently). This enforces
+        # the policy that only the invoker can follow up without @mention.
+        _session_followup = False
+        if not direct_inv and not engaged and _GROUP_SESSION_ENABLED:
+            try:
+                _active_session = get_active_session(chat.id)
+                if _active_session and _active_session.invoker_user_id == user.id:
+                    _session_followup = True
+                    engaged = True  # treat session followup as engaged
+            except Exception as _e:
+                log.debug(f"Session followup check failed (non-fatal): {_e}")
+
+        # Closure signal: if user is in an active session and says "thanks" etc.,
+        # close the session and drop the message (no inbox write, no ack).
+        if engaged and _GROUP_SESSION_ENABLED:
+            try:
+                if is_closure_signal(text):
+                    close_session(chat.id)
+                    log.debug(
+                        f"Session closed for {chat.id}: closure signal from {user.id}"
+                    )
+                    return
+            except Exception as _e:
+                log.debug(f"Session closure check failed (non-fatal): {_e}")
+
         if direct_inv or engaged:
             _mark_thread_engaged(chat.id, thread_root_id)
             # Also register the current message's ID as a future thread root so
@@ -1281,6 +1318,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Group thread engaged: chat={chat.id} thread_root={thread_root_id} "
                 f"msg_id={message.message_id} direct={direct_inv} engaged={engaged}"
             )
+
+            # Open/refresh a per-user session when directly invoked.
+            if direct_inv and _GROUP_SESSION_ENABLED:
+                try:
+                    open_session(chat_id=chat.id, invoker_user_id=user.id)
+                except Exception as _e:
+                    log.debug(f"Session open failed (non-fatal): {_e}")
 
     # Create message file in inbox
     msg_data = {
@@ -1898,6 +1942,14 @@ class OutboxHandler(FileSystemEventHandler):
                     log.info(f"Sent reply to {chat_id} in {n} chunks: {text[:50]}...")
                 else:
                     log.info(f"Sent reply to {chat_id}: {text[:50]}...")
+                # Refresh per-user session TTL whenever the bot replies to a group.
+                # This extends the engagement window so active conversations don't
+                # time out mid-exchange.
+                if _GROUP_SESSION_ENABLED and isinstance(chat_id, int) and chat_id < 0:
+                    try:
+                        refresh_session(chat_id)
+                    except Exception as _e:
+                        log.debug(f"Session refresh failed (non-fatal): {_e}")
                 os.remove(filepath)
             else:
                 log.warning(f"Skipping reply {filepath}: missing chat_id={chat_id}, text={bool(text)}, bot={bool(bot_app)}")
