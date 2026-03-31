@@ -14,6 +14,14 @@ File injection order:
 2. ~/lobster-user-config/agents/user.base.bootup.md (if exists)
 3. ~/lobster-user-config/agents/user.dispatcher.bootup.md (dispatcher only, if exists)
    OR ~/lobster-user-config/agents/user.subagent.bootup.md (subagent only, if exists)
+
+Hook ordering note:
+This hook calls session_role.write_dispatcher_session_id() when it detects a
+dispatcher session, making it self-sufficient regardless of whether
+write-dispatcher-session-id.py ran first. The write is idempotent: if
+write-dispatcher-session-id.py already ran (position 0 in settings.json),
+the file already has the correct ID and this is a no-op; if this hook runs
+first for any reason, the ID is written here and downstream hooks benefit.
 """
 
 import json
@@ -40,7 +48,7 @@ HOOK_NAME = "inject-bootup-context"
 
 
 def _read_file_safe(path: Path, label: str) -> str | None:
-    """Return file contents or None on any error, logging to stderr."""
+    """Return file contents or None on any error or empty file, logging to stderr."""
     if not path.exists():
         print(
             f"[{HOOK_NAME}] WARNING: {path} not found; skipping {label} injection.",
@@ -48,7 +56,8 @@ def _read_file_safe(path: Path, label: str) -> str | None:
         )
         return None
     try:
-        return path.read_text()
+        content = path.read_text()
+        return content if content.strip() else None
     except OSError as exc:
         print(
             f"[{HOOK_NAME}] WARNING: could not read {path}: {exc}",
@@ -58,12 +67,13 @@ def _read_file_safe(path: Path, label: str) -> str | None:
 
 
 def _inject_if_exists(path: Path, label: str) -> None:
-    """Read and print file contents if the file exists. Silent skip if absent."""
+    """Read and print file contents if the file exists and is non-empty. Silent skip otherwise."""
     if not path.exists():
         return
     try:
         content = path.read_text()
-        print(content)
+        if content.strip():
+            print(content)
     except OSError as exc:
         print(
             f"[{HOOK_NAME}] WARNING: could not read {path} ({label}): {exc}",
@@ -79,6 +89,14 @@ def main() -> None:
         hook_input = {}
 
     is_dispatcher = session_role.is_dispatcher(hook_input)
+
+    # If this is the dispatcher session, write the session ID to the marker file.
+    # This makes the hook self-sufficient regardless of whether
+    # write-dispatcher-session-id.py ran first. The write is idempotent.
+    if is_dispatcher:
+        session_id = session_role.get_session_id(hook_input)
+        if session_id:
+            session_role.write_dispatcher_session_id(session_id)
 
     # 1. Inject system bootup file based on role.
     if is_dispatcher:
