@@ -35,7 +35,7 @@ _SKILL_DIR = str(Path(__file__).resolve().parent.parent.parent /
 if _SKILL_DIR not in _sys.path:
     _sys.path.insert(0, _SKILL_DIR)
 try:
-    from multiplayer_telegram_bot.whitelist import load_whitelist, enable_group, add_allowed_user, save_whitelist  # noqa: E402
+    from multiplayer_telegram_bot.whitelist import load_whitelist, enable_group, add_allowed_user, remove_group, save_whitelist  # noqa: E402
     _GROUP_GATING_ENABLED = True
 except ImportError:
     _GROUP_GATING_ENABLED = False
@@ -1654,8 +1654,9 @@ async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TY
 
     When added by a whitelisted user: auto-enables the group in group-whitelist.json
     and seeds all ALLOWED_USERS as allowed members.
-    When added by a non-whitelisted user: silently ignores (no whitelist entry written).
-    When removed from a group: logs the removal only.
+    When added by a non-whitelisted user: immediately leaves the group so the bot
+    cannot be used in unauthorized contexts.
+    When removed from a group: removes the group from the whitelist.
     """
     if not update.my_chat_member:
         return
@@ -1685,10 +1686,23 @@ async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TY
         else:
             adder_id = adder.id if adder else "unknown"
             log.info(
-                f"Bot added to group {chat.id} by non-whitelisted user {adder_id} — ignoring"
+                f"Bot added to group {chat.id} by non-whitelisted user {adder_id} — leaving"
             )
+            try:
+                await context.bot.leave_chat(chat.id)
+                log.info(f"Left group {chat.id} (added by non-whitelisted user {adder_id})")
+            except Exception as e:
+                log.error(f"Failed to leave group {chat.id}: {e}")
     elif new_status in ("left", "kicked"):
-        log.info(f"Bot removed from group {chat.id} ({chat.title})")
+        log.info(f"Bot removed from group {chat.id} ({chat.title or str(chat.id)})")
+        if _GROUP_GATING_ENABLED:
+            try:
+                store = load_whitelist()
+                store = remove_group(chat.id, store)
+                save_whitelist(store)
+                log.info(f"Group {chat.id} removed from whitelist")
+            except Exception as e:
+                log.error(f"Failed to remove group {chat.id} from whitelist: {e}")
 
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):

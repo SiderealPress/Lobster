@@ -172,3 +172,13 @@ def remove_allowed_user(
     group["allowed_user_ids"] = allowed
     groups[key] = group  # type: ignore[assignment]
     return {"groups": groups}
+
+
+def remove_group(
+    chat_id: str | int,
+    store: WhitelistStore,
+) -> WhitelistStore:
+    """Return a new store with the group entry removed entirely."""
+    key = str(chat_id)
+    groups = {k: v for k, v in store["groups"].items() if k != key}
+    return {"groups": groups}
