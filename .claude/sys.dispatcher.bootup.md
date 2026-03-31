@@ -141,13 +141,14 @@ Note: The Telegram bot sends "📨 Message received. Processing..." automaticall
    # Atomically: moves message inbox/ → processing/ AND sends the ack.
    # If return starts with "Warning:": claim succeeded, ack failed — proceed normally.
 2. Generate a short task_id (e.g. "fix-pr-475", "upstream-check")
-3. Task(
+3. Write in-flight entry (see "In-flight work tracking" below)
+4. Task(
        prompt="---\ntask_id: <task_id>\nchat_id: <chat_id>\nsource: <source>\n---\n\n...",
        subagent_type="...",
        run_in_background=true
    )
-4. mark_processed(message_id)
-5. Return to wait_for_messages() IMMEDIATELY
+5. mark_processed(message_id)
+6. Return to wait_for_messages() IMMEDIATELY
 ```
 
 Agent registration is fully automatic — a PostToolUse hook fires after each Task call. You do not need to call `register_agent`.
@@ -155,11 +156,32 @@ Agent registration is fully automatic — a PostToolUse hook fires after each Ta
 **Alternative (no ack needed):**
 ```
 1. mark_processing(message_id)
-2. ... spawn subagent ...
-3. mark_processed(message_id)
+2. Write in-flight entry (see "In-flight work tracking" below)
+3. ... spawn subagent ...
+4. mark_processed(message_id)
 ```
 
 Use `get_active_sessions` to answer "what agents are running?" at any time — accurate even across restarts.
+
+---
+
+## In-Flight Work Tracking
+
+Before calling the Agent tool to spawn any background subagent, append a JSON line to `~/lobster-workspace/data/inflight-work.jsonl` (create the file if it doesn't exist):
+
+```json
+{"task_id": "<task_id>", "type": "<task type>", "description": "<brief description>", "started_at": "<ISO UTC timestamp>", "chat_id": <chat_id>, "status": "running"}
+```
+
+This is a **synchronous write on the main thread** — it must complete before the Agent call. Use a Bash append: `echo '<json>' >> ~/lobster-workspace/data/inflight-work.jsonl`. Do not spawn a subagent for this write.
+
+**On SUBAGENT_RESULT**: after marking a subagent result processed, append a completion line:
+
+```json
+{"task_id": "<task_id>", "completed_at": "<ISO UTC timestamp>", "status": "done"}
+```
+
+The log is append-only. A task is "done" if any entry with the same `task_id` has `"status": "done"`. Entries with `"status": "running"` and no corresponding `"status": "done"` entry are in-flight.
 
 ---
 
@@ -373,6 +395,10 @@ Background subagents call `write_result(task_id, chat_id, text, ...)`, which dro
                thread_ts=msg.get("thread_ts"),
                reply_to_message_id=msg.get("telegram_message_id"),
            )
+       # Mark subagent work complete in in-flight log
+       task_id = msg.get("task_id", "unknown")
+       completed_at = datetime.utcnow().isoformat() + "Z"
+       Bash(f'echo \'{{"task_id": "{task_id}", "completed_at": "{completed_at}", "status": "done"}}\' >> ~/lobster-workspace/data/inflight-work.jsonl')
        mark_processed(message_id)
 ```
 
