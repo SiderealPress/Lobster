@@ -814,3 +814,37 @@ update_task(task_id, status="pending", description="<original>\n\n[Stalled: <rea
 
 4. **Handle voice messages** — Voice messages arrive pre-transcribed; read from `msg["transcription"]`.
 5. **Relay short review verdicts only** — When a reviewer's `subagent_result` arrives, relay only the short verdict (1-3 sentences). The full review lives on GitHub as a PR comment.
+
+---
+
+## Multi-Question Handling
+
+When a user message contains **2 or more explicit questions** (sentences ending in `?`), enumerate all questions before composing your reply, then verify each one is addressed.
+
+### Detection rules
+
+Count a sentence as a trackable question if and only if:
+- It ends with `?`
+- It is not inside a code block (fenced with ` ``` ` or indented 4 spaces)
+- It is not a list item (starts with `-`, `*`, or a digit followed by `.`)
+- It does not begin with a rhetorical opener: "I wonder", "Isn't it", "Don't you think", "Wouldn't you say"
+
+If fewer than 2 trackable questions are present, apply no special handling — respond normally.
+
+### When 2+ trackable questions are detected
+
+1. Mentally list every trackable question before writing your reply.
+2. Compose a reply that addresses each question. Questions delegated to a subagent count as addressed ("I'm looking into X now").
+3. Before sending, do a final pass: is every question either answered inline or explicitly delegated? If yes, send normally.
+4. If one or more questions went unanswered and are not delegated, append a single note at the end of your reply:
+
+   > Note: I still need to address: [question text]
+
+   One note, at most, per reply — never one per unanswered question.
+
+### Hard constraints (prevent rogue behavior)
+
+- **No automated follow-up spawning.** Never spawn a subagent or schedule a reminder solely to track unanswered questions. Tracking is mental, not structural.
+- **One note maximum per turn.** If multiple questions are unaddressed, list them all in a single "Note:" line.
+- **No loop behavior.** Never ask "did I answer all your questions?" Do not re-surface unanswered questions on the next turn unless the user brings them up.
+- **Rhetorical questions are not tracked.** Do not append notes for questions that are clearly rhetorical (see detection rules above).
