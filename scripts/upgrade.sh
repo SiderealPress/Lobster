@@ -1933,6 +1933,130 @@ else:
         migrated=$((migrated + 1))
     fi
 
+    # Migration 55: Migrate existing jobs.json entries to systemd timers.
+    # The cron+jobs.json scheduling backend has been replaced by systemd timers
+    # (see PR #1105). Existing entries in ~/lobster-workspace/scheduled-jobs/jobs.json
+    # will no longer fire because sync-crontab.sh is no longer called.
+    #
+    # Sudoers note: install.sh already grants `lobster ALL=(ALL) NOPASSWD:ALL`,
+    # which covers `sudo systemctl` and `sudo tee`. No separate sudoers entry is needed.
+    #
+    # This migration reads jobs.json and, for each enabled job that has a
+    # `command` field set, creates the corresponding systemd timer unit.
+    # Jobs without a command field cannot be migrated automatically — they
+    # will be reported as warnings so the user can recreate them via
+    # create_scheduled_job with an explicit command.
+    local JOBS_JSON="$WORKSPACE_DIR/scheduled-jobs/jobs.json"
+    if [ -f "$JOBS_JSON" ] && command -v python3 >/dev/null 2>&1 && pidof systemd >/dev/null 2>&1; then
+        local jobs_count
+        jobs_count=$(python3 -c "
+import json, sys
+try:
+    d = json.loads(open('$JOBS_JSON').read())
+    print(len(d.get('jobs', {})))
+except Exception:
+    print(0)
+" 2>/dev/null || echo "0")
+        if [ "${jobs_count:-0}" -gt 0 ]; then
+            substep "Migrating $jobs_count jobs.json entries to systemd timers..."
+            JOBS_JSON_PATH="$JOBS_JSON"
+            python3 - "$JOBS_JSON_PATH" <<'PYEOF'
+import json, subprocess, sys
+from pathlib import Path
+
+JOBS_FILE = Path(sys.argv[1])
+SYSTEMD_DIR = Path("/etc/systemd/system")
+UNIT_PREFIX = "lobster-"
+LOBSTER_MARKER = "# LOBSTER-MANAGED"
+LOBSTER_USER = "lobster"
+
+def sudo_write(path: Path, content: str) -> None:
+    """Write content to a root-owned path using sudo tee."""
+    result = subprocess.run(
+        ["sudo", "tee", str(path)],
+        input=content.encode(),
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise PermissionError(f"sudo tee {path} failed: {result.stderr.decode().strip()}")
+
+try:
+    data = json.loads(JOBS_FILE.read_text())
+except Exception as e:
+    print(f"  warning: could not read jobs.json: {e}", file=sys.stderr)
+    sys.exit(0)
+
+jobs = data.get("jobs", {})
+migrated = 0
+skipped = []
+
+for name, job in jobs.items():
+    if not job.get("enabled", True):
+        continue
+
+    command = job.get("command") or job.get("runner") or ""
+    schedule = job.get("schedule", "")
+
+    if not command or not command.startswith("/"):
+        skipped.append((name, "no absolute command path — recreate with create_scheduled_job"))
+        continue
+
+    if not schedule:
+        skipped.append((name, "no schedule — recreate with create_scheduled_job"))
+        continue
+
+    timer_path = SYSTEMD_DIR / f"{UNIT_PREFIX}{name}.timer"
+    service_path = SYSTEMD_DIR / f"{UNIT_PREFIX}{name}.service"
+
+    # Skip if already migrated
+    try:
+        if timer_path.exists() and LOBSTER_MARKER in timer_path.read_text():
+            continue
+    except OSError:
+        pass
+
+    desc = job.get("description") or f"Lobster scheduled job: {name}"
+
+    timer_content = f"""[Unit]
+Description={desc}
+{LOBSTER_MARKER}
+
+[Timer]
+OnCalendar={schedule}
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+"""
+    service_content = f"""[Unit]
+Description={desc}
+{LOBSTER_MARKER}
+
+[Service]
+Type=oneshot
+User={LOBSTER_USER}
+ExecStart={command}
+"""
+
+    try:
+        sudo_write(timer_path, timer_content)
+        sudo_write(service_path, service_content)
+        subprocess.run(["sudo", "systemctl", "daemon-reload"], check=True, capture_output=True)
+        subprocess.run(["sudo", "systemctl", "enable", "--now", f"{UNIT_PREFIX}{name}.timer"],
+                       check=True, capture_output=True)
+        print(f"  migrated: {name} ({schedule}) -> {UNIT_PREFIX}{name}.timer")
+        migrated += 1
+    except Exception as e:
+        skipped.append((name, f"error: {e}"))
+
+print(f"  {migrated} job(s) migrated to systemd timers")
+for sname, reason in skipped:
+    print(f"  WARN: '{sname}' skipped — {reason}", file=sys.stderr)
+PYEOF
+            migrated=$((migrated + 1))
+        fi
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
