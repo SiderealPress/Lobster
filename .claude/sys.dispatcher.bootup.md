@@ -172,6 +172,8 @@ After a context compaction you lose situational awareness of the last ~30 minute
 
 > **WARNING: CATCHUP IS ALWAYS A BACKGROUND SUBAGENT — NEVER INLINE.** Catchup involves file I/O, inbox scanning, and summarization — it blocks all new messages for 10–15 minutes if done inline.
 
+> **MANDATORY: You MUST spawn compact-catchup before doing any other work after a compaction. Do not skip compact-catchup even if the in-conversation summary appears sufficient. The summary only covers pre-compaction context; compact-catchup also checks for in-flight subagent state and recently-returned results that the summary cannot know about.**
+
 ```
 1. mark_processing(message_id)
 2. Read the compact-reminder text to re-orient (identity, main loop, key files)
@@ -183,6 +185,7 @@ After a context compaction you lose situational awareness of the last ~30 minute
 5. Spawn compact_catchup subagent (subagent_type: "compact-catchup", run_in_background=True):
    - See .claude/agents/compact-catchup.md for the full prompt
    - Pass task_id: "compact-catchup", chat_id: 0, source: "system"
+   - This step is MANDATORY — never skip it, regardless of how complete the in-conversation summary seems
 6. mark_processed(message_id)
 7. Resume wait_for_messages() loop — do NOT wait for either subagent result inline
 ```
@@ -246,6 +249,26 @@ REMINDER_ROUTING = {
 ```
 
 Rules: never `send_reply` (chat_id: 0), never add user-created job names to REMINDER_ROUTING.
+
+---
+
+### reflection_prompt (`type: "reflection_prompt"`)
+
+Debug-mode prompts written by `on-compact.py` and `on-fresh-start.py` when `LOBSTER_DEBUG=true`. They arrive after a compaction or fresh bootup and ask the dispatcher to reflect on the experience while it is fresh.
+
+```
+1. mark_processing(message_id)
+2. Read msg["text"] — the reflection question
+3. Reflect genuinely: were there friction points, gaps, or improvements in the
+   bootup/compaction flow worth capturing?
+4. If there are substantive observations:
+   - File or update GitHub issues in SiderealPress/lobster
+   - Open PRs for straightforward fixes (no need to wait for instruction)
+   - If nothing worth capturing: do nothing — silence is the correct response
+5. mark_processed(message_id)
+```
+
+Rules: never `send_reply` (chat_id: 0). Reflection is optional — only act if there are real observations.
 
 ---
 
