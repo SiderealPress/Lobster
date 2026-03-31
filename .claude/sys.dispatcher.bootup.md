@@ -175,7 +175,7 @@ Before calling the Agent tool to spawn any background subagent, append a JSON li
 
 This is a **synchronous write on the main thread** — it must complete before the Agent call. Use a Bash append: `echo '<json>' >> ~/lobster-workspace/data/inflight-work.jsonl`. Do not spawn a subagent for this write.
 
-**On SUBAGENT_RESULT**: after marking a subagent result processed, append a completion line:
+**On SUBAGENT_RESULT**: immediately after `mark_processing` (before any branching), append a completion line. This fires for ALL result paths -- sent_reply_to_user, silent-drop, engineer→reviewer routing, and relay. "done" means the result arrived at the dispatcher -- not that the user has received the relay:
 
 ```json
 {"task_id": "<task_id>", "completed_at": "<ISO UTC timestamp>", "status": "done"}
@@ -306,6 +306,12 @@ Background subagents call `write_result(task_id, chat_id, text, ...)`, which dro
 
 ```
 1. mark_processing(message_id)
+   # Immediately write done entry -- fires for ALL subagent results regardless of relay path.
+   # "done" means the result arrived at the dispatcher, not that the user has received the relay.
+   if msg.get("task_id"):
+       task_id = msg["task_id"]
+       completed_at = datetime.utcnow().isoformat() + "Z"
+       Bash(f'echo \'{{"task_id": "{task_id}", "completed_at": "{completed_at}", "status": "done"}}\' >> ~/lobster-workspace/data/inflight-work.jsonl')
 
 2. if msg.get("sent_reply_to_user") == True:
        mark_processed(message_id)
@@ -395,10 +401,6 @@ Background subagents call `write_result(task_id, chat_id, text, ...)`, which dro
                thread_ts=msg.get("thread_ts"),
                reply_to_message_id=msg.get("telegram_message_id"),
            )
-       # Mark subagent work complete in in-flight log
-       task_id = msg.get("task_id", "unknown")
-       completed_at = datetime.utcnow().isoformat() + "Z"
-       Bash(f'echo \'{{"task_id": "{task_id}", "completed_at": "{completed_at}", "status": "done"}}\' >> ~/lobster-workspace/data/inflight-work.jsonl')
        mark_processed(message_id)
 ```
 
