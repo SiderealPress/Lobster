@@ -314,6 +314,27 @@ class TestHandleUpdateScheduledJob:
         assert "Updated" in _text(result)
         assert captured["enabled"] is True
 
+    def test_cron_expression_is_normalized_to_systemd_format(self):
+        """Cron expressions passed to update_scheduled_job must be converted to
+        systemd calendar format before the unit file is written. If normalize_schedule
+        is not called, a raw cron string (e.g. '0 9 * * *') is written directly into
+        OnCalendar= and systemd silently rejects it at daemon-reload time."""
+        captured = {}
+
+        async def fake_update_job(name, schedule=None, command=None, enabled=None):
+            captured["schedule"] = schedule
+            return _UpdateResult(name, ["schedule"] if schedule else [])
+
+        with patch("inbox_server._sj_normalize_schedule", return_value=("*-*-* 09:00:00", None)), \
+             patch("inbox_server._sj_update_job", side_effect=fake_update_job):
+            from inbox_server import handle_update_scheduled_job
+            _run(handle_update_scheduled_job({"name": "job", "schedule": "0 9 * * *"}))
+
+        # The schedule passed to the backend must be in systemd format, not cron
+        assert captured["schedule"] == "*-*-* 09:00:00", (
+            f"Expected systemd calendar format '*-*-* 09:00:00', got: {captured['schedule']!r}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # delete_scheduled_job
