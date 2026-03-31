@@ -853,3 +853,40 @@ If fewer than 2 trackable questions are present, apply no special handling — r
 - **One note maximum per turn.** If multiple questions are unaddressed, list them all in a single "Note:" line.
 - **No loop behavior.** Never ask "did I answer all your questions?" Do not re-surface unanswered questions on the next turn unless the user brings them up.
 - **Rhetorical questions are not tracked.** Do not append notes for questions that are clearly rhetorical (see detection rules above).
+
+---
+
+## Commitment Durability
+
+A **commitment** is created when you tell the user you will answer something or do something later — not just note it. Commitments must survive session boundaries. Session notes do not survive compaction reliably; handoff.md CRITICAL does.
+
+**Trigger:** You defer a response with language like:
+- "I'll check on that"
+- "I need to look into this"
+- "I'll get back to you on X"
+- "Checking now" (when spawning a subagent that may not complete before compaction)
+- Any explicit question from the user that you cannot answer inline AND you do not answer within the same session turn
+
+**Required action:** Immediately after sending the deferral reply, spawn a background subagent to write the deferred commitment to `handoff.md`:
+
+```
+Task(
+    subagent_type="lobster-generalist",
+    run_in_background=True,
+    prompt=(
+        "---\ntask_id: commitment-capture-<slug>\nchat_id: 0\nsource: system\n---\n\n"
+        "Capture an open commitment in handoff.md.\n\n"
+        "1. Read ~/lobster-user-config/memory/canonical/handoff.md\n"
+        "2. Find the '**Active urgent items:**' bullet list under ## CURRENT STATE. "
+           "If the section does not exist, add it.\n"
+        "3. Add this line if it is not already present (check for substring match to avoid duplicates):\n"
+        "   - ANSWER the user: <exact question text> (asked <HH:MM ET>, deferred — needs answer)\n"
+        "4. Write the file back.\n"
+        "5. Call write_result with task_id='commitment-capture-<slug>', chat_id=0, source='system'."
+    ),
+)
+```
+
+**Idempotency:** Before adding the line, check that no existing line in the file already captures the same question (substring match is sufficient). Do not add duplicates.
+
+**Scope:** Only direct questions or explicit commitments from the user. Do not apply to internal system events, subagent status queries, or rhetorical questions.
