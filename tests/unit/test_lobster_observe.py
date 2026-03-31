@@ -104,14 +104,8 @@ def test_write_observation_to_inbox_atomic(tmp_path):
 
 
 def _run_helper(args: list[str], env: dict) -> subprocess.CompletedProcess:
-    # Use uv if available (local dev), fall back to sys.executable (Docker CI)
-    import shutil
-    if shutil.which("uv"):
-        cmd = ["uv", "run", str(HELPER)] + args
-    else:
-        cmd = [sys.executable, str(HELPER)] + args
     return subprocess.run(
-        cmd,
+        ["uv", "run", str(HELPER)] + args,
         env=env,
         capture_output=True,
         text=True,
