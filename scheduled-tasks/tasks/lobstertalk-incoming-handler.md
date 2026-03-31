@@ -15,11 +15,48 @@ For full instructions, see the skill reference:
 
 ## Authentication
 
-Read the bot-talk API token:
+Read the bot-talk API token using this lookup chain (first non-empty value wins):
+
+1. `~/lobster-workspace/data/bot-talk-token.txt` (legacy token file)
+2. `BOT_TALK_TOKEN` key in `~/messages/config/config.env`
+3. `BOT_TALK_TOKEN` key in `~/lobster-config/config.env`
+
 ```python
-token = open(os.path.expanduser("~/lobster-workspace/data/bot-talk-token.txt")).read().strip()
+def _load_bot_talk_token() -> str:
+    import os
+    from pathlib import Path
+
+    # 1. Legacy token file
+    token_file = Path.home() / "lobster-workspace" / "data" / "bot-talk-token.txt"
+    if token_file.exists():
+        token = token_file.read_text().strip()
+        if token:
+            return token
+
+    # 2. config.env files
+    for config_path in [
+        Path.home() / "messages" / "config" / "config.env",
+        Path.home() / "lobster-config" / "config.env",
+    ]:
+        if config_path.exists():
+            for line in config_path.read_text().splitlines():
+                line = line.strip()
+                if line.startswith("BOT_TALK_TOKEN="):
+                    value = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    if value:
+                        return value
+
+    return ""
+
+token = _load_bot_talk_token()
+if not token:
+    # log error, call write_task_output with status "failed", then write_result with chat_id=0
+    ...
 headers = {"X-Bot-Token": token}
 ```
+
+If the token cannot be found via any of the above paths, log an error and call `write_task_output`
+with status "failed".
 
 ## State File
 
@@ -34,7 +71,7 @@ Schema:
 
 ## Instructions
 
-### Step 1: Load state and check for new messages
+### Step 1: Load state and fetch new messages
 
 Read state file (create if not exists with `last_processed_ts = "2026-01-01T00:00:00Z"`).
 
@@ -43,14 +80,37 @@ Poll bot-talk for new messages from AlbertLobster:
 GET http://46.224.41.108:4242/messages?sender=AlbertLobster&since=<last_processed_ts>&limit=50
 ```
 
-Filter for messages containing query patterns:
+Sort messages by timestamp ascending (oldest first).
+
+### Step 2: Forward each new message to the owner via Telegram
+
+For **every** new message from AlbertLobster (not just query messages), send an individual
+Telegram notification to chat_id `8305714125` using the directional arrow format:
+
+- AlbertLobster messages (incoming from Albert's side):
+  ```
+  AlbertLobster → Lobster: {content}
+  ```
+
+If the content is longer than 1000 characters, truncate and append `… (truncated)`.
+
+Use `send_reply` with:
+- `chat_id`: 8305714125
+- `text`: formatted message
+- `source`: "telegram"
+
+Send each message as a separate `send_reply` call — do not batch.
+
+### Step 3: For query messages, compose and send a bot-talk reply
+
+Filter the new messages for query patterns:
 - "what do you know about"
 - "tell me about"
 - "context on"
 - "who is"
 - "any info on"
 
-### Step 2: For each query message, extract person and topic keywords
+For each query message, extract person and topic keywords:
 
 Extract the person name from the message. Common patterns:
 - "What do you know about Bob Smith?" -> "Bob Smith"
@@ -128,7 +188,7 @@ Authorization: Bearer <token>
 {"query": "{ people(filter: {name: {firstName: {like: \"%NAME%\"}}}, first: 5) { edges { node { id name { firstName lastName } emails { primaryEmail } phones { primaryPhoneNumber } notes { edges { node { body } } } } } } }"}
 ```
 
-### Step 3: Compose and send the response
+#### Compose and send the context reply
 
 Aggregate all findings into a concise context reply. Format:
 
@@ -168,23 +228,26 @@ POST http://46.224.41.108:4242/message
 }
 ```
 
+After sending the bot-talk reply, also forward it to the owner via Telegram with the outbound format:
+```
+Lobster → AlbertLobster: {content}
+```
+
 ### Step 4: Update state
 
 Update `last_processed_ts` to the timestamp of the latest processed message.
 Write to state file atomically (write .tmp then rename).
 
-Also notify Sahar via Telegram if a context query was received and answered:
-- chat_id: 8305714125
-- Message: "Bot-talk query handled: AlbertLobster asked about NAME. Replied with context from [sources]."
-
-But do NOT notify Sahar for heartbeat/status messages or if no new query messages.
+If no new messages were found, do not update state.
 
 ## Output
 
 Call `write_task_output` with:
 - job_name: "lobstertalk-incoming-handler"
-- output: Brief summary (e.g. "No new queries." or "Handled query about Bob Smith, replied with context from Drive + Gmail.")
+- output: Brief summary (e.g. "No new messages." or "Forwarded 2 messages; handled query about Bob Smith, replied with context from Drive + Gmail.")
 - status: "success" or "failed"
 
-If no new queries, call `write_result` with chat_id=0 (silent).
-If a query was handled, call `write_result` with chat_id=8305714125 and sent_reply_to_user=True.
+If new messages were forwarded to Telegram, call `write_result` with `chat_id=8305714125` and
+`sent_reply_to_user=True` (Telegram notifications were already sent inline).
+
+If no new messages, call `write_result` with `chat_id=0` (silent).
