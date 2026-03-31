@@ -870,7 +870,14 @@ _http_session_manager = None  # Set to StreamableHTTPSessionManager in main() wh
 # State file: the dispatcher session ID persisted to disk so hooks can read it
 # without network calls or JSONL parsing.  Written atomically by
 # _tag_dispatcher_session(); cleared at server startup.
+#
+# _DISPATCHER_SESSION_STATE_FILE  — HTTP session ID (32-char hex, Option A/B/C)
+# _DISPATCHER_CLAUDE_SESSION_STATE_FILE — Claude session UUID (written when
+#   session_start(agent_type='dispatcher') is called, Fix 1 for issue #1253).
+#   This is the ID that the SessionStart hook receives, so the hook can compare
+#   apples to apples instead of Claude UUID vs HTTP session ID.
 _DISPATCHER_SESSION_STATE_FILE = _WORKSPACE / "data" / "dispatcher-session-id"
+_DISPATCHER_CLAUDE_SESSION_STATE_FILE = _WORKSPACE / "data" / "dispatcher-claude-session-id"
 
 
 def _write_dispatcher_state_file(session_id: str) -> None:
@@ -888,8 +895,28 @@ def _write_dispatcher_state_file(session_id: str) -> None:
         pass
 
 
+def _write_dispatcher_claude_session_file(claude_session_id: str) -> None:
+    """Atomically write the Claude session UUID to the dedicated Claude-session state file.
+
+    Written when session_start(agent_type='dispatcher') is called.  The
+    SessionStart hook receives the Claude UUID (not the HTTP session ID), so
+    this file lets the hook perform an apples-to-apples comparison.
+
+    Cleared at server startup alongside the HTTP session state file.
+    Silent on any failure — must never crash the caller.
+    """
+    try:
+        _DISPATCHER_CLAUDE_SESSION_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _DISPATCHER_CLAUDE_SESSION_STATE_FILE.with_suffix(".tmp")
+        tmp.write_text(claude_session_id.strip())
+        tmp.replace(_DISPATCHER_CLAUDE_SESSION_STATE_FILE)
+        log.info(f"[session-tag] Dispatcher Claude session UUID written: {claude_session_id}")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _clear_dispatcher_state_file() -> None:
-    """Remove the dispatcher state file on server startup.
+    """Remove the dispatcher state files on server startup.
 
     Prevents a stale session ID from a previous run from being mistaken for
     the current dispatcher session.  Silent on any failure.
@@ -898,6 +925,12 @@ def _clear_dispatcher_state_file() -> None:
         if _DISPATCHER_SESSION_STATE_FILE.exists():
             _DISPATCHER_SESSION_STATE_FILE.unlink()
             log.info("[session-tag] Cleared stale dispatcher-session-id state file on startup")
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        if _DISPATCHER_CLAUDE_SESSION_STATE_FILE.exists():
+            _DISPATCHER_CLAUDE_SESSION_STATE_FILE.unlink()
+            log.info("[session-tag] Cleared stale dispatcher-claude-session-id state file on startup")
     except Exception:  # noqa: BLE001
         pass
 
@@ -6860,6 +6893,13 @@ async def handle_session_start(args: dict) -> list[TextContent]:
         http_session_id = _get_current_http_session_id()
         if http_session_id is not None:
             _tag_dispatcher_session(http_session_id)
+
+    # Fix 1 (issue #1253): Write the Claude session UUID to a dedicated file.
+    # The SessionStart hook receives the Claude UUID (the agent_id passed here),
+    # not the HTTP session ID.  Writing the Claude UUID to a separate state file
+    # lets the hook compare apples to apples and correctly identify the dispatcher.
+    if agent_type == "dispatcher" and agent_id:
+        _write_dispatcher_claude_session_file(agent_id)
 
     # Notify wire server so SSE clients update within 40ms
     asyncio.create_task(_notify_wire_server())

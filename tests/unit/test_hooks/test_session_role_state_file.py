@@ -177,9 +177,10 @@ class TestIsDispatcherMCPStateFile:
         assert sr.is_dispatcher(_hook_input("sess-hook-001")) is True
 
     def test_mcp_file_absent_no_secondary_returns_false(self, monkeypatch, tmp_path):
-        """Both files absent → default False."""
+        """Both files absent and no LOBSTER_MAIN_SESSION → default False."""
         sr = _reload_session_role(monkeypatch, tmp_path)
         monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("LOBSTER_MAIN_SESSION", raising=False)
         sr = importlib.reload(sr)
 
         assert sr.is_dispatcher(_hook_input("any-session")) is False
@@ -223,17 +224,19 @@ class TestIsDispatcherHookMarkerFile:
 
 class TestIsDispatcherDefault:
     def test_no_files_returns_false(self, monkeypatch, tmp_path):
-        """No state files present → default False (conservative)."""
+        """No state files and no LOBSTER_MAIN_SESSION → default False (conservative)."""
         sr = _reload_session_role(monkeypatch, tmp_path)
         monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("LOBSTER_MAIN_SESSION", raising=False)
         sr = importlib.reload(sr)
 
         assert sr.is_dispatcher(_hook_input("any-session")) is False
 
     def test_no_session_id_in_hook_input_returns_false(self, monkeypatch, tmp_path):
-        """No session_id in hook input → both file checks return None → False."""
+        """No session_id in hook input → file checks return None, no env var → False."""
         sr = _reload_session_role(monkeypatch, tmp_path)
         monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("LOBSTER_MAIN_SESSION", raising=False)
         sr = importlib.reload(sr)
 
         # Write both files to ensure it's the missing session_id causing the result.
@@ -309,3 +312,180 @@ class TestReadDispatcherSessionIdShim:
         # Reload again to pick up new DISPATCHER_SESSION_FILE path.
         sr = importlib.reload(sr)
         assert sr._read_dispatcher_session_id() == "stored-sess-001"
+
+
+# ---------------------------------------------------------------------------
+# Fix 1 (issue #1253): Claude UUID state file (primary check)
+# ---------------------------------------------------------------------------
+
+
+class TestIsDispatcherClaudeUUIDFile:
+    """The Claude UUID state file (dispatcher-claude-session-id) is checked
+    first because it stores the same ID type that the hook receives."""
+
+    def test_claude_uuid_match_returns_true(self, monkeypatch, tmp_path):
+        """Claude UUID file matches hook session_id → dispatcher."""
+        sr = _reload_session_role(monkeypatch, tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        sr = importlib.reload(sr)
+
+        data_dir = tmp_path / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        (data_dir / "dispatcher-claude-session-id").write_text(
+            "756633a5-4802-4327-ab98-684243d5fc2a"
+        )
+        # HTTP session file contains a different (hex) ID that would NOT match.
+        (data_dir / "dispatcher-session-id").write_text("43e178fa975741eb9f6c1cb9f328d52b")
+
+        result = sr.is_dispatcher(
+            _hook_input("756633a5-4802-4327-ab98-684243d5fc2a")
+        )
+        assert result is True
+
+    def test_claude_uuid_mismatch_returns_false_immediately(self, monkeypatch, tmp_path):
+        """Claude UUID file present but non-matching → subagent (no fallthrough)."""
+        sr = _reload_session_role(monkeypatch, tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        sr = importlib.reload(sr)
+
+        data_dir = tmp_path / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        # Dispatcher's Claude UUID
+        (data_dir / "dispatcher-claude-session-id").write_text(
+            "aaaaaaaa-0000-0000-0000-000000000000"
+        )
+
+        result = sr.is_dispatcher(_hook_input("bbbbbbbb-1111-1111-1111-111111111111"))
+        assert result is False
+
+    def test_claude_uuid_file_absent_falls_through_to_http_file(
+        self, monkeypatch, tmp_path
+    ):
+        """When the Claude UUID file is absent, the HTTP session file is tried."""
+        sr = _reload_session_role(monkeypatch, tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        sr = importlib.reload(sr)
+
+        data_dir = tmp_path / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        # Only the HTTP session file is written.
+        (data_dir / "dispatcher-session-id").write_text("http-sess-abc")
+
+        # session_id matches the HTTP file
+        assert sr.is_dispatcher(_hook_input("http-sess-abc")) is True
+        # session_id does NOT match the HTTP file
+        assert sr.is_dispatcher(_hook_input("other-sess")) is False
+
+    def test_http_mismatch_does_not_block_when_claude_file_matches(
+        self, monkeypatch, tmp_path
+    ):
+        """The Claude UUID file takes priority; an HTTP file mismatch is irrelevant."""
+        sr = _reload_session_role(monkeypatch, tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        sr = importlib.reload(sr)
+
+        data_dir = tmp_path / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        (data_dir / "dispatcher-claude-session-id").write_text("claude-uuid-correct")
+        # HTTP file has a completely different ID — the real-world bug scenario.
+        (data_dir / "dispatcher-session-id").write_text("43e178fa975741eb9f6c1cb9f328d52b")
+
+        assert sr.is_dispatcher(_hook_input("claude-uuid-correct")) is True
+
+    def test_production_scenario_uuid_vs_hex(self, monkeypatch, tmp_path):
+        """Regression test: the exact mismatch from production logs on 2026-03-31.
+
+        Before the fix: HTTP file = 43e178fa...  (hex), hook sees UUID → mismatch → False.
+        After the fix: Claude UUID file = UUID, hook sees UUID → match → True.
+        """
+        sr = _reload_session_role(monkeypatch, tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        sr = importlib.reload(sr)
+
+        data_dir = tmp_path / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        # Simulate post-fix state: Claude UUID file written by session_start.
+        (data_dir / "dispatcher-claude-session-id").write_text(
+            "756633a5-4802-4327-ab98-684243d5fc2a"
+        )
+        # HTTP file still has the old hex ID (MCP internal session ID).
+        (data_dir / "dispatcher-session-id").write_text("43e178fa975741eb9f6c1cb9f328d52b")
+
+        # Hook receives the Claude UUID — should now be True.
+        assert sr.is_dispatcher(
+            _hook_input("756633a5-4802-4327-ab98-684243d5fc2a")
+        ) is True
+
+    def test_get_mcp_claude_session_state_file_respects_env(
+        self, monkeypatch, tmp_path
+    ):
+        """_get_mcp_claude_session_state_file() uses LOBSTER_WORKSPACE."""
+        sr = _reload_session_role(monkeypatch, tmp_path)
+        monkeypatch.setenv("LOBSTER_WORKSPACE", str(tmp_path))
+        sr = importlib.reload(sr)
+        expected = tmp_path / "data" / "dispatcher-claude-session-id"
+        assert sr._get_mcp_claude_session_state_file() == expected
+
+
+# ---------------------------------------------------------------------------
+# Fix 3 (issue #1253): LOBSTER_MAIN_SESSION env var fallback
+# ---------------------------------------------------------------------------
+
+
+class TestIsDispatcherLobsterMainSession:
+    """LOBSTER_MAIN_SESSION=1 fires only when all state files are absent."""
+
+    def test_env_var_set_no_files_returns_true(self, monkeypatch, tmp_path):
+        """LOBSTER_MAIN_SESSION=1 and no state files → dispatcher."""
+        sr = _reload_session_role(monkeypatch, tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("LOBSTER_MAIN_SESSION", "1")
+        sr = importlib.reload(sr)
+
+        assert sr.is_dispatcher(_hook_input("any-uuid")) is True
+
+    def test_env_var_not_set_no_files_returns_false(self, monkeypatch, tmp_path):
+        """No LOBSTER_MAIN_SESSION and no state files → subagent (conservative)."""
+        sr = _reload_session_role(monkeypatch, tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("LOBSTER_MAIN_SESSION", raising=False)
+        sr = importlib.reload(sr)
+
+        assert sr.is_dispatcher(_hook_input("any-uuid")) is False
+
+    def test_env_var_set_but_file_mismatch_returns_false(self, monkeypatch, tmp_path):
+        """LOBSTER_MAIN_SESSION=1 does NOT override a file that says 'subagent'."""
+        sr = _reload_session_role(monkeypatch, tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("LOBSTER_MAIN_SESSION", "1")
+        sr = importlib.reload(sr)
+
+        data_dir = tmp_path / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        # Claude UUID file contains a different session → this is a subagent.
+        (data_dir / "dispatcher-claude-session-id").write_text("dispatcher-uuid")
+
+        # Even with LOBSTER_MAIN_SESSION=1, the file says False.
+        assert sr.is_dispatcher(_hook_input("subagent-uuid")) is False
+
+    def test_env_var_set_file_matches_returns_true(self, monkeypatch, tmp_path):
+        """LOBSTER_MAIN_SESSION=1 with a matching file → still True (redundant but correct)."""
+        sr = _reload_session_role(monkeypatch, tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("LOBSTER_MAIN_SESSION", "1")
+        sr = importlib.reload(sr)
+
+        data_dir = tmp_path / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        (data_dir / "dispatcher-claude-session-id").write_text("my-dispatcher-uuid")
+
+        assert sr.is_dispatcher(_hook_input("my-dispatcher-uuid")) is True
+
+    def test_env_var_wrong_value_no_files_returns_false(self, monkeypatch, tmp_path):
+        """LOBSTER_MAIN_SESSION set to non-'1' value doesn't trigger the fallback."""
+        sr = _reload_session_role(monkeypatch, tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("LOBSTER_MAIN_SESSION", "true")
+        sr = importlib.reload(sr)
+
+        assert sr.is_dispatcher(_hook_input("any-uuid")) is False

@@ -8,37 +8,46 @@ dispatcher or a background subagent.
 
 ## Detection strategy (layered)
 
-1. **MCP state file (primary)**: The MCP server writes the current dispatcher
-   session ID to `$LOBSTER_WORKSPACE/data/dispatcher-session-id` (defaulting to
-   `~/lobster-workspace/data/dispatcher-session-id`) whenever
-   `_tag_dispatcher_session()` is called (Options A, B, or C).  The file is
-   cleared when the MCP server starts, so a stale ID from a previous run never
-   lingers.  This hook reads that file and compares to the `session_id` field in
-   the hook JSON input.
-   Match → dispatcher.  Mismatch → subagent.  File absent → try fallback.
+1. **Claude UUID state file (primary)**: When session_start(agent_type='dispatcher')
+   is called, the MCP server writes the Claude session UUID (the agent_id field,
+   which is the same UUID that the SessionStart hook receives) to
+   `$LOBSTER_WORKSPACE/data/dispatcher-claude-session-id`.  The hook compares the
+   `session_id` from hook_input against this file — apples to apples.
+   Match → dispatcher.  Mismatch → subagent.  File absent → try next.
 
-2. **Hook marker file (secondary)**: At dispatcher startup the SessionStart hook
+2. **HTTP session ID state file**: The MCP server also writes the HTTP session ID
+   (32-char hex) to `$LOBSTER_WORKSPACE/data/dispatcher-session-id` via
+   `_tag_dispatcher_session()`.  This file uses a different ID space than the
+   Claude UUID, so a match here is not expected in normal operation.  It is
+   kept as a belt-and-suspenders check for stdio transport mode where HTTP
+   session IDs may not be in play.
+   Match → dispatcher.  Mismatch → try next.  File absent → try next.
+
+3. **Hook marker file**: At dispatcher startup the SessionStart hook
    (`write-dispatcher-session-id.py`) writes the session ID to
-   `~/messages/config/dispatcher-session-id`.  Used as fallback when the MCP
-   state file is absent (e.g. before the first `_tag_dispatcher_session` call
-   after a server restart, or if LOBSTER_WORKSPACE points to a non-standard
-   location).
-   Match → dispatcher.  Mismatch → subagent.  File absent → default.
+   `~/messages/config/dispatcher-session-id`.  Used as fallback when neither
+   MCP state file is available.
+   Match → dispatcher.  Mismatch → subagent.  File absent → try env var.
 
-3. **Default**: If neither state file is readable or present, return False
-   (treat as subagent = safe/conservative).
+4. **LOBSTER_MAIN_SESSION env var (defense-in-depth)**: If the env var
+   LOBSTER_MAIN_SESSION=1 is set and all state files are absent or unreadable,
+   assume dispatcher.  This catches the narrow race window between MCP restart
+   and the first session_start(agent_type='dispatcher') call, where no state
+   file exists yet.  Only fires when no conflicting file evidence exists.
+
+5. **Default**: If none of the above resolve, return False (conservative/subagent).
 
 The transcript-scanning fallback that existed in previous versions has been
 removed.  It was fragile (CC JSONL format changes, same-week compaction bug
-tracked in PR #1076) and is now superseded by the MCP state file, which is
-always authoritative when the MCP server is running.
+tracked in PR #1076) and is now superseded by the MCP state files.
 
 ## Writing the marker file
 
 Call `write_dispatcher_session_id(session_id)` at dispatcher startup.
 Typically invoked from the `write-dispatcher-session-id.py` SessionStart hook.
-The MCP server also calls `_write_dispatcher_state_file()` internally; hooks
-do not need to call that path directly.
+The MCP server also calls `_write_dispatcher_state_file()` and
+`_write_dispatcher_claude_session_file()` internally; hooks do not need to
+call those paths directly.
 """
 
 import os
@@ -59,13 +68,27 @@ DISPATCHER_ONLY_TOOLS = {
 
 
 def _get_mcp_session_state_file() -> Path:
-    """Return the MCP server state file path, resolved at call time.
+    """Return the MCP HTTP-session state file path, resolved at call time.
 
     Reads LOBSTER_WORKSPACE on every call so tests can override the env var
     without having to patch a module-level constant.
     """
     workspace = Path(os.environ.get("LOBSTER_WORKSPACE", Path.home() / "lobster-workspace"))
     return workspace / "data" / "dispatcher-session-id"
+
+
+def _get_mcp_claude_session_state_file() -> Path:
+    """Return the MCP Claude-UUID state file path, resolved at call time.
+
+    This file stores the Claude session UUID (written when
+    session_start(agent_type='dispatcher') is called).  Unlike the HTTP-session
+    state file, the ID stored here matches the session_id field in hook_input.
+
+    Reads LOBSTER_WORKSPACE on every call so tests can override the env var
+    without having to patch a module-level constant.
+    """
+    workspace = Path(os.environ.get("LOBSTER_WORKSPACE", Path.home() / "lobster-workspace"))
+    return workspace / "data" / "dispatcher-claude-session-id"
 
 
 # Module-level alias for test patching convenience — tests that set LOBSTER_WORKSPACE
@@ -86,9 +109,8 @@ def get_session_id(hook_input: dict) -> str | None:
 def is_dispatcher(hook_input: dict) -> bool:
     """Return True if the current session is the Lobster dispatcher.
 
-    Checks the MCP state file first (written by the running MCP server and
-    cleared on restart), then falls back to the hook marker file.  Returns
-    False when no state file is present or readable.
+    Checks state files in priority order, then falls back to the LOBSTER_MAIN_SESSION
+    env var.  Returns False when no evidence is found (conservative default).
 
     Fail-open behavior: if a file exists but cannot be read due to an OS
     error, returns True (same conservative fail-open as before) so the
@@ -96,15 +118,27 @@ def is_dispatcher(hook_input: dict) -> bool:
     """
     session_id = get_session_id(hook_input)
 
-    # --- Primary: MCP state file (re-resolved each call to respect env overrides) ---
-    primary_result = _check_state_file(_get_mcp_session_state_file(), session_id)
-    if primary_result is not None:
-        return primary_result
+    # --- Primary: Claude UUID state file (correct ID space — apples to apples) ---
+    claude_result = _check_state_file(_get_mcp_claude_session_state_file(), session_id)
+    if claude_result is not None:
+        return claude_result
 
-    # --- Secondary: hook marker file ---
-    secondary_result = _check_state_file(DISPATCHER_SESSION_FILE, session_id)
-    if secondary_result is not None:
-        return secondary_result
+    # --- Secondary: HTTP session ID state file (different ID space; kept for belt-and-suspenders) ---
+    http_result = _check_state_file(_get_mcp_session_state_file(), session_id)
+    if http_result is not None:
+        return http_result
+
+    # --- Tertiary: hook marker file ---
+    hook_result = _check_state_file(DISPATCHER_SESSION_FILE, session_id)
+    if hook_result is not None:
+        return hook_result
+
+    # --- Fix 3 (defense-in-depth): LOBSTER_MAIN_SESSION env var ---
+    # Only fires when all state files are absent (no conflicting evidence).
+    # This covers the race window between MCP restart and the first
+    # session_start(agent_type='dispatcher') call.
+    if os.environ.get("LOBSTER_MAIN_SESSION") == "1":
+        return True
 
     # --- Default: no state file present → treat as subagent (conservative) ---
     return False

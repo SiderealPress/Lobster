@@ -34,9 +34,20 @@ def _load_hook(monkeypatch, tmp_path):
     DEBUG_BOOTUP_FILE, and DEBUG_DISPATCHER_BOOTUP_FILE patched to temp-dir
     paths so tests are hermetic.
 
+    Sets HOME and LOBSTER_WORKSPACE to tmp_path so all session-role state-file
+    lookups are isolated from the real workspace.  Clears LOBSTER_MAIN_SESSION
+    so tests that don't provide dispatcher state files don't accidentally
+    trigger the env-var fallback in is_dispatcher().
+
     Returns the loaded module object.
     """
     hook_path = Path(__file__).parents[3] / "hooks" / "inject-debug-bootup.py"
+
+    # Isolate state-file lookups from the real workspace.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOBSTER_WORKSPACE", str(tmp_path))
+    monkeypatch.delenv("LOBSTER_MAIN_SESSION", raising=False)
+
     spec = importlib.util.spec_from_file_location("inject_debug_bootup", hook_path)
     mod = importlib.util.module_from_spec(spec)
     # Load into a fresh namespace each time

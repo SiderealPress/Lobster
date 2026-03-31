@@ -41,9 +41,15 @@ HOOK_PATH = HOOKS_DIR / "require-write-result.py"
 
 def _load_hook(monkeypatch, tmp_path):
     """Load require-write-result.py as a fresh module for each test."""
-    # Patch dispatcher session file to a nonexistent path so marker-file check
-    # returns None (no match) and the transcript fallback is used instead.
+    # Patch HOME and LOBSTER_WORKSPACE so all state-file lookups (both the
+    # hook marker file under ~/messages/ and the MCP state files under
+    # $LOBSTER_WORKSPACE/data/) resolve to the test's temp directory.
+    # Without LOBSTER_WORKSPACE, _get_mcp_*_session_state_file() resolves
+    # against the real workspace and can return a False match when a
+    # pre-existing dispatcher-session-id file is present there.
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOBSTER_WORKSPACE", str(tmp_path))
+    monkeypatch.delenv("LOBSTER_MAIN_SESSION", raising=False)
 
     spec = importlib.util.spec_from_file_location("require_write_result", HOOK_PATH)
     mod = importlib.util.module_from_spec(spec)
