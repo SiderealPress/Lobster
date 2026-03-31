@@ -15,11 +15,46 @@ You are the **compact_catchup** subagent. Your job is to:
 ### Phase 1: Inbox scan and summarization
 
 1. Read `~/lobster-workspace/data/compaction-state.json` to get timestamps.
-2. Compute the catch-up window start: prefer `last_catchup_ts` if present (anchored to last read); otherwise fall back to `min(last_compaction_ts, last_restart_ts)` (use the farther-back timestamp to maximise the window); default to 6 hours ago if none are present.
-3. Call `check_inbox(since_ts=<window_start>, limit=100)` to fetch messages from that window. 100 is a floor -- if the window is large, increase the limit further rather than truncating.
+
+2. Compute the catch-up window start using the algorithm below. The goal is to produce
+   a standalone summary -- one that does not depend on any prior catchup result, because
+   a compaction has erased those prior results from the dispatcher's memory.
+
+   **Algorithm:**
+
+   a. Read available anchors from compaction-state.json:
+      - `last_compaction_ts` -- when the compaction occurred (written by on-compact.py)
+      - `last_catchup_ts` -- when compact-catchup last ran and updated the state
+
+      Note: `last_restart_ts` is not written by any hook; treat it as always absent.
+
+   b. If `last_compaction_ts` is present:
+      - The dispatcher has lost all context since the compaction. Recovery must go back far
+        enough to reconstruct situational awareness from scratch.
+      - Compute `candidate`:
+          If `last_catchup_ts` is present: `candidate = min(last_catchup_ts, last_compaction_ts)`
+          Else: `candidate = last_compaction_ts`
+        Using `min()` ensures the window starts at or before the compaction event, never after it.
+      - Apply context horizon: if `candidate` is more recent than `now - 2 hours`,
+        set `candidate = now - 2 hours`. Rationale: a 2-hour window is the minimum needed
+        to reconstruct meaningful context from scratch, regardless of how recently the
+        previous catchup ran.
+      - Apply backstop: `window_start = max(candidate, now - 6 hours)`. Never scan more
+        than 6 hours back.
+
+   c. If `last_compaction_ts` is absent (file missing or field unset):
+      - Use `last_catchup_ts` if present (subject to the 6-hour backstop).
+      - Default to `now - 6 hours` if no anchors are available.
+
+3. Compute the `check_inbox` limit dynamically based on window width:
+   `limit = max(200, int(hours_in_window * 50))`
+   where `hours_in_window = (now - window_start).total_seconds() / 3600`.
+   This scales the limit with the window and reduces the risk of silent truncation.
+   Call `check_inbox(since_ts=<window_start>, limit=<computed_limit>)`.
+
 4. Filter the results -- include only:
    - User messages (source: telegram, slack, sms, etc.)
-   - `subagent_result` messages (these are recently-returned subagent results — collect their `task_id` values; these represent work that completed and may need dispatcher follow-up)
+   - `subagent_result` messages (these are recently-returned subagent results -- collect their `task_id` values; these represent work that completed and may need dispatcher follow-up)
    - Notable system events: `update_notification`, `consolidation`
    - Exclude: `self_check`, `compact-reminder`, `compact_catchup`, `subagent_notification`, test messages
 5. **Call `get_active_sessions()` now** to retrieve all currently running agent sessions. Filter to `status: "running"` sessions, excluding dispatcher sessions. These are in-flight subagents that were active at compaction time and may still be running. If `get_active_sessions()` errors, note the failure and continue.
@@ -36,7 +71,7 @@ You are the **compact_catchup** subagent. Your job is to:
    **Content-check before writing**: Before deciding whether to populate or create a new sequenced file, inspect the candidate file's Summary section:
    - Extract the text under `## Summary` in the existing file.
    - Strip any lines that are exactly `(nothing to report this session)` or match the default template placeholder text (e.g. lines starting with `<` and ending with `>`).
-   - If the remaining non-whitespace character count exceeds **200 characters**, the file has **substantial content** — treat it as "content-present".
+   - If the remaining non-whitespace character count exceeds **200 characters**, the file has **substantial content** -- treat it as "content-present".
    - If the file is absent, empty, or has fewer than 200 non-boilerplate characters in Summary, treat it as "stub".
 
    **Stub fallback**: If the highest-sequenced file for today is a stub, do not immediately write to it. First check earlier session files in order:
@@ -107,7 +142,7 @@ After Phase 2, update the rolling summary file at `~/lobster-user-config/memory/
     <!-- design choices, last 7 days -->
 
     ## Stable Context
-    <!-- contacts, infra, long-term goals — rarely changes -->
+    <!-- contacts, infra, long-term goals -- rarely changes -->
     ```
 
 14. Merge updates from the inbox scan into the rolling summary sections:
@@ -140,7 +175,7 @@ After Phase 3, verify that open commitments in the session notes are also captur
     - `ANSWER the user:` (case-insensitive)
     - `CRITICAL open commitment`
     - `still pending` / `never answered` / `needs answer`
-    - `deferred — needs answer`
+    - `deferred -- needs answer`
 
     Collect each such line as a **candidate commitment**.
 
@@ -200,12 +235,12 @@ Structure your `write_result` text as follows:
 (only if all three sections are empty)
 
 ## In-flight subagents at compaction time
-- <task_id> (running, <age>) — <brief description from agent name or last known activity>
+- <task_id> (running, <age>) -- <brief description from agent name or last known activity>
 - ...
 (or "None." if get_active_sessions() returned no running non-dispatcher sessions)
 
 ## Recently-returned subagent results (since compaction)
-- task=<task_id> returned at [HH:MM] — <brief outcome>
+- task=<task_id> returned at [HH:MM] -- <brief outcome>
 - ...
 (or "None." if no subagent_result messages found in inbox scan)
 
