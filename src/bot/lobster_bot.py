@@ -1030,21 +1030,9 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
             "image_file": str(image_path),
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
-        direct_inv = False
-        engaged = False
-        thread_root_id: Optional[int] = None
         if _is_group:
-            bot_username = _get_bot_username()
-            thread_root_id = _get_thread_root_id(message)
-            direct_inv = _is_direct_invocation(message, bot_username)
-            engaged = _is_in_engaged_thread(chat.id, thread_root_id)
-            if direct_inv or engaged:
-                _mark_thread_engaged(chat.id, thread_root_id)
-                _mark_thread_engaged(chat.id, message.message_id)
             msg_data["group_chat_id"] = chat.id
             msg_data["group_title"] = chat.title
-            msg_data["direct_invocation"] = direct_inv or engaged
-            msg_data["thread_root_message_id"] = thread_root_id
 
         # Capture full reply-to context if this message is a reply
         reply_ctx = extract_reply_to_context(message)
@@ -1140,21 +1128,9 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
             "file_id": document.file_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
-        direct_inv = False
-        engaged = False
-        thread_root_id: Optional[int] = None
         if _is_group:
-            bot_username = _get_bot_username()
-            thread_root_id = _get_thread_root_id(message)
-            direct_inv = _is_direct_invocation(message, bot_username)
-            engaged = _is_in_engaged_thread(chat.id, thread_root_id)
-            if direct_inv or engaged:
-                _mark_thread_engaged(chat.id, thread_root_id)
-                _mark_thread_engaged(chat.id, message.message_id)
             msg_data["group_chat_id"] = chat.id
             msg_data["group_title"] = chat.title
-            msg_data["direct_invocation"] = direct_inv or engaged
-            msg_data["thread_root_message_id"] = thread_root_id
 
         # Capture full reply-to context if this message is a reply
         reply_ctx = extract_reply_to_context(message)
@@ -1226,29 +1202,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     chat = message.chat
-    if chat.type in ("group", "supergroup"):
-        # Tier 1 + Tier 2 — group gating
-        if _GROUP_GATING_ENABLED:
-            store = load_whitelist()
-            result = gate_message(chat.id, user.id, store)
-            if result.action == GatingAction.DROP_SILENT:
-                log.debug(f"Group message silently dropped: {result.reason}")
-                return
-            elif result.action == GatingAction.SEND_REGISTRATION_DM:
-                # Group is whitelisted but user is not — silently drop, no DM
-                log.debug(
-                    f"Non-whitelisted user {user.id} in whitelisted group {chat.id}: "
-                    "silently dropped"
-                )
-                return
-            # GatingAction.ALLOW — fall through to message handling
-        else:
-            # Skill not available; drop all group messages silently
-            return
-    else:
-        # DM path — unchanged behaviour
-        if user.id not in ALLOWED_USERS:
-            return
+    if not await _check_group_gating(user, chat, context):
+        return
 
     # Wake Claude if hibernating (non-blocking — spawns subprocess if needed)
     wake_claude_if_hibernating()
@@ -1545,7 +1500,11 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     user = update.effective_user
-    if not user or user.id not in ALLOWED_USERS:
+    if not user:
+        return
+
+    chat = reaction_update.chat
+    if not await _check_group_gating(user, chat, context):
         return
 
     chat_id: int = reaction_update.chat.id
@@ -1650,21 +1609,9 @@ async def handle_audio_message(
             "file_id": audio_obj.file_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
-        direct_inv = False
-        engaged = False
-        thread_root_id: Optional[int] = None
         if _is_group:
-            bot_username = _get_bot_username()
-            thread_root_id = _get_thread_root_id(message)
-            direct_inv = _is_direct_invocation(message, bot_username)
-            engaged = _is_in_engaged_thread(chat.id, thread_root_id)
-            if direct_inv or engaged:
-                _mark_thread_engaged(chat.id, thread_root_id)
-                _mark_thread_engaged(chat.id, message.message_id)
             msg_data["group_chat_id"] = chat.id
             msg_data["group_title"] = chat.title
-            msg_data["direct_invocation"] = direct_inv or engaged
-            msg_data["thread_root_message_id"] = thread_root_id
 
         # Capture full reply-to context if this message is a reply
         reply_ctx = extract_reply_to_context(message)
