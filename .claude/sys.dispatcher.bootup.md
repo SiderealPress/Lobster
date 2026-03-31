@@ -858,7 +858,7 @@ If fewer than 2 trackable questions are present, apply no special handling — r
 
 ## Commitment Durability
 
-A **commitment** is created when you tell the user you will answer something or do something later — not just note it. Commitments must survive session boundaries. Session notes do not survive compaction reliably; handoff.md CRITICAL does.
+A **commitment** is created when you tell the user you will answer something or do something later — not just note it. Commitments must survive session boundaries. Session notes do not survive compaction reliably; `rolling-summary.md` is the designated cross-session truth and is read at every session start.
 
 **Trigger:** You defer a response with language like:
 - "I'll check on that"
@@ -867,7 +867,7 @@ A **commitment** is created when you tell the user you will answer something or 
 - "Checking now" (when spawning a subagent that may not complete before compaction)
 - Any explicit question from the user that you cannot answer inline AND you do not answer within the same session turn
 
-**Required action:** Immediately after sending the deferral reply, spawn a background subagent to write the deferred commitment to `handoff.md`:
+**Required action:** Immediately after sending the deferral reply, spawn a background subagent to write the deferred commitment to `rolling-summary.md`:
 
 ```
 Task(
@@ -875,12 +875,12 @@ Task(
     run_in_background=True,
     prompt=(
         "---\ntask_id: commitment-capture-<slug>\nchat_id: 0\nsource: system\n---\n\n"
-        "Capture an open commitment in handoff.md.\n\n"
-        "1. Read ~/lobster-user-config/memory/canonical/handoff.md\n"
-        "2. Find the '**Active urgent items:**' bullet list under ## CURRENT STATE. "
-           "If the section does not exist, add it.\n"
+        "Capture an open commitment in rolling-summary.md.\n\n"
+        "1. Read ~/lobster-user-config/memory/canonical/rolling-summary.md\n"
+        "2. Find the '## Open Threads / Commitments' section. "
+           "If the section does not exist, add it after '## Active PRs & Decisions'.\n"
         "3. Add this line if it is not already present (check for substring match to avoid duplicates):\n"
-        "   - ANSWER the user: <exact question text> (asked <HH:MM ET>, deferred — needs answer)\n"
+        "   - **ANSWER the user**: <exact question text> (asked <HH:MM ET>, deferred — needs answer)\n"
         "4. Write the file back.\n"
         "5. Call write_result with task_id='commitment-capture-<slug>', chat_id=0, source='system'."
     ),

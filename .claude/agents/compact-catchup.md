@@ -135,7 +135,7 @@ Rolling summary: write failed (<reason>)
 
 ### Phase 4: Commitment carry-forward
 
-After Phase 3, verify that open commitments in the session notes are also captured in handoff.md. This is the safety net: if the dispatcher forgot to write a commitment immediately, catchup catches it here.
+After Phase 3, verify that open commitments in the session notes are also captured in `rolling-summary.md`. This is the safety net: if the dispatcher forgot to write a commitment immediately, catchup catches it here.
 
 17. Scan the tier-1 session files (the 2 most recent, already read in Phase 1) for lines matching any of these patterns:
     - `ANSWER the user:` (case-insensitive)
@@ -145,22 +145,22 @@ After Phase 3, verify that open commitments in the session notes are also captur
 
     Collect each such line as a **candidate commitment**.
 
-18. Read `~/lobster-user-config/memory/canonical/handoff.md`.
+18. Read `~/lobster-user-config/memory/canonical/rolling-summary.md`.
 
-19. For each candidate commitment, check whether handoff.md already contains it (substring match, case-insensitive). If the commitment is **not** present in handoff.md:
-    - Locate the `**Active urgent items:**` bullet list under `## CURRENT STATE`. If the section is absent, add it directly under the `---` separator after the CURRENT STATE header.
+19. For each candidate commitment, check whether `rolling-summary.md` already contains it (substring match, case-insensitive). If the commitment is **not** present:
+    - Locate the `## Open Threads / Commitments` section. If the section is absent, add it after `## Active PRs & Decisions`.
     - Prepend the missing commitment line verbatim (as found in the session note), prefixed with `- `.
     - Mark it with `(carried forward by compact-catchup)` if the original text doesn't already have that annotation.
 
-20. If any commitments were added: write handoff.md back. Include in the `write_result` footer:
+20. If any commitments were added: write `rolling-summary.md` back. Include in the `write_result` footer:
     ```
-    Commitment carry-forward: <N> item(s) added to handoff.md CRITICAL
+    Commitment carry-forward: <N> item(s) added to rolling-summary.md
     ```
     If none were missing: include:
     ```
     Commitment carry-forward: none needed
     ```
-    If handoff.md could not be read or written, note the failure but do not abort catchup.
+    If `rolling-summary.md` could not be read or written during Phase 4, note the failure but do not abort catchup.
 
 ## Session notes reading
 
@@ -211,7 +211,7 @@ Active agents: <N> (<comma-separated task_ids or "none">)
 ### Rolling summary
 Updated: <path> (<line_count> lines)
 ### Commitment carry-forward
-<N> item(s) added to handoff.md CRITICAL (or "none needed")
+<N> item(s) added to rolling-summary.md (or "none needed")
 ```
 
 Omit the "Session context" section entirely if no session files were found.
@@ -230,7 +230,7 @@ Keep each line to one sentence. The dispatcher is on mobile -- brevity matters.
 - If the session file cannot be found or written (permissions, path not found), note the failure in `write_result` and continue -- do not crash the entire catchup.
 - If `rolling-summary.md` cannot be read or written, note the failure in `write_result` and continue -- do not abort catchup.
 - Never remove content from rolling-summary.md unless there is clear evidence in the inbox scan that the item is resolved. When in doubt, carry it forward.
-- If handoff.md cannot be read or written during Phase 4, note the failure in `write_result` and continue -- do not abort catchup.
+- If `rolling-summary.md` cannot be read or written during Phase 4, note the failure in `write_result` and continue -- do not abort catchup (this is separate from the Phase 3 rolling summary update).
 
 ## Delivering results
 
