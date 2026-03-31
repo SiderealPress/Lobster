@@ -6,8 +6,7 @@ Tests the four command handlers added in Phase 3:
 
 Each handler must:
   - Silently drop commands from non-ALLOWED_USERS (no reply)
-  - Reply with an error for commands sent from non-DM chats (group chats)
-    (only /enable_group_bot sends an error; the rest silently drop)
+  - Silently drop commands sent from non-DM chats (group chats) — no reply
   - Delegate to the multiplayer_telegram_bot skill's command functions
   - Reply to the user with the result
 """
@@ -83,8 +82,8 @@ class TestEnableGroupBotCommand:
             update.message.reply_text.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_group_chat_gets_error_reply(self):
-        """Command sent from a group chat returns a DM-only error message."""
+    async def test_group_chat_silently_drops(self):
+        """Command sent from a group chat is silently dropped (no reply)."""
         with patch.dict(os.environ, _make_env()):
             import importlib
             import src.bot.lobster_bot as bot_module
@@ -93,9 +92,7 @@ class TestEnableGroupBotCommand:
             update = _make_update(chat_type="group")
             await bot_module.enable_group_bot_command(update, _make_context())
 
-            update.message.reply_text.assert_called_once()
-            reply = update.message.reply_text.call_args[0][0]
-            assert "private" in reply.lower() or "DM" in reply
+            update.message.reply_text.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_valid_command_enables_group(self):
