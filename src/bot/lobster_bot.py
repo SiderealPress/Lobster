@@ -752,7 +752,6 @@ async def enable_group_bot_command(update: Update, context: ContextTypes.DEFAULT
     if not user or user.id not in ALLOWED_USERS:
         return
     if update.effective_chat.type != "private":
-        await update.message.reply_text("This command only works in a private DM with me.")
         return
     if not _GROUP_COMMANDS_ENABLED:
         await update.message.reply_text("Group management commands are not available (skill not installed).")
