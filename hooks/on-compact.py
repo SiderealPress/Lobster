@@ -6,8 +6,8 @@ Fires on SessionStart with a 'compact' event. Injects a system message into
 the Lobster inbox so that the next call to wait_for_messages() surfaces a
 reminder to re-read CLAUDE.md and re-orient from handoff/memory context.
 
-The script is idempotent: if a compact-reminder message already exists in the
-inbox it skips writing a duplicate.
+The script is idempotent: if a compact-reminder message already exists in
+inbox/ or processing/ it skips writing a duplicate.
 
 Notification: always sends a Telegram message directly to the owner's chat ID
 so the user is immediately notified that a compaction occurred.  The health
@@ -50,6 +50,7 @@ from session_role import (
 
 
 INBOX_DIR = Path(os.path.expanduser("~/messages/inbox"))
+PROCESSING_DIR = Path(os.path.expanduser("~/messages/processing"))
 CONFIG_ENV = Path(os.path.expanduser("~/lobster-config/config.env"))
 STATE_FILE = Path(
     os.environ.get(
@@ -88,18 +89,24 @@ COMPACTION_TELEGRAM_MESSAGE = "\u267b\ufe0f Context compacted. Re-orienting..."
 
 
 def already_pending() -> bool:
-    """Return True if a compact-reminder message is already sitting in the inbox."""
-    if not INBOX_DIR.exists():
-        return False
-    for path in INBOX_DIR.iterdir():
-        if not path.suffix == ".json":
+    """Return True if a compact-reminder message is already in inbox/ or processing/.
+
+    Checks both directories so that a reminder being actively processed by the
+    dispatcher (moved to processing/ by mark_processing) is not counted as absent,
+    which would cause a duplicate to be written on a rapid second compaction.
+    """
+    for search_dir in (INBOX_DIR, PROCESSING_DIR):
+        if not search_dir.exists():
             continue
-        try:
-            data = json.loads(path.read_text())
-            if data.get("subtype") == "compact-reminder":
-                return True
-        except (json.JSONDecodeError, OSError):
-            continue
+        for path in search_dir.iterdir():
+            if path.suffix != ".json":
+                continue
+            try:
+                data = json.loads(path.read_text())
+                if data.get("subtype") == "compact-reminder":
+                    return True
+            except (json.JSONDecodeError, OSError):
+                continue
     return False
 
 
