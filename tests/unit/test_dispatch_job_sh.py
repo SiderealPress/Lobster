@@ -361,6 +361,51 @@ class TestRunJobShMissingTaskFile:
             f"Expected 'auto-disab' in log, got: {log_content!r}"
         )
 
+    def test_missing_task_file_writes_observations_log(self, tmp_path):
+        """Auto-disable must write a structured entry to the observations log."""
+        workspace, messages_dir, config_dir, fake_bin = _setup_workspace(
+            tmp_path, "no-task-job", enabled=True, has_task_file=False
+        )
+        env = _make_env(workspace, config_dir, messages_dir, fake_bin=fake_bin)
+
+        subprocess.run(
+            ["bash", str(RUN_JOB), "no-task-job"],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+        obs_log = workspace / "logs" / "observations.log"
+        assert obs_log.exists(), "observations.log must be created on auto-disable"
+        content = obs_log.read_text()
+        assert "no-task-job" in content, f"Job name must appear in observations log, got: {content!r}"
+        assert "auto-disabled" in content.lower() or "task file" in content.lower(), (
+            f"Observations log must describe the auto-disable reason, got: {content!r}"
+        )
+
+    def test_missing_task_file_writes_telegram_outbox_alert(self, tmp_path):
+        """Auto-disable must drop a Telegram outbox file when ADMIN_CHAT_ID is set."""
+        workspace, messages_dir, config_dir, fake_bin = _setup_workspace(
+            tmp_path, "no-task-job", enabled=True, has_task_file=False
+        )
+        env = _make_env(workspace, config_dir, messages_dir, fake_bin=fake_bin)
+        env["LOBSTER_ADMIN_CHAT_ID"] = "8305714125"
+
+        subprocess.run(
+            ["bash", str(RUN_JOB), "no-task-job"],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+        outbox_dir = messages_dir / "outbox"
+        alert_files = list(outbox_dir.glob("alert_*.json"))
+        assert len(alert_files) == 1, f"Expected 1 outbox alert file, got {len(alert_files)}"
+        import json as _json
+        alert = _json.loads(alert_files[0].read_text())
+        assert alert["chat_id"] == 8305714125
+        assert "no-task-job" in alert["text"]
+
     def test_auto_disabled_job_does_not_dispatch_on_second_run(self, tmp_path):
         """Once auto-disabled, a second cron fire must skip silently with no inbox message."""
         workspace, messages_dir, config_dir, fake_bin = _setup_workspace(
