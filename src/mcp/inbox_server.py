@@ -651,6 +651,9 @@ _assert_not_in_git_repo(_WORKSPACE)
 # Scheduled Tasks Directories (task definitions live in workspace, not the repo)
 SCHEDULED_JOBS_DIR = _WORKSPACE / "scheduled-jobs"
 SCHEDULED_TASKS_TASKS_DIR = SCHEDULED_JOBS_DIR / "tasks"
+# NOTE: SCHEDULED_JOBS_FILE is retained for the MCP tool handlers that still
+# read/write jobs.json. It will be removed once PR #1105 (systemd backend) merges
+# and the handlers are migrated to systemd_jobs.py.
 SCHEDULED_JOBS_FILE = SCHEDULED_JOBS_DIR / "jobs.json"
 SCHEDULED_TASKS_LOGS_DIR = SCHEDULED_JOBS_DIR / "logs"
 
@@ -742,10 +745,6 @@ if not OPENAI_API_KEY:
 # Initialize tasks file if needed
 if not TASKS_FILE.exists():
     TASKS_FILE.write_text(json.dumps({"tasks": [], "next_id": 1}, indent=2))
-
-# Initialize scheduled jobs file if needed
-if not SCHEDULED_JOBS_FILE.exists():
-    SCHEDULED_JOBS_FILE.write_text(json.dumps({"jobs": {}}, indent=2))
 
 # Record the moment this server process started. Used by stale-session cleanup
 # to distinguish output files from the current run vs a previous (dead) run.

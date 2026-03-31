@@ -188,14 +188,6 @@ wheels = [
 ]
 
 [[package]]
-name = "blue-lobster"
-version = "0.1.0"
-source = { git = "https://github.com/sayhar/blue-lobster.git#461cdea04620fe2b659180970e00f1e6945406d3" }
-dependencies = [
-    { name = "httpx" },
-]
-
-[[package]]
 name = "certifi"
 version = "2026.1.4"
 source = { registry = "https://pypi.org/simple" }
@@ -881,7 +873,6 @@ name = "lobster"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "blue-lobster" },
     { name = "cryptography" },
     { name = "fastembed" },
     { name = "httpx" },
@@ -920,7 +911,6 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "blue-lobster", git = "https://github.com/sayhar/blue-lobster.git" },
     { name = "cryptography", specifier = ">=42.0.0" },
     { name = "fastembed", specifier = ">=0.3.0" },
     { name = "httpx", specifier = ">=0.27.0" },
