@@ -5,7 +5,9 @@ Verifies:
 1. build_observation_payload produces the correct shape
 2. write_observation_to_inbox writes atomically to the right path
 3. CLI produces a subagent_observation with the expected fields
-4. No writes to observations.log (only inbox)
+4. system_error observations write to observations.log (durability fallback)
+5. Non-system_error observations do NOT write to observations.log
+6. No writes to outbox/ (inbox-only alerting)
 """
 
 from __future__ import annotations
@@ -136,24 +138,56 @@ def test_cli_writes_observation_to_inbox(tmp_path):
     assert "foo" in payload["text"]
 
 
-def test_cli_no_observations_log_written(tmp_path):
-    """Helper must not write to observations.log — only to inbox."""
+def test_cli_system_error_writes_observations_log(tmp_path):
+    """system_error observations must be written to observations.log as a durability fallback."""
     import os
     messages_dir = tmp_path / "messages"
+    workspace_dir = tmp_path / "workspace"
     inbox_dir = messages_dir / "inbox"
     inbox_dir.mkdir(parents=True, exist_ok=True)
+    (workspace_dir / "logs").mkdir(parents=True, exist_ok=True)
 
     env = os.environ.copy()
     env["LOBSTER_MESSAGES"] = str(messages_dir)
+    env["LOBSTER_WORKSPACE"] = str(workspace_dir)
 
-    _run_helper(
+    result = _run_helper(
         ["--category", "system_error", "--text", "Test alert."],
         env=env,
     )
+    assert result.returncode == 0, f"stdout: {result.stdout}\nstderr: {result.stderr}"
 
-    # No observations.log anywhere under tmp_path
-    obs_logs = list(tmp_path.rglob("observations.log"))
-    assert obs_logs == [], f"Helper must not write observations.log, found: {obs_logs}"
+    obs_log = workspace_dir / "logs" / "observations.log"
+    assert obs_log.exists(), "observations.log must be written for system_error"
+    import json as _json
+    lines = [_json.loads(l) for l in obs_log.read_text().splitlines() if l.strip()]
+    assert len(lines) == 1
+    entry = lines[0]
+    assert entry["category"] == "system_error"
+    assert entry["source"] == "cron-direct"
+    assert "Test alert" in entry["content"]
+
+
+def test_cli_non_system_error_does_not_write_observations_log(tmp_path):
+    """Non-system_error observations must NOT write to observations.log."""
+    import os
+    messages_dir = tmp_path / "messages"
+    workspace_dir = tmp_path / "workspace"
+    inbox_dir = messages_dir / "inbox"
+    inbox_dir.mkdir(parents=True, exist_ok=True)
+    (workspace_dir / "logs").mkdir(parents=True, exist_ok=True)
+
+    env = os.environ.copy()
+    env["LOBSTER_MESSAGES"] = str(messages_dir)
+    env["LOBSTER_WORKSPACE"] = str(workspace_dir)
+
+    _run_helper(
+        ["--category", "system_context", "--text", "Informational note."],
+        env=env,
+    )
+
+    obs_log = workspace_dir / "logs" / "observations.log"
+    assert not obs_log.exists(), "observations.log must not be written for non-system_error categories"
 
 
 def test_cli_no_outbox_written(tmp_path):

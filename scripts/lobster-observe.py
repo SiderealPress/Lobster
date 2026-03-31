@@ -6,13 +6,22 @@ observations via the inbox API without needing direct MCP access.  It
 produces the exact same payload format as `handle_write_observation` in
 inbox_server.py so the dispatcher handles it identically.
 
+For `system_error` observations, this script also appends a line directly to
+``~/lobster-workspace/logs/observations.log`` as a durability fallback — the
+same fallback the MCP server performs.  If the dispatcher is down when the
+cron job fires, the alert still lands in the ops log.  The ``source`` field
+in the log entry is set to ``"cron-direct"`` to distinguish these entries
+from MCP-written ones.  Worst case: two log entries for the same event
+(acceptable — no deduplication is needed).
+
 Usage:
     uv run scripts/lobster-observe.py \\
         --category system_error \\
         --text "Job 'foo' was auto-disabled because its task file is missing."
 
 Environment variables:
-    LOBSTER_MESSAGES  — parent of the inbox/ dir (default: ~/messages)
+    LOBSTER_MESSAGES    — parent of the inbox/ dir (default: ~/messages)
+    LOBSTER_WORKSPACE   — workspace root used to locate logs/ (default: ~/lobster-workspace)
 
 Exit codes:
     0 — observation written successfully
@@ -84,6 +93,35 @@ def resolve_inbox_dir() -> Path:
     return Path(messages) / "inbox"
 
 
+def resolve_obs_log() -> Path:
+    """Return the observations.log path from env or default workspace (pure-ish)."""
+    workspace = os.environ.get(
+        "LOBSTER_WORKSPACE", str(Path.home() / "lobster-workspace")
+    )
+    return Path(workspace) / "logs" / "observations.log"
+
+
+def append_to_obs_log(obs_log: Path, payload: dict) -> None:
+    """Append a JSON line to observations.log as a durability fallback (side effect).
+
+    Mirrors the belt-and-suspenders write the MCP server performs in
+    ``handle_write_observation``.  The ``source`` field is set to
+    ``"cron-direct"`` so log readers can distinguish these entries from
+    MCP-written ones.  Only called for ``system_error`` observations.
+    """
+    obs_log.parent.mkdir(parents=True, exist_ok=True)
+    log_entry: dict = {
+        "ts": payload["timestamp"],
+        "category": payload["category"],
+        "content": payload["text"],
+        "source": "cron-direct",
+    }
+    if "task_id" in payload:
+        log_entry["task_id"] = payload["task_id"]
+    with obs_log.open("a") as f:
+        f.write(json.dumps(log_entry) + "\n")
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -112,8 +150,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--source",
-        default="system",
-        help="Message source tag (default: system).",
+        default="telegram",
+        help="Message source tag (default: telegram).",
     )
     parser.add_argument(
         "--task-id",
@@ -140,6 +178,17 @@ def main() -> int:
     except OSError as exc:
         print(f"Error writing observation to inbox: {exc}", file=sys.stderr)
         return 2
+
+    # Durability fallback: for system_error, also append directly to
+    # observations.log in case the dispatcher is down when this fires.
+    if args.category == "system_error":
+        obs_log = resolve_obs_log()
+        try:
+            append_to_obs_log(obs_log, payload)
+        except OSError as exc:
+            # Non-fatal: the inbox write succeeded; log the failure but don't
+            # change the exit code so cron doesn't retry the entire observation.
+            print(f"Warning: could not write to {obs_log}: {exc}", file=sys.stderr)
 
     print(f"Observation written: {payload['id']}")
     return 0

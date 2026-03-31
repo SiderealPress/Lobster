@@ -418,8 +418,16 @@ class TestRunJobShMissingTaskFile:
             f"Expected no outbox alert files (alerts go through inbox API), got: {alert_files}"
         )
 
-    def test_missing_task_file_writes_no_observations_log(self, tmp_path):
-        """Auto-disable must NOT write directly to observations.log — alerting goes through inbox API."""
+    def test_missing_task_file_writes_observations_log_via_observe_script(self, tmp_path):
+        """Auto-disable writes observations.log via lobster-observe.py (durability fallback).
+
+        dispatch-job.sh must NOT write to observations.log directly — it delegates
+        to lobster-observe.py, which appends a ``cron-direct`` entry as its own
+        durability fallback.  This test verifies the entry is present and carries
+        the expected source tag.
+        """
+        import json as _json
+
         workspace, messages_dir, config_dir, fake_bin = _setup_workspace(
             tmp_path, "no-task-job", enabled=True, has_task_file=False
         )
@@ -433,9 +441,16 @@ class TestRunJobShMissingTaskFile:
         )
 
         obs_log = workspace / "logs" / "observations.log"
-        assert not obs_log.exists(), (
-            "dispatch-job.sh must not write directly to observations.log — use inbox API"
+        assert obs_log.exists(), (
+            "observations.log must be written by lobster-observe.py for system_error auto-disable alerts"
         )
+        lines = [_json.loads(l) for l in obs_log.read_text().splitlines() if l.strip()]
+        assert len(lines) >= 1
+        entry = lines[0]
+        assert entry.get("source") == "cron-direct", (
+            f"Expected source='cron-direct' (written by lobster-observe.py), got {entry.get('source')!r}"
+        )
+        assert entry.get("category") == "system_error"
 
     def test_auto_disabled_job_does_not_dispatch_on_second_run(self, tmp_path):
         """Once auto-disabled, a second cron fire must skip silently with no inbox message."""
