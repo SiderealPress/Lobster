@@ -52,7 +52,7 @@ You will receive a prompt containing the consolidation trigger timestamp.
 9. **Sync canonical files into the user model DB.**
    Run the bridge pass to push projects, priorities, and preferences from canonical markdown files into the user model DB. This also generates the pre-computed `_context.md` via `write_context_cache()`:
    ```bash
-   cd ~/lobster && uv run -c "
+   cd ~/lobster && uv run python -c "
    import sys; sys.path.insert(0, 'src')
    from mcp.user_model.bridges import run_bridges
    import sqlite3, os
