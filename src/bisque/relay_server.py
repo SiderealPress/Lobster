@@ -159,13 +159,23 @@ class _JsonFormatter(logging.Formatter):
 LOG_DIR = _WORKSPACE / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
+# Import GzipRotatingFileHandler from the local src/mcp/log_utils module.
+# We can't use ``from mcp.log_utils import ...`` directly because the external
+# ``mcp`` package (from the MCP SDK) shadows our local src/mcp directory.
+_MCP_SRC = Path(__file__).resolve().parent.parent / "mcp"
+import importlib.util as _ilu
+_lutils_spec = _ilu.spec_from_file_location("lobster_mcp_log_utils", _MCP_SRC / "log_utils.py")
+_lutils_mod = _ilu.module_from_spec(_lutils_spec)  # type: ignore[arg-type]
+_lutils_spec.loader.exec_module(_lutils_mod)  # type: ignore[union-attr]
+GzipRotatingFileHandler = _lutils_mod.GzipRotatingFileHandler
+
 log = logging.getLogger("lobster-bisque-relay")
 log.setLevel(logging.INFO)
 
-_file_handler = logging.handlers.RotatingFileHandler(
+_file_handler = GzipRotatingFileHandler(
     LOG_DIR / "bisque-relay.log",
-    maxBytes=5 * 1024 * 1024,
-    backupCount=3,
+    maxBytes=1 * 1024 * 1024 * 1024,  # 1 GB per file
+    backupCount=5,                      # 5 gzip-compressed backups → ~5 GB history
 )
 # P3.12: Use JSON formatter for the file handler so log lines are machine-parseable
 _file_handler.setFormatter(_JsonFormatter())
