@@ -177,7 +177,7 @@ After a context compaction you lose situational awareness of the last ~30 minute
 2. Read the compact-reminder text to re-orient (identity, main loop, key files)
 3. Spawn session-note-polish subagent (run_in_background=True, subagent_type: "lobster-generalist"):
    - See .claude/agents/session-note-polish.md for the agent definition
-   - Pass: task_id: "session-note-polish", chat_id: 0, source: "system", current_session_file: <path>
+   - Pass: task_id: "session-note-polish", chat_id: 0, source: "system", current_session_file: <path>, MESSAGE_COUNT: <current message count>
    - Do NOT wait for it — spawn and immediately proceed to step 4
 4. Run: ~/lobster/scripts/record-catchup-state.sh start
 5. Spawn compact_catchup subagent (subagent_type: "compact-catchup", run_in_background=True):
@@ -467,6 +467,22 @@ Injected by the MCP server after every 20 real user messages. Spawn session-note
 
 Do NOT spawn during wind-down mode (`WIND_DOWN_MODE = True`) — session-note-polish handles the final consolidation.
 
+```
+1. mark_processing(message_id)
+2. Call get_active_sessions() to get running subagents.
+   For each session, compute elapsed_minutes = round((now - started_at).total_seconds() / 60) to the nearest minute.
+   If started_at is unavailable, omit elapsed_minutes for that entry.
+   Build in_flight list: [{task_id, type, description, elapsed_minutes}, ...]
+3. Check ~/messages/processing/ — any message file present has been claimed (mark_processing called)
+   but not yet answered. Build pending_responses list from those files (use sender and text fields).
+4. Spawn session-note-appender (run_in_background=True, subagent_type: "lobster-generalist"):
+   - Pass: task_id: "session-note-appender", chat_id: 0, source: "system",
+           session_file: <current_session_file>, activity: <recent activity>,
+           in_flight: <in_flight list from step 2>,
+           pending_responses: <pending_responses list from step 3>
+5. mark_processed(message_id)
+```
+
 ---
 
 ## Message Source Handling
@@ -583,7 +599,10 @@ Do not modify Summary or Started/Ended. 3. Write back. 4. Call write_result.
 
 **Periodic snapshots:** Triggered by `session_note_reminder` (every 20 user messages). Spawn `session-note-appender` (see `.claude/agents/session-note-appender.md`) with `current_session_file` and a list of recent activity visible in working context.
 
-**Pre-compaction polish:** On `compact-reminder`, spawn `session-note-polish` (see `.claude/agents/session-note-polish.md`) with `current_session_file` before spawning compact_catchup.
+**Pre-compaction polish:** On `compact-reminder`, spawn `session-note-polish` (see `.claude/agents/session-note-polish.md`) with `current_session_file` before spawning compact_catchup. When passing context to `session-note-polish`, include:
+- All currently in-flight subagents (task_id, subagent type, brief description, and elapsed time since started_at) — these are the entries most at risk of being lost across compaction
+- Any pending user responses (messages that were mark_processing-d but not yet replied to)
+- The current MESSAGE_COUNT at time of compaction
 
 **On context_warning:** Spawn a session note update subagent as the very first step — captures current state before graceful restart erases working context.
 
