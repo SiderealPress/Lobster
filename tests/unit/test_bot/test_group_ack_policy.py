@@ -519,6 +519,148 @@ class TestGroupAckPolicy:
             assert data["thread_root_message_id"] == 5
 
 
+class TestSecondUserCloseEdgeCase:
+    """Closure signals from a non-invoker must not close an open session.
+
+    Scenario: User A @mentions the bot (opens a session). User B (also
+    authorized) says "thanks" in the same chat. The session must stay open.
+    Only when User A says "thanks" should the session close.
+    """
+
+    USER_A = 111  # session invoker
+    USER_B = 222  # different authorized user
+    CHAT_ID = -100123
+
+    @pytest.fixture(autouse=True)
+    def clear_engagement(self):
+        import src.bot.lobster_bot as bot_module
+        bot_module._engaged_threads.clear()
+        yield
+        bot_module._engaged_threads.clear()
+
+    def _make_group_message(self, text, user_id, chat_id=CHAT_ID,
+                            is_mention=False, message_id=10):
+        """Build a mock Update with a configurable sender."""
+        update = MagicMock()
+        user = update.effective_user
+        user.id = user_id
+        user.first_name = "User" + str(user_id)
+        user.username = "user" + str(user_id)
+
+        msg = update.message
+        msg.message_id = message_id
+        msg.chat_id = chat_id
+        msg.text = text
+        msg.voice = None
+        msg.audio = None
+        msg.photo = None
+        msg.document = None
+        msg.reply_text = AsyncMock()
+        msg.caption = None
+        msg.caption_entities = []
+        msg.reply_to_message = None
+
+        chat = msg.chat
+        chat.id = chat_id
+        chat.type = "supergroup"
+        chat.title = "Test Group"
+
+        if is_mention:
+            entity = MagicMock()
+            entity.type = "mention"
+            entity.offset = 0
+            entity.length = len("@testbot")
+            msg.entities = [entity]
+            msg.text = "@testbot " + text
+        else:
+            msg.entities = []
+
+        return update
+
+    @pytest.mark.asyncio
+    async def test_user_b_closure_signal_does_not_close_session(
+        self, temp_messages_dir
+    ):
+        """Session opened by user A stays open when user B sends a closure signal.
+
+        This test drives handle_message with get_active_session/close_session
+        mocked so we can inspect exactly which calls were made. The mock
+        simulates an active session owned by USER_A.
+
+        Test flow:
+          1. User A @mentions bot → session opens (mocked open_session returns session)
+          2. User B sends "thanks" → get_active_session returns USER_A's session
+             → close_session must NOT be called
+          3. User A (who is session invoker) is in the engaged thread → sends "thanks"
+             → close_session MUST be called once
+        """
+        inbox = temp_messages_dir / "inbox"
+        context = MagicMock()
+
+        # User B sends a closure signal (should NOT close the session)
+        update_b_thanks = self._make_group_message(
+            text="thanks", user_id=self.USER_B, message_id=11
+        )
+        # User A sends a closure signal (SHOULD close the session)
+        update_a_thanks = self._make_group_message(
+            text="thanks", user_id=self.USER_A, message_id=12
+        )
+
+        from multiplayer_telegram_bot.session import GroupSession
+        from datetime import datetime, timedelta, timezone
+
+        # An active session owned by USER_A
+        active_session = GroupSession(
+            chat_id=self.CHAT_ID,
+            invoker_user_id=self.USER_A,
+            expires_at=datetime.now(timezone.utc) + timedelta(seconds=600),
+            active=True,
+        )
+
+        close_session_calls: list = []
+
+        with patch.dict(os.environ, {
+            "TELEGRAM_BOT_TOKEN": "test_token",
+            "TELEGRAM_ALLOWED_USERS": f"{self.USER_A},{self.USER_B}",
+        }):
+            import src.bot.lobster_bot as bot_module
+            importlib.reload(bot_module)
+            bot_module._engaged_threads.clear()
+
+            with patch.object(bot_module, "INBOX_DIR", inbox), \
+                 patch.object(bot_module, "_check_group_gating", return_value=True), \
+                 patch.object(bot_module, "wake_claude_if_hibernating", lambda: None), \
+                 patch.object(bot_module, "is_user_onboarded", return_value=True), \
+                 patch.object(bot_module, "_get_bot_username", return_value="testbot"), \
+                 patch.object(bot_module, "extract_reply_to_context", return_value=None), \
+                 patch.object(bot_module, "get_source_for_chat", return_value="lobster-group"), \
+                 patch.object(bot_module, "_GROUP_SESSION_ENABLED", True), \
+                 patch.object(bot_module, "get_active_session", return_value=active_session), \
+                 patch.object(bot_module, "open_session") as mock_open, \
+                 patch.object(bot_module, "close_session", side_effect=lambda cid: close_session_calls.append(cid)) as mock_close:
+
+                # Step 1: User B sends "thanks" — session must NOT close
+                # USER_B is not in an engaged thread and is not the invoker, so
+                # even if closure signal is detected, it should not fire for them.
+                await bot_module.handle_message(update_b_thanks, context)
+
+                assert mock_close.call_count == 0, (
+                    f"close_session must NOT be called when non-invoker (user B) "
+                    f"sends a closure signal; was called {mock_close.call_count} times"
+                )
+
+                # Step 2: User A (the invoker) is in an engaged thread and says "thanks"
+                # → session SHOULD close
+                bot_module._mark_thread_engaged(self.CHAT_ID, None)
+                await bot_module.handle_message(update_a_thanks, context)
+
+                assert mock_close.call_count == 1, (
+                    f"close_session must be called exactly once when the invoker "
+                    f"(user A) sends a closure signal; was called {mock_close.call_count} times"
+                )
+                assert close_session_calls[0] == self.CHAT_ID
+
+
 # Sentinel values reused in test (avoids MagicMock confusion with return_value=True)
 return_value_True = MagicMock(return_value=True)
 return_value_testbot = MagicMock(return_value="testbot")
