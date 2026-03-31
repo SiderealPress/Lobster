@@ -54,6 +54,7 @@ INBOX_SYSTEM_TYPES: frozenset[str] = frozenset({
     "system",                 # DEPRECATED alias — normalizes to "health_check" on ingest (from health check scripts)
     "task-output",            # DEPRECATED alias — normalizes to "health_check" on ingest (scripts/daily-health-check.sh)
     "debug_observation",      # debug output from inbox_server.py internals; excluded from skill processing
+    "session_note_reminder",  # MCP counter reached 20 user messages — dispatcher should spawn session-note-appender
 })
 
 # ---------------------------------------------------------------------------
