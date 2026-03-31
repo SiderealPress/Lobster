@@ -104,6 +104,7 @@ COMPACTION_STATE_FILE = Path(
 )
 
 INBOX_DIR = Path(os.path.expanduser("~/messages/inbox"))
+PROCESSING_DIR = Path(os.path.expanduser("~/messages/processing"))
 
 # If the compaction state file was written within this window, treat the
 # current SessionStart as a compaction restart rather than a fresh restart.
@@ -187,21 +188,27 @@ def _is_catchup_stale() -> bool:
 
 
 def _compact_reminder_already_queued() -> bool:
-    """Return True if a compact-reminder message is already in the inbox."""
-    try:
-        if not INBOX_DIR.exists():
-            return False
-        for path in INBOX_DIR.iterdir():
-            if path.suffix != ".json":
+    """Return True if a compact-reminder message is already in inbox/ or processing/.
+
+    Checks both directories so that a reminder being actively processed by the
+    dispatcher (moved to processing/ by mark_processing) is not counted as absent,
+    which would cause a duplicate to be written on startup.
+    """
+    for search_dir in (INBOX_DIR, PROCESSING_DIR):
+        try:
+            if not search_dir.exists():
                 continue
-            try:
-                data = json.loads(path.read_text())
-                if data.get("subtype") == "compact-reminder":
-                    return True
-            except (json.JSONDecodeError, OSError):
-                continue
-    except OSError:
-        pass
+            for path in search_dir.iterdir():
+                if path.suffix != ".json":
+                    continue
+                try:
+                    data = json.loads(path.read_text())
+                    if data.get("subtype") == "compact-reminder":
+                        return True
+                except (json.JSONDecodeError, OSError):
+                    continue
+        except OSError:
+            continue
     return False
 
 
