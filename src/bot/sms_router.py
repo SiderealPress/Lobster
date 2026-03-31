@@ -91,11 +91,22 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 log = logging.getLogger("lobster-sms")
 log.setLevel(logging.INFO)
-from logging.handlers import RotatingFileHandler
-_fh = RotatingFileHandler(
+# Import GzipRotatingFileHandler from the local src/mcp/log_utils module.
+# We can't use ``from mcp.log_utils import ...`` directly because the external
+# ``mcp`` package (from the MCP SDK) shadows our local src/mcp directory
+# when it is installed in the venv.
+import importlib.util as _ilu
+_lutils_spec = _ilu.spec_from_file_location(
+    "lobster_mcp_log_utils",
+    Path(__file__).resolve().parent.parent / "mcp" / "log_utils.py",
+)
+_lutils_mod = _ilu.module_from_spec(_lutils_spec)  # type: ignore[arg-type]
+_lutils_spec.loader.exec_module(_lutils_mod)  # type: ignore[union-attr]
+GzipRotatingFileHandler = _lutils_mod.GzipRotatingFileHandler
+_fh = GzipRotatingFileHandler(
     LOG_DIR / "sms-router.log",
-    maxBytes=5 * 1024 * 1024,
-    backupCount=3,
+    maxBytes=1 * 1024 * 1024 * 1024,  # 1 GB per file
+    backupCount=5,                      # 5 gzip-compressed backups → ~5 GB history
 )
 _fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
 log.addHandler(_fh)
