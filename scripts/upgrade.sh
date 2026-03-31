@@ -2280,6 +2280,16 @@ PYEOF
         migrated=$((migrated + 1))
     fi
 
+    # Migration 63: Rename data/events.jsonl -> data/memory-events.jsonl.
+    # StaticMemory now writes to memory-events.jsonl to distinguish it from the
+    # EventBus operational log at logs/events.jsonl. Rename any existing file
+    # so history is preserved without manual intervention.
+    if [ -f "$WORKSPACE_DIR/data/events.jsonl" ] && [ ! -f "$WORKSPACE_DIR/data/memory-events.jsonl" ]; then
+        mv "$WORKSPACE_DIR/data/events.jsonl" "$WORKSPACE_DIR/data/memory-events.jsonl"
+        substep "Renamed data/events.jsonl -> data/memory-events.jsonl"
+        migrated=$((migrated + 1))
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
