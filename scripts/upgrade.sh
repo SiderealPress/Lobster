@@ -2264,22 +2264,25 @@ PYEOF
         migrated=$((migrated + 1))
     fi
 
-    # Migration 62: Install log-cleanup.sh and verify it runs.
+    # Migration 63: Install log-cleanup.sh and verify it runs.
     # Adds scripts/log-cleanup.sh (prune stale logs/processed/audio files).
     # nightly-consolidation.sh calls it at 3am; this migration ensures the
     # script is executable and runs --dry-run to confirm it is functional.
+    # Idempotency: sentinel checks for the script file itself. On a fresh
+    # install the file does not yet exist; on an upgrade it already does,
+    # so the migration body is skipped safely.
     local LOG_CLEANUP_SCRIPT="$LOBSTER_DIR/scripts/log-cleanup.sh"
-    if [ ! -x "$LOG_CLEANUP_SCRIPT" ]; then
+    if [ ! -f "$LOG_CLEANUP_SCRIPT" ]; then
         chmod +x "$LOG_CLEANUP_SCRIPT" 2>/dev/null || true
         if "$LOG_CLEANUP_SCRIPT" --dry-run > /dev/null 2>&1; then
             substep "log-cleanup.sh --dry-run succeeded"
         else
             warn "log-cleanup.sh --dry-run returned non-zero (non-fatal)"
         fi
-        substep "Migration 62 complete: log-cleanup.sh is ready"
+        substep "Migration 63 complete: log-cleanup.sh is ready"
         migrated=$((migrated + 1))
     else
-        substep "log-cleanup.sh already executable — skipping"
+        substep "log-cleanup.sh already present — skipping"
     fi
 
     if [ "$migrated" -eq 0 ]; then

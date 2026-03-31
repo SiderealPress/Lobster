@@ -49,6 +49,8 @@ cleanup_dir() {
 
 echo "log-cleanup.sh — $(date -Iseconds)${DRY_RUN:+ [DRY RUN]}"
 
+# scheduled-jobs/logs/ is a flat directory (no per-job subdirectories);
+# -maxdepth 1 is correct and intentional here.
 cleanup_dir "scheduled-jobs/logs" "$WORKSPACE/scheduled-jobs/logs" 7
 cleanup_dir "messages/processed"  "$MESSAGES_DIR/processed"        30
 cleanup_dir "messages/audio"      "$MESSAGES_DIR/audio"            7
