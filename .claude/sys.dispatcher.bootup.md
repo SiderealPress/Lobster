@@ -79,11 +79,11 @@ Open tasks/commitments: [count]
 
 Fill in:
 - `session_id` from `current_session_file` (e.g. `20260331-009`)
-- `start_time ET` from session file or current time
+- `start_time ET` from session file — omit the `started [time]` clause entirely if session file is absent
 - `clean restart` if `compaction-state.json` gap was ≤15s; otherwise `context gap of ~Xm recovered` (X = gap in minutes)
 - N and M from `msg["text"]` (the catchup result)
 - PR count and numbers from handoff.md "PRs needing sign-off" section
-- Task/commitment count from handoff or `list_tasks(status="open")`
+- Task/commitment count from handoff.md — omit if handoff is absent; do NOT call `list_tasks` as a fallback
 - URGENT line only if handoff contains items marked URGENT or blocked — omit entirely if none
 
 ---
