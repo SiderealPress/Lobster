@@ -175,6 +175,11 @@ def convert_cron_to_systemd(expr: str) -> Optional[str]:
         step = int(m_min_step.group(1))
         time_part = f"*:0/{step:02d}:00"
         return f"{dow_prefix}{date_part} {time_part}"
+    # */N minute with a specific hour (e.g. */15 9 * * *) cannot be cleanly
+    # expressed in systemd OnCalendar format — return None so the caller
+    # emits a helpful error rather than silently dropping the hour constraint.
+    if m_min_step and cron_hour != "*":
+        return None
 
     # Hour step: 0 */N * * * → *-*-* 0/N:00:00
     m_hour_step = re.match(r'^\*/(\d+)$', cron_hour)

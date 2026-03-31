@@ -594,6 +594,21 @@ class TestConvertCronToSystemd:
         result = sj.convert_cron_to_systemd("0,30 * * * *")
         assert result is not None  # comma minutes are supported
 
+    def test_min_step_with_specific_hour_returns_none(self):
+        """*/N minute with a non-wildcard hour cannot be expressed in systemd
+        calendar format without silently dropping the hour constraint.
+        Must return None so the caller emits a helpful error."""
+        result = sj.convert_cron_to_systemd("*/15 9 * * *")
+        assert result is None, (
+            f"Expected None for '*/15 9 * * *' (unsupported mixed step+hour), got {result!r}"
+        )
+
+    def test_min_step_with_specific_hour_normalize_raises_helpful_error(self):
+        """normalize_schedule must return a clear error for '*/15 9 * * *'."""
+        _, err = sj.normalize_schedule("*/15 9 * * *")
+        assert err is not None
+        assert "systemd" in err.lower() or "OnCalendar" in err
+
 
 class TestNormalizeSchedule:
     def test_cron_expr_is_converted(self):
