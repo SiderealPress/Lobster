@@ -250,4 +250,4 @@ Call `write_task_output` with:
 If new messages were forwarded to Telegram, call `write_result` with `chat_id=8305714125` and
 `sent_reply_to_user=True` (Telegram notifications were already sent inline).
 
-If no new messages, call `write_result` with `chat_id=8305714125` (dispatcher handles silently — no Telegram message sent).
+If no new messages, call `write_result` with `chat_id=8305714125` and `sent_reply_to_user=True` (no Telegram notification sent — scheduled job ran silently).
