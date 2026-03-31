@@ -32,7 +32,6 @@ done
 unset _env_file
 
 WORKSPACE="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
-JOBS_FILE="$WORKSPACE/scheduled-jobs/jobs.json"
 TASK_FILE="$WORKSPACE/scheduled-jobs/tasks/${JOB_NAME}.md"
 LOG_DIR="$WORKSPACE/scheduled-jobs/logs"
 INBOX_DIR="${LOBSTER_MESSAGES:-$HOME/messages}/inbox"
@@ -45,22 +44,11 @@ mkdir -p "$LOG_DIR" "$INBOX_DIR"
 LOG_FILE="$LOG_DIR/${JOB_NAME}-${TIMESTAMP}.log"
 
 # --- Check enabled flag ---
-# If the job is marked enabled=false in jobs.json, exit silently.
-if [ -f "$JOBS_FILE" ]; then
-    ENABLED=$(python3 -c "
-import json, sys
-try:
-    with open('$JOBS_FILE') as f:
-        data = json.load(f)
-    job = data.get('jobs', {}).get('$JOB_NAME', {})
-    print(str(job.get('enabled', True)).lower())
-except Exception:
-    print('true')
-" 2>/dev/null)
-    if [ "$ENABLED" = "false" ]; then
-        echo "[$START_ISO] Job '$JOB_NAME' is disabled — skipping" >> "$LOG_FILE" 2>&1 || true
-        exit 0
-    fi
+# Query systemd for the enabled state of this job's timer unit.
+# If the unit doesn't exist or is disabled, exit silently.
+if ! systemctl is-enabled --quiet "lobster-${JOB_NAME}.timer" 2>/dev/null; then
+    echo "[$START_ISO] Job '$JOB_NAME' is disabled — skipping" >> "$LOG_FILE" 2>&1 || true
+    exit 0
 fi
 
 echo "[$START_ISO] Posting dispatch for job: $JOB_NAME" | tee "$LOG_FILE"
@@ -95,23 +83,12 @@ task_file  = sys.argv[5]
 with open(task_file) as f:
     task_content = f.read()
 
-jobs_file = os.environ.get("LOBSTER_WORKSPACE", os.path.expanduser("~/lobster-workspace")) + "/scheduled-jobs/jobs.json"
-job_chat_id = 0
-try:
-    import json as _json
-    with open(jobs_file) as _jf:
-        _jobs_data = _json.load(_jf)
-    _job_record = _jobs_data.get("jobs", {}).get(job_name, {})
-    job_chat_id = _job_record.get("chat_id", 0)
-except Exception:
-    pass
-
 msg = {
     "id": msg_id,
     "source": "system",
     "type": "scheduled_reminder",
-    "chat_id": job_chat_id,
-    "user_id": job_chat_id,
+    "chat_id": 0,
+    "user_id": 0,
     "username": "lobster-cron",
     "user_name": "Cron",
     "text": f"[Cron] Dispatch job '{job_name}'",
@@ -131,42 +108,5 @@ print(f"Dispatch posted: {out_path}")
 PYEOF
 
 echo "[$START_ISO] Dispatch posted for job: $JOB_NAME — dispatcher will spawn subagent" | tee -a "$LOG_FILE"
-
-# Update jobs.json last_run to reflect when the job was dispatched.
-# Uses a lock file to serialise concurrent cron fires and always writes via
-# tmp+rename so an interrupted write never leaves jobs.json truncated (#920).
-if [ -f "$JOBS_FILE" ]; then
-    JOBS_LOCK="${JOBS_FILE}.lock"
-    (
-        # Acquire exclusive lock (fd 9) — releases automatically when subshell exits
-        flock -x 9
-        if command -v jq &> /dev/null; then
-            TMP_FILE=$(mktemp)
-            jq --arg name "$JOB_NAME" \
-               --arg last_run "$START_ISO" \
-               'if .jobs[$name] then .jobs[$name].last_run = $last_run else . end' \
-               "$JOBS_FILE" > "$TMP_FILE" && mv "$TMP_FILE" "$JOBS_FILE"
-        else
-            uv run - \
-                "$JOBS_FILE" \
-                "$JOB_NAME" \
-                "$START_ISO" \
-                << 'PYEOF'
-import json, os, sys
-jobs_file = sys.argv[1]
-job_name  = sys.argv[2]
-last_run  = sys.argv[3]
-with open(jobs_file) as f:
-    data = json.load(f)
-if job_name in data.get('jobs', {}):
-    data['jobs'][job_name]['last_run'] = last_run
-    tmp = jobs_file + '.tmp.' + str(os.getpid())
-    with open(tmp, 'w') as f:
-        json.dump(data, f, indent=2)
-    os.replace(tmp, jobs_file)
-PYEOF
-        fi
-    ) 9>"$JOBS_LOCK" 2>/dev/null || true
-fi
 
 exit 0
