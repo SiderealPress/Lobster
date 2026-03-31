@@ -30,15 +30,30 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 # multiplayer-telegram-bot skill — soft import; enables group whitelist management
+# and group management commands.  Three levels up from src/bot/lobster_bot.py
+# lands at the repo root (~/lobster/), then lobster-shop/ is a subdirectory there.
 _SKILL_DIR = str(Path(__file__).resolve().parent.parent.parent /
                  "lobster-shop" / "multiplayer-telegram-bot" / "src")
 if _SKILL_DIR not in _sys.path:
     _sys.path.insert(0, _SKILL_DIR)
 try:
     from multiplayer_telegram_bot.whitelist import load_whitelist, enable_group, add_allowed_user, save_whitelist  # noqa: E402
+    from multiplayer_telegram_bot.gating import gate_message, GatingAction  # noqa: E402
+    from multiplayer_telegram_bot.router import get_source_for_chat  # noqa: E402
+    from multiplayer_telegram_bot.commands import (  # noqa: E402
+        handle_enable_group_bot,
+        handle_whitelist,
+        handle_unwhitelist,
+    )
     _GROUP_GATING_ENABLED = True
+    _GROUP_COMMANDS_ENABLED = True
 except ImportError:
     _GROUP_GATING_ENABLED = False
+    _GROUP_COMMANDS_ENABLED = False
+    import logging as _logging
+    _logging.getLogger(__name__).warning(
+        "multiplayer-telegram-bot skill not available — group gating and management commands disabled"
+    )
 
 # ChannelAdapter Protocol — soft import; lobster_bot satisfies it structurally
 # but keeps its own async OutboxHandler rather than using OutboxFileHandler.
@@ -48,26 +63,6 @@ try:
     from channels.base import ChannelAdapter  # noqa: F401
 except ImportError:
     pass  # channels package not yet installed; type hint only
-
-# multiplayer-telegram-bot skill — group gating library.
-# Adds the skill's src/ directory to sys.path so we can import the pure
-# gating/whitelist/router modules without a full package install.
-_SKILL_DIR = str(Path(__file__).resolve().parent.parent.parent
-                 / "lobster-shop" / "multiplayer-telegram-bot" / "src")
-if _SKILL_DIR not in _sys.path:
-    _sys.path.insert(0, _SKILL_DIR)
-
-try:
-    from multiplayer_telegram_bot.whitelist import load_whitelist
-    from multiplayer_telegram_bot.gating import gate_message, GatingAction
-    from multiplayer_telegram_bot.router import get_source_for_chat
-    _GROUP_GATING_ENABLED = True
-except ImportError:
-    _GROUP_GATING_ENABLED = False
-    import logging as _logging
-    _logging.getLogger(__name__).warning(
-        "multiplayer-telegram-bot skill not available — group gating disabled"
-    )
 
 import re
 from dataclasses import dataclass, field
@@ -745,6 +740,95 @@ async def onboarding_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     chunks = split_message(onboarding_msg)
     for chunk in chunks:
         await update.message.reply_text(md_to_html(chunk), parse_mode="HTML")
+
+
+async def enable_group_bot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /enable_group_bot <chat_id> [name] — enable a group in the whitelist.
+
+    Only works in private DMs from ALLOWED_USERS. Silently drops the command
+    from non-DM chats or non-allowed users.
+    """
+    user = update.effective_user
+    if not user or user.id not in ALLOWED_USERS:
+        return
+    if update.effective_chat.type != "private":
+        await update.message.reply_text("This command only works in a private DM with me.")
+        return
+    if not _GROUP_COMMANDS_ENABLED:
+        await update.message.reply_text("Group management commands are not available (skill not installed).")
+        return
+    result = handle_enable_group_bot(update.message.text)
+    await update.message.reply_text(result.reply)
+
+
+async def whitelist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /whitelist <user_id> <chat_id> — add a user to a group's whitelist.
+
+    Only works in private DMs from ALLOWED_USERS. Silently drops otherwise.
+    """
+    user = update.effective_user
+    if not user or user.id not in ALLOWED_USERS:
+        return
+    if update.effective_chat.type != "private":
+        return
+    if not _GROUP_COMMANDS_ENABLED:
+        await update.message.reply_text("Group management commands are not available (skill not installed).")
+        return
+    result = handle_whitelist(update.message.text)
+    await update.message.reply_text(result.reply)
+
+
+async def unwhitelist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /unwhitelist <user_id> <chat_id> — remove a user from a group's whitelist.
+
+    Only works in private DMs from ALLOWED_USERS. Silently drops otherwise.
+    """
+    user = update.effective_user
+    if not user or user.id not in ALLOWED_USERS:
+        return
+    if update.effective_chat.type != "private":
+        return
+    if not _GROUP_COMMANDS_ENABLED:
+        await update.message.reply_text("Group management commands are not available (skill not installed).")
+        return
+    result = handle_unwhitelist(update.message.text)
+    await update.message.reply_text(result.reply)
+
+
+async def list_groups_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /list_groups — show all configured groups and their whitelisted users.
+
+    Only works in private DMs from ALLOWED_USERS. Silently drops otherwise.
+    """
+    user = update.effective_user
+    if not user or user.id not in ALLOWED_USERS:
+        return
+    if update.effective_chat.type != "private":
+        return
+    if not _GROUP_COMMANDS_ENABLED:
+        await update.message.reply_text("Group management commands are not available (skill not installed).")
+        return
+
+    store = load_whitelist()
+    groups = store.get("groups", {})
+
+    if not groups:
+        await update.message.reply_text("No groups configured.")
+        return
+
+    lines = ["Configured groups:\n"]
+    for group_id, config in groups.items():
+        name = config.get("name", group_id)
+        enabled = config.get("enabled", False)
+        allowed_ids = config.get("allowed_user_ids", [])
+        status = "enabled" if enabled else "disabled"
+        lines.append(f"• {name} ({group_id}) — {status}")
+        if allowed_ids:
+            lines.append(f"  Whitelisted users: {', '.join(str(uid) for uid in allowed_ids)}")
+        else:
+            lines.append("  No whitelisted users")
+
+    await update.message.reply_text("\n".join(lines))
 
 
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1725,6 +1809,12 @@ async def run_bot():
     # Add handlers
     bot_app.add_handler(CommandHandler("start", start_command))
     bot_app.add_handler(CommandHandler("onboarding", onboarding_command))
+    # Group management commands — registered before the generic MessageHandler so
+    # they are dispatched as commands rather than falling through to Claude.
+    bot_app.add_handler(CommandHandler("enable_group_bot", enable_group_bot_command))
+    bot_app.add_handler(CommandHandler("whitelist", whitelist_command))
+    bot_app.add_handler(CommandHandler("unwhitelist", unwhitelist_command))
+    bot_app.add_handler(CommandHandler("list_groups", list_groups_command))
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     bot_app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_message))
     bot_app.add_handler(MessageHandler(filters.PHOTO, handle_message))
