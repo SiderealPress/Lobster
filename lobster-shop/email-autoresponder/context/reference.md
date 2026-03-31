@@ -4,7 +4,7 @@
 
 - **Job name**: `gmail-auto-draft`
 - **Schedule**: Every 5 minutes (`*/5 * * * *`)
-- **Account**: GMAIL_ACCOUNT_REDACTED
+- **Account**: albobsterbot@gmail.com
 - **What it does**: Finds inbox emails without existing drafts, drafts context-aware HTML replies with named read-only Drive links
 
 ### Draft deduplication (critical)
@@ -81,7 +81,7 @@ Always do a fresh search — do not rely solely on hardcoded IDs.
 
 - **Job name**: `lobstertalk-incoming-handler`
 - **Schedule**: Every 5 minutes (`*/5 * * * *`)
-- **Account**: GMAIL_ACCOUNT2_REDACTED
+- **Account**: robotsquadsm@gmail.com
 - **What it does**: Polls bot-talk for context queries from AlbertLobster, looks up Drive + Gmail + CRM, and replies via bot-talk
 
 ### Task file
@@ -187,14 +187,14 @@ Send reply via bot-talk:
 ```
 POST http://46.224.41.108:4242/message
 Authorization: X-Bot-Token <token>
-{"sender": "OwnerLobster", "recipient": "AlbertLobster", "content": "<reply>", "genre": "acknowledgment", "tier": "TIER-BOT"}
+{"sender": "SaharLobster", "recipient": "AlbertLobster", "content": "<reply>", "genre": "acknowledgment", "tier": "TIER-BOT"}
 ```
 
 ### Step 5: Update state
 
 Update `last_processed_ts` to the latest processed message timestamp. Write atomically (write .tmp then rename).
 
-Notify the instance owner via Telegram (chat_id: ADMIN_CHAT_ID_REDACTED) if a query was handled:
+Notify Sahar via Telegram (chat_id: 8305714125) if a query was handled:
 "Bot-talk query handled: AlbertLobster asked about NAME. Replied with context from [sources]."
 
 Do NOT notify for heartbeat/status messages or if no new queries.
