@@ -98,6 +98,34 @@ def _get_project_context(canonical_dir: Path, project: str) -> str:
     return f"No project file for '{project}'. Available: {', '.join(available) or 'none'}"
 
 
+def _list_person_names(canonical_dir: Path) -> list[dict]:
+    """List person markdown files under canonical_dir/people/."""
+    people_dir = canonical_dir / "people"
+    if not people_dir.exists():
+        return []
+    return [
+        {"name": f.stem, "path": str(f)}
+        for f in sorted(people_dir.glob("*.md"))
+    ]
+
+
+def _get_person_context(canonical_dir: Path, person: str) -> str:
+    """Read a person file or return available people as a fallback."""
+    if "/" in person or "\\" in person or ".." in person:
+        return "Error: invalid person name."
+
+    path = canonical_dir / "people" / f"{person}.md"
+    if path.exists():
+        return path.read_text()
+
+    available = (
+        [f.stem for f in (canonical_dir / "people").glob("*.md")]
+        if (canonical_dir / "people").exists()
+        else []
+    )
+    return f"No person file for '{person}'. Available: {', '.join(available) or 'none'}"
+
+
 # ---------------------------------------------------------------------------
 # MCP Server
 # ---------------------------------------------------------------------------
@@ -155,6 +183,28 @@ async def list_tools() -> list[Tool]:
                 "properties": {},
             },
         ),
+        Tool(
+            name="get_person_context",
+            description="Fetch context for a specific person. Returns role, contact info, and interaction history from the canonical people file.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "person": {
+                        "type": "string",
+                        "description": "Person name matching the file stem in people/ (e.g., 'Alice', 'Bob')",
+                    },
+                },
+                "required": ["person"],
+            },
+        ),
+        Tool(
+            name="list_people",
+            description="List all people tracked in Lobster's canonical memory. Returns person names for use with get_person_context().",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
     ]
 
 
@@ -184,6 +234,13 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         "list_projects": lambda args: json.dumps(_list_project_names(CANONICAL_DIR), indent=2)
         if _list_project_names(CANONICAL_DIR)
         else "No project files found in canonical memory.",
+        "get_person_context": lambda args: _get_person_context(
+            CANONICAL_DIR,
+            args.get("person", ""),
+        ),
+        "list_people": lambda args: json.dumps(_list_person_names(CANONICAL_DIR), indent=2)
+        if _list_person_names(CANONICAL_DIR)
+        else "No person files found in canonical memory.",
     }
 
     handler = dispatch.get(name)
