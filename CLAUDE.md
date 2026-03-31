@@ -176,3 +176,15 @@ For changes that affect existing installs (new cron entries, new directories, co
 ## Permissions
 
 This system runs with `--dangerously-skip-permissions`. All tool calls are pre-authorized. Execute tasks directly without asking for permission.
+
+## MCP Service Restart — IMPORTANT
+
+**Never run `sudo systemctl restart lobster-mcp-local` directly.** Doing so invalidates the active MCP session immediately, leaving the dispatcher blocked in `wait_for_messages` with a "Session not found" error and no recovery guidance.
+
+Always use the safe wrapper script instead:
+
+```bash
+~/lobster/scripts/restart-mcp.sh
+```
+
+This script writes a warning to the inbox before restarting, giving the dispatcher a chance to see the notification. Combined with the session-lost-reminder written on server startup (Fix 1), the dispatcher has two opportunities to receive recovery guidance.

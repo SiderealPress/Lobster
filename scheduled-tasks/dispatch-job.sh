@@ -54,9 +54,48 @@ fi
 echo "[$START_ISO] Posting dispatch for job: $JOB_NAME" | tee "$LOG_FILE"
 
 # --- Check task file exists ---
+# If missing, auto-disable the job in jobs.json so cron stops dispatching it,
+# then exit 0 so cron doesn't keep logging errors (#1200).
 if [ ! -f "$TASK_FILE" ]; then
-    echo "[$START_ISO] Error: Task file not found: $TASK_FILE" | tee -a "$LOG_FILE"
-    exit 1
+    echo "[$START_ISO] Error: Task file not found: $TASK_FILE — auto-disabling job '$JOB_NAME'" | tee -a "$LOG_FILE"
+    if [ -f "$JOBS_FILE" ]; then
+        JOBS_LOCK="${JOBS_FILE}.lock"
+        (
+            flock -x 9
+            if command -v jq &> /dev/null; then
+                TMP_FILE=$(mktemp)
+                jq --arg name "$JOB_NAME" \
+                   '.jobs[$name].enabled = false' \
+                   "$JOBS_FILE" > "$TMP_FILE" && mv "$TMP_FILE" "$JOBS_FILE"
+            else
+                uv run - \
+                    "$JOBS_FILE" \
+                    "$JOB_NAME" \
+                    << 'PYEOF'
+import json, os, sys
+jobs_file = sys.argv[1]
+job_name  = sys.argv[2]
+with open(jobs_file) as f:
+    data = json.load(f)
+if job_name in data.get('jobs', {}):
+    data['jobs'][job_name]['enabled'] = False
+    tmp = jobs_file + '.tmp.' + str(os.getpid())
+    with open(tmp, 'w') as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp, jobs_file)
+PYEOF
+            fi
+        ) 9>"$JOBS_LOCK" 2>/dev/null || true
+        echo "[$START_ISO] Job '$JOB_NAME' auto-disabled in jobs.json (task file missing)" | tee -a "$LOG_FILE"
+    fi
+    exit 0
+fi
+
+# --- Dedup guard: skip if a pending dispatch already exists in inbox (#1201) ---
+# This prevents inbox flooding when a job's subagent takes longer than the schedule interval.
+if ls "${INBOX_DIR}"/*_scheduled_"${JOB_NAME}".json 2>/dev/null | head -1 | grep -q .; then
+    echo "[$START_ISO] Job '$JOB_NAME' already has a pending dispatch in inbox — skipping" | tee -a "$LOG_FILE"
+    exit 0
 fi
 
 # --- Write scheduled_reminder to inbox ---
