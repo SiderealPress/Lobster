@@ -534,6 +534,68 @@ def _was_task_replied(task_id: str, chat_id: Any) -> bool:
 _HUMAN_SOURCES = {"telegram", "sms", "signal", "slack", "whatsapp", "bisque"}
 
 # ---------------------------------------------------------------------------
+# Per-session user message counter (issue #1159 — session-note-appender trigger)
+#
+# Counts how many real user messages (type in USER_FACING_TYPES, source in
+# _HUMAN_SOURCES) have been processed via mark_processing in this server
+# process lifetime. Every 20 messages a `session_note_reminder` system
+# message is injected into the inbox so the dispatcher can spawn
+# session-note-appender without relying on working-context counting.
+#
+# Reset to 0 on process start — keyed to the process lifetime, which maps
+# to a single dispatcher session (dispatcher restarts coincide with process
+# restarts via systemd / hibernation).
+# ---------------------------------------------------------------------------
+_user_message_counter: int = 0
+SESSION_NOTE_REMINDER_INTERVAL: int = 20
+
+
+def _tick_user_message_counter(msg_type: str, msg_source: str) -> None:
+    """Increment _user_message_counter for real user messages and inject a
+    session_note_reminder into the inbox every SESSION_NOTE_REMINDER_INTERVAL
+    messages.
+
+    Only counts messages where msg_type is in USER_FACING_TYPES and msg_source
+    is in _HUMAN_SOURCES.  System messages, subagent results, cron reminders,
+    and other non-human traffic are excluded.
+
+    Called from both handle_mark_processing and handle_claim_and_ack so that
+    the counter ticks regardless of which claim path the dispatcher uses.
+    """
+    if msg_type not in USER_FACING_TYPES or msg_source not in _HUMAN_SOURCES:
+        return
+
+    global _user_message_counter
+    _user_message_counter += 1
+    if _user_message_counter % SESSION_NOTE_REMINDER_INTERVAL == 0:
+        try:
+            now_utc = datetime.now(timezone.utc)
+            ts_ms = int(now_utc.timestamp() * 1000)
+            reminder_id = f"{ts_ms}_session_note_reminder"
+            reminder = {
+                "id": reminder_id,
+                "type": "session_note_reminder",
+                "source": "system",
+                "chat_id": 0,
+                "text": (
+                    f"session_note_reminder: {_user_message_counter} user messages "
+                    f"processed this session. Spawn session-note-appender in the background "
+                    f"to append a timestamped activity snapshot to the current session file."
+                ),
+                "user_message_count": _user_message_counter,
+                "timestamp": now_utc.isoformat(),
+            }
+            inbox_file = INBOX_DIR / f"{reminder_id}.json"
+            atomic_write_json(inbox_file, reminder)
+            log.info(
+                f"session_note_reminder injected after {_user_message_counter} user messages"
+            )
+        except Exception as _snr_exc:
+            log.warning(f"session_note_reminder injection failed: {_snr_exc}")
+            # Non-fatal: the session note will be written at compaction regardless.
+
+
+# ---------------------------------------------------------------------------
 # Formal message type taxonomy (issue #156)
 # Definitions live in message_types.py (dependency-free, independently testable).
 # Re-exported here so callers import from a single place.
@@ -4349,6 +4411,10 @@ async def handle_mark_processing(args: dict) -> list[TextContent]:
             # this is the common case and emitting on every no-match is pure noise.
             pass
 
+    # User message counter — session-note-appender trigger (issue #1159)
+    # Shared helper handles filtering, incrementing, and reminder injection.
+    _tick_user_message_counter(msg_type, msg_source)
+
     # Stamp _processing_started_at so stale detection uses actual claim time, not file mtime.
     try:
         msg_data["_processing_started_at"] = datetime.now(timezone.utc).isoformat()
@@ -4407,6 +4473,10 @@ async def handle_claim_and_ack(args: dict) -> list[TextContent]:
             source=msg_data.get("source"),
             ts=msg_data.get("timestamp"),
         )
+
+    # User message counter — session-note-appender trigger (issue #1159)
+    # Shared helper handles filtering, incrementing, and reminder injection.
+    _tick_user_message_counter(msg_type, msg_data.get("source", ""))
 
     log.info(f"claim_and_ack: message claimed: {message_id}")
 
