@@ -29,6 +29,17 @@ from utils.fs import atomic_write_json  # noqa: E402
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
+# multiplayer-telegram-bot skill — soft import; enables group whitelist management
+_SKILL_DIR = str(Path(__file__).resolve().parent.parent.parent /
+                 "lobster-shop" / "multiplayer-telegram-bot" / "src")
+if _SKILL_DIR not in _sys.path:
+    _sys.path.insert(0, _SKILL_DIR)
+try:
+    from multiplayer_telegram_bot.whitelist import load_whitelist, enable_group, add_allowed_user, save_whitelist  # noqa: E402
+    _GROUP_GATING_ENABLED = True
+except ImportError:
+    _GROUP_GATING_ENABLED = False
+
 # ChannelAdapter Protocol — soft import; lobster_bot satisfies it structurally
 # but keeps its own async OutboxHandler rather than using OutboxFileHandler.
 try:
@@ -43,7 +54,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyParameters
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, MessageReactionHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ChatMemberHandler, MessageReactionHandler, filters, ContextTypes
 from collections import deque
 
 
@@ -2059,7 +2070,7 @@ async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TY
 
     When added by a whitelisted user: auto-enables the group in group-whitelist.json
     and seeds all ALLOWED_USERS as allowed members.
-    When added by a non-whitelisted user: leaves the group immediately.
+    When added by a non-whitelisted user: silently ignores (no whitelist entry written).
     When removed from a group: logs the removal only.
     """
     if not update.my_chat_member:
@@ -2090,9 +2101,8 @@ async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TY
         else:
             adder_id = adder.id if adder else "unknown"
             log.info(
-                f"Bot added to group {chat.id} by non-whitelisted user {adder_id} — leaving"
+                f"Bot added to group {chat.id} by non-whitelisted user {adder_id} — ignoring"
             )
-            await context.bot.leave_chat(chat.id)
     elif new_status in ("left", "kicked"):
         log.info(f"Bot removed from group {chat.id} ({chat.title})")
 
@@ -2145,6 +2155,7 @@ async def run_bot():
     bot_app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE & filters.TEXT, handle_edited_message))
     # Requires python-telegram-bot >= v20.6 for Update.ALL_TYPES to include message_reaction
     bot_app.add_handler(MessageReactionHandler(handle_reaction))
+    bot_app.add_handler(ChatMemberHandler(handle_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
     bot_app.add_error_handler(error_handler)
 
     # Initialize and start
