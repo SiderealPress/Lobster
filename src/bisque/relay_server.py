@@ -165,7 +165,7 @@ log.setLevel(logging.INFO)
 _file_handler = logging.handlers.RotatingFileHandler(
     LOG_DIR / "bisque-relay.log",
     maxBytes=5 * 1024 * 1024,
-    backupCount=3,
+    backupCount=5,
 )
 # P3.12: Use JSON formatter for the file handler so log lines are machine-parseable
 _file_handler.setFormatter(_JsonFormatter())
