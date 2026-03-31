@@ -280,6 +280,57 @@ class TestStaticMemory:
     def test_close_is_noop(self, static_mem):
         static_mem.close()  # Should not raise
 
+    def test_rotate_if_needed_fires_at_threshold(self, temp_dir):
+        """File at or above 1 GB triggers rename to <name>.1."""
+        from src.mcp.memory.static_memory import StaticMemory, _ROTATION_THRESHOLD
+        event_log = temp_dir / "memory-events.jsonl"
+        canonical_dir = temp_dir / "canonical"
+        mem = StaticMemory(canonical_dir=canonical_dir, event_log=event_log)
+
+        # Write a file that is exactly at the threshold
+        event_log.write_bytes(b"x" * _ROTATION_THRESHOLD)
+        mem._rotate_if_needed()
+
+        rotated = event_log.with_suffix(event_log.suffix + ".1")
+        assert rotated.exists(), "Rotated file .1 should exist after rotation"
+        assert not event_log.exists(), "Original file should be gone after rotation"
+
+    def test_rotate_if_needed_skips_below_threshold(self, temp_dir):
+        """File below 1 GB leaves the log file untouched."""
+        from src.mcp.memory.static_memory import StaticMemory, _ROTATION_THRESHOLD
+        event_log = temp_dir / "memory-events.jsonl"
+        canonical_dir = temp_dir / "canonical"
+        mem = StaticMemory(canonical_dir=canonical_dir, event_log=event_log)
+
+        event_log.write_bytes(b"x" * (_ROTATION_THRESHOLD - 1))
+        mem._rotate_if_needed()
+
+        assert event_log.exists(), "Original file should still exist below threshold"
+        rotated = event_log.with_suffix(event_log.suffix + ".1")
+        assert not rotated.exists(), "No .1 file should be created below threshold"
+
+    def test_rotate_if_needed_clobbers_existing_rotation(self, temp_dir):
+        """A second rotation overwrites any existing .1 file."""
+        from src.mcp.memory.static_memory import StaticMemory, _ROTATION_THRESHOLD
+        event_log = temp_dir / "memory-events.jsonl"
+        canonical_dir = temp_dir / "canonical"
+        rotated = event_log.with_suffix(event_log.suffix + ".1")
+
+        mem = StaticMemory(canonical_dir=canonical_dir, event_log=event_log)
+
+        # Simulate a stale .1 file from a previous rotation
+        rotated.write_text("old rotation content")
+
+        # Write a new log that exceeds the threshold
+        event_log.write_bytes(b"y" * _ROTATION_THRESHOLD)
+        mem._rotate_if_needed()
+
+        assert rotated.exists(), "Rotated .1 file should exist"
+        # The stale content should have been overwritten
+        assert rotated.read_bytes() == b"y" * _ROTATION_THRESHOLD, (
+            "Existing .1 file should be clobbered by the new rotation"
+        )
+
 
 # ============================================================================
 # VectorMemory Tests
