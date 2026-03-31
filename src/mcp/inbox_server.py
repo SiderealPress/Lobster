@@ -54,6 +54,17 @@ if _SRC_DIR not in sys.path:
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
+# IFTTT behavioral rules store
+from utils.ifttt_rules import (
+    load_rules as _ifttt_load_rules,
+    save_rules as _ifttt_save_rules,
+    add_rule as _ifttt_add_rule,
+    remove_rule as _ifttt_remove_rule,
+    find_rule as _ifttt_find_rule,
+    get_enabled_rules as _ifttt_get_enabled_rules,
+)
+import uuid as _uuid_mod
+
 # Reliability utilities (atomic writes, validation, audit logging, circuit breaker)
 from reliability import (
     atomic_write_json,
@@ -1616,6 +1627,100 @@ async def list_tools() -> list[Tool]:
                 "required": ["task_id"],
             },
         ),
+        # IFTTT Behavioral Rules Tools
+        Tool(
+            name="list_rules",
+            description="List all IFTTT-style behavioral rules from the rules store. Returns id, condition, action_ref, and enabled for each rule. Pass resolve=true to also include the memory DB content for each action_ref.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "enabled_only": {
+                        "type": "boolean",
+                        "description": "If true, return only enabled rules. Default false (returns all rules).",
+                        "default": False,
+                    },
+                    "resolve": {
+                        "type": "boolean",
+                        "description": "If true, fetch and include the memory DB content for each action_ref. Default false.",
+                        "default": False,
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="add_rule",
+            description="Add a new IFTTT-style behavioral rule. The condition is the IF clause in plain English. The action_content is the THEN clause (plain-English behavioral instruction) — it is stored to the memory DB automatically and the resulting DB entry ID is used as action_ref in the YAML index. Returns the new rule's ID.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "condition": {
+                        "type": "string",
+                        "description": "Natural-language IF clause (one sentence, e.g. 'The user asks about a meeting or scheduling').",
+                    },
+                    "action_content": {
+                        "type": "string",
+                        "description": "Plain-English THEN clause (behavioral instruction). Stored to memory DB; the assigned DB entry ID becomes the action_ref.",
+                    },
+                },
+                "required": ["condition", "action_content"],
+            },
+        ),
+        Tool(
+            name="delete_rule",
+            description="Delete an IFTTT behavioral rule by ID. Returns true if deleted, false if not found. Pass delete_memory=true to also delete the memory DB entry for action_ref.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "rule_id": {
+                        "type": "string",
+                        "description": "The ID of the rule to delete.",
+                    },
+                    "delete_memory": {
+                        "type": "boolean",
+                        "description": "If true, also delete the memory DB entry referenced by action_ref. Default false.",
+                        "default": False,
+                    },
+                },
+                "required": ["rule_id"],
+            },
+        ),
+        Tool(
+            name="get_rule",
+            description="Get a single IFTTT behavioral rule by ID. Returns null if not found. Pass resolve=true to also include the memory DB content for action_ref.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "rule_id": {
+                        "type": "string",
+                        "description": "The ID of the rule to retrieve.",
+                    },
+                    "resolve": {
+                        "type": "boolean",
+                        "description": "If true, fetch and include the memory DB content for action_ref. Default false.",
+                        "default": False,
+                    },
+                },
+                "required": ["rule_id"],
+            },
+        ),
+        Tool(
+            name="update_rule",
+            description="Soft-disable or re-enable an IFTTT behavioral rule by ID. Returns the updated rule, or null if not found.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "rule_id": {
+                        "type": "string",
+                        "description": "The ID of the rule to update.",
+                    },
+                    "enabled": {
+                        "type": "boolean",
+                        "description": "Set to false to soft-disable the rule (kept in store, never applied). Set to true to re-enable.",
+                    },
+                },
+                "required": ["rule_id", "enabled"],
+            },
+        ),
         Tool(
             name="transcribe_audio",
             description="Transcribe a voice message to text using local whisper.cpp (small model). Use this for messages with type='voice'. Runs entirely locally using whisper.cpp - no cloud API or API key needed.",
@@ -3005,6 +3110,17 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
         return await handle_get_task(arguments)
     elif name == "delete_task":
         return await handle_delete_task(arguments)
+    # IFTTT Behavioral Rules Tools
+    elif name == "list_rules":
+        return await handle_list_rules(arguments)
+    elif name == "add_rule":
+        return await handle_add_rule(arguments)
+    elif name == "delete_rule":
+        return await handle_delete_rule(arguments)
+    elif name == "get_rule":
+        return await handle_get_rule(arguments)
+    elif name == "update_rule":
+        return await handle_update_rule(arguments)
     elif name == "transcribe_audio":
         return await handle_transcribe_audio(arguments)
     # Headless Browser Fetch
@@ -5054,6 +5170,205 @@ async def handle_delete_task(args: dict) -> list[TextContent]:
 
     save_tasks(data)
     return [TextContent(type="text", text=f"🗑️ Task #{task_id} deleted.")]
+
+
+# =============================================================================
+# IFTTT Behavioral Rules Handlers
+# =============================================================================
+
+
+def _resolve_action_ref(action_ref: str) -> str:
+    """Fetch memory DB content for an action_ref ID.
+
+    Returns the content string, or a descriptive fallback when the memory
+    system is unavailable or the entry is not found.
+    """
+    if _memory_provider is None:
+        return "(memory system unavailable)"
+    if not action_ref:
+        return "(no action_ref)"
+    if not hasattr(_memory_provider, "get"):
+        return "(memory backend does not support get-by-ID)"
+    try:
+        event = _memory_provider.get(int(action_ref))
+        if event is None:
+            return f"(memory entry {action_ref} not found)"
+        return event.content
+    except (ValueError, TypeError):
+        return f"(action_ref '{action_ref}' is not a valid integer ID)"
+    except Exception as e:
+        log.warning(f"_resolve_action_ref: failed for action_ref={action_ref}: {e}")
+        return f"(error resolving action_ref: {e})"
+
+
+def _generate_rule_id(condition: str) -> str:
+    """Derive a stable slug from the condition text, falling back to a UUID suffix."""
+    import re
+    slug = condition.lower()
+    slug = re.sub(r"[^a-z0-9\s-]", "", slug)
+    slug = re.sub(r"\s+", "-", slug.strip())
+    slug = slug[:48].rstrip("-")
+    if not slug:
+        slug = "rule"
+    # Append short UUID fragment to avoid collisions
+    slug = f"{slug}-{_uuid_mod.uuid4().hex[:6]}"
+    return slug
+
+
+async def handle_list_rules(args: dict) -> list[TextContent]:
+    """List IFTTT behavioral rules."""
+    enabled_only = bool(args.get("enabled_only", False))
+    resolve = bool(args.get("resolve", False))
+    rules = _ifttt_load_rules()
+    if enabled_only:
+        rules = _ifttt_get_enabled_rules(rules)
+
+    if not rules:
+        label = "enabled " if enabled_only else ""
+        return [TextContent(type="text", text=f"No {label}rules found.")]
+
+    lines = []
+    for r in rules:
+        enabled_flag = "" if r.get("enabled", True) else " [disabled]"
+        entry = (
+            f"[{r['id']}]{enabled_flag}\n"
+            f"  condition:  {r['condition']}\n"
+            f"  action_ref: {r['action_ref']}"
+        )
+        if resolve:
+            content = _resolve_action_ref(r["action_ref"])
+            entry += f"\n  action:     {content}"
+        lines.append(entry)
+    summary = f"Rules: {len(rules)} total" + (f" ({sum(1 for r in rules if r.get('enabled', True))} enabled)" if not enabled_only else "")
+    output = "\n\n".join(lines) + f"\n\n---\n{summary}"
+    return [TextContent(type="text", text=output)]
+
+
+async def handle_add_rule(args: dict) -> list[TextContent]:
+    """Add a new IFTTT behavioral rule.
+
+    Stores action_content to the memory DB and uses the resulting entry ID
+    as action_ref in the YAML index.
+    """
+    condition = (args.get("condition") or "").strip()
+    action_content = (args.get("action_content") or "").strip()
+
+    if not condition:
+        return [TextContent(type="text", text="Error: condition is required.")]
+    if not action_content:
+        return [TextContent(type="text", text="Error: action_content is required.")]
+
+    if _memory_provider is None:
+        return [TextContent(type="text", text="Error: memory system is not available — cannot store action content.")]
+
+    event = MemoryEvent(
+        id=None,
+        timestamp=datetime.now(timezone.utc),
+        type="ifttt_action",
+        source="internal",
+        project=None,
+        content=action_content,
+        metadata={"tags": ["ifttt_rule"], "condition": condition},
+    )
+    try:
+        action_ref = str(_memory_provider.store(event))
+    except Exception as e:
+        log.error(f"handle_add_rule: memory store failed: {e}", exc_info=True)
+        return [TextContent(type="text", text=f"Error storing action to memory DB: {e}")]
+
+    rule_id = _generate_rule_id(condition)
+    rules = _ifttt_load_rules()
+    updated = _ifttt_add_rule(rules, rule_id=rule_id, condition=condition, action_ref=action_ref)
+    _ifttt_save_rules(updated)
+
+    return [TextContent(type="text", text=f"Rule added: {rule_id} (action_ref: {action_ref})")]
+
+
+async def handle_delete_rule(args: dict) -> list[TextContent]:
+    """Delete an IFTTT behavioral rule by ID.
+
+    Pass delete_memory=True to also delete the memory DB entry for action_ref.
+    """
+    rule_id = (args.get("rule_id") or "").strip()
+    if not rule_id:
+        return [TextContent(type="text", text="Error: rule_id is required.")]
+
+    rules = _ifttt_load_rules()
+    rule = _ifttt_find_rule(rules, rule_id)
+    if rule is None:
+        return [TextContent(type="text", text="false")]
+
+    delete_memory = bool(args.get("delete_memory", False))
+    memory_note = ""
+    if delete_memory:
+        action_ref = rule.get("action_ref", "")
+        if action_ref and _memory_provider is not None and hasattr(_memory_provider, "delete"):
+            try:
+                deleted = _memory_provider.delete(int(action_ref))
+                memory_note = f" (memory entry {action_ref} {'deleted' if deleted else 'not found'})"
+            except (ValueError, TypeError):
+                memory_note = f" (could not delete memory entry: action_ref '{action_ref}' is not a valid integer ID)"
+            except Exception as e:
+                log.warning(f"handle_delete_rule: memory delete failed for action_ref={action_ref}: {e}")
+                memory_note = f" (memory delete failed: {e})"
+        elif delete_memory and _memory_provider is None:
+            memory_note = " (memory system unavailable — rule deleted, memory entry not removed)"
+
+    updated = _ifttt_remove_rule(rules, rule_id)
+    _ifttt_save_rules(updated)
+    return [TextContent(type="text", text=f"true{memory_note}")]
+
+
+async def handle_get_rule(args: dict) -> list[TextContent]:
+    """Get a single IFTTT behavioral rule by ID."""
+    rule_id = (args.get("rule_id") or "").strip()
+    if not rule_id:
+        return [TextContent(type="text", text="Error: rule_id is required.")]
+
+    resolve = bool(args.get("resolve", False))
+    rules = _ifttt_load_rules()
+    rule = _ifttt_find_rule(rules, rule_id)
+    if rule is None:
+        return [TextContent(type="text", text="null")]
+
+    output = (
+        f"id:         {rule['id']}\n"
+        f"condition:  {rule['condition']}\n"
+        f"action_ref: {rule['action_ref']}\n"
+        f"enabled:    {rule.get('enabled', True)}"
+    )
+    if resolve:
+        content = _resolve_action_ref(rule["action_ref"])
+        output += f"\naction:     {content}"
+    return [TextContent(type="text", text=output)]
+
+
+async def handle_update_rule(args: dict) -> list[TextContent]:
+    """Soft-disable or re-enable an IFTTT behavioral rule by ID."""
+    rule_id = (args.get("rule_id") or "").strip()
+    if not rule_id:
+        return [TextContent(type="text", text="Error: rule_id is required.")]
+
+    enabled = args.get("enabled")
+    if enabled is None:
+        return [TextContent(type="text", text="Error: enabled is required.")]
+
+    rules = _ifttt_load_rules()
+    rule = _ifttt_find_rule(rules, rule_id)
+    if rule is None:
+        return [TextContent(type="text", text="null")]
+
+    updated_rules = [{**r, "enabled": bool(enabled)} if r["id"] == rule_id else r for r in rules]
+    _ifttt_save_rules(updated_rules)
+
+    updated_rule = _ifttt_find_rule(updated_rules, rule_id)
+    output = (
+        f"id:         {updated_rule['id']}\n"
+        f"condition:  {updated_rule['condition']}\n"
+        f"action_ref: {updated_rule['action_ref']}\n"
+        f"enabled:    {updated_rule.get('enabled', True)}"
+    )
+    return [TextContent(type="text", text=output)]
 
 
 # =============================================================================
