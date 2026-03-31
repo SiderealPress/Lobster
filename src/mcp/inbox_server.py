@@ -2717,6 +2717,28 @@ async def list_tools() -> list[Tool]:
                 "properties": {},
             },
         ),
+        Tool(
+            name="get_person_context",
+            description="Fetch context for a specific person. Returns role, contact info, and interaction history from the canonical people file.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "person": {
+                        "type": "string",
+                        "description": "Person name matching the file stem in people/ (e.g., 'Alice', 'Bob')",
+                    },
+                },
+                "required": ["person"],
+            },
+        ),
+        Tool(
+            name="list_people",
+            description="List all people tracked in Lobster's canonical memory. Returns person names for use with get_person_context().",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
         # Local Sync Awareness Tools
         Tool(
             name="check_local_sync",
@@ -3276,6 +3298,10 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
         return await handle_get_daily_digest(arguments)
     elif name == "list_projects":
         return await handle_list_projects(arguments)
+    elif name == "get_person_context":
+        return await handle_get_person_context(arguments)
+    elif name == "list_people":
+        return await handle_list_people(arguments)
     # Local Sync Awareness Tools
     elif name == "check_local_sync":
         return await handle_check_local_sync(arguments)
@@ -7549,6 +7575,17 @@ def _list_project_names() -> list[dict]:
     ]
 
 
+def _list_person_names() -> list[dict]:
+    """Pure helper: list person markdown files under CANONICAL_DIR/people/."""
+    people_dir = CANONICAL_DIR / "people"
+    if not people_dir.exists():
+        return []
+    return [
+        {"name": f.stem, "path": str(f)}
+        for f in sorted(people_dir.glob("*.md"))
+    ]
+
+
 async def handle_get_priorities(arguments: dict[str, Any]) -> list[TextContent]:
     """Return the canonical priorities.md content."""
     try:
@@ -7609,6 +7646,42 @@ async def handle_list_projects(arguments: dict[str, Any]) -> list[TextContent]:
     except Exception as e:
         log.error(f"list_projects failed: {e}", exc_info=True)
         return [TextContent(type="text", text=f"Error listing projects: {e}")]
+
+
+async def handle_get_person_context(arguments: dict[str, Any]) -> list[TextContent]:
+    """Return a specific person's canonical markdown content."""
+    person = arguments.get("person", "")
+    if not person:
+        return [TextContent(type="text", text="Error: person name is required.")]
+
+    # Sanitize: reject path traversal attempts
+    if "/" in person or "\\" in person or ".." in person:
+        return [TextContent(type="text", text="Error: invalid person name.")]
+
+    try:
+        path = CANONICAL_DIR / "people" / f"{person}.md"
+        if path.exists():
+            return [TextContent(type="text", text=path.read_text())]
+        available = [f.stem for f in (CANONICAL_DIR / "people").glob("*.md")] if (CANONICAL_DIR / "people").exists() else []
+        return [TextContent(
+            type="text",
+            text=f"No person file for '{person}'. Available: {', '.join(available) or 'none'}",
+        )]
+    except Exception as e:
+        log.error(f"get_person_context failed: {e}", exc_info=True)
+        return [TextContent(type="text", text=f"Error reading person context: {e}")]
+
+
+async def handle_list_people(arguments: dict[str, Any]) -> list[TextContent]:
+    """List all person files in canonical memory."""
+    try:
+        people = _list_person_names()
+        if not people:
+            return [TextContent(type="text", text="No person files found in canonical memory.")]
+        return [TextContent(type="text", text=json.dumps(people, indent=2))]
+    except Exception as e:
+        log.error(f"list_people failed: {e}", exc_info=True)
+        return [TextContent(type="text", text=f"Error listing people: {e}")]
 
 
 # =============================================================================
