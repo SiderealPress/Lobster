@@ -16,7 +16,7 @@ _MCP_SRC = str(Path(__file__).resolve().parents[3] / "src" / "mcp")
 if _MCP_SRC not in sys.path:
     sys.path.insert(0, _MCP_SRC)
 
-from log_utils import JsonFormatter, configure_file_handler
+from log_utils import GzipRotatingFileHandler, JsonFormatter, configure_file_handler
 
 
 # ---------------------------------------------------------------------------
@@ -146,8 +146,8 @@ class TestConfigureFileHandler:
         logger = logging.getLogger(f"test.cfg.{tmp_path.name}")
         logger.handlers.clear()
         handler = configure_file_handler(logger, component="srv", log_dir=tmp_path)
-        assert isinstance(handler, RotatingFileHandler)
-        assert any(isinstance(h, RotatingFileHandler) for h in logger.handlers)
+        assert isinstance(handler, GzipRotatingFileHandler)
+        assert any(isinstance(h, GzipRotatingFileHandler) for h in logger.handlers)
 
     def test_log_file_created(self, tmp_path):
         logger = logging.getLogger(f"test.file.{tmp_path.name}")
@@ -175,7 +175,7 @@ class TestConfigureFileHandler:
         logger.handlers.clear()
         configure_file_handler(logger, component="srv", log_dir=tmp_path)
         configure_file_handler(logger, component="srv", log_dir=tmp_path)
-        rotating_handlers = [h for h in logger.handlers if isinstance(h, RotatingFileHandler)]
+        rotating_handlers = [h for h in logger.handlers if isinstance(h, GzipRotatingFileHandler)]
         assert len(rotating_handlers) == 1
 
     def test_custom_filename(self, tmp_path):
