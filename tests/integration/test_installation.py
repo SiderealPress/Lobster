@@ -58,15 +58,6 @@ class TestFileInitialization:
         assert content["tasks"] == []
         assert content["next_id"] == 1
 
-    def test_jobs_json_initialized(self, temp_scheduled_tasks_dir: Path):
-        """Test that jobs.json is properly initialized."""
-        jobs_file = temp_scheduled_tasks_dir / "jobs.json"
-
-        content = json.loads(jobs_file.read_text())
-
-        assert "jobs" in content
-        assert content["jobs"] == {}
-
 
 @pytest.mark.integration
 class TestPythonEnvironment:

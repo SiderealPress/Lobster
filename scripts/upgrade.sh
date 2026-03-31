@@ -1466,14 +1466,13 @@ with open(path, 'w') as f:
     # Provides an off-process durable copy of high-signal logs and a foundation
     # for future remote forwarding (see issue #730).
     local LOG_EXPORT_MARKER="# LOBSTER-LOG-EXPORT"
-    if ! crontab -l 2>/dev/null | grep -q "$LOG_EXPORT_MARKER"; then
-        local log_export_script="$LOBSTER_DIR/scheduled-tasks/export-logs.py"
-        chmod +x "$log_export_script" 2>/dev/null || true
-        "$LOBSTER_DIR/scripts/cron-manage.sh" add "$LOG_EXPORT_MARKER" \
-            "0 3 * * * cd $LOBSTER_DIR && uv run scheduled-tasks/export-logs.py $LOG_EXPORT_MARKER"
-        substep "Added daily log-export cron entry (03:00 UTC, archives observations.log + audit.jsonl)"
-        migrated=$((migrated + 1))
-    fi
+    local log_export_script="$LOBSTER_DIR/scheduled-tasks/export-logs.py"
+    chmod +x "$log_export_script" 2>/dev/null || true
+    # Remove any existing entry (stale path or schedule) then re-add with correct values
+    crontab -l 2>/dev/null | grep -v "$LOG_EXPORT_MARKER" | crontab - 2>/dev/null || true
+    (crontab -l 2>/dev/null; echo "0 3 * * * cd $LOBSTER_DIR && $HOME/.local/bin/uv run scheduled-tasks/export-logs.py $LOG_EXPORT_MARKER") | crontab -
+    substep "Set daily log-export cron entry (03:00 UTC, archives observations.log + audit.jsonl)"
+    migrated=$((migrated + 1))
 
     # Migration 29: Restore gws OAuth client secret from lobster-config — superseded by Migration 34 (removed)
 
@@ -1635,9 +1634,9 @@ EOF
             | length
         ' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
         if [ "${has_block_claude_p:-0}" = "0" ] || [ "${has_block_claude_p:-0}" = "" ]; then
-            chmod +x "$INSTALL_DIR/hooks/block-claude-p.py" 2>/dev/null || true
+            chmod +x "$LOBSTER_DIR/hooks/block-claude-p.py" 2>/dev/null || true
             TMP_SETTINGS=$(mktemp)
-            jq --arg cmd "python3 $INSTALL_DIR/hooks/block-claude-p.py" \
+            jq --arg cmd "python3 $LOBSTER_DIR/hooks/block-claude-p.py" \
                '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
                 "matcher": "Bash",
                 "hooks": [{
@@ -1811,15 +1810,15 @@ EOF
     # so no LLM subagent is spawned on empty polls. The runner field in jobs.json
     # drives this via sync-crontab.sh; this migration re-syncs the crontab so the
     # change takes effect on existing installs without a manual sync.
-    local BOT_TALK_CHECK_SCRIPT="$INSTALL_DIR/scheduled-tasks/bot-talk-check-dispatch.sh"
+    local BOT_TALK_CHECK_SCRIPT="$LOBSTER_DIR/scheduled-tasks/bot-talk-check-dispatch.sh"
     if [ -f "$BOT_TALK_CHECK_SCRIPT" ]; then
         if ! crontab -l 2>/dev/null | grep -q "bot-talk-check-dispatch.sh"; then
             chmod +x "$BOT_TALK_CHECK_SCRIPT" 2>/dev/null || true
             # Re-run sync-crontab.sh to rebuild the crontab from jobs.json, picking up
             # the new runner field for bot-talk-poller.
-            if [ -f "$INSTALL_DIR/scheduled-tasks/sync-crontab.sh" ]; then
-                chmod +x "$INSTALL_DIR/scheduled-tasks/sync-crontab.sh" 2>/dev/null || true
-                "$INSTALL_DIR/scheduled-tasks/sync-crontab.sh" 2>/dev/null || true
+            if [ -f "$LOBSTER_DIR/scheduled-tasks/sync-crontab.sh" ]; then
+                chmod +x "$LOBSTER_DIR/scheduled-tasks/sync-crontab.sh" 2>/dev/null || true
+                "$LOBSTER_DIR/scheduled-tasks/sync-crontab.sh" 2>/dev/null || true
                 substep "Crontab re-synced: bot-talk-poller now uses bot-talk-check-dispatch.sh"
                 migrated=$((migrated + 1))
             fi
@@ -1845,6 +1844,424 @@ EOF
             warn "Cannot add $USER to crontab group (sudo unavailable). Run manually: sudo usermod -aG crontab $USER"
             warn "Until this is done, create_scheduled_job/update_scheduled_job/delete_scheduled_job will fail to sync crontab."
         fi
+    fi
+
+
+    # Migration 47: Seed ifttt-rules.yaml in lobster-user-config/memory/canonical/
+    # Introduces the IFTTT-style behavioral rules store (issue #853). The file is
+    # machine-readable YAML, bounded to 100 rules, and managed autonomously by Lobster.
+    # Existing installs that predate this change need the file seeded so the dispatcher
+    # can load rules at startup without errors. The file starts empty (rules: []) so
+    # no behavioral change occurs on upgrade — rules accumulate over time.
+    local ifttt_src="$LOBSTER_DIR/memory/canonical-templates/ifttt-rules.yaml"
+    local ifttt_dst="$USER_CONFIG_DIR/memory/canonical/ifttt-rules.yaml"
+    if [ -f "$ifttt_src" ] && [ ! -f "$ifttt_dst" ]; then
+        cp "$ifttt_src" "$ifttt_dst"
+        substep "Seeded ifttt-rules.yaml into $USER_CONFIG_DIR/memory/canonical/"
+        migrated=$((migrated + 1))
+    fi
+
+    # Migration 48: Add idempotency column to agent_sessions.
+    # The idempotency column enables safe orphan recovery after restarts (#866).
+    # Sessions classified as 'safe' can be re-run automatically; 'unsafe'/'unknown'
+    # sessions surface a user notification instead. The column is also used by the
+    # session_start and register_agent MCP tools so the dispatcher can classify
+    # tasks at spawn time. Migration is a no-op on fresh installs (column already
+    # in CREATE TABLE DDL). On existing installs it adds the column with DEFAULT 'unknown'.
+    # The Python session_store migration list also handles this idempotently — this
+    # upgrade.sh entry is the documentation anchor and ensures crontab/service
+    # restarts don't miss the schema change on minimal installs without uv.
+    if command -v uv &>/dev/null; then
+        uv run python -c "
+import sqlite3, os
+db_path = os.path.expanduser('~/messages/config/agent_sessions.db')
+if os.path.exists(db_path):
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(\"ALTER TABLE agent_sessions ADD COLUMN idempotency TEXT DEFAULT 'unknown'\")
+        conn.commit()
+        print('idempotency column added')
+    except sqlite3.OperationalError:
+        print('idempotency column already exists')
+    finally:
+        conn.close()
+else:
+    print('agent_sessions.db not found — will be created on next server start')
+" 2>/dev/null && substep "agent_sessions.idempotency column present (fresh or migrated)" && migrated=$((migrated + 1)) || true
+    fi
+
+    # Migration 52: Add LOBSTER-GHOST-DETECTOR cron entry.
+    # agent-monitor.py runs every 30 minutes and calls --alert --mark-failed directly,
+    # sending Telegram alerts when ghost agents are found. No LLM subagent is needed.
+    # Previously this was routed through REMINDER_ROUTING in sys.dispatcher.bootup.md
+    # which spawned a lobster-generalist just to run the script and relay its output.
+    # That LLM relay layer has been removed; the script now runs directly from cron.
+    local GHOST_DETECTOR_MARKER="# LOBSTER-GHOST-DETECTOR"
+    # Remove any existing entry (stale path or schedule) then re-add with correct values
+    crontab -l 2>/dev/null | grep -v "$GHOST_DETECTOR_MARKER" | crontab - 2>/dev/null || true
+    (crontab -l 2>/dev/null; echo "*/30 * * * * cd $HOME && $HOME/.local/bin/uv run $LOBSTER_DIR/scripts/agent-monitor.py --alert --mark-failed >> $WORKSPACE_DIR/logs/agent-monitor.log 2>&1 $GHOST_DETECTOR_MARKER") | crontab -
+    substep "Set ghost detector cron entry (agent-monitor.py --alert --mark-failed, every 30 min)"
+    migrated=$((migrated + 1))
+
+    # Migration 53: Add LOBSTER-OOM-CHECK cron entry.
+    # oom-monitor.py runs every 10 minutes, scans the kernel journal for OOM kills,
+    # and writes inbox messages directly when new events are detected. No LLM needed.
+    # Previously this was routed through REMINDER_ROUTING which spawned a subagent.
+    # Only active when LOBSTER_DEBUG=true (the script exits 0 silently otherwise).
+    local OOM_CHECK_MARKER="# LOBSTER-OOM-CHECK"
+    if ! crontab -l 2>/dev/null | grep -q "$OOM_CHECK_MARKER"; then
+        "$LOBSTER_DIR/scripts/cron-manage.sh" add "$OOM_CHECK_MARKER" \
+            "*/10 * * * * cd $HOME && uv run $LOBSTER_DIR/scripts/oom-monitor.py --since-minutes 10 >> $WORKSPACE_DIR/logs/oom-monitor.log 2>&1 $OOM_CHECK_MARKER"
+        substep "Added OOM monitor cron entry (oom-monitor.py --since-minutes 10, every 10 min)"
+        migrated=$((migrated + 1))
+    fi
+
+    # Migration 54: Add inbox-staleness-warn.sh cron entry
+    # Injects a scheduled_reminder into the inbox when the oldest unprocessed
+    # user message has been waiting for 3+ minutes. Gives the dispatcher an
+    # in-band nudge to call wait_for_messages or delegate, complementing the
+    # health-check restart path (which only fires at 8+ minutes). Dedup prevents
+    # multiple warnings per staleness event.
+    local STALENESS_WARN_MARKER="# LOBSTER-INBOX-STALENESS-WARN"
+    if ! crontab -l 2>/dev/null | grep -q "$STALENESS_WARN_MARKER"; then
+        chmod +x "$LOBSTER_DIR/scripts/inbox-staleness-warn.sh" 2>/dev/null || true
+        "$LOBSTER_DIR/scripts/cron-manage.sh" add "$STALENESS_WARN_MARKER" \
+            "*/1 * * * * $LOBSTER_DIR/scripts/inbox-staleness-warn.sh $STALENESS_WARN_MARKER"
+        substep "Added inbox-staleness-warn.sh cron entry (runs every minute, warns at 3-minute staleness)"
+        migrated=$((migrated + 1))
+    fi
+
+    # Migration 55: Migrate existing jobs.json entries to systemd timers.
+    # The cron+jobs.json scheduling backend has been replaced by systemd timers
+    # (see PR #1105). Existing entries in ~/lobster-workspace/scheduled-jobs/jobs.json
+    # will no longer fire because sync-crontab.sh is no longer called.
+    #
+    # Sudoers note: install.sh already grants `lobster ALL=(ALL) NOPASSWD:ALL`,
+    # which covers `sudo systemctl` and `sudo tee`. No separate sudoers entry is needed.
+    #
+    # This migration reads jobs.json and, for each enabled job that has a
+    # `command` field set, creates the corresponding systemd timer unit.
+    # Jobs without a command field cannot be migrated automatically — they
+    # will be reported as warnings so the user can recreate them via
+    # create_scheduled_job with an explicit command.
+    local JOBS_JSON="$WORKSPACE_DIR/scheduled-jobs/jobs.json"
+    if [ -f "$JOBS_JSON" ] && command -v python3 >/dev/null 2>&1 && pidof systemd >/dev/null 2>&1; then
+        local jobs_count
+        jobs_count=$(python3 -c "
+import json, sys
+try:
+    d = json.loads(open('$JOBS_JSON').read())
+    print(len(d.get('jobs', {})))
+except Exception:
+    print(0)
+" 2>/dev/null || echo "0")
+        if [ "${jobs_count:-0}" -gt 0 ]; then
+            substep "Migrating $jobs_count jobs.json entries to systemd timers..."
+            JOBS_JSON_PATH="$JOBS_JSON"
+            python3 - "$JOBS_JSON_PATH" <<'PYEOF'
+import json, subprocess, sys
+from pathlib import Path
+
+JOBS_FILE = Path(sys.argv[1])
+SYSTEMD_DIR = Path("/etc/systemd/system")
+UNIT_PREFIX = "lobster-"
+LOBSTER_MARKER = "# LOBSTER-MANAGED"
+LOBSTER_USER = "lobster"
+
+def sudo_write(path: Path, content: str) -> None:
+    """Write content to a root-owned path using sudo tee."""
+    result = subprocess.run(
+        ["sudo", "tee", str(path)],
+        input=content.encode(),
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise PermissionError(f"sudo tee {path} failed: {result.stderr.decode().strip()}")
+
+try:
+    data = json.loads(JOBS_FILE.read_text())
+except Exception as e:
+    print(f"  warning: could not read jobs.json: {e}", file=sys.stderr)
+    sys.exit(0)
+
+jobs = data.get("jobs", {})
+migrated = 0
+skipped = []
+
+for name, job in jobs.items():
+    if not job.get("enabled", True):
+        continue
+
+    command = job.get("command") or job.get("runner") or ""
+    schedule = job.get("schedule", "")
+
+    if not command or not command.startswith("/"):
+        skipped.append((name, "no absolute command path — recreate with create_scheduled_job"))
+        continue
+
+    if not schedule:
+        skipped.append((name, "no schedule — recreate with create_scheduled_job"))
+        continue
+
+    timer_path = SYSTEMD_DIR / f"{UNIT_PREFIX}{name}.timer"
+    service_path = SYSTEMD_DIR / f"{UNIT_PREFIX}{name}.service"
+
+    # Skip if already migrated
+    try:
+        if timer_path.exists() and LOBSTER_MARKER in timer_path.read_text():
+            continue
+    except OSError:
+        pass
+
+    desc = job.get("description") or f"Lobster scheduled job: {name}"
+
+    timer_content = f"""[Unit]
+Description={desc}
+{LOBSTER_MARKER}
+
+[Timer]
+OnCalendar={schedule}
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+"""
+    service_content = f"""[Unit]
+Description={desc}
+{LOBSTER_MARKER}
+
+[Service]
+Type=oneshot
+User={LOBSTER_USER}
+ExecStart={command}
+"""
+
+    try:
+        sudo_write(timer_path, timer_content)
+        sudo_write(service_path, service_content)
+        subprocess.run(["sudo", "systemctl", "daemon-reload"], check=True, capture_output=True)
+        subprocess.run(["sudo", "systemctl", "enable", "--now", f"{UNIT_PREFIX}{name}.timer"],
+                       check=True, capture_output=True)
+        print(f"  migrated: {name} ({schedule}) -> {UNIT_PREFIX}{name}.timer")
+        migrated += 1
+    except Exception as e:
+        skipped.append((name, f"error: {e}"))
+
+print(f"  {migrated} job(s) migrated to systemd timers")
+for sname, reason in skipped:
+    print(f"  WARN: '{sname}' skipped — {reason}", file=sys.stderr)
+PYEOF
+        fi
+    fi
+
+    # Migration 60: Register inject-bootup-context.py SessionStart hooks in settings.json
+    # Adds two SessionStart entries: one empty-matcher entry for all fresh sessions
+    # (must run after write-dispatcher-session-id so role detection works), and one
+    # compact-matcher entry so bootup content is re-injected after context compaction.
+    if [ -f "$CLAUDE_SETTINGS" ]; then
+        chmod +x "$LOBSTER_DIR/hooks/inject-bootup-context.py" 2>/dev/null || true
+        if ! jq -e '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("inject-bootup-context")) | select(.matcher == "")' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+            TMP_SETTINGS=$(mktemp)
+            jq '.hooks.SessionStart = (.hooks.SessionStart // []) + [{
+                "matcher": "",
+                "hooks": [{
+                    "type": "command",
+                    "command": "python3 '"$LOBSTER_DIR"'/hooks/inject-bootup-context.py",
+                    "timeout": 10
+                }]
+            }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+            substep "Registered inject-bootup-context SessionStart hook (all sessions)"
+            migrated=$((migrated + 1))
+        fi
+        if ! jq -e '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("inject-bootup-context")) | select(.matcher == "compact")' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+            TMP_SETTINGS=$(mktemp)
+            jq '.hooks.SessionStart = (.hooks.SessionStart // []) + [{
+                "matcher": "compact",
+                "hooks": [{
+                    "type": "command",
+                    "command": "python3 '"$LOBSTER_DIR"'/hooks/inject-bootup-context.py",
+                    "timeout": 10
+                }]
+            }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+            substep "Registered inject-bootup-context SessionStart hook (compact sessions)"
+            migrated=$((migrated + 1))
+        fi
+    fi
+
+    # Migration 61: Add nightly-consolidation crontab entry.
+    # install.sh adds this entry but existing installs may be missing it.
+    # Runs at 3am daily to consolidate memory and rotate digests.
+    local NIGHTLY_CONSOLIDATION_MARKER="# LOBSTER-NIGHTLY-CONSOLIDATION"
+    if ! crontab -l 2>/dev/null | grep -q "$NIGHTLY_CONSOLIDATION_MARKER"; then
+        chmod +x "$LOBSTER_DIR/scripts/nightly-consolidation.sh" 2>/dev/null || true
+        "$LOBSTER_DIR/scripts/cron-manage.sh" add "$NIGHTLY_CONSOLIDATION_MARKER" \
+            "0 3 * * * $LOBSTER_DIR/scripts/nightly-consolidation.sh $NIGHTLY_CONSOLIDATION_MARKER"
+        substep "nightly-consolidation crontab entry added (runs at 3am daily)"
+        migrated=$((migrated + 1))
+    else
+        substep "nightly-consolidation crontab entry already present"
+
+    fi
+
+    # Migration 61: Add nightly-consolidation crontab entry.
+    # install.sh adds this entry but existing installs may be missing it.
+    # Runs at 3am daily to consolidate memory and rotate digests.
+    local NIGHTLY_CONSOLIDATION_MARKER="# LOBSTER-NIGHTLY-CONSOLIDATION"
+    if ! crontab -l 2>/dev/null | grep -q "$NIGHTLY_CONSOLIDATION_MARKER"; then
+        chmod +x "$LOBSTER_DIR/scripts/nightly-consolidation.sh" 2>/dev/null || true
+        "$LOBSTER_DIR/scripts/cron-manage.sh" add "$NIGHTLY_CONSOLIDATION_MARKER" \
+            "0 3 * * * $LOBSTER_DIR/scripts/nightly-consolidation.sh $NIGHTLY_CONSOLIDATION_MARKER"
+        substep "nightly-consolidation crontab entry added (runs at 3am daily)"
+        migrated=$((migrated + 1))
+    else
+        substep "nightly-consolidation crontab entry already present"
+
+    fi
+
+    # Migration 56: Add LOBSTER_ADMIN_CHAT_ID to config.env if missing.
+    # alert.sh and the transcription worker use this to send error notifications
+    # directly to the admin. Without it, alerts are silently dropped.
+    # Defaults to the first entry in TELEGRAM_ALLOWED_USERS (which is the owner).
+    if [ -f "$CONFIG_FILE" ]; then
+        # shellcheck source=/dev/null
+        source "$CONFIG_FILE" 2>/dev/null || true
+        if [ -z "${LOBSTER_ADMIN_CHAT_ID:-}" ]; then
+            # Derive from TELEGRAM_ALLOWED_USERS — first comma-separated value
+            local first_allowed
+            first_allowed=$(echo "${TELEGRAM_ALLOWED_USERS:-}" | cut -d',' -f1 | tr -d '[:space:]')
+            if [ -n "$first_allowed" ]; then
+                echo "" >> "$CONFIG_FILE"
+                echo "# Admin chat ID for system alerts (auto-derived from TELEGRAM_ALLOWED_USERS)" >> "$CONFIG_FILE"
+                echo "LOBSTER_ADMIN_CHAT_ID=$first_allowed" >> "$CONFIG_FILE"
+                substep "Added LOBSTER_ADMIN_CHAT_ID=$first_allowed to config.env"
+                migrated=$((migrated + 1))
+            else
+                warn "LOBSTER_ADMIN_CHAT_ID missing and could not be derived — set it manually in $CONFIG_FILE"
+            fi
+        fi
+    fi
+
+    # Migration 57: Add LOBSTER_INTERNAL_SECRET to config.env if missing.
+    # Required for the push-calendar-token endpoint in inbox_server_http.py.
+    # Without it, Google Calendar token pushes from the remote bridge are disabled.
+    if [ -f "$CONFIG_FILE" ]; then
+        # shellcheck source=/dev/null
+        source "$CONFIG_FILE" 2>/dev/null || true
+        if [ -z "${LOBSTER_INTERNAL_SECRET:-}" ]; then
+            local generated_secret
+            generated_secret=$(python3 -c "import secrets; print(secrets.token_hex(32))" 2>/dev/null || \
+                               openssl rand -hex 32 2>/dev/null || \
+                               echo "")
+            if [ -n "$generated_secret" ]; then
+                echo "" >> "$CONFIG_FILE"
+                echo "# Internal secret for authenticated MCP HTTP endpoints (e.g. push-calendar-token)" >> "$CONFIG_FILE"
+                echo "LOBSTER_INTERNAL_SECRET=$generated_secret" >> "$CONFIG_FILE"
+                substep "Generated and added LOBSTER_INTERNAL_SECRET to config.env"
+                migrated=$((migrated + 1))
+            else
+                warn "LOBSTER_INTERNAL_SECRET missing and could not be generated — set it manually in $CONFIG_FILE"
+            fi
+        fi
+    fi
+
+    # Migration 58: Add LOBSTER-DAILY-HEALTH cron entry.
+    # install.sh registers daily-health-check.sh at 06:00 UTC; existing installs
+    # that were set up before this cron was added will not have it.
+    local DAILY_HEALTH_SCRIPT="$LOBSTER_DIR/scripts/daily-health-check.sh"
+    if [ -f "$DAILY_HEALTH_SCRIPT" ]; then
+        if ! crontab -l 2>/dev/null | grep -q "LOBSTER-DAILY-HEALTH"; then
+            chmod +x "$DAILY_HEALTH_SCRIPT" 2>/dev/null || true
+            "$LOBSTER_DIR/scripts/cron-manage.sh" add "# LOBSTER-DAILY-HEALTH" \
+                "0 6 * * * $DAILY_HEALTH_SCRIPT # LOBSTER-DAILY-HEALTH" 2>/dev/null && {
+                substep "Added LOBSTER-DAILY-HEALTH cron entry (daily-health-check.sh, 06:00 UTC)"
+                migrated=$((migrated + 1))
+            } || warn "Could not add LOBSTER-DAILY-HEALTH cron entry — check cron-manage.sh"
+        fi
+    fi
+
+    # Migration 59: Seed obsidian.env from template if missing.
+    # The obsidian-km skill requires ~/lobster-config/obsidian.env to exist.
+    # On existing installs the file may not be present; seed it from the template
+    # so the skill can be activated without manual setup steps.
+    local OBSIDIAN_ENV="$LOBSTER_CONFIG_DIR/obsidian.env"
+    local OBSIDIAN_TEMPLATE="$LOBSTER_DIR/lobster-shop/obsidian-km/config/obsidian.env.template"
+    if [ -f "$OBSIDIAN_TEMPLATE" ] && [ ! -f "$OBSIDIAN_ENV" ]; then
+        cp "$OBSIDIAN_TEMPLATE" "$OBSIDIAN_ENV"
+        substep "Seeded $OBSIDIAN_ENV from template (configure OBSIDIAN_VAULT_PATH before use)"
+        migrated=$((migrated + 1))
+    fi
+
+    # Migration 56: Add LOBSTER_ADMIN_CHAT_ID to config.env if missing.
+    # alert.sh and the transcription worker use this to send error notifications
+    # directly to the admin. Without it, alerts are silently dropped.
+    # Defaults to the first entry in TELEGRAM_ALLOWED_USERS (which is the owner).
+    if [ -f "$CONFIG_FILE" ]; then
+        # shellcheck source=/dev/null
+        source "$CONFIG_FILE" 2>/dev/null || true
+        if [ -z "${LOBSTER_ADMIN_CHAT_ID:-}" ]; then
+            # Derive from TELEGRAM_ALLOWED_USERS — first comma-separated value
+            local first_allowed
+            first_allowed=$(echo "${TELEGRAM_ALLOWED_USERS:-}" | cut -d',' -f1 | tr -d '[:space:]')
+            if [ -n "$first_allowed" ]; then
+                echo "" >> "$CONFIG_FILE"
+                echo "# Admin chat ID for system alerts (auto-derived from TELEGRAM_ALLOWED_USERS)" >> "$CONFIG_FILE"
+                echo "LOBSTER_ADMIN_CHAT_ID=$first_allowed" >> "$CONFIG_FILE"
+                substep "Added LOBSTER_ADMIN_CHAT_ID=$first_allowed to config.env"
+                migrated=$((migrated + 1))
+            else
+                warn "LOBSTER_ADMIN_CHAT_ID missing and could not be derived — set it manually in $CONFIG_FILE"
+            fi
+        fi
+    fi
+
+    # Migration 57: Add LOBSTER_INTERNAL_SECRET to config.env if missing.
+    # Required for the push-calendar-token endpoint in inbox_server_http.py.
+    # Without it, Google Calendar token pushes from the remote bridge are disabled.
+    if [ -f "$CONFIG_FILE" ]; then
+        # shellcheck source=/dev/null
+        source "$CONFIG_FILE" 2>/dev/null || true
+        if [ -z "${LOBSTER_INTERNAL_SECRET:-}" ]; then
+            local generated_secret
+            generated_secret=$(python3 -c "import secrets; print(secrets.token_hex(32))" 2>/dev/null || \
+                               openssl rand -hex 32 2>/dev/null || \
+                               echo "")
+            if [ -n "$generated_secret" ]; then
+                echo "" >> "$CONFIG_FILE"
+                echo "# Internal secret for authenticated MCP HTTP endpoints (e.g. push-calendar-token)" >> "$CONFIG_FILE"
+                echo "LOBSTER_INTERNAL_SECRET=$generated_secret" >> "$CONFIG_FILE"
+                substep "Generated and added LOBSTER_INTERNAL_SECRET to config.env"
+                migrated=$((migrated + 1))
+            else
+                warn "LOBSTER_INTERNAL_SECRET missing and could not be generated — set it manually in $CONFIG_FILE"
+            fi
+        fi
+    fi
+
+    # Migration 58: Add LOBSTER-DAILY-HEALTH cron entry.
+    # install.sh registers daily-health-check.sh at 06:00 UTC; existing installs
+    # that were set up before this cron was added will not have it.
+    local DAILY_HEALTH_SCRIPT="$LOBSTER_DIR/scripts/daily-health-check.sh"
+    if [ -f "$DAILY_HEALTH_SCRIPT" ]; then
+        if ! crontab -l 2>/dev/null | grep -q "LOBSTER-DAILY-HEALTH"; then
+            chmod +x "$DAILY_HEALTH_SCRIPT" 2>/dev/null || true
+            "$LOBSTER_DIR/scripts/cron-manage.sh" add "# LOBSTER-DAILY-HEALTH" \
+                "0 6 * * * $DAILY_HEALTH_SCRIPT # LOBSTER-DAILY-HEALTH" 2>/dev/null && {
+                substep "Added LOBSTER-DAILY-HEALTH cron entry (daily-health-check.sh, 06:00 UTC)"
+                migrated=$((migrated + 1))
+            } || warn "Could not add LOBSTER-DAILY-HEALTH cron entry — check cron-manage.sh"
+        fi
+    fi
+
+    # Migration 59: Seed obsidian.env from template if missing.
+    # The obsidian-km skill requires ~/lobster-config/obsidian.env to exist.
+    # On existing installs the file may not be present; seed it from the template
+    # so the skill can be activated without manual setup steps.
+    local OBSIDIAN_ENV="$LOBSTER_CONFIG_DIR/obsidian.env"
+    local OBSIDIAN_TEMPLATE="$LOBSTER_DIR/lobster-shop/obsidian-km/config/obsidian.env.template"
+    if [ -f "$OBSIDIAN_TEMPLATE" ] && [ ! -f "$OBSIDIAN_ENV" ]; then
+        cp "$OBSIDIAN_TEMPLATE" "$OBSIDIAN_ENV"
+        substep "Seeded $OBSIDIAN_ENV from template (configure OBSIDIAN_VAULT_PATH before use)"
+        migrated=$((migrated + 1))
     fi
 
     if [ "$migrated" -eq 0 ]; then

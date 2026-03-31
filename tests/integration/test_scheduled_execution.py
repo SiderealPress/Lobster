@@ -1,80 +1,98 @@
 """
 Tests for Scheduled Job Execution
 
-Tests cron job execution and output handling.
+Tests systemd timer job execution and output handling.
 """
 
 import json
 import pytest
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 import subprocess
 
 
 @pytest.mark.integration
 class TestScheduledJobCreation:
-    """Tests for scheduled job creation and configuration."""
-
-    @pytest.fixture
-    def jobs_setup(self, temp_scheduled_tasks_dir: Path):
-        """Set up scheduled jobs environment."""
-        return {
-            "jobs_file": temp_scheduled_tasks_dir / "jobs.json",
-            "tasks_dir": temp_scheduled_tasks_dir / "tasks",
-            "logs_dir": temp_scheduled_tasks_dir / "logs",
-            "base_dir": temp_scheduled_tasks_dir,
-        }
+    """Tests for scheduled job creation and configuration (systemd backend)."""
 
     @pytest.mark.asyncio
-    async def test_create_job_creates_task_file(self, jobs_setup):
-        """Test that creating a job creates the task markdown file."""
-        with patch.multiple(
-            "src.mcp.inbox_server",
-            SCHEDULED_JOBS_FILE=jobs_setup["jobs_file"],
-            SCHEDULED_JOBS_DIR=jobs_setup["base_dir"],
-            SCHEDULED_TASKS_TASKS_DIR=jobs_setup["tasks_dir"],
-            sync_crontab=MagicMock(return_value=(True, "")),
-        ):
-            from src.mcp.inbox_server import handle_create_scheduled_job
+    async def test_create_job_converts_cron_to_systemd_format(self):
+        """Cron expressions passed to create_scheduled_job must be converted
+        to systemd OnCalendar syntax before the unit file is written.
 
-            await handle_create_scheduled_job({
+        If the conversion is broken, a raw cron string like '0 9 * * *' would
+        land in OnCalendar= and systemd would reject it at daemon-reload time.
+        """
+        captured = {}
+
+        async def fake_create_job(name, schedule, command, description=""):
+            captured["schedule"] = schedule
+            from src.mcp.systemd_jobs import CreateResult
+            return CreateResult(name=name, status="created")
+
+        with patch("inbox_server._sj_validate_name", return_value=None), \
+             patch("inbox_server._sj_validate_command", return_value=None), \
+             patch("inbox_server._sj_create_job", side_effect=fake_create_job):
+            import sys
+            from pathlib import Path as _Path
+            _mcp = _Path(__file__).parent.parent.parent / "src" / "mcp"
+            if str(_mcp) not in sys.path:
+                sys.path.insert(0, str(_mcp))
+            import inbox_server as _is
+            result = await _is.handle_create_scheduled_job({
                 "name": "test-job",
                 "schedule": "0 9 * * *",
-                "context": "Run daily tests and report results",
+                "command": "/bin/echo hello",
             })
 
-            # Verify task file exists
-            task_file = jobs_setup["tasks_dir"] / "test-job.md"
-            assert task_file.exists()
-
-            content = task_file.read_text()
-            assert "test-job" in content.lower() or "Test Job" in content
-            assert "Run daily tests" in content
+        # The schedule written to systemd must NOT be raw cron syntax
+        assert "captured" in dir() or captured  # ensure fake was called
+        assert captured.get("schedule") == "*-*-* 09:00:00", (
+            f"Expected systemd format '*-*-* 09:00:00', got {captured.get('schedule')!r} — "
+            "cron-to-systemd conversion is broken"
+        )
+        assert "Created" in result[0].text
 
     @pytest.mark.asyncio
-    async def test_job_registered_in_jobs_json(self, jobs_setup):
-        """Test that job is registered in jobs.json."""
-        with patch.multiple(
-            "src.mcp.inbox_server",
-            SCHEDULED_JOBS_FILE=jobs_setup["jobs_file"],
-            SCHEDULED_JOBS_DIR=jobs_setup["base_dir"],
-            SCHEDULED_TASKS_TASKS_DIR=jobs_setup["tasks_dir"],
-            sync_crontab=MagicMock(return_value=(True, "")),
-        ):
-            from src.mcp.inbox_server import handle_create_scheduled_job
+    async def test_create_job_invokes_systemd_backend(self):
+        """create_scheduled_job invokes the systemd backend (create_job) and
+        the timer + service unit names appear in the response.
 
-            await handle_create_scheduled_job({
+        The old backend wrote a jobs.json file; the new backend writes
+        /etc/systemd/system/lobster-<name>.{timer,service}. This test
+        verifies the new backend is wired correctly by checking that:
+        1. _sj_create_job is called with the expected arguments.
+        2. The MCP response references the unit file names.
+        """
+        captured = {}
+
+        async def fake_create_job(name, schedule, command, description=""):
+            captured.update({"name": name, "schedule": schedule, "command": command})
+            from src.mcp.systemd_jobs import CreateResult
+            return CreateResult(name=name, status="created")
+
+        with patch("inbox_server._sj_validate_name", return_value=None), \
+             patch("inbox_server._sj_validate_command", return_value=None), \
+             patch("inbox_server._sj_create_job", side_effect=fake_create_job):
+            import sys
+            from pathlib import Path as _Path
+            _mcp = _Path(__file__).parent.parent.parent / "src" / "mcp"
+            if str(_mcp) not in sys.path:
+                sys.path.insert(0, str(_mcp))
+            import inbox_server as _is
+            result = await _is.handle_create_scheduled_job({
                 "name": "daily-backup",
                 "schedule": "0 2 * * *",
-                "context": "Run daily backup",
+                "command": "/bin/echo backup",
             })
 
-            jobs_data = json.loads(jobs_setup["jobs_file"].read_text())
-
-            assert "daily-backup" in jobs_data["jobs"]
-            job = jobs_data["jobs"]["daily-backup"]
-            assert job["schedule"] == "0 2 * * *"
-            assert job["enabled"] is True
+        assert captured.get("name") == "daily-backup"
+        # Schedule must be systemd format (cron was converted)
+        assert captured.get("schedule") == "*-*-* 02:00:00"
+        # Response must reference the unit files — proves systemd path was taken
+        text = result[0].text
+        assert "lobster-daily-backup.timer" in text
+        assert "lobster-daily-backup.service" in text
 
 
 @pytest.mark.integration
@@ -190,8 +208,14 @@ class TestTaskOutputs:
 
 
 @pytest.mark.integration
-class TestCrontabSync:
-    """Tests for crontab synchronization."""
+class TestScheduleNormalization:
+    """Tests for schedule normalization (replaces crontab sync tests).
+
+    The old backend used sync-crontab.sh to flush jobs to the user crontab.
+    The new backend uses systemd unit files. This class tests that schedule
+    normalization — the equivalent of crontab format enforcement — works
+    correctly via the systemd_jobs module.
+    """
 
     def test_sync_crontab_script_syntax(self):
         """Test that sync-crontab.sh has valid bash syntax."""
@@ -208,37 +232,49 @@ class TestCrontabSync:
 
         assert result.returncode == 0, f"Syntax error: {result.stderr}"
 
-    def test_sync_crontab_function(self, temp_scheduled_tasks_dir: Path):
-        """Test the sync_crontab function."""
-        # Create a mock jobs file
-        jobs_file = temp_scheduled_tasks_dir / "jobs.json"
-        jobs_file.write_text(json.dumps({
-            "jobs": {
-                "test-job": {
-                    "name": "test-job",
-                    "schedule": "0 9 * * *",
-                    "enabled": True,
-                }
-            }
-        }))
+    def test_normalize_schedule_converts_cron_to_systemd(self):
+        """normalize_schedule converts a valid cron expression to systemd
+        OnCalendar syntax and returns no error.
 
-        # Note: Actually syncing crontab requires cron to be running
-        # and could affect the system, so we skip actual sync
+        This replaces the old sync_crontab test which verified that a cron
+        expression in jobs.json was written to the system crontab. The new
+        backend's equivalent step is normalize_schedule: it converts cron
+        syntax at job creation/update time so only valid OnCalendar strings
+        are ever written to unit files.
+        """
+        import sys
+        from pathlib import Path as _Path
+        _mcp = _Path(__file__).parent.parent.parent / "src" / "mcp"
+        if str(_mcp) not in sys.path:
+            sys.path.insert(0, str(_mcp))
+        from systemd_jobs import normalize_schedule
 
-        # Just verify the function doesn't crash
-        with patch.multiple(
-            "src.mcp.inbox_server",
-            SCHEDULED_JOBS_FILE=jobs_file,
-            _REPO_DIR=temp_scheduled_tasks_dir.parent.parent,
-        ):
-            with patch("subprocess.run") as mock_run:
-                mock_run.return_value = MagicMock(
-                    returncode=0, stdout="Synced", stderr=""
-                )
+        normalized, err = normalize_schedule("0 9 * * *")
+        assert err is None, f"Unexpected error: {err}"
+        assert normalized == "*-*-* 09:00:00"
 
-                from src.mcp.inbox_server import sync_crontab
+    def test_normalize_schedule_rejects_invalid_expressions(self):
+        """normalize_schedule returns an error for invalid schedule strings."""
+        import sys
+        from pathlib import Path as _Path
+        _mcp = _Path(__file__).parent.parent.parent / "src" / "mcp"
+        if str(_mcp) not in sys.path:
+            sys.path.insert(0, str(_mcp))
+        from systemd_jobs import normalize_schedule
 
-                success, msg = sync_crontab()
+        _, err = normalize_schedule("not-a-schedule")
+        assert err is not None
+        assert "Invalid" in err or "invalid" in err
 
-                # Function should complete (actual success depends on system)
-                assert isinstance(success, bool)
+    def test_normalize_schedule_accepts_systemd_calendar_expressions(self):
+        """normalize_schedule accepts native systemd OnCalendar expressions."""
+        import sys
+        from pathlib import Path as _Path
+        _mcp = _Path(__file__).parent.parent.parent / "src" / "mcp"
+        if str(_mcp) not in sys.path:
+            sys.path.insert(0, str(_mcp))
+        from systemd_jobs import normalize_schedule
+
+        for expr in ("daily", "hourly", "*-*-* 09:00:00", "*:0/30:00"):
+            normalized, err = normalize_schedule(expr)
+            assert err is None, f"Expression {expr!r} should be valid, got error: {err}"

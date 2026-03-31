@@ -378,6 +378,16 @@ if [ "$CONTAINER_SETUP" = true ]; then
                 fi
             done
         done
+        # Seed YAML templates (e.g. ifttt-rules.yaml)
+        for tmpl in "$TEMPLATES_DIR"/*.yaml; do
+            [ -f "$tmpl" ] || continue
+            base=$(basename "$tmpl")
+            dest="$USER_CONFIG_DIR/memory/canonical/$base"
+            if [ ! -f "$dest" ]; then
+                cp "$tmpl" "$dest"
+                info "  Seeded canonical template: $base"
+            fi
+        done
     fi
 
     # Create stub user-config agent files if they don't exist
@@ -388,13 +398,6 @@ if [ "$CONTAINER_SETUP" = true ]; then
             info "  Created stub: agents/$stub_file"
         fi
     done
-
-    # Create jobs.json if it doesn't exist
-    JOBS_FILE="$WORKSPACE_DIR/scheduled-jobs/jobs.json"
-    if [ ! -f "$JOBS_FILE" ]; then
-        echo '{"jobs": {}}' > "$JOBS_FILE"
-        info "  Created scheduled-jobs registry"
-    fi
 
     # sqlite-vec: verify it loads correctly
     # pyproject.toml requires >=0.1.7a1 which has correct aarch64 wheels.
@@ -1128,6 +1131,16 @@ if [ -d "$TEMPLATES_DIR" ]; then
             fi
         done
     done
+    # Seed YAML templates (e.g. ifttt-rules.yaml)
+    for tmpl in "$TEMPLATES_DIR"/*.yaml; do
+        [ -f "$tmpl" ] || continue
+        base=$(basename "$tmpl")
+        dest="$USER_CONFIG_DIR/memory/canonical/$base"
+        if [ ! -f "$dest" ]; then
+            cp "$tmpl" "$dest"
+            info "  Seeded canonical template: $base"
+        fi
+    done
 fi
 
 # Seed system-audit.context.md to user-config/agents/ on first run
@@ -1242,84 +1255,8 @@ info "  See docs/GLOBAL-ENV.md for full documentation"
 
 step "Setting up scheduled tasks infrastructure..."
 
-# Create jobs.json if it doesn't exist (in workspace, not repo)
-JOBS_FILE="$WORKSPACE_DIR/scheduled-jobs/jobs.json"
-if [ ! -f "$JOBS_FILE" ]; then
-    echo '{"jobs": {}}' > "$JOBS_FILE"
-fi
-
 # Install dispatch-job.sh (posts scheduled_reminder to inbox; no direct Claude invocation)
 chmod +x "$INSTALL_DIR/scheduled-tasks/dispatch-job.sh" || true
-
-# Create sync-crontab.sh
-cat > "$INSTALL_DIR/scheduled-tasks/sync-crontab.sh" << 'SYNCCRON'
-#!/bin/bash
-# Lobster Crontab Synchronizer
-
-set -e
-
-WORKSPACE="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
-REPO_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
-JOBS_FILE="$WORKSPACE/scheduled-jobs/jobs.json"
-RUNNER="$REPO_DIR/scheduled-tasks/dispatch-job.sh"
-
-if ! command -v crontab &> /dev/null; then
-    echo "Warning: crontab not found. Install cron to enable scheduled tasks."
-    exit 0
-fi
-
-if [ ! -f "$JOBS_FILE" ]; then
-    echo "Error: Jobs file not found: $JOBS_FILE"
-    exit 1
-fi
-
-MARKER="# LOBSTER-SCHEDULED"
-EXISTING=$(crontab -l 2>/dev/null | grep -v "$MARKER" | grep -v "$RUNNER" || true)
-
-if command -v jq &> /dev/null; then
-    CRON_ENTRIES=$(jq -r --arg runner "$RUNNER" --arg marker "$MARKER" \
-        --arg repo_dir "$REPO_DIR" '
-        .jobs | to_entries[] |
-        select(.value.enabled == true) |
-        (.value.runner // $runner) as $job_runner |
-        # Expand $REPO_DIR placeholder so per-job runners can reference the install dir
-        ($job_runner | gsub("\\$REPO_DIR"; $repo_dir)) as $resolved_runner |
-        "\(.value.schedule) \($resolved_runner) \(.key) \($marker)"
-    ' "$JOBS_FILE" 2>/dev/null || echo "")
-else
-    CRON_ENTRIES=$(python3 -c "
-import json
-import sys
-try:
-    with open('$JOBS_FILE', 'r') as f:
-        data = json.load(f)
-    repo_dir = '$REPO_DIR'
-    default_runner = '$RUNNER'
-    for name, job in data.get('jobs', {}).items():
-        if job.get('enabled', True):
-            schedule = job.get('schedule', '')
-            if schedule:
-                runner = job.get('runner', default_runner)
-                runner = runner.replace('\$REPO_DIR', repo_dir)
-                print(f\"{schedule} {runner} {name} $MARKER\")
-except Exception as e:
-    sys.stderr.write(f'Error: {e}\n')
-" 2>/dev/null || echo "")
-fi
-
-{
-    if [ -n "$EXISTING" ]; then
-        echo "$EXISTING"
-    fi
-    if [ -n "$CRON_ENTRIES" ]; then
-        echo "$CRON_ENTRIES"
-    fi
-} | crontab -
-
-echo "Crontab synchronized:"
-crontab -l 2>/dev/null | grep "$MARKER" || echo "(no lobster jobs)"
-SYNCCRON
-chmod +x "$INSTALL_DIR/scheduled-tasks/sync-crontab.sh" || true
 
 # Enable cron service (name differs by distro)
 if [ "$PKG_MANAGER" = "apt" ]; then
@@ -1385,6 +1322,35 @@ chmod +x "$INSTALL_DIR/scheduled-tasks/export-logs.py" 2>/dev/null || true
     "0 3 * * * cd $INSTALL_DIR && uv run scheduled-tasks/export-logs.py # LOBSTER-LOG-EXPORT"
 
 success "Log export configured (runs at 03:00 UTC daily)"
+
+#===============================================================================
+# Ghost Detector (agent-monitor)
+#===============================================================================
+
+step "Setting up ghost detector cron..."
+
+# agent-monitor.py runs every 5 minutes, checks for stale/dead agent sessions,
+# sends a Telegram alert if GHOST_CONFIRMED or UNREGISTERED agents are found,
+# and marks ghost sessions as failed in agent_sessions.db. No LLM involved.
+"$INSTALL_DIR/scripts/cron-manage.sh" add "# LOBSTER-GHOST-DETECTOR" \
+    "*/5 * * * * cd $HOME && uv run $INSTALL_DIR/scripts/agent-monitor.py --alert --mark-failed >> $HOME/lobster-workspace/logs/agent-monitor.log 2>&1 # LOBSTER-GHOST-DETECTOR"
+
+success "Ghost detector configured (runs every 5 minutes)"
+
+#===============================================================================
+# OOM Monitor
+#===============================================================================
+
+step "Setting up OOM monitor cron..."
+
+# oom-monitor.py runs every 10 minutes, scans the kernel journal for OOM kills
+# affecting Lobster/Claude processes, and writes an inbox message for the
+# dispatcher when new OOM kill events are detected. No LLM involved.
+# Only active when LOBSTER_DEBUG=true (the script is a no-op otherwise).
+"$INSTALL_DIR/scripts/cron-manage.sh" add "# LOBSTER-OOM-CHECK" \
+    "*/10 * * * * cd $HOME && uv run $INSTALL_DIR/scripts/oom-monitor.py --since-minutes 10 >> $HOME/lobster-workspace/logs/oom-monitor.log 2>&1 # LOBSTER-OOM-CHECK"
+
+success "OOM monitor configured (runs every 10 minutes, active only when LOBSTER_DEBUG=true)"
 
 # Ensure any lingering self-check cron entry is removed on fresh installs
 { crontab -l 2>/dev/null | grep -v "# LOBSTER-SELF-CHECK" | grep -v "periodic-self-check" || true; } | crontab -
@@ -1710,6 +1676,30 @@ else
     info "Skipping write-dispatcher-session-id hook (settings.json not yet created)"
 fi
 
+# Set up Claude Code SessionStart hook to inject system and user bootup files into context.
+# Runs after write-dispatcher-session-id so role detection (is_dispatcher) works correctly.
+# Adds two entries: one empty-matcher entry for all fresh sessions, and one compact-matcher
+# entry so bootup content is re-injected after context compaction.
+chmod +x "$INSTALL_DIR/hooks/inject-bootup-context.py" || true
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("inject-bootup-context")) | select(.matcher == "")' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq '.hooks.SessionStart = (.hooks.SessionStart // []) + [{
+            "matcher": "",
+            "hooks": [{
+                "type": "command",
+                "command": "python3 '"$INSTALL_DIR"'/hooks/inject-bootup-context.py",
+                "timeout": 10
+            }]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "inject-bootup-context hook installed (all sessions)"
+    else
+        info "inject-bootup-context hook already configured in Claude Code settings (all sessions)"
+    fi
+else
+    info "Skipping inject-bootup-context hook (settings.json not yet created)"
+fi
+
 # Set up Claude Code SessionStart hook to set compact flag on context compaction
 chmod +x "$INSTALL_DIR/hooks/on-compact.py" || true
 if [ -f "$CLAUDE_SETTINGS" ]; then
@@ -1729,6 +1719,28 @@ if [ -f "$CLAUDE_SETTINGS" ]; then
     fi
 else
     info "Skipping on-compact hook (settings.json not yet created)"
+fi
+
+# Set up Claude Code SessionStart hook to re-inject bootup context after compaction.
+# The compact-matcher entry ensures bootup files are injected into the fresh context
+# that follows a compaction event, just as they are on a fresh session start.
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("inject-bootup-context")) | select(.matcher == "compact")' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq '.hooks.SessionStart = (.hooks.SessionStart // []) + [{
+            "matcher": "compact",
+            "hooks": [{
+                "type": "command",
+                "command": "python3 '"$INSTALL_DIR"'/hooks/inject-bootup-context.py",
+                "timeout": 10
+            }]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "inject-bootup-context hook installed (compact sessions)"
+    else
+        info "inject-bootup-context hook already configured in Claude Code settings (compact sessions)"
+    fi
+else
+    info "Skipping inject-bootup-context compact hook (settings.json not yet created)"
 fi
 
 # Set up Claude Code SessionStart hook to inject sys.debug.bootup.md when LOBSTER_DEBUG=true

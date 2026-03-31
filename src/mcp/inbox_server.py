@@ -34,6 +34,13 @@ if _MCP_SRC_DIR not in sys.path:
     sys.path.insert(0, _MCP_SRC_DIR)
 from log_utils import JsonFormatter, configure_file_handler
 
+# Early logger — same name as the main `log` object defined after all imports.
+# Python's logging registry is global, so this resolves to the same Logger
+# instance that gets a StreamHandler + RotatingFileHandler during setup_logging().
+# Using it here (before those handlers are attached) sends records to the root
+# logger fallback, which is acceptable for startup diagnostics.
+_startup_log = logging.getLogger("lobster-mcp")
+
 # Event bus — structured observability infrastructure (issue #890).
 # Imported here so callsites can use _emit_event() throughout the module.
 # The singleton is initialised later in main(); events emitted before init
@@ -53,6 +60,17 @@ if _SRC_DIR not in sys.path:
 
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+
+# IFTTT behavioral rules store
+from utils.ifttt_rules import (
+    load_rules as _ifttt_load_rules,
+    save_rules as _ifttt_save_rules,
+    add_rule as _ifttt_add_rule,
+    remove_rule as _ifttt_remove_rule,
+    find_rule as _ifttt_find_rule,
+    get_enabled_rules as _ifttt_get_enabled_rules,
+)
+import uuid as _uuid_mod
 
 # Reliability utilities (atomic writes, validation, audit logging, circuit breaker)
 from reliability import (
@@ -102,9 +120,9 @@ try:
     _db_count_conversation_history = _db_reader_mod.count_conversation_history
     _db_get_message_by_telegram_id_fn = _db_reader_mod.get_message_by_telegram_id
     _db_get_message_stats = _db_reader_mod.get_message_stats
-    print('[DB] db.reader loaded — DB reads available', file=sys.stderr)
+    _startup_log.info('[DB] db.reader loaded — DB reads available')
 except Exception as _db_reader_import_err:
-    print(f'[WARN] DB reader module unavailable: {_db_reader_import_err}', file=sys.stderr)
+    _startup_log.warning('DB reader module unavailable: %s', _db_reader_import_err)
 
 # BIS-167 Slice 6: Live DB write path — persist messages to messages.db
 _db_persist_inbound = None
@@ -118,10 +136,10 @@ try:
     )
     _db_flag = os.environ.get("LOBSTER_USE_DB", "0")
     _db_status = "ENABLED" if _db_flag == "1" else "DISABLED (set LOBSTER_USE_DB=1 to enable)"
-    print(f"[DB] message_store loaded — DB writes {_db_status}", file=sys.stderr)
+    _startup_log.info('[DB] message_store loaded — DB writes %s', _db_status)
     del _db_flag, _db_status
 except Exception as _db_import_err:
-    print(f"[WARN] messages.db write path unavailable: {_db_import_err}", file=sys.stderr)
+    _startup_log.warning('messages.db write path unavailable: %s', _db_import_err)
 
 
 # Memory system (optional — gracefully degrades to static file search)
@@ -132,7 +150,7 @@ try:
 except Exception as _mem_err:
     # Memory system is optional; log and continue
     import traceback as _tb
-    print(f"[WARN] Memory system unavailable: {_mem_err}", file=sys.stderr)
+    _startup_log.warning('Memory system unavailable: %s', _mem_err)
 
 # User Model subsystem
 _user_model = None
@@ -142,10 +160,10 @@ try:
     from user_model import create_user_model, USER_MODEL_TOOL_DEFINITIONS
     _user_model = create_user_model()
     _user_model_tool_names = _user_model.tool_names
-    print("[INFO] User Model subsystem initialized.", file=sys.stderr)
+    _startup_log.info('User Model subsystem initialized.')
 except Exception as _um_err:
     import traceback as _um_tb
-    print(f"[WARN] User Model subsystem unavailable: {_um_err}", file=sys.stderr)
+    _startup_log.warning('User Model subsystem unavailable: %s', _um_err)
 
 # ---------------------------------------------------------------------------
 # Background observation worker — fire-and-forget, zero main-thread blocking
@@ -523,6 +541,69 @@ def _was_task_replied(task_id: str, chat_id: Any) -> bool:
 _HUMAN_SOURCES = {"telegram", "sms", "signal", "slack", "whatsapp", "bisque"}
 
 # ---------------------------------------------------------------------------
+# Per-session user message counter (issue #1159 — session-note-appender trigger)
+#
+# Counts how many real user messages (type in USER_FACING_TYPES, source in
+# _HUMAN_SOURCES) have been processed via mark_processing in this server
+# process lifetime. Every 20 messages a `session_note_reminder` system
+# message is injected into the inbox so the dispatcher can spawn
+# session-note-appender without relying on working-context counting.
+#
+# Reset to 0 on process start — keyed to the process lifetime, which maps
+# to a single dispatcher session (dispatcher restarts coincide with process
+# restarts via systemd / hibernation).
+# ---------------------------------------------------------------------------
+_user_message_counter: int = 0
+SESSION_NOTE_REMINDER_INTERVAL: int = 20
+
+
+def _tick_user_message_counter(msg_type: str, msg_source: str) -> None:
+    """Increment _user_message_counter for real user messages and inject a
+    session_note_reminder into the inbox every SESSION_NOTE_REMINDER_INTERVAL
+    messages.
+
+    Only counts messages where msg_type is in USER_FACING_TYPES and msg_source
+    is in _HUMAN_SOURCES.  System messages, subagent results, cron reminders,
+    and other non-human traffic are excluded.
+
+    Called from both handle_mark_processing and handle_claim_and_ack so that
+    the counter ticks regardless of which claim path the dispatcher uses.
+    """
+    if msg_type not in USER_FACING_TYPES or msg_source not in _HUMAN_SOURCES:
+        return
+
+    global _user_message_counter
+    _user_message_counter += 1
+    if _user_message_counter % SESSION_NOTE_REMINDER_INTERVAL == 0:
+        try:
+            now_utc = datetime.now(timezone.utc)
+            ts_ms = int(now_utc.timestamp() * 1000)
+            reminder_id = f"{ts_ms}_session_note_reminder"
+            reminder = {
+                "id": reminder_id,
+                "type": "session_note_reminder",
+                "source": "system",
+                "chat_id": 0,
+                "text": (
+                    f"session_note_reminder: {_user_message_counter} user messages "
+                    f"processed this session. Spawn session-note-appender in the background "
+                    f"to append a timestamped activity snapshot to the current session file."
+                ),
+                "user_message_count": _user_message_counter,
+                "timestamp": now_utc.isoformat(),
+            }
+            inbox_file = INBOX_DIR / f"{reminder_id}.json"
+            atomic_write_json(inbox_file, reminder)
+            log.info(
+                f"session_note_reminder injected after {_user_message_counter} user messages"
+            )
+        except Exception as _snr_exc:
+            log.warning(f"session_note_reminder injection failed: {_snr_exc}")
+            # Non-fatal: the session note will be written at compaction regardless.
+
+
+
+# ---------------------------------------------------------------------------
 # Formal message type taxonomy (issue #156)
 # Definitions live in message_types.py (dependency-free, independently testable).
 # Re-exported here so callers import from a single place.
@@ -640,6 +721,9 @@ _assert_not_in_git_repo(_WORKSPACE)
 # Scheduled Tasks Directories (task definitions live in workspace, not the repo)
 SCHEDULED_JOBS_DIR = _WORKSPACE / "scheduled-jobs"
 SCHEDULED_TASKS_TASKS_DIR = SCHEDULED_JOBS_DIR / "tasks"
+# NOTE: SCHEDULED_JOBS_FILE is retained for the MCP tool handlers that still
+# read/write jobs.json. It will be removed once PR #1105 (systemd backend) merges
+# and the handlers are migrated to systemd_jobs.py.
 SCHEDULED_JOBS_FILE = SCHEDULED_JOBS_DIR / "jobs.json"
 SCHEDULED_TASKS_LOGS_DIR = SCHEDULED_JOBS_DIR / "logs"
 
@@ -732,10 +816,6 @@ if not OPENAI_API_KEY:
 if not TASKS_FILE.exists():
     TASKS_FILE.write_text(json.dumps({"tasks": [], "next_id": 1}, indent=2))
 
-# Initialize scheduled jobs file if needed
-if not SCHEDULED_JOBS_FILE.exists():
-    SCHEDULED_JOBS_FILE.write_text(json.dumps({"jobs": {}}, indent=2))
-
 # Record the moment this server process started. Used by stale-session cleanup
 # to distinguish output files from the current run vs a previous (dead) run.
 _SERVER_START_TIME = datetime.now(timezone.utc)
@@ -787,6 +867,128 @@ _SERVER_START_TIME = datetime.now(timezone.utc)
 _dispatcher_session_id: str | None = None
 _http_session_manager = None  # Set to StreamableHTTPSessionManager in main() when HTTP mode is active
 
+# State file: the dispatcher HTTP session ID persisted to disk so hooks can
+# read it without network calls or JSONL parsing.  Written atomically by
+# _tag_dispatcher_session(); cleared at server startup.
+_DISPATCHER_SESSION_STATE_FILE = _WORKSPACE / "data" / "dispatcher-session-id"
+
+# Companion state file: the dispatcher *Claude* session UUID (format:
+# xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx) written when the dispatcher calls
+# session_start(agent_type='dispatcher', claude_session_id=<uuid>).  This is
+# the ID that Claude Code SessionStart hooks receive in hook_input["session_id"],
+# which is a different ID space from the HTTP transport session ID above.
+# Having both files allows hooks to match whichever ID format they receive.
+_DISPATCHER_CLAUDE_SESSION_FILE = _WORKSPACE / "data" / "dispatcher-claude-session-id"
+
+
+def _write_dispatcher_state_file(session_id: str) -> None:
+    """Atomically write session_id to the dispatcher state file.
+
+    Uses a temp-file + os.rename() for atomicity so concurrent readers never
+    see a partial write.  Silent on any failure — must never crash the caller.
+    """
+    try:
+        _DISPATCHER_SESSION_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _DISPATCHER_SESSION_STATE_FILE.with_suffix(".tmp")
+        tmp.write_text(session_id.strip())
+        tmp.replace(_DISPATCHER_SESSION_STATE_FILE)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _write_dispatcher_claude_session_file(claude_session_id: str) -> None:
+    """Atomically write the Claude session UUID to the dispatcher claude-session file.
+
+    Called by handle_session_start when agent_type='dispatcher' and a
+    claude_session_id is provided.  This file is read by SessionStart hooks
+    which receive the Claude UUID (not the HTTP session ID) in hook_input.
+
+    Uses a temp-file + os.rename() for atomicity.  Silent on any failure.
+    """
+    try:
+        _DISPATCHER_CLAUDE_SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _DISPATCHER_CLAUDE_SESSION_FILE.with_suffix(".tmp")
+        tmp.write_text(claude_session_id.strip())
+        tmp.replace(_DISPATCHER_CLAUDE_SESSION_FILE)
+        log.info(f"[session-tag] Wrote dispatcher Claude session UUID: {claude_session_id!r}")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _clear_dispatcher_state_file() -> None:
+    """Remove the dispatcher state files on server startup.
+
+    Prevents stale session IDs from a previous run from being mistaken for
+    the current dispatcher session.  Silent on any failure.
+    """
+    try:
+        if _DISPATCHER_SESSION_STATE_FILE.exists():
+            _DISPATCHER_SESSION_STATE_FILE.unlink()
+            log.info("[session-tag] Cleared stale dispatcher-session-id state file on startup")
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        if _DISPATCHER_CLAUDE_SESSION_FILE.exists():
+            _DISPATCHER_CLAUDE_SESSION_FILE.unlink()
+            log.info("[session-tag] Cleared stale dispatcher-claude-session-id state file on startup")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _write_session_lost_reminder() -> None:
+    """Write a compact-reminder to the inbox on MCP server startup.
+
+    When the MCP server restarts (e.g. via systemctl restart lobster-mcp-local),
+    any dispatcher blocked in wait_for_messages receives a "Session not found"
+    error (-32600) at the protocol level with no recovery guidance.  This
+    function writes a synthetic inbox message so that when the dispatcher
+    reconnects and calls wait_for_messages, it immediately receives a prompt
+    to re-orient and resume the main loop.
+
+    Guard: skipped when the lobster-state file indicates a mid-session MCP
+    reconnect (mode=active AND file age < 30 min).  That pattern means Claude
+    Code auto-updated or the HTTP transport briefly cycled — the dispatcher was
+    NOT blocked in a dead session and does not need to re-orient.
+
+    Idempotent: writing an extra compact-reminder during a real restart is
+    harmless; the dispatcher processes it as a routine self-check message.
+    """
+    try:
+        # Same reconnect-detection guard used by _reset_state_on_startup.
+        if LOBSTER_STATE_FILE.exists():
+            try:
+                state_data = json.loads(LOBSTER_STATE_FILE.read_text())
+                mode = state_data.get("mode", "active")
+                file_age = time.time() - LOBSTER_STATE_FILE.stat().st_mtime
+                if mode not in _TRANSIENT_MODES and file_age < _RECONNECT_GRACE_SECONDS:
+                    log.info(
+                        "[session-lost] Skipping session-lost-reminder: mid-session MCP "
+                        f"reconnect detected (mode={mode!r}, age={file_age:.0f}s)"
+                    )
+                    return
+            except Exception:  # noqa: BLE001
+                pass  # Can't read state — fall through and write the reminder
+
+        now_utc = datetime.now(timezone.utc)
+        reminder_id = f"session-lost-{int(now_utc.timestamp())}"
+        reminder = {
+            "id": reminder_id,
+            "source": "system",
+            "type": "compact-reminder",
+            "chat_id": 0,
+            "text": (
+                "SESSION LOST — The MCP server restarted and your previous session was "
+                "invalidated. Re-orient now: read sys.dispatcher.bootup.md and resume "
+                "the main loop."
+            ),
+            "timestamp": now_utc.isoformat(),
+        }
+        inbox_file = INBOX_DIR / f"{reminder_id}.json"
+        atomic_write_json(inbox_file, reminder)
+        log.info(f"[session-lost] Wrote session-lost-reminder to inbox: {reminder_id}")
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"[session-lost] Failed to write session-lost-reminder: {exc}")
+
 
 def _get_current_http_session_id() -> str | None:
     """Return the MCP session ID for the current tool call request.
@@ -814,14 +1016,20 @@ def _get_current_http_session_id() -> str | None:
 def _tag_dispatcher_session(session_id: str) -> None:
     """Record session_id as the privileged dispatcher session.
 
-    Called by Option A (handle_wait_for_messages) and Option B
-    (handle_session_start with agent_type="dispatcher").  Whichever fires
-    first wins; both paths update on reconnect.
+    Called by Option A (handle_wait_for_messages), Option B
+    (handle_session_start with agent_type="dispatcher"), and Option C
+    (auto-tag on first guarded tool call after server restart).  Whichever
+    fires first wins; both paths update on reconnect.
+
+    Also writes the session_id to the dispatcher state file
+    (_DISPATCHER_SESSION_STATE_FILE) so hooks can read the current dispatcher
+    session without network calls or JSONL parsing.
     """
     global _dispatcher_session_id
     if session_id and session_id != _dispatcher_session_id:
         _dispatcher_session_id = session_id
         log.info(f"[session-tag] Dispatcher session tagged: {session_id}")
+        _write_dispatcher_state_file(session_id)
 
 
 def _is_main_http_session() -> bool:
@@ -1576,6 +1784,100 @@ async def list_tools() -> list[Tool]:
                 "required": ["task_id"],
             },
         ),
+        # IFTTT Behavioral Rules Tools
+        Tool(
+            name="list_rules",
+            description="List all IFTTT-style behavioral rules from the rules store. Returns id, condition, action_ref, and enabled for each rule. Pass resolve=true to also include the memory DB content for each action_ref.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "enabled_only": {
+                        "type": "boolean",
+                        "description": "If true, return only enabled rules. Default false (returns all rules).",
+                        "default": False,
+                    },
+                    "resolve": {
+                        "type": "boolean",
+                        "description": "If true, fetch and include the memory DB content for each action_ref. Default false.",
+                        "default": False,
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="add_rule",
+            description="Add a new IFTTT-style behavioral rule. The condition is the IF clause in plain English. The action_content is the THEN clause (plain-English behavioral instruction) — it is stored to the memory DB automatically and the resulting DB entry ID is used as action_ref in the YAML index. Returns the new rule's ID.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "condition": {
+                        "type": "string",
+                        "description": "Natural-language IF clause (one sentence, e.g. 'The user asks about a meeting or scheduling').",
+                    },
+                    "action_content": {
+                        "type": "string",
+                        "description": "Plain-English THEN clause (behavioral instruction). Stored to memory DB; the assigned DB entry ID becomes the action_ref.",
+                    },
+                },
+                "required": ["condition", "action_content"],
+            },
+        ),
+        Tool(
+            name="delete_rule",
+            description="Delete an IFTTT behavioral rule by ID. Returns true if deleted, false if not found. Pass delete_memory=true to also delete the memory DB entry for action_ref.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "rule_id": {
+                        "type": "string",
+                        "description": "The ID of the rule to delete.",
+                    },
+                    "delete_memory": {
+                        "type": "boolean",
+                        "description": "If true, also delete the memory DB entry referenced by action_ref. Default false.",
+                        "default": False,
+                    },
+                },
+                "required": ["rule_id"],
+            },
+        ),
+        Tool(
+            name="get_rule",
+            description="Get a single IFTTT behavioral rule by ID. Returns null if not found. Pass resolve=true to also include the memory DB content for action_ref.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "rule_id": {
+                        "type": "string",
+                        "description": "The ID of the rule to retrieve.",
+                    },
+                    "resolve": {
+                        "type": "boolean",
+                        "description": "If true, fetch and include the memory DB content for action_ref. Default false.",
+                        "default": False,
+                    },
+                },
+                "required": ["rule_id"],
+            },
+        ),
+        Tool(
+            name="update_rule",
+            description="Soft-disable or re-enable an IFTTT behavioral rule by ID. Returns the updated rule, or null if not found.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "rule_id": {
+                        "type": "string",
+                        "description": "The ID of the rule to update.",
+                    },
+                    "enabled": {
+                        "type": "boolean",
+                        "description": "Set to false to soft-disable the rule (kept in store, never applied). Set to true to re-enable.",
+                    },
+                },
+                "required": ["rule_id", "enabled"],
+            },
+        ),
         Tool(
             name="transcribe_audio",
             description="Transcribe a voice message to text using local whisper.cpp (small model). Use this for messages with type='voice'. Runs entirely locally using whisper.cpp - no cloud API or API key needed.",
@@ -1615,36 +1917,36 @@ async def list_tools() -> list[Tool]:
                 "required": ["url"],
             },
         ),
-        # Scheduled Jobs Tools
+        # Scheduled Jobs Tools (systemd timer backend)
         Tool(
             name="create_scheduled_job",
-            description="Create a new scheduled job that runs automatically via cron. Jobs run in separate Claude instances and write outputs to the task-outputs inbox.",
+            description="Create a new scheduled job backed by a systemd timer unit. The command must be an absolute path to an executable.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "Unique name for the job (lowercase, hyphens allowed, e.g., 'morning-weather').",
+                        "description": "Unique name for the job (lowercase alphanumeric + hyphens, e.g., 'morning-weather').",
                     },
                     "schedule": {
                         "type": "string",
-                        "description": "Cron schedule expression (e.g., '0 9 * * *' for 9am daily, '*/30 * * * *' for every 30 mins).",
+                        "description": "Schedule for the job. Accepts systemd OnCalendar expressions (e.g., '*-*-* 09:00:00' for 9am daily, '*:0/30:00' for every 30 mins, 'daily', 'hourly') or standard 5-field cron expressions (e.g., '0 9 * * *') which are auto-converted to systemd format.",
                     },
-                    "context": {
+                    "command": {
                         "type": "string",
-                        "description": "Instructions for the job. Describe what the scheduled task should do.",
+                        "description": "Absolute path to the executable to run (e.g., '/home/lobster/lobster/scheduled-tasks/my-job.sh').",
                     },
-                    "chat_id": {
+                    "description": {
                         "type": "string",
-                        "description": "Optional: chat_id of the user who owns this job. Notifications route to this user.",
+                        "description": "Optional human-readable description for the systemd unit.",
                     },
                 },
-                "required": ["name", "schedule", "context"],
+                "required": ["name", "schedule", "command"],
             },
         ),
         Tool(
             name="list_scheduled_jobs",
-            description="List all scheduled jobs with their status and schedules.",
+            description="List all lobster-managed systemd timer jobs with their schedule, last run, next run, and active status.",
             inputSchema={
                 "type": "object",
                 "properties": {},
@@ -1652,7 +1954,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="get_scheduled_job",
-            description="Get detailed information about a specific scheduled job.",
+            description="Get detailed information about a specific lobster-managed systemd timer job.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1666,7 +1968,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="update_scheduled_job",
-            description="Update an existing scheduled job's schedule, context, or enabled status.",
+            description="Update an existing lobster-managed job's schedule, command, or enabled state. Rewrites the unit files and restarts the timer when schedule/command change.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1676,15 +1978,15 @@ async def list_tools() -> list[Tool]:
                     },
                     "schedule": {
                         "type": "string",
-                        "description": "New cron schedule (optional).",
+                        "description": "New schedule (systemd OnCalendar or cron expression — auto-converted). Optional.",
                     },
-                    "context": {
+                    "command": {
                         "type": "string",
-                        "description": "New instructions for the job (optional).",
+                        "description": "New absolute path command (optional).",
                     },
                     "enabled": {
                         "type": "boolean",
-                        "description": "Enable or disable the job (optional).",
+                        "description": "Set to false to pause/disable the timer without deleting it. Set to true to re-enable it. Optional.",
                     },
                 },
                 "required": ["name"],
@@ -1692,7 +1994,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="delete_scheduled_job",
-            description="Delete a scheduled job and remove it from crontab.",
+            description="Stop, disable, and remove the systemd unit files for a lobster-managed job.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1702,6 +2004,20 @@ async def list_tools() -> list[Tool]:
                     },
                 },
                 "required": ["name"],
+            },
+        ),
+        Tool(
+            name="get_job_scaffold",
+            description="Return a starter script template for writing a lobster scheduled job. Use this as a starting point before creating a new job.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "kind": {
+                        "type": "string",
+                        "description": "Template kind: 'poller' (default). Returns the contents of the matching template file, or a minimal inline template.",
+                        "default": "poller",
+                    },
+                },
             },
         ),
         Tool(
@@ -1934,6 +2250,17 @@ async def list_tools() -> list[Tool]:
                             "recent output file activity can be presumed dead. Default: 30."
                         ),
                     },
+                    "idempotency": {
+                        "type": "string",
+                        "description": (
+                            "Re-run safety classification for orphan recovery. "
+                            "'safe' — read-only/idempotent task, safe to re-run automatically after restart. "
+                            "'unsafe' — task has side effects (sends messages, modifies files, posts comments); "
+                            "requires explicit user approval to re-run. "
+                            "'unknown' — caller did not classify (default; treated as unsafe for recovery)."
+                        ),
+                        "enum": ["safe", "unsafe", "unknown"],
+                    },
                 },
                 "required": ["agent_id", "description", "chat_id"],
             },
@@ -2022,6 +2349,27 @@ async def list_tools() -> list[Tool]:
                             "First 200 chars of the triggering message text. PII — stored "
                             "only in this private repo's SQLite DB, not forwarded to wire "
                             "server unless LOBSTER_WIRE_REDACT_PII=false."
+                        ),
+                    },
+                    "idempotency": {
+                        "type": "string",
+                        "description": (
+                            "Re-run safety classification for orphan recovery. "
+                            "'safe' — read-only/idempotent task, safe to re-run automatically after restart. "
+                            "'unsafe' — task has side effects (sends messages, modifies files, posts comments); "
+                            "requires explicit user approval to re-run. "
+                            "'unknown' — caller did not classify (default; treated as unsafe for recovery)."
+                        ),
+                        "enum": ["safe", "unsafe", "unknown"],
+                    },
+                    "claude_session_id": {
+                        "type": "string",
+                        "description": (
+                            "The Claude Code session UUID for this session "
+                            "(hook_input['session_id'], format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx). "
+                            "Required when agent_type='dispatcher': written to a dedicated state file "
+                            "so SessionStart hooks can correctly identify the dispatcher session. "
+                            "This is a different ID space from the MCP HTTP transport session ID."
                         ),
                     },
                 },
@@ -2475,6 +2823,28 @@ async def list_tools() -> list[Tool]:
                 "properties": {},
             },
         ),
+        Tool(
+            name="get_person_context",
+            description="Fetch context for a specific person. Returns role, contact info, and interaction history from the canonical people file.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "person": {
+                        "type": "string",
+                        "description": "Person name matching the file stem in people/ (e.g., 'Alice', 'Bob')",
+                    },
+                },
+                "required": ["person"],
+            },
+        ),
+        Tool(
+            name="list_people",
+            description="List all people tracked in Lobster's canonical memory. Returns person names for use with get_person_context().",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
         # Local Sync Awareness Tools
         Tool(
             name="check_local_sync",
@@ -2736,6 +3106,91 @@ async def list_tools() -> list[Tool]:
                 "required": [],
             },
         ),
+        # Session File Management Tools
+        Tool(
+            name="create_session_file",
+            description=(
+                "Create a new session file for today. Copies the session template, "
+                "substitutes the date/sequence/timestamps, writes the file to "
+                "~/lobster-user-config/memory/canonical/sessions/YYYYMMDD-NNN.md, "
+                "and records the path in /tmp/lobster-current-session-file. "
+                "Returns {path, session_id}."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        ),
+        Tool(
+            name="get_session_file",
+            description=(
+                "Read a session file. If session_id is 'current' (the default), "
+                "reads the pointer at /tmp/lobster-current-session-file, or finds "
+                "today's latest session. Otherwise looks up the file matching the "
+                "given YYYYMMDD-NNN session_id. "
+                "Returns {path, content, session_id}."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session ID (e.g. '20260329-001') or 'current'. Defaults to 'current'.",
+                        "default": "current",
+                    },
+                },
+                "required": [],
+            },
+        ),
+        Tool(
+            name="update_session_file",
+            description=(
+                "Update a named H2 section (e.g. '## Summary', '## Open Threads') "
+                "inside a session file. Replaces only the targeted section; all other "
+                "sections and the file header are preserved verbatim. Write is atomic "
+                "(temp-file + rename). "
+                "Returns {path, section, updated: true}."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "section": {
+                        "type": "string",
+                        "description": "Section name without the '## ' prefix, e.g. 'Summary' or 'Open Threads'.",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "New content for the section (replaces everything between the section header and the next H2 or EOF).",
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session ID (e.g. '20260329-001') or 'current'. Defaults to 'current'.",
+                        "default": "current",
+                    },
+                },
+                "required": ["section", "content"],
+            },
+        ),
+        Tool(
+            name="list_session_files",
+            description=(
+                "List session files, optionally filtered to a single date. "
+                "Returns a sorted list of {session_id, path, has_content} objects. "
+                "has_content is true when the Summary section contains more than 50 "
+                "characters of non-boilerplate text."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "date": {
+                        "type": "string",
+                        "description": "Optional YYYYMMDD date string to filter results.",
+                    },
+                },
+                "required": [],
+            },
+        ),
     ] + (
         # User Model Tools (only registered when feature flag is enabled)
         [
@@ -2858,6 +3313,17 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
         return await handle_get_task(arguments)
     elif name == "delete_task":
         return await handle_delete_task(arguments)
+    # IFTTT Behavioral Rules Tools
+    elif name == "list_rules":
+        return await handle_list_rules(arguments)
+    elif name == "add_rule":
+        return await handle_add_rule(arguments)
+    elif name == "delete_rule":
+        return await handle_delete_rule(arguments)
+    elif name == "get_rule":
+        return await handle_get_rule(arguments)
+    elif name == "update_rule":
+        return await handle_update_rule(arguments)
     elif name == "transcribe_audio":
         return await handle_transcribe_audio(arguments)
     # Headless Browser Fetch
@@ -2874,6 +3340,8 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
         return await handle_update_scheduled_job(arguments)
     elif name == "delete_scheduled_job":
         return await handle_delete_scheduled_job(arguments)
+    elif name == "get_job_scaffold":
+        return await handle_get_job_scaffold(arguments)
     elif name == "check_task_outputs":
         return await handle_check_task_outputs(arguments)
     elif name == "write_task_output":
@@ -2936,6 +3404,10 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
         return await handle_get_daily_digest(arguments)
     elif name == "list_projects":
         return await handle_list_projects(arguments)
+    elif name == "get_person_context":
+        return await handle_get_person_context(arguments)
+    elif name == "list_people":
+        return await handle_list_people(arguments)
     # Local Sync Awareness Tools
     elif name == "check_local_sync":
         return await handle_check_local_sync(arguments)
@@ -2967,6 +3439,15 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
         return await handle_create_report(arguments)
     elif name == "list_reports":
         return await handle_list_reports(arguments)
+    # Session File Management Tools
+    elif name == "create_session_file":
+        return await handle_create_session_file(arguments)
+    elif name == "get_session_file":
+        return await handle_get_session_file(arguments)
+    elif name == "update_session_file":
+        return await handle_update_session_file(arguments)
+    elif name == "list_session_files":
+        return await handle_list_session_files(arguments)
     # User Model Tools (dispatched to user_model subsystem)
     elif name in _user_model_tool_names and _user_model is not None:
         result_json = _user_model.dispatch(name, arguments)
@@ -4062,6 +4543,10 @@ async def handle_mark_processing(args: dict) -> list[TextContent]:
             # this is the common case and emitting on every no-match is pure noise.
             pass
 
+    # User message counter — session-note-appender trigger (issue #1159)
+    # Shared helper handles filtering, incrementing, and reminder injection.
+    _tick_user_message_counter(msg_type, msg_source)
+
     # Stamp _processing_started_at so stale detection uses actual claim time, not file mtime.
     try:
         msg_data["_processing_started_at"] = datetime.now(timezone.utc).isoformat()
@@ -4120,6 +4605,10 @@ async def handle_claim_and_ack(args: dict) -> list[TextContent]:
             source=msg_data.get("source"),
             ts=msg_data.get("timestamp"),
         )
+
+    # User message counter — session-note-appender trigger (issue #1159)
+    # Shared helper handles filtering, incrementing, and reminder injection.
+    _tick_user_message_counter(msg_type, msg_data.get("source", ""))
 
     log.info(f"claim_and_ack: message claimed: {message_id}")
 
@@ -4901,6 +5390,430 @@ async def handle_delete_task(args: dict) -> list[TextContent]:
 
 
 # =============================================================================
+# IFTTT Behavioral Rules Handlers
+# =============================================================================
+
+
+def _resolve_action_ref(action_ref: str) -> str:
+    """Fetch memory DB content for an action_ref ID.
+
+    Returns the content string, or a descriptive fallback when the memory
+    system is unavailable or the entry is not found.
+    """
+    if _memory_provider is None:
+        return "(memory system unavailable)"
+    if not action_ref:
+        return "(no action_ref)"
+    if not hasattr(_memory_provider, "get"):
+        return "(memory backend does not support get-by-ID)"
+    try:
+        event = _memory_provider.get(int(action_ref))
+        if event is None:
+            return f"(memory entry {action_ref} not found)"
+        return event.content
+    except (ValueError, TypeError):
+        return f"(action_ref '{action_ref}' is not a valid integer ID)"
+    except Exception as e:
+        log.warning(f"_resolve_action_ref: failed for action_ref={action_ref}: {e}")
+        return f"(error resolving action_ref: {e})"
+
+
+def _generate_rule_id(condition: str) -> str:
+    """Derive a stable slug from the condition text, falling back to a UUID suffix."""
+    import re
+    slug = condition.lower()
+    slug = re.sub(r"[^a-z0-9\s-]", "", slug)
+    slug = re.sub(r"\s+", "-", slug.strip())
+    slug = slug[:48].rstrip("-")
+    if not slug:
+        slug = "rule"
+    # Append short UUID fragment to avoid collisions
+    slug = f"{slug}-{_uuid_mod.uuid4().hex[:6]}"
+    return slug
+
+
+async def handle_list_rules(args: dict) -> list[TextContent]:
+    """List IFTTT behavioral rules."""
+    enabled_only = bool(args.get("enabled_only", False))
+    resolve = bool(args.get("resolve", False))
+    rules = _ifttt_load_rules()
+    if enabled_only:
+        rules = _ifttt_get_enabled_rules(rules)
+
+    if not rules:
+        label = "enabled " if enabled_only else ""
+        return [TextContent(type="text", text=f"No {label}rules found.")]
+
+    lines = []
+    for r in rules:
+        enabled_flag = "" if r.get("enabled", True) else " [disabled]"
+        entry = (
+            f"[{r['id']}]{enabled_flag}\n"
+            f"  condition:  {r['condition']}\n"
+            f"  action_ref: {r['action_ref']}"
+        )
+        if resolve:
+            content = _resolve_action_ref(r["action_ref"])
+            entry += f"\n  action:     {content}"
+        lines.append(entry)
+    summary = f"Rules: {len(rules)} total" + (f" ({sum(1 for r in rules if r.get('enabled', True))} enabled)" if not enabled_only else "")
+    output = "\n\n".join(lines) + f"\n\n---\n{summary}"
+    return [TextContent(type="text", text=output)]
+
+
+async def handle_add_rule(args: dict) -> list[TextContent]:
+    """Add a new IFTTT behavioral rule.
+
+    Stores action_content to the memory DB and uses the resulting entry ID
+    as action_ref in the YAML index.
+    """
+    condition = (args.get("condition") or "").strip()
+    action_content = (args.get("action_content") or "").strip()
+
+    if not condition:
+        return [TextContent(type="text", text="Error: condition is required.")]
+    if not action_content:
+        return [TextContent(type="text", text="Error: action_content is required.")]
+
+    if _memory_provider is None:
+        return [TextContent(type="text", text="Error: memory system is not available — cannot store action content.")]
+
+    event = MemoryEvent(
+        id=None,
+        timestamp=datetime.now(timezone.utc),
+        type="ifttt_action",
+        source="internal",
+        project=None,
+        content=action_content,
+        metadata={"tags": ["ifttt_rule"], "condition": condition},
+    )
+    try:
+        action_ref = str(_memory_provider.store(event))
+    except Exception as e:
+        log.error(f"handle_add_rule: memory store failed: {e}", exc_info=True)
+        return [TextContent(type="text", text=f"Error storing action to memory DB: {e}")]
+
+    rule_id = _generate_rule_id(condition)
+    rules = _ifttt_load_rules()
+    updated = _ifttt_add_rule(rules, rule_id=rule_id, condition=condition, action_ref=action_ref)
+    _ifttt_save_rules(updated)
+
+    return [TextContent(type="text", text=f"Rule added: {rule_id} (action_ref: {action_ref})")]
+
+
+async def handle_delete_rule(args: dict) -> list[TextContent]:
+    """Delete an IFTTT behavioral rule by ID.
+
+    Pass delete_memory=True to also delete the memory DB entry for action_ref.
+    """
+    rule_id = (args.get("rule_id") or "").strip()
+    if not rule_id:
+        return [TextContent(type="text", text="Error: rule_id is required.")]
+
+    rules = _ifttt_load_rules()
+    rule = _ifttt_find_rule(rules, rule_id)
+    if rule is None:
+        return [TextContent(type="text", text="false")]
+
+    delete_memory = bool(args.get("delete_memory", False))
+    memory_note = ""
+    if delete_memory:
+        action_ref = rule.get("action_ref", "")
+        if action_ref and _memory_provider is not None and hasattr(_memory_provider, "delete"):
+            try:
+                deleted = _memory_provider.delete(int(action_ref))
+                memory_note = f" (memory entry {action_ref} {'deleted' if deleted else 'not found'})"
+            except (ValueError, TypeError):
+                memory_note = f" (could not delete memory entry: action_ref '{action_ref}' is not a valid integer ID)"
+            except Exception as e:
+                log.warning(f"handle_delete_rule: memory delete failed for action_ref={action_ref}: {e}")
+                memory_note = f" (memory delete failed: {e})"
+        elif delete_memory and _memory_provider is None:
+            memory_note = " (memory system unavailable — rule deleted, memory entry not removed)"
+
+    updated = _ifttt_remove_rule(rules, rule_id)
+    _ifttt_save_rules(updated)
+    return [TextContent(type="text", text=f"true{memory_note}")]
+
+
+async def handle_get_rule(args: dict) -> list[TextContent]:
+    """Get a single IFTTT behavioral rule by ID."""
+    rule_id = (args.get("rule_id") or "").strip()
+    if not rule_id:
+        return [TextContent(type="text", text="Error: rule_id is required.")]
+
+    resolve = bool(args.get("resolve", False))
+    rules = _ifttt_load_rules()
+    rule = _ifttt_find_rule(rules, rule_id)
+    if rule is None:
+        return [TextContent(type="text", text="null")]
+
+    output = (
+        f"id:         {rule['id']}\n"
+        f"condition:  {rule['condition']}\n"
+        f"action_ref: {rule['action_ref']}\n"
+        f"enabled:    {rule.get('enabled', True)}"
+    )
+    if resolve:
+        content = _resolve_action_ref(rule["action_ref"])
+        output += f"\naction:     {content}"
+    return [TextContent(type="text", text=output)]
+
+
+async def handle_update_rule(args: dict) -> list[TextContent]:
+    """Soft-disable or re-enable an IFTTT behavioral rule by ID."""
+    rule_id = (args.get("rule_id") or "").strip()
+    if not rule_id:
+        return [TextContent(type="text", text="Error: rule_id is required.")]
+
+    enabled = args.get("enabled")
+    if enabled is None:
+        return [TextContent(type="text", text="Error: enabled is required.")]
+
+    rules = _ifttt_load_rules()
+    rule = _ifttt_find_rule(rules, rule_id)
+    if rule is None:
+        return [TextContent(type="text", text="null")]
+
+    updated_rules = [{**r, "enabled": bool(enabled)} if r["id"] == rule_id else r for r in rules]
+    _ifttt_save_rules(updated_rules)
+
+    updated_rule = _ifttt_find_rule(updated_rules, rule_id)
+    output = (
+        f"id:         {updated_rule['id']}\n"
+        f"condition:  {updated_rule['condition']}\n"
+        f"action_ref: {updated_rule['action_ref']}\n"
+        f"enabled:    {updated_rule.get('enabled', True)}"
+    )
+    return [TextContent(type="text", text=output)]
+
+
+# =============================================================================
+# Session File Management Handlers
+# =============================================================================
+
+# Pointer file written/read to track the current session
+_SESSION_POINTER_FILE = Path("/tmp/lobster-current-session-file")
+
+# Boilerplate placeholder text in session template summaries
+_SESSION_SUMMARY_BOILERPLATE = "<1-3 sentence summary"
+
+
+def _resolve_sessions_dir() -> Path:
+    """Return the sessions directory, creating it if absent."""
+    sessions_dir = _USER_CONFIG / "memory" / "canonical" / "sessions"
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    return sessions_dir
+
+
+def _resolve_session_template(sessions_dir: Path) -> str | None:
+    """Return template content, or None if the template file does not exist."""
+    template_path = sessions_dir / "session.template.md"
+    if template_path.exists():
+        return template_path.read_text()
+    return None
+
+
+def _next_sequence_number(sessions_dir: Path, date_str: str) -> int:
+    """Return the next available sequence number for *date_str* (YYYYMMDD)."""
+    existing = [
+        p.stem for p in sessions_dir.glob(f"{date_str}-*.md")
+        if p.stem != "session.template"
+    ]
+    if not existing:
+        return 1
+    numbers = []
+    for stem in existing:
+        parts = stem.split("-", 1)
+        if len(parts) == 2:
+            try:
+                numbers.append(int(parts[1]))
+            except ValueError:
+                pass
+    return max(numbers) + 1 if numbers else 1
+
+
+def _session_id_to_path(sessions_dir: Path, session_id: str) -> Path | None:
+    """Return the Path for *session_id*, or None if not found."""
+    candidate = sessions_dir / f"{session_id}.md"
+    return candidate if candidate.exists() else None
+
+
+def _resolve_current_session_path(sessions_dir: Path) -> Path | None:
+    """Return the 'current' session path via pointer file or latest today."""
+    if _SESSION_POINTER_FILE.exists():
+        try:
+            pointer = Path(_SESSION_POINTER_FILE.read_text().strip())
+            if pointer.exists():
+                return pointer
+        except Exception:
+            pass
+
+    # Fall back to the latest session file for today (UTC)
+    today = datetime.now(timezone.utc).strftime("%Y%m%d")
+    candidates = sorted(sessions_dir.glob(f"{today}-*.md"))
+    return candidates[-1] if candidates else None
+
+
+def _extract_section_content(text: str, section_name: str) -> str | None:
+    """Return the body text of a named H2 section, or None if not found."""
+    pattern = re.compile(
+        rf"^## {re.escape(section_name)}\s*\n(.*?)(?=\Z|^## )",
+        re.MULTILINE | re.DOTALL,
+    )
+    m = pattern.search(text)
+    return m.group(1) if m else None
+
+
+def _replace_section_content(text: str, section_name: str, new_body: str) -> str | None:
+    """
+    Replace the body of the named H2 section with *new_body*.
+
+    Returns the updated full text, or None if the section was not found.
+    """
+    pattern = re.compile(
+        rf"(^## {re.escape(section_name)}\s*\n)(.*?)(?=\Z|^## )",
+        re.MULTILINE | re.DOTALL,
+    )
+    if not pattern.search(text):
+        return None
+    body = new_body if new_body.endswith("\n") else new_body + "\n"
+    return pattern.sub(lambda m: m.group(1) + body, text)
+
+
+def _atomic_write(path: Path, content: str) -> None:
+    """Write *content* to *path* atomically via a sibling temp file + rename."""
+    tmp_path = path.with_suffix(".tmp")
+    tmp_path.write_text(content, encoding="utf-8")
+    os.rename(tmp_path, path)
+
+
+async def handle_create_session_file(args: dict) -> list[TextContent]:
+    """Create a new session file from the template."""
+    sessions_dir = _resolve_sessions_dir()
+    today = datetime.now(timezone.utc).strftime("%Y%m%d")
+    seq = _next_sequence_number(sessions_dir, today)
+    session_id = f"{today}-{seq:03d}"
+    file_path = sessions_dir / f"{session_id}.md"
+
+    template = _resolve_session_template(sessions_dir)
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    if template:
+        content = (
+            template
+            .replace("YYYYMMDD-NNN", session_id)
+            .replace("<ISO timestamp, e.g. 2026-03-25T14:32:00Z>", now_iso)
+        )
+    else:
+        content = (
+            f"# Session {session_id}\n\n"
+            f"**Started:** {now_iso}\n"
+            f"**Ended:** active\n\n"
+            "## Summary\n\n"
+            "## Open Threads\n\n"
+            "## Open Tasks\n\n"
+            "## Open Subagents\n\n"
+            "## Communication Channels\n\n"
+            "## Notable Events\n"
+        )
+
+    _atomic_write(file_path, content)
+    _atomic_write(_SESSION_POINTER_FILE, str(file_path))
+
+    import json as _json
+    result = _json.dumps({"path": str(file_path), "session_id": session_id})
+    return [TextContent(type="text", text=result)]
+
+
+async def handle_get_session_file(args: dict) -> list[TextContent]:
+    """Read a session file by ID or return the current one."""
+    import json as _json
+
+    session_id = args.get("session_id", "current")
+    sessions_dir = _resolve_sessions_dir()
+
+    if session_id == "current":
+        path = _resolve_current_session_path(sessions_dir)
+        if path is None:
+            return [TextContent(type="text", text='{"error": "No current session file found."}')]
+        resolved_id = path.stem
+    else:
+        path = _session_id_to_path(sessions_dir, session_id)
+        if path is None:
+            return [TextContent(type="text", text=_json.dumps({"error": f"Session file not found: {session_id}"}))]
+        resolved_id = session_id
+
+    content = path.read_text(encoding="utf-8")
+    result = _json.dumps({"path": str(path), "content": content, "session_id": resolved_id})
+    return [TextContent(type="text", text=result)]
+
+
+async def handle_update_session_file(args: dict) -> list[TextContent]:
+    """Update a named H2 section in a session file."""
+    import json as _json
+
+    section = args.get("section")
+    new_content = args.get("content")
+    session_id = args.get("session_id", "current")
+
+    if not section:
+        return [TextContent(type="text", text='{"error": "section is required."}')]
+    if new_content is None:
+        return [TextContent(type="text", text='{"error": "content is required."}')]
+
+    sessions_dir = _resolve_sessions_dir()
+
+    if session_id == "current":
+        path = _resolve_current_session_path(sessions_dir)
+        if path is None:
+            return [TextContent(type="text", text='{"error": "No current session file found."}')]
+    else:
+        path = _session_id_to_path(sessions_dir, session_id)
+        if path is None:
+            return [TextContent(type="text", text=_json.dumps({"error": f"Session file not found: {session_id}"}))]
+
+    original = path.read_text(encoding="utf-8")
+    updated = _replace_section_content(original, section, new_content)
+
+    if updated is None:
+        return [TextContent(type="text", text=_json.dumps({"error": f"Section not found: {section}"}))]
+
+    _atomic_write(path, updated)
+    result = _json.dumps({"path": str(path), "section": section, "updated": True})
+    return [TextContent(type="text", text=result)]
+
+
+async def handle_list_session_files(args: dict) -> list[TextContent]:
+    """List session files, optionally filtered by date."""
+    import json as _json
+
+    date_filter = args.get("date")
+    sessions_dir = _resolve_sessions_dir()
+
+    pattern = f"{date_filter}-*.md" if date_filter else "*.md"
+    candidates = sorted(
+        p for p in sessions_dir.glob(pattern)
+        if p.stem != "session.template" and re.match(r"^\d{8}-\d{3}$", p.stem)
+    )
+
+    def _has_content(path: Path) -> bool:
+        try:
+            text = path.read_text(encoding="utf-8")
+            body = _extract_section_content(text, "Summary") or ""
+            stripped = body.strip()
+            return len(stripped) > 50 and not stripped.startswith(_SESSION_SUMMARY_BOILERPLATE)
+        except Exception:
+            return False
+
+    entries = [
+        {"session_id": p.stem, "path": str(p), "has_content": _has_content(p)}
+        for p in candidates
+    ]
+    return [TextContent(type="text", text=_json.dumps(entries))]
+
+
+# =============================================================================
 # Audio Transcription Handler (Local Whisper.cpp)
 # =============================================================================
 
@@ -5241,390 +6154,191 @@ async def handle_fetch_page(args: dict) -> list[TextContent]:
 
 
 # =============================================================================
-# Scheduled Jobs Handlers
+# Scheduled Jobs Handlers (systemd timer backend)
 # =============================================================================
 
-import subprocess
-
-
-def load_scheduled_jobs() -> dict:
-    """Load scheduled jobs from file."""
-    try:
-        with open(SCHEDULED_JOBS_FILE, "r") as f:
-            return json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return {"jobs": {}}
-
-
-def save_scheduled_jobs(data: dict) -> None:
-    """Save scheduled jobs to file atomically (crash-safe)."""
-    atomic_write_json(SCHEDULED_JOBS_FILE, data)
-
-
-def validate_cron_schedule(schedule: str) -> tuple[bool, str]:
-    """Validate a cron schedule expression. Returns (is_valid, error_message)."""
-    parts = schedule.strip().split()
-    if len(parts) != 5:
-        return False, f"Cron schedule must have 5 parts (minute hour day month weekday), got {len(parts)}"
-
-    # Basic validation for each field
-    field_names = ["minute", "hour", "day", "month", "weekday"]
-    field_ranges = [(0, 59), (0, 23), (1, 31), (1, 12), (0, 7)]
-
-    for i, (part, name, (min_val, max_val)) in enumerate(zip(parts, field_names, field_ranges)):
-        # Allow *, */n, n, n-m, n,m,o patterns
-        if part == "*":
-            continue
-        if part.startswith("*/"):
-            try:
-                step = int(part[2:])
-                if step < 1:
-                    return False, f"Invalid step value in {name}: {part}"
-            except ValueError:
-                return False, f"Invalid step value in {name}: {part}"
-            continue
-
-        # Handle comma-separated values and ranges
-        for subpart in part.split(","):
-            if "-" in subpart:
-                try:
-                    start, end = subpart.split("-")
-                    start, end = int(start), int(end)
-                    if not (min_val <= start <= max_val and min_val <= end <= max_val):
-                        return False, f"Range out of bounds in {name}: {subpart}"
-                except ValueError:
-                    return False, f"Invalid range in {name}: {subpart}"
-            else:
-                try:
-                    val = int(subpart)
-                    if not (min_val <= val <= max_val):
-                        return False, f"Value out of range in {name}: {val} (must be {min_val}-{max_val})"
-                except ValueError:
-                    return False, f"Invalid value in {name}: {subpart}"
-
-    return True, ""
-
-
-def cron_to_human(schedule: str) -> str:
-    """Convert cron schedule to human-readable format."""
-    parts = schedule.strip().split()
-    if len(parts) != 5:
-        return schedule
-
-    minute, hour, day, month, weekday = parts
-
-    # Common patterns
-    if schedule == "* * * * *":
-        return "Every minute"
-    if minute.startswith("*/"):
-        mins = minute[2:]
-        if hour == "*" and day == "*" and month == "*" and weekday == "*":
-            return f"Every {mins} minutes"
-    if hour.startswith("*/"):
-        hrs = hour[2:]
-        if minute == "0" and day == "*" and month == "*" and weekday == "*":
-            return f"Every {hrs} hours"
-    if day == "*" and month == "*" and weekday == "*":
-        if minute != "*" and hour != "*":
-            return f"Daily at {hour}:{minute.zfill(2)}"
-    if weekday != "*" and day == "*" and month == "*":
-        days = {"0": "Sun", "1": "Mon", "2": "Tue", "3": "Wed", "4": "Thu", "5": "Fri", "6": "Sat", "7": "Sun"}
-        day_name = days.get(weekday, weekday)
-        if minute != "*" and hour != "*":
-            return f"Every {day_name} at {hour}:{minute.zfill(2)}"
-
-    return schedule
-
-
-def validate_job_name(name: str) -> tuple[bool, str]:
-    """Validate a job name. Returns (is_valid, error_message)."""
-    if not name:
-        return False, "Job name cannot be empty"
-    if not re.match(r'^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$', name):
-        return False, "Job name must be lowercase alphanumeric with hyphens, cannot start/end with hyphen"
-    if len(name) > 50:
-        return False, "Job name must be 50 characters or less"
-    return True, ""
-
-
-async def sync_crontab() -> tuple[bool, str]:
-    """Sync jobs.json to crontab. Returns (success, message).
-
-    Uses asyncio.create_subprocess_exec so the event loop remains responsive
-    while the crontab subprocess runs (fixes: sync was blocking for up to 10s).
-    """
-    sync_script = _REPO_DIR / "scheduled-tasks" / "sync-crontab.sh"
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            str(sync_script),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.communicate()
-            return False, "Sync script timed out"
-        if proc.returncode == 0:
-            return True, stdout.decode()
-        else:
-            return False, stderr.decode() or "Sync failed"
-    except Exception as e:
-        return False, str(e)
+from systemd_jobs import (
+    validate_name as _sj_validate_name,
+    validate_command as _sj_validate_command,
+    validate_schedule as _sj_validate_schedule,
+    normalize_schedule as _sj_normalize_schedule,
+    create_job as _sj_create_job,
+    list_jobs as _sj_list_jobs,
+    update_job as _sj_update_job,
+    delete_job as _sj_delete_job,
+    get_scaffold as _sj_get_scaffold,
+    _timer_path as _sj_timer_path,
+    _service_path as _sj_service_path,
+    _read_unit_field as _sj_read_unit_field,
+    _is_lobster_unit as _sj_is_lobster_unit,
+)
 
 
 async def handle_create_scheduled_job(args: dict) -> list[TextContent]:
-    """Create a new scheduled job."""
+    """Create a new systemd-timer-backed scheduled job."""
     name = args.get("name", "").strip().lower()
     schedule = args.get("schedule", "").strip()
-    context = args.get("context", "").strip()
+    command = args.get("command", "").strip()
+    description = args.get("description", "").strip()
 
-    # Validate name
-    valid, error = validate_job_name(name)
-    if not valid:
-        return [TextContent(type="text", text=f"Error: {error}")]
+    err = _sj_validate_name(name)
+    if err:
+        return [TextContent(type="text", text=f"Error: {err}")]
 
-    # Validate schedule
-    valid, error = validate_cron_schedule(schedule)
-    if not valid:
-        return [TextContent(type="text", text=f"Error: Invalid cron schedule - {error}")]
+    # Normalize converts cron expressions and validates via systemd-analyze
+    schedule, err = _sj_normalize_schedule(schedule)
+    if err:
+        return [TextContent(type="text", text=f"Error: {err}")]
 
-    if not context:
-        return [TextContent(type="text", text="Error: context is required")]
+    err = _sj_validate_command(command)
+    if err:
+        return [TextContent(type="text", text=f"Error: {err}")]
 
-    # Check if job already exists
-    data = load_scheduled_jobs()
-    if name in data.get("jobs", {}):
-        return [TextContent(type="text", text=f"Error: Job '{name}' already exists. Use update_scheduled_job to modify it.")]
+    try:
+        result = await _sj_create_job(name, schedule, command, description)
+    except Exception as exc:
+        return [TextContent(type="text", text=f"Error creating job '{name}': {exc}")]
 
-    # Create task markdown file
-    now = datetime.now(timezone.utc)
-    task_file = SCHEDULED_TASKS_TASKS_DIR / f"{name}.md"
-    schedule_human = cron_to_human(schedule)
+    if result.status == "already_exists":
+        return [TextContent(type="text", text=f"Job '{name}' already exists with the same schedule and command (no changes made).")]
 
-    task_content = f"""# {name.replace('-', ' ').title()}
-
-**Job**: {name}
-**Schedule**: {schedule_human} (`{schedule}`)
-**Created**: {_format_display_ts(now)}
-
-## Context
-
-You are running as a scheduled task. The main Lobster instance created this job.
-
-## Instructions
-
-{context}
-
-## Output
-
-When you complete your task, call `write_task_output` with:
-- job_name: "{name}"
-- output: Your results/summary
-- status: "success" or "failed"
-
-Keep output concise. The main Lobster instance will review this later.
-"""
-
-    task_file.write_text(task_content)
-
-    # Add to jobs.json
-    job_record = {
-        "name": name,
-        "schedule": schedule,
-        "schedule_human": schedule_human,
-        "task_file": f"tasks/{name}.md",
-        "created_at": now.isoformat(),
-        "updated_at": now.isoformat(),
-        "enabled": True,
-        "last_run": None,
-        "last_status": None,
-    }
-    chat_id = args.get("chat_id")
-    if chat_id is not None:
-        job_record["chat_id"] = chat_id
-    data["jobs"][name] = job_record
-    save_scheduled_jobs(data)
-
-    # Sync to crontab
-    success, msg = await sync_crontab()
-    if not success:
-        return [TextContent(type="text", text=f"Job created but crontab sync failed: {msg}")]
-
-    return [TextContent(type="text", text=f"Created scheduled job '{name}'\nSchedule: {schedule_human} (`{schedule}`)\nTask file: {task_file}")]
+    return [TextContent(type="text", text=(
+        f"Created scheduled job '{name}'\n"
+        f"Schedule: {schedule}\n"
+        f"Command: {command}\n"
+        f"Timer: /etc/systemd/system/lobster-{name}.timer\n"
+        f"Service: /etc/systemd/system/lobster-{name}.service"
+    ))]
 
 
 async def handle_list_scheduled_jobs(args: dict) -> list[TextContent]:
-    """List all scheduled jobs."""
-    data = load_scheduled_jobs()
-    jobs = data.get("jobs", {})
+    """List all lobster-managed systemd timer jobs."""
+    try:
+        jobs = await _sj_list_jobs()
+    except Exception as exc:
+        return [TextContent(type="text", text=f"Error listing jobs: {exc}")]
 
     if not jobs:
-        return [TextContent(type="text", text="No scheduled jobs configured.\n\nUse `create_scheduled_job` to create one.")]
+        return [TextContent(type="text", text="No lobster-managed scheduled jobs found.\n\nUse `create_scheduled_job` to create one.")]
 
-    output = "**Scheduled Jobs:**\n\n"
+    lines = ["**Scheduled Jobs:**\n"]
+    for job in sorted(jobs, key=lambda j: j.name):
+        status = "active" if job.active else "inactive"
+        lines.append(f"**{job.name}** ({status})")
+        lines.append(f"  Schedule: {job.schedule}")
+        lines.append(f"  Command: {job.command}")
+        lines.append(f"  Last run: {job.last_run or 'never'}")
+        lines.append(f"  Next run: {job.next_run or 'unknown'}")
+        lines.append("")
 
-    for name, job in sorted(jobs.items()):
-        status_icon = "" if job.get("enabled", True) else " (disabled)"
-        schedule = job.get("schedule_human", job.get("schedule", ""))
-        last_run = job.get("last_run", "never")
-        last_status = job.get("last_status", "-")
-
-        if last_run and last_run != "never":
-            try:
-                last_run = _format_iso_for_display(last_run, "%Y-%m-%d %I:%M %p %Z")
-            except (ValueError, TypeError):
-                pass
-
-        output += f"**{name}**{status_icon}\n"
-        output += f"  Schedule: {schedule}\n"
-        output += f"  Last run: {last_run} ({last_status})\n\n"
-
-    output += f"---\nTotal: {len(jobs)} job(s)"
-    return [TextContent(type="text", text=output)]
+    lines.append(f"---\nTotal: {len(jobs)} job(s)")
+    return [TextContent(type="text", text="\n".join(lines))]
 
 
 async def handle_get_scheduled_job(args: dict) -> list[TextContent]:
-    """Get details of a scheduled job."""
+    """Get details of a specific lobster-managed systemd timer job."""
     name = args.get("name", "").strip().lower()
 
     if not name:
         return [TextContent(type="text", text="Error: name is required")]
 
-    data = load_scheduled_jobs()
-    job = data.get("jobs", {}).get(name)
+    timer = _sj_timer_path(name)
+    service = _sj_service_path(name)
 
-    if not job:
+    if not timer.exists() or not _sj_is_lobster_unit(timer):
         return [TextContent(type="text", text=f"Error: Job '{name}' not found")]
 
-    # Read task file content
-    task_file = SCHEDULED_TASKS_TASKS_DIR / f"{name}.md"
-    task_content = ""
-    if task_file.exists():
-        task_content = task_file.read_text()
-
-    _fmt = "%Y-%m-%d %I:%M %p %Z"
-    created_disp = _format_iso_for_display(job.get("created_at", ""), _fmt) if job.get("created_at") else "N/A"
-    updated_disp = _format_iso_for_display(job.get("updated_at", ""), _fmt) if job.get("updated_at") else "N/A"
-    last_run_raw = job.get("last_run") or ""
-    last_run_disp = _format_iso_for_display(last_run_raw, _fmt) if last_run_raw else "never"
+    schedule = _sj_read_unit_field(timer, "OnCalendar") or "(unknown)"
+    command = _sj_read_unit_field(service, "ExecStart") or "(unknown)"
 
     output = f"**Job: {name}**\n\n"
-    output += f"**Schedule**: {job.get('schedule_human', '')} (`{job.get('schedule', '')}`)\n"
-    output += f"**Enabled**: {'Yes' if job.get('enabled', True) else 'No'}\n"
-    output += f"**Created**: {created_disp}\n"
-    output += f"**Updated**: {updated_disp}\n"
-    output += f"**Last Run**: {last_run_disp}\n"
-    output += f"**Last Status**: {job.get('last_status', '-')}\n\n"
-    output += f"---\n\n**Task File** (`{task_file}`):\n\n```markdown\n{task_content}\n```"
+    output += f"**Schedule**: {schedule}\n"
+    output += f"**Command**: {command}\n"
+    output += f"**Timer unit**: /etc/systemd/system/lobster-{name}.timer\n"
+    output += f"**Service unit**: /etc/systemd/system/lobster-{name}.service\n\n"
+    output += "---\n\n**Timer unit contents:**\n\n```ini\n"
+    try:
+        output += timer.read_text()
+    except OSError:
+        output += "(unable to read)"
+    output += "\n```\n\n**Service unit contents:**\n\n```ini\n"
+    try:
+        output += service.read_text()
+    except OSError:
+        output += "(unable to read)"
+    output += "\n```"
 
     return [TextContent(type="text", text=output)]
 
 
 async def handle_update_scheduled_job(args: dict) -> list[TextContent]:
-    """Update a scheduled job."""
+    """Update schedule, command, and/or enabled state for an existing lobster job."""
     name = args.get("name", "").strip().lower()
 
     if not name:
         return [TextContent(type="text", text="Error: name is required")]
 
-    data = load_scheduled_jobs()
-    job = data.get("jobs", {}).get(name)
+    schedule = args.get("schedule", "").strip() or None
+    command = args.get("command", "").strip() or None
+    enabled_raw = args.get("enabled")
+    enabled = None  # type: bool | None
+    if enabled_raw is not None:
+        if isinstance(enabled_raw, bool):
+            enabled = enabled_raw
+        elif isinstance(enabled_raw, str):
+            enabled = enabled_raw.lower() not in ("false", "0", "no")
 
-    if not job:
-        return [TextContent(type="text", text=f"Error: Job '{name}' not found")]
+    if schedule is not None:
+        # Normalize converts cron expressions and validates via systemd-analyze
+        schedule, err = _sj_normalize_schedule(schedule)
+        if err:
+            return [TextContent(type="text", text=f"Error: {err}")]
 
-    updated = []
+    if command is not None:
+        err = _sj_validate_command(command)
+        if err:
+            return [TextContent(type="text", text=f"Error: {err}")]
 
-    # Update schedule if provided
-    if "schedule" in args and args["schedule"]:
-        new_schedule = args["schedule"].strip()
-        valid, error = validate_cron_schedule(new_schedule)
-        if not valid:
-            return [TextContent(type="text", text=f"Error: Invalid cron schedule - {error}")]
-        job["schedule"] = new_schedule
-        job["schedule_human"] = cron_to_human(new_schedule)
-        updated.append(f"schedule -> {new_schedule}")
+    try:
+        result = await _sj_update_job(name, schedule=schedule, command=command, enabled=enabled)
+    except FileNotFoundError as exc:
+        return [TextContent(type="text", text=f"Error: {exc}")]
+    except Exception as exc:
+        return [TextContent(type="text", text=f"Error updating job '{name}': {exc}")]
 
-    # Update enabled if provided
-    if "enabled" in args:
-        job["enabled"] = bool(args["enabled"])
-        updated.append(f"enabled -> {job['enabled']}")
+    if not result.updated_fields:
+        return [TextContent(type="text", text="No changes specified. Provide schedule, command, or enabled.")]
 
-    # Update context if provided
-    if "context" in args and args["context"]:
-        new_context = args["context"].strip()
-        task_file = SCHEDULED_TASKS_TASKS_DIR / f"{name}.md"
-
-        # Rewrite task file
-        now = datetime.now(timezone.utc)
-        created_disp = _format_iso_for_display(job.get("created_at", "")) if job.get("created_at") else "N/A"
-        task_content = f"""# {name.replace('-', ' ').title()}
-
-**Job**: {name}
-**Schedule**: {job.get('schedule_human', '')} (`{job.get('schedule', '')}`)
-**Created**: {created_disp}
-**Updated**: {_format_display_ts(now)}
-
-## Context
-
-You are running as a scheduled task. The main Lobster instance created this job.
-
-## Instructions
-
-{new_context}
-
-## Output
-
-When you complete your task, call `write_task_output` with:
-- job_name: "{name}"
-- output: Your results/summary
-- status: "success" or "failed"
-
-Keep output concise. The main Lobster instance will review this later.
-"""
-        task_file.write_text(task_content)
-        updated.append("context (task file rewritten)")
-
-    if not updated:
-        return [TextContent(type="text", text="No changes specified. Provide schedule, context, or enabled.")]
-
-    job["updated_at"] = datetime.now(timezone.utc).isoformat()
-    save_scheduled_jobs(data)
-
-    # Sync to crontab
-    success, msg = await sync_crontab()
-    sync_status = "" if success else f"\n(Warning: crontab sync failed: {msg})"
-
-    return [TextContent(type="text", text=f"Updated job '{name}':\n- " + "\n- ".join(updated) + sync_status)]
+    return [TextContent(type="text", text=(
+        f"Updated job '{name}':\n- " + "\n- ".join(result.updated_fields)
+    ))]
 
 
 async def handle_delete_scheduled_job(args: dict) -> list[TextContent]:
-    """Delete a scheduled job."""
+    """Delete a lobster-managed systemd timer job."""
     name = args.get("name", "").strip().lower()
 
     if not name:
         return [TextContent(type="text", text="Error: name is required")]
 
-    data = load_scheduled_jobs()
-    if name not in data.get("jobs", {}):
-        return [TextContent(type="text", text=f"Error: Job '{name}' not found")]
+    try:
+        result = await _sj_delete_job(name)
+    except PermissionError as exc:
+        return [TextContent(type="text", text=f"Error: {exc}")]
+    except Exception as exc:
+        return [TextContent(type="text", text=f"Error deleting job '{name}': {exc}")]
 
-    # Remove from jobs.json
-    del data["jobs"][name]
-    save_scheduled_jobs(data)
+    if result.status == "not_found":
+        return [TextContent(type="text", text=f"Job '{name}' not found (nothing to delete).")]
 
-    # Delete task file
-    task_file = SCHEDULED_TASKS_TASKS_DIR / f"{name}.md"
-    if task_file.exists():
-        task_file.unlink()
+    return [TextContent(type="text", text=f"Deleted job '{name}' (timer stopped, disabled, unit files removed).")]
 
-    # Sync to crontab
-    success, msg = await sync_crontab()
-    sync_status = "" if success else f"\n(Warning: crontab sync failed: {msg})"
 
-    return [TextContent(type="text", text=f"Deleted job '{name}'" + sync_status)]
+async def handle_get_job_scaffold(args: dict) -> list[TextContent]:
+    """Return a starter script template for a lobster scheduled job."""
+    kind = args.get("kind", "poller").strip() or "poller"
+    content = _sj_get_scaffold(kind)
+    return [TextContent(type="text", text=f"**Job scaffold ({kind}):**\n\n```python\n{content}\n```")]
 
 
 async def handle_check_task_outputs(args: dict) -> list[TextContent]:
@@ -6033,6 +6747,7 @@ async def handle_register_agent(args: dict) -> list[TextContent]:
     source = (args.get("source") or "telegram").strip() or "telegram"
     output_file = args.get("output_file") or None
     timeout_minutes = args.get("timeout_minutes") or None
+    idempotency = args.get("idempotency") or None
 
     if not agent_id:
         return [TextContent(type="text", text="Error: agent_id is required")]
@@ -6063,12 +6778,20 @@ async def handle_register_agent(args: dict) -> list[TextContent]:
             source=source,
             output_file=output_file,
             timeout_minutes=timeout_minutes,
+            idempotency=idempotency,
         )
     except Exception as exc:
         log.error(f"register_agent failed: {exc}", exc_info=True)
         return [TextContent(type="text", text=f"Error recording agent: {exc}")]
 
     log.info(f"Registered pending agent: agent_id={agent_id!r} chat_id={chat_id_int}")
+    _emit_event(
+        text=f"agent.spawn: agent_id={agent_id!r} description={description!r}",
+        event_type="agent.spawn",
+        severity="info",
+        task_id=task_id,
+        chat_id=chat_id_int,
+    )
     return [TextContent(
         type="text",
         text=f"Agent registered: {agent_id!r} — {description}",
@@ -6092,6 +6815,11 @@ async def handle_unregister_agent(args: dict) -> list[TextContent]:
         return [TextContent(type="text", text=f"Error removing agent: {exc}")]
 
     log.info(f"Unregistered pending agent: agent_id={agent_id!r}")
+    _emit_event(
+        text=f"agent.complete: agent_id={agent_id!r} status=completed",
+        event_type="agent.complete",
+        severity="info",
+    )
     return [TextContent(
         type="text",
         text=f"Agent unregistered: {agent_id!r}",
@@ -6122,6 +6850,8 @@ async def handle_session_start(args: dict) -> list[TextContent]:
     input_summary = args.get("input_summary") or None
     trigger_message_id = args.get("trigger_message_id") or None
     trigger_snippet = args.get("trigger_snippet") or None
+    idempotency = args.get("idempotency") or None
+    claude_session_id = (args.get("claude_session_id") or "").strip() or None
 
     if not agent_id:
         return [TextContent(type="text", text="Error: agent_id is required")]
@@ -6150,12 +6880,20 @@ async def handle_session_start(args: dict) -> list[TextContent]:
             input_summary=input_summary,
             trigger_message_id=trigger_message_id,
             trigger_snippet=trigger_snippet,
+            idempotency=idempotency,
         )
     except Exception as exc:
         log.error(f"session_start failed: {exc}", exc_info=True)
         return [TextContent(type="text", text=f"Error starting session: {exc}")]
 
     log.info(f"Session started: agent_id={agent_id!r} agent_type={agent_type!r} chat_id={chat_id}")
+    _emit_event(
+        text=f"agent.spawn: agent_id={agent_id!r} agent_type={agent_type!r} description={description!r}",
+        event_type="agent.spawn",
+        severity="info",
+        task_id=task_id,
+        chat_id=chat_id if isinstance(chat_id, (int, str)) else None,
+    )
 
     # Option B: explicit dispatcher declaration.
     # If the caller declares itself as the dispatcher, tag its MCP session ID
@@ -6166,6 +6904,14 @@ async def handle_session_start(args: dict) -> list[TextContent]:
         http_session_id = _get_current_http_session_id()
         if http_session_id is not None:
             _tag_dispatcher_session(http_session_id)
+
+    # Write the Claude session UUID when the dispatcher provides it.
+    # SessionStart hooks receive the Claude UUID (hook_input["session_id"]),
+    # which is a different ID space from the HTTP transport session ID written
+    # above by _tag_dispatcher_session().  Having a dedicated file for the
+    # Claude UUID allows hooks to match correctly without any ID-format conversion.
+    if agent_type == "dispatcher" and claude_session_id:
+        _write_dispatcher_claude_session_file(claude_session_id)
 
     # Notify wire server so SSE clients update within 40ms
     asyncio.create_task(_notify_wire_server())
@@ -6202,6 +6948,11 @@ async def handle_session_end(args: dict) -> list[TextContent]:
         return [TextContent(type="text", text=f"Error ending session: {exc}")]
 
     log.info(f"Session ended: agent_id={agent_id!r} status={status!r}")
+    _emit_event(
+        text=f"agent.complete: agent_id={agent_id!r} status={status!r}",
+        event_type="agent.complete",
+        severity="info" if status == "completed" else "warn",
+    )
     # Notify wire server so SSE clients update within 40ms
     asyncio.create_task(_notify_wire_server())
     return [TextContent(
@@ -6963,6 +7714,17 @@ def _list_project_names() -> list[dict]:
     ]
 
 
+def _list_person_names() -> list[dict]:
+    """Pure helper: list person markdown files under CANONICAL_DIR/people/."""
+    people_dir = CANONICAL_DIR / "people"
+    if not people_dir.exists():
+        return []
+    return [
+        {"name": f.stem, "path": str(f)}
+        for f in sorted(people_dir.glob("*.md"))
+    ]
+
+
 async def handle_get_priorities(arguments: dict[str, Any]) -> list[TextContent]:
     """Return the canonical priorities.md content."""
     try:
@@ -7023,6 +7785,42 @@ async def handle_list_projects(arguments: dict[str, Any]) -> list[TextContent]:
     except Exception as e:
         log.error(f"list_projects failed: {e}", exc_info=True)
         return [TextContent(type="text", text=f"Error listing projects: {e}")]
+
+
+async def handle_get_person_context(arguments: dict[str, Any]) -> list[TextContent]:
+    """Return a specific person's canonical markdown content."""
+    person = arguments.get("person", "")
+    if not person:
+        return [TextContent(type="text", text="Error: person name is required.")]
+
+    # Sanitize: reject path traversal attempts
+    if "/" in person or "\\" in person or ".." in person:
+        return [TextContent(type="text", text="Error: invalid person name.")]
+
+    try:
+        path = CANONICAL_DIR / "people" / f"{person}.md"
+        if path.exists():
+            return [TextContent(type="text", text=path.read_text())]
+        available = [f.stem for f in (CANONICAL_DIR / "people").glob("*.md")] if (CANONICAL_DIR / "people").exists() else []
+        return [TextContent(
+            type="text",
+            text=f"No person file for '{person}'. Available: {', '.join(available) or 'none'}",
+        )]
+    except Exception as e:
+        log.error(f"get_person_context failed: {e}", exc_info=True)
+        return [TextContent(type="text", text=f"Error reading person context: {e}")]
+
+
+async def handle_list_people(arguments: dict[str, Any]) -> list[TextContent]:
+    """List all person files in canonical memory."""
+    try:
+        people = _list_person_names()
+        if not people:
+            return [TextContent(type="text", text="No person files found in canonical memory.")]
+        return [TextContent(type="text", text=json.dumps(people, indent=2))]
+    except Exception as e:
+        log.error(f"list_people failed: {e}", exc_info=True)
+        return [TextContent(type="text", text=f"Error listing people: {e}")]
 
 
 # =============================================================================
@@ -8121,6 +8919,17 @@ async def main():
     """Run the MCP server."""
     setup_logging()
     _ensure_observation_worker()
+
+    # Clear the dispatcher state file on startup so a stale session ID from a
+    # previous run cannot linger and mislead hooks into thinking the old session
+    # is still active.  The file is re-written by _tag_dispatcher_session() once
+    # the dispatcher identifies itself via Options A, B, or C.
+    _clear_dispatcher_state_file()
+
+    # Write a session-lost-reminder to the inbox so the dispatcher knows to
+    # re-orient after reconnecting.  Skipped for mid-session MCP reconnects.
+    # See _write_session_lost_reminder() for full rationale.
+    _write_session_lost_reminder()
 
     # Initialize the event bus singleton with standard listeners.
     # JsonlFileListener writes all events to logs/events.jsonl.
