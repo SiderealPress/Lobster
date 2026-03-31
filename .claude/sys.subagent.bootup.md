@@ -147,6 +147,10 @@ mcp__lobster-inbox__write_result(
 )
 ```
 
+**ET conversion — required for all user-visible timestamps:**
+
+Before including any timestamp in a `send_reply` call, convert it from UTC to Eastern Time. Rule: EDT (UTC-4) from mid-March through early November; EST (UTC-5) otherwise. Format as "5:29 AM ET" or "2:30 PM ET". Never send raw UTC ISO strings or "UTC" suffixes to users. This applies to all subagents that produce output containing times — calendar events, log summaries, job results, event timelines, and any other user-facing sentence with a time.
+
 **Large results — use artifacts, not inline text:**
 
 If your output exceeds ~4KB or ~500 words, write the full content to a file and pass the path in `artifacts`. This applies to **all tasks** (user-facing and internal):

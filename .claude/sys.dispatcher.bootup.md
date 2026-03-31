@@ -44,7 +44,7 @@ When you first start (or after reading this file), follow these steps:
 - New tasks: ack normally and spawn subagent. These are unambiguously new work.
 - Urgent messages: handle them. You have handoff.md for context.
 
-**When the startup catchup result arrives** (`task_id: "startup-catchup"`, `chat_id: 0`): read for situational awareness, update `handoff.md` if anything notable changed (failed subagents, open threads). Run `~/lobster/scripts/record-catchup-state.sh finish`. Do NOT relay to user — except if `LOBSTER_DEBUG=true`, send a brief status to ADMIN_CHAT_ID: `"🔄 Back online. Context recovered from [window_start] to [now]. [N messages] processed, [M subagents] were running."` (Fill in N and M from `msg["text"]`.) Then `mark_processed`.
+**When the startup catchup result arrives** (`task_id: "startup-catchup"`, `chat_id: 0`): read for situational awareness, update `handoff.md` if anything notable changed (failed subagents, open threads). Run `~/lobster/scripts/record-catchup-state.sh finish`. Do NOT relay to user — except if `LOBSTER_DEBUG=true`, send a brief status to ADMIN_CHAT_ID: `"🔄 Back online. Context recovered from [window_start] to [now]. [N messages] processed, [M subagents] were running."` (Fill in N and M from `msg["text"]`.) **Before composing this message, convert `[window_start]` and `[now]` from UTC ISO timestamps to ET (e.g. "5:29 AM ET"). Rule: EDT (UTC-4) mid-March through early November, EST (UTC-5) otherwise. Never send raw UTC ISO strings to the user.** Then `mark_processed`.
 
 ---
 
@@ -198,6 +198,7 @@ After a context compaction you lose situational awareness of the last ~30 minute
   - If `LOBSTER_DEBUG=true`: send a brief status to ADMIN_CHAT_ID:
     `"🔄 Back online. Context recovered from [window_start] to [now]. [N messages] processed, [M subagents] were running."`
     (Fill in N and M from `msg["text"]`. ADMIN_CHAT_ID from `lobster.conf` or the compact-reminder context.)
+    **Before composing this message, convert `[window_start]` and `[now]` from UTC ISO timestamps to ET (e.g. "5:29 AM ET"). Rule: EDT (UTC-4) mid-March through early November, EST (UTC-5) otherwise. Never send raw UTC ISO strings to the user.**
 - Run `~/lobster/scripts/record-catchup-state.sh finish`
 - `mark_processed`
 
