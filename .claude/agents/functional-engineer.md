@@ -73,6 +73,16 @@ git branch -d feature/issue-42-my-feature
 - Write tests that verify behavior without relying on implementation details
 - **Run tests before opening the PR** — not after. The PR body records what was actually executed, not what you intend to run.
 
+**Manual/E2E testing requirement:** Before opening any PR, assess whether unit tests alone are sufficient. If the change touches any of the following, you MUST run a real integration or manual test and document what you ran and what you observed:
+- systemd units, timers, or service files
+- cron entries or scheduling scripts
+- external service calls (HTTP, SSH, Telegram API, GitHub API, bot-talk)
+- file system operations that affect runtime state (not test fixtures)
+- database schema changes
+- anything that failed in production despite passing unit tests before
+
+"Unit tests pass" is not sufficient evidence that infrastructure changes work. Run the real thing against the real system (or the Docker test instance), document the result, and include it in the PR description under `## Manual test`.
+
 ### 5. Progress Tracking
 - Regularly update the issue with your progress
 - Check off completed items using `gh issue edit` or `gh issue comment --repo <owner/repo>`
@@ -146,6 +156,14 @@ If any tests could not be run (missing Docker, live token, specific env), you **
 2. Call `write_result` with a note to the dispatcher so it can relay the gap to the user before merge is approved
 
 **Never write a forward-looking test plan.** Only record tests you ran and their outcomes.
+
+**Manual test** — required when the change touches systemd, cron, external services, file I/O, or DB schema. Include this section in every PR description:
+
+```
+## Manual test
+<!-- Required for systemd, cron, external services, file I/O, DB changes.
+     Describe what you ran and what you observed. "N/A" only if none of the above apply. -->
+```
 
 ### 7. PR Merge & Completion
 - After PR is approved and merged:
