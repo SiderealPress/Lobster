@@ -2264,7 +2264,7 @@ PYEOF
         migrated=$((migrated + 1))
     fi
 
-    # Migration 60: Wire lobstertalk-incoming-handler service to use the SSH pre-check wrapper.
+    # Migration 62: Wire lobstertalk-incoming-handler service to use the SSH pre-check wrapper.
     # The service was created calling dispatch-job.sh directly, which means it spawns
     # a Claude subagent even when the bot-talk host (46.224.41.108) is unreachable and
     # fails noisily. The pre-check wrapper (lobstertalk-incoming-check-dispatch.sh) tests
@@ -2279,8 +2279,8 @@ PYEOF
             sudo sed -i \
                 "s|ExecStart=.*/dispatch-job.sh lobstertalk-incoming-handler|ExecStart=$LOBSTER_DIR/scheduled-tasks/run-lobstertalk-incoming-handler.sh|" \
                 "$LOBSTERTALK_SERVICE"
-            sudo systemctl daemon-reload 2>/dev/null || warn "Failed to reload systemd daemon after M60"
-            substep "M60: Updated lobstertalk-incoming-handler service to use SSH pre-check wrapper"
+            sudo systemctl daemon-reload 2>/dev/null || warn "Failed to reload systemd daemon after M62"
+            substep "M62: Updated lobstertalk-incoming-handler service to use SSH pre-check wrapper"
             migrated=$((migrated + 1))
         fi
     fi
