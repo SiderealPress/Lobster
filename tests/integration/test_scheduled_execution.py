@@ -53,6 +53,47 @@ class TestScheduledJobCreation:
         )
         assert "Created" in result[0].text
 
+    @pytest.mark.asyncio
+    async def test_create_job_invokes_systemd_backend(self):
+        """create_scheduled_job invokes the systemd backend (create_job) and
+        the timer + service unit names appear in the response.
+
+        The old backend wrote a jobs.json file; the new backend writes
+        /etc/systemd/system/lobster-<name>.{timer,service}. This test
+        verifies the new backend is wired correctly by checking that:
+        1. _sj_create_job is called with the expected arguments.
+        2. The MCP response references the unit file names.
+        """
+        captured = {}
+
+        async def fake_create_job(name, schedule, command, description=""):
+            captured.update({"name": name, "schedule": schedule, "command": command})
+            from src.mcp.systemd_jobs import CreateResult
+            return CreateResult(name=name, status="created")
+
+        with patch("inbox_server._sj_validate_name", return_value=None), \
+             patch("inbox_server._sj_validate_command", return_value=None), \
+             patch("inbox_server._sj_create_job", side_effect=fake_create_job):
+            import sys
+            from pathlib import Path as _Path
+            _mcp = _Path(__file__).parent.parent.parent / "src" / "mcp"
+            if str(_mcp) not in sys.path:
+                sys.path.insert(0, str(_mcp))
+            import inbox_server as _is
+            result = await _is.handle_create_scheduled_job({
+                "name": "daily-backup",
+                "schedule": "0 2 * * *",
+                "command": "/bin/echo backup",
+            })
+
+        assert captured.get("name") == "daily-backup"
+        # Schedule must be systemd format (cron was converted)
+        assert captured.get("schedule") == "*-*-* 02:00:00"
+        # Response must reference the unit files — proves systemd path was taken
+        text = result[0].text
+        assert "lobster-daily-backup.timer" in text
+        assert "lobster-daily-backup.service" in text
+
 
 @pytest.mark.integration
 class TestJobExecution:
