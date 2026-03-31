@@ -2264,6 +2264,27 @@ PYEOF
         migrated=$((migrated + 1))
     fi
 
+    # Migration 60: Wire lobstertalk-incoming-handler service to use the SSH pre-check wrapper.
+    # The service was created calling dispatch-job.sh directly, which means it spawns
+    # a Claude subagent even when the bot-talk host (46.224.41.108) is unreachable and
+    # fails noisily. The pre-check wrapper (lobstertalk-incoming-check-dispatch.sh) tests
+    # SSH connectivity first and exits cleanly if the host is down.
+    local LOBSTERTALK_SERVICE="/etc/systemd/system/lobster-lobstertalk-incoming-handler.service"
+    local LOBSTERTALK_PRECHECK_SCRIPT="$LOBSTER_DIR/scheduled-tasks/lobstertalk-incoming-check-dispatch.sh"
+    local LOBSTERTALK_RUN_SCRIPT="$LOBSTER_DIR/scheduled-tasks/run-lobstertalk-incoming-handler.sh"
+    if [ -f "$LOBSTERTALK_SERVICE" ] && [ -f "$LOBSTERTALK_PRECHECK_SCRIPT" ]; then
+        if grep -q "dispatch-job.sh lobstertalk-incoming-handler" "$LOBSTERTALK_SERVICE"; then
+            chmod +x "$LOBSTERTALK_PRECHECK_SCRIPT" 2>/dev/null || true
+            chmod +x "$LOBSTERTALK_RUN_SCRIPT" 2>/dev/null || true
+            sudo sed -i \
+                "s|ExecStart=.*/dispatch-job.sh lobstertalk-incoming-handler|ExecStart=$LOBSTER_DIR/scheduled-tasks/run-lobstertalk-incoming-handler.sh|" \
+                "$LOBSTERTALK_SERVICE"
+            sudo systemctl daemon-reload 2>/dev/null || warn "Failed to reload systemd daemon after M60"
+            substep "M60: Updated lobstertalk-incoming-handler service to use SSH pre-check wrapper"
+            migrated=$((migrated + 1))
+        fi
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
