@@ -50,7 +50,7 @@ def _load_bot_talk_token() -> str:
 
 token = _load_bot_talk_token()
 if not token:
-    # log error, call write_task_output with status "failed", then write_result with chat_id=0
+    # log error, call write_task_output with status "failed", then write_result with chat_id=8305714125
     ...
 headers = {"X-Bot-Token": token}
 ```
@@ -250,4 +250,4 @@ Call `write_task_output` with:
 If new messages were forwarded to Telegram, call `write_result` with `chat_id=8305714125` and
 `sent_reply_to_user=True` (Telegram notifications were already sent inline).
 
-If no new messages, call `write_result` with `chat_id=0` (silent).
+If no new messages, call `write_result` with `chat_id=8305714125` (dispatcher handles silently — no Telegram message sent).
