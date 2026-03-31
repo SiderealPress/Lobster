@@ -39,10 +39,17 @@ emitted for any session tagged 'dispatcher'.
 If the dispatcher crashes or is killed without a clean `lobster stop`, the
 marker file retains the dead session's ID. On the next start, the new
 dispatcher's session_id won't match and would normally be misclassified as a
-subagent. This hook detects that the stored session's .jsonl file no longer
-exists and correctly classifies the new session as the replacement dispatcher.
-The primary defence against this scenario is `lobster stop` (and `restart`)
-clearing the marker file; this check is a secondary safety net.
+subagent. This hook detects that the stored session's JSONL file has not been
+modified recently (idle for longer than JSONL_MAX_IDLE_SECONDS, default 3
+hours) and correctly classifies the new session as the replacement dispatcher.
+
+Note: Claude Code never deletes JSONL files for ended sessions, so presence
+alone cannot distinguish a live session from a dead one.  Using mtime (last
+modification time) as a proxy for liveness is reliable because active
+dispatcher sessions append to their JSONL file on every message.  A JSONL
+file that has not been modified for 3+ hours belongs to an idle or dead
+session.  The primary defence against this scenario is `lobster stop` (and
+`restart`) clearing the marker file; this check is a secondary safety net.
 
 ## settings.json configuration
 
@@ -67,6 +74,7 @@ via a "compact" matcher — the two hooks can coexist safely.
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 # Allow imports from both the hooks directory (session_role) and src/agents (session_store).
@@ -78,13 +86,21 @@ sys.path.insert(0, str(_SRC_DIR))
 import session_role  # noqa: E402 — path insert must precede this
 from agents import session_store  # noqa: E402
 
+# A JSONL file not modified for longer than this is treated as belonging to an
+# idle or dead session.  Active dispatcher sessions append to their JSONL on
+# every message, so 3 hours of silence indicates the session has ended.
+JSONL_MAX_IDLE_SECONDS = 3 * 60 * 60  # 3 hours
+
 
 def _stored_session_is_alive(stored_session_id: str) -> bool:
-    """Return True if the stored dispatcher session's JSONL file still exists.
+    """Return True if the stored dispatcher session appears to be active.
 
     Claude Code stores each session's conversation as
-    ~/.claude/projects/<workspace-slug>/<session-id>.jsonl. If the file is
-    gone, the session has ended and can no longer be the active dispatcher.
+    ~/.claude/projects/<workspace-slug>/<session-id>.jsonl.  Claude never
+    deletes these files, so presence alone does not mean the session is live.
+    Instead, we check the file's modification time: a JSONL file not written
+    to for longer than JSONL_MAX_IDLE_SECONDS belongs to an idle or dead
+    session.
 
     Falls back to True (conservative / assume alive) if the project directory
     cannot be determined or the JSONL file is not found via glob.
@@ -95,8 +111,11 @@ def _stored_session_is_alive(stored_session_id: str) -> bool:
             return True  # can't determine — assume alive (conservative)
         # Search all workspace subdirectories for the session file.
         for jsonl in projects_dir.glob(f"*/{stored_session_id}.jsonl"):
-            return True
-        # No JSONL file found anywhere — the stored session ended.
+            # File found — check whether it has been modified recently.
+            age_seconds = time.time() - jsonl.stat().st_mtime
+            return age_seconds < JSONL_MAX_IDLE_SECONDS
+        # No JSONL file found anywhere — the stored session ended (or was never
+        # started here); treat as dead.
         return False
     except Exception:  # noqa: BLE001
         return True  # conservative fallback
