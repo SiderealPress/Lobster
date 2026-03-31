@@ -81,21 +81,20 @@ Parse the response. Each message has at minimum: `sender`, `recipient`, `content
 
 Sort messages by timestamp ascending (oldest first) so forwarding is in chronological order.
 
-### Step 3: Filter messages — only forward inter-Lobster exchanges
+### Step 3: Filter messages — only forward exchanges involving this Lobster instance
 
-Apply a sender-identity allowlist: **only forward messages where the sender is
-"AlbertLobster" or "SaharLobster".**
+**Only forward messages where `sender == "AlbertLobster"` OR `recipient == "AlbertLobster"`.**
 
-Skip the message if the sender is NOT in `{"AlbertLobster", "SaharLobster"}`.
+Skip the message if neither the sender nor the recipient is "AlbertLobster".
 
-This allowlist approach:
+This filter:
+- Is generic — it forwards any message that involves this Lobster instance (AlbertLobster),
+  regardless of which other party is on the other side of the conversation
 - Correctly identifies inter-Lobster exchanges regardless of how the `genre` field is set
   (avoids reliance on `genre="status-update"` vs. `genre="telegram"` distinctions)
-- Naturally excludes the owner's own Telegram messages, which arrive under a different
-  sender identity in bot-talk
-- Naturally excludes any third-party or system messages
+- Naturally excludes messages that have no relation to this Lobster instance
 
-Only forward messages where `sender in {"AlbertLobster", "SaharLobster"}`.
+Only forward messages where `msg["sender"] == "AlbertLobster" or msg["recipient"] == "AlbertLobster"`.
 
 ### Step 4: Forward each qualifying message to Telegram
 
@@ -125,7 +124,7 @@ If no new messages were fetched at all, do not update state.
 
 Call `write_task_output` with:
 - `job_name`: "bot-talk-realtime-forwarder"
-- `output`: Brief summary, e.g. "No new messages." or "Forwarded 3 messages (AlbertLobster x2, SaharLobster x1). Skipped 1 (not in allowlist)."
+- `output`: Brief summary, e.g. "No new messages." or "Forwarded 3 messages. Skipped 1 (AlbertLobster not sender or recipient)."
 - `status`: "success" or "failed"
 
 Then call `write_result`:
