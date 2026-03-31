@@ -462,6 +462,162 @@ class TestRunJobShDedupGuard:
         assert len(inbox_files) == 2, f"Expected 2 inbox files (other + dispatched), got {len(inbox_files)}"
 
 
+        subprocess.run(
+            ["bash", str(RUN_JOB), "no-task-job"],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+        jobs_json_path = workspace / "scheduled-jobs" / "jobs.json"
+        data = json.loads(jobs_json_path.read_text())
+        assert data["jobs"]["no-task-job"]["enabled"] is False, (
+            "Job must be auto-disabled when task file is missing"
+        )
+
+    def test_missing_task_file_logs_auto_disable(self, tmp_path):
+        """Log must mention auto-disable so operator knows what happened."""
+        workspace, messages_dir, config_dir = _setup_workspace(
+            tmp_path, "no-task-job", enabled=True, has_task_file=False
+        )
+        env = _make_env(workspace, config_dir, messages_dir)
+
+        subprocess.run(
+            ["bash", str(RUN_JOB), "no-task-job"],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+        log_dir = workspace / "scheduled-jobs" / "logs"
+        log_files = list(log_dir.glob("no-task-job-*.log"))
+        assert len(log_files) == 1
+        log_content = log_files[0].read_text()
+        assert "auto-disab" in log_content.lower(), (
+            f"Expected 'auto-disab' in log, got: {log_content!r}"
+        )
+
+    def test_auto_disabled_job_does_not_dispatch_on_second_run(self, tmp_path):
+        """Once auto-disabled, a second cron fire must skip silently with no inbox message."""
+        workspace, messages_dir, config_dir = _setup_workspace(
+            tmp_path, "no-task-job", enabled=True, has_task_file=False
+        )
+        env = _make_env(workspace, config_dir, messages_dir)
+        inbox_dir = messages_dir / "inbox"
+
+        # First run: detects missing task file, auto-disables
+        subprocess.run(["bash", str(RUN_JOB), "no-task-job"], env=env, capture_output=True, text=True)
+
+        # Second run: job is now disabled, must skip silently
+        result = subprocess.run(
+            ["bash", str(RUN_JOB), "no-task-job"],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0
+        inbox_files = list(inbox_dir.glob("*.json"))
+        assert inbox_files == [], f"Expected no inbox messages after auto-disable, got: {inbox_files}"
+
+
+class TestRunJobShDedupGuard:
+    """Dedup guard: job must be skipped if a pending dispatch already exists in inbox (#1201)."""
+
+    def test_skips_if_pending_dispatch_in_inbox(self, tmp_path):
+        """When a matching *_scheduled_<job>.json file already exists in inbox, skip dispatch."""
+        workspace, messages_dir, config_dir = _setup_workspace(
+            tmp_path, "my-poller", enabled=True
+        )
+        env = _make_env(workspace, config_dir, messages_dir)
+        inbox_dir = messages_dir / "inbox"
+
+        # Simulate a pending dispatch already in inbox
+        pending = inbox_dir / "1700000000000_scheduled_my-poller.json"
+        pending.write_text('{"id": "1700000000000_scheduled_my-poller", "type": "scheduled_reminder"}\n')
+
+        result = subprocess.run(
+            ["bash", str(RUN_JOB), "my-poller"],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0, f"Expected exit 0, got {result.returncode}. stderr: {result.stderr}"
+        # The existing pending file should be unchanged, and no new file added
+        inbox_files = list(inbox_dir.glob("*.json"))
+        assert len(inbox_files) == 1, f"Expected only the pre-existing file, got {len(inbox_files)}"
+
+    def test_dedup_skips_logs_message(self, tmp_path):
+        """When dedup guard fires, a log entry must be written."""
+        workspace, messages_dir, config_dir = _setup_workspace(
+            tmp_path, "my-poller", enabled=True
+        )
+        env = _make_env(workspace, config_dir, messages_dir)
+        inbox_dir = messages_dir / "inbox"
+
+        pending = inbox_dir / "1700000000000_scheduled_my-poller.json"
+        pending.write_text('{"id": "1700000000000_scheduled_my-poller", "type": "scheduled_reminder"}\n')
+
+        subprocess.run(
+            ["bash", str(RUN_JOB), "my-poller"],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+        log_dir = workspace / "scheduled-jobs" / "logs"
+        log_files = list(log_dir.glob("my-poller-*.log"))
+        assert len(log_files) == 1
+        log_content = log_files[0].read_text()
+        assert "pending" in log_content.lower() or "skipping" in log_content.lower(), (
+            f"Expected dedup message in log, got: {log_content!r}"
+        )
+
+    def test_dispatches_when_no_pending_in_inbox(self, tmp_path):
+        """Without a pending dispatch, job must dispatch normally."""
+        workspace, messages_dir, config_dir = _setup_workspace(
+            tmp_path, "my-poller", enabled=True
+        )
+        env = _make_env(workspace, config_dir, messages_dir)
+        inbox_dir = messages_dir / "inbox"
+
+        result = subprocess.run(
+            ["bash", str(RUN_JOB), "my-poller"],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0
+        inbox_files = list(inbox_dir.glob("*.json"))
+        assert len(inbox_files) == 1, f"Expected 1 dispatched message, got {len(inbox_files)}"
+
+    def test_dedup_does_not_match_different_job(self, tmp_path):
+        """Pending dispatch for a different job must not block the current job."""
+        workspace, messages_dir, config_dir = _setup_workspace(
+            tmp_path, "my-poller", enabled=True
+        )
+        env = _make_env(workspace, config_dir, messages_dir)
+        inbox_dir = messages_dir / "inbox"
+
+        # Pending dispatch for a DIFFERENT job
+        other_pending = inbox_dir / "1700000000000_scheduled_other-job.json"
+        other_pending.write_text('{"id": "1700000000000_scheduled_other-job", "type": "scheduled_reminder"}\n')
+
+        result = subprocess.run(
+            ["bash", str(RUN_JOB), "my-poller"],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0
+        # my-poller should have dispatched, so total is 2 (other-job + my-poller)
+        inbox_files = list(inbox_dir.glob("*.json"))
+        assert len(inbox_files) == 2, f"Expected 2 inbox files (other + dispatched), got {len(inbox_files)}"
+
+
 class TestRunJobShNoClaude:
     """dispatch-job.sh must never invoke claude -p under any condition."""
 
