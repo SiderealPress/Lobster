@@ -19,7 +19,7 @@ You will receive a prompt containing the consolidation trigger timestamp.
    If the result is empty, note that in your write_result and exit — nothing to consolidate.
 
 **1b. Read today's session files.**
-List `~/lobster-user-config/memory/canonical/sessions/` for files matching today's date pattern (`YYYYMMDD-*.md` where `YYYYMMDD` = today's date).
+Run `date +%Y%m%d` to get today's date string (e.g. `20260331`). Then list `~/lobster-user-config/memory/canonical/sessions/` for files matching `<date>-*.md`.
 Read each file. Extract:
 - Snapshot blocks (`## Snapshot [timestamp]`) — these contain the running activity log
 - Open Threads and Open Tasks sections (from session header)
@@ -34,13 +34,15 @@ Merge this context with the memory_recent results from step 1. Session files oft
 Run these commands to get today's GitHub work (use --limit flags to keep output manageable):
 
 ```bash
+today=$(date +%Y-%m-%d)
+
 # PRs merged today
 gh pr list --repo SiderealPress/lobster --state merged --limit 20 --json number,title,mergedAt,author | \
-  python3 -c "import json,sys; prs=json.load(sys.stdin); today='$(date +%Y-%m-%d)'; [print(f'Merged PR #{p[\"number\"]}: {p[\"title\"]}') for p in prs if p.get('mergedAt','').startswith(today)]"
+  python3 -c "import json,sys; today='$today'; prs=json.load(sys.stdin); [print(f'Merged PR #{p[\"number\"]}: {p[\"title\"]}') for p in prs if p.get('mergedAt','').startswith(today)]"
 
 # Issues opened/closed today
 gh issue list --repo SiderealPress/lobster --state all --limit 30 --json number,title,state,createdAt,closedAt | \
-  python3 -c "import json,sys; issues=json.load(sys.stdin); today='$(date +%Y-%m-%d)'; [print(f'Issue #{i[\"number\"]} ({i[\"state\"]}): {i[\"title\"]}') for i in issues if (i.get('createdAt','') or i.get('closedAt','')).startswith(today)]"
+  python3 -c "import json,sys; today='$today'; issues=json.load(sys.stdin); [print(f'Issue #{i[\"number\"]} ({i[\"state\"]}): {i[\"title\"]}') for i in issues if (i.get('createdAt','') or i.get('closedAt','')).startswith(today)]"
 ```
 
 Include the GitHub activity summary in the synthesis for rolling-summary.md and daily-digest.md. List merged PRs under a "Code shipped" bullet. List new/closed issues under an "Issues" bullet. If no GitHub activity, omit this section.
@@ -52,6 +54,8 @@ Include the GitHub activity summary in the synthesis for rolling-summary.md and 
    - Active work streams that progressed
    - Unresolved threads or blockers
    - Any notable mood or energy signals
+   - **Code shipped** bullet: merged PRs from step 2b (if any)
+   - **Issues** bullet: opened/closed issues from step 2b (if any)
    Keep each entry concise — 5-10 bullet points max. Do NOT rewrite past entries.
 
 4. **Update `daily-digest.md`.**
