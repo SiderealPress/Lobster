@@ -1470,7 +1470,7 @@ with open(path, 'w') as f:
         local log_export_script="$LOBSTER_DIR/scheduled-tasks/export-logs.py"
         chmod +x "$log_export_script" 2>/dev/null || true
         "$LOBSTER_DIR/scripts/cron-manage.sh" add "$LOG_EXPORT_MARKER" \
-            "0 3 * * * cd $LOBSTER_DIR && uv run scheduled-tasks/export-logs.py $LOG_EXPORT_MARKER"
+            "0 3 * * * cd $LOBSTER_DIR && $HOME/.local/bin/uv run scheduled-tasks/export-logs.py $LOG_EXPORT_MARKER"
         substep "Added daily log-export cron entry (03:00 UTC, archives observations.log + audit.jsonl)"
         migrated=$((migrated + 1))
     fi
@@ -1892,7 +1892,7 @@ else:
     fi
 
     # Migration 52: Add LOBSTER-GHOST-DETECTOR cron entry.
-    # agent-monitor.py runs every 5 minutes and calls --alert --mark-failed directly,
+    # agent-monitor.py runs every 30 minutes and calls --alert --mark-failed directly,
     # sending Telegram alerts when ghost agents are found. No LLM subagent is needed.
     # Previously this was routed through REMINDER_ROUTING in sys.dispatcher.bootup.md
     # which spawned a lobster-generalist just to run the script and relay its output.
@@ -1900,8 +1900,8 @@ else:
     local GHOST_DETECTOR_MARKER="# LOBSTER-GHOST-DETECTOR"
     if ! crontab -l 2>/dev/null | grep -q "$GHOST_DETECTOR_MARKER"; then
         "$LOBSTER_DIR/scripts/cron-manage.sh" add "$GHOST_DETECTOR_MARKER" \
-            "*/5 * * * * cd $HOME && uv run $LOBSTER_DIR/scripts/agent-monitor.py --alert --mark-failed >> $WORKSPACE_DIR/logs/agent-monitor.log 2>&1 $GHOST_DETECTOR_MARKER"
-        substep "Added ghost detector cron entry (agent-monitor.py --alert --mark-failed, every 5 min)"
+            "*/30 * * * * cd $HOME && $HOME/.local/bin/uv run $LOBSTER_DIR/scripts/agent-monitor.py --alert --mark-failed >> $WORKSPACE_DIR/logs/agent-monitor.log 2>&1 $GHOST_DETECTOR_MARKER"
+        substep "Added ghost detector cron entry (agent-monitor.py --alert --mark-failed, every 30 min)"
         migrated=$((migrated + 1))
     fi
 
