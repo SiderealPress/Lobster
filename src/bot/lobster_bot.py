@@ -1738,7 +1738,7 @@ async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TY
 
     When added by a whitelisted user: auto-enables the group in group-whitelist.json
     and seeds all ALLOWED_USERS as allowed members.
-    When added by a non-whitelisted user: silently ignores (no whitelist entry written).
+    When added by a non-whitelisted user: leaves the group immediately.
     When removed from a group: logs the removal only.
     """
     if not update.my_chat_member:
@@ -1769,8 +1769,9 @@ async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TY
         else:
             adder_id = adder.id if adder else "unknown"
             log.info(
-                f"Bot added to group {chat.id} by non-whitelisted user {adder_id} — ignoring"
+                f"Bot added to group {chat.id} by non-whitelisted user {adder_id} — leaving"
             )
+            await context.bot.leave_chat(chat.id)
     elif new_status in ("left", "kicked"):
         log.info(f"Bot removed from group {chat.id} ({chat.title})")
 
