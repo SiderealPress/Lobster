@@ -285,6 +285,7 @@ When summarizing recent activity, cover the last **30 minutes OR 25 messages, wh
 covers more ground**. If the session was busy (25 messages in 10 minutes), use message count.
 If it was slow (5 messages over 45 minutes), use the time window.
 
+
 1. Read the current session file at {current_session_file}.
    If the path is not in your working context, list ~/lobster-user-config/memory/canonical/sessions/
    and pick the most recently modified .md file (excluding session.template.md).
