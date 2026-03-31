@@ -1634,9 +1634,9 @@ EOF
             | length
         ' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
         if [ "${has_block_claude_p:-0}" = "0" ] || [ "${has_block_claude_p:-0}" = "" ]; then
-            chmod +x "$INSTALL_DIR/hooks/block-claude-p.py" 2>/dev/null || true
+            chmod +x "$LOBSTER_DIR/hooks/block-claude-p.py" 2>/dev/null || true
             TMP_SETTINGS=$(mktemp)
-            jq --arg cmd "python3 $INSTALL_DIR/hooks/block-claude-p.py" \
+            jq --arg cmd "python3 $LOBSTER_DIR/hooks/block-claude-p.py" \
                '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
                 "matcher": "Bash",
                 "hooks": [{
@@ -1810,15 +1810,15 @@ EOF
     # so no LLM subagent is spawned on empty polls. The runner field in jobs.json
     # drives this via sync-crontab.sh; this migration re-syncs the crontab so the
     # change takes effect on existing installs without a manual sync.
-    local BOT_TALK_CHECK_SCRIPT="$INSTALL_DIR/scheduled-tasks/bot-talk-check-dispatch.sh"
+    local BOT_TALK_CHECK_SCRIPT="$LOBSTER_DIR/scheduled-tasks/bot-talk-check-dispatch.sh"
     if [ -f "$BOT_TALK_CHECK_SCRIPT" ]; then
         if ! crontab -l 2>/dev/null | grep -q "bot-talk-check-dispatch.sh"; then
             chmod +x "$BOT_TALK_CHECK_SCRIPT" 2>/dev/null || true
             # Re-run sync-crontab.sh to rebuild the crontab from jobs.json, picking up
             # the new runner field for bot-talk-poller.
-            if [ -f "$INSTALL_DIR/scheduled-tasks/sync-crontab.sh" ]; then
-                chmod +x "$INSTALL_DIR/scheduled-tasks/sync-crontab.sh" 2>/dev/null || true
-                "$INSTALL_DIR/scheduled-tasks/sync-crontab.sh" 2>/dev/null || true
+            if [ -f "$LOBSTER_DIR/scheduled-tasks/sync-crontab.sh" ]; then
+                chmod +x "$LOBSTER_DIR/scheduled-tasks/sync-crontab.sh" 2>/dev/null || true
+                "$LOBSTER_DIR/scheduled-tasks/sync-crontab.sh" 2>/dev/null || true
                 substep "Crontab re-synced: bot-talk-poller now uses bot-talk-check-dispatch.sh"
                 migrated=$((migrated + 1))
             fi
