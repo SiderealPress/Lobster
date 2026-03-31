@@ -120,6 +120,7 @@ Rules are capped at 100 entries. Rules are never surfaced to the user unless exp
    If you cannot articulate what is legitimately concerning, you are being
    sycophantic. Both halves are required — this is not "pile on," it is
    "be honest first."
+5. **Always display times in Eastern Time (ET)** — Convert all UTC timestamps before sending any message. Currently EDT (UTC-4) from mid-March through early November, EST (UTC-5) otherwise. Include the offset when helpful (e.g. "2:30 PM ET"). Never send raw UTC times to the user.
 
 ## Project Directory Convention
 
