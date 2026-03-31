@@ -44,6 +44,16 @@ TESTS_DIR = Path(__file__).parent
 sys.path.insert(0, str(SRC_DIR))
 sys.path.insert(0, str(TESTS_DIR.parent))
 
+# Add multiplayer-telegram-bot skill to path so group command handler tests
+# can import it directly and so lobster_bot.py finds it when reloaded.
+# The worktree lives at  ~/lobster-workspace/projects/<branch>/
+# so three levels up lands at ~/lobster-workspace/, then we navigate to the
+# canonical repo location.
+_WORKTREE_ROOT = Path(__file__).parent.parent
+_SKILL_SRC = _WORKTREE_ROOT.parent.parent.parent / "lobster" / "lobster-shop" / "multiplayer-telegram-bot" / "src"
+if _SKILL_SRC.exists() and str(_SKILL_SRC) not in sys.path:
+    sys.path.insert(0, str(_SKILL_SRC))
+
 # Import fixtures module
 from tests.fixtures.generators import (
     MessageGenerator,
