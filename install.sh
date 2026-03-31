@@ -1676,6 +1676,30 @@ else
     info "Skipping write-dispatcher-session-id hook (settings.json not yet created)"
 fi
 
+# Set up Claude Code SessionStart hook to inject system and user bootup files into context.
+# Runs after write-dispatcher-session-id so role detection (is_dispatcher) works correctly.
+# Adds two entries: one empty-matcher entry for all fresh sessions, and one compact-matcher
+# entry so bootup content is re-injected after context compaction.
+chmod +x "$INSTALL_DIR/hooks/inject-bootup-context.py" || true
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("inject-bootup-context")) | select(.matcher == "")' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq '.hooks.SessionStart = (.hooks.SessionStart // []) + [{
+            "matcher": "",
+            "hooks": [{
+                "type": "command",
+                "command": "python3 '"$INSTALL_DIR"'/hooks/inject-bootup-context.py",
+                "timeout": 10
+            }]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "inject-bootup-context hook installed (all sessions)"
+    else
+        info "inject-bootup-context hook already configured in Claude Code settings (all sessions)"
+    fi
+else
+    info "Skipping inject-bootup-context hook (settings.json not yet created)"
+fi
+
 # Set up Claude Code SessionStart hook to set compact flag on context compaction
 chmod +x "$INSTALL_DIR/hooks/on-compact.py" || true
 if [ -f "$CLAUDE_SETTINGS" ]; then
@@ -1695,6 +1719,28 @@ if [ -f "$CLAUDE_SETTINGS" ]; then
     fi
 else
     info "Skipping on-compact hook (settings.json not yet created)"
+fi
+
+# Set up Claude Code SessionStart hook to re-inject bootup context after compaction.
+# The compact-matcher entry ensures bootup files are injected into the fresh context
+# that follows a compaction event, just as they are on a fresh session start.
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("inject-bootup-context")) | select(.matcher == "compact")' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq '.hooks.SessionStart = (.hooks.SessionStart // []) + [{
+            "matcher": "compact",
+            "hooks": [{
+                "type": "command",
+                "command": "python3 '"$INSTALL_DIR"'/hooks/inject-bootup-context.py",
+                "timeout": 10
+            }]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "inject-bootup-context hook installed (compact sessions)"
+    else
+        info "inject-bootup-context hook already configured in Claude Code settings (compact sessions)"
+    fi
+else
+    info "Skipping inject-bootup-context compact hook (settings.json not yet created)"
 fi
 
 # Set up Claude Code SessionStart hook to inject sys.debug.bootup.md when LOBSTER_DEBUG=true
