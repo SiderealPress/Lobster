@@ -267,17 +267,18 @@ Scheduled reminders arrive from `scheduled-tasks/dispatch-job.sh` (user-created 
 3. task_content = msg.get("task_content", "").strip()
 
 4. if task_content:
-       # Generic dispatch: user-created job
-       prompt = f"---\ntask_id: scheduled-job-{reminder_type}\nchat_id: 0\nsource: system\n---\n\n{task_content}"
-       # --- CLEANUP / DELETE JOB NAME GUARD ---
+       # --- CLEANUP / DELETE JOB NAME GUARD (runs before prompt construction) ---
        # Jobs whose names include 'cleanup', 'clean-up', 'delete', or 'purge' are
        # potentially destructive. Require explicit human confirmation before dispatching.
        # This prevents a repeat of the 2026-03-31 incident where a dynamically-spawned
        # log-cleanup subagent deleted 220 MB of permanent runtime data.
+       # Note: Rule 2 fires on job name only — jobs that delete files but have benign
+       # names are caught by Rule 1 when their result arrives.
        DESTRUCTIVE_JOB_KEYWORDS = ["cleanup", "clean-up", "delete", "purge"]
        is_destructive_job_name = any(k in reminder_type.lower() for k in DESTRUCTIVE_JOB_KEYWORDS)
        if is_destructive_job_name:
            # Surface the job request to the user for approval before running it.
+           # Early return: do NOT construct or dispatch a prompt for this job yet.
            import os
            admin_chat_id = os.environ.get("LOBSTER_ADMIN_CHAT_ID", "0")
            send_reply(
@@ -306,7 +307,10 @@ Scheduled reminders arrive from `scheduled-tasks/dispatch-job.sh` (user-created 
                },
            )
            mark_processed(message_id)
-           continue
+           continue  # ← explicit early exit — prompt construction never reached
+
+       # Generic dispatch: user-created job (non-destructive name)
+       prompt = f"---\ntask_id: scheduled-job-{reminder_type}\nchat_id: 0\nsource: system\n---\n\n{task_content}"
    else:
        # Unknown reminder with no task content
        prompt = f"---\ntask_id: unknown-reminder\nchat_id: 0\nsource: system\n---\n\nUnknown reminder_type: '{reminder_type}'. Call write_result and return."
@@ -366,6 +370,7 @@ Background subagents call `write_result(task_id, chat_id, text, ...)`, which dro
            continue  # nothing to relay
 
        # --- DELETION INTERCEPT GUARD ---
+       # Note: deletion intercept fires before engineer→reviewer routing.
        # Before relaying any subagent result to the user, check whether the result
        # reports deleting, removing, purging, or cleaning up files under protected paths.
        # If so, do NOT silently relay — intercept and require explicit user confirmation.
@@ -688,7 +693,72 @@ Always pass the correct `source` parameter to `send_reply` — Telegram and Slac
 
 If `reacted_to_text` is empty: use `get_conversation_history` to get context.
 
-**Button callbacks** (`type: "callback"`): respond with a confirmation, no ack needed.
+**Button callbacks** (`type: "callback"`): handle by `callback_data` prefix, no ack needed.
+
+```
+1. mark_processing(message_id)
+2. data    = msg.get("callback_data", "")
+   chat_id = msg.get("chat_id")
+   source  = msg.get("source", "telegram")
+
+3. if data.startswith("delete-confirm-yes-"):
+       task_id_slug = data.removeprefix("delete-confirm-yes-")
+       # Retrieve the parked result from memory by task_id.
+       results = memory_search(query=f"pending-deletion-result {task_id_slug}", limit=5)
+       parked  = next((r for r in results if r.get("metadata", {}).get("task_id") == task_id_slug), None)
+       if parked:
+           pr_url_match = re.search(r"https://github\.com/.*/pull/\d+", parked["content"])
+           if pr_url_match:
+               # Engineer→reviewer path: spawn reviewer, do NOT send inline to user.
+               pr_url    = pr_url_match.group(0)
+               pr_parts  = pr_url.rstrip("/").split("/")
+               pr_number = pr_parts[-1]
+               pr_repo   = f"{pr_parts[-4]}/{pr_parts[-3]}"
+               reviewer_task_id = f"review-delete-confirmed-{task_id_slug}"
+               Task(
+                   subagent_type="general-purpose",
+                   run_in_background=True,
+                   prompt=(
+                       f"---\ntask_id: {reviewer_task_id}\nchat_id: {chat_id}\nsource: {source}\n---\n\n"
+                       f"Review PR {pr_url} and post findings:\n"
+                       f"  gh pr review <N> --repo {pr_repo} --comment --body \"PASS/NEEDS-WORK/FAIL: ...\"\n"
+                       f"Use --comment only (never --approve or --request-changes).\n"
+                       f"After posting, call write_result with a short verdict (1-3 sentences).\n\n"
+                       f"Engineer\'s briefing:\n{parked[\'content\']}"
+                   ),
+               )
+               send_reply(chat_id=chat_id, text="Deletion confirmed — spawning reviewer.", source=source)
+           else:
+               send_reply(chat_id=chat_id, text=parked["content"], source=source)
+               send_reply(chat_id=chat_id, text="Deletion confirmed and result relayed.", source=source)
+       else:
+           send_reply(chat_id=chat_id, text="Could not find parked result — it may have expired.", source=source)
+
+4. elif data.startswith("delete-confirm-no-"):
+       # Discard: the parked memory entry will expire naturally.
+       send_reply(chat_id=chat_id, text="Deletion discarded.", source=source)
+
+5. elif data.startswith("job-confirm-yes-"):
+       job_name = data.removeprefix("job-confirm-yes-")
+       results  = memory_search(query=f"pending-destructive-job {job_name}", limit=5)
+       parked   = next((r for r in results if r.get("metadata", {}).get("job_name") == job_name), None)
+       if parked:
+           task_content = parked["content"]
+           prompt = f"---\ntask_id: scheduled-job-{job_name}\nchat_id: 0\nsource: system\n---\n\n{task_content}"
+           Task(subagent_type="lobster-generalist", run_in_background=True, prompt=prompt)
+           send_reply(chat_id=chat_id, text=f"Job \'{job_name}\' dispatched.", source=source)
+       else:
+           send_reply(chat_id=chat_id, text="Could not find parked job content — it may have expired.", source=source)
+
+6. elif data.startswith("job-confirm-no-"):
+       job_name = data.removeprefix("job-confirm-no-")
+       send_reply(chat_id=chat_id, text="Job cancelled.", source=source)
+
+7. else:
+       send_reply(chat_id=chat_id, text=f"Unknown callback: {data}", source=source)
+
+8. mark_processed(message_id)
+```
 
 ### Telegram-specific
 
@@ -1108,6 +1178,8 @@ If the name matches:
 **After user confirms via button callback:**
 - `job-confirm-yes-<name>`: retrieve task content from memory, dispatch as `lobster-generalist` subagent, mark processed.
 - `job-confirm-no-<name>`: discard, send "Job cancelled." to admin chat, mark processed.
+
+> **Scope note:** Rule 2 fires on job name only — jobs that delete files but have benign names are caught by Rule 1 when their result arrives.
 
 ### Bypass
 
