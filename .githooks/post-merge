@@ -5,6 +5,12 @@
 # After `git pull` (which triggers post-merge), this hook writes a system
 # message to ~/messages/inbox/ so that the running Claude Code session sees
 # it on the next wait_for_messages() poll and knows to run the upgrade.
+#
+# Rate limit: at most one upgrade message per COOLDOWN_SECONDS (600 = 10 min).
+# This prevents floods when many branches are pulled or rebased in quick
+# succession (e.g. local-dev rebuild merging 10 PRs writes 10+ post-merge
+# events in under 2 minutes).  A single upgrade reminder is enough to prompt
+# the dispatcher to run uv pip install -e .
 #===============================================================================
 
 MESSAGES_DIR="${LOBSTER_MESSAGES:-$HOME/messages}"
@@ -14,6 +20,33 @@ INBOX_DIR="$MESSAGES_DIR/inbox"
 if [ ! -d "$INBOX_DIR" ]; then
     exit 0
 fi
+
+# ---------------------------------------------------------------------------
+# Rate-limit guard: skip if we already queued a message within the cooldown
+# window.  The state file stores the epoch second of the last queued message.
+# ---------------------------------------------------------------------------
+COOLDOWN_SECONDS=600  # 10 minutes
+STATE_DIR="${LOBSTER_MESSAGES:-$HOME/messages}/config"
+RATE_LIMIT_FILE="$STATE_DIR/upgrade-hook-last-ts"
+
+NOW=$(date +%s)
+
+if [ -f "$RATE_LIMIT_FILE" ]; then
+    LAST_TS=$(cat "$RATE_LIMIT_FILE" 2>/dev/null || echo 0)
+    # Use arithmetic expansion; treat non-numeric values as 0
+    LAST_TS=$(( LAST_TS + 0 ))
+    ELAPSED=$(( NOW - LAST_TS ))
+    if [ "$ELAPSED" -lt "$COOLDOWN_SECONDS" ]; then
+        echo "[post-merge] Skipping upgrade reminder (last sent ${ELAPSED}s ago, cooldown=${COOLDOWN_SECONDS}s)."
+        exit 0
+    fi
+fi
+
+# Record the current timestamp before writing (atomic enough for a hook — no
+# parallel writers expected here, and worst case is one extra message, not a
+# flood).
+mkdir -p "$STATE_DIR"
+echo "$NOW" > "$RATE_LIMIT_FILE"
 
 TIMESTAMP=$(date +%s%3N)
 MSG_FILE="$INBOX_DIR/${TIMESTAMP}_upgrade.json"
