@@ -1,6 +1,6 @@
 ## Obsidian KM — Automatic Link Capture
 
-This skill automatically saves URLs that Drew sends to the Obsidian vault at `~/obsidian-vault/Links/`.
+This skill automatically saves URLs that Drew sends to the Obsidian vault at `~/obsidian-vault/Links/`. # noname
 
 ### When to capture links
 
