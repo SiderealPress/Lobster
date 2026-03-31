@@ -49,15 +49,54 @@ You will receive a prompt containing the consolidation trigger timestamp.
    Read `~/lobster-user-config/memory/canonical/handoff.md`.
    Update the "Current state" section to reflect the synthesized current state. This is the first file the next session reads — keep it accurate and current.
 
-9. **Write `_context.md` (user model summary).**
-   Write a concise pre-computed summary to `~/lobster-workspace/user-model/_context.md`.
-   This file is read at session startup. Include:
-   - User's current top priorities (from priorities.md or observed themes)
-   - Active projects and their status
-   - Key people in current focus
-   - Any emotional baseline signals (stress level, energy, mode of operation)
-   - Constraints or preferences that were reinforced today
-   Create the directory if it does not exist. Overwrite the file entirely each run.
+9. **Sync canonical files into the user model DB.**
+   Run the bridge pass to push projects, priorities, and preferences from canonical markdown files into the user model DB. This also generates the pre-computed `_context.md` via `write_context_cache()`:
+   ```bash
+   cd ~/lobster && uv run python -c "
+   import sys; sys.path.insert(0, 'src')
+   from mcp.user_model.bridges import run_bridges
+   import sqlite3, os
+   db_path = os.path.expanduser('~/lobster-workspace/data/memory.db')
+   conn = sqlite3.connect(db_path)
+   result = run_bridges(conn)
+   conn.close()
+   print(result)
+   "
+   ```
+   This syncs `projects/*.md` as narrative arcs and `priorities.md` as attention items, and writes the pre-computed `~/lobster-workspace/user-model/_context.md`.
+   If the script fails (e.g. DB not initialized), continue to step 10.
+
+10. **Write `_context.md` (user model summary).**
+    Call `model_user_context(deep=True)` to retrieve structured user model data from the DB.
+    Combine it with today's synthesized context (from steps 1–8) to write a complete snapshot.
+
+    Create `~/lobster-workspace/user-model/` if it does not exist, then write `_context.md` with this structure:
+
+    ```markdown
+    # User Model Context
+    *Auto-generated YYYY-MM-DD — do not edit manually*
+
+    ## Active Projects
+    <list from model_user_context(deep=True) plus any new project status from today's events>
+
+    ## Top Priorities
+    <from priorities.md or inferred from today's attention>
+
+    ## Key People (Recent Focus)
+    <people who appeared in today's events or model_user_context>
+
+    ## Preferences & Constraints
+    <behavioral rules reinforced today; hard constraints; known preferences>
+
+    ## Emotional Baseline
+    <mood/energy signals from today's events and model baseline>
+
+    ## Open Questions / Pending Decisions
+    <unresolved threads identified in today's synthesis>
+    ```
+
+    If `model_user_context(deep=True)` returns no data (model not yet populated), write the file from today's synthesis alone — do not leave the file empty or skip this step.
+    Overwrite the file entirely each run.
 
 ### What NOT to do
 
