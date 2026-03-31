@@ -894,6 +894,61 @@ def _clear_dispatcher_state_file() -> None:
         pass
 
 
+def _write_session_lost_reminder() -> None:
+    """Write a compact-reminder to the inbox on MCP server startup.
+
+    When the MCP server restarts (e.g. via systemctl restart lobster-mcp-local),
+    any dispatcher blocked in wait_for_messages receives a "Session not found"
+    error (-32600) at the protocol level with no recovery guidance.  This
+    function writes a synthetic inbox message so that when the dispatcher
+    reconnects and calls wait_for_messages, it immediately receives a prompt
+    to re-orient and resume the main loop.
+
+    Guard: skipped when the lobster-state file indicates a mid-session MCP
+    reconnect (mode=active AND file age < 30 min).  That pattern means Claude
+    Code auto-updated or the HTTP transport briefly cycled — the dispatcher was
+    NOT blocked in a dead session and does not need to re-orient.
+
+    Idempotent: writing an extra compact-reminder during a real restart is
+    harmless; the dispatcher processes it as a routine self-check message.
+    """
+    try:
+        # Same reconnect-detection guard used by _reset_state_on_startup.
+        if LOBSTER_STATE_FILE.exists():
+            try:
+                state_data = json.loads(LOBSTER_STATE_FILE.read_text())
+                mode = state_data.get("mode", "active")
+                file_age = time.time() - LOBSTER_STATE_FILE.stat().st_mtime
+                if mode not in _TRANSIENT_MODES and file_age < _RECONNECT_GRACE_SECONDS:
+                    log.info(
+                        "[session-lost] Skipping session-lost-reminder: mid-session MCP "
+                        f"reconnect detected (mode={mode!r}, age={file_age:.0f}s)"
+                    )
+                    return
+            except Exception:  # noqa: BLE001
+                pass  # Can't read state — fall through and write the reminder
+
+        now_utc = datetime.now(timezone.utc)
+        reminder_id = f"session-lost-{int(now_utc.timestamp())}"
+        reminder = {
+            "id": reminder_id,
+            "source": "system",
+            "type": "compact-reminder",
+            "chat_id": 0,
+            "text": (
+                "SESSION LOST — The MCP server restarted and your previous session was "
+                "invalidated. Re-orient now: read sys.dispatcher.bootup.md and resume "
+                "the main loop."
+            ),
+            "timestamp": now_utc.isoformat(),
+        }
+        inbox_file = INBOX_DIR / f"{reminder_id}.json"
+        atomic_write_json(inbox_file, reminder)
+        log.info(f"[session-lost] Wrote session-lost-reminder to inbox: {reminder_id}")
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"[session-lost] Failed to write session-lost-reminder: {exc}")
+
+
 def _get_current_http_session_id() -> str | None:
     """Return the MCP session ID for the current tool call request.
 
@@ -8786,6 +8841,11 @@ async def main():
     # is still active.  The file is re-written by _tag_dispatcher_session() once
     # the dispatcher identifies itself via Options A, B, or C.
     _clear_dispatcher_state_file()
+
+    # Write a session-lost-reminder to the inbox so the dispatcher knows to
+    # re-orient after reconnecting.  Skipped for mid-session MCP reconnects.
+    # See _write_session_lost_reminder() for full rationale.
+    _write_session_lost_reminder()
 
     # Initialize the event bus singleton with standard listeners.
     # JsonlFileListener writes all events to logs/events.jsonl.
