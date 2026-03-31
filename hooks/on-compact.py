@@ -65,6 +65,14 @@ COMPACTION_STATE_FILE = Path(
         os.path.expanduser("~/lobster-workspace/data/compaction-state.json"),
     )
 )
+# Simple timestamp file read by health-check-v3.sh for a 10-minute grace period
+# after compaction (prevents stale-inbox alerts during post-compaction re-orientation).
+LAST_COMPACT_TS_FILE = Path(
+    os.environ.get(
+        "LOBSTER_LAST_COMPACT_TS_FILE_OVERRIDE",
+        os.path.expanduser("~/lobster-workspace/data/last-compact.ts"),
+    )
+)
 
 REMINDER_TEXT = (
     "COMPACT REMINDER \u2014 RE-ORIENT NOW\n\n"
@@ -180,6 +188,27 @@ def write_compaction_state() -> None:
         tmp_path = COMPACTION_STATE_FILE.with_suffix(".tmp")
         tmp_path.write_text(json.dumps(state, indent=2) + "\n")
         tmp_path.replace(COMPACTION_STATE_FILE)  # atomic on Linux (same filesystem)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def write_last_compact_ts() -> None:
+    """
+    Write the current Unix timestamp (integer seconds) to last-compact.ts.
+
+    This simple timestamp file is read by health-check-v3.sh to determine
+    whether a compaction occurred within the last 10 minutes.  If so, the
+    health check skips its inbox staleness alert entirely, giving the dispatcher
+    a grace period to re-read bootup files and drain the inbox backlog before
+    any staleness alert fires.
+
+    Silent on any failure -- must never crash the hook.
+    """
+    try:
+        LAST_COMPACT_TS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = LAST_COMPACT_TS_FILE.with_suffix(".ts.tmp")
+        tmp_path.write_text(str(int(time.time())) + "\n")
+        tmp_path.replace(LAST_COMPACT_TS_FILE)  # atomic on Linux (same filesystem)
     except Exception:  # noqa: BLE001
         pass
 
@@ -368,6 +397,65 @@ def _is_dispatcher_compact(data: dict) -> bool:
     return True
 
 
+def _schedule_reflection_prompt(trigger: str) -> None:
+    """In debug mode, write a reflection-prompt message to the inbox.
+
+    When LOBSTER_DEBUG=true, drops a message asking the dispatcher to reflect
+    on the bootup/compaction experience and file GitHub issues with observations.
+    Written immediately — the dispatcher processes inbox messages in order so it
+    will reach this after handling the compact-reminder and catching up.
+
+    Silent on any failure — must never crash the hook.
+    """
+    if os.environ.get("LOBSTER_DEBUG", "false").lower() != "true":
+        return
+
+    try:
+        INBOX_DIR.mkdir(parents=True, exist_ok=True)
+
+        ts = time.time()
+        msg_id = f"reflection_{trigger}_{int(ts)}"
+        timestamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + ".000000"
+
+        content = (
+            f"[Debug] {trigger.capitalize()} reflection prompt:\n\n"
+            "How was the experience? Were there friction points, gaps, or improvements "
+            "worth capturing?\n\n"
+            "If you have observations: file or update GitHub issues in SiderealPress/lobster, "
+            "or open PRs for straightforward fixes. Capture it while it's fresh."
+        )
+
+        msg = {
+            "id": msg_id,
+            "source": "system",
+            "chat_id": 0,
+            "user_id": 0,
+            "username": "lobster-system",
+            "user_name": "System",
+            "type": "reflection_prompt",
+            "trigger": trigger,
+            "text": content,
+            "timestamp": timestamp,
+        }
+
+        # Use current epoch_ms so this sorts after the compact-reminder (ts_ms=0)
+        # and after any queued user messages, but before future messages.
+        ts_ms = int(ts * 1000)
+        msg_path = INBOX_DIR / f"{ts_ms}_reflection_{trigger}.json"
+        tmp_path = msg_path.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(msg, indent=2) + "\n")
+        tmp_path.rename(msg_path)
+        print(
+            f"[on-compact] debug: wrote reflection prompt to {msg_path}",
+            file=sys.stderr,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"[on-compact] debug: failed to write reflection prompt: {exc}",
+            file=sys.stderr,
+        )
+
+
 def main() -> None:
     try:
         data = json.load(sys.stdin)
@@ -378,6 +466,11 @@ def main() -> None:
     # compactions.  The health check reads this to suppress false-positive
     # "stale inbox" restarts during any compaction pause window.
     write_compacted_at()
+
+    # Write simple Unix timestamp for the 10-minute post-compaction grace period.
+    # health-check-v3.sh reads this file and skips staleness alerts for 10 minutes
+    # after a compaction, giving the dispatcher time to re-orient.
+    write_last_compact_ts()
 
     # Always record last_compaction_ts for the catch-up subagent, regardless
     # of whether this is a dispatcher or subagent compaction.  The catch-up
@@ -415,6 +508,8 @@ def main() -> None:
         write_reminder()
     except Exception:  # noqa: BLE001
         pass  # Reminder failure is non-fatal — sentinel is the critical artifact
+
+    _schedule_reflection_prompt("compaction")
 
 
 if __name__ == "__main__":
