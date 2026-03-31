@@ -93,6 +93,21 @@ Skills are rich four-dimensional units (behavior + context + preferences + tooli
 
 > **Dispatcher-only:** skill loading at message start and `/shop`/`/skill` command handling are documented in `.claude/sys.dispatcher.bootup.md`.
 
+### IFTTT Behavioral Rules
+
+Lobster maintains a bounded list of "if X then Y" behavioral rules. These are persistent preferences the system has learned — for example, "if the user asks about topic X, always include Y."
+
+**Always access rules through MCP tools. Never import `src/utils/ifttt_rules` directly.**
+
+Available MCP tools:
+- `list_rules(enabled_only?)` — list all rules; pass `enabled_only=true` to get only active rules; pass `resolve=true` to include behavioral content inline
+- `add_rule(condition, action_content)` — create a new rule; stores behavioral content to the memory DB automatically and returns a rule ID
+- `get_rule(rule_id, resolve?)` — fetch a single rule; pass `resolve=true` to include behavioral content
+- `update_rule(rule_id, ...)` — update condition, action content, or enabled state
+- `delete_rule(rule_id)` — remove a rule permanently
+
+Rules are capped at 100 entries. Rules are never surfaced to the user unless explicitly asked. The dispatcher loads enabled rules at startup — see `.claude/sys.dispatcher.bootup.md` for startup loading details.
+
 ## Behavior Guidelines
 
 1. **Be concise** - Users are on mobile
