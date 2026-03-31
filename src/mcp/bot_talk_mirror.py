@@ -110,6 +110,10 @@ BOT_TALK_TIER = "TIER-BOT"
 
 _WORKSPACE = Path.home() / "lobster-workspace"
 _LOCAL_LOG = _WORKSPACE / "logs" / "bot-talk-mirror.log"
+_ACTIVITY_LOG = _WORKSPACE / "data" / "bot-talk-activity.jsonl"
+
+# Lock for thread-safe appends to the activity log
+_activity_log_lock = threading.Lock()
 
 # Subtypes that should NOT be mirrored — Lobster-internal system messages
 _EXCLUDED_SUBTYPES = frozenset({
@@ -249,6 +253,76 @@ def _do_mirror(content: str, genre: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Activity log — write-at-source for real-time forwarding
+# ---------------------------------------------------------------------------
+
+def _append_activity(entry: dict) -> None:
+    """Append a single JSON entry to the bot-talk activity log.
+
+    Thread-safe. Never raises — failures are silently swallowed to avoid
+    disrupting the calling path (send_reply or incoming handler).
+
+    Entry schema:
+        ts         - ISO-8601 UTC timestamp
+        direction  - "sent" | "received"
+        sender     - who sent (e.g. "SaharLobster")
+        recipient  - who received (e.g. "AlbertLobster", or empty for broadcasts)
+        text       - message text
+        forwarded  - false (realtime-forwarder will flip to true after delivery)
+    """
+    try:
+        _ACTIVITY_LOG.parent.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(entry) + "\n"
+        with _activity_log_lock:
+            with _ACTIVITY_LOG.open("a") as f:
+                f.write(line)
+    except Exception as exc:
+        log.debug(f"bot-talk activity log write failed: {exc}")
+
+
+def log_sent(text: str, recipient: str = "AlbertLobster") -> None:
+    """Log an outbound bot-talk message to the activity log.
+
+    Call this immediately after successfully POSTing a message to the
+    bot-talk API as SaharLobster.
+
+    Args:
+        text:      The message content that was sent.
+        recipient: The intended recipient Lobster name.
+    """
+    entry = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "direction": "sent",
+        "sender": BOT_TALK_SENDER,
+        "recipient": recipient,
+        "text": text,
+        "forwarded": False,
+    }
+    _append_activity(entry)
+
+
+def log_received(text: str, sender: str, recipient: str = "SaharLobster") -> None:
+    """Log an inbound bot-talk message to the activity log.
+
+    Call this immediately after receiving a message from the bot-talk API.
+
+    Args:
+        text:      The message content received.
+        sender:    The name of the Lobster that sent the message (e.g. "AlbertLobster").
+        recipient: The name of the recipient (defaults to "SaharLobster").
+    """
+    entry = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "direction": "received",
+        "sender": sender,
+        "recipient": recipient,
+        "text": text,
+        "forwarded": False,
+    }
+    _append_activity(entry)
+
+
+# ---------------------------------------------------------------------------
 # Public entry points
 # ---------------------------------------------------------------------------
 
@@ -264,6 +338,10 @@ def mirror_outbound(text: str, source: str, chat_id: str | int) -> None:
         chat_id: Destination chat ID.
     """
     content = f"[OUTBOUND → {source.upper()} chat={chat_id}] {text}"
+    # Log to activity file so the realtime-forwarder can pick it up without
+    # polling the API. Only log Telegram/owner-directed outbound messages.
+    if source.lower() == "telegram":
+        log_sent(text=content, recipient="AlbertLobster")
     _spawn_mirror(content, genre="status-update")
 
 

@@ -6,133 +6,92 @@
 ## Context
 
 You are running as a scheduled task. Forward new inter-Lobster bot-talk exchanges to the owner on
-Telegram as they arrive. This job polls the bot-talk API and delivers each new message individually
-to the owner's Telegram.
+Telegram as they arrive.
 
-## Authentication
+**Architecture**: Rather than polling the bot-talk API to detect what was sent and received, this
+job reads from a local activity log (`bot-talk-activity.jsonl`) that is written at the moment each
+message is sent or received. Entries with `"forwarded": false` are new and need to be forwarded.
+This eliminates all filtering/identity-detection complexity — if it's in the log, it's relevant.
 
-Read the bot-talk API token using this lookup chain (first non-empty value wins):
+## Activity Log Format
 
-1. `~/lobster-workspace/data/bot-talk-token.txt` (legacy token file)
-2. `BOT_TALK_TOKEN` key in `~/messages/config/config.env`
-3. `BOT_TALK_TOKEN` key in `~/lobster-config/config.env`
+The log lives at `~/lobster-workspace/data/bot-talk-activity.jsonl`.
 
-Example (Python):
-```python
-def _load_bot_talk_token() -> str:
-    import os
-    from pathlib import Path
-
-    token_file = Path.home() / "lobster-workspace" / "data" / "bot-talk-token.txt"
-    if token_file.exists():
-        token = token_file.read_text().strip()
-        if token:
-            return token
-
-    for config_path in [
-        Path.home() / "messages" / "config" / "config.env",
-        Path.home() / "lobster-config" / "config.env",
-    ]:
-        if config_path.exists():
-            for line in config_path.read_text().splitlines():
-                line = line.strip()
-                if line.startswith("BOT_TALK_TOKEN="):
-                    value = line.split("=", 1)[1].strip().strip('"').strip("'")
-                    if value:
-                        return value
-
-    return ""
-```
-
-If the token cannot be found, log an error and call `write_task_output` with status "failed".
-
-## State File
-
-Read and write `~/lobster-workspace/data/bot-talk-realtime-state.json`.
-
-Schema:
+Each line is a JSON entry:
 ```json
 {
-  "last_processed_ts": "2026-01-01T00:00:00Z"
+  "ts": "2026-03-31T14:05:00.123456+00:00",
+  "direction": "sent" | "received",
+  "sender": "SaharLobster",
+  "recipient": "AlbertLobster",
+  "text": "message content",
+  "forwarded": false
 }
 ```
 
-Create with default `last_processed_ts = "2026-01-01T00:00:00Z"` if not found.
+Entries are appended by:
+- `bot_talk_mirror.py` — for outbound messages sent via `mirror_outbound` (SaharLobster → bot-talk)
+- `lobstertalk-incoming-handler` — for inbound queries from AlbertLobster and the replies sent back
 
 ## Instructions
 
-### Step 1: Load state
+### Step 1: Read the activity log
 
-Read `~/lobster-workspace/data/bot-talk-realtime-state.json`. Extract `last_processed_ts`.
+Open `~/lobster-workspace/data/bot-talk-activity.jsonl`. If the file does not exist, exit silently
+with `write_task_output(output="No activity log found yet.", status="success")` and
+`write_result(chat_id=0, sent_reply_to_user=False)`.
 
-Load the bot-talk API token using the lookup chain above. If empty, fail immediately with
-`write_task_output(status="failed", output="BOT_TALK_TOKEN not configured")`.
+Read all lines. Parse each as JSON. Collect entries where `"forwarded": false`.
 
-### Step 2: Fetch new messages from bot-talk
+Sort the unforwarded entries by `ts` ascending (oldest first).
 
-Poll for all recent messages since `last_processed_ts`:
+### Step 2: Forward each unforwarded entry to Telegram
 
-```
-GET http://46.224.41.108:4242/messages?since=<last_processed_ts>&limit=100
-X-Bot-Token: <token>
-```
-
-The API returns `{"count": N, "messages": [...]}`. Each message has these fields:
-`id`, `sender`, `content`, `genre`, `tier`, `timestamp`.
-
-Note: there is no `recipient` field and no `from_me` field in the API response.
-
-Sort messages by timestamp ascending (oldest first) so forwarding is in chronological order.
-
-### Step 3: No sender filter needed
-
-Forward **all** fetched messages. The bot-talk network currently carries only inter-Lobster
-exchanges — every message returned by the API is part of the AlbertLobster ↔ SaharLobster
-conversation and is relevant to the owner.
-
-Do not filter by sender name. Do not require a `BOT_TALK_SENDER` config value. Simply forward
-every message in the fetched list.
-
-```python
-# All fetched messages are qualifying — no filter needed
-qualifying = messages
-```
-
-### Step 4: Forward each qualifying message to Telegram
-
-For each qualifying message (in chronological order), call `send_reply` with:
+For each unforwarded entry (in chronological order), call `send_reply` with:
 - `chat_id`: 8305714125
 - `source`: "telegram"
 - `text`: formatted as:
   ```
-  [Bot-Talk] {sender}: {content}
+  [Bot-Talk] {direction} — {sender}: {text}
   ```
+  where `direction` is `"sent"` or `"received"`.
 
-If content is longer than 1000 characters, truncate and append `… (truncated)`.
+If `text` is longer than 1000 characters, truncate and append `... (truncated)`.
 
-Send each message as a separate `send_reply` call — do not batch into one message.
+Send each entry as a separate `send_reply` call — do not batch into one message.
 
-### Step 5: Update state
+### Step 3: Mark forwarded entries
 
-After forwarding all qualifying new messages, update `last_processed_ts` to the timestamp
-of the latest message from the full fetched list.
+After forwarding all entries, rewrite `bot-talk-activity.jsonl` with every forwarded entry's
+`"forwarded"` field set to `true`.
 
-Write state file atomically: write to a `.tmp` file, then rename to the final path.
+Do this atomically:
+1. Read all lines again (re-read to avoid race conditions)
+2. Build a set of `ts` values from entries you just forwarded
+3. For each line, if its `ts` is in the forwarded set, set `"forwarded": true`
+4. Write all lines to a `.tmp` file, then rename to the final path
 
-If no new messages were fetched at all, do not update state.
+If there are no unforwarded entries, skip the rewrite entirely.
 
-### Step 6: Write output
+### Step 4: Write output
 
 Call `write_task_output` with:
 - `job_name`: "bot-talk-realtime-forwarder"
-- `output`: Brief summary, e.g. "No new messages." or "Forwarded 3 messages."
+- `output`: Brief summary, e.g. "No new entries." or "Forwarded 3 entries."
 - `status`: "success" or "failed"
 
 Then call `write_result`:
-- If messages were forwarded via `send_reply`: `write_result(task_id=<task_id>, chat_id=8305714125, sent_reply_to_user=True)`
-- If no messages were forwarded (no new messages): `write_result(task_id=<task_id>, chat_id=0, sent_reply_to_user=False)`
+- If entries were forwarded: `write_result(task_id=<task_id>, chat_id=8305714125, sent_reply_to_user=True)`
+- If nothing forwarded: `write_result(task_id=<task_id>, chat_id=0, sent_reply_to_user=False)`
 
 ## Timezone
 
 Always display timestamps in **Eastern Time (ET)** — currently EDT (UTC-4). Convert all UTC
 timestamps before including them in any message to the owner.
+
+## Error handling
+
+- If the activity log cannot be parsed (corrupt line), skip that line and continue.
+- If a `send_reply` fails, stop forwarding and report the error in `write_task_output`.
+  Do not mark any entries as forwarded if the send failed.
+- Never call the bot-talk API directly — this job does not poll the API.

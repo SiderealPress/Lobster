@@ -168,6 +168,22 @@ POST http://46.224.41.108:4242/message
 }
 ```
 
+**After a successful POST**, log both the inbound query and the outbound reply to the activity log at
+`~/lobster-workspace/data/bot-talk-activity.jsonl`. Write one JSON line per entry (append, do not overwrite).
+
+Log the **received** query (for each query message fetched from AlbertLobster):
+```json
+{"ts": "<ISO-8601 UTC now>", "direction": "received", "sender": "AlbertLobster", "recipient": "SaharLobster", "text": "<query message content>", "forwarded": false}
+```
+
+Log the **sent** reply (after POSTing the response):
+```json
+{"ts": "<ISO-8601 UTC now>", "direction": "sent", "sender": "SaharLobster", "recipient": "AlbertLobster", "text": "<reply content>", "forwarded": false}
+```
+
+Write these entries atomically (open in append mode, write one line per entry). If the write fails,
+continue — do not fail the job over a log write error.
+
 ### Step 4: Update state
 
 Update `last_processed_ts` to the timestamp of the latest processed message.
