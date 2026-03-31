@@ -2051,6 +2051,37 @@ print(f"  {migrated} job(s) migrated to systemd timers")
 for sname, reason in skipped:
     print(f"  WARN: '{sname}' skipped — {reason}", file=sys.stderr)
 PYEOF
+
+    # Migration 60: Register inject-bootup-context.py SessionStart hooks in settings.json
+    # Adds two SessionStart entries: one empty-matcher entry for all fresh sessions
+    # (must run after write-dispatcher-session-id so role detection works), and one
+    # compact-matcher entry so bootup content is re-injected after context compaction.
+    if [ -f "$CLAUDE_SETTINGS" ]; then
+        chmod +x "$LOBSTER_DIR/hooks/inject-bootup-context.py" 2>/dev/null || true
+        if ! jq -e '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("inject-bootup-context")) | select(.matcher == "")' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+            TMP_SETTINGS=$(mktemp)
+            jq '.hooks.SessionStart = (.hooks.SessionStart // []) + [{
+                "matcher": "",
+                "hooks": [{
+                    "type": "command",
+                    "command": "python3 '"$LOBSTER_DIR"'/hooks/inject-bootup-context.py",
+                    "timeout": 10
+                }]
+            }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+            substep "Registered inject-bootup-context SessionStart hook (all sessions)"
+            migrated=$((migrated + 1))
+        fi
+        if ! jq -e '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("inject-bootup-context")) | select(.matcher == "compact")' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+            TMP_SETTINGS=$(mktemp)
+            jq '.hooks.SessionStart = (.hooks.SessionStart // []) + [{
+                "matcher": "compact",
+                "hooks": [{
+                    "type": "command",
+                    "command": "python3 '"$LOBSTER_DIR"'/hooks/inject-bootup-context.py",
+                    "timeout": 10
+                }]
+            }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+            substep "Registered inject-bootup-context SessionStart hook (compact sessions)"
             migrated=$((migrated + 1))
         fi
     fi
