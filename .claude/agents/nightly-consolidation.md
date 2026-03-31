@@ -18,8 +18,32 @@ You will receive a prompt containing the consolidation trigger timestamp.
    Call `memory_recent(hours=24)` to retrieve all observations and events from the past 24 hours.
    If the result is empty, note that in your write_result and exit — nothing to consolidate.
 
+**1b. Read today's session files.**
+List `~/lobster-user-config/memory/canonical/sessions/` for files matching today's date pattern (`YYYYMMDD-*.md` where `YYYYMMDD` = today's date).
+Read each file. Extract:
+- Snapshot blocks (`## Snapshot [timestamp]`) — these contain the running activity log
+- Open Threads and Open Tasks sections (from session header)
+- Notable Events sections
+
+Merge this context with the memory_recent results from step 1. Session files often contain richer conversational context than memory events — prefer session file content for narrative synthesis (steps 3-6) when available.
+
 2. **Search for key mentions.**
    Call `memory_search()` for any prominent project names, person names, or topics that appeared in step 1. This surfaces related older context that might be relevant to the synthesis.
+
+**2b. Pull today's GitHub activity.**
+Run these commands to get today's GitHub work (use --limit flags to keep output manageable):
+
+```bash
+# PRs merged today
+gh pr list --repo SiderealPress/lobster --state merged --limit 20 --json number,title,mergedAt,author | \
+  python3 -c "import json,sys; prs=json.load(sys.stdin); today='$(date +%Y-%m-%d)'; [print(f'Merged PR #{p[\"number\"]}: {p[\"title\"]}') for p in prs if p.get('mergedAt','').startswith(today)]"
+
+# Issues opened/closed today
+gh issue list --repo SiderealPress/lobster --state all --limit 30 --json number,title,state,createdAt,closedAt | \
+  python3 -c "import json,sys; issues=json.load(sys.stdin); today='$(date +%Y-%m-%d)'; [print(f'Issue #{i[\"number\"]} ({i[\"state\"]}): {i[\"title\"]}') for i in issues if (i.get('createdAt','') or i.get('closedAt','')).startswith(today)]"
+```
+
+Include the GitHub activity summary in the synthesis for rolling-summary.md and daily-digest.md. List merged PRs under a "Code shipped" bullet. List new/closed issues under an "Issues" bullet. If no GitHub activity, omit this section.
 
 3. **Update `rolling-summary.md`.**
    Read `~/lobster-user-config/memory/canonical/rolling-summary.md`.
@@ -158,7 +182,7 @@ You will receive a prompt containing the consolidation trigger timestamp.
 mcp__lobster-inbox__write_result(
     task_id=task_id,   # from your prompt header
     chat_id=0,
-    text="Nightly consolidation complete. Updated: rolling-summary.md, daily-digest.md, handoff.md, _context.md. Projects updated: <list or 'none'>. People updated: <list or 'none'>. Events consolidated: <count>.",
+    text="Nightly consolidation complete. Updated: rolling-summary.md, daily-digest.md, handoff.md, _context.md. Projects updated: <list or 'none'>. People updated: <list or 'none'>. Events consolidated: <count>. Session files read: <count>. GitHub PRs merged: <count>. GitHub issues opened/closed: <count>.",
     source="system",
     status="success",
     sent_reply_to_user=False,
