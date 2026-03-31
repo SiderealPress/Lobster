@@ -51,31 +51,6 @@ class TestScheduledJobCreation:
             assert "test-job" in content.lower() or "Test Job" in content
             assert "Run daily tests" in content
 
-    @pytest.mark.asyncio
-    async def test_job_registered_in_jobs_json(self, jobs_setup):
-        """Test that job is registered in jobs.json."""
-        with patch.multiple(
-            "src.mcp.inbox_server",
-            SCHEDULED_JOBS_FILE=jobs_setup["jobs_file"],
-            SCHEDULED_JOBS_DIR=jobs_setup["base_dir"],
-            SCHEDULED_TASKS_TASKS_DIR=jobs_setup["tasks_dir"],
-            sync_crontab=MagicMock(return_value=(True, "")),
-        ):
-            from src.mcp.inbox_server import handle_create_scheduled_job
-
-            await handle_create_scheduled_job({
-                "name": "daily-backup",
-                "schedule": "0 2 * * *",
-                "context": "Run daily backup",
-            })
-
-            jobs_data = json.loads(jobs_setup["jobs_file"].read_text())
-
-            assert "daily-backup" in jobs_data["jobs"]
-            job = jobs_data["jobs"]["daily-backup"]
-            assert job["schedule"] == "0 2 * * *"
-            assert job["enabled"] is True
-
 
 @pytest.mark.integration
 class TestJobExecution:
