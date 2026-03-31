@@ -25,6 +25,13 @@ import sys as _sys
 _SRC_DIR = str(Path(__file__).resolve().parent.parent)
 if _SRC_DIR not in _sys.path:
     _sys.path.insert(0, _SRC_DIR)
+# Add multiplayer-telegram-bot skill to sys.path for group gating support.
+# The path resolves to lobster-shop/multiplayer-telegram-bot/src relative to
+# the repo root (two levels up from src/bot/).
+_SKILL_DIR = str(Path(__file__).resolve().parent.parent.parent /
+                 "lobster-shop" / "multiplayer-telegram-bot" / "src")
+if _SKILL_DIR not in _sys.path:
+    _sys.path.insert(0, _SKILL_DIR)
 from utils.fs import atomic_write_json  # noqa: E402
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
@@ -37,6 +44,30 @@ try:
     from channels.base import ChannelAdapter  # noqa: F401
 except ImportError:
     pass  # channels package not yet installed; type hint only
+
+# Group gating — soft import from multiplayer-telegram-bot skill.
+# If the skill is unavailable the bot continues to work; all group messages
+# are silently dropped (same as the pre-group-support behaviour).
+try:
+    from multiplayer_telegram_bot.whitelist import (
+        load_whitelist,
+        enable_group,
+        add_allowed_user,
+        save_whitelist,
+    )
+    from multiplayer_telegram_bot.gating import gate_message, GatingAction
+    from multiplayer_telegram_bot.router import get_source_for_chat
+    _GROUP_GATING_ENABLED = True
+except ImportError:
+    _GROUP_GATING_ENABLED = False
+    # Logged after `log` is configured below; a module-level print ensures the
+    # condition is surfaced even if logging setup hasn't run yet.
+    import sys as _sys_warn
+    print(
+        "[lobster_bot] WARNING: multiplayer-telegram-bot skill not available "
+        "— group gating disabled",
+        file=_sys_warn.stderr,
+    )
 
 import re
 from dataclasses import dataclass, field
@@ -895,6 +926,66 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
         await message.reply_text("❌ Failed to process document.")
 
 
+async def _check_group_gating(user, chat) -> bool:
+    """Apply two-tier access gating for the given user and chat.
+
+    Returns True if the message should be processed, False if it should be
+    dropped.  Side effect: may send a registration DM when the group is
+    whitelisted but the user is unknown.
+
+    Decision tree:
+    - DM (chat.type == "private"): allow iff user.id in ALLOWED_USERS
+    - Group/supergroup:
+        - gating enabled: delegate to gate_message() from the multiplayer skill
+        - gating disabled: silently drop all group messages
+    """
+    if chat.type not in ("group", "supergroup"):
+        # DM path — existing behaviour, unchanged
+        return user.id in ALLOWED_USERS
+
+    # Group path
+    if not _GROUP_GATING_ENABLED:
+        log.debug("Group gating not available — silently dropping group message")
+        return False
+
+    store = load_whitelist()
+    result = gate_message(chat.id, user.id, store)
+
+    if result.action == GatingAction.DROP_SILENT:
+        log.debug(f"Group message silently dropped: {result.reason}")
+        return False
+
+    if result.action == GatingAction.SEND_REGISTRATION_DM:
+        log.info(f"Sending registration DM to user {user.id} for group {chat.id}")
+        try:
+            await bot_app.bot.send_message(
+                chat_id=user.id,
+                text=(
+                    "Hi! To use Lobster in this group, "
+                    "please ask the group admin to whitelist you."
+                ),
+            )
+        except Exception as exc:
+            log.warning(f"Failed to send registration DM to {user.id}: {exc}")
+        return False
+
+    # GatingAction.ALLOW — fall through
+    return True
+
+
+def _group_context_fields(chat) -> dict:
+    """Return extra msg_data fields for group messages; empty dict for DMs.
+
+    Pure function — no I/O.
+    """
+    if chat.type not in ("group", "supergroup"):
+        return {}
+    return {
+        "group_chat_id": chat.id,
+        "group_title": getattr(chat, "title", None),
+    }
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle all incoming messages."""
     message = update.message
@@ -902,7 +993,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user = update.effective_user
-    if not user or user.id not in ALLOWED_USERS:
+    if not user:
+        return
+
+    chat = message.chat
+    if not await _check_group_gating(user, chat):
         return
 
     # Wake Claude if hibernating (non-blocking — spawns subprocess if needed)
@@ -940,7 +1035,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Create message file in inbox
     msg_data = {
         "id": msg_id,
-        "source": "telegram",
+        "source": get_source_for_chat(chat.type) if _GROUP_GATING_ENABLED else "telegram",
         "type": "text",
         "chat_id": message.chat_id,
         "telegram_message_id": message.message_id,
@@ -949,6 +1044,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "user_name": user.first_name,
         "text": text,
         "timestamp": datetime.utcnow().isoformat(),
+        **_group_context_fields(chat),
     }
 
     # Capture full reply-to context if this message is a reply
@@ -1005,7 +1101,11 @@ async def handle_edited_message(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     user = update.effective_user
-    if not user or user.id not in ALLOWED_USERS:
+    if not user:
+        return
+
+    chat = message.chat
+    if not await _check_group_gating(user, chat):
         return
 
     text = message.text
@@ -1019,7 +1119,7 @@ async def handle_edited_message(update: Update, context: ContextTypes.DEFAULT_TY
 
     msg_data = {
         "id": msg_id,
-        "source": "telegram",
+        "source": get_source_for_chat(chat.type) if _GROUP_GATING_ENABLED else "telegram",
         "type": "text",
         "chat_id": message.chat_id,
         "telegram_message_id": message.message_id,
@@ -1029,6 +1129,7 @@ async def handle_edited_message(update: Update, context: ContextTypes.DEFAULT_TY
         "text": text,
         "timestamp": datetime.utcnow().isoformat(),
         "_edit_of_telegram_id": original_tg_id,
+        **_group_context_fields(chat),
     }
 
     if original_file is not None:
