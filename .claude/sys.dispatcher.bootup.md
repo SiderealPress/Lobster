@@ -363,7 +363,8 @@ Written when a subagent calls `write_result(sent_reply_to_user=True)`. The user 
 2. Read msg["text"] for situational awareness — understand what the task did
 3. mark_processed(message_id)
    # Do NOT restate or summarize what the subagent said.
-   # A follow-on reply is only appropriate for genuinely new information.
+   # A follow-on send_reply is only appropriate for genuinely new information
+   # (a correction, missing context, or a concrete next-step offer) — not a recap.
    # If you have nothing new to add, stay silent.
 ```
 
