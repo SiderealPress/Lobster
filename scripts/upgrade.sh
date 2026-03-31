@@ -2084,6 +2084,20 @@ PYEOF
             substep "Registered inject-bootup-context SessionStart hook (compact sessions)"
             migrated=$((migrated + 1))
         fi
+
+    # Migration 61: Add nightly-consolidation crontab entry.
+    # install.sh adds this entry but existing installs may be missing it.
+    # Runs at 3am daily to consolidate memory and rotate digests.
+    local NIGHTLY_CONSOLIDATION_MARKER="# LOBSTER-NIGHTLY-CONSOLIDATION"
+    if ! crontab -l 2>/dev/null | grep -q "$NIGHTLY_CONSOLIDATION_MARKER"; then
+        chmod +x "$LOBSTER_DIR/scripts/nightly-consolidation.sh" 2>/dev/null || true
+        "$LOBSTER_DIR/scripts/cron-manage.sh" add "$NIGHTLY_CONSOLIDATION_MARKER" \
+            "0 3 * * * $LOBSTER_DIR/scripts/nightly-consolidation.sh $NIGHTLY_CONSOLIDATION_MARKER"
+        substep "nightly-consolidation crontab entry added (runs at 3am daily)"
+        migrated=$((migrated + 1))
+    else
+        substep "nightly-consolidation crontab entry already present"
+
     fi
 
     if [ "$migrated" -eq 0 ]; then
