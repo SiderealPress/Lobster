@@ -83,17 +83,19 @@ Sort messages by timestamp ascending (oldest first) so forwarding is in chronolo
 
 ### Step 3: Filter messages — only forward inter-Lobster exchanges
 
-Apply these rules to each message before forwarding. Skip the message if ANY of the
-following is true:
+Apply a sender-identity allowlist: **only forward messages where the sender is
+"AlbertLobster" or "SaharLobster".**
 
-1. **genre is "telegram"** (or contains "telegram"): this message originated from the owner's
-   Telegram — forwarding it would create an echo loop. # noname
-2. **sender is "SaharLobster" AND recipient is not "AlbertLobster"**: SaharLobster sending
-   to anyone other than AlbertLobster is an outbound message, not an inter-Lobster exchange.
+Skip the message if the sender is NOT in `{"AlbertLobster", "SaharLobster"}`.
 
-Only forward messages that represent genuine AlbertLobster ↔ SaharLobster exchanges:
-- AlbertLobster → SaharLobster (any genre except "telegram")
-- SaharLobster → AlbertLobster (any genre except "telegram")
+This allowlist approach:
+- Correctly identifies inter-Lobster exchanges regardless of how the `genre` field is set
+  (avoids reliance on `genre="status-update"` vs. `genre="telegram"` distinctions)
+- Naturally excludes the owner's own Telegram messages, which arrive under a different
+  sender identity in bot-talk
+- Naturally excludes any third-party or system messages
+
+Only forward messages where `sender in {"AlbertLobster", "SaharLobster"}`.
 
 ### Step 4: Forward each qualifying message to Telegram
 
@@ -123,7 +125,7 @@ If no new messages were fetched at all, do not update state.
 
 Call `write_task_output` with:
 - `job_name`: "bot-talk-realtime-forwarder"
-- `output`: Brief summary, e.g. "No new messages." or "Forwarded 3 messages (AlbertLobster x2, SaharLobster x1). Skipped 1 (telegram genre)."
+- `output`: Brief summary, e.g. "No new messages." or "Forwarded 3 messages (AlbertLobster x2, SaharLobster x1). Skipped 1 (not in allowlist)."
 - `status`: "success" or "failed"
 
 Then call `write_result`:
