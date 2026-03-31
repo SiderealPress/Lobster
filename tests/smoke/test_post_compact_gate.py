@@ -75,12 +75,16 @@ def _run_gate(
     tool_input: dict | None = None,
     *,
     main_session: bool = True,
+    agent_id: str | None = None,
 ) -> subprocess.CompletedProcess:
     """Run the gate hook with the given tool call payload piped to stdin.
 
     HOME is overridden to home so the sentinel and log paths are isolated.
+    agent_id, when provided, simulates a subagent PreToolUse payload.
     """
     payload = {"tool_name": tool_name, "tool_input": tool_input or {}}
+    if agent_id is not None:
+        payload["agent_id"] = agent_id
     env = {
         **os.environ,
         "HOME": str(home),
@@ -181,4 +185,48 @@ def test_gate_passes_when_sentinel_is_stale(tmp_path):
     assert result.returncode == 0, f"Hook exited non-zero: {result.stderr}"
     assert result.stdout.strip() == "", (
         f"Expected empty stdout (stale sentinel passes), got: {result.stdout!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# B4 — subagent fast-path: agent_id present, no sentinel → pass immediately
+# ---------------------------------------------------------------------------
+
+
+def test_subagent_passes_without_sentinel(tmp_path):
+    """B4 (Case 1): agent_id present, no sentinel — hook exits 0 with no output.
+
+    Failure mode caught: if the agent_id fast-path is broken, subagent tool
+    calls would fall through to the dispatcher-detection layers and potentially
+    be blocked or incur unnecessary filesystem I/O.
+    """
+    # No sentinel created — normal subagent operation.
+    result = _run_gate(tmp_path, tool_name="some_tool", agent_id="subagent-abc123")
+
+    assert result.returncode == 0, f"Hook exited non-zero: {result.stderr}"
+    assert result.stdout.strip() == "", (
+        f"Expected empty stdout (subagent fast-exit), got: {result.stdout!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# B5 — subagent fast-path: agent_id present, sentinel active → still pass
+# ---------------------------------------------------------------------------
+
+
+def test_subagent_passes_with_fresh_sentinel(tmp_path):
+    """B5 (Case 4): agent_id present, fresh sentinel present — hook still exits 0.
+
+    Failure mode caught: the sentinel should only gate the dispatcher.  If a
+    subagent is blocked when the sentinel is active, subagent tool calls would
+    be denied during the compact-recovery window — incorrectly applying a
+    dispatcher-only constraint to subagents.
+    """
+    _make_sentinel(tmp_path)
+
+    result = _run_gate(tmp_path, tool_name="some_tool", agent_id="subagent-abc123")
+
+    assert result.returncode == 0, f"Hook exited non-zero: {result.stderr}"
+    assert result.stdout.strip() == "", (
+        f"Expected empty stdout (subagent fast-exit despite sentinel), got: {result.stdout!r}"
     )
