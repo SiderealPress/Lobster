@@ -19,14 +19,22 @@ finds a stale sentinel and the gate passes immediately. No deadlock.
 
 Detection is performed by is_dispatcher_session(), which uses a layered strategy:
 
-1. MCP state file (primary): The running MCP server writes the dispatcher
-   session ID to ~/lobster-workspace/data/dispatcher-session-id.  This file is
-   cleared on MCP server restart so stale IDs never linger.  Match → dispatcher.
+0. agent_id field (fast path): Claude Code injects agent_id into PreToolUse
+   payloads only for subagent sessions.  It is absent for the top-level
+   dispatcher.  If present → immediately return False (subagent).  No
+   filesystem I/O required.  This is the primary check for the common case.
+   See issue #1152.
+
+1. MCP state file: The running MCP server writes the dispatcher session ID to
+   ~/lobster-workspace/data/dispatcher-session-id.  NOTE: this file stores an
+   HTTP MCP session ID, not a CC UUID; it will never match the hook session_id
+   field in practice (namespace mismatch — see issue #1151).  Retained for
+   belt-and-suspenders; effectively a no-op in hook context.
 
 2. Hook marker file (secondary): At dispatcher startup, write-dispatcher-session-id.py
    (a SessionStart hook) writes the session ID to
-   ~/messages/config/dispatcher-session-id.  Used as fallback when the MCP
-   state file is absent.  Match → dispatcher.
+   ~/messages/config/dispatcher-session-id.  This is the real primary
+   state-file signal for hooks (CC UUID on both sides).  Match → dispatcher.
 
 3. Process-tree fallback: If neither state file is present or gives a definitive
    answer, walk the process tree upward.  Two consecutive claude-like ancestors
