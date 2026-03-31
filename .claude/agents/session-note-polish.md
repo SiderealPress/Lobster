@@ -27,6 +27,9 @@ When summarizing recent activity, cover the last **30 minutes OR 25 messages, wh
    - List Open Subagents concisely (task_id + one-line description).
    - Trim Notable Events to the 3-5 most significant entries across the whole session.
    - Set the Ended field to the current UTC timestamp.
+   - Before stripping Snapshot blocks, scan each one for `In-flight:` bullets and `Pending response to:` bullets:
+     - Any `In-flight: <task_id>` found should be added to the Open Subagents section if not already present.
+     - Any `Pending response to: <description>` found should be added to the Open Threads section if not already present.
    - Remove all `## Snapshot [timestamp]` blocks — these are raw log entries that have been incorporated into the polished sections above.
    - Keep all five section headings. Do not delete any section.
 

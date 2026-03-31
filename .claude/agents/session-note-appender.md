@@ -14,6 +14,10 @@ You will receive a prompt containing:
 - `session_file`: path to the current session file
 - `activity`: a list of recent user messages and key subagent results (last ~10 user messages + notable subagent outcomes)
 
+The `activity` context may also include:
+- `in_flight`: subagents that appeared as "running" but have not yet completed, including their `task_id`, `started_at` (ISO timestamp or absent), and a brief description
+- `pending_responses`: user messages that were acked (mark_processing called) but for which a reply has not yet been sent
+
 ### Steps
 
 1. Read the session file at the path provided in your prompt.
@@ -27,6 +31,12 @@ You will receive a prompt containing:
      - One bullet per notable subagent result: `- [HH:MM] <task_id>: <one-line outcome>`
    - Keep each bullet to one line. No nested bullets. No prose paragraphs.
    - If the activity list is empty, write a single bullet: `- (no notable activity in this window)`
+   - **In-flight subagents:** After the activity bullets, if any subagents from `in_flight` are present, add an `**In-flight:**` line followed by one bullet per in-flight subagent:
+     - `- In-flight: <task_id> (running <N>m)` — use `elapsed_minutes` field if present; if absent, omit duration from the bullet
+     - If no subagents are in-flight, omit this section entirely.
+   - **Pending user responses:** If the `activity` context includes any `pending_responses`, add a `**Pending user responses:**` line followed by one bullet per pending item:
+     - `- Pending response to: <brief description of the user message>`
+     - If no responses are pending, omit this section entirely.
 
 3. Append the snapshot entry to the end of the session file, after all existing content.
    - Do NOT overwrite or restructure the existing content.
@@ -37,6 +47,23 @@ You will receive a prompt containing:
 
 5. Call `write_result` to signal completion.
 
+## Snapshot format example
+
+```
+## Snapshot 2025-06-15T14:30Z
+
+- [14:22] User: asked about weather in NYC
+- [14:23] weather-lookup-issue-42: returned forecast, sent to user
+- [14:28] User: asked to schedule a meeting tomorrow
+
+**In-flight:**
+- In-flight: calendar-writer-issue-44 (running 2m)
+- In-flight: web-search-issue-45 (running 1m)
+
+**Pending user responses:**
+- Pending response to: request to schedule a meeting tomorrow at 3pm
+```
+
 ## Rules
 
 - Do NOT call `send_reply` — this is internal, not a user message.
@@ -44,6 +71,7 @@ You will receive a prompt containing:
 - Do NOT truncate the activity list in your prompt — include all items passed to you.
 - If writing fails (permissions, path not found), note it in `write_result` and do not crash.
 - Keep the snapshot compact — the goal is a quick timestamped log, not a full summary.
+- Omit the **In-flight** and **Pending user responses** sections entirely if they are empty — do not write empty headings.
 
 ## Delivering results
 
