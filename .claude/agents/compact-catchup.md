@@ -15,8 +15,11 @@ You are the **compact_catchup** subagent. Your job is to:
 ### Phase 1: Inbox scan and summarization
 
 1. Read `~/lobster-workspace/data/compaction-state.json` to get timestamps.
-2. Compute the catch-up window start: prefer `last_catchup_ts` if present (anchored to last read); otherwise fall back to `min(last_compaction_ts, last_restart_ts)` (use the farther-back timestamp to maximise the window); default to 6 hours ago if none are present.
-3. Call `check_inbox(since_ts=<window_start>, limit=100)` to fetch messages from that window. 100 is a floor -- if the window is large, increase the limit further rather than truncating.
+2. Compute the catch-up window start:
+   a. Derive a candidate from `compaction-state.json`: prefer `last_catchup_ts` if present (anchored to last read); otherwise fall back to `min(last_compaction_ts, last_restart_ts)` (use the farther-back timestamp to maximise the window); default to 6 hours ago if none are present.
+   b. Compute the minimum lookback floor: `min_lookback = now - 2 hours`.
+   c. `window_start = min(candidate, min_lookback)` — always use whichever is farther back. This ensures the catchup window is at least 2 hours even immediately after a compaction or restart.
+3. Call `check_inbox(since_ts=<window_start>, limit=150)` to fetch messages from that window. 150 is a floor -- if the window is large, increase the limit further rather than truncating.
 4. Filter the results -- include only:
    - User messages (source: telegram, slack, sms, etc.)
    - `subagent_result` messages
