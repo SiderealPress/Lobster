@@ -20,40 +20,19 @@ When summarizing recent activity, cover the last **30 minutes OR 25 messages, wh
    - The path is passed in your prompt as `current_session_file`.
    - If the path is not in your working context, list `~/lobster-user-config/memory/canonical/sessions/` and pick the most recently modified `.md` file (excluding `session.template.md`).
 
-2. Call `get_active_sessions()` to get currently running agents.
-
-3. Rewrite the file in place as a clean, dense handoff summary in **decision-log format**:
-
-   **Summary** — Write 1-3 sentences in decision-log narrative style, not changelog style:
-   - Focus on: what we started working on, what we discovered or decided, what is still in progress.
-   - Good: "We started working on X to address Y; we realized Z and pivoted to approach A; X and B are still in progress."
-   - Avoid: "Merged PR #N, commented on issue #M, ran tests."
-   - Synthesize from ALL snapshot blocks, not just the most recent context window.
-
-   **Open Threads** — Remove in-progress noise; keep only what is genuinely unresolved. Check snapshot entries for threads that have since resolved.
-
-   **Open Tasks** — Consolidate into two sub-lists:
-   - **Just completed** (finished in the last 30 min): task_id + one-line outcome
-   - **Still in-flight**: task_id + one-line description + how long running
-   Use snapshot entries to distinguish completed from in-flight.
-
-   **Open Subagents** — List every agent from `get_active_sessions()` still in `running` state. Include: task_id, one-line description, elapsed time (from `started_at`). Write "(none currently running)" if the result is empty.
-
-   **Pending user responses** — Add if any open thread is waiting for the user to reply or approve something. List each: what is being waited on + which subagent owns it. Write "(none)" if nothing is pending.
-
-   **Notable Events** — Trim to the 3-5 most significant entries across the whole session.
-
-   **File cleanup:**
+2. Rewrite the file in place as a clean, dense handoff summary:
+   - Condense the Summary to 1-3 sentences covering the session's main outcomes. Synthesize from ALL snapshot blocks, not just the most recent context window.
+   - Remove in-progress noise from Open Threads — keep only what is genuinely unresolved. Check snapshot entries for threads that have since resolved.
+   - Consolidate Open Tasks to only what is actually in-flight (not completed). Use snapshot entries to identify tasks that completed mid-session.
+   - List Open Subagents concisely (task_id + one-line description).
+   - Trim Notable Events to the 3-5 most significant entries across the whole session.
    - Set the Ended field to the current UTC timestamp.
-   - Before stripping Snapshot blocks, scan each one for `In-flight:` bullets and `Pending response to:` bullets:
-     - Any `In-flight: <task_id>` found should be added to the Open Subagents section if not already present.
-     - Any `Pending response to: <description>` found should be added to the Open Threads section if not already present.
    - Remove all `## Snapshot [timestamp]` blocks — these are raw log entries that have been incorporated into the polished sections above.
    - Keep all five section headings. Do not delete any section.
 
-4. Write the polished content back to the same file path.
+3. Write the polished content back to the same file path.
 
-5. Call `write_result` to signal completion.
+4. Call `write_result` to signal completion.
 
 ## Rules
 

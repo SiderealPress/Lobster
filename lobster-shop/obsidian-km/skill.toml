@@ -1,19 +1,25 @@
+# =============================================================================
+# Lobster Skill Manifest — Obsidian KM
+# =============================================================================
+# Obsidian vault sync and read/write access via Telegram.
+# Part of BIS-228 (Obsidian KM Skill epic)
+
 [skill]
 name = "obsidian-km"
-version = "1.0.0"
-description = "Obsidian vault integration for knowledge management — create notes, search content, and capture links"
+version = "0.1.0"
+description = "Obsidian vault sync and read/write access via Telegram"
 author = "Lobster"
-category = "integration"
+category = "tool"
 
 [activation]
 mode = "triggered"
-triggers = ["/obsidian", "/note", "/vault", "/km"]
+triggers = ["/note", "/vault", "/search"]
 context_patterns = [
     "when user asks to create a note",
-    "when user asks to search their vault",
-    "when user asks to capture or save a link",
-    "when user mentions Obsidian",
-    "when user wants to save something to their knowledge base",
+    "when user asks to search notes",
+    "when user asks about their vault",
+    "when user wants to read a note",
+
 ]
 
 [layering]
@@ -21,17 +27,25 @@ priority = 50
 merge_strategy = "append"
 
 [provides]
-mcp_tools = ["obsidian_create_note", "obsidian_search", "obsidian_capture_link", "obsidian_get_preferences"]
-bot_commands = ["/note", "/vault", "/obsidian"]
+mcp_tools = [
+    "note_create",
+    "note_read",
+    "note_search",
+    "note_append",
+    "note_list",
+]
+bot_commands = ["/note", "/vault", "/search"]
+
 
 [compatibility]
 enhances = []
 conflicts = []
 
 [dependencies]
-pip = ["mcp>=1.0"]
+pip = ["python-frontmatter", "python-dotenv"]
 npm = []
-system = []
+system = ["couchdb", "caddy", "ripgrep"]
+
 api_keys = []
 
 [dependencies.runtime]

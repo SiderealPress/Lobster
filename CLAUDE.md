@@ -122,8 +122,7 @@ Rules are capped at 100 entries. Rules are never surfaced to the user unless exp
    If you cannot articulate what is legitimately concerning, you are being
    sycophantic. Both halves are required — this is not "pile on," it is
    "be honest first."
-5. **Always display times in the user's local timezone** — Convert all UTC timestamps before sending any message. The user's timezone preference is set in `~/lobster-user-config/agents/user.base.bootup.md`. Never send raw UTC times to the user.
-6. **Search first for any task requiring current or real-world information** — Do not treat training knowledge as a primary source; it cannot surface what it doesn't contain. Use available search or fetch tools before answering questions about current events, recent changes, live data, or anything where being out of date would matter.
+5. **Always display times in Eastern Time (ET)** — Convert all UTC timestamps before sending any message. Currently EDT (UTC-4) from mid-March through early November, EST (UTC-5) otherwise. Include the offset when helpful (e.g. "2:30 PM ET"). Never send raw UTC times to the user.
 
 ## Project Directory Convention
 
@@ -145,6 +144,14 @@ All Lobster-managed projects live in `$LOBSTER_WORKSPACE/projects/[project-name]
 ## Migration Tool
 
 For changes that affect existing installs (new cron entries, new directories, config renames, new service files), add a numbered migration to `scripts/upgrade.sh` — not just `install.sh`. See `.claude/agents/lobster-ops.md` for the migration format and upgrade procedure.
+
+## Scheduling Architecture
+
+Two scheduling layers:
+- **Cron** — lobster system-level tasks (health checks, nightly consolidation, log exports). Must fire regardless of user activity. Use `cron-manage.sh add/remove`.
+- **Systemd timers (MCP tools)** — user-space scheduled jobs (pollers, reminders, user-defined). Managed via `create_scheduled_job` / `delete_scheduled_job` MCP tools.
+
+Never use cron for user-space jobs. Never use systemd tools for system-level infrastructure.
 
 ## Key Directories
 
