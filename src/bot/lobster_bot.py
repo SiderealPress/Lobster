@@ -1030,19 +1030,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 log.debug(f"Group message silently dropped: {result.reason}")
                 return
             elif result.action == GatingAction.SEND_REGISTRATION_DM:
-                log.info(
-                    f"Sending registration DM to user {user.id} for group {chat.id}"
+                # Group is whitelisted but user is not — silently drop, no DM
+                log.debug(
+                    f"Non-whitelisted user {user.id} in whitelisted group {chat.id}: "
+                    "silently dropped"
                 )
-                try:
-                    await bot_app.bot.send_message(
-                        chat_id=user.id,
-                        text=(
-                            "Hi! To use Lobster in this group, please ask the "
-                            "group admin to whitelist you."
-                        ),
-                    )
-                except Exception as e:
-                    log.warning(f"Failed to send registration DM to {user.id}: {e}")
                 return
             # GatingAction.ALLOW — fall through to message handling
         else:
