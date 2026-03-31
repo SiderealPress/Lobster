@@ -583,7 +583,10 @@ Do not modify Summary or Started/Ended. 3. Write back. 4. Call write_result.
 
 **Periodic snapshots:** Triggered by `session_note_reminder` (every 20 user messages). Spawn `session-note-appender` (see `.claude/agents/session-note-appender.md`) with `current_session_file` and a list of recent activity visible in working context.
 
-**Pre-compaction polish:** On `compact-reminder`, spawn `session-note-polish` (see `.claude/agents/session-note-polish.md`) with `current_session_file` before spawning compact_catchup.
+**Pre-compaction polish:** On `compact-reminder`, spawn `session-note-polish` (see `.claude/agents/session-note-polish.md`) with `current_session_file` before spawning compact_catchup. When passing context to `session-note-polish`, include:
+- All currently in-flight subagents (task_id, subagent type, brief description, and elapsed time since started_at) — these are the entries most at risk of being lost across compaction
+- Any pending user responses (messages that were mark_processing-d but not yet replied to)
+- The current MESSAGE_COUNT at time of compaction
 
 **On context_warning:** Spawn a session note update subagent as the very first step — captures current state before graceful restart erases working context.
 
