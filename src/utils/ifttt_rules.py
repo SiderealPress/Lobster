@@ -1,29 +1,35 @@
 """
 src/utils/ifttt_rules.py — IFTTT-style behavioral rules store for Lobster.
 
-Provides a bounded, LRU-pruned flat list of "if X then Y" behavioral rules that
-the dispatcher loads at startup. Rules are stored as structured YAML — machine-
-readable, diff-able, and version-controllable in lobster-user-config.
+Provides a bounded flat list of "if X then Y" behavioral rules that the
+dispatcher loads at startup. Rules are stored as minimal YAML — the file is
+an index only; behavioral content and access metadata are held in the memory
+DB, looked up via `action_ref` (a memory DB entry ID).
 
 Design principles:
   - Pure functions for all queries and transformations; side effects isolated to
     load_rules() and save_rules()
   - Immutability: all mutation functions return new rule lists rather than
     modifying in place
-  - LRU pruning: when the cap is exceeded, the least-recently-used rules (by
-    last_accessed_at, breaking ties by access_count) are pruned silently
   - Cap: MAX_RULES (default 100) — prevents unbounded growth and keeps the file
-    scannable at startup
+    scannable at startup. LRU enforcement is handled by the memory DB (DB access
+    increments counters there; the DB prunes old entries when needed).
   - Graceful degradation: missing or malformed rules file returns an empty list
     (Lobster continues without rules; no crash)
 
 File location: ~/lobster-user-config/memory/canonical/ifttt-rules.yaml
+
+Schema (version 1):
+  id:         Stable unique slug (e.g. "check-calendar-on-meeting")
+  condition:  Natural-language "IF" condition (one sentence in English)
+  action_ref: Memory DB entry ID to look up — the DB holds the behavioral
+              content and tracks access metadata (access_count, last_accessed_at)
+  enabled:    true = active, false = soft-disabled (kept in file, never applied)
 """
 
 import logging
 import os
 import tempfile
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -49,16 +55,11 @@ _DEFAULT_RULES_PATH = (
 # Types
 # ---------------------------------------------------------------------------
 
-# A Rule is a plain dict with at least these keys:
-#   id: str                  — stable unique identifier (slug, e.g. "check-calendar-on-meeting")
-#   trigger: str             — natural-language "if" condition
-#   action: str              — natural-language "then" action
-#   created_at: str          — ISO 8601 UTC timestamp
-#   last_accessed_at: str    — ISO 8601 UTC timestamp (updated on every lookup hit)
-#   access_count: int        — total number of times this rule was accessed
-#   source: str              — how the rule was created ("lobster" | "user" | "system")
-#   enabled: bool            — whether the rule is active (False = soft-disabled, not pruned)
-#   notes: str | None        — optional human-readable annotation
+# A Rule is a plain dict with exactly these keys:
+#   id: str           — stable unique slug
+#   condition: str    — natural-language "if" condition
+#   action_ref: str   — memory DB entry ID (DB holds behavioral content + metadata)
+#   enabled: bool     — whether the rule is active
 
 Rule = dict[str, Any]
 RuleStore = list[Rule]
@@ -68,103 +69,51 @@ RuleStore = list[Rule]
 # ---------------------------------------------------------------------------
 
 
-def _now_iso() -> str:
-    """Return current UTC time as ISO 8601 string."""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _lru_key(rule: Rule) -> tuple[str, int]:
-    """Sort key for LRU pruning: (last_accessed_at ASC, access_count ASC).
-
-    Rules with the oldest last_accessed_at — or the lowest access_count on
-    ties — are candidates for pruning first.
-    """
-    return (rule.get("last_accessed_at", ""), rule.get("access_count", 0))
-
-
-def prune_lru(rules: RuleStore, cap: int = MAX_RULES) -> RuleStore:
-    """Return a new rule list pruned to at most `cap` entries via LRU policy.
-
-    Rules are sorted by (last_accessed_at ASC, access_count ASC). The least-
-    recently-used entries beyond the cap are dropped. The returned list
-    preserves the original order of the surviving rules.
-
-    Args:
-        rules: Current rule list (not mutated).
-        cap: Maximum number of rules to retain.
-
-    Returns:
-        A new list containing at most `cap` rules. If len(rules) <= cap,
-        returns a shallow copy unchanged.
-    """
-    if len(rules) <= cap:
-        return list(rules)
-
-    # Identify the set of IDs to keep (the `cap` most-recently-used)
-    sorted_by_lru = sorted(rules, key=_lru_key)
-    keep_ids = {r["id"] for r in sorted_by_lru[len(rules) - cap :]}
-
-    # Preserve original order for the kept rules
-    pruned = [r for r in rules if r["id"] in keep_ids]
-
-    n_dropped = len(rules) - len(pruned)
-    if n_dropped:
-        log.info(
-            "ifttt_rules: pruned %d rule(s) (LRU, cap=%d)", n_dropped, cap
-        )
-
-    return pruned
-
-
 def add_rule(
     rules: RuleStore,
     *,
     rule_id: str,
-    trigger: str,
-    action: str,
-    source: str = "lobster",
-    notes: str | None = None,
+    condition: str,
+    action_ref: str,
     cap: int = MAX_RULES,
 ) -> RuleStore:
-    """Return a new rule list with `rule` appended and LRU pruning applied.
+    """Return a new rule list with the given rule appended (or replaced).
 
     If a rule with the same `rule_id` already exists, it is replaced in place
-    (update semantics). Otherwise, the new rule is appended and the list is
-    pruned if over cap.
+    (update semantics). Otherwise, the new rule is appended. If the list
+    exceeds `cap` after appending, the last rule(s) beyond the cap are
+    dropped (FIFO overflow — the memory DB owns LRU logic).
 
     Args:
         rules: Current rule list (not mutated).
         rule_id: Stable unique slug for the rule.
-        trigger: Natural-language "if" condition.
-        action: Natural-language "then" action.
-        source: Origin label ("lobster" | "user" | "system").
-        notes: Optional annotation.
-        cap: Maximum rule count after pruning.
+        condition: Natural-language "IF" condition (one sentence).
+        action_ref: Memory DB entry ID for the behavioral content.
+        cap: Maximum rule count; excess rules at the tail are dropped.
 
     Returns:
-        New rule list with the rule added (and list pruned to cap if needed).
+        New rule list with the rule added (and capped to `cap` entries).
     """
-    now = _now_iso()
     new_rule: Rule = {
         "id": rule_id,
-        "trigger": trigger,
-        "action": action,
-        "created_at": now,
-        "last_accessed_at": now,
-        "access_count": 0,
-        "source": source,
+        "condition": condition,
+        "action_ref": action_ref,
         "enabled": True,
-        "notes": notes,
     }
 
-    # Replace existing rule with same ID, or append
     existing_ids = {r["id"] for r in rules}
     if rule_id in existing_ids:
         updated = [new_rule if r["id"] == rule_id else r for r in rules]
     else:
         updated = list(rules) + [new_rule]
 
-    return prune_lru(updated, cap=cap)
+    # Cap: drop oldest entries (from head) to keep the newest rules
+    if len(updated) > cap:
+        n_dropped = len(updated) - cap
+        log.info("ifttt_rules: dropped %d oldest rule(s) to enforce cap=%d", n_dropped, cap)
+        updated = updated[n_dropped:]
+
+    return updated
 
 
 def remove_rule(rules: RuleStore, rule_id: str) -> RuleStore:
@@ -180,34 +129,6 @@ def remove_rule(rules: RuleStore, rule_id: str) -> RuleStore:
         New rule list without the specified rule.
     """
     return [r for r in rules if r["id"] != rule_id]
-
-
-def touch_rule(rules: RuleStore, rule_id: str) -> RuleStore:
-    """Return a new rule list with access metadata updated for `rule_id`.
-
-    Increments access_count and sets last_accessed_at to now. Used when a
-    rule is matched and applied during a session. No-op if the rule does not
-    exist.
-
-    Args:
-        rules: Current rule list (not mutated).
-        rule_id: ID of the accessed rule.
-
-    Returns:
-        New rule list with updated access metadata for the specified rule.
-    """
-    now = _now_iso()
-
-    def _touch(rule: Rule) -> Rule:
-        if rule["id"] != rule_id:
-            return rule
-        return {
-            **rule,
-            "last_accessed_at": now,
-            "access_count": rule.get("access_count", 0) + 1,
-        }
-
-    return [_touch(r) for r in rules]
 
 
 def get_enabled_rules(rules: RuleStore) -> RuleStore:
@@ -239,12 +160,15 @@ def find_rule(rules: RuleStore, rule_id: str) -> Rule | None:
 
 
 def format_rules_for_context(rules: RuleStore) -> str:
-    """Render enabled rules as a compact plain-text block for injection into context.
+    """Render enabled rules as a compact plain-text block for context injection.
 
     Produces one line per rule in the format:
-        [id] IF <trigger> THEN <action>
+        [id] IF <condition> THEN lookup <action_ref> in memory DB
 
     Disabled rules are omitted. If no enabled rules exist, returns an empty string.
+
+    The agent should batch all rule lookups that match a given turn — resolve all
+    matching `action_ref` values in a single DB query rather than one at a time.
 
     Args:
         rules: Full rule list.
@@ -256,7 +180,8 @@ def format_rules_for_context(rules: RuleStore) -> str:
     if not enabled:
         return ""
     lines = [
-        f"[{r['id']}] IF {r['trigger']} THEN {r['action']}" for r in enabled
+        f"[{r['id']}] IF {r['condition']} THEN lookup {r['action_ref']} in memory DB"
+        for r in enabled
     ]
     return "\n".join(lines)
 
@@ -300,22 +225,18 @@ def load_rules(path: Path | None = None) -> RuleStore:
 
     raw_rules = data.get("rules", [])
     if not isinstance(raw_rules, list):
-        log.warning(
-            "ifttt_rules: 'rules' key is not a list in %s", rules_path
-        )
+        log.warning("ifttt_rules: 'rules' key is not a list in %s", rules_path)
         return []
 
     # Validate minimum required keys; skip malformed entries with a warning
     valid_rules: RuleStore = []
     for i, entry in enumerate(raw_rules):
         if not isinstance(entry, dict):
-            log.warning(
-                "ifttt_rules: rule[%d] is not a dict, skipping", i
-            )
+            log.warning("ifttt_rules: rule[%d] is not a dict, skipping", i)
             continue
-        if not all(k in entry for k in ("id", "trigger", "action")):
+        if not all(k in entry for k in ("id", "condition", "action_ref")):
             log.warning(
-                "ifttt_rules: rule[%d] missing required keys (id/trigger/action), skipping",
+                "ifttt_rules: rule[%d] missing required keys (id/condition/action_ref), skipping",
                 i,
             )
             continue
@@ -332,14 +253,13 @@ def save_rules(
 ) -> None:
     """Persist rule list to YAML file atomically.
 
-    Applies LRU pruning before writing so the on-disk file never exceeds `cap`
-    entries. Uses write-to-temp-then-rename to ensure readers never see a
-    partial file.
+    Caps the rule list before writing (FIFO — drops tail entries beyond cap).
+    Uses write-to-temp-then-rename to ensure readers never see a partial file.
 
     Args:
         rules: Rule list to persist (not mutated).
         path: Target file path. Defaults to the canonical location.
-        cap: Maximum number of rules to retain (LRU pruning applied).
+        cap: Maximum number of rules to retain.
 
     Raises:
         OSError: If the write or rename fails.
@@ -347,11 +267,12 @@ def save_rules(
     rules_path = path or _DEFAULT_RULES_PATH
     rules_path.parent.mkdir(parents=True, exist_ok=True)
 
-    pruned = prune_lru(rules, cap=cap)
+    # Drop oldest (head) entries to keep the newest rules at cap
+    capped = rules[-cap:] if len(rules) > cap else list(rules)
 
     data = {
         "version": 1,
-        "rules": pruned,
+        "rules": capped,
     }
 
     serialized = yaml.dump(
@@ -362,9 +283,7 @@ def save_rules(
     )
 
     # Atomic write: temp file in same directory, then rename
-    fd, tmp_path = tempfile.mkstemp(
-        dir=str(rules_path.parent), suffix=".tmp"
-    )
+    fd, tmp_path = tempfile.mkstemp(dir=str(rules_path.parent), suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(serialized)
@@ -378,6 +297,4 @@ def save_rules(
             pass
         raise
 
-    log.debug(
-        "ifttt_rules: saved %d rule(s) to %s", len(pruned), rules_path
-    )
+    log.debug("ifttt_rules: saved %d rule(s) to %s", len(capped), rules_path)

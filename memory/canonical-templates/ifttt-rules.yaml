@@ -3,20 +3,15 @@
 # Schema: version 1
 #
 # Each rule has:
-#   id:               Stable unique slug (snake_case, e.g. "check-calendar-on-meeting").
-#                     Never reuse a deleted rule's ID.
-#   trigger:          Natural-language "if" condition (one sentence).
-#   action:           Natural-language "then" action (one sentence).
-#   created_at:       ISO 8601 UTC timestamp when the rule was created.
-#   last_accessed_at: ISO 8601 UTC timestamp when the rule was last matched/used.
-#   access_count:     Total number of times this rule has been applied.
-#   source:           Who created the rule: "lobster" | "user" | "system".
-#   enabled:          true = active, false = soft-disabled (kept for LRU purposes, never applied).
-#   notes:            Optional human-readable annotation or rationale. May be null.
+#   id:         Stable unique slug (snake_case, e.g. "check-calendar-on-meeting").
+#               Never reuse a deleted rule's ID.
+#   condition:  Natural-language "IF" condition (one sentence in English).
+#   action_ref: Memory DB entry ID. The DB holds the behavioral content and
+#               all access metadata (access_count, last_accessed_at, etc.).
+#   enabled:    true = active, false = soft-disabled (kept for reference, never applied).
 #
-# Cap: 100 rules maximum. Least-recently-used rules are pruned automatically
-# when the cap is exceeded. The user does not need to manage this file manually.
-#
+# Cap: 100 rules maximum. The user does not need to manage this file manually.
+# This file is an index only — the memory DB holds the behavioral content.
 # This file is committed to lobster-user-config and survives machine migrations.
 
 version: 1

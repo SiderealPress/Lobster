@@ -1029,8 +1029,12 @@ Lobster maintains a bounded list of "if X then Y" behavioral rules at:
 
     ~/lobster-user-config/memory/canonical/ifttt-rules.yaml
 
-These rules are loaded at startup (step 2a) and applied throughout the session. They are managed
+These rules are loaded at startup (step 2b) and applied throughout the session. They are managed
 autonomously by Lobster — the user never writes or reviews them directly.
+
+The file is an index only. Behavioral content (the actual "then" instruction) lives in the
+memory DB, keyed by `action_ref`. Access metadata (access_count, last_accessed_at, etc.) is
+also stored in the DB — not in the YAML file.
 
 ### Reading rules at startup
 
@@ -1042,30 +1046,23 @@ The YAML structure is:
 version: 1
 rules:
   - id: "check-calendar-on-meeting"
-    trigger: "The user asks about a meeting or scheduling"
-    action: "Check the calendar first before responding"
-    created_at: "2026-03-26T00:00:00Z"
-    last_accessed_at: "2026-03-26T00:00:00Z"
-    access_count: 3
-    source: "lobster"
+    condition: "The user asks about a meeting or scheduling"
+    action_ref: "mem_abc123"
     enabled: true
-    notes: null
 ```
 
-Load only enabled rules (`enabled: true`). Disabled rules are kept on disk for LRU accounting
-but never applied.
+Load only enabled rules (`enabled: true`). Disabled rules are kept on disk but never applied.
 
 ### Applying rules during a session
 
 Before responding to any user message, scan your working context for matching enabled rules.
-A rule matches when its `trigger` condition is satisfied by the current message. Apply the
-corresponding `action` as a behavioral constraint on your response.
+A rule matches when its `condition` is satisfied by the current message.
 
-When a rule is matched and applied:
-- Note which rule ID was used (for updating access metadata)
-- After saving any rule updates, call `save_rules()` from `src/utils/ifttt_rules.py` (or
-  update the YAML file directly) to increment `access_count` and update `last_accessed_at`.
-  This update can be done as a background file write — it does not need to block the response.
+**Batch all lookups.** When multiple rules match a given turn, resolve all their `action_ref`
+values in a single memory DB query — do not look them up one at a time. The DB call naturally
+increments access metadata for each retrieved entry.
+
+Apply the retrieved behavioral content as constraints on your response.
 
 ### Adding and updating rules
 
@@ -1073,16 +1070,18 @@ Lobster adds rules autonomously when it detects a recurring pattern in user beha
 are never added just because the user asks once — a pattern must be observed across multiple
 interactions or explicitly established by the user as a permanent preference.
 
-To add a rule, use `add_rule()` from `src/utils/ifttt_rules.py`. The function applies LRU
-pruning automatically if the cap (100) is exceeded.
+To add a rule, write an entry to the memory DB (to create the `action_ref`), then add a
+corresponding index entry to the YAML file via the MCP `memory_store` tool and a direct
+YAML write. All access to rules goes through MCP tools — do not call Python scripts or
+import `src/utils/ifttt_rules` directly.
 
 Rules are never surfaced to the user unless the user explicitly asks to see them.
 
-### LRU pruning
+### Cap
 
-The file is hard-capped at 100 rules. When the cap is reached, the least-recently-used rules
-(by `last_accessed_at`, breaking ties by `access_count`) are pruned automatically and silently
-at write time. No user notification is sent on prune.
+The file is hard-capped at 100 rules. When the cap is reached, new rules push out the
+oldest (by insertion order) at the tail. LRU enforcement is owned by the memory DB, which
+naturally de-prioritizes entries that are never accessed.
 
 ## Startup Behavior
 

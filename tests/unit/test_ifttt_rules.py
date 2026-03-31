@@ -2,20 +2,16 @@
 Tests for src/utils/ifttt_rules.py — IFTTT-style behavioral rules store.
 
 Covers:
-- prune_lru: LRU ordering, cap enforcement, tie-breaking by access_count
-- add_rule: append new rule, replace existing rule, cap enforcement on add
+- add_rule: append new rule, replace existing rule, cap enforcement (FIFO tail drop)
 - remove_rule: remove existing, no-op on missing
-- touch_rule: access count increment, timestamp update, no-op on missing
 - get_enabled_rules: filters disabled rules
 - find_rule: lookup by ID
-- format_rules_for_context: plain-text rendering, empty case
+- format_rules_for_context: plain-text rendering with action_ref, empty case
 - load_rules: missing file, malformed YAML, missing keys, valid file
-- save_rules: round-trip, atomic write, LRU pruning before write
+- save_rules: round-trip, atomic write, cap enforcement before write
 """
 
 import os
-import tempfile
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -28,10 +24,8 @@ from src.utils.ifttt_rules import (
     format_rules_for_context,
     get_enabled_rules,
     load_rules,
-    prune_lru,
     remove_rule,
     save_rules,
-    touch_rule,
 )
 
 
@@ -42,76 +36,15 @@ from src.utils.ifttt_rules import (
 
 def make_rule(
     rule_id: str,
-    last_accessed_at: str = "2026-01-01T00:00:00Z",
-    access_count: int = 0,
     enabled: bool = True,
+    action_ref: str | None = None,
 ) -> dict:
     return {
         "id": rule_id,
-        "trigger": f"trigger for {rule_id}",
-        "action": f"action for {rule_id}",
-        "created_at": "2026-01-01T00:00:00Z",
-        "last_accessed_at": last_accessed_at,
-        "access_count": access_count,
-        "source": "lobster",
+        "condition": f"condition for {rule_id}",
+        "action_ref": action_ref or f"mem_{rule_id}",
         "enabled": enabled,
-        "notes": None,
     }
-
-
-# ---------------------------------------------------------------------------
-# prune_lru
-# ---------------------------------------------------------------------------
-
-
-class TestPruneLru:
-    def test_no_pruning_when_under_cap(self):
-        rules = [make_rule(f"rule-{i}") for i in range(5)]
-        result = prune_lru(rules, cap=10)
-        assert len(result) == 5
-
-    def test_no_pruning_when_at_cap(self):
-        rules = [make_rule(f"rule-{i}") for i in range(10)]
-        result = prune_lru(rules, cap=10)
-        assert len(result) == 10
-
-    def test_prunes_oldest_accessed(self):
-        # rule-old was accessed 2020, rule-new was accessed 2026 — rule-old should go
-        old = make_rule("rule-old", last_accessed_at="2020-01-01T00:00:00Z")
-        new = make_rule("rule-new", last_accessed_at="2026-01-01T00:00:00Z")
-        result = prune_lru([old, new], cap=1)
-        assert len(result) == 1
-        assert result[0]["id"] == "rule-new"
-
-    def test_breaks_ties_by_access_count(self):
-        # Same timestamp, different access counts — lower access_count is pruned first
-        low = make_rule("low-count", last_accessed_at="2026-01-01T00:00:00Z", access_count=1)
-        high = make_rule("high-count", last_accessed_at="2026-01-01T00:00:00Z", access_count=10)
-        result = prune_lru([low, high], cap=1)
-        assert result[0]["id"] == "high-count"
-
-    def test_preserves_original_order_of_survivors(self):
-        # Survivors should appear in original list order, not sorted order
-        rules = [
-            make_rule("c", last_accessed_at="2026-03-01T00:00:00Z"),
-            make_rule("b", last_accessed_at="2026-02-01T00:00:00Z"),
-            make_rule("a", last_accessed_at="2020-01-01T00:00:00Z"),  # oldest → pruned
-        ]
-        result = prune_lru(rules, cap=2)
-        assert [r["id"] for r in result] == ["c", "b"]
-
-    def test_returns_new_list(self):
-        rules = [make_rule("x")]
-        result = prune_lru(rules, cap=10)
-        assert result is not rules
-
-    def test_empty_list(self):
-        assert prune_lru([], cap=5) == []
-
-    def test_prunes_to_exact_cap(self):
-        rules = [make_rule(f"r{i}", last_accessed_at=f"2026-0{i+1}-01T00:00:00Z") for i in range(5)]
-        result = prune_lru(rules, cap=3)
-        assert len(result) == 3
 
 
 # ---------------------------------------------------------------------------
@@ -121,51 +54,56 @@ class TestPruneLru:
 
 class TestAddRule:
     def test_adds_new_rule(self):
-        result = add_rule([], rule_id="my-rule", trigger="IF x", action="THEN y")
+        result = add_rule([], rule_id="my-rule", condition="IF x", action_ref="mem_abc")
         assert len(result) == 1
         assert result[0]["id"] == "my-rule"
-        assert result[0]["trigger"] == "IF x"
-        assert result[0]["action"] == "THEN y"
+        assert result[0]["condition"] == "IF x"
+        assert result[0]["action_ref"] == "mem_abc"
 
-    def test_new_rule_has_correct_defaults(self):
-        result = add_rule([], rule_id="r", trigger="t", action="a")
-        rule = result[0]
-        assert rule["access_count"] == 0
-        assert rule["enabled"] is True
-        assert rule["source"] == "lobster"
-        assert rule["notes"] is None
-        assert "created_at" in rule
-        assert "last_accessed_at" in rule
+    def test_new_rule_enabled_by_default(self):
+        result = add_rule([], rule_id="r", condition="c", action_ref="mem_r")
+        assert result[0]["enabled"] is True
 
     def test_replaces_existing_rule_with_same_id(self):
         existing = make_rule("dup")
-        result = add_rule([existing], rule_id="dup", trigger="new trigger", action="new action")
+        result = add_rule(
+            [existing], rule_id="dup", condition="new condition", action_ref="mem_new"
+        )
         assert len(result) == 1
-        assert result[0]["trigger"] == "new trigger"
+        assert result[0]["condition"] == "new condition"
+        assert result[0]["action_ref"] == "mem_new"
 
-    def test_replacement_resets_metadata(self):
-        # When replaced, the rule gets fresh created_at and access_count=0
-        existing = make_rule("dup", access_count=99)
-        result = add_rule([existing], rule_id="dup", trigger="t", action="a")
-        assert result[0]["access_count"] == 0
+    def test_replacement_preserves_list_position(self):
+        rules = [make_rule("a"), make_rule("dup"), make_rule("b")]
+        result = add_rule(rules, rule_id="dup", condition="updated", action_ref="mem_x")
+        assert [r["id"] for r in result] == ["a", "dup", "b"]
+        assert result[1]["condition"] == "updated"
 
-    def test_prunes_when_over_cap(self):
-        # Fill to cap, then add one more — oldest should be pruned
-        rules = [
-            make_rule(f"r{i}", last_accessed_at=f"2026-0{(i % 9) + 1}-01T00:00:00Z")
-            for i in range(5)
-        ]
-        result = add_rule(rules, rule_id="new", trigger="t", action="a", cap=5)
+    def test_drops_oldest_when_over_cap(self):
+        # Fill to cap, then add one more — the oldest (head) rule should be dropped
+        rules = [make_rule(f"r{i}") for i in range(5)]
+        result = add_rule(rules, rule_id="new", condition="c", action_ref="mem_new", cap=5)
         assert len(result) == 5
+        # "new" (newest) should be present
         assert any(r["id"] == "new" for r in result)
+        # r0 (oldest) should be gone
+        assert not any(r["id"] == "r0" for r in result)
 
-    def test_custom_source(self):
-        result = add_rule([], rule_id="r", trigger="t", action="a", source="user")
-        assert result[0]["source"] == "user"
+    def test_no_drop_when_under_cap(self):
+        rules = [make_rule(f"r{i}") for i in range(3)]
+        result = add_rule(rules, rule_id="new", condition="c", action_ref="m", cap=10)
+        assert len(result) == 4
 
-    def test_custom_notes(self):
-        result = add_rule([], rule_id="r", trigger="t", action="a", notes="hello")
-        assert result[0]["notes"] == "hello"
+    def test_no_drop_at_exact_cap_on_replace(self):
+        # Replacing an existing rule should not change count
+        rules = [make_rule(f"r{i}") for i in range(5)]
+        result = add_rule(rules, rule_id="r0", condition="updated", action_ref="m", cap=5)
+        assert len(result) == 5
+
+    def test_returns_new_list(self):
+        rules = [make_rule("a")]
+        result = add_rule(rules, rule_id="b", condition="c", action_ref="m")
+        assert result is not rules
 
 
 # ---------------------------------------------------------------------------
@@ -192,44 +130,6 @@ class TestRemoveRule:
 
     def test_empty_list(self):
         assert remove_rule([], "x") == []
-
-
-# ---------------------------------------------------------------------------
-# touch_rule
-# ---------------------------------------------------------------------------
-
-
-class TestTouchRule:
-    def test_increments_access_count(self):
-        rules = [make_rule("r", access_count=3)]
-        result = touch_rule(rules, "r")
-        assert result[0]["access_count"] == 4
-
-    def test_updates_last_accessed_at(self):
-        rules = [make_rule("r", last_accessed_at="2020-01-01T00:00:00Z")]
-        result = touch_rule(rules, "r")
-        assert result[0]["last_accessed_at"] != "2020-01-01T00:00:00Z"
-
-    def test_noop_on_missing_id(self):
-        rules = [make_rule("a", access_count=1)]
-        result = touch_rule(rules, "nonexistent")
-        assert result[0]["access_count"] == 1
-
-    def test_does_not_touch_other_rules(self):
-        rules = [make_rule("a", access_count=0), make_rule("b", access_count=0)]
-        result = touch_rule(rules, "a")
-        assert result[0]["access_count"] == 1
-        assert result[1]["access_count"] == 0
-
-    def test_returns_new_list(self):
-        rules = [make_rule("a")]
-        result = touch_rule(rules, "a")
-        assert result is not rules
-
-    def test_returns_new_rule_dict(self):
-        rules = [make_rule("a")]
-        result = touch_rule(rules, "a")
-        assert result[0] is not rules[0]
 
 
 # ---------------------------------------------------------------------------
@@ -284,12 +184,11 @@ class TestFindRule:
 
 
 class TestFormatRulesForContext:
-    def test_formats_enabled_rules(self):
-        rules = [make_rule("check-cal")]
-        rules[0]["trigger"] = "user mentions meeting"
-        rules[0]["action"] = "check calendar first"
+    def test_formats_enabled_rules_with_action_ref(self):
+        rules = [make_rule("check-cal", action_ref="mem_abc123")]
+        rules[0]["condition"] = "user mentions meeting"
         output = format_rules_for_context(rules)
-        assert "[check-cal] IF user mentions meeting THEN check calendar first" in output
+        assert "[check-cal] IF user mentions meeting THEN lookup mem_abc123 in memory DB" in output
 
     def test_omits_disabled_rules(self):
         rules = [make_rule("a", enabled=False)]
@@ -330,9 +229,11 @@ class TestLoadRules:
 
     def test_skips_entries_missing_required_keys(self, tmp_path):
         f = tmp_path / "rules.yaml"
+        # First entry valid (has id/condition/action_ref), second missing action_ref
         f.write_text(
-            "version: 1\nrules:\n  - id: ok\n    trigger: t\n    action: a\n"
-            "  - id: no-action\n    trigger: t\n",
+            "version: 1\nrules:\n"
+            "  - id: ok\n    condition: c\n    action_ref: mem_ok\n"
+            "  - id: bad\n    condition: c\n",
             encoding="utf-8",
         )
         result = load_rules(f)
@@ -346,14 +247,9 @@ class TestLoadRules:
             "rules": [
                 {
                     "id": "r1",
-                    "trigger": "IF meeting",
-                    "action": "check cal",
-                    "created_at": "2026-01-01T00:00:00Z",
-                    "last_accessed_at": "2026-01-01T00:00:00Z",
-                    "access_count": 5,
-                    "source": "lobster",
+                    "condition": "user asks about meeting",
+                    "action_ref": "mem_r1",
                     "enabled": True,
-                    "notes": None,
                 }
             ],
         }
@@ -361,7 +257,7 @@ class TestLoadRules:
         result = load_rules(f)
         assert len(result) == 1
         assert result[0]["id"] == "r1"
-        assert result[0]["access_count"] == 5
+        assert result[0]["action_ref"] == "mem_r1"
 
     def test_returns_empty_list_when_rules_is_not_list(self, tmp_path):
         f = tmp_path / "rules.yaml"
@@ -387,20 +283,16 @@ class TestSaveRules:
         rules = [
             {
                 "id": "r1",
-                "trigger": "t",
-                "action": "a",
-                "created_at": "2026-01-01T00:00:00Z",
-                "last_accessed_at": "2026-01-01T00:00:00Z",
-                "access_count": 0,
-                "source": "lobster",
+                "condition": "user asks about calendar",
+                "action_ref": "mem_r1",
                 "enabled": True,
-                "notes": None,
             }
         ]
         save_rules(rules, path=f)
         loaded = load_rules(f)
         assert len(loaded) == 1
         assert loaded[0]["id"] == "r1"
+        assert loaded[0]["action_ref"] == "mem_r1"
 
     def test_creates_parent_directory(self, tmp_path):
         nested = tmp_path / "deep" / "nested" / "rules.yaml"
@@ -413,15 +305,15 @@ class TestSaveRules:
         data = yaml.safe_load(f.read_text())
         assert data["version"] == 1
 
-    def test_prunes_before_writing(self, tmp_path):
+    def test_caps_before_writing(self, tmp_path):
         f = tmp_path / "rules.yaml"
-        rules = [
-            make_rule(f"r{i}", last_accessed_at=f"2026-0{(i % 9) + 1}-01T00:00:00Z")
-            for i in range(10)
-        ]
+        rules = [make_rule(f"r{i}") for i in range(10)]
         save_rules(rules, path=f, cap=5)
         loaded = load_rules(f)
         assert len(loaded) == 5
+        # Drops oldest (head): last 5 rules are kept
+        assert loaded[0]["id"] == "r5"
+        assert loaded[4]["id"] == "r9"
 
     def test_atomic_write_leaves_no_tmp_files(self, tmp_path):
         f = tmp_path / "rules.yaml"
