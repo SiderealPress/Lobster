@@ -150,6 +150,8 @@ Synthesise the tier-1 and tier-2 reads into the "Session context" section of the
 
 Structure your `write_result` text as follows:
 
+> **Note on timestamps:** The `## Catch-up:` header (below) uses UTC ISO format for internal/dispatcher use. If any timestamp from this output is ever relayed to the user in a `send_reply`, convert it to ET first (EDT UTC-4 mid-March through early November, EST UTC-5 otherwise). Format: "5:29 AM ET". Never send raw UTC ISO strings to users.
+
 ```
 ## Catch-up: <window_start> -> now
 
