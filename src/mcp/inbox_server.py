@@ -595,6 +595,7 @@ def _tick_user_message_counter(msg_type: str, msg_source: str) -> None:
             # Non-fatal: the session note will be written at compaction regardless.
 
 
+
 # ---------------------------------------------------------------------------
 # Formal message type taxonomy (issue #156)
 # Definitions live in message_types.py (dependency-free, independently testable).
