@@ -34,6 +34,13 @@ if _MCP_SRC_DIR not in sys.path:
     sys.path.insert(0, _MCP_SRC_DIR)
 from log_utils import JsonFormatter, configure_file_handler
 
+# Early logger — same name as the main `log` object defined after all imports.
+# Python's logging registry is global, so this resolves to the same Logger
+# instance that gets a StreamHandler + RotatingFileHandler during setup_logging().
+# Using it here (before those handlers are attached) sends records to the root
+# logger fallback, which is acceptable for startup diagnostics.
+_startup_log = logging.getLogger("lobster-mcp")
+
 # Event bus — structured observability infrastructure (issue #890).
 # Imported here so callsites can use _emit_event() throughout the module.
 # The singleton is initialised later in main(); events emitted before init
@@ -113,9 +120,9 @@ try:
     _db_count_conversation_history = _db_reader_mod.count_conversation_history
     _db_get_message_by_telegram_id_fn = _db_reader_mod.get_message_by_telegram_id
     _db_get_message_stats = _db_reader_mod.get_message_stats
-    print('[DB] db.reader loaded — DB reads available', file=sys.stderr)
+    _startup_log.info('[DB] db.reader loaded — DB reads available')
 except Exception as _db_reader_import_err:
-    print(f'[WARN] DB reader module unavailable: {_db_reader_import_err}', file=sys.stderr)
+    _startup_log.warning('DB reader module unavailable: %s', _db_reader_import_err)
 
 # BIS-167 Slice 6: Live DB write path — persist messages to messages.db
 _db_persist_inbound = None
@@ -129,10 +136,10 @@ try:
     )
     _db_flag = os.environ.get("LOBSTER_USE_DB", "0")
     _db_status = "ENABLED" if _db_flag == "1" else "DISABLED (set LOBSTER_USE_DB=1 to enable)"
-    print(f"[DB] message_store loaded — DB writes {_db_status}", file=sys.stderr)
+    _startup_log.info('[DB] message_store loaded — DB writes %s', _db_status)
     del _db_flag, _db_status
 except Exception as _db_import_err:
-    print(f"[WARN] messages.db write path unavailable: {_db_import_err}", file=sys.stderr)
+    _startup_log.warning('messages.db write path unavailable: %s', _db_import_err)
 
 
 # Memory system (optional — gracefully degrades to static file search)
@@ -143,7 +150,7 @@ try:
 except Exception as _mem_err:
     # Memory system is optional; log and continue
     import traceback as _tb
-    print(f"[WARN] Memory system unavailable: {_mem_err}", file=sys.stderr)
+    _startup_log.warning('Memory system unavailable: %s', _mem_err)
 
 # User Model subsystem
 _user_model = None
@@ -153,10 +160,10 @@ try:
     from user_model import create_user_model, USER_MODEL_TOOL_DEFINITIONS
     _user_model = create_user_model()
     _user_model_tool_names = _user_model.tool_names
-    print("[INFO] User Model subsystem initialized.", file=sys.stderr)
+    _startup_log.info('User Model subsystem initialized.')
 except Exception as _um_err:
     import traceback as _um_tb
-    print(f"[WARN] User Model subsystem unavailable: {_um_err}", file=sys.stderr)
+    _startup_log.warning('User Model subsystem unavailable: %s', _um_err)
 
 # ---------------------------------------------------------------------------
 # Background observation worker — fire-and-forget, zero main-thread blocking
@@ -534,6 +541,69 @@ def _was_task_replied(task_id: str, chat_id: Any) -> bool:
 _HUMAN_SOURCES = {"telegram", "sms", "signal", "slack", "whatsapp", "bisque"}
 
 # ---------------------------------------------------------------------------
+# Per-session user message counter (issue #1159 — session-note-appender trigger)
+#
+# Counts how many real user messages (type in USER_FACING_TYPES, source in
+# _HUMAN_SOURCES) have been processed via mark_processing in this server
+# process lifetime. Every 20 messages a `session_note_reminder` system
+# message is injected into the inbox so the dispatcher can spawn
+# session-note-appender without relying on working-context counting.
+#
+# Reset to 0 on process start — keyed to the process lifetime, which maps
+# to a single dispatcher session (dispatcher restarts coincide with process
+# restarts via systemd / hibernation).
+# ---------------------------------------------------------------------------
+_user_message_counter: int = 0
+SESSION_NOTE_REMINDER_INTERVAL: int = 20
+
+
+def _tick_user_message_counter(msg_type: str, msg_source: str) -> None:
+    """Increment _user_message_counter for real user messages and inject a
+    session_note_reminder into the inbox every SESSION_NOTE_REMINDER_INTERVAL
+    messages.
+
+    Only counts messages where msg_type is in USER_FACING_TYPES and msg_source
+    is in _HUMAN_SOURCES.  System messages, subagent results, cron reminders,
+    and other non-human traffic are excluded.
+
+    Called from both handle_mark_processing and handle_claim_and_ack so that
+    the counter ticks regardless of which claim path the dispatcher uses.
+    """
+    if msg_type not in USER_FACING_TYPES or msg_source not in _HUMAN_SOURCES:
+        return
+
+    global _user_message_counter
+    _user_message_counter += 1
+    if _user_message_counter % SESSION_NOTE_REMINDER_INTERVAL == 0:
+        try:
+            now_utc = datetime.now(timezone.utc)
+            ts_ms = int(now_utc.timestamp() * 1000)
+            reminder_id = f"{ts_ms}_session_note_reminder"
+            reminder = {
+                "id": reminder_id,
+                "type": "session_note_reminder",
+                "source": "system",
+                "chat_id": 0,
+                "text": (
+                    f"session_note_reminder: {_user_message_counter} user messages "
+                    f"processed this session. Spawn session-note-appender in the background "
+                    f"to append a timestamped activity snapshot to the current session file."
+                ),
+                "user_message_count": _user_message_counter,
+                "timestamp": now_utc.isoformat(),
+            }
+            inbox_file = INBOX_DIR / f"{reminder_id}.json"
+            atomic_write_json(inbox_file, reminder)
+            log.info(
+                f"session_note_reminder injected after {_user_message_counter} user messages"
+            )
+        except Exception as _snr_exc:
+            log.warning(f"session_note_reminder injection failed: {_snr_exc}")
+            # Non-fatal: the session note will be written at compaction regardless.
+
+
+
+# ---------------------------------------------------------------------------
 # Formal message type taxonomy (issue #156)
 # Definitions live in message_types.py (dependency-free, independently testable).
 # Re-exported here so callers import from a single place.
@@ -651,6 +721,9 @@ _assert_not_in_git_repo(_WORKSPACE)
 # Scheduled Tasks Directories (task definitions live in workspace, not the repo)
 SCHEDULED_JOBS_DIR = _WORKSPACE / "scheduled-jobs"
 SCHEDULED_TASKS_TASKS_DIR = SCHEDULED_JOBS_DIR / "tasks"
+# NOTE: SCHEDULED_JOBS_FILE is retained for the MCP tool handlers that still
+# read/write jobs.json. It will be removed once PR #1105 (systemd backend) merges
+# and the handlers are migrated to systemd_jobs.py.
 SCHEDULED_JOBS_FILE = SCHEDULED_JOBS_DIR / "jobs.json"
 SCHEDULED_TASKS_LOGS_DIR = SCHEDULED_JOBS_DIR / "logs"
 
@@ -743,10 +816,6 @@ if not OPENAI_API_KEY:
 if not TASKS_FILE.exists():
     TASKS_FILE.write_text(json.dumps({"tasks": [], "next_id": 1}, indent=2))
 
-# Initialize scheduled jobs file if needed
-if not SCHEDULED_JOBS_FILE.exists():
-    SCHEDULED_JOBS_FILE.write_text(json.dumps({"jobs": {}}, indent=2))
-
 # Record the moment this server process started. Used by stale-session cleanup
 # to distinguish output files from the current run vs a previous (dead) run.
 _SERVER_START_TIME = datetime.now(timezone.utc)
@@ -831,6 +900,61 @@ def _clear_dispatcher_state_file() -> None:
             log.info("[session-tag] Cleared stale dispatcher-session-id state file on startup")
     except Exception:  # noqa: BLE001
         pass
+
+
+def _write_session_lost_reminder() -> None:
+    """Write a compact-reminder to the inbox on MCP server startup.
+
+    When the MCP server restarts (e.g. via systemctl restart lobster-mcp-local),
+    any dispatcher blocked in wait_for_messages receives a "Session not found"
+    error (-32600) at the protocol level with no recovery guidance.  This
+    function writes a synthetic inbox message so that when the dispatcher
+    reconnects and calls wait_for_messages, it immediately receives a prompt
+    to re-orient and resume the main loop.
+
+    Guard: skipped when the lobster-state file indicates a mid-session MCP
+    reconnect (mode=active AND file age < 30 min).  That pattern means Claude
+    Code auto-updated or the HTTP transport briefly cycled — the dispatcher was
+    NOT blocked in a dead session and does not need to re-orient.
+
+    Idempotent: writing an extra compact-reminder during a real restart is
+    harmless; the dispatcher processes it as a routine self-check message.
+    """
+    try:
+        # Same reconnect-detection guard used by _reset_state_on_startup.
+        if LOBSTER_STATE_FILE.exists():
+            try:
+                state_data = json.loads(LOBSTER_STATE_FILE.read_text())
+                mode = state_data.get("mode", "active")
+                file_age = time.time() - LOBSTER_STATE_FILE.stat().st_mtime
+                if mode not in _TRANSIENT_MODES and file_age < _RECONNECT_GRACE_SECONDS:
+                    log.info(
+                        "[session-lost] Skipping session-lost-reminder: mid-session MCP "
+                        f"reconnect detected (mode={mode!r}, age={file_age:.0f}s)"
+                    )
+                    return
+            except Exception:  # noqa: BLE001
+                pass  # Can't read state — fall through and write the reminder
+
+        now_utc = datetime.now(timezone.utc)
+        reminder_id = f"session-lost-{int(now_utc.timestamp())}"
+        reminder = {
+            "id": reminder_id,
+            "source": "system",
+            "type": "compact-reminder",
+            "chat_id": 0,
+            "text": (
+                "SESSION LOST — The MCP server restarted and your previous session was "
+                "invalidated. Re-orient now: read sys.dispatcher.bootup.md and resume "
+                "the main loop."
+            ),
+            "timestamp": now_utc.isoformat(),
+        }
+        inbox_file = INBOX_DIR / f"{reminder_id}.json"
+        atomic_write_json(inbox_file, reminder)
+        log.info(f"[session-lost] Wrote session-lost-reminder to inbox: {reminder_id}")
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"[session-lost] Failed to write session-lost-reminder: {exc}")
 
 
 def _get_current_http_session_id() -> str | None:
@@ -2656,6 +2780,28 @@ async def list_tools() -> list[Tool]:
                 "properties": {},
             },
         ),
+        Tool(
+            name="get_person_context",
+            description="Fetch context for a specific person. Returns role, contact info, and interaction history from the canonical people file.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "person": {
+                        "type": "string",
+                        "description": "Person name matching the file stem in people/ (e.g., 'Alice', 'Bob')",
+                    },
+                },
+                "required": ["person"],
+            },
+        ),
+        Tool(
+            name="list_people",
+            description="List all people tracked in Lobster's canonical memory. Returns person names for use with get_person_context().",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
         # Local Sync Awareness Tools
         Tool(
             name="check_local_sync",
@@ -3215,6 +3361,10 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
         return await handle_get_daily_digest(arguments)
     elif name == "list_projects":
         return await handle_list_projects(arguments)
+    elif name == "get_person_context":
+        return await handle_get_person_context(arguments)
+    elif name == "list_people":
+        return await handle_list_people(arguments)
     # Local Sync Awareness Tools
     elif name == "check_local_sync":
         return await handle_check_local_sync(arguments)
@@ -4350,6 +4500,10 @@ async def handle_mark_processing(args: dict) -> list[TextContent]:
             # this is the common case and emitting on every no-match is pure noise.
             pass
 
+    # User message counter — session-note-appender trigger (issue #1159)
+    # Shared helper handles filtering, incrementing, and reminder injection.
+    _tick_user_message_counter(msg_type, msg_source)
+
     # Stamp _processing_started_at so stale detection uses actual claim time, not file mtime.
     try:
         msg_data["_processing_started_at"] = datetime.now(timezone.utc).isoformat()
@@ -4408,6 +4562,10 @@ async def handle_claim_and_ack(args: dict) -> list[TextContent]:
             source=msg_data.get("source"),
             ts=msg_data.get("timestamp"),
         )
+
+    # User message counter — session-note-appender trigger (issue #1159)
+    # Shared helper handles filtering, incrementing, and reminder injection.
+    _tick_user_message_counter(msg_type, msg_data.get("source", ""))
 
     log.info(f"claim_and_ack: message claimed: {message_id}")
 
@@ -6584,6 +6742,13 @@ async def handle_register_agent(args: dict) -> list[TextContent]:
         return [TextContent(type="text", text=f"Error recording agent: {exc}")]
 
     log.info(f"Registered pending agent: agent_id={agent_id!r} chat_id={chat_id_int}")
+    _emit_event(
+        text=f"agent.spawn: agent_id={agent_id!r} description={description!r}",
+        event_type="agent.spawn",
+        severity="info",
+        task_id=task_id,
+        chat_id=chat_id_int,
+    )
     return [TextContent(
         type="text",
         text=f"Agent registered: {agent_id!r} — {description}",
@@ -6607,6 +6772,11 @@ async def handle_unregister_agent(args: dict) -> list[TextContent]:
         return [TextContent(type="text", text=f"Error removing agent: {exc}")]
 
     log.info(f"Unregistered pending agent: agent_id={agent_id!r}")
+    _emit_event(
+        text=f"agent.complete: agent_id={agent_id!r} status=completed",
+        event_type="agent.complete",
+        severity="info",
+    )
     return [TextContent(
         type="text",
         text=f"Agent unregistered: {agent_id!r}",
@@ -6673,6 +6843,13 @@ async def handle_session_start(args: dict) -> list[TextContent]:
         return [TextContent(type="text", text=f"Error starting session: {exc}")]
 
     log.info(f"Session started: agent_id={agent_id!r} agent_type={agent_type!r} chat_id={chat_id}")
+    _emit_event(
+        text=f"agent.spawn: agent_id={agent_id!r} agent_type={agent_type!r} description={description!r}",
+        event_type="agent.spawn",
+        severity="info",
+        task_id=task_id,
+        chat_id=chat_id if isinstance(chat_id, (int, str)) else None,
+    )
 
     # Option B: explicit dispatcher declaration.
     # If the caller declares itself as the dispatcher, tag its MCP session ID
@@ -6719,6 +6896,11 @@ async def handle_session_end(args: dict) -> list[TextContent]:
         return [TextContent(type="text", text=f"Error ending session: {exc}")]
 
     log.info(f"Session ended: agent_id={agent_id!r} status={status!r}")
+    _emit_event(
+        text=f"agent.complete: agent_id={agent_id!r} status={status!r}",
+        event_type="agent.complete",
+        severity="info" if status == "completed" else "warn",
+    )
     # Notify wire server so SSE clients update within 40ms
     asyncio.create_task(_notify_wire_server())
     return [TextContent(
@@ -7480,6 +7662,17 @@ def _list_project_names() -> list[dict]:
     ]
 
 
+def _list_person_names() -> list[dict]:
+    """Pure helper: list person markdown files under CANONICAL_DIR/people/."""
+    people_dir = CANONICAL_DIR / "people"
+    if not people_dir.exists():
+        return []
+    return [
+        {"name": f.stem, "path": str(f)}
+        for f in sorted(people_dir.glob("*.md"))
+    ]
+
+
 async def handle_get_priorities(arguments: dict[str, Any]) -> list[TextContent]:
     """Return the canonical priorities.md content."""
     try:
@@ -7540,6 +7733,42 @@ async def handle_list_projects(arguments: dict[str, Any]) -> list[TextContent]:
     except Exception as e:
         log.error(f"list_projects failed: {e}", exc_info=True)
         return [TextContent(type="text", text=f"Error listing projects: {e}")]
+
+
+async def handle_get_person_context(arguments: dict[str, Any]) -> list[TextContent]:
+    """Return a specific person's canonical markdown content."""
+    person = arguments.get("person", "")
+    if not person:
+        return [TextContent(type="text", text="Error: person name is required.")]
+
+    # Sanitize: reject path traversal attempts
+    if "/" in person or "\\" in person or ".." in person:
+        return [TextContent(type="text", text="Error: invalid person name.")]
+
+    try:
+        path = CANONICAL_DIR / "people" / f"{person}.md"
+        if path.exists():
+            return [TextContent(type="text", text=path.read_text())]
+        available = [f.stem for f in (CANONICAL_DIR / "people").glob("*.md")] if (CANONICAL_DIR / "people").exists() else []
+        return [TextContent(
+            type="text",
+            text=f"No person file for '{person}'. Available: {', '.join(available) or 'none'}",
+        )]
+    except Exception as e:
+        log.error(f"get_person_context failed: {e}", exc_info=True)
+        return [TextContent(type="text", text=f"Error reading person context: {e}")]
+
+
+async def handle_list_people(arguments: dict[str, Any]) -> list[TextContent]:
+    """List all person files in canonical memory."""
+    try:
+        people = _list_person_names()
+        if not people:
+            return [TextContent(type="text", text="No person files found in canonical memory.")]
+        return [TextContent(type="text", text=json.dumps(people, indent=2))]
+    except Exception as e:
+        log.error(f"list_people failed: {e}", exc_info=True)
+        return [TextContent(type="text", text=f"Error listing people: {e}")]
 
 
 # =============================================================================
@@ -8644,6 +8873,11 @@ async def main():
     # is still active.  The file is re-written by _tag_dispatcher_session() once
     # the dispatcher identifies itself via Options A, B, or C.
     _clear_dispatcher_state_file()
+
+    # Write a session-lost-reminder to the inbox so the dispatcher knows to
+    # re-orient after reconnecting.  Skipped for mid-session MCP reconnects.
+    # See _write_session_lost_reminder() for full rationale.
+    _write_session_lost_reminder()
 
     # Initialize the event bus singleton with standard listeners.
     # JsonlFileListener writes all events to logs/events.jsonl.

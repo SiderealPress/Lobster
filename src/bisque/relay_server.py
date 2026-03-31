@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import collections
 import json
 import logging
 import logging.handlers
@@ -98,8 +99,58 @@ def _mime_to_ext(mime_type: str) -> str:
     return _MIME_EXT_MAP.get(base_type, "")
 
 
+# P1.3: Token store lives outside the repo at ~/messages/config/bisque-tokens.json.
+# Fall back to the legacy in-repo path for environments that have not yet migrated.
+_EXTERNAL_TOKENS_FILE = _MESSAGES / "config" / "bisque-tokens.json"
 _BISQUE_CHAT_PROJECT = _WORKSPACE / "projects" / "bisque-chat"
-_TOKENS_FILE = _BISQUE_CHAT_PROJECT / "data" / "tokens.json"
+_LEGACY_TOKENS_FILE = _BISQUE_CHAT_PROJECT / "data" / "tokens.json"
+
+
+def _resolve_tokens_file() -> Path:
+    """Return the active token-store path, migrating the legacy file if needed."""
+    config_dir = _MESSAGES / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    # Migrate legacy in-repo file to new location on first run
+    if _LEGACY_TOKENS_FILE.exists() and not _EXTERNAL_TOKENS_FILE.exists():
+        import shutil
+        shutil.copy2(_LEGACY_TOKENS_FILE, _EXTERNAL_TOKENS_FILE)
+        log.info("Migrated token store from %s to %s", _LEGACY_TOKENS_FILE, _EXTERNAL_TOKENS_FILE)
+    return _EXTERNAL_TOKENS_FILE
+
+
+_TOKENS_FILE = _resolve_tokens_file()
+
+# ---------------------------------------------------------------------------
+# P3.12: Structured JSON log formatter
+# ---------------------------------------------------------------------------
+
+class _JsonFormatter(logging.Formatter):
+    """P3.12: Emit one-line JSON objects for every log record.
+
+    Each record includes: ts (ISO 8601), level, logger, message, and any
+    ``extra`` fields passed via ``logging.info(..., extra={...})``.
+
+    Used for the rotating log file so that observability tooling (e.g. the
+    relay health monitor) can parse log lines without fragile regex.
+    The console handler keeps the human-readable formatter for readability.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:  # type: ignore[override]
+        entry: dict[str, Any] = {
+            "ts": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
+            "level": record.levelname,
+            "logger": record.name,
+            "msg": record.getMessage(),
+        }
+        # Attach any extra fields injected via ``logging.info(msg, extra={...})``
+        for key, val in record.__dict__.items():
+            if key not in logging.LogRecord.__dict__ and not key.startswith("_"):
+                # Skip standard LogRecord attributes; include custom extras only
+                entry[key] = val
+        if record.exc_info:
+            entry["exc"] = self.formatException(record.exc_info)
+        return json.dumps(entry, default=str)
+
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -108,17 +159,87 @@ _TOKENS_FILE = _BISQUE_CHAT_PROJECT / "data" / "tokens.json"
 LOG_DIR = _WORKSPACE / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
+# Import GzipRotatingFileHandler from the local src/mcp/log_utils module.
+# We can't use ``from mcp.log_utils import ...`` directly because the external
+# ``mcp`` package (from the MCP SDK) shadows our local src/mcp directory.
+_MCP_SRC = Path(__file__).resolve().parent.parent / "mcp"
+import importlib.util as _ilu
+_lutils_spec = _ilu.spec_from_file_location("lobster_mcp_log_utils", _MCP_SRC / "log_utils.py")
+_lutils_mod = _ilu.module_from_spec(_lutils_spec)  # type: ignore[arg-type]
+_lutils_spec.loader.exec_module(_lutils_mod)  # type: ignore[union-attr]
+GzipRotatingFileHandler = _lutils_mod.GzipRotatingFileHandler
+
 log = logging.getLogger("lobster-bisque-relay")
 log.setLevel(logging.INFO)
 
-_file_handler = logging.handlers.RotatingFileHandler(
+_file_handler = GzipRotatingFileHandler(
     LOG_DIR / "bisque-relay.log",
-    maxBytes=5 * 1024 * 1024,
-    backupCount=3,
+    maxBytes=1 * 1024 * 1024 * 1024,  # 1 GB per file
+    backupCount=5,                      # 5 gzip-compressed backups → ~5 GB history
 )
-_file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+# P3.12: Use JSON formatter for the file handler so log lines are machine-parseable
+_file_handler.setFormatter(_JsonFormatter())
 log.addHandler(_file_handler)
+# Console handler keeps human-readable format
 log.addHandler(logging.StreamHandler())
+
+
+# ---------------------------------------------------------------------------
+# P3.6: Rate limiter — token bucket per IP, applied to auth and upload endpoints
+# ---------------------------------------------------------------------------
+
+class _RateLimiter:
+    """Token-bucket rate limiter keyed by remote IP.
+
+    Each IP gets `capacity` tokens that refill at `rate` tokens/second.
+    A call to ``is_allowed(ip)`` consumes one token and returns True if the
+    bucket was non-empty, False if the IP should be throttled.
+
+    Uses a lazy-refill strategy: tokens are added proportional to elapsed
+    time since the last request, capped at `capacity`.  This avoids a
+    background thread while still being accurate.
+
+    Thread-safety note: the relay is asyncio-based (single-threaded event
+    loop), so plain dict access is safe without a mutex.
+    """
+
+    def __init__(self, rate: float = 5.0, capacity: float = 10.0) -> None:
+        """
+        Args:
+            rate:     Tokens refilled per second (default 5 — 5 req/s steady state).
+            capacity: Maximum burst size (default 10).
+        """
+        self._rate = rate
+        self._capacity = capacity
+        # ip -> (tokens: float, last_refill_ts: float)
+        self._buckets: dict[str, tuple[float, float]] = {}
+
+    def is_allowed(self, ip: str) -> bool:
+        """Consume one token for `ip`. Returns True if allowed, False if throttled."""
+        now = time.monotonic()
+        tokens, last_ts = self._buckets.get(ip, (self._capacity, now))
+        # Refill proportional to elapsed time
+        elapsed = now - last_ts
+        tokens = min(self._capacity, tokens + elapsed * self._rate)
+        if tokens < 1.0:
+            self._buckets[ip] = (tokens, now)
+            return False
+        self._buckets[ip] = (tokens - 1.0, now)
+        return True
+
+    def purge_old(self, max_age: float = 300.0) -> int:
+        """Remove buckets that have been idle for `max_age` seconds. Returns count removed."""
+        now = time.monotonic()
+        stale = [ip for ip, (_, ts) in self._buckets.items() if now - ts > max_age]
+        for ip in stale:
+            del self._buckets[ip]
+        return len(stale)
+
+
+# Auth endpoints: 5 req/s steady, burst 10
+_AUTH_RATE_LIMITER = _RateLimiter(rate=5.0, capacity=10.0)
+# Upload endpoint: 2 req/s steady, burst 5 (uploads are heavier)
+_UPLOAD_RATE_LIMITER = _RateLimiter(rate=2.0, capacity=5.0)
 
 
 # ---------------------------------------------------------------------------
@@ -261,17 +382,64 @@ class BisqueRelayServer:
         self._client_emails: dict[int, str] = {}  # ws id -> email
         # In-memory message cache for reply context lookup (id -> {text, sender})
         # Bounded to the most recent 500 messages to avoid unbounded growth.
+        # P4.25: use collections.deque for O(1) FIFO eviction
+        import collections
         self._message_cache: dict[str, dict[str, str]] = {}
-        self._message_cache_order: list[str] = []
+        self._message_cache_order: collections.deque = collections.deque()
+        # P3.2: track startup time for /health uptime reporting
+        self._start_time: float = time.time()
+        # P3.2: track last event timestamp
+        self._last_event_ts: float | None = None
         # Event sources
         self._outbox_source: OutboxEventSource | None = None
         self._fs_source: FileSystemEventSource | None = None
         self._runner: web.AppRunner | None = None
 
+    # --- HTTP handler: GET /health ---
+
+    async def _http_health(self, request: web.Request) -> web.Response:
+        """P3.4: Health check endpoint — reports relay liveness and key metrics.
+
+        Returns JSON with: status, uptime_seconds, client_count, active_sessions,
+        event_log_depth, last_event_ts, version.
+
+        No auth required — the endpoint contains no sensitive data.
+        """
+        uptime = time.time() - self._start_time
+        last_event = self._last_event_ts
+        return web.json_response(
+            {
+                "status": "ok",
+                "uptime_seconds": round(uptime, 1),
+                "client_count": len(self._clients),
+                "active_sessions": self._token_store.active_session_count,
+                "event_log_depth": len(self._event_log),
+                "last_event_ts": last_event,
+                "version": 2,
+            },
+            headers={"Access-Control-Allow-Origin": "*"},
+        )
+
     # --- HTTP handler: POST /auth/exchange ---
 
     async def _http_auth_exchange(self, request: web.Request) -> web.Response:
-        """Handle bootstrap token exchange via HTTP POST."""
+        """Handle bootstrap token exchange via HTTP POST.
+
+        P3.6: Rate-limited to 5 req/s per IP (burst 10).
+        """
+        # P3.6: rate limit auth exchange
+        remote_ip = request.remote or "unknown"
+        if not _AUTH_RATE_LIMITER.is_allowed(remote_ip):
+            log.warning("Rate limit hit on /auth/exchange from %s", remote_ip)
+            return web.json_response(
+                {"error": "Too many requests — please wait a moment"},
+                status=429,
+                headers={
+                    "Access-Control-Allow-Origin": "*",
+                    "Retry-After": "1",
+                },
+            )
+
         try:
             body = await request.json()
         except (json.JSONDecodeError, Exception):
@@ -320,6 +488,16 @@ class BisqueRelayServer:
             "Access-Control-Allow-Methods": "POST, OPTIONS",
             "Access-Control-Allow-Headers": "Content-Type, Authorization",
         }
+
+        # P3.6: rate limit admin token creation
+        remote_ip = request.remote or "unknown"
+        if not _AUTH_RATE_LIMITER.is_allowed(remote_ip):
+            log.warning("Rate limit hit on /auth/admin/token from %s", remote_ip)
+            return web.json_response(
+                {"error": "Too many requests — please wait a moment"},
+                status=429,
+                headers={**_cors_headers, "Retry-After": "1"},
+            )
 
         # Check admin secret is configured
         if not _ADMIN_SECRET:
@@ -426,6 +604,16 @@ class BisqueRelayServer:
             "Access-Control-Allow-Methods": "POST, OPTIONS",
             "Access-Control-Allow-Headers": "Content-Type, Authorization",
         }
+
+        # --- P3.6: Rate limit uploads per IP (2 req/s, burst 5) ---
+        remote_ip = request.remote or "unknown"
+        if not _UPLOAD_RATE_LIMITER.is_allowed(remote_ip):
+            log.warning("Rate limit hit on /upload from %s", remote_ip)
+            return web.json_response(
+                {"error": "Too many requests — please wait a moment"},
+                status=429,
+                headers={**_cors, "Retry-After": "1"},
+            )
 
         # --- Auth ---
         token = request.rel_url.query.get("token", "")
@@ -715,14 +903,17 @@ class BisqueRelayServer:
     _MESSAGE_CACHE_LIMIT = 500
 
     def _cache_message(self, msg_id: str, text: str, sender: str) -> None:
-        """Store a message in the bounded in-memory cache for reply lookups."""
+        """Store a message in the bounded in-memory cache for reply lookups.
+
+        P4.25: Uses deque.popleft() for O(1) FIFO eviction instead of list.pop(0).
+        """
         if msg_id in self._message_cache:
             return
         self._message_cache[msg_id] = {"text": text, "sender": sender}
         self._message_cache_order.append(msg_id)
         # Evict oldest entries once the cache exceeds the limit
         while len(self._message_cache_order) > self._MESSAGE_CACHE_LIMIT:
-            oldest = self._message_cache_order.pop(0)
+            oldest = self._message_cache_order.popleft()
             self._message_cache.pop(oldest, None)
 
     def _resolve_reply_context(
@@ -737,7 +928,112 @@ class BisqueRelayServer:
         return None
 
     def _load_recent_messages(self, limit: int = 50) -> list[dict[str, Any]]:
-        """Load recent conversation history from sent/ and processed/ directories.
+        """Load recent conversation history for the snapshot frame.
+
+        Primary path (when LOBSTER_USE_DB=1): query the messages.db SQLite
+        database which is the authoritative store after the BIS-159 cutover.
+        The bisque_events table holds both user (inbound) and assistant
+        (outbound) messages with source='bisque'.
+
+        Fallback path: scan JSON files in sent/ and processed/ directories.
+        Used when the DB is unavailable or returns no results.
+
+        Results are sorted chronologically so history renders oldest-first.
+        """
+        use_db = os.environ.get("LOBSTER_USE_DB", "0").strip() == "1"
+
+        if use_db:
+            db_messages = self._load_recent_messages_from_db(limit)
+            if db_messages:
+                return db_messages
+            # DB returned nothing — fall through to filesystem scan
+            log.info("DB returned no bisque history; falling back to filesystem scan")
+
+        return self._load_recent_messages_from_fs(limit)
+
+    def _load_recent_messages_from_db(self, limit: int) -> list[dict[str, Any]]:
+        """Load recent bisque conversation from messages.db (SQLite).
+
+        Reads from the bisque_events table which stores both user messages
+        (source='bisque', inbound) and assistant replies (source='bisque',
+        outbound).  Rows are ordered by timestamp ascending so the snapshot
+        presents history in chronological order.
+
+        Returns an empty list if the DB is unavailable or has no rows.
+        """
+        db_path_env = os.environ.get("LOBSTER_MESSAGES_DB", "")
+        db_path = Path(db_path_env) if db_path_env else _HOME / "messages" / "messages.db"
+
+        if not db_path.exists():
+            return []
+
+        try:
+            import sqlite3
+            conn = sqlite3.connect(str(db_path))
+            conn.row_factory = sqlite3.Row
+            try:
+                # bisque_events stores user inbound AND assistant outbound messages.
+                # The 'id' prefix convention is:
+                #   bisque_<ts>_<hex>  — user messages (inbound)
+                #   <ts>_bisque        — assistant replies (outbound)
+                # We derive role from the id prefix pattern.
+                rows = conn.execute(
+                    """
+                    SELECT id, chat_id, type, text, reply_to_id, reply_to, timestamp
+                    FROM bisque_events
+                    WHERE text IS NOT NULL AND text != ''
+                    ORDER BY timestamp DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+            finally:
+                conn.close()
+        except Exception as exc:
+            log.warning("Failed to load bisque history from DB: %s", exc)
+            return []
+
+        if not rows:
+            return []
+
+        messages: list[dict[str, Any]] = []
+        for row in rows:
+            msg_id = row["id"] or ""
+            # Determine role from message ID prefix convention:
+            #   IDs starting with 'bisque_' are inbound (user → Lobster)
+            #   IDs ending with '_bisque' or containing '_bisque' outbound are assistant
+            if msg_id.startswith("bisque_"):
+                role = "user"
+            else:
+                role = "assistant"
+
+            entry: dict[str, Any] = {
+                "id": msg_id,
+                "role": role,
+                "text": row["text"],
+                "timestamp": row["timestamp"] or "",
+            }
+
+            # Include reply context if present
+            reply_to_raw = row["reply_to"]
+            if reply_to_raw:
+                try:
+                    import json as _json
+                    if isinstance(reply_to_raw, str):
+                        entry["reply_to"] = _json.loads(reply_to_raw)
+                    else:
+                        entry["reply_to"] = reply_to_raw
+                except (ValueError, TypeError):
+                    pass
+
+            messages.append(entry)
+
+        # Reverse to chronological order (we fetched DESC for the LIMIT)
+        messages.reverse()
+        return messages
+
+    def _load_recent_messages_from_fs(self, limit: int) -> list[dict[str, Any]]:
+        """Load recent bisque conversation from JSON files (filesystem fallback).
 
         Combines Lobster's outgoing messages (sent/) and user messages (processed/)
         to reconstruct the full conversation. Only bisque messages are included.
@@ -896,10 +1192,17 @@ class BisqueRelayServer:
     async def _on_event(self, event_id: str, frame: str) -> None:
         """Called by the event bus when a new event is available."""
         self._event_log.append(event_id, frame)
+        self._last_event_ts = time.time()  # P3.2: track for /health + heartbeat
 
         # Parse once for both BIS-118 and BIS-122 side-effects.
+        target_email: str | None = None
         try:
             data = json.loads(frame)
+
+            # P3.3: Extract target email from the frame for per-user routing.
+            # Outbox frames carry chat_id (the email) so we can isolate delivery.
+            target_email = data.get("chat_id") or data.get("email") or None
+
             if data.get("type") == "message":
                 # BIS-118: cache assistant messages so reply context is available
                 # for future reply_to_id lookups.
@@ -912,19 +1215,35 @@ class BisqueRelayServer:
 
                 # BIS-122: send is_typing=false before the message frame so the
                 # typing indicator dismisses immediately when a reply arrives.
-                await self._fan_out(self._make_typing_frame(False))
+                # P3.3: scope the typing clear to the same user as the message.
+                await self._fan_out(self._make_typing_frame(False), target_email=target_email)
         except (json.JSONDecodeError, Exception):
             pass
 
-        await self._fan_out(frame)
+        await self._fan_out(frame, target_email=target_email)
 
-    async def _fan_out(self, frame: str) -> None:
-        """Send a frame to all connected clients."""
+    async def _fan_out(self, frame: str, target_email: str | None = None) -> None:
+        """Send a frame to connected clients.
+
+        P3.3: When target_email is provided, only clients authenticated as that
+        email receive the frame (per-user isolation). When None, all clients
+        receive the frame (used for global events like typing indicators that
+        are scoped per-connection by the caller).
+
+        P3.11: Send failures are logged rather than swallowed silently.
+        """
         dead: set = set()
         for ws in self._clients.copy():
+            # P3.3: filter by email when a target is specified
+            if target_email is not None:
+                ws_email = self._client_emails.get(id(ws))
+                if ws_email != target_email:
+                    continue
             try:
                 await ws.send_str(frame)
-            except Exception:
+            except Exception as exc:
+                ws_email = self._client_emails.get(id(ws), "<unknown>")
+                log.debug("Send failed for %s: %s", ws_email, exc)  # P3.11
                 dead.add(ws)
 
         for ws in dead:
@@ -932,6 +1251,36 @@ class BisqueRelayServer:
             self._client_emails.pop(id(ws), None)
 
     # --- Server lifecycle ---
+
+    # --- P3.13: Heartbeat logging ---
+
+    async def _heartbeat_loop(self, interval: float = 60.0) -> None:
+        """P3.13: Emit a periodic heartbeat log with client count and last event ts.
+
+        Runs every `interval` seconds for the lifetime of the server. The log
+        entry is structured to match the JsonFormatter (Op6) output format and
+        is used by the observability service to detect stale relays.
+        """
+        while self._running:
+            await asyncio.sleep(interval)
+            if not self._running:
+                break
+            client_count = len(self._clients)
+            last_ts = self._last_event_ts
+            last_ts_str = (
+                datetime.fromtimestamp(last_ts, timezone.utc).isoformat()
+                if last_ts else "never"
+            )
+            log.info(
+                "Heartbeat: clients=%d sessions=%d event_log_depth=%d last_event=%s",
+                client_count,
+                self._token_store.active_session_count,
+                len(self._event_log),
+                last_ts_str,
+            )
+            # P3.6: Purge stale rate limiter buckets to prevent unbounded memory growth
+            _AUTH_RATE_LIMITER.purge_old()
+            _UPLOAD_RATE_LIMITER.purge_old()
 
     def shutdown(self) -> None:
         """Signal the server to stop."""
@@ -970,6 +1319,9 @@ class BisqueRelayServer:
 
         # Build aiohttp app
         app = web.Application()
+        # P3.4: Health check endpoint
+        app.router.add_get("/health", self._http_health)
+        app.router.add_get("/bisque-relay/health", self._http_health)
         app.router.add_post("/auth/exchange", self._http_auth_exchange)
         app.router.add_route("OPTIONS", "/auth/exchange", self._http_options)
         app.router.add_post("/auth/admin/token", self._http_admin_create_token)
@@ -990,6 +1342,9 @@ class BisqueRelayServer:
         app.router.add_get("/", self._ws_handler)
         # Catch-all for WS connections on any path
         app.router.add_get("/{path:.*}", self._ws_handler)
+
+        # P3.13: Start heartbeat logging task
+        asyncio.get_running_loop().create_task(self._heartbeat_loop())
 
         self._runner = web.AppRunner(app)
         await self._runner.setup()
