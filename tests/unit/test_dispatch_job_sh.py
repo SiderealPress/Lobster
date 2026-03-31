@@ -306,6 +306,7 @@ class TestRunJobShMissingTaskFile:
         )
         env = _make_env(workspace, config_dir, messages_dir)
 
+
         subprocess.run(
             ["bash", str(RUN_JOB), "no-task-job"],
             env=env,
