@@ -867,10 +867,18 @@ _SERVER_START_TIME = datetime.now(timezone.utc)
 _dispatcher_session_id: str | None = None
 _http_session_manager = None  # Set to StreamableHTTPSessionManager in main() when HTTP mode is active
 
-# State file: the dispatcher session ID persisted to disk so hooks can read it
-# without network calls or JSONL parsing.  Written atomically by
+# State file: the dispatcher HTTP session ID persisted to disk so hooks can
+# read it without network calls or JSONL parsing.  Written atomically by
 # _tag_dispatcher_session(); cleared at server startup.
 _DISPATCHER_SESSION_STATE_FILE = _WORKSPACE / "data" / "dispatcher-session-id"
+
+# Companion state file: the dispatcher *Claude* session UUID (format:
+# xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx) written when the dispatcher calls
+# session_start(agent_type='dispatcher', claude_session_id=<uuid>).  This is
+# the ID that Claude Code SessionStart hooks receive in hook_input["session_id"],
+# which is a different ID space from the HTTP transport session ID above.
+# Having both files allows hooks to match whichever ID format they receive.
+_DISPATCHER_CLAUDE_SESSION_FILE = _WORKSPACE / "data" / "dispatcher-claude-session-id"
 
 
 def _write_dispatcher_state_file(session_id: str) -> None:
@@ -888,16 +896,41 @@ def _write_dispatcher_state_file(session_id: str) -> None:
         pass
 
 
-def _clear_dispatcher_state_file() -> None:
-    """Remove the dispatcher state file on server startup.
+def _write_dispatcher_claude_session_file(claude_session_id: str) -> None:
+    """Atomically write the Claude session UUID to the dispatcher claude-session file.
 
-    Prevents a stale session ID from a previous run from being mistaken for
+    Called by handle_session_start when agent_type='dispatcher' and a
+    claude_session_id is provided.  This file is read by SessionStart hooks
+    which receive the Claude UUID (not the HTTP session ID) in hook_input.
+
+    Uses a temp-file + os.rename() for atomicity.  Silent on any failure.
+    """
+    try:
+        _DISPATCHER_CLAUDE_SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _DISPATCHER_CLAUDE_SESSION_FILE.with_suffix(".tmp")
+        tmp.write_text(claude_session_id.strip())
+        tmp.replace(_DISPATCHER_CLAUDE_SESSION_FILE)
+        log.info(f"[session-tag] Wrote dispatcher Claude session UUID: {claude_session_id!r}")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _clear_dispatcher_state_file() -> None:
+    """Remove the dispatcher state files on server startup.
+
+    Prevents stale session IDs from a previous run from being mistaken for
     the current dispatcher session.  Silent on any failure.
     """
     try:
         if _DISPATCHER_SESSION_STATE_FILE.exists():
             _DISPATCHER_SESSION_STATE_FILE.unlink()
             log.info("[session-tag] Cleared stale dispatcher-session-id state file on startup")
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        if _DISPATCHER_CLAUDE_SESSION_FILE.exists():
+            _DISPATCHER_CLAUDE_SESSION_FILE.unlink()
+            log.info("[session-tag] Cleared stale dispatcher-claude-session-id state file on startup")
     except Exception:  # noqa: BLE001
         pass
 
@@ -2328,6 +2361,16 @@ async def list_tools() -> list[Tool]:
                             "'unknown' — caller did not classify (default; treated as unsafe for recovery)."
                         ),
                         "enum": ["safe", "unsafe", "unknown"],
+                    },
+                    "claude_session_id": {
+                        "type": "string",
+                        "description": (
+                            "The Claude Code session UUID for this session "
+                            "(hook_input['session_id'], format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx). "
+                            "Required when agent_type='dispatcher': written to a dedicated state file "
+                            "so SessionStart hooks can correctly identify the dispatcher session. "
+                            "This is a different ID space from the MCP HTTP transport session ID."
+                        ),
                     },
                 },
                 "required": ["agent_id", "description", "chat_id"],
@@ -6808,6 +6851,7 @@ async def handle_session_start(args: dict) -> list[TextContent]:
     trigger_message_id = args.get("trigger_message_id") or None
     trigger_snippet = args.get("trigger_snippet") or None
     idempotency = args.get("idempotency") or None
+    claude_session_id = (args.get("claude_session_id") or "").strip() or None
 
     if not agent_id:
         return [TextContent(type="text", text="Error: agent_id is required")]
@@ -6860,6 +6904,14 @@ async def handle_session_start(args: dict) -> list[TextContent]:
         http_session_id = _get_current_http_session_id()
         if http_session_id is not None:
             _tag_dispatcher_session(http_session_id)
+
+    # Write the Claude session UUID when the dispatcher provides it.
+    # SessionStart hooks receive the Claude UUID (hook_input["session_id"]),
+    # which is a different ID space from the HTTP transport session ID written
+    # above by _tag_dispatcher_session().  Having a dedicated file for the
+    # Claude UUID allows hooks to match correctly without any ID-format conversion.
+    if agent_type == "dispatcher" and claude_session_id:
+        _write_dispatcher_claude_session_file(claude_session_id)
 
     # Notify wire server so SSE clients update within 40ms
     asyncio.create_task(_notify_wire_server())
