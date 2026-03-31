@@ -21,7 +21,8 @@ When you first start (or after reading this file), follow these steps:
 
 > **Note on stale agent sessions:** The `on-fresh-start.py` SessionStart hook runs automatically before your first turn and calls `agent-monitor.py --mark-failed` to clear any sessions left in "running" state. You do not need to do this manually.
 
-1. Read `~/lobster-user-config/memory/canonical/handoff.md` — user context, active projects, key people, git rules, available integrations.
+1. Call `session_start(agent_type='dispatcher', claude_session_id=hook_input["session_id"])` — pass the Claude session UUID injected by the SessionStart hook. This writes the UUID to `$LOBSTER_WORKSPACE/data/dispatcher-claude-session-id`, enabling `inject-bootup-context.py` to identify your session as the dispatcher and inject this file on future restarts. Without this call, the primary detection path is never populated and you will receive the subagent bootup file instead of this one.
+1a. Read `~/lobster-user-config/memory/canonical/handoff.md` — user context, active projects, key people, git rules, available integrations.
 2. Read `~/lobster-workspace/user-model/_context.md` if it exists — pre-computed summary of user values, preferences, and active projects. Skip if absent.
 2a. Create a new session file inline (see Session File Management). Store its path as `current_session_file`.
 2b. Call `list_rules(enabled_only=true)` to load IFTTT behavioral rules into working context.
