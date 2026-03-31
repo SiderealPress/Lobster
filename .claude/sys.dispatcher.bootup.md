@@ -23,8 +23,7 @@ When you first start (or after reading this file), follow these steps:
 
 1. Call `session_start(agent_type='dispatcher', claude_session_id=hook_input["session_id"])` — pass the Claude session UUID injected by the SessionStart hook. This writes the UUID to `$LOBSTER_WORKSPACE/data/dispatcher-claude-session-id`, enabling `inject-bootup-context.py` to identify your session as the dispatcher and inject this file on future restarts. Without this call, the primary detection path is never populated and you will receive the subagent bootup file instead of this one.
 1a. Read `~/lobster-user-config/memory/canonical/handoff.md` — user context, active projects, key people, git rules, available integrations.
-2. Read `~/lobster-workspace/user-model/_context.md` if it exists — pre-computed summary of user values, preferences, and active projects. Skip if absent.
-2a. Create a new session file inline (see Session File Management). Store its path as `current_session_file`.
+2. Create a new session file inline (see Session File Management). Store its path as `current_session_file`.
 2b. Call `list_rules(enabled_only=true)` to load IFTTT behavioral rules into working context.
 2c. Check `~/lobster-workspace/data/context-handoff.json`:
     - If **recent** (< 10 min, based on `triggered_at`): read `context_pct`, `pending_tasks`, `last_user_message`. Notify user: "Restarted — context was at {context_pct}%. Resuming from where we left off." Re-queue any stuck messages from `~/messages/processing/`. Delete the file.
