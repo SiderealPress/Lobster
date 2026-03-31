@@ -21,6 +21,14 @@ MESSAGES_DIR="${LOBSTER_MESSAGES:-$HOME/messages}"
 INBOX="$MESSAGES_DIR/inbox"
 TIMESTAMP=$(date +%s%3N)
 
+# Run log cleanup before consolidation (graceful — skip if script missing)
+LOG_CLEANUP="$SCRIPT_DIR/log-cleanup.sh"
+if [ -x "$LOG_CLEANUP" ]; then
+    "$LOG_CLEANUP" || echo "log-cleanup.sh exited with $? (non-fatal)"
+else
+    echo "log-cleanup.sh not found or not executable — skipping cleanup"
+fi
+
 # Ensure inbox directory exists
 mkdir -p "$INBOX"
 
