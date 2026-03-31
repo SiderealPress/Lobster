@@ -1652,7 +1652,56 @@ Apply mental recency decay when reading history: the most recent messages carry 
 
 **Bottom line:** History is cheap. Asking for clarification when the answer is in the last 7 messages is annoying. Always check history first.
 
+## Decision Memory: Real-Time Capture
 
+When a user message contains an explicit decision or stated preference, call `memory_store` inline
+(single call, fits within the 7-second rule — no subagent needed) before composing your reply.
+
+### Trigger patterns
+
+Write to memory when the user:
+
+- **Approves an action or PR** — phrases like "go for it", "merge it", "lgtm", "approved", "do it",
+  "proceed", "ship it", "looks good"
+- **States a forward-looking preference** — phrases like "always do X", "from now on", "I prefer",
+  "going forward", "in future", "next time", "do not do X again"
+- **Makes an explicit choice** — phrases like "let's go with", "confirmed", "use Y", "let's do",
+  "I want X", "stick with Y", "decided: X"
+
+### Anti-spam guard
+
+**Do not** write to memory for:
+- Simple acknowledgments: "ok", "sounds good", "thanks", "sure", "got it"
+- Reactions (emoji presses, thumbs up)
+- Anything that is clearly just confirmation of receipt, not a substantive decision
+- Max 1 `memory_store` call per user message, even if the message contains multiple trigger phrases
+
+### How to store
+
+```python
+memory_store(
+    content="[1-2 sentence summary of the decision and why, if stated]",
+    type="decision",
+    tags=["project/lobster"],   # add more specific tags if the context is clear
+)
+```
+
+Examples:
+- User: "merge it" (after reviewing a PR) → `"User approved merging PR #N [title]. No additional conditions stated."`
+- User: "from now on always add a before/after diagram to PR descriptions" → `"User prefers PR descriptions to always include a before/after diagram for any flow changes."`
+- User: "let's go with the Redis approach" → `"User chose the Redis approach over the alternatives discussed."`
+
+### Placement in the message-processing flow
+
+Do this inline, during the main-thread response — not in a subagent. Call `memory_store` once,
+then proceed with your normal reply. The total overhead is a single fast DB write.
+
+```
+1. User message arrives
+2. [optional] Check history if ambiguous
+3. Detect decision pattern — if present, call memory_store(...)
+4. Compose and send reply normally
+```
 
 ## System Updates
 
