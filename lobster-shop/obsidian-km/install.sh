@@ -173,6 +173,27 @@ else
 fi
 
 #===============================================================================
+# Step 6: Generate LiveSync Setup URI
+#===============================================================================
+step "Generating LiveSync Setup URI"
+
+SETUP_URI_SCRIPT="$SKILL_DIR/scripts/generate-setup-uri.sh"
+if [[ -f "$SETUP_URI_SCRIPT" ]]; then
+    chmod +x "$SETUP_URI_SCRIPT"
+    echo ""
+    echo -e "${CYAN}${BOLD}=== LIVESYNC SETUP URI ===${NC}"
+    echo ""
+    if bash "$SETUP_URI_SCRIPT"; then
+        success "Setup URI generated — share it with your Obsidian devices"
+    else
+        warn "Setup URI generation failed. Run manually:"
+        warn "  bash $SETUP_URI_SCRIPT"
+    fi
+else
+    warn "Setup URI script not found: $SETUP_URI_SCRIPT"
+fi
+
+#===============================================================================
 # Done
 #===============================================================================
 echo ""
@@ -186,6 +207,9 @@ echo "  Commands:"
 echo "    View timer:        systemctl --user status couchdb-health.timer"
 echo "    View logs:         journalctl --user -u couchdb-health.service -f"
 echo "    Run manually:      $SCRIPT_SRC"
+echo ""
+echo "  Setup URI command:"
+echo "    bash $SKILL_DIR/scripts/generate-setup-uri.sh"
 echo ""
 echo "  To update later, just re-run this script:"
 echo "    bash $SKILL_DIR/install.sh"
