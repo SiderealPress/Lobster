@@ -34,12 +34,27 @@ unset _env_file
 WORKSPACE="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
 TASK_FILE="$WORKSPACE/scheduled-jobs/tasks/${JOB_NAME}.md"
 LOG_DIR="$WORKSPACE/scheduled-jobs/logs"
+JOBS_FILE="${SCHEDULED_JOBS_FILE:-$WORKSPACE/scheduled-jobs/jobs.json}"
 INBOX_DIR="${LOBSTER_MESSAGES:-$HOME/messages}/inbox"
+LOBSTER_INSTALL="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 START_ISO=$(date -Iseconds)
 
 # Ensure log directory exists
 mkdir -p "$LOG_DIR" "$INBOX_DIR"
+
+# Helper: emit a system_error observation via the inbox API.
+# Uses lobster-observe.py so the dispatcher (not the bash script) routes the
+# alert — no raw file writes to observations.log or outbox/.
+_send_alert() {
+    local msg="$1"
+    uv run "$LOBSTER_INSTALL/scripts/lobster-observe.py" \
+        --category system_error \
+        --text "$msg" \
+        --source "dispatch-job" \
+        --task-id "dispatch-job/$JOB_NAME" \
+        2>&1 || true
+}
 
 LOG_FILE="$LOG_DIR/${JOB_NAME}-${TIMESTAMP}.log"
 
@@ -55,7 +70,7 @@ echo "[$START_ISO] Posting dispatch for job: $JOB_NAME" | tee "$LOG_FILE"
 
 # --- Check task file exists ---
 # If missing, auto-disable the job in jobs.json so cron stops dispatching it,
-# then exit 0 so cron doesn't keep logging errors (#1200).
+# then alert the dispatcher and exit 0 so cron doesn't keep logging errors (#1200).
 if [ ! -f "$TASK_FILE" ]; then
     echo "[$START_ISO] Error: Task file not found: $TASK_FILE — auto-disabling job '$JOB_NAME'" | tee -a "$LOG_FILE"
     if [ -f "$JOBS_FILE" ]; then
@@ -88,6 +103,7 @@ PYEOF
         ) 9>"$JOBS_LOCK" 2>/dev/null || true
         echo "[$START_ISO] Job '$JOB_NAME' auto-disabled in jobs.json (task file missing)" | tee -a "$LOG_FILE"
     fi
+    _send_alert "Job '$JOB_NAME' was auto-disabled because its task file is missing: $TASK_FILE. Re-enable the job with a valid task file to resume."
     exit 0
 fi
 
