@@ -258,12 +258,19 @@ then call write_result.
 3. Do NOT send_reply — this is internal context, not a user message.
 4. Run: ~/lobster/scripts/record-catchup-state.sh finish
    (tells health check catchup is complete — lifts WFM suppression immediately)
-5. mark_processed(message_id)
+5. if LOBSTER_DEBUG=true:
+       send_reply(
+           chat_id=ADMIN_CHAT_ID,
+           text="🔄 Back online. Context recovered from [window_start] to [now]. [N messages] processed, [M subagents] were running.",
+           source="telegram"
+       )
+   (Fill in N and M from msg["text"]. ADMIN_CHAT_ID from lobster.conf or the compact-reminder context.)
+6. mark_processed(message_id)
 ```
 
 **Rules:**
-- Never send the catch-up summary to the user unless you spot something urgent (e.g. a failed subagent that was never acknowledged).
-- The catch-up result arrives as a normal `subagent_result` with `task_id: "compact-catchup"` and `chat_id: 0`. The `chat_id: 0` signals it is internal — do not relay.
+- Never send the catch-up summary to the user unless you spot something urgent (e.g. a failed subagent that was never acknowledged), except for the brief debug-mode status above.
+- The catch-up result arrives as a normal `subagent_result` with `task_id: "compact-catchup"` and `chat_id: 0`. The `chat_id: 0` signals it is internal — do not relay beyond the debug status line.
 - If the catch-up window has no messages, that is valid — the subagent reports "Nothing to report."
 
 **Pre-compaction session note polish prompt** (pass to `lobster-generalist`, `run_in_background=True`):
@@ -1173,7 +1180,7 @@ then call write_result.
 
 > **Note:** The startup result handler is the only one that updates `handoff.md`. Post-compaction catchup runs more frequently and operates on shorter windows; updating `handoff.md` on every compaction would create noise. Startup gaps can span hours, making notable changes more likely to be worth persisting.
 
-**When the startup `compact-catchup` result arrives** (as `subagent_result` with `task_id: "startup-catchup"` and `chat_id: 0`): read `msg["text"]` for situational awareness and update `handoff.md` if anything notable changed (failed subagents, open threads, etc.). Do NOT relay to the user — this is internal context only. Run `~/lobster/scripts/record-catchup-state.sh finish` to lift WFM suppression, then `mark_processed`.
+**When the startup `compact-catchup` result arrives** (as `subagent_result` with `task_id: "startup-catchup"` and `chat_id: 0`): read `msg["text"]` for situational awareness and update `handoff.md` if anything notable changed (failed subagents, open threads, etc.). Do NOT relay to the user — this is internal context only. Run `~/lobster/scripts/record-catchup-state.sh finish` to lift WFM suppression. If LOBSTER_DEBUG=true, send a brief status to ADMIN_CHAT_ID: "🔄 Back online. Context recovered from [window_start] to [now]. [N messages] processed, [M subagents] were running." (Fill in N and M from msg["text"].) Then `mark_processed`.
 
 **Responding to users while startup catchup is in-flight (issue #911):**
 
