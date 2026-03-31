@@ -43,7 +43,7 @@ import uvicorn
 # ---------------------------------------------------------------------------
 import sys as _sys
 _sys.path.insert(0, str(Path(__file__).parent.parent))
-from channels.outbox import OutboxFileHandler, drain_outbox  # noqa: E402
+from channels.outbox import OutboxFileHandler, OutboxWatcher, drain_outbox  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Canonical atomic filesystem helper (src/utils/fs.py)
@@ -446,7 +446,7 @@ def main() -> None:
     # Start outbox watcher thread
     observer = Observer()
     observer.schedule(
-        OutboxFileHandler(source="sms", send_fn=_send_sms_reply, log=log),
+        OutboxWatcher(source="sms", send_fn=_send_sms_reply, log=log),
         str(OUTBOX_DIR),
         recursive=False,
     )
