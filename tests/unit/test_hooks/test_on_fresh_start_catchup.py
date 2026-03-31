@@ -180,6 +180,34 @@ class TestCompactReminderAlreadyQueued:
         # Should not raise, and should return False (no valid compact-reminder found)
         assert mod._compact_reminder_already_queued() is False
 
+    def test_returns_true_when_reminder_in_processing(self, tmp_path):
+        """Reminder claimed by dispatcher (in processing/) counts as already queued.
+
+        Regression test: before the fix, only inbox/ was checked. A reminder in
+        processing/ was invisible, causing a duplicate to be injected on startup.
+        """
+        inbox = tmp_path / "inbox"
+        inbox.mkdir()
+        processing = tmp_path / "processing"
+        processing.mkdir()
+        msg = {"id": "0_compact", "subtype": "compact-reminder", "text": "test"}
+        (processing / "0_compact.json").write_text(json.dumps(msg))
+
+        mod = _load_on_fresh_start()
+        mod.INBOX_DIR = inbox
+        mod.PROCESSING_DIR = processing
+        assert mod._compact_reminder_already_queued() is True
+
+    def test_returns_false_when_processing_absent(self, tmp_path):
+        """When processing/ does not exist, should not raise and return False."""
+        inbox = tmp_path / "inbox"
+        inbox.mkdir()
+
+        mod = _load_on_fresh_start()
+        mod.INBOX_DIR = inbox
+        mod.PROCESSING_DIR = tmp_path / "nonexistent_processing"
+        assert mod._compact_reminder_already_queued() is False
+
 
 class TestInjectCompactReminder:
     """Tests for _inject_compact_reminder()."""
