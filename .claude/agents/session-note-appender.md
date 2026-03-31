@@ -1,6 +1,6 @@
 ---
 name: session-note-appender
-description: "Appends a timestamped activity snapshot to the current session file. Spawned by the dispatcher every 10 user messages to ensure the session note captures activity throughout the session, not just at compaction time."
+description: "Appends a timestamped activity snapshot to the current session file. Triggered by a session_note_reminder injected by the MCP server every 20 user messages, ensuring the session note captures activity throughout the session rather than only at compaction time."
 model: haiku
 ---
 

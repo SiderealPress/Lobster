@@ -534,6 +534,22 @@ def _was_task_replied(task_id: str, chat_id: Any) -> bool:
 _HUMAN_SOURCES = {"telegram", "sms", "signal", "slack", "whatsapp", "bisque"}
 
 # ---------------------------------------------------------------------------
+# Per-session user message counter (issue #1159 — session-note-appender trigger)
+#
+# Counts how many real user messages (type in USER_FACING_TYPES, source in
+# _HUMAN_SOURCES) have been processed via mark_processing in this server
+# process lifetime. Every 20 messages a `session_note_reminder` system
+# message is injected into the inbox so the dispatcher can spawn
+# session-note-appender without relying on working-context counting.
+#
+# Reset to 0 on process start — keyed to the process lifetime, which maps
+# to a single dispatcher session (dispatcher restarts coincide with process
+# restarts via systemd / hibernation).
+# ---------------------------------------------------------------------------
+_user_message_counter: int = 0
+SESSION_NOTE_REMINDER_INTERVAL: int = 20
+
+# ---------------------------------------------------------------------------
 # Formal message type taxonomy (issue #156)
 # Definitions live in message_types.py (dependency-free, independently testable).
 # Re-exported here so callers import from a single place.
@@ -4348,6 +4364,45 @@ async def handle_mark_processing(args: dict) -> list[TextContent]:
             # No trigger match — context injection skipped. No notification emitted;
             # this is the common case and emitting on every no-match is pure noise.
             pass
+
+    # ---------------------------------------------------------------------------
+    # User message counter — session-note-appender trigger (issue #1159)
+    #
+    # Count only real user messages (type in USER_FACING_TYPES AND source from a
+    # human channel). System messages, subagent results, cron reminders, etc. are
+    # excluded. Every SESSION_NOTE_REMINDER_INTERVAL messages, inject a
+    # `session_note_reminder` into the inbox so the dispatcher can spawn
+    # session-note-appender without relying on working-context counting.
+    # ---------------------------------------------------------------------------
+    if msg_type in USER_FACING_TYPES and msg_source in _HUMAN_SOURCES:
+        global _user_message_counter
+        _user_message_counter += 1
+        if _user_message_counter % SESSION_NOTE_REMINDER_INTERVAL == 0:
+            try:
+                now_utc = datetime.now(timezone.utc)
+                ts_ms = int(now_utc.timestamp() * 1000)
+                reminder_id = f"{ts_ms}_session_note_reminder"
+                reminder = {
+                    "id": reminder_id,
+                    "type": "session_note_reminder",
+                    "source": "system",
+                    "chat_id": 0,
+                    "text": (
+                        f"session_note_reminder: {_user_message_counter} user messages "
+                        f"processed this session. Spawn session-note-appender in the background "
+                        f"to append a timestamped activity snapshot to the current session file."
+                    ),
+                    "user_message_count": _user_message_counter,
+                    "timestamp": now_utc.isoformat(),
+                }
+                inbox_file = INBOX_DIR / f"{reminder_id}.json"
+                atomic_write_json(inbox_file, reminder)
+                log.info(
+                    f"session_note_reminder injected after {_user_message_counter} user messages"
+                )
+            except Exception as _snr_exc:
+                log.warning(f"session_note_reminder injection failed: {_snr_exc}")
+                # Non-fatal: the session note will be written at compaction regardless.
 
     # Stamp _processing_started_at so stale detection uses actual claim time, not file mtime.
     try:
