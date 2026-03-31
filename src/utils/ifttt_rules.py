@@ -253,7 +253,7 @@ def save_rules(
 ) -> None:
     """Persist rule list to YAML file atomically.
 
-    Caps the rule list before writing (FIFO — drops tail entries beyond cap).
+    Caps the rule list before writing (FIFO — drops head/oldest entries beyond cap).
     Uses write-to-temp-then-rename to ensure readers never see a partial file.
 
     Args:

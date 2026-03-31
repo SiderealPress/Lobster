@@ -1664,6 +1664,24 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="update_rule",
+            description="Soft-disable or re-enable an IFTTT behavioral rule by ID. Returns the updated rule, or null if not found.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "rule_id": {
+                        "type": "string",
+                        "description": "The ID of the rule to update.",
+                    },
+                    "enabled": {
+                        "type": "boolean",
+                        "description": "Set to false to soft-disable the rule (kept in store, never applied). Set to true to re-enable.",
+                    },
+                },
+                "required": ["rule_id", "enabled"],
+            },
+        ),
+        Tool(
             name="transcribe_audio",
             description="Transcribe a voice message to text using local whisper.cpp (small model). Use this for messages with type='voice'. Runs entirely locally using whisper.cpp - no cloud API or API key needed.",
             inputSchema={
@@ -2934,6 +2952,8 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
         return await handle_delete_rule(arguments)
     elif name == "get_rule":
         return await handle_get_rule(arguments)
+    elif name == "update_rule":
+        return await handle_update_rule(arguments)
     elif name == "transcribe_audio":
         return await handle_transcribe_audio(arguments)
     # Headless Browser Fetch
@@ -5138,6 +5158,34 @@ async def handle_get_rule(args: dict) -> list[TextContent]:
     if resolve:
         content = _resolve_action_ref(rule["action_ref"])
         output += f"\naction:     {content}"
+    return [TextContent(type="text", text=output)]
+
+
+async def handle_update_rule(args: dict) -> list[TextContent]:
+    """Soft-disable or re-enable an IFTTT behavioral rule by ID."""
+    rule_id = (args.get("rule_id") or "").strip()
+    if not rule_id:
+        return [TextContent(type="text", text="Error: rule_id is required.")]
+
+    enabled = args.get("enabled")
+    if enabled is None:
+        return [TextContent(type="text", text="Error: enabled is required.")]
+
+    rules = _ifttt_load_rules()
+    rule = _ifttt_find_rule(rules, rule_id)
+    if rule is None:
+        return [TextContent(type="text", text="null")]
+
+    updated_rules = [{**r, "enabled": bool(enabled)} if r["id"] == rule_id else r for r in rules]
+    _ifttt_save_rules(updated_rules)
+
+    updated_rule = _ifttt_find_rule(updated_rules, rule_id)
+    output = (
+        f"id:         {updated_rule['id']}\n"
+        f"condition:  {updated_rule['condition']}\n"
+        f"action_ref: {updated_rule['action_ref']}\n"
+        f"enabled:    {updated_rule.get('enabled', True)}"
+    )
     return [TextContent(type="text", text=output)]
 
 

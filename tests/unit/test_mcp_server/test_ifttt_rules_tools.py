@@ -1,7 +1,7 @@
 """
 Tests for MCP Server IFTTT Behavioral Rules Tools
 
-Covers: list_rules, add_rule, delete_rule, get_rule
+Covers: list_rules, add_rule, delete_rule, get_rule, update_rule
 """
 
 import asyncio
@@ -493,3 +493,124 @@ class TestGetRule:
             asyncio.run(handle_get_rule({"rule_id": "r1"}))
 
         mock_provider.get.assert_not_called()
+
+
+# =============================================================================
+# update_rule
+# =============================================================================
+
+
+class TestUpdateRule:
+    def test_disables_enabled_rule(self):
+        existing = [
+            {"id": "r1", "condition": "IF x", "action_ref": "mem_1", "enabled": True}
+        ]
+        saved = []
+
+        def fake_save(rules, **kwargs):
+            saved.extend(rules)
+
+        with (
+            patch("src.mcp.inbox_server._ifttt_load_rules", return_value=list(existing)),
+            patch("src.mcp.inbox_server._ifttt_save_rules", side_effect=fake_save),
+        ):
+            from src.mcp.inbox_server import handle_update_rule
+            result = asyncio.run(handle_update_rule({"rule_id": "r1", "enabled": False}))
+
+        text = result[0].text
+        assert "r1" in text
+        assert "False" in text
+        assert saved[0]["enabled"] is False
+
+    def test_re_enables_disabled_rule(self):
+        existing = [
+            {"id": "r1", "condition": "IF x", "action_ref": "mem_1", "enabled": False}
+        ]
+        saved = []
+
+        def fake_save(rules, **kwargs):
+            saved.extend(rules)
+
+        with (
+            patch("src.mcp.inbox_server._ifttt_load_rules", return_value=list(existing)),
+            patch("src.mcp.inbox_server._ifttt_save_rules", side_effect=fake_save),
+        ):
+            from src.mcp.inbox_server import handle_update_rule
+            result = asyncio.run(handle_update_rule({"rule_id": "r1", "enabled": True}))
+
+        text = result[0].text
+        assert "r1" in text
+        assert "True" in text
+        assert saved[0]["enabled"] is True
+
+    def test_returns_null_when_rule_not_found(self):
+        with (
+            patch("src.mcp.inbox_server._ifttt_load_rules", return_value=[]),
+            patch("src.mcp.inbox_server._ifttt_save_rules") as mock_save,
+        ):
+            from src.mcp.inbox_server import handle_update_rule
+            result = asyncio.run(handle_update_rule({"rule_id": "nonexistent", "enabled": False}))
+
+        assert "null" in result[0].text
+        mock_save.assert_not_called()
+
+    def test_requires_rule_id(self):
+        with patch("src.mcp.inbox_server._ifttt_load_rules", return_value=[]):
+            from src.mcp.inbox_server import handle_update_rule
+            result = asyncio.run(handle_update_rule({"enabled": False}))
+
+        assert "Error" in result[0].text
+        assert "rule_id" in result[0].text.lower()
+
+    def test_requires_enabled(self):
+        with patch("src.mcp.inbox_server._ifttt_load_rules", return_value=[]):
+            from src.mcp.inbox_server import handle_update_rule
+            result = asyncio.run(handle_update_rule({"rule_id": "r1"}))
+
+        assert "Error" in result[0].text
+        assert "enabled" in result[0].text.lower()
+
+    def test_only_updates_target_rule(self):
+        existing = [
+            {"id": "r1", "condition": "IF x", "action_ref": "mem_1", "enabled": True},
+            {"id": "r2", "condition": "IF y", "action_ref": "mem_2", "enabled": True},
+        ]
+        saved = []
+
+        def fake_save(rules, **kwargs):
+            saved.extend(rules)
+
+        with (
+            patch("src.mcp.inbox_server._ifttt_load_rules", return_value=list(existing)),
+            patch("src.mcp.inbox_server._ifttt_save_rules", side_effect=fake_save),
+        ):
+            from src.mcp.inbox_server import handle_update_rule
+            asyncio.run(handle_update_rule({"rule_id": "r1", "enabled": False}))
+
+        assert len(saved) == 2
+        r1 = next(r for r in saved if r["id"] == "r1")
+        r2 = next(r for r in saved if r["id"] == "r2")
+        assert r1["enabled"] is False
+        assert r2["enabled"] is True  # untouched
+
+    def test_returns_updated_rule_fields(self):
+        existing = [
+            {
+                "id": "check-cal",
+                "condition": "user mentions meeting",
+                "action_ref": "mem_xyz",
+                "enabled": True,
+            }
+        ]
+
+        with (
+            patch("src.mcp.inbox_server._ifttt_load_rules", return_value=list(existing)),
+            patch("src.mcp.inbox_server._ifttt_save_rules"),
+        ):
+            from src.mcp.inbox_server import handle_update_rule
+            result = asyncio.run(handle_update_rule({"rule_id": "check-cal", "enabled": False}))
+
+        text = result[0].text
+        assert "check-cal" in text
+        assert "user mentions meeting" in text
+        assert "mem_xyz" in text
