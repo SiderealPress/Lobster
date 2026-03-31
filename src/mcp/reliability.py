@@ -18,6 +18,7 @@ import logging
 import sys
 import time
 from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
@@ -124,13 +125,28 @@ def validate_message_id(message_id: Any) -> str:
 # =============================================================================
 
 _AUDIT_LOG_PATH = None  # Set during init
+_AUDIT_LOG_HANDLER: RotatingFileHandler | None = None  # Rotating handler for audit.jsonl
+
+_AUDIT_MAX_BYTES = 5 * 1024 * 1024  # 5 MB per file
+_AUDIT_BACKUP_COUNT = 5             # keep 5 rotated files
 
 
 def init_audit_log(log_dir: Path) -> None:
-    """Initialize the audit log file path."""
-    global _AUDIT_LOG_PATH
+    """Initialize the audit log file path with rotation.
+
+    Sets up a RotatingFileHandler (5 MB x 5 backups) so audit.jsonl never grows
+    unboundedly. Subsequent calls after the first are no-ops.
+    """
+    global _AUDIT_LOG_PATH, _AUDIT_LOG_HANDLER
     log_dir.mkdir(parents=True, exist_ok=True)
     _AUDIT_LOG_PATH = log_dir / "audit.jsonl"
+    if _AUDIT_LOG_HANDLER is None:
+        _AUDIT_LOG_HANDLER = RotatingFileHandler(
+            _AUDIT_LOG_PATH,
+            maxBytes=_AUDIT_MAX_BYTES,
+            backupCount=_AUDIT_BACKUP_COUNT,
+            encoding="utf-8",
+        )
 
 
 def audit_log(
@@ -187,8 +203,26 @@ def audit_log(
 
     try:
         line = json.dumps(entry, default=str) + "\n"
-        with open(_AUDIT_LOG_PATH, "a") as f:
-            f.write(line)
+        if _AUDIT_LOG_HANDLER is not None:
+            # Write via the RotatingFileHandler so size-based rotation fires.
+            # We bypass the logging.Formatter layer — the handler's stream is
+            # opened lazily on first use and rotated when maxBytes is exceeded.
+            handler = _AUDIT_LOG_HANDLER
+            handler.acquire()
+            try:
+                if handler.stream is None:
+                    handler.stream = handler._open()  # type: ignore[attr-defined]
+                # shouldRollover reads the current file size.
+                if handler.shouldRollover(logging.makeLogRecord({"msg": line})):
+                    handler.doRollover()
+                handler.stream.write(line)
+                handler.stream.flush()
+            finally:
+                handler.release()
+        else:
+            # Fallback for callers that bypass init_audit_log (e.g. tests).
+            with open(_AUDIT_LOG_PATH, "a", encoding="utf-8") as f:  # type: ignore[arg-type]
+                f.write(line)
     except Exception:
         pass  # Audit logging must never crash the main process
 
