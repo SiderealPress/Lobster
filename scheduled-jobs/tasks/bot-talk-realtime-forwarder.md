@@ -6,8 +6,8 @@
 ## Context
 
 You are running as a scheduled task. Forward new inter-Lobster bot-talk exchanges to the owner on
-Telegram as they arrive. This job polls the bot-talk API for all messages (no sender filter) and
-delivers each qualifying new message individually to the owner's Telegram.
+Telegram as they arrive. This job polls the bot-talk API and delivers each new message individually
+to the owner's Telegram.
 
 ## Authentication
 
@@ -46,38 +46,6 @@ def _load_bot_talk_token() -> str:
 
 If the token cannot be found, log an error and call `write_task_output` with status "failed".
 
-## Local Bot Identity
-
-Read the name this Lobster instance uses on the bot-talk network from config. This is the
-identity used when filtering messages — only messages where this instance is sender or
-recipient should be forwarded to the owner.
-
-Read `BOT_TALK_SENDER` using the same lookup chain as the token (config.env files in order).
-If not found in any config file, fall back to the `BOT_TALK_SENDER` environment variable.
-If still not set, log an error and call `write_task_output` with status "failed" — the job
-cannot filter correctly without knowing this instance's identity.
-
-Example (Python):
-```python
-def _load_bot_talk_sender() -> str:
-    from pathlib import Path
-
-    for config_path in [
-        Path.home() / "messages" / "config" / "config.env",
-        Path.home() / "lobster-config" / "config.env",
-    ]:
-        if config_path.exists():
-            for line in config_path.read_text().splitlines():
-                line = line.strip()
-                if line.startswith("BOT_TALK_SENDER="):
-                    value = line.split("=", 1)[1].strip().strip('"').strip("'")
-                    if value:
-                        return value
-
-    import os
-    return os.environ.get("BOT_TALK_SENDER", "")
-```
-
 ## State File
 
 Read and write `~/lobster-workspace/data/bot-talk-realtime-state.json`.
@@ -97,46 +65,37 @@ Create with default `last_processed_ts = "2026-01-01T00:00:00Z"` if not found.
 
 Read `~/lobster-workspace/data/bot-talk-realtime-state.json`. Extract `last_processed_ts`.
 
-Load the bot-talk API token using the lookup chain above.
-
-Load the local bot identity using `_load_bot_talk_sender()`. If empty, fail immediately with
-`write_task_output(status="failed", output="BOT_TALK_SENDER not configured")`.
+Load the bot-talk API token using the lookup chain above. If empty, fail immediately with
+`write_task_output(status="failed", output="BOT_TALK_TOKEN not configured")`.
 
 ### Step 2: Fetch new messages from bot-talk
 
-Poll for all recent messages (no sender filter) since `last_processed_ts`:
+Poll for all recent messages since `last_processed_ts`:
 
 ```
 GET http://46.224.41.108:4242/messages?since=<last_processed_ts>&limit=100
 X-Bot-Token: <token>
 ```
 
-Parse the response. Each message has at minimum: `sender`, `recipient`, `content`,
-`timestamp` (or `created_at`). Also check for a `genre` field.
+The API returns `{"count": N, "messages": [...]}`. Each message has these fields:
+`id`, `sender`, `content`, `genre`, `tier`, `timestamp`.
+
+Note: there is no `recipient` field and no `from_me` field in the API response.
 
 Sort messages by timestamp ascending (oldest first) so forwarding is in chronological order.
 
-### Step 3: Filter messages — only forward exchanges involving this Lobster instance
+### Step 3: No sender filter needed
 
-**Only forward messages where `sender == lobster_name` OR `recipient == lobster_name`**, where
-`lobster_name` is the value loaded from `BOT_TALK_SENDER` in Step 1.
+Forward **all** fetched messages. The bot-talk network currently carries only inter-Lobster
+exchanges — every message returned by the API is part of the AlbertLobster ↔ SaharLobster
+conversation and is relevant to the owner.
 
-Skip the message if neither the sender nor the recipient matches this instance's identity.
-
-This filter:
-- Is generic — it works for any Lobster instance regardless of its bot-talk name
-- Forwards any message that involves this Lobster instance, regardless of which other party
-  is on the other side of the conversation
-- Correctly identifies inter-Lobster exchanges regardless of how the `genre` field is set
-  (avoids reliance on `genre="status-update"` vs. `genre="telegram"` distinctions)
-- Naturally excludes messages that have no relation to this Lobster instance
+Do not filter by sender name. Do not require a `BOT_TALK_SENDER` config value. Simply forward
+every message in the fetched list.
 
 ```python
-lobster_name = _load_bot_talk_sender()  # loaded in Step 1
-qualifying = [
-    msg for msg in messages
-    if msg.get("sender") == lobster_name or msg.get("recipient") == lobster_name
-]
+# All fetched messages are qualifying — no filter needed
+qualifying = messages
 ```
 
 ### Step 4: Forward each qualifying message to Telegram
@@ -156,8 +115,7 @@ Send each message as a separate `send_reply` call — do not batch into one mess
 ### Step 5: Update state
 
 After forwarding all qualifying new messages, update `last_processed_ts` to the timestamp
-of the latest message from the full fetched list (not just the forwarded ones — advance the
-cursor past all fetched messages to avoid re-processing skipped ones).
+of the latest message from the full fetched list.
 
 Write state file atomically: write to a `.tmp` file, then rename to the final path.
 
@@ -167,12 +125,12 @@ If no new messages were fetched at all, do not update state.
 
 Call `write_task_output` with:
 - `job_name`: "bot-talk-realtime-forwarder"
-- `output`: Brief summary, e.g. "No new messages." or "Forwarded 3 messages. Skipped 1 (not sender or recipient for this instance)."
+- `output`: Brief summary, e.g. "No new messages." or "Forwarded 3 messages."
 - `status`: "success" or "failed"
 
 Then call `write_result`:
 - If messages were forwarded via `send_reply`: `write_result(task_id=<task_id>, chat_id=8305714125, sent_reply_to_user=True)`
-- If no messages were forwarded (no new messages, or all skipped): `write_result(task_id=<task_id>, chat_id=0, sent_reply_to_user=False)`
+- If no messages were forwarded (no new messages): `write_result(task_id=<task_id>, chat_id=0, sent_reply_to_user=False)`
 
 ## Timezone
 
