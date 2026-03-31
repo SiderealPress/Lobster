@@ -891,9 +891,13 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
         caption = message.caption or ""
 
+        chat = message.chat
+        _is_group = chat.type in ("group", "supergroup")
         msg_data = {
             "id": msg_id,
-            "source": "telegram",
+            "source": (
+                get_source_for_chat(chat.type) if _GROUP_GATING_ENABLED else "telegram"
+            ),
             "type": "photo",
             "chat_id": message.chat_id,
             "telegram_message_id": message.message_id,
@@ -904,6 +908,9 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
             "image_file": str(image_path),
             "timestamp": datetime.utcnow().isoformat(),
         }
+        if _is_group:
+            msg_data["group_chat_id"] = chat.id
+            msg_data["group_title"] = chat.title
 
         # Capture full reply-to context if this message is a reply
         reply_ctx = extract_reply_to_context(message)
@@ -976,9 +983,13 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
     try:
         caption = message.caption or ""
 
+        chat = message.chat
+        _is_group = chat.type in ("group", "supergroup")
         msg_data = {
             "id": msg_id,
-            "source": "telegram",
+            "source": (
+                get_source_for_chat(chat.type) if _GROUP_GATING_ENABLED else "telegram"
+            ),
             "type": "document",
             "chat_id": message.chat_id,
             "telegram_message_id": message.message_id,
@@ -992,6 +1003,9 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
             "file_id": document.file_id,
             "timestamp": datetime.utcnow().isoformat(),
         }
+        if _is_group:
+            msg_data["group_chat_id"] = chat.id
+            msg_data["group_title"] = chat.title
 
         # Capture full reply-to context if this message is a reply
         reply_ctx = extract_reply_to_context(message)
@@ -1009,6 +1023,46 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
         await message.reply_text("❌ Failed to process document.")
 
 
+async def _check_group_gating(
+    user,
+    chat,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    """Two-tier access check for a message.
+
+    Returns True if the message should be processed, False if it should be
+    dropped.  Handles three cases:
+      - Group/supergroup with gating enabled: run gate_message() and act on result.
+      - Group/supergroup without gating skill: drop silently.
+      - DM: allow only if user.id is in ALLOWED_USERS.
+
+    This is a pure decision function — callers are responsible for returning
+    early when False is returned.
+    """
+    if chat.type in ("group", "supergroup"):
+        if _GROUP_GATING_ENABLED:
+            store = load_whitelist()
+            result = gate_message(chat.id, user.id, store)
+            if result.action == GatingAction.DROP_SILENT:
+                log.debug(f"Group message silently dropped: {result.reason}")
+                return False
+            elif result.action == GatingAction.SEND_REGISTRATION_DM:
+                # Group is whitelisted but user is not — silently drop, no DM
+                log.debug(
+                    f"Non-whitelisted user {user.id} in whitelisted group {chat.id}: "
+                    "silently dropped"
+                )
+                return False
+            # GatingAction.ALLOW — proceed
+            return True
+        else:
+            # Skill not available; drop all group messages silently
+            return False
+    else:
+        # DM path — unchanged behaviour
+        return user.id in ALLOWED_USERS
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle all incoming messages."""
     message = update.message
@@ -1020,29 +1074,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     chat = message.chat
-    if chat.type in ("group", "supergroup"):
-        # Tier 1 + Tier 2 — group gating
-        if _GROUP_GATING_ENABLED:
-            store = load_whitelist()
-            result = gate_message(chat.id, user.id, store)
-            if result.action == GatingAction.DROP_SILENT:
-                log.debug(f"Group message silently dropped: {result.reason}")
-                return
-            elif result.action == GatingAction.SEND_REGISTRATION_DM:
-                # Group is whitelisted but user is not — silently drop, no DM
-                log.debug(
-                    f"Non-whitelisted user {user.id} in whitelisted group {chat.id}: "
-                    "silently dropped"
-                )
-                return
-            # GatingAction.ALLOW — fall through to message handling
-        else:
-            # Skill not available; drop all group messages silently
-            return
-    else:
-        # DM path — unchanged behaviour
-        if user.id not in ALLOWED_USERS:
-            return
+    if not await _check_group_gating(user, chat, context):
+        return
 
     # Wake Claude if hibernating (non-blocking — spawns subprocess if needed)
     wake_claude_if_hibernating()
@@ -1150,7 +1183,11 @@ async def handle_edited_message(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     user = update.effective_user
-    if not user or user.id not in ALLOWED_USERS:
+    if not user:
+        return
+
+    chat = message.chat
+    if not await _check_group_gating(user, chat, context):
         return
 
     text = message.text
@@ -1162,9 +1199,12 @@ async def handle_edited_message(update: Update, context: ContextTypes.DEFAULT_TY
 
     msg_id = f"{int(time.time() * 1000)}_edit_{message.message_id}"
 
+    _is_group = chat.type in ("group", "supergroup")
     msg_data = {
         "id": msg_id,
-        "source": "telegram",
+        "source": (
+            get_source_for_chat(chat.type) if _GROUP_GATING_ENABLED else "telegram"
+        ),
         "type": "text",
         "chat_id": message.chat_id,
         "telegram_message_id": message.message_id,
@@ -1175,6 +1215,9 @@ async def handle_edited_message(update: Update, context: ContextTypes.DEFAULT_TY
         "timestamp": datetime.utcnow().isoformat(),
         "_edit_of_telegram_id": original_tg_id,
     }
+    if _is_group:
+        msg_data["group_chat_id"] = chat.id
+        msg_data["group_title"] = chat.title
 
     if original_file is not None:
         msg_data["_replaces_inbox_id"] = original_file.stem
@@ -1266,7 +1309,11 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     user = update.effective_user
-    if not user or user.id not in ALLOWED_USERS:
+    if not user:
+        return
+
+    chat = reaction_update.chat
+    if not await _check_group_gating(user, chat, context):
         return
 
     chat_id: int = reaction_update.chat.id
@@ -1350,9 +1397,13 @@ async def handle_audio_message(
             else "[Audio file - pending transcription]"
         )
 
+        chat = message.chat
+        _is_group = chat.type in ("group", "supergroup")
         msg_data = {
             "id": msg_id,
-            "source": "telegram",
+            "source": (
+                get_source_for_chat(chat.type) if _GROUP_GATING_ENABLED else "telegram"
+            ),
             "type": msg_type,
             "chat_id": message.chat_id,
             "telegram_message_id": message.message_id,
@@ -1367,6 +1418,9 @@ async def handle_audio_message(
             "file_id": audio_obj.file_id,
             "timestamp": datetime.utcnow().isoformat(),
         }
+        if _is_group:
+            msg_data["group_chat_id"] = chat.id
+            msg_data["group_title"] = chat.title
 
         # Capture full reply-to context if this message is a reply
         reply_ctx = extract_reply_to_context(message)
