@@ -15,7 +15,7 @@ You are the **compact_catchup** subagent. Your job is to:
 ### Phase 1: Inbox scan and summarization
 
 1. Read `~/lobster-workspace/data/compaction-state.json` to get timestamps.
-2. Compute the catch-up window start: prefer `last_catchup_ts` if present (anchored to last read); otherwise fall back to `max(last_compaction_ts, last_restart_ts)`; default to 30 minutes ago if none are present.
+2. Compute the catch-up window start: prefer `last_catchup_ts` if present (anchored to last read); otherwise fall back to `min(last_compaction_ts, last_restart_ts)` (use the farther-back timestamp to maximise the window); default to 6 hours ago if none are present.
 3. Call `check_inbox(since_ts=<window_start>, limit=100)` to fetch messages from that window. 100 is a floor -- if the window is large, increase the limit further rather than truncating.
 4. Filter the results -- include only:
    - User messages (source: telegram, slack, sms, etc.)
@@ -28,9 +28,40 @@ You are the **compact_catchup** subagent. Your job is to:
 
 ### Phase 2: Populate the session file
 
-8. Locate the current session file:
+8. Locate or create the current session file:
    a. Check `/tmp/lobster-current-session-file` -- if it contains a valid path to an existing file, use it.
-   b. Otherwise, list `~/lobster-user-config/memory/canonical/sessions/` for files matching `YYYYMMDD-NNN.md`. Pick the highest-sequenced file for today (UTC date). If today has no file, the session file hasn't been created yet -- skip session file population and note this in `write_result`.
+   b. Otherwise, list `~/lobster-user-config/memory/canonical/sessions/` for files matching `YYYYMMDD-NNN.md` where `YYYYMMDD` is today's UTC date. Pick the highest-sequenced file for today. If today has no file, **create one** (see step c below).
+
+   **Content-check before writing**: Before deciding whether to populate or create a new sequenced file, inspect the candidate file's Summary section:
+   - Extract the text under `## Summary` in the existing file.
+   - Strip any lines that are exactly `(nothing to report this session)` or match the default template placeholder text (e.g. lines starting with `<` and ending with `>`).
+   - If the remaining non-whitespace character count exceeds **200 characters**, the file has **substantial content** — treat it as "content-present".
+   - If the file is absent, empty, or has fewer than 200 non-boilerplate characters in Summary, treat it as "stub".
+
+   **Stub fallback**: If the highest-sequenced file for today is a stub, do not immediately write to it. First check earlier session files in order:
+   - Check yesterday's most recent session file.
+   - Then check the next earlier file (two days ago, or the next-older file by date).
+   Apply the same content-check to each candidate. Use the first file that is either:
+     - A stub from today (populated in-place), or
+     - A stub from a prior day (carry forward its threads/tasks into a new today file), or
+     - Content-present from a prior day (create a new sequenced file for today).
+   If all checked files are content-present, create a new sequenced file for today.
+
+   Decision summary:
+   - **Today's highest file is stub**: populate it in-place (overwrite section bodies, preserve header).
+   - **Today's highest file is content-present**: create a new sequenced file instead (increment sequence number), populate that, and update `/tmp/lobster-current-session-file` to point to the new file. Do NOT overwrite the existing populated file.
+   - **No file for today**: create one (step c).
+
+   c. Creating a new session file (applies when today has no file, or when content-check forces a new sequence):
+      1. Find all files for today to determine the next sequence number. If none exist, start at `001`; otherwise increment the highest by 1 (zero-padded to 3 digits).
+      2. Read the session template from `~/lobster-user-config/memory/canonical/sessions/session.template.md`. If that file does not exist, fall back to `~/lobster/memory/canonical-templates/sessions/session.template.md`. If neither exists, use a minimal inline template (header + empty sections).
+      3. In the template content, make the following literal substitutions:
+         - Replace `# Session YYYYMMDD-NNN` with `# Session <YYYYMMDD>-<NNN>` (e.g. `# Session 20260329-001`)
+         - Replace `<ISO timestamp, e.g. 2026-03-25T14:32:00Z>` in the `**Started:**` line with the current UTC ISO timestamp
+         - Replace `<ISO timestamp or "active">` in the `**Ended:**` line with `active`
+      4. Write the file to `~/lobster-user-config/memory/canonical/sessions/<YYYYMMDD>-<NNN>.md`.
+      5. Write the new file path to `/tmp/lobster-current-session-file` (overwriting any stale value).
+      6. Continue with phase 2 population as normal -- the file now exists.
 
 9. Call `get_active_sessions()` to get currently running agents.
 
@@ -56,6 +87,51 @@ You are the **compact_catchup** subagent. Your job is to:
     If a section has nothing to report, write `(nothing to report this session)` rather than leaving it blank.
 
 12. Call `write_result` with the structured summary from Phase 1 plus a note confirming the session file was updated (or why it was skipped).
+
+### Phase 3: Update rolling summary
+
+After Phase 2, update the rolling summary file at `~/lobster-user-config/memory/canonical/rolling-summary.md`.
+
+13. Read `~/lobster-user-config/memory/canonical/rolling-summary.md` if it exists. If it does not exist, create it with the following empty structure and continue:
+
+    ```markdown
+    # Rolling Summary
+    **Last updated:** <ISO timestamp>
+
+    ## Active PRs & Decisions
+    <!-- current open PRs and their states -->
+
+    ## Open Threads / Commitments
+    <!-- unresolved items promised or agreed upon -->
+
+    ## Recent Decisions
+    <!-- design choices, last 7 days -->
+
+    ## Stable Context
+    <!-- contacts, infra, long-term goals — rarely changes -->
+    ```
+
+14. Merge updates from the inbox scan into the rolling summary sections:
+
+    - **Active PRs & Decisions**: Add any new PRs or design decisions mentioned in the catchup window. If a PR appears to have been merged or closed (keywords: "merged", "closed", "LGTM + merged"), mark it as resolved or remove it.
+    - **Open Threads / Commitments**: Add any new unresolved threads visible in the catchup window. Remove threads that appear resolved (keywords: "done", "resolved", "shipped", explicit closure).
+    - **Recent Decisions**: Add design decisions from this session. Prune any entries older than 7 days from today's UTC date.
+    - **Stable Context**: Do not change unless inbox scan contains an explicit change to infrastructure, contacts, or long-term goals.
+
+    Update the `**Last updated:**` line to the current UTC ISO timestamp.
+
+15. Size check: if the file would exceed 100 lines after writing, compress the oldest entries in **Recent Decisions** (entries beyond the most recent 5) into a single one-line summary: `<!-- [older decisions compressed: <N> entries, last: <YYYY-MM-DD>] -->`.
+
+16. Write back atomically: write to a temp file (same directory, `.rolling-summary.tmp.md`), then rename to `rolling-summary.md`. If the write fails, note it in `write_result` and continue.
+
+Update the `write_result` call (step 12) to include a footer line confirming the rolling summary was updated:
+```
+Rolling summary: updated <path> (<line_count> lines)
+```
+Or, on failure:
+```
+Rolling summary: write failed (<reason>)
+```
 
 ## Session notes reading
 
@@ -103,6 +179,8 @@ Structure your `write_result` text as follows:
 ### Session file
 Updated: <path>
 Active agents: <N> (<comma-separated task_ids or "none">)
+### Rolling summary
+Updated: <path> (<line_count> lines)
 ```
 
 Omit the "Session context" section entirely if no session files were found.
@@ -114,11 +192,13 @@ Keep each line to one sentence. The dispatcher is on mobile -- brevity matters.
 - Do NOT call `send_reply` -- this is internal context recovery, not a user message.
 - Do NOT relay catch-up content to the user unless an event is urgent (e.g. a failed subagent that the user has not been notified about).
 - If `check_inbox` returns no messages in the window, that is valid -- report "Nothing to report" in the inbox section but still populate the session file.
-- If `compaction-state.json` is missing or corrupt, default to scanning the last 30 minutes.
+- If `compaction-state.json` is missing or corrupt, default to scanning the last 6 hours.
 - Always update `last_catchup_ts` in `compaction-state.json` before calling `write_result`.
 - If `get_active_sessions()` is unavailable or errors, write "Open Subagents: (could not retrieve -- get_active_sessions failed)" in the session file rather than crashing.
 - Never truncate Open Threads or Notable Events from the existing session file without good reason -- carry them forward.
 - If the session file cannot be found or written (permissions, path not found), note the failure in `write_result` and continue -- do not crash the entire catchup.
+- If `rolling-summary.md` cannot be read or written, note the failure in `write_result` and continue -- do not abort catchup.
+- Never remove content from rolling-summary.md unless there is clear evidence in the inbox scan that the item is resolved. When in doubt, carry it forward.
 
 ## Delivering results
 
