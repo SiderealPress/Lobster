@@ -36,30 +36,24 @@ TASK_FILE="$WORKSPACE/scheduled-jobs/tasks/${JOB_NAME}.md"
 LOG_DIR="$WORKSPACE/scheduled-jobs/logs"
 JOBS_FILE="${SCHEDULED_JOBS_FILE:-$WORKSPACE/scheduled-jobs/jobs.json}"
 INBOX_DIR="${LOBSTER_MESSAGES:-$HOME/messages}/inbox"
-OUTBOX_DIR="${LOBSTER_MESSAGES:-$HOME/messages}/outbox"
-OBSERVATIONS_LOG="$WORKSPACE/logs/observations.log"
-DISABLED_ALERTS_DIR="$WORKSPACE/data/disabled-job-alerts"
+LOBSTER_INSTALL="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 START_ISO=$(date -Iseconds)
-ADMIN_CHAT_ID="${LOBSTER_ADMIN_CHAT_ID:-}"
 
 # Ensure log directory exists
-mkdir -p "$LOG_DIR" "$INBOX_DIR" "$OUTBOX_DIR" "$(dirname "$OBSERVATIONS_LOG")" "$DISABLED_ALERTS_DIR"
+mkdir -p "$LOG_DIR" "$INBOX_DIR"
 
-# Helper: write a Telegram alert to outbox and log to observations
+# Helper: emit a system_error observation via the inbox API.
+# Uses lobster-observe.py so the dispatcher (not the bash script) routes the
+# alert — no raw file writes to observations.log or outbox/.
 _send_alert() {
     local msg="$1"
-    echo "[$START_ISO] [dispatch-job/$JOB_NAME] $msg" >> "$OBSERVATIONS_LOG"
-    if [[ -n "$ADMIN_CHAT_ID" ]]; then
-        local alert_file="$OUTBOX_DIR/alert_$(date +%s%N).json"
-        cat > "$alert_file" << ALERT_EOF
-{
-    "chat_id": $ADMIN_CHAT_ID,
-    "text": "Lobster job alert\n\nJob: $JOB_NAME\n$msg",
-    "source": "telegram"
-}
-ALERT_EOF
-    fi
+    uv run "$LOBSTER_INSTALL/scripts/lobster-observe.py" \
+        --category system_error \
+        --text "$msg" \
+        --source "dispatch-job" \
+        --task-id "dispatch-job/$JOB_NAME" \
+        2>&1 || true
 }
 
 LOG_FILE="$LOG_DIR/${JOB_NAME}-${TIMESTAMP}.log"
@@ -69,18 +63,6 @@ LOG_FILE="$LOG_DIR/${JOB_NAME}-${TIMESTAMP}.log"
 # If the unit doesn't exist or is disabled, exit silently.
 if ! systemctl is-enabled --quiet "lobster-${JOB_NAME}.timer" 2>/dev/null; then
     echo "[$START_ISO] Job '$JOB_NAME' is disabled — skipping" >> "$LOG_FILE" 2>&1 || true
-    # Periodic reminder: alert once per 24h when a disabled job is skipped
-    DISABLED_ALERT_TS_FILE="$DISABLED_ALERTS_DIR/${JOB_NAME}.last_alert"
-    NOW_EPOCH=$(date +%s)
-    LAST_ALERT=0
-    if [[ -f "$DISABLED_ALERT_TS_FILE" ]]; then
-        LAST_ALERT=$(cat "$DISABLED_ALERT_TS_FILE" 2>/dev/null || echo 0)
-    fi
-    SECONDS_SINCE=$(( NOW_EPOCH - LAST_ALERT ))
-    if (( SECONDS_SINCE >= 86400 )); then
-        _send_alert "Job '$JOB_NAME' is disabled and has been skipped. Re-enable or delete the job to stop this reminder."
-        echo "$NOW_EPOCH" > "$DISABLED_ALERT_TS_FILE"
-    fi
     exit 0
 fi
 
@@ -88,7 +70,7 @@ echo "[$START_ISO] Posting dispatch for job: $JOB_NAME" | tee "$LOG_FILE"
 
 # --- Check task file exists ---
 # If missing, auto-disable the job in jobs.json so cron stops dispatching it,
-# then exit 0 so cron doesn't keep logging errors (#1200).
+# then alert the dispatcher and exit 0 so cron doesn't keep logging errors (#1200).
 if [ ! -f "$TASK_FILE" ]; then
     echo "[$START_ISO] Error: Task file not found: $TASK_FILE — auto-disabling job '$JOB_NAME'" | tee -a "$LOG_FILE"
     if [ -f "$JOBS_FILE" ]; then
@@ -121,7 +103,7 @@ PYEOF
         ) 9>"$JOBS_LOCK" 2>/dev/null || true
         echo "[$START_ISO] Job '$JOB_NAME' auto-disabled in jobs.json (task file missing)" | tee -a "$LOG_FILE"
     fi
-    _send_alert "Job '$JOB_NAME' was auto-disabled because its task file is missing: $TASK_FILE. The job will no longer run until re-enabled with a valid task file."
+    _send_alert "Job '$JOB_NAME' was auto-disabled because its task file is missing: $TASK_FILE. Re-enable the job with a valid task file to resume."
     exit 0
 fi
 

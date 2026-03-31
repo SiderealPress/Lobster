@@ -4,8 +4,9 @@ Tests for scheduled-tasks/dispatch-job.sh
 Verifies:
 1. Disabled jobs (systemctl is-enabled returns non-zero) exit 0 without inbox message
 2. Enabled jobs (systemctl is-enabled returns 0) write a scheduled_reminder to inbox
-3. Missing task file exits non-zero
+3. Missing task file: auto-disables job and emits a subagent_observation to inbox
 4. No claude -p invocation under any path
+5. No raw file writes to observations.log or outbox/ for alerts (uses inbox API)
 """
 
 import json
@@ -295,7 +296,8 @@ class TestRunJobShMissingTaskFile:
 
         assert result.returncode == 0, f"Expected exit 0, got {result.returncode}. stderr: {result.stderr}"
 
-    def test_missing_task_file_writes_no_inbox_message(self, tmp_path):
+    def test_missing_task_file_writes_no_scheduled_reminder(self, tmp_path):
+        """Auto-disable must not write a scheduled_reminder — it writes an observation instead."""
         workspace, messages_dir, config_dir = _setup_workspace(
             tmp_path, "no-task-job", has_task_file=False
         )
@@ -312,8 +314,10 @@ class TestRunJobShMissingTaskFile:
             text=True,
         )
 
-        inbox_files = list(inbox_dir.glob("*.json"))
-        assert inbox_files == []
+        reminder_files = list(inbox_dir.glob("*_scheduled_*.json"))
+        assert reminder_files == [], (
+            f"Expected no scheduled_reminder inbox files for missing-task-file case, got: {reminder_files}"
+        )
 
     def test_missing_task_file_auto_disables_job_in_jobs_json(self, tmp_path):
         """After fix #1200: job must be set to enabled=false in jobs.json when task file is missing."""
@@ -361,12 +365,17 @@ class TestRunJobShMissingTaskFile:
             f"Expected 'auto-disab' in log, got: {log_content!r}"
         )
 
-    def test_missing_task_file_writes_observations_log(self, tmp_path):
-        """Auto-disable must write a structured entry to the observations log."""
+    def test_missing_task_file_writes_observation_to_inbox(self, tmp_path):
+        """Auto-disable must emit a subagent_observation/system_error to the inbox.
+
+        The observation is written by scripts/lobster-observe.py (called via uv run)
+        so the dispatcher routes the alert — no raw writes to observations.log or outbox/.
+        """
         workspace, messages_dir, config_dir, fake_bin = _setup_workspace(
             tmp_path, "no-task-job", enabled=True, has_task_file=False
         )
         env = _make_env(workspace, config_dir, messages_dir, fake_bin=fake_bin)
+        inbox_dir = messages_dir / "inbox"
 
         subprocess.run(
             ["bash", str(RUN_JOB), "no-task-job"],
@@ -375,16 +384,21 @@ class TestRunJobShMissingTaskFile:
             text=True,
         )
 
-        obs_log = workspace / "logs" / "observations.log"
-        assert obs_log.exists(), "observations.log must be created on auto-disable"
-        content = obs_log.read_text()
-        assert "no-task-job" in content, f"Job name must appear in observations log, got: {content!r}"
-        assert "auto-disabled" in content.lower() or "task file" in content.lower(), (
-            f"Observations log must describe the auto-disable reason, got: {content!r}"
+        obs_files = [
+            f for f in inbox_dir.glob("*_observation_*.json")
+        ]
+        assert len(obs_files) == 1, (
+            f"Expected exactly 1 observation inbox file, got {len(obs_files)}: {obs_files}"
+        )
+        payload = json.loads(obs_files[0].read_text())
+        assert payload["type"] == "subagent_observation", f"Unexpected type: {payload['type']!r}"
+        assert payload["category"] == "system_error", f"Unexpected category: {payload['category']!r}"
+        assert "no-task-job" in payload["text"], (
+            f"Job name must appear in observation text, got: {payload['text']!r}"
         )
 
-    def test_missing_task_file_writes_telegram_outbox_alert(self, tmp_path):
-        """Auto-disable must drop a Telegram outbox file when ADMIN_CHAT_ID is set."""
+    def test_missing_task_file_writes_no_outbox_alert(self, tmp_path):
+        """Auto-disable must NOT write a raw outbox file — alerting goes through inbox API."""
         workspace, messages_dir, config_dir, fake_bin = _setup_workspace(
             tmp_path, "no-task-job", enabled=True, has_task_file=False
         )
@@ -399,12 +413,29 @@ class TestRunJobShMissingTaskFile:
         )
 
         outbox_dir = messages_dir / "outbox"
-        alert_files = list(outbox_dir.glob("alert_*.json"))
-        assert len(alert_files) == 1, f"Expected 1 outbox alert file, got {len(alert_files)}"
-        import json as _json
-        alert = _json.loads(alert_files[0].read_text())
-        assert alert["chat_id"] == 8305714125
-        assert "no-task-job" in alert["text"]
+        alert_files = list(outbox_dir.glob("alert_*.json")) if outbox_dir.exists() else []
+        assert alert_files == [], (
+            f"Expected no outbox alert files (alerts go through inbox API), got: {alert_files}"
+        )
+
+    def test_missing_task_file_writes_no_observations_log(self, tmp_path):
+        """Auto-disable must NOT write directly to observations.log — alerting goes through inbox API."""
+        workspace, messages_dir, config_dir, fake_bin = _setup_workspace(
+            tmp_path, "no-task-job", enabled=True, has_task_file=False
+        )
+        env = _make_env(workspace, config_dir, messages_dir, fake_bin=fake_bin)
+
+        subprocess.run(
+            ["bash", str(RUN_JOB), "no-task-job"],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+        obs_log = workspace / "logs" / "observations.log"
+        assert not obs_log.exists(), (
+            "dispatch-job.sh must not write directly to observations.log — use inbox API"
+        )
 
     def test_auto_disabled_job_does_not_dispatch_on_second_run(self, tmp_path):
         """Once auto-disabled, a second cron fire must skip silently with no inbox message."""
@@ -426,8 +457,11 @@ class TestRunJobShMissingTaskFile:
         )
 
         assert result.returncode == 0
-        inbox_files = list(inbox_dir.glob("*.json"))
-        assert inbox_files == [], f"Expected no inbox messages after auto-disable, got: {inbox_files}"
+        # No scheduled_reminder messages — observations (from auto-disable alert) are expected
+        reminder_files = list(inbox_dir.glob("*_scheduled_*.json"))
+        assert reminder_files == [], (
+            f"Expected no scheduled_reminder messages after auto-disable, got: {reminder_files}"
+        )
 
 
 class TestRunJobShDedupGuard:
