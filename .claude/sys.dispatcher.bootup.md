@@ -24,14 +24,14 @@ When you first start (or after reading this file), follow these steps:
 1. Call `session_start(agent_type='dispatcher', claude_session_id=hook_input["session_id"])` — pass the Claude session UUID injected by the SessionStart hook. This writes the UUID to `$LOBSTER_WORKSPACE/data/dispatcher-claude-session-id`, enabling `inject-bootup-context.py` to identify your session as the dispatcher and inject this file on future restarts. Without this call, the primary detection path is never populated and you will receive the subagent bootup file instead of this one.
 1a. Read `~/lobster-user-config/memory/canonical/handoff.md` — user context, active projects, key people, git rules, available integrations.
 2. Create a new session file inline (see Session File Management). Store its path as `current_session_file`.
-2b. Call `list_rules(enabled_only=true)` to load IFTTT behavioral rules into working context.
-2c. Check `~/lobster-workspace/data/context-handoff.json`:
+2a. Call `list_rules(enabled_only=true)` to load IFTTT behavioral rules into working context.
+2b. Check `~/lobster-workspace/data/context-handoff.json`:
     - If **recent** (< 10 min, based on `triggered_at`): read `context_pct`, `pending_tasks`, `last_user_message`. Notify user: "Restarted — context was at {context_pct}%. Resuming from where we left off." Re-queue any stuck messages from `~/messages/processing/`. Delete the file.
     - If **stale** (>= 10 min) or absent: ignore.
-2d. Check `~/lobster-workspace/data/compaction-state.json` for `last_catchup_ts`:
+2c. Check `~/lobster-workspace/data/compaction-state.json` for `last_catchup_ts`:
     - `gap_seconds > 15`: send `"🦞 Warming up — back in a moment."` to admin chat.
     - `gap_seconds <= 15`: stay silent (health-check restart, not a meaningful gap).
-    - Skip if step 2c already sent a restart notification.
+    - Skip if step 2b already sent a restart notification.
 3. Run `~/lobster/scripts/record-catchup-state.sh start` (suppresses WFM freshness check for 15 min).
 4. Spawn the `compact-catchup` agent in the background with `task_id: startup-catchup` and `chat_id: 0`. See agent definition at `.claude/agents/compact-catchup.md` for the full prompt — pass it with `task_id: startup-catchup` instead of `compact-catchup`. **Never do catchup inline — it violates the 7-second rule.**
 5. Call `wait_for_messages()` to start listening.
@@ -539,7 +539,7 @@ wait_for_messages() ← loop back
 
 ## IFTTT Behavioral Rules
 
-IFTTT rules are loaded at startup (step 2b) and applied throughout the session. They are at `~/lobster-user-config/memory/canonical/ifttt-rules.yaml`. The file is an index only — behavioral content lives in the memory DB, keyed by `action_ref`.
+IFTTT rules are loaded at startup (step 2a) and applied throughout the session. They are at `~/lobster-user-config/memory/canonical/ifttt-rules.yaml`. The file is an index only — behavioral content lives in the memory DB, keyed by `action_ref`.
 
 **Loading:** `list_rules(enabled_only=true)`. If no rules, proceed normally. Load only enabled rules into working context.
 
@@ -553,7 +553,7 @@ IFTTT rules are loaded at startup (step 2b) and applied throughout the session. 
 
 One session note file per session. Lives in `~/lobster-user-config/memory/canonical/sessions/`, named `YYYYMMDD-NNN.md`.
 
-**Creating (startup step 2a):**
+**Creating (startup step 2):**
 1. List the directory, find highest sequence number for today. If none, start at 001.
 2. Copy `session.template.md` to the new path.
 3. Replace `Started` placeholder with current UTC ISO timestamp.
