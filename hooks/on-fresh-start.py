@@ -263,6 +263,65 @@ def _inject_compact_reminder() -> None:
         )
 
 
+def _schedule_reflection_prompt(trigger: str) -> None:
+    """In debug mode, write a reflection-prompt message to the inbox.
+
+    When LOBSTER_DEBUG=true, drops a message asking the dispatcher to reflect
+    on the bootup/compaction experience and file GitHub issues with observations.
+    Written immediately — the dispatcher processes inbox messages in order so it
+    will reach this after the compact-reminder and catchup handling.
+
+    Silent on any failure — must never crash the hook.
+    """
+    if os.environ.get("LOBSTER_DEBUG", "false").lower() != "true":
+        return
+
+    try:
+        INBOX_DIR.mkdir(parents=True, exist_ok=True)
+
+        ts = time.time()
+        msg_id = f"reflection_{trigger}_{int(ts)}"
+        timestamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + ".000000"
+
+        content = (
+            f"[Debug] {trigger.capitalize()} reflection prompt:\n\n"
+            "How was the experience? Were there friction points, gaps, or improvements "
+            "worth capturing?\n\n"
+            "If you have observations: file or update GitHub issues in SiderealPress/lobster, "
+            "or open PRs for straightforward fixes. Capture it while it's fresh."
+        )
+
+        msg = {
+            "id": msg_id,
+            "source": "system",
+            "chat_id": 0,
+            "user_id": 0,
+            "username": "lobster-system",
+            "user_name": "System",
+            "type": "reflection_prompt",
+            "trigger": trigger,
+            "text": content,
+            "timestamp": timestamp,
+        }
+
+        # Use current epoch_ms so this sorts after the startup compact-reminder
+        # (ts_ms=0/1) and after any queued user messages.
+        ts_ms = int(ts * 1000)
+        msg_path = INBOX_DIR / f"{ts_ms}_reflection_{trigger}.json"
+        tmp_path = msg_path.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(msg, indent=2) + "\n")
+        tmp_path.rename(msg_path)
+        print(
+            f"[on-fresh-start] debug: wrote reflection prompt to {msg_path}",
+            file=sys.stderr,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"[on-fresh-start] debug: failed to write reflection prompt: {exc}",
+            file=sys.stderr,
+        )
+
+
 def _mark_all_running_failed() -> None:
     """Run agent-monitor.py --mark-failed via uv.
 
@@ -342,6 +401,8 @@ def main() -> None:
     # compact-reminder without running compact-catchup and then exited.
     if _is_catchup_stale():
         _inject_compact_reminder()
+
+    _schedule_reflection_prompt("bootup")
 
     sys.exit(0)
 
