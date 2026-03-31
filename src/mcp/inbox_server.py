@@ -60,6 +60,13 @@ if _MCP_SRC_DIR not in sys.path:
     sys.path.insert(0, _MCP_SRC_DIR)
 from log_utils import JsonFormatter, configure_file_handler
 
+# Early logger — same name as the main `log` object defined after all imports.
+# Python's logging registry is global, so this resolves to the same Logger
+# instance that gets a StreamHandler + RotatingFileHandler during setup_logging().
+# Using it here (before those handlers are attached) sends records to the root
+# logger fallback, which is acceptable for startup diagnostics.
+_startup_log = logging.getLogger("lobster-mcp")
+
 # Event bus — structured observability infrastructure (issue #890).
 # Imported here so callsites can use _emit_event() throughout the module.
 # The singleton is initialised later in main(); events emitted before init
@@ -140,9 +147,9 @@ try:
     _db_count_conversation_history = _db_reader_mod.count_conversation_history
     _db_get_message_by_telegram_id_fn = _db_reader_mod.get_message_by_telegram_id
     _db_get_message_stats = _db_reader_mod.get_message_stats
-    print('[DB] db.reader loaded — DB reads available', file=sys.stderr)
+    _startup_log.info('[DB] db.reader loaded — DB reads available')
 except Exception as _db_reader_import_err:
-    print(f'[WARN] DB reader module unavailable: {_db_reader_import_err}', file=sys.stderr)
+    _startup_log.warning('DB reader module unavailable: %s', _db_reader_import_err)
 
 # BIS-167 Slice 6: Live DB write path — persist messages to messages.db
 _db_persist_inbound = None
@@ -156,10 +163,10 @@ try:
     )
     _db_flag = os.environ.get("LOBSTER_USE_DB", "0")
     _db_status = "ENABLED" if _db_flag == "1" else "DISABLED (set LOBSTER_USE_DB=1 to enable)"
-    print(f"[DB] message_store loaded — DB writes {_db_status}", file=sys.stderr)
+    _startup_log.info('[DB] message_store loaded — DB writes %s', _db_status)
     del _db_flag, _db_status
 except Exception as _db_import_err:
-    print(f"[WARN] messages.db write path unavailable: {_db_import_err}", file=sys.stderr)
+    _startup_log.warning('messages.db write path unavailable: %s', _db_import_err)
 
 
 # Memory system (optional — gracefully degrades to static file search)
@@ -620,6 +627,7 @@ def _tick_user_message_counter(msg_type: str, msg_source: str) -> None:
         except Exception as _snr_exc:
             log.warning(f"session_note_reminder injection failed: {_snr_exc}")
             # Non-fatal: the session note will be written at compaction regardless.
+
 
 
 # ---------------------------------------------------------------------------
@@ -7643,6 +7651,13 @@ async def handle_session_start(args: dict) -> list[TextContent]:
         return [TextContent(type="text", text=f"Error starting session: {exc}")]
 
     log.info(f"Session started: agent_id={agent_id!r} agent_type={agent_type!r} chat_id={chat_id}")
+    _emit_event(
+        text=f"agent.spawn: agent_id={agent_id!r} agent_type={agent_type!r} description={description!r}",
+        event_type="agent.spawn",
+        severity="info",
+        task_id=task_id,
+        chat_id=chat_id if isinstance(chat_id, (int, str)) else None,
+    )
 
     # Option B: explicit dispatcher declaration.
     # If the caller declares itself as the dispatcher, tag its MCP session ID
