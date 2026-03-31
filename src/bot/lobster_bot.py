@@ -1139,8 +1139,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     log.info(f"Wrote message to inbox: {msg_id}")
 
-    # Send acknowledgment
-    await message.reply_text("📨 Message received. Processing...")
+    # Send acknowledgment only in DMs — group acks are too chatty and
+    # clutter the conversation for all group members.
+    if not _is_group:
+        await message.reply_text("📨 Message received. Processing...")
 
 
 def _find_message_by_telegram_id(tg_message_id: int) -> Path | None:
