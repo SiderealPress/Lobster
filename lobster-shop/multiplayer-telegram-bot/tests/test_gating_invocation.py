@@ -9,10 +9,8 @@ import pytest
 from multiplayer_telegram_bot.gating import is_invocation, is_session_followup
 from multiplayer_telegram_bot.session import GroupSession
 
-import os
-
-BOT_USERNAME = os.getenv("LOBSTER_BOT_USERNAME", "your_lobster_bot")
-BOT_USER_ID = int(os.getenv("LOBSTER_BOT_USER_ID", "0"))
+BOT_USERNAME = "Awp_Sebastian_bot"
+BOT_USER_ID = 8796720409
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -46,19 +44,19 @@ def _expired_session(chat_id: int, invoker_user_id: int) -> GroupSession:
 
 class TestIsInvocationMention:
     def test_mention_via_entity(self):
-        text = f"@{BOT_USERNAME} what is the weather?"
-        entities = [_make_entity("mention", 0, len(f"@{BOT_USERNAME}"))]
+        text = "@Awp_Sebastian_bot what is the weather?"
+        entities = [_make_entity("mention", 0, len("@Awp_Sebastian_bot"))]
         assert is_invocation(text, BOT_USERNAME, BOT_USER_ID, entities, None)
 
     def test_mention_via_entity_case_insensitive(self):
-        text = f"@{BOT_USERNAME.lower()} hello"
-        entities = [_make_entity("mention", 0, len(f"@{BOT_USERNAME.lower()}"))]
+        text = "@awp_sebastian_bot hello"
+        entities = [_make_entity("mention", 0, len("@awp_sebastian_bot"))]
         assert is_invocation(text, BOT_USERNAME, BOT_USER_ID, entities, None)
 
     def test_mention_in_middle_of_text(self):
-        text = f"hey @{BOT_USERNAME} can you help?"
+        text = "hey @Awp_Sebastian_bot can you help?"
         offset = text.index("@")
-        entities = [_make_entity("mention", offset, len(f"@{BOT_USERNAME}"))]
+        entities = [_make_entity("mention", offset, len("@Awp_Sebastian_bot"))]
         assert is_invocation(text, BOT_USERNAME, BOT_USER_ID, entities, None)
 
     def test_different_mention_not_invocation(self):
@@ -67,11 +65,11 @@ class TestIsInvocationMention:
         assert not is_invocation(text, BOT_USERNAME, BOT_USER_ID, entities, None)
 
     def test_mention_fallback_string_search_no_entities(self):
-        text = f"Hey @{BOT_USERNAME} are you there?"
+        text = "Hey @Awp_Sebastian_bot are you there?"
         assert is_invocation(text, BOT_USERNAME, BOT_USER_ID, None, None)
 
     def test_mention_fallback_case_insensitive(self):
-        text = f"@{BOT_USERNAME.upper()} yo"
+        text = "@AWP_SEBASTIAN_BOT yo"
         assert is_invocation(text, BOT_USERNAME, BOT_USER_ID, None, None)
 
     def test_no_mention_no_invocation(self):
@@ -79,9 +77,8 @@ class TestIsInvocationMention:
         assert not is_invocation(text, BOT_USERNAME, BOT_USER_ID, None, None)
 
     def test_partial_username_not_invocation(self):
-        # A partial username (missing a suffix) should not trigger
-        partial = BOT_USERNAME.rsplit("_", 1)[0] if "_" in BOT_USERNAME else BOT_USERNAME[:-1]
-        text = f"@{partial} what's up"
+        # "@Awp_Sebastian" (missing "_bot") should not trigger
+        text = "@Awp_Sebastian what's up"
         assert not is_invocation(text, BOT_USERNAME, BOT_USER_ID, None, None)
 
 
@@ -93,7 +90,7 @@ class TestIsInvocationCommand:
         assert is_invocation("/help", BOT_USERNAME, BOT_USER_ID, None, None)
 
     def test_slash_any_command(self):
-        assert is_invocation(f"/mycommand@{BOT_USERNAME}", BOT_USERNAME, BOT_USER_ID, None, None)
+        assert is_invocation("/mycommand@Awp_Sebastian_bot", BOT_USERNAME, BOT_USER_ID, None, None)
 
     def test_not_command_without_slash(self):
         assert not is_invocation("start", BOT_USERNAME, BOT_USER_ID, None, None)
@@ -148,7 +145,7 @@ class TestIsInvocationEdgeCases:
         # When entities list is provided (non-None), string-search fallback is
         # NOT used — entities is authoritative. A non-mention entity type means
         # this is NOT an @mention invocation.
-        text = f"@{BOT_USERNAME}"
+        text = "@Awp_Sebastian_bot"
         entities = [_make_entity("bold", 0, len(text))]
         # entities list is provided but contains no "mention" type → not invoked
         assert not is_invocation(text, BOT_USERNAME, BOT_USER_ID, entities, None)
@@ -181,5 +178,5 @@ class TestIsSessionFollowup:
 
     def test_matching_user_id_int_comparison(self):
         # Ensure int vs int comparison works correctly
-        session = _future_session(-100, invoker_user_id=BOT_USER_ID)
-        assert is_session_followup(-100, BOT_USER_ID, session)
+        session = _future_session(-100, invoker_user_id=8796720409)
+        assert is_session_followup(-100, 8796720409, session)

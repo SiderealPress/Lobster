@@ -45,11 +45,20 @@ try:
         handle_whitelist,
         handle_unwhitelist,
     )
+    from multiplayer_telegram_bot.session import (  # noqa: E402
+        get_active_session,
+        open_session,
+        close_session,
+        refresh_session,
+        is_closure_signal,
+    )
     _GROUP_GATING_ENABLED = True
     _GROUP_COMMANDS_ENABLED = True
+    _GROUP_SESSION_ENABLED = True
 except ImportError:
     _GROUP_GATING_ENABLED = False
     _GROUP_COMMANDS_ENABLED = False
+    _GROUP_SESSION_ENABLED = False
     import logging as _logging
     _logging.getLogger(__name__).warning(
         "multiplayer-telegram-bot skill not available — group gating and management commands disabled"
@@ -523,7 +532,7 @@ def _is_direct_invocation(message, bot_username: str) -> bool:
             offset = getattr(entity, "offset", 0)
             length = getattr(entity, "length", 0)
             mentioned = entity_text_source[offset:offset + length]
-            # mentioned is like "@your_lobster_bot"
+            # mentioned is like "@Awp_Sebastian_bot"
             if mentioned.lstrip("@").lower() == bot_username.lower():
                 return True
 
@@ -1030,9 +1039,21 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
             "image_file": str(image_path),
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
+        direct_inv = False
+        engaged = False
+        thread_root_id: Optional[int] = None
         if _is_group:
+            bot_username = _get_bot_username()
+            thread_root_id = _get_thread_root_id(message)
+            direct_inv = _is_direct_invocation(message, bot_username)
+            engaged = _is_in_engaged_thread(chat.id, thread_root_id)
+            if direct_inv or engaged:
+                _mark_thread_engaged(chat.id, thread_root_id)
+                _mark_thread_engaged(chat.id, message.message_id)
             msg_data["group_chat_id"] = chat.id
             msg_data["group_title"] = chat.title
+            msg_data["direct_invocation"] = direct_inv or engaged
+            msg_data["thread_root_message_id"] = thread_root_id
 
         # Capture full reply-to context if this message is a reply
         reply_ctx = extract_reply_to_context(message)
@@ -1128,9 +1149,21 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
             "file_id": document.file_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
+        direct_inv = False
+        engaged = False
+        thread_root_id: Optional[int] = None
         if _is_group:
+            bot_username = _get_bot_username()
+            thread_root_id = _get_thread_root_id(message)
+            direct_inv = _is_direct_invocation(message, bot_username)
+            engaged = _is_in_engaged_thread(chat.id, thread_root_id)
+            if direct_inv or engaged:
+                _mark_thread_engaged(chat.id, thread_root_id)
+                _mark_thread_engaged(chat.id, message.message_id)
             msg_data["group_chat_id"] = chat.id
             msg_data["group_title"] = chat.title
+            msg_data["direct_invocation"] = direct_inv or engaged
+            msg_data["thread_root_message_id"] = thread_root_id
 
         # Capture full reply-to context if this message is a reply
         reply_ctx = extract_reply_to_context(message)
@@ -1254,27 +1287,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # has an active session (they invoked the bot recently). This enforces
         # the policy that only the invoker can follow up without @mention.
         _session_followup = False
-        _active_session = None
-        if _GROUP_SESSION_ENABLED:
+        if not direct_inv and not engaged and _GROUP_SESSION_ENABLED:
             try:
                 _active_session = get_active_session(chat.id)
+                if _active_session and _active_session.invoker_user_id == user.id:
+                    _session_followup = True
+                    engaged = True  # treat session followup as engaged
             except Exception as _e:
-                log.debug(f"Session lookup failed (non-fatal): {_e}")
+                log.debug(f"Session followup check failed (non-fatal): {_e}")
 
-        if not direct_inv and not engaged and _active_session is not None:
-            if _active_session.invoker_user_id == user.id:
-                _session_followup = True
-                engaged = True  # treat session followup as engaged
-
-        # Closure signal: close the session only if the sender is the session
-        # invoker. A different authorized user saying "thanks" in the same
-        # group chat must NOT close a session they did not open.
-        if engaged and _active_session is not None:
+        # Closure signal: if user is in an active session and says "thanks" etc.,
+        # close the session and drop the message (no inbox write, no ack).
+        if engaged and _GROUP_SESSION_ENABLED:
             try:
-                if (
-                    is_closure_signal(text)
-                    and _active_session.invoker_user_id == user.id
-                ):
+                if is_closure_signal(text):
                     close_session(chat.id)
                     log.debug(
                         f"Session closed for {chat.id}: closure signal from {user.id}"
@@ -1301,7 +1327,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     log.debug(f"Session open failed (non-fatal): {_e}")
 
     # Create message file in inbox
-    _is_group = chat.type in ("group", "supergroup")
     msg_data = {
         "id": msg_id,
         "source": (
@@ -1319,6 +1344,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if _is_group:
         msg_data["group_chat_id"] = chat.id
         msg_data["group_title"] = chat.title
+        msg_data["direct_invocation"] = direct_inv or engaged
+        msg_data["thread_root_message_id"] = thread_root_id
 
     # Capture full reply-to context if this message is a reply
     reply_ctx = extract_reply_to_context(message)
@@ -1330,10 +1357,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     log.info(f"Wrote message to inbox: {msg_id}")
 
-    # Send acknowledgment only in DMs — group acks are too chatty and
-    # clutter the conversation for all group members.
+    # Send acknowledgment.
+    # In DMs: always ack.
+    # In groups: ack only for direct invocations and engaged thread continuations.
+    # Passive group messages are processed silently — no ack, no noise.
     if not _is_group:
         await message.reply_text("📨 Message received. Processing...")
+    elif direct_inv or engaged:
+        await message.reply_text("📨 Got it. Processing...")
 
 
 def _find_message_by_telegram_id(tg_message_id: int) -> Path | None:
@@ -1611,9 +1642,21 @@ async def handle_audio_message(
             "file_id": audio_obj.file_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
+        direct_inv = False
+        engaged = False
+        thread_root_id: Optional[int] = None
         if _is_group:
+            bot_username = _get_bot_username()
+            thread_root_id = _get_thread_root_id(message)
+            direct_inv = _is_direct_invocation(message, bot_username)
+            engaged = _is_in_engaged_thread(chat.id, thread_root_id)
+            if direct_inv or engaged:
+                _mark_thread_engaged(chat.id, thread_root_id)
+                _mark_thread_engaged(chat.id, message.message_id)
             msg_data["group_chat_id"] = chat.id
             msg_data["group_title"] = chat.title
+            msg_data["direct_invocation"] = direct_inv or engaged
+            msg_data["thread_root_message_id"] = thread_root_id
 
         # Capture full reply-to context if this message is a reply
         reply_ctx = extract_reply_to_context(message)
