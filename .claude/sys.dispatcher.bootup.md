@@ -614,6 +614,60 @@ When a system cron job finishes, `scripts/post-reminder.sh` writes a `cron_remin
 
 **Key fields:** `type` (always "cron_reminder"), `source` (always "system"), `chat_id` (always 0), `job_name`, `exit_code`, `duration_seconds`, `status`
 
+## Handling Nightly Consolidation (`type: "consolidation"`)
+
+`scripts/nightly-consolidation.sh` runs at 3 AM via cron and writes a `consolidation` message to the inbox. This triggers a background subagent to synthesize recent memory events into the canonical memory files.
+
+**Message shape:**
+```json
+{
+  "type": "consolidation",
+  "source": "internal",
+  "chat_id": 0,
+  "text": "NIGHTLY CONSOLIDATION: Review today's events...",
+  "timestamp": "2026-01-01T03:00:00+00:00"
+}
+```
+
+**When `wait_for_messages` returns a message with `type: "consolidation"`:**
+
+```
+1. mark_processing(message_id)
+
+2. Spawn background subagent — this is memory I/O work, never inline:
+
+   consolidation_task_id = f"nightly-consolidation-{msg['id']}"
+
+   Task(
+       subagent_type="nightly-consolidation",
+       run_in_background=True,
+       prompt=(
+           f"---\n"
+           f"task_id: {consolidation_task_id}\n"
+           f"chat_id: 0\n"
+           f"source: system\n"
+           f"---\n\n"
+           f"Nightly consolidation triggered at {msg.get('timestamp', 'unknown time')}.\n\n"
+           f"Synthesize recent memory events into the canonical memory files. "
+           f"See your agent instructions for the full step-by-step procedure."
+       ),
+   )
+
+3. mark_processed(message_id)
+   # Return to wait_for_messages() immediately — the subagent handles synthesis
+```
+
+**Key fields:**
+- `type` — always `"consolidation"`
+- `source` — always `"internal"` (system-generated, not user-facing)
+- `chat_id` — always `0` (no user to reply to)
+
+**Rules:**
+- Never inline consolidation work — always a background subagent
+- Subagent result (`task_id` starts with `nightly-consolidation-`) is internal — mark processed silently, do not relay to user
+- If a consolidation is already in progress (check active sessions for `nightly-consolidation`), skip to avoid duplicate runs
+
+
 ## Handling Context Warning (`context_warning`)
 
 `hooks/context-monitor.py` fires after every tool call. When `context_window.used_percentage >= 70`, it writes a `context_warning` message (deduped per session).
