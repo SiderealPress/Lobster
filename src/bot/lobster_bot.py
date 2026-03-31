@@ -45,11 +45,20 @@ try:
         handle_whitelist,
         handle_unwhitelist,
     )
+    from multiplayer_telegram_bot.session import (  # noqa: E402
+        get_active_session,
+        open_session,
+        close_session,
+        refresh_session,
+        is_closure_signal,
+    )
     _GROUP_GATING_ENABLED = True
     _GROUP_COMMANDS_ENABLED = True
+    _GROUP_SESSION_ENABLED = True
 except ImportError:
     _GROUP_GATING_ENABLED = False
     _GROUP_COMMANDS_ENABLED = False
+    _GROUP_SESSION_ENABLED = False
     import logging as _logging
     _logging.getLogger(__name__).warning(
         "multiplayer-telegram-bot skill not available — group gating and management commands disabled"
@@ -478,6 +487,114 @@ class _MediaGroupBuffer:
 # media_group_id -> _MediaGroupBuffer
 _media_group_buffers: dict[str, _MediaGroupBuffer] = {}
 
+# Group chat engagement state — tracks active bot conversation threads.
+# Key: (chat_id, thread_root_message_id | None)
+# Value: timestamp of last invocation in this thread
+# Entries expire after ENGAGEMENT_WINDOW_SECONDS with no new messages.
+_engaged_threads: dict[tuple[int, Optional[int]], float] = {}
+ENGAGEMENT_WINDOW_SECONDS = 600  # 10 minutes
+
+
+def _is_direct_invocation(message, bot_username: str) -> bool:
+    """Return True if this group message is directly addressed to the bot.
+
+    A message is a direct invocation if:
+    - It contains a @mention entity pointing to the bot's username, OR
+    - It is a reply to a message sent by the bot.
+
+    Uses message.entities for mention detection (not raw text search) to avoid
+    false positives when users quote the bot's name in ordinary conversation.
+    """
+    # Reply-to-bot check
+    reply_to = getattr(message, "reply_to_message", None)
+    if reply_to:
+        sender = getattr(reply_to, "from_user", None)
+        if sender and getattr(sender, "is_bot", False):
+            # Check if that bot is our bot — by username if available
+            sender_username = getattr(sender, "username", None)
+            if sender_username and bot_username:
+                if sender_username.lower() == bot_username.lower():
+                    return True
+            elif getattr(sender, "is_bot", False):
+                # Fallback: any bot reply counts (single-bot context)
+                return True
+
+    # Entity-based mention check
+    entities = getattr(message, "entities", None) or []
+    text = getattr(message, "text", "") or ""
+    caption_entities = getattr(message, "caption_entities", None) or []
+    caption = getattr(message, "caption", "") or ""
+
+    for entity in list(entities) + list(caption_entities):
+        entity_text_source = text if entity in entities else caption
+        entity_type = getattr(entity, "type", "")
+        if entity_type == "mention":
+            offset = getattr(entity, "offset", 0)
+            length = getattr(entity, "length", 0)
+            mentioned = entity_text_source[offset:offset + length]
+            # mentioned is like "@Awp_Sebastian_bot"
+            if mentioned.lstrip("@").lower() == bot_username.lower():
+                return True
+
+    return False
+
+
+def _get_thread_root_id(message) -> Optional[int]:
+    """Return the Telegram message ID that roots this reply chain, or None.
+
+    If the message is a reply, return the ID of the message it replied to.
+    This is used to track engagement by thread rather than by individual message.
+    """
+    reply_to = getattr(message, "reply_to_message", None)
+    if reply_to:
+        return getattr(reply_to, "message_id", None)
+    return None
+
+
+def _is_in_engaged_thread(chat_id: int, thread_root_id: Optional[int]) -> bool:
+    """Return True if there is an active engagement window for this thread.
+
+    An engagement window is active if the last direct invocation in this thread
+    was within ENGAGEMENT_WINDOW_SECONDS.
+    """
+    key = (chat_id, thread_root_id)
+    last_ts = _engaged_threads.get(key)
+    if last_ts is None:
+        return False
+    return (time.time() - last_ts) < ENGAGEMENT_WINDOW_SECONDS
+
+
+def _mark_thread_engaged(chat_id: int, thread_root_id: Optional[int]) -> None:
+    """Record or refresh engagement for a conversation thread."""
+    _engaged_threads[(chat_id, thread_root_id)] = time.time()
+
+
+def _expire_engaged_threads() -> None:
+    """Remove stale engagement entries older than ENGAGEMENT_WINDOW_SECONDS.
+
+    Called opportunistically from the typing refresh loop to prevent unbounded
+    growth of _engaged_threads.
+    """
+    cutoff = time.time() - ENGAGEMENT_WINDOW_SECONDS
+    stale = [k for k, ts in _engaged_threads.items() if ts < cutoff]
+    for k in stale:
+        del _engaged_threads[k]
+
+
+def _get_bot_username() -> str:
+    """Return the bot's Telegram username (without @) for mention detection.
+
+    Reads from the running bot_app after initialization. Falls back to the
+    BOT_USERNAME environment variable, then to an empty string (which causes
+    _is_direct_invocation to skip entity-based checks safely).
+    """
+    if bot_app and getattr(bot_app, "bot", None):
+        username = getattr(bot_app.bot, "username", None)
+        if username:
+            return username
+    env_val = os.environ.get("BOT_USERNAME", "")
+    return env_val
+
 
 async def send_typing_indicator(chat_id: int) -> None:
     """Send a Telegram 'typing...' indicator to chat_id.
@@ -499,13 +616,23 @@ async def typing_refresh_loop() -> None:
 
     Telegram's typing indicator expires after ~5 seconds, so we refresh at 4s
     to keep it visible while Lobster works on a long task.
+
+    For group messages (source="lobster-group"), the typing indicator is sent
+    only when direct_invocation=True.  Passive group messages that Lobster
+    processes silently should not advertise bot activity to the whole group.
     """
     log.info("Typing refresh loop started")
+    _expire_cycle = 0
     while True:
         await asyncio.sleep(4)
         try:
             if not bot_app:
                 continue
+            # Periodically expire stale engagement windows (every ~60s)
+            _expire_cycle += 1
+            if _expire_cycle >= 15:
+                _expire_engaged_threads()
+                _expire_cycle = 0
             # Scan all files in the processing directory
             if not _PROCESSING_DIR.exists():
                 continue
@@ -514,7 +641,11 @@ async def typing_refresh_loop() -> None:
                     data = json.loads(msg_file.read_text())
                     source = data.get("source", "")
                     chat_id = data.get("chat_id")
-                    if source == "telegram" and chat_id:
+                    # For DMs: always send typing indicator.
+                    # For group messages: only when directly invoked (not passive).
+                    # default True preserves DM behavior for messages without the field.
+                    direct_inv = data.get("direct_invocation", True)
+                    if source in ("telegram", "lobster-group") and direct_inv and chat_id:
                         await send_typing_indicator(int(chat_id))
                 except Exception:
                     pass  # Skip corrupt/unreadable files silently
@@ -908,9 +1039,21 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
             "image_file": str(image_path),
             "timestamp": datetime.utcnow().isoformat(),
         }
+        direct_inv = False
+        engaged = False
+        thread_root_id: Optional[int] = None
         if _is_group:
+            bot_username = _get_bot_username()
+            thread_root_id = _get_thread_root_id(message)
+            direct_inv = _is_direct_invocation(message, bot_username)
+            engaged = _is_in_engaged_thread(chat.id, thread_root_id)
+            if direct_inv or engaged:
+                _mark_thread_engaged(chat.id, thread_root_id)
+                _mark_thread_engaged(chat.id, message.message_id)
             msg_data["group_chat_id"] = chat.id
             msg_data["group_title"] = chat.title
+            msg_data["direct_invocation"] = direct_inv or engaged
+            msg_data["thread_root_message_id"] = thread_root_id
 
         # Capture full reply-to context if this message is a reply
         reply_ctx = extract_reply_to_context(message)
@@ -921,7 +1064,10 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
         atomic_write_json(inbox_file, msg_data)
 
         log.info(f"Wrote photo message to inbox: {msg_id}")
-        await message.reply_text("📸 Photo received. Looking at it...")
+        if not _is_group:
+            await message.reply_text("📸 Photo received. Looking at it...")
+        elif direct_inv or engaged:
+            await message.reply_text("📸 Photo received. Looking at it...")
 
     except Exception as e:
         log.error(f"Error handling photo message: {e}", exc_info=True)
@@ -1003,9 +1149,21 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
             "file_id": document.file_id,
             "timestamp": datetime.utcnow().isoformat(),
         }
+        direct_inv = False
+        engaged = False
+        thread_root_id: Optional[int] = None
         if _is_group:
+            bot_username = _get_bot_username()
+            thread_root_id = _get_thread_root_id(message)
+            direct_inv = _is_direct_invocation(message, bot_username)
+            engaged = _is_in_engaged_thread(chat.id, thread_root_id)
+            if direct_inv or engaged:
+                _mark_thread_engaged(chat.id, thread_root_id)
+                _mark_thread_engaged(chat.id, message.message_id)
             msg_data["group_chat_id"] = chat.id
             msg_data["group_title"] = chat.title
+            msg_data["direct_invocation"] = direct_inv or engaged
+            msg_data["thread_root_message_id"] = thread_root_id
 
         # Capture full reply-to context if this message is a reply
         reply_ctx = extract_reply_to_context(message)
@@ -1016,7 +1174,10 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
         atomic_write_json(inbox_file, msg_data)
 
         log.info(f"Wrote document message to inbox: {msg_id}")
-        await message.reply_text("📎 Document received.")
+        if not _is_group:
+            await message.reply_text("📎 Document received.")
+        elif direct_inv or engaged:
+            await message.reply_text("📎 Document received.")
 
     except Exception as e:
         log.error(f"Error handling document message: {e}", exc_info=True)
@@ -1109,8 +1270,63 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text:
         return
 
-    # Create message file in inbox
+    # Determine group-chat engagement state before writing to inbox
     _is_group = chat.type in ("group", "supergroup")
+    direct_inv = False
+    engaged = False
+    thread_root_id: Optional[int] = None
+
+    if _is_group:
+        bot_username = _get_bot_username()
+        thread_root_id = _get_thread_root_id(message)
+        direct_inv = _is_direct_invocation(message, bot_username)
+        engaged = _is_in_engaged_thread(chat.id, thread_root_id)
+
+        # Per-user session followup check (persistent, survives restarts).
+        # In addition to thread-based engagement, check if the sending user
+        # has an active session (they invoked the bot recently). This enforces
+        # the policy that only the invoker can follow up without @mention.
+        _session_followup = False
+        if not direct_inv and not engaged and _GROUP_SESSION_ENABLED:
+            try:
+                _active_session = get_active_session(chat.id)
+                if _active_session and _active_session.invoker_user_id == user.id:
+                    _session_followup = True
+                    engaged = True  # treat session followup as engaged
+            except Exception as _e:
+                log.debug(f"Session followup check failed (non-fatal): {_e}")
+
+        # Closure signal: if user is in an active session and says "thanks" etc.,
+        # close the session and drop the message (no inbox write, no ack).
+        if engaged and _GROUP_SESSION_ENABLED:
+            try:
+                if is_closure_signal(text):
+                    close_session(chat.id)
+                    log.debug(
+                        f"Session closed for {chat.id}: closure signal from {user.id}"
+                    )
+                    return
+            except Exception as _e:
+                log.debug(f"Session closure check failed (non-fatal): {_e}")
+
+        if direct_inv or engaged:
+            _mark_thread_engaged(chat.id, thread_root_id)
+            # Also register the current message's ID as a future thread root so
+            # replies to *this* message are covered by the engagement window.
+            _mark_thread_engaged(chat.id, message.message_id)
+            log.debug(
+                f"Group thread engaged: chat={chat.id} thread_root={thread_root_id} "
+                f"msg_id={message.message_id} direct={direct_inv} engaged={engaged}"
+            )
+
+            # Open/refresh a per-user session when directly invoked.
+            if direct_inv and _GROUP_SESSION_ENABLED:
+                try:
+                    open_session(chat_id=chat.id, invoker_user_id=user.id)
+                except Exception as _e:
+                    log.debug(f"Session open failed (non-fatal): {_e}")
+
+    # Create message file in inbox
     msg_data = {
         "id": msg_id,
         "source": (
@@ -1128,6 +1344,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if _is_group:
         msg_data["group_chat_id"] = chat.id
         msg_data["group_title"] = chat.title
+        msg_data["direct_invocation"] = direct_inv or engaged
+        msg_data["thread_root_message_id"] = thread_root_id
 
     # Capture full reply-to context if this message is a reply
     reply_ctx = extract_reply_to_context(message)
@@ -1139,10 +1357,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     log.info(f"Wrote message to inbox: {msg_id}")
 
-    # Send acknowledgment only in DMs — group acks are too chatty and
-    # clutter the conversation for all group members.
+    # Send acknowledgment.
+    # In DMs: always ack.
+    # In groups: ack only for direct invocations and engaged thread continuations.
+    # Passive group messages are processed silently — no ack, no noise.
     if not _is_group:
         await message.reply_text("📨 Message received. Processing...")
+    elif direct_inv or engaged:
+        await message.reply_text("📨 Got it. Processing...")
 
 
 def _find_message_by_telegram_id(tg_message_id: int) -> Path | None:
@@ -1420,9 +1642,21 @@ async def handle_audio_message(
             "file_id": audio_obj.file_id,
             "timestamp": datetime.utcnow().isoformat(),
         }
+        direct_inv = False
+        engaged = False
+        thread_root_id: Optional[int] = None
         if _is_group:
+            bot_username = _get_bot_username()
+            thread_root_id = _get_thread_root_id(message)
+            direct_inv = _is_direct_invocation(message, bot_username)
+            engaged = _is_in_engaged_thread(chat.id, thread_root_id)
+            if direct_inv or engaged:
+                _mark_thread_engaged(chat.id, thread_root_id)
+                _mark_thread_engaged(chat.id, message.message_id)
             msg_data["group_chat_id"] = chat.id
             msg_data["group_title"] = chat.title
+            msg_data["direct_invocation"] = direct_inv or engaged
+            msg_data["thread_root_message_id"] = thread_root_id
 
         # Capture full reply-to context if this message is a reply
         reply_ctx = extract_reply_to_context(message)
@@ -1434,7 +1668,10 @@ async def handle_audio_message(
 
         log.info(f"Wrote {msg_type} message to pending-transcription: {msg_id}")
         ack = "🎤 Voice message received. Transcribing..." if is_voice else "🎵 Audio file received. Transcribing..."
-        await message.reply_text(ack)
+        if not _is_group:
+            await message.reply_text(ack)
+        elif direct_inv or engaged:
+            await message.reply_text(ack)
 
     except Exception as e:
         log.error(f"Error handling {msg_type} message: {e}", exc_info=True)
@@ -1705,6 +1942,14 @@ class OutboxHandler(FileSystemEventHandler):
                     log.info(f"Sent reply to {chat_id} in {n} chunks: {text[:50]}...")
                 else:
                     log.info(f"Sent reply to {chat_id}: {text[:50]}...")
+                # Refresh per-user session TTL whenever the bot replies to a group.
+                # This extends the engagement window so active conversations don't
+                # time out mid-exchange.
+                if _GROUP_SESSION_ENABLED and isinstance(chat_id, int) and chat_id < 0:
+                    try:
+                        refresh_session(chat_id)
+                    except Exception as _e:
+                        log.debug(f"Session refresh failed (non-fatal): {_e}")
                 os.remove(filepath)
             else:
                 log.warning(f"Skipping reply {filepath}: missing chat_id={chat_id}, text={bool(text)}, bot={bool(bot_app)}")
