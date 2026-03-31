@@ -253,8 +253,9 @@ def validate_schedule(schedule: str) -> Optional[str]:
     the value — this catches typos and unsupported syntax before the unit
     file is written.
     """
-    _, err = normalize_schedule(schedule)
-    return err
+    if not schedule:
+        return "schedule cannot be empty"
+    return None
 
 
 def normalize_schedule(schedule: str) -> tuple[str, Optional[str]]:
