@@ -1287,20 +1287,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # has an active session (they invoked the bot recently). This enforces
         # the policy that only the invoker can follow up without @mention.
         _session_followup = False
-        if not direct_inv and not engaged and _GROUP_SESSION_ENABLED:
+        _active_session = None
+        if _GROUP_SESSION_ENABLED:
             try:
                 _active_session = get_active_session(chat.id)
-                if _active_session and _active_session.invoker_user_id == user.id:
-                    _session_followup = True
-                    engaged = True  # treat session followup as engaged
             except Exception as _e:
-                log.debug(f"Session followup check failed (non-fatal): {_e}")
+                log.debug(f"Session lookup failed (non-fatal): {_e}")
 
-        # Closure signal: if user is in an active session and says "thanks" etc.,
-        # close the session and drop the message (no inbox write, no ack).
-        if engaged and _GROUP_SESSION_ENABLED:
+        if not direct_inv and not engaged and _active_session is not None:
+            if _active_session.invoker_user_id == user.id:
+                _session_followup = True
+                engaged = True  # treat session followup as engaged
+
+        # Closure signal: close the session only if the sender is the session
+        # invoker. A different authorized user saying "thanks" in the same
+        # group chat must NOT close a session they did not open.
+        if engaged and _active_session is not None:
             try:
-                if is_closure_signal(text):
+                if (
+                    is_closure_signal(text)
+                    and _active_session.invoker_user_id == user.id
+                ):
                     close_session(chat.id)
                     log.debug(
                         f"Session closed for {chat.id}: closure signal from {user.id}"
