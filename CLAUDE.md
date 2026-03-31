@@ -144,6 +144,14 @@ All Lobster-managed projects live in `$LOBSTER_WORKSPACE/projects/[project-name]
 
 For changes that affect existing installs (new cron entries, new directories, config renames, new service files), add a numbered migration to `scripts/upgrade.sh` — not just `install.sh`. See `.claude/agents/lobster-ops.md` for the migration format and upgrade procedure.
 
+## Scheduling Architecture
+
+Two scheduling layers:
+- **Cron** — lobster system-level tasks (health checks, nightly consolidation, log exports). Must fire regardless of user activity. Use `cron-manage.sh add/remove`.
+- **Systemd timers (MCP tools)** — user-space scheduled jobs (pollers, reminders, user-defined). Managed via `create_scheduled_job` / `delete_scheduled_job` MCP tools.
+
+Never use cron for user-space jobs. Never use systemd tools for system-level infrastructure.
+
 ## Key Directories
 
 - `~/lobster/` - Repository (code only, no personal data)
