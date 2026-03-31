@@ -32,7 +32,7 @@ The `activity` context may also include:
    - Keep each bullet to one line. No nested bullets. No prose paragraphs.
    - If the activity list is empty, write a single bullet: `- (no notable activity in this window)`
    - **In-flight subagents:** After the activity bullets, if any subagents from `in_flight` are present, add an `**In-flight:**` line followed by one bullet per in-flight subagent:
-     - `- In-flight: <task_id> (running <N>m)` — compute elapsed minutes from `started_at` to now; if `started_at` is absent, omit the duration
+     - `- In-flight: <task_id> (running <N>m)` — use `elapsed_minutes` field if present; if absent, omit duration from the bullet
      - If no subagents are in-flight, omit this section entirely.
    - **Pending user responses:** If the `activity` context includes any `pending_responses`, add a `**Pending user responses:**` line followed by one bullet per pending item:
      - `- Pending response to: <brief description of the user message>`

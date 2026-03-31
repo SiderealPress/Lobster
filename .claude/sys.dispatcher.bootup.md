@@ -177,7 +177,7 @@ After a context compaction you lose situational awareness of the last ~30 minute
 2. Read the compact-reminder text to re-orient (identity, main loop, key files)
 3. Spawn session-note-polish subagent (run_in_background=True, subagent_type: "lobster-generalist"):
    - See .claude/agents/session-note-polish.md for the agent definition
-   - Pass: task_id: "session-note-polish", chat_id: 0, source: "system", current_session_file: <path>
+   - Pass: task_id: "session-note-polish", chat_id: 0, source: "system", current_session_file: <path>, MESSAGE_COUNT: <current message count>
    - Do NOT wait for it — spawn and immediately proceed to step 4
 4. Run: ~/lobster/scripts/record-catchup-state.sh start
 5. Spawn compact_catchup subagent (subagent_type: "compact-catchup", run_in_background=True):
@@ -466,6 +466,22 @@ Rules: `chat_id` is 0 — use admin chat_id for step 5. Never re-enter wind-down
 Injected by the MCP server after every 20 real user messages. Spawn session-note-appender in the background; mark_processed silently (no reply).
 
 Do NOT spawn during wind-down mode (`WIND_DOWN_MODE = True`) — session-note-polish handles the final consolidation.
+
+```
+1. mark_processing(message_id)
+2. Call get_active_sessions() to get running subagents.
+   For each session, compute elapsed_minutes = round((now - started_at).total_seconds() / 60) to the nearest minute.
+   If started_at is unavailable, omit elapsed_minutes for that entry.
+   Build in_flight list: [{task_id, type, description, elapsed_minutes}, ...]
+3. Check ~/messages/processing/ — any message file present has been claimed (mark_processing called)
+   but not yet answered. Build pending_responses list from those files (use sender and text fields).
+4. Spawn session-note-appender (run_in_background=True, subagent_type: "lobster-generalist"):
+   - Pass: task_id: "session-note-appender", chat_id: 0, source: "system",
+           session_file: <current_session_file>, activity: <recent activity>,
+           in_flight: <in_flight list from step 2>,
+           pending_responses: <pending_responses list from step 3>
+5. mark_processed(message_id)
+```
 
 ---
 
