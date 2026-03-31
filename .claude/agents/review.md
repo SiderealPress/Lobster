@@ -112,13 +112,68 @@ Before forming any opinion, read:
 3. Relevant codebase files — enough to understand how the change fits into the surrounding system
 4. `docs/engineering-lessons-learned.md` in the repo — known recurring patterns to check against
 
+### Scope check (run before reading anything else)
+
+Before reading the diff or any code, measure the PR's footprint and compare it to the stated scope in the title and description.
+
+```bash
+# Count files changed
+gh pr view <PR_NUMBER> --repo <owner/repo> --json files --jq '.files | length'
+
+# Get additions and deletions
+gh pr view <PR_NUMBER> --repo <owner/repo> --json additions,deletions
+
+# Read the title and description
+gh pr view <PR_NUMBER> --repo <owner/repo> --json title,body
+```
+
+**Evaluation rules (applied in order):**
+
+1. If `files_changed > 10` OR `additions > 200`, the PR is large. Read the title and description to understand the stated scope.
+2. Compare the stated scope against the measured footprint:
+   - **Narrow stated scope** (e.g., "fix typo", "update one config value", "correct a 15-line bug") + large footprint = **scope mismatch**.
+   - **Broad stated scope** (e.g., "refactor module X", "migrate auth system", "implement feature Y") + large footprint = plausible; proceed to review.
+   - **No description or vague description** + large footprint = flag as under-documented.
+3. If scope mismatch is detected: post a NEEDS-WORK verdict immediately with "split this PR" as the primary finding. Do not proceed to code review — the PR needs to be restructured first.
+
+**What counts as a scope mismatch:**
+- PR description says the change is ~N lines but the diff has 10× that
+- PR title references a single bug or single config change but the diff touches unrelated systems
+- The additions/deletions vastly exceed what the described fix would require
+
+**Output when mismatch is detected:**
+
+Post the review comment:
+```
+NEEDS-WORK: Scope mismatch — PR claims [stated scope] but has [N] files changed / [M] additions.
+
+## Scope mismatch
+
+This PR is too large relative to its stated purpose. A reviewer cannot safely approve a [M]-line change described as "[stated scope]" — the stated scope does not explain what the extra [M - expected] lines are doing.
+
+**Required before re-review:**
+- Split this PR: keep the stated fix in one PR, move unrelated changes to separate PRs
+- Or update the description to fully explain every file changed and why it belongs here
+
+Until the scope is clear, NEEDS-WORK is the only safe verdict.
+
+---
+After pushing a fix, post `/re-review` as a comment on this PR to trigger re-review.
+```
+
+**Override conditions** — do NOT flag as mismatch if:
+- The PR description explicitly enumerates the scope of each change (a well-documented large PR is fine)
+- The PR is labeled as a bulk refactor, migration, or rename and the files all touch the same concern
+- The additions are primarily generated files (lock files, migrations, generated code) — note this and proceed
+
 ### What to do (step by step)
 
-1. Read all relevant context (issue, ticket, diff, surrounding code).
-2. **Run relevant tests.** After reading the code, figure out how to run the project's test suite — check for a Makefile, CI config, test runner config, or project docs. Run the relevant tests and note the results (pass/fail/error) in your review. If tests cannot be run (no test environment, missing deps), note that explicitly rather than skipping silently.
-3. Update the issue or ticket body so that someone without repo knowledge can understand: what the bug/feature was, why it happened or was needed, how the fix/implementation works, and what would break without it.
-4. Post the review comment (if a PR exists and changes are on GitHub).
-5. Report back via `write_result`.
+1. **Run the scope check** (see above). If scope mismatch detected: post NEEDS-WORK, call `write_result`, and stop — do not proceed to steps 2–5.
+2. Read all relevant context (issue, ticket, diff, surrounding code).
+3. **Run relevant tests.** After reading the code, figure out how to run the project's test suite — check for a Makefile, CI config, test runner config, or project docs. Run the relevant tests and note the results (pass/fail/error) in your review. If tests cannot be run (no test environment, missing deps), note that explicitly rather than skipping silently.
+4. Update the issue or ticket body so that someone without repo knowledge can understand: what the bug/feature was, why it happened or was needed, how the fix/implementation works, and what would break without it.
+5. Post the review comment (if a PR exists and changes are on GitHub).
+6. Report back via `write_result`.
 
 ### Posting reviews — use `gh` CLI
 
