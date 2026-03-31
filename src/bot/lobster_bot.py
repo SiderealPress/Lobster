@@ -49,6 +49,26 @@ try:
 except ImportError:
     pass  # channels package not yet installed; type hint only
 
+# multiplayer-telegram-bot skill — group gating library.
+# Adds the skill's src/ directory to sys.path so we can import the pure
+# gating/whitelist/router modules without a full package install.
+_SKILL_DIR = str(Path(__file__).resolve().parent.parent.parent
+                 / "lobster-shop" / "multiplayer-telegram-bot" / "src")
+if _SKILL_DIR not in _sys.path:
+    _sys.path.insert(0, _SKILL_DIR)
+
+try:
+    from multiplayer_telegram_bot.whitelist import load_whitelist
+    from multiplayer_telegram_bot.gating import gate_message, GatingAction
+    from multiplayer_telegram_bot.router import get_source_for_chat
+    _GROUP_GATING_ENABLED = True
+except ImportError:
+    _GROUP_GATING_ENABLED = False
+    import logging as _logging
+    _logging.getLogger(__name__).warning(
+        "multiplayer-telegram-bot skill not available — group gating disabled"
+    )
+
 import re
 from dataclasses import dataclass, field
 from typing import Optional
@@ -913,8 +933,41 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user = update.effective_user
-    if not user or user.id not in ALLOWED_USERS:
+    if not user:
         return
+
+    chat = message.chat
+    if chat.type in ("group", "supergroup"):
+        # Tier 1 + Tier 2 — group gating
+        if _GROUP_GATING_ENABLED:
+            store = load_whitelist()
+            result = gate_message(chat.id, user.id, store)
+            if result.action == GatingAction.DROP_SILENT:
+                log.debug(f"Group message silently dropped: {result.reason}")
+                return
+            elif result.action == GatingAction.SEND_REGISTRATION_DM:
+                log.info(
+                    f"Sending registration DM to user {user.id} for group {chat.id}"
+                )
+                try:
+                    await bot_app.bot.send_message(
+                        chat_id=user.id,
+                        text=(
+                            "Hi! To use Lobster in this group, please ask the "
+                            "group admin to whitelist you."
+                        ),
+                    )
+                except Exception as e:
+                    log.warning(f"Failed to send registration DM to {user.id}: {e}")
+                return
+            # GatingAction.ALLOW — fall through to message handling
+        else:
+            # Skill not available; drop all group messages silently
+            return
+    else:
+        # DM path — unchanged behaviour
+        if user.id not in ALLOWED_USERS:
+            return
 
     # Wake Claude if hibernating (non-blocking — spawns subprocess if needed)
     wake_claude_if_hibernating()
@@ -949,9 +1002,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Create message file in inbox
+    _is_group = chat.type in ("group", "supergroup")
     msg_data = {
         "id": msg_id,
-        "source": "telegram",
+        "source": (
+            get_source_for_chat(chat.type) if _GROUP_GATING_ENABLED else "telegram"
+        ),
         "type": "text",
         "chat_id": message.chat_id,
         "telegram_message_id": message.message_id,
@@ -961,6 +1017,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "text": text,
         "timestamp": datetime.utcnow().isoformat(),
     }
+    if _is_group:
+        msg_data["group_chat_id"] = chat.id
+        msg_data["group_title"] = chat.title
 
     # Capture full reply-to context if this message is a reply
     reply_ctx = extract_reply_to_context(message)
