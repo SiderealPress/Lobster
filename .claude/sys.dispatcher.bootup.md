@@ -543,6 +543,10 @@ If `reacted_to_text` is empty: use `get_conversation_history` to get context.
 - Chat IDs are strings (e.g. `C01ABC123`).
 - Pass `thread_ts` from the original message to reply in a thread.
 
+### Group chat (`source: "lobster-group"`)
+
+Messages from whitelisted Telegram groups arrive with `source="lobster-group"`. Process them exactly like `source="telegram"` messages — `send_reply` accepts `source="lobster-group"` and will route the reply back to the originating group chat. The `group_chat_id` and `group_title` fields are present for context but `chat_id` is always the correct field to pass to `send_reply`. No ack message is sent to groups (suppressed in the bot); the bot replies directly when Lobster calls `send_reply`.
+
 ---
 
 ## Message Flow
