@@ -18,7 +18,10 @@ import logging
 import sys
 import time
 from datetime import datetime, timezone
-from logging.handlers import RotatingFileHandler
+try:
+    from .log_utils import GzipRotatingFileHandler
+except ImportError:
+    from log_utils import GzipRotatingFileHandler  # type: ignore[no-redef]
 from pathlib import Path
 from typing import Any
 
@@ -125,23 +128,24 @@ def validate_message_id(message_id: Any) -> str:
 # =============================================================================
 
 _AUDIT_LOG_PATH = None  # Set during init
-_AUDIT_LOG_HANDLER: RotatingFileHandler | None = None  # Rotating handler for audit.jsonl
+_AUDIT_LOG_HANDLER: GzipRotatingFileHandler | None = None  # Rotating handler for audit.jsonl
 
-_AUDIT_MAX_BYTES = 5 * 1024 * 1024  # 5 MB per file
-_AUDIT_BACKUP_COUNT = 5             # keep 5 rotated files
+_AUDIT_MAX_BYTES = 1 * 1024 * 1024 * 1024  # 1 GB per file
+_AUDIT_BACKUP_COUNT = 5                     # keep 5 gzip-compressed rotated files
 
 
 def init_audit_log(log_dir: Path) -> None:
     """Initialize the audit log file path with rotation.
 
-    Sets up a RotatingFileHandler (5 MB x 5 backups) so audit.jsonl never grows
-    unboundedly. Subsequent calls after the first are no-ops.
+    Sets up a GzipRotatingFileHandler (1 GB x 5 backups, gzip-compressed) so
+    audit.jsonl never grows unboundedly while preserving up to ~5 GB of history.
+    Subsequent calls after the first are no-ops.
     """
     global _AUDIT_LOG_PATH, _AUDIT_LOG_HANDLER
     log_dir.mkdir(parents=True, exist_ok=True)
     _AUDIT_LOG_PATH = log_dir / "audit.jsonl"
     if _AUDIT_LOG_HANDLER is None:
-        _AUDIT_LOG_HANDLER = RotatingFileHandler(
+        _AUDIT_LOG_HANDLER = GzipRotatingFileHandler(
             _AUDIT_LOG_PATH,
             maxBytes=_AUDIT_MAX_BYTES,
             backupCount=_AUDIT_BACKUP_COUNT,

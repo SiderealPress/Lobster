@@ -21,7 +21,10 @@ import os
 import threading
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
-from logging.handlers import RotatingFileHandler
+try:
+    from .log_utils import GzipRotatingFileHandler
+except ImportError:
+    from log_utils import GzipRotatingFileHandler  # type: ignore[no-redef]
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -170,15 +173,16 @@ class JsonlFileListener:
     """
     Writes every accepted event to ~/lobster-workspace/logs/events.jsonl.
 
-    One JSON object per line. Uses a RotatingFileHandler (5 MB x 5 backups) so
-    the file never grows unboundedly. The handler is initialised lazily on first
-    deliver() call so that importing this module does not create any files.
+    One JSON object per line. Uses a GzipRotatingFileHandler (1 GB x 5 backups,
+    gzip-compressed) so the file never grows unboundedly while preserving up to
+    ~5 GB of history. The handler is initialised lazily on first deliver() call
+    so that importing this module does not create any files.
     """
 
     name = "jsonl-file"
 
-    _MAX_BYTES = 5 * 1024 * 1024  # 5 MB per file
-    _BACKUP_COUNT = 5              # keep 5 rotated files
+    _MAX_BYTES = 1 * 1024 * 1024 * 1024  # 1 GB per file
+    _BACKUP_COUNT = 5                      # keep 5 gzip-compressed rotated files
 
     def __init__(
         self,
@@ -195,16 +199,16 @@ class JsonlFileListener:
             event_types={"*"},
             require_debug_mode=False,
         )
-        self._handler: RotatingFileHandler | None = None
+        self._handler: GzipRotatingFileHandler | None = None
         self._handler_lock = threading.Lock()
 
-    def _get_handler(self) -> RotatingFileHandler:
-        """Return (and lazily initialise) the RotatingFileHandler."""
+    def _get_handler(self) -> GzipRotatingFileHandler:
+        """Return (and lazily initialise) the GzipRotatingFileHandler."""
         if self._handler is None:
             with self._handler_lock:
                 if self._handler is None:
                     self._path.parent.mkdir(parents=True, exist_ok=True)
-                    self._handler = RotatingFileHandler(
+                    self._handler = GzipRotatingFileHandler(
                         self._path,
                         maxBytes=self._MAX_BYTES,
                         backupCount=self._BACKUP_COUNT,
