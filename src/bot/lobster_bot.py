@@ -1111,6 +1111,49 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await message.reply_text("📨 Message received. Processing...")
 
 
+async def _check_message_access(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    """Return True if this message should be processed, False if it should be dropped.
+
+    Applies two-tier gating:
+    - Group messages: require group whitelist via gate_message() (Tier 1 + Tier 2).
+    - DM messages: require user.id in ALLOWED_USERS (existing behaviour).
+
+    This helper centralises the gating logic so all handlers apply it identically.
+    It operates on update.effective_message and update.effective_user, both of which
+    are populated for every update type that has an associated chat and user.
+    """
+    user = update.effective_user
+    message = update.effective_message
+    if not user or not message:
+        return False
+
+    chat = message.chat
+    if chat.type in ("group", "supergroup"):
+        if _GROUP_GATING_ENABLED:
+            store = load_whitelist()
+            result = gate_message(chat.id, user.id, store)
+            if result.action == GatingAction.DROP_SILENT:
+                log.debug(f"Group message silently dropped: {result.reason}")
+                return False
+            elif result.action == GatingAction.SEND_REGISTRATION_DM:
+                log.debug(
+                    f"Non-whitelisted user {user.id} in whitelisted group {chat.id}: "
+                    "silently dropped"
+                )
+                return False
+            # GatingAction.ALLOW — fall through
+            return True
+        else:
+            # Skill not available; drop all group messages silently
+            return False
+    else:
+        # DM path — unchanged behaviour
+        return user.id in ALLOWED_USERS
+
+
 def _find_message_by_telegram_id(tg_message_id: int) -> Path | None:
     """Scan inbox/ and processing/ for a message file with a matching telegram_message_id.
 
@@ -1150,14 +1193,16 @@ async def handle_edited_message(update: Update, context: ContextTypes.DEFAULT_TY
     if not message:
         return
 
-    user = update.effective_user
-    if not user or user.id not in ALLOWED_USERS:
+    if not await _check_message_access(update, context):
         return
 
+    user = update.effective_user
     text = message.text
     if not text:
         return  # Ignore non-text edits (media caption edits are not yet handled)
 
+    chat = message.chat
+    _is_group = chat.type in ("group", "supergroup")
     original_tg_id = message.message_id
     original_file = _find_message_by_telegram_id(original_tg_id)
 
@@ -1165,7 +1210,9 @@ async def handle_edited_message(update: Update, context: ContextTypes.DEFAULT_TY
 
     msg_data = {
         "id": msg_id,
-        "source": "telegram",
+        "source": (
+            get_source_for_chat(chat.type) if _GROUP_GATING_ENABLED else "telegram"
+        ),
         "type": "text",
         "chat_id": message.chat_id,
         "telegram_message_id": message.message_id,
@@ -1176,6 +1223,9 @@ async def handle_edited_message(update: Update, context: ContextTypes.DEFAULT_TY
         "timestamp": datetime.utcnow().isoformat(),
         "_edit_of_telegram_id": original_tg_id,
     }
+    if _is_group:
+        msg_data["group_chat_id"] = chat.id
+        msg_data["group_title"] = chat.title
 
     if original_file is not None:
         msg_data["_replaces_inbox_id"] = original_file.stem
@@ -1209,11 +1259,16 @@ async def _emit_reaction_signal(
     chat_id: int,
     tg_msg_id: int,
     emoji: str,
+    chat_type: str = "private",
+    chat_title: str | None = None,
 ) -> None:
     """Write a reaction inbox entry after the undo window has elapsed.
 
     This coroutine is scheduled as an asyncio.Task and cancelled if the user
     removes the reaction within REACTION_UNDO_WINDOW_SECS.
+
+    chat_type and chat_title are forwarded from handle_reaction so that group
+    reactions carry the correct source and group context fields.
     """
     # Note: pending reactions are dropped on bot restart — acceptable given the 5s window
     await asyncio.sleep(REACTION_UNDO_WINDOW_SECS)
@@ -1221,9 +1276,12 @@ async def _emit_reaction_signal(
     reacted_to_text = _lookup_reacted_to_text(tg_msg_id)
     msg_id = f"{int(time.time() * 1000)}_reaction_{tg_msg_id}"
 
+    _is_group = chat_type in ("group", "supergroup")
     msg_data = {
         "id": msg_id,
-        "source": "telegram",
+        "source": (
+            get_source_for_chat(chat_type) if _GROUP_GATING_ENABLED else "telegram"
+        ),
         "type": "reaction",
         "chat_id": chat_id,
         "telegram_message_id": tg_msg_id,
@@ -1232,6 +1290,9 @@ async def _emit_reaction_signal(
         "text": f"[Reaction: {emoji} on message {tg_msg_id}]",
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
+    if _is_group:
+        msg_data["group_chat_id"] = chat_id
+        msg_data["group_title"] = chat_title or ""
 
     inbox_file = INBOX_DIR / f"{msg_id}.json"
     atomic_write_json(inbox_file, msg_data)
@@ -1267,8 +1328,28 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     user = update.effective_user
-    if not user or user.id not in ALLOWED_USERS:
+    if not user:
         return
+
+    # Apply two-tier gating for group reactions; fall back to ALLOWED_USERS for DMs.
+    # MessageReactionUpdated has its own .chat attribute (not update.effective_message).
+    reaction_chat = reaction_update.chat
+    if reaction_chat.type in ("group", "supergroup"):
+        if _GROUP_GATING_ENABLED:
+            store = load_whitelist()
+            result = gate_message(reaction_chat.id, user.id, store)
+            if result.action in (GatingAction.DROP_SILENT, GatingAction.SEND_REGISTRATION_DM):
+                log.debug(
+                    f"Group reaction silently dropped for user={user.id} "
+                    f"chat={reaction_chat.id}: {result.action}"
+                )
+                return
+            # GatingAction.ALLOW — fall through
+        else:
+            return  # Skill not available; drop all group reactions silently
+    else:
+        if user.id not in ALLOWED_USERS:
+            return
 
     chat_id: int = reaction_update.chat.id
     tg_msg_id: int = reaction_update.message_id
@@ -1296,7 +1377,13 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         # Schedule delivery after the undo window
         task = asyncio.create_task(
-            _emit_reaction_signal(chat_id, tg_msg_id, emoji)
+            _emit_reaction_signal(
+                chat_id,
+                tg_msg_id,
+                emoji,
+                chat_type=reaction_chat.type,
+                chat_title=getattr(reaction_chat, "title", None),
+            )
         )
         _pending_reactions[pending_key] = task
         log.info(
