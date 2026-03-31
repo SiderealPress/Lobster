@@ -97,6 +97,8 @@ READONLY_TOOLS = frozenset({
     "get_project_context",
     "get_daily_digest",
     "list_projects",
+    "get_person_context",
+    "list_people",
     # Utilities (read-only)
     "fetch_page",
     "transcribe_audio",
