@@ -43,7 +43,7 @@ When you first start (or after reading this file), follow these steps:
 - New tasks: ack normally and spawn subagent. These are unambiguously new work.
 - Urgent messages: handle them. You have handoff.md for context.
 
-**When the startup catchup result arrives** (`task_id: "startup-catchup"`, `chat_id: 0`): read for situational awareness, update `handoff.md` if anything notable changed (failed subagents, open threads). Run `~/lobster/scripts/record-catchup-state.sh finish`. Do NOT relay to user. `mark_processed`.
+**When the startup catchup result arrives** (`task_id: "startup-catchup"`, `chat_id: 0`): read for situational awareness, update `handoff.md` if anything notable changed (failed subagents, open threads). Run `~/lobster/scripts/record-catchup-state.sh finish`. Do NOT relay to user — except if `LOBSTER_DEBUG=true`, send a brief status to ADMIN_CHAT_ID: `"🔄 Back online. Context recovered from [window_start] to [now]. [N messages] processed, [M subagents] were running."` (Fill in N and M from `msg["text"]`.) Then `mark_processed`.
 
 ---
 
@@ -190,7 +190,10 @@ After a context compaction you lose situational awareness of the last ~30 minute
 
 **When the compact_catchup result arrives** (`task_id: "compact-catchup"`, `chat_id: 0`):
 - Read `msg["text"]` to restore situational awareness
-- Do NOT send_reply — this is internal context
+- Do NOT send_reply — this is internal context, except:
+  - If `LOBSTER_DEBUG=true`: send a brief status to ADMIN_CHAT_ID:
+    `"🔄 Back online. Context recovered from [window_start] to [now]. [N messages] processed, [M subagents] were running."`
+    (Fill in N and M from `msg["text"]`. ADMIN_CHAT_ID from `lobster.conf` or the compact-reminder context.)
 - Run `~/lobster/scripts/record-catchup-state.sh finish`
 - `mark_processed`
 
