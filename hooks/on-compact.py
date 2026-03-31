@@ -65,6 +65,14 @@ COMPACTION_STATE_FILE = Path(
         os.path.expanduser("~/lobster-workspace/data/compaction-state.json"),
     )
 )
+# Simple timestamp file read by health-check-v3.sh for a 10-minute grace period
+# after compaction (prevents stale-inbox alerts during post-compaction re-orientation).
+LAST_COMPACT_TS_FILE = Path(
+    os.environ.get(
+        "LOBSTER_LAST_COMPACT_TS_FILE_OVERRIDE",
+        os.path.expanduser("~/lobster-workspace/data/last-compact.ts"),
+    )
+)
 
 REMINDER_TEXT = (
     "COMPACT REMINDER \u2014 RE-ORIENT NOW\n\n"
@@ -180,6 +188,27 @@ def write_compaction_state() -> None:
         tmp_path = COMPACTION_STATE_FILE.with_suffix(".tmp")
         tmp_path.write_text(json.dumps(state, indent=2) + "\n")
         tmp_path.replace(COMPACTION_STATE_FILE)  # atomic on Linux (same filesystem)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def write_last_compact_ts() -> None:
+    """
+    Write the current Unix timestamp (integer seconds) to last-compact.ts.
+
+    This simple timestamp file is read by health-check-v3.sh to determine
+    whether a compaction occurred within the last 10 minutes.  If so, the
+    health check skips its inbox staleness alert entirely, giving the dispatcher
+    a grace period to re-read bootup files and drain the inbox backlog before
+    any staleness alert fires.
+
+    Silent on any failure -- must never crash the hook.
+    """
+    try:
+        LAST_COMPACT_TS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = LAST_COMPACT_TS_FILE.with_suffix(".ts.tmp")
+        tmp_path.write_text(str(int(time.time())) + "\n")
+        tmp_path.replace(LAST_COMPACT_TS_FILE)  # atomic on Linux (same filesystem)
     except Exception:  # noqa: BLE001
         pass
 
@@ -378,6 +407,11 @@ def main() -> None:
     # compactions.  The health check reads this to suppress false-positive
     # "stale inbox" restarts during any compaction pause window.
     write_compacted_at()
+
+    # Write simple Unix timestamp for the 10-minute post-compaction grace period.
+    # health-check-v3.sh reads this file and skips staleness alerts for 10 minutes
+    # after a compaction, giving the dispatcher time to re-orient.
+    write_last_compact_ts()
 
     # Always record last_compaction_ts for the catch-up subagent, regardless
     # of whether this is a dispatcher or subagent compaction.  The catch-up
