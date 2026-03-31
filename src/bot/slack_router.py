@@ -33,7 +33,7 @@ from slack_sdk.errors import SlackApiError
 # ---------------------------------------------------------------------------
 import sys as _sys
 _sys.path.insert(0, str(Path(__file__).parent.parent))
-from channels.outbox import OutboxFileHandler, drain_outbox  # noqa: E402
+from channels.outbox import OutboxFileHandler, OutboxWatcher, drain_outbox  # noqa: E402
 
 # Configuration from environment
 SLACK_BOT_TOKEN = os.environ.get("LOBSTER_SLACK_BOT_TOKEN", "")
@@ -385,7 +385,7 @@ def main():
     # Set up outbox watcher
     observer = Observer()
     observer.schedule(
-        OutboxFileHandler(source="slack", send_fn=_send_slack_reply, log=log),
+        OutboxWatcher(source="slack", send_fn=_send_slack_reply, log=log),
         str(OUTBOX_DIR),
         recursive=False,
     )
