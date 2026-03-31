@@ -216,24 +216,24 @@ class TestIsDispatcherClaudeUUIDFile:
         # With the fix: primary Claude UUID file matches → dispatcher correctly identified.
         assert sr.is_dispatcher(_hook_input(claude_uuid)) is True
 
-    def test_claude_uuid_file_absent_falls_through_to_http_file(
+    def test_claude_uuid_file_absent_with_only_http_file_returns_false(
         self, monkeypatch, tmp_path
     ):
-        """When the Claude UUID file is absent, fall through to the HTTP session file."""
+        """Primary absent, only HTTP session file present → False (secondary skipped, tertiary absent)."""
         sr = _reload_session_role(monkeypatch, tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        sr = importlib.reload(sr)
         data_dir = tmp_path / "data"
         data_dir.mkdir()
 
         # Only the HTTP session file is present (older MCP version or race window).
-        # Since it contains an HTTP session ID, it will mismatch the Claude UUID
-        # and return False (subagent).  This is expected — the fix is to also write
-        # the Claude UUID file.
+        # The secondary check is intentionally skipped (format mismatch — see
+        # session_role.py), and the tertiary hook marker file is also absent,
+        # so is_dispatcher() falls through to the default → False.
         http_session_id = "43e178fa975741eb9f6c1cb9f328d52b"
         claude_uuid = "756633a5-4802-4327-ab98-684243d5fc2a"
         (data_dir / "dispatcher-session-id").write_text(http_session_id)
 
-        # HTTP session ID does not match Claude UUID → secondary check returns False.
-        # This confirms the pre-fix behavior: even the secondary check fails.
         assert sr.is_dispatcher(_hook_input(claude_uuid)) is False
 
     def test_claude_uuid_file_absent_falls_through_to_hook_marker(
@@ -254,30 +254,53 @@ class TestIsDispatcherClaudeUUIDFile:
 
 
 # ---------------------------------------------------------------------------
-# is_dispatcher — MCP HTTP session state file (secondary)
+# is_dispatcher — MCP HTTP session state file (secondary, skipped)
+#
+# The secondary file (dispatcher-session-id) stores the HTTP transport session
+# ID (32-char hex), NOT the Claude UUID. The secondary check is intentionally
+# skipped in is_dispatcher() because it would always return False for both
+# dispatcher and subagents (format mismatch), blocking the tertiary check.
+# These tests verify that the secondary file alone never causes a True return,
+# and that the function falls through correctly to the tertiary check.
 # ---------------------------------------------------------------------------
 
 
 class TestIsDispatcherMCPStateFile:
-    def test_mcp_file_match_returns_true(self, monkeypatch, tmp_path):
-        """Secondary MCP state file matches → dispatcher."""
+    def test_mcp_file_alone_never_returns_true(self, monkeypatch, tmp_path):
+        """Secondary-only: MCP HTTP session file is skipped; returns False (no tertiary)."""
         sr = _reload_session_role(monkeypatch, tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        sr = importlib.reload(sr)
         mcp_dir = tmp_path / "data"
         mcp_dir.mkdir()
+        # Write the secondary file with a value that matches the hook input.
+        # Under the old code this would return True; under the fix it is skipped
+        # and the tertiary (hook marker) file is absent → False.
         (mcp_dir / "dispatcher-session-id").write_text("sess-mcp-001")
 
-        assert sr.is_dispatcher(_hook_input("sess-mcp-001")) is True
+        assert sr.is_dispatcher(_hook_input("sess-mcp-001")) is False
 
-    def test_mcp_file_mismatch_returns_false(self, monkeypatch, tmp_path):
-        """Secondary MCP state file contains a different session → subagent."""
+    def test_mcp_file_present_falls_through_to_tertiary(self, monkeypatch, tmp_path):
+        """Secondary file present but skipped → tertiary hook marker file decides."""
         sr = _reload_session_role(monkeypatch, tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        sr = importlib.reload(sr)
         mcp_dir = tmp_path / "data"
         mcp_dir.mkdir()
-        (mcp_dir / "dispatcher-session-id").write_text("dispatcher-session")
+        # Write secondary with a hex value (typical real-world content).
+        http_session_id = "43e178fa975741eb9f6c1cb9f328d52b"
+        (mcp_dir / "dispatcher-session-id").write_text(http_session_id)
 
-        assert sr.is_dispatcher(_hook_input("subagent-session")) is False
+        # Write tertiary with the matching Claude UUID.
+        claude_uuid = "756633a5-4802-4327-ab98-684243d5fc2a"
+        config_dir = tmp_path / "messages" / "config"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "dispatcher-session-id").write_text(claude_uuid)
 
-    def test_mcp_file_absent_falls_through_to_secondary(self, monkeypatch, tmp_path):
+        # Secondary is skipped; tertiary matches → dispatcher.
+        assert sr.is_dispatcher(_hook_input(claude_uuid)) is True
+
+    def test_mcp_file_absent_falls_through_to_tertiary(self, monkeypatch, tmp_path):
         """Both MCP files absent → falls through to hook marker file."""
         sr = _reload_session_role(monkeypatch, tmp_path)
         # Set HOME so tertiary hook marker file resolves under tmp_path.
@@ -358,6 +381,84 @@ class TestIsDispatcherDefault:
         (mcp_dir / "dispatcher-claude-session-id").write_text("some-dispatcher-uuid")
 
         assert sr.is_dispatcher({}) is False  # no session_id key
+
+
+# ---------------------------------------------------------------------------
+# Regression: secondary check format mismatch blocked tertiary fallback
+#
+# Bug: when the secondary file (dispatcher-session-id) existed with a 32-char
+# hex HTTP session ID, _check_state_file() returned False (mismatch).  The
+# early-exit `if secondary_result is not None: return secondary_result` then
+# returned False immediately, preventing the tertiary check from running.
+# The tertiary file (~/messages/config/dispatcher-session-id) stores a Claude
+# UUID and WOULD have returned True — but was never reached.
+#
+# Fix: remove the secondary early-exit entirely.  The secondary file stores an
+# incompatible format and is not a reliable discriminator for either session
+# type.  The function falls through to the tertiary check in all cases.
+# ---------------------------------------------------------------------------
+
+
+class TestIsDispatcherSecondaryCheckSkipped:
+    def test_secondary_hex_does_not_block_tertiary_uuid_match(
+        self, monkeypatch, tmp_path
+    ):
+        """Core regression: primary absent, secondary has hex, tertiary has UUID → True.
+
+        This is the exact failure mode that triggered the bug report.  After
+        compaction, the Claude UUID state file (primary) may be absent.  The
+        secondary file exists with a 32-char hex HTTP session ID.  The tertiary
+        hook marker file has the correct Claude UUID.
+
+        Before the fix: secondary returned False (mismatch) → early exit →
+        is_dispatcher() returned False for the dispatcher.
+
+        After the fix: secondary is skipped → tertiary check runs → True.
+        """
+        sr = _reload_session_role(monkeypatch, tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        sr = importlib.reload(sr)
+
+        # Primary file absent (simulates post-compaction state).
+
+        # Secondary: MCP HTTP session ID (32-char hex) — real content in production.
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        http_session_id = "43e178fa975741eb9f6c1cb9f328d52b"
+        (data_dir / "dispatcher-session-id").write_text(http_session_id)
+
+        # Tertiary: hook marker file with the correct Claude UUID.
+        claude_uuid = "756633a5-4802-4327-ab98-684243d5fc2a"
+        config_dir = tmp_path / "messages" / "config"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "dispatcher-session-id").write_text(claude_uuid)
+
+        # Must return True — the dispatcher is correctly identified via the
+        # tertiary check, which is now reached because the secondary is skipped.
+        assert sr.is_dispatcher(_hook_input(claude_uuid)) is True
+
+    def test_secondary_hex_does_not_block_tertiary_uuid_mismatch(
+        self, monkeypatch, tmp_path
+    ):
+        """Secondary skipped, tertiary has a different UUID → False (subagent)."""
+        sr = _reload_session_role(monkeypatch, tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        sr = importlib.reload(sr)
+
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        http_session_id = "43e178fa975741eb9f6c1cb9f328d52b"
+        (data_dir / "dispatcher-session-id").write_text(http_session_id)
+
+        # Tertiary has the dispatcher UUID.
+        dispatcher_uuid = "756633a5-4802-4327-ab98-684243d5fc2a"
+        subagent_uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        config_dir = tmp_path / "messages" / "config"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "dispatcher-session-id").write_text(dispatcher_uuid)
+
+        # Subagent session ID does not match tertiary → False.
+        assert sr.is_dispatcher(_hook_input(subagent_uuid)) is False
 
 
 # ---------------------------------------------------------------------------
