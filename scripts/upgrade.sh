@@ -2051,6 +2051,8 @@ print(f"  {migrated} job(s) migrated to systemd timers")
 for sname, reason in skipped:
     print(f"  WARN: '{sname}' skipped — {reason}", file=sys.stderr)
 PYEOF
+        fi
+    fi
 
     # Migration 60: Register inject-bootup-context.py SessionStart hooks in settings.json
     # Adds two SessionStart entries: one empty-matcher entry for all fresh sessions
@@ -2084,6 +2086,7 @@ PYEOF
             substep "Registered inject-bootup-context SessionStart hook (compact sessions)"
             migrated=$((migrated + 1))
         fi
+    fi
 
     # Migration 61: Add nightly-consolidation crontab entry.
     # install.sh adds this entry but existing installs may be missing it.
