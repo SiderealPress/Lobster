@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import collections
 import json
 import logging
 import logging.handlers
@@ -65,38 +66,6 @@ BISQUE_OUTBOX_DIR = _MESSAGES / "bisque-outbox"
 WIRE_EVENTS_DIR = _MESSAGES / "wire-events"
 SENT_DIR = _MESSAGES / "sent"
 UPLOADS_DIR = _MESSAGES / "bisque-uploads"
-
-# Maximum file upload size: 50 MB
-MAX_UPLOAD_BYTES = 50 * 1024 * 1024
-
-# MIME types we serve inline (images, video); everything else is an attachment
-_INLINE_MIME_PREFIXES = ("image/", "video/", "audio/")
-
-# Map content-type prefixes to file extensions for raw binary uploads
-_MIME_EXT_MAP: dict[str, str] = {
-    "audio/webm": ".webm",
-    "audio/ogg": ".ogg",
-    "audio/mp4": ".m4a",
-    "audio/mpeg": ".mp3",
-    "audio/wav": ".wav",
-    "audio/x-wav": ".wav",
-    "audio/aac": ".aac",
-    "audio/flac": ".flac",
-    "image/jpeg": ".jpg",
-    "image/png": ".png",
-    "image/gif": ".gif",
-    "image/webp": ".webp",
-    "video/mp4": ".mp4",
-    "video/webm": ".webm",
-}
-
-
-def _mime_to_ext(mime_type: str) -> str:
-    """Return a file extension for a MIME type, or empty string if unknown."""
-    # Strip parameters like ;codecs=opus
-    base_type = mime_type.split(";")[0].strip().lower()
-    return _MIME_EXT_MAP.get(base_type, "")
-
 
 # Maximum file upload size: 50 MB
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
@@ -213,6 +182,64 @@ _file_handler.setFormatter(_JsonFormatter())
 log.addHandler(_file_handler)
 # Console handler keeps human-readable format
 log.addHandler(logging.StreamHandler())
+
+
+# ---------------------------------------------------------------------------
+# P3.6: Rate limiter — token bucket per IP, applied to auth and upload endpoints
+# ---------------------------------------------------------------------------
+
+class _RateLimiter:
+    """Token-bucket rate limiter keyed by remote IP.
+
+    Each IP gets `capacity` tokens that refill at `rate` tokens/second.
+    A call to ``is_allowed(ip)`` consumes one token and returns True if the
+    bucket was non-empty, False if the IP should be throttled.
+
+    Uses a lazy-refill strategy: tokens are added proportional to elapsed
+    time since the last request, capped at `capacity`.  This avoids a
+    background thread while still being accurate.
+
+    Thread-safety note: the relay is asyncio-based (single-threaded event
+    loop), so plain dict access is safe without a mutex.
+    """
+
+    def __init__(self, rate: float = 5.0, capacity: float = 10.0) -> None:
+        """
+        Args:
+            rate:     Tokens refilled per second (default 5 — 5 req/s steady state).
+            capacity: Maximum burst size (default 10).
+        """
+        self._rate = rate
+        self._capacity = capacity
+        # ip -> (tokens: float, last_refill_ts: float)
+        self._buckets: dict[str, tuple[float, float]] = {}
+
+    def is_allowed(self, ip: str) -> bool:
+        """Consume one token for `ip`. Returns True if allowed, False if throttled."""
+        now = time.monotonic()
+        tokens, last_ts = self._buckets.get(ip, (self._capacity, now))
+        # Refill proportional to elapsed time
+        elapsed = now - last_ts
+        tokens = min(self._capacity, tokens + elapsed * self._rate)
+        if tokens < 1.0:
+            self._buckets[ip] = (tokens, now)
+            return False
+        self._buckets[ip] = (tokens - 1.0, now)
+        return True
+
+    def purge_old(self, max_age: float = 300.0) -> int:
+        """Remove buckets that have been idle for `max_age` seconds. Returns count removed."""
+        now = time.monotonic()
+        stale = [ip for ip, (_, ts) in self._buckets.items() if now - ts > max_age]
+        for ip in stale:
+            del self._buckets[ip]
+        return len(stale)
+
+
+# Auth endpoints: 5 req/s steady, burst 10
+_AUTH_RATE_LIMITER = _RateLimiter(rate=5.0, capacity=10.0)
+# Upload endpoint: 2 req/s steady, burst 5 (uploads are heavier)
+_UPLOAD_RATE_LIMITER = _RateLimiter(rate=2.0, capacity=5.0)
 
 
 # ---------------------------------------------------------------------------
@@ -355,8 +382,14 @@ class BisqueRelayServer:
         self._client_emails: dict[int, str] = {}  # ws id -> email
         # In-memory message cache for reply context lookup (id -> {text, sender})
         # Bounded to the most recent 500 messages to avoid unbounded growth.
+        # P4.25: use collections.deque for O(1) FIFO eviction
+        import collections
         self._message_cache: dict[str, dict[str, str]] = {}
-        self._message_cache_order: list[str] = []
+        self._message_cache_order: collections.deque = collections.deque()
+        # P3.2: track startup time for /health uptime reporting
+        self._start_time: float = time.time()
+        # P3.2: track last event timestamp
+        self._last_event_ts: float | None = None
         # Event sources
         self._outbox_source: OutboxEventSource | None = None
         self._fs_source: FileSystemEventSource | None = None
@@ -455,6 +488,16 @@ class BisqueRelayServer:
             "Access-Control-Allow-Methods": "POST, OPTIONS",
             "Access-Control-Allow-Headers": "Content-Type, Authorization",
         }
+
+        # P3.6: rate limit admin token creation
+        remote_ip = request.remote or "unknown"
+        if not _AUTH_RATE_LIMITER.is_allowed(remote_ip):
+            log.warning("Rate limit hit on /auth/admin/token from %s", remote_ip)
+            return web.json_response(
+                {"error": "Too many requests — please wait a moment"},
+                status=429,
+                headers={**_cors_headers, "Retry-After": "1"},
+            )
 
         # Check admin secret is configured
         if not _ADMIN_SECRET:
@@ -561,6 +604,16 @@ class BisqueRelayServer:
             "Access-Control-Allow-Methods": "POST, OPTIONS",
             "Access-Control-Allow-Headers": "Content-Type, Authorization",
         }
+
+        # --- P3.6: Rate limit uploads per IP (2 req/s, burst 5) ---
+        remote_ip = request.remote or "unknown"
+        if not _UPLOAD_RATE_LIMITER.is_allowed(remote_ip):
+            log.warning("Rate limit hit on /upload from %s", remote_ip)
+            return web.json_response(
+                {"error": "Too many requests — please wait a moment"},
+                status=429,
+                headers={**_cors, "Retry-After": "1"},
+            )
 
         # --- Auth ---
         token = request.rel_url.query.get("token", "")
@@ -850,14 +903,17 @@ class BisqueRelayServer:
     _MESSAGE_CACHE_LIMIT = 500
 
     def _cache_message(self, msg_id: str, text: str, sender: str) -> None:
-        """Store a message in the bounded in-memory cache for reply lookups."""
+        """Store a message in the bounded in-memory cache for reply lookups.
+
+        P4.25: Uses deque.popleft() for O(1) FIFO eviction instead of list.pop(0).
+        """
         if msg_id in self._message_cache:
             return
         self._message_cache[msg_id] = {"text": text, "sender": sender}
         self._message_cache_order.append(msg_id)
         # Evict oldest entries once the cache exceeds the limit
         while len(self._message_cache_order) > self._MESSAGE_CACHE_LIMIT:
-            oldest = self._message_cache_order.pop(0)
+            oldest = self._message_cache_order.popleft()
             self._message_cache.pop(oldest, None)
 
     def _resolve_reply_context(
@@ -872,7 +928,112 @@ class BisqueRelayServer:
         return None
 
     def _load_recent_messages(self, limit: int = 50) -> list[dict[str, Any]]:
-        """Load recent conversation history from sent/ and processed/ directories.
+        """Load recent conversation history for the snapshot frame.
+
+        Primary path (when LOBSTER_USE_DB=1): query the messages.db SQLite
+        database which is the authoritative store after the BIS-159 cutover.
+        The bisque_events table holds both user (inbound) and assistant
+        (outbound) messages with source='bisque'.
+
+        Fallback path: scan JSON files in sent/ and processed/ directories.
+        Used when the DB is unavailable or returns no results.
+
+        Results are sorted chronologically so history renders oldest-first.
+        """
+        use_db = os.environ.get("LOBSTER_USE_DB", "0").strip() == "1"
+
+        if use_db:
+            db_messages = self._load_recent_messages_from_db(limit)
+            if db_messages:
+                return db_messages
+            # DB returned nothing — fall through to filesystem scan
+            log.info("DB returned no bisque history; falling back to filesystem scan")
+
+        return self._load_recent_messages_from_fs(limit)
+
+    def _load_recent_messages_from_db(self, limit: int) -> list[dict[str, Any]]:
+        """Load recent bisque conversation from messages.db (SQLite).
+
+        Reads from the bisque_events table which stores both user messages
+        (source='bisque', inbound) and assistant replies (source='bisque',
+        outbound).  Rows are ordered by timestamp ascending so the snapshot
+        presents history in chronological order.
+
+        Returns an empty list if the DB is unavailable or has no rows.
+        """
+        db_path_env = os.environ.get("LOBSTER_MESSAGES_DB", "")
+        db_path = Path(db_path_env) if db_path_env else _HOME / "messages" / "messages.db"
+
+        if not db_path.exists():
+            return []
+
+        try:
+            import sqlite3
+            conn = sqlite3.connect(str(db_path))
+            conn.row_factory = sqlite3.Row
+            try:
+                # bisque_events stores user inbound AND assistant outbound messages.
+                # The 'id' prefix convention is:
+                #   bisque_<ts>_<hex>  — user messages (inbound)
+                #   <ts>_bisque        — assistant replies (outbound)
+                # We derive role from the id prefix pattern.
+                rows = conn.execute(
+                    """
+                    SELECT id, chat_id, type, text, reply_to_id, reply_to, timestamp
+                    FROM bisque_events
+                    WHERE text IS NOT NULL AND text != ''
+                    ORDER BY timestamp DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+            finally:
+                conn.close()
+        except Exception as exc:
+            log.warning("Failed to load bisque history from DB: %s", exc)
+            return []
+
+        if not rows:
+            return []
+
+        messages: list[dict[str, Any]] = []
+        for row in rows:
+            msg_id = row["id"] or ""
+            # Determine role from message ID prefix convention:
+            #   IDs starting with 'bisque_' are inbound (user → Lobster)
+            #   IDs ending with '_bisque' or containing '_bisque' outbound are assistant
+            if msg_id.startswith("bisque_"):
+                role = "user"
+            else:
+                role = "assistant"
+
+            entry: dict[str, Any] = {
+                "id": msg_id,
+                "role": role,
+                "text": row["text"],
+                "timestamp": row["timestamp"] or "",
+            }
+
+            # Include reply context if present
+            reply_to_raw = row["reply_to"]
+            if reply_to_raw:
+                try:
+                    import json as _json
+                    if isinstance(reply_to_raw, str):
+                        entry["reply_to"] = _json.loads(reply_to_raw)
+                    else:
+                        entry["reply_to"] = reply_to_raw
+                except (ValueError, TypeError):
+                    pass
+
+            messages.append(entry)
+
+        # Reverse to chronological order (we fetched DESC for the LIMIT)
+        messages.reverse()
+        return messages
+
+    def _load_recent_messages_from_fs(self, limit: int) -> list[dict[str, Any]]:
+        """Load recent bisque conversation from JSON files (filesystem fallback).
 
         Combines Lobster's outgoing messages (sent/) and user messages (processed/)
         to reconstruct the full conversation. Only bisque messages are included.
@@ -1031,27 +1192,7 @@ class BisqueRelayServer:
     async def _on_event(self, event_id: str, frame: str) -> None:
         """Called by the event bus when a new event is available."""
         self._event_log.append(event_id, frame)
-
-        # Parse once for both BIS-118 and BIS-122 side-effects.
-        try:
-            data = json.loads(frame)
-            if data.get("type") == "message":
-                # BIS-118: cache assistant messages so reply context is available
-                # for future reply_to_id lookups.
-                msg_id = data.get("message_id") or data.get("id")
-                text = data.get("text", "")
-                role = data.get("role", "assistant")
-                if msg_id and text:
-                    sender = "assistant" if role == "assistant" else "user"
-                    self._cache_message(msg_id=msg_id, text=text, sender=sender)
-
-                # BIS-122: send is_typing=false before the message frame so the
-                # typing indicator dismisses immediately when a reply arrives.
-                await self._fan_out(self._make_typing_frame(False))
-        except (json.JSONDecodeError, Exception):
-            pass
-
-        await self._fan_out(frame)
+        self._last_event_ts = time.time()  # P3.2: track for /health + heartbeat
 
         # Parse once for both BIS-118 and BIS-122 side-effects.
         target_email: str | None = None

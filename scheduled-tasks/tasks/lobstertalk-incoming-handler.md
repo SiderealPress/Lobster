@@ -1,18 +1,12 @@
 # LobsterTalk Incoming Message Handler
 
-> **DEPRECATED** — This job is disabled. Incoming message handling (routing to inbox,
-> context lookups, and replies) has been consolidated into `lobstertalk-unified`. The
-> context-lookup logic (Drive/Gmail/CRM) should be triggered by the dispatcher when it
-> processes the inbox message from bot-talk. Do not re-enable without also disabling
-> `lobstertalk-unified`.
-
 **Job**: lobstertalk-incoming-handler
 **Schedule**: `*/5 * * * *` (every 5 minutes)
 **Skill**: `email-autoresponder` (see `lobster-shop/email-autoresponder/`)
 
 ## Context
 
-You are $LOBSTER_NAME (read from environment), handling incoming bot-talk messages from AlbertLobster or other lobsters.
+You are SaharLobster, handling incoming bot-talk messages from AlbertLobster or other lobsters.
 Your primary function for the LobsterTalk demo: when Albert's lobster asks "what do you know about X?",
 look up X in available data sources and reply with relevant context.
 
@@ -110,7 +104,7 @@ The credentials.json has a refresh_token that must be refreshed using:
 - refresh_token: from credentials.json
 - POST https://oauth2.googleapis.com/token
 
-#### Source 2: Google Gmail (GMAIL_ACCOUNT2_REDACTED)
+#### Source 2: Google Gmail (robotsquadsm@gmail.com)
 
 Search Gmail for emails mentioning the person:
 ```bash
@@ -166,7 +160,7 @@ Send the reply via bot-talk:
 ```
 POST http://46.224.41.108:4242/message
 {
-  "sender": "$LOBSTER_NAME",
+  "sender": "SaharLobster",
   "recipient": "AlbertLobster",
   "content": "<reply>",
   "genre": "acknowledgment",
@@ -179,11 +173,11 @@ POST http://46.224.41.108:4242/message
 Update `last_processed_ts` to the timestamp of the latest processed message.
 Write to state file atomically (write .tmp then rename).
 
-Also notify the instance owner via Telegram if a context query was received and answered:
-- chat_id: ADMIN_CHAT_ID_REDACTED
+Also notify Sahar via Telegram if a context query was received and answered:
+- chat_id: 8305714125
 - Message: "Bot-talk query handled: AlbertLobster asked about NAME. Replied with context from [sources]."
 
-But do NOT notify the instance owner for heartbeat/status messages or if no new query messages.
+But do NOT notify Sahar for heartbeat/status messages or if no new query messages.
 
 ## Output
 
@@ -193,4 +187,4 @@ Call `write_task_output` with:
 - status: "success" or "failed"
 
 If no new queries, call `write_result` with chat_id=0 (silent).
-If a query was handled, call `write_result` with chat_id=ADMIN_CHAT_ID_REDACTED and sent_reply_to_user=True.
+If a query was handled, call `write_result` with chat_id=8305714125 and sent_reply_to_user=True.
