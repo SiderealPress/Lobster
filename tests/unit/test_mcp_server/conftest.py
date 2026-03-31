@@ -3,16 +3,15 @@ Shared fixtures for test_mcp_server unit tests.
 
 Debug alert isolation
 ---------------------
-`_emit_debug_observation` writes to OUTBOX_DIR when LOBSTER_DEBUG=true is set
-in the host environment AND a valid admin channel is configured. On a live
-lobster host both conditions are met, which would cause unrelated tests to see
-extra outbox files.
+The `isolate_debug_config` fixture redirects _CONFIG_DIR to an empty temp dir
+so that debug-alert resolution reads no config file. This prevents live host
+credentials (TELEGRAM_BOT_TOKEN, LOBSTER_SLACK_BOT_TOKEN) from being used
+during tests, ensuring debug alerts are disabled even when LOBSTER_DEBUG=true
+is set in the environment.
 
-The `isolate_debug_config` fixture redirects _CONFIG_DIR to a non-existent
-path so _resolve_debug_config() finds no config file and leaves
-_DEBUG_ALERTS_ENABLED=False (no valid destination resolved). Individual tests
-in test_debug_alerts.py that need debug mode active patch the relevant globals
-explicitly via patch.multiple, bypassing config resolution entirely.
+Note: the older _DEBUG_RESOLVED / _DEBUG_MODE / _DEBUG_ALERTS_ENABLED globals
+were removed as part of the debug observability refactor (issue #891). Only
+_CONFIG_DIR isolation is needed now.
 """
 
 from pathlib import Path
@@ -25,25 +24,9 @@ import pytest
 def isolate_debug_config(tmp_path):
     """Redirect _CONFIG_DIR to an empty temp dir for each test.
 
-    _resolve_debug_config reads config.env from _CONFIG_DIR. Pointing it at an
-    empty directory means no TELEGRAM_BOT_TOKEN or LOBSTER_SLACK_BOT_TOKEN is
-    found, so _DEBUG_ALERTS_ENABLED stays False even when LOBSTER_DEBUG=true is
-    set in the host environment.
-
-    Also resets the lazy-resolution globals so each test starts clean.
-
-    Tests in test_debug_alerts.py that need debug alerts active short-circuit
-    _resolve_debug_config by patching _DEBUG_RESOLVED=True and _DEBUG_MODE=True
-    directly via patch.multiple — those patches take effect before this fixture's
-    side effects are relevant.
+    Pointing _CONFIG_DIR at an empty directory means no TELEGRAM_BOT_TOKEN or
+    LOBSTER_SLACK_BOT_TOKEN is found during config resolution, so debug alerts
+    stay disabled even when LOBSTER_DEBUG=true is set in the host environment.
     """
-    with patch.multiple(
-        "src.mcp.inbox_server",
-        _CONFIG_DIR=tmp_path,
-        _DEBUG_RESOLVED=False,
-        _DEBUG_MODE=None,
-        _DEBUG_ALERTS_ENABLED=False,
-        _DEBUG_OWNER_CHAT_ID=None,
-        _DEBUG_OWNER_SOURCE="telegram",
-    ):
+    with patch("src.mcp.inbox_server._CONFIG_DIR", tmp_path):
         yield

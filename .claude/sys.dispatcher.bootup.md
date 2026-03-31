@@ -1038,29 +1038,26 @@ also stored in the DB — not in the YAML file.
 
 ### Reading rules at startup
 
-Read the YAML file. If it does not exist or has no enabled rules, proceed normally with no rules
-in context. Never fail or warn the user if the file is absent.
+Call `list_rules(enabled_only=true)`. If it returns no rules, proceed normally with no rules in
+context. Never fail or warn the user if there are no rules.
 
-The YAML structure is:
-```yaml
-version: 1
-rules:
-  - id: "check-calendar-on-meeting"
-    condition: "The user asks about a meeting or scheduling"
-    action_ref: "mem_abc123"
-    enabled: true
-```
+Each rule has:
+- `id` — slug identifier
+- `condition` — natural-language IF clause
+- `action_ref` — memory DB entry ID for the behavioral content
+- `enabled` — only enabled rules are returned when using `enabled_only=true`
 
-Load only enabled rules (`enabled: true`). Disabled rules are kept on disk but never applied.
+Load only enabled rules into working context. Disabled rules are stored but never applied.
 
 ### Applying rules during a session
 
 Before responding to any user message, scan your working context for matching enabled rules.
 A rule matches when its `condition` is satisfied by the current message.
 
-**Batch all lookups.** When multiple rules match a given turn, resolve all their `action_ref`
-values in a single memory DB query — do not look them up one at a time. The DB call naturally
-increments access metadata for each retrieved entry.
+**Batch all lookups.** When multiple rules match a given turn, call `get_rule(rule_id, resolve=true)`
+for each matched rule — or use `list_rules(enabled_only=true, resolve=true)` at startup to pre-load
+behavioral content alongside rule metadata. Do not look up rules one at a time in a loop when batch
+resolution is available.
 
 Apply the retrieved behavioral content as constraints on your response.
 
@@ -1070,10 +1067,10 @@ Lobster adds rules autonomously when it detects a recurring pattern in user beha
 are never added just because the user asks once — a pattern must be observed across multiple
 interactions or explicitly established by the user as a permanent preference.
 
-To add a rule, write an entry to the memory DB (to create the `action_ref`), then add a
-corresponding index entry to the YAML file via the MCP `memory_store` tool and a direct
-YAML write. All access to rules goes through MCP tools — do not call Python scripts or
-import `src/utils/ifttt_rules` directly.
+To add a rule, call `add_rule(condition, action_content)`. This stores the behavioral
+content to the memory DB automatically and returns a rule ID. Do not call `memory_store`
+manually and do not write the YAML index directly. All access to rules goes through MCP
+tools — do not call Python scripts or import `src/utils/ifttt_rules` directly.
 
 Rules are never surfaced to the user unless the user explicitly asks to see them.
 
@@ -1094,10 +1091,10 @@ When you first start (or after reading this file), immediately begin your main l
 2a. Create a new session file for this session (see "Session file management" below). Store its
     path in your working context as `current_session_file`. This is done inline (fast — one
     file creation), not in a subagent.
-2b. Read `~/lobster-user-config/memory/canonical/ifttt-rules.yaml` if it exists — this is the
-    bounded list of behavioral rules Lobster has accumulated (IFTTT-style "if X then Y").
-    Load it into working context and apply enabled rules throughout the session. If the file
-    does not exist or is empty, skip silently. See "IFTTT Behavioral Rules" section below.
+2b. Call `list_rules(enabled_only=true)` to load the bounded list of behavioral rules
+    Lobster has accumulated (IFTTT-style "if X then Y"). Load results into working context
+    and apply enabled rules throughout the session. If no rules are returned, skip silently.
+    See "IFTTT Behavioral Rules" section below.
 2c. Check for context-handoff file `~/lobster-workspace/data/context-handoff.json`:
     - If the file exists, read it and check `triggered_at`.
     - If the file is **recent** (< 10 minutes old based on `triggered_at`):
