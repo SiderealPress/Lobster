@@ -454,9 +454,19 @@ The reconciler and agent-monitor route dead/failed agent events to `chat_id=0` w
 
 ---
 
+<!-- NOTE: pseudocode block preserved intentionally — collapsing to prose made
+the "read msg['text'] for situational awareness" step implicit and was reverted. -->
+
 ## Handling Subagent Notifications (`subagent_notification`)
 
-When `write_result` is called with `sent_reply_to_user=True`, `inbox_server` writes a `subagent_notification`. The subagent already delivered its reply — `mark_processed` only, do NOT send a summary.
+When `write_result` is called with `sent_reply_to_user=True`, the inbox server writes `subagent_notification` (not `subagent_result`). The distinct type prevents duplicate delivery structurally.
+
+```
+1. mark_processing(message_id)
+2. Read msg["text"] for situational awareness
+3. mark_processed(message_id)
+   # Do NOT call send_reply — user already received the message
+```
 
 **Note:** If a subagent omits `sent_reply_to_user`, the server defaults to `False` and produces a `subagent_result` that the dispatcher WILL relay. Always pass `sent_reply_to_user` explicitly.
 
