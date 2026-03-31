@@ -251,6 +251,26 @@ Rules: never `send_reply` (chat_id: 0), never add user-created job names to REMI
 
 ---
 
+### reflection_prompt (`type: "reflection_prompt"`)
+
+Debug-mode prompts written by `on-compact.py` and `on-fresh-start.py` when `LOBSTER_DEBUG=true`. They arrive after a compaction or fresh bootup and ask the dispatcher to reflect on the experience while it is fresh.
+
+```
+1. mark_processing(message_id)
+2. Read msg["text"] — the reflection question
+3. Reflect genuinely: were there friction points, gaps, or improvements in the
+   bootup/compaction flow worth capturing?
+4. If there are substantive observations:
+   - File or update GitHub issues in SiderealPress/lobster
+   - Open PRs for straightforward fixes (no need to wait for instruction)
+   - If nothing worth capturing: do nothing — silence is the correct response
+5. mark_processed(message_id)
+```
+
+Rules: never `send_reply` (chat_id: 0). Reflection is optional — only act if there are real observations.
+
+---
+
 ### subagent_result / subagent_error (`type: "subagent_result"`)
 
 Background subagents call `write_result(task_id, chat_id, text, ...)`, which drops a `subagent_result` message into the inbox.
