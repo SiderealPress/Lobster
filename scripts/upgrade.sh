@@ -2176,6 +2176,79 @@ PYEOF
         migrated=$((migrated + 1))
     fi
 
+    # Migration 56: Add LOBSTER_ADMIN_CHAT_ID to config.env if missing.
+    # alert.sh and the transcription worker use this to send error notifications
+    # directly to the admin. Without it, alerts are silently dropped.
+    # Defaults to the first entry in TELEGRAM_ALLOWED_USERS (which is the owner).
+    if [ -f "$CONFIG_FILE" ]; then
+        # shellcheck source=/dev/null
+        source "$CONFIG_FILE" 2>/dev/null || true
+        if [ -z "${LOBSTER_ADMIN_CHAT_ID:-}" ]; then
+            # Derive from TELEGRAM_ALLOWED_USERS — first comma-separated value
+            local first_allowed
+            first_allowed=$(echo "${TELEGRAM_ALLOWED_USERS:-}" | cut -d',' -f1 | tr -d '[:space:]')
+            if [ -n "$first_allowed" ]; then
+                echo "" >> "$CONFIG_FILE"
+                echo "# Admin chat ID for system alerts (auto-derived from TELEGRAM_ALLOWED_USERS)" >> "$CONFIG_FILE"
+                echo "LOBSTER_ADMIN_CHAT_ID=$first_allowed" >> "$CONFIG_FILE"
+                substep "Added LOBSTER_ADMIN_CHAT_ID=$first_allowed to config.env"
+                migrated=$((migrated + 1))
+            else
+                warn "LOBSTER_ADMIN_CHAT_ID missing and could not be derived — set it manually in $CONFIG_FILE"
+            fi
+        fi
+    fi
+
+    # Migration 57: Add LOBSTER_INTERNAL_SECRET to config.env if missing.
+    # Required for the push-calendar-token endpoint in inbox_server_http.py.
+    # Without it, Google Calendar token pushes from the remote bridge are disabled.
+    if [ -f "$CONFIG_FILE" ]; then
+        # shellcheck source=/dev/null
+        source "$CONFIG_FILE" 2>/dev/null || true
+        if [ -z "${LOBSTER_INTERNAL_SECRET:-}" ]; then
+            local generated_secret
+            generated_secret=$(python3 -c "import secrets; print(secrets.token_hex(32))" 2>/dev/null || \
+                               openssl rand -hex 32 2>/dev/null || \
+                               echo "")
+            if [ -n "$generated_secret" ]; then
+                echo "" >> "$CONFIG_FILE"
+                echo "# Internal secret for authenticated MCP HTTP endpoints (e.g. push-calendar-token)" >> "$CONFIG_FILE"
+                echo "LOBSTER_INTERNAL_SECRET=$generated_secret" >> "$CONFIG_FILE"
+                substep "Generated and added LOBSTER_INTERNAL_SECRET to config.env"
+                migrated=$((migrated + 1))
+            else
+                warn "LOBSTER_INTERNAL_SECRET missing and could not be generated — set it manually in $CONFIG_FILE"
+            fi
+        fi
+    fi
+
+    # Migration 58: Add LOBSTER-DAILY-HEALTH cron entry.
+    # install.sh registers daily-health-check.sh at 06:00 UTC; existing installs
+    # that were set up before this cron was added will not have it.
+    local DAILY_HEALTH_SCRIPT="$LOBSTER_DIR/scripts/daily-health-check.sh"
+    if [ -f "$DAILY_HEALTH_SCRIPT" ]; then
+        if ! crontab -l 2>/dev/null | grep -q "LOBSTER-DAILY-HEALTH"; then
+            chmod +x "$DAILY_HEALTH_SCRIPT" 2>/dev/null || true
+            "$LOBSTER_DIR/scripts/cron-manage.sh" add "# LOBSTER-DAILY-HEALTH" \
+                "0 6 * * * $DAILY_HEALTH_SCRIPT # LOBSTER-DAILY-HEALTH" 2>/dev/null && {
+                substep "Added LOBSTER-DAILY-HEALTH cron entry (daily-health-check.sh, 06:00 UTC)"
+                migrated=$((migrated + 1))
+            } || warn "Could not add LOBSTER-DAILY-HEALTH cron entry — check cron-manage.sh"
+        fi
+    fi
+
+    # Migration 59: Seed obsidian.env from template if missing.
+    # The obsidian-km skill requires ~/lobster-config/obsidian.env to exist.
+    # On existing installs the file may not be present; seed it from the template
+    # so the skill can be activated without manual setup steps.
+    local OBSIDIAN_ENV="$LOBSTER_CONFIG_DIR/obsidian.env"
+    local OBSIDIAN_TEMPLATE="$LOBSTER_DIR/lobster-shop/obsidian-km/config/obsidian.env.template"
+    if [ -f "$OBSIDIAN_TEMPLATE" ] && [ ! -f "$OBSIDIAN_ENV" ]; then
+        cp "$OBSIDIAN_TEMPLATE" "$OBSIDIAN_ENV"
+        substep "Seeded $OBSIDIAN_ENV from template (configure OBSIDIAN_VAULT_PATH before use)"
+        migrated=$((migrated + 1))
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
