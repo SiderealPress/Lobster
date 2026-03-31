@@ -2086,6 +2086,7 @@ PYEOF
             substep "Registered inject-bootup-context SessionStart hook (compact sessions)"
             migrated=$((migrated + 1))
         fi
+    fi
 
     # Migration 61: Add nightly-consolidation crontab entry.
     # install.sh adds this entry but existing installs may be missing it.
