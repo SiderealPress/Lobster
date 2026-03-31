@@ -62,6 +62,7 @@ def _load_hook(
     state_file: Path,
     sentinel_file: Path,
     session_id: str = "test-dispatcher-session",
+    processing_dir: Path | None = None,
 ) -> types.ModuleType:
     """
     Load hooks/on-compact.py as a fresh module with patched path constants.
@@ -330,4 +331,62 @@ def test_on_compact_always_sends_notification(tmp_path: Path) -> None:
         f"Expected send_compaction_notify() to be called exactly once, "
         f"but it was called {call_count[0]} time(s). "
         "The notification must fire unconditionally, not gated on LOBSTER_DEBUG."
+    )
+
+
+# ---------------------------------------------------------------------------
+# A6 – idempotent when reminder is in processing/ (not inbox/)
+# ---------------------------------------------------------------------------
+
+
+def test_on_compact_idempotent_when_reminder_in_processing(tmp_path: Path) -> None:
+    """
+    A6: If a compact-reminder is currently in processing/ (claimed by the
+    dispatcher via mark_processing), the hook must NOT write a second reminder
+    to inbox/.
+
+    Failure mode (bug fixed in this PR): already_pending() only checked
+    inbox/, so a rapid second compaction while the dispatcher was handling the
+    first compact-reminder would write a duplicate.  The dispatcher would then
+    process two compact-reminders, triggering two catch-up subagents and a
+    confusing double re-orientation.
+    """
+    inbox_dir = tmp_path / "inbox"
+    processing_dir = tmp_path / "processing"
+    state_file = tmp_path / "config" / "lobster-state.json"
+    sentinel_file = tmp_path / "config" / "compact-pending"
+
+    # Simulate the first compact-reminder already having been claimed by the
+    # dispatcher (moved from inbox/ to processing/).
+    processing_dir.mkdir(parents=True)
+    existing_reminder = {
+        "id": "0_compact",
+        "source": "system",
+        "type": "compact-reminder",
+        "subtype": "compact-reminder",
+        "text": "COMPACT REMINDER",
+    }
+    (processing_dir / "0_compact.json").write_text(
+        json.dumps(existing_reminder, indent=2) + "\n"
+    )
+
+    # inbox/ is empty — the reminder has already been claimed.
+    inbox_dir.mkdir(parents=True)
+
+    mod = _load_hook(
+        inbox_dir, state_file, sentinel_file, processing_dir=processing_dir
+    )
+    with _stdin_from_module(mod):
+        mod.main()
+
+    # inbox/ must still be empty (no new compact-reminder written).
+    inbox_reminders = [
+        p
+        for p in inbox_dir.glob("*.json")
+        if json.loads(p.read_text()).get("subtype") == "compact-reminder"
+    ]
+    assert len(inbox_reminders) == 0, (
+        f"Expected 0 compact-reminders in inbox/ (reminder was in processing/), "
+        f"but found {len(inbox_reminders)}. Double-compaction regression — "
+        "already_pending() must check processing/ as well as inbox/."
     )
