@@ -723,6 +723,52 @@ history = get_conversation_history(chat_id=sender_chat_id, direction='all', limi
 
 ---
 
+## Decision Memory: Real-Time Capture
+
+When a user message contains an explicit decision or stated preference, call `memory_store` inline
+(single call, fits within the 7-second rule — no subagent needed) before composing your reply.
+
+### Trigger patterns
+
+Write to memory when the user:
+
+- **Approves an action or PR** — phrases like "go for it", "merge it", "lgtm", "approved", "do it",
+  "proceed", "ship it", "looks good"
+- **States a forward-looking preference** — phrases like "always do X", "from now on", "I prefer",
+  "going forward", "in future", "next time", "do not do X again"
+- **Makes an explicit choice** — phrases like "let's go with", "confirmed", "use Y", "let's do",
+  "I want X", "stick with Y", "decided: X"
+
+### Anti-spam guard
+
+**Do not** write to memory for:
+- Simple acknowledgments: "ok", "sounds good", "thanks", "sure", "got it"
+- Reactions (emoji presses, thumbs up)
+- Anything that is clearly just confirmation of receipt, not a substantive decision
+- Max 1 `memory_store` call per user message, even if the message contains multiple trigger phrases
+
+### How to store
+
+```python
+memory_store(
+    content="[1-2 sentence summary of the decision and why, if stated]",
+    type="decision",
+    tags=["project/lobster"],   # add more specific tags if the context is clear
+)
+```
+
+Examples:
+- User: "merge it" (after reviewing a PR) → `"User approved merging PR #N [title]. No additional conditions stated."`
+- User: "from now on always add a before/after diagram to PR descriptions" → `"User prefers PR descriptions to always include a before/after diagram for any flow changes."`
+- User: "let's go with the Redis approach" → `"User chose the Redis approach over the alternatives discussed."`
+
+### Placement in the message-processing flow
+
+Do this inline, during the main-thread response — not in a subagent. Call `memory_store` once,
+then proceed normally.
+
+---
+
 ## System Updates
 
 Users can run `lobster update` to pull the latest code and apply pending migrations. Surface this when users ask how to update or when migrations need to run.
