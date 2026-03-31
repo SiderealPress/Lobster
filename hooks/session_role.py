@@ -17,14 +17,16 @@ dispatcher or a background subagent.
    server restarts.
    Match → dispatcher.  Mismatch → subagent.  File absent → try next fallback.
 
-2. **MCP HTTP session state file (secondary)**: The MCP server also writes the
-   HTTP transport session ID (32-char hex) to
+2. **MCP HTTP session state file (secondary — currently skipped)**: The MCP
+   server writes the HTTP transport session ID (32-char hex) to
    `$LOBSTER_WORKSPACE/data/dispatcher-session-id` whenever
-   `_tag_dispatcher_session()` is called (Options A, B, or C).  This ID is a
-   different format from the Claude UUID and does NOT match
-   `hook_input["session_id"]`.  Kept as a fallback: when absent it falls through;
-   when present it conclusively identifies subagents (mismatch).
-   Match → dispatcher.  Mismatch → subagent.  File absent → try next fallback.
+   `_tag_dispatcher_session()` is called.  This ID is a DIFFERENT format from
+   the Claude UUID in `hook_input["session_id"]` — they never match.  When the
+   secondary file is present, `_check_state_file()` always returns False
+   (mismatch) for both dispatcher and subagents, making it useless as a
+   discriminator.  Worse, the False short-circuits execution before the
+   tertiary check, which uses the correct UUID format.  The secondary check is
+   intentionally skipped; the file is left on disk for diagnostic purposes only.
 
 3. **Hook marker file (tertiary)**: At dispatcher startup the SessionStart hook
    (`write-dispatcher-session-id.py`) writes the Claude session ID to
@@ -117,14 +119,17 @@ def is_dispatcher(hook_input: dict) -> bool:
     error, returns True (same conservative fail-open as before) so the
     dispatcher is never incorrectly blocked by a transient I/O error.
 
-    ## Why three checks?
+    ## Why two active checks (primary + tertiary)?
 
     The Claude UUID (hook_input["session_id"]) and the MCP HTTP session ID are
     different formats — they never match directly.  The primary check uses the
-    Claude UUID file, which IS the correct comparison for SessionStart hooks.
-    The secondary and tertiary checks are retained as fallbacks for the race
-    window before session_start is called (e.g. on MCP server restart before
-    the dispatcher has had a chance to call session_start).
+    Claude UUID file (dispatcher-claude-session-id), which IS the correct
+    comparison for SessionStart hooks.  The secondary check (dispatcher-session-id)
+    stores the HTTP transport session ID and is intentionally skipped because it
+    always mismatches both dispatcher and subagents, causing false-negative
+    short-circuits before the tertiary check.  The tertiary check (hook marker
+    file ~/messages/config/dispatcher-session-id) stores the Claude UUID and
+    serves as the fallback for the race window before session_start is called.
     """
     session_id = get_session_id(hook_input)
 
@@ -135,14 +140,18 @@ def is_dispatcher(hook_input: dict) -> bool:
     if primary_result is not None:
         return primary_result
 
-    # --- Secondary: MCP HTTP session state file ---
-    # Written by _tag_dispatcher_session() with the HTTP transport session ID.
-    # Different format from session_id, so this will always be a mismatch for
-    # the dispatcher — but it conclusively identifies subagents when the file
-    # exists and the IDs differ.  When absent, falls through to the next check.
-    secondary_result = _check_state_file(_get_mcp_session_state_file(), session_id)
-    if secondary_result is not None:
-        return secondary_result
+    # --- Secondary: MCP HTTP session state file (SKIPPED intentionally) ---
+    # _get_mcp_session_state_file() stores the MCP HTTP transport session ID
+    # (32-char hex, e.g. '43e178fa975741eb9f6c1cb9f328d52b'), but
+    # hook_input["session_id"] is a Claude UUID (36-char UUID4, e.g.
+    # '756633a5-4802-4327-ab98-684243d5fc2a').  These formats never match, so
+    # _check_state_file() always returns False when the secondary file is
+    # present — for BOTH the dispatcher and subagents.  Treating that False as
+    # a conclusive "subagent" result blocks the tertiary check, which uses
+    # ~/messages/config/dispatcher-session-id (a file that DOES store the
+    # correct Claude UUID and WOULD return True for the dispatcher).
+    # The secondary check is not a reliable discriminator; skip it entirely and
+    # fall through to the tertiary check.
 
     # --- Tertiary: hook marker file ---
     tertiary_result = _check_state_file(DISPATCHER_SESSION_FILE, session_id)
