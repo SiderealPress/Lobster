@@ -47,12 +47,22 @@ sees the full conversation thread.
 
 ### Step 3: Forward each new message to Telegram
 
-For each new message (in chronological order), send a Telegram message to chat_id `8305714125`:
+For each new message (in chronological order), send a Telegram message to chat_id `8305714125`.
 
-Format:
-```
-[Bot-Talk] {sender}: {content}
-```
+Use a directional arrow format that makes the conversation flow immediately readable:
+
+- AlbertLobster messages (incoming from Albert's side):
+  ```
+  AlbertLobster → Lobster: {content}
+  ```
+- SaharLobster messages (sent by this Lobster):
+  ```
+  Lobster → AlbertLobster: {content}
+  ```
+- Any other sender (e.g. a third Lobster instance):
+  ```
+  {sender} → bot-talk: {content}
+  ```
 
 If the content is longer than 1000 characters, truncate and append `… (truncated)`.
 
