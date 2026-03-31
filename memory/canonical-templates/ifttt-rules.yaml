@@ -1,0 +1,18 @@
+# IFTTT-style behavioral rules — managed autonomously by Lobster.
+#
+# Schema: version 1
+#
+# Each rule has:
+#   id:         Stable unique slug (snake_case, e.g. "check-calendar-on-meeting").
+#               Never reuse a deleted rule's ID.
+#   condition:  Natural-language "IF" condition (one sentence in English).
+#   action_ref: Memory DB entry ID. The DB holds the behavioral content and
+#               all access metadata (access_count, last_accessed_at, etc.).
+#   enabled:    true = active, false = soft-disabled (kept for reference, never applied).
+#
+# Cap: 100 rules maximum. The user does not need to manage this file manually.
+# This file is an index only — the memory DB holds the behavioral content.
+# This file is committed to lobster-user-config and survives machine migrations.
+
+version: 1
+rules: []

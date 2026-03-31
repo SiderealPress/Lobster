@@ -378,6 +378,16 @@ if [ "$CONTAINER_SETUP" = true ]; then
                 fi
             done
         done
+        # Seed YAML templates (e.g. ifttt-rules.yaml)
+        for tmpl in "$TEMPLATES_DIR"/*.yaml; do
+            [ -f "$tmpl" ] || continue
+            base=$(basename "$tmpl")
+            dest="$USER_CONFIG_DIR/memory/canonical/$base"
+            if [ ! -f "$dest" ]; then
+                cp "$tmpl" "$dest"
+                info "  Seeded canonical template: $base"
+            fi
+        done
     fi
 
     # Create stub user-config agent files if they don't exist
@@ -1128,6 +1138,16 @@ if [ -d "$TEMPLATES_DIR" ]; then
             fi
         done
     done
+    # Seed YAML templates (e.g. ifttt-rules.yaml)
+    for tmpl in "$TEMPLATES_DIR"/*.yaml; do
+        [ -f "$tmpl" ] || continue
+        base=$(basename "$tmpl")
+        dest="$USER_CONFIG_DIR/memory/canonical/$base"
+        if [ ! -f "$dest" ]; then
+            cp "$tmpl" "$dest"
+            info "  Seeded canonical template: $base"
+        fi
+    done
 fi
 
 # Seed system-audit.context.md to user-config/agents/ on first run
@@ -1146,6 +1166,32 @@ for stub_file in "user.base.bootup.md" "user.base.context.md" "user.dispatcher.b
         info "  Created stub: agents/$stub_file"
     fi
 done
+
+# Seed skill configuration templates (only files that don't already exist)
+# Skills can have .env.template files in their config/ directory
+for skill_dir in "$INSTALL_DIR"/lobster-shop/*/; do
+    [ -d "$skill_dir" ] || continue
+    skill_name=$(basename "$skill_dir")
+    config_template="$skill_dir/config/${skill_name}.env.template"
+    if [ -f "$config_template" ]; then
+        # Handle special cases: obsidian-km → obsidian.env
+        env_name="${skill_name%.env.template}"
+        env_name="${env_name/-km/}"  # obsidian-km → obsidian
+        dest_file="$CONFIG_DIR/${env_name}.env"
+        if [ ! -f "$dest_file" ]; then
+            cp "$config_template" "$dest_file"
+            info "  Seeded skill config: ${env_name}.env"
+        fi
+    fi
+done
+
+# Also handle obsidian.env.template specifically (named differently from skill)
+OBSIDIAN_TEMPLATE="$INSTALL_DIR/lobster-shop/obsidian-km/config/obsidian.env.template"
+OBSIDIAN_DEST="$CONFIG_DIR/obsidian.env"
+if [ -f "$OBSIDIAN_TEMPLATE" ] && [ ! -f "$OBSIDIAN_DEST" ]; then
+    cp "$OBSIDIAN_TEMPLATE" "$OBSIDIAN_DEST"
+    info "  Seeded skill config: obsidian.env"
+fi
 
 success "Directories created"
 info "  $PROJECTS_DIR - All Lobster-managed projects"
@@ -1359,6 +1405,35 @@ chmod +x "$INSTALL_DIR/scheduled-tasks/export-logs.py" 2>/dev/null || true
     "0 3 * * * cd $INSTALL_DIR && uv run scheduled-tasks/export-logs.py # LOBSTER-LOG-EXPORT"
 
 success "Log export configured (runs at 03:00 UTC daily)"
+
+#===============================================================================
+# Ghost Detector (agent-monitor)
+#===============================================================================
+
+step "Setting up ghost detector cron..."
+
+# agent-monitor.py runs every 5 minutes, checks for stale/dead agent sessions,
+# sends a Telegram alert if GHOST_CONFIRMED or UNREGISTERED agents are found,
+# and marks ghost sessions as failed in agent_sessions.db. No LLM involved.
+"$INSTALL_DIR/scripts/cron-manage.sh" add "# LOBSTER-GHOST-DETECTOR" \
+    "*/5 * * * * cd $HOME && uv run $INSTALL_DIR/scripts/agent-monitor.py --alert --mark-failed >> $HOME/lobster-workspace/logs/agent-monitor.log 2>&1 # LOBSTER-GHOST-DETECTOR"
+
+success "Ghost detector configured (runs every 5 minutes)"
+
+#===============================================================================
+# OOM Monitor
+#===============================================================================
+
+step "Setting up OOM monitor cron..."
+
+# oom-monitor.py runs every 10 minutes, scans the kernel journal for OOM kills
+# affecting Lobster/Claude processes, and writes an inbox message for the
+# dispatcher when new OOM kill events are detected. No LLM involved.
+# Only active when LOBSTER_DEBUG=true (the script is a no-op otherwise).
+"$INSTALL_DIR/scripts/cron-manage.sh" add "# LOBSTER-OOM-CHECK" \
+    "*/10 * * * * cd $HOME && uv run $INSTALL_DIR/scripts/oom-monitor.py --since-minutes 10 >> $HOME/lobster-workspace/logs/oom-monitor.log 2>&1 # LOBSTER-OOM-CHECK"
+
+success "OOM monitor configured (runs every 10 minutes, active only when LOBSTER_DEBUG=true)"
 
 # Ensure any lingering self-check cron entry is removed on fresh installs
 { crontab -l 2>/dev/null | grep -v "# LOBSTER-SELF-CHECK" | grep -v "periodic-self-check" || true; } | crontab -

@@ -1847,15 +1847,99 @@ EOF
         fi
     fi
 
-    # Migration 47: Migrate existing jobs.json entries to systemd timers.
+
+    # Migration 47: Seed ifttt-rules.yaml in lobster-user-config/memory/canonical/
+    # Introduces the IFTTT-style behavioral rules store (issue #853). The file is
+    # machine-readable YAML, bounded to 100 rules, and managed autonomously by Lobster.
+    # Existing installs that predate this change need the file seeded so the dispatcher
+    # can load rules at startup without errors. The file starts empty (rules: []) so
+    # no behavioral change occurs on upgrade — rules accumulate over time.
+    local ifttt_src="$LOBSTER_DIR/memory/canonical-templates/ifttt-rules.yaml"
+    local ifttt_dst="$USER_CONFIG_DIR/memory/canonical/ifttt-rules.yaml"
+    if [ -f "$ifttt_src" ] && [ ! -f "$ifttt_dst" ]; then
+        cp "$ifttt_src" "$ifttt_dst"
+        substep "Seeded ifttt-rules.yaml into $USER_CONFIG_DIR/memory/canonical/"
+        migrated=$((migrated + 1))
+    fi
+
+    # Migration 48: Add idempotency column to agent_sessions.
+    # The idempotency column enables safe orphan recovery after restarts (#866).
+    # Sessions classified as 'safe' can be re-run automatically; 'unsafe'/'unknown'
+    # sessions surface a user notification instead. The column is also used by the
+    # session_start and register_agent MCP tools so the dispatcher can classify
+    # tasks at spawn time. Migration is a no-op on fresh installs (column already
+    # in CREATE TABLE DDL). On existing installs it adds the column with DEFAULT 'unknown'.
+    # The Python session_store migration list also handles this idempotently — this
+    # upgrade.sh entry is the documentation anchor and ensures crontab/service
+    # restarts don't miss the schema change on minimal installs without uv.
+    if command -v uv &>/dev/null; then
+        uv run python -c "
+import sqlite3, os
+db_path = os.path.expanduser('~/messages/config/agent_sessions.db')
+if os.path.exists(db_path):
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(\"ALTER TABLE agent_sessions ADD COLUMN idempotency TEXT DEFAULT 'unknown'\")
+        conn.commit()
+        print('idempotency column added')
+    except sqlite3.OperationalError:
+        print('idempotency column already exists')
+    finally:
+        conn.close()
+else:
+    print('agent_sessions.db not found — will be created on next server start')
+" 2>/dev/null && substep "agent_sessions.idempotency column present (fresh or migrated)" && migrated=$((migrated + 1)) || true
+    fi
+
+    # Migration 52: Add LOBSTER-GHOST-DETECTOR cron entry.
+    # agent-monitor.py runs every 5 minutes and calls --alert --mark-failed directly,
+    # sending Telegram alerts when ghost agents are found. No LLM subagent is needed.
+    # Previously this was routed through REMINDER_ROUTING in sys.dispatcher.bootup.md
+    # which spawned a lobster-generalist just to run the script and relay its output.
+    # That LLM relay layer has been removed; the script now runs directly from cron.
+    local GHOST_DETECTOR_MARKER="# LOBSTER-GHOST-DETECTOR"
+    if ! crontab -l 2>/dev/null | grep -q "$GHOST_DETECTOR_MARKER"; then
+        "$LOBSTER_DIR/scripts/cron-manage.sh" add "$GHOST_DETECTOR_MARKER" \
+            "*/5 * * * * cd $HOME && uv run $LOBSTER_DIR/scripts/agent-monitor.py --alert --mark-failed >> $WORKSPACE_DIR/logs/agent-monitor.log 2>&1 $GHOST_DETECTOR_MARKER"
+        substep "Added ghost detector cron entry (agent-monitor.py --alert --mark-failed, every 5 min)"
+        migrated=$((migrated + 1))
+    fi
+
+    # Migration 53: Add LOBSTER-OOM-CHECK cron entry.
+    # oom-monitor.py runs every 10 minutes, scans the kernel journal for OOM kills,
+    # and writes inbox messages directly when new events are detected. No LLM needed.
+    # Previously this was routed through REMINDER_ROUTING which spawned a subagent.
+    # Only active when LOBSTER_DEBUG=true (the script exits 0 silently otherwise).
+    local OOM_CHECK_MARKER="# LOBSTER-OOM-CHECK"
+    if ! crontab -l 2>/dev/null | grep -q "$OOM_CHECK_MARKER"; then
+        "$LOBSTER_DIR/scripts/cron-manage.sh" add "$OOM_CHECK_MARKER" \
+            "*/10 * * * * cd $HOME && uv run $LOBSTER_DIR/scripts/oom-monitor.py --since-minutes 10 >> $WORKSPACE_DIR/logs/oom-monitor.log 2>&1 $OOM_CHECK_MARKER"
+        substep "Added OOM monitor cron entry (oom-monitor.py --since-minutes 10, every 10 min)"
+        migrated=$((migrated + 1))
+    fi
+
+    # Migration 54: Add inbox-staleness-warn.sh cron entry
+    # Injects a scheduled_reminder into the inbox when the oldest unprocessed
+    # user message has been waiting for 3+ minutes. Gives the dispatcher an
+    # in-band nudge to call wait_for_messages or delegate, complementing the
+    # health-check restart path (which only fires at 8+ minutes). Dedup prevents
+    # multiple warnings per staleness event.
+    local STALENESS_WARN_MARKER="# LOBSTER-INBOX-STALENESS-WARN"
+    if ! crontab -l 2>/dev/null | grep -q "$STALENESS_WARN_MARKER"; then
+        chmod +x "$LOBSTER_DIR/scripts/inbox-staleness-warn.sh" 2>/dev/null || true
+        "$LOBSTER_DIR/scripts/cron-manage.sh" add "$STALENESS_WARN_MARKER" \
+            "*/1 * * * * $LOBSTER_DIR/scripts/inbox-staleness-warn.sh $STALENESS_WARN_MARKER"
+        substep "Added inbox-staleness-warn.sh cron entry (runs every minute, warns at 3-minute staleness)"
+        migrated=$((migrated + 1))
+    fi
+
+    # Migration 55: Migrate existing jobs.json entries to systemd timers.
     # The cron+jobs.json scheduling backend has been replaced by systemd timers
     # (see PR #1105). Existing entries in ~/lobster-workspace/scheduled-jobs/jobs.json
     # will no longer fire because sync-crontab.sh is no longer called.
     #
     # Sudoers note: install.sh already grants `lobster ALL=(ALL) NOPASSWD:ALL`,
-    # which covers `sudo systemctl`. No separate sudoers entry is needed.
-    # If a more restricted grant is desired in the future, the entry can be
-    # narrowed to: `lobster ALL=(ALL) NOPASSWD: /usr/bin/systemctl`
+    # which covers `sudo systemctl` and `sudo tee`. No separate sudoers entry is needed.
     #
     # This migration reads jobs.json and, for each enabled job that has a
     # `command` field set, creates the corresponding systemd timer unit.
@@ -1886,6 +1970,16 @@ UNIT_PREFIX = "lobster-"
 LOBSTER_MARKER = "# LOBSTER-MANAGED"
 LOBSTER_USER = "lobster"
 
+def sudo_write(path: Path, content: str) -> None:
+    """Write content to a root-owned path using sudo tee."""
+    result = subprocess.run(
+        ["sudo", "tee", str(path)],
+        input=content.encode(),
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise PermissionError(f"sudo tee {path} failed: {result.stderr.decode().strip()}")
+
 try:
     data = json.loads(JOBS_FILE.read_text())
 except Exception as e:
@@ -1915,8 +2009,11 @@ for name, job in jobs.items():
     service_path = SYSTEMD_DIR / f"{UNIT_PREFIX}{name}.service"
 
     # Skip if already migrated
-    if timer_path.exists() and LOBSTER_MARKER in timer_path.read_text():
-        continue
+    try:
+        if timer_path.exists() and LOBSTER_MARKER in timer_path.read_text():
+            continue
+    except OSError:
+        pass
 
     desc = job.get("description") or f"Lobster scheduled job: {name}"
 
@@ -1942,8 +2039,8 @@ ExecStart={command}
 """
 
     try:
-        timer_path.write_text(timer_content)
-        service_path.write_text(service_content)
+        sudo_write(timer_path, timer_content)
+        sudo_write(service_path, service_content)
         subprocess.run(["sudo", "systemctl", "daemon-reload"], check=True, capture_output=True)
         subprocess.run(["sudo", "systemctl", "enable", "--now", f"{UNIT_PREFIX}{name}.timer"],
                        check=True, capture_output=True)

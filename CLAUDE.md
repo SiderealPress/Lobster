@@ -41,7 +41,8 @@ User context files are private and not committed to git. They contain user-speci
 ## Available Tools (MCP)
 
 ### Messaging Tools
-- `send_reply(chat_id, text, source?, thread_ts?, buttons?, message_id?, task_id?)` - Send a reply to a user. **Pass `message_id` to atomically mark the message as processed** (combines send_reply + mark_processed in one call). **Pass `task_id` (subagents only) to auto-suppress duplicate delivery: if write_result is later called with the same task_id, sent_reply_to_user is automatically set to True.** Supports inline keyboard buttons (Telegram) and thread replies (Slack).
+- `send_reply(chat_id, text, source?, thread_ts?, buttons?, message_id?, task_id?, reply_to_message_id?)` - Send a reply to a user. **Pass `message_id` to atomically mark the message as processed** (combines send_reply + mark_processed in one call). **Pass `task_id` (subagents only) to auto-suppress duplicate delivery: if write_result is later called with the same task_id, sent_reply_to_user is automatically set to True.** Supports inline keyboard buttons (Telegram) and thread replies (Slack).
+  > **Telegram threading**: When replying to a Telegram message, always pass `reply_to_message_id` (the integer Telegram message ID shown in `wait_for_messages` output as "pass as reply_to_message_id") in addition to `message_id`. Without `reply_to_message_id`, replies are sent standalone — not threaded to the original message. `message_id` and `reply_to_message_id` serve different purposes: `message_id` marks the internal inbox message as processed; `reply_to_message_id` creates the Telegram thread.
 - `check_inbox(source?, limit?)` - Non-blocking inbox check
 - `list_sources()` - List available channels
 - `get_stats()` - Inbox statistics

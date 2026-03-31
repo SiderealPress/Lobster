@@ -54,6 +54,17 @@ if _SRC_DIR not in sys.path:
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
+# IFTTT behavioral rules store
+from utils.ifttt_rules import (
+    load_rules as _ifttt_load_rules,
+    save_rules as _ifttt_save_rules,
+    add_rule as _ifttt_add_rule,
+    remove_rule as _ifttt_remove_rule,
+    find_rule as _ifttt_find_rule,
+    get_enabled_rules as _ifttt_get_enabled_rules,
+)
+import uuid as _uuid_mod
+
 # Reliability utilities (atomic writes, validation, audit logging, circuit breaker)
 from reliability import (
     atomic_write_json,
@@ -787,6 +798,40 @@ _SERVER_START_TIME = datetime.now(timezone.utc)
 _dispatcher_session_id: str | None = None
 _http_session_manager = None  # Set to StreamableHTTPSessionManager in main() when HTTP mode is active
 
+# State file: the dispatcher session ID persisted to disk so hooks can read it
+# without network calls or JSONL parsing.  Written atomically by
+# _tag_dispatcher_session(); cleared at server startup.
+_DISPATCHER_SESSION_STATE_FILE = _WORKSPACE / "data" / "dispatcher-session-id"
+
+
+def _write_dispatcher_state_file(session_id: str) -> None:
+    """Atomically write session_id to the dispatcher state file.
+
+    Uses a temp-file + os.rename() for atomicity so concurrent readers never
+    see a partial write.  Silent on any failure — must never crash the caller.
+    """
+    try:
+        _DISPATCHER_SESSION_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _DISPATCHER_SESSION_STATE_FILE.with_suffix(".tmp")
+        tmp.write_text(session_id.strip())
+        tmp.replace(_DISPATCHER_SESSION_STATE_FILE)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _clear_dispatcher_state_file() -> None:
+    """Remove the dispatcher state file on server startup.
+
+    Prevents a stale session ID from a previous run from being mistaken for
+    the current dispatcher session.  Silent on any failure.
+    """
+    try:
+        if _DISPATCHER_SESSION_STATE_FILE.exists():
+            _DISPATCHER_SESSION_STATE_FILE.unlink()
+            log.info("[session-tag] Cleared stale dispatcher-session-id state file on startup")
+    except Exception:  # noqa: BLE001
+        pass
+
 
 def _get_current_http_session_id() -> str | None:
     """Return the MCP session ID for the current tool call request.
@@ -814,14 +859,20 @@ def _get_current_http_session_id() -> str | None:
 def _tag_dispatcher_session(session_id: str) -> None:
     """Record session_id as the privileged dispatcher session.
 
-    Called by Option A (handle_wait_for_messages) and Option B
-    (handle_session_start with agent_type="dispatcher").  Whichever fires
-    first wins; both paths update on reconnect.
+    Called by Option A (handle_wait_for_messages), Option B
+    (handle_session_start with agent_type="dispatcher"), and Option C
+    (auto-tag on first guarded tool call after server restart).  Whichever
+    fires first wins; both paths update on reconnect.
+
+    Also writes the session_id to the dispatcher state file
+    (_DISPATCHER_SESSION_STATE_FILE) so hooks can read the current dispatcher
+    session without network calls or JSONL parsing.
     """
     global _dispatcher_session_id
     if session_id and session_id != _dispatcher_session_id:
         _dispatcher_session_id = session_id
         log.info(f"[session-tag] Dispatcher session tagged: {session_id}")
+        _write_dispatcher_state_file(session_id)
 
 
 def _is_main_http_session() -> bool:
@@ -1576,6 +1627,100 @@ async def list_tools() -> list[Tool]:
                 "required": ["task_id"],
             },
         ),
+        # IFTTT Behavioral Rules Tools
+        Tool(
+            name="list_rules",
+            description="List all IFTTT-style behavioral rules from the rules store. Returns id, condition, action_ref, and enabled for each rule. Pass resolve=true to also include the memory DB content for each action_ref.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "enabled_only": {
+                        "type": "boolean",
+                        "description": "If true, return only enabled rules. Default false (returns all rules).",
+                        "default": False,
+                    },
+                    "resolve": {
+                        "type": "boolean",
+                        "description": "If true, fetch and include the memory DB content for each action_ref. Default false.",
+                        "default": False,
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="add_rule",
+            description="Add a new IFTTT-style behavioral rule. The condition is the IF clause in plain English. The action_content is the THEN clause (plain-English behavioral instruction) — it is stored to the memory DB automatically and the resulting DB entry ID is used as action_ref in the YAML index. Returns the new rule's ID.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "condition": {
+                        "type": "string",
+                        "description": "Natural-language IF clause (one sentence, e.g. 'The user asks about a meeting or scheduling').",
+                    },
+                    "action_content": {
+                        "type": "string",
+                        "description": "Plain-English THEN clause (behavioral instruction). Stored to memory DB; the assigned DB entry ID becomes the action_ref.",
+                    },
+                },
+                "required": ["condition", "action_content"],
+            },
+        ),
+        Tool(
+            name="delete_rule",
+            description="Delete an IFTTT behavioral rule by ID. Returns true if deleted, false if not found. Pass delete_memory=true to also delete the memory DB entry for action_ref.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "rule_id": {
+                        "type": "string",
+                        "description": "The ID of the rule to delete.",
+                    },
+                    "delete_memory": {
+                        "type": "boolean",
+                        "description": "If true, also delete the memory DB entry referenced by action_ref. Default false.",
+                        "default": False,
+                    },
+                },
+                "required": ["rule_id"],
+            },
+        ),
+        Tool(
+            name="get_rule",
+            description="Get a single IFTTT behavioral rule by ID. Returns null if not found. Pass resolve=true to also include the memory DB content for action_ref.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "rule_id": {
+                        "type": "string",
+                        "description": "The ID of the rule to retrieve.",
+                    },
+                    "resolve": {
+                        "type": "boolean",
+                        "description": "If true, fetch and include the memory DB content for action_ref. Default false.",
+                        "default": False,
+                    },
+                },
+                "required": ["rule_id"],
+            },
+        ),
+        Tool(
+            name="update_rule",
+            description="Soft-disable or re-enable an IFTTT behavioral rule by ID. Returns the updated rule, or null if not found.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "rule_id": {
+                        "type": "string",
+                        "description": "The ID of the rule to update.",
+                    },
+                    "enabled": {
+                        "type": "boolean",
+                        "description": "Set to false to soft-disable the rule (kept in store, never applied). Set to true to re-enable.",
+                    },
+                },
+                "required": ["rule_id", "enabled"],
+            },
+        ),
         Tool(
             name="transcribe_audio",
             description="Transcribe a voice message to text using local whisper.cpp (small model). Use this for messages with type='voice'. Runs entirely locally using whisper.cpp - no cloud API or API key needed.",
@@ -1948,6 +2093,17 @@ async def list_tools() -> list[Tool]:
                             "recent output file activity can be presumed dead. Default: 30."
                         ),
                     },
+                    "idempotency": {
+                        "type": "string",
+                        "description": (
+                            "Re-run safety classification for orphan recovery. "
+                            "'safe' — read-only/idempotent task, safe to re-run automatically after restart. "
+                            "'unsafe' — task has side effects (sends messages, modifies files, posts comments); "
+                            "requires explicit user approval to re-run. "
+                            "'unknown' — caller did not classify (default; treated as unsafe for recovery)."
+                        ),
+                        "enum": ["safe", "unsafe", "unknown"],
+                    },
                 },
                 "required": ["agent_id", "description", "chat_id"],
             },
@@ -2037,6 +2193,17 @@ async def list_tools() -> list[Tool]:
                             "only in this private repo's SQLite DB, not forwarded to wire "
                             "server unless LOBSTER_WIRE_REDACT_PII=false."
                         ),
+                    },
+                    "idempotency": {
+                        "type": "string",
+                        "description": (
+                            "Re-run safety classification for orphan recovery. "
+                            "'safe' — read-only/idempotent task, safe to re-run automatically after restart. "
+                            "'unsafe' — task has side effects (sends messages, modifies files, posts comments); "
+                            "requires explicit user approval to re-run. "
+                            "'unknown' — caller did not classify (default; treated as unsafe for recovery)."
+                        ),
+                        "enum": ["safe", "unsafe", "unknown"],
                     },
                 },
                 "required": ["agent_id", "description", "chat_id"],
@@ -2750,6 +2917,91 @@ async def list_tools() -> list[Tool]:
                 "required": [],
             },
         ),
+        # Session File Management Tools
+        Tool(
+            name="create_session_file",
+            description=(
+                "Create a new session file for today. Copies the session template, "
+                "substitutes the date/sequence/timestamps, writes the file to "
+                "~/lobster-user-config/memory/canonical/sessions/YYYYMMDD-NNN.md, "
+                "and records the path in /tmp/lobster-current-session-file. "
+                "Returns {path, session_id}."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        ),
+        Tool(
+            name="get_session_file",
+            description=(
+                "Read a session file. If session_id is 'current' (the default), "
+                "reads the pointer at /tmp/lobster-current-session-file, or finds "
+                "today's latest session. Otherwise looks up the file matching the "
+                "given YYYYMMDD-NNN session_id. "
+                "Returns {path, content, session_id}."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session ID (e.g. '20260329-001') or 'current'. Defaults to 'current'.",
+                        "default": "current",
+                    },
+                },
+                "required": [],
+            },
+        ),
+        Tool(
+            name="update_session_file",
+            description=(
+                "Update a named H2 section (e.g. '## Summary', '## Open Threads') "
+                "inside a session file. Replaces only the targeted section; all other "
+                "sections and the file header are preserved verbatim. Write is atomic "
+                "(temp-file + rename). "
+                "Returns {path, section, updated: true}."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "section": {
+                        "type": "string",
+                        "description": "Section name without the '## ' prefix, e.g. 'Summary' or 'Open Threads'.",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "New content for the section (replaces everything between the section header and the next H2 or EOF).",
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session ID (e.g. '20260329-001') or 'current'. Defaults to 'current'.",
+                        "default": "current",
+                    },
+                },
+                "required": ["section", "content"],
+            },
+        ),
+        Tool(
+            name="list_session_files",
+            description=(
+                "List session files, optionally filtered to a single date. "
+                "Returns a sorted list of {session_id, path, has_content} objects. "
+                "has_content is true when the Summary section contains more than 50 "
+                "characters of non-boilerplate text."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "date": {
+                        "type": "string",
+                        "description": "Optional YYYYMMDD date string to filter results.",
+                    },
+                },
+                "required": [],
+            },
+        ),
     ] + (
         # User Model Tools (only registered when feature flag is enabled)
         [
@@ -2872,6 +3124,17 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
         return await handle_get_task(arguments)
     elif name == "delete_task":
         return await handle_delete_task(arguments)
+    # IFTTT Behavioral Rules Tools
+    elif name == "list_rules":
+        return await handle_list_rules(arguments)
+    elif name == "add_rule":
+        return await handle_add_rule(arguments)
+    elif name == "delete_rule":
+        return await handle_delete_rule(arguments)
+    elif name == "get_rule":
+        return await handle_get_rule(arguments)
+    elif name == "update_rule":
+        return await handle_update_rule(arguments)
     elif name == "transcribe_audio":
         return await handle_transcribe_audio(arguments)
     # Headless Browser Fetch
@@ -2983,6 +3246,15 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
         return await handle_create_report(arguments)
     elif name == "list_reports":
         return await handle_list_reports(arguments)
+    # Session File Management Tools
+    elif name == "create_session_file":
+        return await handle_create_session_file(arguments)
+    elif name == "get_session_file":
+        return await handle_get_session_file(arguments)
+    elif name == "update_session_file":
+        return await handle_update_session_file(arguments)
+    elif name == "list_session_files":
+        return await handle_list_session_files(arguments)
     # User Model Tools (dispatched to user_model subsystem)
     elif name in _user_model_tool_names and _user_model is not None:
         result_json = _user_model.dispatch(name, arguments)
@@ -3101,6 +3373,12 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
 
     # Touch heartbeat at start - signals Claude is alive and waiting for messages
     touch_heartbeat()
+
+    # Write "active" state so the health check always sees a live signal when
+    # wait_for_messages is called.  This is the authoritative steady-state write:
+    # even if claude-persistent.sh left the state in "starting" or another
+    # transient mode, calling wait_for_messages means Claude is up and running.
+    _write_lobster_state(LOBSTER_STATE_FILE, "active")
 
     # Recover stale processing and retryable failed messages
     _recover_stale_processing()
@@ -4911,6 +5189,430 @@ async def handle_delete_task(args: dict) -> list[TextContent]:
 
 
 # =============================================================================
+# IFTTT Behavioral Rules Handlers
+# =============================================================================
+
+
+def _resolve_action_ref(action_ref: str) -> str:
+    """Fetch memory DB content for an action_ref ID.
+
+    Returns the content string, or a descriptive fallback when the memory
+    system is unavailable or the entry is not found.
+    """
+    if _memory_provider is None:
+        return "(memory system unavailable)"
+    if not action_ref:
+        return "(no action_ref)"
+    if not hasattr(_memory_provider, "get"):
+        return "(memory backend does not support get-by-ID)"
+    try:
+        event = _memory_provider.get(int(action_ref))
+        if event is None:
+            return f"(memory entry {action_ref} not found)"
+        return event.content
+    except (ValueError, TypeError):
+        return f"(action_ref '{action_ref}' is not a valid integer ID)"
+    except Exception as e:
+        log.warning(f"_resolve_action_ref: failed for action_ref={action_ref}: {e}")
+        return f"(error resolving action_ref: {e})"
+
+
+def _generate_rule_id(condition: str) -> str:
+    """Derive a stable slug from the condition text, falling back to a UUID suffix."""
+    import re
+    slug = condition.lower()
+    slug = re.sub(r"[^a-z0-9\s-]", "", slug)
+    slug = re.sub(r"\s+", "-", slug.strip())
+    slug = slug[:48].rstrip("-")
+    if not slug:
+        slug = "rule"
+    # Append short UUID fragment to avoid collisions
+    slug = f"{slug}-{_uuid_mod.uuid4().hex[:6]}"
+    return slug
+
+
+async def handle_list_rules(args: dict) -> list[TextContent]:
+    """List IFTTT behavioral rules."""
+    enabled_only = bool(args.get("enabled_only", False))
+    resolve = bool(args.get("resolve", False))
+    rules = _ifttt_load_rules()
+    if enabled_only:
+        rules = _ifttt_get_enabled_rules(rules)
+
+    if not rules:
+        label = "enabled " if enabled_only else ""
+        return [TextContent(type="text", text=f"No {label}rules found.")]
+
+    lines = []
+    for r in rules:
+        enabled_flag = "" if r.get("enabled", True) else " [disabled]"
+        entry = (
+            f"[{r['id']}]{enabled_flag}\n"
+            f"  condition:  {r['condition']}\n"
+            f"  action_ref: {r['action_ref']}"
+        )
+        if resolve:
+            content = _resolve_action_ref(r["action_ref"])
+            entry += f"\n  action:     {content}"
+        lines.append(entry)
+    summary = f"Rules: {len(rules)} total" + (f" ({sum(1 for r in rules if r.get('enabled', True))} enabled)" if not enabled_only else "")
+    output = "\n\n".join(lines) + f"\n\n---\n{summary}"
+    return [TextContent(type="text", text=output)]
+
+
+async def handle_add_rule(args: dict) -> list[TextContent]:
+    """Add a new IFTTT behavioral rule.
+
+    Stores action_content to the memory DB and uses the resulting entry ID
+    as action_ref in the YAML index.
+    """
+    condition = (args.get("condition") or "").strip()
+    action_content = (args.get("action_content") or "").strip()
+
+    if not condition:
+        return [TextContent(type="text", text="Error: condition is required.")]
+    if not action_content:
+        return [TextContent(type="text", text="Error: action_content is required.")]
+
+    if _memory_provider is None:
+        return [TextContent(type="text", text="Error: memory system is not available — cannot store action content.")]
+
+    event = MemoryEvent(
+        id=None,
+        timestamp=datetime.now(timezone.utc),
+        type="ifttt_action",
+        source="internal",
+        project=None,
+        content=action_content,
+        metadata={"tags": ["ifttt_rule"], "condition": condition},
+    )
+    try:
+        action_ref = str(_memory_provider.store(event))
+    except Exception as e:
+        log.error(f"handle_add_rule: memory store failed: {e}", exc_info=True)
+        return [TextContent(type="text", text=f"Error storing action to memory DB: {e}")]
+
+    rule_id = _generate_rule_id(condition)
+    rules = _ifttt_load_rules()
+    updated = _ifttt_add_rule(rules, rule_id=rule_id, condition=condition, action_ref=action_ref)
+    _ifttt_save_rules(updated)
+
+    return [TextContent(type="text", text=f"Rule added: {rule_id} (action_ref: {action_ref})")]
+
+
+async def handle_delete_rule(args: dict) -> list[TextContent]:
+    """Delete an IFTTT behavioral rule by ID.
+
+    Pass delete_memory=True to also delete the memory DB entry for action_ref.
+    """
+    rule_id = (args.get("rule_id") or "").strip()
+    if not rule_id:
+        return [TextContent(type="text", text="Error: rule_id is required.")]
+
+    rules = _ifttt_load_rules()
+    rule = _ifttt_find_rule(rules, rule_id)
+    if rule is None:
+        return [TextContent(type="text", text="false")]
+
+    delete_memory = bool(args.get("delete_memory", False))
+    memory_note = ""
+    if delete_memory:
+        action_ref = rule.get("action_ref", "")
+        if action_ref and _memory_provider is not None and hasattr(_memory_provider, "delete"):
+            try:
+                deleted = _memory_provider.delete(int(action_ref))
+                memory_note = f" (memory entry {action_ref} {'deleted' if deleted else 'not found'})"
+            except (ValueError, TypeError):
+                memory_note = f" (could not delete memory entry: action_ref '{action_ref}' is not a valid integer ID)"
+            except Exception as e:
+                log.warning(f"handle_delete_rule: memory delete failed for action_ref={action_ref}: {e}")
+                memory_note = f" (memory delete failed: {e})"
+        elif delete_memory and _memory_provider is None:
+            memory_note = " (memory system unavailable — rule deleted, memory entry not removed)"
+
+    updated = _ifttt_remove_rule(rules, rule_id)
+    _ifttt_save_rules(updated)
+    return [TextContent(type="text", text=f"true{memory_note}")]
+
+
+async def handle_get_rule(args: dict) -> list[TextContent]:
+    """Get a single IFTTT behavioral rule by ID."""
+    rule_id = (args.get("rule_id") or "").strip()
+    if not rule_id:
+        return [TextContent(type="text", text="Error: rule_id is required.")]
+
+    resolve = bool(args.get("resolve", False))
+    rules = _ifttt_load_rules()
+    rule = _ifttt_find_rule(rules, rule_id)
+    if rule is None:
+        return [TextContent(type="text", text="null")]
+
+    output = (
+        f"id:         {rule['id']}\n"
+        f"condition:  {rule['condition']}\n"
+        f"action_ref: {rule['action_ref']}\n"
+        f"enabled:    {rule.get('enabled', True)}"
+    )
+    if resolve:
+        content = _resolve_action_ref(rule["action_ref"])
+        output += f"\naction:     {content}"
+    return [TextContent(type="text", text=output)]
+
+
+async def handle_update_rule(args: dict) -> list[TextContent]:
+    """Soft-disable or re-enable an IFTTT behavioral rule by ID."""
+    rule_id = (args.get("rule_id") or "").strip()
+    if not rule_id:
+        return [TextContent(type="text", text="Error: rule_id is required.")]
+
+    enabled = args.get("enabled")
+    if enabled is None:
+        return [TextContent(type="text", text="Error: enabled is required.")]
+
+    rules = _ifttt_load_rules()
+    rule = _ifttt_find_rule(rules, rule_id)
+    if rule is None:
+        return [TextContent(type="text", text="null")]
+
+    updated_rules = [{**r, "enabled": bool(enabled)} if r["id"] == rule_id else r for r in rules]
+    _ifttt_save_rules(updated_rules)
+
+    updated_rule = _ifttt_find_rule(updated_rules, rule_id)
+    output = (
+        f"id:         {updated_rule['id']}\n"
+        f"condition:  {updated_rule['condition']}\n"
+        f"action_ref: {updated_rule['action_ref']}\n"
+        f"enabled:    {updated_rule.get('enabled', True)}"
+    )
+    return [TextContent(type="text", text=output)]
+
+
+# =============================================================================
+# Session File Management Handlers
+# =============================================================================
+
+# Pointer file written/read to track the current session
+_SESSION_POINTER_FILE = Path("/tmp/lobster-current-session-file")
+
+# Boilerplate placeholder text in session template summaries
+_SESSION_SUMMARY_BOILERPLATE = "<1-3 sentence summary"
+
+
+def _resolve_sessions_dir() -> Path:
+    """Return the sessions directory, creating it if absent."""
+    sessions_dir = _USER_CONFIG / "memory" / "canonical" / "sessions"
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    return sessions_dir
+
+
+def _resolve_session_template(sessions_dir: Path) -> str | None:
+    """Return template content, or None if the template file does not exist."""
+    template_path = sessions_dir / "session.template.md"
+    if template_path.exists():
+        return template_path.read_text()
+    return None
+
+
+def _next_sequence_number(sessions_dir: Path, date_str: str) -> int:
+    """Return the next available sequence number for *date_str* (YYYYMMDD)."""
+    existing = [
+        p.stem for p in sessions_dir.glob(f"{date_str}-*.md")
+        if p.stem != "session.template"
+    ]
+    if not existing:
+        return 1
+    numbers = []
+    for stem in existing:
+        parts = stem.split("-", 1)
+        if len(parts) == 2:
+            try:
+                numbers.append(int(parts[1]))
+            except ValueError:
+                pass
+    return max(numbers) + 1 if numbers else 1
+
+
+def _session_id_to_path(sessions_dir: Path, session_id: str) -> Path | None:
+    """Return the Path for *session_id*, or None if not found."""
+    candidate = sessions_dir / f"{session_id}.md"
+    return candidate if candidate.exists() else None
+
+
+def _resolve_current_session_path(sessions_dir: Path) -> Path | None:
+    """Return the 'current' session path via pointer file or latest today."""
+    if _SESSION_POINTER_FILE.exists():
+        try:
+            pointer = Path(_SESSION_POINTER_FILE.read_text().strip())
+            if pointer.exists():
+                return pointer
+        except Exception:
+            pass
+
+    # Fall back to the latest session file for today (UTC)
+    today = datetime.now(timezone.utc).strftime("%Y%m%d")
+    candidates = sorted(sessions_dir.glob(f"{today}-*.md"))
+    return candidates[-1] if candidates else None
+
+
+def _extract_section_content(text: str, section_name: str) -> str | None:
+    """Return the body text of a named H2 section, or None if not found."""
+    pattern = re.compile(
+        rf"^## {re.escape(section_name)}\s*\n(.*?)(?=\Z|^## )",
+        re.MULTILINE | re.DOTALL,
+    )
+    m = pattern.search(text)
+    return m.group(1) if m else None
+
+
+def _replace_section_content(text: str, section_name: str, new_body: str) -> str | None:
+    """
+    Replace the body of the named H2 section with *new_body*.
+
+    Returns the updated full text, or None if the section was not found.
+    """
+    pattern = re.compile(
+        rf"(^## {re.escape(section_name)}\s*\n)(.*?)(?=\Z|^## )",
+        re.MULTILINE | re.DOTALL,
+    )
+    if not pattern.search(text):
+        return None
+    body = new_body if new_body.endswith("\n") else new_body + "\n"
+    return pattern.sub(lambda m: m.group(1) + body, text)
+
+
+def _atomic_write(path: Path, content: str) -> None:
+    """Write *content* to *path* atomically via a sibling temp file + rename."""
+    tmp_path = path.with_suffix(".tmp")
+    tmp_path.write_text(content, encoding="utf-8")
+    os.rename(tmp_path, path)
+
+
+async def handle_create_session_file(args: dict) -> list[TextContent]:
+    """Create a new session file from the template."""
+    sessions_dir = _resolve_sessions_dir()
+    today = datetime.now(timezone.utc).strftime("%Y%m%d")
+    seq = _next_sequence_number(sessions_dir, today)
+    session_id = f"{today}-{seq:03d}"
+    file_path = sessions_dir / f"{session_id}.md"
+
+    template = _resolve_session_template(sessions_dir)
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    if template:
+        content = (
+            template
+            .replace("YYYYMMDD-NNN", session_id)
+            .replace("<ISO timestamp, e.g. 2026-03-25T14:32:00Z>", now_iso)
+        )
+    else:
+        content = (
+            f"# Session {session_id}\n\n"
+            f"**Started:** {now_iso}\n"
+            f"**Ended:** active\n\n"
+            "## Summary\n\n"
+            "## Open Threads\n\n"
+            "## Open Tasks\n\n"
+            "## Open Subagents\n\n"
+            "## Communication Channels\n\n"
+            "## Notable Events\n"
+        )
+
+    _atomic_write(file_path, content)
+    _atomic_write(_SESSION_POINTER_FILE, str(file_path))
+
+    import json as _json
+    result = _json.dumps({"path": str(file_path), "session_id": session_id})
+    return [TextContent(type="text", text=result)]
+
+
+async def handle_get_session_file(args: dict) -> list[TextContent]:
+    """Read a session file by ID or return the current one."""
+    import json as _json
+
+    session_id = args.get("session_id", "current")
+    sessions_dir = _resolve_sessions_dir()
+
+    if session_id == "current":
+        path = _resolve_current_session_path(sessions_dir)
+        if path is None:
+            return [TextContent(type="text", text='{"error": "No current session file found."}')]
+        resolved_id = path.stem
+    else:
+        path = _session_id_to_path(sessions_dir, session_id)
+        if path is None:
+            return [TextContent(type="text", text=_json.dumps({"error": f"Session file not found: {session_id}"}))]
+        resolved_id = session_id
+
+    content = path.read_text(encoding="utf-8")
+    result = _json.dumps({"path": str(path), "content": content, "session_id": resolved_id})
+    return [TextContent(type="text", text=result)]
+
+
+async def handle_update_session_file(args: dict) -> list[TextContent]:
+    """Update a named H2 section in a session file."""
+    import json as _json
+
+    section = args.get("section")
+    new_content = args.get("content")
+    session_id = args.get("session_id", "current")
+
+    if not section:
+        return [TextContent(type="text", text='{"error": "section is required."}')]
+    if new_content is None:
+        return [TextContent(type="text", text='{"error": "content is required."}')]
+
+    sessions_dir = _resolve_sessions_dir()
+
+    if session_id == "current":
+        path = _resolve_current_session_path(sessions_dir)
+        if path is None:
+            return [TextContent(type="text", text='{"error": "No current session file found."}')]
+    else:
+        path = _session_id_to_path(sessions_dir, session_id)
+        if path is None:
+            return [TextContent(type="text", text=_json.dumps({"error": f"Session file not found: {session_id}"}))]
+
+    original = path.read_text(encoding="utf-8")
+    updated = _replace_section_content(original, section, new_content)
+
+    if updated is None:
+        return [TextContent(type="text", text=_json.dumps({"error": f"Section not found: {section}"}))]
+
+    _atomic_write(path, updated)
+    result = _json.dumps({"path": str(path), "section": section, "updated": True})
+    return [TextContent(type="text", text=result)]
+
+
+async def handle_list_session_files(args: dict) -> list[TextContent]:
+    """List session files, optionally filtered by date."""
+    import json as _json
+
+    date_filter = args.get("date")
+    sessions_dir = _resolve_sessions_dir()
+
+    pattern = f"{date_filter}-*.md" if date_filter else "*.md"
+    candidates = sorted(
+        p for p in sessions_dir.glob(pattern)
+        if p.stem != "session.template" and re.match(r"^\d{8}-\d{3}$", p.stem)
+    )
+
+    def _has_content(path: Path) -> bool:
+        try:
+            text = path.read_text(encoding="utf-8")
+            body = _extract_section_content(text, "Summary") or ""
+            stripped = body.strip()
+            return len(stripped) > 50 and not stripped.startswith(_SESSION_SUMMARY_BOILERPLATE)
+        except Exception:
+            return False
+
+    entries = [
+        {"session_id": p.stem, "path": str(p), "has_content": _has_content(p)}
+        for p in candidates
+    ]
+    return [TextContent(type="text", text=_json.dumps(entries))]
+
+
+# =============================================================================
 # Audio Transcription Handler (Local Whisper.cpp)
 # =============================================================================
 
@@ -5844,6 +6546,7 @@ async def handle_register_agent(args: dict) -> list[TextContent]:
     source = (args.get("source") or "telegram").strip() or "telegram"
     output_file = args.get("output_file") or None
     timeout_minutes = args.get("timeout_minutes") or None
+    idempotency = args.get("idempotency") or None
 
     if not agent_id:
         return [TextContent(type="text", text="Error: agent_id is required")]
@@ -5874,6 +6577,7 @@ async def handle_register_agent(args: dict) -> list[TextContent]:
             source=source,
             output_file=output_file,
             timeout_minutes=timeout_minutes,
+            idempotency=idempotency,
         )
     except Exception as exc:
         log.error(f"register_agent failed: {exc}", exc_info=True)
@@ -5933,6 +6637,7 @@ async def handle_session_start(args: dict) -> list[TextContent]:
     input_summary = args.get("input_summary") or None
     trigger_message_id = args.get("trigger_message_id") or None
     trigger_snippet = args.get("trigger_snippet") or None
+    idempotency = args.get("idempotency") or None
 
     if not agent_id:
         return [TextContent(type="text", text="Error: agent_id is required")]
@@ -5961,6 +6666,7 @@ async def handle_session_start(args: dict) -> list[TextContent]:
             input_summary=input_summary,
             trigger_message_id=trigger_message_id,
             trigger_snippet=trigger_snippet,
+            idempotency=idempotency,
         )
     except Exception as exc:
         log.error(f"session_start failed: {exc}", exc_info=True)
@@ -7932,6 +8638,12 @@ async def main():
     """Run the MCP server."""
     setup_logging()
     _ensure_observation_worker()
+
+    # Clear the dispatcher state file on startup so a stale session ID from a
+    # previous run cannot linger and mislead hooks into thinking the old session
+    # is still active.  The file is re-written by _tag_dispatcher_session() once
+    # the dispatcher identifies itself via Options A, B, or C.
+    _clear_dispatcher_state_file()
 
     # Initialize the event bus singleton with standard listeners.
     # JsonlFileListener writes all events to logs/events.jsonl.
