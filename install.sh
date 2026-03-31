@@ -399,13 +399,6 @@ if [ "$CONTAINER_SETUP" = true ]; then
         fi
     done
 
-    # Create jobs.json if it doesn't exist
-    JOBS_FILE="$WORKSPACE_DIR/scheduled-jobs/jobs.json"
-    if [ ! -f "$JOBS_FILE" ]; then
-        echo '{"jobs": {}}' > "$JOBS_FILE"
-        info "  Created scheduled-jobs registry"
-    fi
-
     # sqlite-vec: verify it loads correctly
     # pyproject.toml requires >=0.1.7a1 which has correct aarch64 wheels.
     # This verification step catches any future regressions.
@@ -1262,84 +1255,8 @@ info "  See docs/GLOBAL-ENV.md for full documentation"
 
 step "Setting up scheduled tasks infrastructure..."
 
-# Create jobs.json if it doesn't exist (in workspace, not repo)
-JOBS_FILE="$WORKSPACE_DIR/scheduled-jobs/jobs.json"
-if [ ! -f "$JOBS_FILE" ]; then
-    echo '{"jobs": {}}' > "$JOBS_FILE"
-fi
-
 # Install dispatch-job.sh (posts scheduled_reminder to inbox; no direct Claude invocation)
 chmod +x "$INSTALL_DIR/scheduled-tasks/dispatch-job.sh" || true
-
-# Create sync-crontab.sh
-cat > "$INSTALL_DIR/scheduled-tasks/sync-crontab.sh" << 'SYNCCRON'
-#!/bin/bash
-# Lobster Crontab Synchronizer
-
-set -e
-
-WORKSPACE="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
-REPO_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
-JOBS_FILE="$WORKSPACE/scheduled-jobs/jobs.json"
-RUNNER="$REPO_DIR/scheduled-tasks/dispatch-job.sh"
-
-if ! command -v crontab &> /dev/null; then
-    echo "Warning: crontab not found. Install cron to enable scheduled tasks."
-    exit 0
-fi
-
-if [ ! -f "$JOBS_FILE" ]; then
-    echo "Error: Jobs file not found: $JOBS_FILE"
-    exit 1
-fi
-
-MARKER="# LOBSTER-SCHEDULED"
-EXISTING=$(crontab -l 2>/dev/null | grep -v "$MARKER" | grep -v "$RUNNER" || true)
-
-if command -v jq &> /dev/null; then
-    CRON_ENTRIES=$(jq -r --arg runner "$RUNNER" --arg marker "$MARKER" \
-        --arg repo_dir "$REPO_DIR" '
-        .jobs | to_entries[] |
-        select(.value.enabled == true) |
-        (.value.runner // $runner) as $job_runner |
-        # Expand $REPO_DIR placeholder so per-job runners can reference the install dir
-        ($job_runner | gsub("\\$REPO_DIR"; $repo_dir)) as $resolved_runner |
-        "\(.value.schedule) \($resolved_runner) \(.key) \($marker)"
-    ' "$JOBS_FILE" 2>/dev/null || echo "")
-else
-    CRON_ENTRIES=$(python3 -c "
-import json
-import sys
-try:
-    with open('$JOBS_FILE', 'r') as f:
-        data = json.load(f)
-    repo_dir = '$REPO_DIR'
-    default_runner = '$RUNNER'
-    for name, job in data.get('jobs', {}).items():
-        if job.get('enabled', True):
-            schedule = job.get('schedule', '')
-            if schedule:
-                runner = job.get('runner', default_runner)
-                runner = runner.replace('\$REPO_DIR', repo_dir)
-                print(f\"{schedule} {runner} {name} $MARKER\")
-except Exception as e:
-    sys.stderr.write(f'Error: {e}\n')
-" 2>/dev/null || echo "")
-fi
-
-{
-    if [ -n "$EXISTING" ]; then
-        echo "$EXISTING"
-    fi
-    if [ -n "$CRON_ENTRIES" ]; then
-        echo "$CRON_ENTRIES"
-    fi
-} | crontab -
-
-echo "Crontab synchronized:"
-crontab -l 2>/dev/null | grep "$MARKER" || echo "(no lobster jobs)"
-SYNCCRON
-chmod +x "$INSTALL_DIR/scheduled-tasks/sync-crontab.sh" || true
 
 # Enable cron service (name differs by distro)
 if [ "$PKG_MANAGER" = "apt" ]; then

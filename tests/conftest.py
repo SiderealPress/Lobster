@@ -356,21 +356,6 @@ def tasks_file(temp_messages_dir: Path, task_generator: TaskGenerator) -> Path:
     return tasks_file
 
 
-@pytest.fixture
-def jobs_file(
-    temp_scheduled_tasks_dir: Path, job_generator: ScheduledJobGenerator
-) -> Path:
-    """Create a jobs.json file with sample jobs."""
-    jobs = {}
-    for _ in range(3):
-        job = job_generator.generate_job()
-        jobs[job["name"]] = job
-
-    jobs_file = temp_scheduled_tasks_dir / "jobs.json"
-    jobs_file.write_text(json.dumps({"jobs": jobs}, indent=2))
-    return jobs_file
-
-
 # =============================================================================
 # Mock Fixtures
 # =============================================================================
