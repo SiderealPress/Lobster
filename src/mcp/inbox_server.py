@@ -1760,36 +1760,36 @@ async def list_tools() -> list[Tool]:
                 "required": ["url"],
             },
         ),
-        # Scheduled Jobs Tools
+        # Scheduled Jobs Tools (systemd timer backend)
         Tool(
             name="create_scheduled_job",
-            description="Create a new scheduled job that runs automatically via cron. Jobs run in separate Claude instances and write outputs to the task-outputs inbox.",
+            description="Create a new scheduled job backed by a systemd timer unit. The command must be an absolute path to an executable.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "Unique name for the job (lowercase, hyphens allowed, e.g., 'morning-weather').",
+                        "description": "Unique name for the job (lowercase alphanumeric + hyphens, e.g., 'morning-weather').",
                     },
                     "schedule": {
                         "type": "string",
-                        "description": "Cron schedule expression (e.g., '0 9 * * *' for 9am daily, '*/30 * * * *' for every 30 mins).",
+                        "description": "Schedule for the job. Accepts systemd OnCalendar expressions (e.g., '*-*-* 09:00:00' for 9am daily, '*:0/30:00' for every 30 mins, 'daily', 'hourly') or standard 5-field cron expressions (e.g., '0 9 * * *') which are auto-converted to systemd format.",
                     },
-                    "context": {
+                    "command": {
                         "type": "string",
-                        "description": "Instructions for the job. Describe what the scheduled task should do.",
+                        "description": "Absolute path to the executable to run (e.g., '/home/lobster/lobster/scheduled-tasks/my-job.sh').",
                     },
-                    "chat_id": {
+                    "description": {
                         "type": "string",
-                        "description": "Optional: chat_id of the user who owns this job. Notifications route to this user.",
+                        "description": "Optional human-readable description for the systemd unit.",
                     },
                 },
-                "required": ["name", "schedule", "context"],
+                "required": ["name", "schedule", "command"],
             },
         ),
         Tool(
             name="list_scheduled_jobs",
-            description="List all scheduled jobs with their status and schedules.",
+            description="List all lobster-managed systemd timer jobs with their schedule, last run, next run, and active status.",
             inputSchema={
                 "type": "object",
                 "properties": {},
@@ -1797,7 +1797,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="get_scheduled_job",
-            description="Get detailed information about a specific scheduled job.",
+            description="Get detailed information about a specific lobster-managed systemd timer job.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1811,7 +1811,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="update_scheduled_job",
-            description="Update an existing scheduled job's schedule, context, or enabled status.",
+            description="Update an existing lobster-managed job's schedule, command, or enabled state. Rewrites the unit files and restarts the timer when schedule/command change.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1821,15 +1821,15 @@ async def list_tools() -> list[Tool]:
                     },
                     "schedule": {
                         "type": "string",
-                        "description": "New cron schedule (optional).",
+                        "description": "New schedule (systemd OnCalendar or cron expression — auto-converted). Optional.",
                     },
-                    "context": {
+                    "command": {
                         "type": "string",
-                        "description": "New instructions for the job (optional).",
+                        "description": "New absolute path command (optional).",
                     },
                     "enabled": {
                         "type": "boolean",
-                        "description": "Enable or disable the job (optional).",
+                        "description": "Set to false to pause/disable the timer without deleting it. Set to true to re-enable it. Optional.",
                     },
                 },
                 "required": ["name"],
@@ -1837,7 +1837,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="delete_scheduled_job",
-            description="Delete a scheduled job and remove it from crontab.",
+            description="Stop, disable, and remove the systemd unit files for a lobster-managed job.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1847,6 +1847,20 @@ async def list_tools() -> list[Tool]:
                     },
                 },
                 "required": ["name"],
+            },
+        ),
+        Tool(
+            name="get_job_scaffold",
+            description="Return a starter script template for writing a lobster scheduled job. Use this as a starting point before creating a new job.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "kind": {
+                        "type": "string",
+                        "description": "Template kind: 'poller' (default). Returns the contents of the matching template file, or a minimal inline template.",
+                        "default": "poller",
+                    },
+                },
             },
         ),
         Tool(
@@ -3137,6 +3151,8 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
         return await handle_update_scheduled_job(arguments)
     elif name == "delete_scheduled_job":
         return await handle_delete_scheduled_job(arguments)
+    elif name == "get_job_scaffold":
+        return await handle_get_job_scaffold(arguments)
     elif name == "check_task_outputs":
         return await handle_check_task_outputs(arguments)
     elif name == "write_task_output":
@@ -5937,390 +5953,191 @@ async def handle_fetch_page(args: dict) -> list[TextContent]:
 
 
 # =============================================================================
-# Scheduled Jobs Handlers
+# Scheduled Jobs Handlers (systemd timer backend)
 # =============================================================================
 
-import subprocess
-
-
-def load_scheduled_jobs() -> dict:
-    """Load scheduled jobs from file."""
-    try:
-        with open(SCHEDULED_JOBS_FILE, "r") as f:
-            return json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return {"jobs": {}}
-
-
-def save_scheduled_jobs(data: dict) -> None:
-    """Save scheduled jobs to file atomically (crash-safe)."""
-    atomic_write_json(SCHEDULED_JOBS_FILE, data)
-
-
-def validate_cron_schedule(schedule: str) -> tuple[bool, str]:
-    """Validate a cron schedule expression. Returns (is_valid, error_message)."""
-    parts = schedule.strip().split()
-    if len(parts) != 5:
-        return False, f"Cron schedule must have 5 parts (minute hour day month weekday), got {len(parts)}"
-
-    # Basic validation for each field
-    field_names = ["minute", "hour", "day", "month", "weekday"]
-    field_ranges = [(0, 59), (0, 23), (1, 31), (1, 12), (0, 7)]
-
-    for i, (part, name, (min_val, max_val)) in enumerate(zip(parts, field_names, field_ranges)):
-        # Allow *, */n, n, n-m, n,m,o patterns
-        if part == "*":
-            continue
-        if part.startswith("*/"):
-            try:
-                step = int(part[2:])
-                if step < 1:
-                    return False, f"Invalid step value in {name}: {part}"
-            except ValueError:
-                return False, f"Invalid step value in {name}: {part}"
-            continue
-
-        # Handle comma-separated values and ranges
-        for subpart in part.split(","):
-            if "-" in subpart:
-                try:
-                    start, end = subpart.split("-")
-                    start, end = int(start), int(end)
-                    if not (min_val <= start <= max_val and min_val <= end <= max_val):
-                        return False, f"Range out of bounds in {name}: {subpart}"
-                except ValueError:
-                    return False, f"Invalid range in {name}: {subpart}"
-            else:
-                try:
-                    val = int(subpart)
-                    if not (min_val <= val <= max_val):
-                        return False, f"Value out of range in {name}: {val} (must be {min_val}-{max_val})"
-                except ValueError:
-                    return False, f"Invalid value in {name}: {subpart}"
-
-    return True, ""
-
-
-def cron_to_human(schedule: str) -> str:
-    """Convert cron schedule to human-readable format."""
-    parts = schedule.strip().split()
-    if len(parts) != 5:
-        return schedule
-
-    minute, hour, day, month, weekday = parts
-
-    # Common patterns
-    if schedule == "* * * * *":
-        return "Every minute"
-    if minute.startswith("*/"):
-        mins = minute[2:]
-        if hour == "*" and day == "*" and month == "*" and weekday == "*":
-            return f"Every {mins} minutes"
-    if hour.startswith("*/"):
-        hrs = hour[2:]
-        if minute == "0" and day == "*" and month == "*" and weekday == "*":
-            return f"Every {hrs} hours"
-    if day == "*" and month == "*" and weekday == "*":
-        if minute != "*" and hour != "*":
-            return f"Daily at {hour}:{minute.zfill(2)}"
-    if weekday != "*" and day == "*" and month == "*":
-        days = {"0": "Sun", "1": "Mon", "2": "Tue", "3": "Wed", "4": "Thu", "5": "Fri", "6": "Sat", "7": "Sun"}
-        day_name = days.get(weekday, weekday)
-        if minute != "*" and hour != "*":
-            return f"Every {day_name} at {hour}:{minute.zfill(2)}"
-
-    return schedule
-
-
-def validate_job_name(name: str) -> tuple[bool, str]:
-    """Validate a job name. Returns (is_valid, error_message)."""
-    if not name:
-        return False, "Job name cannot be empty"
-    if not re.match(r'^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$', name):
-        return False, "Job name must be lowercase alphanumeric with hyphens, cannot start/end with hyphen"
-    if len(name) > 50:
-        return False, "Job name must be 50 characters or less"
-    return True, ""
-
-
-async def sync_crontab() -> tuple[bool, str]:
-    """Sync jobs.json to crontab. Returns (success, message).
-
-    Uses asyncio.create_subprocess_exec so the event loop remains responsive
-    while the crontab subprocess runs (fixes: sync was blocking for up to 10s).
-    """
-    sync_script = _REPO_DIR / "scheduled-tasks" / "sync-crontab.sh"
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            str(sync_script),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.communicate()
-            return False, "Sync script timed out"
-        if proc.returncode == 0:
-            return True, stdout.decode()
-        else:
-            return False, stderr.decode() or "Sync failed"
-    except Exception as e:
-        return False, str(e)
+from systemd_jobs import (
+    validate_name as _sj_validate_name,
+    validate_command as _sj_validate_command,
+    validate_schedule as _sj_validate_schedule,
+    normalize_schedule as _sj_normalize_schedule,
+    create_job as _sj_create_job,
+    list_jobs as _sj_list_jobs,
+    update_job as _sj_update_job,
+    delete_job as _sj_delete_job,
+    get_scaffold as _sj_get_scaffold,
+    _timer_path as _sj_timer_path,
+    _service_path as _sj_service_path,
+    _read_unit_field as _sj_read_unit_field,
+    _is_lobster_unit as _sj_is_lobster_unit,
+)
 
 
 async def handle_create_scheduled_job(args: dict) -> list[TextContent]:
-    """Create a new scheduled job."""
+    """Create a new systemd-timer-backed scheduled job."""
     name = args.get("name", "").strip().lower()
     schedule = args.get("schedule", "").strip()
-    context = args.get("context", "").strip()
+    command = args.get("command", "").strip()
+    description = args.get("description", "").strip()
 
-    # Validate name
-    valid, error = validate_job_name(name)
-    if not valid:
-        return [TextContent(type="text", text=f"Error: {error}")]
+    err = _sj_validate_name(name)
+    if err:
+        return [TextContent(type="text", text=f"Error: {err}")]
 
-    # Validate schedule
-    valid, error = validate_cron_schedule(schedule)
-    if not valid:
-        return [TextContent(type="text", text=f"Error: Invalid cron schedule - {error}")]
+    # Normalize converts cron expressions and validates via systemd-analyze
+    schedule, err = _sj_normalize_schedule(schedule)
+    if err:
+        return [TextContent(type="text", text=f"Error: {err}")]
 
-    if not context:
-        return [TextContent(type="text", text="Error: context is required")]
+    err = _sj_validate_command(command)
+    if err:
+        return [TextContent(type="text", text=f"Error: {err}")]
 
-    # Check if job already exists
-    data = load_scheduled_jobs()
-    if name in data.get("jobs", {}):
-        return [TextContent(type="text", text=f"Error: Job '{name}' already exists. Use update_scheduled_job to modify it.")]
+    try:
+        result = await _sj_create_job(name, schedule, command, description)
+    except Exception as exc:
+        return [TextContent(type="text", text=f"Error creating job '{name}': {exc}")]
 
-    # Create task markdown file
-    now = datetime.now(timezone.utc)
-    task_file = SCHEDULED_TASKS_TASKS_DIR / f"{name}.md"
-    schedule_human = cron_to_human(schedule)
+    if result.status == "already_exists":
+        return [TextContent(type="text", text=f"Job '{name}' already exists with the same schedule and command (no changes made).")]
 
-    task_content = f"""# {name.replace('-', ' ').title()}
-
-**Job**: {name}
-**Schedule**: {schedule_human} (`{schedule}`)
-**Created**: {_format_display_ts(now)}
-
-## Context
-
-You are running as a scheduled task. The main Lobster instance created this job.
-
-## Instructions
-
-{context}
-
-## Output
-
-When you complete your task, call `write_task_output` with:
-- job_name: "{name}"
-- output: Your results/summary
-- status: "success" or "failed"
-
-Keep output concise. The main Lobster instance will review this later.
-"""
-
-    task_file.write_text(task_content)
-
-    # Add to jobs.json
-    job_record = {
-        "name": name,
-        "schedule": schedule,
-        "schedule_human": schedule_human,
-        "task_file": f"tasks/{name}.md",
-        "created_at": now.isoformat(),
-        "updated_at": now.isoformat(),
-        "enabled": True,
-        "last_run": None,
-        "last_status": None,
-    }
-    chat_id = args.get("chat_id")
-    if chat_id is not None:
-        job_record["chat_id"] = chat_id
-    data["jobs"][name] = job_record
-    save_scheduled_jobs(data)
-
-    # Sync to crontab
-    success, msg = await sync_crontab()
-    if not success:
-        return [TextContent(type="text", text=f"Job created but crontab sync failed: {msg}")]
-
-    return [TextContent(type="text", text=f"Created scheduled job '{name}'\nSchedule: {schedule_human} (`{schedule}`)\nTask file: {task_file}")]
+    return [TextContent(type="text", text=(
+        f"Created scheduled job '{name}'\n"
+        f"Schedule: {schedule}\n"
+        f"Command: {command}\n"
+        f"Timer: /etc/systemd/system/lobster-{name}.timer\n"
+        f"Service: /etc/systemd/system/lobster-{name}.service"
+    ))]
 
 
 async def handle_list_scheduled_jobs(args: dict) -> list[TextContent]:
-    """List all scheduled jobs."""
-    data = load_scheduled_jobs()
-    jobs = data.get("jobs", {})
+    """List all lobster-managed systemd timer jobs."""
+    try:
+        jobs = await _sj_list_jobs()
+    except Exception as exc:
+        return [TextContent(type="text", text=f"Error listing jobs: {exc}")]
 
     if not jobs:
-        return [TextContent(type="text", text="No scheduled jobs configured.\n\nUse `create_scheduled_job` to create one.")]
+        return [TextContent(type="text", text="No lobster-managed scheduled jobs found.\n\nUse `create_scheduled_job` to create one.")]
 
-    output = "**Scheduled Jobs:**\n\n"
+    lines = ["**Scheduled Jobs:**\n"]
+    for job in sorted(jobs, key=lambda j: j.name):
+        status = "active" if job.active else "inactive"
+        lines.append(f"**{job.name}** ({status})")
+        lines.append(f"  Schedule: {job.schedule}")
+        lines.append(f"  Command: {job.command}")
+        lines.append(f"  Last run: {job.last_run or 'never'}")
+        lines.append(f"  Next run: {job.next_run or 'unknown'}")
+        lines.append("")
 
-    for name, job in sorted(jobs.items()):
-        status_icon = "" if job.get("enabled", True) else " (disabled)"
-        schedule = job.get("schedule_human", job.get("schedule", ""))
-        last_run = job.get("last_run", "never")
-        last_status = job.get("last_status", "-")
-
-        if last_run and last_run != "never":
-            try:
-                last_run = _format_iso_for_display(last_run, "%Y-%m-%d %I:%M %p %Z")
-            except (ValueError, TypeError):
-                pass
-
-        output += f"**{name}**{status_icon}\n"
-        output += f"  Schedule: {schedule}\n"
-        output += f"  Last run: {last_run} ({last_status})\n\n"
-
-    output += f"---\nTotal: {len(jobs)} job(s)"
-    return [TextContent(type="text", text=output)]
+    lines.append(f"---\nTotal: {len(jobs)} job(s)")
+    return [TextContent(type="text", text="\n".join(lines))]
 
 
 async def handle_get_scheduled_job(args: dict) -> list[TextContent]:
-    """Get details of a scheduled job."""
+    """Get details of a specific lobster-managed systemd timer job."""
     name = args.get("name", "").strip().lower()
 
     if not name:
         return [TextContent(type="text", text="Error: name is required")]
 
-    data = load_scheduled_jobs()
-    job = data.get("jobs", {}).get(name)
+    timer = _sj_timer_path(name)
+    service = _sj_service_path(name)
 
-    if not job:
+    if not timer.exists() or not _sj_is_lobster_unit(timer):
         return [TextContent(type="text", text=f"Error: Job '{name}' not found")]
 
-    # Read task file content
-    task_file = SCHEDULED_TASKS_TASKS_DIR / f"{name}.md"
-    task_content = ""
-    if task_file.exists():
-        task_content = task_file.read_text()
-
-    _fmt = "%Y-%m-%d %I:%M %p %Z"
-    created_disp = _format_iso_for_display(job.get("created_at", ""), _fmt) if job.get("created_at") else "N/A"
-    updated_disp = _format_iso_for_display(job.get("updated_at", ""), _fmt) if job.get("updated_at") else "N/A"
-    last_run_raw = job.get("last_run") or ""
-    last_run_disp = _format_iso_for_display(last_run_raw, _fmt) if last_run_raw else "never"
+    schedule = _sj_read_unit_field(timer, "OnCalendar") or "(unknown)"
+    command = _sj_read_unit_field(service, "ExecStart") or "(unknown)"
 
     output = f"**Job: {name}**\n\n"
-    output += f"**Schedule**: {job.get('schedule_human', '')} (`{job.get('schedule', '')}`)\n"
-    output += f"**Enabled**: {'Yes' if job.get('enabled', True) else 'No'}\n"
-    output += f"**Created**: {created_disp}\n"
-    output += f"**Updated**: {updated_disp}\n"
-    output += f"**Last Run**: {last_run_disp}\n"
-    output += f"**Last Status**: {job.get('last_status', '-')}\n\n"
-    output += f"---\n\n**Task File** (`{task_file}`):\n\n```markdown\n{task_content}\n```"
+    output += f"**Schedule**: {schedule}\n"
+    output += f"**Command**: {command}\n"
+    output += f"**Timer unit**: /etc/systemd/system/lobster-{name}.timer\n"
+    output += f"**Service unit**: /etc/systemd/system/lobster-{name}.service\n\n"
+    output += "---\n\n**Timer unit contents:**\n\n```ini\n"
+    try:
+        output += timer.read_text()
+    except OSError:
+        output += "(unable to read)"
+    output += "\n```\n\n**Service unit contents:**\n\n```ini\n"
+    try:
+        output += service.read_text()
+    except OSError:
+        output += "(unable to read)"
+    output += "\n```"
 
     return [TextContent(type="text", text=output)]
 
 
 async def handle_update_scheduled_job(args: dict) -> list[TextContent]:
-    """Update a scheduled job."""
+    """Update schedule, command, and/or enabled state for an existing lobster job."""
     name = args.get("name", "").strip().lower()
 
     if not name:
         return [TextContent(type="text", text="Error: name is required")]
 
-    data = load_scheduled_jobs()
-    job = data.get("jobs", {}).get(name)
+    schedule = args.get("schedule", "").strip() or None
+    command = args.get("command", "").strip() or None
+    enabled_raw = args.get("enabled")
+    enabled = None  # type: bool | None
+    if enabled_raw is not None:
+        if isinstance(enabled_raw, bool):
+            enabled = enabled_raw
+        elif isinstance(enabled_raw, str):
+            enabled = enabled_raw.lower() not in ("false", "0", "no")
 
-    if not job:
-        return [TextContent(type="text", text=f"Error: Job '{name}' not found")]
+    if schedule is not None:
+        # Normalize converts cron expressions and validates via systemd-analyze
+        schedule, err = _sj_normalize_schedule(schedule)
+        if err:
+            return [TextContent(type="text", text=f"Error: {err}")]
 
-    updated = []
+    if command is not None:
+        err = _sj_validate_command(command)
+        if err:
+            return [TextContent(type="text", text=f"Error: {err}")]
 
-    # Update schedule if provided
-    if "schedule" in args and args["schedule"]:
-        new_schedule = args["schedule"].strip()
-        valid, error = validate_cron_schedule(new_schedule)
-        if not valid:
-            return [TextContent(type="text", text=f"Error: Invalid cron schedule - {error}")]
-        job["schedule"] = new_schedule
-        job["schedule_human"] = cron_to_human(new_schedule)
-        updated.append(f"schedule -> {new_schedule}")
+    try:
+        result = await _sj_update_job(name, schedule=schedule, command=command, enabled=enabled)
+    except FileNotFoundError as exc:
+        return [TextContent(type="text", text=f"Error: {exc}")]
+    except Exception as exc:
+        return [TextContent(type="text", text=f"Error updating job '{name}': {exc}")]
 
-    # Update enabled if provided
-    if "enabled" in args:
-        job["enabled"] = bool(args["enabled"])
-        updated.append(f"enabled -> {job['enabled']}")
+    if not result.updated_fields:
+        return [TextContent(type="text", text="No changes specified. Provide schedule, command, or enabled.")]
 
-    # Update context if provided
-    if "context" in args and args["context"]:
-        new_context = args["context"].strip()
-        task_file = SCHEDULED_TASKS_TASKS_DIR / f"{name}.md"
-
-        # Rewrite task file
-        now = datetime.now(timezone.utc)
-        created_disp = _format_iso_for_display(job.get("created_at", "")) if job.get("created_at") else "N/A"
-        task_content = f"""# {name.replace('-', ' ').title()}
-
-**Job**: {name}
-**Schedule**: {job.get('schedule_human', '')} (`{job.get('schedule', '')}`)
-**Created**: {created_disp}
-**Updated**: {_format_display_ts(now)}
-
-## Context
-
-You are running as a scheduled task. The main Lobster instance created this job.
-
-## Instructions
-
-{new_context}
-
-## Output
-
-When you complete your task, call `write_task_output` with:
-- job_name: "{name}"
-- output: Your results/summary
-- status: "success" or "failed"
-
-Keep output concise. The main Lobster instance will review this later.
-"""
-        task_file.write_text(task_content)
-        updated.append("context (task file rewritten)")
-
-    if not updated:
-        return [TextContent(type="text", text="No changes specified. Provide schedule, context, or enabled.")]
-
-    job["updated_at"] = datetime.now(timezone.utc).isoformat()
-    save_scheduled_jobs(data)
-
-    # Sync to crontab
-    success, msg = await sync_crontab()
-    sync_status = "" if success else f"\n(Warning: crontab sync failed: {msg})"
-
-    return [TextContent(type="text", text=f"Updated job '{name}':\n- " + "\n- ".join(updated) + sync_status)]
+    return [TextContent(type="text", text=(
+        f"Updated job '{name}':\n- " + "\n- ".join(result.updated_fields)
+    ))]
 
 
 async def handle_delete_scheduled_job(args: dict) -> list[TextContent]:
-    """Delete a scheduled job."""
+    """Delete a lobster-managed systemd timer job."""
     name = args.get("name", "").strip().lower()
 
     if not name:
         return [TextContent(type="text", text="Error: name is required")]
 
-    data = load_scheduled_jobs()
-    if name not in data.get("jobs", {}):
-        return [TextContent(type="text", text=f"Error: Job '{name}' not found")]
+    try:
+        result = await _sj_delete_job(name)
+    except PermissionError as exc:
+        return [TextContent(type="text", text=f"Error: {exc}")]
+    except Exception as exc:
+        return [TextContent(type="text", text=f"Error deleting job '{name}': {exc}")]
 
-    # Remove from jobs.json
-    del data["jobs"][name]
-    save_scheduled_jobs(data)
+    if result.status == "not_found":
+        return [TextContent(type="text", text=f"Job '{name}' not found (nothing to delete).")]
 
-    # Delete task file
-    task_file = SCHEDULED_TASKS_TASKS_DIR / f"{name}.md"
-    if task_file.exists():
-        task_file.unlink()
+    return [TextContent(type="text", text=f"Deleted job '{name}' (timer stopped, disabled, unit files removed).")]
 
-    # Sync to crontab
-    success, msg = await sync_crontab()
-    sync_status = "" if success else f"\n(Warning: crontab sync failed: {msg})"
 
-    return [TextContent(type="text", text=f"Deleted job '{name}'" + sync_status)]
+async def handle_get_job_scaffold(args: dict) -> list[TextContent]:
+    """Return a starter script template for a lobster scheduled job."""
+    kind = args.get("kind", "poller").strip() or "poller"
+    content = _sj_get_scaffold(kind)
+    return [TextContent(type="text", text=f"**Job scaffold ({kind}):**\n\n```python\n{content}\n```")]
 
 
 async def handle_check_task_outputs(args: dict) -> list[TextContent]:
