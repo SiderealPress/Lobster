@@ -96,6 +96,9 @@ from agents.tracker import add_pending_agent as _add_pending_agent, remove_pendi
 # Agent session store — SQLite-backed, used directly for new MCP tools
 import agents.session_store as _session_store
 
+# Atomic claim DB — SQLite INSERT OR FAIL claim gate (issue #1360)
+from claims import AtomicClaimDB as _AtomicClaimDB
+
 # Skill management system
 from skill_manager import (
     list_available_skills as _list_available_skills,
@@ -1050,6 +1053,26 @@ try:
     log.info("Agent session store initialized (SQLite WAL mode)")
 except Exception as _ss_err:
     log.warning(f"Agent session store init failed (non-fatal): {_ss_err}")
+
+# Initialize atomic claim DB — creates message_claims and dispatcher_lock tables
+# in the existing agent_sessions.db. Idempotent.
+try:
+    _claims_db = _AtomicClaimDB()
+    log.info("Atomic claim DB initialized (message_claims + dispatcher_lock tables)")
+except Exception as _claims_err:
+    # Degrade gracefully: create a no-op stub so the rest of the module
+    # continues to work even if the DB cannot be opened.
+    log.warning(f"Atomic claim DB init failed — degrading to filesystem-only claims: {_claims_err}")
+    class _NoOpClaimsDB:  # type: ignore[no-redef]
+        def claim(self, *a, **kw) -> bool: return True
+        def release(self, *a, **kw) -> None: pass
+        def update_status(self, *a, **kw) -> None: pass
+        def is_claimed(self, *a, **kw) -> bool: return False
+        def acquire_dispatcher_lock(self, *a, **kw) -> bool: return True
+        def get_dispatcher_lock(self, *a, **kw): return None
+        def release_dispatcher_lock(self, *a, **kw) -> None: pass
+        def force_replace_dispatcher_lock(self, *a, **kw) -> None: pass
+    _claims_db = _NoOpClaimsDB()
 
 # NOTE: Startup cleanup (cleanup_stale_running_sessions) is intentionally NOT
 # called here at module level. This module is imported by inbox_server_http.py
@@ -3489,6 +3512,9 @@ def _recover_stale_processing():
 
     Uses a type-aware timeout: 90s for text messages, 300s for media
     (voice/audio/photo/document) where transcription or download can be slow.
+
+    Releases the SQLite claim row BEFORE moving back to inbox/ so a fresh
+    claim is possible on the next dispatch cycle (issue #1360).
     """
     now = time.time()
     for f in PROCESSING_DIR.glob("*.json"):
@@ -3497,6 +3523,11 @@ def _recover_stale_processing():
             msg = json.loads(f.read_text())
             max_age = _stale_timeout_for_message(msg)
             if age > max_age:
+                # Extract message_id from filename (strip .json suffix)
+                message_id = f.stem
+                # Release claim BEFORE moving so a concurrent dispatcher cannot
+                # win a new claim while the file is still in processing/.
+                _claims_db.release(message_id)
                 dest = INBOX_DIR / f.name
                 f.rename(dest)
                 log.warning(
@@ -3563,6 +3594,37 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
         session_id = _get_current_http_session_id()
         if session_id is not None:
             _tag_dispatcher_session(session_id)
+
+    # Phase 2: SQLite dispatcher lock — enforce single-dispatcher structurally.
+    # Take (or replace stale) dispatcher lock so a second concurrent loop cannot
+    # run alongside this one.  We check whether the existing lock holder is still
+    # an active HTTP session before taking over; if it is, we log a warning and
+    # proceed anyway (fail-open) rather than blocking the dispatcher entirely.
+    if _http_session_manager is not None:
+        session_id = _get_current_http_session_id()
+        if session_id is not None:
+            existing_lock = _claims_db.get_dispatcher_lock()
+            if existing_lock is not None and existing_lock["session_id"] != session_id:
+                # Another session holds the lock — check whether it is still active.
+                old_session_id = existing_lock["session_id"]
+                lock_holder_active = False
+                try:
+                    lock_holder_active = _http_session_manager.has_session(old_session_id)
+                except Exception:
+                    lock_holder_active = False
+                if lock_holder_active:
+                    log.warning(
+                        f"[dispatcher-lock] Second dispatcher detected: "
+                        f"session {session_id!r} called wait_for_messages while "
+                        f"{old_session_id!r} holds an active lock. "
+                        "Allowing takeover to unblock the main loop."
+                    )
+                else:
+                    log.info(
+                        f"[dispatcher-lock] Stale lock from {old_session_id!r} — "
+                        f"taking over for {session_id!r}"
+                    )
+            _claims_db.force_replace_dispatcher_lock(session_id)
 
     # Touch heartbeat at start - signals Claude is alive and waiting for messages
     touch_heartbeat()
@@ -4426,6 +4488,10 @@ async def handle_mark_processed(args: dict) -> list[TextContent]:
     dest = PROCESSED_DIR / found.name
     found.rename(dest)
 
+    # Update claim status to 'processed' (issue #1360).
+    # No-op on rows that predate this migration (message_id absent from table).
+    _claims_db.update_status(message_id, "processed")
+
     # BIS-167 Slice 6: persist inbound message to messages.db now that it is fully processed.
     if _db_persist_inbound is not None:
         try:
@@ -4465,7 +4531,16 @@ async def handle_mark_processing(args: dict) -> list[TextContent]:
     # the message (issue #635). This is the single ingest normalization point.
     msg_data = normalize_message_type(msg_data)
 
-    # Atomic move to processing
+    # Atomic claim via SQLite INSERT OR FAIL (issue #1360).
+    # This is the claim gate: one caller wins, all others get already_claimed.
+    # The filesystem rename becomes a consequence of a won claim, not the claim
+    # itself — eliminating the last-writer-wins race in concurrent dispatchers.
+    session_id = _get_current_http_session_id() or "dispatcher"
+    if not _claims_db.claim(message_id, session_id):
+        log.warning(f"mark_processing: already_claimed: {message_id}")
+        return [TextContent(type="text", text=f"Error: already_claimed: {message_id}")]
+
+    # Atomic move to processing (consequence of won claim)
     dest = PROCESSING_DIR / found.name
     found.rename(dest)
 
@@ -4574,6 +4649,13 @@ async def handle_claim_and_ack(args: dict) -> list[TextContent]:
     if not found:
         return [TextContent(type="text", text=f"Error: Message not found in inbox: {message_id}")]
 
+    # Atomic claim via SQLite INSERT OR FAIL (issue #1360).
+    # Must succeed before any filesystem move or ack is sent.
+    session_id = _get_current_http_session_id() or "dispatcher"
+    if not _claims_db.claim(message_id, session_id):
+        log.warning(f"claim_and_ack: already_claimed: {message_id}")
+        return [TextContent(type="text", text=f"Error: already_claimed: {message_id}")]
+
     # Read message content before moving (for observation queue + timestamp)
     try:
         msg_data = json.loads(found.read_text())
@@ -4583,7 +4665,7 @@ async def handle_claim_and_ack(args: dict) -> list[TextContent]:
     # Stamp actual processing start time so stale detection uses it
     msg_data["_processing_started_at"] = datetime.now(timezone.utc).isoformat()
 
-    # Atomic move to processing/
+    # Atomic move to processing/ (consequence of won claim)
     dest = PROCESSING_DIR / found.name
     found.rename(dest)
 
@@ -4677,6 +4759,8 @@ async def handle_mark_failed(args: dict) -> list[TextContent]:
         # which is safe (idempotent). The reverse loses data.
         atomic_write_json(dest, msg)
         found.unlink(missing_ok=True)
+        # Update claim status to 'failed' (issue #1360)
+        _claims_db.update_status(message_id, "failed")
         log.error(f"Message permanently failed after {max_retries} retries: {message_id} - {error}")
         return [TextContent(type="text", text=f"Message permanently failed after {max_retries} retries: {message_id}")]
 
@@ -4689,6 +4773,8 @@ async def handle_mark_failed(args: dict) -> list[TextContent]:
     # Write destination FIRST, then remove source (crash-safe ordering)
     atomic_write_json(dest, msg)
     found.unlink(missing_ok=True)
+    # Release claim row so the message can be re-claimed on retry (issue #1360)
+    _claims_db.release(message_id)
     log.warning(f"Message failed (retry {retry_count}/{max_retries}, next in {backoff}s): {message_id} - {error}")
     return [TextContent(type="text", text=f"Message queued for retry ({retry_count}/{max_retries}, backoff {backoff}s): {message_id}")]
 
