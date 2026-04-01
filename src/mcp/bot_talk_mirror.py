@@ -25,8 +25,9 @@ Configuration (all overridable via environment variables):
 
 Anti-duplication
 ----------------
-The bot-talk poller reads only messages with sender="AlbertLobster".
-This module writes sender="SaharLobster", so there is no echo loop.
+The bot-talk poller reads only messages where sender != BOT_TALK_SELF_USER (i.e. the
+remote side's messages). This module writes with BOT_TALK_SENDER configured via the
+BOT_TALK_SENDER env variable or config.env, so there is no echo loop.
 
 Filtering
 ---------
@@ -105,7 +106,11 @@ BOT_TALK_TOKEN: str = (
 )
 BOT_TALK_HTTP_TIMEOUT = 3.0   # seconds
 BOT_TALK_HTTP_RETRIES = 2
-BOT_TALK_SENDER = "SaharLobster"
+BOT_TALK_SENDER: str = (
+    os.environ.get("BOT_TALK_SENDER")
+    or _read_config_env("BOT_TALK_SENDER")
+    or "SaharLobster"  # fallback for legacy installs without BOT_TALK_SENDER in config
+)
 BOT_TALK_TIER = "TIER-BOT"
 
 _WORKSPACE = Path.home() / "lobster-workspace"

@@ -44,6 +44,41 @@ Schema:
 Always write updated state atomically: write to a `.tmp` file, then rename to the
 final path.
 
+## Identity and Filtering
+
+Read the self-identity from config at runtime (same pattern as the hourly poller):
+
+```python
+def _load_self_user() -> str:
+    from pathlib import Path
+    import os
+
+    for key in ("BOT_TALK_SELF_USER", "BOT_TALK_SENDER"):
+        val = os.environ.get(key, "").strip()
+        if val:
+            return val
+
+    for config_path in [
+        Path.home() / "messages" / "config" / "config.env",
+        Path.home() / "lobster-config" / "config.env",
+    ]:
+        if config_path.exists():
+            for line in config_path.read_text().splitlines():
+                line = line.strip()
+                for key in ("BOT_TALK_SELF_USER", "BOT_TALK_SENDER"):
+                    if line.startswith(f"{key}="):
+                        value = line.split("=", 1)[1].strip().strip('"').strip("'")
+                        if value:
+                            return value
+
+    return "{{LOCAL_LOBSTER_IDENTITY}}"
+
+SELF_USER = _load_self_user()
+```
+
+**Filter rule**: Only notify for messages where `sender != SELF_USER` (received from the
+remote side). Messages from `SELF_USER` are outbound — suppress them silently.
+
 ## Instructions
 
 1. **Fast-exit if not in hot mode:**
@@ -55,24 +90,25 @@ final path.
 2. **Poll for new messages from both senders:**
    - Fetch all messages from `{{LOBSTERTALK_HOST}}/messages` with
      timestamp > `last_message_ts`.
-   - Collect messages from **both** `sender={{LOCAL_LOBSTER_IDENTITY}}` AND `sender={{REMOTE_LOBSTER_IDENTITY}}`.
+   - Collect messages from **both** senders.
    - Sort by timestamp ascending (oldest first).
+   - Filter to find remote messages only (sender != SELF_USER) for notification purposes.
 
 3. **If new messages found:**
-   - Format each message with a directional prefix:
-     - {{LOCAL_LOBSTER_IDENTITY}} messages: `📤 {{LOCAL_LOBSTER_IDENTITY}} → remote: <content>`
-     - {{REMOTE_LOBSTER_IDENTITY}} messages: `📥 {{REMOTE_LOBSTER_IDENTITY}} → the owner: <content>`
-   - Send a single Telegram notification to the owner (chat_id={{TELEGRAM_CHAT_ID}}) with the full
-     conversation block, e.g.:
+   - **Only if there are new remote messages** (sender != SELF_USER):
+     - Format each remote message: `📥 {{REMOTE_LOBSTER_IDENTITY}} → the owner: <content>`
+     - Send a single Telegram notification to the owner (chat_id={{TELEGRAM_CHAT_ID}}), e.g.:
 
-     ```
-     New bot-talk activity:
+       ```
+       New message from {{REMOTE_LOBSTER_IDENTITY}}:
 
-     📤 {{LOCAL_LOBSTER_IDENTITY}} → remote: Hello!
-     📥 {{REMOTE_LOBSTER_IDENTITY}} → the owner: Hi back!
-     ```
+       📥 {{REMOTE_LOBSTER_IDENTITY}} → the owner: Hi back!
+       ```
 
-   - Update `last_message_ts` to the latest timestamp across both senders.
+   - **If only SELF_USER messages (no remote messages)**:
+     - Do NOT send a Telegram notification. Complete silently.
+   - Update `last_message_ts` to the latest timestamp across both senders
+     (SELF_USER messages still advance the cursor even if not notified).
    - Reset `consecutive_empty_polls` to 0.
 
 4. **If no new messages:**

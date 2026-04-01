@@ -43,15 +43,15 @@ class TestBuildHttpPayload:
         payload = btm._build_http_payload("some content here", "query")
         assert payload["content"] == "some content here"
 
-    def test_sender_is_saharlобster(self):
+    def test_sender_matches_configured_bot_talk_sender(self):
         payload = btm._build_http_payload("x", "status-update")
-        assert payload["sender"] == "SaharLobster"
+        assert payload["sender"] == btm.BOT_TALK_SENDER
 
 
 class TestBuildSshLogLine:
     def test_log_line_contains_sender_tier_genre(self):
         line = btm._build_ssh_log_line("msg content", "status-update")
-        assert "[SaharLobster]" in line
+        assert f"[{btm.BOT_TALK_SENDER}]" in line
         assert "[TIER-BOT]" in line
         assert "[status-update]" in line
 
@@ -267,7 +267,7 @@ class TestWriteLocalLog:
         lines = log_file.read_text().strip().splitlines()
         assert len(lines) == 1
         entry = json.loads(lines[0])
-        assert entry["sender"] == "SaharLobster"
+        assert entry["sender"] == btm.BOT_TALK_SENDER
         assert entry["genre"] == "status-update"
         assert "test content" in entry["content"]
         assert entry["mirror_failed_reason"] == "http_and_ssh_both_failed"

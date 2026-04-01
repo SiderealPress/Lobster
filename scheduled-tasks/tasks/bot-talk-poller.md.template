@@ -8,8 +8,8 @@
 You are running as a scheduled task. The main Lobster instance created this job.
 
 This is the **hourly baseline poller**. It also manages the hot-mode state that drives
-`bot-talk-poller-fast` (the 2-minute fast poller). When {{REMOTE_LOBSTER_IDENTITY}} is
-active, set `hot_mode=true` so the fast poller takes over. When activity stops, the fast
+`bot-talk-poller-fast` (the 2-minute fast poller). When the remote Lobster ({{REMOTE_LOBSTER_IDENTITY}})
+is active, set `hot_mode=true` so the fast poller takes over. When activity stops, the fast
 poller self-cools and this job confirms the quiet state each hour.
 
 ## Authentication
@@ -80,6 +80,46 @@ Schema:
 Always write the updated state back atomically: write to a `.tmp` file, then rename to
 the final path.
 
+## Identity and Filtering
+
+This instance's configured identity in bot-talk is `{{LOCAL_LOBSTER_IDENTITY}}` (set via
+`BOT_TALK_SENDER` in config.env). At runtime, read the self-identity from config so the
+filter is always based on current config, not baked-in names:
+
+```python
+def _load_self_user() -> str:
+    """Load BOT_TALK_SELF_USER (or BOT_TALK_SENDER) from config — determines which
+    messages are 'ours' (sent by us) vs 'theirs' (received from the remote side)."""
+    from pathlib import Path
+    import os
+
+    for key in ("BOT_TALK_SELF_USER", "BOT_TALK_SENDER"):
+        val = os.environ.get(key, "").strip()
+        if val:
+            return val
+
+    for config_path in [
+        Path.home() / "messages" / "config" / "config.env",
+        Path.home() / "lobster-config" / "config.env",
+    ]:
+        if config_path.exists():
+            for line in config_path.read_text().splitlines():
+                line = line.strip()
+                for key in ("BOT_TALK_SELF_USER", "BOT_TALK_SENDER"):
+                    if line.startswith(f"{key}="):
+                        value = line.split("=", 1)[1].strip().strip('"').strip("'")
+                        if value:
+                            return value
+
+    return "{{LOCAL_LOBSTER_IDENTITY}}"  # fallback to instantiation-time value
+
+SELF_USER = _load_self_user()
+```
+
+**Filter rule**: Messages where `sender == SELF_USER` are outbound (sent by us); the owner
+already knows about those. Only notify for messages where `sender != SELF_USER` (received
+from the remote side).
+
 ## Instructions
 
 1. Poll `{{LOBSTERTALK_HOST}}/messages` for new messages from **both** {{LOCAL_LOBSTER_IDENTITY}}
@@ -92,13 +132,17 @@ the final path.
      with timestamp > last_message_ts.
    - Sort them by timestamp (ascending — oldest first, so the conversation reads
      chronologically).
+   - **Only notify for messages where `sender != SELF_USER`** (messages received from the remote side).
+     Messages from `SELF_USER` are outbound — the owner sent those and doesn't need to see them again.
    - Format each message with a directional prefix:
-     - {{LOCAL_LOBSTER_IDENTITY}} messages: `📤 {{LOCAL_LOBSTER_IDENTITY}} → remote: <content>`
-     - {{REMOTE_LOBSTER_IDENTITY}} messages: `📥 {{REMOTE_LOBSTER_IDENTITY}} → the owner: <content>`
-   - For each {{REMOTE_LOBSTER_IDENTITY}} message, also post a comment on the relevant GitHub issue
+     - `SELF_USER` messages: `📤 {{LOCAL_LOBSTER_IDENTITY}} → remote: <content>`
+     - remote messages: `📥 {{REMOTE_LOBSTER_IDENTITY}} → the owner: <content>`
+   - For each remote message, also post a comment on the relevant GitHub issue
      if actionable (configure repo in `BOT_TALK_GITHUB_REPO` env var if used).
-   - Notify the owner via Telegram (chat_id={{TELEGRAM_CHAT_ID}}) with the full conversation block
-     showing both sides.
+   - **Only if there are new remote messages** (sender != SELF_USER): notify the owner via
+     Telegram (chat_id={{TELEGRAM_CHAT_ID}}).
+   - **If only SELF_USER messages (no remote messages)**: do NOT send a Telegram notification.
+     Complete silently.
    - Update `last_message_ts` in state file to the latest seen message timestamp
      (across both senders).
    - Set `hot_mode=true` in state file.
@@ -119,28 +163,32 @@ the final path.
 
 ## Telegram Notification Format
 
-When there are new messages, send a single notification to the owner showing the full
-conversation block. Example:
+When there are new messages from the remote side, send a single notification to the owner
+showing only the remote messages (sender != SELF_USER). Example:
 
 ```
-New bot-talk activity:
+New message from {{REMOTE_LOBSTER_IDENTITY}}:
 
-📤 {{LOCAL_LOBSTER_IDENTITY}} → remote: What do you think about the new plan?
 📥 {{REMOTE_LOBSTER_IDENTITY}} → the owner: I reviewed it. Looks reasonable, a few questions though.
 📥 {{REMOTE_LOBSTER_IDENTITY}} → the owner: Can you clarify item 3?
-📤 {{LOCAL_LOBSTER_IDENTITY}} → remote: Sure, item 3 means we delay the deployment.
 ```
 
-Messages are sorted chronologically so the conversation is readable top-to-bottom.
+Messages are sorted chronologically. Do NOT include SELF_USER outbound messages in the
+notification — the owner sent those and doesn't need to see them again.
 
 ## Telegram Notification Rules
 
-Only send a Telegram message to the owner (chat_id={{TELEGRAM_CHAT_ID}}) when there is genuinely new content:
-- One or more new messages (from either sender) since last run
+Only send a Telegram message to the owner (chat_id={{TELEGRAM_CHAT_ID}}) when:
+- One or more new messages from the **remote side** (sender != SELF_USER) since last run
 - A new actionable GitHub comment requiring attention
 - The HTTP API has been continuously down for more than 30 minutes
 
-For routine no-op cycles (no new messages, API healthy, nothing actionable): do NOT call send_reply. Instead, call write_task_output with status "success" and a brief internal note like "no new activity". The dispatcher will handle it silently.
+Do NOT notify for messages from SELF_USER — the owner sent those herself and does not need to hear about them.
+
+For routine no-op cycles (no new messages, API healthy, nothing actionable) OR cycles where
+only SELF_USER outbound messages are seen: do NOT call send_reply. Instead, call
+write_task_output with status "success" and a brief internal note like "no new activity" or
+"only outbound messages, no notification sent". The dispatcher will handle it silently.
 
 ## Output
 
