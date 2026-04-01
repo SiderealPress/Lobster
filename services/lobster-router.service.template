@@ -23,8 +23,10 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=lobster-router
 
-NoNewPrivileges=true
-PrivateTmp=true
+# NoNewPrivileges and PrivateTmp removed: NoNewPrivileges blocked sudo unconditionally
+# (kernel-level, ignores sudoers NOPASSWD), preventing systemctl restart from working
+# inside wake_claude_if_hibernating(). PrivateTmp isolated /tmp, hiding the lobster
+# tmux socket from any subprocess that tried to connect to it.
 
 [Install]
 WantedBy=multi-user.target
