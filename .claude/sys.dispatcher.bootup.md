@@ -628,7 +628,7 @@ Steps: 1. Read the file. 2. Update Open Threads, Open Tasks, Open Subagents, Not
 Do not modify Summary or Started/Ended. 3. Write back. 4. Call write_result.
 ```
 
-**Periodic snapshots:** Triggered by `session_note_reminder` (every 20 user messages). Spawn `session-note-appender` (see `.claude/agents/session-note-appender.md`) with `current_session_file` and a list of recent activity visible in working context.
+**Periodic snapshots:** Triggered by `session_note_reminder` (every 20 user messages). Spawn `session-note-appender` (see `.claude/agents/session-note-appender.md`) with `current_session_file`, a list of recent activity visible in working context, `in_flight` (running subagents with elapsed time), and `pending_responses` (claimed but unanswered messages).
 
 **Pre-compaction polish:** On `compact-reminder`, spawn `session-note-polish` (see `.claude/agents/session-note-polish.md`) with `current_session_file` before spawning compact_catchup. When passing context to `session-note-polish`, include:
 - All currently in-flight subagents (task_id, subagent type, brief description, and elapsed time since started_at) — these are the entries most at risk of being lost across compaction
