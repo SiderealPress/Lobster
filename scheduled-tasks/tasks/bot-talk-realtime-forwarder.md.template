@@ -65,19 +65,36 @@ Each message in the API response may carry a `direction` field written at send t
 - `"OUTBOUND"` — message sent FROM this Lobster (already seen by the owner)
 - `"INBOUND"` — message received FROM the remote side (needs forwarding)
 
-**Filter rule**: Only forward messages where `direction == "INBOUND"`.
+**Filter rule**: Only forward messages where `direction == "INBOUND"` AND the sender
+is not a local sender (e.g. `SaharLobster`). Messages from local senders with
+`direction="INBOUND"` are the owner's own Telegram messages echoed by `bot_talk_mirror.py`
+— they are not cross-Lobster messages from the remote side.
+
+Also filter out content-based routing noise: messages whose content starts with
+`[INBOUND from TELEGRAM` or `[OUTBOUND → TELEGRAM]` are internal routing markers,
+not real messages.
 
 Backwards compatibility: if a message has no `direction` field (older entries in the
 log before this field was added), treat it as `"INBOUND"` — show it rather than
-silently drop it.
+silently drop it (unless it matches the local-sender or content-marker filters).
 
 ```python
-def _is_inbound(msg: dict) -> bool:
+_LOCAL_SENDERS = {"SaharLobster"}
+_INTERNAL_CONTENT_MARKERS = ("[INBOUND from TELEGRAM", "[OUTBOUND → TELEGRAM")
+
+def _is_cross_lobster_inbound(msg: dict) -> bool:
     """Return True if the message should be forwarded to the owner.
 
-    INBOUND = came from the remote side.
-    Missing direction field = treat as INBOUND (backwards compat).
+    Must be INBOUND direction (or no direction field for backwards compat),
+    AND must not be from a local sender (owner's own Telegram messages echoed
+    by bot_talk_mirror.py have direction=INBOUND but sender=SaharLobster),
+    AND must not be internal routing noise.
     """
+    if msg.get("sender", "") in _LOCAL_SENDERS:
+        return False
+    content = msg.get("content", "") or msg.get("text", "") or ""
+    if any(content.startswith(m) for m in _INTERNAL_CONTENT_MARKERS):
+        return False
     return msg.get("direction", "INBOUND") == "INBOUND"
 ```
 
@@ -112,7 +129,7 @@ Sort messages by timestamp ascending (oldest first) so forwarding is in chronolo
 Apply the direction filter to find messages that should be forwarded to the owner:
 
 ```python
-qualifying = [m for m in messages if _is_inbound(m)]
+qualifying = [m for m in messages if _is_cross_lobster_inbound(m)]
 ```
 
 Note: The state timestamp (`last_processed_ts`) must still advance based on the full fetched

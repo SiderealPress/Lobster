@@ -52,32 +52,36 @@ Each message in the API response may carry a `direction` field written at send t
 
 **Show BOTH directions**, labeled separately — the owner wants to see the full conversation.
 
-**Exception — internal routing noise**: some OUTBOUND messages are internal status
-notifications (e.g. `[OUTBOUND → TELEGRAM]` routing markers), not real cross-Lobster
-messages. Filter those out.
+**Exception — internal routing noise**: some messages are internal status
+notifications (e.g. `[OUTBOUND → TELEGRAM]` or `[INBOUND from TELEGRAM]` routing markers),
+not real cross-Lobster messages. Also, messages from a local sender (e.g. `SaharLobster`)
+are Lobster's own echoed activity, not remote messages. Filter these out.
 
 Backwards compatibility: if a message has no `direction` field (older entries before
 this field was added), treat it as `"INBOUND"`.
 
 ```python
+_LOCAL_SENDERS = {"SaharLobster"}
+_INTERNAL_CONTENT_MARKERS = ("[INBOUND from TELEGRAM", "[OUTBOUND → TELEGRAM")
+
 def _is_internal_noise(msg: dict) -> bool:
     """Return True if this is an internal routing message, not a real cross-Lobster exchange."""
+    if msg.get("sender", "") in _LOCAL_SENDERS:
+        return True
     content = msg.get("content", "") or msg.get("text", "") or ""
-    return "[OUTBOUND → TELEGRAM" in content
-
-_OUTBOUND_SENDERS = {"SaharLobster"}
+    return any(content.startswith(m) for m in _INTERNAL_CONTENT_MARKERS)
 
 def _is_inbound(msg: dict) -> bool:
     direction = msg.get("direction")
     if direction is not None:
         return direction == "INBOUND"
-    return msg.get("sender", "") not in _OUTBOUND_SENDERS
+    return msg.get("sender", "") not in _LOCAL_SENDERS
 
 def _is_outbound(msg: dict) -> bool:
     direction = msg.get("direction")
     if direction is not None:
         return direction == "OUTBOUND"
-    return msg.get("sender", "") in _OUTBOUND_SENDERS
+    return msg.get("sender", "") in _LOCAL_SENDERS
 
 def _should_show(msg: dict) -> bool:
     return not _is_internal_noise(msg)
