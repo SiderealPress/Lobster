@@ -2290,6 +2290,41 @@ PYEOF
         migrated=$((migrated + 1))
     fi
 
+    # Migration 64: Add message_claims and dispatcher_lock tables to agent_sessions.db
+    # These tables are the SQLite-backed claim gate introduced in issue #1360.
+    # message_claims: UNIQUE PRIMARY KEY on message_id — INSERT OR FAIL provides
+    #   exclusive ownership without filesystem rename races.
+    # dispatcher_lock: single-row table (CHECK id=1) — enforces at most one active
+    #   dispatcher loop at any time.
+    local AGENT_SESSIONS_DB="${LOBSTER_MESSAGES:-$HOME/messages}/config/agent_sessions.db"
+    if [ -f "$AGENT_SESSIONS_DB" ]; then
+        if ! sqlite3 "$AGENT_SESSIONS_DB" "PRAGMA table_info(message_claims);" 2>/dev/null | grep -q "message_id"; then
+            substep "Adding message_claims table to agent_sessions.db..."
+            sqlite3 "$AGENT_SESSIONS_DB" "
+CREATE TABLE IF NOT EXISTS message_claims (
+    message_id  TEXT PRIMARY KEY,
+    claimed_by  TEXT NOT NULL,
+    claimed_at  TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'processing'
+);" 2>/dev/null && \
+                success "message_claims table created" || \
+                warn "Failed to create message_claims table (may already exist)"
+            migrated=$((migrated + 1))
+        fi
+        if ! sqlite3 "$AGENT_SESSIONS_DB" "PRAGMA table_info(dispatcher_lock);" 2>/dev/null | grep -q "session_id"; then
+            substep "Adding dispatcher_lock table to agent_sessions.db..."
+            sqlite3 "$AGENT_SESSIONS_DB" "
+CREATE TABLE IF NOT EXISTS dispatcher_lock (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    session_id  TEXT NOT NULL,
+    locked_at   TEXT NOT NULL
+);" 2>/dev/null && \
+                success "dispatcher_lock table created" || \
+                warn "Failed to create dispatcher_lock table (may already exist)"
+            migrated=$((migrated + 1))
+        fi
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
