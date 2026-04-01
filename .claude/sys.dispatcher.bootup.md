@@ -209,50 +209,28 @@ After a context compaction you lose situational awareness of the last ~30 minute
 
 ### scheduled_reminder (`type: "scheduled_reminder"`)
 
-Scheduled reminders arrive from `scripts/post-reminder.sh` (system cron jobs) or `scheduled-tasks/dispatch-job.sh` (user-created jobs). Both produce `type: "scheduled_reminder"`.
+Scheduled reminders arrive from `scheduled-tasks/dispatch-job.sh` (user-created jobs) and produce `type: "scheduled_reminder"`.
 
-**User-created jobs** carry a `task_content` field — the full task file contents. Pass directly to `lobster-generalist` with no REMINDER_ROUTING entry needed.
+**User-created jobs** carry a `task_content` field — the full task file contents. Pass directly to `lobster-generalist`.
 
-**System jobs** (`ghost_detector`, `oom_check`) have static routes in REMINDER_ROUTING.
-
-```python
-REMINDER_ROUTING = {
-  "ghost_detector": {
-    "subagent_type": "lobster-generalist",
-    "prompt": "---\ntask_id: agent-monitor\nchat_id: 0\nsource: system\n---\n\n"
-              "Run the agent monitor check. Script is at ~/lobster/scripts/agent-monitor.py. "
-              "Run it with uv run ~/lobster/scripts/agent-monitor.py and report findings.",
-  },
-  "oom_check": {
-    "subagent_type": "lobster-generalist",
-    "prompt": "---\ntask_id: oom-check\nchat_id: 0\nsource: system\n---\n\n"
-              "Run the OOM monitor check. Script is at ~/lobster/scripts/oom-monitor.py. "
-              "Run it with uv run ~/lobster/scripts/oom-monitor.py --since-minutes 10 "
-              "and report findings.",
-  },
-}
-```
+> **Note:** `ghost_detector` and `oom_check` are NOT dispatched via this path. Both `agent-monitor.py` and `oom-monitor.py` run directly from cron and write to the inbox themselves when they have findings. No LLM layer is involved.
 
 ```
 1. mark_processing(message_id)
 2. reminder_type = msg.get("reminder_type") or msg.get("job_name")
-3. route = REMINDER_ROUTING.get(reminder_type)
+3. task_content = msg.get("task_content", "").strip()
 
-4. if route is None:
-       task_content = msg.get("task_content", "").strip()
-       if task_content:
-           # Generic dispatch: user-created job
-           prompt = f"---\ntask_id: scheduled-job-{reminder_type}\nchat_id: 0\nsource: system\n---\n\n{task_content}"
-       else:
-           # Truly unknown reminder
-           prompt = f"---\ntask_id: unknown-reminder\nchat_id: 0\nsource: system\n---\n\nUnknown reminder_type: '{reminder_type}'. Call write_result and return."
-       Spawn subagent: subagent_type: "lobster-generalist", prompt: prompt
+4. if task_content:
+       # Generic dispatch: user-created job
+       prompt = f"---\ntask_id: scheduled-job-{reminder_type}\nchat_id: 0\nsource: system\n---\n\n{task_content}"
    else:
-       Spawn subagent: subagent_type: route["subagent_type"], prompt: route["prompt"]
+       # Unknown reminder with no task content
+       prompt = f"---\ntask_id: unknown-reminder\nchat_id: 0\nsource: system\n---\n\nUnknown reminder_type: '{reminder_type}'. Call write_result and return."
+   Spawn subagent: subagent_type: "lobster-generalist", prompt: prompt
 5. mark_processed(message_id)
 ```
 
-Rules: never `send_reply` (chat_id: 0), never add user-created job names to REMINDER_ROUTING.
+Rules: never `send_reply` (chat_id: 0).
 
 ---
 
