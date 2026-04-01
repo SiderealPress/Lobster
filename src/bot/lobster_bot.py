@@ -797,7 +797,15 @@ def wake_claude_if_hibernating() -> None:
         except Exception as e:
             log.error(f"wake_claude: failed to reset state ({e}), proceeding with wake anyway")
 
-        # Preferred: restart via systemd (keeps service state consistent)
+        # Restart via systemd (keeps service state consistent).
+        # No sudo needed — the lobster user owns this service and systemd
+        # allows the service owner to restart it without privilege escalation.
+        # We previously used "sudo systemctl restart" but NoNewPrivileges=true
+        # in lobster-router.service blocked sudo unconditionally, forcing a
+        # tmux-spawning fallback that created a second claude-persistent.sh
+        # instance and a crash loop. The fallback has been removed: if
+        # systemctl restart fails for any reason, wait_for_wake() (polling
+        # every 10s) and health-check-v3.sh (every 4 min) provide recovery.
         try:
             result = subprocess.run(
                 ["sudo", "systemctl", "restart", "lobster-claude"],
@@ -808,21 +816,12 @@ def wake_claude_if_hibernating() -> None:
             if result.returncode == 0:
                 log.info("wake_claude: 'systemctl restart lobster-claude' succeeded")
             else:
-                log.error(f"wake_claude: systemctl restart exited {result.returncode}: {result.stderr.strip()}")
-                raise RuntimeError("systemctl restart failed")
-        except Exception as e:
-            log.error(f"wake_claude: systemctl restart failed ({e}), trying start script")
-            # Fallback: call start-lobster.sh directly
-            if CLAUDE_WAKE_SCRIPT.exists():
-                subprocess.run(
-                    ["bash", str(CLAUDE_WAKE_SCRIPT)],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=60,
+                log.error(
+                    f"wake_claude: systemctl restart exited {result.returncode}: "
+                    f"{result.stderr.strip()} — wait_for_wake() will recover"
                 )
-                log.info(f"wake_claude: spawned {CLAUDE_WAKE_SCRIPT}")
-            else:
-                log.error(f"wake_claude: fallback script not found: {CLAUDE_WAKE_SCRIPT}")
+        except Exception as e:
+            log.error(f"wake_claude: systemctl restart failed ({e}) — wait_for_wake() will recover")
     finally:
         _wake_lock.release()
 
