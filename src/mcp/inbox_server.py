@@ -87,11 +87,6 @@ from reliability import (
 # Self-update system
 from update_manager import UpdateManager
 
-# Bot-talk mirroring — fire-and-forget relay for cross-Lobster messages only.
-# mirror_inbound (old) has been removed — owner Telegram messages are NOT bot-talk.
-# log_inbound_cross_lobster is the correct entry point for inbound cross-Lobster messages.
-from bot_talk_mirror import mirror_outbound as _mirror_outbound
-
 # Pending agent tracker (thin adapter over session_store)
 from agents.tracker import add_pending_agent as _add_pending_agent, remove_pending_agent as _remove_pending_agent
 
@@ -4195,9 +4190,6 @@ async def handle_send_reply(args: dict) -> list[TextContent]:
 
     # Atomic write: temp file + fsync + rename to prevent watchdog race condition
     atomic_write_json(outbox_file, reply_data)
-
-    # Mirror outbound reply to bot-talk (fire-and-forget, never blocks)
-    _mirror_outbound(text=text, source=source, chat_id=chat_id)
 
     # Save a copy to sent directory for conversation history
     sent_file = SENT_DIR / f"{reply_id}.json"

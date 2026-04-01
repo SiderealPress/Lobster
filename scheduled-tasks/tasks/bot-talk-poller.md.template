@@ -93,10 +93,7 @@ Each message in the API response carries a `direction` field written at send tim
 Both directions are shown to the owner. The log already has correct fields — no
 content-marker heuristics or special-case filtering needed.
 
-Backwards compatibility: if a message has no `direction` field (entries written before
-this field was added), infer direction from sender:
-- sender == {{LOCAL_LOBSTER_IDENTITY}} → treat as OUTBOUND
-- otherwise → treat as INBOUND
+If a message has no `direction` field, skip it entirely — do not infer direction from sender.
 
 ## Instructions
 
