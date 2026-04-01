@@ -2264,6 +2264,32 @@ PYEOF
         migrated=$((migrated + 1))
     fi
 
+    # Migration 62: Ensure ~/messages/config/group-whitelist.json exists.
+    # The group chat gating system (Phases 1-4) reads this file at startup.
+    # On existing installs the config/ subdirectory may not exist; this creates
+    # it and seeds an empty whitelist so the bot starts cleanly without errors.
+    local MESSAGES_CONFIG_DIR="$HOME/messages/config"
+    if [ ! -d "$MESSAGES_CONFIG_DIR" ]; then
+        mkdir -p "$MESSAGES_CONFIG_DIR"
+        substep "Created $MESSAGES_CONFIG_DIR"
+        migrated=$((migrated + 1))
+    fi
+    if [ ! -f "$MESSAGES_CONFIG_DIR/group-whitelist.json" ]; then
+        echo '{"groups": {}}' > "$MESSAGES_CONFIG_DIR/group-whitelist.json"
+        substep "Created empty $MESSAGES_CONFIG_DIR/group-whitelist.json"
+        migrated=$((migrated + 1))
+    fi
+
+    # Migration 63: Rename data/events.jsonl -> data/memory-events.jsonl.
+    # StaticMemory now writes to memory-events.jsonl to distinguish it from the
+    # EventBus operational log at logs/events.jsonl. Rename any existing file
+    # so history is preserved without manual intervention.
+    if [ -f "$WORKSPACE_DIR/data/events.jsonl" ] && [ ! -f "$WORKSPACE_DIR/data/memory-events.jsonl" ]; then
+        mv "$WORKSPACE_DIR/data/events.jsonl" "$WORKSPACE_DIR/data/memory-events.jsonl"
+        substep "Renamed data/events.jsonl -> data/memory-events.jsonl"
+        migrated=$((migrated + 1))
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else

@@ -44,6 +44,14 @@ TESTS_DIR = Path(__file__).parent
 sys.path.insert(0, str(SRC_DIR))
 sys.path.insert(0, str(TESTS_DIR.parent))
 
+# Add multiplayer-telegram-bot skill to path so group command handler tests
+# can import it directly and so lobster_bot.py finds it when reloaded.
+# Use an absolute path anchored to $HOME so this works regardless of which
+# worktree or directory the tests are run from.
+_SKILL_SRC = Path.home() / "lobster" / "lobster-shop" / "multiplayer-telegram-bot" / "src"
+if _SKILL_SRC.exists() and str(_SKILL_SRC) not in sys.path:
+    sys.path.insert(0, str(_SKILL_SRC))
+
 # Import fixtures module
 from tests.fixtures.generators import (
     MessageGenerator,

@@ -21,6 +21,9 @@ When you first start (or after reading this file), follow these steps:
 
 > **Note on stale agent sessions:** The `on-fresh-start.py` SessionStart hook runs automatically before your first turn and calls `agent-monitor.py --mark-failed` to clear any sessions left in "running" state. You do not need to do this manually.
 
+0. Call `session_start(agent_type="dispatcher", agent_id="lobster-dispatcher", description="Lobster dispatcher main loop", chat_id=<ADMIN_CHAT_ID>)` to register this session as the dispatcher. This clears any stale `_dispatcher_session_id` from a previous dispatcher instance and ensures all guarded MCP tools (`send_reply`, `check_inbox`, etc.) work immediately. Without this, a new dispatcher session may be blocked by a stale session ID from the previous instance.
+   - Get ADMIN_CHAT_ID from `lobster.conf` (`grep ADMIN_CHAT_ID ~/lobster-config/lobster.conf` or equivalent), or use the `chat_id` from `context-handoff.json` if available.
+   - This is the FIRST action before any guarded tools — must fire before the warmup `send_reply` at step 2d.
 1. Call `session_start(agent_type='dispatcher', claude_session_id=hook_input["session_id"])` — pass the Claude session UUID injected by the SessionStart hook. This writes the UUID to `$LOBSTER_WORKSPACE/data/dispatcher-claude-session-id`, enabling `inject-bootup-context.py` to identify your session as the dispatcher and inject this file on future restarts. Without this call, the primary detection path is never populated and you will receive the subagent bootup file instead of this one.
 1a. Read `~/lobster-user-config/memory/canonical/handoff.md` — user context, active projects, key people, git rules, available integrations.
 2. Read `~/lobster-workspace/user-model/_context.md` if it exists — pre-computed summary of user values, preferences, and active projects. Skip if absent.
@@ -44,7 +47,7 @@ When you first start (or after reading this file), follow these steps:
 - New tasks: ack normally and spawn subagent. These are unambiguously new work.
 - Urgent messages: handle them. You have handoff.md for context.
 
-**When the startup catchup result arrives** (`task_id: "startup-catchup"`, `chat_id: 0`): read for situational awareness, update `handoff.md` if anything notable changed (failed subagents, open threads). Run `~/lobster/scripts/record-catchup-state.sh finish`. Do NOT relay to user — except if `LOBSTER_DEBUG=true`, send a brief status to ADMIN_CHAT_ID: `"🔄 Back online. Context recovered from [window_start] to [now]. [N messages] processed, [M subagents] were running."` (Fill in N and M from `msg["text"]`.) Then `mark_processed`.
+**When the startup catchup result arrives** (`task_id: "startup-catchup"`, `chat_id: 0`): read for situational awareness, update `handoff.md` if anything notable changed (failed subagents, open threads). Run `~/lobster/scripts/record-catchup-state.sh finish`. Do NOT relay to user — except if `LOBSTER_DEBUG=true`, send a brief status to ADMIN_CHAT_ID: `"🔄 Back online. Context recovered from [window_start] to [now]. [N messages] processed, [M subagents] were running."` (Fill in N and M from `msg["text"]`.) **Before composing this message, convert `[window_start]` and `[now]` from UTC ISO timestamps to ET (e.g. "5:29 AM ET"). Rule: EDT (UTC-4) mid-March through early November, EST (UTC-5) otherwise. Never send raw UTC ISO strings to the user.** Then `mark_processed`.
 
 ---
 
@@ -172,17 +175,20 @@ After a context compaction you lose situational awareness of the last ~30 minute
 
 > **WARNING: CATCHUP IS ALWAYS A BACKGROUND SUBAGENT — NEVER INLINE.** Catchup involves file I/O, inbox scanning, and summarization — it blocks all new messages for 10–15 minutes if done inline.
 
+> **MANDATORY: You MUST spawn compact-catchup before doing any other work after a compaction. Do not skip compact-catchup even if the in-conversation summary appears sufficient. The summary only covers pre-compaction context; compact-catchup also checks for in-flight subagent state and recently-returned results that the summary cannot know about.**
+
 ```
 1. mark_processing(message_id)
 2. Read the compact-reminder text to re-orient (identity, main loop, key files)
 3. Spawn session-note-polish subagent (run_in_background=True, subagent_type: "lobster-generalist"):
    - See .claude/agents/session-note-polish.md for the agent definition
-   - Pass: task_id: "session-note-polish", chat_id: 0, source: "system", current_session_file: <path>
+   - Pass: task_id: "session-note-polish", chat_id: 0, source: "system", current_session_file: <path>, MESSAGE_COUNT: <current message count>
    - Do NOT wait for it — spawn and immediately proceed to step 4
 4. Run: ~/lobster/scripts/record-catchup-state.sh start
 5. Spawn compact_catchup subagent (subagent_type: "compact-catchup", run_in_background=True):
    - See .claude/agents/compact-catchup.md for the full prompt
    - Pass task_id: "compact-catchup", chat_id: 0, source: "system"
+   - This step is MANDATORY — never skip it, regardless of how complete the in-conversation summary seems
 6. mark_processed(message_id)
 7. Resume wait_for_messages() loop — do NOT wait for either subagent result inline
 ```
@@ -195,6 +201,7 @@ After a context compaction you lose situational awareness of the last ~30 minute
   - If `LOBSTER_DEBUG=true`: send a brief status to ADMIN_CHAT_ID:
     `"🔄 Back online. Context recovered from [window_start] to [now]. [N messages] processed, [M subagents] were running."`
     (Fill in N and M from `msg["text"]`. ADMIN_CHAT_ID from `lobster.conf` or the compact-reminder context.)
+    **Before composing this message, convert `[window_start]` and `[now]` from UTC ISO timestamps to ET (e.g. "5:29 AM ET"). Rule: EDT (UTC-4) mid-March through early November, EST (UTC-5) otherwise. Never send raw UTC ISO strings to the user.**
 - Run `~/lobster/scripts/record-catchup-state.sh finish`
 - `mark_processed`
 
@@ -202,50 +209,48 @@ After a context compaction you lose situational awareness of the last ~30 minute
 
 ### scheduled_reminder (`type: "scheduled_reminder"`)
 
-Scheduled reminders arrive from `scripts/post-reminder.sh` (system cron jobs) or `scheduled-tasks/dispatch-job.sh` (user-created jobs). Both produce `type: "scheduled_reminder"`.
+Scheduled reminders arrive from `scheduled-tasks/dispatch-job.sh` (user-created jobs) and produce `type: "scheduled_reminder"`.
 
-**User-created jobs** carry a `task_content` field — the full task file contents. Pass directly to `lobster-generalist` with no REMINDER_ROUTING entry needed.
+**User-created jobs** carry a `task_content` field — the full task file contents. Pass directly to `lobster-generalist`.
 
-**System jobs** (`ghost_detector`, `oom_check`) have static routes in REMINDER_ROUTING.
-
-```python
-REMINDER_ROUTING = {
-  "ghost_detector": {
-    "subagent_type": "lobster-generalist",
-    "prompt": "---\ntask_id: agent-monitor\nchat_id: 0\nsource: system\n---\n\n"
-              "Run the agent monitor check. Script is at ~/lobster/scripts/agent-monitor.py. "
-              "Run it with uv run ~/lobster/scripts/agent-monitor.py and report findings.",
-  },
-  "oom_check": {
-    "subagent_type": "lobster-generalist",
-    "prompt": "---\ntask_id: oom-check\nchat_id: 0\nsource: system\n---\n\n"
-              "Run the OOM monitor check. Script is at ~/lobster/scripts/oom-monitor.py. "
-              "Run it with uv run ~/lobster/scripts/oom-monitor.py --since-minutes 10 "
-              "and report findings.",
-  },
-}
-```
+> **Note:** `ghost_detector` and `oom_check` are NOT dispatched via this path. Both `agent-monitor.py` and `oom-monitor.py` run directly from cron and write to the inbox themselves when they have findings. No LLM layer is involved.
 
 ```
 1. mark_processing(message_id)
 2. reminder_type = msg.get("reminder_type") or msg.get("job_name")
-3. route = REMINDER_ROUTING.get(reminder_type)
+3. task_content = msg.get("task_content", "").strip()
 
-4. if route is None:
-       task_content = msg.get("task_content", "").strip()
-       if task_content:
-           # Generic dispatch: user-created job
-           prompt = f"---\ntask_id: scheduled-job-{reminder_type}\nchat_id: 0\nsource: system\n---\n\n{task_content}"
-       else:
-           # Truly unknown reminder
-           prompt = f"---\ntask_id: unknown-reminder\nchat_id: 0\nsource: system\n---\n\nUnknown reminder_type: '{reminder_type}'. Call write_result and return."
-       Spawn subagent: subagent_type: "lobster-generalist", prompt: prompt
+4. if task_content:
+       # Generic dispatch: user-created job
+       prompt = f"---\ntask_id: scheduled-job-{reminder_type}\nchat_id: 0\nsource: system\n---\n\n{task_content}"
    else:
-       Spawn subagent: subagent_type: route["subagent_type"], prompt: route["prompt"]
+       # Unknown reminder with no task content
+       prompt = f"---\ntask_id: unknown-reminder\nchat_id: 0\nsource: system\n---\n\nUnknown reminder_type: '{reminder_type}'. Call write_result and return."
+   Spawn subagent: subagent_type: "lobster-generalist", prompt: prompt
 5. mark_processed(message_id)
 ```
 
-Rules: never `send_reply` (chat_id: 0), never add user-created job names to REMINDER_ROUTING.
+Rules: never `send_reply` (chat_id: 0).
+
+---
+
+### reflection_prompt (`type: "reflection_prompt"`)
+
+Debug-mode prompts written by `on-compact.py` and `on-fresh-start.py` when `LOBSTER_DEBUG=true`. They arrive after a compaction or fresh bootup and ask the dispatcher to reflect on the experience while it is fresh.
+
+```
+1. mark_processing(message_id)
+2. Read msg["text"] — the reflection question
+3. Reflect genuinely: were there friction points, gaps, or improvements in the
+   bootup/compaction flow worth capturing?
+4. If there are substantive observations:
+   - File or update GitHub issues in SiderealPress/lobster
+   - Open PRs for straightforward fixes (no need to wait for instruction)
+   - If nothing worth capturing: do nothing — silence is the correct response
+5. mark_processed(message_id)
+```
+
+Rules: never `send_reply` (chat_id: 0). Reflection is optional — only act if there are real observations.
 
 ---
 
@@ -467,6 +472,22 @@ Injected by the MCP server after every 20 real user messages. Spawn session-note
 
 Do NOT spawn during wind-down mode (`WIND_DOWN_MODE = True`) — session-note-polish handles the final consolidation.
 
+```
+1. mark_processing(message_id)
+2. Call get_active_sessions() to get running subagents.
+   For each session, compute elapsed_minutes = round((now - started_at).total_seconds() / 60) to the nearest minute.
+   If started_at is unavailable, omit elapsed_minutes for that entry.
+   Build in_flight list: [{task_id, type, description, elapsed_minutes}, ...]
+3. Check ~/messages/processing/ — any message file present has been claimed (mark_processing called)
+   but not yet answered. Build pending_responses list from those files (use sender and text fields).
+4. Spawn session-note-appender (run_in_background=True, subagent_type: "lobster-generalist"):
+   - Pass: task_id: "session-note-appender", chat_id: 0, source: "system",
+           session_file: <current_session_file>, activity: <recent activity>,
+           in_flight: <in_flight list from step 2>,
+           pending_responses: <pending_responses list from step 3>
+5. mark_processed(message_id)
+```
+
 ---
 
 ## Message Source Handling
@@ -502,6 +523,10 @@ If `reacted_to_text` is empty: use `get_conversation_history` to get context.
 
 - Chat IDs are strings (e.g. `C01ABC123`).
 - Pass `thread_ts` from the original message to reply in a thread.
+
+### Group chat (`source: "lobster-group"`)
+
+Messages from whitelisted Telegram groups arrive with `source="lobster-group"`. Process them exactly like `source="telegram"` messages — `send_reply` accepts `source="lobster-group"` and will route the reply back to the originating group chat. The `group_chat_id` and `group_title` fields are present for context but `chat_id` is always the correct field to pass to `send_reply`. No ack message is sent to groups (suppressed in the bot); the bot replies directly when Lobster calls `send_reply`.
 
 ---
 
@@ -581,9 +606,12 @@ Steps: 1. Read the file. 2. Update Open Threads, Open Tasks, Open Subagents, Not
 Do not modify Summary or Started/Ended. 3. Write back. 4. Call write_result.
 ```
 
-**Periodic snapshots:** Triggered by `session_note_reminder` (every 20 user messages). Spawn `session-note-appender` (see `.claude/agents/session-note-appender.md`) with `current_session_file` and a list of recent activity visible in working context.
+**Periodic snapshots:** Triggered by `session_note_reminder` (every 20 user messages). Spawn `session-note-appender` (see `.claude/agents/session-note-appender.md`) with `current_session_file`, a list of recent activity visible in working context, `in_flight` (running subagents with elapsed time), and `pending_responses` (claimed but unanswered messages).
 
-**Pre-compaction polish:** On `compact-reminder`, spawn `session-note-polish` (see `.claude/agents/session-note-polish.md`) with `current_session_file` before spawning compact_catchup.
+**Pre-compaction polish:** On `compact-reminder`, spawn `session-note-polish` (see `.claude/agents/session-note-polish.md`) with `current_session_file` before spawning compact_catchup. When passing context to `session-note-polish`, include:
+- All currently in-flight subagents (task_id, subagent type, brief description, and elapsed time since started_at) — these are the entries most at risk of being lost across compaction
+- Any pending user responses (messages that were mark_processing-d but not yet replied to)
+- The current MESSAGE_COUNT at time of compaction
 
 **On context_warning:** Spawn a session note update subagent as the very first step — captures current state before graceful restart erases working context.
 
@@ -853,3 +881,40 @@ If fewer than 2 trackable questions are present, apply no special handling — r
 - **One note maximum per turn.** If multiple questions are unaddressed, list them all in a single "Note:" line.
 - **No loop behavior.** Never ask "did I answer all your questions?" Do not re-surface unanswered questions on the next turn unless the user brings them up.
 - **Rhetorical questions are not tracked.** Do not append notes for questions that are clearly rhetorical (see detection rules above).
+
+---
+
+## Commitment Durability
+
+A **commitment** is created when you tell the user you will answer something or do something later — not just note it. Commitments must survive session boundaries. Session notes do not survive compaction reliably; `rolling-summary.md` is the designated cross-session truth and is read at every session start.
+
+**Trigger:** You defer a response with language like:
+- "I'll check on that"
+- "I need to look into this"
+- "I'll get back to you on X"
+- "Checking now" (when spawning a subagent that may not complete before compaction)
+- Any explicit question from the user that you cannot answer inline AND you do not answer within the same session turn
+
+**Required action:** Immediately after sending the deferral reply, spawn a background subagent to write the deferred commitment to `rolling-summary.md`:
+
+```
+Task(
+    subagent_type="lobster-generalist",
+    run_in_background=True,
+    prompt=(
+        "---\ntask_id: commitment-capture-<slug>\nchat_id: 0\nsource: system\n---\n\n"
+        "Capture an open commitment in rolling-summary.md.\n\n"
+        "1. Read ~/lobster-user-config/memory/canonical/rolling-summary.md\n"
+        "2. Find the '## Open Threads / Commitments' section. "
+           "If the section does not exist, add it after '## Active PRs & Decisions'.\n"
+        "3. Add this line if it is not already present (check for substring match to avoid duplicates):\n"
+        "   - **ANSWER the user**: <exact question text> (asked <HH:MM ET>, deferred — needs answer)\n"
+        "4. Write the file back.\n"
+        "5. Call write_result with task_id='commitment-capture-<slug>', chat_id=0, source='system'."
+    ),
+)
+```
+
+**Idempotency:** Before adding the line, check that no existing line in the file already captures the same question (substring match is sufficient). Do not add duplicates.
+
+**Scope:** Only direct questions or explicit commitments from the user. Do not apply to internal system events, subagent status queries, or rhetorical questions.

@@ -15,27 +15,63 @@ You are the **compact_catchup** subagent. Your job is to:
 ### Phase 1: Inbox scan and summarization
 
 1. Read `~/lobster-workspace/data/compaction-state.json` to get timestamps.
-2. Compute the catch-up window start: prefer `last_catchup_ts` if present (anchored to last read); otherwise fall back to `min(last_compaction_ts, last_restart_ts)` (use the farther-back timestamp to maximise the window); default to 6 hours ago if none are present.
-3. Call `check_inbox(since_ts=<window_start>, limit=100)` to fetch messages from that window. 100 is a floor -- if the window is large, increase the limit further rather than truncating.
+
+2. Compute the catch-up window start using the algorithm below. The goal is to produce
+   a standalone summary -- one that does not depend on any prior catchup result, because
+   a compaction has erased those prior results from the dispatcher's memory.
+
+   **Algorithm:**
+
+   a. Read available anchors from compaction-state.json:
+      - `last_compaction_ts` -- when the compaction occurred (written by on-compact.py)
+      - `last_catchup_ts` -- when compact-catchup last ran and updated the state
+
+      Note: `last_restart_ts` is not written by any hook; treat it as always absent.
+
+   b. If `last_compaction_ts` is present:
+      - The dispatcher has lost all context since the compaction. Recovery must go back far
+        enough to reconstruct situational awareness from scratch.
+      - Compute `candidate`:
+          If `last_catchup_ts` is present: `candidate = min(last_catchup_ts, last_compaction_ts)`
+          Else: `candidate = last_compaction_ts`
+        Using `min()` ensures the window starts at or before the compaction event, never after it.
+      - Apply context horizon: if `candidate` is more recent than `now - 2 hours`,
+        set `candidate = now - 2 hours`. Rationale: a 2-hour window is the minimum needed
+        to reconstruct meaningful context from scratch, regardless of how recently the
+        previous catchup ran.
+      - Apply backstop: `window_start = max(candidate, now - 6 hours)`. Never scan more
+        than 6 hours back.
+
+   c. If `last_compaction_ts` is absent (file missing or field unset):
+      - Use `last_catchup_ts` if present (subject to the 6-hour backstop).
+      - Default to `now - 6 hours` if no anchors are available.
+
+3. Compute the `check_inbox` limit dynamically based on window width:
+   `limit = max(200, int(hours_in_window * 50))`
+   where `hours_in_window = (now - window_start).total_seconds() / 3600`.
+   This scales the limit with the window and reduces the risk of silent truncation.
+   Call `check_inbox(since_ts=<window_start>, limit=<computed_limit>)`.
+
 4. Filter the results -- include only:
    - User messages (source: telegram, slack, sms, etc.)
-   - `subagent_result` messages
+   - `subagent_result` messages (these are recently-returned subagent results -- collect their `task_id` values; these represent work that completed and may need dispatcher follow-up)
    - Notable system events: `update_notification`, `consolidation`
    - Exclude: `self_check`, `compact-reminder`, `compact_catchup`, `subagent_notification`, test messages
-5. Read session notes in tiers (see "Session notes reading" below).
-6. Produce a concise structured summary (see output format below).
-7. Update `last_catchup_ts` in `compaction-state.json` to now (prevents duplicate windows on the next compaction).
+5. **Call `get_active_sessions()` now** to retrieve all currently running agent sessions. Filter to `status: "running"` sessions, excluding dispatcher sessions. These are in-flight subagents that were active at compaction time and may still be running. If `get_active_sessions()` errors, note the failure and continue.
+6. Read session notes in tiers (see "Session notes reading" below).
+7. Produce a concise structured summary (see output format below).
+8. Update `last_catchup_ts` in `compaction-state.json` to now (prevents duplicate windows on the next compaction).
 
 ### Phase 2: Populate the session file
 
-8. Locate or create the current session file:
+9. Locate or create the current session file:
    a. Check `/tmp/lobster-current-session-file` -- if it contains a valid path to an existing file, use it.
    b. Otherwise, list `~/lobster-user-config/memory/canonical/sessions/` for files matching `YYYYMMDD-NNN.md` where `YYYYMMDD` is today's UTC date. Pick the highest-sequenced file for today. If today has no file, **create one** (see step c below).
 
    **Content-check before writing**: Before deciding whether to populate or create a new sequenced file, inspect the candidate file's Summary section:
    - Extract the text under `## Summary` in the existing file.
    - Strip any lines that are exactly `(nothing to report this session)` or match the default template placeholder text (e.g. lines starting with `<` and ending with `>`).
-   - If the remaining non-whitespace character count exceeds **200 characters**, the file has **substantial content** — treat it as "content-present".
+   - If the remaining non-whitespace character count exceeds **200 characters**, the file has **substantial content** -- treat it as "content-present".
    - If the file is absent, empty, or has fewer than 200 non-boilerplate characters in Summary, treat it as "stub".
 
    **Stub fallback**: If the highest-sequenced file for today is a stub, do not immediately write to it. First check earlier session files in order:
@@ -63,9 +99,7 @@ You are the **compact_catchup** subagent. Your job is to:
       5. Write the new file path to `/tmp/lobster-current-session-file` (overwriting any stale value).
       6. Continue with phase 2 population as normal -- the file now exists.
 
-9. Call `get_active_sessions()` to get currently running agents.
-
-10. Build the session file content using the data from phases 1 and 2:
+9. Build the session file content using the data from phases 1 and 2:
 
     - **Summary** (1-3 sentences): Synthesize from the catchup window. What was the user working on? What work completed?
     - **Open Threads**: Carry forward any threads found in the existing session file that are still pending. Add new threads for in-flight requests visible in the catchup window.
@@ -73,7 +107,7 @@ You are the **compact_catchup** subagent. Your job is to:
     - **Open Subagents**: List every agent from `get_active_sessions()` that is still in `running` state. Format: `task_id`, brief description (from the agent name or recent subagent_result), how long running (from the `started_at` field). Exclude dispatcher sessions.
     - **Notable Events**: Restarts, compactions, failed subagents, user decisions, errors -- pulled from the catchup window.
 
-11. Write the populated content to the session file. Preserve the file header (`# Session YYYYMMDD-NNN`, `**Started:**`, `**Ended:**` lines) verbatim -- only overwrite the section bodies below them.
+10. Write the populated content to the session file. Preserve the file header (`# Session YYYYMMDD-NNN`, `**Started:**`, `**Ended:**` lines) verbatim -- only overwrite the section bodies below them.
 
     The sections to populate are the same as the session template:
     ```
@@ -86,7 +120,7 @@ You are the **compact_catchup** subagent. Your job is to:
 
     If a section has nothing to report, write `(nothing to report this session)` rather than leaving it blank.
 
-12. Call `write_result` with the structured summary from Phase 1 plus a note confirming the session file was updated (or why it was skipped).
+11. Call `write_result` with the structured summary from Phase 1 plus a note confirming the session file was updated (or why it was skipped).
 
 ### Phase 3: Update rolling summary
 
@@ -108,7 +142,7 @@ After Phase 2, update the rolling summary file at `~/lobster-user-config/memory/
     <!-- design choices, last 7 days -->
 
     ## Stable Context
-    <!-- contacts, infra, long-term goals — rarely changes -->
+    <!-- contacts, infra, long-term goals -- rarely changes -->
     ```
 
 14. Merge updates from the inbox scan into the rolling summary sections:
@@ -133,6 +167,35 @@ Or, on failure:
 Rolling summary: write failed (<reason>)
 ```
 
+### Phase 4: Commitment carry-forward
+
+After Phase 3, verify that open commitments in the session notes are also captured in `rolling-summary.md`. This is the safety net: if the dispatcher forgot to write a commitment immediately, catchup catches it here.
+
+17. Scan the tier-1 session files (the 2 most recent, already read in Phase 1) for lines matching any of these patterns:
+    - `ANSWER the user:` (case-insensitive)
+    - `CRITICAL open commitment`
+    - `still pending` / `never answered` / `needs answer`
+    - `deferred -- needs answer`
+
+    Collect each such line as a **candidate commitment**.
+
+18. Read `~/lobster-user-config/memory/canonical/rolling-summary.md`.
+
+19. For each candidate commitment, check whether `rolling-summary.md` already contains it (substring match, case-insensitive). If the commitment is **not** present:
+    - Locate the `## Open Threads / Commitments` section. If the section is absent, add it after `## Active PRs & Decisions`.
+    - Prepend the missing commitment line verbatim (as found in the session note), prefixed with `- `.
+    - Mark it with `(carried forward by compact-catchup)` if the original text doesn't already have that annotation.
+
+20. If any commitments were added: write `rolling-summary.md` back. Include in the `write_result` footer:
+    ```
+    Commitment carry-forward: <N> item(s) added to rolling-summary.md
+    ```
+    If none were missing: include:
+    ```
+    Commitment carry-forward: none needed
+    ```
+    If `rolling-summary.md` could not be read or written during Phase 4, note the failure but do not abort catchup.
+
 ## Session notes reading
 
 Read session notes from `~/lobster-user-config/memory/canonical/sessions/` in tiers:
@@ -150,6 +213,8 @@ Synthesise the tier-1 and tier-2 reads into the "Session context" section of the
 ## Output format
 
 Structure your `write_result` text as follows:
+
+> **Note on timestamps:** The `## Catch-up:` header (below) uses UTC ISO format for internal/dispatcher use. If any timestamp from this output is ever relayed to the user in a `send_reply`, convert it to ET first (EDT UTC-4 mid-March through early November, EST UTC-5 otherwise). Format: "5:29 AM ET". Never send raw UTC ISO strings to users.
 
 ```
 ## Catch-up: <window_start> -> now
@@ -169,6 +234,16 @@ Structure your `write_result` text as follows:
 ### Nothing to report
 (only if all three sections are empty)
 
+## In-flight subagents at compaction time
+- <task_id> (running, <age>) -- <brief description from agent name or last known activity>
+- ...
+(or "None." if get_active_sessions() returned no running non-dispatcher sessions)
+
+## Recently-returned subagent results (since compaction)
+- task=<task_id> returned at [HH:MM] -- <brief outcome>
+- ...
+(or "None." if no subagent_result messages found in inbox scan)
+
 ## Session context (from session notes)
 - [Latest session: YYYYMMDD-NNN] <one-line summary>
 - Open threads from prior sessions: <list any unresolved threads, or "none">
@@ -181,6 +256,8 @@ Updated: <path>
 Active agents: <N> (<comma-separated task_ids or "none">)
 ### Rolling summary
 Updated: <path> (<line_count> lines)
+### Commitment carry-forward
+<N> item(s) added to rolling-summary.md (or "none needed")
 ```
 
 Omit the "Session context" section entirely if no session files were found.
@@ -194,11 +271,12 @@ Keep each line to one sentence. The dispatcher is on mobile -- brevity matters.
 - If `check_inbox` returns no messages in the window, that is valid -- report "Nothing to report" in the inbox section but still populate the session file.
 - If `compaction-state.json` is missing or corrupt, default to scanning the last 6 hours.
 - Always update `last_catchup_ts` in `compaction-state.json` before calling `write_result`.
-- If `get_active_sessions()` is unavailable or errors, write "Open Subagents: (could not retrieve -- get_active_sessions failed)" in the session file rather than crashing.
+- If `get_active_sessions()` is unavailable or errors, write "Open Subagents: (could not retrieve -- get_active_sessions failed)" in the session file and "None (get_active_sessions failed)" in the in-flight section of write_result rather than crashing.
 - Never truncate Open Threads or Notable Events from the existing session file without good reason -- carry them forward.
 - If the session file cannot be found or written (permissions, path not found), note the failure in `write_result` and continue -- do not crash the entire catchup.
 - If `rolling-summary.md` cannot be read or written, note the failure in `write_result` and continue -- do not abort catchup.
 - Never remove content from rolling-summary.md unless there is clear evidence in the inbox scan that the item is resolved. When in doubt, carry it forward.
+- If `rolling-summary.md` cannot be read or written during Phase 4, note the failure in `write_result` and continue -- do not abort catchup (this is separate from the Phase 3 rolling summary update).
 
 ## Delivering results
 
