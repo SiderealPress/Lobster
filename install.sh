@@ -2157,6 +2157,35 @@ if [ -f "$CONFIG_FILE" ]; then
 fi
 
 #===============================================================================
+# Set LOBSTER_INSTANCE_URL (required for Google OAuth consent-link flow)
+#===============================================================================
+
+if [ -f "$CONFIG_FILE" ]; then
+    source "$CONFIG_FILE"
+    if [ -z "${LOBSTER_INSTANCE_URL:-}" ]; then
+        step "Setting LOBSTER_INSTANCE_URL..."
+        # Attempt to auto-detect the public IP and build an https URL.
+        # The user can update this later if the auto-detected value is wrong.
+        DETECTED_IP=$(curl -s --max-time 5 https://api.ipify.org 2>/dev/null || true)
+        if [ -n "$DETECTED_IP" ]; then
+            INSTANCE_URL="https://${DETECTED_IP}"
+            warn "Auto-detected LOBSTER_INSTANCE_URL=${INSTANCE_URL}"
+            warn "Update this in config.env if your domain name differs from the IP."
+        else
+            INSTANCE_URL=""
+            warn "Could not auto-detect public IP. Set LOBSTER_INSTANCE_URL in config.env manually."
+        fi
+        echo "" >> "$CONFIG_FILE"
+        echo "# Public base URL of this Lobster VPS (used by generate_consent_link for Google OAuth)" >> "$CONFIG_FILE"
+        echo "# Update to your actual domain, e.g. https://vps.example.com" >> "$CONFIG_FILE"
+        echo "LOBSTER_INSTANCE_URL=${INSTANCE_URL}" >> "$CONFIG_FILE"
+        success "LOBSTER_INSTANCE_URL written to config.env"
+    else
+        success "LOBSTER_INSTANCE_URL already set"
+    fi
+fi
+
+#===============================================================================
 # Developer Mode: Enable LOBSTER_DEBUG
 #===============================================================================
 
