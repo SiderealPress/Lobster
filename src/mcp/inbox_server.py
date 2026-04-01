@@ -3063,6 +3063,117 @@ async def list_tools() -> list[Tool]:
                 "required": ["telegram_chat_id"],
             },
         ),
+        # Gmail Read-Only Tools
+        Tool(
+            name="get_gmail_messages",
+            description=(
+                "List recent Gmail messages for a user. "
+                "Returns an empty list with needs_auth=true if the token is missing or "
+                "lacks the gmail.readonly scope — the caller should then surface a "
+                "re-consent link to the user. "
+                "Accepts an optional Gmail query string (e.g. 'is:unread') and "
+                "optional label filter."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "user_id": {
+                        "oneOf": [{"type": "integer"}, {"type": "string"}],
+                        "description": "Telegram chat_id of the user whose Gmail to read.",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Maximum number of messages to return. Default 20.",
+                        "default": 20,
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Gmail search query (e.g. 'is:unread', 'from:boss@corp.com'). Empty means no filter.",
+                        "default": "",
+                    },
+                },
+                "required": ["user_id"],
+            },
+        ),
+        Tool(
+            name="get_gmail_message",
+            description=(
+                "Fetch a single Gmail message by ID. "
+                "Returns null with needs_auth=true if the token is missing or "
+                "lacks the gmail.readonly scope. "
+                "Use format='full' to include the decoded plain-text body."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "user_id": {
+                        "oneOf": [{"type": "integer"}, {"type": "string"}],
+                        "description": "Telegram chat_id of the user.",
+                    },
+                    "message_id": {
+                        "type": "string",
+                        "description": "Gmail message ID.",
+                    },
+                    "format": {
+                        "type": "string",
+                        "description": "API format: 'metadata' (default), 'full' (includes body), or 'minimal'.",
+                        "default": "metadata",
+                        "enum": ["metadata", "full", "minimal"],
+                    },
+                },
+                "required": ["user_id", "message_id"],
+            },
+        ),
+        Tool(
+            name="search_gmail",
+            description=(
+                "Search Gmail messages using Gmail query syntax. "
+                "Returns an empty list with needs_auth=true if the token is missing "
+                "or lacks the gmail.readonly scope. "
+                "Examples: 'from:acme invoice', 'subject:Q2 plan', 'is:unread newer_than:1d'."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "user_id": {
+                        "oneOf": [{"type": "integer"}, {"type": "string"}],
+                        "description": "Telegram chat_id of the user.",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Gmail search query string.",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Maximum number of results to return. Default 20.",
+                        "default": 20,
+                    },
+                },
+                "required": ["user_id", "query"],
+            },
+        ),
+        Tool(
+            name="get_gmail_thread",
+            description=(
+                "Fetch a full Gmail thread (all messages in conversation order). "
+                "Returns null with needs_auth=true if the token is missing or "
+                "lacks the gmail.readonly scope."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "user_id": {
+                        "oneOf": [{"type": "integer"}, {"type": "string"}],
+                        "description": "Telegram chat_id of the user.",
+                    },
+                    "thread_id": {
+                        "type": "string",
+                        "description": "Gmail thread ID.",
+                    },
+                },
+                "required": ["user_id", "thread_id"],
+            },
+        ),
         # /report Slash Command Tool
         Tool(
             name="create_report",
@@ -3457,6 +3568,15 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
         return await handle_create_calendar_event(arguments)
     elif name == "list_calendar_events":
         return await handle_list_calendar_events(arguments)
+    # Gmail Read-Only Tools
+    elif name == "get_gmail_messages":
+        return await handle_get_gmail_messages(arguments)
+    elif name == "get_gmail_message":
+        return await handle_get_gmail_message(arguments)
+    elif name == "search_gmail":
+        return await handle_search_gmail(arguments)
+    elif name == "get_gmail_thread":
+        return await handle_get_gmail_thread(arguments)
     # /report Slash Command Tools
     elif name == "create_report":
         return await handle_create_report(arguments)
@@ -8506,6 +8626,226 @@ async def handle_list_calendar_events(args: dict) -> list[TextContent]:
         }
         for e in events
     ]
+    return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+
+# ---------------------------------------------------------------------------
+# Gmail Read-Only Handlers
+# ---------------------------------------------------------------------------
+
+def _gmail_needs_auth_response(user_id: str) -> list[TextContent]:
+    """Return the standardised needs_auth response for Gmail tool calls.
+
+    Emitted when the user's token is absent or missing the gmail.readonly
+    scope.  The dispatcher should surface a re-consent link when it sees
+    ``needs_auth: true`` in the response.
+
+    Args:
+        user_id: User identifier included in the response for routing.
+
+    Returns:
+        A single TextContent item containing a JSON object with
+        ``needs_auth: true`` and a human-readable ``message``.
+    """
+    from integrations.google_calendar.token_store import get_valid_token
+    from integrations.gmail.client import has_gmail_scope
+    from integrations.google_calendar.oauth import generate_auth_url
+    import secrets
+
+    # Determine whether token is absent entirely or just missing Gmail scope
+    token = get_valid_token(user_id)
+    if token is None:
+        reason = "no_token"
+        detail = "No Google token found. The user needs to connect their Google account."
+    elif not has_gmail_scope(token):
+        reason = "missing_gmail_scope"
+        detail = (
+            "Google token is present but does not include gmail.readonly. "
+            "The user needs to re-authorise with the expanded scope."
+        )
+    else:
+        # Should not reach here — caller guards against this
+        reason = "unknown"
+        detail = "Gmail access unavailable."
+
+    # Generate a re-consent URL with the full scope set (including gmail.readonly)
+    auth_url: str | None = None
+    try:
+        from integrations.google_calendar.config import DEFAULT_SCOPES
+        auth_url = generate_auth_url(
+            state=secrets.token_urlsafe(16),
+            scopes=DEFAULT_SCOPES,
+        )
+    except Exception as exc:
+        log.warning("Could not generate auth URL for Gmail re-consent: %s", exc)
+
+    payload: dict = {
+        "needs_auth": True,
+        "reason": reason,
+        "message": detail,
+        "user_id": user_id,
+    }
+    if auth_url:
+        payload["auth_url"] = auth_url
+
+    return [TextContent(type="text", text=json.dumps(payload, indent=2))]
+
+
+def _gmail_message_to_dict(msg) -> dict:
+    """Convert a GmailMessage to a JSON-serialisable dict.
+
+    Pure helper — no I/O.
+    """
+    return {
+        "id": msg.id,
+        "thread_id": msg.thread_id,
+        "subject": msg.subject,
+        "sender": msg.sender,
+        "recipients": msg.recipients,
+        "date": msg.date.isoformat(),
+        "snippet": msg.snippet,
+        "body_text": msg.body_text,
+        "label_ids": msg.label_ids,
+        "is_unread": msg.is_unread,
+    }
+
+
+async def handle_get_gmail_messages(args: dict) -> list[TextContent]:
+    """Handle the get_gmail_messages MCP tool.
+
+    Required args:
+        user_id — int or str Telegram chat_id
+
+    Optional args:
+        max_results — int (default 20)
+        query       — Gmail search query string (default "")
+    """
+    _src = str(Path(__file__).resolve().parent.parent)
+    if _src not in sys.path:
+        sys.path.insert(0, _src)
+    from integrations.gmail.client import get_recent_messages, has_gmail_scope
+    from integrations.google_calendar.token_store import get_valid_token
+
+    user_id = str(args.get("user_id", "")).strip()
+    if not user_id:
+        return [TextContent(type="text", text='{"error": "user_id is required."}')]
+
+    max_results = int(args.get("max_results", 20))
+    query = str(args.get("query", "")).strip()
+
+    # Check auth before delegating so we can return needs_auth when appropriate
+    token = get_valid_token(user_id)
+    if token is None or not has_gmail_scope(token):
+        return _gmail_needs_auth_response(user_id)
+
+    messages = get_recent_messages(user_id, max_results=max_results, query=query)
+    result = [_gmail_message_to_dict(m) for m in messages]
+    return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+
+async def handle_get_gmail_message(args: dict) -> list[TextContent]:
+    """Handle the get_gmail_message MCP tool.
+
+    Required args:
+        user_id    — int or str Telegram chat_id
+        message_id — Gmail message ID
+
+    Optional args:
+        format — "metadata" | "full" | "minimal" (default "metadata")
+    """
+    _src = str(Path(__file__).resolve().parent.parent)
+    if _src not in sys.path:
+        sys.path.insert(0, _src)
+    from integrations.gmail.client import get_message, has_gmail_scope
+    from integrations.google_calendar.token_store import get_valid_token
+
+    user_id = str(args.get("user_id", "")).strip()
+    message_id = str(args.get("message_id", "")).strip()
+    format_ = str(args.get("format", "metadata")).strip() or "metadata"
+
+    if not user_id:
+        return [TextContent(type="text", text='{"error": "user_id is required."}')]
+    if not message_id:
+        return [TextContent(type="text", text='{"error": "message_id is required."}')]
+
+    token = get_valid_token(user_id)
+    if token is None or not has_gmail_scope(token):
+        return _gmail_needs_auth_response(user_id)
+
+    msg = get_message(user_id, message_id, format=format_)
+    if msg is None:
+        return [TextContent(type="text", text=json.dumps({"result": None}))]
+    return [TextContent(type="text", text=json.dumps(_gmail_message_to_dict(msg), indent=2))]
+
+
+async def handle_search_gmail(args: dict) -> list[TextContent]:
+    """Handle the search_gmail MCP tool.
+
+    Required args:
+        user_id — int or str Telegram chat_id
+        query   — Gmail search query string
+
+    Optional args:
+        max_results — int (default 20)
+    """
+    _src = str(Path(__file__).resolve().parent.parent)
+    if _src not in sys.path:
+        sys.path.insert(0, _src)
+    from integrations.gmail.client import search_messages, has_gmail_scope
+    from integrations.google_calendar.token_store import get_valid_token
+
+    user_id = str(args.get("user_id", "")).strip()
+    query = str(args.get("query", "")).strip()
+    max_results = int(args.get("max_results", 20))
+
+    if not user_id:
+        return [TextContent(type="text", text='{"error": "user_id is required."}')]
+    if not query:
+        return [TextContent(type="text", text='{"error": "query is required."}')]
+
+    token = get_valid_token(user_id)
+    if token is None or not has_gmail_scope(token):
+        return _gmail_needs_auth_response(user_id)
+
+    messages = search_messages(user_id, query=query, max_results=max_results)
+    result = [_gmail_message_to_dict(m) for m in messages]
+    return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+
+async def handle_get_gmail_thread(args: dict) -> list[TextContent]:
+    """Handle the get_gmail_thread MCP tool.
+
+    Required args:
+        user_id   — int or str Telegram chat_id
+        thread_id — Gmail thread ID
+    """
+    _src = str(Path(__file__).resolve().parent.parent)
+    if _src not in sys.path:
+        sys.path.insert(0, _src)
+    from integrations.gmail.client import get_thread, has_gmail_scope
+    from integrations.google_calendar.token_store import get_valid_token
+
+    user_id = str(args.get("user_id", "")).strip()
+    thread_id = str(args.get("thread_id", "")).strip()
+
+    if not user_id:
+        return [TextContent(type="text", text='{"error": "user_id is required."}')]
+    if not thread_id:
+        return [TextContent(type="text", text='{"error": "thread_id is required."}')]
+
+    token = get_valid_token(user_id)
+    if token is None or not has_gmail_scope(token):
+        return _gmail_needs_auth_response(user_id)
+
+    thread = get_thread(user_id, thread_id)
+    if thread is None:
+        return [TextContent(type="text", text=json.dumps({"result": None}))]
+
+    result = {
+        "id": thread.id,
+        "subject": thread.subject,
+        "messages": [_gmail_message_to_dict(m) for m in thread.messages],
+    }
     return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
 

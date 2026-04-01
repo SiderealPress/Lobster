@@ -13,9 +13,10 @@ The integration degrades gracefully: if either variable is absent, all Google
 Calendar features are disabled and a single warning is emitted at import time.
 Callers should check ``is_enabled()`` before attempting any OAuth flow.
 
-OAuth scopes required for full calendar access:
+OAuth scopes required for full calendar + Gmail read access:
     https://www.googleapis.com/auth/calendar.readonly      — list/read events
     https://www.googleapis.com/auth/calendar.events        — create/update events
+    https://www.googleapis.com/auth/gmail.readonly         — read Gmail messages
 
 Redirect URI expected by the Google OAuth app:
     https://myownlobster.ai/auth/google/callback
@@ -40,10 +41,13 @@ SCOPE_READONLY: str = "https://www.googleapis.com/auth/calendar.readonly"
 #: Full scope for creating and modifying events.
 SCOPE_EVENTS: str = "https://www.googleapis.com/auth/calendar.events"
 
+#: Read-only access to Gmail messages and metadata.
+SCOPE_GMAIL_READONLY: str = "https://www.googleapis.com/auth/gmail.readonly"
+
 #: Default scopes requested during the OAuth flow.
-#: Includes both read and write access so Lobster can read and create/modify
-#: calendar events on the user's behalf.
-DEFAULT_SCOPES: tuple[str, ...] = (SCOPE_READONLY, SCOPE_EVENTS)
+#: Includes calendar read/write and Gmail read-only so a single consent screen
+#: covers all Lobster Google integrations.
+DEFAULT_SCOPES: tuple[str, ...] = (SCOPE_READONLY, SCOPE_EVENTS, SCOPE_GMAIL_READONLY)
 
 
 # ---------------------------------------------------------------------------
