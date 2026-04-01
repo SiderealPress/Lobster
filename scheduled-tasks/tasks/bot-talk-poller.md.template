@@ -83,23 +83,43 @@ the final path.
 ## Filtering on direction
 
 Each message in the API response may carry a `direction` field written at send time:
-- `"OUTBOUND"` — message sent FROM this Lobster (already seen by the owner)
-- `"INBOUND"` — message received FROM the remote side (needs notification)
+- `"OUTBOUND"` — message sent FROM this Lobster to the remote side
+- `"INBOUND"` — message received FROM the remote side
 
-**Filter rule**: Only notify for messages where `direction == "INBOUND"`.
+**Show BOTH directions**, labeled separately — the owner wants to see the full conversation.
 
-Backwards compatibility: if a message has no `direction` field (older entries in the
-log before this field was added), treat it as `"INBOUND"` — show it rather than
-silently drop it.
+**Exception — internal routing noise**: some OUTBOUND messages are internal status
+notifications (e.g. `[OUTBOUND → TELEGRAM]` routing markers), not real cross-Lobster
+messages. Filter those out.
+
+Backwards compatibility: if a message has no `direction` field (older entries before
+this field was added), treat it as `"INBOUND"`.
 
 ```python
-def _is_inbound(msg: dict) -> bool:
-    """Return True if the message should be shown to the owner.
+def _is_internal_noise(msg: dict) -> bool:
+    """Return True if this is an internal routing message, not a real cross-Lobster exchange."""
+    content = msg.get("content", "") or msg.get("text", "") or ""
+    return "[OUTBOUND → TELEGRAM" in content
 
-    INBOUND = came from the remote side.
-    Missing direction field = treat as INBOUND (backwards compat).
-    """
-    return msg.get("direction", "INBOUND") == "INBOUND"
+_OUTBOUND_SENDERS = {"SaharLobster"}
+
+def _is_inbound(msg: dict) -> bool:
+    """Return True if message was received FROM the remote Lobster."""
+    direction = msg.get("direction")
+    if direction is not None:
+        return direction == "INBOUND"
+    return msg.get("sender", "") not in _OUTBOUND_SENDERS
+
+def _is_outbound(msg: dict) -> bool:
+    """Return True if message was sent TO the remote Lobster."""
+    direction = msg.get("direction")
+    if direction is not None:
+        return direction == "OUTBOUND"
+    return msg.get("sender", "") in _OUTBOUND_SENDERS
+
+def _should_show(msg: dict) -> bool:
+    """Return True if this message belongs in the summary (not internal noise)."""
+    return not _is_internal_noise(msg)
 ```
 
 ## Instructions
@@ -112,17 +132,17 @@ def _is_inbound(msg: dict) -> bool:
    - Collect ALL new messages with timestamp > last_message_ts.
    - Sort them by timestamp (ascending — oldest first, so the conversation reads
      chronologically).
-   - Filter to find inbound messages: `inbound_msgs = [m for m in new_msgs if _is_inbound(m)]`
-   - **Only if there are inbound messages:**
-     - Format each inbound message: `📥 {sender} → the owner: <content>`
-     - For each inbound message, also post a comment on the relevant GitHub issue
-       if actionable (configure repo in `BOT_TALK_GITHUB_REPO` env var if used).
-     - Notify the owner via Telegram (chat_id={{TELEGRAM_CHAT_ID}}) showing only
-       inbound messages.
-   - **If there are only OUTBOUND messages (no inbound):**
+   - Exclude internal routing noise: `real_msgs = [m for m in new_msgs if _should_show(m)]`
+   - Split into inbox and outbox:
+     - `inbox_msgs = [m for m in real_msgs if _is_inbound(m)]`
+     - `outbox_msgs = [m for m in real_msgs if _is_outbound(m)]`
+   - **If there are any real messages (inbox or outbox):**
+     - Build a notification showing BOTH sections (omit a section if empty).
+     - Notify the owner via Telegram (chat_id={{TELEGRAM_CHAT_ID}}).
+   - **If there are only noise/routing messages (no real messages):**
      - Do NOT send a Telegram notification. Complete silently.
    - Update `last_message_ts` in state file to the latest seen message timestamp
-     (across all messages, so OUTBOUND messages still advance the cursor).
+     (across all messages, including noise, so the cursor always advances).
    - Set `hot_mode=true` in state file.
    - Set `hot_mode_activated_at` to current UTC ISO timestamp (if not already set).
    - Reset `consecutive_empty_polls` to 0.
@@ -141,28 +161,32 @@ def _is_inbound(msg: dict) -> bool:
 
 ## Telegram Notification Format
 
-When there are new inbound messages, send a single notification to the owner. Example:
+Show BOTH inbox and outbox sections. Omit a section if it has no messages. Example:
 
 ```
-New message from AlbertLobster:
+Bot-talk update:
 
-📥 AlbertLobster → the owner: I reviewed it. Looks reasonable, a few questions though.
-📥 AlbertLobster → the owner: Can you clarify item 3?
+📥 Inbox (from AlbertLobster):
+  AlbertLobster: I reviewed it. Looks reasonable, a few questions.
+  AlbertLobster: Can you clarify item 3?
+
+📤 Outbox (sent to AlbertLobster):
+  You: Sure, item 3 means X.
 ```
 
-Messages are sorted chronologically. Do NOT include OUTBOUND messages in the
-notification — the owner sent those and doesn't need to see them again.
+Messages within each section are sorted chronologically (oldest first).
 
 ## Telegram Notification Rules
 
-Only send a Telegram message to the owner (chat_id={{TELEGRAM_CHAT_ID}}) when:
-- One or more new INBOUND messages since last run
+Send a Telegram notification to the owner (chat_id={{TELEGRAM_CHAT_ID}}) when:
+- One or more new real messages (INBOUND or non-noise OUTBOUND) since last run
 - A new actionable GitHub comment requiring attention
 - The HTTP API has been continuously down for more than 30 minutes
 
-Do NOT notify for OUTBOUND messages — the owner sent those herself and does not need to hear about them.
-
-For routine no-op cycles (no new messages, API healthy, nothing actionable) OR cycles where only OUTBOUND messages are seen: do NOT call send_reply. Instead, call write_task_output with status "success" and a brief internal note like "no new activity" or "only outbound messages, no notification sent". The dispatcher will handle it silently.
+For routine no-op cycles (no new messages, API healthy, nothing actionable) OR cycles
+where only internal routing noise is seen: do NOT call send_reply. Instead, call
+write_task_output with status "success" and a brief internal note like "no new activity"
+or "only internal noise, no notification sent". The dispatcher will handle it silently.
 
 ## Output
 
