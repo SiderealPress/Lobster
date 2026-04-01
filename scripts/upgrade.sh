@@ -2290,6 +2290,25 @@ PYEOF
         migrated=$((migrated + 1))
     fi
 
+    # Migration 64: Initialize message-claims.db for atomic message claiming (issue #1360).
+    # Creates the message_claims and dispatcher_lock tables in a dedicated SQLite DB.
+    # Safe to run on existing installs — CREATE TABLE IF NOT EXISTS is idempotent.
+    local claims_db="$WORKSPACE_DIR/data/message-claims.db"
+    mkdir -p "$WORKSPACE_DIR/data"
+    python3 -c "
+import sqlite3, os, sys
+db_path = os.path.expanduser('$claims_db')
+os.makedirs(os.path.dirname(db_path), exist_ok=True)
+db = sqlite3.connect(db_path)
+db.execute('PRAGMA journal_mode=WAL')
+db.execute('CREATE TABLE IF NOT EXISTS message_claims (message_id TEXT PRIMARY KEY, claimed_at TEXT NOT NULL, session_id TEXT)')
+db.execute('CREATE TABLE IF NOT EXISTS dispatcher_lock (id INTEGER PRIMARY KEY CHECK (id=1), session_id TEXT NOT NULL, locked_at TEXT NOT NULL)')
+db.commit()
+db.close()
+print('message-claims.db initialized')
+" 2>/dev/null && substep "Initialized $claims_db (atomic message claiming)" && migrated=$((migrated + 1)) || \
+    warn "Migration 64: Failed to initialize message-claims.db — server will create it on first run"
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else

@@ -159,6 +159,15 @@ def isolate_inbox_server_paths(tmp_path: Path):
         yield dirs_result
         return
 
+    # Redirect the claims DB (issue #1360) to a per-test temp path so each test
+    # starts with an empty claims table.  This must happen inside the patch.multiple
+    # context so the reset is scoped to the test lifetime.
+    try:
+        import claims as _claims_mod
+        _claims_mod._set_db_path(tmp_path / "test-message-claims.db")
+    except Exception:
+        pass  # claims module may not be importable in all test environments
+
     try:
         with patch.multiple(
             _INBOX_SERVER_MODULE,
@@ -190,6 +199,13 @@ def isolate_inbox_server_paths(tmp_path: Path):
         # Fallback: yield without patching so tests that don't need
         # inbox_server isolation still run cleanly.
         yield dirs_result
+    finally:
+        # Reset claims DB path after test so subsequent tests get a fresh DB.
+        try:
+            import claims as _claims_mod
+            _claims_mod._set_db_path(None)
+        except Exception:
+            pass
 
 
 @pytest.fixture

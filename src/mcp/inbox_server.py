@@ -96,6 +96,11 @@ from agents.tracker import add_pending_agent as _add_pending_agent, remove_pendi
 # Agent session store — SQLite-backed, used directly for new MCP tools
 import agents.session_store as _session_store
 
+# Atomic message claim operations — SQLite INSERT OR FAIL prevents duplicate processing
+from claims import claim_message as _claim_message, release_claim as _release_claim
+from claims import acquire_dispatcher_lock as _acquire_dispatcher_lock
+from claims import release_dispatcher_lock as _release_dispatcher_lock
+
 # Skill management system
 from skill_manager import (
     list_available_skills as _list_available_skills,
@@ -3489,6 +3494,12 @@ def _recover_stale_processing():
 
     Uses a type-aware timeout: 90s for text messages, 300s for media
     (voice/audio/photo/document) where transcription or download can be slow.
+
+    Releases the SQLite claim row BEFORE moving the file back to inbox/ so that
+    a fresh claim attempt on the recovered message does not get IntegrityError
+    (issue #1360).  The order matters: release then rename — if we crash between
+    the two operations the claim row is orphaned but harmless; the file is still
+    in processing/ and will be recovered again on the next WFM call.
     """
     now = time.time()
     for f in PROCESSING_DIR.glob("*.json"):
@@ -3497,6 +3508,13 @@ def _recover_stale_processing():
             msg = json.loads(f.read_text())
             max_age = _stale_timeout_for_message(msg)
             if age > max_age:
+                # Extract message_id from filename or JSON before release
+                try:
+                    message_id = msg.get("id") or f.stem
+                except Exception:
+                    message_id = f.stem
+                # Release claim BEFORE moving so a re-claim can succeed
+                _release_claim(message_id)
                 dest = INBOX_DIR / f.name
                 f.rename(dest)
                 log.warning(
@@ -3563,6 +3581,26 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
         session_id = _get_current_http_session_id()
         if session_id is not None:
             _tag_dispatcher_session(session_id)
+
+    # Phase 2 (issue #1360): acquire the SQLite dispatcher lock so that a second
+    # concurrent loop calling wait_for_messages is rejected before it can claim
+    # messages.  acquire_dispatcher_lock returns False only when a *different*
+    # session_id holds the lock; same session renewing is always allowed.
+    # Fail-open: if the DB is unavailable the lock is skipped rather than
+    # blocking the dispatcher from starting.
+    if _http_session_manager is not None:
+        wfm_session_id = _get_current_http_session_id()
+        if wfm_session_id is not None:
+            if not _acquire_dispatcher_lock(wfm_session_id):
+                return [TextContent(
+                    type="text",
+                    text=(
+                        "Error: dispatcher_lock_held — another session is already running "
+                        "wait_for_messages. Only one dispatcher loop may run at a time. "
+                        "If the previous dispatcher crashed, the lock will be released "
+                        "automatically on server restart."
+                    ),
+                )]
 
     # Touch heartbeat at start - signals Claude is alive and waiting for messages
     touch_heartbeat()
@@ -4426,6 +4464,12 @@ async def handle_mark_processed(args: dict) -> list[TextContent]:
     dest = PROCESSED_DIR / found.name
     found.rename(dest)
 
+    # Release the SQLite claim row so the message_id slot is freed (issue #1360).
+    # Called after the filesystem move so the audit trail is consistent: if we
+    # crash between rename and release the claim row is orphaned but harmless —
+    # the message is already in processed/ and will never be re-claimed.
+    _release_claim(message_id)
+
     # BIS-167 Slice 6: persist inbound message to messages.db now that it is fully processed.
     if _db_persist_inbound is not None:
         try:
@@ -4451,8 +4495,22 @@ async def handle_mark_processing(args: dict) -> list[TextContent]:
     """Move message from inbox to processing to claim it."""
     message_id = validate_message_id(args.get("message_id", ""))
 
+    # --- Atomic claim gate (Phase 1, issue #1360) ---
+    # SQLite INSERT OR FAIL on message_claims is the exclusive-ownership gate.
+    # Two concurrent callers race on the INSERT; one commits, one gets
+    # IntegrityError → False → returns already_claimed without moving any file.
+    session_id = _get_current_http_session_id() if _http_session_manager is not None else None
+    if not _claim_message(message_id, session_id=session_id):
+        return [TextContent(
+            type="text",
+            text=f"Error: already_claimed: {message_id}",
+        )]
+
     found = _find_message_file(INBOX_DIR, message_id)
     if not found:
+        # Message disappeared between claim INSERT and filesystem lookup —
+        # release the claim so the message can be retried if it reappears.
+        _release_claim(message_id)
         return [TextContent(type="text", text=f"Message not found in inbox: {message_id}")]
 
     # Read message content BEFORE moving (for observation queue)
@@ -4465,7 +4523,7 @@ async def handle_mark_processing(args: dict) -> list[TextContent]:
     # the message (issue #635). This is the single ingest normalization point.
     msg_data = normalize_message_type(msg_data)
 
-    # Atomic move to processing
+    # Atomic move to processing — consequence of a won claim, not the claim itself
     dest = PROCESSING_DIR / found.name
     found.rename(dest)
 
@@ -4569,9 +4627,22 @@ async def handle_claim_and_ack(args: dict) -> list[TextContent]:
     """
     message_id = validate_message_id(args.get("message_id", ""))
 
-    # --- Step 1: Claim the message (must succeed before sending ack) ---
+    # --- Step 1: Claim the message via SQLite INSERT OR FAIL ---
+    # This is the exclusive-ownership gate (issue #1360). Two concurrent callers
+    # race on the INSERT; one commits (True) and proceeds; the other gets
+    # IntegrityError → False → returns already_claimed without sending any ack.
+    session_id = _get_current_http_session_id() if _http_session_manager is not None else None
+    if not _claim_message(message_id, session_id=session_id):
+        return [TextContent(
+            type="text",
+            text=f"Error: already_claimed: {message_id}",
+        )]
+
     found = _find_message_file(INBOX_DIR, message_id)
     if not found:
+        # Message disappeared between claim INSERT and filesystem lookup.
+        # Release so the message can be re-claimed if it reappears.
+        _release_claim(message_id)
         return [TextContent(type="text", text=f"Error: Message not found in inbox: {message_id}")]
 
     # Read message content before moving (for observation queue + timestamp)
@@ -4583,7 +4654,7 @@ async def handle_claim_and_ack(args: dict) -> list[TextContent]:
     # Stamp actual processing start time so stale detection uses it
     msg_data["_processing_started_at"] = datetime.now(timezone.utc).isoformat()
 
-    # Atomic move to processing/
+    # Move to processing/ — consequence of the won claim, not the claim itself
     dest = PROCESSING_DIR / found.name
     found.rename(dest)
 
@@ -4677,6 +4748,9 @@ async def handle_mark_failed(args: dict) -> list[TextContent]:
         # which is safe (idempotent). The reverse loses data.
         atomic_write_json(dest, msg)
         found.unlink(missing_ok=True)
+        # Release the SQLite claim row — permanently failed messages are never retried
+        # so we free the slot immediately (issue #1360).
+        _release_claim(message_id)
         log.error(f"Message permanently failed after {max_retries} retries: {message_id} - {error}")
         return [TextContent(type="text", text=f"Message permanently failed after {max_retries} retries: {message_id}")]
 
@@ -4689,6 +4763,9 @@ async def handle_mark_failed(args: dict) -> list[TextContent]:
     # Write destination FIRST, then remove source (crash-safe ordering)
     atomic_write_json(dest, msg)
     found.unlink(missing_ok=True)
+    # Release the claim so the message can be re-claimed when it retries from failed/
+    # back to inbox/ (via _recover_retryable_messages) (issue #1360).
+    _release_claim(message_id)
     log.warning(f"Message failed (retry {retry_count}/{max_retries}, next in {backoff}s): {message_id} - {error}")
     return [TextContent(type="text", text=f"Message queued for retry ({retry_count}/{max_retries}, backoff {backoff}s): {message_id}")]
 
