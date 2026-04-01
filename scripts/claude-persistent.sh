@@ -332,6 +332,92 @@ kill_orphaned_claude_processes() {
 }
 
 #===============================================================================
+# Kill orphaned MCP server processes (inbox_server.py, obsidian-mcp, etc.)
+# that are NOT descendants of the current tmux session's pane PIDs.
+#
+# Why this is needed:
+#   When Claude is killed or exits abnormally, the MCP servers it launched
+#   (inbox_server.py, obsidian-mcp via npx, etc.) become orphaned — their
+#   parent Claude process is gone but they continue running. On the next
+#   restart, Claude spawns fresh MCP servers. Without cleanup the old ones
+#   accumulate indefinitely, leaking memory and file descriptors.
+#
+# Safety contract:
+#   - Only kills processes matching the specific MCP server patterns below
+#   - Uses the same tmux pane lineage check as kill_orphaned_claude_processes
+#   - SIGTERM first, SIGKILL only after a 3-second grace period
+#   - SIGKILL only sent to PIDs that received SIGTERM (prevents PID-reuse kills)
+#===============================================================================
+kill_orphaned_mcp_processes() {
+    local tmux_panes
+    tmux_panes=$(tmux -L lobster list-panes -a -F '#{pane_pid}' 2>/dev/null || true)
+
+    # Collect PIDs for each known MCP server pattern
+    local mcp_pids=""
+    mcp_pids+=" $(pgrep -f "src/mcp/inbox_server\.py" 2>/dev/null || true)"
+    mcp_pids+=" $(pgrep -f "obsidian-mcp" 2>/dev/null || true)"
+    mcp_pids=$(echo "$mcp_pids" | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -u || true)
+
+    if [[ -z "$mcp_pids" ]]; then
+        log "CLEANUP: No stale MCP server processes found"
+        return 0
+    fi
+
+    log "CLEANUP: Found MCP PID(s): $(echo "$mcp_pids" | tr '\n' ' ')"
+
+    local killed=0
+    local skipped=0
+    local sigterm_pids=()
+
+    for pid in $mcp_pids; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            continue
+        fi
+
+        local is_ours=false
+        if [[ -n "$tmux_panes" ]]; then
+            local check_pid="$pid"
+            for _hop in 1 2 3 4 5 6 7 8; do
+                local ppid
+                ppid=$(ps -o ppid= -p "$check_pid" 2>/dev/null | tr -d ' ')
+                if [[ -z "$ppid" || "$ppid" == "1" ]]; then
+                    break
+                fi
+                if echo "$tmux_panes" | grep -qw "$ppid"; then
+                    is_ours=true
+                    break
+                fi
+                check_pid="$ppid"
+            done
+        fi
+
+        if [[ "$is_ours" == "true" ]]; then
+            log "CLEANUP: MCP PID $pid is a current-session descendant — skipping"
+            skipped=$((skipped + 1))
+        else
+            log "CLEANUP: Killing orphaned MCP PID $pid (SIGTERM)"
+            if kill -TERM "$pid" 2>/dev/null; then
+                sigterm_pids+=("$pid")
+            fi
+            killed=$((killed + 1))
+        fi
+    done
+
+    if [[ $killed -gt 0 ]]; then
+        sleep 3
+        for pid in "${sigterm_pids[@]}"; do
+            if kill -0 "$pid" 2>/dev/null; then
+                log "CLEANUP: MCP PID $pid still alive after SIGTERM — sending SIGKILL"
+                kill -KILL "$pid" 2>/dev/null || true
+            fi
+        done
+        log "CLEANUP: Sent SIGTERM to $killed orphaned MCP process(es), skipped $skipped in-session"
+    else
+        log "CLEANUP: No orphaned MCP processes to kill (skipped $skipped in-session)"
+    fi
+}
+
+#===============================================================================
 # Launch Claude in persistent mode
 #===============================================================================
 launch_claude() {
@@ -347,6 +433,12 @@ launch_claude() {
     # This prevents resource leaks when ExecStop fails (e.g. tmux already dead).
     # -------------------------------------------------------------------------
     kill_orphaned_claude_processes
+
+    # -------------------------------------------------------------------------
+    # Kill orphaned MCP server processes (inbox_server.py, obsidian-mcp, etc.)
+    # that were spawned by killed Claude sessions and never cleaned up.
+    # -------------------------------------------------------------------------
+    kill_orphaned_mcp_processes
 
     # -------------------------------------------------------------------------
     # Clean leaked Claude Code env vars before launching.
