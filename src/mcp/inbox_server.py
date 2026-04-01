@@ -87,8 +87,10 @@ from reliability import (
 # Self-update system
 from update_manager import UpdateManager
 
-# Bot-talk mirroring — fire-and-forget relay to the shared SaharLobster/AlbertLobster channel
-from bot_talk_mirror import mirror_outbound as _mirror_outbound, mirror_inbound as _mirror_inbound
+# Bot-talk mirroring — fire-and-forget relay for cross-Lobster messages only.
+# mirror_inbound (old) has been removed — owner Telegram messages are NOT bot-talk.
+# log_inbound_cross_lobster is the correct entry point for inbound cross-Lobster messages.
+from bot_talk_mirror import mirror_outbound as _mirror_outbound
 
 # Pending agent tracker (thin adapter over session_store)
 from agents.tracker import add_pending_agent as _add_pending_agent, remove_pending_agent as _remove_pending_agent
@@ -4016,8 +4018,10 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
                             log.error(f"check_inbox: subagent_recovered pre-processor error: {exc}", exc_info=True)
                     msg["_filename"] = f.name
                     messages.append(msg)
-                    # Mirror real inbound user messages to bot-talk (fire-and-forget)
-                    _mirror_inbound(msg)
+                    # NOTE: Inbound cross-Lobster messages from bot-talk are routed to this
+                    # inbox by bot_talk_mirror.log_inbound_cross_lobster() with source="bot-talk".
+                    # We no longer mirror owner Telegram messages to bot-talk from here —
+                    # only actual cross-Lobster exchanges belong in bot-talk (issue #1350).
                     if len(messages) >= limit:
                         break
             except Exception as e:
