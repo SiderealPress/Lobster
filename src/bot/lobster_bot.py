@@ -814,10 +814,11 @@ def wake_claude_if_hibernating() -> None:
             log.error(f"wake_claude: systemctl restart failed ({e}), trying start script")
             # Fallback: call start-lobster.sh directly
             if CLAUDE_WAKE_SCRIPT.exists():
-                subprocess.Popen(
+                subprocess.run(
                     ["bash", str(CLAUDE_WAKE_SCRIPT)],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
+                    timeout=60,
                 )
                 log.info(f"wake_claude: spawned {CLAUDE_WAKE_SCRIPT}")
             else:
