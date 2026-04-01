@@ -44,6 +44,28 @@ Schema:
 Always write updated state atomically: write to a `.tmp` file, then rename to the
 final path.
 
+## Filtering on direction
+
+Each message in the API response may carry a `direction` field written at send time:
+- `"OUTBOUND"` — message sent FROM this Lobster (already seen by the owner)
+- `"INBOUND"` — message received FROM the remote side (needs notification)
+
+**Filter rule**: Only notify for messages where `direction == "INBOUND"`.
+
+Backwards compatibility: if a message has no `direction` field (older entries in the
+log before this field was added), treat it as `"INBOUND"` — show it rather than
+silently drop it.
+
+```python
+def _is_inbound(msg: dict) -> bool:
+    """Return True if the message should be shown to the owner.
+
+    INBOUND = came from the remote side.
+    Missing direction field = treat as INBOUND (backwards compat).
+    """
+    return msg.get("direction", "INBOUND") == "INBOUND"
+```
+
 ## Instructions
 
 1. **Fast-exit if not in hot mode:**
@@ -52,27 +74,27 @@ final path.
      status "success" and output "hot_mode=false, skipped". Exit immediately.
    - Do NOT poll the API or send any Telegram notification in this case.
 
-2. **Poll for new messages from both senders:**
+2. **Poll for new messages:**
    - Fetch all messages from `{{LOBSTERTALK_HOST}}/messages` with
      timestamp > `last_message_ts`.
-   - Collect messages from **both** `sender={{LOCAL_LOBSTER_IDENTITY}}` AND `sender={{REMOTE_LOBSTER_IDENTITY}}`.
    - Sort by timestamp ascending (oldest first).
+   - Filter to find inbound messages: `inbound_msgs = [m for m in new_msgs if _is_inbound(m)]`
 
 3. **If new messages found:**
-   - Format each message with a directional prefix:
-     - {{LOCAL_LOBSTER_IDENTITY}} messages: `📤 {{LOCAL_LOBSTER_IDENTITY}} → remote: <content>`
-     - {{REMOTE_LOBSTER_IDENTITY}} messages: `📥 {{REMOTE_LOBSTER_IDENTITY}} → the owner: <content>`
-   - Send a single Telegram notification to the owner (chat_id={{TELEGRAM_CHAT_ID}}) with the full
-     conversation block, e.g.:
+   - **Only if there are inbound messages** (`direction == "INBOUND"` or missing):
+     - Format each inbound message: `📥 {sender} → the owner: <content>`
+     - Send a single Telegram notification to the owner (chat_id={{TELEGRAM_CHAT_ID}}), e.g.:
 
-     ```
-     New bot-talk activity:
+       ```
+       New message from AlbertLobster:
 
-     📤 {{LOCAL_LOBSTER_IDENTITY}} → remote: Hello!
-     📥 {{REMOTE_LOBSTER_IDENTITY}} → the owner: Hi back!
-     ```
+       📥 AlbertLobster → the owner: Hi back!
+       ```
 
-   - Update `last_message_ts` to the latest timestamp across both senders.
+   - **If only OUTBOUND messages (no inbound messages):**
+     - Do NOT send a Telegram notification. Complete silently.
+   - Update `last_message_ts` to the latest timestamp across all messages
+     (OUTBOUND messages still advance the cursor even if not notified).
    - Reset `consecutive_empty_polls` to 0.
 
 4. **If no new messages:**

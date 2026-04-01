@@ -23,10 +23,15 @@ Configuration (all overridable via environment variables):
   BOT_TALK_SSH_HOST      - SSH host alias for the fallback log write
   BOT_TALK_SSH_LOG_PATH  - Remote log file path on the SSH host
 
-Anti-duplication
-----------------
-The bot-talk poller reads only messages with sender="AlbertLobster".
-This module writes sender="SaharLobster", so there is no echo loop.
+Direction field
+---------------
+Each message written to bot-talk carries a `direction` field set at write time:
+  "OUTBOUND" — message sent FROM this Lobster to the other side (mirror_outbound)
+  "INBOUND"  — message received by this Lobster from the other side (mirror_inbound)
+
+Pollers filter on `direction == "INBOUND"` to show only messages from the remote
+side. This replaces all sender-name or config-variable filtering; no identity
+config is needed on either end.
 
 Filtering
 ---------
@@ -108,6 +113,10 @@ BOT_TALK_HTTP_RETRIES = 2
 BOT_TALK_SENDER = "SaharLobster"
 BOT_TALK_TIER = "TIER-BOT"
 
+# Direction constants — set at write time, consumed by pollers at read time.
+DIRECTION_OUTBOUND = "OUTBOUND"
+DIRECTION_INBOUND = "INBOUND"
+
 _WORKSPACE = Path.home() / "lobster-workspace"
 _LOCAL_LOG = _WORKSPACE / "logs" / "bot-talk-mirror.log"
 
@@ -135,8 +144,14 @@ _MIRROR_INBOUND_TYPES = frozenset({
 # Core mirror function (pure: no I/O side effects, takes a pre-built payload)
 # ---------------------------------------------------------------------------
 
-def _build_http_payload(content: str, genre: str) -> dict:
+def _build_http_payload(content: str, genre: str, direction: str) -> dict:
     """Build the POST body for the bot-talk HTTP server.
+
+    Args:
+        content:   The message content string.
+        genre:     Message genre tag (e.g. "status-update").
+        direction: DIRECTION_OUTBOUND or DIRECTION_INBOUND — set at write time
+                   so pollers can filter without knowing sender names.
 
     Returns a plain dict; no I/O performed.
     """
@@ -145,17 +160,23 @@ def _build_http_payload(content: str, genre: str) -> dict:
         "tier": BOT_TALK_TIER,
         "genre": genre,
         "content": content,
+        "direction": direction,
     }
 
 
-def _build_ssh_log_line(content: str, genre: str) -> str:
+def _build_ssh_log_line(content: str, genre: str, direction: str) -> str:
     """Build the log line for the SSH fallback.
+
+    Args:
+        content:   The message content string.
+        genre:     Message genre tag.
+        direction: DIRECTION_OUTBOUND or DIRECTION_INBOUND.
 
     Returns a plain string; no I/O performed.
     """
     ts = datetime.now(timezone.utc).isoformat()
     short = content[:200].replace("\n", " ")
-    return f"[{ts}] [{BOT_TALK_SENDER}] [{BOT_TALK_TIER}] [{genre}] {short}"
+    return f"[{ts}] [{BOT_TALK_SENDER}] [{BOT_TALK_TIER}] [{genre}] [{direction}] {short}"
 
 
 def _build_auth_headers() -> dict:
@@ -211,7 +232,7 @@ def _try_ssh(log_line: str) -> bool:
         return False
 
 
-def _write_local_log(content: str, genre: str, reason: str) -> None:
+def _write_local_log(content: str, genre: str, direction: str, reason: str) -> None:
     """Write a local fallback log entry when both HTTP and SSH fail."""
     try:
         _LOCAL_LOG.parent.mkdir(parents=True, exist_ok=True)
@@ -220,6 +241,7 @@ def _write_local_log(content: str, genre: str, reason: str) -> None:
             "timestamp": ts,
             "sender": BOT_TALK_SENDER,
             "genre": genre,
+            "direction": direction,
             "content": content[:500],
             "mirror_failed_reason": reason,
         }
@@ -229,23 +251,23 @@ def _write_local_log(content: str, genre: str, reason: str) -> None:
         pass  # if even local logging fails, stay silent
 
 
-def _do_mirror(content: str, genre: str) -> None:
+def _do_mirror(content: str, genre: str, direction: str) -> None:
     """Execute the mirror chain: HTTP → SSH → local log.
 
     Designed to run in a daemon thread. Never raises.
     """
-    payload = _build_http_payload(content, genre)
+    payload = _build_http_payload(content, genre, direction)
     if _try_http(payload):
-        log.debug(f"bot-talk mirror: HTTP ok ({genre})")
+        log.debug(f"bot-talk mirror: HTTP ok ({genre}, {direction})")
         return
 
-    log_line = _build_ssh_log_line(content, genre)
+    log_line = _build_ssh_log_line(content, genre, direction)
     if _try_ssh(log_line):
-        log.debug(f"bot-talk mirror: SSH fallback ok ({genre})")
+        log.debug(f"bot-talk mirror: SSH fallback ok ({genre}, {direction})")
         return
 
-    _write_local_log(content, genre, "http_and_ssh_both_failed")
-    log.debug(f"bot-talk mirror: both HTTP and SSH failed, wrote local log ({genre})")
+    _write_local_log(content, genre, direction, "http_and_ssh_both_failed")
+    log.debug(f"bot-talk mirror: both HTTP and SSH failed, wrote local log ({genre}, {direction})")
 
 
 # ---------------------------------------------------------------------------
@@ -254,6 +276,9 @@ def _do_mirror(content: str, genre: str) -> None:
 
 def mirror_outbound(text: str, source: str, chat_id: str | int) -> None:
     """Mirror an outbound send_reply to bot-talk.
+
+    Writes direction="OUTBOUND" so pollers can filter this message out —
+    the owner sent it and doesn't need to be notified about it.
 
     Fire-and-forget: spawns a daemon thread and returns immediately.
     Safe to call from any async or sync context.
@@ -264,11 +289,14 @@ def mirror_outbound(text: str, source: str, chat_id: str | int) -> None:
         chat_id: Destination chat ID.
     """
     content = f"[OUTBOUND → {source.upper()} chat={chat_id}] {text}"
-    _spawn_mirror(content, genre="status-update")
+    _spawn_mirror(content, genre="status-update", direction=DIRECTION_OUTBOUND)
 
 
 def mirror_inbound(msg: dict) -> None:
     """Mirror a real inbound user message to bot-talk.
+
+    Writes direction="INBOUND" so pollers know this message came from the
+    remote side and should be forwarded to the owner.
 
     Filters out system/internal message types — only real user messages
     (text, voice, photo, document) are mirrored.
@@ -301,13 +329,13 @@ def mirror_inbound(msg: dict) -> None:
     else:
         content = f"[INBOUND from {source}] {user}: {text}"
 
-    _spawn_mirror(content, genre="status-update")
+    _spawn_mirror(content, genre="status-update", direction=DIRECTION_INBOUND)
 
 
-def _spawn_mirror(content: str, genre: str) -> None:
+def _spawn_mirror(content: str, genre: str, direction: str) -> None:
     """Spawn a daemon thread to run _do_mirror.
 
     Using daemon=True means the thread won't prevent process exit.
     """
-    t = threading.Thread(target=_do_mirror, args=(content, genre), daemon=True)
+    t = threading.Thread(target=_do_mirror, args=(content, genre, direction), daemon=True)
     t.start()

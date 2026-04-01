@@ -1,0 +1,160 @@
+# Bot-Talk Real-Time Forwarder
+
+**Job**: bot-talk-realtime-forwarder
+**Schedule**: `*/2 * * * *` (every 2 minutes)
+
+## Context
+
+You are running as a scheduled task. Forward new inter-Lobster bot-talk exchanges to the owner on
+Telegram as they arrive. This job polls the bot-talk API and delivers each new INBOUND message
+individually to the owner's Telegram.
+
+## Authentication
+
+Read the bot-talk API token using this lookup chain (first non-empty value wins):
+
+1. `~/lobster-workspace/data/bot-talk-token.txt` (legacy token file)
+2. `BOT_TALK_TOKEN` key in `~/messages/config/config.env`
+3. `BOT_TALK_TOKEN` key in `~/lobster-config/config.env`
+
+Example (Python):
+```python
+def _load_bot_talk_token() -> str:
+    import os
+    from pathlib import Path
+
+    token_file = Path.home() / "lobster-workspace" / "data" / "bot-talk-token.txt"
+    if token_file.exists():
+        token = token_file.read_text().strip()
+        if token:
+            return token
+
+    for config_path in [
+        Path.home() / "messages" / "config" / "config.env",
+        Path.home() / "lobster-config" / "config.env",
+    ]:
+        if config_path.exists():
+            for line in config_path.read_text().splitlines():
+                line = line.strip()
+                if line.startswith("BOT_TALK_TOKEN="):
+                    value = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    if value:
+                        return value
+
+    return ""
+```
+
+If the token cannot be found, log an error and call `write_task_output` with status "failed".
+
+## State File
+
+Read and write `~/lobster-workspace/data/bot-talk-realtime-state.json`.
+
+Schema:
+```json
+{
+  "last_processed_ts": "2026-01-01T00:00:00Z"
+}
+```
+
+Create with default `last_processed_ts = "2026-01-01T00:00:00Z"` if not found.
+
+## Filtering on direction
+
+Each message in the API response may carry a `direction` field written at send time:
+- `"OUTBOUND"` — message sent FROM this Lobster (already seen by the owner)
+- `"INBOUND"` — message received FROM the remote side (needs forwarding)
+
+**Filter rule**: Only forward messages where `direction == "INBOUND"`.
+
+Backwards compatibility: if a message has no `direction` field (older entries in the
+log before this field was added), treat it as `"INBOUND"` — show it rather than
+silently drop it.
+
+```python
+def _is_inbound(msg: dict) -> bool:
+    """Return True if the message should be forwarded to the owner.
+
+    INBOUND = came from the remote side.
+    Missing direction field = treat as INBOUND (backwards compat).
+    """
+    return msg.get("direction", "INBOUND") == "INBOUND"
+```
+
+## Instructions
+
+### Step 1: Load state
+
+Read `~/lobster-workspace/data/bot-talk-realtime-state.json`. Extract `last_processed_ts`.
+
+Load the bot-talk API token using the lookup chain above. If empty, fail immediately with
+`write_task_output(status="failed", output="BOT_TALK_TOKEN not configured")`.
+
+### Step 2: Fetch new messages from bot-talk
+
+Poll for all recent messages since `last_processed_ts`:
+
+```
+GET {{LOBSTERTALK_HOST}}/messages?since=<last_processed_ts>&limit=100
+X-Bot-Token: <token>
+```
+
+The API returns `{"count": N, "messages": [...]}`. Each message has these fields:
+`id`, `sender`, `content`, `genre`, `tier`, `timestamp`, and optionally `direction`.
+
+Note: there is no `recipient` field and no `from_me` field in the API response.
+Endpoints `/me`, `/whoami`, and `/identity` do not exist on this API.
+
+Sort messages by timestamp ascending (oldest first) so forwarding is in chronological order.
+
+### Step 3: Filter messages
+
+Apply the direction filter to find messages that should be forwarded to the owner:
+
+```python
+qualifying = [m for m in messages if _is_inbound(m)]
+```
+
+Note: The state timestamp (`last_processed_ts`) must still advance based on the full fetched
+list (including filtered-out OUTBOUND messages) — see Step 5. This prevents re-processing old
+messages on subsequent runs.
+
+### Step 4: Forward each qualifying message to Telegram
+
+For each qualifying message (in chronological order), call `send_reply` with:
+- `chat_id`: {{TELEGRAM_CHAT_ID}}
+- `source`: "telegram"
+- `text`: formatted as:
+  ```
+  [Bot-Talk] {sender}: {content}
+  ```
+
+If content is longer than 1000 characters, truncate and append `… (truncated)`.
+
+Send each message as a separate `send_reply` call — do not batch into one message.
+
+### Step 5: Update state
+
+After forwarding all qualifying new messages, update `last_processed_ts` to the timestamp
+of the latest message from the full fetched list (including OUTBOUND messages — they advance
+the cursor too, we just don't forward them).
+
+Write state file atomically: write to a `.tmp` file, then rename to the final path.
+
+If no new messages were fetched at all, do not update state.
+
+### Step 6: Write output
+
+Call `write_task_output` with:
+- `job_name`: "bot-talk-realtime-forwarder"
+- `output`: Brief summary, e.g. "No new messages." or "Forwarded 3 messages."
+- `status`: "success" or "failed"
+
+Then call `write_result`:
+- If messages were forwarded via `send_reply`: `write_result(task_id=<task_id>, chat_id={{TELEGRAM_CHAT_ID}}, sent_reply_to_user=True)`
+- If no messages were forwarded (no new messages): `write_result(task_id=<task_id>, chat_id=0, sent_reply_to_user=False)`
+
+## Timezone
+
+Always display timestamps in **Eastern Time (ET)** — currently EDT (UTC-4). Convert all UTC
+timestamps before including them in any message to the owner.

@@ -8,6 +8,7 @@ Tests cover:
 - Local log fallback
 - mirror_outbound / mirror_inbound filtering
 - Thread spawning (daemon thread is started)
+- direction field: written at send time, propagated through all layers
 """
 
 import json
@@ -33,37 +34,52 @@ import bot_talk_mirror as btm
 
 class TestBuildHttpPayload:
     def test_required_fields_present(self):
-        payload = btm._build_http_payload("hello", "status-update")
+        payload = btm._build_http_payload("hello", "status-update", btm.DIRECTION_OUTBOUND)
         assert payload["sender"] == btm.BOT_TALK_SENDER
         assert payload["tier"] == btm.BOT_TALK_TIER
         assert payload["genre"] == "status-update"
         assert payload["content"] == "hello"
 
+    def test_direction_field_outbound(self):
+        payload = btm._build_http_payload("x", "status-update", btm.DIRECTION_OUTBOUND)
+        assert payload["direction"] == "OUTBOUND"
+
+    def test_direction_field_inbound(self):
+        payload = btm._build_http_payload("x", "status-update", btm.DIRECTION_INBOUND)
+        assert payload["direction"] == "INBOUND"
+
     def test_content_is_passed_through(self):
-        payload = btm._build_http_payload("some content here", "query")
+        payload = btm._build_http_payload("some content here", "query", btm.DIRECTION_INBOUND)
         assert payload["content"] == "some content here"
 
-    def test_sender_is_saharlобster(self):
-        payload = btm._build_http_payload("x", "status-update")
+    def test_sender_is_saharlobster(self):
+        payload = btm._build_http_payload("x", "status-update", btm.DIRECTION_OUTBOUND)
         assert payload["sender"] == "SaharLobster"
 
 
 class TestBuildSshLogLine:
     def test_log_line_contains_sender_tier_genre(self):
-        line = btm._build_ssh_log_line("msg content", "status-update")
+        line = btm._build_ssh_log_line("msg content", "status-update", btm.DIRECTION_OUTBOUND)
         assert "[SaharLobster]" in line
         assert "[TIER-BOT]" in line
         assert "[status-update]" in line
 
+    def test_log_line_contains_direction(self):
+        line_out = btm._build_ssh_log_line("msg", "status-update", btm.DIRECTION_OUTBOUND)
+        assert "[OUTBOUND]" in line_out
+
+        line_in = btm._build_ssh_log_line("msg", "status-update", btm.DIRECTION_INBOUND)
+        assert "[INBOUND]" in line_in
+
     def test_long_content_truncated_to_200(self):
         long_content = "x" * 300
-        line = btm._build_ssh_log_line(long_content, "status-update")
+        line = btm._build_ssh_log_line(long_content, "status-update", btm.DIRECTION_INBOUND)
         # 200 chars of content + surrounding brackets and timestamp
         assert "x" * 200 in line
         assert "x" * 201 not in line
 
     def test_newlines_replaced_in_log_line(self):
-        line = btm._build_ssh_log_line("line1\nline2", "status-update")
+        line = btm._build_ssh_log_line("line1\nline2", "status-update", btm.DIRECTION_INBOUND)
         assert "\n" not in line
 
 
@@ -107,7 +123,10 @@ class TestTryHttp:
             mock_client.post.return_value = mock_response
             mock_client_cls.return_value = mock_client
 
-            result = btm._try_http({"sender": "SaharLobster", "content": "x", "tier": "TIER-BOT", "genre": "status-update"})
+            result = btm._try_http({
+                "sender": "SaharLobster", "content": "x", "tier": "TIER-BOT",
+                "genre": "status-update", "direction": "OUTBOUND",
+            })
 
         assert result is True
 
@@ -260,7 +279,7 @@ class TestTrySsh:
 class TestWriteLocalLog:
     def test_writes_json_entry(self, tmp_path):
         with patch.object(btm, "_LOCAL_LOG", tmp_path / "bot-talk-mirror.log"):
-            btm._write_local_log("test content", "status-update", "http_and_ssh_both_failed")
+            btm._write_local_log("test content", "status-update", btm.DIRECTION_OUTBOUND, "http_and_ssh_both_failed")
 
         log_file = tmp_path / "bot-talk-mirror.log"
         assert log_file.exists()
@@ -269,14 +288,22 @@ class TestWriteLocalLog:
         entry = json.loads(lines[0])
         assert entry["sender"] == "SaharLobster"
         assert entry["genre"] == "status-update"
+        assert entry["direction"] == "OUTBOUND"
         assert "test content" in entry["content"]
         assert entry["mirror_failed_reason"] == "http_and_ssh_both_failed"
+
+    def test_writes_direction_inbound(self, tmp_path):
+        with patch.object(btm, "_LOCAL_LOG", tmp_path / "bot-talk-mirror.log"):
+            btm._write_local_log("msg", "status-update", btm.DIRECTION_INBOUND, "http_and_ssh_both_failed")
+
+        entry = json.loads((tmp_path / "bot-talk-mirror.log").read_text().strip())
+        assert entry["direction"] == "INBOUND"
 
     def test_does_not_raise_on_write_error(self):
         """_write_local_log must never raise, even if the path is unwritable."""
         with patch.object(btm, "_LOCAL_LOG", Path("/nonexistent/readonly/path/log.log")):
             # Should not raise
-            btm._write_local_log("content", "status-update", "reason")
+            btm._write_local_log("content", "status-update", btm.DIRECTION_INBOUND, "reason")
 
 
 # ---------------------------------------------------------------------------
@@ -288,7 +315,7 @@ class TestDoMirror:
         with patch.object(btm, "_try_http", return_value=True) as mock_http, \
              patch.object(btm, "_try_ssh") as mock_ssh, \
              patch.object(btm, "_write_local_log") as mock_local:
-            btm._do_mirror("content", "status-update")
+            btm._do_mirror("content", "status-update", btm.DIRECTION_OUTBOUND)
 
         mock_http.assert_called_once()
         mock_ssh.assert_not_called()
@@ -298,7 +325,7 @@ class TestDoMirror:
         with patch.object(btm, "_try_http", return_value=False), \
              patch.object(btm, "_try_ssh", return_value=True) as mock_ssh, \
              patch.object(btm, "_write_local_log") as mock_local:
-            btm._do_mirror("content", "status-update")
+            btm._do_mirror("content", "status-update", btm.DIRECTION_INBOUND)
 
         mock_ssh.assert_called_once()
         mock_local.assert_not_called()
@@ -307,36 +334,71 @@ class TestDoMirror:
         with patch.object(btm, "_try_http", return_value=False), \
              patch.object(btm, "_try_ssh", return_value=False), \
              patch.object(btm, "_write_local_log") as mock_local:
-            btm._do_mirror("content", "status-update")
+            btm._do_mirror("content", "status-update", btm.DIRECTION_INBOUND)
 
         mock_local.assert_called_once()
 
+    def test_direction_passed_to_http_payload(self):
+        """_do_mirror must pass direction through to the HTTP payload."""
+        captured_payloads = []
+
+        def capturing_try_http(payload):
+            captured_payloads.append(payload)
+            return True
+
+        with patch.object(btm, "_try_http", side_effect=capturing_try_http):
+            btm._do_mirror("msg", "status-update", btm.DIRECTION_OUTBOUND)
+
+        assert len(captured_payloads) == 1
+        assert captured_payloads[0]["direction"] == "OUTBOUND"
+
+    def test_direction_inbound_passed_to_http_payload(self):
+        captured_payloads = []
+
+        def capturing_try_http(payload):
+            captured_payloads.append(payload)
+            return True
+
+        with patch.object(btm, "_try_http", side_effect=capturing_try_http):
+            btm._do_mirror("msg", "status-update", btm.DIRECTION_INBOUND)
+
+        assert captured_payloads[0]["direction"] == "INBOUND"
+
 
 # ---------------------------------------------------------------------------
-# mirror_outbound
+# mirror_outbound — direction must be OUTBOUND
 # ---------------------------------------------------------------------------
 
 class TestMirrorOutbound:
-    def test_spawns_daemon_thread(self):
+    def test_spawns_daemon_thread_with_outbound_direction(self):
         spawned = []
 
-        def capturing_spawn(content, genre):
-            spawned.append((content, genre))
+        def capturing_spawn(content, genre, direction):
+            spawned.append((content, genre, direction))
 
         with patch.object(btm, "_spawn_mirror", side_effect=capturing_spawn):
             btm.mirror_outbound("hello world", "telegram", 12345)
 
         assert len(spawned) == 1
-        content, genre = spawned[0]
+        content, genre, direction = spawned[0]
         assert "OUTBOUND" in content
         assert "TELEGRAM" in content
         assert "12345" in content
         assert "hello world" in content
         assert genre == "status-update"
+        assert direction == btm.DIRECTION_OUTBOUND
+
+    def test_direction_is_outbound(self):
+        """mirror_outbound must always set direction=OUTBOUND."""
+        captured = []
+        with patch.object(btm, "_spawn_mirror", side_effect=lambda c, genre, direction: captured.append(direction)):
+            btm.mirror_outbound("msg", "slack", 999)
+
+        assert captured[0] == "OUTBOUND"
 
     def test_includes_source_and_chat_id(self):
         spawned = []
-        with patch.object(btm, "_spawn_mirror", side_effect=lambda c, genre: spawned.append(c)):
+        with patch.object(btm, "_spawn_mirror", side_effect=lambda c, genre, direction: spawned.append(c)):
             btm.mirror_outbound("msg", "slack", 999)
 
         assert "SLACK" in spawned[0]
@@ -344,7 +406,7 @@ class TestMirrorOutbound:
 
 
 # ---------------------------------------------------------------------------
-# mirror_inbound — filtering
+# mirror_inbound — direction must be INBOUND, filtering still works
 # ---------------------------------------------------------------------------
 
 class TestMirrorInbound:
@@ -359,9 +421,18 @@ class TestMirrorInbound:
             msg["subtype"] = subtype
         return msg
 
+    def test_direction_is_inbound(self):
+        """mirror_inbound must always set direction=INBOUND."""
+        captured = []
+        with patch.object(btm, "_spawn_mirror", side_effect=lambda c, genre, direction: captured.append(direction)):
+            btm.mirror_inbound(self._make_msg(msg_type="text", text="hello"))
+
+        assert len(captured) == 1
+        assert captured[0] == "INBOUND"
+
     def test_text_message_is_mirrored(self):
         spawned = []
-        with patch.object(btm, "_spawn_mirror", side_effect=lambda c, genre: spawned.append(c)):
+        with patch.object(btm, "_spawn_mirror", side_effect=lambda c, genre, direction: spawned.append(c)):
             btm.mirror_inbound(self._make_msg(msg_type="text", text="hello"))
         assert len(spawned) == 1
         assert "hello" in spawned[0]
@@ -369,14 +440,14 @@ class TestMirrorInbound:
 
     def test_voice_message_is_mirrored_with_label(self):
         spawned = []
-        with patch.object(btm, "_spawn_mirror", side_effect=lambda c, genre: spawned.append(c)):
+        with patch.object(btm, "_spawn_mirror", side_effect=lambda c, genre, direction: spawned.append(c)):
             btm.mirror_inbound(self._make_msg(msg_type="voice"))
         assert len(spawned) == 1
         assert "voice message" in spawned[0]
 
     def test_photo_message_is_mirrored(self):
         spawned = []
-        with patch.object(btm, "_spawn_mirror", side_effect=lambda c, genre: spawned.append(c)):
+        with patch.object(btm, "_spawn_mirror", side_effect=lambda c, genre, direction: spawned.append(c)):
             btm.mirror_inbound(self._make_msg(msg_type="photo"))
         assert len(spawned) == 1
         assert "photo" in spawned[0]
@@ -385,37 +456,37 @@ class TestMirrorInbound:
         spawned = []
         msg = self._make_msg(msg_type="document")
         msg["file_name"] = "report.pdf"
-        with patch.object(btm, "_spawn_mirror", side_effect=lambda c, genre: spawned.append(c)):
+        with patch.object(btm, "_spawn_mirror", side_effect=lambda c, genre, direction: spawned.append(c)):
             btm.mirror_inbound(msg)
         assert "report.pdf" in spawned[0]
 
     def test_self_check_subtype_excluded(self):
         spawned = []
-        with patch.object(btm, "_spawn_mirror", side_effect=lambda c, genre: spawned.append(c)):
+        with patch.object(btm, "_spawn_mirror", side_effect=lambda c, genre, direction: spawned.append(c)):
             btm.mirror_inbound(self._make_msg(subtype="self_check"))
         assert len(spawned) == 0
 
     def test_subagent_notification_excluded(self):
         spawned = []
-        with patch.object(btm, "_spawn_mirror", side_effect=lambda c, genre: spawned.append(c)):
+        with patch.object(btm, "_spawn_mirror", side_effect=lambda c, genre, direction: spawned.append(c)):
             btm.mirror_inbound(self._make_msg(msg_type="text", subtype="subagent_notification"))
         assert len(spawned) == 0
 
     def test_subagent_result_type_excluded(self):
         spawned = []
-        with patch.object(btm, "_spawn_mirror", side_effect=lambda c, genre: spawned.append(c)):
+        with patch.object(btm, "_spawn_mirror", side_effect=lambda c, genre, direction: spawned.append(c)):
             btm.mirror_inbound(self._make_msg(msg_type="subagent_result"))
         assert len(spawned) == 0
 
     def test_subagent_error_type_excluded(self):
         spawned = []
-        with patch.object(btm, "_spawn_mirror", side_effect=lambda c, genre: spawned.append(c)):
+        with patch.object(btm, "_spawn_mirror", side_effect=lambda c, genre, direction: spawned.append(c)):
             btm.mirror_inbound(self._make_msg(msg_type="subagent_error"))
         assert len(spawned) == 0
 
     def test_includes_source_in_content(self):
         spawned = []
-        with patch.object(btm, "_spawn_mirror", side_effect=lambda c, genre: spawned.append(c)):
+        with patch.object(btm, "_spawn_mirror", side_effect=lambda c, genre, direction: spawned.append(c)):
             btm.mirror_inbound(self._make_msg(source="slack"))
         assert "SLACK" in spawned[0]
 
@@ -429,11 +500,40 @@ class TestSpawnMirror:
         """_spawn_mirror must start a daemon thread that calls _do_mirror."""
         called = threading.Event()
 
-        def fake_do_mirror(content, genre):
+        def fake_do_mirror(content, genre, direction):
             called.set()
 
         with patch.object(btm, "_do_mirror", side_effect=fake_do_mirror):
-            btm._spawn_mirror("test content", "status-update")
+            btm._spawn_mirror("test content", "status-update", btm.DIRECTION_OUTBOUND)
             called.wait(timeout=2.0)
 
         assert called.is_set(), "_do_mirror was not called within 2 seconds"
+
+    def test_direction_passed_to_do_mirror(self):
+        """_spawn_mirror must pass direction argument through to _do_mirror."""
+        captured = []
+
+        def fake_do_mirror(content, genre, direction):
+            captured.append(direction)
+
+        with patch.object(btm, "_do_mirror", side_effect=fake_do_mirror):
+            btm._spawn_mirror("test content", "status-update", btm.DIRECTION_INBOUND)
+            # Give the thread a moment to run
+            import time as _time; _time.sleep(0.1)
+
+        assert captured == [btm.DIRECTION_INBOUND]
+
+
+# ---------------------------------------------------------------------------
+# Direction constants are defined and have expected values
+# ---------------------------------------------------------------------------
+
+class TestDirectionConstants:
+    def test_direction_outbound_value(self):
+        assert btm.DIRECTION_OUTBOUND == "OUTBOUND"
+
+    def test_direction_inbound_value(self):
+        assert btm.DIRECTION_INBOUND == "INBOUND"
+
+    def test_constants_are_distinct(self):
+        assert btm.DIRECTION_OUTBOUND != btm.DIRECTION_INBOUND
