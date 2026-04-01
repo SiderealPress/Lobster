@@ -816,17 +816,9 @@ def wake_claude_if_hibernating() -> None:
             if result.returncode == 0:
                 log.info("wake_claude: 'systemctl restart lobster-claude' succeeded")
             else:
-                log.error(f"wake_claude: systemctl restart exited {result.returncode}: {result.stderr.strip()}")
-                raise RuntimeError("systemctl restart failed")
-        except Exception as e:
-            log.error(f"wake_claude: systemctl restart failed ({e}), trying start script")
-            # Fallback: call start-lobster.sh directly
-            if CLAUDE_WAKE_SCRIPT.exists():
-                subprocess.run(
-                    ["bash", str(CLAUDE_WAKE_SCRIPT)],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=60,
+                log.error(
+                    f"wake_claude: systemctl restart exited {result.returncode}: "
+                    f"{result.stderr.strip()} — wait_for_wake() will recover"
                 )
         except Exception as e:
             log.error(f"wake_claude: systemctl restart failed ({e}) — wait_for_wake() will recover")
