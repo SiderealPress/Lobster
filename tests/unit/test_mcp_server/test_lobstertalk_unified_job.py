@@ -98,7 +98,7 @@ def update_hot_mode(state: dict[str, Any], messages_received: int) -> dict[str, 
             state["hot_mode_activated_at"] = datetime.now(timezone.utc).isoformat()
     else:
         state["consecutive_empty_polls"] = state.get("consecutive_empty_polls", 0) + 1
-        if state["consecutive_empty_polls"] >= 5:
+        if state["consecutive_empty_polls"] >= 2:
             state["hot_mode"] = False
             state["hot_mode_activated_at"] = None
     return state
@@ -278,17 +278,17 @@ class TestHotModeLogic:
         result = update_hot_mode(state, messages_received=0)
         assert result["consecutive_empty_polls"] == 3
 
-    def test_five_empty_polls_disables_hot_mode(self):
-        state = self._base_state(hot_mode=True, consecutive_empty_polls=4)
+    def test_two_empty_polls_disables_hot_mode(self):
+        state = self._base_state(hot_mode=True, consecutive_empty_polls=1)
         result = update_hot_mode(state, messages_received=0)
-        assert result["consecutive_empty_polls"] == 5
+        assert result["consecutive_empty_polls"] == 2
         assert result["hot_mode"] is False
 
-    def test_four_empty_polls_does_not_disable_hot_mode(self):
-        """Hot mode requires exactly 5 consecutive empty polls to cool down."""
-        state = self._base_state(hot_mode=True, consecutive_empty_polls=3)
+    def test_one_empty_poll_does_not_disable_hot_mode(self):
+        """Hot mode requires 2 consecutive empty polls to cool down."""
+        state = self._base_state(hot_mode=True, consecutive_empty_polls=0)
         result = update_hot_mode(state, messages_received=0)
-        assert result["consecutive_empty_polls"] == 4
+        assert result["consecutive_empty_polls"] == 1
         assert result["hot_mode"] is True
 
     def test_hot_mode_activated_at_set_on_first_activation(self):
@@ -305,7 +305,7 @@ class TestHotModeLogic:
     def test_cooling_down_clears_hot_mode_activated_at(self):
         state = self._base_state(
             hot_mode=True,
-            consecutive_empty_polls=4,
+            consecutive_empty_polls=1,
             hot_mode_activated_at="2026-04-01T10:00:00Z",
         )
         result = update_hot_mode(state, messages_received=0)

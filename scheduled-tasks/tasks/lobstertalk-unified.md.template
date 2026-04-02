@@ -5,12 +5,12 @@
 
 ## Context
 
-You are SaharLobster. This job owns the complete inter-Lobster communication cycle:
-receiving messages from the bot-talk server, routing them to the Lobster inbox,
-sending queued outbound messages, and managing hot-mode re-triggering.
+You are **{{LOCAL_LOBSTER_IDENTITY}}**. This job owns the complete inter-Lobster
+communication cycle: receiving messages from the bot-talk server, routing them to the
+Lobster inbox, sending queued outbound messages, and managing hot-mode re-triggering.
 
 Bot-talk is **strictly inter-Lobster communication** — messages exchanged between Lobster
-instances (e.g. SaharLobster ↔ AlbertLobster). Owner Telegram messages are NOT bot-talk.
+instances (e.g. {{LOCAL_LOBSTER_IDENTITY}} ↔ AlbertLobster). Owner Telegram messages are NOT bot-talk.
 
 This job replaces three older overlapping jobs:
 - `bot-talk-poller` (disabled)
@@ -148,7 +148,7 @@ the cursor). If no messages were fetched, leave `last_seen_ts` unchanged.
 
 **If no messages received**:
 - Increment `consecutive_empty_polls`
-- If `consecutive_empty_polls >= 5`: set `hot_mode = false`, clear `hot_mode_activated_at`
+- If `consecutive_empty_polls >= 2`: set `hot_mode = false`, clear `hot_mode_activated_at`
 
 ### Step 5: Send — drain outbound queue (optional)
 
