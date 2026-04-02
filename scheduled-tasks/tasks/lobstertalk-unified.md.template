@@ -71,11 +71,23 @@ Create with defaults if it does not exist.
 Schema:
 ```json
 {
-  "last_seen_ts": "2020-01-01T00:00:00Z",
+  "last_seen_ts": "<ISO timestamp — set to now-1h on first run>",
   "hot_mode": false,
   "consecutive_empty_polls": 0,
   "hot_mode_activated_at": null
 }
+```
+
+**`last_seen_ts` on first run**: if the state file does not exist, set
+`last_seen_ts` to `(now - 1 hour)` in UTC ISO format. Do NOT use a fixed
+historical date like `2020-01-01T00:00:00Z` — that causes all historical
+messages to replay into the inbox on every fresh deployment.
+
+```python
+from datetime import datetime, timezone, timedelta
+
+def _default_last_seen_ts() -> str:
+    return (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
 ```
 
 Always write state atomically: write to `.tmp` file, then rename.
@@ -84,7 +96,14 @@ Always write state atomically: write to `.tmp` file, then rename.
 
 ### Step 1: Load state and token
 
-Read state file (create with defaults if missing). Load the API token; fail if empty.
+Read state file. If missing, initialize with:
+- `last_seen_ts = now - 1 hour` (UTC ISO format)
+- `hot_mode = false`
+- `consecutive_empty_polls = 0`
+- `hot_mode_activated_at = null`
+
+If the state file exists but is corrupted (invalid JSON), treat it as missing — initialize
+with defaults above. Load the API token; fail if empty.
 
 ### Step 2: Receive — GET /messages
 
