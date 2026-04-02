@@ -1016,24 +1016,43 @@ AUTH_CONSECUTIVE_RED_THRESHOLD=3  # Must fail this many consecutive 4-min checks
 
 check_auth_token() {
     local creds_file="$HOME/.claude/.credentials.json"
+
+    # Option B: .credentials.json is the single canonical auth store.
+    # RED immediately if the file is missing — no fallback to env vars.
     if [[ ! -f "$creds_file" ]]; then
-        log_warn "No credentials file found at $creds_file"
-        return 1
+        log_error "AUTH RED: No credentials file at $creds_file — run 'claude auth login'"
+        rm -f "$AUTH_FAILURE_COUNTER_FILE"
+        return 2
     fi
 
-    local remaining
-    remaining=$(python3 -c "
+    # Read token state: remaining seconds and whether a refresh token is present.
+    # A missing refresh_token means auto-refresh is disabled (Option B violation).
+    local remaining has_refresh
+    read -r remaining has_refresh < <(python3 -c "
 import json, time
 try:
     d = json.load(open('$creds_file'))
-    ea = d.get('claudeAiOauth', {}).get('expiresAt', 0) / 1000
-    print(f'{ea - time.time():.0f}')
+    oauth = d.get('claudeAiOauth', {})
+    ea = oauth.get('expiresAt', 0) / 1000
+    has_rt = '1' if oauth.get('refreshToken') else '0'
+    print(f'{ea - time.time():.0f}', has_rt)
 except:
-    print('-1')
+    print('-1', '0')
 " 2>/dev/null)
 
+    # No refresh token means this is a degraded credential set (e.g. from
+    # CLAUDE_CODE_OAUTH_TOKEN flow). Report RED immediately so the operator
+    # can run `claude auth login` to get a full credential set.
+    if [[ "${has_refresh:-0}" == "0" ]]; then
+        log_error "AUTH RED: credentials.json has no refresh_token — run 'claude auth login' to restore full OAuth"
+        rm -f "$AUTH_FAILURE_COUNTER_FILE"
+        return 2
+    fi
+
     if [[ "${remaining:-0}" -lt 0 || "${remaining:-0}" -lt 3600 ]]; then
-        # Token is expired or expiring very soon — increment consecutive counter
+        # Token is expired or expiring very soon — increment consecutive counter.
+        # With a refresh token present, Claude will auto-refresh on next API call,
+        # so we use the consecutive-failure guard to avoid false-positive alerts.
         local failure_count=0
         if [[ -f "$AUTH_FAILURE_COUNTER_FILE" ]]; then
             failure_count=$(cat "$AUTH_FAILURE_COUNTER_FILE" 2>/dev/null || echo 0)
@@ -1042,19 +1061,14 @@ except:
         echo "$failure_count" > "$AUTH_FAILURE_COUNTER_FILE"
 
         if [[ "${remaining:-0}" -lt 0 ]]; then
-            log_error "AUTH: Token has EXPIRED (consecutive: $failure_count/$AUTH_CONSECUTIVE_RED_THRESHOLD)"
+            log_error "AUTH: Access token EXPIRED (refresh_token present; consecutive: $failure_count/$AUTH_CONSECUTIVE_RED_THRESHOLD)"
         else
-            log_error "AUTH RED: Token expires in $((remaining / 60)) minutes (consecutive: $failure_count/$AUTH_CONSECUTIVE_RED_THRESHOLD)"
+            log_error "AUTH YELLOW: Access token expires in $((remaining / 60)) minutes (consecutive: $failure_count/$AUTH_CONSECUTIVE_RED_THRESHOLD)"
         fi
 
-        # Only return RED (which triggers a Telegram alert) after consecutive failures.
-        # On the first few hits, return YELLOW — Claude likely hasn't needed to
-        # refresh yet, or will refresh on next API call.
+        # Only return RED after consecutive failures — Claude refreshes lazily on
+        # actual API calls, so the file may show stale expiry while Claude is healthy.
         if [[ $failure_count -ge $AUTH_CONSECUTIVE_RED_THRESHOLD ]]; then
-            # Reset counter after crossing the threshold so we don't spam —
-            # the main loop will send one Telegram alert, then the counter
-            # resets. If the problem persists, it will escalate again after
-            # another AUTH_CONSECUTIVE_RED_THRESHOLD checks.
             rm -f "$AUTH_FAILURE_COUNTER_FILE"
             return 2
         else
@@ -1063,12 +1077,12 @@ except:
     elif [[ "${remaining:-0}" -lt 14400 ]]; then
         # Token healthy but within 4-hour warning window: reset counter, stay YELLOW
         rm -f "$AUTH_FAILURE_COUNTER_FILE"
-        log_warn "AUTH YELLOW: Token expires in $((remaining / 3600)) hours"
+        log_warn "AUTH YELLOW: Access token expires in $((remaining / 3600))h (refresh_token OK)"
         return 1
     else
-        # Token is healthy: reset consecutive failure counter
+        # Token is healthy and refresh token present: full GREEN
         rm -f "$AUTH_FAILURE_COUNTER_FILE"
-        log_info "AUTH OK: Token expires in $((remaining / 3600)) hours"
+        log_info "AUTH OK: Access token expires in $((remaining / 3600))h, refresh_token present"
         return 0
     fi
 }
