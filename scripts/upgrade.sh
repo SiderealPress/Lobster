@@ -2325,6 +2325,41 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
         fi
     fi
 
+    # Migration 65: Replace 3 legacy LobsterTalk jobs with unified lobstertalk-unified.
+    # bot-talk-poller, bot-talk-realtime-forwarder, and lobstertalk-incoming-handler were
+    # three overlapping jobs that collectively polled, forwarded, and handled inter-Lobster
+    # messages (PR #1374). They are replaced by a single lobstertalk-unified job that owns
+    # the complete inbound+outbound cycle. This migration stops/disables the old timers and
+    # enables the new one.
+    local _old_lt_jobs=("bot-talk-poller" "bot-talk-realtime-forwarder" "lobstertalk-incoming-handler")
+    local _lt_migrated=0
+    for _old_job in "${_old_lt_jobs[@]}"; do
+        local _old_unit="lobster-${_old_job}.timer"
+        if systemctl list-unit-files "${_old_unit}" 2>/dev/null | grep -q "${_old_unit}"; then
+            substep "Disabling legacy job: ${_old_job}..."
+            sudo systemctl stop "${_old_unit}" 2>/dev/null || true
+            sudo systemctl disable "${_old_unit}" 2>/dev/null || true
+            _lt_migrated=$((_lt_migrated + 1))
+        fi
+    done
+    local _unified_unit="lobster-lobstertalk-unified.timer"
+    if systemctl list-unit-files "${_unified_unit}" 2>/dev/null | grep -q "${_unified_unit}"; then
+        if ! systemctl is-enabled --quiet "${_unified_unit}" 2>/dev/null; then
+            substep "Enabling lobstertalk-unified timer..."
+            sudo systemctl enable "${_unified_unit}" 2>/dev/null && \
+                sudo systemctl start "${_unified_unit}" 2>/dev/null || \
+                warn "Failed to enable ${_unified_unit} — register via create_scheduled_job if needed"
+            _lt_migrated=$((_lt_migrated + 1))
+        fi
+    else
+        substep "lobstertalk-unified timer unit not found — registering via create_scheduled_job..."
+        warn "lobster-lobstertalk-unified.timer not installed. Run install.sh or register lobstertalk-unified manually via create_scheduled_job (schedule: '0 * * * *')."
+    fi
+    if [ "${_lt_migrated}" -gt 0 ]; then
+        migrated=$((migrated + _lt_migrated))
+        success "LobsterTalk job migration: disabled ${#_old_lt_jobs[@]} legacy jobs, enabled lobstertalk-unified"
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
