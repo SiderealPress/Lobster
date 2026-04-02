@@ -2387,135 +2387,39 @@ if [ "$AUTH_METHOD" = "oauth" ] && [ "$EXISTING_OAUTH" != true ]; then
     info "Starting OAuth authentication..."
     echo ""
 
-    # Detect headless environment
-    IS_HEADLESS=false
-    if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ] && ! command -v open &>/dev/null; then
-        IS_HEADLESS=true
-        echo -e "${YELLOW}Headless server detected (no display).${NC}"
-        echo ""
-        echo "For headless authentication, we recommend using 'claude setup-token'."
-        echo "It will display a URL — open it in any browser (phone, laptop, etc.),"
-        echo "authorize, then paste the code back here when prompted."
-        echo ""
-        echo -e "Alternatively, you can use an ${BOLD}API key${NC} instead (billed per-token)."
-        echo ""
-        echo "  1) Try setup-token (OAuth via URL + code paste)"
-        echo "  2) Use an API key instead"
-        echo ""
-        read -p "Choose [1/2]: " HEADLESS_CHOICE
-        if [ "$HEADLESS_CHOICE" = "2" ]; then
-            AUTH_METHOD="apikey_fallback"
-        fi
-    fi
-
     if [ "$AUTH_METHOD" = "oauth" ]; then
         echo ""
         echo "Claude Code will generate an authentication URL."
         echo -e "Open it in ${BOLD}any browser${NC} (phone, laptop, etc.) and sign in with your Anthropic account."
         echo ""
+        echo "This writes credentials to ~/.claude/.credentials.json, which supports"
+        echo "automatic token refresh — no manual token management required."
+        echo ""
         read -p "Press Enter to continue..."
         echo ""
 
-        if [ "$IS_HEADLESS" = true ]; then
-            # --- Headless path: setup-token ---
-            # Two issues with setup-token inside a bash script:
-            # 1. It needs a pseudo-TTY (uses Ink/React-for-CLI which requires raw mode).
-            #    Fix: `script -qc` provides a pseudo-TTY.
-            # 2. It does NOT save credentials to ~/.claude/.credentials.json by design.
-            #    It only outputs a long-lived OAuth token to stdout.
-            #    See: https://github.com/anthropics/claude-code/issues/19274
-            #    Fix: Capture the token and persist it to config.env.
-
-            SETUP_TMPFILE=$(mktemp)
-            # Clean up temp file if the script is killed mid-auth
-            trap 'rm -f "$SETUP_TMPFILE"' EXIT INT TERM
-            info "Running 'claude setup-token' with pseudo-TTY (via 'script')..."
-            echo ""
-
-            # Run setup-token inside a pseudo-TTY so Ink's raw mode works.
-            # The 'script' command records all terminal output to SETUP_TMPFILE.
-            script -qc "claude setup-token" "$SETUP_TMPFILE"
-            SETUP_EXIT=$?
-
-            # Extract the OAuth token from setup-token output.
-            # Token format: sk-ant-oat01-<base64-chars>
-            # Strip ANSI escape codes first, then grep for the token.
-            CAPTURED_TOKEN=""
-            if [ -f "$SETUP_TMPFILE" ]; then
-                CAPTURED_TOKEN=$(sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' "$SETUP_TMPFILE" \
-                    | grep -oP 'sk-ant-oat01-[A-Za-z0-9_-]+' | head -1)
-                rm -f "$SETUP_TMPFILE"
-            fi
-
-            if [ -n "$CAPTURED_TOKEN" ]; then
-                # Save the token so Claude Code can use it at runtime
-                export CLAUDE_CODE_OAUTH_TOKEN="$CAPTURED_TOKEN"
-
-                # Persist to config.env so systemd service picks it up
-                if [ -f "$CONFIG_FILE" ]; then
-                    echo "" >> "$CONFIG_FILE"
-                    echo "# OAuth token from claude setup-token (long-lived)" >> "$CONFIG_FILE"
-                    echo "export CLAUDE_CODE_OAUTH_TOKEN=$CAPTURED_TOKEN" >> "$CONFIG_FILE"
-                fi
-
-                success "OAuth token captured and saved to config.env!"
+        # --- auth login (all environments) ---
+        # Option B: always use `claude auth login`, which saves a full OAuth credential
+        # set (including refresh_token) to ~/.claude/.credentials.json. This enables
+        # Claude Code's built-in token refresh — no CLAUDE_CODE_OAUTH_TOKEN env var needed.
+        #
+        # Both headless and desktop environments work: auth login displays a URL and
+        # polls for the callback automatically, so no browser needs to be open locally.
+        if script -qc "claude auth login" /dev/null; then
+            if claude --print -p "ping" --max-turns 1 &>/dev/null 2>&1; then
+                success "OAuth authentication successful (verified)!"
             else
-                # Token extraction failed — fall back to manual paste
-                warn "Could not automatically extract the OAuth token from setup-token output."
-                echo ""
-                echo "If setup-token displayed a token (starts with sk-ant-oat01-...), paste it now."
-                echo "If it failed entirely, press Enter to fall back to API key."
-                echo ""
-                read -p "Paste token (or Enter to skip): " MANUAL_TOKEN
-
-                if [[ "$MANUAL_TOKEN" == sk-ant-* ]]; then
-                    CAPTURED_TOKEN="$MANUAL_TOKEN"
-                    export CLAUDE_CODE_OAUTH_TOKEN="$CAPTURED_TOKEN"
-                    if [ -f "$CONFIG_FILE" ]; then
-                        echo "" >> "$CONFIG_FILE"
-                        echo "# OAuth token from claude setup-token (long-lived, manually pasted)" >> "$CONFIG_FILE"
-                        echo "export CLAUDE_CODE_OAUTH_TOKEN=$CAPTURED_TOKEN" >> "$CONFIG_FILE"
-                    fi
-                    success "OAuth token saved to config.env!"
-                else
-                    warn "No valid token provided."
-                    echo "Falling back to API key..."
-                    AUTH_METHOD="apikey_fallback"
-                fi
-            fi
-
-            # Verify auth works if we got a token
-            if [ "$AUTH_METHOD" = "oauth" ] && [ -n "${CAPTURED_TOKEN:-}" ]; then
-                if claude --print -p "ping" --max-turns 1 &>/dev/null 2>&1; then
-                    success "OAuth authentication verified!"
-                else
-                    warn "Token was saved but API verification failed."
-                    warn "The token may need a moment to activate, or the OAuth flow didn't complete."
-                    echo ""
-                    echo "Falling back to API key..."
-                    AUTH_METHOD="apikey_fallback"
-                fi
-            fi
-        else
-            # --- Non-headless path: auth login ---
-            # auth login saves credentials to ~/.claude/.credentials.json automatically,
-            # but still needs a pseudo-TTY when run inside a script (Ink/raw mode).
-            if script -qc "claude auth login" /dev/null; then
-                if claude --print -p "ping" --max-turns 1 &>/dev/null 2>&1; then
-                    success "OAuth authentication successful (verified)!"
-                else
-                    warn "Auth command completed but API verification failed."
-                    warn "The token may have expired or the code exchange didn't complete."
-                    echo ""
-                    echo "Falling back to API key..."
-                    AUTH_METHOD="apikey_fallback"
-                fi
-            else
-                warn "OAuth authentication failed or was cancelled."
+                warn "Auth command completed but API verification failed."
+                warn "The token may have expired or the code exchange didn't complete."
                 echo ""
                 echo "Falling back to API key..."
                 AUTH_METHOD="apikey_fallback"
             fi
+        else
+            warn "OAuth authentication failed or was cancelled."
+            echo ""
+            echo "Falling back to API key..."
+            AUTH_METHOD="apikey_fallback"
         fi
     fi
 fi
