@@ -931,23 +931,23 @@ check_outbox_drain() {
 }
 
 # Check 6: wait_for_messages freshness
-# The dispatcher is considered "fresh" if EITHER:
+# The dispatcher is considered "fresh" if ANY of:
 #   (a) the claude-heartbeat file was touched recently — inbox_server.py touches
 #       it at the start of every wait_for_messages call, OR
 #   (b) last_processed_at in lobster-state.json was updated recently — written
-#       by inbox_server.py on every successful mark_processed call (issue #694).
+#       by inbox_server.py on every successful mark_processed call (issue #694), OR
+#   (c) last_thinking_at in lobster-state.json was updated recently — written by
+#       hooks/thinking-heartbeat.py on every PostToolUse event (issue #1401).
 #
-# Using both signals prevents a spurious restart when the dispatcher is actively
-# processing a long batch of messages (e.g. 20 cron pings) without returning to
-# wait_for_messages.  Before this fix, a long batch could exhaust the suppression
-# window mid-batch, triggering a false-positive health-check restart even though
-# the dispatcher was busy and healthy.
+# Signals (b) and (c) together cover the full dispatcher lifecycle: (b) fires
+# during message processing batches; (c) fires during the reasoning phase (thinking,
+# composing, spawning subagents) when no WFM or mark_processed calls are made.
 #
-# The effective freshness timestamp is max(wfm_heartbeat_mtime, last_processed_at).
+# The effective freshness timestamp is max(wfm_heartbeat_mtime, last_processed_at,
+# last_thinking_at).
 #
 # Gracefully skips the check if the heartbeat file does not exist (fresh install).
-# Gracefully ignores a missing or unparseable last_processed_at (field absent on
-# older installs before this change was deployed).
+# Gracefully ignores missing or unparseable state file fields (backward compat).
 #
 # Returns: 0=GREEN (fresh or skipped), 2=RED (stale)
 check_wfm_freshness() {
@@ -963,11 +963,12 @@ check_wfm_freshness() {
         return 0
     fi
 
-    # Read the per-message heartbeat written by mark_processed (issue #694).
-    # Use whichever signal is more recent as the effective freshness epoch.
+    # Read per-message heartbeat (mark_processed, issue #694) and PostToolUse
+    # thinking heartbeat (issue #1401) from lobster-state.json.
     local last_processed_epoch=0
+    local last_thinking_epoch=0
     if [[ -f "$LOBSTER_STATE_FILE" ]]; then
-        local last_processed_at
+        local last_processed_at last_thinking_at
         last_processed_at=$(python3 -c "
 import json, sys
 try:
@@ -976,18 +977,35 @@ try:
 except Exception:
     print('')
 " 2>/dev/null)
+        last_thinking_at=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('$LOBSTER_STATE_FILE'))
+    print(d.get('last_thinking_at', ''))
+except Exception:
+    print('')
+" 2>/dev/null)
         if [[ -n "$last_processed_at" ]]; then
             last_processed_epoch=$(date -d "$last_processed_at" +%s 2>/dev/null) || last_processed_epoch=0
         fi
+        if [[ -n "$last_thinking_at" ]]; then
+            last_thinking_epoch=$(date -d "$last_thinking_at" +%s 2>/dev/null) || last_thinking_epoch=0
+        fi
     fi
 
-    # Effective freshness = most recent of the two signals
-    local effective_last
-    if [[ "$last_processed_epoch" -gt "$last_heartbeat" ]]; then
+    # Effective freshness = most recent of all three signals
+    local effective_last="$last_heartbeat"
+    local effective_source="WFM heartbeat"
+    if [[ "$last_processed_epoch" -gt "$effective_last" ]]; then
         effective_last="$last_processed_epoch"
-        log_info "WFM freshness: using last_processed_at signal (more recent than WFM heartbeat)"
-    else
-        effective_last="$last_heartbeat"
+        effective_source="last_processed_at"
+    fi
+    if [[ "$last_thinking_epoch" -gt "$effective_last" ]]; then
+        effective_last="$last_thinking_epoch"
+        effective_source="last_thinking_at"
+    fi
+    if [[ "$effective_source" != "WFM heartbeat" ]]; then
+        log_info "WFM freshness: using $effective_source signal (more recent than WFM heartbeat)"
     fi
 
     local now age
@@ -995,11 +1013,11 @@ except Exception:
     age=$(( now - effective_last ))
 
     if [[ $age -gt $WFM_STALE_SECONDS ]]; then
-        log_error "RED: dispatcher stale — last activity ${age}s ago (threshold: ${WFM_STALE_SECONDS}s, wfm=${last_heartbeat}, last_processed=${last_processed_epoch})"
+        log_error "RED: dispatcher stale — last activity ${age}s ago (threshold: ${WFM_STALE_SECONDS}s, wfm=${last_heartbeat}, last_processed=${last_processed_epoch}, last_thinking=${last_thinking_epoch})"
         return 2
     fi
 
-    log_info "WFM freshness OK: last dispatcher activity ${age}s ago"
+    log_info "WFM freshness OK: last dispatcher activity ${age}s ago (via $effective_source)"
     return 0
 }
 
