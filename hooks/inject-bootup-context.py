@@ -22,6 +22,15 @@ write-dispatcher-session-id.py ran first. The write is idempotent: if
 write-dispatcher-session-id.py already ran (position 0 in settings.json),
 the file already has the correct ID and this is a no-op; if this hook runs
 first for any reason, the ID is written here and downstream hooks benefit.
+
+Post-compaction sentinel fallback (Option 3, issue #1375):
+After context compaction, CC assigns a NEW session_id to the post-compact
+session.  on-compact.py writes the new UUID to both state files (Option 1),
+but as defense-in-depth this hook also checks for the compact-pending sentinel
+file.  If the sentinel exists AND LOBSTER_MAIN_SESSION=1, the session is
+treated as a post-compact dispatcher session regardless of the ID-match result.
+This bypasses the chicken-and-egg timing problem entirely for the post-compact
+case and ensures dispatcher bootup is always injected when it should be.
 """
 
 import json
@@ -45,6 +54,39 @@ USER_DISPATCHER_BOOTUP = USER_CONFIG_DIR / "user.dispatcher.bootup.md"
 USER_SUBAGENT_BOOTUP = USER_CONFIG_DIR / "user.subagent.bootup.md"
 
 HOOK_NAME = "inject-bootup-context"
+
+# Compact-pending sentinel written by on-compact.py for dispatcher compactions only.
+# Used as the Option 3 fallback: sentinel present + LOBSTER_MAIN_SESSION=1 → dispatcher.
+COMPACT_PENDING_SENTINEL = Path(os.path.expanduser("~/messages/config/compact-pending"))
+
+
+def _is_post_compact_dispatcher() -> bool:
+    """Return True if this looks like a post-compaction dispatcher session.
+
+    This is the Option 3 sentinel-based fallback for issue #1375.  It
+    bypasses the session-ID matching checks entirely for the post-compact case.
+
+    Conditions (both required):
+    - LOBSTER_MAIN_SESSION=1 is set in the environment (marks sessions started
+      by claude-persistent.sh as the dispatcher or its subagents).
+    - The compact-pending sentinel file exists.  on-compact.py writes this
+      file only for dispatcher compactions, so its presence is a reliable
+      dispatcher-scoped signal.
+
+    Why this is safe for subagents:
+    Subagent sessions that compact (rare) also have LOBSTER_MAIN_SESSION=1
+    and the sentinel will be present from the dispatcher's last compaction.
+    However, the sentinel is removed when the dispatcher calls
+    wait_for_messages() via post-compact-gate.py, so by the time a subagent
+    is spawned after a compaction the sentinel is normally gone.  In the
+    narrow window where a subagent starts while the sentinel is still present,
+    injecting dispatcher bootup is low-cost: the subagent will receive extra
+    context that does not conflict with its own bootup.  This is the same
+    acceptable trade-off documented in _is_dispatcher_compact().
+    """
+    if os.environ.get("LOBSTER_MAIN_SESSION", "") != "1":
+        return False
+    return COMPACT_PENDING_SENTINEL.exists()
 
 
 def _read_file_safe(path: Path, label: str) -> str | None:
@@ -89,6 +131,19 @@ def main() -> None:
         hook_input = {}
 
     is_dispatcher = session_role.is_dispatcher(hook_input)
+
+    # Option 3 fallback (issue #1375): if the compact-pending sentinel exists
+    # and LOBSTER_MAIN_SESSION=1, treat this as a post-compact dispatcher session
+    # regardless of what is_dispatcher() returned.  This covers the case where
+    # Option 1 (writing the new UUID in on-compact.py) hasn't propagated yet or
+    # fails silently, and provides defense-in-depth for the post-compact window.
+    if not is_dispatcher and _is_post_compact_dispatcher():
+        print(
+            f"[{HOOK_NAME}] sentinel fallback: compact-pending exists + "
+            "LOBSTER_MAIN_SESSION=1; treating as post-compact dispatcher",
+            file=sys.stderr,
+        )
+        is_dispatcher = True
 
     # If this is the dispatcher session, write the session ID to the marker file.
     # This makes the hook self-sufficient regardless of whether
