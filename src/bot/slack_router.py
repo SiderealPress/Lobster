@@ -285,18 +285,6 @@ def handle_message_events(body, say, logger):
 
     write_message_to_inbox(msg_data)
 
-    # Send acknowledgment reaction
-    try:
-        client.reactions_add(
-            channel=channel_id,
-            timestamp=ts,
-            name="eyes"  # eyes emoji to show message was received
-        )
-    except SlackApiError as e:
-        # Ignore if reaction already exists
-        if e.response.get("error") != "already_reacted":
-            log.warning(f"Could not add reaction: {e}")
-
 
 @app.event("app_mention")
 def handle_app_mention(body, say, logger):
