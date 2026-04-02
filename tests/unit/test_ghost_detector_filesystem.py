@@ -555,3 +555,170 @@ class TestMarkFailedAllGhostsStaleNoFile:
         assert marked == []
         out = capsys.readouterr().out
         assert "No GHOST_CONFIRMED or STALE_NO_FILE" in out
+
+
+# ---------------------------------------------------------------------------
+# load_live_dispatcher_session_id
+# ---------------------------------------------------------------------------
+
+
+class TestLoadLiveDispatcherSessionId:
+    """Tests for the helper that reads dispatcher-claude-session-id."""
+
+    def test_returns_session_id_from_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Returns the stripped session ID when the file exists and is non-empty."""
+        session_id_file = tmp_path / "dispatcher-claude-session-id"
+        session_id_file.write_text("63ba2c62-f965-4521-8f7b-807c5c316f1d\n")
+
+        monkeypatch.setattr(
+            gd.Path,
+            "home",
+            classmethod(lambda cls: tmp_path),
+        )
+        # Patch the actual path used in the function
+        monkeypatch.setattr(
+            gd,
+            "load_live_dispatcher_session_id",
+            lambda: session_id_file.read_text().strip() or None,
+        )
+        result = gd.load_live_dispatcher_session_id()
+        assert result == "63ba2c62-f965-4521-8f7b-807c5c316f1d"
+
+    def test_returns_none_when_file_missing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Returns None when the file does not exist (no guard applied)."""
+        missing_file = tmp_path / "nonexistent" / "dispatcher-claude-session-id"
+        monkeypatch.setattr(
+            gd,
+            "load_live_dispatcher_session_id",
+            lambda: None,
+        )
+        result = gd.load_live_dispatcher_session_id()
+        assert result is None
+
+    def test_returns_none_when_file_empty(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Returns None when the file exists but is empty."""
+        session_id_file = tmp_path / "dispatcher-claude-session-id"
+        session_id_file.write_text("   \n")
+        monkeypatch.setattr(
+            gd,
+            "load_live_dispatcher_session_id",
+            lambda: None,
+        )
+        result = gd.load_live_dispatcher_session_id()
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Live dispatcher guard in mark_failed_all_ghosts
+# ---------------------------------------------------------------------------
+
+
+class TestLiveDispatcherGuard:
+    """The live dispatcher session must be skipped in the STALE_NO_FILE sweep."""
+
+    LIVE_SESSION_ID = "63ba2c62-f965-4521-8f7b-807c5c316f1d"
+
+    def _make_stale_classified(self, agent_id: str) -> gd.ClassifiedAgent:
+        row = gd.AgentRow(
+            agent_id=agent_id,
+            task_id=None,
+            description=f"Lobster dispatcher (registered by SessionStart hook)",
+            chat_id="0",
+            status="running",
+            spawned_at="2026-03-15T09:00:00+00:00",
+            output_file=None,
+            last_seen_at=None,
+        )
+        return gd.ClassifiedAgent(
+            row=row,
+            classification="STALE_NO_FILE",
+            age_minutes=180.0,
+            output_file_age_minutes=None,
+        )
+
+    def test_live_dispatcher_session_is_skipped(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The session matching dispatcher-claude-session-id must not be marked failed."""
+        marked: list[str] = []
+        monkeypatch.setattr(gd, "mark_agent_failed", lambda db_path, agent_id: marked.append(agent_id))
+        monkeypatch.setattr(gd, "drop_inbox_message", lambda payload: None)
+        monkeypatch.setattr(gd, "load_live_dispatcher_session_id", lambda: self.LIVE_SESSION_ID)
+
+        live_session = self._make_stale_classified(self.LIVE_SESSION_ID)
+        fake_db = tmp_path / "agent_sessions.db"
+
+        gd.mark_failed_all_ghosts([], fake_db, stale_no_file=[live_session])
+
+        assert self.LIVE_SESSION_ID not in marked
+        assert marked == []
+
+    def test_stale_dispatcher_sessions_still_marked_when_not_live(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Old dispatcher sessions with a different ID are still marked failed."""
+        marked: list[str] = []
+        monkeypatch.setattr(gd, "mark_agent_failed", lambda db_path, agent_id: marked.append(agent_id))
+        monkeypatch.setattr(gd, "drop_inbox_message", lambda payload: None)
+        monkeypatch.setattr(gd, "load_live_dispatcher_session_id", lambda: self.LIVE_SESSION_ID)
+
+        old_session = self._make_stale_classified("old-dead-session-uuid-aabbccdd")
+        fake_db = tmp_path / "agent_sessions.db"
+
+        gd.mark_failed_all_ghosts([], fake_db, stale_no_file=[old_session])
+
+        assert "old-dead-session-uuid-aabbccdd" in marked
+
+    def test_mixed_live_and_stale_only_stale_marked(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With one live session and one dead session, only the dead one is marked."""
+        marked: list[str] = []
+        monkeypatch.setattr(gd, "mark_agent_failed", lambda db_path, agent_id: marked.append(agent_id))
+        monkeypatch.setattr(gd, "drop_inbox_message", lambda payload: None)
+        monkeypatch.setattr(gd, "load_live_dispatcher_session_id", lambda: self.LIVE_SESSION_ID)
+
+        live_session = self._make_stale_classified(self.LIVE_SESSION_ID)
+        dead_session = self._make_stale_classified("dead-dispatcher-session-0000")
+        fake_db = tmp_path / "agent_sessions.db"
+
+        gd.mark_failed_all_ghosts([], fake_db, stale_no_file=[live_session, dead_session])
+
+        assert self.LIVE_SESSION_ID not in marked
+        assert "dead-dispatcher-session-0000" in marked
+
+    def test_guard_disabled_when_session_file_missing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When dispatcher-claude-session-id is absent, no guard is applied — all stale sessions are marked."""
+        marked: list[str] = []
+        monkeypatch.setattr(gd, "mark_agent_failed", lambda db_path, agent_id: marked.append(agent_id))
+        monkeypatch.setattr(gd, "drop_inbox_message", lambda payload: None)
+        # Simulate missing file — load_live_dispatcher_session_id returns None
+        monkeypatch.setattr(gd, "load_live_dispatcher_session_id", lambda: None)
+
+        session_a = self._make_stale_classified("session-aaa")
+        session_b = self._make_stale_classified("session-bbb")
+        fake_db = tmp_path / "agent_sessions.db"
+
+        gd.mark_failed_all_ghosts([], fake_db, stale_no_file=[session_a, session_b])
+
+        assert "session-aaa" in marked
+        assert "session-bbb" in marked
+
+    def test_skip_message_printed_when_live_session_found(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """A skip notice is printed when the live dispatcher session is excluded."""
+        monkeypatch.setattr(gd, "mark_agent_failed", lambda db_path, agent_id: None)
+        monkeypatch.setattr(gd, "drop_inbox_message", lambda payload: None)
+        monkeypatch.setattr(gd, "load_live_dispatcher_session_id", lambda: self.LIVE_SESSION_ID)
+
+        live_session = self._make_stale_classified(self.LIVE_SESSION_ID)
+        fake_db = tmp_path / "agent_sessions.db"
+
+        gd.mark_failed_all_ghosts([], fake_db, stale_no_file=[live_session])
+
+        out = capsys.readouterr().out
+        assert "Skipping" in out
+        assert "live" in out.lower() or "dispatcher" in out.lower()

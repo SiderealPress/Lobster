@@ -788,6 +788,25 @@ def mark_failed_unregistered(agent: UnregisteredAgent) -> None:
     print(f"  [mark-failed] Notification queued for unregistered agent {agent.agent_id[:16]}...")
 
 
+def load_live_dispatcher_session_id() -> str | None:
+    """Return the current live dispatcher's session ID, or None if unavailable.
+
+    The live dispatcher writes its Claude session ID to
+    ~/lobster-workspace/data/dispatcher-claude-session-id on startup. This
+    ID matches the agent_id (primary key) in agent_sessions for dispatcher
+    rows (they use the Claude session UUID as their DB id).
+
+    Returns None if the file does not exist or cannot be read — callers must
+    handle this gracefully (i.e., do not apply a guard if the file is absent).
+    """
+    session_id_file = Path.home() / "lobster-workspace" / "data" / "dispatcher-claude-session-id"
+    try:
+        content = session_id_file.read_text().strip()
+        return content if content else None
+    except (OSError, IOError):
+        return None
+
+
 def mark_failed_all_ghosts(
     confirmed: list[ClassifiedAgent],
     db_path: Path,
@@ -801,8 +820,25 @@ def mark_failed_all_ghosts(
     Dispatcher sessions always land in STALE_NO_FILE (they are long-running processes
     that never register an output file), which is why --mark-failed would previously
     leave stale dispatcher sessions in status=running indefinitely.
+
+    The live dispatcher session is always excluded from the STALE_NO_FILE sweep:
+    its session ID is read from dispatcher-claude-session-id and any matching
+    entry is skipped. If the file is absent the guard is disabled (no exclusion).
     """
     stale_no_file = stale_no_file or []
+
+    # Guard: exclude the current live dispatcher session from the sweep.
+    live_dispatcher_id = load_live_dispatcher_session_id()
+    if live_dispatcher_id and stale_no_file:
+        filtered_stale = [a for a in stale_no_file if a.row.agent_id != live_dispatcher_id]
+        skipped = len(stale_no_file) - len(filtered_stale)
+        if skipped:
+            print(
+                f"\n  [mark-failed] Skipping {skipped} STALE_NO_FILE session(s) matching live "
+                f"dispatcher session ID ({live_dispatcher_id[:16]}...) — still running."
+            )
+        stale_no_file = filtered_stale
+
     to_fail = confirmed + stale_no_file
 
     if not to_fail:
