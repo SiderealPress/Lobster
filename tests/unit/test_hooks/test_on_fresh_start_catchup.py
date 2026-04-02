@@ -518,3 +518,38 @@ class TestClearStaleClaim:
 
         # Stale claim row must have been cleared
         assert not _row_exists(db, "0_startup_compact")
+
+    def test_inject_compact_reminder_removes_stale_processing_file(self, tmp_path):
+        """End-to-end: stale processing/ file is removed before re-injection.
+
+        A crashed or compacted dispatcher session may leave the message file in
+        processing/ instead of inbox/.  Without cleanup the new dispatcher's
+        mark_processing would fail because the file already exists at the
+        destination path.  The fix removes any stale processing/ file before
+        writing a fresh copy to inbox/.
+        """
+        inbox = tmp_path / "inbox"
+        inbox.mkdir()
+        processing = tmp_path / "processing"
+        processing.mkdir()
+        db = tmp_path / "config" / "agent_sessions.db"
+        _make_claims_db(db)
+
+        # Simulate a stale processing file from the previous dispatcher session
+        stale_file = processing / "0_startup_compact.json"
+        stale_file.write_text('{"id": "0_startup_compact"}\n')
+
+        mod = _load_on_fresh_start()
+        mod.INBOX_DIR = inbox
+        mod.PROCESSING_DIR = processing
+        mod.AGENT_SESSIONS_DB = db
+
+        mod._inject_compact_reminder()
+
+        # Fresh file must be in inbox/
+        inbox_files = list(inbox.iterdir())
+        assert len(inbox_files) == 1
+        assert inbox_files[0].name == "0_startup_compact.json"
+
+        # Stale processing file must have been removed
+        assert not stale_file.exists()

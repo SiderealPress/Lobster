@@ -323,6 +323,21 @@ def _inject_compact_reminder() -> None:
         # status='processed') will cause already_claimed on the next startup.
         # See issue #1398.
         _clear_stale_claim(message_id)
+
+        # Also remove any stale processing/ file for this message_id.  The MCP
+        # server moves the file from inbox/ to processing/ when mark_processing
+        # is called, and only removes it on mark_processed/mark_failed.  A
+        # crashed or compacted session may leave the file in processing/ with no
+        # active dispatcher to clear it, causing the next startup's mark_processing
+        # call to fail because the file already exists at the destination path.
+        stale_processing_file = PROCESSING_DIR / f"{message_id}.json"
+        if stale_processing_file.exists():
+            stale_processing_file.unlink()
+            print(
+                f"[on-fresh-start] removed stale processing file: {stale_processing_file}",
+                file=sys.stderr,
+            )
+
         timestamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + ".000000"
 
         message = {
