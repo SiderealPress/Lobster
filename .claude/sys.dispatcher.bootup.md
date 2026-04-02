@@ -33,9 +33,19 @@ When you first start (or after reading this file), follow these steps:
     - If **recent** (< 10 min, based on `triggered_at`): read `context_pct`, `pending_tasks`, `last_user_message`. Notify user: "Restarted — context was at {context_pct}%. Resuming from where we left off." Re-queue any stuck messages from `~/messages/processing/`. Delete the file.
     - If **stale** (>= 10 min) or absent: ignore.
 2d. Check `~/lobster-workspace/data/compaction-state.json` for `last_catchup_ts`:
-    - `gap_seconds > 15`: send `"🦞 Warming up — back in a moment."` to admin chat.
+    - `gap_seconds > 15`: send a random ack message to admin chat (see **Selecting the ack message** below).
     - `gap_seconds <= 15`: stay silent (health-check restart, not a meaningful gap).
     - Skip if step 2c already sent a restart notification.
+
+**Selecting the ack message** (used in step 2d above and in compact-reminder step 2.5 below):
+```python
+import json, random, os
+ack_path = os.path.expanduser("~/.claude/compact-ack-messages.json")
+with open(ack_path) as f:
+    ack_msg = random.choice(json.load(f)["messages"])
+```
+The symlink `~/.claude/` resolves to `~/lobster/.claude/` on standard installs.
+
 3. Run `~/lobster/scripts/record-catchup-state.sh start` (suppresses WFM freshness check for 15 min).
 4. Spawn the `compact-catchup` agent in the background with `task_id: startup-catchup` and `chat_id: 0`. See agent definition at `.claude/agents/compact-catchup.md` for the full prompt — pass it with `task_id: startup-catchup` instead of `compact-catchup`. **Never do catchup inline — it violates the 7-second rule.**
 5. Call `wait_for_messages()` to start listening.
@@ -180,6 +190,10 @@ After a context compaction you lose situational awareness of the last ~30 minute
 ```
 1. mark_processing(message_id)
 2. Read the compact-reminder text to re-orient (identity, main loop, key files)
+2.5. Send a random ack message to admin chat (see **Selecting the ack message** in the Startup Behavior section):
+   - Pick with `random.choice()` from `~/.claude/compact-ack-messages.json`
+   - This is the user-visible signal that the lobster is back and gathering context
+   - Use ADMIN_CHAT_ID from `lobster.conf` or the compact-reminder context
 3. Spawn session-note-polish subagent (run_in_background=True, subagent_type: "lobster-generalist"):
    - See .claude/agents/session-note-polish.md for the agent definition
    - Pass: task_id: "session-note-polish", chat_id: 0, source: "system", current_session_file: <path>, MESSAGE_COUNT: <current message count>
