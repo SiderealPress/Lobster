@@ -81,7 +81,27 @@ git branch -d feature/issue-42-my-feature
 - database schema changes
 - anything that failed in production despite passing unit tests before
 
-"Unit tests pass" is not sufficient evidence that infrastructure changes work. Run the real thing against the real system (or the Docker test instance), document the result, and include it in the PR description under `## Manual test`.
+"Unit tests pass" is not sufficient evidence that infrastructure changes work. For any change touching an external service, follow this preference hierarchy — do not skip levels without explicit justification:
+
+1. **Unit tests:** mock the external service — never hit production in automated tests
+2. **Integration tests:** use a dedicated test instance, test chat_id (`$TEST_TELEGRAM_BOT_TOKEN`), or sandbox environment
+3. **Manual verification (last resort):** use an explicitly scoped production call (limit=1, single message_id, bounded date range) ONLY when no test environment exists — AND always ask the user to confirm they see the expected result before declaring PASS
+
+"Run the real thing against the real system" without qualification is not acceptable. State what endpoint, what scope, and why production was required.
+
+**Side-effect audit before declaring PASS:** Before closing out any integration or manual test, answer these questions:
+- Could this code cause unexpected volume (floods, loops, mass sends)?
+- Does it write to shared state that other jobs also read?
+- Does it affect production data or messages that cannot be undone?
+- For any paginated data fetch (messages, events, history): is cursor/pagination tracking confirmed working with a small bounded test before running at full scope?
+
+If yes to any of the first three: run in test scope first, verify bounds, then scale up. Document observed side effects (even minor ones) in the PR under `## Manual test`.
+
+**User-visible outcome requirement:** A feature is not PASS until what the USER sees is verified — not just what the code does internally.
+- "Message routed to inbox" is not PASS. "User received the message in Telegram" is PASS.
+- "Endpoint returned 200" is not PASS. "Downstream effect was observed" is PASS.
+- For any change that produces output the user can observe (Telegram message, notification, calendar event, formatted reply): you must verify that output actually appeared correctly.
+- If you cannot self-verify (e.g., a Telegram message in the user's chat): either ask the user explicitly ("did you see X in Telegram?"), or use a designated test chat_id, and document which was used.
 
 ### 5. Progress Tracking
 - Regularly update the issue with your progress
@@ -162,7 +182,24 @@ If any tests could not be run (missing Docker, live token, specific env), you **
 ```
 ## Manual test
 <!-- Required for systemd, cron, external services, file I/O, DB changes.
-     Describe what you ran and what you observed. "N/A" only if none of the above apply. -->
+     Describe what you ran and what you observed. "N/A" only if none of the above apply.
+
+     For any Telegram/UI output: state how you verified the user-visible outcome:
+       (a) asked the user and got confirmation — "did you see X in Telegram?"
+       (b) used test chat_id (document which)
+       (c) not applicable — this change is entirely internal (explain why)
+     Leaving this blank is not acceptable. -->
+```
+
+**Definition of Done checklist** — include this in every PR that touches external services, Telegram output, or user-visible behavior:
+
+```
+## Definition of Done
+- [ ] Unit tests pass with proper mocking (no production hits in automated tests)
+- [ ] Integration/manual test run (if applicable) — see ## Manual test
+- [ ] User-visible outcome verified OR not applicable (explain)
+- [ ] Side-effect audit complete: no floods, no unscoped writes, no unintended volume
+- [ ] External service calls: mocked in tests, explicitly scoped in any manual runs
 ```
 
 ### 7. PR Merge & Completion
