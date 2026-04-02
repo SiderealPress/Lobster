@@ -1,65 +1,57 @@
 # Remote / Headless Authentication
 
-Claude Code uses OAuth tokens that expire periodically. On a headless VPS there is
-no browser to complete the re-authentication flow. If the token expires unnoticed,
-the Claude session crash-loops silently — in one incident, 22,551 restart attempts
-over several weeks went undetected.
+Claude Code uses OAuth credentials stored in `~/.claude/.credentials.json`. This file
+carries a refresh token, enabling Claude Code to silently renew the access token without
+any manual intervention. This is the **only** supported auth mechanism in Lobster (Option B).
 
-This document covers how to re-authenticate and how to detect expired tokens.
-
----
-
-## Method 1: `claude setup-token` (preferred)
-
-1. SSH to the VPS:
-
-   ```bash
-   ssh root@162.55.60.42
-   ```
-
-2. Run `setup-token` as the lobster user:
-
-   ```bash
-   sudo -u lobster bash -c '
-     export HOME=/home/lobster
-     export PATH=/home/lobster/.local/bin:/usr/local/bin:/usr/bin:/bin
-     claude setup-token
-   '
-   ```
-
-3. The CLI displays an OAuth URL. Copy it and open in **any** browser (your laptop, phone, etc.).
-
-4. Authorize in the browser. You will be redirected to a callback page.
-
-5. The CLI polls `platform.claude.com` automatically using the `state` parameter. Wait up to 30 seconds — it should pick up the code and write credentials.
-
-6. Verify credentials were written:
-
-   ```bash
-   cat /home/lobster/.claude/.credentials.json | python3 -c '
-     import json, sys, datetime
-     d = json.load(sys.stdin)
-     oauth = d.get("claudeAiOauth", {})
-     if oauth.get("accessToken"):
-         exp = datetime.datetime.fromtimestamp(oauth["expiresAt"] / 1000)
-         print(f"OK — token expires {exp}")
-     else:
-         print("MISSING — no token found")
-   '
-   ```
-
-7. Restart the Claude session:
-
-   ```bash
-   systemctl restart lobster-claude
-   ```
+If the credentials file is missing or the refresh token is absent, the Claude session
+will fail to authenticate. If the file is present but the access token has expired,
+Claude Code refreshes it automatically on the next API call.
 
 ---
 
-## Method 2: Transfer credentials from local machine (fallback)
+## Authenticate (or re-authenticate)
 
-If `setup-token` polling does not pick up the code (network issues, timeout, etc.),
-transfer OAuth credentials from a machine where Claude Code is already authenticated.
+Run `claude auth login` as the lobster user. It generates an OAuth URL that you open in
+**any** browser (your laptop, phone, etc.). After authorizing in the browser, the CLI
+polls for the callback and writes `~/.claude/.credentials.json` automatically.
+
+```bash
+sudo -u lobster bash -c '
+  export HOME=/home/lobster
+  export PATH=/home/lobster/.local/bin:/usr/local/bin:/usr/bin:/bin
+  claude auth login
+'
+```
+
+No token copying or pasting is required. The credentials file will contain both an
+`accessToken` and a `refreshToken`.
+
+---
+
+## Verify credentials
+
+```bash
+cat /home/lobster/.claude/.credentials.json | python3 -c '
+  import json, sys, datetime
+  d = json.load(sys.stdin)
+  oauth = d.get("claudeAiOauth", {})
+  if oauth.get("refreshToken"):
+      exp = datetime.datetime.fromtimestamp(oauth["expiresAt"] / 1000)
+      print(f"OK — refresh token present, access token expires {exp}")
+  elif oauth.get("accessToken"):
+      print("WARNING — access token present but NO refresh token (re-run claude auth login)")
+  else:
+      print("MISSING — no token found (run claude auth login)")
+'
+```
+
+---
+
+## Transfer credentials from another machine (fallback)
+
+If `claude auth login` is unavailable (e.g., network timeout), transfer credentials
+from a machine where Claude Code is already authenticated with a refresh token.
 
 1. **On your Mac** — extract credentials from Keychain:
 
@@ -67,25 +59,34 @@ transfer OAuth credentials from a machine where Claude Code is already authentic
    security find-generic-password -s "Claude Code-credentials" -w > /tmp/creds.json
    ```
 
-2. **Transfer to VPS**:
+2. **Verify the local credentials have a refresh token** before transferring:
+
+   ```bash
+   python3 -c "
+   import json; d = json.load(open('/tmp/creds.json'))
+   print('has refresh_token:', bool(d.get('claudeAiOauth', {}).get('refreshToken')))
+   "
+   ```
+
+3. **Transfer to VPS**:
 
    ```bash
    scp /tmp/creds.json root@162.55.60.42:/home/lobster/.claude/.credentials.json
    ```
 
-3. **Fix ownership and permissions**:
+4. **Fix ownership and permissions**:
 
    ```bash
    ssh root@162.55.60.42 "chown lobster:lobster /home/lobster/.claude/.credentials.json && chmod 600 /home/lobster/.claude/.credentials.json"
    ```
 
-4. **Clean up locally**:
+5. **Clean up locally**:
 
    ```bash
    rm /tmp/creds.json
    ```
 
-5. **Restart**:
+6. **Restart**:
 
    ```bash
    ssh root@162.55.60.42 "systemctl restart lobster-claude"
@@ -129,8 +130,10 @@ python3 -c '
   import json, datetime
   d = json.load(open("/home/lobster/.claude/.credentials.json"))
   exp = d["claudeAiOauth"]["expiresAt"] / 1000
+  has_refresh = bool(d["claudeAiOauth"].get("refreshToken"))
   print("Expires:", datetime.datetime.fromtimestamp(exp))
   print("Status:", "EXPIRED" if exp < datetime.datetime.now().timestamp() else "VALID")
+  print("Has refresh token:", has_refresh)
 '
 ```
 
@@ -138,13 +141,17 @@ python3 -c '
 
 ## Post-auth checklist
 
-1. **Verify credentials exist**:
+1. **Verify credentials exist and have a refresh token**:
 
    ```bash
    cat /home/lobster/.claude/.credentials.json | python3 -c '
      import json, sys
      d = json.load(sys.stdin)
-     print("OK" if d.get("claudeAiOauth", {}).get("accessToken") else "MISSING")
+     oauth = d.get("claudeAiOauth", {})
+     has_refresh = bool(oauth.get("refreshToken"))
+     has_access = bool(oauth.get("accessToken"))
+     print("access_token:", "OK" if has_access else "MISSING")
+     print("refresh_token:", "OK" if has_refresh else "MISSING — re-run claude auth login")
    '
    ```
 
