@@ -45,6 +45,7 @@ from session_role import (
     DISPATCHER_SESSION_FILE,
     is_dispatcher,
     write_dispatcher_session_id,
+    write_dispatcher_claude_session_id,
     _read_dispatcher_session_id,
 )
 
@@ -384,13 +385,23 @@ def _is_dispatcher_compact(data: dict) -> bool:
     if not _stored_dispatcher_session_alive():
         return False
 
-    # This looks like a dispatcher compaction.  Update the marker file to the
-    # new session_id so all subsequent hook calls in this session recognise it.
+    # This looks like a dispatcher compaction.  Update both the hook marker
+    # file (tertiary) and the primary MCP Claude UUID state file so all
+    # subsequent hook calls in this session recognise the new session_id.
+    #
+    # Writing the primary file (dispatcher-claude-session-id) is the Option 1
+    # fix for issue #1375: inject-bootup-context.py fires before session_start()
+    # is called, so the MCP server hasn't had a chance to update the primary
+    # file yet.  By writing it here — in on-compact.py, which runs before
+    # inject-bootup-context.py in the SessionStart hook chain — the primary
+    # check in is_dispatcher() passes and dispatcher bootup is injected correctly.
     new_session_id = data.get("session_id", "").strip()
     if new_session_id:
         write_dispatcher_session_id(new_session_id)
+        write_dispatcher_claude_session_id(new_session_id)
         print(
-            f"[on-compact] compaction fallback: updated dispatcher-session-id to {new_session_id}",
+            f"[on-compact] compaction fallback: updated dispatcher-session-id "
+            f"and dispatcher-claude-session-id to {new_session_id}",
             file=sys.stderr,
         )
 
