@@ -788,19 +788,42 @@ def mark_failed_unregistered(agent: UnregisteredAgent) -> None:
     print(f"  [mark-failed] Notification queued for unregistered agent {agent.agent_id[:16]}...")
 
 
-def mark_failed_all_ghosts(confirmed: list[ClassifiedAgent], db_path: Path) -> None:
-    """Iterate confirmed ghosts and mark each one failed, reporting outcomes."""
-    if not confirmed:
-        print("\nNo GHOST_CONFIRMED agents to mark failed.")
+def mark_failed_all_ghosts(
+    confirmed: list[ClassifiedAgent],
+    db_path: Path,
+    stale_no_file: list[ClassifiedAgent] | None = None,
+) -> None:
+    """Iterate confirmed ghosts and mark each one failed, reporting outcomes.
+
+    Also marks STALE_NO_FILE agents as failed when provided. These sessions have
+    no output_file recorded, so liveness cannot be checked — on a fresh restart
+    any session older than the threshold is safe to treat as dead and mark failed.
+    Dispatcher sessions always land in STALE_NO_FILE (they are long-running processes
+    that never register an output file), which is why --mark-failed would previously
+    leave stale dispatcher sessions in status=running indefinitely.
+    """
+    stale_no_file = stale_no_file or []
+    to_fail = confirmed + stale_no_file
+
+    if not to_fail:
+        print("\nNo GHOST_CONFIRMED or STALE_NO_FILE agents to mark failed.")
         return
 
-    print(f"\nMarking {len(confirmed)} ghost agent(s) as failed...")
-    for agent in confirmed:
-        label = agent.row.task_id or agent.row.description[:50]
-        print(f"\n  Ghost: {agent.row.agent_id[:16]}... | {label}")
-        mark_failed_ghost(agent, db_path)
+    if confirmed:
+        print(f"\nMarking {len(confirmed)} GHOST_CONFIRMED agent(s) as failed...")
+        for agent in confirmed:
+            label = agent.row.task_id or agent.row.description[:50]
+            print(f"\n  Ghost: {agent.row.agent_id[:16]}... | {label}")
+            mark_failed_ghost(agent, db_path)
 
-    print(f"\nDone. {len(confirmed)} agent(s) marked failed; alerts queued for dispatcher.")
+    if stale_no_file:
+        print(f"\nMarking {len(stale_no_file)} STALE_NO_FILE agent(s) as failed (no output file — cannot check liveness)...")
+        for agent in stale_no_file:
+            label = agent.row.task_id or agent.row.description[:50]
+            print(f"\n  Stale-no-file: {agent.row.agent_id[:16]}... | {label}")
+            mark_failed_ghost(agent, db_path)
+
+    print(f"\nDone. {len(to_fail)} agent(s) marked failed; alerts queued for dispatcher.")
 
 
 def auto_correct_completed_not_updated(
@@ -884,7 +907,10 @@ def parse_args() -> argparse.Namespace:
         help=(
             "For each GHOST_CONFIRMED agent: send a Telegram alert, mark the agent "
             "as failed in agent_sessions.db, and queue a notification for the "
-            "dispatcher. For dead UNREGISTERED agents: queue a dispatcher notification. "
+            "dispatcher. For STALE_NO_FILE agents (no output_file recorded — e.g. "
+            "dispatcher sessions): also mark failed, since liveness cannot be checked "
+            "and any session older than the threshold is safely presumed dead on restart. "
+            "For dead UNREGISTERED agents: queue a dispatcher notification. "
             "The detector does not spawn a new Claude process directly — "
             "it alerts the dispatcher who can decide whether to re-spawn."
         ),
@@ -939,9 +965,10 @@ def main() -> int:
     print(report)
 
     confirmed = [a for a in classified if a.classification == "GHOST_CONFIRMED"]
+    stale_no_file = [a for a in classified if a.classification == "STALE_NO_FILE"]
 
     if args.mark_failed:
-        mark_failed_all_ghosts(confirmed, db_path)
+        mark_failed_all_ghosts(confirmed, db_path, stale_no_file=stale_no_file)
         mark_failed_unregistered_dead(unregistered)
     elif args.alert and (confirmed or unregistered):
         send_alert(confirmed, unregistered, report)
