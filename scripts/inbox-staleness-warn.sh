@@ -17,6 +17,17 @@
 
 set -euo pipefail
 
+# Developer mode: suppress all system notifications so the developer isn't
+# bothered while testing. Real user messages are never affected by this flag.
+_LOBSTER_CONFIG="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}/config.env"
+if [ -f "$_LOBSTER_CONFIG" ]; then
+    _DEV_MODE=$(grep -m1 '^LOBSTER_DEV_MODE=' "$_LOBSTER_CONFIG" 2>/dev/null | cut -d= -f2)
+    if [ "$_DEV_MODE" = "true" ] || [ "$_DEV_MODE" = "1" ]; then
+        exit 0
+    fi
+fi
+unset _LOBSTER_CONFIG _DEV_MODE
+
 INBOX_DIR="${HOME}/messages/inbox"
 PROCESSING_DIR="${HOME}/messages/processing"
 
