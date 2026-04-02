@@ -180,6 +180,31 @@ def write_dispatcher_session_id(session_id: str) -> None:
         pass
 
 
+def write_dispatcher_claude_session_id(session_id: str) -> None:
+    """Write session_id to the primary MCP Claude UUID state file.
+
+    This is the primary dispatcher detection file read by is_dispatcher().
+    It stores the Claude session UUID (36-char UUID4) that matches
+    hook_input["session_id"] in SessionStart hooks.
+
+    Called by on-compact.py when a dispatcher compaction is confirmed, so that
+    inject-bootup-context.py can detect the new post-compact session as the
+    dispatcher before session_start() has been called (which would normally
+    write this file via the MCP server).
+
+    Atomic write via a .tmp rename.  Silent on any failure — must never crash
+    the caller.
+    """
+    try:
+        path = _get_mcp_claude_session_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_suffix(".tmp")
+        tmp_path.write_text(session_id.strip())
+        tmp_path.replace(path)  # atomic on Linux
+    except Exception:  # noqa: BLE001
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
