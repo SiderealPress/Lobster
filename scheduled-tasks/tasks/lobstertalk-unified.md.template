@@ -98,9 +98,14 @@ The API returns `{"count": N, "messages": [...]}`. Each message has:
 
 Sort all returned messages by `timestamp` ascending (oldest first).
 
+**Self-message filter**: skip any message where `sender == "{{LOCAL_LOBSTER_IDENTITY}}"`.
+These are outbound context logs (prefixed "[INBOUND from TELEGRAM]" or "[OUTBOUND →]") that
+the email-autoresponder skill mirrors back to the bot-talk server. They are not incoming
+messages from other Lobster instances and must not be re-routed to the inbox.
+
 **Direction for received messages: always INBOUND** (they arrived via GET).
 
-For each INBOUND message:
+For each INBOUND message (after filtering out self-messages):
 
 1. **Route to Lobster inbox** — write a JSON file to `~/messages/inbox/`:
    ```json

@@ -100,6 +100,17 @@ def update_hot_mode(state: dict[str, Any], messages_received: int) -> dict[str, 
     return state
 
 
+def filter_self_messages(messages: list[dict], local_identity: str) -> list[dict]:
+    """Filter out messages sent by the local Lobster instance.
+
+    Messages where sender == local_identity are outbound context logs mirrored
+    back to the bot-talk server by the email-autoresponder skill (prefixed
+    "[INBOUND from TELEGRAM]" or "[OUTBOUND →]"). They are not incoming messages
+    from other Lobster instances and must not be re-routed to the inbox.
+    """
+    return [m for m in messages if m.get("sender") != local_identity]
+
+
 def should_rotate_log(log_file: Path, max_bytes: int = 50 * 1024 * 1024) -> bool:
     """Return True if the log file exceeds max_bytes and should be rotated."""
     if not log_file.exists():
@@ -265,6 +276,64 @@ class TestHotModeLogic:
         state = self._base_state(consecutive_empty_polls=2)
         _ = update_hot_mode(state, messages_received=0)
         assert state["consecutive_empty_polls"] == 2
+
+
+class TestSelfMessageFilter:
+    """Messages where sender == local identity are context mirrors, not real inbound messages.
+
+    The email-autoresponder skill logs both sides of conversations to bot-talk with
+    prefixes like "[INBOUND from TELEGRAM]" or "[OUTBOUND →]". These have
+    sender == "SaharLobster" (or whatever the local identity is) and must be
+    skipped during the GET /messages receive step.
+    """
+
+    LOCAL_IDENTITY = "SaharLobster"
+
+    def _make_msg(self, sender: str, content: str = "hello") -> dict:
+        return {
+            "id": "msg_test",
+            "sender": sender,
+            "content": content,
+            "timestamp": "2026-04-02T10:00:00Z",
+        }
+
+    def test_self_messages_are_filtered_out(self):
+        msgs = [
+            self._make_msg("SaharLobster", "[INBOUND from TELEGRAM] user: hello"),
+            self._make_msg("AlbertLobster", "hi there"),
+        ]
+        result = filter_self_messages(msgs, self.LOCAL_IDENTITY)
+        assert len(result) == 1
+        assert result[0]["sender"] == "AlbertLobster"
+
+    def test_all_self_messages_filtered(self):
+        msgs = [
+            self._make_msg("SaharLobster", "[OUTBOUND →] hi"),
+            self._make_msg("SaharLobster", "[INBOUND from TELEGRAM] user: test"),
+        ]
+        result = filter_self_messages(msgs, self.LOCAL_IDENTITY)
+        assert result == []
+
+    def test_non_self_messages_pass_through(self):
+        msgs = [
+            self._make_msg("AlbertLobster", "hello from albert"),
+            self._make_msg("CarolLobster", "hello from carol"),
+        ]
+        result = filter_self_messages(msgs, self.LOCAL_IDENTITY)
+        assert len(result) == 2
+
+    def test_empty_list_returns_empty(self):
+        assert filter_self_messages([], self.LOCAL_IDENTITY) == []
+
+    def test_filter_is_identity_specific(self):
+        """Filter only removes messages matching the exact local identity."""
+        msgs = [
+            self._make_msg("SaharLobster2"),  # different identity, should pass through
+            self._make_msg("SaharLobster"),   # exact match, should be filtered
+        ]
+        result = filter_self_messages(msgs, self.LOCAL_IDENTITY)
+        assert len(result) == 1
+        assert result[0]["sender"] == "SaharLobster2"
 
 
 class TestLogRotation:
