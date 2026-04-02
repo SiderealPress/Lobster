@@ -1129,55 +1129,75 @@ AUTH_FAILURE_COUNTER_FILE="$WORKSPACE_DIR/logs/auth-token-failures"
 AUTH_CONSECUTIVE_RED_THRESHOLD=3  # Must fail this many consecutive 4-min checks (~12 min total)
 
 check_auth_token() {
-    # Single check: `claude auth status` is the authoritative source of truth.
-    # Auth is managed via CLAUDE_CODE_OAUTH_TOKEN env var in config.env.
-    # Unset CLAUDECODE/CLAUDE_CODE_ENTRYPOINT to avoid nested-session errors.
-    #
-    # NOTE: `claude auth status` outputs JSON by default. Do NOT pass
-    # --output-format json — that flag does not exist and causes an error,
-    # leaving auth_json empty and making the parse return "unknown" every run.
-    local auth_json
-    auth_json=$(env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT \
-        claude auth status 2>/dev/null)
+    local creds_file="$HOME/.claude/.credentials.json"
 
-    local logged_in auth_method
-    logged_in=$(echo "$auth_json" | uv run python3 -c "
-import json, sys
+    # Option B: .credentials.json is the single canonical auth store.
+    # RED immediately if the file is missing — no fallback to env vars.
+    if [[ ! -f "$creds_file" ]]; then
+        log_error "AUTH RED: No credentials file at $creds_file — run 'claude auth login'"
+        rm -f "$AUTH_FAILURE_COUNTER_FILE"
+        return 2
+    fi
+
+    # Read token state: remaining seconds and whether a refresh token is present.
+    # A missing refresh_token means auto-refresh is disabled (Option B violation).
+    local remaining has_refresh
+    read -r remaining has_refresh < <(python3 -c "
+import json, time
 try:
-    d = json.load(sys.stdin)
-    print('true' if d.get('loggedIn') else 'false')
+    d = json.load(open('$creds_file'))
+    oauth = d.get('claudeAiOauth', {})
+    ea = oauth.get('expiresAt', 0) / 1000
+    has_rt = '1' if oauth.get('refreshToken') else '0'
+    print(f'{ea - time.time():.0f}', has_rt)
 except:
-    print('unknown')
-" 2>/dev/null)
-    auth_method=$(echo "$auth_json" | uv run python3 -c "
-import json, sys
-try:
-    d = json.load(sys.stdin)
-    print(d.get('authMethod', 'unknown'))
-except:
-    print('unknown')
+    print('-1', '0')
 " 2>/dev/null)
 
-    if [[ "$logged_in" == "false" ]]; then
-        # Confirmed not logged in — increment consecutive counter to avoid
-        # false positives from transient `claude auth status` failures.
+    # No refresh token means this is a degraded credential set (e.g. from
+    # CLAUDE_CODE_OAUTH_TOKEN flow). Report RED immediately so the operator
+    # can run `claude auth login` to get a full credential set.
+    if [[ "${has_refresh:-0}" == "0" ]]; then
+        log_error "AUTH RED: credentials.json has no refresh_token — run 'claude auth login' to restore full OAuth"
+        rm -f "$AUTH_FAILURE_COUNTER_FILE"
+        return 2
+    fi
+
+    if [[ "${remaining:-0}" -lt 0 || "${remaining:-0}" -lt 3600 ]]; then
+        # Token is expired or expiring very soon — increment consecutive counter.
+        # With a refresh token present, Claude will auto-refresh on next API call,
+        # so we use the consecutive-failure guard to avoid false-positive alerts.
         local failure_count=0
         if [[ -f "$AUTH_FAILURE_COUNTER_FILE" ]]; then
             failure_count=$(cat "$AUTH_FAILURE_COUNTER_FILE" 2>/dev/null || echo 0)
         fi
         failure_count=$((failure_count + 1))
         echo "$failure_count" > "$AUTH_FAILURE_COUNTER_FILE"
-        log_error "AUTH RED: claude auth status reports loggedIn=false (consecutive: $failure_count/$AUTH_CONSECUTIVE_RED_THRESHOLD) — check CLAUDE_CODE_OAUTH_TOKEN in config.env"
+
+        if [[ "${remaining:-0}" -lt 0 ]]; then
+            log_error "AUTH: Access token EXPIRED (refresh_token present; consecutive: $failure_count/$AUTH_CONSECUTIVE_RED_THRESHOLD)"
+        else
+            log_error "AUTH YELLOW: Access token expires in $((remaining / 60)) minutes (consecutive: $failure_count/$AUTH_CONSECUTIVE_RED_THRESHOLD)"
+        fi
+
+        # Only return RED after consecutive failures — Claude refreshes lazily on
+        # actual API calls, so the file may show stale expiry while Claude is healthy.
         if [[ $failure_count -ge $AUTH_CONSECUTIVE_RED_THRESHOLD ]]; then
             rm -f "$AUTH_FAILURE_COUNTER_FILE"
             return 2
         else
             return 1
         fi
-    elif [[ "$logged_in" == "unknown" ]]; then
-        # Could not parse output — treat as transient and log a warning
-        log_warn "AUTH YELLOW: could not parse 'claude auth status' output — treating as transient"
+    elif [[ "${remaining:-0}" -lt 14400 ]]; then
+        # Token healthy but within 4-hour warning window: reset counter, stay YELLOW
+        rm -f "$AUTH_FAILURE_COUNTER_FILE"
+        log_warn "AUTH YELLOW: Access token expires in $((remaining / 3600))h (refresh_token OK)"
         return 1
+    else
+        # Token is healthy and refresh token present: full GREEN
+        rm -f "$AUTH_FAILURE_COUNTER_FILE"
+        log_info "AUTH OK: Access token expires in $((remaining / 3600))h, refresh_token present"
+        return 0
     fi
 
     # Logged in — reset failure counter and report GREEN.
