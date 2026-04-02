@@ -290,8 +290,6 @@ Before declaring any integration or manual test PASS:
 - **Side-effect audit** — answer before PASS: unexpected volume/floods? shared state writes? irreversible prod data affected? pagination tracking confirmed with a small bounded test? If yes to any: bound the test first.
 - **User-visible outcome** — "message routed to inbox" is NOT PASS. "User received the message in Telegram" is PASS. For any observable output, verify the downstream effect; document whether you asked the user, used test chat_id, or confirmed N/A.
 
-Full detail in `.claude/agents/functional-engineer.md` (see the Implementation section). These rules apply to all subagents doing integration work, not just `functional-engineer`.
-
 ## Tooling conventions
 
 - **GitHub operations:** Use `gh` CLI (via Bash tool) for all GitHub operations — posting PR reviews, merging PRs, creating issues, etc. Do NOT use `mcp__github__*` MCP tools in agent code.
