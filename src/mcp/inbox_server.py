@@ -575,6 +575,11 @@ def _tick_user_message_counter(msg_type: str, msg_source: str) -> None:
     if msg_type not in USER_FACING_TYPES or msg_source not in _HUMAN_SOURCES:
         return
 
+    # Developer mode: suppress session_note_reminder injections so the developer
+    # isn't bothered while testing. Real user messages are never suppressed.
+    if os.environ.get("LOBSTER_DEV_MODE", "").lower() in ("true", "1"):
+        return
+
     global _user_message_counter
     _user_message_counter += 1
     if _user_message_counter % SESSION_NOTE_REMINDER_INTERVAL == 0:
@@ -955,7 +960,14 @@ def _write_session_lost_reminder() -> None:
 
     Idempotent: writing an extra compact-reminder during a real restart is
     harmless; the dispatcher processes it as a routine self-check message.
+
+    Developer mode: when LOBSTER_DEV_MODE=true (or 1), the session-lost
+    reminder is suppressed so the developer isn't interrupted during testing.
     """
+    # Developer mode: suppress session-lost reminders during development.
+    if os.environ.get("LOBSTER_DEV_MODE", "").lower() in ("true", "1"):
+        log.info("[session-lost] LOBSTER_DEV_MODE active — skipping session-lost-reminder")
+        return
     try:
         # Same reconnect-detection guard used by _reset_state_on_startup.
         if LOBSTER_STATE_FILE.exists():
