@@ -35,6 +35,19 @@ import sys as _sys
 _sys.path.insert(0, str(Path(__file__).parent.parent))
 from channels.outbox import OutboxFileHandler, OutboxWatcher, drain_outbox  # noqa: E402
 
+# ---------------------------------------------------------------------------
+# Slack Connector ingress logger (logs every event to JSONL before LLM routing)
+# ---------------------------------------------------------------------------
+try:
+    _shop_root = Path(__file__).parent.parent.parent / "lobster-shop" / "slack-connector"
+    _sys.path.insert(0, str(_shop_root))
+    from src.ingress_logger import SlackIngressLogger  # noqa: E402
+    _ingress_logger = SlackIngressLogger()
+    _INGRESS_LOGGING_ENABLED = True
+except ImportError:
+    _ingress_logger = None  # type: ignore[assignment]
+    _INGRESS_LOGGING_ENABLED = False
+
 # Configuration from environment
 SLACK_BOT_TOKEN = os.environ.get("LOBSTER_SLACK_BOT_TOKEN", "")
 SLACK_APP_TOKEN = os.environ.get("LOBSTER_SLACK_APP_TOKEN", "")
@@ -213,6 +226,26 @@ def handle_message_events(body, say, logger):
 
     if not user_id or not channel_id:
         return
+
+    # --- Ingress logging (BEFORE authorization / LLM routing) ---
+    if _INGRESS_LOGGING_ENABLED and _ingress_logger is not None:
+        try:
+            _user_info = get_user_info(user_id)
+            _channel_info = get_channel_info(channel_id)
+            _ingress_logger.log_message(
+                event=event,
+                channel_id=channel_id,
+                channel_name=_channel_info.get("name", channel_id),
+                user_id=user_id,
+                username=_user_info.get("name", user_id),
+                display_name=(
+                    _user_info.get("profile", {}).get("display_name")
+                    or _user_info.get("real_name", "")
+                ),
+                is_dm=_channel_info.get("is_im", False),
+            )
+        except Exception:
+            log.exception("Ingress logging failed (non-fatal)")
 
     # Check authorization
     if not is_authorized(channel_id, user_id):
