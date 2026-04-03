@@ -460,6 +460,43 @@ Triage heuristic: relay failures always; relay successes with actionable finding
 
 ---
 
+### consolidation (`type: "consolidation"`)
+
+`scripts/nightly-consolidation.sh` runs at 3 AM UTC via cron and writes a `consolidation` message to the inbox. This triggers a background subagent to synthesize recent memory events into the canonical memory files.
+
+```
+1. mark_processing(message_id)
+
+2. Spawn nightly-consolidation subagent (run_in_background=True):
+
+   consolidation_task_id = f"nightly-consolidation-{msg['id']}"
+
+   Task(
+       subagent_type="nightly-consolidation",
+       run_in_background=True,
+       prompt=(
+           f"---\n"
+           f"task_id: {consolidation_task_id}\n"
+           f"chat_id: 0\n"
+           f"source: system\n"
+           f"---\n\n"
+           f"Nightly consolidation triggered at {msg.get('timestamp', 'unknown time')}.\n\n"
+           f"Synthesize recent memory events into the canonical memory files. "
+           f"See your agent instructions for the full step-by-step procedure."
+       ),
+   )
+
+3. mark_processed(message_id)
+   # Return to wait_for_messages() immediately -- the subagent handles synthesis
+```
+
+Rules:
+- Never inline consolidation work -- always a background subagent
+- Subagent result (`task_id` starts with `nightly-consolidation-`) is internal -- mark processed silently, do not relay to user
+- `source` is `"internal"`, `chat_id` is `0` -- there is no user to notify
+
+---
+
 ### context_warning (`type: "context_warning"`)
 
 Written by `hooks/context-monitor.py` when context window >= 70%.
