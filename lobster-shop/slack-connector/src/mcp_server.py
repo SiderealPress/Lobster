@@ -347,15 +347,19 @@ def _build_status(
     except Exception:
         pass
 
-    # Detect account type from preferences
+    # Detect account type from preferences using proper TOML parsing.
     account_type = "bot"
     prefs_file = Path(__file__).resolve().parent.parent / "preferences" / "defaults.toml"
     if prefs_file.exists():
         try:
-            content = prefs_file.read_text()
-            if 'account_type = "person"' in content:
-                account_type = "person"
-        except OSError:
+            try:
+                import tomllib
+            except ImportError:
+                import tomli as tomllib  # type: ignore[no-redef]
+            with open(prefs_file, "rb") as _f:
+                _prefs = tomllib.load(_f)
+            account_type = _prefs.get("account_type", "bot")
+        except Exception:
             pass
 
     return {
@@ -411,6 +415,14 @@ def _handle_slack_log_search(arguments: dict[str, Any]) -> str:
             idx.close()
 
     # Strategy 2: JSONL scan fallback
+    # Enforce date-range guard: if no explicit dates were provided, the
+    # defaults above already cap to last 7 days — re-check here so that
+    # callers who pass explicit None values still get the default window.
+    if not arguments.get("start_date"):
+        start_date = _date_n_days_ago(7)
+    if not arguments.get("end_date"):
+        end_date = _today_str()
+
     store = _get_log_store()
     all_messages: list[dict[str, Any]] = []
 
@@ -420,20 +432,22 @@ def _handle_slack_log_search(arguments: dict[str, Any]) -> str:
         channels_to_scan = store.list_channels()
 
     for ch_id in channels_to_scan:
-        messages = store.query_range(ch_id, start_date, end_date)
-        matching = _filter_messages_by_query(messages, query)
-        all_messages.extend(
-            _format_message_for_display(m) for m in matching
-        )
+        # Stop scanning additional channels once the cap is reached.
         if len(all_messages) >= limit:
             break
+        messages = store.query_range(ch_id, start_date, end_date)
+        matching = _filter_messages_by_query(messages, query)
+        remaining = limit - len(all_messages)
+        all_messages.extend(
+            _format_message_for_display(m) for m in matching[:remaining]
+        )
 
     return json.dumps({
         "source": "jsonl_scan",
         "query": query,
         "date_range": {"start": start_date, "end": end_date},
-        "result_count": min(len(all_messages), limit),
-        "results": all_messages[:limit],
+        "result_count": len(all_messages),
+        "results": all_messages,
     })
 
 
