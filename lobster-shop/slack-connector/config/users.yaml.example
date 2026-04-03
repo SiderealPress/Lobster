@@ -1,0 +1,22 @@
+# Slack Connector — User Permissions
+#
+# Copy this file to ~/lobster-workspace/slack-connector/config/users.yaml
+# and edit to match your workspace.
+#
+# When use_allowlist is true in skill preferences, only users listed here
+# (with can_address_lobster: true) can trigger LLM routing. A wildcard
+# entry {id: "*"} permits all users.
+
+defaults:
+  can_address_lobster: false
+  is_admin: false
+
+users:
+  # - id: U01DEF456
+  #   name: alice
+  #   can_address_lobster: true
+  #   is_admin: true
+  #   dm_mode: full
+  #
+  # Wildcard — allow all users:
+  # - id: "*"
