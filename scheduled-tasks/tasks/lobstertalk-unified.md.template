@@ -1,0 +1,233 @@
+# LobsterTalk Unified Job
+
+**Job**: lobstertalk-unified
+**Schedule**: Hourly baseline (`0 * * * *`); self-reschedules to every 5 min during hot mode
+
+## Context
+
+You are **{{LOCAL_LOBSTER_IDENTITY}}**. This job owns the complete inter-Lobster
+communication cycle: receiving messages from the bot-talk server, routing them to the
+Lobster inbox, sending queued outbound messages, and managing hot-mode re-triggering.
+
+Bot-talk is **strictly inter-Lobster communication** — messages exchanged between Lobster
+instances (e.g. {{LOCAL_LOBSTER_IDENTITY}} ↔ AlbertLobster). Owner Telegram messages are NOT bot-talk.
+
+This job replaces three older overlapping jobs:
+- `bot-talk-poller` (disabled)
+- `bot-talk-realtime-forwarder` (disabled)
+- `lobstertalk-incoming-handler` (disabled)
+
+## Direction Inference
+
+Direction is inferred from which API endpoint is called — no stored `direction` field needed:
+- `GET /messages` (receive) → **INBOUND**
+- `POST /message` (send) → **OUTBOUND**
+
+This is more reliable than inspecting a stored field or filtering by sender name.
+
+If the API response does include a `direction` field, use it as a cross-check; otherwise
+infer from endpoint context as above.
+
+## Authentication
+
+Read the bot-talk API token using this lookup chain (first non-empty value wins):
+
+1. `~/lobster-workspace/data/bot-talk-token.txt`
+2. `BOT_TALK_TOKEN` in `~/messages/config/config.env`
+3. `BOT_TALK_TOKEN` in `~/lobster-config/config.env`
+
+```python
+def _load_bot_talk_token() -> str:
+    from pathlib import Path
+
+    token_file = Path.home() / "lobster-workspace" / "data" / "bot-talk-token.txt"
+    if token_file.exists():
+        token = token_file.read_text().strip()
+        if token:
+            return token
+
+    for config_path in [
+        Path.home() / "messages" / "config" / "config.env",
+        Path.home() / "lobster-config" / "config.env",
+    ]:
+        if config_path.exists():
+            for line in config_path.read_text().splitlines():
+                line = line.strip()
+                if line.startswith("BOT_TALK_TOKEN="):
+                    value = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    if value:
+                        return value
+    return ""
+```
+
+If the token is empty after all lookups: call `write_task_output` with status="failed" and
+exit immediately.
+
+## State File
+
+Read and write `~/lobster-workspace/data/lobstertalk-unified-state.json`.
+Create with defaults if it does not exist.
+
+Schema:
+```json
+{
+  "last_seen_ts": "2020-01-01T00:00:00Z",
+  "hot_mode": false,
+  "consecutive_empty_polls": 0,
+  "hot_mode_activated_at": null
+}
+```
+
+Always write state atomically: write to `.tmp` file, then rename.
+
+## Instructions
+
+### Step 1: Load state and token
+
+Read state file (create with defaults if missing). Load the API token; fail if empty.
+
+### Step 2: Receive — GET /messages
+
+```
+GET http://{{LOBSTERTALK_HOST}}/messages?since=<last_seen_ts>&limit=100
+X-Bot-Token: <token>
+```
+
+The API returns `{"count": N, "messages": [...]}`. Each message has:
+`id`, `sender`, `content`, `genre`, `tier`, `timestamp`.
+
+Sort all returned messages by `timestamp` ascending (oldest first).
+
+**Self-message filter**: skip any message where `sender == "{{LOCAL_LOBSTER_IDENTITY}}"`.
+These are outbound context logs (prefixed "[INBOUND from TELEGRAM]" or "[OUTBOUND →]") that
+the email-autoresponder skill mirrors back to the bot-talk server. They are not incoming
+messages from other Lobster instances and must not be re-routed to the inbox.
+
+**Direction for received messages: always INBOUND** (they arrived via GET).
+
+For each INBOUND message (after filtering out self-messages):
+
+1. **Route to Lobster inbox** — write a JSON file to `~/messages/inbox/`:
+   ```json
+   {
+     "id": "<timestamp_ms>_bot_talk_<uuid8>",
+     "type": "text",
+     "source": "bot-talk",
+     "chat_id": "<sender>",
+     "user_name": "<sender>",
+     "text": "<content>",
+     "timestamp": "<ISO timestamp>",
+     "direction": "INBOUND",
+     "from": "<sender>",
+     "to": "{{LOCAL_LOBSTER_IDENTITY}}"
+   }
+   ```
+   Write atomically (`.tmp` then rename). This ensures the dispatcher processes it
+   like any other inbox message.
+
+2. **Log the message** — append a JSONL entry to
+   `~/lobster-workspace/logs/lobstertalk.jsonl`:
+   ```json
+   {"ts": "<ISO>", "direction": "INBOUND", "sender": "<sender>", "content": "<content>", "job_run": "<run_id>"}
+   ```
+
+3. **If `LOBSTER_DEBUG=true`** (env var) — also call `send_reply` with:
+   - `chat_id`: {{TELEGRAM_CHAT_ID}}
+   - `text`: `[LobsterTalk DEBUG] INBOUND from {sender}: {content[:500]}`
+
+If no messages returned (count == 0 or empty list): increment `consecutive_empty_polls`.
+
+### Step 3: Advance timestamp cursor
+
+After processing all fetched messages, update `last_seen_ts` to the timestamp of the
+latest message in the fetched list (regardless of direction — both directions advance
+the cursor). If no messages were fetched, leave `last_seen_ts` unchanged.
+
+### Step 4: Hot-mode management
+
+**If any messages were received** (count > 0):
+- Set `hot_mode = true`
+- Set `hot_mode_activated_at` to current UTC ISO timestamp (if not already set)
+- Reset `consecutive_empty_polls = 0`
+- Schedule a 5-minute re-run (see Hot-Mode Re-trigger below)
+
+**If no messages received**:
+- Increment `consecutive_empty_polls`
+- If `consecutive_empty_polls >= 2`: set `hot_mode = false`, clear `hot_mode_activated_at`
+
+### Step 5: Send — drain outbound queue (optional)
+
+If there are any messages queued in `~/messages/outbox/` with `source="bot-talk"`:
+- For each such message (in chronological order):
+  ```
+  POST http://{{LOBSTERTALK_HOST}}/message
+  X-Bot-Token: <token>
+  Content-Type: application/json
+  {
+    "sender": "{{LOCAL_LOBSTER_IDENTITY}}",
+    "recipient": "<recipient from message>",
+    "content": "<text from message>",
+    "genre": "acknowledgment",
+    "tier": "TIER-BOT"
+  }
+  ```
+- On HTTP 200/201: log the message to `lobstertalk.jsonl` as OUTBOUND, move the file
+  to `~/messages/processed/`
+- On failure: leave the file in outbox (will retry next run); log the error
+
+Note: If the outbox directory does not exist or is empty, skip this step silently.
+
+### Step 6: Write state and output
+
+Write updated state file atomically.
+
+Call `write_task_output` with:
+- `job_name`: "lobstertalk-unified"
+- `output`: Brief summary, e.g.:
+  - "No new messages. hot_mode=false, consecutive_empty=3"
+  - "Received 2 INBOUND messages, routed to inbox. hot_mode=true"
+  - "Received 1 INBOUND, sent 1 OUTBOUND. hot_mode=true"
+- `status`: "success" or "failed"
+
+Then call `write_result`:
+- If INBOUND messages were received: `write_result(task_id=<task_id>, chat_id={{TELEGRAM_CHAT_ID}}, sent_reply_to_user=False)`
+  (the dispatcher will see the inbox messages and handle them)
+- If no new messages: `write_result(task_id=<task_id>, chat_id=0, sent_reply_to_user=False)`
+
+## Hot-Mode Re-trigger
+
+When `hot_mode=true` after processing, schedule a one-shot 5-minute re-run using systemd:
+
+```bash
+systemd-run --user --on-active=5min \
+  --unit=lobster-lobstertalk-unified-hot \
+  /home/lobster/lobster/scheduled-tasks/dispatch-job.sh lobstertalk-unified
+```
+
+If the `systemd-run` command fails (e.g. not available or already scheduled), log the
+failure but do not abort — the hourly baseline will catch any missed activity.
+
+## Error Handling
+
+- **API down** (connection refused / timeout): log the failure, do NOT alert the owner
+  unless the API has been down for > 30 minutes (track `api_down_since` in state file
+  if needed). Call `write_task_output` with status="success" and note the outage.
+- **Inbox write failure**: log warning, continue processing remaining messages.
+- **Token missing**: call `write_task_output` with status="failed", exit immediately.
+- **Outbound send failure**: leave message in outbox, log error, continue.
+
+## Timezone
+
+Always display timestamps in **Eastern Time (ET)** — currently EDT (UTC-4). Convert all
+UTC timestamps before including them in any message or notification. Never show raw UTC.
+
+## Logging
+
+Append all sent and received messages to `~/lobster-workspace/logs/lobstertalk.jsonl`:
+
+```json
+{"ts": "ISO", "direction": "INBOUND|OUTBOUND", "sender": "...", "recipient": "...", "content": "...", "job_run": "..."}
+```
+
+Create the file and parent directories if they do not exist.
+Rotate if > 50 MB (rename to `.jsonl.bak`, start fresh).
