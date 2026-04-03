@@ -21,8 +21,8 @@ priority = 55
 merge_strategy = "append"
 
 [provides]
-mcp_tools = ["slack_log_search", "slack_channel_summary", "slack_thread_summary"]
-bot_commands = ["/slack", "/analyze-logs", "/slack-status"]
+mcp_tools = ["slack_log_search", "slack_channel_summary", "slack_thread_summary", "slack_status"]
+bot_commands = ["/slack", "/analyze-logs", "/slack-status", "/slack channels", "/slack rules", "/slack reload"]
 
 [compatibility]
 enhances = ["morning-briefing", "lobster-status"]
