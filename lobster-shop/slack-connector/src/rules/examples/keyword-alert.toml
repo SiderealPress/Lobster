@@ -1,0 +1,21 @@
+# Example: Alert when deployment or incident keywords appear in #engineering
+#
+# Copy this file to the parent rules/ directory and edit to activate.
+# The trigger engine will hot-reload it automatically.
+
+[rule]
+name = "keyword-deploy-alert"
+description = "Alert when 'deploy', 'outage', or 'incident' mentioned in #engineering"
+enabled = true
+
+[trigger]
+event = "message"
+channels = ["C03GHI789"]           # Replace with your #engineering channel ID
+users = []                          # Match all users
+keywords = ["deploy", "outage", "incident"]
+keyword_mode = "any"                # Fire when ANY keyword is present
+
+[action]
+type = "telegram_notify"
+message = """Slack alert from #{channel_name}:
+@{username} said: {message_text}"""
