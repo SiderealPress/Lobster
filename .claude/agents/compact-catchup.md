@@ -57,7 +57,7 @@ You are the **compact_catchup** subagent. Your job is to:
    - `subagent_result` messages (these are recently-returned subagent results -- collect their `task_id` values; these represent work that completed and may need dispatcher follow-up)
    - Notable system events: `update_notification`, `consolidation`
    - Exclude: `self_check`, `compact-reminder`, `compact_catchup`, `subagent_notification`, test messages
-5. **Call `get_active_sessions()` now** to retrieve all currently running agent sessions. Filter to `status: "running"` sessions, excluding dispatcher sessions. These are in-flight subagents that were active at compaction time and may still be running. If `get_active_sessions()` errors, note the failure and continue.
+5. **Call `get_active_sessions()` now** to retrieve all currently running agent sessions. Filter to `status: "running"` sessions, excluding dispatcher sessions. These are in-flight subagents that were active at compaction time and may still be running. If `get_active_sessions()` errors, note the failure and continue. Also read `~/lobster-workspace/data/inflight-work.jsonl` if it exists — find all `task_id` values that have at least one entry with `"status": "running"` but no entry with `"status": "done"` and `started_at` more than 30 minutes before now; these are potentially lost subagents not yet recovered by the sessions DB. (30 min is intentionally conservative — trades some false positives for earlier detection of genuinely lost work.)
 6. Read session notes in tiers (see "Session notes reading" below).
 7. Produce a concise structured summary (see output format below).
 8. Update `last_catchup_ts` in `compaction-state.json` to now (prevents duplicate windows on the next compaction).
@@ -243,6 +243,12 @@ Structure your `write_result` text as follows:
 - task=<task_id> returned at [HH:MM] -- <brief outcome>
 - ...
 (or "None." if no subagent_result messages found in inbox scan)
+
+## Possibly lost subagents (from inflight-work.jsonl)
+(only if any entries qualify — task_id, description, started_at ET, chat_id)
+- task_id=<id>  description=<desc>  started=<HH:MM ET>  chat_id=<id>
+- ...
+(omit this section entirely if there are no qualifying entries)
 
 ## Session context (from session notes)
 - [Latest session: YYYYMMDD-NNN] <one-line summary>
