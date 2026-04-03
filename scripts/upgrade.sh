@@ -2325,6 +2325,27 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
         fi
     fi
 
+    # Migration 65: Re-deploy all plain task file templates to runtime directory to fix
+    # template drift (issue #1404). When a PR updates a task file in scheduled-tasks/tasks/,
+    # the change was not propagated to already-deployed runtime copies in
+    # $WORKSPACE_DIR/scheduled-jobs/tasks/. This migration overwrites every plain .md file
+    # (not .md.template — those require placeholder substitution) so existing installs
+    # stay in sync with the repo without a full reinstall.
+    local repo_tasks_dir="$LOBSTER_DIR/scheduled-tasks/tasks"
+    local runtime_tasks_dir="$WORKSPACE_DIR/scheduled-jobs/tasks"
+    if [ -d "$repo_tasks_dir" ]; then
+        mkdir -p "$runtime_tasks_dir"
+        for task_file in "$repo_tasks_dir"/*.md; do
+            [ -f "$task_file" ] || continue
+            local base
+            base=$(basename "$task_file")
+            [ "$base" = "README.md" ] && continue
+            cp "$task_file" "$runtime_tasks_dir/$base"
+            substep "Re-deployed task template: $base"
+            migrated=$((migrated + 1))
+        done
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
