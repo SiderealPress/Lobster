@@ -1,0 +1,25 @@
+# Example: Trigger a Lobster task when someone reacts with :eyes: emoji
+#
+# Copy this file to the parent rules/ directory and edit to activate.
+
+[rule]
+name = "eyes-reaction-review"
+description = "When someone reacts with :eyes:, ask Lobster to review the message"
+enabled = true
+
+[trigger]
+event = "reaction_added"
+channels = []                       # Match all channels
+users = []                          # Match all users
+emoji = "eyes"                      # Only trigger on :eyes: reaction
+
+[action]
+type = "lobster_task"
+task_prompt = """A message in Slack channel {channel_id} received an :eyes: reaction from user {user_id}.
+
+Original message: {original_message_text}
+
+Please review this message and determine if any action is needed. If it's a question
+that Lobster can help with, draft a response. If it's an FYI, acknowledge it."""
+subagent_type = "general-purpose"
+run_in_background = true
