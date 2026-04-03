@@ -83,3 +83,11 @@ scripts/upgrade.sh:Personal name (sahar)
 # Slack connector onboarding uses a placeholder example email (lobster@yourcompany.com)
 # in setup instructions — not a real email address
 lobster-shop/slack-connector/src/onboarding.py:Email address
+
+# Slack connector onboarding uses STEP_BOT_TOKEN, STEP_APP_TOKEN, STEP_PERSON_TOKEN as
+# step-name identifier strings (wizard state machine steps), not hardcoded credential values
+lobster-shop/slack-connector/src/onboarding.py:Hardcoded token
+
+# periodic-self-check.sh contains a pre-existing comment referencing a name as a role
+# description — this is a code comment, not a secret or PII in the data sense
+scripts/periodic-self-check.sh:Personal name (drew)
