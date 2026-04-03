@@ -531,9 +531,43 @@ handle_exit() {
             log "HIBERNATING: Claude exited cleanly (hibernation). Will wait for wake signal."
             return 0
         else
-            # Claude exited cleanly but not in hibernate mode
-            # This can happen when --max-turns is exhausted
-            log "Claude exited cleanly (code 0) but not in hibernate mode. Will restart."
+            # Claude exited cleanly but mode is not "hibernate".
+            # Race condition guard: the MCP tool writes mode=hibernate then Claude
+            # exits, but if the health check fires between those two events it sees
+            # mode=active + stale WFM and triggers a false restart.
+            # Write mode=hibernate NOW (atomically, preserving existing fields) so
+            # the health check immediately sees the correct state.
+            log "Claude exited cleanly (code 0) but mode='${current_mode}' (not hibernate). Writing hibernate state before restart decision."
+            local now
+            now=$(date -Iseconds)
+            local tmp_state
+            tmp_state=$(mktemp "${STATE_FILE}.tmp.XXXXXX")
+            python3 -c "
+import json
+path = '$STATE_FILE'
+now = '$now'
+try:
+    with open(path) as f:
+        d = json.load(f)
+except Exception:
+    d = {}
+d['mode'] = 'hibernate'
+d['detail'] = 'clean exit, mode forced by wrapper (race condition guard)'
+d['updated_at'] = now
+with open('$tmp_state', 'w') as f:
+    json.dump(d, f, indent=2)
+    f.write('
+')
+" 2>/dev/null && mv -f "$tmp_state" "$STATE_FILE" || { rm -f "$tmp_state" 2>/dev/null; write_state "hibernate" "clean exit, mode forced by wrapper"; }
+            log "Hibernate state written atomically. Re-reading mode..."
+            current_mode=$(read_state_mode)
+            if [[ "$current_mode" == "hibernate" ]]; then
+                # Treat as intentional hibernation — wait for new messages
+                log "HIBERNATING: Clean exit treated as hibernation (mode forced by wrapper). Will wait for wake signal."
+                return 0
+            fi
+            # State write failed somehow — fall through to restart
+            log "State write did not yield hibernate mode (got: ${current_mode}). Will restart."
             write_state "restarting" "clean exit, max-turns likely exhausted"
             # Reset auth failure tracking — a clean exit means auth is working
             AUTH_FAIL_COUNT=0
