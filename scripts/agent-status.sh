@@ -115,6 +115,11 @@ scan_agent_status() {
         local basename_f
         basename_f=$(basename "$filepath" .output)
 
+        # Skip bash tool output files — only symlinks are real subagent outputs
+        if [ ! -L "$filepath" ]; then
+            continue
+        fi
+
         # Determine agent status from stop_reason (deterministic, ~1ms)
         local stop_reason
         stop_reason=$(_get_stop_reason "$filepath")
@@ -228,6 +233,11 @@ scan_completed_tasks() {
     for filepath in "${output_files[@]}"; do
         local basename_f
         basename_f=$(basename "$filepath" .output)
+
+        # Skip bash tool output files — only symlinks are real subagent outputs
+        if [ ! -L "$filepath" ]; then
+            continue
+        fi
 
         # Skip if already reported
         if grep -q "^${basename_f}$" "$reported_file" 2>/dev/null; then
