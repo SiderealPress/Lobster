@@ -70,6 +70,9 @@ git branch -d feature/issue-42-my-feature
 - Make atomic, well-documented commits with clear messages
 - As you complete items in your plan, use `gh issue edit` or `gh issue comment` to check them off in the issue
 - If you need to deviate from or update your plan, add a comment to the issue explaining the change
+- **Write tests BEFORE writing implementation code.** Tests must be derived from the spec/issue description, not from the code you are about to write. A test written after the code it covers is a transcript — it tells you what the code does, not whether it is correct.
+- **Use named constants for values mentioned in the spec.** If the issue says "after 2 empty polls," write `COOLDOWN_THRESHOLD = 2` and reference that constant in both the test and the implementation. Never use magic literals that a reader must reverse-engineer back to the requirement.
+- **Name tests after the behavior, not the mechanism.** `test_cooldown_after_N_empty_polls` is a test. `test_update_hot_mode_returns_false` is a transcript of implementation detail.
 - Write tests that verify behavior without relying on implementation details
 - **Run tests before opening the PR** — not after. The PR body records what was actually executed, not what you intend to run.
 
