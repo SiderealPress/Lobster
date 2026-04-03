@@ -332,7 +332,90 @@ else
 fi
 
 #===============================================================================
-# Step 8: Done — print success
+# Step 8: Register MCP server in Claude Code config
+#===============================================================================
+step "8: Registering MCP server"
+
+CLAUDE_JSON="$HOME/.claude.json"
+MCP_SERVER_PATH="$SKILL_DIR/src/mcp_server.py"
+
+# Register the slack-connector MCP server in ~/.claude.json
+# Uses Python for safe JSON manipulation (no jq dependency)
+if [ -f "$CLAUDE_JSON" ]; then
+    ALREADY_REGISTERED=$("$PYTHON_BIN" -c "
+import json, sys
+try:
+    with open('$CLAUDE_JSON') as f:
+        data = json.load(f)
+    servers = data.get('mcpServers', {})
+    print('yes' if 'slack-connector' in servers else 'no')
+except Exception:
+    print('no')
+" 2>/dev/null || echo "no")
+
+    if [ "$ALREADY_REGISTERED" = "yes" ]; then
+        info "slack-connector MCP server already registered in $CLAUDE_JSON"
+    else
+        "$PYTHON_BIN" -c "
+import json, os
+
+claude_json_path = '$CLAUDE_JSON'
+mcp_server_path = '$MCP_SERVER_PATH'
+python_bin = '$PYTHON_BIN'
+workspace = '$LOBSTER_WORKSPACE'
+
+with open(claude_json_path) as f:
+    data = json.load(f)
+
+if 'mcpServers' not in data:
+    data['mcpServers'] = {}
+
+data['mcpServers']['slack-connector'] = {
+    'command': python_bin,
+    'args': [mcp_server_path],
+    'env': {
+        'LOBSTER_WORKSPACE': workspace,
+    },
+}
+
+with open(claude_json_path, 'w') as f:
+    json.dump(data, f, indent=2)
+    f.write('\n')
+" 2>/dev/null
+        if [ $? -eq 0 ]; then
+            success "slack-connector MCP server registered in $CLAUDE_JSON"
+        else
+            warn "Could not register MCP server automatically"
+            echo ""
+            echo "  Add this to your ~/.claude.json mcpServers section:"
+            echo ""
+            echo "    \"slack-connector\": {"
+            echo "      \"command\": \"$PYTHON_BIN\","
+            echo "      \"args\": [\"$MCP_SERVER_PATH\"],"
+            echo "      \"env\": {"
+            echo "        \"LOBSTER_WORKSPACE\": \"$LOBSTER_WORKSPACE\""
+            echo "      }"
+            echo "    }"
+            echo ""
+        fi
+    fi
+else
+    warn "$CLAUDE_JSON not found — MCP server not registered"
+    echo ""
+    echo "  When Claude Code is available, add this to ~/.claude.json mcpServers:"
+    echo ""
+    echo "    \"slack-connector\": {"
+    echo "      \"command\": \"$PYTHON_BIN\","
+    echo "      \"args\": [\"$MCP_SERVER_PATH\"],"
+    echo "      \"env\": {"
+    echo "        \"LOBSTER_WORKSPACE\": \"$LOBSTER_WORKSPACE\""
+    echo "      }"
+    echo "    }"
+    echo ""
+fi
+
+#===============================================================================
+# Step 9: Done — print success
 #===============================================================================
 echo ""
 echo -e "${GREEN}${BOLD}Slack Connector skill installed!${NC}"
