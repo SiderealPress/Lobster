@@ -23,13 +23,17 @@ The `activity` context may also include:
 1. Read the session file at the path provided in your prompt.
    - If the file does not exist or the path is missing, note the failure in `write_result` and exit.
 
-2. Build a timestamped snapshot entry:
+2. Call `get_active_sessions()` to retrieve currently running agents.
+
+3. Build a timestamped snapshot entry:
    - Use the current UTC time as the section timestamp, formatted as `YYYY-MM-DDTHH:MMZ`
    - Write a `## Snapshot [timestamp]` heading
-   - Under it, write a bullet list derived from the `activity` context passed in your prompt:
-     - One bullet per user message: `- [HH:MM] User: <brief summary of message>`
-     - One bullet per notable subagent result: `- [HH:MM] <task_id>: <one-line outcome>`
-   - Keep each bullet to one line. No nested bullets. No prose paragraphs.
+   - Under it, write the following subsections:
+
+   **Recent activity (last 30 min)** — derived from the `activity` context passed in your prompt:
+   - One bullet per user message: `- [HH:MM UTC] User: <brief summary of message>`
+   - One bullet per notable subagent result: `- [HH:MM UTC] <task_id>: <one-line outcome>`
+   - Include timestamps on every bullet — they are the primary value of this log.
    - If the activity list is empty, write a single bullet: `- (no notable activity in this window)`
    - **In-flight subagents:** After the activity bullets, if any subagents from `in_flight` are present, add an `**In-flight:**` line followed by one bullet per in-flight subagent:
      - `- In-flight: <task_id> (running <N>m)` — use `elapsed_minutes` field if present; if absent, omit duration from the bullet
@@ -38,14 +42,22 @@ The `activity` context may also include:
      - `- Pending response to: <brief description of the user message>`
      - If no responses are pending, omit this section entirely.
 
-3. Append the snapshot entry to the end of the session file, after all existing content.
+   **In-flight subagents** — from the `get_active_sessions()` result:
+   - One bullet per agent in `running` state: `- <task_id>: <agent name or description>, running ~<N>m`
+     (compute elapsed time from the `started_at` field; round to nearest minute)
+   - Exclude dispatcher sessions.
+   - If no agents are running: `- (none)`
+
+   Keep each bullet to one line. No nested bullets. No prose paragraphs.
+
+4. Append the snapshot entry to the end of the session file, after all existing content.
    - Do NOT overwrite or restructure the existing content.
    - Do NOT modify the header, Summary, Open Threads, Open Tasks, Open Subagents, or Notable Events sections.
    - Simply append the new `## Snapshot [timestamp]` block at the bottom.
 
-4. Write the updated file back to the same path.
+5. Write the updated file back to the same path.
 
-5. Call `write_result` to signal completion.
+6. Call `write_result` to signal completion.
 
 ## Snapshot format example
 
@@ -69,9 +81,23 @@ The `activity` context may also include:
 - Do NOT call `send_reply` — this is internal, not a user message.
 - Do NOT rewrite or reformat existing sections — append only.
 - Do NOT truncate the activity list in your prompt — include all items passed to you.
+- If `get_active_sessions()` fails or is unavailable, write `- (get_active_sessions failed)` in the In-flight subagents subsection and continue.
 - If writing fails (permissions, path not found), note it in `write_result` and do not crash.
 - Keep the snapshot compact — the goal is a quick timestamped log, not a full summary.
 - Omit the **In-flight** and **Pending user responses** sections entirely if they are empty — do not write empty headings.
+
+## Snapshot format
+
+```
+## Snapshot [YYYY-MM-DDTHH:MMZ]
+
+### Recent activity (last 30 min)
+- [HH:MM UTC] User: <brief summary>
+- [HH:MM UTC] <task_id>: <one-line outcome>
+
+### In-flight subagents
+- <task_id>: <description>, running ~Nm
+```
 
 ## Delivering results
 
