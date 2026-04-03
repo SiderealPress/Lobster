@@ -79,3 +79,7 @@ scheduled-tasks/bot-talk-check-dispatch.sh:IP address
 # scripts/upgrade.sh contains pre-existing migration comments written before the
 # name-block hook was added. These are historical references, not new additions.
 scripts/upgrade.sh:Personal name (sahar)
+
+# Slack connector onboarding uses a placeholder example email (lobster@yourcompany.com)
+# in setup instructions — not a real email address
+lobster-shop/slack-connector/src/onboarding.py:Email address
