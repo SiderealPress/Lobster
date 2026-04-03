@@ -436,60 +436,92 @@ is_compact_grace_period() {
 # Check if a catchup subagent is actively running (or recently started).
 # Returns 0 (true) if the WFM freshness check should be suppressed, 1 otherwise.
 #
-# The dispatcher writes catchup_started_at to lobster-state.json before spawning
-# either the startup-catchup or compact-catchup subagent, and writes
-# catchup_finished_at when the subagent result arrives.  If catchup_finished_at
-# is absent or older than catchup_started_at, the catchup is still in flight.
+# Primary path: the dispatcher writes catchup_started_at to lobster-state.json
+# before spawning either the startup-catchup or compact-catchup subagent, and
+# writes catchup_finished_at when the subagent result arrives.  If
+# catchup_finished_at is absent or older than catchup_started_at, the catchup
+# is still in flight.
 #
-# Suppression window: CATCHUP_SUPPRESS_SECONDS from catchup_started_at.
+# Fallback path (issue #1283): if the dispatcher forgot to call
+# record-catchup-state.sh (e.g. it batched the compact-reminder with other
+# messages), catchup_started_at is never updated.  In that case we fall back
+# to compacted_at: if a compaction is more recent than catchup_finished_at and
+# within CATCHUP_SUPPRESS_SECONDS, we treat catchup as in-flight.
+#
+# Suppression window: CATCHUP_SUPPRESS_SECONDS from the effective start time.
 # This caps suppression even if catchup_finished_at is never written (e.g. the
 # subagent crashed), preventing permanent suppression.
 is_catchup_active() {
     if [[ ! -f "$LOBSTER_STATE_FILE" ]]; then
         return 1
     fi
-    local started_at finished_at
-    started_at=$(python3 -c "
-import json, sys
-try:
-    d = json.load(open('$LOBSTER_STATE_FILE'))
-    print(d.get('catchup_started_at', ''))
-except Exception:
-    print('')
-" 2>/dev/null)
-    if [[ -z "$started_at" ]]; then
-        return 1
-    fi
-    local started_epoch
-    started_epoch=$(date -d "$started_at" +%s 2>/dev/null) || return 1
+
     local now
     now=$(date +%s)
-    local age=$((now - started_epoch))
-    # Hard cap: don't suppress longer than CATCHUP_SUPPRESS_SECONDS even if
-    # catchup_finished_at was never written (subagent crash, etc.)
-    if [[ $age -gt $CATCHUP_SUPPRESS_SECONDS ]]; then
-        log_info "Catchup suppression expired: started ${age}s ago (cap: ${CATCHUP_SUPPRESS_SECONDS}s)"
-        return 1
-    fi
-    # Check if catchup has already finished
-    finished_at=$(python3 -c "
+
+    # Read all relevant timestamps in one python call for efficiency
+    local started_at finished_at compacted_at
+    read -r started_at finished_at compacted_at < <(python3 -c "
 import json, sys
 try:
     d = json.load(open('$LOBSTER_STATE_FILE'))
-    print(d.get('catchup_finished_at', ''))
+    print(d.get('catchup_started_at', ''), d.get('catchup_finished_at', ''), d.get('compacted_at', ''))
 except Exception:
-    print('')
+    print('', '', '')
 " 2>/dev/null)
+
+    local finished_epoch=0
     if [[ -n "$finished_at" ]]; then
-        local finished_epoch
-        finished_epoch=$(date -d "$finished_at" +%s 2>/dev/null) || { log_warn "WARN: failed to parse finished_epoch from finished_at=${finished_at} — treating catchup as still in flight"; true; }
-        if [[ -n "$finished_epoch" && "$finished_epoch" -ge "$started_epoch" ]]; then
-            log_info "Catchup complete: finished_at=$finished_at — WFM suppression lifted"
-            return 1
+        finished_epoch=$(date -d "$finished_at" +%s 2>/dev/null) || finished_epoch=0
+    fi
+
+    # --- Primary path: catchup_started_at is present ---
+    if [[ -n "$started_at" ]]; then
+        local started_epoch
+        started_epoch=$(date -d "$started_at" +%s 2>/dev/null) || started_epoch=0
+        if [[ $started_epoch -gt 0 ]]; then
+            local age=$(( now - started_epoch ))
+            # Hard cap: don't suppress longer than CATCHUP_SUPPRESS_SECONDS even if
+            # catchup_finished_at was never written (subagent crash, etc.)
+            if [[ $age -gt $CATCHUP_SUPPRESS_SECONDS ]]; then
+                log_info "Catchup suppression expired: started ${age}s ago (cap: ${CATCHUP_SUPPRESS_SECONDS}s)"
+                # Fall through to compacted_at fallback — maybe a new compaction
+                # occurred after the cap expired and a new catchup is in flight.
+            else
+                # Check if catchup has already finished
+                if [[ $finished_epoch -gt 0 && $finished_epoch -ge $started_epoch ]]; then
+                    log_info "Catchup complete: finished_at=$finished_at — WFM suppression lifted"
+                    return 1
+                fi
+                log_info "Catchup in flight: started ${age}s ago (cap: ${CATCHUP_SUPPRESS_SECONDS}s) — WFM freshness suppressed"
+                return 0
+            fi
         fi
     fi
-    log_info "Catchup in flight: started ${age}s ago (cap: ${CATCHUP_SUPPRESS_SECONDS}s) — WFM freshness suppressed"
-    return 0
+
+    # --- Fallback path: check compacted_at (issue #1283) ---
+    # If the dispatcher forgot to write catchup_started_at (e.g. it batched
+    # the compact-reminder with other messages), we fall back to compacted_at.
+    # A compaction that is more recent than catchup_finished_at implies that
+    # a new catchup should be in flight but was never registered.
+    if [[ -n "$compacted_at" ]]; then
+        local compacted_epoch
+        compacted_epoch=$(date -d "$compacted_at" +%s 2>/dev/null) || compacted_epoch=0
+        if [[ $compacted_epoch -gt 0 ]]; then
+            local compaction_age=$(( now - compacted_epoch ))
+            if [[ $compaction_age -le $CATCHUP_SUPPRESS_SECONDS ]]; then
+                # Compaction is recent — check if catchup finished AFTER the compaction
+                if [[ $finished_epoch -gt 0 && $finished_epoch -ge $compacted_epoch ]]; then
+                    log_info "Catchup complete (fallback): compacted_at=$compacted_at, finished_at=$finished_at — WFM suppression not needed"
+                    return 1
+                fi
+                log_warn "Catchup fallback active (issue #1283): compacted_at=${compaction_age}s ago, catchup_started_at missing or stale — WFM freshness suppressed"
+                return 0
+            fi
+        fi
+    fi
+
+    return 1
 }
 
 # Check if a boot/restart occurred within the last BOOT_GRACE_SECONDS.
