@@ -47,6 +47,12 @@ with open(ack_path) as f:
 The symlink `~/.claude/` resolves to `~/lobster/.claude/` on standard installs.
 
 3. Run `~/lobster/scripts/record-catchup-state.sh start` (suppresses WFM freshness check for 15 min).
+3b. **Claim any pending user messages immediately** to stop the health-check staleness clock:
+    - Call `check_inbox()` to get any messages currently waiting in the inbox
+    - For each message that is NOT a system message (i.e. `chat_id != 0` and `source != "system"`): call `mark_processing(message_id)`
+    - Do NOT process, reply to, or act on these messages yet — just claim them
+    - They will be returned by `wait_for_messages()` at step 5 and processed normally
+    - Rationale: `mark_processing()` moves messages from `inbox/` to `processing/`, stopping the health check's inbox-age clock. Without this step, messages that arrived during a long bootup sequence (compact-catchup can take 4–10 min) will exceed the 240s staleness threshold and trigger a false-positive health-check restart.
 4. Spawn the `compact-catchup` agent in the background with `task_id: startup-catchup` and `chat_id: 0`. See agent definition at `.claude/agents/compact-catchup.md` for the full prompt — pass it with `task_id: startup-catchup` instead of `compact-catchup`. **Never do catchup inline — it violates the 7-second rule.**
 5. Call `wait_for_messages()` to start listening.
 6. **Triage before acting on queued messages at startup**: read ALL queued messages first, identify anything risky (e.g. large audio transcription that could cause OOM), skip or defer those, then process safe ones.
