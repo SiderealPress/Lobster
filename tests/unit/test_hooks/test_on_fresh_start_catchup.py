@@ -42,13 +42,19 @@ class _PatchEnv:
                 os.environ[k] = saved_v
 
 
-def _load_on_fresh_start(compaction_state_override: str = None, inbox_dir: str = None):
+def _load_on_fresh_start(
+    compaction_state_override: str = None,
+    inbox_dir: str = None,
+    session_file_pointer_override: str = None,
+):
     """Load on-fresh-start.py as a module, overriding file paths for isolation."""
     # We need to patch the module-level constants after load, so we patch env vars
     # that are read at import time and then re-patch constants after import.
     env_patch = {}
     if compaction_state_override:
         env_patch["LOBSTER_COMPACTION_STATE_FILE_OVERRIDE"] = compaction_state_override
+    if session_file_pointer_override:
+        env_patch["LOBSTER_CURRENT_SESSION_FILE_OVERRIDE"] = session_file_pointer_override
 
     with _PatchEnv(env_patch):
         spec = importlib.util.spec_from_file_location("on_fresh_start", _HOOK_PATH)
@@ -62,6 +68,8 @@ def _load_on_fresh_start(compaction_state_override: str = None, inbox_dir: str =
         mod.COMPACTION_STATE_FILE = Path(compaction_state_override)
     if inbox_dir:
         mod.INBOX_DIR = Path(inbox_dir)
+    if session_file_pointer_override:
+        mod.CURRENT_SESSION_FILE_POINTER = Path(session_file_pointer_override)
     return mod
 
 
@@ -133,6 +141,87 @@ class TestIsCatchupStale:
         state_file.write_text(json.dumps({"last_catchup_ts": recent_ts}))
         mod = _load_on_fresh_start(compaction_state_override=str(state_file))
         assert mod._is_catchup_stale() is False
+
+
+
+class TestHasRecentSessionFile:
+    """Tests for _has_recent_session_file()."""
+
+    def test_returns_false_when_pointer_absent(self, tmp_path):
+        """No pointer file → no recent session, return False."""
+        pointer = tmp_path / "nonexistent-pointer"
+        mod = _load_on_fresh_start(session_file_pointer_override=str(pointer))
+        assert mod._has_recent_session_file() is False
+
+    def test_returns_false_when_pointer_empty(self, tmp_path):
+        """Empty pointer file → no session path, return False."""
+        pointer = tmp_path / "pointer"
+        pointer.write_text("")
+        mod = _load_on_fresh_start(session_file_pointer_override=str(pointer))
+        assert mod._has_recent_session_file() is False
+
+    def test_returns_false_when_session_file_absent(self, tmp_path):
+        """Pointer points to nonexistent session file → return False."""
+        pointer = tmp_path / "pointer"
+        pointer.write_text(str(tmp_path / "nonexistent-session.md"))
+        mod = _load_on_fresh_start(session_file_pointer_override=str(pointer))
+        assert mod._has_recent_session_file() is False
+
+    def test_returns_true_when_session_file_recent(self, tmp_path):
+        """Session file modified 5 min ago (within 4h) → return True."""
+        session_file = tmp_path / "20260331-001.md"
+        session_file.write_text("# Session 20260331-001")
+        pointer = tmp_path / "pointer"
+        pointer.write_text(str(session_file))
+        mod = _load_on_fresh_start(session_file_pointer_override=str(pointer))
+        assert mod._has_recent_session_file() is True
+
+    def test_returns_false_when_session_file_old(self, tmp_path):
+        """Session file modified > 4h ago → return False."""
+        import os as _os
+        session_file = tmp_path / "20260330-003.md"
+        session_file.write_text("# Session 20260330-003")
+        # Set mtime to 5 hours ago
+        five_hours_ago = time.time() - (5 * 60 * 60)
+        _os.utime(str(session_file), (five_hours_ago, five_hours_ago))
+        pointer = tmp_path / "pointer"
+        pointer.write_text(str(session_file))
+        mod = _load_on_fresh_start(session_file_pointer_override=str(pointer))
+        assert mod._has_recent_session_file() is False
+
+    def test_boundary_just_within_4h(self, tmp_path):
+        """Session file modified 3h59m ago → return True."""
+        import os as _os
+        session_file = tmp_path / "session.md"
+        session_file.write_text("# Session")
+        just_within = time.time() - (4 * 60 * 60 - 60)  # 3h59m ago
+        _os.utime(str(session_file), (just_within, just_within))
+        pointer = tmp_path / "pointer"
+        pointer.write_text(str(session_file))
+        mod = _load_on_fresh_start(session_file_pointer_override=str(pointer))
+        assert mod._has_recent_session_file() is True
+
+    def test_boundary_just_over_4h(self, tmp_path):
+        """Session file modified 4h1m ago → return False."""
+        import os as _os
+        session_file = tmp_path / "session.md"
+        session_file.write_text("# Session")
+        just_over = time.time() - (4 * 60 * 60 + 60)  # 4h1m ago
+        _os.utime(str(session_file), (just_over, just_over))
+        pointer = tmp_path / "pointer"
+        pointer.write_text(str(session_file))
+        mod = _load_on_fresh_start(session_file_pointer_override=str(pointer))
+        assert mod._has_recent_session_file() is False
+
+    def test_handles_oserror_gracefully(self, tmp_path):
+        """OSError reading pointer → return False without raising."""
+        mod = _load_on_fresh_start()
+        # Point to /proc path that exists but read fails with PermissionError
+        mod.CURRENT_SESSION_FILE_POINTER = Path("/proc/1/mem")
+        # Must not raise
+        result = mod._has_recent_session_file()
+        assert result is False
+
 
 
 class TestCompactReminderAlreadyQueued:

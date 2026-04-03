@@ -106,6 +106,15 @@ COMPACTION_STATE_FILE = Path(
 INBOX_DIR = Path(os.path.expanduser("~/messages/inbox"))
 PROCESSING_DIR = Path(os.path.expanduser("~/messages/processing"))
 
+# Pointer to the current session file (written by compact-catchup / session management).
+# If this file exists and was modified recently, there is a prior session worth catching up.
+CURRENT_SESSION_FILE_POINTER = Path(
+    os.environ.get(
+        "LOBSTER_CURRENT_SESSION_FILE_OVERRIDE",
+        "/tmp/lobster-current-session-file",
+    )
+)
+
 # If the compaction state file was written within this window, treat the
 # current SessionStart as a compaction restart rather than a fresh restart.
 COMPACTION_RECENCY_SECONDS = 60
@@ -114,6 +123,13 @@ COMPACTION_RECENCY_SECONDS = 60
 # so the dispatcher is forced to run compact-catchup via its WFM handler.
 # This is the code-level safety net for issue #909.
 STALE_CATCHUP_THRESHOLD_SECONDS = 30 * 60  # 30 minutes
+
+# If a session file exists and was modified within this window, inject a
+# compact-reminder even if last_catchup_ts appears recent. This handles the
+# case where the dispatcher was restarted while actively working — there may
+# be in-flight activity the new session should recover even though catchup
+# ran successfully at the start of the previous session.
+SESSION_FILE_RECENCY_SECONDS = 4 * 60 * 60  # 4 hours
 
 STARTUP_COMPACT_REMINDER_TEXT = (
     "COMPACT REMINDER \u2014 RE-ORIENT NOW (injected by on-fresh-start.py)\n\n"
@@ -185,6 +201,29 @@ def _is_catchup_stale() -> bool:
     except (OSError, KeyError, ValueError, AttributeError):
         # File absent, unreadable, or field missing — treat as stale.
         return True
+
+
+def _has_recent_session_file() -> bool:
+    """Return True if /tmp/lobster-current-session-file points to a session file
+    that was modified within SESSION_FILE_RECENCY_SECONDS.
+
+    This catches the case where the dispatcher was restarted mid-session while
+    actively working. Even if last_catchup_ts is recent, there may be new
+    activity in the session file that the fresh session should catch up on.
+    """
+    try:
+        if not CURRENT_SESSION_FILE_POINTER.exists():
+            return False
+        session_path_str = CURRENT_SESSION_FILE_POINTER.read_text().strip()
+        if not session_path_str:
+            return False
+        session_path = Path(session_path_str)
+        if not session_path.exists():
+            return False
+        age_seconds = time.time() - session_path.stat().st_mtime
+        return age_seconds <= SESSION_FILE_RECENCY_SECONDS
+    except OSError:
+        return False
 
 
 def _compact_reminder_already_queued() -> bool:
@@ -399,7 +438,12 @@ def main() -> None:
     # guarantees the dispatcher will process a compact-reminder via
     # wait_for_messages — even if a previous session consumed the original
     # compact-reminder without running compact-catchup and then exited.
-    if _is_catchup_stale():
+    #
+    # Also inject when a recent session file exists (< 4h old), even if
+    # last_catchup_ts is recent. A mid-session restart can leave in-flight
+    # activity in the session file that the new session needs to recover,
+    # regardless of when catchup last ran.
+    if _is_catchup_stale() or _has_recent_session_file():
         _inject_compact_reminder()
 
     _schedule_reflection_prompt("bootup")
