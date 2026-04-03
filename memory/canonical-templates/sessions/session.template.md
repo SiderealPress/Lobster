@@ -11,6 +11,8 @@
 
 **Started:** <ISO timestamp, e.g. 2026-03-25T14:32:00Z>
 **Ended:** <ISO timestamp or "active">
+**Messages processed:** <count or "unknown">
+**End reason:** <"active" | "graceful wind-down" | "context_warning" | "short session" | "crash">
 
 ## Summary
 <1-3 sentence summary of what happened this session: main topics, decisions made, work completed.>
