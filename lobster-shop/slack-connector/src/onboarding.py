@@ -8,18 +8,23 @@ Design principles:
 - Pure functions for instruction text generation and token format validation
 - Side effects isolated at boundaries (token validation, config writes)
 - Composable: bot and person paths share common config-write helpers
+- Telegram-native interactive flow: multi-step guided setup over chat
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
 import shutil
+import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
+
+import yaml
 
 from . import account_mode
 
@@ -621,6 +626,363 @@ def format_success_message(
         app_masked=mask_token(app_token),
         config_path=config_path,
     )
+
+
+# ---------------------------------------------------------------------------
+# Telegram-native onboarding state
+# ---------------------------------------------------------------------------
+
+# Onboarding steps — defines the state machine
+STEP_MODE_SELECT = "mode_select"
+STEP_BOT_GUIDE_1 = "bot_guide_1"
+STEP_BOT_GUIDE_2 = "bot_guide_2"
+STEP_BOT_GUIDE_3 = "bot_guide_3"
+STEP_BOT_GUIDE_4 = "bot_guide_4"
+STEP_BOT_GUIDE_5 = "bot_guide_5"
+STEP_BOT_TOKEN = "bot_token"
+STEP_APP_TOKEN = "app_token"
+STEP_CHANNEL_SELECT = "channel_select"
+STEP_CHANNEL_MODES = "channel_modes"
+STEP_CONFIRM = "confirm"
+STEP_DONE = "done"
+STEP_CANCELLED = "cancelled"
+
+STEP_PERSON_TOKEN = "person_token"
+STEP_PERSON_CHANNEL_SELECT = "person_channel_select"
+STEP_PERSON_CONFIRM = "person_confirm"
+
+_STATE_DIR = Path(
+    os.environ.get("LOBSTER_WORKSPACE", Path.home() / "lobster-workspace")
+) / "slack-connector" / "state"
+
+
+@dataclass
+class OnboardingState:
+    """Persistent state for a single user's onboarding flow."""
+
+    chat_id: str
+    step: str = STEP_MODE_SELECT
+    mode: str = ""           # "bot" or "person"
+    bot_token: str = ""
+    app_token: str = ""
+    person_token: str = ""
+    workspace_name: str = ""
+    available_channels: list[dict[str, Any]] = field(default_factory=list)
+    selected_channels: list[str] = field(default_factory=list)
+    channel_modes: dict[str, str] = field(default_factory=dict)
+    # Stores the Telegram message_id of the last token message so it can be deleted
+    last_token_message_id: Optional[int] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to JSON-safe dict. Pure."""
+        return {
+            "chat_id": self.chat_id,
+            "step": self.step,
+            "mode": self.mode,
+            "bot_token": self.bot_token,
+            "app_token": self.app_token,
+            "person_token": self.person_token,
+            "workspace_name": self.workspace_name,
+            "available_channels": self.available_channels,
+            "selected_channels": self.selected_channels,
+            "channel_modes": self.channel_modes,
+            "last_token_message_id": self.last_token_message_id,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "OnboardingState":
+        """Deserialize from dict. Pure."""
+        return cls(
+            chat_id=str(data.get("chat_id", "")),
+            step=data.get("step", STEP_MODE_SELECT),
+            mode=data.get("mode", ""),
+            bot_token=data.get("bot_token", ""),
+            app_token=data.get("app_token", ""),
+            person_token=data.get("person_token", ""),
+            workspace_name=data.get("workspace_name", ""),
+            available_channels=data.get("available_channels", []),
+            selected_channels=data.get("selected_channels", []),
+            channel_modes=data.get("channel_modes", {}),
+            last_token_message_id=data.get("last_token_message_id"),
+        )
+
+
+def _state_path(chat_id: str, state_dir: Path | None = None) -> Path:
+    """Return the file path for onboarding state for a given chat_id. Pure."""
+    d = state_dir or _STATE_DIR
+    return d / f"onboarding_{chat_id}.json"
+
+
+def get_onboarding_state(
+    chat_id: str,
+    state_dir: Path | None = None,
+) -> OnboardingState:
+    """Read onboarding state for chat_id from disk.
+
+    Side effect: file read.
+    Returns a fresh OnboardingState if none exists.
+    """
+    path = _state_path(str(chat_id), state_dir)
+    if path.exists():
+        try:
+            data = json.loads(path.read_text())
+            return OnboardingState.from_dict(data)
+        except (json.JSONDecodeError, KeyError):
+            pass
+    return OnboardingState(chat_id=str(chat_id))
+
+
+def save_onboarding_state(
+    state: OnboardingState,
+    state_dir: Path | None = None,
+) -> None:
+    """Write onboarding state to disk.
+
+    Side effect: file write.
+    """
+    path = _state_path(state.chat_id, state_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state.to_dict(), indent=2))
+
+
+def clear_onboarding_state(
+    chat_id: str,
+    state_dir: Path | None = None,
+) -> None:
+    """Delete onboarding state file for chat_id.
+
+    Side effect: file delete.
+    """
+    path = _state_path(str(chat_id), state_dir)
+    if path.exists():
+        path.unlink()
+
+
+# ---------------------------------------------------------------------------
+# Slack API helpers — side-effectful
+# ---------------------------------------------------------------------------
+
+def list_workspace_channels(
+    token: str,
+    _conversations_list_fn: Any = None,
+) -> list[dict[str, Any]]:
+    """Fetch public and private channels from Slack using conversations.list.
+
+    Side effect: HTTP call to Slack API.
+
+    Args:
+        token: Bot or user token.
+        _conversations_list_fn: Optional override for testing (dependency injection).
+
+    Returns:
+        List of dicts with keys: id, name, is_member, is_private.
+        Returns empty list on error.
+    """
+    if _conversations_list_fn is not None:
+        return _conversations_list_fn(token)
+
+    try:
+        from slack_sdk import WebClient
+        from slack_sdk.errors import SlackApiError
+    except ImportError:
+        log.warning("slack_sdk not installed — cannot list channels")
+        return []
+
+    client = WebClient(token=token)
+    channels: list[dict[str, Any]] = []
+
+    try:
+        cursor = None
+        while True:
+            kwargs: dict[str, Any] = {
+                "types": "public_channel,private_channel",
+                "exclude_archived": True,
+                "limit": 200,
+            }
+            if cursor:
+                kwargs["cursor"] = cursor
+
+            resp = client.conversations_list(**kwargs)
+            if not resp.get("ok"):
+                log.warning("conversations.list failed: %s", resp.get("error"))
+                break
+
+            for ch in resp.get("channels", []):
+                channels.append({
+                    "id": ch.get("id", ""),
+                    "name": ch.get("name", ""),
+                    "is_member": ch.get("is_member", False),
+                    "is_private": ch.get("is_private", False),
+                })
+
+            meta = resp.get("response_metadata", {})
+            cursor = meta.get("next_cursor")
+            if not cursor:
+                break
+
+    except SlackApiError as e:
+        log.warning("Slack API error listing channels: %s", e)
+    except Exception as e:
+        log.warning("Unexpected error listing channels: %s", e)
+
+    return channels
+
+
+# ---------------------------------------------------------------------------
+# Telegram helpers — side-effectful
+# ---------------------------------------------------------------------------
+
+def delete_telegram_message(
+    chat_id: str | int,
+    message_id: int,
+    bot_token: str | None = None,
+    _delete_fn: Any = None,
+) -> bool:
+    """Delete a Telegram message via Bot API.
+
+    Used to remove token messages immediately after reading them for privacy.
+
+    Side effect: HTTP call to Telegram Bot API.
+
+    Args:
+        chat_id: Telegram chat ID.
+        message_id: The Telegram message ID to delete.
+        bot_token: Telegram bot token. Reads TELEGRAM_BOT_TOKEN env var if None.
+        _delete_fn: Optional override for testing.
+
+    Returns:
+        True if deletion succeeded, False otherwise.
+    """
+    if _delete_fn is not None:
+        return _delete_fn(chat_id, message_id)
+
+    tg_token = bot_token or os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    if not tg_token:
+        log.warning("delete_telegram_message: no bot token available")
+        return False
+
+    try:
+        import urllib.request
+        import urllib.error
+
+        url = f"https://api.telegram.org/bot{tg_token}/deleteMessage"
+        data = json.dumps({"chat_id": chat_id, "message_id": message_id}).encode()
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read())
+            return result.get("ok", False)
+    except Exception as e:
+        log.warning("Failed to delete Telegram message %s: %s", message_id, e)
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Config write helpers — side-effectful
+# ---------------------------------------------------------------------------
+
+_CHANNELS_CONFIG_PATH = Path(
+    os.environ.get("LOBSTER_WORKSPACE", Path.home() / "lobster-workspace")
+) / "slack-connector" / "config" / "channels.yaml"
+
+# Valid routing modes for channel configuration
+CHANNEL_MODE_MONITOR = "monitor"
+CHANNEL_MODE_MENTIONS = "mentions"
+CHANNEL_MODE_FULL = "full"
+CHANNEL_MODES = (CHANNEL_MODE_MONITOR, CHANNEL_MODE_MENTIONS, CHANNEL_MODE_FULL)
+
+
+def build_channels_config(
+    channel_selections: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Build a channels.yaml structure from a list of channel selections.
+
+    Pure function — takes channel data, returns a dict suitable for YAML serialization.
+
+    Each item in channel_selections should have:
+        id (str): Slack channel ID
+        name (str): channel name
+        mode (str): one of monitor / mentions / full
+
+    Returns:
+        Dict with "channels" key mapping channel IDs to config blocks.
+    """
+    channels: dict[str, Any] = {}
+    for ch in channel_selections:
+        ch_id = ch.get("id", "")
+        if not ch_id:
+            continue
+        mode = ch.get("mode", CHANNEL_MODE_MONITOR)
+        if mode not in CHANNEL_MODES:
+            mode = CHANNEL_MODE_MONITOR
+        channels[ch_id] = {
+            "name": ch.get("name", ch_id),
+            "mode": mode,
+            "log_messages": True,
+            "log_reactions": True,
+            "log_edits": True,
+            "log_deletes": False,
+            "log_files": True,
+        }
+    return {"channels": channels}
+
+
+def write_channels_config(
+    channel_selections: list[dict[str, Any]],
+    config_path: Path | None = None,
+) -> None:
+    """Write channels.yaml from a list of channel selections.
+
+    Side effect: file write.
+
+    Args:
+        channel_selections: List of dicts with id, name, mode keys.
+        config_path: Override path (defaults to workspace channels.yaml).
+    """
+    path = config_path or _CHANNELS_CONFIG_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    config_data = build_channels_config(channel_selections)
+    path.write_text(yaml.dump(config_data, default_flow_style=False, sort_keys=False))
+
+
+def restart_ingress_service(
+    service_name: str = "lobster-slack-connector",
+    _run_fn: Any = None,
+) -> tuple[bool, str]:
+    """Restart the Slack ingress service via systemctl.
+
+    Side effect: subprocess call to systemctl.
+
+    Args:
+        service_name: systemd service name to restart.
+        _run_fn: Optional override for testing (dependency injection).
+
+    Returns:
+        (success, message) tuple.
+    """
+    if _run_fn is not None:
+        return _run_fn(service_name)
+
+    try:
+        result = subprocess.run(
+            ["systemctl", "restart", service_name],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode == 0:
+            return True, f"Service {service_name} restarted."
+        return False, f"systemctl exited {result.returncode}: {result.stderr.strip()}"
+    except FileNotFoundError:
+        return False, "systemctl not found — service restart skipped."
+    except subprocess.TimeoutExpired:
+        return False, f"systemctl restart timed out for {service_name}."
+    except Exception as e:
+        return False, f"Unexpected error restarting {service_name}: {e}"
 
 
 # ---------------------------------------------------------------------------
