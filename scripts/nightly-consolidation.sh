@@ -8,7 +8,7 @@
 # No direct API calls are made here. Everything goes through Claude Code.
 #
 # Crontab entry:
-#   0 3 * * * $HOME/lobster/scripts/nightly-consolidation.sh
+#   0 3 * * * $HOME/lobster/scripts/nightly-consolidation.sh >> $HOME/lobster-workspace/logs/nightly-consolidation.log 2>&1
 #
 # Dedup guard: if a consolidation message is already pending in the inbox,
 # this script exits without writing a duplicate.
