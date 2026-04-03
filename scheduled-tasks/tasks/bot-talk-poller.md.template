@@ -7,10 +7,14 @@
 
 You are running as a scheduled task. The main Lobster instance created this job.
 
-This is the **hourly baseline poller**. It also manages the hot-mode state that drives
-`bot-talk-poller-fast` (the 2-minute fast poller). When {{REMOTE_LOBSTER_IDENTITY}} is
-active, set `hot_mode=true` so the fast poller takes over. When activity stops, the fast
-poller self-cools and this job confirms the quiet state each hour.
+This is the **hourly baseline poller**. Bot-talk is strictly inter-Lobster communication
+(messages between Lobster instances only). Owner Telegram messages to their own Lobster
+are NOT bot-talk and never appear here.
+
+This poller manages the hot-mode state that drives `bot-talk-poller-fast` (the 2-minute
+fast poller). When {{REMOTE_LOBSTER_IDENTITY}} is active, set `hot_mode=true` so the fast
+poller takes over. When activity stops, the fast poller self-cools and this job confirms
+the quiet state each hour.
 
 ## Authentication
 
@@ -80,27 +84,32 @@ Schema:
 Always write the updated state back atomically: write to a `.tmp` file, then rename to
 the final path.
 
+## Direction Fields
+
+Each message in the API response carries a `direction` field written at send time:
+- `"OUTBOUND"` — message sent FROM this Lobster to the remote Lobster
+- `"INBOUND"` — message received FROM the remote Lobster
+
+Both directions are shown to the owner. The log already has correct fields — no
+content-marker heuristics or special-case filtering needed.
+
+If a message has no `direction` field, skip it entirely — do not infer direction from sender.
+
 ## Instructions
 
-1. Poll `{{LOBSTERTALK_HOST}}/messages` for new messages from **both** {{LOCAL_LOBSTER_IDENTITY}}
-   and {{REMOTE_LOBSTER_IDENTITY}}.
+1. Poll `{{LOBSTERTALK_HOST}}/messages` for new messages.
    Track last-seen message timestamp using `last_message_ts` in the state file
    (fall back to `~/lobster-workspace/data/bot-talk-last-seen.txt` for legacy compat).
 
-2. **If new messages found (from either sender):**
-   - Collect ALL new messages (both `sender={{LOCAL_LOBSTER_IDENTITY}}` and `sender={{REMOTE_LOBSTER_IDENTITY}}`)
-     with timestamp > last_message_ts.
-   - Sort them by timestamp (ascending — oldest first, so the conversation reads
-     chronologically).
-   - Format each message with a directional prefix:
-     - {{LOCAL_LOBSTER_IDENTITY}} messages: `📤 {{LOCAL_LOBSTER_IDENTITY}} → remote: <content>`
-     - {{REMOTE_LOBSTER_IDENTITY}} messages: `📥 {{REMOTE_LOBSTER_IDENTITY}} → the owner: <content>`
-   - For each {{REMOTE_LOBSTER_IDENTITY}} message, also post a comment on the relevant GitHub issue
-     if actionable (configure repo in `BOT_TALK_GITHUB_REPO` env var if used).
-   - Notify the owner via Telegram (chat_id={{TELEGRAM_CHAT_ID}}) with the full conversation block
-     showing both sides.
-   - Update `last_message_ts` in state file to the latest seen message timestamp
-     (across both senders).
+2. **If new messages found:**
+   - Collect ALL new messages with timestamp > last_message_ts.
+   - Sort by timestamp ascending (oldest first).
+   - Format each message by direction:
+     - INBOUND messages:  `📥 **Inbox** ({sender}): {content}`
+     - OUTBOUND messages: `📤 **Outbox** (you → {to}): {content}`
+   - Notify the owner via Telegram (chat_id={{TELEGRAM_CHAT_ID}}) with the full
+     conversation block showing both directions.
+   - Update `last_message_ts` in state file to the latest seen message timestamp.
    - Set `hot_mode=true` in state file.
    - Set `hot_mode_activated_at` to current UTC ISO timestamp (if not already set).
    - Reset `consecutive_empty_polls` to 0.
@@ -117,30 +126,38 @@ the final path.
 
 5. Write updated state file.
 
+## Timezone
+
+Always display timestamps in **Eastern Time (ET)** — currently EDT (UTC-4). Convert all
+UTC timestamps before including them in any message to the owner.
+
 ## Telegram Notification Format
 
-When there are new messages, send a single notification to the owner showing the full
-conversation block. Example:
+Show BOTH inbox (INBOUND) and outbox (OUTBOUND) messages, labeled separately.
+Omit a section if it has no messages. Example:
 
 ```
-New bot-talk activity:
+Bot-talk update:
 
-📤 {{LOCAL_LOBSTER_IDENTITY}} → remote: What do you think about the new plan?
-📥 {{REMOTE_LOBSTER_IDENTITY}} → the owner: I reviewed it. Looks reasonable, a few questions though.
-📥 {{REMOTE_LOBSTER_IDENTITY}} → the owner: Can you clarify item 3?
-📤 {{LOCAL_LOBSTER_IDENTITY}} → remote: Sure, item 3 means we delay the deployment.
+📥 **Inbox** (from {{REMOTE_LOBSTER_IDENTITY}}):
+  I reviewed it. Looks reasonable, a few questions.
+  Can you clarify item 3?
+
+📤 **Outbox** (you → {{REMOTE_LOBSTER_IDENTITY}}):
+  Sure, item 3 means we delay the deployment.
 ```
 
-Messages are sorted chronologically so the conversation is readable top-to-bottom.
+Messages within each section are sorted chronologically (oldest first).
 
 ## Telegram Notification Rules
 
 Only send a Telegram message to the owner (chat_id={{TELEGRAM_CHAT_ID}}) when there is genuinely new content:
-- One or more new messages (from either sender) since last run
-- A new actionable GitHub comment requiring attention
+- One or more new cross-Lobster messages (INBOUND or OUTBOUND) since last run
 - The HTTP API has been continuously down for more than 30 minutes
 
-For routine no-op cycles (no new messages, API healthy, nothing actionable): do NOT call send_reply. Instead, call write_task_output with status "success" and a brief internal note like "no new activity". The dispatcher will handle it silently.
+For routine no-op cycles (no new messages, API healthy): do NOT call send_reply. Instead,
+call write_task_output with status "success" and a brief internal note like "no new activity".
+The dispatcher will handle it silently.
 
 ## Output
 
