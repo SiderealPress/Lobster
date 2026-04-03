@@ -162,6 +162,13 @@ _HISTORY_COLUMNS = (
     "timestamp, extra"
 )
 
+# Table-qualified version for use in JOINs (e.g. FTS5 queries against messages_fts)
+# where column names like 'source', 'type', 'text' exist in multiple tables and
+# SQLite raises "ambiguous column name" without explicit qualification.
+_HISTORY_COLUMNS_M = ", ".join(
+    f"m.{col.strip()}" for col in _HISTORY_COLUMNS.split(",")
+)
+
 
 def get_conversation_history(
     conn: sqlite3.Connection,
@@ -232,9 +239,25 @@ def get_conversation_history(
         # Prefer FTS5 — fast and ranking-aware
         use_fts = _table_exists(conn, "messages_fts")
         if use_fts:
-            fts_where_extra = ("AND " + " AND ".join(conditions)) if conditions else ""
+            # Re-qualify conditions for the FTS JOIN context.  The messages_fts
+            # virtual table exposes: text, transcription, user_name, source, type —
+            # the same names as columns in messages.  Without table prefixes SQLite
+            # raises "ambiguous column name".  We rebuild the condition list with
+            # bare column references replaced by m.<col>.
+            fts_conditions = [
+                c.replace("LOWER(source)", "LOWER(m.source)")
+                 .replace("LOWER(type)", "LOWER(m.type)")
+                 .replace("LOWER(text)", "LOWER(m.text)")
+                 .replace("LOWER(transcription)", "LOWER(m.transcription)")
+                 .replace("LOWER(user_name)", "LOWER(m.user_name)")
+                 .replace("direction =", "m.direction =")
+                 .replace("chat_id =", "m.chat_id =")
+                 .replace(" type IN", " m.type IN")
+                for c in conditions
+            ]
+            fts_where_extra = ("AND " + " AND ".join(fts_conditions)) if fts_conditions else ""
             fts_query = (
-                f"SELECT m.{_HISTORY_COLUMNS} "
+                f"SELECT {_HISTORY_COLUMNS_M} "
                 f"FROM messages m "
                 f"JOIN messages_fts f ON f.rowid = m.rowid "
                 f"WHERE messages_fts MATCH ? "
@@ -308,7 +331,20 @@ def count_conversation_history(
     if search:
         use_fts = _table_exists(conn, "messages_fts")
         if use_fts:
-            fts_where_extra = ("AND " + " AND ".join(conditions)) if conditions else ""
+            # Re-qualify conditions for the FTS JOIN context (same fix as
+            # get_conversation_history — messages_fts shares column names with messages).
+            fts_conditions = [
+                c.replace("LOWER(source)", "LOWER(m.source)")
+                 .replace("LOWER(type)", "LOWER(m.type)")
+                 .replace("LOWER(text)", "LOWER(m.text)")
+                 .replace("LOWER(transcription)", "LOWER(m.transcription)")
+                 .replace("LOWER(user_name)", "LOWER(m.user_name)")
+                 .replace("direction =", "m.direction =")
+                 .replace("chat_id =", "m.chat_id =")
+                 .replace(" type IN", " m.type IN")
+                for c in conditions
+            ]
+            fts_where_extra = ("AND " + " AND ".join(fts_conditions)) if fts_conditions else ""
             fts_query = (
                 f"SELECT COUNT(*) "
                 f"FROM messages m "
