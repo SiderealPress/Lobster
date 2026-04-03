@@ -453,6 +453,16 @@ def _write_config_env(
             new_lines.append(f"{key}={value}")
 
     path.write_text("\n".join(new_lines) + "\n")
+    path.chmod(0o600)
+
+
+def _write_tokens_to_config(config_path: Path, tokens: dict[str, str]) -> None:
+    """Idempotently update config.env with token key=value pairs. Sets mode 0o600.
+
+    Uses re.sub to replace existing lines in-place, or appends new ones.
+    Delegates to _write_config_env for the actual write (which also sets chmod 600).
+    """
+    _write_config_env(tokens, config_path=config_path)
 
 
 def write_person_config(
@@ -743,6 +753,7 @@ def save_onboarding_state(
     path = _state_path(state.chat_id, state_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(state.to_dict(), indent=2))
+    path.chmod(0o600)
 
 
 def clear_onboarding_state(
