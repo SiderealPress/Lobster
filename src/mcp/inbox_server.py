@@ -8760,6 +8760,16 @@ def _enqueue_reconciler_notification(session: dict, outcome: str) -> None:
                 "skipping inbox notification (logged to debug only)",
                 _agent_id, _chat_id,
             )
+            # Mark as notified so this session is not re-enqueued on every
+            # restart. The early return skips inbox delivery (intentional —
+            # there is no user to notify), but bookkeeping must still happen.
+            try:
+                _session_store.set_notified(_agent_id)
+            except Exception as _exc:
+                log.error(
+                    "[reconciler] Failed to set_notified for no-user dead session %r: %s",
+                    _agent_id, _exc,
+                )
             return
 
     agent_id = session.get("id", "")
@@ -8783,6 +8793,27 @@ def _enqueue_reconciler_notification(session: dict, outcome: str) -> None:
         # Do NOT mark notified — next cycle will retry (at-least-once guarantee)
 
 
+def _inbox_already_has_agent(agent_id: str) -> bool:
+    """Return True if any file in the inbox already references agent_id.
+
+    Used by _startup_sweep() as an idempotency guard: if the server crashed
+    after writing the inbox file but before set_notified() was called, the
+    file is already there and re-enqueuing would deliver the notification twice.
+
+    Pure check — reads existing inbox files, no writes.
+    """
+    if not agent_id:
+        return False
+    for path in INBOX_DIR.glob("*.json"):
+        try:
+            data = json.loads(path.read_text())
+            if data.get("agent_id") == agent_id:
+                return True
+        except (OSError, json.JSONDecodeError):
+            continue
+    return False
+
+
 async def _startup_sweep() -> None:
     """Send missed notifications for sessions that completed while server was down.
 
@@ -8794,6 +8825,9 @@ async def _startup_sweep() -> None:
     marking a session completed and writing notified_at, the notification is
     re-sent on the next startup. The at-most-once property is upheld by
     set_notified() being called immediately after enqueueing.
+
+    An additional idempotency guard checks whether an inbox file for the agent
+    already exists (handles the crash-after-write-before-set_notified race).
     """
     try:
         unnotified = _session_store.get_unnotified_completed(since_hours=24)
@@ -8803,6 +8837,14 @@ async def _startup_sweep() -> None:
                 f"completed/dead session(s) — re-enqueuing notifications"
             )
         for session in unnotified:
+            agent_id = session.get("id", "")
+            if _inbox_already_has_agent(agent_id):
+                log.debug(
+                    "[reconciler] Startup sweep: inbox file already exists for "
+                    "agent %r — skipping re-enqueue (idempotency guard)",
+                    agent_id,
+                )
+                continue
             outcome = session.get("status", "completed")
             _enqueue_reconciler_notification(session, outcome=outcome)
     except Exception as exc:
