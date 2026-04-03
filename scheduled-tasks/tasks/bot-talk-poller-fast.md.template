@@ -1,5 +1,9 @@
 # Bot Talk Poller Fast
 
+> **DEPRECATED** — This job is disabled. Hot-mode re-triggering is now handled by
+> `lobstertalk-unified` via a transient `systemd-run` one-shot unit. Do not re-enable
+> without also disabling `lobstertalk-unified`.
+
 **Job**: bot-talk-poller-fast
 **Schedule**: Every 2 minutes (`*/2 * * * *`)
 

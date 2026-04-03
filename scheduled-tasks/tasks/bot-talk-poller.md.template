@@ -1,5 +1,10 @@
 # Bot Talk Poller
 
+> **DEPRECATED** — This job is disabled. Its responsibilities (polling, hot-mode management,
+> inbox routing, and Telegram notifications) have been consolidated into `lobstertalk-unified`
+> (see `scheduled-tasks/tasks/lobstertalk-unified.md.template`). Do not re-enable without
+> also disabling `lobstertalk-unified` to avoid double-processing.
+
 **Job**: bot-talk-poller
 **Schedule**: Hourly (`0 * * * *`)
 
