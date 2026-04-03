@@ -109,26 +109,8 @@ BOOT_GRACE_SECONDS=90                # 90s - skip stale-inbox, WFM, and process 
 
 HIBERNATE_FRESH_SECONDS=30           # Ignore hibernate state younger than this — transient dispatcher hibernation
 
-HIBERNATE_FRESH_SECONDS=30           # DEPRECATED — kept for reference; hibernate state is no longer written by dispatcher
-
-WFM_STALE_SECONDS=1200               # 20 minutes - kept for backward-compat references; superseded by DISPATCHER_HEARTBEAT_STALE_SECONDS
-HEARTBEAT_FILE="$WORKSPACE_DIR/logs/claude-heartbeat"   # legacy WFM-touch signal; superseded by dispatcher-heartbeat
-
-# Dispatcher heartbeat sentinel (issue #1483 simplification)
-# Written by hooks/thinking-heartbeat.py on every PostToolUse event.
-# Single file, single integer (Unix epoch seconds). No JSON parsing required.
-# Threshold is generous enough to cover compaction + catchup without suppression.
-DISPATCHER_HEARTBEAT_FILE="${LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE:-$WORKSPACE_DIR/logs/dispatcher-heartbeat}"
-DISPATCHER_HEARTBEAT_STALE_SECONDS=1200   # 20 min — covers compaction (~5m) + catchup (~12m) + margin
-
-# WFM-active signal (issue #1713 / #949): inbox_server.py writes this file with
-# a Unix epoch timestamp when wait_for_messages begins blocking and refreshes it
-# every WAIT_HEARTBEAT_INTERVAL (60s). When this file is fresh, the dispatcher is
-# alive and waiting for messages — heartbeat staleness is expected, not a problem.
-# Threshold: 3x WAIT_HEARTBEAT_INTERVAL to absorb one missed refresh cycle.
-# File is deleted by the MCP server when WFM returns (message arrived or timeout).
-DISPATCHER_WFM_ACTIVE_FILE="${LOBSTER_WFM_ACTIVE_OVERRIDE:-$WORKSPACE_DIR/logs/dispatcher-wfm-active}"
-WFM_ACTIVE_STALE_SECONDS=180   # 3x WAIT_HEARTBEAT_INTERVAL (60s) — absorbs one missed tick
+WFM_STALE_SECONDS=1200               # 20 minutes - RED if wait_for_messages not called since this long ago (raised from 600 to accommodate long reasoning/subagent-spawning phases)
+HEARTBEAT_FILE="$WORKSPACE_DIR/logs/claude-heartbeat"
 
 OUTBOX_DIR="$MESSAGES_DIR/outbox"
 OUTBOX_STALE_THRESHOLD_SECONDS=900   # 15 min = RED
