@@ -115,6 +115,11 @@ scan_agent_status() {
         local basename_f
         basename_f=$(basename "$filepath" .output)
 
+        # Skip bash tool output files — only symlinks are real subagent outputs
+        if [ ! -L "$filepath" ]; then
+            continue
+        fi
+
         # Determine agent status from stop_reason (deterministic, ~1ms)
         local stop_reason
         stop_reason=$(_get_stop_reason "$filepath")
