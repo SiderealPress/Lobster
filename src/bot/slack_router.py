@@ -48,6 +48,20 @@ except ImportError:
     _ingress_logger = None  # type: ignore[assignment]
     _INGRESS_LOGGING_ENABLED = False
 
+# ---------------------------------------------------------------------------
+# Slack Connector channel config + user permissions (Phase 3)
+# ---------------------------------------------------------------------------
+try:
+    from src.channel_config import ChannelConfig  # noqa: E402
+    from src.user_permissions import UserPermissions  # noqa: E402
+    _channel_config = ChannelConfig()
+    _user_permissions = UserPermissions()
+    _CHANNEL_CONFIG_ENABLED = True
+except ImportError:
+    _channel_config = None  # type: ignore[assignment]
+    _user_permissions = None  # type: ignore[assignment]
+    _CHANNEL_CONFIG_ENABLED = False
+
 # Configuration from environment
 SLACK_BOT_TOKEN = os.environ.get("LOBSTER_SLACK_BOT_TOKEN", "")
 SLACK_APP_TOKEN = os.environ.get("LOBSTER_SLACK_APP_TOKEN", "")
@@ -316,31 +330,6 @@ def handle_message_events(body, say, logger):
     ts = event.get("ts")
 
     if not user_id or not channel_id:
-        return
-
-    # --- Ingress logging (BEFORE authorization / LLM routing) ---
-    if _INGRESS_LOGGING_ENABLED and _ingress_logger is not None:
-        try:
-            _user_info = get_user_info(user_id)
-            _channel_info = get_channel_info(channel_id)
-            _ingress_logger.log_message(
-                event=event,
-                channel_id=channel_id,
-                channel_name=_channel_info.get("name", channel_id),
-                user_id=user_id,
-                username=_user_info.get("name", user_id),
-                display_name=(
-                    _user_info.get("profile", {}).get("display_name")
-                    or _user_info.get("real_name", "")
-                ),
-                is_dm=_channel_info.get("is_im", False),
-            )
-        except Exception:
-            log.exception("Ingress logging failed (non-fatal)")
-
-    # Check authorization
-    if not is_authorized(channel_id, user_id):
-        log.warning(f"Unauthorized message from channel={channel_id} user={user_id}")
         return
 
     # --- Ingress logging (BEFORE authorization / LLM routing) ---
