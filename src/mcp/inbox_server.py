@@ -9553,6 +9553,16 @@ def _enqueue_reconciler_notification(session: dict, outcome: str) -> None:
                 "skipping inbox notification (logged to debug only)",
                 _agent_id, _chat_id,
             )
+            # Mark as notified so this session is not re-enqueued on every
+            # restart. The early return skips inbox delivery (intentional —
+            # there is no user to notify), but bookkeeping must still happen.
+            try:
+                _session_store.set_notified(_agent_id)
+            except Exception as _exc:
+                log.error(
+                    "[reconciler] Failed to set_notified for no-user dead session %r: %s",
+                    _agent_id, _exc,
+                )
             return
 
     agent_id = session.get("id", "")
