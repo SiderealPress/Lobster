@@ -282,6 +282,14 @@ Lobster uses a tiered model strategy to balance cost and quality. Each subagent 
 
 **For general background tasks** with no specific agent type, use `subagent_type='lobster-generalist'` rather than omitting `subagent_type` or using an untyped Agent call. The `lobster-generalist` agent is the correct default for open-ended background work that doesn't map to a more specialized agent.
 
+## Integration testing and Definition of Done
+
+Before declaring any integration or manual test PASS:
+
+- **External service hierarchy** — always prefer: (1) mock in unit tests, (2) test instance / test chat_id / sandbox, (3) explicitly scoped prod call (limit=1, single ID, bounded range) only when no test env exists. Never "run the real thing" without stating what endpoint, what scope, and why prod was required.
+- **Side-effect audit** — answer before PASS: unexpected volume/floods? shared state writes? irreversible prod data affected? pagination tracking confirmed with a small bounded test? If yes to any: bound the test first.
+- **User-visible outcome** — "message routed to inbox" is NOT PASS. "User received the message in Telegram" is PASS. For any observable output, verify the downstream effect; document whether you asked the user, used test chat_id, or confirmed N/A.
+
 ## Tooling conventions
 
 - **GitHub operations:** Use `gh` CLI (via Bash tool) for all GitHub operations — posting PR reviews, merging PRs, creating issues, etc. Do NOT use `mcp__github__*` MCP tools in agent code.
