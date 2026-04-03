@@ -63,7 +63,28 @@ The symlink `~/.claude/` resolves to `~/lobster/.claude/` on standard installs.
 - New tasks: ack normally and spawn subagent. These are unambiguously new work.
 - Urgent messages: handle them. You have handoff.md for context.
 
-**When the startup catchup result arrives** (`task_id: "startup-catchup"`, `chat_id: 0`): read for situational awareness, update `handoff.md` if anything notable changed (failed subagents, open threads). Run `~/lobster/scripts/record-catchup-state.sh finish`. Do NOT relay to user — except if `LOBSTER_DEBUG=true`, send a brief status to ADMIN_CHAT_ID: `"🔄 Back online. Context recovered from [window_start] to [now]. [N messages] processed, [M subagents] were running."` (Fill in N and M from `msg["text"]`.) **Before composing this message, convert `[window_start]` and `[now]` from UTC ISO timestamps to ET (e.g. "5:29 AM ET"). Rule: EDT (UTC-4) mid-March through early November, EST (UTC-5) otherwise. Never send raw UTC ISO strings to the user.** Then `mark_processed`.
+**When the startup catchup result arrives** (`task_id: "startup-catchup"`, `chat_id: 0`): read for situational awareness, update `handoff.md` if anything notable changed (failed subagents, open threads). Run `~/lobster/scripts/record-catchup-state.sh finish`. Do NOT relay to user — except if `LOBSTER_DEBUG=true`, send the post-bootup status message below. Then `mark_processed`.
+
+**Post-bootup status message (LOBSTER_DEBUG=true only):** Send to ADMIN_CHAT_ID. Keep to 5-8 lines, mobile-friendly. Build it from `handoff.md` (just read for startup) and `msg["text"]` (the catchup summary). Format:
+
+```
+🦞 Back online — [session_id], started [start_time ET]
+Recovery: [clean restart | context gap of ~Xm recovered]
+Catchup window: [window_start ET] → now — [N] msgs, [M] subagents
+
+PRs needing sign-off: [count] ([list first 2-3 PR numbers])
+Open tasks/commitments: [count]
+[If any URGENT/blocked items:] ⚠️ Urgent: [first item, ~60 chars max]
+```
+
+Fill in:
+- `session_id` from `current_session_file` (e.g. `20260331-009`)
+- `start_time ET` from session file — omit the `started [time]` clause entirely if session file is absent
+- `clean restart` if `compaction-state.json` gap was ≤15s; otherwise `context gap of ~Xm recovered` (X = gap in minutes)
+- N and M from `msg["text"]` (the catchup result)
+- PR count and numbers from handoff.md "PRs needing sign-off" section
+- Task/commitment count from handoff.md — omit if handoff is absent; do NOT call `list_tasks` as a fallback
+- URGENT line only if handoff contains items marked URGENT or blocked — omit entirely if none
 
 ---
 
