@@ -1,21 +1,57 @@
-"""Slack Connector — Bot Account Onboarding
+"""Slack Connector — Onboarding Helpers.
 
-Interactive setup flow for Slack bot account (xoxb-) path.
-Validates prerequisites, collects tokens, writes config, and guides users
-through Slack App creation.
+Provides setup instructions and token validation for both bot and person
+account paths. Pure validation functions at the core, side-effectful I/O
+at the edges.
 
-Design: pure validation functions at the core, side-effectful I/O at the edges.
+Design principles:
+- Pure functions for instruction text generation and token format validation
+- Side effects isolated at boundaries (token validation, config writes)
+- Composable: bot and person paths share common config-write helpers
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
+
+from . import account_mode
+
+log = logging.getLogger("slack-onboarding")
+
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+_CONFIG_ENV_PATH = Path(
+    os.environ.get("LOBSTER_CONFIG_DIR", Path.home() / "lobster-config")
+) / "config.env"
+
+BOT_TOKEN_PREFIX = "xoxb-"
+APP_TOKEN_PREFIX = "xapp-"
+
+REQUIRED_BOT_SCOPES = frozenset({
+    "channels:history", "channels:read",
+    "groups:history", "groups:read",
+    "im:history", "im:read",
+    "mpim:history", "mpim:read",
+    "chat:write", "users:read",
+    "reactions:read", "files:read",
+})
+
+REQUIRED_BOT_EVENTS = frozenset({
+    "message.channels", "message.groups",
+    "message.im", "message.mpim",
+    "reaction_added", "app_mention",
+    "file_shared",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -49,26 +85,6 @@ class ValidationResult:
 # Pure validation functions
 # ---------------------------------------------------------------------------
 
-BOT_TOKEN_PREFIX = "xoxb-"
-APP_TOKEN_PREFIX = "xapp-"
-
-REQUIRED_BOT_SCOPES = frozenset({
-    "channels:history", "channels:read",
-    "groups:history", "groups:read",
-    "im:history", "im:read",
-    "mpim:history", "mpim:read",
-    "chat:write", "users:read",
-    "reactions:read", "files:read",
-})
-
-REQUIRED_BOT_EVENTS = frozenset({
-    "message.channels", "message.groups",
-    "message.im", "message.mpim",
-    "reaction_added", "app_mention",
-    "file_shared",
-})
-
-
 def validate_bot_token_format(token: str) -> ValidationResult:
     """Check that a bot token has valid xoxb- format.
 
@@ -82,7 +98,6 @@ def validate_bot_token_format(token: str) -> ValidationResult:
             False,
             f"Bot token must start with '{BOT_TOKEN_PREFIX}' — got '{token[:10]}...'"
         )
-    # xoxb- tokens have the structure: xoxb-{team_id}-{bot_id}-{secret}
     parts = token.split("-")
     if len(parts) < 4:
         return ValidationResult(
@@ -183,6 +198,118 @@ def failed_prerequisites(results: list[PrerequisiteResult]) -> list[Prerequisite
 
 
 # ---------------------------------------------------------------------------
+# Pure functions — instruction text generation
+# ---------------------------------------------------------------------------
+
+def bot_instructions() -> str:
+    """Return step-by-step instructions for bot account setup.
+
+    Pure function: no I/O.
+    """
+    scopes = ", ".join(account_mode.get_required_scopes(account_mode.BOT))
+    return f"""\
+=== Slack Connector: Bot Account Setup ===
+
+Step 1: Create a Slack App
+  - Go to https://api.slack.com/apps -> "Create New App" -> "From scratch"
+  - App name: "Lobster" (or any name you prefer)
+  - Select your workspace
+
+Step 2: Enable Socket Mode
+  - App settings -> "Socket Mode" -> Enable
+  - Create an App-Level Token with scope: connections:write
+  - Save the token (starts with xapp-) -- this is LOBSTER_SLACK_APP_TOKEN
+
+Step 3: Add Bot Token Scopes
+  - OAuth & Permissions -> Bot Token Scopes:
+    Required: {scopes}
+    Optional: commands (for slash commands)
+
+Step 4: Subscribe to Events
+  - Event Subscriptions -> Enable -> Subscribe to Bot Events:
+    message.channels, message.groups, message.im, message.mpim,
+    reaction_added, app_mention, file_shared
+
+Step 5: Install App to Workspace
+  - OAuth & Permissions -> "Install to Workspace" -> Allow
+  - Save the Bot User OAuth Token (starts with xoxb-) -- this is LOBSTER_SLACK_BOT_TOKEN
+
+Step 6: Run the installer
+  bash ~/lobster/lobster-shop/slack-connector/install.sh
+
+Step 7: Invite Lobster to channels
+  - In Slack: /invite @Lobster to each channel you want monitored
+"""
+
+
+def person_instructions() -> str:
+    """Return step-by-step instructions for person (user-seat) account setup.
+
+    Pure function: no I/O.
+    """
+    scopes = ", ".join(account_mode.get_required_scopes(account_mode.PERSON))
+    return f"""\
+=== Slack Connector: Person Account Setup ===
+
+This path uses a real Slack user account. Lobster will appear as a human
+team member, can read all messages in joined channels without @mentions,
+and consumes a paid workspace seat.
+
+Step 1: Create a dedicated Slack user account
+  - Create an account with a distinct email (e.g., lobster@yourcompany.com)
+  - Add the account to your Slack workspace
+  - Set up 2FA and save credentials securely
+
+Step 2: Obtain a user token (xoxp-)
+
+  Option A (recommended): OAuth App with user scopes
+    - Go to https://api.slack.com/apps -> "Create New App" -> "From scratch"
+    - Under OAuth & Permissions, add these USER Token Scopes (not Bot):
+      {scopes}
+    - Install the app to your workspace
+    - When prompted, authorize AS THE LOBSTER USER ACCOUNT (not your own!)
+    - Copy the User OAuth Token (starts with xoxp-)
+
+  Option B (development only -- DEPRECATED by Slack):
+    - Go to https://api.slack.com/legacy/custom-integrations/legacy-tokens
+    - Generate a legacy token while logged in as the Lobster user
+    - WARNING: Legacy tokens are deprecated and may stop working.
+      Use Option A for production setups.
+
+Step 3: Run the installer with person mode
+  SLACK_ACCOUNT_TYPE=person bash ~/lobster/lobster-shop/slack-connector/install.sh
+
+Step 4: Add the Lobster user to channels
+  - Invite the Lobster user account to channels in the Slack UI
+  - In person mode, Lobster reads ALL messages in joined channels (not just @mentions)
+
+=== Behavior Differences (Person vs Bot) ===
+
+  - Person mode logs ALL channel messages, not just @mentions
+  - Lobster will NOT respond to its own messages (self-message filtering)
+  - The Lobster user appears in channel member lists
+  - Rate limits follow user-tier (not bot-tier) rules
+  - No Socket Mode -- person mode uses the Slack Web API for polling
+
+=== Switching Back to Bot Mode ===
+
+  /skill set slack-connector account_type bot
+  -- or --
+  Set LOBSTER_SLACK_ACCOUNT_TYPE=bot in config.env and restart
+"""
+
+
+def instructions_for_mode(mode: str) -> str:
+    """Return setup instructions for the given account mode.
+
+    Pure function: dispatches to bot_instructions() or person_instructions().
+    """
+    if mode == account_mode.PERSON:
+        return person_instructions()
+    return bot_instructions()
+
+
+# ---------------------------------------------------------------------------
 # Config file operations (side-effectful, isolated)
 # ---------------------------------------------------------------------------
 
@@ -234,7 +361,6 @@ def build_updated_config(
         else:
             result_lines.append(line)
 
-    # Append missing tokens with a section header if neither existed
     additions = []
     if not bot_found:
         additions.append(f"LOBSTER_SLACK_BOT_TOKEN={bot_token}")
@@ -242,15 +368,12 @@ def build_updated_config(
         additions.append(f"LOBSTER_SLACK_APP_TOKEN={app_token}")
 
     if additions:
-        # Add a blank line separator if the file doesn't end with one
         if result_lines and result_lines[-1].strip():
             result_lines.append("")
-        # Add section comment if both are new
         if not bot_found and not app_found:
             result_lines.append("# Slack Integration")
         result_lines.extend(additions)
 
-    # Ensure trailing newline
     result = "\n".join(result_lines)
     if not result.endswith("\n"):
         result += "\n"
@@ -272,6 +395,113 @@ def write_tokens_to_config(
     existing = path.read_text() if path.exists() else ""
     updated = build_updated_config(existing, bot_token, app_token)
     path.write_text(updated)
+
+
+def _read_config_env(config_path: Path | None = None) -> dict[str, str]:
+    """Read config.env into a dict. Side effect: file read."""
+    path = config_path or _CONFIG_ENV_PATH
+    if not path.exists():
+        return {}
+
+    entries: dict[str, str] = {}
+    for line in path.read_text().splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if "=" in stripped:
+            key, _, value = stripped.partition("=")
+            value = value.strip().strip("'\"")
+            entries[key.strip()] = value
+    return entries
+
+
+def _write_config_env(
+    entries: dict[str, str], config_path: Path | None = None
+) -> None:
+    """Write/update config.env with new entries. Side effect: file write.
+
+    Preserves existing entries and comments. Updates values for existing keys,
+    appends new keys at the end.
+    """
+    path = config_path or _CONFIG_ENV_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    existing_lines: list[str] = []
+    if path.exists():
+        existing_lines = path.read_text().splitlines()
+
+    updated_keys: set[str] = set()
+    new_lines: list[str] = []
+
+    for line in existing_lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and "=" in stripped:
+            key = stripped.split("=", 1)[0].strip()
+            if key in entries:
+                new_lines.append(f"{key}={entries[key]}")
+                updated_keys.add(key)
+                continue
+        new_lines.append(line)
+
+    for key, value in entries.items():
+        if key not in updated_keys:
+            new_lines.append(f"{key}={value}")
+
+    path.write_text("\n".join(new_lines) + "\n")
+
+
+def write_person_config(
+    token: str, config_path: Path | None = None
+) -> tuple[bool, str]:
+    """Validate a person token and write it to config.env.
+
+    Side effects: HTTP validation call, file write.
+
+    Returns:
+        (success, message) tuple.
+    """
+    valid, info = account_mode.validate_person_token(token)
+    if not valid:
+        return False, f"Token validation failed: {info.get('error', 'unknown error')}"
+
+    _write_config_env(
+        {
+            "LOBSTER_SLACK_USER_TOKEN": token,
+            "LOBSTER_SLACK_ACCOUNT_TYPE": "person",
+        },
+        config_path=config_path,
+    )
+
+    name = info.get("name", "unknown")
+    team = info.get("team", "unknown")
+    return True, f"Connected as {name} in workspace {team}. Config written."
+
+
+def write_bot_config(
+    bot_token: str,
+    app_token: str,
+    config_path: Path | None = None,
+) -> tuple[bool, str]:
+    """Validate a bot token and write both tokens to config.env.
+
+    Side effects: HTTP validation call, file write.
+    """
+    valid, info = account_mode.validate_bot_token(bot_token)
+    if not valid:
+        return False, f"Token validation failed: {info.get('error', 'unknown error')}"
+
+    _write_config_env(
+        {
+            "LOBSTER_SLACK_BOT_TOKEN": bot_token,
+            "LOBSTER_SLACK_APP_TOKEN": app_token,
+            "LOBSTER_SLACK_ACCOUNT_TYPE": "bot",
+        },
+        config_path=config_path,
+    )
+
+    name = info.get("name", "unknown")
+    team = info.get("team", "unknown")
+    return True, f"Connected as bot {name} in workspace {team}. Config written."
 
 
 # ---------------------------------------------------------------------------
@@ -413,7 +643,6 @@ class SlackOnboarding:
         self.config_path = Path(
             config_path or os.path.expanduser("~/lobster-config/config.env")
         )
-        # Injectable I/O for testability
         self._input = input_fn or input
         self._print = print_fn or print
 
@@ -424,14 +653,10 @@ class SlackOnboarding:
         return [f.message for f in failures]
 
     def validate_bot_token(self, token: str) -> tuple[bool, str]:
-        """Validate bot token format and call auth.test.
-
-        Returns (valid, workspace_name_or_error).
-        """
+        """Validate bot token format and call auth.test."""
         format_result = validate_bot_token_format(token)
         if not format_result.valid:
             return False, format_result.message
-
         return validate_bot_token_with_api(token)
 
     def validate_app_token(self, token: str) -> bool:
@@ -443,10 +668,7 @@ class SlackOnboarding:
         write_tokens_to_config(self.config_path, bot_token, app_token)
 
     def _prompt_token(self, prompt: str, validator, max_attempts: int = 3):
-        """Prompt user for a token with validation retry loop.
-
-        Returns (token, validation_info) or (None, error_message).
-        """
+        """Prompt user for a token with validation retry loop."""
         for attempt in range(max_attempts):
             token = self._input(prompt).strip()
             if not token:
@@ -465,14 +687,9 @@ class SlackOnboarding:
         return None, "Maximum attempts exceeded"
 
     def run_setup_wizard(self) -> bool:
-        """Full interactive setup flow. Returns True on success.
-
-        Orchestrates all steps: prerequisites, token check, guided setup,
-        collection, validation, and config writing.
-        """
+        """Full interactive setup flow. Returns True on success."""
         self._print("\n=== Slack Connector — Bot Account Setup ===\n")
 
-        # Step 1: Prerequisites
         self._print("Step 1: Checking prerequisites...")
         failures = self.check_prerequisites()
         if failures:
@@ -482,7 +699,6 @@ class SlackOnboarding:
             return False
         self._print("  ✓ All prerequisites met\n")
 
-        # Step 2: Check existing tokens
         self._print("Step 2: Checking existing tokens...")
         existing = read_config_tokens(self.config_path)
         if existing["bot_token"] and existing["app_token"]:
@@ -501,15 +717,12 @@ class SlackOnboarding:
             self._print("  App token: not configured")
         self._print("")
 
-        # Step 3: Show Slack App creation guide
         self._print("Step 3: Slack App Setup")
         self._print(SLACK_APP_CREATION_GUIDE)
         self._input("Press Enter when you've completed the steps above...")
 
-        # Step 4: Collect and validate tokens
         self._print("\nStep 4: Token Collection\n")
 
-        # Collect bot token (skip if already set)
         if existing["bot_token"]:
             bot_token = existing["bot_token"]
             self._print(f"  Using existing bot token: {mask_token(bot_token)}")
@@ -524,7 +737,6 @@ class SlackOnboarding:
                 return False
             self._print(f"  ✓ Bot token valid — workspace: {workspace}\n")
 
-        # Collect app token (skip if already set)
         if existing["app_token"]:
             app_token = existing["app_token"]
             self._print(f"  Using existing app token: {mask_token(app_token)}")
@@ -538,12 +750,10 @@ class SlackOnboarding:
                 return False
             self._print("  ✓ App token format valid\n")
 
-        # Write tokens
         self._print("  Writing tokens to config.env...")
         self.write_tokens_to_config(bot_token, app_token)
         self._print("  ✓ Tokens saved\n")
 
-        # Success
         self._print(
             format_success_message(
                 workspace=workspace,
