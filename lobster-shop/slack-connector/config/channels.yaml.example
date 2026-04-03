@@ -1,0 +1,32 @@
+# Slack Connector — Channel Configuration
+#
+# Copy this file to channels.yaml and customize.
+# Each channel entry controls what Lobster does in that channel.
+#
+# To apply changes: the ingress worker hot-reloads this file automatically.
+
+# Default settings applied to all channels unless overridden
+defaults:
+  log: true            # Log messages to disk
+  index: true          # Include in search index
+  llm_route: false     # Don't send to LLM dispatcher by default
+  triggers: true       # Evaluate trigger rules
+
+channels:
+  # Example: monitor #general, log everything, don't route to LLM
+  # general:
+  #   log: true
+  #   index: true
+  #   llm_route: false
+
+  # Example: monitor #alerts, route all messages to LLM for processing
+  # alerts:
+  #   log: true
+  #   index: true
+  #   llm_route: true
+  #   triggers: true
+
+  # Example: ignore #random entirely
+  # random:
+  #   log: false
+  #   index: false
