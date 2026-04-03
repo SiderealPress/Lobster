@@ -87,9 +87,6 @@ from reliability import (
 # Self-update system
 from update_manager import UpdateManager
 
-# Bot-talk mirroring — fire-and-forget relay to the shared SaharLobster/AlbertLobster channel
-from bot_talk_mirror import mirror_outbound as _mirror_outbound, mirror_inbound as _mirror_inbound
-
 # Pending agent tracker (thin adapter over session_store)
 from agents.tracker import add_pending_agent as _add_pending_agent, remove_pending_agent as _remove_pending_agent
 
@@ -4090,8 +4087,10 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
                             log.error(f"check_inbox: subagent_recovered pre-processor error: {exc}", exc_info=True)
                     msg["_filename"] = f.name
                     messages.append(msg)
-                    # Mirror real inbound user messages to bot-talk (fire-and-forget)
-                    _mirror_inbound(msg)
+                    # NOTE: Inbound cross-Lobster messages from bot-talk are routed to this
+                    # inbox by bot_talk_mirror.log_inbound_cross_lobster() with source="bot-talk".
+                    # We no longer mirror owner Telegram messages to bot-talk from here —
+                    # only actual cross-Lobster exchanges belong in bot-talk (issue #1350).
                     if len(messages) >= limit:
                         break
             except Exception as e:
@@ -4265,9 +4264,6 @@ async def handle_send_reply(args: dict) -> list[TextContent]:
 
     # Atomic write: temp file + fsync + rename to prevent watchdog race condition
     atomic_write_json(outbox_file, reply_data)
-
-    # Mirror outbound reply to bot-talk (fire-and-forget, never blocks)
-    _mirror_outbound(text=text, source=source, chat_id=chat_id)
 
     # Save a copy to sent directory for conversation history
     sent_file = SENT_DIR / f"{reply_id}.json"
