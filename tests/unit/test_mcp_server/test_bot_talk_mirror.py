@@ -1,13 +1,17 @@
 """
-Unit tests for bot_talk_mirror module.
+Unit tests for bot_talk_mirror module — cross-Lobster channel redesign.
 
 Tests cover:
 - Payload and log-line builders (pure functions)
 - HTTP attempt logic (mock httpx)
 - SSH fallback logic (mock subprocess)
 - Local log fallback
-- mirror_outbound / mirror_inbound filtering
+- mirror_outbound: records OUTBOUND direction, from/to fields
+- log_inbound_cross_lobster: records INBOUND direction, routes to inbox
+- _route_to_inbox: writes correctly structured inbox file
+- _emit_event_bus: emits LobsterEvent with correct payload
 - Thread spawning (daemon thread is started)
+- Old mirror_inbound() does not exist (removed)
 """
 
 import json
@@ -33,19 +37,27 @@ import bot_talk_mirror as btm
 
 class TestBuildHttpPayload:
     def test_required_fields_present(self):
-        payload = btm._build_http_payload("hello", "status-update")
+        payload = btm._build_http_payload("hello", "status-update", "OUTBOUND", "SaharLobster", "AlbertLobster")
         assert payload["sender"] == btm.BOT_TALK_SENDER
         assert payload["tier"] == btm.BOT_TALK_TIER
         assert payload["genre"] == "status-update"
         assert payload["content"] == "hello"
 
-    def test_content_is_passed_through(self):
-        payload = btm._build_http_payload("some content here", "query")
-        assert payload["content"] == "some content here"
+    def test_direction_from_to_fields_present(self):
+        payload = btm._build_http_payload("msg", "status-update", "OUTBOUND", "SaharLobster", "AlbertLobster")
+        assert payload["direction"] == "OUTBOUND"
+        assert payload["from"] == "SaharLobster"
+        assert payload["to"] == "AlbertLobster"
 
-    def test_sender_is_saharlобster(self):
-        payload = btm._build_http_payload("x", "status-update")
-        assert payload["sender"] == "SaharLobster"
+    def test_inbound_direction(self):
+        payload = btm._build_http_payload("msg", "status-update", "INBOUND", "AlbertLobster", "SaharLobster")
+        assert payload["direction"] == "INBOUND"
+        assert payload["from"] == "AlbertLobster"
+        assert payload["to"] == "SaharLobster"
+
+    def test_content_is_passed_through(self):
+        payload = btm._build_http_payload("some content here", "query", "OUTBOUND", "A", "B")
+        assert payload["content"] == "some content here"
 
 
 class TestBuildSshLogLine:
@@ -55,10 +67,18 @@ class TestBuildSshLogLine:
         assert "[TIER-BOT]" in line
         assert "[status-update]" in line
 
+    def test_direction_included_when_provided(self):
+        line = btm._build_ssh_log_line("msg", "status-update", "OUTBOUND")
+        assert "[OUTBOUND]" in line
+
+    def test_no_direction_bracket_when_empty(self):
+        line = btm._build_ssh_log_line("msg", "status-update")
+        # Should not include empty direction brackets like "[]"
+        assert "[]" not in line
+
     def test_long_content_truncated_to_200(self):
         long_content = "x" * 300
         line = btm._build_ssh_log_line(long_content, "status-update")
-        # 200 chars of content + surrounding brackets and timestamp
         assert "x" * 200 in line
         assert "x" * 201 not in line
 
@@ -267,7 +287,7 @@ class TestWriteLocalLog:
         lines = log_file.read_text().strip().splitlines()
         assert len(lines) == 1
         entry = json.loads(lines[0])
-        assert entry["sender"] == "SaharLobster"
+        assert entry["sender"] == btm.BOT_TALK_SENDER
         assert entry["genre"] == "status-update"
         assert "test content" in entry["content"]
         assert entry["mirror_failed_reason"] == "http_and_ssh_both_failed"
@@ -280,36 +300,167 @@ class TestWriteLocalLog:
 
 
 # ---------------------------------------------------------------------------
-# do_mirror integration (unit-level: mock all I/O)
+# _emit_event_bus
+# ---------------------------------------------------------------------------
+
+class TestEmitEventBus:
+    def test_emits_with_correct_payload(self):
+        """_emit_event_bus calls EventBus.emit_sync with correct direction/from/to."""
+        captured_events = []
+
+        mock_event_class = MagicMock(side_effect=lambda **kw: kw)
+        mock_bus = MagicMock()
+        mock_bus.emit_sync.side_effect = lambda e: captured_events.append(e)
+
+        with patch.dict("sys.modules", {
+            "event_bus": MagicMock(
+                get_event_bus=MagicMock(return_value=mock_bus),
+                LobsterEvent=mock_event_class,
+            )
+        }):
+            btm._emit_event_bus("OUTBOUND", "SaharLobster", "AlbertLobster", "hello world")
+
+        assert len(captured_events) == 1
+        event_kwargs = captured_events[0]
+        assert event_kwargs["event_type"] == "bot_talk.message"
+        assert event_kwargs["severity"] == "info"
+        payload = event_kwargs["payload"]
+        assert payload["direction"] == "OUTBOUND"
+        assert payload["from"] == "SaharLobster"
+        assert payload["to"] == "AlbertLobster"
+        assert "hello world" in payload["content"]
+
+    def test_does_not_raise_when_event_bus_unavailable(self):
+        """_emit_event_bus must not raise when event_bus module is missing."""
+        with patch.dict("sys.modules", {"event_bus": None}):
+            # Should not raise
+            btm._emit_event_bus("INBOUND", "AlbertLobster", "SaharLobster", "test")
+
+    def test_content_truncated_to_500(self):
+        """_emit_event_bus truncates content to 500 chars in the payload."""
+        captured = []
+        mock_event_class = MagicMock(side_effect=lambda **kw: kw)
+        mock_bus = MagicMock()
+        mock_bus.emit_sync.side_effect = lambda e: captured.append(e)
+
+        with patch.dict("sys.modules", {
+            "event_bus": MagicMock(
+                get_event_bus=MagicMock(return_value=mock_bus),
+                LobsterEvent=mock_event_class,
+            )
+        }):
+            btm._emit_event_bus("INBOUND", "A", "B", "x" * 600)
+
+        payload = captured[0]["payload"]
+        assert len(payload["content"]) == 500
+
+
+# ---------------------------------------------------------------------------
+# _route_to_inbox
+# ---------------------------------------------------------------------------
+
+class TestRouteToInbox:
+    def test_creates_inbox_file(self, tmp_path):
+        inbox_dir = tmp_path / "inbox"
+        with patch.object(btm, "_INBOX_DIR", inbox_dir):
+            btm._route_to_inbox("AlbertLobster", "hello from Albert")
+
+        files = list(inbox_dir.glob("*.json"))
+        assert len(files) == 1
+        msg = json.loads(files[0].read_text())
+        assert msg["source"] == "bot-talk"
+        assert msg["type"] == "text"
+        assert msg["text"] == "hello from Albert"
+        assert msg["direction"] == "INBOUND"
+        assert msg["from"] == "AlbertLobster"
+
+    def test_message_has_correct_to_field(self, tmp_path):
+        inbox_dir = tmp_path / "inbox"
+        with patch.object(btm, "_INBOX_DIR", inbox_dir), \
+             patch.object(btm, "BOT_TALK_SENDER", "SaharLobster"):
+            btm._route_to_inbox("AlbertLobster", "content")
+
+        msg = json.loads(list(inbox_dir.glob("*.json"))[0].read_text())
+        assert msg["to"] == "SaharLobster"
+
+    def test_message_user_name_is_sender(self, tmp_path):
+        inbox_dir = tmp_path / "inbox"
+        with patch.object(btm, "_INBOX_DIR", inbox_dir):
+            btm._route_to_inbox("AlbertLobster", "hi")
+
+        msg = json.loads(list(inbox_dir.glob("*.json"))[0].read_text())
+        assert msg["user_name"] == "AlbertLobster"
+        assert msg["chat_id"] == "AlbertLobster"
+
+    def test_does_not_raise_on_io_error(self):
+        """_route_to_inbox must not raise even if the inbox dir is unwritable."""
+        with patch.object(btm, "_INBOX_DIR", Path("/nonexistent/readonly/inbox")):
+            # Should not raise
+            btm._route_to_inbox("AlbertLobster", "content")
+
+    def test_atomic_write_uses_tmp_then_rename(self, tmp_path):
+        """Verifies that writes go through a .tmp file (atomic rename pattern)."""
+        inbox_dir = tmp_path / "inbox"
+        written_paths = []
+
+        original_write_text = Path.write_text
+
+        def capturing_write_text(self, *args, **kwargs):
+            written_paths.append(str(self))
+            return original_write_text(self, *args, **kwargs)
+
+        with patch.object(btm, "_INBOX_DIR", inbox_dir), \
+             patch.object(Path, "write_text", capturing_write_text):
+            btm._route_to_inbox("AlbertLobster", "content")
+
+        # The tmp file should have been written
+        assert any(".tmp" in p for p in written_paths)
+
+
+# ---------------------------------------------------------------------------
+# _do_mirror
 # ---------------------------------------------------------------------------
 
 class TestDoMirror:
-    def test_http_success_skips_ssh_and_local(self):
+    def test_http_success_skips_ssh_writes_event_bus(self):
         with patch.object(btm, "_try_http", return_value=True) as mock_http, \
              patch.object(btm, "_try_ssh") as mock_ssh, \
-             patch.object(btm, "_write_local_log") as mock_local:
-            btm._do_mirror("content", "status-update")
+             patch.object(btm, "_write_local_log") as mock_local, \
+             patch.object(btm, "_emit_event_bus") as mock_bus:
+            btm._do_mirror("content", "status-update", "OUTBOUND", "SaharLobster", "AlbertLobster")
 
         mock_http.assert_called_once()
         mock_ssh.assert_not_called()
         mock_local.assert_not_called()
+        mock_bus.assert_called_once()
 
-    def test_http_failure_falls_back_to_ssh(self):
+    def test_http_failure_falls_back_to_ssh_then_event_bus(self):
         with patch.object(btm, "_try_http", return_value=False), \
              patch.object(btm, "_try_ssh", return_value=True) as mock_ssh, \
-             patch.object(btm, "_write_local_log") as mock_local:
-            btm._do_mirror("content", "status-update")
+             patch.object(btm, "_write_local_log") as mock_local, \
+             patch.object(btm, "_emit_event_bus") as mock_bus:
+            btm._do_mirror("content", "status-update", "INBOUND", "AlbertLobster", "SaharLobster")
 
         mock_ssh.assert_called_once()
         mock_local.assert_not_called()
+        mock_bus.assert_called_once()
 
-    def test_http_and_ssh_failure_writes_local(self):
+    def test_http_and_ssh_failure_writes_local_then_event_bus(self):
         with patch.object(btm, "_try_http", return_value=False), \
              patch.object(btm, "_try_ssh", return_value=False), \
-             patch.object(btm, "_write_local_log") as mock_local:
-            btm._do_mirror("content", "status-update")
+             patch.object(btm, "_write_local_log") as mock_local, \
+             patch.object(btm, "_emit_event_bus") as mock_bus:
+            btm._do_mirror("content", "status-update", "OUTBOUND", "A", "B")
 
         mock_local.assert_called_once()
+        mock_bus.assert_called_once()
+
+    def test_event_bus_called_with_correct_direction_fields(self):
+        with patch.object(btm, "_try_http", return_value=True), \
+             patch.object(btm, "_emit_event_bus") as mock_bus:
+            btm._do_mirror("the content", "status-update", "INBOUND", "AlbertLobster", "SaharLobster")
+
+        mock_bus.assert_called_once_with("INBOUND", "AlbertLobster", "SaharLobster", "the content")
 
 
 # ---------------------------------------------------------------------------
@@ -317,107 +468,93 @@ class TestDoMirror:
 # ---------------------------------------------------------------------------
 
 class TestMirrorOutbound:
-    def test_spawns_daemon_thread(self):
+    def test_spawns_daemon_thread_with_outbound_direction(self):
         spawned = []
 
-        def capturing_spawn(content, genre):
-            spawned.append((content, genre))
+        def capturing_spawn(content, genre, direction, from_, to):
+            spawned.append({"content": content, "genre": genre, "direction": direction, "from": from_, "to": to})
 
         with patch.object(btm, "_spawn_mirror", side_effect=capturing_spawn):
-            btm.mirror_outbound("hello world", "telegram", 12345)
+            btm.mirror_outbound("hello world", "bot-talk", "AlbertLobster")
 
         assert len(spawned) == 1
-        content, genre = spawned[0]
-        assert "OUTBOUND" in content
-        assert "TELEGRAM" in content
-        assert "12345" in content
-        assert "hello world" in content
-        assert genre == "status-update"
+        call_data = spawned[0]
+        assert call_data["direction"] == "OUTBOUND"
+        assert call_data["to"] == "AlbertLobster"
+        assert call_data["from"] == btm.BOT_TALK_SENDER
+        assert call_data["content"] == "hello world"
+        assert call_data["genre"] == "status-update"
 
-    def test_includes_source_and_chat_id(self):
-        spawned = []
-        with patch.object(btm, "_spawn_mirror", side_effect=lambda c, genre: spawned.append(c)):
-            btm.mirror_outbound("msg", "slack", 999)
+    def test_chat_id_integer_converted_to_str_for_to_field(self):
+        to_values = []
 
-        assert "SLACK" in spawned[0]
-        assert "999" in spawned[0]
+        def capture_to(content, genre, direction, from_, to):
+            to_values.append(to)
+
+        with patch.object(btm, "_spawn_mirror", side_effect=capture_to):
+            btm.mirror_outbound("msg", "bot-talk", 9999)
+
+        assert to_values[0] == "9999"
 
 
 # ---------------------------------------------------------------------------
-# mirror_inbound — filtering
+# log_inbound_cross_lobster
 # ---------------------------------------------------------------------------
 
-class TestMirrorInbound:
-    def _make_msg(self, msg_type="text", subtype="", source="telegram", user="Alice", text="hi"):
-        msg = {
-            "type": msg_type,
-            "source": source,
-            "user_name": user,
-            "text": text,
-        }
-        if subtype:
-            msg["subtype"] = subtype
-        return msg
-
-    def test_text_message_is_mirrored(self):
+class TestLogInboundCrossLobster:
+    def test_spawns_mirror_with_inbound_direction(self):
         spawned = []
-        with patch.object(btm, "_spawn_mirror", side_effect=lambda c, genre: spawned.append(c)):
-            btm.mirror_inbound(self._make_msg(msg_type="text", text="hello"))
+
+        def capturing_spawn(content, genre, direction, from_, to):
+            spawned.append({"content": content, "direction": direction, "from": from_, "to": to})
+
+        with patch.object(btm, "_spawn_mirror", side_effect=capturing_spawn), \
+             patch.object(btm, "_route_to_inbox"):
+            btm.log_inbound_cross_lobster("AlbertLobster", "hello from Albert")
+
         assert len(spawned) == 1
-        assert "hello" in spawned[0]
-        assert "Alice" in spawned[0]
+        call_data = spawned[0]
+        assert call_data["direction"] == "INBOUND"
+        assert call_data["from"] == "AlbertLobster"
+        assert call_data["to"] == btm.BOT_TALK_SENDER
+        assert call_data["content"] == "hello from Albert"
 
-    def test_voice_message_is_mirrored_with_label(self):
-        spawned = []
-        with patch.object(btm, "_spawn_mirror", side_effect=lambda c, genre: spawned.append(c)):
-            btm.mirror_inbound(self._make_msg(msg_type="voice"))
-        assert len(spawned) == 1
-        assert "voice message" in spawned[0]
+    def test_routes_to_inbox(self):
+        """log_inbound_cross_lobster must call _route_to_inbox."""
+        routed = []
 
-    def test_photo_message_is_mirrored(self):
-        spawned = []
-        with patch.object(btm, "_spawn_mirror", side_effect=lambda c, genre: spawned.append(c)):
-            btm.mirror_inbound(self._make_msg(msg_type="photo"))
-        assert len(spawned) == 1
-        assert "photo" in spawned[0]
+        with patch.object(btm, "_spawn_mirror"), \
+             patch.object(btm, "_route_to_inbox", side_effect=lambda sender, content: routed.append((sender, content))):
+            btm.log_inbound_cross_lobster("AlbertLobster", "some message")
 
-    def test_document_message_shows_filename(self):
-        spawned = []
-        msg = self._make_msg(msg_type="document")
-        msg["file_name"] = "report.pdf"
-        with patch.object(btm, "_spawn_mirror", side_effect=lambda c, genre: spawned.append(c)):
-            btm.mirror_inbound(msg)
-        assert "report.pdf" in spawned[0]
+        assert len(routed) == 1
+        assert routed[0] == ("AlbertLobster", "some message")
 
-    def test_self_check_subtype_excluded(self):
-        spawned = []
-        with patch.object(btm, "_spawn_mirror", side_effect=lambda c, genre: spawned.append(c)):
-            btm.mirror_inbound(self._make_msg(subtype="self_check"))
-        assert len(spawned) == 0
+    def test_mirror_and_inbox_both_called(self):
+        """Both _spawn_mirror and _route_to_inbox must be called for inbound."""
+        mirror_called = []
+        inbox_called = []
 
-    def test_subagent_notification_excluded(self):
-        spawned = []
-        with patch.object(btm, "_spawn_mirror", side_effect=lambda c, genre: spawned.append(c)):
-            btm.mirror_inbound(self._make_msg(msg_type="text", subtype="subagent_notification"))
-        assert len(spawned) == 0
+        with patch.object(btm, "_spawn_mirror", side_effect=lambda *a, **kw: mirror_called.append(True)), \
+             patch.object(btm, "_route_to_inbox", side_effect=lambda s, c: inbox_called.append(True)):
+            btm.log_inbound_cross_lobster("AlbertLobster", "msg")
 
-    def test_subagent_result_type_excluded(self):
-        spawned = []
-        with patch.object(btm, "_spawn_mirror", side_effect=lambda c, genre: spawned.append(c)):
-            btm.mirror_inbound(self._make_msg(msg_type="subagent_result"))
-        assert len(spawned) == 0
+        assert len(mirror_called) == 1
+        assert len(inbox_called) == 1
 
-    def test_subagent_error_type_excluded(self):
-        spawned = []
-        with patch.object(btm, "_spawn_mirror", side_effect=lambda c, genre: spawned.append(c)):
-            btm.mirror_inbound(self._make_msg(msg_type="subagent_error"))
-        assert len(spawned) == 0
 
-    def test_includes_source_in_content(self):
-        spawned = []
-        with patch.object(btm, "_spawn_mirror", side_effect=lambda c, genre: spawned.append(c)):
-            btm.mirror_inbound(self._make_msg(source="slack"))
-        assert "SLACK" in spawned[0]
+# ---------------------------------------------------------------------------
+# mirror_inbound removed — verify it does not exist
+# ---------------------------------------------------------------------------
+
+class TestMirrorInboundRemoved:
+    def test_mirror_inbound_does_not_exist(self):
+        """The old mirror_inbound() that incorrectly logged Telegram messages
+        as bot-talk entries must be removed."""
+        assert not hasattr(btm, "mirror_inbound"), (
+            "mirror_inbound() still exists — it was supposed to be removed in #1350. "
+            "Owner Telegram messages must never be logged as bot-talk."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -429,11 +566,11 @@ class TestSpawnMirror:
         """_spawn_mirror must start a daemon thread that calls _do_mirror."""
         called = threading.Event()
 
-        def fake_do_mirror(content, genre):
+        def fake_do_mirror(content, genre, direction, from_, to):
             called.set()
 
         with patch.object(btm, "_do_mirror", side_effect=fake_do_mirror):
-            btm._spawn_mirror("test content", "status-update")
+            btm._spawn_mirror("test content", "status-update", "OUTBOUND", "A", "B")
             called.wait(timeout=2.0)
 
         assert called.is_set(), "_do_mirror was not called within 2 seconds"

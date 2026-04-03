@@ -8,9 +8,11 @@
 You are running as a scheduled task. The main Lobster instance created this job.
 
 This is the **fast poller** — it runs every 2 minutes but only does real work when
-`hot_mode=true` in the state file. The hourly baseline poller (`bot-talk-poller`)
-activates hot mode when there is activity; this fast poller then keeps up with the
-conversation in near-real-time.
+`hot_mode=true` in the state file. Bot-talk is strictly inter-Lobster communication
+(messages between Lobster instances only). Owner Telegram messages are NOT bot-talk.
+
+The hourly baseline poller (`bot-talk-poller`) activates hot mode when there is activity;
+this fast poller then keeps up with the conversation in near-real-time.
 
 ## Authentication
 
@@ -44,6 +46,19 @@ Schema:
 Always write updated state atomically: write to a `.tmp` file, then rename to the
 final path.
 
+## Direction Fields
+
+Each message in the API response carries a `direction` field:
+- `"INBOUND"` — message received FROM the remote Lobster (needs forwarding to owner)
+- `"OUTBOUND"` — message sent FROM this Lobster to remote (owner already saw it go out)
+
+**This poller only forwards INBOUND messages to the owner.** OUTBOUND messages still
+advance the timestamp cursor but are not shown.
+
+Backwards compatibility: if `direction` is absent, infer from sender:
+- sender == {{LOCAL_LOBSTER_IDENTITY}} → OUTBOUND (skip)
+- otherwise → INBOUND (forward)
+
 ## Instructions
 
 1. **Fast-exit if not in hot mode:**
@@ -52,37 +67,39 @@ final path.
      status "success" and output "hot_mode=false, skipped". Exit immediately.
    - Do NOT poll the API or send any Telegram notification in this case.
 
-2. **Poll for new messages from both senders:**
+2. **Poll for new messages:**
    - Fetch all messages from `{{LOBSTERTALK_HOST}}/messages` with
      timestamp > `last_message_ts`.
-   - Collect messages from **both** `sender={{LOCAL_LOBSTER_IDENTITY}}` AND `sender={{REMOTE_LOBSTER_IDENTITY}}`.
    - Sort by timestamp ascending (oldest first).
 
-3. **If new messages found:**
-   - Format each message with a directional prefix:
-     - {{LOCAL_LOBSTER_IDENTITY}} messages: `📤 {{LOCAL_LOBSTER_IDENTITY}} → remote: <content>`
-     - {{REMOTE_LOBSTER_IDENTITY}} messages: `📥 {{REMOTE_LOBSTER_IDENTITY}} → the owner: <content>`
-   - Send a single Telegram notification to the owner (chat_id={{TELEGRAM_CHAT_ID}}) with the full
-     conversation block, e.g.:
+3. **Filter to INBOUND only:**
+   - Only forward messages with `direction="INBOUND"` (or inferred INBOUND).
+   - OUTBOUND messages advance the cursor but are not forwarded.
 
+4. **If INBOUND messages found:**
+   - Format each message as:
      ```
-     New bot-talk activity:
-
-     📤 {{LOCAL_LOBSTER_IDENTITY}} → remote: Hello!
-     📥 {{REMOTE_LOBSTER_IDENTITY}} → the owner: Hi back!
+     📥 **Inbox** ({sender}): {content}
      ```
-
-   - Update `last_message_ts` to the latest timestamp across both senders.
+   - Send a single Telegram notification to the owner (chat_id={{TELEGRAM_CHAT_ID}})
+     with all new INBOUND messages.
+   - Update `last_message_ts` to the latest timestamp across ALL fetched messages
+     (including OUTBOUND — they advance the cursor too).
    - Reset `consecutive_empty_polls` to 0.
 
-4. **If no new messages:**
+5. **If no new messages (or only OUTBOUND):**
    - Increment `consecutive_empty_polls`.
    - If `consecutive_empty_polls >= 5`: set `hot_mode=false`, clear `hot_mode_activated_at`.
      (Cooling down after 5 consecutive empty fast-polls ≈ 10 minutes of no activity.)
    - Write updated state file.
-   - Call write_task_output with status "success" and output "no new messages, poll N".
+   - Call write_task_output with status "success" and output "no new inbound messages, poll N".
 
-5. Write updated state file (always).
+6. Write updated state file (always).
+
+## Timezone
+
+Always display timestamps in **Eastern Time (ET)** — currently EDT (UTC-4). Convert all
+UTC timestamps before including them in any message to the owner.
 
 ## Cooldown Behavior
 
