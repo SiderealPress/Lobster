@@ -217,12 +217,11 @@ if [ "$TOKENS_NEED_SETUP" = true ]; then
             fi
 
             # API validation via Python (uses the onboarding module)
-            VALIDATION_RESULT=$("$PYTHON_BIN" -c "
-from lobster_shop_slack_connector_src import validate_bot_token_api
-import sys
-sys.path.insert(0, '$SKILL_DIR')
+            VALIDATION_RESULT=$(SLACK_BOT_TOKEN="$BOT_TOKEN" SKILL_DIR="$SKILL_DIR" "$PYTHON_BIN" -c "
+import os, sys
+sys.path.insert(0, os.environ['SKILL_DIR'])
 from src.onboarding import validate_bot_token_with_api
-ok, msg = validate_bot_token_with_api('$BOT_TOKEN')
+ok, msg = validate_bot_token_with_api(os.environ['SLACK_BOT_TOKEN'])
 print(f'{ok}|{msg}')
 " 2>/dev/null || echo "True|validation-skipped")
 
@@ -267,11 +266,11 @@ print(f'{ok}|{msg}')
 
     # Write tokens to config.env using the Python onboarding module
     info "Writing tokens to $CONFIG_ENV..."
-    "$PYTHON_BIN" -c "
-import sys
-sys.path.insert(0, '$SKILL_DIR')
+    SLACK_BOT_TOKEN="$BOT_TOKEN" SLACK_APP_TOKEN="$APP_TOKEN" SKILL_DIR="$SKILL_DIR" CONFIG_ENV_PATH="$CONFIG_ENV" "$PYTHON_BIN" -c "
+import os, sys
+sys.path.insert(0, os.environ['SKILL_DIR'])
 from src.onboarding import write_tokens_to_config
-write_tokens_to_config('$CONFIG_ENV', '$BOT_TOKEN', '$APP_TOKEN')
+write_tokens_to_config(os.environ['CONFIG_ENV_PATH'], os.environ['SLACK_BOT_TOKEN'], os.environ['SLACK_APP_TOKEN'])
 "
     success "Tokens saved to $CONFIG_ENV"
 else
