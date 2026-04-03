@@ -1,5 +1,11 @@
 # LobsterTalk Incoming Message Handler
 
+> **DEPRECATED** — This job is disabled. Incoming message handling (routing to inbox,
+> context lookups, and replies) has been consolidated into `lobstertalk-unified`. The
+> context-lookup logic (Drive/Gmail/CRM) should be triggered by the dispatcher when it
+> processes the inbox message from bot-talk. Do not re-enable without also disabling
+> `lobstertalk-unified`.
+
 **Job**: lobstertalk-incoming-handler
 **Schedule**: `*/5 * * * *` (every 5 minutes)
 **Skill**: `email-autoresponder` (see `lobster-shop/email-autoresponder/`)
