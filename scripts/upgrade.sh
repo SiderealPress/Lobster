@@ -2346,6 +2346,27 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
         done
     fi
 
+    # Migration 66: Install PostToolUse thinking-heartbeat hook (issue #1401).
+    # The hook writes last_thinking_at to lobster-state.json on every tool call,
+    # giving the health check a freshness signal during the dispatcher's reasoning
+    # phase (10+ minutes of LLM work with no WFM or mark_processed calls).
+    chmod +x "$LOBSTER_DIR/hooks/thinking-heartbeat.py" 2>/dev/null || true
+    if [ -f "$CLAUDE_SETTINGS" ]; then
+        if ! jq -e '.hooks.PostToolUse[]? | select(.hooks[]?.command | contains("thinking-heartbeat"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+            TMP_SETTINGS=$(mktemp)
+            jq '.hooks.PostToolUse = (.hooks.PostToolUse // []) + [{
+                "matcher": "",
+                "hooks": [{
+                    "type": "command",
+                    "command": "python3 '"$LOBSTER_DIR"'/hooks/thinking-heartbeat.py",
+                    "timeout": 5
+                }]
+            }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+            substep "Installed thinking-heartbeat PostToolUse hook"
+            migrated=$((migrated + 1))
+        fi
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
