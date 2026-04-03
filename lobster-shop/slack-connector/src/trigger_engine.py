@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shlex
 import subprocess
 import threading
 from datetime import datetime, timezone
@@ -226,8 +227,6 @@ def matches_keywords(rule: dict[str, Any], event: dict[str, Any]) -> bool:
 
     text = event.get("text", "").lower()
     keyword_mode = rule.get("keyword_mode", "any")
-
-    keyword_checks = (kw.lower() in text for kw in keywords)
 
     if keyword_mode == "all":
         return all(kw.lower() in text for kw in keywords)
@@ -669,7 +668,8 @@ def _handle_shell(
     if not command:
         return {"status": "error", "error": "shell action missing command"}
 
-    interpolated = interpolate_template(command, template_vars)
+    quoted_vars = {k: shlex.quote(str(v)) for k, v in template_vars.items()}
+    interpolated = interpolate_template(command, quoted_vars)
     timeout = min(action.get("timeout", _SHELL_TIMEOUT_SECONDS), _SHELL_TIMEOUT_SECONDS)
 
     try:
