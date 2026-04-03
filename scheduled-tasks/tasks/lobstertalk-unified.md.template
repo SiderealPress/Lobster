@@ -113,7 +113,7 @@ For each INBOUND message (after filtering out self-messages):
      "id": "<timestamp_ms>_bot_talk_<uuid8>",
      "type": "text",
      "source": "bot-talk",
-     "chat_id": "<sender>",
+     "chat_id": ADMIN_CHAT_ID_REDACTED,
      "user_name": "<sender>",
      "text": "<content>",
      "timestamp": "<ISO timestamp>",
@@ -122,6 +122,8 @@ For each INBOUND message (after filtering out self-messages):
      "to": "{{LOCAL_LOBSTER_IDENTITY}}"
    }
    ```
+   Note: `chat_id` is always the owner's `ADMIN_CHAT_ID` (integer `ADMIN_CHAT_ID_REDACTED`) for
+   delivery routing. Sender identity is carried in the `from` field.
    Write atomically (`.tmp` then rename). This ensures the dispatcher processes it
    like any other inbox message.
 
