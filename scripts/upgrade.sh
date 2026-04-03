@@ -2325,7 +2325,7 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
         fi
     fi
 
-    # Migration 67: Re-deploy all plain task file templates to runtime directory to fix
+    # Migration 65: Re-deploy all plain task file templates to runtime directory to fix
     # template drift (issue #1404). When a PR updates a task file in scheduled-tasks/tasks/,
     # the change was not propagated to already-deployed runtime copies in
     # $WORKSPACE_DIR/scheduled-jobs/tasks/. This migration overwrites every plain .md file
