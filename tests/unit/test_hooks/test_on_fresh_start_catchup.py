@@ -1,16 +1,19 @@
 """
 Unit tests for the stale-catchup compact-reminder injection in
-hooks/on-fresh-start.py (issue #909 safety net).
+hooks/on-fresh-start.py (issue #909 safety net), and the stale-claim cleanup
+added for issue #1398.
 
 Validates:
 - _is_catchup_stale() correctly identifies stale / fresh / missing state
 - _compact_reminder_already_queued() correctly detects existing reminders
 - _inject_compact_reminder() writes the correct message or skips when one exists
+- _clear_stale_claim() deletes stale message_claims rows before re-injection
 """
 
 import importlib.util
 import json
 import os
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -385,3 +388,168 @@ class TestInjectCompactReminder:
         text = data["text"]
         assert "compact_catchup" in text or "compact-catchup" in text or "catchup" in text.lower()
         assert "wait_for_messages" in text
+
+
+def _make_claims_db(path: Path) -> None:
+    """Create a minimal agent_sessions.db with the message_claims table."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path))
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS message_claims (
+            message_id  TEXT PRIMARY KEY,
+            claimed_by  TEXT NOT NULL,
+            claimed_at  TEXT NOT NULL,
+            status      TEXT NOT NULL DEFAULT 'processing'
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
+def _insert_claim(db_path: Path, message_id: str, status: str = "processed") -> None:
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "INSERT INTO message_claims (message_id, claimed_by, claimed_at, status) VALUES (?, ?, ?, ?)",
+        (message_id, "test-session", "2026-04-02T00:00:00+00:00", status),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _row_exists(db_path: Path, message_id: str) -> bool:
+    conn = sqlite3.connect(str(db_path))
+    row = conn.execute(
+        "SELECT 1 FROM message_claims WHERE message_id=?", (message_id,)
+    ).fetchone()
+    conn.close()
+    return row is not None
+
+
+class TestClearStaleClaim:
+    """Tests for _clear_stale_claim() — issue #1398."""
+
+    def test_deletes_processed_row(self, tmp_path):
+        db = tmp_path / "config" / "agent_sessions.db"
+        _make_claims_db(db)
+        _insert_claim(db, "0_startup_compact", status="processed")
+
+        mod = _load_on_fresh_start()
+        mod.AGENT_SESSIONS_DB = db
+
+        mod._clear_stale_claim("0_startup_compact")
+
+        assert not _row_exists(db, "0_startup_compact")
+
+    def test_deletes_processing_row(self, tmp_path):
+        """Also clears rows with status='processing' (stuck mid-session)."""
+        db = tmp_path / "config" / "agent_sessions.db"
+        _make_claims_db(db)
+        _insert_claim(db, "0_startup_compact", status="processing")
+
+        mod = _load_on_fresh_start()
+        mod.AGENT_SESSIONS_DB = db
+
+        mod._clear_stale_claim("0_startup_compact")
+
+        assert not _row_exists(db, "0_startup_compact")
+
+    def test_noop_when_row_absent(self, tmp_path):
+        """No-op when the row does not exist — must not raise."""
+        db = tmp_path / "config" / "agent_sessions.db"
+        _make_claims_db(db)
+
+        mod = _load_on_fresh_start()
+        mod.AGENT_SESSIONS_DB = db
+
+        # Should not raise
+        mod._clear_stale_claim("0_startup_compact")
+
+    def test_noop_when_db_absent(self, tmp_path):
+        """No-op when agent_sessions.db does not exist — must not raise."""
+        mod = _load_on_fresh_start()
+        mod.AGENT_SESSIONS_DB = tmp_path / "config" / "agent_sessions.db"
+
+        # Must not raise
+        mod._clear_stale_claim("0_startup_compact")
+
+    def test_does_not_delete_other_rows(self, tmp_path):
+        """Only the target message_id row is deleted; unrelated rows are untouched."""
+        db = tmp_path / "config" / "agent_sessions.db"
+        _make_claims_db(db)
+        _insert_claim(db, "0_startup_compact", status="processed")
+        _insert_claim(db, "some_other_message", status="processed")
+
+        mod = _load_on_fresh_start()
+        mod.AGENT_SESSIONS_DB = db
+
+        mod._clear_stale_claim("0_startup_compact")
+
+        assert not _row_exists(db, "0_startup_compact")
+        assert _row_exists(db, "some_other_message")
+
+    def test_inject_compact_reminder_clears_claim_before_writing(self, tmp_path):
+        """End-to-end: inject succeeds even when a stale claim row exists.
+
+        This is the regression test for issue #1398: mark_processing would
+        return already_claimed because the message_claims row from a previous
+        session persisted after restart.  The fix is that _inject_compact_reminder
+        calls _clear_stale_claim before writing the file, ensuring the new
+        dispatcher can claim the message cleanly.
+        """
+        inbox = tmp_path / "inbox"
+        inbox.mkdir()
+        db = tmp_path / "config" / "agent_sessions.db"
+        _make_claims_db(db)
+        # Simulate a stale row from the previous dispatcher session
+        _insert_claim(db, "0_startup_compact", status="processed")
+
+        mod = _load_on_fresh_start()
+        mod.INBOX_DIR = inbox
+        mod.AGENT_SESSIONS_DB = db
+
+        mod._inject_compact_reminder()
+
+        # File must have been written
+        files = list(inbox.iterdir())
+        assert len(files) == 1
+        assert files[0].name == "0_startup_compact.json"
+
+        # Stale claim row must have been cleared
+        assert not _row_exists(db, "0_startup_compact")
+
+    def test_inject_compact_reminder_removes_stale_processing_file(self, tmp_path):
+        """End-to-end: stale processing/ file is removed before re-injection.
+
+        A crashed or compacted dispatcher session may leave the message file in
+        processing/ instead of inbox/.  Without cleanup the new dispatcher's
+        mark_processing would fail because the file already exists at the
+        destination path.  The fix removes any stale processing/ file before
+        writing a fresh copy to inbox/.
+        """
+        inbox = tmp_path / "inbox"
+        inbox.mkdir()
+        processing = tmp_path / "processing"
+        processing.mkdir()
+        db = tmp_path / "config" / "agent_sessions.db"
+        _make_claims_db(db)
+
+        # Simulate a stale processing file from the previous dispatcher session
+        stale_file = processing / "0_startup_compact.json"
+        stale_file.write_text('{"id": "0_startup_compact"}\n')
+
+        mod = _load_on_fresh_start()
+        mod.INBOX_DIR = inbox
+        mod.PROCESSING_DIR = processing
+        mod.AGENT_SESSIONS_DB = db
+
+        mod._inject_compact_reminder()
+
+        # Fresh file must be in inbox/
+        inbox_files = list(inbox.iterdir())
+        assert len(inbox_files) == 1
+        assert inbox_files[0].name == "0_startup_compact.json"
+
+        # Stale processing file must have been removed
+        assert not stale_file.exists()
