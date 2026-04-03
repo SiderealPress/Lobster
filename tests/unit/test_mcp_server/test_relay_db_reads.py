@@ -260,6 +260,57 @@ class TestGetConversationHistory:
         assert result[0]["id"] == "m1"
         conn.close()
 
+    def test_search_via_fts5_path(self):
+        """FTS5 search works when messages_fts table is present (regression: BIS-164)."""
+        conn = _make_conn()
+        _insert_message(conn, id="m1", text="find the needle here")
+        _insert_message(conn, id="m2", text="nothing relevant")
+        # The in-memory DB created by _make_conn() includes messages_fts,
+        # so this exercises the real FTS5 JOIN path — no mocking.
+        result = db_reader.get_conversation_history(conn, search="needle")
+        assert len(result) == 1
+        assert result[0]["id"] == "m1"
+        conn.close()
+
+    def test_search_fts5_with_source_filter_no_ambiguous_column(self):
+        """
+        FTS5 search combined with source filter must not raise
+        'ambiguous column name: source' (regression: GitHub issue #849 / BIS-164).
+
+        The bug: SELECT used bare m.{_HISTORY_COLUMNS} which only prefixed the
+        first column, and conditions were passed unqualified into the FTS JOIN
+        WHERE clause — SQLite raised OperationalError for shared column names
+        (source, type, text, transcription, user_name).
+        """
+        conn = _make_conn()
+        _insert_message(conn, id="m1", source="telegram", text="needle in telegram")
+        _insert_message(conn, id="m2", source="bisque", text="needle in bisque")
+        # Must not raise OperationalError: ambiguous column name: source
+        result = db_reader.get_conversation_history(conn, source="telegram", search="needle")
+        assert len(result) == 1
+        assert result[0]["id"] == "m1"
+        conn.close()
+
+    def test_search_fts5_with_chat_id_and_source_filter(self):
+        """FTS5 search with both chat_id and source filters does not raise ambiguous column."""
+        conn = _make_conn()
+        _insert_message(conn, id="m1", chat_id="111", source="telegram", text="needle here")
+        _insert_message(conn, id="m2", chat_id="222", source="telegram", text="needle there")
+        result = db_reader.get_conversation_history(
+            conn, chat_id="111", source="telegram", search="needle"
+        )
+        assert len(result) == 1
+        assert result[0]["id"] == "m1"
+        conn.close()
+
+    def test_count_search_fts5_with_source_filter_no_ambiguous_column(self):
+        """count_conversation_history FTS5 path also handles source filter without error."""
+        conn = _make_conn()
+        _insert_message(conn, id="m1", source="telegram", text="needle in telegram")
+        _insert_message(conn, id="m2", source="bisque", text="needle in bisque")
+        count = db_reader.count_conversation_history(conn, source="telegram", search="needle")
+        assert count == 1
+
     def test_extra_json_column_merged_into_result(self):
         conn = _make_conn()
         extra = json.dumps({"image_file": "/tmp/foo.jpg", "image_width": 800})
