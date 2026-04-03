@@ -87,7 +87,7 @@ BOOT_GRACE_SECONDS=90                # 90s - skip stale-inbox, WFM, and process 
 
 HIBERNATE_FRESH_SECONDS=30           # Ignore hibernate state younger than this — transient dispatcher hibernation
 
-WFM_STALE_SECONDS=600                # 10 minutes - RED if wait_for_messages not called since this long ago
+WFM_STALE_SECONDS=1200               # 20 minutes - RED if wait_for_messages not called since this long ago (raised from 600 to accommodate long reasoning/subagent-spawning phases)
 HEARTBEAT_FILE="$WORKSPACE_DIR/logs/claude-heartbeat"
 
 OUTBOX_DIR="$MESSAGES_DIR/outbox"
