@@ -9,6 +9,7 @@ Design principles:
 - Side effects isolated to log_event() boundary (file I/O, dedup DB)
 - Deduplication via SQLite (ts + channel_id composite key)
 - Automatic pruning of stale dedup records (>7 days)
+- Account-mode aware: person mode logs all messages but filters self-messages
 """
 
 from __future__ import annotations
@@ -116,6 +117,89 @@ def _extract_subtypes(event: dict[str, Any]) -> list[str]:
     return [subtype] if subtype else []
 
 
+def is_self_message(event: dict[str, Any], own_user_id: str) -> bool:
+    """Check if an event was authored by our own user account.
+
+    Pure function. Used in person mode to prevent Lobster from
+    responding to (or re-logging) its own messages.
+
+    Args:
+        event: The raw Slack event dict.
+        own_user_id: The Slack user ID of the Lobster account.
+
+    Returns:
+        True if the event was authored by own_user_id.
+    """
+    if not own_user_id:
+        return False
+    return event.get("user", "") == own_user_id
+
+
+def should_log_in_mode(
+    *,
+    account_type: str,
+    is_mention: bool,
+    is_dm: bool,
+    is_self: bool,
+) -> bool:
+    """Decide whether an event should be logged given the account mode.
+
+    Pure function. In bot mode, all events are logged (filtering happens
+    at the channel config level). In person mode, self-messages are
+    excluded to prevent feedback loops.
+
+    Args:
+        account_type: 'bot' or 'person'.
+        is_mention: Whether the event mentions our account.
+        is_dm: Whether the event is a direct message.
+        is_self: Whether the event was authored by our account.
+
+    Returns:
+        True if the event should be logged.
+    """
+    # Never log our own messages in person mode
+    if account_type == "person" and is_self:
+        return False
+    return True
+
+
+def should_route_to_llm_for_mode(
+    *,
+    account_type: str,
+    is_mention: bool,
+    is_dm: bool,
+    is_self: bool,
+    channel_mode: str = "monitor",
+) -> bool:
+    """Decide whether an event should be routed to the LLM inbox.
+
+    Pure function. Combines account-mode filtering with channel-mode routing.
+
+    In person mode: route ALL messages in 'respond'/'full' channels
+    (not just @mentions), except self-messages.
+    In bot mode: follow standard channel_config routing (mentions/DMs only
+    in 'respond' mode).
+    """
+    # Never route self-messages
+    if is_self:
+        return False
+
+    if channel_mode in ("monitor", "ignore"):
+        return False
+
+    if channel_mode == "full":
+        return True
+
+    if channel_mode == "respond":
+        # Person mode: route all messages, not just mentions
+        if account_type == "person":
+            return True
+        # Bot mode: only route mentions and DMs
+        return is_mention or is_dm
+
+    return False
+
+
 def log_path_for_event(
     *, channel_id: str, is_dm: bool, log_root: Path, date: Optional[str] = None
 ) -> Path:
@@ -211,15 +295,23 @@ class SlackIngressLogger:
 
     Side effects are isolated here: file writes and dedup DB access.
     All data transformation is delegated to pure functions above.
+
+    Supports both bot and person account modes:
+    - Bot mode: logs all events, delegates filtering to channel config
+    - Person mode: logs all events except self-authored messages
     """
 
     def __init__(
         self,
         log_root: Optional[Path] = None,
         dedup_db_path: Optional[Path] = None,
+        account_type: str = "bot",
+        own_user_id: str = "",
     ) -> None:
         self._log_root = log_root or _DEFAULT_LOG_ROOT
         self._dedup = DedupStore(dedup_db_path or _DEFAULT_DEDUP_DB)
+        self._account_type = account_type
+        self._own_user_id = own_user_id
 
     def log_message(self, event: dict[str, Any], channel_id: str, **kwargs: Any) -> None:
         """Log a message event. Deduplicates by (ts, channel_id)."""
@@ -254,10 +346,20 @@ class SlackIngressLogger:
         display_name: str = "",
         is_dm: bool = False,
     ) -> None:
-        """Core logging pipeline: dedup → build record → append to file."""
+        """Core logging pipeline: self-check → dedup → build record → append to file."""
         ts = event.get("ts", "")
         if not ts or not channel_id:
             log.warning("Skipping event with missing ts or channel_id")
+            return
+
+        # In person mode, skip self-authored messages
+        if not should_log_in_mode(
+            account_type=self._account_type,
+            is_mention=False,  # not relevant for logging decision
+            is_dm=is_dm,
+            is_self=is_self_message(event, self._own_user_id),
+        ):
+            log.debug("Skipping self-message ts=%s in person mode", ts)
             return
 
         # Dedup check (atomic check-and-mark)
