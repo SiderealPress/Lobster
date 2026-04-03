@@ -215,10 +215,10 @@ else
     fail "Expected '5 turns' in: '$RESULT'"
 fi
 
-# Test 9: Stale threshold is 10 minutes (600 seconds) for empty stop_reason
-begin_test "Agent at exactly 9 minutes is NOT stale"
+# Test 9: Stale threshold is 60 minutes (3600 seconds) for empty stop_reason
+begin_test "Agent at exactly 59 minutes is NOT stale"
 reset_tasks
-create_agent_file "border.output" 10 540
+create_agent_file "border.output" 10 3540
 source_agent_status
 RESULT=$(scan_agent_status)
 if [[ "$RESULT" == *"border"* ]] && [[ "$RESULT" != *"stale"* ]]; then
@@ -227,10 +227,10 @@ else
     fail "Expected agent to appear (not stale) in: '$RESULT'"
 fi
 
-# Test 10: Agent at 11 minutes IS filtered as stale (STALE_STARTING_SECONDS=600)
-begin_test "Agent at 11 minutes IS stale"
+# Test 10: Agent at 61 minutes IS filtered as stale (STALE_STARTING_SECONDS=3600)
+begin_test "Agent at 61 minutes IS stale"
 reset_tasks
-create_agent_file "border2.output" 10 660
+create_agent_file "border2.output" 10 3660
 source_agent_status
 RESULT=$(scan_agent_status)
 if [ -z "$RESULT" ]; then
