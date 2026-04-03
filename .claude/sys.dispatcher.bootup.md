@@ -27,7 +27,7 @@ When you first start (or after reading this file), follow these steps:
 1. Call `session_start(agent_type='dispatcher', claude_session_id=hook_input["session_id"])` — pass the Claude session UUID injected by the SessionStart hook. This writes the UUID to `$LOBSTER_WORKSPACE/data/dispatcher-claude-session-id`, enabling `inject-bootup-context.py` to identify your session as the dispatcher and inject this file on future restarts. Without this call, the primary detection path is never populated and you will receive the subagent bootup file instead of this one.
 1a. Read `~/lobster-user-config/memory/canonical/handoff.md` — user context, active projects, key people, git rules, available integrations.
 2. Read `~/lobster-workspace/user-model/_context.md` if it exists — pre-computed summary of user values, preferences, and active projects. Skip if absent.
-2a. Create a new session file inline (see Session File Management). Store its path as `current_session_file`.
+2a. Create a new session file inline (see Session File Management). Store its path as `current_session_file`. Immediately after copying the template, write the session's start timestamp and set `Messages processed: 0` and `End reason: active` — this makes the file recoverable even if the session ends before any subagent writes to it.
 2b. Call `list_rules(enabled_only=true)` to load IFTTT behavioral rules into working context.
 2c. Check `~/lobster-workspace/data/context-handoff.json`:
     - If **recent** (< 10 min, based on `triggered_at`): read `context_pct`, `pending_tasks`, `last_user_message`. Notify user: "Restarted — context was at {context_pct}%. Resuming from where we left off." Re-queue any stuck messages from `~/messages/processing/`. Delete the file.
@@ -539,16 +539,22 @@ Written by `hooks/context-monitor.py` when context window >= 70%.
 
 ```
 1. mark_processing(message_id)
-2. Enter wind-down mode:
+2. Write a tombstone to the current session file (inline, no subagent needed — this is fast):
+   - Set Ended to current UTC ISO timestamp
+   - Set Messages processed to the count of messages handled this session (tracked in working context as MESSAGE_COUNT)
+   - Set End reason to "context_warning"
+   - Set Summary to "Graceful wind-down triggered at {context_pct}% context. [Brief list of what was in progress, if anything.]"
+   This ensures the session file is recoverable even if nothing else was written during this session.
+3. Enter wind-down mode:
    - Set WIND_DOWN_MODE = True
    - Do NOT spawn new non-trivial subagents
    - For new user messages: ack, create_task to record, tell user "Compacting context shortly — will pick this up after."
-3. Drain in-flight agents: poll get_active_sessions() every 10s. Process arriving subagent results normally.
-4. Write ~/lobster-workspace/data/context-handoff.json:
+4. Drain in-flight agents: poll get_active_sessions() every 10s. Process arriving subagent results normally.
+5. Write ~/lobster-workspace/data/context-handoff.json:
    {"triggered_at": "<iso8601>", "context_pct": <pct>, "pending_tasks": <list>, "last_user_message": "<text>", "note": "Graceful wind-down"}
-5. Send user (use admin chat_id from config): "Context at {pct}% — entering wind-down mode. Handing off cleanly."
-6. Stop the main loop — do NOT call wait_for_messages() again. Claude Code will compact naturally.
-7. mark_processed(message_id)
+6. Send user (use admin chat_id from config): "Context at {pct}% — entering wind-down mode. Handing off cleanly."
+7. Stop the main loop — do NOT call wait_for_messages() again. Claude Code will compact naturally.
+8. mark_processed(message_id)
 ```
 
 Rules: `chat_id` is 0 — use admin chat_id for step 5. Never re-enter wind-down for a second warning. Do NOT call `lobster restart` — compaction is the recovery mechanism.
@@ -707,7 +713,11 @@ One session note file per session. Lives in `~/lobster-user-config/memory/canoni
 1. List the directory, find highest sequence number for today. If none, start at 001.
 2. Copy `session.template.md` to the new path.
 3. Replace `Started` placeholder with current UTC ISO timestamp.
-4. Store full path as `current_session_file`.
+4. Replace `Messages processed` placeholder with `0`.
+5. Replace `End reason` placeholder with `active`.
+6. Store full path as `current_session_file`.
+
+> **Why this matters:** The session file is created at startup but subagent writes only happen when real work occurs. If the session ends before any subagent writes (crash, rapid restart, short session), the file stays as a template stub — useless for recovery. Writing minimal tombstone metadata at creation time (start time, messages=0, reason=active) means even a 30-second session leaves a partially recoverable record. Subsequent updates fill in the rest.
 
 **When to update** (via background `lobster-generalist` subagent — never inline):
 - A subagent result arrives with non-trivial content (PR opened, task completed, error)
@@ -730,6 +740,16 @@ Steps: 1. Read the file. 2. Update Open Threads, Open Tasks, Open Subagents, Not
 Do not modify Summary or Started/Ended. 3. Write back. 4. Call write_result.
 ```
 
+**Tombstone on session end (unconditional):** Whenever the session ends for any reason, write a tombstone update to the session file before stopping. This is done inline (not via subagent) and takes <1 second. Minimum content:
+- `Ended`: current UTC ISO timestamp
+- `Messages processed`: MESSAGE_COUNT (tracked in working context; increment on each `mark_processed` call)
+- `End reason`: one of `graceful wind-down`, `context_warning`, `short session`, `crash` (use `short session` if session ran < 5 minutes and no reason is known)
+- `Summary`: at minimum, "Session ended [reason]. [N] messages processed." — fill in more if context permits.
+
+This rule is unconditional — even if the session processed zero messages, the tombstone must be written. A stub file with only a start timestamp is nearly as bad as no file at all.
+
+**MESSAGE_COUNT tracking:** On startup, initialize `MESSAGE_COUNT = 0` in working context. Increment it each time you call `mark_processed(message_id)` for a real user message (not system messages like `session_note_reminder`).
+
 **Periodic snapshots:** Triggered by `session_note_reminder` (every 20 user messages). Spawn `session-note-appender` (see `.claude/agents/session-note-appender.md`) with `current_session_file`, a list of recent activity visible in working context, `in_flight` (running subagents with elapsed time), and `pending_responses` (claimed but unanswered messages).
 
 **Pre-compaction polish:** On `compact-reminder`, spawn `session-note-polish` (see `.claude/agents/session-note-polish.md`) with `current_session_file` before spawning compact_catchup. When passing context to `session-note-polish`, include:
@@ -737,7 +757,7 @@ Do not modify Summary or Started/Ended. 3. Write back. 4. Call write_result.
 - Any pending user responses (messages that were mark_processing-d but not yet replied to)
 - The current MESSAGE_COUNT at time of compaction
 
-**On context_warning:** Spawn a session note update subagent as the very first step — captures current state before graceful restart erases working context.
+**On context_warning:** Write a tombstone inline as step 2 (see context_warning handler above) — this is faster and more reliable than spawning a subagent, and ensures the record survives even if wind-down is interrupted.
 
 ---
 
