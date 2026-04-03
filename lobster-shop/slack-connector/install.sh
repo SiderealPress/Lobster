@@ -4,11 +4,16 @@
 #
 # Idempotent installer for the slack-connector Lobster skill.
 # Sets up:
-#   1. Python dependencies (slack-bolt, slack-sdk, watchdog) in the Lobster venv
-#   2. Runtime directories under ~/lobster-workspace/slack-connector/
-#   3. Example configs (no-clobber copy)
-#   4. Token validation
-#   5. Service restart (if running)
+#   1. Prerequisites check (Python, slack-bolt, config.env)
+#   2. Python dependencies (slack-bolt, slack-sdk, watchdog)
+#   3. Token collection and validation (interactive or pre-configured)
+#   4. Runtime directories under ~/lobster-workspace/slack-connector/
+#   5. Example configs (no-clobber copy)
+#   6. Service enable/restart
+#
+# Account type:
+#   Default: bot (xoxb- token via Slack App)
+#   Set SLACK_ACCOUNT_TYPE=person for user-seat path (Phase 7)
 #
 # Usage: bash ~/lobster/lobster-shop/slack-connector/install.sh
 #===============================================================================
@@ -28,7 +33,7 @@ info()    { echo -e "${BLUE}[INFO]${NC} $1"; }
 success() { echo -e "${GREEN}[OK]${NC} $1"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error()   { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
-step()    { echo -e "\n${CYAN}${BOLD}--- $1${NC}"; }
+step()    { echo -e "\n${CYAN}${BOLD}--- Step $1${NC}"; }
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -39,16 +44,35 @@ SKILL_DIR="$LOBSTER_DIR/lobster-shop/slack-connector"
 RUNTIME_DIR="$LOBSTER_WORKSPACE/slack-connector"
 CONFIG_ENV="$HOME/lobster-config/config.env"
 PIP_BIN="$LOBSTER_DIR/.venv/bin/pip"
+PYTHON_BIN="$LOBSTER_DIR/.venv/bin/python"
 
 echo ""
 echo -e "${BOLD}Slack Connector Skill Installer${NC}"
 echo "================================="
 echo ""
 
+# ---------------------------------------------------------------------------
+# Person account path stub (Phase 7)
+# ---------------------------------------------------------------------------
+if [ "${SLACK_ACCOUNT_TYPE}" = "person" ]; then
+    info "Person account path will be implemented in Phase 7."
+    info "Please run with SLACK_ACCOUNT_TYPE=bot (or unset) for now."
+    exit 0
+fi
+
 #===============================================================================
 # Step 1: Check prerequisites
 #===============================================================================
-step "Checking prerequisites"
+step "1: Checking prerequisites"
+
+# Python version >= 3.11
+PYTHON_VERSION=$("$PYTHON_BIN" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || echo "0.0")
+PYTHON_MAJOR=$(echo "$PYTHON_VERSION" | cut -d. -f1)
+PYTHON_MINOR=$(echo "$PYTHON_VERSION" | cut -d. -f2)
+if [ "$PYTHON_MAJOR" -lt 3 ] || { [ "$PYTHON_MAJOR" -eq 3 ] && [ "$PYTHON_MINOR" -lt 11 ]; }; then
+    error "Python >= 3.11 required (found $PYTHON_VERSION at $PYTHON_BIN)"
+fi
+success "Python $PYTHON_VERSION"
 
 # Lobster venv pip
 if [ ! -f "$PIP_BIN" ]; then
@@ -62,18 +86,202 @@ if [ ! -f "$SKILL_DIR/skill.toml" ]; then
 fi
 success "Skill directory found"
 
+# config.env writable
+if [ ! -f "$CONFIG_ENV" ]; then
+    error "Config file not found at $CONFIG_ENV — run Lobster install first"
+fi
+if [ ! -w "$CONFIG_ENV" ]; then
+    error "Config file $CONFIG_ENV is not writable"
+fi
+success "config.env is writable"
+
 #===============================================================================
 # Step 2: Install Python dependencies
 #===============================================================================
-step "Installing Python dependencies"
+step "2: Installing Python dependencies"
 
 $PIP_BIN install --quiet "slack-bolt>=1.18" "slack-sdk>=3.26" "watchdog>=3.0" 2>&1 | tail -5
 success "slack-bolt, slack-sdk, watchdog installed"
 
+# Verify import
+if ! "$PYTHON_BIN" -c "import slack_bolt" 2>/dev/null; then
+    error "slack-bolt installed but not importable — check your venv"
+fi
+success "slack-bolt importable"
+
 #===============================================================================
-# Step 3: Create runtime directories
+# Step 3: Check existing tokens
 #===============================================================================
-step "Creating runtime directories"
+step "3: Checking existing tokens"
+
+# Pure function: read a token value from config.env
+# Returns the value via stdout, empty string if not found
+read_token() {
+    local token_name="$1"
+    if [ -f "$CONFIG_ENV" ] && grep -q "^${token_name}=" "$CONFIG_ENV"; then
+        grep "^${token_name}=" "$CONFIG_ENV" | head -1 | cut -d'=' -f2- | sed "s/^['\"]//;s/['\"]$//"
+    fi
+}
+
+# Pure function: mask a token for display
+mask_token() {
+    local token="$1"
+    local len=${#token}
+    if [ "$len" -le 10 ]; then
+        echo "${token:0:5}****"
+    else
+        echo "${token:0:5}****${token: -4}"
+    fi
+}
+
+EXISTING_BOT_TOKEN=$(read_token "LOBSTER_SLACK_BOT_TOKEN")
+EXISTING_APP_TOKEN=$(read_token "LOBSTER_SLACK_APP_TOKEN")
+
+TOKENS_NEED_SETUP=false
+
+if [ -n "$EXISTING_BOT_TOKEN" ] && [ -n "$EXISTING_APP_TOKEN" ]; then
+    success "LOBSTER_SLACK_BOT_TOKEN is set ($(mask_token "$EXISTING_BOT_TOKEN"))"
+    success "LOBSTER_SLACK_APP_TOKEN is set ($(mask_token "$EXISTING_APP_TOKEN"))"
+    info "Both tokens already configured — skipping to Step 5"
+    BOT_TOKEN="$EXISTING_BOT_TOKEN"
+    APP_TOKEN="$EXISTING_APP_TOKEN"
+else
+    if [ -n "$EXISTING_BOT_TOKEN" ]; then
+        success "LOBSTER_SLACK_BOT_TOKEN is set ($(mask_token "$EXISTING_BOT_TOKEN"))"
+        BOT_TOKEN="$EXISTING_BOT_TOKEN"
+    else
+        warn "LOBSTER_SLACK_BOT_TOKEN is not set"
+        TOKENS_NEED_SETUP=true
+    fi
+    if [ -n "$EXISTING_APP_TOKEN" ]; then
+        success "LOBSTER_SLACK_APP_TOKEN is set ($(mask_token "$EXISTING_APP_TOKEN"))"
+        APP_TOKEN="$EXISTING_APP_TOKEN"
+    else
+        warn "LOBSTER_SLACK_APP_TOKEN is not set"
+        TOKENS_NEED_SETUP=true
+    fi
+fi
+
+#===============================================================================
+# Step 4: Guide user and collect tokens (if needed)
+#===============================================================================
+if [ "$TOKENS_NEED_SETUP" = true ]; then
+    step "4: Slack App Setup & Token Collection"
+
+    echo ""
+    echo -e "${BOLD}Follow these steps to create your Slack App:${NC}"
+    echo ""
+    echo "  1. Go to https://api.slack.com/apps"
+    echo "     → Click \"Create New App\" → \"From scratch\""
+    echo "     → App name: \"Lobster\" (or any name)"
+    echo "     → Pick your workspace"
+    echo ""
+    echo "  2. Enable Socket Mode"
+    echo "     → App settings → \"Socket Mode\" → Enable"
+    echo "     → Create an App-Level Token with scope: connections:write"
+    echo "     → Save the token (starts with xapp-)"
+    echo ""
+    echo "  3. Add Bot Token Scopes"
+    echo "     → OAuth & Permissions → Bot Token Scopes → Add:"
+    echo "       channels:history  channels:read   groups:history  groups:read"
+    echo "       im:history        im:read         mpim:history    mpim:read"
+    echo "       chat:write        users:read      reactions:read  files:read"
+    echo ""
+    echo "  4. Subscribe to Bot Events"
+    echo "     → Event Subscriptions → Enable → Subscribe to Bot Events:"
+    echo "       message.channels  message.groups  message.im  message.mpim"
+    echo "       reaction_added    app_mention     file_shared"
+    echo ""
+    echo "  5. Install App to Workspace"
+    echo "     → OAuth & Permissions → \"Install to Workspace\" → Allow"
+    echo "     → Save the Bot User OAuth Token (starts with xoxb-)"
+    echo ""
+    read -rp "Press Enter when you've completed the steps above..."
+    echo ""
+
+    # Collect bot token if missing
+    if [ -z "$BOT_TOKEN" ]; then
+        for attempt in 1 2 3; do
+            read -rp "  Enter your Bot Token (xoxb-...): " BOT_TOKEN
+            BOT_TOKEN=$(echo "$BOT_TOKEN" | xargs)  # trim whitespace
+
+            # Format check
+            if [[ ! "$BOT_TOKEN" =~ ^xoxb- ]]; then
+                echo -e "  ${RED}Invalid: Bot token must start with 'xoxb-'${NC}"
+                if [ "$attempt" -lt 3 ]; then
+                    echo "  Please try again."
+                    BOT_TOKEN=""
+                    continue
+                fi
+                error "Bot token validation failed after 3 attempts"
+            fi
+
+            # API validation via Python (uses the onboarding module)
+            VALIDATION_RESULT=$("$PYTHON_BIN" -c "
+from lobster_shop_slack_connector_src import validate_bot_token_api
+import sys
+sys.path.insert(0, '$SKILL_DIR')
+from src.onboarding import validate_bot_token_with_api
+ok, msg = validate_bot_token_with_api('$BOT_TOKEN')
+print(f'{ok}|{msg}')
+" 2>/dev/null || echo "True|validation-skipped")
+
+            VALID=$(echo "$VALIDATION_RESULT" | cut -d'|' -f1)
+            WORKSPACE=$(echo "$VALIDATION_RESULT" | cut -d'|' -f2-)
+
+            if [ "$VALID" = "True" ]; then
+                success "Bot token valid — workspace: $WORKSPACE"
+                break
+            else
+                echo -e "  ${RED}API validation failed: $WORKSPACE${NC}"
+                if [ "$attempt" -lt 3 ]; then
+                    echo "  Please try again."
+                    BOT_TOKEN=""
+                else
+                    error "Bot token validation failed after 3 attempts"
+                fi
+            fi
+        done
+    fi
+
+    # Collect app token if missing
+    if [ -z "$APP_TOKEN" ]; then
+        for attempt in 1 2 3; do
+            read -rp "  Enter your App Token (xapp-...): " APP_TOKEN
+            APP_TOKEN=$(echo "$APP_TOKEN" | xargs)  # trim whitespace
+
+            if [[ "$APP_TOKEN" =~ ^xapp- ]]; then
+                success "App token format valid"
+                break
+            else
+                echo -e "  ${RED}Invalid: App token must start with 'xapp-'${NC}"
+                if [ "$attempt" -lt 3 ]; then
+                    echo "  Please try again."
+                    APP_TOKEN=""
+                else
+                    error "App token validation failed after 3 attempts"
+                fi
+            fi
+        done
+    fi
+
+    # Write tokens to config.env using the Python onboarding module
+    info "Writing tokens to $CONFIG_ENV..."
+    "$PYTHON_BIN" -c "
+import sys
+sys.path.insert(0, '$SKILL_DIR')
+from src.onboarding import write_tokens_to_config
+write_tokens_to_config('$CONFIG_ENV', '$BOT_TOKEN', '$APP_TOKEN')
+"
+    success "Tokens saved to $CONFIG_ENV"
+else
+    info "Skipping Step 4 — tokens already configured"
+fi
+
+#===============================================================================
+# Step 5: Create runtime directories
+#===============================================================================
+step "5: Creating runtime directories"
 
 readonly DIRS=(
     "$RUNTIME_DIR"
@@ -90,9 +298,9 @@ done
 success "Runtime directories created at $RUNTIME_DIR/"
 
 #===============================================================================
-# Step 4: Copy example configs (no-clobber)
+# Step 6: Copy example configs (no-clobber)
 #===============================================================================
-step "Copying example configs"
+step "6: Copying example configs"
 
 copy_no_clobber() {
     local src="$1"
@@ -108,38 +316,9 @@ copy_no_clobber() {
 copy_no_clobber "$SKILL_DIR/config/channels.yaml.example" "$RUNTIME_DIR/config/channels.yaml"
 
 #===============================================================================
-# Step 5: Check for required tokens
+# Step 7: Enable/restart lobster-slack-router service
 #===============================================================================
-step "Checking API tokens"
-
-check_token() {
-    local token_name="$1"
-    if [ -f "$CONFIG_ENV" ] && grep -q "^${token_name}=" "$CONFIG_ENV"; then
-        local token_value
-        token_value=$(grep "^${token_name}=" "$CONFIG_ENV" | head -1 | cut -d'=' -f2-)
-        if [ -n "$token_value" ] && [ "$token_value" != '""' ] && [ "$token_value" != "''" ]; then
-            success "$token_name is set"
-            return 0
-        fi
-    fi
-    warn "$token_name is not set in $CONFIG_ENV"
-    echo "  To set it, add this line to $CONFIG_ENV:"
-    echo "    ${token_name}=xoxb-your-token-here"
-    return 1
-}
-
-TOKENS_OK=true
-check_token "LOBSTER_SLACK_BOT_TOKEN" || TOKENS_OK=false
-check_token "LOBSTER_SLACK_APP_TOKEN" || TOKENS_OK=false
-
-if [ "$TOKENS_OK" = false ]; then
-    warn "Some tokens are missing — the skill will install but won't connect until tokens are configured"
-fi
-
-#===============================================================================
-# Step 6: Restart lobster-slack-router if running
-#===============================================================================
-step "Checking lobster-slack-router service"
+step "7: Checking lobster-slack-router service"
 
 if systemctl is-active --quiet lobster-slack-router 2>/dev/null; then
     info "Restarting lobster-slack-router to pick up changes..."
@@ -154,19 +333,21 @@ else
 fi
 
 #===============================================================================
-# Done
+# Step 8: Done — print success
 #===============================================================================
 echo ""
 echo -e "${GREEN}${BOLD}Slack Connector skill installed!${NC}"
 echo ""
-echo "  Runtime dir:  $RUNTIME_DIR/"
-echo "  Config:       $RUNTIME_DIR/config/channels.yaml"
-echo "  Logs:         $RUNTIME_DIR/logs/"
+echo "  Runtime dir:   $RUNTIME_DIR/"
+echo "  Config:        $RUNTIME_DIR/config/channels.yaml"
+echo "  Logs:          $RUNTIME_DIR/logs/"
 echo "  Trigger rules: $RUNTIME_DIR/config/rules/"
 echo ""
-if [ "$TOKENS_OK" = false ]; then
-    echo -e "  ${YELLOW}⚠ Set missing tokens in $CONFIG_ENV and re-run this script${NC}"
-    echo ""
-fi
-echo "  To activate:  /skill activate slack-connector"
+echo "  Bot Token:     $(mask_token "$BOT_TOKEN")"
+echo "  App Token:     $(mask_token "$APP_TOKEN")"
+echo ""
+echo "  Next steps:"
+echo "    1. Invite Lobster to channels:  /invite @Lobster"
+echo "    2. Activate the skill:          /skill activate slack-connector"
+echo "    3. Configure channels:          edit $RUNTIME_DIR/config/channels.yaml"
 echo ""
