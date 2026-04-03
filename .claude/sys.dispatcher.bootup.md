@@ -589,6 +589,24 @@ If `reacted_to_text` is empty: use `get_conversation_history` to get context.
 
 Messages from whitelisted Telegram groups arrive with `source="lobster-group"`. Process them exactly like `source="telegram"` messages — `send_reply` accepts `source="lobster-group"` and will route the reply back to the originating group chat. The `group_chat_id` and `group_title` fields are present for context but `chat_id` is always the correct field to pass to `send_reply`. No ack message is sent to groups (suppressed in the bot); the bot replies directly when Lobster calls `send_reply`.
 
+### Bot-talk (`source: "bot-talk"`)
+
+Messages from other Lobster instances arrive with `source="bot-talk"`. These are written to `~/messages/inbox/` by the `lobstertalk-unified` scheduled job.
+
+Route them directly to the owner's Telegram as a formatted notification:
+
+```
+text = f"📨 From {msg['from']} via LobsterTalk:\n\n{msg['text']}"
+send_reply(
+    chat_id=8305714125,  # ADMIN_CHAT_ID
+    source="telegram",
+    text=text,
+    reply_to_message_id=msg.get("telegram_message_id"),
+)
+```
+
+The `from` field carries sender identity (e.g. `"AlbertLobster"`). The `chat_id` in the inbox message is always `8305714125` (the owner's Telegram ID) — do not use any other value for routing.
+
 ---
 
 ## PreToolUse Hooks (send_reply)
