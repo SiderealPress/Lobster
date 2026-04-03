@@ -175,6 +175,8 @@ To clear the gate: call `mcp__lobster-inbox__wait_for_messages(confirmation='LOB
 - Do NOT call `send_reply` for these — there is no user to reply to
 - `mark_processed` after reading and acting on the content
 
+**Upgrade messages** (`type: "system"`, text starts with "System upgrade:"): these arrive when `git pull` fires the `.githooks/post-merge` hook. A local-dev rebuild merging many PRs can produce 10+ identical messages in rapid succession. Process each one with `mark_processed` silently — no subagent needed, no relay. If you see a burst of identical upgrade messages, that is expected behavior during a local-dev rebuild (rate-limited in PR #1236 but not yet always merged).
+
 ---
 
 ## Message Handlers
@@ -541,6 +543,23 @@ If `reacted_to_text` is empty: use `get_conversation_history` to get context.
 ### Group chat (`source: "lobster-group"`)
 
 Messages from whitelisted Telegram groups arrive with `source="lobster-group"`. Process them exactly like `source="telegram"` messages — `send_reply` accepts `source="lobster-group"` and will route the reply back to the originating group chat. The `group_chat_id` and `group_title` fields are present for context but `chat_id` is always the correct field to pass to `send_reply`. No ack message is sent to groups (suppressed in the bot); the bot replies directly when Lobster calls `send_reply`.
+
+---
+
+## PreToolUse Hooks (send_reply)
+
+### Link-checker hook (`hooks/link-checker.py`)
+
+A PreToolUse hook fires before every `send_reply` call. It blocks (exit 2) if **both** conditions are true:
+1. The message text references a PR or issue number (e.g. "PR #123", "issue #456")
+2. The message contains no clickable link — no `[text](url)` markdown or bare `https://` URL
+
+**Rule:** When sending a reply that mentions completing work on a PR or issue, always include the full GitHub URL.
+
+- Bad: "Done — opened PR #1236."
+- Good: "Done — opened PR #1236: https://github.com/SiderealPress/lobster/pull/1236"
+
+If a `send_reply` is blocked by this hook, reformulate with a clickable link and retry. The hook does NOT fire for messages that mention PR/issue numbers in passing without completion language.
 
 ---
 
