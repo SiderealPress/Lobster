@@ -45,6 +45,7 @@ from src.onboarding import (
     build_channels_config,
     write_channels_config,
     restart_ingress_service,
+    _write_tokens_to_config,
 )
 
 
@@ -477,3 +478,77 @@ class TestRestartIngressService:
 
         assert ok is False
         assert "timed out" in msg.lower()
+
+# ============================================================================
+# _write_tokens_to_config — idempotent config writes with chmod 600
+# ============================================================================
+
+class TestWriteTokensToConfig:
+    def test_creates_file_with_tokens(self, tmp_path):
+        config = tmp_path / "config.env"
+        _write_tokens_to_config(config, {"LOBSTER_SLACK_BOT_TOKEN": "xoxb-test"})
+        assert "LOBSTER_SLACK_BOT_TOKEN=xoxb-test" in config.read_text()
+
+    def test_file_chmod_600(self, tmp_path):
+        config = tmp_path / "config.env"
+        _write_tokens_to_config(config, {"LOBSTER_SLACK_BOT_TOKEN": "xoxb-abc"})
+        import stat
+        mode = stat.S_IMODE(config.stat().st_mode)
+        assert mode == 0o600
+
+    def test_idempotent_update(self, tmp_path):
+        config = tmp_path / "config.env"
+        config.write_text("LOBSTER_SLACK_BOT_TOKEN=xoxb-old\n")
+        _write_tokens_to_config(config, {"LOBSTER_SLACK_BOT_TOKEN": "xoxb-new"})
+        content = config.read_text()
+        assert "xoxb-new" in content
+        assert "xoxb-old" not in content
+
+    def test_appends_new_key(self, tmp_path):
+        config = tmp_path / "config.env"
+        config.write_text("EXISTING_KEY=value\n")
+        _write_tokens_to_config(config, {"LOBSTER_SLACK_APP_TOKEN": "xapp-test"})
+        content = config.read_text()
+        assert "EXISTING_KEY=value" in content
+        assert "LOBSTER_SLACK_APP_TOKEN=xapp-test" in content
+
+    def test_multiple_tokens(self, tmp_path):
+        config = tmp_path / "config.env"
+        _write_tokens_to_config(config, {
+            "LOBSTER_SLACK_BOT_TOKEN": "xoxb-bot",
+            "LOBSTER_SLACK_APP_TOKEN": "xapp-app",
+        })
+        content = config.read_text()
+        assert "LOBSTER_SLACK_BOT_TOKEN=xoxb-bot" in content
+        assert "LOBSTER_SLACK_APP_TOKEN=xapp-app" in content
+
+    def test_creates_parent_dirs(self, tmp_path):
+        config = tmp_path / "subdir" / "config.env"
+        _write_tokens_to_config(config, {"KEY": "val"})
+        assert config.exists()
+
+
+# ============================================================================
+# save_onboarding_state — state files must be chmod 600
+# ============================================================================
+
+class TestSaveOnboardingStateChmod:
+    def test_state_file_chmod_600(self, tmp_path):
+        import stat
+        state = OnboardingState(chat_id="999", bot_token="xoxb-secret", app_token="xapp-secret")
+        save_onboarding_state(state, state_dir=tmp_path)
+        path = tmp_path / "onboarding_999.json"
+        assert path.exists()
+        mode = stat.S_IMODE(path.stat().st_mode)
+        assert mode == 0o600
+
+    def test_state_file_chmod_preserved_on_overwrite(self, tmp_path):
+        import stat
+        state = OnboardingState(chat_id="777")
+        save_onboarding_state(state, state_dir=tmp_path)
+        # Overwrite with updated state
+        state2 = OnboardingState(chat_id="777", bot_token="xoxb-updated")
+        save_onboarding_state(state2, state_dir=tmp_path)
+        path = tmp_path / "onboarding_777.json"
+        mode = stat.S_IMODE(path.stat().st_mode)
+        assert mode == 0o600
