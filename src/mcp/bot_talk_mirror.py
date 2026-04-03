@@ -1,15 +1,32 @@
 #!/usr/bin/env python3
 """
-Bot-talk mirroring module.
+Bot-talk mirroring module — cross-Lobster channel only.
 
-Mirrors Lobster's inbound and outbound messages to the shared bot-talk channel
-so Albert's Lobster can observe what the owner's Lobster is doing.
+Bot-talk is strictly inter-Lobster communication: messages exchanged between
+Lobster instances (e.g. SaharLobster <-> AlbertLobster). Owner messages sent
+from Telegram to their own Lobster are NOT bot-talk and are never logged here.
+
+Public API
+----------
+mirror_outbound(text, source, chat_id)
+    Called when this Lobster sends a reply OUT to the bot-talk channel (to
+    another Lobster). Records direction="OUTBOUND" and emits to EventBus.
+    Fire-and-forget.
+
+log_inbound_cross_lobster(sender, content)
+    Called when a cross-Lobster message arrives FROM another Lobster instance.
+    Records direction="INBOUND", emits to EventBus, and routes the message
+    to ~/messages/inbox/ with source="bot-talk" so the dispatcher handles it.
+    Fire-and-forget.
+
+The old mirror_inbound() function (which incorrectly logged owner Telegram
+messages as bot-talk entries) has been removed. Only cross-Lobster messages
+should be passed to this module.
 
 Architecture
 ------------
-Every call to `mirror_outbound` or `mirror_inbound` spawns a short-lived daemon
-thread that fires once and exits.  The calling path (handle_send_reply,
-handle_check_inbox) is never blocked — if the mirror fails, the message is still
+Every call spawns a short-lived daemon thread that fires once and exits.
+The calling path is never blocked — if the mirror fails, the message is still
 delivered normally.
 
 Resilience chain
@@ -18,21 +35,19 @@ Resilience chain
 2. SSH fallback: append a log line to the remote log file via BOT_TALK_SSH_HOST
 3. Local log: ~/lobster-workspace/logs/bot-talk-mirror.log
 
+All bot-talk messages (both directions) are also logged to the central
+EventBus (logs/events.jsonl) with structured direction/from/to fields.
+
 Configuration (all overridable via environment variables):
   BOT_TALK_HTTP_URL      - Full URL to the bot-talk /message endpoint
   BOT_TALK_SSH_HOST      - SSH host alias for the fallback log write
   BOT_TALK_SSH_LOG_PATH  - Remote log file path on the SSH host
+  BOT_TALK_SENDER        - Identity string for this Lobster instance
 
-Anti-duplication
-----------------
-The bot-talk poller reads only messages with sender="AlbertLobster".
-This module writes sender="SaharLobster", so there is no echo loop.
-
-Filtering
----------
-Only real user messages and outbound replies reach bot-talk.
-Internal system subtypes (self_check, subagent_*, compact-reminder, compact_catchup, scheduler_*) are
-excluded so Albert's Lobster isn't spammed with Lobster-internal chatter.
+IMPORTANT: The bot-talk service runs plain HTTP on port 4242 — there is no
+TLS on this endpoint (TLS was intentionally removed).  Always use http://
+(never https://) when constructing or configuring BOT_TALK_HTTP_URL.
+Using https:// causes an SSL handshake failure on every request.
 """
 
 import json
@@ -42,6 +57,7 @@ import shlex
 import subprocess
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -54,11 +70,6 @@ log = logging.getLogger(__name__)
 # Falls back to reading config.env (same pattern as inbox_server.py / OPENAI_API_KEY).
 # If BOT_TALK_HTTP_URL is empty after all lookups, HTTP mirroring is silently
 # disabled (SSH fallback still applies if sharedLobster is reachable).
-#
-# IMPORTANT: The bot-talk service runs plain HTTP on port 4242 — there is no
-# TLS on this endpoint (TLS was intentionally removed).  Always use http://
-# (never https://) when constructing or configuring BOT_TALK_HTTP_URL.
-# Using https:// causes an SSL handshake failure on every request.
 # ---------------------------------------------------------------------------
 
 def _read_config_env(key: str) -> str:
@@ -103,39 +114,26 @@ BOT_TALK_TOKEN: str = (
     or _read_config_env("BOT_TALK_TOKEN")
     or ""
 )
+BOT_TALK_SENDER: str = (
+    os.environ.get("BOT_TALK_SENDER")
+    or _read_config_env("BOT_TALK_SENDER")
+    or "SaharLobster"
+)
 BOT_TALK_HTTP_TIMEOUT = 3.0   # seconds
 BOT_TALK_HTTP_RETRIES = 2
-BOT_TALK_SENDER = "SaharLobster"
 BOT_TALK_TIER = "TIER-BOT"
 
-_WORKSPACE = Path.home() / "lobster-workspace"
+_WORKSPACE = Path(os.environ.get("LOBSTER_WORKSPACE", Path.home() / "lobster-workspace"))
 _LOCAL_LOG = _WORKSPACE / "logs" / "bot-talk-mirror.log"
-
-# Subtypes that should NOT be mirrored — Lobster-internal system messages
-_EXCLUDED_SUBTYPES = frozenset({
-    "self_check",
-    "compact-reminder",
-    "compact_catchup",
-    "subagent_notification",
-    "subagent_observation",
-    "subagent_recovered",
-    "scheduler_tick",
-})
-
-# Message types that carry real user content worth mirroring
-_MIRROR_INBOUND_TYPES = frozenset({
-    "text",
-    "voice",
-    "photo",
-    "document",
-})
+_MESSAGES_DIR = Path(os.environ.get("LOBSTER_MESSAGES", Path.home() / "messages"))
+_INBOX_DIR = _MESSAGES_DIR / "inbox"
 
 
 # ---------------------------------------------------------------------------
-# Core mirror function (pure: no I/O side effects, takes a pre-built payload)
+# Pure builder functions (no I/O side effects)
 # ---------------------------------------------------------------------------
 
-def _build_http_payload(content: str, genre: str) -> dict:
+def _build_http_payload(content: str, genre: str, direction: str, from_: str, to: str) -> dict:
     """Build the POST body for the bot-talk HTTP server.
 
     Returns a plain dict; no I/O performed.
@@ -145,17 +143,21 @@ def _build_http_payload(content: str, genre: str) -> dict:
         "tier": BOT_TALK_TIER,
         "genre": genre,
         "content": content,
+        "direction": direction,
+        "from": from_,
+        "to": to,
     }
 
 
-def _build_ssh_log_line(content: str, genre: str) -> str:
+def _build_ssh_log_line(content: str, genre: str, direction: str = "") -> str:
     """Build the log line for the SSH fallback.
 
     Returns a plain string; no I/O performed.
     """
     ts = datetime.now(timezone.utc).isoformat()
     short = content[:200].replace("\n", " ")
-    return f"[{ts}] [{BOT_TALK_SENDER}] [{BOT_TALK_TIER}] [{genre}] {short}"
+    direction_tag = f" [{direction}]" if direction else ""
+    return f"[{ts}] [{BOT_TALK_SENDER}] [{BOT_TALK_TIER}] [{genre}]{direction_tag} {short}"
 
 
 def _build_auth_headers() -> dict:
@@ -168,6 +170,10 @@ def _build_auth_headers() -> dict:
         headers["X-Bot-Token"] = BOT_TALK_TOKEN
     return headers
 
+
+# ---------------------------------------------------------------------------
+# I/O helpers
+# ---------------------------------------------------------------------------
 
 def _try_http(payload: dict) -> bool:
     """Attempt to POST payload to the bot-talk HTTP server.
@@ -229,23 +235,83 @@ def _write_local_log(content: str, genre: str, reason: str) -> None:
         pass  # if even local logging fails, stay silent
 
 
-def _do_mirror(content: str, genre: str) -> None:
-    """Execute the mirror chain: HTTP → SSH → local log.
+def _emit_event_bus(direction: str, from_: str, to: str, content: str) -> None:
+    """Emit a bot-talk event to the central EventBus (logs/events.jsonl).
+
+    Non-blocking: swallows all exceptions so a bus failure never affects
+    the calling path. The event carries structured direction/from/to fields
+    so log queries need no content-marker heuristics.
+    """
+    try:
+        from event_bus import get_event_bus, LobsterEvent  # type: ignore[import]
+        event = LobsterEvent(
+            event_type="bot_talk.message",
+            severity="info",
+            source="bot_talk_mirror",
+            payload={
+                "direction": direction,
+                "from": from_,
+                "to": to,
+                "content": content[:500],
+            },
+        )
+        get_event_bus().emit_sync(event)
+    except Exception as exc:
+        log.debug(f"bot-talk EventBus emit failed: {exc}")
+
+
+def _route_to_inbox(from_: str, content: str) -> None:
+    """Write an inbound cross-Lobster message to ~/messages/inbox/.
+
+    The message is written with source="bot-talk" so the dispatcher picks
+    it up and processes it like any other message. Swallows all exceptions
+    so inbox routing failures are non-fatal.
+    """
+    try:
+        _INBOX_DIR.mkdir(parents=True, exist_ok=True)
+        now = datetime.now(timezone.utc)
+        ts_ms = int(now.timestamp() * 1000)
+        msg_id = f"{ts_ms}_bot_talk_{uuid.uuid4().hex[:8]}"
+        message = {
+            "id": msg_id,
+            "type": "text",
+            "source": "bot-talk",
+            "chat_id": from_,
+            "user_name": from_,
+            "text": content,
+            "timestamp": now.isoformat(),
+            "direction": "INBOUND",
+            "from": from_,
+            "to": BOT_TALK_SENDER,
+        }
+        inbox_file = _INBOX_DIR / f"{msg_id}.json"
+        # Atomic write: write to tmp then rename to prevent partial reads
+        tmp_file = inbox_file.with_suffix(".tmp")
+        tmp_file.write_text(json.dumps(message), encoding="utf-8")
+        tmp_file.rename(inbox_file)
+        log.debug(f"bot-talk: routed inbound message from {from_!r} to inbox ({msg_id})")
+    except Exception as exc:
+        log.warning(f"bot-talk: failed to route inbound message to inbox: {exc}")
+
+
+def _do_mirror(content: str, genre: str, direction: str, from_: str, to: str) -> None:
+    """Execute the mirror chain: HTTP -> SSH -> local log, then emit to EventBus.
 
     Designed to run in a daemon thread. Never raises.
     """
-    payload = _build_http_payload(content, genre)
+    payload = _build_http_payload(content, genre, direction, from_, to)
     if _try_http(payload):
-        log.debug(f"bot-talk mirror: HTTP ok ({genre})")
-        return
+        log.debug(f"bot-talk mirror: HTTP ok ({genre}, {direction})")
+    else:
+        log_line = _build_ssh_log_line(content, genre, direction)
+        if _try_ssh(log_line):
+            log.debug(f"bot-talk mirror: SSH fallback ok ({genre}, {direction})")
+        else:
+            _write_local_log(content, genre, "http_and_ssh_both_failed")
+            log.debug(f"bot-talk mirror: both HTTP and SSH failed, wrote local log ({genre}, {direction})")
 
-    log_line = _build_ssh_log_line(content, genre)
-    if _try_ssh(log_line):
-        log.debug(f"bot-talk mirror: SSH fallback ok ({genre})")
-        return
-
-    _write_local_log(content, genre, "http_and_ssh_both_failed")
-    log.debug(f"bot-talk mirror: both HTTP and SSH failed, wrote local log ({genre})")
+    # Always emit to EventBus regardless of HTTP/SSH result
+    _emit_event_bus(direction, from_, to, content)
 
 
 # ---------------------------------------------------------------------------
@@ -253,61 +319,66 @@ def _do_mirror(content: str, genre: str) -> None:
 # ---------------------------------------------------------------------------
 
 def mirror_outbound(text: str, source: str, chat_id: str | int) -> None:
-    """Mirror an outbound send_reply to bot-talk.
+    """Log an outbound cross-Lobster message to bot-talk.
 
-    Fire-and-forget: spawns a daemon thread and returns immediately.
-    Safe to call from any async or sync context.
+    This should only be called for messages sent TO another Lobster instance
+    via the bot-talk channel. Regular Telegram/Slack replies to the owner
+    are NOT bot-talk and must not be passed here.
 
-    Args:
-        text:    The reply text that was sent.
-        source:  Channel source (telegram, slack, etc.)
-        chat_id: Destination chat ID.
-    """
-    content = f"[OUTBOUND → {source.upper()} chat={chat_id}] {text}"
-    _spawn_mirror(content, genre="status-update")
-
-
-def mirror_inbound(msg: dict) -> None:
-    """Mirror a real inbound user message to bot-talk.
-
-    Filters out system/internal message types — only real user messages
-    (text, voice, photo, document) are mirrored.
-
-    Fire-and-forget: spawns a daemon thread and returns immediately.
+    Records direction="OUTBOUND" with from=this_lobster, to=destination.
+    Emits to EventBus. Fire-and-forget (daemon thread).
 
     Args:
-        msg: The raw message dict from the inbox JSON file.
+        text:    The message text sent to the remote Lobster.
+        source:  Channel source identifier (e.g. "bot-talk").
+        chat_id: Destination identifier (remote Lobster name or channel).
     """
-    msg_type = msg.get("type", "text")
-    subtype = msg.get("subtype", "")
-
-    # Skip internal / system messages
-    if subtype in _EXCLUDED_SUBTYPES:
-        return
-    if msg_type not in _MIRROR_INBOUND_TYPES:
-        return
-
-    source = msg.get("source", "unknown").upper()
-    user = msg.get("user_name") or msg.get("username") or "unknown"
-    text = msg.get("text", "(no text)")
-
-    if msg_type == "voice":
-        content = f"[INBOUND from {source}] {user}: (voice message)"
-    elif msg_type == "photo":
-        content = f"[INBOUND from {source}] {user}: (photo message)"
-    elif msg_type == "document":
-        fname = msg.get("file_name", "file")
-        content = f"[INBOUND from {source}] {user}: (document: {fname})"
-    else:
-        content = f"[INBOUND from {source}] {user}: {text}"
-
-    _spawn_mirror(content, genre="status-update")
+    destination = str(chat_id)
+    _spawn_mirror(
+        content=text,
+        genre="status-update",
+        direction="OUTBOUND",
+        from_=BOT_TALK_SENDER,
+        to=destination,
+    )
 
 
-def _spawn_mirror(content: str, genre: str) -> None:
+def log_inbound_cross_lobster(sender: str, content: str) -> None:
+    """Log and route an inbound cross-Lobster message.
+
+    Called when THIS Lobster receives a message FROM another Lobster instance.
+    Two things happen (both fire-and-forget):
+      1. The message is mirrored to the bot-talk HTTP endpoint (with direction,
+         from, to fields) and emitted to the central EventBus.
+      2. The message is routed to ~/messages/inbox/ with source="bot-talk" so
+         the dispatcher picks it up and processes it normally.
+
+    Fire-and-forget: spawns a daemon thread and returns immediately.
+
+    Args:
+        sender:  Identity of the remote Lobster (e.g. "AlbertLobster").
+        content: The message content received.
+    """
+    # Mirror + EventBus in background thread
+    _spawn_mirror(
+        content=content,
+        genre="status-update",
+        direction="INBOUND",
+        from_=sender,
+        to=BOT_TALK_SENDER,
+    )
+    # Route to inbox — fast file write, done inline before returning
+    _route_to_inbox(sender, content)
+
+
+def _spawn_mirror(content: str, genre: str, direction: str, from_: str, to: str) -> None:
     """Spawn a daemon thread to run _do_mirror.
 
     Using daemon=True means the thread won't prevent process exit.
     """
-    t = threading.Thread(target=_do_mirror, args=(content, genre), daemon=True)
+    t = threading.Thread(
+        target=_do_mirror,
+        args=(content, genre, direction, from_, to),
+        daemon=True,
+    )
     t.start()
