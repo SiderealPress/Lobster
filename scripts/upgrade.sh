@@ -2367,6 +2367,32 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
         fi
     fi
 
+    # Migration 67: Update nightly-consolidation cron entry to redirect stdout+stderr to a log file.
+    # The original entry (added in Migration 61) did not capture output, so errors from the script
+    # were silently dropped. This migration replaces it with an entry that appends to
+    # ~/lobster-workspace/logs/nightly-consolidation.log.
+    local NIGHTLY_CONSOLIDATION_MARKER="# LOBSTER-NIGHTLY-CONSOLIDATION"
+    local NIGHTLY_LOG="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}/logs/nightly-consolidation.log"
+    local DESIRED_ENTRY="0 3 * * * $LOBSTER_DIR/scripts/nightly-consolidation.sh >> $NIGHTLY_LOG 2>&1 $NIGHTLY_CONSOLIDATION_MARKER"
+    if crontab -l 2>/dev/null | grep -qF "$NIGHTLY_CONSOLIDATION_MARKER"; then
+        if ! crontab -l 2>/dev/null | grep -F "$NIGHTLY_CONSOLIDATION_MARKER" | grep -q ">> "; then
+            # Entry exists but lacks log redirect — replace it.
+            mkdir -p "$(dirname "$NIGHTLY_LOG")"
+            "$LOBSTER_DIR/scripts/cron-manage.sh" add "$NIGHTLY_CONSOLIDATION_MARKER" "$DESIRED_ENTRY"
+            substep "Updated nightly-consolidation cron entry to redirect output to $NIGHTLY_LOG"
+            migrated=$((migrated + 1))
+        else
+            substep "nightly-consolidation cron entry already has log redirect — skipping"
+        fi
+    else
+        # Entry is missing entirely — add it with logging.
+        mkdir -p "$(dirname "$NIGHTLY_LOG")"
+        chmod +x "$LOBSTER_DIR/scripts/nightly-consolidation.sh" 2>/dev/null || true
+        "$LOBSTER_DIR/scripts/cron-manage.sh" add "$NIGHTLY_CONSOLIDATION_MARKER" "$DESIRED_ENTRY"
+        substep "Added nightly-consolidation cron entry with log redirect to $NIGHTLY_LOG"
+        migrated=$((migrated + 1))
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
