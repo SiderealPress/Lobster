@@ -31,13 +31,21 @@ LOBSTER_DIR="$(dirname "$SCRIPT_DIR")"
 MESSAGES_DIR="${LOBSTER_MESSAGES:-$HOME/messages}"
 INBOX="$MESSAGES_DIR/inbox"
 TIMESTAMP=$(date +%s%3N)
+LOG_DIR="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}/logs"
+LOG_FILE="$LOG_DIR/nightly-consolidation.log"
 
-# Ensure inbox directory exists
-mkdir -p "$INBOX"
+# Ensure directories exist
+mkdir -p "$INBOX" "$LOG_DIR"
+
+log() {
+    echo "[$(date -Iseconds)] $*" | tee -a "$LOG_FILE"
+}
+
+log "nightly-consolidation.sh started"
 
 # Dedup guard: skip if a consolidation message is already pending
 if ls "$INBOX"/*_consolidation.json 2>/dev/null | grep -q .; then
-    echo "Consolidation message already pending in inbox. Skipping."
+    log "Consolidation message already pending in inbox. Skipping."
     exit 0
 fi
 
@@ -53,4 +61,4 @@ cat > "$INBOX/${TIMESTAMP}_consolidation.json" << EOF
 }
 EOF
 
-echo "Consolidation message injected at $(date -Iseconds)"
+log "Consolidation message injected at $(date -Iseconds)"
