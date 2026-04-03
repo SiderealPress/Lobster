@@ -347,19 +347,15 @@ def _build_status(
     except Exception:
         pass
 
-    # Detect account type from preferences using proper TOML parsing.
+    # Detect account type from preferences
     account_type = "bot"
     prefs_file = Path(__file__).resolve().parent.parent / "preferences" / "defaults.toml"
     if prefs_file.exists():
         try:
-            try:
-                import tomllib
-            except ImportError:
-                import tomli as tomllib  # type: ignore[no-redef]
-            with open(prefs_file, "rb") as _f:
-                _prefs = tomllib.load(_f)
-            account_type = _prefs.get("account_type", "bot")
-        except Exception:
+            content = prefs_file.read_text()
+            if 'account_type = "person"' in content:
+                account_type = "person"
+        except OSError:
             pass
 
     return {
@@ -415,14 +411,6 @@ def _handle_slack_log_search(arguments: dict[str, Any]) -> str:
             idx.close()
 
     # Strategy 2: JSONL scan fallback
-    # Enforce date-range guard: if no explicit dates were provided, the
-    # defaults above already cap to last 7 days — re-check here so that
-    # callers who pass explicit None values still get the default window.
-    if not arguments.get("start_date"):
-        start_date = _date_n_days_ago(7)
-    if not arguments.get("end_date"):
-        end_date = _today_str()
-
     store = _get_log_store()
     all_messages: list[dict[str, Any]] = []
 
@@ -432,22 +420,20 @@ def _handle_slack_log_search(arguments: dict[str, Any]) -> str:
         channels_to_scan = store.list_channels()
 
     for ch_id in channels_to_scan:
-        # Stop scanning additional channels once the cap is reached.
-        if len(all_messages) >= limit:
-            break
         messages = store.query_range(ch_id, start_date, end_date)
         matching = _filter_messages_by_query(messages, query)
-        remaining = limit - len(all_messages)
         all_messages.extend(
-            _format_message_for_display(m) for m in matching[:remaining]
+            _format_message_for_display(m) for m in matching
         )
+        if len(all_messages) >= limit:
+            break
 
     return json.dumps({
         "source": "jsonl_scan",
         "query": query,
         "date_range": {"start": start_date, "end": end_date},
-        "result_count": len(all_messages),
-        "results": all_messages,
+        "result_count": min(len(all_messages), limit),
+        "results": all_messages[:limit],
     })
 
 
@@ -513,67 +499,6 @@ def _handle_slack_status(arguments: dict[str, Any]) -> str:
     channels = store.list_channels()
     status = _build_status(_LOG_ROOT, _CONFIG_DIR, _STATE_DIR, channels)
     return json.dumps(status)
-
-
-def _handle_slack_onboarding_state(arguments: dict[str, Any]) -> str:
-    """Handle slack_onboarding_state tool call.
-
-    Reads or writes onboarding state for a given chat_id.
-    This lets the dispatcher resume a partially-completed onboarding after
-    a session restart.
-
-    Operations:
-        get   — returns current onboarding state for chat_id.
-        set   — merges provided fields into existing state and saves.
-        clear — deletes the state file for chat_id (resets the flow).
-    """
-    import sys as _sys
-    if str(_SKILL_SRC) not in _sys.path:
-        _sys.path.insert(0, str(_SKILL_SRC))
-
-    from onboarding import (
-        get_onboarding_state,
-        save_onboarding_state,
-        clear_onboarding_state,
-    )
-
-    op = arguments.get("op", "get")
-    chat_id = str(arguments.get("chat_id", ""))
-
-    if not chat_id:
-        return json.dumps({"error": "chat_id is required"})
-
-    if op == "get":
-        state = get_onboarding_state(chat_id, state_dir=_STATE_DIR)
-        return json.dumps(state.to_dict())
-
-    if op == "set":
-        state = get_onboarding_state(chat_id, state_dir=_STATE_DIR)
-        updates = {
-            k: v for k, v in arguments.items()
-            if k not in ("op", "chat_id")
-        }
-        # Apply field updates safely — only update known fields
-        known_fields = {
-            "step", "mode", "bot_token", "app_token", "person_token",
-            "workspace_name", "available_channels", "selected_channels",
-            "channel_modes", "last_token_message_id",
-        }
-        state_dict = state.to_dict()
-        for field_name, value in updates.items():
-            if field_name in known_fields:
-                state_dict[field_name] = value
-
-        from onboarding import OnboardingState
-        updated_state = OnboardingState.from_dict(state_dict)
-        save_onboarding_state(updated_state, state_dir=_STATE_DIR)
-        return json.dumps({"ok": True, "state": updated_state.to_dict()})
-
-    if op == "clear":
-        clear_onboarding_state(chat_id, state_dir=_STATE_DIR)
-        return json.dumps({"ok": True, "cleared": chat_id})
-
-    return json.dumps({"error": f"Unknown op: {op!r}. Use get, set, or clear."})
 
 
 # ---------------------------------------------------------------------------
@@ -682,70 +607,6 @@ async def list_tools() -> list[Tool]:
                 "properties": {},
             },
         ),
-        Tool(
-            name="slack_onboarding_state",
-            description=(
-                "Read or write Slack Connector onboarding state for a given "
-                "Telegram chat_id. Allows the dispatcher to resume a "
-                "partially-completed /slack-setup flow after a session restart. "
-                "Operations: get (read state), set (update fields), clear (reset)."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "op": {
-                        "type": "string",
-                        "description": "Operation: 'get', 'set', or 'clear'",
-                        "enum": ["get", "set", "clear"],
-                    },
-                    "chat_id": {
-                        "type": "string",
-                        "description": "Telegram chat ID of the user running setup",
-                    },
-                    "step": {
-                        "type": "string",
-                        "description": "Current onboarding step name (set op only)",
-                    },
-                    "mode": {
-                        "type": "string",
-                        "description": "Account mode: 'bot' or 'person' (set op only)",
-                    },
-                    "bot_token": {
-                        "type": "string",
-                        "description": "Collected bot token (set op only)",
-                    },
-                    "app_token": {
-                        "type": "string",
-                        "description": "Collected app token (set op only)",
-                    },
-                    "person_token": {
-                        "type": "string",
-                        "description": "Collected person/user token (set op only)",
-                    },
-                    "workspace_name": {
-                        "type": "string",
-                        "description": "Validated workspace name (set op only)",
-                    },
-                    "available_channels": {
-                        "type": "array",
-                        "description": "List of available channels from conversations.list (set op only)",
-                    },
-                    "selected_channels": {
-                        "type": "array",
-                        "description": "Channel IDs the user selected (set op only)",
-                    },
-                    "channel_modes": {
-                        "type": "object",
-                        "description": "channel_id → mode mapping (set op only)",
-                    },
-                    "last_token_message_id": {
-                        "type": "integer",
-                        "description": "Telegram message ID of last token message, for deletion (set op only)",
-                    },
-                },
-                "required": ["op", "chat_id"],
-            },
-        ),
     ]
 
 
@@ -757,7 +618,6 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         "slack_channel_summary": _handle_slack_channel_summary,
         "slack_thread_summary": _handle_slack_thread_summary,
         "slack_status": _handle_slack_status,
-        "slack_onboarding_state": _handle_slack_onboarding_state,
     }
 
     handler = dispatch.get(name)
