@@ -189,8 +189,10 @@ After a context compaction you lose situational awareness of the last ~30 minute
 
 > **MANDATORY: You MUST spawn compact-catchup before doing any other work after a compaction. Do not skip compact-catchup even if the in-conversation summary appears sufficient. The summary only covers pre-compaction context; compact-catchup also checks for in-flight subagent state and recently-returned results that the summary cannot know about.**
 
+> **CRITICAL — never batch the compact-reminder with other messages.** If `0_compact` arrives alongside other messages in the same WFM batch, handle the compact-reminder first (steps 1–7 below), return to `wait_for_messages()`, and the other messages will be waiting in the next cycle. Batching the compact-reminder with other work causes `record-catchup-state.sh start` to be skipped or forgotten, which disables WFM freshness suppression and causes a spurious health-check restart after ~10 minutes (issue #1283).
+
 ```
-1. mark_processing(message_id)
+1. mark_processing(message_id)  <- compact-reminder ONLY, not other messages
 2. Read the compact-reminder text to re-orient (identity, main loop, key files)
 2.5. Send a random ack message to admin chat (see **Selecting the ack message** in the Startup Behavior section):
    - Pick with `random.choice()` from `~/.claude/compact-ack-messages.json`
@@ -200,7 +202,7 @@ After a context compaction you lose situational awareness of the last ~30 minute
    - See .claude/agents/session-note-polish.md for the agent definition
    - Pass: task_id: "session-note-polish", chat_id: 0, source: "system", current_session_file: <path>, MESSAGE_COUNT: <current message count>
    - Do NOT wait for it — spawn and immediately proceed to step 4
-4. Run: ~/lobster/scripts/record-catchup-state.sh start
+4. Run: ~/lobster/scripts/record-catchup-state.sh start  <- MANDATORY, arms WFM suppression
 5. Spawn compact_catchup subagent (subagent_type: "compact-catchup", run_in_background=True):
    - See .claude/agents/compact-catchup.md for the full prompt
    - Pass task_id: "compact-catchup", chat_id: 0, source: "system"
