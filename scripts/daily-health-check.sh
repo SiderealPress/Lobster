@@ -111,12 +111,64 @@ update_system_packages() {
 
     if command -v apt-get &>/dev/null; then
         log "INFO: update_system_packages: using apt-get"
-        if ${sudo_prefix}apt-get update -q &>>"$LOG_FILE" && \
-           ${sudo_prefix}apt-get upgrade -y -q &>>"$LOG_FILE"; then
-            log "OK: system packages updated (apt-get)"
-        else
-            log "ERROR: system packages update failed (apt-get)"
-            FAILURES+=("system-packages-apt-get")
+        # Run apt-get update and capture output so we can inspect it for GPG
+        # key errors before deciding whether to fail the health check.
+        local apt_update_out
+        apt_update_out=$(${sudo_prefix}apt-get update -q 2>&1 | tee -a "$LOG_FILE")
+        local apt_update_rc=${PIPESTATUS[0]}
+
+        # Detect untrusted GPG key errors (NO_PUBKEY / not signed).
+        # A stale or corrupt third-party keyring (e.g. cli.github.com) causes
+        # apt-get update to exit non-zero but does not mean the system is
+        # unhealthy — it just means one repo's key needs refreshing.
+        # Strategy:
+        #   1. If NO_PUBKEY is reported for the GitHub CLI repo, attempt to
+        #      refresh the keyring automatically and retry apt-get update.
+        #   2. If update still fails only due to GPG errors (not package
+        #      conflicts or network outages), log a warning but do not fail the
+        #      health check — GPG issues are a configuration matter, not a
+        #      system outage.
+        #   3. If update fails for non-GPG reasons, fail as usual.
+        if echo "$apt_update_out" | grep -q "NO_PUBKEY"; then
+            log "WARN: apt-get update reported untrusted GPG key(s) — checking for known fixable repos"
+            # Self-heal: refresh GitHub CLI keyring if that specific repo is affected
+            if echo "$apt_update_out" | grep -q "cli.github.com"; then
+                log "INFO: Attempting to refresh GitHub CLI apt keyring..."
+                local keyring_path="/etc/apt/keyrings/githubcli-archive-keyring.gpg"
+                if ${sudo_prefix}curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+                       | ${sudo_prefix}dd of="$keyring_path" 2>/dev/null; then
+                    log "INFO: GitHub CLI keyring refreshed — retrying apt-get update"
+                    apt_update_out=$(${sudo_prefix}apt-get update -q 2>&1 | tee -a "$LOG_FILE")
+                    apt_update_rc=${PIPESTATUS[0]}
+                else
+                    log "WARN: Could not refresh GitHub CLI keyring (no network or permission issue)"
+                fi
+            fi
+        fi
+
+        if [ $apt_update_rc -ne 0 ]; then
+            # Check if remaining failures are ALL GPG-related (NO_PUBKEY / not signed).
+            # If so, treat as a warning — apt-get upgrade can still update packages
+            # from repos whose keys ARE trusted. Extract only E: lines, then check
+            # whether any of them are NOT about GPG key trust issues.
+            local non_gpg_errors
+            non_gpg_errors=$(echo "$apt_update_out" | grep "^E:" | grep -vE "NO_PUBKEY|not signed" || true)
+            if [ -z "$non_gpg_errors" ]; then
+                log "WARN: apt-get update has GPG key warnings only — proceeding with upgrade for trusted repos"
+                apt_update_rc=0
+            else
+                log "ERROR: apt-get update failed (non-GPG error): $non_gpg_errors"
+                FAILURES+=("system-packages-apt-get-update")
+            fi
+        fi
+
+        if [ $apt_update_rc -eq 0 ]; then
+            if ${sudo_prefix}apt-get upgrade -y -q &>>"$LOG_FILE"; then
+                log "OK: system packages updated (apt-get)"
+            else
+                log "ERROR: apt-get upgrade failed"
+                FAILURES+=("system-packages-apt-get")
+            fi
         fi
     elif command -v dnf &>/dev/null; then
         log "INFO: update_system_packages: using dnf"
