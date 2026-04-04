@@ -1054,7 +1054,7 @@ check_disk() {
 #
 # Auth is managed via CLAUDE_CODE_OAUTH_TOKEN env var in lobster-config/config.env.
 # The token is passed directly to Claude Code — no credentials file is involved.
-# `claude auth status --output-format json` is the authoritative check regardless
+# `claude auth status` is the authoritative check regardless
 # of how the token was provisioned.
 #
 # RESTART GUARD: When AUTH RED is detected, do NOT restart Claude — restarting
@@ -1071,9 +1071,13 @@ check_auth_token() {
     # Single check: `claude auth status` is the authoritative source of truth.
     # Auth is managed via CLAUDE_CODE_OAUTH_TOKEN env var in config.env.
     # Unset CLAUDECODE/CLAUDE_CODE_ENTRYPOINT to avoid nested-session errors.
+    #
+    # NOTE: `claude auth status` outputs JSON by default. Do NOT pass
+    # --output-format json — that flag does not exist and causes an error,
+    # leaving auth_json empty and making the parse return "unknown" every run.
     local auth_json
     auth_json=$(env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT \
-        claude auth status --output-format json 2>/dev/null)
+        claude auth status 2>/dev/null)
 
     local logged_in auth_method
     logged_in=$(echo "$auth_json" | python3 -c "
