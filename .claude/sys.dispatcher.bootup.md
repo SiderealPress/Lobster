@@ -1004,12 +1004,72 @@ The reviewer self-detects design mode when no PR URL is present. It posts findin
 
 When the user types `/re-review <PR URL or number>`, extract the PR reference and spawn a reviewer:
 
-```
+```python
+import re
+
 parts = msg["text"].strip().split(None, 1)
 pr_ref = parts[1].strip() if len(parts) > 1 else ""
-# Parse as full URL or bare number
-# Spawn review agent with re-review prompt
-# send_reply: "On it — reviewing {pr_url}."
+
+DEFAULT_REPO = "SiderealPress/lobster"
+
+# Parse full GitHub PR URL: https://github.com/owner/repo/pull/123
+url_match = re.match(r'https://github\.com/([^/]+/[^/]+)/pull/(\d+)', pr_ref)
+# Parse bare number: 123
+number_match = re.match(r'^(\d+)$', pr_ref)
+
+if url_match:
+    pr_repo = url_match.group(1)
+    pr_number = int(url_match.group(2))
+elif number_match:
+    pr_repo = DEFAULT_REPO
+    pr_number = int(number_match.group(1))
+else:
+    send_reply(
+        chat_id=chat_id,
+        text="Usage: /re-review <PR URL or number>\nExample: /re-review 123 or /re-review https://github.com/SiderealPress/lobster/pull/123",
+        reply_to_message_id=telegram_message_id,
+        message_id=message_id,
+    )
+    return  # back to main loop
+
+pr_url = f"https://github.com/{pr_repo}/pull/{pr_number}"
+
+send_reply(
+    chat_id=chat_id,
+    text=f"On it — reviewing {pr_url}.",
+    reply_to_message_id=telegram_message_id,
+)
+
+Task(
+    subagent_type="lobster-generalist",
+    run_in_background=True,
+    prompt=(
+        f"---\ntask_id: re-review-{pr_number}\nchat_id: {chat_id}\n"
+        f"source: {source}\nreply_to_message_id: {telegram_message_id}\n---\n\n"
+        f"Re-review requested for PR {pr_url}.\n\n"
+        f"REVIEWER PROCESS (follow this order exactly):\n"
+        f"1. Run: gh pr diff {pr_number} --repo {pr_repo}\n"
+        f"   Read the diff cold. Note independently:\n"
+        f"   - What could go wrong?\n"
+        f"   - What edge cases aren't covered?\n"
+        f"   - What would you want tested?\n\n"
+        f"2. Read the PR description and existing comments.\n"
+        f"   Compare what you found against what was already reviewed.\n"
+        f"   Focus on anything the first review missed.\n\n"
+        f"ALWAYS CHECK:\n"
+        f"- Argument types match what store/DB methods expect\n"
+        f"- Test structure: duplicate class names? Unreachable tests?\n"
+        f"- Tests exercise before-state, not just assert it in comments\n"
+        f"- Pre-existing failure count: verify by running `uv run pytest --tb=no -q`\n\n"
+        f"POST: gh pr review {pr_number} --repo {pr_repo} --comment --body "
+        '"🤖🦞 Lobster (reviewer): PASS/NEEDS-WORK/FAIL: ..."\n'
+        f"(Never --approve or --request-changes)\n\n"
+        f"After posting, call write_result with a plain-English verdict (1-3 sentences)."
+    ),
+)
+
+mark_processed(message_id)
+return  # back to main loop
 ```
 
 **Note:** `/re-review` posted as a GitHub PR comment is not yet wired (tracked in issue #885). Authors must relay the command via Telegram.
