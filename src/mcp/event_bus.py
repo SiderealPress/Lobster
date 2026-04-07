@@ -19,6 +19,8 @@ import json
 import logging
 import os
 import threading
+
+log = logging.getLogger(__name__)
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 try:
@@ -156,7 +158,21 @@ class EventBus:
         running (e.g. tests, scripts), runs the emit coroutine synchronously.
 
         Never blocks the caller beyond scheduling overhead.
+
+        Logs a warning if no listeners are registered — this indicates
+        init_event_bus() was not called at server startup and events will be
+        silently dropped.
         """
+        with self._lock:
+            no_listeners = len(self._listeners) == 0
+        if no_listeners:
+            log.warning(
+                "EventBus.emit_sync called with no listeners registered — "
+                "init_event_bus() was not called at startup; event will be dropped: "
+                "event_type=%s source=%s",
+                event.event_type,
+                event.source,
+            )
         try:
             loop = asyncio.get_running_loop()
             loop.create_task(self.emit(event))
@@ -358,14 +374,21 @@ _EVENT_BUS: EventBus | None = None
 _BUS_LOCK = threading.Lock()
 
 
+_INIT_CALLED = False  # set to True by init_event_bus(); checked by get_event_bus()
+
+
 def get_event_bus() -> EventBus:
     """
     Return the module-level EventBus singleton.
 
     Thread-safe double-checked locking. The bus is created on first call with
     no listeners registered. Listeners are added by init_event_bus() at server
-    startup. Calling get_event_bus() before init_event_bus() is safe — events
-    emitted before listeners are registered are silently dropped.
+    startup.
+
+    Emitting events before init_event_bus() is called means no listeners are
+    registered and all events are silently dropped. To make this misconfiguration
+    visible, a warning is logged when emit() or emit_sync() is called on a bus
+    with no listeners.
     """
     global _EVENT_BUS
     if _EVENT_BUS is None:
