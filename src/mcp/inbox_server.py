@@ -4310,7 +4310,7 @@ async def handle_send_reply(args: dict) -> list[TextContent]:
             from bot_talk_mirror import mirror_outbound  # type: ignore[import]
             mirror_outbound(text, source, chat_id)
         except Exception as _bt_exc:
-            log.debug(f"bot-talk mirror_outbound failed (non-fatal): {_bt_exc}")
+            log.warning(f"bot-talk mirror_outbound failed (non-fatal): {_bt_exc}")
 
     # Atomic mark_processed: if message_id provided, move message to processed/ in same call
     mark_info = ""
