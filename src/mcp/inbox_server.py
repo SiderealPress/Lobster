@@ -4105,7 +4105,7 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
                                 to=msg.get("to", ""),
                             )
                         except Exception as _bt_exc:
-                            log.debug(f"bot-talk EventBus inbound emit failed (non-fatal): {_bt_exc}")
+                            log.warning(f"bot-talk EventBus inbound emit failed (non-fatal): {_bt_exc}")
                     if len(messages) >= limit:
                         break
             except Exception as e:
