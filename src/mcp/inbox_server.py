@@ -663,6 +663,13 @@ HEARTBEAT_FILE = _WORKSPACE / "logs" / "claude-heartbeat"
 # Hibernation state file - tracks whether Lobster is active or hibernating
 LOBSTER_STATE_FILE = CONFIG_DIR / "lobster-state.json"
 
+# Dispatcher PID file — written by claude-persistent.sh when it exec-replaces
+# itself with the claude binary.  The file contains the PID of the running
+# claude process.  Used by _is_dispatcher_alive() to distinguish a true
+# mid-session MCP reconnect (dispatcher alive) from a real session loss
+# (dispatcher dead or absent).  See issue #1429.
+DISPATCHER_PID_FILE = CONFIG_DIR / "dispatcher.pid"
+
 # Reset state to "active" on startup — this is the fix for the critical bug where
 # state was never reset after waking from hibernation.
 # The bot issues systemctl restart → Claude starts → this module loads → state resets.
@@ -682,6 +689,38 @@ LOBSTER_STATE_FILE = CONFIG_DIR / "lobster-state.json"
 # check about session age and causing unnecessary restarts (issue #910).
 _TRANSIENT_MODES = {"hibernate", "starting", "restarting", "waking"}
 _RECONNECT_GRACE_SECONDS = 30 * 60  # 30 minutes
+
+
+def _is_dispatcher_alive() -> bool:
+    """Return True if the dispatcher process recorded in dispatcher.pid is alive.
+
+    Reads DISPATCHER_PID_FILE (written by claude-persistent.sh via exec-replace).
+    Uses kill -0 to test liveness without sending a signal.
+
+    Returns False when:
+    - The file is absent (first boot, or cleaned up on clean exit)
+    - The file is empty or contains a non-numeric value (corrupt)
+    - The PID is 0 or negative (invalid)
+    - kill -0 raises PermissionError or ProcessLookupError (dead process)
+
+    A True return means the claude process is still alive → this MCP restart
+    is a mid-session reconnect, NOT a real session loss.
+
+    A False return means the dispatcher is dead → write the session-lost-reminder.
+    """
+    try:
+        if not DISPATCHER_PID_FILE.exists():
+            return False
+        raw = DISPATCHER_PID_FILE.read_text().strip()
+        if not raw:
+            return False
+        pid = int(raw)
+        if pid <= 0:
+            return False
+        os.kill(pid, 0)  # kill -0: raises if process does not exist
+        return True
+    except (ValueError, ProcessLookupError, OSError):
+        return False
 
 
 def _reset_state_on_startup():
@@ -950,10 +989,15 @@ def _write_session_lost_reminder() -> None:
     reconnects and calls wait_for_messages, it immediately receives a prompt
     to re-orient and resume the main loop.
 
-    Guard: skipped when the lobster-state file indicates a mid-session MCP
-    reconnect (mode=active AND file age < 30 min).  That pattern means Claude
-    Code auto-updated or the HTTP transport briefly cycled — the dispatcher was
-    NOT blocked in a dead session and does not need to re-orient.
+    Guard: skipped when the dispatcher PID (from dispatcher.pid) is alive.  A
+    live PID means Claude Code auto-updated or the HTTP transport briefly
+    cycled — the dispatcher process is still running and does not need to
+    re-orient.  A dead or absent PID means real session loss.
+
+    Previous guard (issue #1429 — removed): checked lobster-state.json mtime
+    < 30 min.  This produced false negatives when cron jobs touched the state
+    file seconds before an MCP restart, making a real session loss look like a
+    reconnect.
 
     Idempotent: writing an extra compact-reminder during a real restart is
     harmless; the dispatcher processes it as a routine self-check message.
@@ -966,20 +1010,22 @@ def _write_session_lost_reminder() -> None:
         log.info("[session-lost] LOBSTER_DEV_MODE active — skipping session-lost-reminder")
         return
     try:
-        # Same reconnect-detection guard used by _reset_state_on_startup.
-        if LOBSTER_STATE_FILE.exists():
-            try:
-                state_data = json.loads(LOBSTER_STATE_FILE.read_text())
-                mode = state_data.get("mode", "active")
-                file_age = time.time() - LOBSTER_STATE_FILE.stat().st_mtime
-                if mode not in _TRANSIENT_MODES and file_age < _RECONNECT_GRACE_SECONDS:
-                    log.info(
-                        "[session-lost] Skipping session-lost-reminder: mid-session MCP "
-                        f"reconnect detected (mode={mode!r}, age={file_age:.0f}s)"
-                    )
-                    return
-            except Exception:  # noqa: BLE001
-                pass  # Can't read state — fall through and write the reminder
+        # PID-based reconnect guard (issue #1429).
+        #
+        # Previous guard (broken): checked lobster-state.json mtime < 30 min.
+        # Problem: cron jobs can touch lobster-state.json moments before an MCP
+        # restart, making the file look fresh even when the dispatcher is dead.
+        #
+        # New guard: check whether the dispatcher PID (from dispatcher.pid) is
+        # still alive via kill -0.  A live PID means Claude Code auto-updated
+        # its transport layer — the dispatcher is still running.  A dead or
+        # absent PID means the dispatcher process is gone — real session loss.
+        if _is_dispatcher_alive():
+            log.info(
+                "[session-lost] Skipping session-lost-reminder: dispatcher PID is alive "
+                f"(pid_file={DISPATCHER_PID_FILE})"
+            )
+            return
 
         now_utc = datetime.now(timezone.utc)
         reminder_id = f"session-lost-{int(now_utc.timestamp())}"
