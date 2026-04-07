@@ -374,8 +374,6 @@ _EVENT_BUS: EventBus | None = None
 _BUS_LOCK = threading.Lock()
 
 
-_INIT_CALLED = False  # set to True by init_event_bus(); checked by get_event_bus()
-
 
 def get_event_bus() -> EventBus:
     """
