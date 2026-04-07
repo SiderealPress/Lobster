@@ -2393,6 +2393,36 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
         migrated=$((migrated + 1))
     fi
 
+    # Migration 68: Broaden context-monitor PostToolUse hook matcher to include Bash
+    # (issue #1430). Claude Code only populates context_window in PostToolUse payloads
+    # for built-in tools like Bash, not for MCP tool calls. The previous matcher
+    # "mcp__lobster-inbox__|Agent" caused the hook to fire but always see no data.
+    # Adding "Bash|" to the front ensures the hook receives context_window data.
+    if [ -f "$CLAUDE_SETTINGS" ] && command -v jq >/dev/null 2>&1; then
+        local has_bash_in_matcher
+        has_bash_in_matcher=$(jq -r '
+            [.hooks.PostToolUse[]? | select(.hooks[]?.command | contains("context-monitor")) | .matcher]
+            | map(select(startswith("Bash|")))
+            | length
+        ' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
+        if [ "${has_bash_in_matcher:-0}" = "0" ] || [ "${has_bash_in_matcher:-0}" = "" ]; then
+            TMP_SETTINGS=$(mktemp)
+            jq '
+                .hooks.PostToolUse = [
+                    .hooks.PostToolUse[]? |
+                    if (.hooks[]?.command | contains("context-monitor"))
+                    then .matcher = ("Bash|" + .matcher)
+                    else .
+                    end
+                ]
+            ' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+            substep "Broadened context-monitor hook matcher to include Bash (issue #1430)"
+            migrated=$((migrated + 1))
+        else
+            substep "context-monitor hook matcher already includes Bash — skipping"
+        fi
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
