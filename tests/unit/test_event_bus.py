@@ -297,3 +297,15 @@ class TestSingleton:
             bus2 = init_event_bus(jsonl_path=path)
             assert bus1 is bus2
             assert len(bus2._listeners) == listener_count_after_first
+
+    def test_emit_sync_warns_when_no_listeners_registered(self, caplog):
+        """emit_sync on a bus with no listeners logs a warning — missing init_event_bus() call."""
+        import logging
+        bus = EventBus()
+        event = make_event(event_type="bot_talk.message", source="bot_talk_mirror")
+        with caplog.at_level(logging.WARNING, logger="event_bus"):
+            bus.emit_sync(event)
+        warning_messages = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("init_event_bus" in msg for msg in warning_messages), (
+            "Expected a warning mentioning init_event_bus when no listeners are registered"
+        )
