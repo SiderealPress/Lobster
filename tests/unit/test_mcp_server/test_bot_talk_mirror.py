@@ -323,7 +323,7 @@ class TestEmitEventBus:
         assert len(captured_events) == 1
         event_kwargs = captured_events[0]
         assert event_kwargs["event_type"] == "bot_talk.message"
-        assert event_kwargs["severity"] == "info"
+        assert event_kwargs["severity"] == "debug"
         payload = event_kwargs["payload"]
         assert payload["direction"] == "OUTBOUND"
         assert payload["from"] == "SaharLobster"
@@ -574,3 +574,56 @@ class TestSpawnMirror:
             called.wait(timeout=2.0)
 
         assert called.is_set(), "_do_mirror was not called within 2 seconds"
+
+
+# ---------------------------------------------------------------------------
+# Severity: bot_talk.message events must be emitted at debug (not info)
+# ---------------------------------------------------------------------------
+
+class TestEventSeverity:
+    def test_emit_event_bus_uses_debug_severity(self):
+        """bot_talk.message events must be emitted at debug severity (issue #1425).
+
+        TelegramOutboxListener is gated on LOBSTER_DEBUG=true and only forwards
+        warn, error, and debug events. info events are silently dropped.
+        Severity must be 'debug' for the existing listener to pick them up.
+        """
+        captured_events = []
+
+        mock_event_class = MagicMock(side_effect=lambda **kw: kw)
+        mock_bus = MagicMock()
+        mock_bus.emit_sync.side_effect = lambda e: captured_events.append(e)
+
+        with patch.dict("sys.modules", {
+            "event_bus": MagicMock(
+                get_event_bus=MagicMock(return_value=mock_bus),
+                LobsterEvent=mock_event_class,
+            )
+        }):
+            btm._emit_event_bus("OUTBOUND", "SaharLobster", "AlbertLobster", "test")
+
+        assert len(captured_events) == 1
+        assert captured_events[0]["severity"] == "debug", (
+            f"Expected severity='debug', got {captured_events[0]['severity']!r}. "
+            "TelegramOutboxListener only handles debug/warn/error; info is silently dropped."
+        )
+
+    def test_emit_event_bus_does_not_use_info_severity(self):
+        """info severity must no longer be used — it bypasses TelegramOutboxListener."""
+        captured_events = []
+
+        mock_event_class = MagicMock(side_effect=lambda **kw: kw)
+        mock_bus = MagicMock()
+        mock_bus.emit_sync.side_effect = lambda e: captured_events.append(e)
+
+        with patch.dict("sys.modules", {
+            "event_bus": MagicMock(
+                get_event_bus=MagicMock(return_value=mock_bus),
+                LobsterEvent=mock_event_class,
+            )
+        }):
+            btm._emit_event_bus("INBOUND", "AlbertLobster", "SaharLobster", "test")
+
+        assert captured_events[0]["severity"] != "info", (
+            "Severity must not be 'info' — TelegramOutboxListener drops info events."
+        )

@@ -4091,6 +4091,21 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
                     # inbox by bot_talk_mirror.log_inbound_cross_lobster() with source="bot-talk".
                     # We no longer mirror owner Telegram messages to bot-talk from here —
                     # only actual cross-Lobster exchanges belong in bot-talk (issue #1350).
+                    # Emit EventBus event for inbound bot-talk messages so TelegramOutboxListener
+                    # can forward them as debug notifications (issue #1425). The message is
+                    # already in the inbox so we only emit to EventBus, not route again.
+                    if msg.get("source") == "bot-talk" and msg.get("direction") == "INBOUND":
+                        try:
+                            from bot_talk_mirror import _spawn_mirror  # type: ignore[import]
+                            _spawn_mirror(
+                                content=msg.get("text", ""),
+                                genre="status-update",
+                                direction="INBOUND",
+                                from_=msg.get("from", msg.get("user_name", "unknown")),
+                                to=msg.get("to", ""),
+                            )
+                        except Exception as _bt_exc:
+                            log.debug(f"bot-talk EventBus inbound emit failed (non-fatal): {_bt_exc}")
                     if len(messages) >= limit:
                         break
             except Exception as e:
@@ -4287,6 +4302,15 @@ async def handle_send_reply(args: dict) -> list[TextContent]:
         log.debug(f"Recorded task_id dedup for task={task_id_param!r} chat={chat_id}")
 
     log.info(f"Reply sent to {source} chat {chat_id}")
+
+    # Mirror outbound bot-talk messages to the EventBus so TelegramOutboxListener
+    # can forward them as debug notifications. Fire-and-forget: non-blocking.
+    if source == "bot-talk":
+        try:
+            from bot_talk_mirror import mirror_outbound  # type: ignore[import]
+            mirror_outbound(text, source, chat_id)
+        except Exception as _bt_exc:
+            log.warning(f"bot-talk mirror_outbound failed (non-fatal): {_bt_exc}")
 
     # Atomic mark_processed: if message_id provided, move message to processed/ in same call
     mark_info = ""
