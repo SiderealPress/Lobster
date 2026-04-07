@@ -246,7 +246,7 @@ def _emit_event_bus(direction: str, from_: str, to: str, content: str) -> None:
         from event_bus import get_event_bus, LobsterEvent  # type: ignore[import]
         event = LobsterEvent(
             event_type="bot_talk.message",
-            severity="info",
+            severity="debug",
             source="bot_talk_mirror",
             payload={
                 "direction": direction,
