@@ -2423,6 +2423,25 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
         fi
     fi
 
+    # Migration 69: Install wfm-watchdog.sh cron entry (every 10 minutes).
+    # Detects when wait_for_messages() is frozen (running >35 min) and injects
+    # a synthetic wfm_watchdog inbox message to unblock the dispatcher.
+    local WFM_WATCHDOG_MARKER="# LOBSTER-WFM-WATCHDOG"
+    local wfm_watchdog_script="$LOBSTER_DIR/scripts/wfm-watchdog.sh"
+    if ! crontab -l 2>/dev/null | grep -qF "$WFM_WATCHDOG_MARKER"; then
+        if [[ -f "$wfm_watchdog_script" ]]; then
+            "$LOBSTER_DIR/scripts/cron-manage.sh" add \
+                "$WFM_WATCHDOG_MARKER" \
+                "*/10 * * * * $wfm_watchdog_script $WFM_WATCHDOG_MARKER"
+            substep "Added wfm-watchdog.sh cron entry (every 10 minutes)"
+            migrated=$((migrated + 1))
+        else
+            substep "WARN: wfm-watchdog.sh not found at $wfm_watchdog_script — skipping"
+        fi
+    else
+        substep "wfm-watchdog.sh cron entry already present — skipping"
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else

@@ -3916,6 +3916,25 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
     # transient mode, calling wait_for_messages means Claude is up and running.
     _write_lobster_state(LOBSTER_STATE_FILE, "active")
 
+    # Write WFM active timestamp so the external watchdog can detect freezes.
+    # The watchdog (scripts/wfm-watchdog.sh) runs every 10 minutes via cron and
+    # injects a synthetic wfm_watchdog message if WFM has been running for longer
+    # than 35 minutes (2100s — 5 min past the default 1800s WFM timeout).
+    # We clear this file in the finally block so the watchdog only fires when
+    # WFM is genuinely blocked and has not returned normally.
+    _wfm_active_file = CONFIG_DIR / "wfm-active.json"
+    try:
+        _wfm_start_ts = datetime.now(timezone.utc)
+        _wfm_active_payload = {
+            "started_at": _wfm_start_ts.isoformat(),
+            "pid": os.getpid(),
+        }
+        _wfm_tmp = _wfm_active_file.parent / f".wfm-active-{os.getpid()}.tmp"
+        _wfm_tmp.write_text(json.dumps(_wfm_active_payload))
+        _wfm_tmp.rename(_wfm_active_file)
+    except Exception as _wfm_exc:
+        log.warning(f"[wfm-watchdog] Failed to write wfm-active.json: {_wfm_exc}")
+
     # Recover stale processing and retryable failed messages
     _recover_stale_processing()
     _recover_retryable_messages()
@@ -4052,350 +4071,13 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
         _hb_thread.join(timeout=1)
         observer.stop()
         observer.join(timeout=1)
-        # Write tombstone to WFM_ACTIVE_FILE instead of deleting it (issue #1730).
-        # Deleting the file creates a TOCTOU race: the health check's -f gate can
-        # pass just before unlink(), then cat returns empty and declares RED.
-        # Writing the non-integer tombstone WFM_ACTIVE_TOMBSTONE means the file is
-        # never transiently absent — the health check treats non-integer content as
-        # "WFM not active" (same as absent), with no race window.
-        _clear_wfm_active_signal()
-
-
-def _is_report_command(text: str) -> bool:
-    """Return True if text is a /report slash command (with a description).
-
-    Matches "/report <description>" at the start of the message.
-    The command token must be exactly "/report" (case-insensitive), followed by
-    whitespace and a non-empty description. Does NOT match "/reports" or other
-    commands that begin with "/report" but have extra characters.
-    """
-    if not text:
-        return False
-    stripped = text.strip()
-    lower = stripped.lower()
-    # Must start with "/report" followed by whitespace or end of string
-    if lower == "/report":
-        return False  # No description — ignore bare command
-    if lower.startswith("/report ") or lower.startswith("/report\t"):
-        rest = stripped[len("/report"):].strip()
-        return bool(rest)
-    return False
-
-
-def _extract_report_description(text: str) -> str:
-    """Extract the description part from a /report command text."""
-    stripped = text.strip()
-    rest = stripped[len("/report"):].strip()
-    return rest
-
-
-async def _handle_report_slash_command(msg: dict, msg_file: Path) -> None:
-    """Auto-handle a /report slash command message.
-
-    Creates the report record, queues a confirmation reply to the user, and
-    moves the message to processed/. This is called from handle_check_inbox
-    before the message reaches the main dispatcher loop.
-
-    Args:
-        msg:      The parsed message dict from the inbox JSON file.
-        msg_file: The Path to the inbox JSON file.
-    """
-    text = msg.get("text", "")
-    chat_id = msg.get("chat_id", "")
-    source = msg.get("source", "telegram")
-    msg_id = msg.get("id", msg_file.stem)
-
-    description = _extract_report_description(text)
-
-    # Capture active agent sessions
-    active_session_ids: list[str] = []
-    try:
-        active = _session_store.get_active_sessions()
-        active_session_ids = [s.get("id", "") for s in active if s.get("id")]
-    except Exception:
-        pass
-
-    snapshot_state = {
-        "active_session_count": len(active_session_ids),
-        "lobster_state": _read_lobster_state(),
-    }
-
-    # Store the report
-    report_id: str | None = None
-    try:
-        report = _session_store.create_report(
-            description=description,
-            chat_id=chat_id,
-            source=source,
-            recent_messages=None,  # not captured in pre-processor to stay fast
-            active_session_ids=active_session_ids if active_session_ids else None,
-            snapshot_state=snapshot_state,
-            instance_id=_INSTANCE_ID,
-        )
-        report_id = report["report_id"]
-        log.info(f"/report pre-processor: created {report_id} for chat {chat_id}")
-    except Exception as exc:
-        log.error(f"/report pre-processor: failed to create report: {exc}", exc_info=True)
-        # Do not send a misleading RPT-ERR ID to the user — the message remains
-        # in the inbox so the dispatcher can handle it or retry.
-        return
-
-    # Send confirmation reply and mark processed atomically
-    confirmation = f"Report filed as {report_id}. We'll look into it."
-    try:
-        await handle_send_reply({
-            "chat_id": chat_id,
-            "text": confirmation,
-            "source": source,
-            "message_id": msg_id,
-        })
-    except Exception as exc:
-        log.error(f"/report pre-processor: send_reply failed: {exc}", exc_info=True)
-        # Fall back to just marking processed
+        # Clear WFM active file so the watchdog knows WFM returned normally.
         try:
-            dest = PROCESSED_DIR / msg_file.name
-            msg_file.rename(dest)
-        except Exception:
-            pass
-
-
-def _get_owner_chat_id_and_source() -> tuple[int | str | None, str]:
-    """Return (owner_chat_id, source) for delivering recovery notifications.
-
-    Resolution order:
-      1. config.env — LOBSTER_ENABLE_SLACK / LOBSTER_SLACK_ALLOWED_CHANNELS
-         and TELEGRAM_ALLOWED_USERS (same logic as _resolve_debug_config())
-      2. Environment variables — TELEGRAM_ALLOWED_USERS and
-         LOBSTER_SLACK_ALLOWED_CHANNELS as a fallback for environments where
-         config.env is absent or incomplete (e.g. CI, test runners).
-
-    Returns (None, "telegram") with a logged warning when the owner's
-    chat_id cannot be resolved from either source.
-    """
-    try:
-        slack_enabled = False
-        slack_channel: str | None = None
-        telegram_chat_id: int | None = None
-
-        config_file = _CONFIG_DIR / "config.env"
-        if config_file.exists():
-            for line in config_file.read_text().splitlines():
-                stripped = line.strip()
-                if stripped.startswith("TELEGRAM_ALLOWED_USERS="):
-                    val = stripped.split("=", 1)[1].strip().strip('"').strip("'")
-                    first = val.split(",")[0].strip()
-                    if first.lstrip("-").isdigit():
-                        telegram_chat_id = int(first)
-                elif stripped.startswith("LOBSTER_ENABLE_SLACK="):
-                    val = stripped.split("=", 1)[1].strip().strip('"').strip("'").lower()
-                    slack_enabled = val == "true"
-                elif stripped.startswith("LOBSTER_SLACK_ALLOWED_CHANNELS="):
-                    val = stripped.split("=", 1)[1].strip().strip('"').strip("'")
-                    first_chan = val.split(",")[0].strip()
-                    if first_chan:
-                        slack_channel = first_chan
-
-        # Env var fallback: used when config.env is absent or the relevant
-        # vars were not set there (e.g. CI / test environments).
-        if telegram_chat_id is None:
-            env_users = os.environ.get("TELEGRAM_ALLOWED_USERS", "").strip().strip('"').strip("'")
-            first = env_users.split(",")[0].strip() if env_users else ""
-            if first.lstrip("-").isdigit():
-                telegram_chat_id = int(first)
-
-        if not slack_channel:
-            env_chans = os.environ.get("LOBSTER_SLACK_ALLOWED_CHANNELS", "").strip().strip('"').strip("'")
-            first_chan = env_chans.split(",")[0].strip() if env_chans else ""
-            if first_chan:
-                slack_channel = first_chan
-
-        if not slack_enabled:
-            env_slack = os.environ.get("LOBSTER_ENABLE_SLACK", "").strip().lower()
-            slack_enabled = env_slack == "true"
-
-        if slack_enabled and slack_channel:
-            return slack_channel, "slack"
-        if telegram_chat_id is not None:
-            return telegram_chat_id, "telegram"
-
-        log.warning(
-            "_get_owner_chat_id_and_source: owner chat_id not resolvable from "
-            "config.env or environment variables"
-        )
-        return None, "telegram"
-    except Exception:
-        log.warning(
-            "_get_owner_chat_id_and_source: unexpected error resolving owner chat_id",
-            exc_info=True,
-        )
-        return None, "telegram"
-
-
-def _enqueue_recovery_notification(msg: dict) -> None:
-    """Write a subagent_notification to the owner's inbox when a subagent_recovered event arrives.
-
-    The notification tells the owner which agent failed to write a result and
-    includes a brief summary of the salvaged transcript content. It is delivered
-    to the owner's chat_id (resolved from config.env) — not to the original
-    chat_id carried by the recovery message, which is always 0 (unknown).
-
-    Best-effort: any failure is logged but never raises.
-    """
-    try:
-        owner_chat_id, owner_source = _get_owner_chat_id_and_source()
-        if owner_chat_id is None:
-            log.warning(
-                "subagent_recovered: cannot enqueue recovery notification — "
-                "owner chat_id not resolvable from config.env or environment variables"
-            )
-            return
-
-        task_id = msg.get("task_id") or "unknown"
-        raw_text = msg.get("text", "")
-
-        # Extract a brief summary (first 300 chars of salvaged content, if any).
-        summary_marker = "Recovered content:\n\n"
-        summary: str
-        if summary_marker in raw_text:
-            salvaged = raw_text.split(summary_marker, 1)[1]
-            summary = salvaged[:300].strip()
-            if len(salvaged) > 300:
-                summary += "…"
-            summary_line = f"Last known activity: {summary}"
-        else:
-            summary_line = "No recoverable transcript content was found."
-
-        notification_text = (
-            f"Agent `{task_id}` failed to write a result (exited without calling write_result).\n"
-            f"{summary_line}\n\n"
-            "Consider relaunching the task if the result is needed."
-        )
-
-        now = datetime.now(timezone.utc)
-        ts_ms = int(now.timestamp() * 1000)
-        safe_task_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in task_id)[:40]
-        notification_id = f"{ts_ms}_{safe_task_id}_recovery_notify"
-
-        notification = {
-            "id": notification_id,
-            "type": "subagent_notification",
-            "source": owner_source,
-            "chat_id": owner_chat_id,
-            "text": notification_text,
-            "task_id": task_id,
-            "status": "error",
-            "sent_reply_to_user": False,
-            "timestamp": now.isoformat(),
-            "warning": (
-                "Agent exited without calling write_result. "
-                "Salvaged content was logged. Consider relaunching if result is needed."
-            ),
-        }
-
-        inbox_file = INBOX_DIR / f"{notification_id}.json"
-        atomic_write_json(inbox_file, notification)
-        log.info(
-            f"subagent_recovered: recovery notification enqueued for task {task_id!r} "
-            f"→ owner chat_id={owner_chat_id!r} ({owner_source})"
-        )
-    except Exception as exc:
-        log.error(f"subagent_recovered: failed to enqueue recovery notification: {exc}", exc_info=True)
-
-
-# ---------------------------------------------------------------------------
-# Priority inbox queue — P0-P4 ordering (issue #1079)
-# ---------------------------------------------------------------------------
-
-# P0: dispatcher housekeeping — zero-cost, must run before everything else
-_INBOX_P0_TYPES: frozenset[str] = frozenset()
-_INBOX_P0_SUBTYPES: frozenset[str] = frozenset({"compact-reminder", "self_check"})
-_INBOX_P0_TEXT_PREFIXES: tuple[str, ...] = ("compact-reminder",)
-
-# P1: real-user messages — latency-sensitive
-_INBOX_P1_TYPES: frozenset[str] = frozenset({"text", "voice", "photo", "document"})
-
-# P2: completing in-flight work
-_INBOX_P2_TYPES: frozenset[str] = frozenset({"subagent_result", "subagent_error"})
-
-# P3: error recovery
-_INBOX_P3_TYPES: frozenset[str] = frozenset({"agent_failed"})
-
-# P4: background / cron — everything else
-_INBOX_P4_DEFAULT: int = 4
-
-
-def _inbox_priority(msg: dict) -> int:
-    """Return the priority tier (0=highest, 4=lowest) for an inbox message.
-
-    Priority is derived from message type and subtype at read time — nothing
-    is stored in the message file itself. Unrecognised types default to P4.
-    """
-    msg_type = msg.get("type", "")
-    msg_subtype = msg.get("subtype", "")
-    msg_text = msg.get("text", "")
-
-    # P0: dispatcher housekeeping
-    if msg_subtype in _INBOX_P0_SUBTYPES:
-        return 0
-    if msg_type in _INBOX_P0_TYPES:
-        return 0
-    # compact-reminder messages are sometimes typed as "text" with a specific prefix
-    if any(msg_text.startswith(p) for p in _INBOX_P0_TEXT_PREFIXES):
-        return 0
-
-    # P1: real-user messages
-    if msg_type in _INBOX_P1_TYPES:
-        return 1
-
-    # P2: completing in-flight subagent work
-    if msg_type in _INBOX_P2_TYPES:
-        return 2
-
-    # P3: error recovery
-    if msg_type in _INBOX_P3_TYPES:
-        return 3
-
-    # P4: everything else (scheduled_reminder, system_error, unknown, ...)
-    return _INBOX_P4_DEFAULT
-
-
-def _inbox_sort_key(
-    f_name: str, priority: int, ts_epoch: float | None
-) -> tuple[int, float, str]:
-    """Return (priority, timestamp_epoch, filename) for stable ordering.
-
-    Lower priority tier = earlier in queue.
-    Within a tier, older messages (smaller epoch) come first (FIFO).
-    Filename is the final tiebreaker for determinism.
-    """
-    # Use a large sentinel so unparseable timestamps sink to the back of their tier
-    epoch = ts_epoch if ts_epoch is not None else float("inf")
-    return (priority, epoch, f_name)
-
-
-def _parse_iso_timestamp(ts: str) -> float | None:
-    """
-    Parse an ISO 8601 UTC timestamp string to a Unix epoch float.
-
-    Accepts formats like '2026-01-01T12:00:00Z', '2026-01-01T12:00:00+00:00',
-    and '2026-01-01T12:00:00.000000'. Returns None if parsing fails.
-    """
-    if not ts:
-        return None
-    # Normalise: replace trailing Z with +00:00 for fromisoformat compat
-    normalised = ts.strip().replace("Z", "+00:00")
-    # If no timezone offset is present, assume UTC
-    if "+" not in normalised and normalised.count("-") < 3:
-        normalised = normalised + "+00:00"
-    try:
-        from datetime import datetime, timezone as _tz
-        dt = datetime.fromisoformat(normalised)
-        # Ensure timezone-aware; treat naive as UTC
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=_tz.utc)
-        return dt.timestamp()
-    except (ValueError, TypeError):
-        return None
+            _wfm_active_file = CONFIG_DIR / "wfm-active.json"
+            if _wfm_active_file.exists():
+                _wfm_active_file.unlink()
+        except Exception as _wfm_clear_exc:
+            log.warning(f"[wfm-watchdog] Failed to clear wfm-active.json: {_wfm_clear_exc}")
 
 
 def _is_report_command(text: str) -> bool:
