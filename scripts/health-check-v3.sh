@@ -102,6 +102,8 @@ MAX_RESTART_ATTEMPTS=3
 RESTART_COOLDOWN_SECONDS=600         # 10 min window for counting attempts
 RESTART_STATE_FILE="$WORKSPACE_DIR/logs/health-restart-state-v3"
 
+BLACK_RENOTIFY_SECONDS=7200          # 2 hours: re-alert if still in BLACK state
+
 ALERT_DEDUP_COOLDOWN_SECONDS=900     # 15 minutes between alerts for the same issue type
 ALERT_DEDUP_DIR="$WORKSPACE_DIR/logs/health-alert-dedup"
 
@@ -264,24 +266,79 @@ is_manual_intervention_required() {
 
 # Write manual intervention flag into the state file.
 # Preserves existing timestamp/count so the record is self-documenting.
+# Appends MANUAL_INTERVENTION and the timestamp when BLACK was first set.
+# Format: <first_restart_ts> <count> MANUAL_INTERVENTION <black_set_ts>
 set_manual_intervention() {
     local now
     now=$(date +%s)
     local existing=""
     [[ -f "$RESTART_STATE_FILE" ]] && existing=$(cat "$RESTART_STATE_FILE" 2>/dev/null || true)
-    # Strip any previous MANUAL_INTERVENTION token, then append it
-    existing=$(echo "$existing" | sed 's/ MANUAL_INTERVENTION//')
-    echo "${existing:-$now 0} MANUAL_INTERVENTION" > "$RESTART_STATE_FILE"
+    # Strip any previous MANUAL_INTERVENTION token (and trailing black_set_ts), then append
+    existing=$(echo "$existing" | sed 's/ MANUAL_INTERVENTION.*//')
+    echo "${existing:-$now 0} MANUAL_INTERVENTION $now" > "$RESTART_STATE_FILE"
     log_warn "Manual intervention flag set in $RESTART_STATE_FILE"
+}
+
+# Return the epoch when BLACK was first set, or empty string if not available.
+# Reads the 4th field from the state file (black_set_ts).
+# Handles both old 3-field format (no black_set_ts) and new 4-field format.
+get_black_set_ts() {
+    [[ ! -f "$RESTART_STATE_FILE" ]] && return
+    local line
+    line=$(cat "$RESTART_STATE_FILE" 2>/dev/null || true)
+    # Fields: <first_restart_ts> <count> MANUAL_INTERVENTION [<black_set_ts>]
+    local black_set_ts
+    black_set_ts=$(echo "$line" | awk '{print $4}')
+    echo "$black_set_ts"
+}
+
+# If system has been in BLACK state longer than BLACK_RENOTIFY_SECONDS,
+# send a re-alert and reset the black_set_ts so the 2-hour timer restarts.
+# This ensures the operator is re-notified every 2 hours until they intervene.
+check_and_renotify_black() {
+    local black_set_ts
+    black_set_ts=$(get_black_set_ts)
+    if [[ -z "$black_set_ts" ]]; then
+        # Old state file format without black_set_ts — update in place to add it now
+        local line
+        line=$(cat "$RESTART_STATE_FILE" 2>/dev/null || true)
+        local base
+        base=$(echo "$line" | sed 's/ MANUAL_INTERVENTION.*//')
+        local now
+        now=$(date +%s)
+        echo "${base} MANUAL_INTERVENTION $now" > "$RESTART_STATE_FILE"
+        log_info "BLACK: Migrated state file to include black_set_ts ($now)"
+        return
+    fi
+
+    local now
+    now=$(date +%s)
+    local elapsed=$(( now - black_set_ts ))
+
+    if [[ $elapsed -gt $BLACK_RENOTIFY_SECONDS ]]; then
+        local hours=$(( elapsed / 3600 ))
+        log_warn "BLACK: System in manual intervention state for ${hours}h — sending re-alert"
+        send_telegram_alert "⚠️ Health check BLACK: system has been in manual intervention state for >${hours}h. Dispatcher still appears dead. Please intervene manually or run: ~/lobster/scripts/health-check-v3.sh --clear-black"
+        # Reset the timer: update black_set_ts to now so next re-alert fires 2h from now
+        local line
+        line=$(cat "$RESTART_STATE_FILE" 2>/dev/null || true)
+        local base
+        base=$(echo "$line" | sed 's/ MANUAL_INTERVENTION.*//')
+        echo "${base} MANUAL_INTERVENTION $now" > "$RESTART_STATE_FILE"
+        log_info "BLACK: Reset re-alert timer (next re-alert in ${BLACK_RENOTIFY_SECONDS}s)"
+    else
+        local remaining=$(( BLACK_RENOTIFY_SECONDS - elapsed ))
+        log_error "BLACK: Manual intervention required (flag already set, ${elapsed}s elapsed, re-alert in ${remaining}s) — skipping restart"
+    fi
 }
 
 # Clear the manual intervention flag when the system is healthy again.
 clear_manual_intervention() {
     if is_manual_intervention_required; then
-        # Strip the sentinel token, keeping the timestamp/count intact
+        # Strip MANUAL_INTERVENTION and any trailing black_set_ts, keeping timestamp/count
         local line
         line=$(cat "$RESTART_STATE_FILE" 2>/dev/null || true)
-        echo "${line/ MANUAL_INTERVENTION/}" > "$RESTART_STATE_FILE"
+        echo "$(echo "$line" | sed 's/ MANUAL_INTERVENTION.*//')" > "$RESTART_STATE_FILE"
         log_info "Manual intervention flag cleared (system healthy)"
     fi
 }
@@ -1304,8 +1361,10 @@ The restart has been skipped to avoid killing running subagents. If the problem 
 
     if ! can_restart; then
         if is_manual_intervention_required; then
-            # Already in BLACK/manual-intervention state — log only, no Telegram spam
-            log_error "BLACK: Manual intervention required (flag already set) — skipping restart and alert"
+            # Already in BLACK/manual-intervention state — check whether it's time to re-alert.
+            # check_and_renotify_black sends a Telegram alert if elapsed time exceeds
+            # BLACK_RENOTIFY_SECONDS (2h), then resets the timer so alerts repeat every 2h.
+            check_and_renotify_black
         else
             # First time hitting BLACK — set flag and send a single alert.
             # Alert fires even during compaction window: this is a severe state
@@ -1997,5 +2056,14 @@ ssh into the server and run: claude auth login"
 
     log_info "=== Health check v3 complete (level=$level, mode=$lobster_mode) ==="
 }
+
+# Handle --clear-black before entering the main loop.
+# This is a maintenance escape hatch: it resets the BLACK state so auto-restarts
+# are re-enabled without requiring a full manual recovery procedure.
+if [[ "${1:-}" == "--clear-black" ]]; then
+    echo "0 0 GREEN" > "$RESTART_STATE_FILE"
+    echo "BLACK state cleared — restart state reset to GREEN"
+    exit 0
+fi
 
 main "$@"
