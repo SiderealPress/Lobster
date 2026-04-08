@@ -212,6 +212,12 @@ _TOKEN_FILE_MODE: int = stat.S_IRUSR | stat.S_IWUSR
 
 _INTERNAL_SECRET: str = os.environ.get("LOBSTER_INTERNAL_SECRET", "").strip()
 
+# AWP_IMPORT_TOKEN is used by the AWP webhook endpoint.
+# In the Google Apps Script that sends intake data, this is stored as LOBSTER_SECRET.
+_AWP_IMPORT_TOKEN: str = os.environ.get("AWP_IMPORT_TOKEN", "").strip()
+
+_INBOX_DIR: Path = _MESSAGES_DIR / "inbox"
+
 
 def _is_authorized_internal(request: Request) -> bool:
     """Return True if the request carries a valid LOBSTER_INTERNAL_SECRET."""
@@ -222,6 +228,21 @@ def _is_authorized_internal(request: Request) -> bool:
     if not auth_header.startswith("Bearer "):
         return False
     return auth_header[7:].strip() == _INTERNAL_SECRET
+
+
+def _is_authorized_awp(request: Request) -> bool:
+    """Return True if the request carries a valid AWP_IMPORT_TOKEN.
+
+    The Apps Script on the AWP side stores this token as LOBSTER_SECRET and
+    sends it as ``Authorization: Bearer <AWP_IMPORT_TOKEN>``.
+    """
+    if not _AWP_IMPORT_TOKEN:
+        logger.error("AWP_IMPORT_TOKEN not configured — awp-intake endpoint disabled")
+        return False
+    auth_header = request.headers.get("authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return False
+    return auth_header[7:].strip() == _AWP_IMPORT_TOKEN
 
 
 async def push_calendar_token_endpoint(scope, receive, send):
@@ -408,6 +429,95 @@ async def push_gmail_token_endpoint(scope, receive, send):
     await response(scope, receive, send)
 
 
+async def awp_intake_endpoint(scope, receive, send):
+    """POST /api/webhooks/awp-intake — receive an AWP investor intake submission.
+
+    Sent by the Google Apps Script attached to the AWP Typeform. The Apps Script
+    stores the auth token as ``LOBSTER_SECRET``; on this side it is ``AWP_IMPORT_TOKEN``.
+
+    Expected JSON body::
+
+        {
+          "submission_id":        "<string>",
+          "submitted_at":         "<ISO 8601 string>",
+          "full_name":            "<string>",
+          "email":                "<string>",
+          "phone":                "<string>",
+          "investable_capital":   "<string>",
+          "accreditation_status": "<string>",
+          "entity_type":          "<string>",
+          "source":               "AWP Website Typeform",
+          "raw":                  {...}
+        }
+
+    Authentication: ``Authorization: Bearer <AWP_IMPORT_TOKEN>``
+    (Apps Script variable name: ``LOBSTER_SECRET``)
+
+    Writes a Lobster inbox message to ``~/messages/inbox/<timestamp>_awp-intake.json``
+    and returns ``{"status": "ok", "message_id": "<id>"}``.
+    """
+    request = Request(scope, receive)
+
+    if not _is_authorized_awp(request):
+        response = JSONResponse({"error": "Unauthorized"}, status_code=401)
+        await response(scope, receive, send)
+        return
+
+    try:
+        body = await request.json()
+    except Exception:
+        response = JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+        await response(scope, receive, send)
+        return
+
+    # Extract fields — all are optional so the message is written even if partial
+    full_name = str(body.get("full_name", "")).strip()
+    email = str(body.get("email", "")).strip()
+    investable_capital = str(body.get("investable_capital", "")).strip()
+    accreditation_status = str(body.get("accreditation_status", "")).strip()
+    entity_type = str(body.get("entity_type", "")).strip()
+
+    now = datetime.now(timezone.utc)
+    timestamp_ms = int(now.timestamp() * 1000)
+    message_id = f"{timestamp_ms}_awp-intake"
+
+    summary_text = (
+        f"New AWP intake: {full_name} ({email})\n"
+        f"Capital: {investable_capital}\n"
+        f"Accreditation: {accreditation_status}\n"
+        f"Entity: {entity_type}"
+    )
+
+    message = {
+        "id": message_id,
+        "type": "awp_intake",
+        "source": "awp",
+        "chat_id": 0,
+        "text": summary_text,
+        "payload": body,
+        "timestamp": now.isoformat(),
+    }
+
+    try:
+        _INBOX_DIR.mkdir(parents=True, exist_ok=True)
+        inbox_path = _INBOX_DIR / f"{message_id}.json"
+        tmp_path = inbox_path.with_suffix(".json.tmp")
+        payload_str = json.dumps(message, indent=2)
+        fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _TOKEN_FILE_MODE)
+        with os.fdopen(fd, "w") as f:
+            f.write(payload_str)
+        os.rename(str(tmp_path), str(inbox_path))
+        logger.info("AWP intake message written: %s (from=%r)", message_id, email)
+    except Exception as exc:
+        logger.error("Failed to write AWP intake message: %s", exc)
+        response = JSONResponse({"error": "Failed to write message"}, status_code=500)
+        await response(scope, receive, send)
+        return
+
+    response = JSONResponse({"status": "ok", "message_id": message_id})
+    await response(scope, receive, send)
+
+
 async def mcp_endpoint(scope, receive, send):
     """Handle all requests: auth check then delegate to MCP."""
     request = Request(scope, receive)
@@ -426,6 +536,11 @@ async def mcp_endpoint(scope, receive, send):
     # Gmail token push — authenticated by LOBSTER_INTERNAL_SECRET
     if path == "/api/push-gmail-token":
         await push_gmail_token_endpoint(scope, receive, send)
+        return
+
+    # AWP investor intake — authenticated by AWP_IMPORT_TOKEN (Apps Script: LOBSTER_SECRET)
+    if path == "/api/webhooks/awp-intake":
+        await awp_intake_endpoint(scope, receive, send)
         return
 
     # Only handle /mcp
