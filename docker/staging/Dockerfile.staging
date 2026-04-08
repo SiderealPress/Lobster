@@ -39,51 +39,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     # Python
     python3 \
-    python3-pip \
-    python3-venv \
-    # Scheduling
-    cron \
-    at \
-    # Claude Code / lobster runtime
-    expect \
-    tmux \
-    bsdutils \
-    procps \
     iproute2 \
-    sudo \
-    # Build tools (for whisper.cpp and Python native extensions)
-    build-essential \
-    cmake \
-    # Media / voice
-    ffmpeg \
-    # Modern CLI tools used by lobster scripts
-    ripgrep \
-    fd-find \
-    bat \
-    fzf \
-    # gh CLI setup
-    gnupg \
-    lsb-release \
-    apt-transport-https \
-    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-       | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg 2>/dev/null \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-       > /etc/apt/sources.list.d/github-cli.list \
-    && apt-get update && apt-get install -y --no-install-recommends gh \
-    # ---------------------------------------------------------------
-    # Prune systemd units that fail or are irrelevant inside Docker.
-    # Keeping only what's needed for multi-user.target + our services.
-    # ---------------------------------------------------------------
-    && find /lib/systemd/system/sysinit.target.wants/ -type l \
-       ! -name 'systemd-tmpfiles-setup*' -delete \
-    && rm -f \
-       /lib/systemd/system/multi-user.target.wants/* \
-       /etc/systemd/system/*.wants/* \
-       /lib/systemd/system/local-fs.target.wants/* \
-       /lib/systemd/system/sockets.target.wants/*udev* \
-       /lib/systemd/system/sockets.target.wants/*initctl* \
-       /lib/systemd/system/basic.target.wants/* \
-       /lib/systemd/system/anaconda.target.wants/* 2>/dev/null || true \
     && rm -rf /var/lib/apt/lists/*
 
 # Create the lobster user (uid 1000, passwordless sudo — staging only)
