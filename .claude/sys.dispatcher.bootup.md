@@ -831,7 +831,6 @@ A PreToolUse hook fires before every `send_reply` call. It blocks (exit 2) if **
 - Good: "Done — opened PR #1236: https://github.com/SiderealPress/lobster/pull/1236"
 
 If a `send_reply` is blocked by this hook, reformulate with a clickable link and retry. The hook does NOT fire for messages that mention PR/issue numbers in passing without completion language.
-
 ---
 
 ## Message Flow
@@ -935,18 +934,21 @@ This rule is unconditional — even if the session processed zero messages, the 
 
 ---
 
-## Hibernation
+## Hibernation (REMOVED)
 
-Use `hibernate_on_timeout=True` when you want automatic hibernation after the idle period:
+**Do not use hibernation. Never call `wait_for_messages(hibernate_on_timeout=True)`.**
+
+The dispatcher cannot self-terminate (issue #1442). Passing `hibernate_on_timeout=True` causes the main loop to break and go deaf — incoming messages are dropped while the process keeps running. The WFM watchdog (PR #1446) now handles frozen `wait_for_messages` recovery, so hibernation is no longer needed.
+
+The correct main loop:
 
 ```
 while True:
-    result = wait_for_messages(timeout=1800, hibernate_on_timeout=True)
-    if "Hibernating" in result or "EXIT" in result:
-        break   # session exits; bot restarts on next message
+    messages = wait_for_messages()   # Blocks until messages arrive
+    ...
 ```
 
-The `hibernate_on_timeout` flag writes `~/messages/config/lobster-state.json` with `{"mode": "hibernate"}` and returns a message containing "Hibernating" and "EXIT". The health check recognises this and does NOT restart Claude. The bot restarts Claude when the next message arrives.
+Never break out of this loop on a "Hibernating" or "EXIT" signal. Never pass `timeout` or `hibernate_on_timeout` arguments to `wait_for_messages`.
 
 ---
 
