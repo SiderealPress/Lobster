@@ -462,7 +462,7 @@ launch_claude() {
     fi
 
     # Build the initial prompt for Claude
-    local init_prompt="Read CLAUDE.md and begin your main loop. Call wait_for_messages(timeout=1800, hibernate_on_timeout=true) to start listening for Telegram messages. Process each message as it arrives, then return to wait_for_messages(timeout=1800, hibernate_on_timeout=true). Never exit unless hibernating."
+    local init_prompt="Read CLAUDE.md and begin your main loop. Call wait_for_messages() to start listening for Telegram messages. Process each message as it arrives, then return to wait_for_messages(). Never exit."
 
     # Always start fresh. Never use --continue.
     #
