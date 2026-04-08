@@ -3690,6 +3690,25 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
     # transient mode, calling wait_for_messages means Claude is up and running.
     _write_lobster_state(LOBSTER_STATE_FILE, "active")
 
+    # Write WFM active timestamp so the external watchdog can detect freezes.
+    # The watchdog (scripts/wfm-watchdog.sh) runs every 10 minutes via cron and
+    # injects a synthetic wfm_watchdog message if WFM has been running for longer
+    # than 35 minutes (2100s — 5 min past the default 1800s WFM timeout).
+    # We clear this file in the finally block so the watchdog only fires when
+    # WFM is genuinely blocked and has not returned normally.
+    _wfm_active_file = CONFIG_DIR / "wfm-active.json"
+    try:
+        _wfm_start_ts = datetime.now(timezone.utc)
+        _wfm_active_payload = {
+            "started_at": _wfm_start_ts.isoformat(),
+            "pid": os.getpid(),
+        }
+        _wfm_tmp = _wfm_active_file.parent / f".wfm-active-{os.getpid()}.tmp"
+        _wfm_tmp.write_text(json.dumps(_wfm_active_payload))
+        _wfm_tmp.rename(_wfm_active_file)
+    except Exception as _wfm_exc:
+        log.warning(f"[wfm-watchdog] Failed to write wfm-active.json: {_wfm_exc}")
+
     # Recover stale processing and retryable failed messages
     _recover_stale_processing()
     _recover_retryable_messages()
@@ -3786,6 +3805,13 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
     finally:
         observer.stop()
         observer.join(timeout=1)
+        # Clear WFM active file so the watchdog knows WFM returned normally.
+        try:
+            _wfm_active_file = CONFIG_DIR / "wfm-active.json"
+            if _wfm_active_file.exists():
+                _wfm_active_file.unlink()
+        except Exception as _wfm_clear_exc:
+            log.warning(f"[wfm-watchdog] Failed to clear wfm-active.json: {_wfm_clear_exc}")
 
 
 def _is_report_command(text: str) -> bool:
