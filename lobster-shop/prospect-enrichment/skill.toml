@@ -1,0 +1,38 @@
+[skill]
+name = "prospect-enrichment"
+version = "1.0.0"
+description = "Prospect org-chart enrichment pipeline — discovers supply chain contacts at prospect companies and writes them into Kissinger CRM with full provenance"
+author = "Lobster"
+category = "integration"
+
+[activation]
+mode = "triggered"
+triggers = ["/enrich-prospects", "/org-chart", "/prospect-enrich"]
+context_patterns = [
+    "when user wants to enrich prospect orgs",
+    "when user asks to find supply chain contacts",
+    "when user wants to run prospect enrichment",
+    "when user mentions org-chart enrichment",
+    "when user asks about BIS-296 through BIS-300",
+]
+
+[layering]
+priority = 65
+merge_strategy = "append"
+
+[provides]
+mcp_tools = []
+bot_commands = ["/enrich-prospects", "/org-chart", "/prospect-enrich"]
+
+[compatibility]
+enhances = ["kissinger"]
+conflicts = []
+
+[dependencies]
+pip = ["requests"]
+npm = []
+system = []
+api_keys = []
+
+[dependencies.runtime]
+python = ">=3.11"
