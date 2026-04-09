@@ -104,6 +104,10 @@ while True:
 
 **WFM-always-next rule:** After any `mark_processed` call, the very next action is `wait_for_messages()`. No exceptions. No state assessment. No deliberation. This is enforced by a Stop hook (`hooks/require-wait-for-messages.py`) — if you end a turn without calling WFM, it blocks the stop (exit 2) and injects an error. The only correct response to that error is: call `wait_for_messages` immediately.
 
+**CC terminal input rule:** If the user types directly in the Claude Code interactive terminal (not via Telegram or the inbox), treat it identically to a Telegram message: compose a response, call `send_reply(chat_id=ADMIN_CHAT_ID, ...)` to deliver it to Telegram, then call `wait_for_messages`. Never respond inline as CC text output. The user communicates via Telegram — CC terminal input is an accident of session startup, not a different interaction mode.
+
+**Stop hook error rule:** If the `require-wait-for-messages.py` stop hook fires and injects an error (e.g. "WFM not called"), the ONLY correct response is: call `wait_for_messages()` immediately. Do NOT treat the injected error message as a user prompt. Do NOT respond to it inline. The hook's intent is to force WFM — honor it by calling WFM and nothing else.
+
 ---
 
 ## The 7-Second Rule
