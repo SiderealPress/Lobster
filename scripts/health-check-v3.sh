@@ -102,7 +102,7 @@ MAX_RESTART_ATTEMPTS=3
 RESTART_COOLDOWN_SECONDS=600         # 10 min window for counting attempts
 RESTART_STATE_FILE="$WORKSPACE_DIR/logs/health-restart-state-v3"
 
-BLACK_RENOTIFY_SECONDS=7200          # 2 hours: re-alert if still in BLACK state
+BLACK_RENOTIFY_SECONDS=7200          # 2 hours: silent restart retry interval while in BLACK state
 
 ALERT_DEDUP_COOLDOWN_SECONDS=900     # 15 minutes between alerts for the same issue type
 ALERT_DEDUP_DIR="$WORKSPACE_DIR/logs/health-alert-dedup"
@@ -293,9 +293,17 @@ get_black_set_ts() {
 }
 
 # If system has been in BLACK state longer than BLACK_RENOTIFY_SECONDS,
-# send a re-alert and reset the black_set_ts so the 2-hour timer restarts.
-# This ensures the operator is re-notified every 2 hours until they intervene.
+# silently attempt a single restart (no Telegram alert). If the restart
+# succeeds the system will return to GREEN on the next health check and
+# clear_manual_intervention() will remove the BLACK flag automatically.
+# If the restart fails, re-set the BLACK flag and reset the 2-hour timer
+# so another attempt fires BLACK_RENOTIFY_SECONDS from now.
+#
+# The one-time alert sent when BLACK is first set (in do_restart) is
+# intentionally preserved. Only the periodic re-notifications are replaced
+# by these silent retry attempts.
 check_and_renotify_black() {
+    local reason="${1:-periodic BLACK retry}"
     local black_set_ts
     black_set_ts=$(get_black_set_ts)
     if [[ -z "$black_set_ts" ]]; then
@@ -317,18 +325,25 @@ check_and_renotify_black() {
 
     if [[ $elapsed -gt $BLACK_RENOTIFY_SECONDS ]]; then
         local hours=$(( elapsed / 3600 ))
-        log_warn "BLACK: System in manual intervention state for ${hours}h — sending re-alert"
-        send_telegram_alert "⚠️ Health check BLACK: system has been in manual intervention state for >${hours}h. Dispatcher still appears dead. Please intervene manually or run: ~/lobster/scripts/health-check-v3.sh --clear-black"
-        # Reset the timer: update black_set_ts to now so next re-alert fires 2h from now
-        local line
-        line=$(cat "$RESTART_STATE_FILE" 2>/dev/null || true)
-        local base
-        base=$(echo "$line" | sed 's/ MANUAL_INTERVENTION.*//')
-        echo "${base} MANUAL_INTERVENTION $now" > "$RESTART_STATE_FILE"
-        log_info "BLACK: Reset re-alert timer (next re-alert in ${BLACK_RENOTIFY_SECONDS}s)"
+        log_warn "BLACK: System in manual intervention state for ${hours}h — attempting silent restart (no alert)"
+        # Temporarily clear the MANUAL_INTERVENTION flag so do_restart's
+        # can_restart() check passes, then attempt a single restart.
+        clear_manual_intervention
+        if do_restart "$reason" "true"; then
+            # Restart succeeded: the system will return to GREEN on the next
+            # health check run, which will call clear_manual_intervention()
+            # again (harmless no-op if already cleared). Nothing more to do.
+            log_info "BLACK: Silent restart attempt succeeded — system should return to GREEN"
+        else
+            # Restart failed: re-enter BLACK and reset the 2-hour retry timer
+            # so we try again BLACK_RENOTIFY_SECONDS from now.
+            log_error "BLACK: Silent restart attempt failed — re-entering BLACK state"
+            set_manual_intervention
+            log_info "BLACK: Reset retry timer (next attempt in ${BLACK_RENOTIFY_SECONDS}s)"
+        fi
     else
         local remaining=$(( BLACK_RENOTIFY_SECONDS - elapsed ))
-        log_error "BLACK: Manual intervention required (flag already set, ${elapsed}s elapsed, re-alert in ${remaining}s) — skipping restart"
+        log_error "BLACK: Manual intervention required (flag already set, ${elapsed}s elapsed, retry in ${remaining}s) — skipping restart"
     fi
 }
 
@@ -1362,9 +1377,10 @@ The restart has been skipped to avoid killing running subagents. If the problem 
     if ! can_restart; then
         if is_manual_intervention_required; then
             # Already in BLACK/manual-intervention state — check whether it's time to re-alert.
-            # check_and_renotify_black sends a Telegram alert if elapsed time exceeds
-            # BLACK_RENOTIFY_SECONDS (2h), then resets the timer so alerts repeat every 2h.
-            check_and_renotify_black
+            # check_and_renotify_black silently retries a restart if BLACK_RENOTIFY_SECONDS
+            # (2h) have elapsed. No Telegram alert is sent — the initial BLACK alert already
+            # fired. If the retry succeeds the system returns to GREEN naturally.
+            check_and_renotify_black "$reason"
         else
             # First time hitting BLACK — set flag and send a single alert.
             # Alert fires even during compaction window: this is a severe state
