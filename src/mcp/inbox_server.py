@@ -4641,6 +4641,26 @@ async def handle_send_reply(args: dict) -> list[TextContent]:
 
     log.info(f"Reply sent to {source} chat {chat_id}")
 
+    # Emit telegram.outbound to EventBus for audit trail (issue #1352).
+    # Skipped for bot-talk — that source already emits via bot_talk_mirror.
+    # Fire-and-forget: swallows all exceptions so the reply path is never blocked.
+    if source != "bot-talk" and _EVENT_BUS_AVAILABLE:
+        try:
+            event = LobsterEvent(
+                event_type="telegram.outbound",
+                severity="info",
+                source="inbox-server",
+                payload={
+                    "source": source,
+                    "chat_id": chat_id,
+                    "text_len": len(text),
+                },
+                chat_id=chat_id,
+            )
+            get_event_bus().emit_sync(event)
+        except Exception:
+            pass  # never block on observability
+
     # Mirror outbound bot-talk messages to the EventBus so TelegramOutboxListener
     # can forward them as debug notifications. Fire-and-forget: non-blocking.
     if source == "bot-talk":
@@ -4885,6 +4905,20 @@ async def handle_mark_processed(args: dict) -> list[TextContent]:
         {"last_processed_at": datetime.now(timezone.utc).isoformat()}
     )
 
+    # Emit inbox.processed to EventBus for audit trail (issue #1352).
+    # Fire-and-forget: swallows all exceptions so the mark_processed path is never blocked.
+    if _EVENT_BUS_AVAILABLE:
+        try:
+            event = LobsterEvent(
+                event_type="inbox.processed",
+                severity="info",
+                source="inbox-server",
+                payload={"message_id": message_id},
+            )
+            get_event_bus().emit_sync(event)
+        except Exception:
+            pass  # never block on observability
+
     log.info(f"Message processed: {message_id}")
     return [TextContent(type="text", text=f"✅ Message marked as processed: {message_id}")]
 
@@ -5004,6 +5038,25 @@ async def handle_mark_processing(args: dict) -> list[TextContent]:
         atomic_write_json(dest, msg_data)
     except Exception:
         pass  # non-fatal; stale recovery falls back to mtime
+
+    # Emit telegram.inbound to EventBus for audit trail (issue #1352).
+    # Fire-and-forget: swallows all exceptions so the claim path is never blocked.
+    if _EVENT_BUS_AVAILABLE:
+        try:
+            event = LobsterEvent(
+                event_type="telegram.inbound",
+                severity="info",
+                source="inbox-server",
+                payload={
+                    "message_id": message_id,
+                    "source": msg_source,
+                    "msg_type": msg_type,
+                },
+                chat_id=msg_data.get("chat_id"),
+            )
+            get_event_bus().emit_sync(event)
+        except Exception:
+            pass  # never block on observability
 
     log.info(f"Message claimed for processing: {message_id}")
     return [TextContent(type="text", text=f"Message claimed: {message_id}{context_block}")]
@@ -5138,12 +5191,18 @@ async def handle_mark_failed(args: dict) -> list[TextContent]:
         # Update claim status to 'failed' (issue #1360)
         _claims_db.update_status(message_id, "failed")
         log.error(f"Message permanently failed after {max_retries} retries: {message_id} - {error}")
-        # Emit inbox.failed to EventBus for audit trail (issue #1352).
-        _emit_mcp_event(
-            "inbox.failed",
-            {"message_id": message_id, "error": error, "permanent": True},
-            severity="warn",
-        )
+        # Emit inbox.failed to EventBus for audit trail (issue #1352). Fire-and-forget.
+        if _EVENT_BUS_AVAILABLE:
+            try:
+                event = LobsterEvent(
+                    event_type="inbox.failed",
+                    severity="warn",
+                    source="inbox-server",
+                    payload={"message_id": message_id, "error": error, "permanent": True},
+                )
+                get_event_bus().emit_sync(event)
+            except Exception:
+                pass  # never block on observability
         return [TextContent(type="text", text=f"Message permanently failed after {max_retries} retries: {message_id}")]
 
     # Schedule retry with exponential backoff: 60s, 120s, 240s
@@ -5158,12 +5217,18 @@ async def handle_mark_failed(args: dict) -> list[TextContent]:
     # Release claim row so the message can be re-claimed on retry (issue #1360)
     _claims_db.release(message_id)
     log.warning(f"Message failed (retry {retry_count}/{max_retries}, next in {backoff}s): {message_id} - {error}")
-    # Emit inbox.failed to EventBus for audit trail (issue #1352).
-    _emit_mcp_event(
-        "inbox.failed",
-        {"message_id": message_id, "error": error, "permanent": False},
-        severity="warn",
-    )
+    # Emit inbox.failed to EventBus for audit trail (issue #1352). Fire-and-forget.
+    if _EVENT_BUS_AVAILABLE:
+        try:
+            event = LobsterEvent(
+                event_type="inbox.failed",
+                severity="warn",
+                source="inbox-server",
+                payload={"message_id": message_id, "error": error, "permanent": False},
+            )
+            get_event_bus().emit_sync(event)
+        except Exception:
+            pass  # never block on observability
     return [TextContent(type="text", text=f"Message queued for retry ({retry_count}/{max_retries}, backoff {backoff}s): {message_id}")]
 
 
@@ -7002,12 +7067,22 @@ async def handle_write_task_output(args: dict) -> list[TextContent]:
     with open(output_file, "w") as f:
         json.dump(output_data, f, indent=2)
 
-    # Emit job.completed to EventBus for audit trail (issue #1352).
-    _emit_mcp_event(
-        "job.completed",
-        {"job_name": job_name, "status": status, "output_len": len(output)},
-        severity="warn" if status == "failed" else "info",
-    )
+    # Emit job.completed to EventBus for audit trail (issue #1352). Fire-and-forget.
+    if _EVENT_BUS_AVAILABLE:
+        try:
+            event = LobsterEvent(
+                event_type="job.completed",
+                severity="warn" if status == "failed" else "info",
+                source="inbox-server",
+                payload={
+                    "job_name": job_name,
+                    "status": status,
+                    "output_len": len(output),
+                },
+            )
+            get_event_bus().emit_sync(event)
+        except Exception:
+            pass  # never block on observability
 
     return [TextContent(type="text", text=f"Output recorded for job '{job_name}'")]
 
