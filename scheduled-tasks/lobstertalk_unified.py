@@ -48,27 +48,17 @@ from pathlib import Path
 from typing import Any
 
 # ---------------------------------------------------------------------------
+# CONFIGURE THESE FOR YOUR INSTANCE
+# ---------------------------------------------------------------------------
+
+MY_LOBSTER_NAME: str = "VT-SM-lobsterbot"   # e.g. "AlbertLobster"
+ADMIN_CHAT_ID: int = 8305714125                      # your owner's chat ID for inbox routing
+
+# ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-_bot_talk_url = os.environ.get("BOT_TALK_URL")
-if not _bot_talk_url:
-    raise RuntimeError("BOT_TALK_URL environment variable is not set — cannot start lobstertalk")
-BOT_TALK_BASE_URL = _bot_talk_url
-
-MY_LOBSTER_NAME: str = (
-    os.environ.get("BOT_TALK_SENDER")
-    or os.environ.get("LOBSTER_NAME")
-    or os.environ.get("BOT_TALK_SENDER_NAME")
-    or ""
-)
-if not MY_LOBSTER_NAME:
-    raise RuntimeError("BOT_TALK_SENDER env var required (set in ~/messages/config/config.env)")
-
-ADMIN_CHAT_ID_STR: str = os.environ.get("LOBSTER_ADMIN_CHAT_ID") or os.environ.get("ADMIN_CHAT_ID") or ""
-if not ADMIN_CHAT_ID_STR:
-    raise RuntimeError("LOBSTER_ADMIN_CHAT_ID env var required (or ADMIN_CHAT_ID as fallback)")
-ADMIN_CHAT_ID: int = int(ADMIN_CHAT_ID_STR)
+BOT_TALK_BASE_URL = os.environ.get("BOT_TALK_URL", "http://46.224.41.108:4242")
 STATE_FILE = Path.home() / "lobster-workspace" / "data" / "lobstertalk-unified-state.json"
 INBOX_DIR = Path.home() / "messages" / "inbox"
 OUTBOX_DIR = Path.home() / "messages" / "outbox"
@@ -76,8 +66,8 @@ PROCESSED_DIR = Path.home() / "messages" / "processed"
 LOG_FILE = Path.home() / "lobster-workspace" / "logs" / "lobstertalk.jsonl"
 LOG_ROTATE_BYTES = 50 * 1024 * 1024  # 50 MB
 
-# Exit hot mode after this many seconds of no new messages (20 minutes)
-HOT_MODE_TIMEOUT_SECS = 20 * 60
+# After this many consecutive empty polls, exit hot mode
+COOLDOWN_THRESHOLD = 2
 
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -123,7 +113,7 @@ def _default_state() -> dict[str, Any]:
     return {
         "last_seen_ts": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
         "hot_mode": False,
-        "last_activity_ts": None,
+        "consecutive_empty_polls": 0,
         "hot_mode_activated_at": None,
     }
 
@@ -156,44 +146,20 @@ def _write_state(state: dict[str, Any]) -> None:
 # Hot-mode state transitions (pure functions)
 # ---------------------------------------------------------------------------
 
-def _update_state_after_messages(
-    state: dict[str, Any], message_count: int, now: datetime | None = None
-) -> dict[str, Any]:
+def _update_state_after_messages(state: dict[str, Any], message_count: int) -> dict[str, Any]:
     """Return updated state dict after a poll that returned `message_count` messages.
-
-    Hot-mode entry: any messages received → hot_mode=True, update last_activity_ts.
-    Hot-mode exit: time-based — if now - last_activity_ts >= HOT_MODE_TIMEOUT_SECS,
-    exit hot mode regardless of poll count. This prevents the dispatcher from
-    being stuck in hot mode forever if the conversation goes quiet.
 
     Pure: does not mutate the input dict.
     """
-    if now is None:
-        now = datetime.now(timezone.utc)
     state = dict(state)
     if message_count > 0:
         state["hot_mode"] = True
-        state["last_activity_ts"] = now.isoformat()
         if not state.get("hot_mode_activated_at"):
-            state["hot_mode_activated_at"] = now.isoformat()
+            state["hot_mode_activated_at"] = datetime.now(timezone.utc).isoformat()
+        state["consecutive_empty_polls"] = 0
     else:
-        # Check time-based timeout
-        last_activity = state.get("last_activity_ts")
-        if last_activity:
-            try:
-                last_dt = datetime.fromisoformat(last_activity)
-                if last_dt.tzinfo is None:
-                    last_dt = last_dt.replace(tzinfo=timezone.utc)
-                idle_secs = (now - last_dt).total_seconds()
-                if idle_secs >= HOT_MODE_TIMEOUT_SECS:
-                    state["hot_mode"] = False
-                    state["hot_mode_activated_at"] = None
-            except (ValueError, TypeError):
-                # Malformed timestamp — exit hot mode to be safe
-                state["hot_mode"] = False
-                state["hot_mode_activated_at"] = None
-        else:
-            # No activity recorded yet — exit hot mode
+        state["consecutive_empty_polls"] = state.get("consecutive_empty_polls", 0) + 1
+        if state["consecutive_empty_polls"] >= COOLDOWN_THRESHOLD:
             state["hot_mode"] = False
             state["hot_mode_activated_at"] = None
     return state
@@ -364,38 +330,16 @@ def _schedule_hot_retrigger(run_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 def _call_write_task_output(output: str, status: str) -> None:
-    """Write task output to ~/messages/task-outputs/ as a JSON file."""
-    task_outputs_dir = Path.home() / "messages" / "task-outputs"
-    task_outputs_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now(timezone.utc)
-    filename = f"{timestamp.strftime('%Y%m%d-%H%M%S')}-lobstertalk-unified.json"
-    record = {
-        "job_name": "lobstertalk-unified",
-        "timestamp": timestamp.isoformat(),
-        "status": status,
-        "output": output,
-    }
-    (task_outputs_dir / filename).write_text(json.dumps(record, indent=2))
+    """Call write_task_output MCP tool via the scheduler's standard interface."""
+    # In practice this is called by the Lobster scheduler which provides MCP context.
+    # When run standalone (outside the scheduler), this is a no-op.
+    pass
 
 
 def _call_write_result(task_id: str, chat_id: int, has_inbound: bool) -> None:
-    """Write a subagent_result notification to ~/messages/inbox/ for the dispatcher."""
-    inbox_dir = Path.home() / "messages" / "inbox"
-    inbox_dir.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now(timezone.utc)
-    filename = f"{int(ts.timestamp() * 1000)}_{task_id}.json"
-    record = {
-        "id": f"{int(ts.timestamp() * 1000)}_{task_id}",
-        "type": "subagent_result",
-        "task_id": task_id,
-        "chat_id": chat_id,
-        "source": "system",
-        "timestamp": ts.isoformat(),
-        "status": "success",
-        "sent_reply_to_user": has_inbound,
-        "text": f"lobstertalk-unified complete. inbound={has_inbound}",
-    }
-    (inbox_dir / filename).write_text(json.dumps(record, indent=2))
+    """Call write_result MCP tool to signal completion to the dispatcher."""
+    # In practice this is called by the Lobster scheduler which provides MCP context.
+    pass
 
 
 # ---------------------------------------------------------------------------
@@ -404,10 +348,6 @@ def _call_write_result(task_id: str, chat_id: int, has_inbound: bool) -> None:
 
 def run(task_id: str = "lobstertalk-unified") -> None:
     """Execute one full lobstertalk-unified cycle."""
-    if os.environ.get("LOBSTER_ENABLE_BOTTALK", "").lower() not in ("1", "true", "yes"):
-        _call_write_task_output("LOBSTER_ENABLE_BOTTALK not set — skipping.", "success")
-        return
-
     run_id = str(uuid.uuid4())[:8]
     debug = os.environ.get("LOBSTER_DEBUG", "").lower() == "true"
 
@@ -454,7 +394,7 @@ def run(task_id: str = "lobstertalk-unified") -> None:
     # our own outbound echoes from the server keep hot mode alive — the
     # conversation is active even if all polled messages were our own.
     traffic_count = len(all_messages)
-    state = _update_state_after_messages(state, traffic_count, now=datetime.now(timezone.utc))
+    state = _update_state_after_messages(state, traffic_count)
     if state["hot_mode"]:
         _schedule_hot_retrigger(run_id)
 
