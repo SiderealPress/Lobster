@@ -308,7 +308,14 @@ def main() -> None:
             sys.exit(0)
 
     # If sentinel is absent or stale, allow everything through.
+    # Delete a stale sentinel so it doesn't linger as an orphan file.
     if not sentinel_is_fresh():
+        if SENTINEL_FILE.exists():
+            try:
+                SENTINEL_FILE.unlink(missing_ok=True)
+                log_gate_event(tool_name, "stale-sentinel-deleted")
+            except OSError:
+                pass
         sys.exit(0)
 
     # Sentinel is fresh and tool is not wait_for_messages — deny.
