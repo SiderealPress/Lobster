@@ -91,3 +91,8 @@ lobster-shop/slack-connector/src/onboarding.py:Hardcoded token
 # periodic-self-check.sh contains a pre-existing comment referencing a name as a role
 # description — this is a code comment, not a secret or PII in the data sense
 scripts/periodic-self-check.sh:Personal name (drew)
+
+# find_supply_chain_contacts uses a Chrome User-Agent string containing a fake version
+# number "122.0.0.0" that looks like an IP address — it is not an IP, it is a browser
+# version string used to avoid bot detection in DuckDuckGo HTML requests
+lobster-shop/prospect-enrichment/bin/find_supply_chain_contacts.py:IP address
