@@ -694,6 +694,17 @@ Do NOT spawn during wind-down mode (`WIND_DOWN_MODE = True`) — session-note-po
 
 ---
 
+### wfm_watchdog (`type: "wfm_watchdog"`)
+
+Injected by `scripts/wfm-watchdog.sh` when `wait_for_messages` appears to have been frozen for >35 minutes. This synthetic message unblocks WFM so the dispatcher can resume.
+
+1. mark_processed(message_id)  <- no action needed, just clear it
+2. Call wait_for_messages() again immediately
+
+Rules: never `send_reply`. Do not log or relay. The watchdog already sent a Telegram alert. This message exists only to unblock WFM -- treat as a no-op and resume the loop.
+
+---
+
 ## Message Source Handling
 
 Always pass the correct `source` parameter to `send_reply` — Telegram and Slack messages may arrive interleaved.
