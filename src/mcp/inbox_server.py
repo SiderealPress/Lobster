@@ -421,15 +421,12 @@ def _format_iso_for_display(iso_str: str, fmt: str = "%Y-%m-%d %I:%M %p %Z") -> 
         return iso_str
 
 
-_ET_ZONE = ZoneInfo("America/New_York")
+def _format_ts_with_local_tz(ts_str: str) -> str:
+    """Format a timestamp string as 'YYYY-MM-DDTHH:MM:SS UTC (H:MM AM/PM TZ)'.
 
-
-def _format_ts_with_et(ts_str: str) -> str:
-    """Format a timestamp string as 'YYYY-MM-DDTHH:MM:SS UTC (H:MM AM/PM ET)'.
-
-    Parses the ISO 8601 timestamp, appends the Eastern Time equivalent
-    (EDT or EST depending on DST), and keeps the UTC value for auditability.
-    Falls back to the raw string if parsing fails.
+    Parses the ISO 8601 timestamp, appends the owner's local time equivalent
+    (read from owner.toml; falls back to UTC if unset), and keeps the UTC value
+    for auditability.  Falls back to the raw string if parsing fails.
     """
     try:
         dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
@@ -437,10 +434,10 @@ def _format_ts_with_et(ts_str: str) -> str:
             dt = dt.replace(tzinfo=timezone.utc)
         # Strip sub-second precision for cleaner display
         utc_str = dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S UTC")
-        et_dt = dt.astimezone(_ET_ZONE)
-        # %Z returns 'EDT' or 'EST' automatically via zoneinfo DST rules
-        et_str = et_dt.strftime("%-I:%M %p %Z")
-        return f"{utc_str} ({et_str})"
+        local_dt = dt.astimezone(_get_display_tz())
+        # %Z returns the tz abbreviation automatically (EDT, EST, PDT, UTC, etc.)
+        local_str = local_dt.strftime("%-I:%M %p %Z")
+        return f"{utc_str} ({local_str})"
     except Exception:
         return ts_str
 
@@ -4264,7 +4261,7 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
         tg_msg_id = msg.get("telegram_message_id")
         if tg_msg_id:
             output += f"Telegram Message ID: `{tg_msg_id}` (pass as reply_to_message_id to send_reply to thread your reply)\n"
-        output += f"Time: {_format_ts_with_et(ts)}\n"
+        output += f"Time: {_format_ts_with_local_tz(ts)}\n"
         # dispatcher_hint: structural signals for the dispatcher to route correctly
         if msg_type == "subagent_notification":
             output += "dispatcher_hint: SUBAGENT_NOTIFICATION — user already received the subagent's reply. Don't summarize it. If you respond, add new value only — a question, a correction, missing context. Call mark_processed when done.\n"
