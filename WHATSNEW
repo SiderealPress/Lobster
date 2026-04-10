@@ -2,6 +2,25 @@
 
 Each entry describes what changed for you as a user — not implementation details.
 
+## April 2026
+
+### Timestamps now show your local time
+
+Lobster has always stored timestamps in UTC internally. Now it also displays them
+in your local timezone. Inbox messages, reports, and digest entries all show the
+time in your configured timezone (e.g. "7:30 AM PDT") alongside the UTC reference.
+
+To enable this, add one line to your `~/lobster-config/owner.toml`:
+
+```toml
+[owner]
+timezone = "America/New_York"   # or your IANA timezone name
+```
+
+Run `lobster identity` if you're not sure how to find your IANA timezone name.
+If you leave this unset, Lobster defaults to UTC — everything still works, times
+just display in UTC.
+
 ## February 2026
 
 ### Browse past conversations
