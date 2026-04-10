@@ -17,7 +17,7 @@ from logging.handlers import RotatingFileHandler
 import os
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import Thread
 
@@ -317,7 +317,7 @@ def handle_message_events(body, say, logger):
         "username": username,
         "user_name": display_name,
         "text": cleaned_text,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "slack_ts": ts,
         "channel_name": channel_name,
         "is_dm": is_dm,

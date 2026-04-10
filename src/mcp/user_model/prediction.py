@@ -12,7 +12,7 @@ Depends on: schema.py, db.py only.
 """
 
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .db import (
@@ -72,7 +72,7 @@ def build_attention_stack(
     - Unresolved contradictions
     """
     items = []
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     contexts = contexts or []
 
     # --- From narrative arcs ---

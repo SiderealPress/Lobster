@@ -87,7 +87,7 @@ def _upsert_seeded_node(
     If a node with this name already exists, update its description and mark as seeded.
     Returns the node ID.
     """
-    from datetime import datetime
+    from datetime import datetime, timezone
     import json
 
     # Check if a node with this name already exists
@@ -109,7 +109,7 @@ def _upsert_seeded_node(
             description=description,
             evidence_count=existing["evidence_count"],
             created_at=datetime.fromisoformat(existing["created_at"]),
-            updated_at=datetime.utcnow(),
+            updated_at=datetime.now(timezone.utc),
             decay_rate=0.01,
         )
         # Set v2 columns via direct SQL (they may not exist in PreferenceNode dataclass yet)
