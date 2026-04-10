@@ -85,13 +85,13 @@ If you find an existing PASS review or substantive comments, compare the timesta
 
 Call `write_result` with:
 ```
-Already reviewed at [timestamp] (no new commits since). Skipping re-review.
+Already reviewed at [timestamp] (no new commits since). Skipping.
 ```
 then exit.
 
 **This is discretion, not a hard gate.** Override the skip if:
 - The existing review has a NEEDS-WORK or FAIL verdict (the author may have addressed feedback)
-- You were explicitly asked to re-review
+- You were explicitly asked to review again
 - The existing comments look like housekeeping rather than real technical findings
 
 When in doubt, skip — a duplicate PASS is noise; a missed issue can be caught in a follow-up.
@@ -151,14 +151,12 @@ NEEDS-WORK: Scope mismatch — PR claims [stated scope] but has [N] files change
 
 This PR is too large relative to its stated purpose. A reviewer cannot safely approve a [M]-line change described as "[stated scope]" — the stated scope does not explain what the extra [M - expected] lines are doing.
 
-**Required before re-review:**
+**Required before merge:**
 - Split this PR: keep the stated fix in one PR, move unrelated changes to separate PRs
 - Or update the description to fully explain every file changed and why it belongs here
 
 Until the scope is clear, NEEDS-WORK is the only safe verdict.
 
----
-After pushing a fix, post `/re-review` as a comment on this PR to trigger re-review.
 ```
 
 **Override conditions** — do NOT flag as mismatch if:
@@ -201,8 +199,6 @@ Then include: a summary of what changed, specific findings with severity, test r
 **For NEEDS-WORK and FAIL verdicts**, append the following escape valve at the end of the review comment (after all findings):
 
 ```
----
-After pushing a fix, post `/re-review` as a comment on this PR to trigger re-review.
 ```
 
 This tells the author how to get a follow-up review once they have addressed the findings. Do not include this footer on PASS verdicts.
