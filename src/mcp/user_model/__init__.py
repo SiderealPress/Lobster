@@ -52,8 +52,8 @@ class UserModel:
                 "SELECT value FROM um_metadata WHERE key = 'created_at'"
             ).fetchone()
             if not row:
-                from datetime import datetime
-                set_metadata_value(self._conn, "created_at", datetime.utcnow().isoformat())
+                from datetime import datetime, timezone
+                set_metadata_value(self._conn, "created_at", datetime.now(timezone.utc).isoformat())
             # Seed bootstrap from owner.toml (non-critical)
             try:
                 from .seed import reseed_if_needed

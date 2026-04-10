@@ -12,7 +12,7 @@ Depends on: schema.py, db.py, narrative.py, prediction.py only.
 
 import re
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -161,7 +161,7 @@ def sync_projects_to_arcs(
                 themes=proj.get("themes") or existing.themes,
                 status=proj["status"],
                 started_at=existing.started_at,
-                last_updated=datetime.utcnow(),
+                last_updated=datetime.now(timezone.utc),
                 resolution=existing.resolution,
             )
             upsert_narrative_arc(conn, arc)
@@ -174,8 +174,8 @@ def sync_projects_to_arcs(
                 description=proj["description"],
                 themes=proj.get("themes", []),
                 status=proj["status"],
-                started_at=datetime.utcnow(),
-                last_updated=datetime.utcnow(),
+                started_at=datetime.now(timezone.utc),
+                last_updated=datetime.now(timezone.utc),
             )
             upsert_narrative_arc(conn, arc)
             created += 1
@@ -219,7 +219,7 @@ def sync_priorities_to_attention(
             context="priorities",
             source="canonical_priorities",
             metadata={"rank": rank + 1},
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
         )
         upsert_attention_item(conn, att)
         injected += 1
@@ -307,7 +307,7 @@ def write_context_cache(
         content = "# User Model Context\n\n*No data yet — model is still learning.*\n"
     else:
         header = "# User Model Context\n"
-        header += f"*Auto-generated {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')} — do not edit*\n"
+        header += f"*Auto-generated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} — do not edit*\n"
         content = header + "\n".join(sections) + "\n"
 
     # Atomic write

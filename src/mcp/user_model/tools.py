@@ -342,7 +342,7 @@ def handle_model_observe(conn: sqlite3.Connection, args: dict, workspace_path: s
         # Record an explicit observation directly
         from .db import insert_observation
         from .schema import Observation, ObservationSignalType
-        from datetime import datetime
+        from datetime import datetime, timezone
 
         type_map = {
             "preference": ObservationSignalType.PREFERENCE,
@@ -361,7 +361,7 @@ def handle_model_observe(conn: sqlite3.Connection, args: dict, workspace_path: s
             content=explicit_observation,
             confidence=confidence,
             context=context,
-            observed_at=datetime.utcnow(),
+            observed_at=datetime.now(timezone.utc),
         )
         obs_id = insert_observation(conn, obs, user_id=user_id)
         result = {"success": True, "mode": "explicit", "obs_id": obs_id, "signal_type": observation_type}

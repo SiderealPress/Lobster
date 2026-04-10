@@ -18,7 +18,7 @@ import json
 import logging
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 import sys as _sys
 _SRC_DIR = str(Path(__file__).resolve().parent.parent)
@@ -218,7 +218,7 @@ def build_text_message(form: dict) -> dict:
         "user_name": from_number,
         "text": body,
         "twilio_message_sid": msg_sid,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
 
