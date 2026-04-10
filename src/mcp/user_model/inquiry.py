@@ -43,6 +43,10 @@ def should_ask_question(
     if not row:
         return True
     last_inquiry = datetime.fromisoformat(row["value"])
+    # Rows written before the tz-aware migration are naive; attach UTC so the
+    # subtraction below never raises TypeError on an upgraded installation.
+    if last_inquiry.tzinfo is None:
+        last_inquiry = last_inquiry.replace(tzinfo=timezone.utc)
     return datetime.now(timezone.utc) - last_inquiry > timedelta(hours=budget_hours)
 
 
@@ -194,6 +198,8 @@ def get_inquiry_status(conn: sqlite3.Connection) -> dict[str, Any]:
         hours_remaining = 0.0
     else:
         last = datetime.fromisoformat(row["value"])
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
         elapsed = datetime.now(timezone.utc) - last
         can_ask = elapsed > timedelta(hours=_DEFAULT_BUDGET_HOURS)
         hours_remaining = max(0, _DEFAULT_BUDGET_HOURS - elapsed.total_seconds() / 3600)
