@@ -48,13 +48,6 @@ from pathlib import Path
 from typing import Any
 
 # ---------------------------------------------------------------------------
-# CONFIGURE THESE FOR YOUR INSTANCE
-# ---------------------------------------------------------------------------
-
-MY_LOBSTER_NAME: str = "VT-SM-lobsterbot"   # e.g. "AlbertLobster"
-ADMIN_CHAT_ID: int = ADMIN_CHAT_ID_REDACTED                      # your owner's chat ID for inbox routing
-
-# ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
@@ -62,6 +55,15 @@ _bot_talk_url = os.environ.get("BOT_TALK_URL")
 if not _bot_talk_url:
     raise RuntimeError("BOT_TALK_URL environment variable is not set — cannot start lobstertalk")
 BOT_TALK_BASE_URL = _bot_talk_url
+
+MY_LOBSTER_NAME: str = os.environ.get("LOBSTER_NAME") or os.environ.get("BOT_TALK_SENDER_NAME") or ""
+if not MY_LOBSTER_NAME:
+    raise RuntimeError("LOBSTER_NAME env var required (or BOT_TALK_SENDER_NAME as fallback)")
+
+ADMIN_CHAT_ID_STR: str = os.environ.get("LOBSTER_ADMIN_CHAT_ID") or os.environ.get("ADMIN_CHAT_ID") or ""
+if not ADMIN_CHAT_ID_STR:
+    raise RuntimeError("LOBSTER_ADMIN_CHAT_ID env var required (or ADMIN_CHAT_ID as fallback)")
+ADMIN_CHAT_ID: int = int(ADMIN_CHAT_ID_STR)
 STATE_FILE = Path.home() / "lobster-workspace" / "data" / "lobstertalk-unified-state.json"
 INBOX_DIR = Path.home() / "messages" / "inbox"
 OUTBOX_DIR = Path.home() / "messages" / "outbox"
