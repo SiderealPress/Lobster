@@ -56,9 +56,14 @@ if not _bot_talk_url:
     raise RuntimeError("BOT_TALK_URL environment variable is not set — cannot start lobstertalk")
 BOT_TALK_BASE_URL = _bot_talk_url
 
-MY_LOBSTER_NAME: str = os.environ.get("LOBSTER_NAME") or os.environ.get("BOT_TALK_SENDER_NAME") or ""
+MY_LOBSTER_NAME: str = (
+    os.environ.get("BOT_TALK_SENDER")
+    or os.environ.get("LOBSTER_NAME")
+    or os.environ.get("BOT_TALK_SENDER_NAME")
+    or ""
+)
 if not MY_LOBSTER_NAME:
-    raise RuntimeError("LOBSTER_NAME env var required (or BOT_TALK_SENDER_NAME as fallback)")
+    raise RuntimeError("BOT_TALK_SENDER env var required (set in ~/messages/config/config.env)")
 
 ADMIN_CHAT_ID_STR: str = os.environ.get("LOBSTER_ADMIN_CHAT_ID") or os.environ.get("ADMIN_CHAT_ID") or ""
 if not ADMIN_CHAT_ID_STR:
@@ -335,16 +340,38 @@ def _schedule_hot_retrigger(run_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 def _call_write_task_output(output: str, status: str) -> None:
-    """Call write_task_output MCP tool via the scheduler's standard interface."""
-    # In practice this is called by the Lobster scheduler which provides MCP context.
-    # When run standalone (outside the scheduler), this is a no-op.
-    pass
+    """Write task output to ~/messages/task-outputs/ as a JSON file."""
+    task_outputs_dir = Path.home() / "messages" / "task-outputs"
+    task_outputs_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc)
+    filename = f"{timestamp.strftime('%Y%m%d-%H%M%S')}-lobstertalk-unified.json"
+    record = {
+        "job_name": "lobstertalk-unified",
+        "timestamp": timestamp.isoformat(),
+        "status": status,
+        "output": output,
+    }
+    (task_outputs_dir / filename).write_text(json.dumps(record, indent=2))
 
 
 def _call_write_result(task_id: str, chat_id: int, has_inbound: bool) -> None:
-    """Call write_result MCP tool to signal completion to the dispatcher."""
-    # In practice this is called by the Lobster scheduler which provides MCP context.
-    pass
+    """Write a subagent_result notification to ~/messages/inbox/ for the dispatcher."""
+    inbox_dir = Path.home() / "messages" / "inbox"
+    inbox_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc)
+    filename = f"{int(ts.timestamp() * 1000)}_{task_id}.json"
+    record = {
+        "id": f"{int(ts.timestamp() * 1000)}_{task_id}",
+        "type": "subagent_result",
+        "task_id": task_id,
+        "chat_id": chat_id,
+        "source": "system",
+        "timestamp": ts.isoformat(),
+        "status": "success",
+        "sent_reply_to_user": has_inbound,
+        "text": f"lobstertalk-unified complete. inbound={has_inbound}",
+    }
+    (inbox_dir / filename).write_text(json.dumps(record, indent=2))
 
 
 # ---------------------------------------------------------------------------
