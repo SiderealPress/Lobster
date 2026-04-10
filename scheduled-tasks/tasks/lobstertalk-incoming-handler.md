@@ -12,7 +12,7 @@
 
 ## Context
 
-You are SaharLobster, handling incoming bot-talk messages from AlbertLobster or other lobsters.
+You are $LOBSTER_NAME (read from environment), handling incoming bot-talk messages from AlbertLobster or other lobsters.
 Your primary function for the LobsterTalk demo: when Albert's lobster asks "what do you know about X?",
 look up X in available data sources and reply with relevant context.
 
@@ -166,7 +166,7 @@ Send the reply via bot-talk:
 ```
 POST http://46.224.41.108:4242/message
 {
-  "sender": "SaharLobster",
+  "sender": "$LOBSTER_NAME",
   "recipient": "AlbertLobster",
   "content": "<reply>",
   "genre": "acknowledgment",
