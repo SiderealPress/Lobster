@@ -15,7 +15,7 @@ Depends on: schema.py, db.py, emotional_model.py, rhythm.py only.
 import re
 import sqlite3
 import zlib
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .db import (
@@ -52,7 +52,7 @@ def estimate_mood(
     """
     recent_states = get_recent_emotional_states(conn, limit=5)
     # Filter to recent_hours
-    cutoff = datetime.utcnow() - timedelta(hours=recent_hours)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=recent_hours)
     recent_states = [s for s in recent_states if s.recorded_at > cutoff]
 
     baseline = get_emotional_baseline(conn, days=30)
@@ -135,7 +135,7 @@ def infer_response_style(
 
     Returns: {"preferred_length": str, "tone": str, "include_rationale": bool, "confidence": float}
     """
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     hour = now.hour
 
     # Defaults
@@ -393,7 +393,7 @@ def _compute_cache_key(
 ) -> str:
     """Compute a stable cache key for the given context."""
     sorted_ctx = ",".join(sorted(contexts))
-    hour = datetime.utcnow().hour
+    hour = datetime.now(timezone.utc).hour
     recent = get_recent_observations(conn, hours=1, limit=5)
     obs_ids = "|".join(o.id or "" for o in recent)
     obs_hash = zlib.crc32(obs_ids.encode()) & 0xFFFFFFFF
@@ -445,7 +445,7 @@ def run_inference(
         "response_style": response_style,
         "likely_next": likely_next,
         "context_used": contexts,
-        "computed_at": datetime.utcnow().isoformat(),
+        "computed_at": datetime.now(timezone.utc).isoformat(),
         "cached": False,
     }
 
@@ -458,7 +458,7 @@ def run_inference(
     # Shorten TTL if data is thin (low confidence)
     if mood.get("confidence", 0) < 0.4:
         ttl = 15
-    expires = datetime.utcnow() + timedelta(minutes=ttl)
+    expires = datetime.now(timezone.utc) + timedelta(minutes=ttl)
     result["expires_at"] = expires.isoformat()
     cacheable["expires_at"] = expires.isoformat()
 
