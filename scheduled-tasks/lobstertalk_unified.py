@@ -58,7 +58,10 @@ ADMIN_CHAT_ID: int = ADMIN_CHAT_ID_REDACTED                      # your owner's 
 # Constants
 # ---------------------------------------------------------------------------
 
-BOT_TALK_BASE_URL = os.environ.get("BOT_TALK_URL", "http://46.224.41.108:4242")
+_bot_talk_url = os.environ.get("BOT_TALK_URL")
+if not _bot_talk_url:
+    raise RuntimeError("BOT_TALK_URL environment variable is not set — cannot start lobstertalk")
+BOT_TALK_BASE_URL = _bot_talk_url
 STATE_FILE = Path.home() / "lobster-workspace" / "data" / "lobstertalk-unified-state.json"
 INBOX_DIR = Path.home() / "messages" / "inbox"
 OUTBOX_DIR = Path.home() / "messages" / "outbox"
@@ -348,6 +351,10 @@ def _call_write_result(task_id: str, chat_id: int, has_inbound: bool) -> None:
 
 def run(task_id: str = "lobstertalk-unified") -> None:
     """Execute one full lobstertalk-unified cycle."""
+    if os.environ.get("LOBSTER_ENABLE_BOTTALK", "").lower() not in ("1", "true", "yes"):
+        _call_write_task_output("LOBSTER_ENABLE_BOTTALK not set — skipping.", "success")
+        return
+
     run_id = str(uuid.uuid4())[:8]
     debug = os.environ.get("LOBSTER_DEBUG", "").lower() == "true"
 
