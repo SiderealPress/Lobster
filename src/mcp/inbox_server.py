@@ -6860,6 +6860,11 @@ async def handle_write_result(args: dict) -> list[TextContent]:
             result_summary=(text[:200] if text else None),
             stop_reason="end_turn",
         )
+        # Mark notified immediately so the reconciler's startup sweep does not
+        # re-enqueue this session on the next MCP restart.  The startup sweep
+        # queries for completed/dead rows where notified_at IS NULL — leaving it
+        # NULL here is what caused the April 4 flood (issue #1432).
+        _session_store.set_notified(task_id)
     except Exception as exc:
         log.warning(f"write_result auto-unregister failed for task_id={task_id!r}: {exc}")
 
