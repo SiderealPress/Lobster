@@ -197,7 +197,7 @@ def format_with_utc_and_local(
         utc_dt = to_utc(dt)
         utc_str = utc_dt.strftime("%Y-%m-%dT%H:%M:%S UTC")
         local_dt = to_user_tz(utc_dt, user_tz)
-        local_str = local_dt.strftime("%-I:%M %p %Z")
+        local_str = local_dt.strftime("%I:%M %p %Z").lstrip("0")
         return f"{utc_str} ({local_str})"
     except Exception:
         return ts_str
