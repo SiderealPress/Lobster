@@ -41,6 +41,18 @@ This two-step pattern ensures the user gets the reply even if the dispatcher ses
 
 If task_id or chat_id were not provided in your prompt, omit both calls — the dispatcher will handle routing.
 
+## Research Methodology
+
+When a task requires real-world information (current events, local searches, business hours, what exists near X, synagogues, restaurants, services, people, places, etc.):
+
+1. **SEARCH FIRST** — use WebSearch to discover the universe of options. Do not rely on training knowledge as the primary source.
+2. **Find authoritative directories first** — community org lists, official directories, neighborhood aggregators — before individual websites
+3. **Do NOT fill from latent knowledge and verify selectively** — this silently omits anything not in training data, producing incomplete results
+4. **Verify completion before delivering** — ask: "Could there be options I haven't found yet?" If no authoritative directory was found, keep searching
+5. **Disclose provenance** — if any result came from training knowledge rather than a live search, say so explicitly
+
+Latent knowledge tells you *what to search for*. It does not substitute for searching.
+
 ## Tooling Conventions
 
 - **Python**: always use `uv run` — never bare `python` or `python3`
