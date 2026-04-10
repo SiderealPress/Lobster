@@ -10,7 +10,7 @@ Schema migration strategy: versioned, idempotent, forward-only.
 import json
 import sqlite3
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -330,7 +330,7 @@ def _new_id() -> str:
 
 
 def _now_iso() -> str:
-    return datetime.utcnow().isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _parse_dt(s: str | None) -> datetime | None:
@@ -394,7 +394,7 @@ def get_recent_observations(
     limit: int = 100,
 ) -> list[Observation]:
     """Get recent observations, optionally filtered by signal type."""
-    cutoff = datetime.utcnow()
+    cutoff = datetime.now(timezone.utc)
     cutoff_iso = cutoff.replace(
         hour=cutoff.hour - min(hours, cutoff.hour),
     ).isoformat()
@@ -439,7 +439,7 @@ def upsert_preference_node(conn: sqlite3.Connection, node: PreferenceNode) -> st
     """Insert or update a preference node. Returns node ID."""
     if not node.id:
         node.id = _new_id()
-    node.updated_at = datetime.utcnow()
+    node.updated_at = datetime.now(timezone.utc)
     conn.execute(
         """INSERT INTO um_preference_nodes
            (id, name, node_type, strength, flexibility, contexts, source,
@@ -743,7 +743,7 @@ def upsert_narrative_arc(conn: sqlite3.Connection, arc: NarrativeArc) -> str:
     """Insert or update a narrative arc. Returns ID."""
     if not arc.id:
         arc.id = _new_id()
-    arc.last_updated = datetime.utcnow()
+    arc.last_updated = datetime.now(timezone.utc)
     conn.execute(
         """INSERT INTO um_narrative_arcs
            (id, title, description, themes, status, started_at, last_updated, resolution)
@@ -796,7 +796,7 @@ def upsert_life_pattern(conn: sqlite3.Connection, pattern: LifePattern) -> str:
     """Insert or update a life pattern. Returns ID."""
     if not pattern.id:
         pattern.id = _new_id()
-    pattern.last_seen = datetime.utcnow()
+    pattern.last_seen = datetime.now(timezone.utc)
     conn.execute(
         """INSERT INTO um_life_patterns
            (id, name, description, stage, evidence_count, confidence, first_seen, last_seen)
@@ -931,7 +931,7 @@ def get_model_metadata(conn: sqlite3.Connection) -> ModelMetadata:
     return ModelMetadata(
         schema_version=int(_get("schema_version") or "0"),
         owner_id=_get("owner_id"),
-        created_at=datetime.fromisoformat(created_str) if created_str else datetime.utcnow(),
+        created_at=datetime.fromisoformat(created_str) if created_str else datetime.now(timezone.utc),
         last_observation_at=_parse_dt(last_obs_str),
         last_consolidation_at=_parse_dt(last_consol_str),
         observation_count=obs_count,
@@ -1182,7 +1182,7 @@ def set_cached_inference(
     """Cache an inference result with TTL. Returns cache entry ID."""
     from datetime import timedelta
     entry_id = _new_id()
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     expires = now + timedelta(minutes=ttl_minutes)
     conn.execute(
         """INSERT INTO um_inference_cache
