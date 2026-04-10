@@ -11,11 +11,25 @@ import sys
 import os
 sys.path.insert(0, os.path.expanduser("~/lobster/src"))
 from integrations.gmail.token_store import load_token
-from mcp.user_model.owner import read_owner
 
-owner = read_owner()
-OWNER_USER_ID = owner.get("owner", {}).get("telegram_chat_id", "")
-token = load_token(OWNER_USER_ID)
+# MULTI-USER: always prefer chat_id from the incoming message context.
+# Fall back to read_owner() only for single-user / legacy installs where
+# the message doesn't carry a chat_id (e.g. scheduled jobs).
+#
+# In the Lobster dispatcher the message looks like:
+#   message["chat_id"]  — Telegram chat_id of the user who sent the message
+#
+# Usage pattern (the subagent receives chat_id as a parameter):
+#   USER_ID = message_chat_id or _fallback_to_owner()
+def _fallback_to_owner() -> str:
+    from mcp.user_model.owner import read_owner
+    owner = read_owner()
+    return owner.get("owner", {}).get("telegram_chat_id", "")
+
+# Prefer caller's chat_id; fall back to owner for single-user installs.
+# `message_chat_id` must be passed in from the dispatcher context.
+USER_ID = str(message_chat_id) if message_chat_id else _fallback_to_owner()
+token = load_token(USER_ID)
 is_authenticated = token is not None
 ```
 
@@ -73,12 +87,20 @@ import sys
 import os
 sys.path.insert(0, os.path.expanduser("~/lobster/src"))
 from integrations.gmail.client import get_recent_emails
-from mcp.user_model.owner import read_owner
 
-owner = read_owner()
-OWNER_USER_ID = owner.get("owner", {}).get("telegram_chat_id", "")
+# MULTI-USER: use the chat_id from the message that triggered this subagent.
+# The dispatcher must pass it as a parameter when spawning the subagent.
+# Fall back to read_owner() only for single-user / legacy installs.
+def _get_user_id(message_chat_id=None) -> str:
+    if message_chat_id:
+        return str(message_chat_id)
+    from mcp.user_model.owner import read_owner
+    owner = read_owner()
+    return owner.get("owner", {}).get("telegram_chat_id", "")
 
-emails = get_recent_emails(user_id=OWNER_USER_ID, max_results=5)
+USER_ID = _get_user_id(message_chat_id)  # pass chat_id from dispatcher context
+
+emails = get_recent_emails(user_id=USER_ID, max_results=5)
 if not emails:
     reply = "No recent emails in your inbox, or Gmail is not connected."
 else:
@@ -97,13 +119,19 @@ import sys
 import os
 sys.path.insert(0, os.path.expanduser("~/lobster/src"))
 from integrations.gmail.client import search_emails
-from mcp.user_model.owner import read_owner
 
-owner = read_owner()
-OWNER_USER_ID = owner.get("owner", {}).get("telegram_chat_id", "")
+# MULTI-USER: use the chat_id from the message that triggered this subagent.
+def _get_user_id(message_chat_id=None) -> str:
+    if message_chat_id:
+        return str(message_chat_id)
+    from mcp.user_model.owner import read_owner
+    owner = read_owner()
+    return owner.get("owner", {}).get("telegram_chat_id", "")
+
+USER_ID = _get_user_id(message_chat_id)  # pass chat_id from dispatcher context
 
 # query is the Gmail search string derived from user's message
-emails = search_emails(user_id=OWNER_USER_ID, query=query, max_results=5)
+emails = search_emails(user_id=USER_ID, query=query, max_results=5)
 if not emails:
     reply = f"No emails found matching \"{query}\"."
 else:
