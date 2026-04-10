@@ -52,31 +52,6 @@ try:
 except ImportError:
     _EVENT_BUS_AVAILABLE = False
 
-# Ensure src/mcp/ is on sys.path so log_utils (a sibling module) can be
-# imported when this script is run directly (same guard used by
-# observability_server.py and wire_server.py).
-_MCP_SRC_DIR = str(Path(__file__).resolve().parent)
-if _MCP_SRC_DIR not in sys.path:
-    sys.path.insert(0, _MCP_SRC_DIR)
-from log_utils import JsonFormatter, configure_file_handler
-
-# Early logger — same name as the main `log` object defined after all imports.
-# Python's logging registry is global, so this resolves to the same Logger
-# instance that gets a StreamHandler + RotatingFileHandler during setup_logging().
-# Using it here (before those handlers are attached) sends records to the root
-# logger fallback, which is acceptable for startup diagnostics.
-_startup_log = logging.getLogger("lobster-mcp")
-
-# Event bus — structured observability infrastructure (issue #890).
-# Imported here so callsites can use _emit_event() throughout the module.
-# The singleton is initialised later in main(); events emitted before init
-# are silently dropped (bus has no listeners yet — safe, not a hard error).
-try:
-    from event_bus import get_event_bus, LobsterEvent
-    _EVENT_BUS_AVAILABLE = True
-except ImportError:
-    _EVENT_BUS_AVAILABLE = False
-
 # Ensure the parent src/ directory is on sys.path so that sibling packages
 # (e.g. integrations, utils, bot) can be imported when this script is run
 # directly via `python inbox_server.py` (which only adds src/mcp/ to sys.path).
@@ -442,6 +417,30 @@ def _format_iso_for_display(iso_str: str, fmt: str = "%Y-%m-%d %I:%M %p %Z") -> 
         return _format_display_ts(dt, fmt)
     except Exception:
         return iso_str
+
+
+_ET_ZONE = ZoneInfo("America/New_York")
+
+
+def _format_ts_with_et(ts_str: str) -> str:
+    """Format a timestamp string as 'YYYY-MM-DDTHH:MM:SS UTC (H:MM AM/PM ET)'.
+
+    Parses the ISO 8601 timestamp, appends the Eastern Time equivalent
+    (EDT or EST depending on DST), and keeps the UTC value for auditability.
+    Falls back to the raw string if parsing fails.
+    """
+    try:
+        dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        # Strip sub-second precision for cleaner display
+        utc_str = dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S UTC")
+        et_dt = dt.astimezone(_ET_ZONE)
+        # %Z returns 'EDT' or 'EST' automatically via zoneinfo DST rules
+        et_str = et_dt.strftime("%-I:%M %p %Z")
+        return f"{utc_str} ({et_str})"
+    except Exception:
+        return ts_str
 
 
 def _track_reply(chat_id: Any) -> None:
