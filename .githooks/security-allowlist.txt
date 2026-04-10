@@ -96,3 +96,7 @@ scripts/periodic-self-check.sh:Personal name (drew)
 # number "122.0.0.0" that looks like an IP address — it is not an IP, it is a browser
 # version string used to avoid bot detection in DuckDuckGo HTML requests
 lobster-shop/prospect-enrichment/bin/find_supply_chain_contacts.py:IP address
+
+# lobstertalk_unified.py uses the bot-talk API server IP as a fallback default
+# for BOT_TALK_URL env var — not a secret, same pattern as bot-talk-check-dispatch.sh
+scheduled-tasks/lobstertalk_unified.py:IP address
