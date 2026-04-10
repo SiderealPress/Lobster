@@ -55,10 +55,10 @@ def is_user_onboarded(user_id: int) -> bool:
 
 def mark_user_onboarded(user_id: int) -> None:
     """Mark a user as onboarded and persist to disk."""
-    from datetime import datetime
+    from datetime import datetime, timezone
 
     data = _load_onboarded_users()
-    data[str(user_id)] = datetime.utcnow().isoformat()
+    data[str(user_id)] = datetime.now(timezone.utc).isoformat()
     _save_onboarded_users(data)
     log.info(f"Marked user {user_id} as onboarded")
 

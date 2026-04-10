@@ -26,6 +26,12 @@
 # Falls back to `gh api user --jq '.login'` if not set and gh CLI is authenticated
 # github_username = "your-github-username"
 
+# Timezone for display (IANA format).  All internal timestamps are stored in UTC;
+# this setting controls how times are shown to you in Telegram messages and reports.
+# Examples: "America/New_York", "America/Los_Angeles", "Europe/London", "Asia/Tokyo"
+# Defaults to "UTC" if not set.
+# timezone = "America/New_York"
+
 [instance]
 # Unique instance identifier (auto-generated for managed instances)
 # id = "lobster-self-hosted-1"

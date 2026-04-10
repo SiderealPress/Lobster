@@ -21,7 +21,7 @@ import json
 import logging
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from twilio.request_validator import RequestValidator
@@ -221,7 +221,7 @@ def build_text_message(form: dict) -> dict:
         "user_name": profile_name or from_number,
         "text": body,
         "twilio_message_sid": msg_sid,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
 
