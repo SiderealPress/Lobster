@@ -12,7 +12,7 @@ Depends on: schema.py, db.py only.
 
 import re
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .db import insert_observation, set_metadata_value
@@ -64,7 +64,7 @@ def extract_signals(
     signals = []
     text = message_text.strip()
     words = set(re.findall(r"\b\w+\b", text.lower()))
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     meta = metadata or {}
 
     # --- Sentiment ---
@@ -241,7 +241,7 @@ def observe_message(
             message_ts = datetime.fromisoformat(message_ts)
         except (ValueError, TypeError):
             message_ts = None
-    ts = message_ts or datetime.utcnow()
+    ts = message_ts or datetime.now(timezone.utc)
     reply_length = len(message_text)
     signals = extract_signals(message_text, message_id, context, metadata)
 
@@ -392,7 +392,7 @@ def extract_latency_signal(
         confidence=confidence,
         context=context,
         metadata={"latency_ms": latency_ms},
-        observed_at=datetime.utcnow(),
+        observed_at=datetime.now(timezone.utc),
     )
 
 
@@ -427,7 +427,7 @@ def extract_length_signal(
         confidence=confidence,
         context=context,
         metadata={"char_count": length},
-        observed_at=datetime.utcnow(),
+        observed_at=datetime.now(timezone.utc),
     )
 
 
@@ -502,5 +502,5 @@ def extract_topic_shift_signal(
         confidence=0.65,
         context=context,
         metadata={"from_topic": previous_topic, "to_topic": current_topic},
-        observed_at=current_ts or datetime.utcnow(),
+        observed_at=current_ts or datetime.now(timezone.utc),
     )
