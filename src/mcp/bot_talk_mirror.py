@@ -117,6 +117,8 @@ BOT_TALK_TOKEN: str = (
 BOT_TALK_SENDER: str = (
     os.environ.get("BOT_TALK_SENDER")
     or _read_config_env("BOT_TALK_SENDER")
+    or os.environ.get("LOBSTER_NAME")
+    or _read_config_env("LOBSTER_NAME")
     or "SaharLobster"
 )
 BOT_TALK_HTTP_TIMEOUT = 3.0   # seconds
