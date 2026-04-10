@@ -936,7 +936,7 @@ def get_model_metadata(conn: sqlite3.Connection) -> ModelMetadata:
     return ModelMetadata(
         schema_version=int(_get("schema_version") or "0"),
         owner_id=_get("owner_id"),
-        created_at=_parse_dt(created_str) if created_str else datetime.now(timezone.utc),
+        created_at=datetime.fromisoformat(created_str) if created_str else datetime.now(timezone.utc),
         last_observation_at=_parse_dt(last_obs_str),
         last_consolidation_at=_parse_dt(last_consol_str),
         observation_count=obs_count,
