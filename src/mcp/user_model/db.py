@@ -336,7 +336,12 @@ def _now_iso() -> str:
 def _parse_dt(s: str | None) -> datetime | None:
     if not s:
         return None
-    return datetime.fromisoformat(s)
+    dt = datetime.fromisoformat(s)
+    # Rows written before the tz-aware migration are naive UTC strings.
+    # Attach UTC so comparisons with datetime.now(timezone.utc) never raise TypeError.
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 # ---------------------------------------------------------------------------
@@ -426,7 +431,7 @@ def _row_to_observation(row: sqlite3.Row) -> Observation:
         confidence=row["confidence"],
         context=row["context"],
         metadata=json.loads(row["metadata"]),
-        observed_at=datetime.fromisoformat(row["observed_at"]),
+        observed_at=_parse_dt(row["observed_at"]),
         processed=bool(row["processed"]),
     )
 
@@ -563,8 +568,8 @@ def _row_to_preference_node(row: sqlite3.Row) -> PreferenceNode:
         description=row["description"],
         evidence_count=row["evidence_count"],
         last_observed=_parse_dt(row["last_observed"]),
-        created_at=datetime.fromisoformat(row["created_at"]),
-        updated_at=datetime.fromisoformat(row["updated_at"]),
+        created_at=_parse_dt(row["created_at"]),
+        updated_at=_parse_dt(row["updated_at"]),
         decay_rate=row["decay_rate"],
     )
 
@@ -630,7 +635,7 @@ def get_recent_emotional_states(
             dominance=r["dominance"],
             trigger=r["trigger"],
             context=r["context"],
-            recorded_at=datetime.fromisoformat(r["recorded_at"]),
+            recorded_at=_parse_dt(r["recorded_at"]),
             confidence=r["confidence"],
         )
         for r in rows
@@ -682,7 +687,7 @@ def get_blind_spots(
             evidence=r["evidence"],
             surfaced=bool(r["surfaced"]),
             confidence=r["confidence"],
-            created_at=datetime.fromisoformat(r["created_at"]),
+            created_at=_parse_dt(r["created_at"]),
         )
         for r in rows
     ]
@@ -729,7 +734,7 @@ def get_active_contradictions(conn: sqlite3.Connection) -> list[Contradiction]:
             tension_score=r["tension_score"],
             resolved=bool(r["resolved"]),
             resolution=r["resolution"],
-            detected_at=datetime.fromisoformat(r["detected_at"]),
+            detected_at=_parse_dt(r["detected_at"]),
         )
         for r in rows
     ]
@@ -780,8 +785,8 @@ def get_active_narrative_arcs(conn: sqlite3.Connection) -> list[NarrativeArc]:
             description=r["description"],
             themes=json.loads(r["themes"]),
             status=r["status"],
-            started_at=datetime.fromisoformat(r["started_at"]),
-            last_updated=datetime.fromisoformat(r["last_updated"]),
+            started_at=_parse_dt(r["started_at"]),
+            last_updated=_parse_dt(r["last_updated"]),
             resolution=r["resolution"],
         )
         for r in rows
@@ -835,8 +840,8 @@ def get_active_life_patterns(conn: sqlite3.Connection) -> list[LifePattern]:
             stage=r["stage"],
             evidence_count=r["evidence_count"],
             confidence=r["confidence"],
-            first_seen=datetime.fromisoformat(r["first_seen"]),
-            last_seen=datetime.fromisoformat(r["last_seen"]),
+            first_seen=_parse_dt(r["first_seen"]),
+            last_seen=_parse_dt(r["last_seen"]),
         )
         for r in rows
     ]
@@ -897,7 +902,7 @@ def get_attention_stack(
             context=r["context"],
             source=r["source"],
             metadata=json.loads(r["metadata"]),
-            created_at=datetime.fromisoformat(r["created_at"]),
+            created_at=_parse_dt(r["created_at"]),
             expires_at=_parse_dt(r["expires_at"]),
         )
         for r in rows
@@ -931,7 +936,7 @@ def get_model_metadata(conn: sqlite3.Connection) -> ModelMetadata:
     return ModelMetadata(
         schema_version=int(_get("schema_version") or "0"),
         owner_id=_get("owner_id"),
-        created_at=datetime.fromisoformat(created_str) if created_str else datetime.now(timezone.utc),
+        created_at=_parse_dt(created_str) if created_str else datetime.now(timezone.utc),
         last_observation_at=_parse_dt(last_obs_str),
         last_consolidation_at=_parse_dt(last_consol_str),
         observation_count=obs_count,
@@ -1004,7 +1009,7 @@ def get_snapshots_since(conn: sqlite3.Connection, days: int = 30) -> list:
 def _row_to_snapshot(row: sqlite3.Row) -> TemporalSnapshot:
     return TemporalSnapshot(
         id=row["id"],
-        snapshot_at=datetime.fromisoformat(row["snapshot_at"]),
+        snapshot_at=_parse_dt(row["snapshot_at"]),
         week_number=row["week_number"],
         year=row["year"],
         data=json.loads(row["data"]),
@@ -1061,7 +1066,7 @@ def get_unsurfaced_drifts(conn: sqlite3.Connection) -> list:
 def _row_to_drift(row: sqlite3.Row) -> DriftRecord:
     return DriftRecord(
         id=row["id"],
-        detected_at=datetime.fromisoformat(row["detected_at"]),
+        detected_at=_parse_dt(row["detected_at"]),
         snapshot_a_id=row["snapshot_a_id"],
         snapshot_b_id=row["snapshot_b_id"],
         drift_type=row["drift_type"],
@@ -1131,7 +1136,7 @@ def get_activity_rhythm(conn: sqlite3.Connection) -> list:
             total_length=r["total_length"],
             total_latency=r["total_latency"],
             latency_count=r["latency_count"],
-            updated_at=datetime.fromisoformat(r["updated_at"]),
+            updated_at=_parse_dt(r["updated_at"]),
         )
         for r in rows
     ]

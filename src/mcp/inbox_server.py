@@ -448,7 +448,7 @@ def _format_ts_with_et(ts_str: str) -> str:
             dt = dt.replace(tzinfo=timezone.utc)
         utc_str = dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S UTC")
         local_dt = dt.astimezone(_get_display_tz())
-        local_str = local_dt.strftime("%-I:%M %p %Z")
+        local_str = local_dt.strftime("%I:%M %p %Z").lstrip("0")
         return f"{utc_str} ({local_str})"
     except Exception:
         return ts_str
