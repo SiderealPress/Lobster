@@ -17,7 +17,7 @@ Depends on: all other user_model modules.
 """
 
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from .db import (
@@ -41,7 +41,7 @@ def run_consolidation(
     Returns a summary dict.
     """
     summary: dict[str, Any] = {
-        "started_at": datetime.utcnow().isoformat(),
+        "started_at": datetime.now(timezone.utc).isoformat(),
         "steps": [],
     }
 
@@ -158,7 +158,7 @@ def run_consolidation(
             summary["steps"].append({"step": "context_cache", "error": str(e)})
 
     # Step 9: Update metadata
-    now_iso = datetime.utcnow().isoformat()
+    now_iso = datetime.now(timezone.utc).isoformat()
     set_metadata_value(conn, "last_consolidation_at", now_iso)
     summary["completed_at"] = now_iso
 

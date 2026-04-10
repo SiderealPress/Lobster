@@ -990,7 +990,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         "text": f"[Button pressed: {query.data}]",
         "callback_data": query.data,
         "original_message_text": query.message.text or query.message.caption or "",
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
     inbox_file = INBOX_DIR / f"{msg_id}.json"
@@ -1037,7 +1037,7 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
             "user_name": user.first_name,
             "text": caption if caption else "[Photo message]",
             "image_file": str(image_path),
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         direct_inv = False
         engaged = False
@@ -1147,7 +1147,7 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
             "document_mime_type": document.mime_type,
             "document_file_size": document.file_size,
             "file_id": document.file_id,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         direct_inv = False
         engaged = False
@@ -1346,7 +1346,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "username": user.username,
         "user_name": user.first_name,
         "text": text,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     if _is_group:
         msg_data["group_chat_id"] = chat.id
@@ -1443,7 +1443,7 @@ async def handle_edited_message(update: Update, context: ContextTypes.DEFAULT_TY
         "username": user.username,
         "user_name": user.first_name,
         "text": text,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "_edit_of_telegram_id": original_tg_id,
     }
     if _is_group:
@@ -1647,7 +1647,7 @@ async def handle_audio_message(
             "audio_duration": audio_obj.duration,
             "audio_mime_type": audio_obj.mime_type or ("audio/ogg" if is_voice else "audio/mpeg"),
             "file_id": audio_obj.file_id,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         direct_inv = False
         engaged = False
@@ -1715,7 +1715,7 @@ async def _flush_media_group(media_group_id: str, chat_id: int) -> None:
         "text": caption if caption else f"[{len(buf.image_paths)} photos]",
         "image_files": buf.image_paths,
         "image_file": buf.image_paths[0],  # backward compat: primary image
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
     if buf.reply_ctx:

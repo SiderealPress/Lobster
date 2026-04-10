@@ -7,7 +7,7 @@ Depends on: schema.py, db.py only.
 """
 
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from .db import (
@@ -61,7 +61,7 @@ def detect_contradictions(conn: sqlite3.Connection) -> list[Contradiction]:
                     node_id_b=node_b.id,
                     description=desc,
                     tension_score=tension,
-                    detected_at=datetime.utcnow(),
+                    detected_at=datetime.now(timezone.utc),
                 )
                 new_contradictions.append(c)
 
@@ -138,7 +138,7 @@ def add_blind_spot(
         evidence=evidence,
         surfaced=False,
         confidence=confidence,
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
     )
     return insert_blind_spot(conn, spot)
 
@@ -177,7 +177,7 @@ def record_life_pattern(
             evidence_count=row["evidence_count"] + 1,
             confidence=min(1.0, confidence + 0.05),
             first_seen=datetime.fromisoformat(row["first_seen"]),
-            last_seen=datetime.utcnow(),
+            last_seen=datetime.now(timezone.utc),
         )
     else:
         pattern = LifePattern(
@@ -187,8 +187,8 @@ def record_life_pattern(
             stage=stage,
             evidence_count=1,
             confidence=confidence,
-            first_seen=datetime.utcnow(),
-            last_seen=datetime.utcnow(),
+            first_seen=datetime.now(timezone.utc),
+            last_seen=datetime.now(timezone.utc),
         )
     return upsert_life_pattern(conn, pattern)
 
