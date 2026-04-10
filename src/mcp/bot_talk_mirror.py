@@ -42,7 +42,7 @@ Configuration (all overridable via environment variables):
   BOT_TALK_HTTP_URL      - Full URL to the bot-talk /message endpoint
   BOT_TALK_SSH_HOST      - SSH host alias for the fallback log write
   BOT_TALK_SSH_LOG_PATH  - Remote log file path on the SSH host
-  BOT_TALK_SENDER        - Identity string for this Lobster instance
+  LOBSTER_NAME           - Identity string for this Lobster instance (required)
 
 IMPORTANT: The bot-talk service runs plain HTTP on port 4242 — there is no
 TLS on this endpoint (TLS was intentionally removed).  Always use http://
@@ -114,10 +114,10 @@ BOT_TALK_TOKEN: str = (
     or _read_config_env("BOT_TALK_TOKEN")
     or ""
 )
-BOT_TALK_SENDER: str = (
-    os.environ.get("BOT_TALK_SENDER")
-    or _read_config_env("BOT_TALK_SENDER")
-    or "SaharLobster"
+LOBSTER_NAME: str = (
+    os.environ.get("LOBSTER_NAME")
+    or _read_config_env("LOBSTER_NAME")
+    or "MyLobster"
 )
 BOT_TALK_HTTP_TIMEOUT = 3.0   # seconds
 BOT_TALK_HTTP_RETRIES = 2
@@ -139,7 +139,7 @@ def _build_http_payload(content: str, genre: str, direction: str, from_: str, to
     Returns a plain dict; no I/O performed.
     """
     return {
-        "sender": BOT_TALK_SENDER,
+        "sender": LOBSTER_NAME,
         "tier": BOT_TALK_TIER,
         "genre": genre,
         "content": content,
@@ -157,7 +157,7 @@ def _build_ssh_log_line(content: str, genre: str, direction: str = "") -> str:
     ts = datetime.now(timezone.utc).isoformat()
     short = content[:200].replace("\n", " ")
     direction_tag = f" [{direction}]" if direction else ""
-    return f"[{ts}] [{BOT_TALK_SENDER}] [{BOT_TALK_TIER}] [{genre}]{direction_tag} {short}"
+    return f"[{ts}] [{LOBSTER_NAME}] [{BOT_TALK_TIER}] [{genre}]{direction_tag} {short}"
 
 
 def _build_auth_headers() -> dict:
@@ -224,7 +224,7 @@ def _write_local_log(content: str, genre: str, reason: str) -> None:
         ts = datetime.now(timezone.utc).isoformat()
         entry = {
             "timestamp": ts,
-            "sender": BOT_TALK_SENDER,
+            "sender": LOBSTER_NAME,
             "genre": genre,
             "content": content[:500],
             "mirror_failed_reason": reason,
@@ -282,7 +282,7 @@ def _route_to_inbox(from_: str, content: str) -> None:
             "timestamp": now.isoformat(),
             "direction": "INBOUND",
             "from": from_,
-            "to": BOT_TALK_SENDER,
+            "to": LOBSTER_NAME,
         }
         inbox_file = _INBOX_DIR / f"{msg_id}.json"
         # Atomic write: write to tmp then rename to prevent partial reads
@@ -338,7 +338,7 @@ def mirror_outbound(text: str, source: str, chat_id: str | int) -> None:
         content=text,
         genre="status-update",
         direction="OUTBOUND",
-        from_=BOT_TALK_SENDER,
+        from_=LOBSTER_NAME,
         to=destination,
     )
 
@@ -365,7 +365,7 @@ def log_inbound_cross_lobster(sender: str, content: str) -> None:
         genre="status-update",
         direction="INBOUND",
         from_=sender,
-        to=BOT_TALK_SENDER,
+        to=LOBSTER_NAME,
     )
     # Route to inbox — fast file write, done inline before returning
     _route_to_inbox(sender, content)
