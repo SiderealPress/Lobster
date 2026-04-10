@@ -459,10 +459,26 @@ Background subagents call `write_result(task_id, chat_id, text, ...)`, which dro
                    prompt=(
                        f"---\ntask_id: {reviewer_task_id}\nchat_id: {msg['chat_id']}\n"
                        f"source: {msg.get('source', 'telegram')}\n---\n\n"
-                       f"Review PR {pr_url} and post findings:\n"
-                       f"  gh pr review <N> --repo {pr_repo} --comment --body \"PASS/NEEDS-WORK/FAIL: ...\"\n"
-                       f"Use --comment only (never --approve or --request-changes — same token = self-review error).\n"
-                       f"After posting, call write_result with a short verdict (1-3 sentences).\n\n"
+                       f"Review PR {pr_url} and post findings as a GitHub comment.\n\n"
+                       f"REVIEWER PROCESS (follow this order exactly):\n"
+                       f"1. Run: gh pr diff {pr_number} --repo {pr_repo}\n"
+                       f"   Read the diff cold. Before reading anything else, note independently:\n"
+                       f"   - What could go wrong with this change?\n"
+                       f"   - What edge cases are not covered?\n"
+                       f"   - What would you want tested?\n\n"
+                       f"2. Then read the engineer's briefing below.\n"
+                       f"   Compare what you found against what the engineer flagged.\n"
+                       f"   A good review catches what the engineer didn't think of.\n\n"
+                       f"ALWAYS CHECK:\n"
+                       f"- For any store/DB/MCP method call: do the argument types match what the method actually expects?\n"
+                       f"- Test structure: duplicate class names? Any test classes unreachable due to shadowing?\n"
+                       f"- Do tests exercise the actual before-state, or just assert it in comments?\n"
+                       f"- \"N pre-existing failures\" claims: run `uv run pytest --tb=no -q` yourself and verify the count\n\n"
+                       f"POST your review as a GitHub comment:\n"
+                       f"  gh pr review {pr_number} --repo {pr_repo} --comment --body \"🤖🦞 Lobster (reviewer): PASS/NEEDS-WORK/FAIL: ...\"\n"
+                       f"  (Never --approve or --request-changes — same token = self-review error)\n\n"
+                       f"After posting, call write_result with a plain-English verdict (1-3 sentences).\n"
+                       f"Translate all findings — no function names, file paths, or code terms. State what each issue means operationally.\n\n"
                        f"Engineer's briefing:\n{msg['text']}"
                    ),
                )
@@ -756,10 +772,26 @@ If `reacted_to_text` is empty: use `get_conversation_history` to get context.
                    run_in_background=True,
                    prompt=(
                        f"---\ntask_id: {reviewer_task_id}\nchat_id: {chat_id}\nsource: {source}\n---\n\n"
-                       f"Review PR {pr_url} and post findings:\n"
-                       f"  gh pr review <N> --repo {pr_repo} --comment --body \"PASS/NEEDS-WORK/FAIL: ...\"\n"
-                       f"Use --comment only (never --approve or --request-changes).\n"
-                       f"After posting, call write_result with a short verdict (1-3 sentences).\n\n"
+                       f"Review PR {pr_url} and post findings as a GitHub comment.\n\n"
+                       f"REVIEWER PROCESS (follow this order exactly):\n"
+                       f"1. Run: gh pr diff {pr_number} --repo {pr_repo}\n"
+                       f"   Read the diff cold. Before reading anything else, note independently:\n"
+                       f"   - What could go wrong with this change?\n"
+                       f"   - What edge cases are not covered?\n"
+                       f"   - What would you want tested?\n\n"
+                       f"2. Then read the engineer's briefing below.\n"
+                       f"   Compare what you found against what the engineer flagged.\n"
+                       f"   A good review catches what the engineer didn't think of.\n\n"
+                       f"ALWAYS CHECK:\n"
+                       f"- For any store/DB/MCP method call: do the argument types match what the method actually expects?\n"
+                       f"- Test structure: duplicate class names? Any test classes unreachable due to shadowing?\n"
+                       f"- Do tests exercise the actual before-state, or just assert it in comments?\n"
+                       f"- \"N pre-existing failures\" claims: run `uv run pytest --tb=no -q` yourself and verify the count\n\n"
+                       f"POST your review as a GitHub comment:\n"
+                       f"  gh pr review {pr_number} --repo {pr_repo} --comment --body \"🤖🦞 Lobster (reviewer): PASS/NEEDS-WORK/FAIL: ...\"\n"
+                       f"  (Never --approve or --request-changes — same token = self-review error)\n\n"
+                       f"After posting, call write_result with a plain-English verdict (1-3 sentences).\n"
+                       f"Translate all findings — no function names, file paths, or code terms. State what each issue means operationally.\n\n"
                        f"Engineer\'s briefing:\n{parked[\'content\']}"
                    ),
                )
@@ -990,8 +1022,8 @@ When the user asks to work on a GitHub issue, spawn `functional-engineer` via `T
 
 1. Engineer's `write_result` arrives as `subagent_result` with a GitHub PR URL in `text`
 2. Dispatcher detects the URL (in `subagent_result` handler above), spawns reviewer, marks processed
-3. Reviewer reads the PR, posts findings with `gh pr review <N> --repo <owner/repo> --comment --body "PASS/NEEDS-WORK/FAIL: ..."` (never `--approve` or `--request-changes` — same token = self-review error)
-4. Reviewer calls `write_result` with a short verdict (1-3 sentences)
+3. Reviewer reads the diff cold first (before the briefing), then posts findings with `gh pr review <N> --repo <owner/repo> --comment --body "🤖🦞 Lobster (reviewer): PASS/NEEDS-WORK/FAIL: ..."` (never `--approve` or `--request-changes` — same token = self-review error)
+4. Reviewer calls `write_result` with a plain-English verdict (1-3 sentences) — no function names or file paths
 5. Dispatcher receives that result, relays the short verdict to the user
 
 **Why this separation matters:** Engineers must not review their own work.
@@ -1025,7 +1057,11 @@ When the user types `/re-review <PR URL or number>`, extract the PR reference an
 parts = msg["text"].strip().split(None, 1)
 pr_ref = parts[1].strip() if len(parts) > 1 else ""
 # Parse as full URL or bare number
-# Spawn review agent with re-review prompt
+# Spawn review agent with the same diff-first reviewer prompt used in ENGINEER→REVIEWER routing:
+#   - Step 1: gh pr diff {pr_number} --repo {pr_repo} (read cold, form independent view)
+#   - Step 2: (no engineer briefing for re-reviews — reviewer works entirely from the diff and PR description)
+#   - POST: gh pr review {pr_number} --repo {pr_repo} --comment --body "🤖🦞 Lobster (reviewer): PASS/NEEDS-WORK/FAIL: ..."
+#   - write_result: plain-English verdict, no code terms
 # send_reply: "On it — reviewing {pr_url}."
 ```
 
