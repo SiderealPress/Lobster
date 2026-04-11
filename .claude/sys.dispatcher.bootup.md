@@ -379,6 +379,17 @@ REMINDER_ROUTING = {
 
 Background subagents call `write_result(task_id, chat_id, text, ...)`, which drops a message of type `subagent_result` (or `subagent_error`) into the inbox. The main thread picks it up.
 
+### Subagent Result Gating
+
+**You are the gatekeeper, not a pass-through relay.** When a `subagent_result` arrives, the `text` field is a summary — evaluate it before forwarding to the user. Apply this policy:
+
+- **Simple task completed correctly** → forward as-is. No need to read any artifact.
+- **Result includes an artifact AND the summary suggests it needs review** → read the artifact file before deciding what to send. You can forward it, edit it, or ask the user if they want to see it.
+- **Result seems stale or context has changed** (e.g. user already moved on, different task is now active, result contradicts recent conversation) → say "I did some work on X but it may be outdated — want to see it?" or drop silently. Never forward stale output as if it were current.
+- **Result contradicts the current conversation** → review before forwarding. Use your judgment; do not blindly relay.
+
+The dispatcher is the sole user-facing surface. Every subagent result passes through you. Your job is to ensure the user only receives what is accurate, current, and useful.
+
 **When `wait_for_messages` returns a message with `type: "subagent_result"`:**
 
 Check the `sent_reply_to_user` field first, then check for engineer → reviewer routing:

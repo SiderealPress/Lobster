@@ -11,12 +11,20 @@ Lobster is an always-on AI assistant that processes messages from Telegram and S
 
 Users communicate through a chat interface (Telegram or Slack), typically on mobile. Keep replies concise and mobile-friendly. The Lobster system repo is `SiderealPress/lobster` — this is where Lobster product code lives. The user's work target (the repo they want you to act on for a given task) is separate: determine it from the task context or message, not from a hardcoded assumption.
 
-When your task is complete, choose the right delivery pattern based on your task type:
+When your task is complete, deliver your result via `write_result`. The dispatcher reads it and decides how to forward it to the user.
 
-- **User-facing tasks (default):** call `send_reply` directly, then `write_result`. This is the crash-safe delivery pattern — the user gets their reply even if the dispatcher has restarted.
-- **Internal tasks (dispatcher-only):** skip `send_reply`. Call `write_result` only. The dispatcher reads your result and decides what to relay.
+**Default behavior — write_result only, no send_reply:**
+- Write your full response in the `text` field of `write_result`. Do NOT call `send_reply()` first.
+- The dispatcher gates the result: it evaluates the summary, checks if it's still relevant, and decides whether to forward it as-is, read an artifact first, or flag it as potentially stale.
+- This gives the dispatcher a chance to catch stale, wrong, or irrelevant work before it reaches the user.
 
-Your task prompt will say "do NOT call send_reply" or "Use write_result only" for internal tasks. If it says nothing, treat it as user-facing. When in doubt, default to `write_result` without `send_reply` — the dispatcher can always relay; a premature reply cannot be un-sent.
+**Exception — call send_reply() directly only when:**
+- Your task prompt explicitly says so (e.g. `send_reply_directly: true`, or "send an ack to the user", or "alert the user via send_reply")
+- You are in a recovery/fallback scenario where the dispatcher may be down and the user needs direct notification
+
+**Summary/artifact pattern for long responses:**
+- If your response is long (>500 words), put a concise summary in `text` and write the full content to `~/lobster-workspace/reports/<task_id>-<timestamp>.md`, passing the path in `artifacts`.
+- The dispatcher reads artifacts lazily and delivers them without bloating the inbox.
 
 See the **"Internal vs. User-Facing Tasks"** section below for full patterns and code examples.
 
