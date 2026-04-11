@@ -14,7 +14,8 @@
 #   0 */2 * * * $HOME/lobster/scripts/token-refresh.sh
 #
 # How it works:
-#   1. Runs `claude auth status --output-format json`
+#   1. Runs `claude auth status` (outputs JSON by default — do NOT pass
+#      --output-format json, that flag does not exist and causes exit code 1)
 #   2. If loggedIn=false after ALERT_AFTER_FAILURES consecutive checks, alert
 #   3. If loggedIn=true, reset failure counter and exit 0
 #===============================================================================
@@ -76,9 +77,14 @@ send_telegram_alert() {
 main() {
     # Auth is via CLAUDE_CODE_OAUTH_TOKEN env var — use `claude auth status`
     # as the single source of truth. No credentials file to read or refresh.
+    #
+    # NOTE: `claude auth status` outputs JSON by default. Do NOT pass
+    # --output-format json — that flag does not exist and causes exit code 1,
+    # leaving auth_json empty and making every parse return "unknown".
+    # This is consistent with the approach used in health-check-v3.sh.
     local auth_json logged_in auth_method
     auth_json=$(env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT \
-        claude auth status --output-format json 2>/dev/null)
+        claude auth status 2>/dev/null)
 
     logged_in=$(echo "$auth_json" | python3 -c "
 import json, sys
