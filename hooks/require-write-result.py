@@ -422,7 +422,7 @@ def _write_synthetic_inbox_message(
             "text": text,
             "task_id": task_id,
             "status": "recovered",
-            "sent_reply_to_user": True,  # chat_id is unknown; dispatcher must not relay via send_reply
+            "sent_reply_to_user": False,  # dispatcher must relay this; user has NOT been notified
             "timestamp": now.isoformat(),
             "recovered": True,
         }
