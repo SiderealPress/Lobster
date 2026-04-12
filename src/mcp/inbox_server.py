@@ -623,6 +623,7 @@ def _tick_user_message_counter(msg_type: str, msg_source: str) -> None:
                 "type": "session_note_reminder",
                 "source": "system",
                 "chat_id": 0,
+                "task_origin": "internal",
                 "text": (
                     f"session_note_reminder: {_user_message_counter} user messages "
                     f"processed this session. Spawn session-note-appender in the background "
@@ -1068,6 +1069,7 @@ def _write_session_lost_reminder() -> None:
             "source": "system",
             "type": "compact-reminder",
             "chat_id": 0,
+            "task_origin": "internal",
             "text": (
                 "SESSION LOST — The MCP server restarted and your previous session was "
                 "invalidated. Re-orient now: read sys.dispatcher.bootup.md and resume "
@@ -2244,6 +2246,17 @@ async def list_tools() -> list[Tool]:
                         ),
                         "default": False,
                     },
+                    "task_origin": {
+                        "type": "string",
+                        "description": (
+                            "Origin of the task that produced this result (issue #1422). "
+                            "'user' — triggered by a real user message. Default. "
+                            "'scheduled' — triggered by a scheduled job or cron task. "
+                            "'internal' — system-initiated, no user to notify "
+                            "(reconciler, health check, dispatcher task, etc.)."
+                        ),
+                        "enum": ["user", "scheduled", "internal"],
+                    },
                 },
                 "required": ["task_id", "chat_id", "text"],
             },
@@ -2473,6 +2486,17 @@ async def list_tools() -> list[Tool]:
                             "'unknown' — caller did not classify (default; treated as unsafe for recovery)."
                         ),
                         "enum": ["safe", "unsafe", "unknown"],
+                    },
+                    "task_origin": {
+                        "type": "string",
+                        "description": (
+                            "Origin of the task — replaces the chat_id=0 sentinel (issue #1422). "
+                            "'user' — triggered by a real user message (Telegram, Slack, etc.). Default. "
+                            "'scheduled' — triggered by a scheduled job or cron task. "
+                            "'internal' — system-initiated with no user involved "
+                            "(reconciler, health check, dispatcher session, etc.)."
+                        ),
+                        "enum": ["user", "scheduled", "internal"],
                     },
                     "claude_session_id": {
                         "type": "string",
@@ -6800,6 +6824,8 @@ async def handle_write_result(args: dict) -> list[TextContent]:
     status = args.get("status", "success")
     artifacts = args.get("artifacts") or []
     thread_ts = args.get("thread_ts")
+    task_origin_raw = args.get("task_origin") or None
+    task_origin = task_origin_raw if task_origin_raw in ("user", "scheduled", "internal") else None
     # Accept new name (sent_reply_to_user) with backward-compat alias (forward).
     # Semantics: sent_reply_to_user=True means subagent already called send_reply →
     # dispatcher should NOT relay. This is the inverse of the old `forward` field.
@@ -6868,6 +6894,8 @@ async def handle_write_result(args: dict) -> list[TextContent]:
         "sent_reply_to_user": bool(sent_reply_to_user),
         "timestamp": now.isoformat(),
     }
+    if task_origin:
+        message["task_origin"] = task_origin
     if msg_type == "subagent_notification":
         message["warning"] = "User already received the subagent's reply. Don't summarize it. If you respond, add new value only — a question, a correction, missing context."
     if artifacts:
@@ -7174,6 +7202,7 @@ async def handle_session_start(args: dict) -> list[TextContent]:
     trigger_message_id = args.get("trigger_message_id") or None
     trigger_snippet = args.get("trigger_snippet") or None
     idempotency = args.get("idempotency") or None
+    task_origin = args.get("task_origin") or None
     claude_session_id = (args.get("claude_session_id") or "").strip() or None
 
     if not agent_id:
@@ -7204,6 +7233,7 @@ async def handle_session_start(args: dict) -> list[TextContent]:
             trigger_message_id=trigger_message_id,
             trigger_snippet=trigger_snippet,
             idempotency=idempotency,
+            task_origin=task_origin,
         )
     except Exception as exc:
         log.error(f"session_start failed: {exc}", exc_info=True)
@@ -8884,9 +8914,13 @@ def _build_reconciler_message(
     For 'completed' outcomes: routes to the originating chat_id so the
     dispatcher can relay the result to the user.
 
-    For 'dead' outcomes: routes to chat_id=0 with type='agent_failed' so the
-    dispatcher treats it as an internal system event — never forwarded to the
-    user directly. The dispatcher decides whether to re-queue, escalate, or drop.
+    For 'dead' outcomes: routes to the originating chat_id with type='agent_failed'
+    and task_origin='internal' so the dispatcher treats it as an internal system
+    event — never forwarded to the user directly. The dispatcher decides whether
+    to re-queue, escalate, or drop.
+
+    Note: the task_origin field (issue #1422) replaces the chat_id=0 sentinel as
+    the canonical signal for "this is a system/internal task, not a user message".
 
     Args:
         session: Session dict from get_active_sessions() or get_unnotified_completed().
@@ -8898,6 +8932,8 @@ def _build_reconciler_message(
     task_id = session.get("task_id") or agent_id
     input_summary = session.get("input_summary")
     output_file = session.get("output_file")
+    # Preserve the session's task_origin for fidelity; fall back to 'user' for legacy rows.
+    session_task_origin = session.get("task_origin") or "user"
 
     elapsed_raw = session.get("elapsed_seconds")
     try:
@@ -8917,6 +8953,7 @@ def _build_reconciler_message(
             "type": "subagent_result",
             "source": session.get("source", "telegram"),
             "chat_id": session.get("chat_id", ""),
+            "task_origin": session_task_origin,
             "text": (
                 f"Agent completed: {description}\n"
                 f"(reconciler-detected via stop_reason=end_turn, {elapsed_min}m elapsed)"
@@ -8928,24 +8965,26 @@ def _build_reconciler_message(
             "timestamp": now.isoformat(),
         }
     else:
-        # Route failure notifications to chat_id=0 (dispatcher-internal).
-        # The dispatcher sees type='agent_failed' and decides whether to re-queue,
-        # escalate to the user, or drop silently. Never relay raw failure noise to
-        # the user's Telegram.
+        # Route failure notifications with task_origin='internal' (dispatcher-internal).
+        # The dispatcher sees type='agent_failed' + task_origin='internal' and decides
+        # whether to re-queue, escalate to the user, or drop silently. Never relay raw
+        # failure noise to the user's Telegram.
+        # chat_id carries the ORIGINAL chat from the session so the dispatcher can
+        # escalate to the correct user if needed — it is no longer set to 0.
         last_output = _read_last_output(output_file)
         original_chat_id = session.get("chat_id", "")
         return {
             "id": message_id,
             "type": "agent_failed",
             "source": "system",
-            "chat_id": 0,
+            "chat_id": original_chat_id,
+            "task_origin": "internal",
             "text": (
                 f"Agent failed/disappeared: {description}\n"
                 f"(no output file after {elapsed_min}m — marked dead)"
             ),
             "task_id": task_id,
             "agent_id": agent_id,
-            "original_chat_id": original_chat_id,
             "original_prompt": input_summary,
             "last_output": last_output,
             "status": "error",
@@ -8960,10 +8999,14 @@ def _enqueue_reconciler_notification(session: dict, outcome: str) -> None:
     For completed agents: routes to the originating chat so the dispatcher can
     relay the result to the user.
 
-    For dead/failed agents: routes to chat_id=0 with type='agent_failed' so the
-    dispatcher handles it internally. Raw failure noise is never forwarded to
-    the user's Telegram — the dispatcher decides whether to re-queue, escalate,
-    or drop silently.
+    For dead/failed agents with task_origin='internal' (or legacy chat_id=0):
+    routes to debug log only — no inbox notification needed. The session is
+    marked notified so bookkeeping is always done regardless of notification path.
+
+    For dead/failed agents with task_origin='user' or 'scheduled': routes to
+    inbox with type='agent_failed' + task_origin='internal' so the dispatcher
+    handles it internally. Raw failure noise is never forwarded to the user's
+    Telegram — the dispatcher decides whether to re-queue, escalate, or drop.
 
     Also marks the session as notified_at to prevent duplicate notifications
     on the next reconciler cycle.
@@ -8976,18 +9019,25 @@ def _enqueue_reconciler_notification(session: dict, outcome: str) -> None:
     if session.get("notified_at"):
         return
 
-    # Dead sessions with no real user don't need dispatcher action — route to
-    # debug log only, not the inbox. The dispatcher cannot notify a user
-    # (no chat_id) or take any meaningful action. Logging preserves observability.
+    # Dead sessions with task_origin='internal' (or legacy chat_id=0 sentinel)
+    # don't need dispatcher inbox action — log to debug and mark notified.
+    # The dispatcher cannot take meaningful action for purely internal tasks.
     if outcome == "dead":
+        _task_origin = session.get("task_origin") or "user"
         _chat_id = session.get("chat_id")
         _chat_id_str = str(_chat_id).strip() if _chat_id is not None else ""
-        if _chat_id_str in ("0", "", "None"):
+        # Check task_origin first (preferred); fall back to chat_id=0 sentinel for
+        # legacy rows that predate the task_origin column (issue #1422 migration).
+        _is_internal = (
+            _task_origin == "internal"
+            or _chat_id_str in ("0", "", "None")
+        )
+        if _is_internal:
             _agent_id = session.get("id", "")
             log.debug(
-                "[reconciler] Dead session %r has no real user (chat_id=%r) — "
-                "skipping inbox notification (logged to debug only)",
-                _agent_id, _chat_id,
+                "[reconciler] Dead session %r is internal (task_origin=%r, chat_id=%r) — "
+                "skipping inbox notification (bookkeeping only)",
+                _agent_id, _task_origin, _chat_id,
             )
             # Mark as notified so this session is not re-enqueued on every
             # restart. The early return skips inbox delivery (intentional —
@@ -8996,7 +9046,7 @@ def _enqueue_reconciler_notification(session: dict, outcome: str) -> None:
                 _session_store.set_notified(_agent_id)
             except Exception as _exc:
                 log.error(
-                    "[reconciler] Failed to set_notified for no-user dead session %r: %s",
+                    "[reconciler] Failed to set_notified for internal dead session %r: %s",
                     _agent_id, _exc,
                 )
             return
