@@ -1387,8 +1387,8 @@ The restart has been skipped to avoid killing running subagents. If the problem 
         if is_manual_intervention_required; then
             # Already in BLACK/manual-intervention state — check whether it's time to re-alert.
             # check_and_renotify_black silently retries a restart if BLACK_RENOTIFY_SECONDS
-            # (2h) have elapsed. No Telegram alert is sent — the initial BLACK alert already
-            # fired. If the retry succeeds the system returns to GREEN naturally.
+            # (2h) have elapsed. If the retry fails, a Telegram re-alert is sent so the user
+            # knows the system is still down. If the retry succeeds, the system returns to GREEN naturally.
             check_and_renotify_black "$reason"
         else
             # First time hitting BLACK — set flag and send a single alert.
