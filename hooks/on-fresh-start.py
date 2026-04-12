@@ -233,6 +233,131 @@ def _has_recent_session_file() -> bool:
         return False
 
 
+def _create_session_file_stub() -> None:
+    """Create a stub session file for this dispatcher session if one doesn't already exist.
+
+    This is the hook-level safety net for issue #1086. The dispatcher bootup doc
+    instructs the LLM to create a session file inline (step 2a), and compact-catchup
+    fills in Phase 2. But if both fail (e.g. compact-catchup doesn't run, or the LLM
+    skips step 2a), no session file is written — leaving the next restart with no context.
+
+    This function runs at SessionStart (fresh restart only, not compaction) and creates
+    a minimal stub session file if today has no file or the existing one is a fresh stub.
+    The stub has the start timestamp filled in and End reason: active, so it is
+    immediately recoverable even if the session ends before anything writes to it.
+
+    Writes the file path to CURRENT_SESSION_FILE_POINTER (/tmp/lobster-current-session-file)
+    so the dispatcher and compact-catchup can find it.
+
+    Never raises — all errors are logged to stderr and the hook continues.
+    """
+    import datetime
+
+    try:
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        today_str = now_utc.strftime("%Y%m%d")
+        ts_iso = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        # Determine sessions directory.
+        sessions_dir = Path(os.path.expanduser(
+            "~/lobster-user-config/memory/canonical/sessions"
+        ))
+
+        # If the pointer file already has a valid today session file, respect it.
+        if CURRENT_SESSION_FILE_POINTER.exists():
+            existing_path_str = CURRENT_SESSION_FILE_POINTER.read_text().strip()
+            if existing_path_str:
+                existing_path = Path(existing_path_str)
+                if (
+                    existing_path.exists()
+                    and existing_path.name.startswith(today_str)
+                    and existing_path.stat().st_size > 0
+                ):
+                    print(
+                        f"[on-fresh-start] session file stub already exists: {existing_path}",
+                        file=sys.stderr,
+                    )
+                    return
+
+        # Find next sequence number for today.
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        existing_today = sorted(sessions_dir.glob(f"{today_str}-???.md"))
+        if existing_today:
+            last_seq_str = existing_today[-1].stem.split("-")[-1]
+            next_seq = int(last_seq_str) + 1
+        else:
+            next_seq = 1
+        seq_str = f"{next_seq:03d}"
+        session_id = f"{today_str}-{seq_str}"
+        session_filename = f"{session_id}.md"
+        session_path = sessions_dir / session_filename
+
+        # Read template — prefer user-config version, fall back to repo version.
+        user_template = Path(os.path.expanduser(
+            "~/lobster-user-config/memory/canonical/sessions/session.template.md"
+        ))
+        repo_template = Path(os.path.expanduser(
+            "~/lobster/memory/canonical-templates/sessions/session.template.md"
+        ))
+
+        template_content: str | None = None
+        for template_path in (user_template, repo_template):
+            if template_path.exists():
+                try:
+                    template_content = template_path.read_text(encoding="utf-8")
+                    break
+                except OSError:
+                    continue
+
+        if template_content is None:
+            # Minimal inline fallback.
+            template_content = (
+                f"# Session YYYYMMDD-NNN\n\n"
+                f"**Started:** <ISO timestamp, e.g. 2026-03-25T14:32:00Z>\n"
+                f"**Ended:** <ISO timestamp or \"active\">\n"
+                f"**Messages processed:** 0\n"
+                f"**End reason:** active\n\n"
+                f"## Summary\n(nothing to report this session)\n\n"
+                f"## Open Threads\n\n## Open Tasks\n\n## Open Subagents\n\n## Notable Events\n"
+            )
+
+        # Substitute template placeholders.
+        stub = template_content
+        stub = stub.replace("# Session YYYYMMDD-NNN", f"# Session {session_id}")
+        stub = stub.replace(
+            "<ISO timestamp, e.g. 2026-03-25T14:32:00Z>", ts_iso
+        )
+        stub = stub.replace('<ISO timestamp or "active">', "active")
+        # Replace Messages processed placeholder if present.
+        stub = stub.replace(
+            '<count or "unknown">',
+            "0",
+        )
+        stub = stub.replace(
+            '<"active" | "graceful wind-down" | "context_warning" | "short session" | "crash">',
+            "active",
+        )
+
+        # Write session file atomically.
+        tmp_path = session_path.with_suffix(".tmp")
+        tmp_path.write_text(stub, encoding="utf-8")
+        tmp_path.rename(session_path)
+
+        # Write the pointer.
+        CURRENT_SESSION_FILE_POINTER.write_text(str(session_path))
+
+        print(
+            f"[on-fresh-start] created session file stub: {session_path}",
+            file=sys.stderr,
+        )
+
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"[on-fresh-start] failed to create session file stub: {exc}",
+            file=sys.stderr,
+        )
+
+
 def _compact_reminder_already_queued() -> bool:
     """Return True if a compact-reminder message is already in inbox/ or processing/.
 
@@ -487,6 +612,13 @@ def main() -> None:
     # Skip subagent sessions — only the dispatcher should run this.
     if not session_role.is_dispatcher(data):
         sys.exit(0)
+
+    # Safety net for issue #1086: create a stub session file for this session.
+    # The dispatcher bootup doc instructs the LLM to create a session file inline
+    # (step 2a), but this is unreliable if the LLM skips the step or compact-catchup
+    # doesn't run. Creating the stub here guarantees there is always a session file
+    # from the moment the dispatcher starts, even if it ends immediately.
+    _create_session_file_stub()
 
     if not AGENT_MONITOR.exists():
         print(
