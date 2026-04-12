@@ -2442,6 +2442,22 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
         substep "wfm-watchdog.sh cron entry already present — skipping"
     fi
 
+    # Migration 70: Remove stale LOBSTER-SCHEDULED crontab entries (issue #1083 Phase 1).
+    # The cron + jobs.json + dispatch-job.sh scheduling layer has been superseded by
+    # systemd timers (PR #1105). Any remaining "# LOBSTER-SCHEDULED" crontab entries
+    # are now duplicates of systemd timers or orphaned jobs that no longer fire on
+    # systemd. Remove them so the crontab is clean.
+    #
+    # NOTE: System-level cron entries (LOBSTER-HEALTH, LOBSTER-SELF-CHECK, etc.) are
+    # intentionally preserved — only LOBSTER-SCHEDULED user-space job entries are removed.
+    if crontab -l 2>/dev/null | grep -q '# LOBSTER-SCHEDULED'; then
+        { crontab -l 2>/dev/null | grep -v '# LOBSTER-SCHEDULED' || true; } | crontab -
+        substep "Removed stale LOBSTER-SCHEDULED crontab entries (superseded by systemd timers)"
+        migrated=$((migrated + 1))
+    else
+        substep "No LOBSTER-SCHEDULED crontab entries found — skipping"
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
