@@ -352,10 +352,17 @@ kill_orphaned_mcp_processes() {
     local tmux_panes
     tmux_panes=$(tmux -L lobster list-panes -a -F '#{pane_pid}' 2>/dev/null || true)
 
-    # Collect PIDs for each known MCP server pattern
+    # Collect PIDs for each known MCP server pattern.
+    # This list intentionally includes node-based MCP servers (google-workspace-mcp,
+    # obsidian-mcp, etc.) that are spawned as children of subagent Claude processes.
+    # When a subagent exits, these node servers become orphaned — their parent is gone
+    # but they keep running, leaking RAM. (#1108)
     local mcp_pids=""
     mcp_pids+=" $(pgrep -f "src/mcp/inbox_server\.py" 2>/dev/null || true)"
     mcp_pids+=" $(pgrep -f "obsidian-mcp" 2>/dev/null || true)"
+    mcp_pids+=" $(pgrep -f "google-workspace-mcp" 2>/dev/null || true)"
+    mcp_pids+=" $(pgrep -f "@modelcontextprotocol/server" 2>/dev/null || true)"
+    mcp_pids+=" $(pgrep -f "mcp-server-" 2>/dev/null || true)"
     mcp_pids=$(echo "$mcp_pids" | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -u || true)
 
     if [[ -z "$mcp_pids" ]]; then
