@@ -1324,6 +1324,23 @@ chmod +x "$INSTALL_DIR/scheduled-tasks/export-logs.py" 2>/dev/null || true
 success "Log export configured (runs at 03:00 UTC daily)"
 
 #===============================================================================
+# Log Cleanup (issue #1240)
+#===============================================================================
+
+step "Setting up log cleanup cron..."
+
+# log-cleanup.sh prunes three directories that grow without bound:
+#   - ~/lobster-workspace/scheduled-jobs/logs/ (keep 14 days)
+#   - ~/messages/processed/                    (keep 30 days)
+#   - ~/messages/audio/                        (keep 7 days)
+# Runs at 04:00 UTC daily (one hour after nightly consolidation).
+chmod +x "$INSTALL_DIR/scripts/log-cleanup.sh" || true
+"$INSTALL_DIR/scripts/cron-manage.sh" add "# LOBSTER-LOG-CLEANUP" \
+    "0 4 * * * $INSTALL_DIR/scripts/log-cleanup.sh >> $HOME/lobster-workspace/logs/log-cleanup.log 2>&1 # LOBSTER-LOG-CLEANUP"
+
+success "Log cleanup configured (runs at 04:00 UTC daily)"
+
+#===============================================================================
 # Ghost Detector (agent-monitor)
 #===============================================================================
 
