@@ -27,6 +27,7 @@ Design principles (following tracker.py patterns):
 import fcntl
 import json
 import os
+import re
 import tempfile
 import tomllib
 from datetime import datetime, timezone
@@ -385,6 +386,139 @@ def get_skill_context(
             skill_dirs[name] = skill_dir
 
     return _assemble_context(skill_dirs, active, state)
+
+
+def _pattern_matches_message(pattern: str, message_text: str) -> bool:
+    """Check if a context_pattern matches the given message text.
+
+    Patterns are natural-language descriptions like "when user asks about X".
+    Matching strategy: extract meaningful keywords from the pattern and check
+    if the message contains them (case-insensitive). This avoids LLM calls
+    while still catching the most common cases.
+
+    For patterns starting with "when user asks about/to/for ...", we extract
+    the subject and look for it in the message.
+    """
+    if not pattern or not message_text:
+        return False
+
+    message_lower = message_text.lower()
+    pattern_lower = pattern.lower()
+
+    # Strip common preamble phrases to get subject keywords
+    strip_prefixes = [
+        r"^when (?:the )?user (?:asks?|wants?|mentions?|requests?|says?|tells?|needs?)"
+        r"(?: to| about| for| if| whether| that| how| when| what|'s| regarding)?:?\s*",
+        r"^when (?:discussing|reviewing|working on|checking|looking at)\s+",
+        r"^when lobster (?:confirms?|starts?|begins?|is|has)\s+",
+        r"^when (?:the )?message (?:contains?|mentions?|includes?|is about)\s*",
+        r"^when\s+",
+    ]
+
+    subject = pattern_lower
+    for prefix_re in strip_prefixes:
+        subject = re.sub(prefix_re, "", subject)
+
+    # Remove filler words to get content words
+    filler = {"a", "an", "the", "their", "its", "some", "any", "or", "and", "to", "in",
+               "on", "at", "of", "for", "with", "by", "from", "is", "are", "be", "been"}
+    words = [w for w in re.findall(r"[a-z0-9][\w-]*", subject) if w not in filler and len(w) > 2]
+
+    if not words:
+        return False
+
+    # Match if at least half the content words appear in the message
+    # (minimum 1 word must match)
+    matches = sum(1 for w in words if w in message_lower)
+    threshold = max(1, len(words) // 2)
+    return matches >= threshold
+
+
+def _get_contextual_skills_data(
+    repo_dir: Path,
+    config_dir: str,
+    state_path: Path,
+) -> list[tuple[str, Path, list[str], int]]:
+    """Return (name, dir, patterns, priority) for installed+active contextual skills."""
+    state = _read_store(state_path)
+    skill_dirs_map: dict[str, Path] = {}
+    for skill_dir in _resolve_skill_dirs(repo_dir, config_dir):
+        manifest = _parse_manifest(skill_dir)
+        if manifest:
+            name = _extract_skill_name(manifest, skill_dir.name)
+            skill_dirs_map[name] = skill_dir
+
+    result = []
+    for name, info in state.get("skills", {}).items():
+        if not info.get("active", False):
+            continue
+        if info.get("activation_mode", "always") != "contextual":
+            continue
+        if name not in skill_dirs_map:
+            continue
+        skill_dir = skill_dirs_map[name]
+        manifest = _parse_manifest(skill_dir)
+        if not manifest:
+            continue
+        patterns = manifest.get("activation", {}).get("context_patterns", [])
+        priority = info.get("priority", 50)
+        result.append((name, skill_dir, patterns, priority))
+    return result
+
+
+def get_skill_context_for_message(
+    message_text: str,
+    repo_dir: Path | None = None,
+    config_dir: str | None = None,
+    state_path: Path = _DEFAULT_STATE_PATH,
+) -> str:
+    """Assemble context from active skills, including contextual skills that match the message.
+
+    For skills with activation_mode='always' or 'triggered': included if active.
+    For skills with activation_mode='contextual': included only if a context_pattern
+    matches the message text.
+
+    Returns markdown string ready for injection into Claude's context.
+    Empty string if no skills are active/matched.
+    """
+    repo_dir = repo_dir or _REPO_DIR
+    config_dir = config_dir or _CONFIG_DIR
+
+    state = _read_store(state_path)
+
+    # Collect always-active and triggered skills (standard path)
+    standard_active = [
+        name for name, info in state.get("skills", {}).items()
+        if info.get("active", False) and info.get("activation_mode", "always") != "contextual"
+    ]
+
+    # Evaluate contextual skills against the message
+    contextual_matches: list[str] = []
+    for name, skill_dir, patterns, priority in _get_contextual_skills_data(
+        repo_dir, config_dir, state_path
+    ):
+        if any(_pattern_matches_message(p, message_text) for p in patterns):
+            contextual_matches.append(name)
+
+    all_active = standard_active + contextual_matches
+    if not all_active:
+        return ""
+
+    # Build name -> dir mapping
+    skill_dirs: dict[str, Path] = {}
+    for skill_dir in _resolve_skill_dirs(repo_dir, config_dir):
+        manifest = _parse_manifest(skill_dir)
+        if manifest:
+            name = _extract_skill_name(manifest, skill_dir.name)
+            skill_dirs[name] = skill_dir
+
+    result = _assemble_context(skill_dirs, all_active, state)
+
+    if contextual_matches:
+        note = "\n\n> **Contextual skills activated for this message:** " + ", ".join(contextual_matches)
+        result = result + note
+
+    return result
 
 
 def activate_skill(

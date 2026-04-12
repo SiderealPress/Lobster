@@ -101,6 +101,7 @@ from claims import AtomicClaimDB as _AtomicClaimDB
 from skill_manager import (
     list_available_skills as _list_available_skills,
     get_skill_context as _get_skill_context,
+    get_skill_context_for_message as _get_skill_context_for_message,
     activate_skill as _activate_skill,
     deactivate_skill as _deactivate_skill,
     get_skill_preferences as _get_skill_preferences,
@@ -3004,6 +3005,20 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="get_skill_context_for_message",
+            description="Get assembled context from all active skills, including contextual skills that match the current message. Pass the incoming message text to activate skills with activation_mode='contextual' whose context_patterns match. Use this instead of get_skill_context when you have message text available (at message processing start).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "message_text": {
+                        "type": "string",
+                        "description": "The incoming message text to evaluate contextual skill patterns against.",
+                    },
+                },
+                "required": ["message_text"],
+            },
+        ),
+        Tool(
             name="list_skills",
             description="List available skills in the Lobster Shop. Shows install/active status for each skill.",
             inputSchema={
@@ -3531,6 +3546,8 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
     # Skill Management Tools
     elif name == "get_skill_context":
         return await handle_get_skill_context(arguments)
+    elif name == "get_skill_context_for_message":
+        return await handle_get_skill_context_for_message(arguments)
     elif name == "list_skills":
         return await handle_list_skills(arguments)
     elif name == "activate_skill":
@@ -8493,6 +8510,21 @@ async def handle_get_skill_context(args: dict) -> list[TextContent]:
         return [TextContent(type="text", text=context)]
     except Exception as e:
         log.error(f"get_skill_context failed: {e}", exc_info=True)
+        return [TextContent(type="text", text=f"Error: {e}")]
+
+
+async def handle_get_skill_context_for_message(args: dict) -> list[TextContent]:
+    """Return assembled context from active skills, including contextual skill matching."""
+    message_text = args.get("message_text", "").strip()
+    if not message_text:
+        return [TextContent(type="text", text="Error: message_text is required.")]
+    try:
+        context = _get_skill_context_for_message(message_text)
+        if not context:
+            return [TextContent(type="text", text="No active skills.")]
+        return [TextContent(type="text", text=context)]
+    except Exception as e:
+        log.error(f"get_skill_context_for_message failed: {e}", exc_info=True)
         return [TextContent(type="text", text=f"Error: {e}")]
 
 
