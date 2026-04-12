@@ -4383,6 +4383,17 @@ async def handle_send_reply(args: dict) -> list[TextContent]:
     else:
         outbox_file = OUTBOX_DIR / f"{reply_id}.json"
 
+    # Outbox-level content dedup (issue #976): suppress duplicate send_reply calls that
+    # carry the same (chat_id, text) within the dedup window. This handles MCP transport
+    # instability where Claude retries a tool call after a timeout, creating two outbox
+    # files with the same content and causing the user to receive the same message twice.
+    if _was_sent_directly(chat_id, text):
+        log.warning(
+            f"send_reply suppressed: duplicate content for chat_id={chat_id} within "
+            f"{_DIRECT_SEND_WINDOW_SECS}s dedup window — skipping outbox write"
+        )
+        return [TextContent(type="text", text="Reply suppressed: duplicate content detected within dedup window (not re-sent to user)")]
+
     # Atomic write: temp file + fsync + rename to prevent watchdog race condition
     atomic_write_json(outbox_file, reply_data)
 
