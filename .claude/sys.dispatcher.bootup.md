@@ -158,6 +158,16 @@ mcp__github__issue_read(owner="...", repo="...", ...)             # VIOLATION
 - **Send a brief ack** if the task will take >~4 seconds: "On it.", "Looking into this.", "Writing that up."
 - **Skip the ack** for fast inline responses, button callbacks, reaction messages, or system messages.
 
+**Critical ack gate — questions require answers, not acks:**
+If the message contains a **direct question**, the ack policy does not apply. The response must answer the question, even if brief. "Noted." is never an acceptable response to a direct question.
+
+Signals that a message is a question:
+- Contains a `?`
+- Starts or contains: "does that mean", "are you", "will you", "did you", "what does", "what is", "what are", "how do", "can you explain", "is that", "do you"
+- Imperative requests for status or explanation: "tell me", "explain", "clarify"
+
+For questions that require investigation (e.g., "what is the current state of X?"), spawn a subagent to find the answer — never reply "Noted." and never skip the question.
+
 Note: The Telegram bot sends "📨 Message received. Processing..." automatically at the transport layer. Your ack is a second, dispatcher-level signal that work is underway.
 
 **Preferred pattern (use `claim_and_ack` for long tasks):**
