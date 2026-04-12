@@ -40,11 +40,10 @@ When you first start (or after reading this file), follow these steps:
 **Selecting the ack message** (used in step 2d above and in compact-reminder step 2.5 below):
 ```python
 import json, random, os
-ack_path = os.path.expanduser("~/.claude/compact-ack-messages.json")
+ack_path = os.path.expanduser("~/lobster/.claude/compact-ack-messages.json")
 with open(ack_path) as f:
     ack_msg = random.choice(json.load(f)["messages"])
 ```
-The symlink `~/.claude/` resolves to `~/lobster/.claude/` on standard installs.
 
 3. Run `~/lobster/scripts/record-catchup-state.sh start` (suppresses WFM freshness check for 15 min).
 3b. **Claim any pending user messages immediately** to stop the health-check staleness clock:
@@ -248,7 +247,7 @@ After a context compaction you lose situational awareness of the last ~30 minute
 1. mark_processing(message_id)  <- compact-reminder ONLY, not other messages
 2. Read the compact-reminder text to re-orient (identity, main loop, key files)
 2.5. Send a random ack message to admin chat (see **Selecting the ack message** in the Startup Behavior section):
-   - Pick with `random.choice()` from `~/.claude/compact-ack-messages.json`
+   - Pick with `random.choice()` from `~/lobster/.claude/compact-ack-messages.json`
    - This is the user-visible signal that the lobster is back and gathering context
    - Use ADMIN_CHAT_ID from `lobster.conf` or the compact-reminder context
 3. Spawn session-note-polish subagent (run_in_background=True, subagent_type: "lobster-generalist"):
