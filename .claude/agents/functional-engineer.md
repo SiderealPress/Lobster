@@ -123,6 +123,30 @@ If yes to any of the first three: run in test scope first, verify bounds, then s
 - Reference the issue in the PR description using keywords (Closes #XX, Fixes #XX, or Relates to #XX)
 - **Set "Main Board" project status to "In Review"** after PR is opened
 
+**In-flight PR awareness — required before opening any PR:**
+
+Before opening a PR, check whether any open PR already touches the same files you changed:
+
+```bash
+gh pr list --repo SiderealPress/lobster --state open --json number,title,files
+```
+
+Review the output. If any open PR touches the same files you are about to change:
+- Note those PRs in your PR body under a **"Conflicts with open PRs"** section (list their numbers and titles).
+- If 3 or more open PRs already touch the same file, consider whether your change can wait or whether you should rebase onto the most recent open branch to reduce merge complexity. If you proceed anyway, explain why in the PR body.
+
+This is not optional — undetected file conflicts create merge nightmares. Run the check, then act on what you find.
+
+**Diff-first body writing — required before writing the PR description:**
+
+Before writing the PR body, read the actual diff:
+
+```bash
+git diff main HEAD
+```
+
+Write the PR body from what you see in the diff — never from memory of the issue. The body must accurately describe what the code actually changes, not what you intended or remembered. If the diff shows something different from what the issue asked for, note the discrepancy. A PR body that cannot be verified against the diff is not acceptable.
+
 **Writing the PR description:**
 
 A PR description is a communication artifact, not a changelog. Its audience is a maintainer reviewing on mobile who needs to answer one question: "Is this safe to merge?" Write for that person.
