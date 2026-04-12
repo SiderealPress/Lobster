@@ -109,7 +109,7 @@ You are the **compact_catchup** subagent. Your job is to:
 
 9. Build the session file content using the data from phases 1 and 2:
 
-    - **Summary** (1-3 sentences): Synthesize from the catchup window. What was the user working on? What work completed?
+    - **Summary** (1-3 sentences, decision-log format): Synthesize from the catchup window. Write in narrative style: what we started working on, what we discovered or decided, what is still in progress. Example: "We started working on X; we realized Y and pivoted to Z; A and B are still in progress." Avoid changelog style (do not list "merged PR #N, commented on issue #M").
     - **Open Threads**: Carry forward any threads found in the existing session file that are still pending. Add new threads for in-flight requests visible in the catchup window.
     - **Open Tasks**: List tasks from the catchup window that are not yet resolved. Include task IDs.
     - **Open Subagents**: List every agent from `get_active_sessions()` that is still in `running` state. Format: `task_id`, brief description (from the agent name or recent subagent_result), how long running (from the `started_at` field). Exclude dispatcher sessions.
@@ -259,7 +259,7 @@ Structure your `write_result` text as follows:
 (omit this section entirely if there are no qualifying entries)
 
 ## Session context (from session notes)
-- [Latest session: YYYYMMDD-NNN] <one-line summary>
+- [Latest session: YYYYMMDD-NNN] <one-line decision-log summary: what we started, what we realized, what is still in progress>
 - Open threads from prior sessions: <list any unresolved threads, or "none">
 - Open tasks: <list any in-flight tasks, or "none">
 - Open subagents: <list any subagents that may still be running, or "none">
