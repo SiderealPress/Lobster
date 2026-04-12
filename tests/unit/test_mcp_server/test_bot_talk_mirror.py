@@ -38,7 +38,7 @@ import bot_talk_mirror as btm
 class TestBuildHttpPayload:
     def test_required_fields_present(self):
         payload = btm._build_http_payload("hello", "status-update", "OUTBOUND", "SaharLobster", "AlbertLobster")
-        assert payload["sender"] == btm.BOT_TALK_SENDER
+        assert payload["sender"] == btm.LOBSTER_NAME
         assert payload["tier"] == btm.BOT_TALK_TIER
         assert payload["genre"] == "status-update"
         assert payload["content"] == "hello"
@@ -287,7 +287,7 @@ class TestWriteLocalLog:
         lines = log_file.read_text().strip().splitlines()
         assert len(lines) == 1
         entry = json.loads(lines[0])
-        assert entry["sender"] == btm.BOT_TALK_SENDER
+        assert entry["sender"] == btm.LOBSTER_NAME
         assert entry["genre"] == "status-update"
         assert "test content" in entry["content"]
         assert entry["mirror_failed_reason"] == "http_and_ssh_both_failed"
@@ -481,7 +481,7 @@ class TestMirrorOutbound:
         call_data = spawned[0]
         assert call_data["direction"] == "OUTBOUND"
         assert call_data["to"] == "AlbertLobster"
-        assert call_data["from"] == btm.BOT_TALK_SENDER
+        assert call_data["from"] == btm.LOBSTER_NAME
         assert call_data["content"] == "hello world"
         assert call_data["genre"] == "status-update"
 
@@ -516,7 +516,7 @@ class TestLogInboundCrossLobster:
         call_data = spawned[0]
         assert call_data["direction"] == "INBOUND"
         assert call_data["from"] == "AlbertLobster"
-        assert call_data["to"] == btm.BOT_TALK_SENDER
+        assert call_data["to"] == btm.LOBSTER_NAME
         assert call_data["content"] == "hello from Albert"
 
     def test_routes_to_inbox(self):
