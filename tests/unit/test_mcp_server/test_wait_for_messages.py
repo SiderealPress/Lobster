@@ -176,21 +176,15 @@ class TestSubagentNotificationWakesWFM:
         """Get inbox directory."""
         return temp_messages_dir / "inbox"
 
-    def test_fallback_poll_detects_subagent_notification_when_watcher_missed(
+    def test_precheck_detects_existing_inbox_files_before_wait(
         self, inbox_dir: Path
     ):
-        """WFM must detect a subagent_notification via the fallback inbox poll.
+        """WFM returns immediately when a subagent_notification is already in the inbox.
 
-        This test bypasses the file watcher by writing the message AFTER the
-        observer is started but preventing on_moved from firing (simulated by
-        writing the file directly, not via rename) — then verifies that the
-        heartbeat-loop poll detects it within a short window.
-
-        The key invariant: subagent_notification files written to INBOX_DIR
-        must wake WFM within heartbeat_interval seconds at most.
+        Validates the pre-check path: after the observer starts but before blocking,
+        WFM scans for existing files. Messages already present are detected without
+        waiting for any heartbeat interval or inotify event.
         """
-        import threading
-
         # Write a subagent_notification BEFORE WFM starts so the pre-check
         # picks it up immediately.  This validates that the pre-check path works.
         notification = {
@@ -214,7 +208,12 @@ class TestSubagentNotificationWakesWFM:
         ):
             from src.mcp.inbox_server import handle_wait_for_messages
 
-            result = asyncio.run(handle_wait_for_messages({"timeout": 2}))
+            start = time.time()
+            result = asyncio.run(handle_wait_for_messages({"timeout": 10}))
+            elapsed = time.time() - start
+
+            # Pre-check should return immediately (< 1 second)
+            assert elapsed < 1.0, f"Expected immediate return from pre-check, took {elapsed:.2f}s"
             text = result[0].text
             assert "subagent_notification" in text.lower() or "SUBAGENT NOTIFICATION" in text
 
@@ -225,31 +224,26 @@ class TestSubagentNotificationWakesWFM:
 
         Simulates the case where a subagent calls write_result(sent_reply_to_user=True)
         while the dispatcher is blocked in wait_for_messages.  Even if the file
-        watcher misses the inotify event, the fallback poll must detect the file.
+        watcher misses the inotify event, the fallback poll must detect the file
+        within WAIT_HEARTBEAT_INTERVAL seconds.
+
+        WAIT_HEARTBEAT_INTERVAL is patched to 1s so the fallback poll fires within
+        ~1.2s of the file being written — well before the 8s join timeout.
         """
         import threading
 
         results = []
         errors = []
 
-        # Use a short heartbeat to make the test fast
         def wait_thread():
             try:
                 with patch.multiple(
                     "src.mcp.inbox_server",
                     INBOX_DIR=inbox_dir,
+                    WAIT_HEARTBEAT_INTERVAL=1,  # Patch heartbeat to 1s so fallback fires quickly
                 ):
-                    # Patch heartbeat_interval to 1s so the fallback poll fires quickly.
-                    import src.mcp.inbox_server as _srv
-                    orig_handle = _srv.handle_wait_for_messages
-
-                    async def _fast_wfm(args):
-                        # Override timeout to 5s and rely on fallback poll
-                        args = dict(args)
-                        args["timeout"] = 5
-                        return await orig_handle(args)
-
-                    result = asyncio.run(_fast_wfm({"timeout": 5}))
+                    from src.mcp.inbox_server import handle_wait_for_messages
+                    result = asyncio.run(handle_wait_for_messages({"timeout": 5}))
                     results.append(result)
             except Exception as e:
                 errors.append(e)
@@ -274,6 +268,8 @@ class TestSubagentNotificationWakesWFM:
         notification_file = inbox_dir / f"{notification['id']}.json"
         notification_file.write_text(json.dumps(notification))
 
+        # With WAIT_HEARTBEAT_INTERVAL=1s and message written at 0.2s, the fallback
+        # poll should fire within ~1.2s — well before the 8s join timeout.
         thread.join(timeout=8)
 
         if errors:
