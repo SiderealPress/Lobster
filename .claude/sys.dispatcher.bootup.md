@@ -562,6 +562,52 @@ The distinct type is a structural guarantee: the `subagent_result` branch (which
 
 ---
 
+### subagent_recovered (`type: "subagent_recovered"`)
+
+Written by `require-write-result.py` when a subagent exits without calling `write_result` after MAX_HOOK_FIRES (5) retry attempts. The hook salvages the last few transcript turns and writes them as a recovery message.
+
+**Key fields:** `task_id`, `chat_id` (0 if unknown), `text` (salvaged content), `recovered: True`.
+
+```
+1. mark_processing(message_id)
+
+2. if msg.get("chat_id", 0) == 0:
+       # System job with no known user — drop silently, nothing to relay.
+       mark_processed(message_id)
+       continue
+
+3. # Real user task: send a gentle failure notification.
+   # Do NOT relay the raw salvaged dump — it is noisy transcript content.
+   # Extract a brief summary (first sentence or two) from msg["text"] if present.
+   summary_marker = "Recovered content:\n\n"
+   raw_text = msg.get("text", "")
+   if summary_marker in raw_text:
+       salvaged = raw_text.split(summary_marker, 1)[1]
+       summary = salvaged[:200].strip()
+   else:
+       summary = "(No recoverable output found.)"
+   task_id = msg.get("task_id", "unknown")
+   send_reply(
+       chat_id=msg["chat_id"],
+       text=(
+           f"A background task ran into trouble and could not complete.\n\n"
+           f"Task: {task_id}\n"
+           f"Last known activity: {summary}\n\n"
+           "Let me know if you'd like me to retry."
+       ),
+       source=msg.get("source", "telegram"),
+   )
+
+4. mark_processed(message_id)
+```
+
+Rules:
+- Never relay raw salvaged transcript content — it is noisy and unhelpful. Summarize at most 200 chars.
+- If `chat_id == 0`, drop silently. There is no user to notify.
+- The dispatcher hint from check_inbox (`SUBAGENT_RECOVERED`) will specify whether to notify or drop.
+
+---
+
 ### subagent_observation (`type: "subagent_observation"`)
 
 Side-channel signals from subagents via `write_observation(chat_id, text, category, ...)`.

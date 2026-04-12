@@ -4278,7 +4278,18 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
         if msg_type == "subagent_notification":
             output += "dispatcher_hint: SUBAGENT_NOTIFICATION — user already received the subagent's reply. Don't summarize it. If you respond, add new value only — a question, a correction, missing context. Call mark_processed when done.\n"
         if msg_type == "subagent_recovered":
-            output += "dispatcher_hint: SUBAGENT_RECOVERED — agent exited without calling write_result; content was salvaged from transcript. The owner has been notified via inbox. Do NOT relay the raw dump to the user. Call mark_processed when done.\n"
+            _recovered_chat_id = msg.get("chat_id", 0)
+            if _recovered_chat_id and _recovered_chat_id != 0:
+                output += (
+                    "dispatcher_hint: SUBAGENT_RECOVERED — agent exited without calling write_result. "
+                    f"The originating user (chat_id={_recovered_chat_id}) has NOT been notified. "
+                    "Send them a brief, gentle message: "
+                    '"A background task ran into trouble and could not complete. Here\'s what it found: [brief summary from text]. '
+                    'Let me know if you\'d like me to retry." '
+                    "Do NOT relay the raw salvaged dump. call mark_processed when done.\n"
+                )
+            else:
+                output += "dispatcher_hint: SUBAGENT_RECOVERED — agent exited without calling write_result; content was salvaged from transcript. chat_id=0 means no known user — drop silently. Call mark_processed when done.\n"
         _has_file = msg_type in ("voice", "photo", "document") or bool(
             msg.get("image_file") or msg.get("image_files") or
             msg.get("file_path") or msg.get("audio_file")
