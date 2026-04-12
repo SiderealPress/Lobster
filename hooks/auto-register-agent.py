@@ -120,8 +120,47 @@ def _extract_task_id_from_text(prompt: str) -> str | None:
     return match.group(1) if match else None
 
 
+def _build_description(task_id: str | None, prompt: str) -> str:
+    """Build a human-readable description for this agent session.
+
+    Priority:
+    1. If task_id is present, use it as the base (e.g. "my-task-id").
+    2. Append a brief excerpt from the first non-empty, non-frontmatter line of
+       the prompt so the dispatcher can tell what the agent was asked to do.
+    3. Fall back to a generic label only when there is truly nothing useful.
+
+    The result is capped at 120 characters.
+    """
+    # Skip past YAML frontmatter block (--- ... ---) to find the first real line
+    body = prompt.lstrip()
+    if body.startswith("---"):
+        rest = body[3:]
+        end = rest.find("\n---")
+        if end != -1:
+            body = rest[end + 4:].lstrip()  # text after closing ---
+
+    # Grab the first non-empty line as the task excerpt
+    first_line = ""
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped:
+            first_line = stripped
+            break
+
+    if task_id and first_line:
+        desc = f"{task_id}: {first_line}"
+    elif task_id:
+        desc = task_id
+    elif first_line:
+        desc = first_line
+    else:
+        desc = "subagent (no description)"
+
+    return desc[:120]
+
+
 def extract_metadata(prompt: str) -> dict:
-    """Return a dict with task_id, chat_id, source, reply_to_message_id from prompt.
+    """Return a dict with task_id, chat_id, source, reply_to_message_id, description from prompt.
 
     Tries YAML frontmatter first. Falls back to text parsing for task_id.
     All values are strings (or None if absent).
@@ -132,6 +171,7 @@ def extract_metadata(prompt: str) -> dict:
     chat_id = fm.get("chat_id")
     source = fm.get("source", "telegram")
     reply_to_message_id = fm.get("reply_to_message_id")
+    description = _build_description(task_id, prompt)
 
     return {
         "task_id": task_id,
@@ -140,6 +180,7 @@ def extract_metadata(prompt: str) -> dict:
         "reply_to_message_id": (
             str(reply_to_message_id) if reply_to_message_id is not None else None
         ),
+        "description": description,
     }
 
 
@@ -197,6 +238,7 @@ def insert_agent_session(
     session_id: str,
     output_file: str | None,
     input_summary: str | None,
+    description: str,
 ) -> None:
     """Insert a 'running' row into agent_sessions.db.
 
@@ -246,12 +288,13 @@ def insert_agent_session(
                 (id, task_id, agent_type, description, chat_id, source,
                  status, output_file, input_summary, spawned_at)
             VALUES
-                (?, ?, 'subagent', 'auto-registered by PostToolUse hook', ?, ?,
+                (?, ?, 'subagent', ?, ?, ?,
                  'running', ?, ?, ?)
             """,
             (
                 agent_id,
                 task_id,
+                description,
                 chat_id if chat_id is not None else "0",
                 source,
                 output_file,
@@ -306,6 +349,7 @@ def main() -> None:
             session_id=session_id,
             output_file=output_file,
             input_summary=input_summary,
+            description=metadata["description"],
         )
 
     except Exception as exc:  # noqa: BLE001
