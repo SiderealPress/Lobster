@@ -25,16 +25,19 @@ Detection is performed by is_dispatcher_session(), which uses a layered strategy
    filesystem I/O required.  This is the primary check for the common case.
    See issue #1152.
 
-1. MCP state file: The running MCP server writes the dispatcher session ID to
-   ~/lobster-workspace/data/dispatcher-session-id.  NOTE: this file stores an
-   HTTP MCP session ID, not a CC UUID; it will never match the hook session_id
-   field in practice (namespace mismatch — see issue #1151).  Retained for
-   belt-and-suspenders; effectively a no-op in hook context.
+1. MCP Claude UUID state file (primary): The MCP server writes the dispatcher
+   Claude session UUID to ~/lobster-workspace/data/dispatcher-claude-session-id
+   when session_start(agent_type='dispatcher', claude_session_id=<uuid>) is
+   called.  This CC UUID matches hook_input["session_id"] directly.
+   Match → dispatcher.  Mismatch → subagent.  File absent → try next.
+   NOTE: The HTTP session state file (dispatcher-session-id) is NOT checked
+   here — it stores an MCP HTTP transport ID (32-char hex) which never matches
+   the CC UUID in hook_input["session_id"] (see issue #1151).
 
 2. Hook marker file (secondary): At dispatcher startup, write-dispatcher-session-id.py
    (a SessionStart hook) writes the session ID to
-   ~/messages/config/dispatcher-session-id.  This is the real primary
-   state-file signal for hooks (CC UUID on both sides).  Match → dispatcher.
+   ~/messages/config/dispatcher-session-id.  This is a CC UUID fallback for
+   the window before session_start is called.  Match → dispatcher.
 
 3. Process-tree fallback: If neither state file is present or gives a definitive
    answer, walk the process tree upward.  Two consecutive claude-like ancestors
@@ -218,22 +221,30 @@ def is_dispatcher_session(hook_input: dict) -> bool:
     removed in PR #1102 because JSONL transcript scanning was fragile and is
     now superseded by the MCP state file written by the running server.
     """
-    # Primary: MCP state file + hook marker file (via session_role).
-    # is_dispatcher() checks both files and returns False if neither is present
-    # or matches.  We need to distinguish "definitely subagent" (file exists,
-    # mismatch) from "no signal" (file absent) to know when to apply the
-    # process-tree fallback.  Probe both files directly.
+    # Primary: MCP Claude UUID state file + hook marker file (via session_role).
+    # We need to distinguish "definitely subagent" (file exists, mismatch) from
+    # "no signal" (file absent) to know when to apply the process-tree fallback.
+    # Probe both files directly.
+    #
+    # NOTE: We use _get_mcp_claude_session_file() (dispatcher-claude-session-id),
+    # NOT _get_mcp_session_state_file() (dispatcher-session-id).  The latter stores
+    # the HTTP MCP transport session ID (32-char hex), while hook_input["session_id"]
+    # is always a Claude Code UUID (36-char UUID4).  These namespaces never match, so
+    # using the HTTP session file would cause _check_state_file() to always return
+    # False when the file exists — short-circuiting before the hook marker file check
+    # and incorrectly treating the dispatcher as a subagent.  See issue #1151.
     from session_role import (
         _check_state_file,
-        _get_mcp_session_state_file,
+        _get_mcp_claude_session_file,
         get_session_id,
         DISPATCHER_SESSION_FILE,
     )
 
     session_id = get_session_id(hook_input)
 
-    # Check MCP state file first (written by the running MCP server).
-    mcp_result = _check_state_file(_get_mcp_session_state_file(), session_id)
+    # Check MCP Claude UUID state file first (written by MCP server on session_start).
+    # This file stores the same Claude UUID format as hook_input["session_id"].
+    mcp_result = _check_state_file(_get_mcp_claude_session_file(), session_id)
     if mcp_result is not None:
         return mcp_result
 

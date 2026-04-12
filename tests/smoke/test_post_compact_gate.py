@@ -76,20 +76,28 @@ def _run_gate(
     *,
     main_session: bool = True,
     agent_id: str | None = None,
+    session_id: str | None = None,
+    workspace: Path | None = None,
 ) -> subprocess.CompletedProcess:
     """Run the gate hook with the given tool call payload piped to stdin.
 
     HOME is overridden to home so the sentinel and log paths are isolated.
     agent_id, when provided, simulates a subagent PreToolUse payload.
+    session_id, when provided, is included in the hook payload.
+    workspace, when provided, overrides LOBSTER_WORKSPACE.
     """
     payload = {"tool_name": tool_name, "tool_input": tool_input or {}}
     if agent_id is not None:
         payload["agent_id"] = agent_id
+    if session_id is not None:
+        payload["session_id"] = session_id
     env = {
         **os.environ,
         "HOME": str(home),
         "LOBSTER_MAIN_SESSION": "1" if main_session else "0",
     }
+    if workspace is not None:
+        env["LOBSTER_WORKSPACE"] = str(workspace)
     return subprocess.run(
         [sys.executable, str(HOOK)],
         input=json.dumps(payload),
@@ -229,4 +237,62 @@ def test_subagent_passes_with_fresh_sentinel(tmp_path):
     assert result.returncode == 0, f"Hook exited non-zero: {result.stderr}"
     assert result.stdout.strip() == "", (
         f"Expected empty stdout (subagent fast-exit despite sentinel), got: {result.stdout!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# B6 — regression: HTTP session state file must not block gate for dispatcher
+# ---------------------------------------------------------------------------
+
+
+def test_dispatcher_not_blocked_by_http_session_state_file(tmp_path):
+    """B6 (Regression #1151): HTTP session state file must not cause dispatcher
+    to be misidentified as subagent.
+
+    Before fix: is_dispatcher_session() checked dispatcher-session-id (HTTP session
+    ID, 32-char hex) against hook_input["session_id"] (Claude UUID, 36-char UUID4).
+    These are different namespaces; _check_state_file() returned False (mismatch)
+    when the HTTP session file existed, causing the gate to pass the dispatcher as
+    if it were a subagent — bypassing the compact-pending sentinel enforcement.
+
+    After fix: is_dispatcher_session() uses dispatcher-claude-session-id (Claude UUID)
+    as the primary check, which matches the hook_input["session_id"] format correctly.
+    """
+    dispatcher_uuid = "b5b15385-5d9c-4755-8d7a-c5cfe3457b12"
+    http_session_id = "8221b9189a0a40f99a81d72bac452e5a"  # different format, never matches
+
+    # Set up workspace with BOTH state files (the HTTP one and the correct UUID one).
+    workspace = tmp_path / "lobster-workspace"
+    data_dir = workspace / "data"
+    data_dir.mkdir(parents=True)
+
+    # Write the HTTP session ID file (wrong namespace — should be ignored).
+    (data_dir / "dispatcher-session-id").write_text(http_session_id)
+    # Write the correct Claude UUID file (right namespace — should match).
+    (data_dir / "dispatcher-claude-session-id").write_text(dispatcher_uuid)
+
+    # Create a fresh sentinel so the gate would block if it detects dispatcher.
+    _make_sentinel(tmp_path)
+
+    # Run gate as the dispatcher (matching session_id = dispatcher UUID).
+    result = _run_gate(
+        tmp_path,
+        tool_name="some_other_tool",
+        session_id=dispatcher_uuid,
+        workspace=workspace,
+    )
+
+    assert result.returncode == 0, f"Hook exited non-zero: {result.stderr}"
+    output_text = result.stdout.strip()
+    assert output_text, (
+        "Expected gate to DENY (dispatcher with fresh sentinel should be blocked), "
+        f"but got empty output.\nstderr: {result.stderr!r}\n"
+        "This indicates the gate treated the dispatcher as a subagent due to the "
+        "HTTP session state file namespace mismatch (regression #1151)."
+    )
+    output = json.loads(output_text)
+    decision = output.get("hookSpecificOutput", {}).get("permissionDecision", "")
+    assert decision == "deny", (
+        f"Expected gate to deny dispatcher, got: {decision!r}\n"
+        "The HTTP session state file caused dispatcher to be misidentified as subagent."
     )
