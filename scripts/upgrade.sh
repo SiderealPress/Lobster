@@ -2442,6 +2442,24 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
         substep "wfm-watchdog.sh cron entry already present — skipping"
     fi
 
+    # Migration 70: Enable and start lobster-transcription.service.
+    # The service was installed by install.sh but was not enabled, so voice messages
+    # accumulated in ~/messages/pending-transcription/ and were never processed.
+    # See issue #1470.
+    if systemctl list-unit-files lobster-transcription.service >/dev/null 2>&1; then
+        if ! systemctl is-enabled --quiet lobster-transcription 2>/dev/null; then
+            substep "Enabling and starting lobster-transcription.service..."
+            sudo systemctl enable lobster-transcription 2>/dev/null || true
+            sudo systemctl start lobster-transcription 2>/dev/null || true
+            substep "lobster-transcription.service enabled and started"
+            migrated=$((migrated + 1))
+        else
+            substep "lobster-transcription.service already enabled — skipping"
+        fi
+    else
+        substep "lobster-transcription.service not installed — skipping"
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
