@@ -153,11 +153,19 @@ class TestNoShouldDropFieldInMessages:
         msg = build_reconciler_message(_REAL_SUBAGENT_SESSION, "completed", NOW)
         assert "should_drop" not in msg
 
-    def test_dead_message_still_has_original_chat_id(self, build_reconciler_message):
-        """original_chat_id is still present so dispatcher can decide action."""
+    def test_dead_message_has_original_chat_in_chat_id(self, build_reconciler_message):
+        """chat_id carries the original session chat so dispatcher can decide action.
+
+        Since issue #1422, dead agent_failed messages no longer use chat_id=0 as
+        a sentinel. Instead, chat_id preserves the original session chat_id, and
+        task_origin='internal' is the canonical signal that this is a system event.
+        The deprecated original_chat_id field has been removed.
+        """
         msg = build_reconciler_message(_REAL_SUBAGENT_SESSION, "dead", NOW)
-        assert "original_chat_id" in msg
-        assert msg["original_chat_id"] == _REAL_SUBAGENT_SESSION["chat_id"]
+        # chat_id must carry the original session chat (not 0)
+        assert msg["chat_id"] == _REAL_SUBAGENT_SESSION["chat_id"]
+        # task_origin signals this is an internal system event
+        assert msg.get("task_origin") == "internal"
 
 
 # ---------------------------------------------------------------------------
