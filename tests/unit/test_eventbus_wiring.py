@@ -1,5 +1,5 @@
 """
-Unit tests for EventBus wiring of remaining event sources (issue #1352).
+Unit tests for EventBus wiring of remaining event sources (issues #1352, #1459).
 
 Verifies that the four event sources emit correctly-typed events to the bus:
 - telegram.inbound  — emitted in handle_mark_processing when a human message is claimed
@@ -14,6 +14,10 @@ Each test follows the same pattern as test_emit_event.py:
 - Assert the event fields match what the spec requires
 
 Tests are named after behavior, not mechanism.
+
+Issue #1459 added _emit_mcp_event() to centralize the 5 per-handler try/except
+emit blocks into a single helper. The handler-level tests below remain the
+behavioral contract; TestEmitMcpEventHelper covers the helper's own contract.
 """
 
 from __future__ import annotations
@@ -425,3 +429,76 @@ class TestJobCompletedEvent:
         ev = _events_of_type(listener, "job.completed")[0]
         assert ev.payload.get("status") == "failed"
         assert ev.severity == "warn"
+
+
+# ---------------------------------------------------------------------------
+# _emit_mcp_event helper — centralized emission contract (issue #1459)
+# ---------------------------------------------------------------------------
+
+class TestEmitMcpEventHelper:
+    """_emit_mcp_event is a no-op when bus unavailable and swallows exceptions."""
+
+    def test_no_emission_when_event_bus_unavailable(self):
+        """When _EVENT_BUS_AVAILABLE is False, _emit_mcp_event does nothing."""
+        bus, listener = _make_bus_with_listener()
+        import inbox_server
+        with patch.object(inbox_server, "_EVENT_BUS_AVAILABLE", False), \
+             patch("inbox_server.get_event_bus", return_value=bus):
+            inbox_server._emit_mcp_event(
+                "inbox.processed",
+                {"message_id": "test-msg"},
+            )
+        assert len(listener.received) == 0
+
+    def test_emission_reaches_bus_when_available(self):
+        """When _EVENT_BUS_AVAILABLE is True, _emit_mcp_event delivers the event."""
+        bus, listener = _make_bus_with_listener()
+        import inbox_server
+        with patch.object(inbox_server, "_EVENT_BUS_AVAILABLE", True), \
+             patch("inbox_server.get_event_bus", return_value=bus):
+            inbox_server._emit_mcp_event(
+                "inbox.processed",
+                {"message_id": "test-msg"},
+            )
+        events = _events_of_type(listener, "inbox.processed")
+        assert len(events) == 1
+        assert events[0].payload["message_id"] == "test-msg"
+        assert events[0].source == "inbox-server"
+
+    def test_exception_in_bus_is_swallowed(self):
+        """A broken bus does not propagate exceptions through _emit_mcp_event."""
+        broken_bus = MagicMock()
+        broken_bus.emit_sync.side_effect = RuntimeError("bus exploded")
+        import inbox_server
+        with patch.object(inbox_server, "_EVENT_BUS_AVAILABLE", True), \
+             patch("inbox_server.get_event_bus", return_value=broken_bus):
+            # Must not raise
+            inbox_server._emit_mcp_event("inbox.processed", {"message_id": "x"})
+
+    def test_severity_forwarded_to_event(self):
+        """severity parameter is passed through to the emitted event."""
+        bus, listener = _make_bus_with_listener()
+        import inbox_server
+        with patch.object(inbox_server, "_EVENT_BUS_AVAILABLE", True), \
+             patch("inbox_server.get_event_bus", return_value=bus):
+            inbox_server._emit_mcp_event(
+                "inbox.failed",
+                {"message_id": "bad-msg", "error": "oops", "permanent": True},
+                severity="warn",
+            )
+        ev = _events_of_type(listener, "inbox.failed")[0]
+        assert ev.severity == "warn"
+
+    def test_chat_id_forwarded_to_event(self):
+        """chat_id parameter is passed through to the emitted event."""
+        bus, listener = _make_bus_with_listener()
+        import inbox_server
+        with patch.object(inbox_server, "_EVENT_BUS_AVAILABLE", True), \
+             patch("inbox_server.get_event_bus", return_value=bus):
+            inbox_server._emit_mcp_event(
+                "telegram.outbound",
+                {"source": "telegram", "chat_id": 1234, "text_len": 10},
+                chat_id=1234,
+            )
+        ev = _events_of_type(listener, "telegram.outbound")[0]
+        assert ev.chat_id == 1234
