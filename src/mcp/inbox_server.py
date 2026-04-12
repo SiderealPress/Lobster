@@ -694,6 +694,10 @@ def normalize_message_type(msg: dict) -> dict:
 # Heartbeat file for health monitoring
 HEARTBEAT_FILE = _WORKSPACE / "logs" / "claude-heartbeat"
 
+# How often (in seconds) wait_for_messages performs a fallback inbox poll.
+# Exposed as a module-level constant so tests can monkeypatch it.
+WAIT_HEARTBEAT_INTERVAL = 60
+
 # Hibernation state file - tracks whether Lobster is active or hibernating
 LOBSTER_STATE_FILE = CONFIG_DIR / "lobster-state.json"
 
@@ -3778,8 +3782,8 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
             touch_heartbeat()
             inbox_results = await handle_check_inbox({"limit": 10})
             return _prepend_sessions_prefix(sessions_prefix, inbox_results)
-        # Wait with periodic heartbeats (every 60 seconds)
-        heartbeat_interval = 60
+        # Wait with periodic heartbeats (every WAIT_HEARTBEAT_INTERVAL seconds)
+        heartbeat_interval = WAIT_HEARTBEAT_INTERVAL
         elapsed = 0
 
         while elapsed < timeout:
