@@ -376,6 +376,7 @@ def _write_synthetic_inbox_message(
     data: dict,
     content: str,
     task_id_hint: str,
+    chat_id: int = 0,
 ) -> None:
     """Write a synthetic subagent_result message to ~/messages/inbox/.
 
@@ -399,10 +400,8 @@ def _write_synthetic_inbox_message(
         safe_task_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in task_id)[:40]
         message_id = f"{ts_ms}_{safe_task_id}_recovered"
 
-        # chat_id: we don't know the original chat_id when the agent didn't call
-        # write_result. Use 0 as the dispatcher system route so the dispatcher
-        # can decide what to do with the recovered result.
-        chat_id = 0
+        # chat_id: use the recovered value from the transcript header if available,
+        # otherwise fall back to 0 (the dispatcher system route for background agents).
 
         recovery_note = (
             "Agent exited without calling write_result. "
@@ -555,19 +554,32 @@ def main():
     if fire_count > MAX_HOOK_FIRES:
         # Give up blocking — extract the best pre-hook content and emit a
         # synthetic subagent_result so the dispatcher gets something.
+        import re
         task_id_hint = ""
-        # Try to extract a task_id hint from the prompt text in the transcript.
-        # A common pattern is "Your task_id is: <id>" injected by the dispatcher.
+        recovered_chat_id = 0
+        # Try to extract task_id and chat_id hints from the prompt text.
+        # The dispatcher injects a header block into every subagent prompt:
+        #   ---
+        #   task_id: <task-id>
+        #   chat_id: <chat-id>
+        #   source: telegram
+        #   ---
         for part in text_content_parts:
-            if "task_id" in part.lower():
-                import re
+            if not task_id_hint and "task_id" in part.lower():
                 m = re.search(r"task[_\s-]?id\s*(?:is\s*)?[:\-]?\s*([A-Za-z0-9_-]+)", part, re.IGNORECASE)
                 if m:
                     task_id_hint = m.group(1)
-                    break
+            if not recovered_chat_id and "chat_id" in part.lower():
+                m = re.search(r"chat[_\s-]?id\s*[:\-]\s*(\d+)", part, re.IGNORECASE)
+                if m:
+                    candidate = int(m.group(1))
+                    if candidate != 0:
+                        recovered_chat_id = candidate
+            if task_id_hint and recovered_chat_id:
+                break
 
         content = _extract_pre_hook_text(transcript, first_fire_ts, _FALLBACK_TURNS)
-        _write_synthetic_inbox_message(data, content, task_id_hint)
+        _write_synthetic_inbox_message(data, content, task_id_hint, chat_id=recovered_chat_id)
 
         # Clean up the fire-count temp file.
         key = _agent_key(data)

@@ -723,3 +723,89 @@ class TestFallbackAfterNFires:
 
         assert "early" in result
         assert "late" not in result
+
+    def test_fallback_extracts_chat_id_from_prompt_header(self, monkeypatch, tmp_path):
+        """Fallback must extract chat_id from the dispatcher-injected header block."""
+        mod = _load_hook(monkeypatch, tmp_path)
+
+        # Transcript includes the dispatcher header with a real chat_id.
+        prompt_with_header = (
+            "---\n"
+            "task_id: my-task-123\n"
+            "chat_id: 987654321\n"
+            "source: telegram\n"
+            "---\n\n"
+            "Do the task and call write_result."
+        )
+        transcript = [
+            {
+                "type": "human",
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "text", "text": prompt_with_header}],
+                },
+                "uuid": "uuid-prompt",
+                "sessionId": "test-session",
+            }
+        ]
+        transcript_file = tmp_path / "agent.jsonl"
+        _write_jsonl_transcript(transcript_file, transcript)
+
+        hook_input = _make_subagentstop_hook_input_with_agent_id(
+            str(transcript_file),
+            agent_id="test-agent-chatid",
+        )
+
+        fire_path = tmp_path / "lobster-hook-fires-test-agent-chatid"
+        monkeypatch.setattr(mod, "_fire_count_path", lambda key: fire_path)
+
+        inbox_dir = tmp_path / "messages" / "inbox"
+        inbox_dir.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        for _ in range(mod.MAX_HOOK_FIRES):
+            _run_hook(mod, hook_input)
+
+        _run_hook(mod, hook_input)  # fallback fire
+
+        inbox_files = list(inbox_dir.glob("*.json"))
+        assert len(inbox_files) == 1, f"Expected 1 inbox file, got {len(inbox_files)}"
+
+        msg = json.loads(inbox_files[0].read_text())
+        assert msg["type"] == "subagent_recovered"
+        assert msg["chat_id"] == 987654321, (
+            f"Expected recovered chat_id=987654321, got {msg['chat_id']}"
+        )
+
+    def test_fallback_chat_id_defaults_to_zero_when_not_found(self, monkeypatch, tmp_path):
+        """Fallback must default chat_id to 0 when no header is present."""
+        mod = _load_hook(monkeypatch, tmp_path)
+
+        transcript_file = tmp_path / "agent.jsonl"
+        _write_jsonl_transcript(
+            transcript_file,
+            _make_transcript_with_text_turns(["I did some work"]),
+        )
+
+        hook_input = _make_subagentstop_hook_input_with_agent_id(
+            str(transcript_file),
+            agent_id="test-agent-no-chatid",
+        )
+
+        fire_path = tmp_path / "lobster-hook-fires-test-agent-no-chatid"
+        monkeypatch.setattr(mod, "_fire_count_path", lambda key: fire_path)
+
+        inbox_dir = tmp_path / "messages" / "inbox"
+        inbox_dir.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        for _ in range(mod.MAX_HOOK_FIRES):
+            _run_hook(mod, hook_input)
+
+        _run_hook(mod, hook_input)  # fallback fire
+
+        inbox_files = list(inbox_dir.glob("*.json"))
+        assert len(inbox_files) == 1
+
+        msg = json.loads(inbox_files[0].read_text())
+        assert msg["chat_id"] == 0, f"Expected chat_id=0 (fallback), got {msg['chat_id']}"
