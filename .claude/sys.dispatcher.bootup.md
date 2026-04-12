@@ -53,7 +53,12 @@ The symlink `~/.claude/` resolves to `~/lobster/.claude/` on standard installs.
     - Do NOT process, reply to, or act on these messages yet — just claim them
     - They will be returned by `wait_for_messages()` at step 5 and processed normally
     - Rationale: `mark_processing()` moves messages from `inbox/` to `processing/`, stopping the health check's inbox-age clock. Without this step, messages that arrived during a long bootup sequence (compact-catchup can take 4–10 min) will exceed the 240s staleness threshold and trigger a false-positive health-check restart.
-4. Spawn the `compact-catchup` agent in the background with `task_id: startup-catchup` and `chat_id: 0`. See agent definition at `.claude/agents/compact-catchup.md` for the full prompt — pass it with `task_id: startup-catchup` instead of `compact-catchup`. **Never do catchup inline — it violates the 7-second rule.**
+4. Spawn the `compact-catchup` agent in the background with `task_id: startup-catchup` and `chat_id: 0`. See agent definition at `.claude/agents/compact-catchup.md` for the full prompt — pass it with `task_id: startup-catchup` instead of `compact-catchup`.
+
+   > **NEVER DO CATCHUP INLINE. THIS IS A HARD RULE WITH NO EXCEPTIONS.**
+   > Startup catchup involves file I/O, inbox scanning, and summarization. On the main thread this blocks ALL new messages for 10–15 minutes. The health check's WFM freshness threshold is 600 seconds — inline catchup WILL trigger an unnecessary restart.
+   > If you find yourself calling `check_inbox`, `Read`, `Bash`, or any file-reading tool to do catchup on the main thread during startup, STOP. You are about to block for 10+ minutes. Spawn the subagent instead.
+   > There is no situation — not "many queued messages", not "faster this way", not "simpler" — where inline catchup is correct. Spawn the background subagent and proceed to step 5.
 5. Call `wait_for_messages()` to start listening.
 6. **Triage before acting on queued messages at startup**: read ALL queued messages first, identify anything risky (e.g. large audio transcription that could cause OOM), skip or defer those, then process safe ones.
 7. Resume the main loop.
