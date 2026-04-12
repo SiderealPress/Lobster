@@ -24,6 +24,17 @@ Do NOT add per-test mocks for:
     SCHEDULED_TASKS_LOGS_DIR, LOG_DIR
 
 These are all redirected automatically.
+
+Bot-talk mirror isolation
+--------------------------
+The ``isolate_bot_talk_mirror`` fixture (autouse=True) prevents tests from
+posting real HTTP messages to the bot-talk network. It patches
+``bot_talk_mirror.mirror_outbound`` and ``bot_talk_mirror._spawn_mirror``
+to no-ops for every test. This matches the approach described in issue #1341.
+
+Without this, tests that exercise ``handle_send_reply`` or ``handle_check_inbox``
+would fire real HTTP POSTs to ``BOT_TALK_HTTP_URL`` if it is configured in
+``~/messages/config/config.env``, polluting the shared bot-talk network.
 """
 
 import asyncio
@@ -59,6 +70,58 @@ from tests.fixtures.generators import (
     ScheduledJobGenerator,
     FixtureLoader,
 )
+
+
+# =============================================================================
+# Bot-talk Mirror Isolation (autouse — prevents network pollution in every test)
+# =============================================================================
+
+@pytest.fixture(autouse=True)
+def isolate_bot_talk_mirror():
+    """Prevent tests from posting real messages to the bot-talk network.
+
+    The bot_talk_mirror module is imported dynamically inside inbox_server.py
+    function bodies (``from bot_talk_mirror import mirror_outbound`` /
+    ``_spawn_mirror``).  Patching at the module level covers all code paths
+    regardless of where bot_talk_mirror is imported from.
+
+    This fixture is autouse so every test is protected without any explicit
+    decoration. Tests that intentionally want to verify bot-talk calls can
+    request the ``isolate_bot_talk_mirror`` fixture explicitly and inspect
+    the returned MagicMock objects:
+
+        def test_something(isolate_bot_talk_mirror):
+            mocks = isolate_bot_talk_mirror
+            # ... mocks["mirror_outbound"], mocks["_spawn_mirror"]
+
+    Issue: #1341 — 943 spurious bot-talk messages posted during test runs.
+    """
+    # Ensure bot_talk_mirror is importable before patching.
+    _MCP_DIR = str(SRC_DIR / "mcp")
+    if _MCP_DIR not in sys.path:
+        sys.path.insert(0, _MCP_DIR)
+
+    try:
+        import importlib
+        btm = importlib.import_module("bot_talk_mirror")
+    except Exception:
+        # If bot_talk_mirror is not importable (missing deps, etc.), yield
+        # without patching — the HTTP calls will fail silently anyway since
+        # the module can't be loaded.
+        yield {}
+        return
+
+    mock_mirror_outbound = MagicMock()
+    mock_spawn_mirror = MagicMock()
+
+    with (
+        patch.object(btm, "mirror_outbound", mock_mirror_outbound),
+        patch.object(btm, "_spawn_mirror", mock_spawn_mirror),
+    ):
+        yield {
+            "mirror_outbound": mock_mirror_outbound,
+            "_spawn_mirror": mock_spawn_mirror,
+        }
 
 
 # =============================================================================
