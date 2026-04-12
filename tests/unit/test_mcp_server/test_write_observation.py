@@ -387,23 +387,24 @@ class TestHandleWriteObservation:
         assert "Observation queued" in result[0].text
 
     def test_system_error_writes_inbox_and_mirrors_in_debug_mode(self, inbox_dir: Path):
-        """system_error observations write to inbox AND emit a debug mirror when LOBSTER_DEBUG=true."""
+        """system_error observations write to inbox AND emit an event via _emit_event."""
         emitted: list[dict] = []
 
         def fake_emit(
             text: str,
-            category: str = "system_context",
-            visibility: str = "mcp-only",
+            event_type: str = "debug.observation",
+            severity: str = "debug",
+            source: str = "inbox-server",
             emitter: str | None = None,
+            task_id: str | None = None,
+            chat_id=None,
         ) -> None:
-            emitted.append({"text": text, "category": category, "visibility": visibility, "emitter": emitter})
+            emitted.append({"text": text, "event_type": event_type, "severity": severity, "emitter": emitter})
 
         with patch.multiple(
             "src.mcp.inbox_server",
             INBOX_DIR=inbox_dir,
-            _DEBUG_MODE=True,
-            _DEBUG_RESOLVED=True,
-            _emit_debug_observation=fake_emit,
+            _emit_event=fake_emit,
         ):
             from src.mcp.inbox_server import handle_write_observation
             result = asyncio.run(handle_write_observation({
@@ -415,31 +416,32 @@ class TestHandleWriteObservation:
         # Inbox file written — dispatcher still sees it (additive, not bypass)
         files = list(inbox_dir.glob("*.json"))
         assert len(files) == 1
-        # Debug mirror also emitted directly to Telegram with mcp-only visibility
+        # Debug event also emitted via event bus
         assert len(emitted) == 1
-        assert emitted[0]["category"] == "system_error"
-        assert emitted[0]["visibility"] == "mcp-only"
+        assert emitted[0]["event_type"] == "agent.observation.system_error"
+        assert emitted[0]["severity"] == "error"
         assert "API call failed." in emitted[0]["text"]
         assert "Observation queued" in result[0].text
 
     def test_user_context_still_queues_inbox_in_debug_mode(self, inbox_dir: Path):
-        """user_context observations always write to inbox even when LOBSTER_DEBUG=true."""
+        """user_context observations always write to inbox and emit an event."""
         emitted: list[dict] = []
 
         def fake_emit(
             text: str,
-            category: str = "system_context",
-            visibility: str = "mcp-only",
+            event_type: str = "debug.observation",
+            severity: str = "debug",
+            source: str = "inbox-server",
             emitter: str | None = None,
+            task_id: str | None = None,
+            chat_id=None,
         ) -> None:
-            emitted.append({"text": text, "category": category, "visibility": visibility, "emitter": emitter})
+            emitted.append({"text": text, "event_type": event_type, "severity": severity, "emitter": emitter})
 
         with patch.multiple(
             "src.mcp.inbox_server",
             INBOX_DIR=inbox_dir,
-            _DEBUG_MODE=True,
-            _DEBUG_RESOLVED=True,
-            _emit_debug_observation=fake_emit,
+            _emit_event=fake_emit,
         ):
             from src.mcp.inbox_server import handle_write_observation
             result = asyncio.run(handle_write_observation({
@@ -451,10 +453,10 @@ class TestHandleWriteObservation:
         # Inbox file written (dispatcher needs to act on user_context)
         files = list(inbox_dir.glob("*.json"))
         assert len(files) == 1
-        # Also emitted directly so user sees it in debug mode
+        # Event also emitted via event bus for user_context
         assert len(emitted) == 1
-        assert emitted[0]["category"] == "user_context"
-        assert emitted[0]["visibility"] == "mcp-only"
+        assert emitted[0]["event_type"] == "agent.observation.user_context"
+        assert emitted[0]["severity"] == "info"
         assert "Observation queued" in result[0].text
 
     def test_system_context_goes_to_inbox_in_non_debug_mode(self, inbox_dir: Path):
@@ -491,27 +493,24 @@ class TestHandleWriteObservation:
         assert "Observation queued" in result[0].text
 
     def test_debug_mirror_includes_task_id_as_emitter(self, inbox_dir: Path):
-        """In debug mode, task_id is passed as the emitter to _emit_debug_observation.
-
-        Uses system_error category (forwarded in debug mode) to verify the emitter field.
-        system_context is suppressed and cannot be used to test the emitter path.
-        """
+        """task_id is passed as the emitter to _emit_event as 'task:<task_id>'."""
         emitted: list[dict] = []
 
         def fake_emit(
             text: str,
-            category: str = "system_context",
-            visibility: str = "mcp-only",
+            event_type: str = "debug.observation",
+            severity: str = "debug",
+            source: str = "inbox-server",
             emitter: str | None = None,
+            task_id: str | None = None,
+            chat_id=None,
         ) -> None:
-            emitted.append({"text": text, "category": category, "visibility": visibility, "emitter": emitter})
+            emitted.append({"text": text, "event_type": event_type, "emitter": emitter})
 
         with patch.multiple(
             "src.mcp.inbox_server",
             INBOX_DIR=inbox_dir,
-            _DEBUG_MODE=True,
-            _DEBUG_RESOLVED=True,
-            _emit_debug_observation=fake_emit,
+            _emit_event=fake_emit,
         ):
             from src.mcp.inbox_server import handle_write_observation
             asyncio.run(handle_write_observation({
@@ -523,26 +522,27 @@ class TestHandleWriteObservation:
 
         assert len(emitted) == 1
         assert emitted[0]["emitter"] == "task:task-42"
-        assert emitted[0]["visibility"] == "mcp-only"
+        assert emitted[0]["event_type"] == "agent.observation.system_error"
 
     def test_debug_bypass_includes_task_id_in_emitted_text(self, inbox_dir: Path):
-        """In debug mode, system_error emitter contains task_id prefix 'task:'."""
+        """The emitter passed to _emit_event contains the task_id prefix 'task:'."""
         emitted: list[dict] = []
 
         def fake_emit(
             text: str,
-            category: str = "system_context",
-            visibility: str = "mcp-only",
+            event_type: str = "debug.observation",
+            severity: str = "debug",
+            source: str = "inbox-server",
             emitter: str | None = None,
+            task_id: str | None = None,
+            chat_id=None,
         ) -> None:
             emitted.append({"text": text, "emitter": emitter})
 
         with patch.multiple(
             "src.mcp.inbox_server",
             INBOX_DIR=inbox_dir,
-            _DEBUG_MODE=True,
-            _DEBUG_RESOLVED=True,
-            _emit_debug_observation=fake_emit,
+            _emit_event=fake_emit,
         ):
             from src.mcp.inbox_server import handle_write_observation
             asyncio.run(handle_write_observation({
