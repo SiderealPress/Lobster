@@ -2448,12 +2448,46 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
     # are now duplicates of systemd timers or orphaned jobs that no longer fire on
     # systemd. Remove them so the crontab is clean.
     #
+    # SAFETY: Only remove a LOBSTER-SCHEDULED cron entry for a job if a corresponding
+    # lobster-managed systemd timer already exists for that job. Entries for jobs that
+    # have no systemd timer are left in place and a warning is printed. This prevents
+    # silent loss of the only trigger for a job.
+    #
     # NOTE: System-level cron entries (LOBSTER-HEALTH, LOBSTER-SELF-CHECK, etc.) are
     # intentionally preserved — only LOBSTER-SCHEDULED user-space job entries are removed.
     if crontab -l 2>/dev/null | grep -q '# LOBSTER-SCHEDULED'; then
-        { crontab -l 2>/dev/null | grep -v '# LOBSTER-SCHEDULED' || true; } | crontab -
-        substep "Removed stale LOBSTER-SCHEDULED crontab entries (superseded by systemd timers)"
-        migrated=$((migrated + 1))
+        _m70_safe_to_remove=""
+        _m70_skipped=""
+        while IFS= read -r _m70_line; do
+            # Extract the job name from lines like:
+            #   0 */6 * * * /path/dispatch-job.sh lobstertalk-ssh-watcher # LOBSTER-SCHEDULED
+            _m70_job=$(echo "$_m70_line" | grep -oP '(?<=dispatch-job\.sh )\S+' || true)
+            if [ -z "$_m70_job" ]; then
+                # Not a dispatch-job.sh line — skip it (don't remove)
+                _m70_skipped="${_m70_skipped}${_m70_line}\n"
+                continue
+            fi
+            _m70_timer="/etc/systemd/system/lobster-${_m70_job}.timer"
+            if [ -f "$_m70_timer" ] && grep -q '# LOBSTER-MANAGED' "$_m70_timer" 2>/dev/null; then
+                # Systemd timer exists and is lobster-managed — safe to remove cron entry
+                _m70_safe_to_remove="${_m70_safe_to_remove}${_m70_job} "
+            else
+                # No systemd timer — leave cron entry in place, warn operator
+                substep "WARNING: LOBSTER-SCHEDULED cron entry for '${_m70_job}' has no systemd timer — leaving in place"
+                substep "  To fix: create a systemd timer for '${_m70_job}' via create_scheduled_job MCP tool, then re-run upgrade.sh"
+                _m70_skipped="${_m70_skipped}${_m70_line}\n"
+            fi
+        done < <(crontab -l 2>/dev/null | grep '# LOBSTER-SCHEDULED')
+
+        if [ -n "$_m70_safe_to_remove" ]; then
+            # Build a pattern that matches only the job names we confirmed are timer-backed
+            _m70_pattern=$(echo "$_m70_safe_to_remove" | tr ' ' '\n' | grep -v '^$' | sed 's/.*/dispatch-job\\.sh &/' | paste -sd '|')
+            { crontab -l 2>/dev/null | grep -Ev "$_m70_pattern" || true; } | crontab -
+            substep "Removed LOBSTER-SCHEDULED cron entries for timer-backed jobs: ${_m70_safe_to_remove% }"
+            migrated=$((migrated + 1))
+        else
+            substep "No timer-backed LOBSTER-SCHEDULED cron entries to remove"
+        fi
     else
         substep "No LOBSTER-SCHEDULED crontab entries found — skipping"
     fi
