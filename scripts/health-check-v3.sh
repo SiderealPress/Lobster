@@ -293,15 +293,16 @@ get_black_set_ts() {
 }
 
 # If system has been in BLACK state longer than BLACK_RENOTIFY_SECONDS,
-# silently attempt a single restart (no Telegram alert). If the restart
-# succeeds the system will return to GREEN on the next health check and
-# clear_manual_intervention() will remove the BLACK flag automatically.
-# If the restart fails, re-set the BLACK flag and reset the 2-hour timer
-# so another attempt fires BLACK_RENOTIFY_SECONDS from now.
+# attempt a single restart. If the restart succeeds the system will return
+# to GREEN on the next health check and clear_manual_intervention() will
+# remove the BLACK flag automatically.
+# If the restart fails, re-set the BLACK flag, reset the 2-hour timer so
+# another attempt fires BLACK_RENOTIFY_SECONDS from now, and send a
+# Telegram re-alert so the user knows the system is still down (issue #989).
 #
 # The one-time alert sent when BLACK is first set (in do_restart) is
-# intentionally preserved. Only the periodic re-notifications are replaced
-# by these silent retry attempts.
+# intentionally preserved. The re-alert fires only when a periodic retry
+# fails, so it cannot spam — at most one alert per BLACK_RENOTIFY_SECONDS.
 check_and_renotify_black() {
     local reason="${1:-periodic BLACK retry}"
     local black_set_ts
@@ -325,7 +326,7 @@ check_and_renotify_black() {
 
     if [[ $elapsed -gt $BLACK_RENOTIFY_SECONDS ]]; then
         local hours=$(( elapsed / 3600 ))
-        log_warn "BLACK: System in manual intervention state for ${hours}h — attempting silent restart (no alert)"
+        log_warn "BLACK: System in manual intervention state for ${hours}h — attempting silent restart"
         # Temporarily clear the MANUAL_INTERVENTION flag so do_restart's
         # can_restart() check passes, then attempt a single restart.
         clear_manual_intervention
@@ -340,6 +341,14 @@ check_and_renotify_black() {
             log_error "BLACK: Silent restart attempt failed — re-entering BLACK state"
             set_manual_intervention
             log_info "BLACK: Reset retry timer (next attempt in ${BLACK_RENOTIFY_SECONDS}s)"
+            # Re-alert: send a Telegram notification so the user knows the system
+            # is still down after ${hours}h. Issue #989: without this, the initial
+            # BLACK alert is the only notification — users have no way to know the
+            # system hasn't recovered during a long outage.
+            send_telegram_alert "System still unrecoverable after ${hours}h in BLACK state.
+
+Restart attempt failed. Manual intervention still required:
+\`lobster restart\`"
         fi
     else
         local remaining=$(( BLACK_RENOTIFY_SECONDS - elapsed ))
