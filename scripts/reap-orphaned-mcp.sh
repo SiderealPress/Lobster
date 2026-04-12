@@ -1,15 +1,25 @@
 #!/bin/bash
 #===============================================================================
-# reap-orphaned-mcp.sh — Kill orphaned MCP server node processes
+# reap-orphaned-mcp.sh — Kill orphaned MCP server and browser processes
 #
 # MCP server node processes (google-workspace-mcp, obsidian-mcp, etc.) are
 # spawned as children of subagent Claude processes. When a subagent exits or
 # gets stuck, these node servers become orphaned — their parent Claude process
 # is gone but the node processes continue running, leaking RAM and file
-# descriptors. This script runs periodically from cron to reap them.
+# descriptors.
+#
+# Additionally, camoufox-browser (the anti-detection browser skill) spawns
+# Chromium/camoufox subprocesses. When Claude sessions end abnormally, these
+# browser processes can become orphaned and accumulate, consuming significant
+# RAM and CPU. The camofox-browser Node.js server is managed by a systemd
+# user service, so only Chromium subprocesses it spawned as orphaned children
+# are targeted — the server process itself is skipped if it is a tmux ancestor.
+#
+# This script runs periodically from cron to reap all such orphans.
 #
 # Safety contract:
-#   - Only kills node processes matching the MCP server patterns below
+#   - Only kills processes matching the known patterns below (MCP servers +
+#     Chromium/camoufox subprocesses)
 #   - Skips any process that is a descendant of the active lobster tmux session
 #     (meaning it is still being used by a live session)
 #   - SIGTERM first, SIGKILL only after a 10-second grace period
@@ -22,7 +32,8 @@
 # Cron (typically every hour):
 #   0 * * * * /home/lobster/lobster/scripts/reap-orphaned-mcp.sh
 #
-# Issue: #1108 — Scheduler leaves orphaned processes
+# Issues: #1108 — Scheduler leaves orphaned processes
+#          #1262 — Camoufox orphaned Chrome subprocesses
 #===============================================================================
 
 set -uo pipefail
@@ -41,12 +52,27 @@ log() {
 # ---------------------------------------------------------------------------
 # MCP server process patterns to match
 # Each pattern is used with pgrep -f to find running processes.
+#
+# MCP server node processes (orphaned when subagent Claude sessions exit):
+#   google-workspace-mcp, obsidian-mcp, @modelcontextprotocol/server, mcp-server-*
+#
+# Camoufox browser Chromium subprocesses (orphaned when sessions end abnormally).
+# The camoufox-js binary is typically named "camoufox" or ".camoufox-real";
+# Chromium subprocesses are launched as --type=renderer, --type=gpu-process, etc.
+# We match on the camoufox binary path (inside node_modules) to avoid
+# killing any system-installed Chromium that is unrelated to Lobster.
 # ---------------------------------------------------------------------------
 MCP_PATTERNS=(
     "google-workspace-mcp"
     "obsidian-mcp"
     "@modelcontextprotocol/server"
     "mcp-server-"
+    # camoufox/camoufox-js spawns Chromium subprocesses; match by the camoufox
+    # binary path so we only target browser processes owned by the lobster install.
+    "node_modules/.bin/camoufox"
+    "node_modules/camoufox-js"
+    ".camoufox-real"
+    "camoufox-browser/server"
 )
 
 # ---------------------------------------------------------------------------
@@ -112,12 +138,12 @@ main() {
     all_pids=$(echo "$all_pids" | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -u || true)
 
     if [[ -z "$all_pids" ]]; then
-        log "No MCP server processes found — nothing to reap"
+        log "No orphaned MCP/browser processes found — nothing to reap"
         log "=== done ==="
         return 0
     fi
 
-    log "MCP candidate PID(s): $(echo "$all_pids" | tr '\n' ' ')"
+    log "Candidate PID(s): $(echo "$all_pids" | tr '\n' ' ')"
 
     local to_kill=()
     local skipped=0
