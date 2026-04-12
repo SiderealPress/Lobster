@@ -347,40 +347,40 @@ def test_maintenance_flag_causes_clean_exit(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# D5 — WFM per-message heartbeat (issue #694)
+# D5 — Dispatcher heartbeat (issue #1483)
 # ---------------------------------------------------------------------------
 #
-# The dispatcher is considered "fresh" if EITHER the WFM heartbeat file was
-# touched recently OR last_processed_at in lobster-state.json was updated
-# recently.  These tests verify both signals independently and together.
+# The dispatcher heartbeat is a single file written by thinking-heartbeat.py
+# on every PostToolUse event. The health check reads the Unix epoch stored in
+# the file and checks if it is fresher than DISPATCHER_HEARTBEAT_STALE_SECONDS
+# (1200s / 20 minutes). This replaces the previous multi-signal WFM freshness
+# check that aggregated the WFM heartbeat file, last_processed_at, and
+# last_thinking_at.
 
-# How long before a dispatcher is considered stale.
-WFM_STALE_SECONDS = 600
+DISPATCHER_HEARTBEAT_STALE_SECONDS = 1200
 
 
-def _check_wfm_freshness_script(
+def _check_dispatcher_heartbeat_script(
     heartbeat_file: Path,
-    state_file: Path,
     tmp_path: Path,
 ) -> str:
     """
     Build a self-contained bash script fragment that:
-    - Sets the minimal variables check_wfm_freshness() reads
+    - Sets the minimal variables check_dispatcher_heartbeat() reads
     - Injects stub log functions so logging doesn't fail
-    - Calls check_wfm_freshness()
+    - Calls check_dispatcher_heartbeat()
     - Exits with the function's return code (0=GREEN, 2=RED)
     """
     log_dir = tmp_path / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / "health-check.log"
 
-    fn_body = _extract_function("check_wfm_freshness")
+    fn_body = _extract_function("check_dispatcher_heartbeat")
 
     return f"""
 #!/bin/bash
-HEARTBEAT_FILE="{heartbeat_file}"
-LOBSTER_STATE_FILE="{state_file}"
-WFM_STALE_SECONDS={WFM_STALE_SECONDS}
+DISPATCHER_HEARTBEAT_FILE="{heartbeat_file}"
+DISPATCHER_HEARTBEAT_STALE_SECONDS={DISPATCHER_HEARTBEAT_STALE_SECONDS}
 LOG_FILE="{log_file}"
 mkdir -p "$(dirname "$LOG_FILE")"
 log()       {{ echo "[$(date -Iseconds)] [$1] $2" >> "$LOG_FILE"; }}
@@ -390,129 +390,88 @@ log_error() {{ log "ERROR" "$1"; }}
 
 {fn_body}
 
-check_wfm_freshness
+check_dispatcher_heartbeat
 exit $?
 """
 
 
-def test_wfm_freshness_green_when_heartbeat_recent(tmp_path: Path) -> None:
+def test_dispatcher_heartbeat_green_when_recent(tmp_path: Path) -> None:
     """
-    D5a: check_wfm_freshness() must return GREEN (0) when the WFM heartbeat
-    file was touched recently, even if last_processed_at is absent.
-
-    This is the pre-existing behaviour: WFM heartbeat alone is sufficient.
+    D5a: check_dispatcher_heartbeat() must return GREEN (0) when the heartbeat
+    file was written recently (epoch within the stale threshold).
     """
-    heartbeat = tmp_path / "claude-heartbeat"
-    heartbeat.touch()  # mtime = now
+    heartbeat = tmp_path / "dispatcher-heartbeat"
+    heartbeat.write_text(str(int(time.time())) + "\n")
 
-    state_file = tmp_path / "lobster-state.json"
-    state_file.write_text(json.dumps({"mode": "active"}))  # no last_processed_at
-
-    fragment = _check_wfm_freshness_script(heartbeat, state_file, tmp_path)
+    fragment = _check_dispatcher_heartbeat_script(heartbeat, tmp_path)
     result = _run_bash_fragment(fragment)
 
     assert result.returncode == 0, (
-        "check_wfm_freshness() returned RED for a fresh WFM heartbeat. "
+        "check_dispatcher_heartbeat() returned RED for a fresh heartbeat file. "
         f"stderr: {result.stderr!r}"
     )
 
 
-def test_wfm_freshness_red_when_both_signals_stale(tmp_path: Path) -> None:
+def test_dispatcher_heartbeat_red_when_stale(tmp_path: Path) -> None:
     """
-    D5b: check_wfm_freshness() must return RED (2) when the WFM heartbeat
-    file is stale AND last_processed_at is either absent or also stale.
+    D5b: check_dispatcher_heartbeat() must return RED (2) when the heartbeat
+    file contains an epoch older than DISPATCHER_HEARTBEAT_STALE_SECONDS.
 
-    Failure mode: if both signals are stale and the function returns GREEN, a
-    genuinely stuck dispatcher goes undetected.
+    Failure mode: if this returns GREEN, a genuinely stuck dispatcher goes
+    undetected.
     """
-    heartbeat = tmp_path / "claude-heartbeat"
-    heartbeat.touch()
-    # Back-date the heartbeat file to well past the stale threshold
-    stale_mtime = time.time() - (WFM_STALE_SECONDS + 120)
-    os.utime(heartbeat, (stale_mtime, stale_mtime))
+    stale_epoch = int(time.time()) - (DISPATCHER_HEARTBEAT_STALE_SECONDS + 120)
+    heartbeat = tmp_path / "dispatcher-heartbeat"
+    heartbeat.write_text(str(stale_epoch) + "\n")
 
-    # last_processed_at is also stale
-    stale_epoch = time.time() - (WFM_STALE_SECONDS + 120)
-    stale_ts = datetime.fromtimestamp(stale_epoch, tz=timezone.utc).strftime(
-        "%Y-%m-%dT%H:%M:%S+00:00"
-    )
-    state_file = tmp_path / "lobster-state.json"
-    state_file.write_text(json.dumps({"mode": "active", "last_processed_at": stale_ts}))
-
-    fragment = _check_wfm_freshness_script(heartbeat, state_file, tmp_path)
+    fragment = _check_dispatcher_heartbeat_script(heartbeat, tmp_path)
     result = _run_bash_fragment(fragment)
 
     assert result.returncode == 2, (
-        "check_wfm_freshness() returned GREEN when both WFM heartbeat and "
-        f"last_processed_at are stale ({WFM_STALE_SECONDS + 120}s old). "
+        "check_dispatcher_heartbeat() returned GREEN when heartbeat epoch is "
+        f"stale ({DISPATCHER_HEARTBEAT_STALE_SECONDS + 120}s old). "
         "A genuinely stuck dispatcher must trigger RED.\n"
         f"stderr: {result.stderr!r}"
     )
 
 
-def test_wfm_freshness_green_when_last_processed_recent(tmp_path: Path) -> None:
+def test_dispatcher_heartbeat_green_when_file_absent(tmp_path: Path) -> None:
     """
-    D5c (the issue #694 fix): check_wfm_freshness() must return GREEN (0) when
-    the WFM heartbeat file is stale but last_processed_at is recent.
+    D5c: check_dispatcher_heartbeat() must return GREEN (0) when the heartbeat
+    file does not exist. This covers fresh installs and first boot.
 
-    This is the core regression test for the fix.  Before this change, a
-    dispatcher actively draining a 20-message batch (without returning to
-    wait_for_messages) could exhaust the suppression window and trigger a
-    spurious health-check restart.  After the fix, any successful mark_processed
-    call resets the clock and keeps the health check GREEN.
-
-    Failure mode: if this returns RED, a busy-but-healthy dispatcher gets
-    restarted mid-batch, losing in-flight work and corrupting dispatcher state.
+    Failure mode: if this returns RED, a fresh install immediately triggers
+    a restart loop before the dispatcher has a chance to create the file.
     """
-    heartbeat = tmp_path / "claude-heartbeat"
-    heartbeat.touch()
-    # Back-date the WFM heartbeat to well past the stale threshold (simulates
-    # a dispatcher that has been processing a long batch without calling WFM)
-    stale_mtime = time.time() - (WFM_STALE_SECONDS + 300)
-    os.utime(heartbeat, (stale_mtime, stale_mtime))
+    heartbeat = tmp_path / "dispatcher-heartbeat"
+    # Do NOT create the file
 
-    # last_processed_at is recent (a few seconds ago) — dispatcher is active
-    recent_ts = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
-    state_file = tmp_path / "lobster-state.json"
-    state_file.write_text(
-        json.dumps({"mode": "active", "last_processed_at": recent_ts})
-    )
-
-    fragment = _check_wfm_freshness_script(heartbeat, state_file, tmp_path)
+    fragment = _check_dispatcher_heartbeat_script(heartbeat, tmp_path)
     result = _run_bash_fragment(fragment)
 
     assert result.returncode == 0, (
-        "check_wfm_freshness() returned RED even though last_processed_at is "
-        "recent. A dispatcher actively draining messages must not be restarted "
-        "just because it hasn't called wait_for_messages recently.\n"
+        "check_dispatcher_heartbeat() returned RED when heartbeat file is absent. "
+        "Must skip check on fresh installs (file not created yet).\n"
         f"stderr: {result.stderr!r}"
     )
 
 
-def test_wfm_freshness_green_when_last_processed_absent_heartbeat_recent(
-    tmp_path: Path,
-) -> None:
+def test_dispatcher_heartbeat_green_when_file_empty(tmp_path: Path) -> None:
     """
-    D5d: check_wfm_freshness() must stay GREEN when last_processed_at is
-    absent from the state file but the WFM heartbeat is fresh.
+    D5d: check_dispatcher_heartbeat() must return GREEN (0) when the heartbeat
+    file exists but contains no valid epoch (e.g. partial write, corruption).
 
-    This covers the upgrade path: before this change is deployed, the state
-    file has no last_processed_at field.  The health check must not break on
-    older state files.
+    Failure mode: if this returns RED, a transient write error causes a
+    spurious restart.
     """
-    heartbeat = tmp_path / "claude-heartbeat"
-    heartbeat.touch()  # mtime = now
+    heartbeat = tmp_path / "dispatcher-heartbeat"
+    heartbeat.write_text("")  # empty file
 
-    # State file exists but has no last_processed_at (pre-upgrade format)
-    state_file = tmp_path / "lobster-state.json"
-    state_file.write_text(json.dumps({"mode": "active", "compacted_at": "2026-01-01T00:00:00Z"}))
-
-    fragment = _check_wfm_freshness_script(heartbeat, state_file, tmp_path)
+    fragment = _check_dispatcher_heartbeat_script(heartbeat, tmp_path)
     result = _run_bash_fragment(fragment)
 
     assert result.returncode == 0, (
-        "check_wfm_freshness() returned RED when last_processed_at is absent "
-        "but WFM heartbeat is recent. Must remain backward-compatible with "
-        "state files that predate issue #694.\n"
+        "check_dispatcher_heartbeat() returned RED when heartbeat file is empty. "
+        "Must degrade gracefully on corrupt/partial writes.\n"
         f"stderr: {result.stderr!r}"
     )

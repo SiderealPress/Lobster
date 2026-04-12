@@ -26,20 +26,17 @@
 #   a compacted_at timestamp to lobster-state.json, and the stale-inbox check
 #   is skipped for COMPACTION_SUPPRESS_SECONDS after that timestamp.
 #
-# Catchup suppression:
-#   After a compaction or restart, the dispatcher spawns a catchup subagent to
-#   recover situational awareness. This subagent can take 10-12 minutes. During
-#   this window the dispatcher IS calling wait_for_messages() but the catchup
-#   subagent delays return from the main loop. The dispatcher writes
-#   catchup_started_at to lobster-state.json before spawning the subagent, and
-#   catchup_finished_at when the result arrives. The WFM freshness check is
-#   suppressed for CATCHUP_SUPPRESS_SECONDS (15 min) after catchup_started_at,
-#   or immediately when catchup_finished_at is written.
+# Dispatcher heartbeat:
+#   hooks/thinking-heartbeat.py writes a Unix epoch to dispatcher-heartbeat on
+#   every PostToolUse event. The health check asks one question: is this file
+#   newer than DISPATCHER_HEARTBEAT_STALE_SECONDS (1200s / 20 minutes)? The
+#   generous threshold absorbs compaction (1-3+ min) and catchup subagents
+#   (10-12 min) without any special suppression logic.
 #
 # Boot grace period:
 #   After any restart (health-check-initiated or manual), the new Claude session
 #   needs ~60-90s to initialize and begin draining the inbox. During this window
-#   the health-check skips stale-inbox, WFM freshness, and process/tmux checks
+#   the health-check skips stale-inbox, heartbeat, and process/tmux checks
 #   to avoid false-positive restarts. The boot timestamp is written to
 #   lobster-state.json as booted_at by claude-persistent.sh (on first start) and
 #   by do_restart() (after each health-check-initiated restart). Resource checks
@@ -80,15 +77,14 @@ MAINTENANCE_EXPIRY_SECONDS=3600      # 1 hour - stale maintenance flag is auto-c
 
 COMPACTION_SUPPRESS_SECONDS=300      # 5 minutes - skip stale-inbox check after a compaction event
 COMPACT_GRACE_SECONDS=600            # 10 minutes - skip stale-inbox check after a compaction (last-compact.ts)
-CATCHUP_SUPPRESS_SECONDS=900         # 15 minutes - skip WFM freshness check while catchup subagent is running
 RESTART_COOLDOWN_SUPPRESS_SECONDS=240 # 4 minutes - suppress stale-inbox RED after a recent restart
 
 BOOT_GRACE_SECONDS=90                # 90s - skip stale-inbox, WFM, and process checks after a restart
 
 HIBERNATE_FRESH_SECONDS=30           # Ignore hibernate state younger than this — transient dispatcher hibernation
 
-WFM_STALE_SECONDS=1200               # 20 minutes - RED if wait_for_messages not called since this long ago (raised from 600 to accommodate long reasoning/subagent-spawning phases)
-HEARTBEAT_FILE="$WORKSPACE_DIR/logs/claude-heartbeat"
+DISPATCHER_HEARTBEAT_STALE_SECONDS=1200  # 20 minutes — generous enough to cover compaction + catchup without suppression logic
+DISPATCHER_HEARTBEAT_FILE="$WORKSPACE_DIR/logs/dispatcher-heartbeat"
 
 OUTBOX_DIR="$MESSAGES_DIR/outbox"
 OUTBOX_STALE_THRESHOLD_SECONDS=900   # 15 min = RED
@@ -505,97 +501,6 @@ is_compact_grace_period() {
     return 1
 }
 
-# Check if a catchup subagent is actively running (or recently started).
-# Returns 0 (true) if the WFM freshness check should be suppressed, 1 otherwise.
-#
-# Primary path: the dispatcher writes catchup_started_at to lobster-state.json
-# before spawning either the startup-catchup or compact-catchup subagent, and
-# writes catchup_finished_at when the subagent result arrives.  If
-# catchup_finished_at is absent or older than catchup_started_at, the catchup
-# is still in flight.
-#
-# Fallback path (issue #1283): if the dispatcher forgot to call
-# record-catchup-state.sh (e.g. it batched the compact-reminder with other
-# messages), catchup_started_at is never updated.  In that case we fall back
-# to compacted_at: if a compaction is more recent than catchup_finished_at and
-# within CATCHUP_SUPPRESS_SECONDS, we treat catchup as in-flight.
-#
-# Suppression window: CATCHUP_SUPPRESS_SECONDS from the effective start time.
-# This caps suppression even if catchup_finished_at is never written (e.g. the
-# subagent crashed), preventing permanent suppression.
-is_catchup_active() {
-    if [[ ! -f "$LOBSTER_STATE_FILE" ]]; then
-        return 1
-    fi
-
-    local now
-    now=$(date +%s)
-
-    # Read all relevant timestamps in one python call for efficiency
-    local started_at finished_at compacted_at
-    read -r started_at finished_at compacted_at < <(python3 -c "
-import json, sys
-try:
-    d = json.load(open('$LOBSTER_STATE_FILE'))
-    print(d.get('catchup_started_at', ''), d.get('catchup_finished_at', ''), d.get('compacted_at', ''))
-except Exception:
-    print('', '', '')
-" 2>/dev/null)
-
-    local finished_epoch=0
-    if [[ -n "$finished_at" ]]; then
-        finished_epoch=$(date -d "$finished_at" +%s 2>/dev/null) || finished_epoch=0
-    fi
-
-    # --- Primary path: catchup_started_at is present ---
-    if [[ -n "$started_at" ]]; then
-        local started_epoch
-        started_epoch=$(date -d "$started_at" +%s 2>/dev/null) || started_epoch=0
-        if [[ $started_epoch -gt 0 ]]; then
-            local age=$(( now - started_epoch ))
-            # Hard cap: don't suppress longer than CATCHUP_SUPPRESS_SECONDS even if
-            # catchup_finished_at was never written (subagent crash, etc.)
-            if [[ $age -gt $CATCHUP_SUPPRESS_SECONDS ]]; then
-                log_info "Catchup suppression expired: started ${age}s ago (cap: ${CATCHUP_SUPPRESS_SECONDS}s)"
-                # Fall through to compacted_at fallback — maybe a new compaction
-                # occurred after the cap expired and a new catchup is in flight.
-            else
-                # Check if catchup has already finished
-                if [[ $finished_epoch -gt 0 && $finished_epoch -ge $started_epoch ]]; then
-                    log_info "Catchup complete: finished_at=$finished_at — WFM suppression lifted"
-                    return 1
-                fi
-                log_info "Catchup in flight: started ${age}s ago (cap: ${CATCHUP_SUPPRESS_SECONDS}s) — WFM freshness suppressed"
-                return 0
-            fi
-        fi
-    fi
-
-    # --- Fallback path: check compacted_at (issue #1283) ---
-    # If the dispatcher forgot to write catchup_started_at (e.g. it batched
-    # the compact-reminder with other messages), we fall back to compacted_at.
-    # A compaction that is more recent than catchup_finished_at implies that
-    # a new catchup should be in flight but was never registered.
-    if [[ -n "$compacted_at" ]]; then
-        local compacted_epoch
-        compacted_epoch=$(date -d "$compacted_at" +%s 2>/dev/null) || compacted_epoch=0
-        if [[ $compacted_epoch -gt 0 ]]; then
-            local compaction_age=$(( now - compacted_epoch ))
-            if [[ $compaction_age -le $CATCHUP_SUPPRESS_SECONDS ]]; then
-                # Compaction is recent — check if catchup finished AFTER the compaction
-                if [[ $finished_epoch -gt 0 && $finished_epoch -ge $compacted_epoch ]]; then
-                    log_info "Catchup complete (fallback): compacted_at=$compacted_at, finished_at=$finished_at — WFM suppression not needed"
-                    return 1
-                fi
-                log_warn "Catchup fallback active (issue #1283): compacted_at=${compaction_age}s ago, catchup_started_at missing or stale — WFM freshness suppressed"
-                return 0
-            fi
-        fi
-    fi
-
-    return 1
-}
-
 # Check if a boot/restart occurred within the last BOOT_GRACE_SECONDS.
 # Returns 0 (true) if we are inside the grace window, 1 otherwise.
 # Reads booted_at from lobster-state.json (written by claude-persistent.sh on
@@ -1002,94 +907,42 @@ check_outbox_drain() {
     fi
 }
 
-# Check 6: wait_for_messages freshness
-# The dispatcher is considered "fresh" if ANY of:
-#   (a) the claude-heartbeat file was touched recently — inbox_server.py touches
-#       it at the start of every wait_for_messages call, OR
-#   (b) last_processed_at in lobster-state.json was updated recently — written
-#       by inbox_server.py on every successful mark_processed call (issue #694), OR
-#   (c) last_thinking_at in lobster-state.json was updated recently — written by
-#       hooks/thinking-heartbeat.py on every PostToolUse event (issue #1401).
+# Check 6: Dispatcher heartbeat freshness
 #
-# Signals (b) and (c) together cover the full dispatcher lifecycle: (b) fires
-# during message processing batches; (c) fires during the reasoning phase (thinking,
-# composing, spawning subagents) when no WFM or mark_processed calls are made.
+# The dispatcher heartbeat is written by hooks/thinking-heartbeat.py on every
+# PostToolUse event. It contains a Unix epoch timestamp. This single signal
+# replaces the previous multi-signal WFM freshness check that aggregated:
+#   (a) claude-heartbeat file mtime (written by inbox_server.py on WFM calls)
+#   (b) last_processed_at in lobster-state.json (written on mark_processed)
+#   (c) last_thinking_at in lobster-state.json (written by thinking-heartbeat.py)
 #
-# The effective freshness timestamp is max(wfm_heartbeat_mtime, last_processed_at,
-# last_thinking_at).
-#
-# Gracefully skips the check if the heartbeat file does not exist (fresh install).
-# Gracefully ignores missing or unparseable state file fields (backward compat).
+# The 1200s (20-minute) threshold absorbs compaction (1-3+ min) and catchup
+# subagents (10-12 min) without any suppression logic.
 #
 # Returns: 0=GREEN (fresh or skipped), 2=RED (stale)
-check_wfm_freshness() {
-    if [[ ! -f "$HEARTBEAT_FILE" ]]; then
-        log_info "WFM freshness: heartbeat file not found — skipping check (fresh install?)"
+check_dispatcher_heartbeat() {
+    if [[ ! -f "$DISPATCHER_HEARTBEAT_FILE" ]]; then
+        log_info "Dispatcher heartbeat: file not found — skipping check (fresh install or first boot)"
         return 0
     fi
 
-    local last_heartbeat
-    last_heartbeat=$(stat -c %Y "$HEARTBEAT_FILE" 2>/dev/null)
-    if [[ -z "$last_heartbeat" ]]; then
-        log_info "WFM freshness: cannot stat heartbeat file — skipping check"
+    local last_epoch
+    last_epoch=$(cat "$DISPATCHER_HEARTBEAT_FILE" 2>/dev/null | tr -d '[:space:]')
+    if [[ -z "$last_epoch" || ! "$last_epoch" =~ ^[0-9]+$ ]]; then
+        log_info "Dispatcher heartbeat: cannot read epoch — skipping check"
         return 0
-    fi
-
-    # Read per-message heartbeat (mark_processed, issue #694) and PostToolUse
-    # thinking heartbeat (issue #1401) from lobster-state.json.
-    local last_processed_epoch=0
-    local last_thinking_epoch=0
-    if [[ -f "$LOBSTER_STATE_FILE" ]]; then
-        local last_processed_at last_thinking_at
-        last_processed_at=$(python3 -c "
-import json, sys
-try:
-    d = json.load(open('$LOBSTER_STATE_FILE'))
-    print(d.get('last_processed_at', ''))
-except Exception:
-    print('')
-" 2>/dev/null)
-        last_thinking_at=$(python3 -c "
-import json, sys
-try:
-    d = json.load(open('$LOBSTER_STATE_FILE'))
-    print(d.get('last_thinking_at', ''))
-except Exception:
-    print('')
-" 2>/dev/null)
-        if [[ -n "$last_processed_at" ]]; then
-            last_processed_epoch=$(date -d "$last_processed_at" +%s 2>/dev/null) || last_processed_epoch=0
-        fi
-        if [[ -n "$last_thinking_at" ]]; then
-            last_thinking_epoch=$(date -d "$last_thinking_at" +%s 2>/dev/null) || last_thinking_epoch=0
-        fi
-    fi
-
-    # Effective freshness = most recent of all three signals
-    local effective_last="$last_heartbeat"
-    local effective_source="WFM heartbeat"
-    if [[ "$last_processed_epoch" -gt "$effective_last" ]]; then
-        effective_last="$last_processed_epoch"
-        effective_source="last_processed_at"
-    fi
-    if [[ "$last_thinking_epoch" -gt "$effective_last" ]]; then
-        effective_last="$last_thinking_epoch"
-        effective_source="last_thinking_at"
-    fi
-    if [[ "$effective_source" != "WFM heartbeat" ]]; then
-        log_info "WFM freshness: using $effective_source signal (more recent than WFM heartbeat)"
     fi
 
     local now age
     now=$(date +%s)
-    age=$(( now - effective_last ))
+    age=$(( now - last_epoch ))
 
-    if [[ $age -gt $WFM_STALE_SECONDS ]]; then
-        log_error "RED: dispatcher stale — last activity ${age}s ago (threshold: ${WFM_STALE_SECONDS}s, wfm=${last_heartbeat}, last_processed=${last_processed_epoch}, last_thinking=${last_thinking_epoch})"
+    if [[ $age -gt $DISPATCHER_HEARTBEAT_STALE_SECONDS ]]; then
+        log_error "RED: dispatcher heartbeat stale — last tool call ${age}s ago (threshold: ${DISPATCHER_HEARTBEAT_STALE_SECONDS}s)"
         return 2
     fi
 
-    log_info "WFM freshness OK: last dispatcher activity ${age}s ago (via $effective_source)"
+    log_info "Dispatcher heartbeat OK: last tool call ${age}s ago"
     return 0
 }
 
@@ -1972,9 +1825,9 @@ main() {
     # Suppressed during hibernation (dispatcher isn't running), transient
     # lifecycle states where Claude hasn't started yet (starting, restarting,
     # waking, backoff, stopped), during the compaction grace period (tool
-    # calls pause while Claude compacts context), and while a catchup subagent
-    # is running (dispatcher may not call wait_for_messages for 10-12 minutes
-    # during startup-catchup or compact-catchup generation).
+    # calls pause while Claude compacts context).
+    # The 20-minute heartbeat threshold absorbs post-compaction catchup without
+    # requiring explicit catchup suppression logic.
 
     if is_hibernating; then
         log_info "WFM freshness suppressed (hibernating)"
@@ -1985,15 +1838,13 @@ main() {
     elif [[ "$boot_grace" == "true" ]]; then
         log_info "WFM freshness suppressed (boot grace period)"
     elif [[ "$compaction_recent" == "true" ]]; then
-        log_info "WFM freshness suppressed (recent compaction)"
-    elif is_catchup_active; then
-        log_info "WFM freshness suppressed (catchup subagent in flight)"
+        log_info "Dispatcher heartbeat suppressed (recent compaction — threshold absorbs post-compaction catchup)"
     else
-        check_wfm_freshness
-        local wfm_rc=$?
-        if [[ $wfm_rc -eq 2 ]]; then
+        check_dispatcher_heartbeat
+        local heartbeat_rc=$?
+        if [[ $heartbeat_rc -eq 2 ]]; then
             level="RED"
-            restart_reason="${restart_reason:+$restart_reason + }wait_for_messages stale (>${WFM_STALE_SECONDS}s)"
+            restart_reason="${restart_reason:+$restart_reason + }dispatcher heartbeat stale (>${DISPATCHER_HEARTBEAT_STALE_SECONDS}s)"
         fi
     fi
 
