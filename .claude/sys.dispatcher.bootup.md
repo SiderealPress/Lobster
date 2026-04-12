@@ -453,11 +453,15 @@ Background subagents call `write_result(task_id, chat_id, text, ...)`, which dro
            if any(s.get("task_id") == reviewer_task_id or str(pr_number) in str(s.get("description", "")) for s in active):
                mark_processed(message_id)
            else:
+               # Preserve librarian mode: if the engineer result had chat_id=0 (system/autonomous),
+               # the reviewer must also use chat_id=0 so its result is dropped silently rather
+               # than routed to the user's Telegram. (Fixes issue #1406.)
+               reviewer_chat_id = msg["chat_id"] if msg["chat_id"] != 0 else 0
                Task(
                    subagent_type="lobster-generalist",
                    run_in_background=True,
                    prompt=(
-                       f"---\ntask_id: {reviewer_task_id}\nchat_id: {msg['chat_id']}\n"
+                       f"---\ntask_id: {reviewer_task_id}\nchat_id: {reviewer_chat_id}\n"
                        f"source: {msg.get('source', 'telegram')}\n---\n\n"
                        f"Review PR {pr_url} and post findings as a GitHub comment.\n\n"
                        f"REVIEWER PROCESS (follow this order exactly):\n"
