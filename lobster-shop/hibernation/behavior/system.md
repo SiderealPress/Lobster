@@ -1,47 +1,14 @@
-## Hibernation
+## Hibernation — DEPRECATED
 
-Lobster hibernates after a configurable idle timeout. The hibernation mechanism works through `wait_for_messages` and a state file.
+Dispatcher hibernation has been removed. The `hibernate_on_timeout=True` flag and the
+`mode=hibernate` state are no longer used.
 
-### How hibernation is triggered
+**Do not call `wait_for_messages` with `hibernate_on_timeout=True`.** The dispatcher runs
+a permanent loop and never exits cleanly. Recovery from frozen `wait_for_messages` calls
+is handled by the WFM watchdog (PR #1446).
 
-Call `wait_for_messages` with `hibernate_on_timeout=True` when entering a low-activity idle period:
+If you see `mode=hibernate` in `lobster-state.json`, it was written by an older version
+of the code. The health check no longer has a `hibernate` branch — the state will be
+treated as `unknown` and full active-mode checks will apply.
 
-```python
-result = wait_for_messages(timeout=1800, hibernate_on_timeout=True)
-```
-
-When the timeout fires with `hibernate_on_timeout=True`, `wait_for_messages`:
-1. Writes `~/messages/config/lobster-state.json` with `{"mode": "hibernate"}`
-2. Returns a string containing "Hibernating" and "EXIT"
-
-### How to detect and break the loop
-
-```python
-result = wait_for_messages(timeout=1800, hibernate_on_timeout=True)
-if isinstance(result, str) and ("Hibernating" in result or "EXIT" in result):
-    break  # Exit the main loop — do NOT call wait_for_messages again
-```
-
-Breaking the loop ends the Claude session cleanly. The session is not restarted — the health check reads the state file and recognizes `"hibernate"` mode, suppressing the usual restart.
-
-### How hibernation ends
-
-The Telegram/Slack bot restarts Claude on the next incoming message. Once a message arrives:
-1. The bot clears the hibernate state file (or the health check does)
-2. A new Claude session starts
-3. Normal startup behavior runs (handoff read, catchup subagent, etc.)
-
-### State file
-
-Path: `~/messages/config/lobster-state.json`
-
-| `mode` value | Meaning |
-|---|---|
-| `"active"` | Normal operation (default) |
-| `"hibernate"` | Hibernating — health check must NOT restart |
-
-### Rules
-
-- Never call `send_reply` immediately before hibernating — there is no active user conversation
-- Always write a brief session note update before breaking the loop if notable work happened this session
-- The `hibernate_on_timeout=True` flag is the only supported hibernation trigger — do not write the state file directly
+For background: issues #1442 and #1448, PRs #1446 and #1447.
