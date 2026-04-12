@@ -363,6 +363,17 @@ MESSAGES_DB_PATH = Path(
 )
 LOBSTER_TMUX_SESSION = os.environ.get("LOBSTER_TMUX_SESSION", "lobster")
 
+# Startup sweep: sessions whose completed_at is older than this threshold are
+# silently drained (set_notified called) rather than re-enqueued in the inbox.
+# This prevents the reconciler from flooding the inbox with stale completion
+# notices on restart — typically 10-30 sessions after any multi-minute outage.
+#
+# Rationale: a genuine crash-between-complete-and-notify race takes <60 seconds.
+# Sessions completed >10 minutes ago cannot be in that window; they are stale
+# artefacts. Re-notifying them blocks real user messages for multiple WFM cycles.
+# 10 minutes chosen conservatively (see issue #1355).
+STALE_NOTIFICATION_THRESHOLD_MINUTES = 10
+
 # Instance identity for multi-instance deployments (BIS-85).
 # Prefer an explicit observability token; fall back to hostname so reports are
 # always attributed to the Lobster instance that filed them.
@@ -9043,6 +9054,29 @@ def _inbox_already_has_agent(agent_id: str) -> bool:
     return False
 
 
+def _is_stale_for_startup(session: dict) -> bool:
+    """Return True if the session completed before the stale-notification window.
+
+    Sessions outside the window are silently drained (set_notified called)
+    without being re-enqueued in the inbox. This prevents startup floods when
+    many sessions completed while the server was offline (issue #1355).
+
+    The threshold is STALE_NOTIFICATION_THRESHOLD_MINUTES. Sessions without a
+    parseable completed_at are treated as fresh (safe default: re-enqueue them).
+    """
+    completed_at_str = session.get("completed_at")
+    if not completed_at_str:
+        return False
+    try:
+        completed_at = datetime.fromisoformat(completed_at_str)
+        if completed_at.tzinfo is None:
+            completed_at = completed_at.replace(tzinfo=timezone.utc)
+        age_seconds = (datetime.now(timezone.utc) - completed_at).total_seconds()
+        return age_seconds > STALE_NOTIFICATION_THRESHOLD_MINUTES * 60
+    except (ValueError, TypeError):
+        return False
+
+
 async def _startup_sweep() -> None:
     """Send missed notifications for sessions that completed while server was down.
 
@@ -9055,6 +9089,13 @@ async def _startup_sweep() -> None:
     re-sent on the next startup. The at-most-once property is upheld by
     set_notified() being called immediately after enqueueing.
 
+    Stale-drain guard (issue #1355): sessions completed more than
+    STALE_NOTIFICATION_THRESHOLD_MINUTES ago are silently marked notified
+    without being enqueued. Re-notifying them would only produce wasted WFM
+    cycles — the dispatcher cannot usefully act on results from tens of minutes
+    ago — and at scale (30+ sessions) this blocks real user messages for
+    multiple WFM cycles.
+
     An additional idempotency guard checks whether an inbox file for the agent
     already exists (handles the crash-after-write-before-set_notified race).
     """
@@ -9065,8 +9106,25 @@ async def _startup_sweep() -> None:
                 f"[reconciler] Startup sweep: found {len(unnotified)} unnotified "
                 f"completed/dead session(s) — re-enqueuing notifications"
             )
+
+        stale_count = 0
         for session in unnotified:
             agent_id = session.get("id", "")
+
+            # Stale-drain guard: sessions that completed before the notification
+            # window cannot be in the genuine crash-before-notify race. Silently
+            # mark them notified to prevent inbox flooding on startup (issue #1355).
+            if _is_stale_for_startup(session):
+                stale_count += 1
+                try:
+                    _session_store.set_notified(agent_id)
+                except Exception as _exc:
+                    log.error(
+                        "[reconciler] Startup sweep: failed to drain stale session %r: %s",
+                        agent_id, _exc,
+                    )
+                continue
+
             if _inbox_already_has_agent(agent_id):
                 log.debug(
                     "[reconciler] Startup sweep: inbox file already exists for "
@@ -9076,6 +9134,13 @@ async def _startup_sweep() -> None:
                 continue
             outcome = session.get("status", "completed")
             _enqueue_reconciler_notification(session, outcome=outcome)
+
+        if stale_count:
+            log.info(
+                f"[reconciler] Startup sweep: silently drained {stale_count} stale "
+                f"session(s) completed >%d min ago (issue #1355)",
+                STALE_NOTIFICATION_THRESHOLD_MINUTES,
+            )
     except Exception as exc:
         log.error(f"[reconciler] Startup sweep error: {exc}", exc_info=True)
 
