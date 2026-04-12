@@ -1336,7 +1336,7 @@ step "Setting up log cleanup cron..."
 # Runs at 04:00 UTC daily (one hour after nightly consolidation).
 chmod +x "$INSTALL_DIR/scripts/log-cleanup.sh" || true
 "$INSTALL_DIR/scripts/cron-manage.sh" add "# LOBSTER-LOG-CLEANUP" \
-    "0 4 * * * $INSTALL_DIR/scripts/log-cleanup.sh >> $HOME/lobster-workspace/logs/log-cleanup.log 2>&1 # LOBSTER-LOG-CLEANUP"
+    "0 4 * * * $INSTALL_DIR/scripts/log-cleanup.sh # LOBSTER-LOG-CLEANUP"
 
 success "Log cleanup configured (runs at 04:00 UTC daily)"
 

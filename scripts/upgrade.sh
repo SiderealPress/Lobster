@@ -2442,7 +2442,7 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
         substep "wfm-watchdog.sh cron entry already present — skipping"
     fi
 
-    # Migration 70: Add LOBSTER-LOG-CLEANUP cron entry (issue #1240).
+    # Migration 71: Add LOBSTER-LOG-CLEANUP cron entry (issue #1240).
     # Prunes scheduled-jobs/logs/ (14d), messages/processed/ (30d), messages/audio/ (7d).
     local LOG_CLEANUP_MARKER="# LOBSTER-LOG-CLEANUP"
     local log_cleanup_script="$LOBSTER_DIR/scripts/log-cleanup.sh"
@@ -2451,7 +2451,7 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
             chmod +x "$log_cleanup_script" 2>/dev/null || true
             "$LOBSTER_DIR/scripts/cron-manage.sh" add \
                 "$LOG_CLEANUP_MARKER" \
-                "0 4 * * * $log_cleanup_script >> $HOME/lobster-workspace/logs/log-cleanup.log 2>&1 $LOG_CLEANUP_MARKER"
+                "0 4 * * * $log_cleanup_script $LOG_CLEANUP_MARKER"
             substep "Added log-cleanup.sh cron entry (daily at 04:00 UTC)"
             migrated=$((migrated + 1))
         else

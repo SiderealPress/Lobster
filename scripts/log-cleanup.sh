@@ -13,8 +13,12 @@
 #   - Counts deleted files and logs the result
 #   - Never touches files newer than the retention window
 #
-# Usage (run by cron — see install.sh / upgrade.sh Migration 70):
-#   0 4 * * * ~/lobster/scripts/log-cleanup.sh >> ~/lobster-workspace/logs/log-cleanup.log 2>&1
+# Usage (run by cron — see install.sh / upgrade.sh Migration 71):
+#   0 4 * * * ~/lobster/scripts/log-cleanup.sh # LOBSTER-LOG-CLEANUP
+#
+# Note: stdout redirect is NOT used in the cron entry. The log() function
+# inside this script appends directly to log-cleanup.log via tee -a, so
+# adding a cron redirect would double-log every line.
 #
 # The cron entry fires at 04:00 UTC daily (one hour after nightly-consolidation).
 #===============================================================================
