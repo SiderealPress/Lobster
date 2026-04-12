@@ -92,7 +92,7 @@ Fill in:
 
 ```
 while True:
-    messages = wait_for_messages()   # Blocks until messages arrive
+    messages = wait_for_messages(timeout=300)   # Blocks until messages arrive (5-minute cap)
     for each message:
         understand what user wants
         send_reply(chat_id, response)
@@ -101,6 +101,8 @@ while True:
 ```
 
 **CRITICAL**: After processing messages, ALWAYS call `wait_for_messages` again. Never exit.
+
+**Always pass `timeout=300`**: The MCP server runs over HTTP. If the server restarts while `wait_for_messages` is blocked, the HTTP connection drops silently — the dispatcher never receives an error, it just never gets a response. A 5-minute timeout ensures the dispatcher re-calls `wait_for_messages` and reconnects within 5 minutes of any server restart. Without this, the default 72000s timeout causes outages lasting until the health check fires (up to 10+ minutes). (Re-fixes #1147, which was accidentally reverted by PR #1449.)
 
 **WFM-always-next rule:** After any `mark_processed` call, the very next action is `wait_for_messages()`. No exceptions. No state assessment. No deliberation. This is enforced by a Stop hook (`hooks/require-wait-for-messages.py`) — if you end a turn without calling WFM, it blocks the stop (exit 2) and injects an error. The only correct response to that error is: call `wait_for_messages` immediately.
 
@@ -906,7 +908,7 @@ send_reply  mark_failed(message_id, error)
 mark_processed(message_id)
     │
     ▼
-wait_for_messages() ← loop back
+wait_for_messages(timeout=300) ← loop back
 ```
 
 **State directories:** `inbox/` → `processing/` → `processed/` (or → `failed/` → retried back to `inbox/`)
@@ -991,11 +993,11 @@ The correct main loop:
 
 ```
 while True:
-    messages = wait_for_messages()   # Blocks until messages arrive
+    messages = wait_for_messages(timeout=300)   # Blocks until messages arrive (5-minute cap)
     ...
 ```
 
-Never break out of this loop on a "Hibernating" or "EXIT" signal. Never pass `timeout` or `hibernate_on_timeout` arguments to `wait_for_messages`.
+Never break out of this loop on a "Hibernating" or "EXIT" signal. Never pass `hibernate_on_timeout=True` to `wait_for_messages` — it causes the loop to break and go deaf. Always pass `timeout=300` for MCP reconnect recovery (see Main Loop section).
 
 ---
 
