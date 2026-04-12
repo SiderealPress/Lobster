@@ -1352,6 +1352,22 @@ step "Setting up OOM monitor cron..."
 
 success "OOM monitor configured (runs every 10 minutes, active only when LOBSTER_DEBUG=true)"
 
+#===============================================================================
+# Orphaned MCP Process Reaper (#1108)
+#===============================================================================
+
+step "Setting up orphaned MCP process reaper..."
+
+# reap-orphaned-mcp.sh runs every hour. It kills node MCP server processes
+# (google-workspace-mcp, obsidian-mcp, etc.) that accumulate when subagent
+# Claude workers exit or get stuck. Without this, each scheduled-job cron run
+# can leak one or more node servers indefinitely, consuming RAM over time.
+chmod +x "$INSTALL_DIR/scripts/reap-orphaned-mcp.sh" || true
+"$INSTALL_DIR/scripts/cron-manage.sh" add "# LOBSTER-REAP-ORPHANED-MCP" \
+    "0 * * * * $INSTALL_DIR/scripts/reap-orphaned-mcp.sh # LOBSTER-REAP-ORPHANED-MCP"
+
+success "Orphaned MCP process reaper configured (runs every hour)"
+
 # Ensure any lingering self-check cron entry is removed on fresh installs
 { crontab -l 2>/dev/null | grep -v "# LOBSTER-SELF-CHECK" | grep -v "periodic-self-check" || true; } | crontab -
 

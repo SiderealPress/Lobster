@@ -2442,6 +2442,27 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
         substep "wfm-watchdog.sh cron entry already present — skipping"
     fi
 
+    # Migration 73: Install reap-orphaned-mcp.sh cron entry (every hour).
+    # Kills orphaned node MCP server processes (google-workspace-mcp, obsidian-mcp,
+    # etc.) that accumulate when subagent Claude workers exit or get stuck. Without
+    # this, each scheduled-job cron run leaks one or more node servers indefinitely.
+    # (#1108)
+    local REAP_MCP_MARKER="# LOBSTER-REAP-ORPHANED-MCP"
+    local reap_mcp_script="$LOBSTER_DIR/scripts/reap-orphaned-mcp.sh"
+    if ! crontab -l 2>/dev/null | grep -qF "$REAP_MCP_MARKER"; then
+        if [[ -f "$reap_mcp_script" ]]; then
+            "$LOBSTER_DIR/scripts/cron-manage.sh" add \
+                "$REAP_MCP_MARKER" \
+                "0 * * * * $reap_mcp_script $REAP_MCP_MARKER"
+            substep "Added reap-orphaned-mcp.sh cron entry (every hour)"
+            migrated=$((migrated + 1))
+        else
+            substep "WARN: reap-orphaned-mcp.sh not found at $reap_mcp_script — skipping"
+        fi
+    else
+        substep "reap-orphaned-mcp.sh cron entry already present — skipping"
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
