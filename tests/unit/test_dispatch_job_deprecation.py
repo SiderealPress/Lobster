@@ -4,7 +4,8 @@ Tests for issue #1083 Phase 1 — dispatch-job.sh tombstone and upgrade migratio
 Verifies:
 1. dispatch-job.sh contains the deprecation notice (issue #1083)
 2. upgrade.sh contains Migration 70 to remove LOBSTER-SCHEDULED crontab entries
-3. Migration 70 only removes LOBSTER-SCHEDULED entries, not other cron entries
+3. Migration 70 only removes LOBSTER-SCHEDULED entries that have a corresponding
+   systemd timer — orphaned entries (no timer) are left in place with a warning
 4. dispatch-job.sh still functions correctly for backward compatibility
    (existing jobs that haven't migrated yet must not break)
 """
@@ -63,8 +64,8 @@ class TestUpgradeMigration70:
         )
 
     def test_migration_70_grep_only_targets_lobster_scheduled(self):
-        """The grep -v command in Migration 70 must filter on 'LOBSTER-SCHEDULED' only,
-        not a broader pattern that would also remove system cron entries."""
+        """Migration 70 must only touch entries marked with LOBSTER-SCHEDULED,
+        not broader patterns that would remove system cron entries."""
         content = UPGRADE_SH.read_text()
         m70_start = content.find("Migration 70")
         assert m70_start != -1
@@ -72,11 +73,49 @@ class TestUpgradeMigration70:
         m70_end = content.find("if [ \"$migrated\" -eq 0 ]", m70_start)
         m70_block = content[m70_start:m70_end]
 
-        # The actual grep -v command must use the specific marker
-        assert "grep -v '# LOBSTER-SCHEDULED'" in m70_block or \
-               'grep -v "# LOBSTER-SCHEDULED"' in m70_block, (
-            "Migration 70 must use grep -v '# LOBSTER-SCHEDULED' to avoid "
+        # The block must reference the LOBSTER-SCHEDULED marker
+        assert "LOBSTER-SCHEDULED" in m70_block, (
+            "Migration 70 must reference the LOBSTER-SCHEDULED crontab marker to avoid "
             "removing LOBSTER-HEALTH, LOBSTER-SELF-CHECK, and other system entries"
+        )
+
+    def test_migration_70_checks_for_systemd_timer_before_removing(self):
+        """Migration 70 must only remove a LOBSTER-SCHEDULED cron entry if a
+        corresponding lobster-managed systemd timer exists — preventing silent job loss."""
+        content = UPGRADE_SH.read_text()
+        m70_start = content.find("Migration 70")
+        assert m70_start != -1
+
+        m70_end = content.find("if [ \"$migrated\" -eq 0 ]", m70_start)
+        m70_block = content[m70_start:m70_end]
+
+        # Must check for the systemd timer file before removing a cron entry
+        assert "/etc/systemd/system/lobster-" in m70_block, (
+            "Migration 70 must check for a lobster-managed systemd timer file "
+            "(/etc/systemd/system/lobster-<name>.timer) before removing each cron entry"
+        )
+        # Must reference the LOBSTER-MANAGED marker check
+        assert "LOBSTER-MANAGED" in m70_block, (
+            "Migration 70 must verify the systemd timer carries the LOBSTER-MANAGED marker"
+        )
+
+    def test_migration_70_warns_when_no_systemd_timer_exists(self):
+        """When a LOBSTER-SCHEDULED cron entry has no systemd timer,
+        Migration 70 must warn the operator rather than silently removing it."""
+        content = UPGRADE_SH.read_text()
+        m70_start = content.find("Migration 70")
+        assert m70_start != -1
+
+        m70_end = content.find("if [ \"$migrated\" -eq 0 ]", m70_start)
+        m70_block = content[m70_start:m70_end]
+
+        assert "WARNING" in m70_block, (
+            "Migration 70 must print a WARNING when a LOBSTER-SCHEDULED cron entry "
+            "has no corresponding systemd timer, so the operator knows to fix it"
+        )
+        assert "create_scheduled_job" in m70_block, (
+            "Migration 70 must tell the operator to use create_scheduled_job MCP tool "
+            "to create the missing systemd timer"
         )
 
     def test_migration_70_references_issue_1083(self):
