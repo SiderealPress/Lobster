@@ -2041,6 +2041,11 @@ LOBSTER_ADMIN_CHAT_ID=
 # Set to "dev" to make the persistent session and health check inert while doing
 # interactive SSH work. Revert to "production" (or remove this line) to resume.
 LOBSTER_ENV=production
+
+# Flood detection tuning (optional — defaults shown)
+# LOBSTER_FLOOD_BURST_THRESHOLD=10
+# LOBSTER_FLOOD_WINDOW_SECONDS=30
+# LOBSTER_FLOOD_STARTUP_GRACE_SECONDS=120
 EOF
     fi
     NEED_CONFIG=false
@@ -2105,6 +2110,11 @@ LOBSTER_ADMIN_CHAT_ID=$USER_ID
 # Set to "dev" to make the persistent session and health check inert while doing
 # interactive SSH work. Revert to "production" (or remove this line) to resume.
 LOBSTER_ENV=production
+
+# Flood detection tuning (optional — defaults shown)
+# LOBSTER_FLOOD_BURST_THRESHOLD=10
+# LOBSTER_FLOOD_WINDOW_SECONDS=30
+# LOBSTER_FLOOD_STARTUP_GRACE_SECONDS=120
 EOF
 
     success "Telegram configuration saved"
