@@ -11,6 +11,8 @@ import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import shutil
+
 import pytest
 
 # ---------------------------------------------------------------------------
@@ -20,6 +22,15 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src" / "mcp"))
 
 import systemd_jobs as sj
+
+# Skip marker for tests that require systemd-analyze to be on PATH.
+# In Docker/CI the validator falls back to permissive mode — rejection tests
+# are meaningless there.
+_systemd_analyze_available = shutil.which("systemd-analyze") is not None
+requires_systemd_analyze = pytest.mark.skipif(
+    not _systemd_analyze_available,
+    reason="systemd-analyze not available — validator falls back to permissive mode",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -625,6 +636,7 @@ class TestNormalizeSchedule:
         _, err = sj.normalize_schedule("")
         assert err is not None
 
+    @requires_systemd_analyze
     def test_invalid_systemd_expr_returns_error(self):
         _, err = sj.normalize_schedule("not-a-schedule")
         assert err is not None

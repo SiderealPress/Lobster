@@ -22,6 +22,13 @@ unset _LOBSTER_CONFIG _DEV_MODE
 # Ensure uv and other tools are in PATH (cron doesn't inherit user PATH)
 export PATH="$HOME/.local/bin:$PATH"
 
+# Use uv if available; fall back to python3 for Docker/CI environments without uv
+if command -v uv >/dev/null 2>&1; then
+    PYTHON_CMD="uv run"
+else
+    PYTHON_CMD="python3"
+fi
+
 JOB_NAME="$1"
 
 if [ -z "$JOB_NAME" ]; then
@@ -59,7 +66,7 @@ mkdir -p "$LOG_DIR" "$INBOX_DIR"
 # alert — no raw file writes to observations.log or outbox/.
 _send_alert() {
     local msg="$1"
-    uv run "$LOBSTER_INSTALL/scripts/lobster-observe.py" \
+    $PYTHON_CMD "$LOBSTER_INSTALL/scripts/lobster-observe.py" \
         --category system_error \
         --text "$msg" \
         --source "dispatch-job" \
@@ -94,7 +101,7 @@ if [ ! -f "$TASK_FILE" ]; then
                    '.jobs[$name].enabled = false' \
                    "$JOBS_FILE" > "$TMP_FILE" && mv "$TMP_FILE" "$JOBS_FILE"
             else
-                uv run - \
+                $PYTHON_CMD - \
                     "$JOBS_FILE" \
                     "$JOB_NAME" \
                     << 'PYEOF'
@@ -131,7 +138,7 @@ fi
 EPOCH_MS=$(date +%s%3N)
 MSG_ID="${EPOCH_MS}_scheduled_${JOB_NAME}"
 
-uv run - \
+$PYTHON_CMD - \
     "${INBOX_DIR}/${MSG_ID}.json" \
     "${MSG_ID}" \
     "${START_ISO}" \
