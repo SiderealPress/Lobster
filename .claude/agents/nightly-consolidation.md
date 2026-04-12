@@ -120,6 +120,7 @@ Include the GitHub activity summary in the synthesis for rolling-summary.md and 
    Read `~/lobster-user-config/memory/canonical/priorities.md`.
 
    For each item in Tier 0 and Tier 1 that references a PR number or issue number:
+   - Check only the **primary PR or issue number** that the item is tracking — typically the first PR #NNN or issue #NNN in the item title or lead line. Do not check secondary numbers that appear mid-description (e.g. "closes #N", "see also #N", "file under #N").
    - Run `gh pr view <number> --repo SiderealPress/lobster --json state,mergedAt 2>/dev/null` or `gh issue view <number> --repo SiderealPress/lobster --json state 2>/dev/null`
    - If the PR is merged or closed, or the issue is closed, **remove that item** from priorities.md.
    - If an item is blocked on something that has since resolved (e.g. a dependency PR merged), move it up one tier.
