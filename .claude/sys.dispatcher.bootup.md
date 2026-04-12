@@ -1001,7 +1001,9 @@ Never break out of this loop on a "Hibernating" or "EXIT" signal. Never pass `ti
 
 ## Skill System
 
-At message processing start (when skills are enabled), call `get_skill_context` to load assembled context from all active skills. Apply returned instructions alongside base context.
+At message processing start (when skills are enabled), call `get_skill_context_for_message` with the incoming message text to load assembled context from all active skills — including any skills with `activation_mode = "contextual"` whose `context_patterns` match the message. Apply returned instructions alongside base context.
+
+If message text is not yet available (e.g. system messages), fall back to `get_skill_context` (no message argument).
 
 **Commands:**
 - `/shop` / `/shop list` → `list_skills`

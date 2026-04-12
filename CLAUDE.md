@@ -91,7 +91,7 @@ Skills are rich four-dimensional units (behavior + context + preferences + tooli
 - `triggered` — Skill activates when its triggers (commands/keywords) are detected
 - `contextual` — Skill activates when message context matches its patterns
 
-**Skill MCP tools:** `get_skill_context`, `list_skills`, `activate_skill`, `deactivate_skill`, `get_skill_preferences`, `set_skill_preference`
+**Skill MCP tools:** `get_skill_context_for_message` (preferred — evaluates contextual skills), `get_skill_context` (fallback — always-active only), `list_skills`, `activate_skill`, `deactivate_skill`, `get_skill_preferences`, `set_skill_preference`
 
 > **Dispatcher-only:** skill loading at message start and `/shop`/`/skill` command handling are documented in `.claude/sys.dispatcher.bootup.md`.
 
