@@ -9043,6 +9043,13 @@ def _inbox_already_has_agent(agent_id: str) -> bool:
     return False
 
 
+# Sessions that completed more than this many minutes before the MCP server
+# started are "stale" — the dispatcher that requested them is gone, and
+# injecting them would flood the inbox at startup (issue #1355).
+# These sessions are silently marked as notified rather than queued.
+_STARTUP_SWEEP_STALE_MINUTES = 10
+
+
 async def _startup_sweep() -> None:
     """Send missed notifications for sessions that completed while server was down.
 
@@ -9057,7 +9064,18 @@ async def _startup_sweep() -> None:
 
     An additional idempotency guard checks whether an inbox file for the agent
     already exists (handles the crash-after-write-before-set_notified race).
+
+    Staleness filter (issue #1355): sessions that completed more than
+    _STARTUP_SWEEP_STALE_MINUTES minutes before the server started are silently
+    marked as notified without being injected into the inbox. This prevents the
+    inbox from being flooded with stale completion notices at startup — which
+    would block real user messages for several WFM cycles.
     """
+    from datetime import timedelta
+
+    # _SERVER_START_TIME is recorded at module import time (~line 899).
+    stale_cutoff = _SERVER_START_TIME - timedelta(minutes=_STARTUP_SWEEP_STALE_MINUTES)
+
     try:
         unnotified = _session_store.get_unnotified_completed(since_hours=24)
         if unnotified:
@@ -9065,8 +9083,30 @@ async def _startup_sweep() -> None:
                 f"[reconciler] Startup sweep: found {len(unnotified)} unnotified "
                 f"completed/dead session(s) — re-enqueuing notifications"
             )
+        stale_count = 0
         for session in unnotified:
             agent_id = session.get("id", "")
+
+            # Staleness check: sessions that finished long before the server
+            # started are stale artifacts — silently acknowledge them.
+            completed_at_str = session.get("completed_at") or session.get("stopped_at")
+            if completed_at_str:
+                try:
+                    completed_at = datetime.fromisoformat(
+                        completed_at_str.replace("Z", "+00:00")
+                    )
+                    if completed_at < stale_cutoff:
+                        _session_store.set_notified(agent_id)
+                        stale_count += 1
+                        log.debug(
+                            "[reconciler] Startup sweep: skipping stale session %r "
+                            "(completed_at=%s, stale_cutoff=%s)",
+                            agent_id, completed_at_str, stale_cutoff.isoformat(),
+                        )
+                        continue
+                except (ValueError, TypeError):
+                    pass  # Unparseable timestamp — fall through to normal handling
+
             if _inbox_already_has_agent(agent_id):
                 log.debug(
                     "[reconciler] Startup sweep: inbox file already exists for "
@@ -9076,6 +9116,12 @@ async def _startup_sweep() -> None:
                 continue
             outcome = session.get("status", "completed")
             _enqueue_reconciler_notification(session, outcome=outcome)
+
+        if stale_count:
+            log.info(
+                f"[reconciler] Startup sweep: silently acknowledged {stale_count} "
+                f"stale session(s) (completed >{_STARTUP_SWEEP_STALE_MINUTES}min before server start)"
+            )
     except Exception as exc:
         log.error(f"[reconciler] Startup sweep error: {exc}", exc_info=True)
 
