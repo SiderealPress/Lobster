@@ -24,9 +24,19 @@ import importlib
 
 
 def _load_bot_module():
-    """Import and return the lobster_bot module freshly."""
-    import src.bot.lobster_bot as bot_module
-    return bot_module
+    """Import and return the lobster_bot module, ensuring required env vars are set.
+
+    lobster_bot.py raises ValueError at module level if TELEGRAM_BOT_TOKEN is
+    absent.  Tests that call this helper do not care about the bot token — they
+    only need the pure helper functions (_is_direct_invocation, etc.) — so we
+    supply dummy values to satisfy the module-level guard.
+    """
+    with patch.dict(os.environ, {
+        "TELEGRAM_BOT_TOKEN": "test_token",
+        "TELEGRAM_ALLOWED_USERS": "111",
+    }):
+        import src.bot.lobster_bot as bot_module
+        return bot_module
 
 
 class TestIsDirectInvocation:
