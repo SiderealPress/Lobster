@@ -390,12 +390,19 @@ if [ "$CONTAINER_SETUP" = true ]; then
         done
     fi
 
-    # Create stub user-config agent files if they don't exist
+    # Create stub user-config agent files if they don't exist.
+    # Seed from canonical-templates if a matching template exists, otherwise create empty stub.
     for stub_file in "user.base.bootup.md" "user.base.context.md" "user.dispatcher.bootup.md" "user.subagent.bootup.md"; do
         stub_dest="$USER_CONFIG_DIR/agents/$stub_file"
         if [ ! -f "$stub_dest" ]; then
-            touch "$stub_dest"
-            info "  Created stub: agents/$stub_file"
+            stub_tmpl="$INSTALL_DIR/memory/canonical-templates/$stub_file"
+            if [ -f "$stub_tmpl" ]; then
+                cp "$stub_tmpl" "$stub_dest"
+                info "  Seeded user config: agents/$stub_file"
+            else
+                touch "$stub_dest"
+                info "  Created stub: agents/$stub_file"
+            fi
         fi
     done
 
@@ -1151,12 +1158,19 @@ if [ -f "$AUDIT_CONTEXT_SEED" ] && [ ! -f "$AUDIT_CONTEXT_DEST" ]; then
     info "  Seeded system-audit.context.md to user-config/agents/"
 fi
 
-# Create stub user-config agent files if they don't exist
+# Create stub user-config agent files if they don't exist.
+# Seed from canonical-templates if a matching template exists, otherwise create empty stub.
 for stub_file in "user.base.bootup.md" "user.base.context.md" "user.dispatcher.bootup.md" "user.subagent.bootup.md"; do
     stub_dest="$USER_CONFIG_DIR/agents/$stub_file"
     if [ ! -f "$stub_dest" ]; then
-        touch "$stub_dest"
-        info "  Created stub: agents/$stub_file"
+        stub_tmpl="$INSTALL_DIR/memory/canonical-templates/$stub_file"
+        if [ -f "$stub_tmpl" ]; then
+            cp "$stub_tmpl" "$stub_dest"
+            info "  Seeded user config: agents/$stub_file"
+        else
+            touch "$stub_dest"
+            info "  Created stub: agents/$stub_file"
+        fi
     fi
 done
 
