@@ -47,12 +47,13 @@ TASK_FILE="$WORKSPACE/scheduled-jobs/tasks/${JOB_NAME}.md"
 LOG_DIR="$WORKSPACE/scheduled-jobs/logs"
 JOBS_FILE="${SCHEDULED_JOBS_FILE:-$WORKSPACE/scheduled-jobs/jobs.json}"
 INBOX_DIR="${LOBSTER_MESSAGES:-$HOME/messages}/inbox"
+PROCESSING_DIR="${LOBSTER_MESSAGES:-$HOME/messages}/processing"
 LOBSTER_INSTALL="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 START_ISO=$(date -Iseconds)
 
 # Ensure log directory exists
-mkdir -p "$LOG_DIR" "$INBOX_DIR"
+mkdir -p "$LOG_DIR" "$INBOX_DIR" "$PROCESSING_DIR"
 
 # Helper: emit a system_error observation via the inbox API.
 # Uses lobster-observe.py so the dispatcher (not the bash script) routes the
@@ -118,10 +119,15 @@ PYEOF
     exit 0
 fi
 
-# --- Dedup guard: skip if a pending dispatch already exists in inbox (#1201) ---
-# This prevents inbox flooding when a job's subagent takes longer than the schedule interval.
+# --- Dedup guard: skip if a pending or in-progress dispatch already exists (#993) ---
+# Checks both inbox/ (queued) and processing/ (currently being handled) so that a
+# storm of triggers — e.g. 90 NATS events in 4 seconds — produces exactly one dispatch.
 if ls "${INBOX_DIR}"/*_scheduled_"${JOB_NAME}".json 2>/dev/null | head -1 | grep -q .; then
     echo "[$START_ISO] Job '$JOB_NAME' already has a pending dispatch in inbox — skipping" | tee -a "$LOG_FILE"
+    exit 0
+fi
+if ls "${PROCESSING_DIR}"/*_scheduled_"${JOB_NAME}".json 2>/dev/null | head -1 | grep -q .; then
+    echo "[$START_ISO] Job '$JOB_NAME' is already being processed — skipping" | tee -a "$LOG_FILE"
     exit 0
 fi
 
