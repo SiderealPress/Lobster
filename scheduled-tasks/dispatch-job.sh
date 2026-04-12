@@ -154,6 +154,7 @@ msg = {
     "source": "system",
     "type": "scheduled_reminder",
     "chat_id": 0,
+    "task_origin": "scheduled",
     "user_id": 0,
     "username": "lobster-cron",
     "user_name": "Cron",
