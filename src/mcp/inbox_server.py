@@ -899,6 +899,104 @@ if not TASKS_FILE.exists():
 _SERVER_START_TIME = datetime.now(timezone.utc)
 
 # ---------------------------------------------------------------------------
+# Inbox flood detection (issue #1420)
+# ---------------------------------------------------------------------------
+#
+# Tracks recent message types to detect bursts. State is in-memory only —
+# reset on each server restart. This is intentional: flood protection is only
+# needed during the current session's drain phase.
+#
+# Known-safe flood types that are auto-drained without spawning subagents:
+#
+#   RECONCILER_GHOST: subagent_result with elapsed_seconds < 30 AND arriving
+#     within FLOOD_STARTUP_GRACE_SECONDS of server start. These represent
+#     stale completion notices from a prior session that was already handled.
+#     Auto-draining avoids the 24-minute manual drain that blocked the
+#     dispatcher on 2026-04-03 (issue #1355).
+#
+# Detection threshold: if >FLOOD_BURST_THRESHOLD messages of the same type
+# arrive within FLOOD_WINDOW_SECONDS, a flood is declared. For unknown flood
+# types, the dispatcher is alerted rather than auto-drained.
+#
+# Tunable via env vars LOBSTER_FLOOD_BURST_THRESHOLD and LOBSTER_FLOOD_WINDOW_SECONDS.
+
+_FLOOD_BURST_THRESHOLD = int(os.environ.get("LOBSTER_FLOOD_BURST_THRESHOLD", "10"))
+_FLOOD_WINDOW_SECONDS = float(os.environ.get("LOBSTER_FLOOD_WINDOW_SECONDS", "30.0"))
+# Grace period after server start during which reconciler ghosts are auto-drained
+_FLOOD_STARTUP_GRACE_SECONDS = float(os.environ.get("LOBSTER_FLOOD_STARTUP_GRACE_SECONDS", "120.0"))
+
+# Rolling window: list of (timestamp, msg_type) tuples for recent messages seen by check_inbox
+_flood_window: list[tuple[float, str]] = []
+_flood_window_lock = threading.Lock()
+
+def _flood_register_message(msg_type: str) -> None:
+    """Register a message type in the flood-detection sliding window."""
+    now = time.time()
+    cutoff = now - _FLOOD_WINDOW_SECONDS
+    with _flood_window_lock:
+        _flood_window.append((now, msg_type))
+        # Evict entries older than the window
+        while _flood_window and _flood_window[0][0] < cutoff:
+            _flood_window.pop(0)
+
+
+def _flood_count_type(msg_type: str) -> int:
+    """Return the count of msg_type entries in the current flood window."""
+    now = time.time()
+    cutoff = now - _FLOOD_WINDOW_SECONDS
+    with _flood_window_lock:
+        return sum(1 for ts, t in _flood_window if ts >= cutoff and t == msg_type)
+
+
+def _is_reconciler_ghost(msg: dict) -> bool:
+    """Return True if msg is a reconciler ghost that is safe to auto-drain.
+
+    A reconciler ghost is a subagent_result that:
+      1. Was written by the reconciler (id contains 'reconciler' or elapsed is short)
+      2. Has elapsed_seconds < 30 (completed almost immediately — stale from prior session)
+      3. Arrived within FLOOD_STARTUP_GRACE_SECONDS of server start
+
+    These are safe to mark_processed without spawning a subagent handler because
+    the underlying task already completed (and the session was already notified)
+    in a prior server run.
+    """
+    if msg.get("type") not in ("subagent_result", "subagent_notification"):
+        return False
+
+    # Check elapsed — must be very short (< 30s) to be a ghost
+    elapsed_raw = msg.get("elapsed_seconds")
+    if elapsed_raw is not None:
+        try:
+            elapsed = int(elapsed_raw)
+        except (TypeError, ValueError):
+            elapsed = None
+        if elapsed is not None and elapsed >= 30:
+            return False  # Long-running — real result, not a ghost
+    elif msg.get("sent_reply_to_user"):
+        # If sent_reply_to_user is already True, this is effectively a notification
+        # not requiring dispatcher relay — treat as drainable ghost candidate.
+        pass
+    else:
+        # No elapsed info and not already replied — be conservative, don't auto-drain
+        return False
+
+    # Check server age — ghost drain only during startup grace period
+    server_age = (datetime.now(timezone.utc) - _SERVER_START_TIME).total_seconds()
+    if server_age > _FLOOD_STARTUP_GRACE_SECONDS:
+        return False
+
+    # Check for reconciler id pattern as a strong signal
+    msg_id = str(msg.get("id", ""))
+    if "reconciler" in msg_id:
+        return True
+
+    # For non-reconciler-id messages: require elapsed < 30s + startup window
+    if elapsed_raw is not None:
+        return True
+
+    return False
+
+# ---------------------------------------------------------------------------
 # HTTP session identity — dispatcher session tagging (Options A and B)
 # ---------------------------------------------------------------------------
 #
@@ -4128,6 +4226,7 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
     since_epoch = _parse_iso_timestamp(since_ts_str) if since_ts_str else None
 
     messages = []
+    _check_inbox_flood_drained: int = 0  # set by flood pre-processor below
 
     if since_epoch is not None:
         # Historical scan mode: read from both processed/ and inbox/, sorted by timestamp.
@@ -4167,12 +4266,63 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
 
         log.info(f"check_inbox (since_ts={since_ts_str!r}) returning {len(messages)} message(s)")
     else:
+        # ----------------------------------------------------------------
+        # Flood pre-processor: auto-drain known-safe flood types before
+        # surfacing messages to the dispatcher (issue #1420).
+        # This runs once per check_inbox call, before the main read loop.
+        # ----------------------------------------------------------------
+        _flood_drain_count = 0
+        _flood_drain_types: dict[str, int] = {}
+        try:
+            _all_inbox_files = sorted(INBOX_DIR.glob("*.json"))
+            _total_inbox = len(_all_inbox_files)
+            if _total_inbox > _FLOOD_BURST_THRESHOLD:
+                # Scan the full inbox looking for drain candidates
+                for _flood_f in _all_inbox_files:
+                    try:
+                        with open(_flood_f) as _fp:
+                            _flood_msg = json.load(_fp)
+                    except Exception:
+                        continue
+                    if _is_reconciler_ghost(_flood_msg):
+                        _msg_id = _flood_msg.get("id", _flood_f.stem)
+                        _msg_type = _flood_msg.get("type", "unknown")
+                        try:
+                            # Move to processed (same logic as mark_processed)
+                            _dest = PROCESSED_DIR / _flood_f.name
+                            _flood_f.rename(_dest)
+                            _flood_drain_count += 1
+                            _flood_drain_types[_msg_type] = _flood_drain_types.get(_msg_type, 0) + 1
+                            _flood_register_message(_msg_type)
+                            log.debug(
+                                "[flood-drain] Auto-drained reconciler ghost %r (type=%s)",
+                                _msg_id, _msg_type,
+                            )
+                        except Exception as _drain_exc:
+                            log.warning(
+                                "[flood-drain] Failed to drain ghost %r: %s",
+                                _msg_id, _drain_exc,
+                            )
+                if _flood_drain_count > 0:
+                    _check_inbox_flood_drained = _flood_drain_count
+                    log.info(
+                        "[flood-drain] Drained %d reconciler ghost(s) from inbox "
+                        "(types=%r, server_age=%.1fs)",
+                        _flood_drain_count,
+                        _flood_drain_types,
+                        (datetime.now(timezone.utc) - _SERVER_START_TIME).total_seconds(),
+                    )
+        except Exception as _flood_exc:
+            log.warning("[flood-drain] Pre-processor error (non-fatal): %s", _flood_exc)
+
         for f in sorted(INBOX_DIR.glob("*.json")):
             try:
                 with open(f) as fp:
                     msg = json.load(fp)
                     if source_filter and msg.get("source", "").lower() != source_filter:
                         continue
+                    # Register in flood window for burst tracking
+                    _flood_register_message(msg.get("type", "unknown"))
                     # /report slash command pre-processor: handle automatically without
                     # surfacing the raw message to the main dispatcher loop.
                     msg_text = msg.get("text", "")
@@ -4218,12 +4368,25 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
                 continue
 
         if not messages:
+            if _check_inbox_flood_drained:
+                return [TextContent(
+                    type="text",
+                    text=(
+                        f"📭 No new messages in inbox. "
+                        f"(flood-drain: {_check_inbox_flood_drained} reconciler ghost(s) "
+                        f"auto-processed — no action needed)"
+                    ),
+                )]
             return [TextContent(type="text", text="📭 No new messages in inbox.")]
 
         log.info(f"check_inbox returning {len(messages)} message(s)")
 
     # Format messages nicely
-    output = f"📬 **{len(messages)} new message(s):**\n\n"
+    _flood_note = (
+        f"\n> flood-drain: {_check_inbox_flood_drained} reconciler ghost(s) were "
+        f"auto-drained before this batch — no action needed for those.\n"
+    ) if _check_inbox_flood_drained else ""
+    output = f"📬 **{len(messages)} new message(s):**{_flood_note}\n\n"
     for msg in messages:
         source = msg.get("source", "unknown").upper()
         user = msg.get("user_name", msg.get("username", "Unknown"))
