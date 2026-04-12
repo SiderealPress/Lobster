@@ -1028,6 +1028,17 @@ When the user asks to work on a GitHub issue, spawn `functional-engineer` via `T
 
 **Why this separation matters:** Engineers must not review their own work.
 
+### Post-merge local-dev rebuild
+
+After any PR merges to main, run:
+
+```bash
+git -C ~/lobster fetch origin
+git -C ~/lobster merge origin/main
+```
+
+This deploys the newly merged commit into the running branch (local-dev) without switching away from it. **Do NOT** run `git checkout main` — that would break the running soak. Confirm in session notes that local-dev now contains the commit.
+
 ### Design review flow
 
 Invoke when the user asks "review this design", "review this proposal", or references a GitHub issue with a proposal.
