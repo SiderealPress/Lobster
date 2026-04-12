@@ -1,62 +1,49 @@
 #!/usr/bin/env python3
 """
-PostToolUse hook: thinking heartbeat.
+PostToolUse hook: dispatcher heartbeat.
 
-Writes last_thinking_at (ISO UTC timestamp) to lobster-state.json on every
-PostToolUse event. The health check reads this field and folds it into the
-effective freshness signal alongside the WFM heartbeat file and last_processed_at.
+Writes a Unix epoch timestamp to ~/lobster-workspace/logs/dispatcher-heartbeat
+on every PostToolUse event. The health check reads this file and asks one
+question: is this file newer than N seconds (default: 1200s / 20 minutes)?
 
-Purpose: the dispatcher can spend 10+ minutes in a reasoning phase (thinking,
-composing responses, spawning subagents) without touching wait_for_messages or
-mark_processed. During this window the health check sees no activity and may
-incorrectly conclude the dispatcher is frozen. Any tool call at all means the
-dispatcher is alive — this hook captures that signal.
+This replaces the previous multi-signal WFM freshness check that aggregated:
+  (a) claude-heartbeat file mtime (written by inbox_server.py on WFM calls)
+  (b) last_processed_at in lobster-state.json (written on mark_processed)
+  (c) last_thinking_at in lobster-state.json (written by this hook)
+
+The 20-minute threshold is generous enough to cover compaction (1-3+ minutes)
+and catchup subagents (10-12 minutes) without any suppression logic.
 
 Design:
 - Unconditional: fires on every PostToolUse (no tool-name filtering needed)
 - Atomic write: write to .tmp, then os.rename() to avoid partial reads
-- Merge: read existing JSON, update last_thinking_at, write back — no overwrite
-- Silent on failure: health check degrades gracefully when field is absent
+- Single value: just a Unix epoch integer, nothing else
+- Silent on failure: health check degrades gracefully when file is absent
 """
 
-import json
 import os
 import sys
-from datetime import datetime, timezone
+import time
 from pathlib import Path
 
 
-MESSAGES_DIR = Path(os.environ.get("LOBSTER_MESSAGES", Path.home() / "messages"))
-STATE_FILE = Path(os.environ.get("LOBSTER_STATE_FILE_OVERRIDE", MESSAGES_DIR / "config" / "lobster-state.json"))
+WORKSPACE_DIR = Path(os.environ.get("LOBSTER_WORKSPACE", Path.home() / "lobster-workspace"))
+HEARTBEAT_FILE = WORKSPACE_DIR / "logs" / "dispatcher-heartbeat"
 
 
-def _read_state(path: Path) -> dict:
-    """Return existing state dict, or empty dict if file is absent or unparseable."""
-    try:
-        return json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-
-def _write_state_atomic(path: Path, state: dict) -> None:
-    """Write state dict atomically: write to .tmp then rename."""
-    tmp = Path(str(path) + ".tmp")
-    tmp.write_text(json.dumps(state, indent=2) + "\n")
-    os.rename(str(tmp), str(path))
-
-
-def write_thinking_heartbeat(state_file: Path) -> None:
-    """Merge last_thinking_at into state_file, creating it if absent."""
-    state = _read_state(state_file)
-    state["last_thinking_at"] = datetime.now(timezone.utc).isoformat()
-    _write_state_atomic(state_file, state)
+def write_dispatcher_heartbeat(heartbeat_file: Path) -> None:
+    """Write current Unix epoch to heartbeat_file atomically."""
+    heartbeat_file.parent.mkdir(parents=True, exist_ok=True)
+    tmp = Path(str(heartbeat_file) + ".tmp")
+    tmp.write_text(str(int(time.time())) + "\n")
+    os.rename(str(tmp), str(heartbeat_file))
 
 
 def main() -> None:
     try:
-        write_thinking_heartbeat(STATE_FILE)
+        write_dispatcher_heartbeat(HEARTBEAT_FILE)
     except Exception:
-        # Never block tool execution — health check degrades gracefully if field is absent
+        # Never block tool execution — health check degrades gracefully if file is absent
         pass
     sys.exit(0)
 
