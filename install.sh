@@ -2620,6 +2620,13 @@ else
         info "Observability server service installed (enable manually with: sudo systemctl enable lobster-observability)"
     fi
 
+    # Install and enable the voice transcription service (whisper.cpp pipeline)
+    if [ -f "$INSTALL_DIR/services/lobster-transcription.service" ]; then
+        sudo cp "$INSTALL_DIR/services/lobster-transcription.service" /etc/systemd/system/
+        sudo systemctl enable lobster-transcription 2>/dev/null || true
+        success "Voice transcription service installed and enabled (lobster-transcription)"
+    fi
+
     sudo systemctl daemon-reload
     success "Services installed"
 fi
@@ -2793,6 +2800,11 @@ if [[ ! $REPLY =~ ^[Nn]$ ]]; then
     sleep 2
     sudo systemctl start lobster-claude
 
+    # Start voice transcription service if installed
+    if systemctl is-enabled --quiet lobster-transcription 2>/dev/null; then
+        sudo systemctl start lobster-transcription 2>/dev/null || true
+    fi
+
     sleep 3
 
     echo ""
@@ -2806,6 +2818,12 @@ if [[ ! $REPLY =~ ^[Nn]$ ]]; then
         success "Claude session: running in tmux"
     else
         warn "Claude session: not running (check with: lobster attach)"
+    fi
+
+    if systemctl is-active --quiet lobster-transcription 2>/dev/null; then
+        success "Voice transcription: running"
+    elif systemctl is-enabled --quiet lobster-transcription 2>/dev/null; then
+        warn "Voice transcription: not running (check: sudo journalctl -u lobster-transcription)"
     fi
 
     # Start dashboard server if not already running

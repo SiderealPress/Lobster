@@ -2442,6 +2442,32 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
         substep "wfm-watchdog.sh cron entry already present — skipping"
     fi
 
+    # Migration 70: Enable and start lobster-transcription.service (voice message pipeline).
+    # The service file was present in prior installs but never enabled, leaving voice
+    # messages stuck in pending-transcription/ indefinitely. (Issue #1470.)
+    local transcription_svc="lobster-transcription"
+    if [ -f "/etc/systemd/system/${transcription_svc}.service" ]; then
+        if ! systemctl is-enabled --quiet "$transcription_svc" 2>/dev/null; then
+            substep "Enabling $transcription_svc service (issue #1470)..."
+            sudo systemctl enable "$transcription_svc" 2>/dev/null || true
+            sudo systemctl start  "$transcription_svc" 2>/dev/null || true
+            substep "Voice transcription service enabled and started"
+            migrated=$((migrated + 1))
+        else
+            substep "$transcription_svc already enabled — skipping"
+        fi
+    elif [ -f "$LOBSTER_DIR/services/${transcription_svc}.service" ]; then
+        substep "Installing $transcription_svc service file..."
+        sudo cp "$LOBSTER_DIR/services/${transcription_svc}.service" /etc/systemd/system/
+        sudo systemctl daemon-reload 2>/dev/null || true
+        sudo systemctl enable "$transcription_svc" 2>/dev/null || true
+        sudo systemctl start  "$transcription_svc" 2>/dev/null || true
+        substep "Voice transcription service installed, enabled, and started"
+        migrated=$((migrated + 1))
+    else
+        substep "WARN: lobster-transcription.service not found — skipping (voice transcription unavailable)"
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
