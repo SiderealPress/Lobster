@@ -83,6 +83,7 @@ on every SessionStart; ordering matters only for the marker file dependency.)
 
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -321,22 +322,21 @@ def _create_session_file_stub() -> None:
                 f"## Open Threads\n\n## Open Tasks\n\n## Open Subagents\n\n## Notable Events\n"
             )
 
-        # Substitute template placeholders.
+        # Substitute template placeholders using flexible regex patterns so
+        # that future edits to example values in the template (e.g. a new
+        # sample date) do not cause silent substitution failures.
         stub = template_content
         stub = stub.replace("# Session YYYYMMDD-NNN", f"# Session {session_id}")
-        stub = stub.replace(
-            "<ISO timestamp, e.g. 2026-03-25T14:32:00Z>", ts_iso
-        )
-        stub = stub.replace('<ISO timestamp or "active">', "active")
-        # Replace Messages processed placeholder if present.
-        stub = stub.replace(
-            '<count or "unknown">',
-            "0",
-        )
-        stub = stub.replace(
-            '<"active" | "graceful wind-down" | "context_warning" | "short session" | "crash">',
-            "active",
-        )
+        # Matches the Ended field: <ISO timestamp or "active"> — must run BEFORE
+        # the general ISO timestamp replacement to avoid being consumed by it.
+        stub = re.sub(r'<ISO timestamp or "active"[^>]*>', "active", stub)
+        # Matches the Started field: <ISO timestamp, e.g. 2026-03-25T14:32:00Z>
+        # (any example date — the "or" variant was already handled above).
+        stub = re.sub(r"<ISO timestamp[^>]*>", ts_iso, stub)
+        # Matches: <count or "unknown"> (the Messages processed field)
+        stub = re.sub(r'<count or "unknown"[^>]*>', "0", stub)
+        # Matches: <"active" | ...> (the End reason field — any pipe-separated options)
+        stub = re.sub(r'<"active"[^>]*>', "active", stub)
 
         # Write session file atomically.
         tmp_path = session_path.with_suffix(".tmp")
