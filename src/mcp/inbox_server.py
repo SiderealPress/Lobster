@@ -3797,6 +3797,15 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
             touch_heartbeat()
             elapsed += wait_time
 
+            # Fallback inbox poll: inotify can miss rename events under high load
+            # (IN_Q_OVERFLOW) or in edge cases with certain filesystem configurations.
+            # This periodic check ensures subagent_notification and other messages
+            # are detected within one heartbeat interval even if the file watcher
+            # missed the event (issue #990).
+            if list(INBOX_DIR.glob("*.json")):
+                message_arrived.set()
+                break
+
         if message_arrived.is_set():
             # Small delay to ensure file is fully written
             await asyncio.sleep(0.1)
