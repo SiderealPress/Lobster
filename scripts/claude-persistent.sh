@@ -374,6 +374,20 @@ kill_orphaned_mcp_processes() {
             continue
         fi
 
+        # Skip systemd-managed services — not orphans, independently lifecycle-managed.
+        # Check: PPID=1 (direct systemd child) AND cgroup maps to an active .service unit.
+        local pid_ppid
+        pid_ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+        if [[ "$pid_ppid" == "1" ]]; then
+            local svc_name
+            svc_name=$(grep -oP '[\w-]+\.service' /proc/"$pid"/cgroup 2>/dev/null | head -1)
+            if [[ -n "$svc_name" ]] && systemctl is-active --quiet "$svc_name" 2>/dev/null; then
+                log "CLEANUP: MCP PID $pid is a systemd-managed service ($svc_name) — skipping"
+                skipped=$((skipped + 1))
+                continue
+            fi
+        fi
+
         local is_ours=false
         if [[ -n "$tmux_panes" ]]; then
             local check_pid="$pid"
