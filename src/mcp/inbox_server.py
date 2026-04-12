@@ -990,10 +990,9 @@ def _is_reconciler_ghost(msg: dict) -> bool:
     if "reconciler" in msg_id:
         return True
 
-    # For non-reconciler-id messages: require elapsed < 30s + startup window
-    if elapsed_raw is not None:
-        return True
-
+    # For non-reconciler-id messages: only the strong signal path (reconciler id)
+    # should trigger ghost classification. The weak fallback (elapsed alone) is
+    # insufficient — it would incorrectly drain legitimate fast user task results.
     return False
 
 # ---------------------------------------------------------------------------

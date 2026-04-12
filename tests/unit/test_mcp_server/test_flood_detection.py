@@ -139,6 +139,21 @@ class TestIsReconcilerGhost:
         }
         assert not inbox_server._is_reconciler_ghost(msg)
 
+    def test_non_reconciler_fast_result_not_ghost(self, inbox_server):
+        """Non-reconciler subagent_result with short elapsed must NOT be treated as a ghost.
+
+        The weak fallback path (elapsed < 30s during startup grace) must not fire
+        for messages whose id does not contain 'reconciler'.  Fast user tasks that
+        complete in < 30 s are legitimate results and must reach the dispatcher.
+        """
+        msg = {
+            "id": "1234567890_my-user-task-xyz",
+            "type": "subagent_result",
+            "elapsed_seconds": 20,  # fast, but not a reconciler
+            "sent_reply_to_user": False,
+        }
+        assert not inbox_server._is_reconciler_ghost(msg)
+
 
 # ---------------------------------------------------------------------------
 # Tests for flood window functions
