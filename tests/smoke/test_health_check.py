@@ -516,3 +516,139 @@ def test_wfm_freshness_green_when_last_processed_absent_heartbeat_recent(
         "state files that predate issue #694.\n"
         f"stderr: {result.stderr!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# D6 — is_dispatcher_busy: activity-aware inbox staleness (issue #1078 Fix B)
+# ---------------------------------------------------------------------------
+#
+# When the dispatcher is actively making tool calls (fresh last_thinking_at),
+# a stale inbox is a false alarm — the dispatcher is processing a backlog, not
+# stuck. is_dispatcher_busy() detects this by reading last_thinking_at from
+# lobster-state.json and returning true if it's within DISPATCHER_BUSY_SECONDS.
+
+# Must match DISPATCHER_BUSY_SECONDS in health-check-v3.sh.
+DISPATCHER_BUSY_SECONDS = 90
+
+
+def _is_dispatcher_busy_script(state_file: Path, tmp_path: Path) -> str:
+    """
+    Build a self-contained bash fragment that calls is_dispatcher_busy()
+    and exits with its return code (0=busy, 1=not busy).
+    """
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "health-check.log"
+
+    fn_body = _extract_function("is_dispatcher_busy")
+
+    return f"""
+#!/bin/bash
+LOBSTER_STATE_FILE="{state_file}"
+DISPATCHER_BUSY_SECONDS={DISPATCHER_BUSY_SECONDS}
+LOG_FILE="{log_file}"
+mkdir -p "$(dirname "$LOG_FILE")"
+log()      {{ echo "[$(date -Iseconds)] [$1] $2" >> "$LOG_FILE"; }}
+log_info() {{ log "INFO" "$1"; }}
+
+{fn_body}
+
+is_dispatcher_busy
+exit $?
+"""
+
+
+def test_dispatcher_busy_returns_true_when_thinking_recent(tmp_path: Path) -> None:
+    """
+    D6a: is_dispatcher_busy() must return 0 (true) when last_thinking_at is
+    within DISPATCHER_BUSY_SECONDS.
+
+    Failure mode: if this returns false for a fresh last_thinking_at, a busy
+    dispatcher processing a backlog gets restarted while it's actively working
+    (the original issue #1078 false alarm scenario).
+    """
+    state_file = tmp_path / "lobster-state.json"
+    recent_ts = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+    state_file.write_text(json.dumps({"mode": "active", "last_thinking_at": recent_ts}))
+
+    fragment = _is_dispatcher_busy_script(state_file, tmp_path)
+    result = _run_bash_fragment(fragment)
+
+    assert result.returncode == 0, (
+        "is_dispatcher_busy() returned false (non-zero) for a fresh last_thinking_at, "
+        "but should return true (0) when the dispatcher made a tool call within "
+        f"the last {DISPATCHER_BUSY_SECONDS}s.\n"
+        f"stderr: {result.stderr!r}"
+    )
+
+
+def test_dispatcher_busy_returns_false_when_thinking_stale(tmp_path: Path) -> None:
+    """
+    D6b: is_dispatcher_busy() must return 1 (false) when last_thinking_at is
+    older than DISPATCHER_BUSY_SECONDS.
+
+    Failure mode: if this returns true for a stale last_thinking_at, a genuinely
+    stuck dispatcher would never trigger a RED restart because the health check
+    would always think it's busy.
+    """
+    state_file = tmp_path / "lobster-state.json"
+    stale_epoch = time.time() - (DISPATCHER_BUSY_SECONDS + 120)
+    stale_ts = datetime.fromtimestamp(stale_epoch, tz=timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S+00:00"
+    )
+    state_file.write_text(json.dumps({"mode": "active", "last_thinking_at": stale_ts}))
+
+    fragment = _is_dispatcher_busy_script(state_file, tmp_path)
+    result = _run_bash_fragment(fragment)
+
+    assert result.returncode != 0, (
+        "is_dispatcher_busy() returned true (0) for a last_thinking_at that is "
+        f"{DISPATCHER_BUSY_SECONDS + 120}s old. A dispatcher that has been silent "
+        f"for >{DISPATCHER_BUSY_SECONDS}s is not busy — inbox staleness must still "
+        "trigger RED.\n"
+        f"stderr: {result.stderr!r}"
+    )
+
+
+def test_dispatcher_busy_returns_false_when_state_absent(tmp_path: Path) -> None:
+    """
+    D6c: is_dispatcher_busy() must return 1 (false) when lobster-state.json
+    does not exist.
+
+    Failure mode: if this returns true when the state file is missing, the health
+    check would never restart a stuck dispatcher on fresh installs or after the
+    state file is deleted.
+    """
+    missing_state_file = tmp_path / "nonexistent-state.json"
+    # Do NOT create the file.
+
+    fragment = _is_dispatcher_busy_script(missing_state_file, tmp_path)
+    result = _run_bash_fragment(fragment)
+
+    assert result.returncode != 0, (
+        "is_dispatcher_busy() returned true (0) when lobster-state.json does not "
+        "exist. A missing state file cannot indicate activity — must return false.\n"
+        f"stderr: {result.stderr!r}"
+    )
+
+
+def test_dispatcher_busy_returns_false_when_thinking_absent(tmp_path: Path) -> None:
+    """
+    D6d: is_dispatcher_busy() must return 1 (false) when lobster-state.json
+    exists but has no last_thinking_at field.
+
+    Failure mode: if this returns true for a state file without last_thinking_at
+    (e.g. an older install that predates the thinking-heartbeat hook), the health
+    check would silently suppress all stale-inbox restarts.
+    """
+    state_file = tmp_path / "lobster-state.json"
+    state_file.write_text(json.dumps({"mode": "active"}))  # no last_thinking_at
+
+    fragment = _is_dispatcher_busy_script(state_file, tmp_path)
+    result = _run_bash_fragment(fragment)
+
+    assert result.returncode != 0, (
+        "is_dispatcher_busy() returned true (0) when last_thinking_at is absent "
+        "from lobster-state.json. A missing field must not indicate activity.\n"
+        f"stderr: {result.stderr!r}"
+    )

@@ -85,6 +85,9 @@ RESTART_COOLDOWN_SUPPRESS_SECONDS=240 # 4 minutes - suppress stale-inbox RED aft
 
 BOOT_GRACE_SECONDS=90                # 90s - skip stale-inbox, WFM, and process checks after a restart
 
+DISPATCHER_BUSY_SECONDS=90           # 90s - if last_thinking_at is this fresh, dispatcher is actively busy;
+                                     # downgrade stale-inbox from RED to YELLOW (issue #1078 Fix B)
+
 HIBERNATE_FRESH_SECONDS=30           # Ignore hibernate state younger than this — transient dispatcher hibernation
 
 WFM_STALE_SECONDS=1200               # 20 minutes - RED if wait_for_messages not called since this long ago (raised from 600 to accommodate long reasoning/subagent-spawning phases)
@@ -651,6 +654,42 @@ is_recent_restart() {
     local age=$((now - restart_epoch))
     if [[ $age -le $RESTART_COOLDOWN_SUPPRESS_SECONDS ]]; then
         log_info "Recent restart ${age}s ago (cooldown: ${RESTART_COOLDOWN_SUPPRESS_SECONDS}s) — stale-inbox RED suppressed"
+        return 0
+    fi
+    return 1
+}
+
+# Check if the dispatcher is actively busy — i.e. making tool calls right now.
+# If last_thinking_at is fresh (within DISPATCHER_BUSY_SECONDS), the dispatcher
+# is in the middle of processing and a stale inbox is a false alarm, not a stall.
+# This prevents restarts when a busy startup backlog causes user messages to age
+# while the dispatcher is legitimately working through lower-priority items.
+# (issue #1078 Fix B)
+#
+# Returns 0 (true) if dispatcher is actively busy, 1 otherwise.
+is_dispatcher_busy() {
+    if [[ ! -f "$LOBSTER_STATE_FILE" ]]; then
+        return 1
+    fi
+    local last_thinking_at
+    last_thinking_at=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('$LOBSTER_STATE_FILE'))
+    print(d.get('last_thinking_at', ''))
+except Exception:
+    print('')
+" 2>/dev/null)
+    if [[ -z "$last_thinking_at" ]]; then
+        return 1
+    fi
+    local thinking_epoch
+    thinking_epoch=$(date -d "$last_thinking_at" +%s 2>/dev/null) || return 1
+    local now
+    now=$(date +%s)
+    local age=$((now - thinking_epoch))
+    if [[ $age -le $DISPATCHER_BUSY_SECONDS ]]; then
+        log_info "Dispatcher active: last tool call ${age}s ago (threshold: ${DISPATCHER_BUSY_SECONDS}s) — stale-inbox RED downgraded to YELLOW (issue #1078)"
         return 0
     fi
     return 1
@@ -1942,6 +1981,11 @@ main() {
                     local inbox_rc=$?
                     if [[ $inbox_rc -eq 2 ]]; then
                         if is_recent_restart; then
+                            [[ "$level" == "GREEN" ]] && level="YELLOW"
+                        elif is_dispatcher_busy; then
+                            # Dispatcher is actively making tool calls — a stale inbox means
+                            # it's processing a backlog, not stuck. Downgrade to YELLOW.
+                            # (issue #1078 Fix B: activity-aware health check)
                             [[ "$level" == "GREEN" ]] && level="YELLOW"
                         else
                             level="RED"
