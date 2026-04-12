@@ -336,6 +336,36 @@ def test_format_truncates_long_description():
     assert "..." in result
 
 
+def test_format_system_agent_separated_from_user_count():
+    """System agents (chat_id=0) must not inflate the user-facing agent count."""
+    sessions = [
+        {"agent_type": "subagent", "description": "User task",
+         "chat_id": "8305714125", "elapsed_seconds": 300, "id": "u1"},
+        {"agent_type": "subagent", "description": "startup-catchup",
+         "chat_id": "0", "elapsed_seconds": 60, "id": "s1"},
+    ]
+    result = session_store.format_active_sessions_block(sessions)
+    # User count should be 1, not 2
+    assert "[1 agent running" in result
+    # System count annotation
+    assert "1 system" in result
+    # System agent shown with 'system' label, not chat_id
+    assert "(system," in result
+    # User agent shown with real chat_id
+    assert "chat: 8305714125" in result
+
+
+def test_format_only_system_agents():
+    """When only system agents are running, header shows 0 user agents + N system."""
+    sessions = [
+        {"agent_type": "subagent", "description": "startup-catchup",
+         "chat_id": 0, "elapsed_seconds": 60, "id": "s1"},
+    ]
+    result = session_store.format_active_sessions_block(sessions)
+    assert "[0 agents running, 1 system]" in result
+    assert "(system," in result
+
+
 # ---------------------------------------------------------------------------
 # Test: tracker.py adapter compatibility
 # ---------------------------------------------------------------------------
