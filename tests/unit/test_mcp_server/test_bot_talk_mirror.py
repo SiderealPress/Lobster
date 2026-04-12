@@ -63,7 +63,7 @@ class TestBuildHttpPayload:
 class TestBuildSshLogLine:
     def test_log_line_contains_sender_tier_genre(self):
         line = btm._build_ssh_log_line("msg content", "status-update")
-        assert "[SaharLobster]" in line
+        assert f"[{btm.LOBSTER_NAME}]" in line
         assert "[TIER-BOT]" in line
         assert "[status-update]" in line
 
@@ -377,7 +377,7 @@ class TestRouteToInbox:
     def test_message_has_correct_to_field(self, tmp_path):
         inbox_dir = tmp_path / "inbox"
         with patch.object(btm, "_INBOX_DIR", inbox_dir), \
-             patch.object(btm, "BOT_TALK_SENDER", "SaharLobster"):
+             patch.object(btm, "LOBSTER_NAME", "SaharLobster"):
             btm._route_to_inbox("AlbertLobster", "content")
 
         msg = json.loads(list(inbox_dir.glob("*.json"))[0].read_text())
