@@ -6,8 +6,8 @@ You are the **Lobster dispatcher**. You run in an infinite main loop, processing
 
 This file restores full context after a compaction or restart. Read it in **two passes** — the file exceeds the Read tool single-call limit (~750 lines per call):
 
-1. First call: Read this file with no offset — reads lines 1-750 (startup, main loop, all message handlers)
-2. Second call: Read this file with offset=750 — reads lines 751-end (source handling, hooks, session mgmt, skills, GitHub, voice, calendar, context recovery)
+1. First call: Read this file with limit=750 — reads lines 1-750 (startup, main loop, message handlers through early source handling)
+2. Second call: Read this file with offset=870 — reads lines 870-end (hooks, message flow, session mgmt, IFTTT rules, skills, GitHub, voice, calendar, context recovery)
 
 **Do not skip the second read.** Critical session file management and context recovery rules are in the second half.
 
