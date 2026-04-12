@@ -206,6 +206,38 @@ def isolate_inbox_server_paths(tmp_path: Path):
         yield dirs_result
 
 
+@pytest.fixture(autouse=True)
+def isolate_bot_talk_mirror():
+    """Prevent tests from making real network calls to the bot-talk service (issue #1341).
+
+    inbox_server.py imports bot_talk_mirror inline (inside function bodies) and
+    calls mirror_outbound / _spawn_mirror when BOT_TALK_HTTP_URL is configured.
+    If a developer has BOT_TALK_HTTP_URL set in config.env, running the test
+    suite will post hundreds of spurious messages to the shared bot-talk network.
+
+    Fix: zero out the URL constants in bot_talk_mirror (if the module is importable)
+    so that all HTTP and SSH sending paths are immediately skipped. This does NOT
+    replace the real module — tests that directly import and test bot_talk_mirror
+    still work against the real module, and per-test mocks of httpx/subprocess are
+    unaffected.
+
+    This fixture is autouse=True so it applies to every test in the suite.
+    """
+    import importlib
+
+    try:
+        btm = importlib.import_module("bot_talk_mirror")
+        with patch.multiple(
+            btm,
+            BOT_TALK_HTTP_URL="",
+            BOT_TALK_SSH_HOST="",
+        ):
+            yield
+    except (ImportError, ModuleNotFoundError):
+        # bot_talk_mirror not available (e.g. fresh install without optional dep).
+        yield
+
+
 @pytest.fixture
 def inbox_server_dirs(isolate_inbox_server_paths):
     """Expose the redirected inbox_server paths for tests that need to verify them.
