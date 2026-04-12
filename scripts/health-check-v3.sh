@@ -14,7 +14,6 @@
 #   active     - Claude is running (WAITING on wait_for_messages or PROCESSING)
 #   starting   - Wrapper is launching Claude (transient, < 30s)
 #   restarting - Wrapper is restarting after an exit (transient, < 60s)
-#   hibernate  - Claude exited cleanly, wrapper watching for inbox messages
 #   backoff    - Wrapper hit rapid-restart limit, cooling down
 #   stopped    - Wrapper received signal, shutting down
 #   waking     - Wrapper detected messages, about to launch Claude
@@ -85,7 +84,6 @@ RESTART_COOLDOWN_SUPPRESS_SECONDS=240 # 4 minutes - suppress stale-inbox RED aft
 
 BOOT_GRACE_SECONDS=90                # 90s - skip stale-inbox, WFM, and process checks after a restart
 
-HIBERNATE_FRESH_SECONDS=30           # Ignore hibernate state younger than this — transient dispatcher hibernation
 
 WFM_STALE_SECONDS=1200               # 20 minutes - RED if wait_for_messages not called since this long ago (raised from 600 to accommodate long reasoning/subagent-spawning phases)
 HEARTBEAT_FILE="$WORKSPACE_DIR/logs/claude-heartbeat"
@@ -409,7 +407,8 @@ record_restart() {
 #===============================================================================
 
 # Read the current Lobster mode from state file.
-# Returns one of: active, starting, restarting, hibernate, backoff, stopped, waking, unknown
+# Returns one of: active, starting, restarting, backoff, stopped, waking, unknown
+# Note: inbox_server.py may still emit "hibernate" from older code paths; treat it as unknown.
 read_lobster_mode() {
     if [[ ! -f "$LOBSTER_STATE_FILE" ]]; then
         echo "unknown"
@@ -440,12 +439,6 @@ read_state_age() {
     local now
     now=$(date +%s)
     echo $((now - file_time))
-}
-
-is_hibernating() {
-    local mode
-    mode=$(read_lobster_mode)
-    [[  "$mode" == "hibernate" ]]
 }
 
 # Check if a context compaction occurred within the last COMPACTION_SUPPRESS_SECONDS.
@@ -1705,8 +1698,6 @@ main() {
     # The persistent wrapper (claude-persistent.sh) manages Claude's lifecycle.
     # We need to check differently depending on the current phase:
     #
-    # hibernate:  Claude exited cleanly, wrapper is polling for new messages.
-    #             No Claude process expected. Only alert if stale user messages.
     # active:     Claude should be running. Full checks apply.
     # starting/restarting/waking: Transient states. Wrapper is handling it.
     # backoff:    Wrapper hit rapid-restart limit. Expected pause.
@@ -1715,60 +1706,6 @@ main() {
     #
 
     case "$lobster_mode" in
-        hibernate)
-            log_info "HIBERNATE: Claude cleanly exited. Wrapper polling for new messages."
-
-            # Boot grace: skip process/tmux/inbox checks — session may not be fully up yet.
-            if [[ "$boot_grace" == "true" ]]; then
-                log_info "Process/inbox checks suppressed (boot grace period)"
-            else
-                # Fresh-state guard: ignore hibernate states younger than HIBERNATE_FRESH_SECONDS.
-                # The dispatcher briefly writes mode=hibernate after wait_for_messages times out,
-                # then immediately wakes if new messages arrive. A health check that fires within
-                # this window would see a momentarily-missing wrapper and false-positive into RED.
-                if [[ $state_age -lt $HIBERNATE_FRESH_SECONDS ]]; then
-                    log_info "Hibernate state is only ${state_age}s old (threshold: ${HIBERNATE_FRESH_SECONDS}s) — skipping process check (transient)"
-                elif ! check_tmux; then
-                    level="RED"
-                    restart_reason="tmux session missing (hibernate mode)"
-                elif [[ "$LOBSTER_DEBUG" == "true" ]]; then
-                    # Debug mode: no persistent wrapper is expected. Claude Code runs
-                    # directly in the tmux pane without claude-persistent.sh. Check for
-                    # the Claude process directly instead of checking for the wrapper.
-                    if ! check_claude_process; then
-                        level="RED"
-                        restart_reason="no Claude process in lobster tmux (debug mode, hibernate)"
-                    fi
-                elif ! check_wrapper_process; then
-                    # Wrapper died during hibernation — need systemd restart
-                    level="RED"
-                    restart_reason="wrapper process missing during hibernation"
-                fi
-
-                # Still check inbox: if user messages are sitting stale, the wrapper
-                # should have woken Claude by now. Give extra time (5 min) since
-                # the wrapper polls every 10s.
-                if [[ "$compaction_recent" == "true" ]]; then
-                    log_info "Inbox drain suppressed (recent compaction)"
-                else
-                    check_inbox_drain
-                    local hibernate_inbox_rc=$?
-                    if [[ $hibernate_inbox_rc -eq 2 ]]; then
-                        # Stale user messages during hibernation — wrapper may be stuck.
-                        # Suppress to YELLOW if a health-check restart just fired: the
-                        # MCP server recovers processing/ messages to inbox/ on startup,
-                        # which would otherwise trigger an immediate second restart.
-                        if is_recent_restart; then
-                            [[ "$level" == "GREEN" ]] && level="YELLOW"
-                        else
-                            level="RED"
-                            restart_reason="${restart_reason:+$restart_reason + }stale inbox during hibernation"
-                        fi
-                    fi
-                fi
-            fi
-            ;;
-
         starting|restarting|waking)
             # Boot grace: skip stale-transient escalation and inbox checks.
             if [[ "$boot_grace" == "true" ]]; then
@@ -1969,16 +1906,14 @@ main() {
     fi
 
     # --- wait_for_messages freshness check ---
-    # Suppressed during hibernation (dispatcher isn't running), transient
-    # lifecycle states where Claude hasn't started yet (starting, restarting,
-    # waking, backoff, stopped), during the compaction grace period (tool
-    # calls pause while Claude compacts context), and while a catchup subagent
-    # is running (dispatcher may not call wait_for_messages for 10-12 minutes
-    # during startup-catchup or compact-catchup generation).
+    # Suppressed during transient lifecycle states where Claude hasn't started
+    # yet (starting, restarting, waking, backoff, stopped), during the
+    # compaction grace period (tool calls pause while Claude compacts context),
+    # and while a catchup subagent is running (dispatcher may not call
+    # wait_for_messages for 10-12 minutes during startup-catchup or
+    # compact-catchup generation).
 
-    if is_hibernating; then
-        log_info "WFM freshness suppressed (hibernating)"
-    elif [[ "$lobster_mode" == "starting" || "$lobster_mode" == "restarting" || \
+    if [[ "$lobster_mode" == "starting" || "$lobster_mode" == "restarting" || \
             "$lobster_mode" == "waking"    || "$lobster_mode" == "backoff"    || \
             "$lobster_mode" == "stopped" ]]; then
         log_info "WFM freshness suppressed (transient lifecycle state: $lobster_mode)"
