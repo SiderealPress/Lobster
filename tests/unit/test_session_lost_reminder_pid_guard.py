@@ -16,6 +16,7 @@ from inbox_server.py source) and verify the full _write_session_lost_reminder()
 flow via the inbox_server module (using a minimal patched environment).
 """
 
+from datetime import datetime, timezone, timedelta
 import json
 import os
 import subprocess
@@ -202,15 +203,16 @@ class TestSessionLostReminderPidGuard:
         assert reminder["type"] == "compact-reminder"
         assert "SESSION LOST" in reminder["text"]
 
-    def test_suppresses_reminder_when_dispatcher_alive(self, tmp_path):
-        """Live dispatcher PID → mid-session reconnect → reminder suppressed."""
+    def test_suppresses_reminder_when_dispatcher_alive_and_responsive(self, tmp_path):
+        """Live PID + fresh heartbeat → clean CC reconnect → reminder suppressed."""
         inbox_dir = tmp_path / "inbox"
         inbox_dir.mkdir(parents=True, exist_ok=True)
         pid_file = tmp_path / DISPATCHER_PID_FILENAME
         pid_file.write_text(str(os.getpid()))  # current process — definitely alive
         state_file = tmp_path / "lobster-state.json"
-        # State file recently touched (simulating cron-job update — old bug trigger)
-        state_file.write_text(json.dumps({"mode": "active"}))
+        # Fresh heartbeat (2 minutes ago) — dispatcher is actively using tools
+        fresh_ts = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
+        state_file.write_text(json.dumps({"mode": "active", "last_thinking_at": fresh_ts}))
 
         _call_write_session_lost_reminder(
             inbox_dir=inbox_dir,
@@ -220,8 +222,32 @@ class TestSessionLostReminderPidGuard:
 
         reminder_files = list(inbox_dir.glob("session-lost-*.json"))
         assert len(reminder_files) == 0, (
-            "Reminder was written despite dispatcher being alive — "
+            "Reminder was written despite dispatcher being alive and responsive — "
             "this is a false positive that would disrupt an active session"
+        )
+
+    def test_writes_reminder_when_dispatcher_alive_but_frozen(self, tmp_path):
+        """Live PID + stale heartbeat → frozen dispatcher (issue #1439) → reminder written."""
+        inbox_dir = tmp_path / "inbox"
+        inbox_dir.mkdir(parents=True, exist_ok=True)
+        pid_file = tmp_path / DISPATCHER_PID_FILENAME
+        pid_file.write_text(str(os.getpid()))  # current process — PID alive
+        state_file = tmp_path / "lobster-state.json"
+        # Stale heartbeat (10 minutes ago) — dispatcher has not made a tool call
+        # since the MCP server restarted and the connection broke silently.
+        stale_ts = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+        state_file.write_text(json.dumps({"mode": "active", "last_thinking_at": stale_ts}))
+
+        _call_write_session_lost_reminder(
+            inbox_dir=inbox_dir,
+            dispatcher_pid_path=pid_file,
+            state_file=state_file,
+        )
+
+        reminder_files = list(inbox_dir.glob("session-lost-*.json"))
+        assert len(reminder_files) == 1, (
+            "Expected session-lost reminder when dispatcher PID is alive but heartbeat is stale — "
+            "issue #1439: MCP crashed, connection broke silently, dispatcher is frozen"
         )
 
     def test_writes_reminder_when_dispatcher_pid_is_dead(self, tmp_path):
