@@ -480,17 +480,19 @@ cmd_env() {
             fi
             mkdir -p "$config_dir"
             touch "$env_file" && chmod 600 "$env_file"
-            # Update existing key in place, or append if not present
-            if grep -qF "^${key}=" "$env_file" 2>/dev/null; then
-                # Use a temp file to avoid sed -i portability issues
-                local tmp
-                tmp=$(mktemp)
-                chmod 600 "$tmp"
-                grep -vF "^${key}=" "$env_file" > "$tmp"
+            # Update existing key in place (including commented-out lines), or append if not present
+            # Use a temp file to avoid sed -i portability issues
+            local tmp
+            tmp=$(mktemp)
+            chmod 600 "$tmp"
+            if grep -qE "^#?${key}=" "$env_file" 2>/dev/null; then
+                # Remove all matching lines (active or commented-out), then append updated value
+                grep -vE "^#?${key}=" "$env_file" > "$tmp"
                 echo "${key}=${value}" >> "$tmp"
                 mv "$tmp" "$env_file"
                 echo -e "${GREEN}Updated${NC} $key"
             else
+                rm -f "$tmp"
                 echo "${key}=${value}" >> "$env_file"
                 echo -e "${GREEN}Set${NC} $key"
             fi
