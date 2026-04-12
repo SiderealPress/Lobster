@@ -1,6 +1,12 @@
 #!/bin/bash
 # Lobster Scheduled Job Dispatcher
 #
+# DEPRECATED (issue #1083 — Phase 1 tombstone)
+# New jobs should be managed by systemd timers via the MCP create_scheduled_job tool.
+# This script remains on disk for compatibility with jobs that have not yet been
+# migrated. It will be archived to scheduled-tasks/deprecated/ in Phase 2 (after
+# 2 weeks of stable systemd-timer operation).
+#
 # Writes a scheduled_reminder message into the Lobster inbox so the dispatcher
 # spawns a subagent for the job. Does NOT invoke Claude directly.
 #
