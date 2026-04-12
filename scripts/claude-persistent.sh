@@ -472,6 +472,53 @@ launch_claude() {
     # by design — it reads CLAUDE.md, enters the loop, and processes messages.
     # Any persistent state lives in canonical memory files, not conversation history.
     local claude_exit_code=0
+
+    # Wait for the MCP server to be ready before launching Claude.
+    # kill_orphaned_mcp_processes() may have just SIGTERM'd the old MCP server
+    # (managed by systemd). Systemd restarts it within ~2 seconds, but if Claude
+    # initializes MCP connections before the server is back up, the tools fail to
+    # load and the dispatcher runs without lobster-inbox tools for the entire session.
+    local mcp_port="${LOBSTER_MCP_PORT:-8766}"
+    local mcp_ready=false
+    for i in {1..15}; do
+        local http_code
+        http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 1 \
+            "http://localhost:${mcp_port}/mcp" 2>/dev/null || echo "000")
+        if [[ "$http_code" != "000" ]]; then
+            mcp_ready=true
+            break
+        fi
+        sleep 1
+    done
+    if [[ "$mcp_ready" == "true" ]]; then
+        log "MCP server ready on port ${mcp_port} (HTTP reachable)"
+        # Second-phase check: verify the MCP SSE endpoint accepts proper protocol
+        # connections. The first check may have passed on the dying old server's last
+        # response. Claude's MCP client needs the new server's SSE endpoint to be
+        # fully initialised before launch or the tools are permanently unavailable.
+        local mcp_sse_ready=false
+        for i in {1..10}; do
+            local sse_code
+            sse_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 2 \
+                -H "Accept: application/json, text/event-stream" \
+                -H "Content-Type: application/json" \
+                -X POST \
+                --data '{"jsonrpc":"2.0","method":"initialize","id":1,"params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"readiness-check","version":"1.0"}}}' \
+                "http://localhost:${mcp_port}/mcp" 2>/dev/null || echo "000")
+            if [[ "$sse_code" == "200" ]]; then
+                mcp_sse_ready=true
+                log "MCP SSE endpoint confirmed ready (attempt $i)"
+                break
+            fi
+            sleep 1
+        done
+        if [[ "$mcp_sse_ready" != "true" ]]; then
+            log "WARNING: MCP SSE endpoint not ready after 10s — launching Claude anyway"
+        fi
+    else
+        log "WARNING: MCP server not responding after 15s — launching Claude anyway"
+    fi
+
     log "Starting fresh session (attempt $attempt)..."
 
     # Schedule a delayed "active" write ~5 seconds after launch so the health
