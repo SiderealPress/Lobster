@@ -725,6 +725,11 @@ _TRANSIENT_MODES = {"hibernate", "starting", "restarting", "waking"}
 _RECONNECT_GRACE_SECONDS = 30 * 60  # 30 minutes
 
 
+# How long without a tool-use heartbeat before we assume the dispatcher is frozen
+# (MCP connection silently broken after MCP server restart, issue #1439).
+_FROZEN_THRESHOLD_SECONDS = 5 * 60  # 5 minutes
+
+
 def _is_dispatcher_alive() -> bool:
     """Return True if the dispatcher process recorded in dispatcher.pid is alive.
 
@@ -755,6 +760,41 @@ def _is_dispatcher_alive() -> bool:
         return True
     except (ValueError, ProcessLookupError, OSError):
         return False
+
+
+def _is_dispatcher_responsive() -> bool:
+    """Return True if the dispatcher made a tool call recently (non-frozen).
+
+    Reads last_thinking_at from lobster-state.json (written by the
+    thinking-heartbeat.py PostToolUse hook on every tool call).  If the
+    field is absent or the timestamp is older than _FROZEN_THRESHOLD_SECONDS,
+    we assume the dispatcher is frozen — its MCP connection may have broken
+    silently after an MCP server restart (issue #1439).
+
+    Returns True (responsive assumed) when:
+    - The state file does not exist (fresh install, no data yet)
+    - The last_thinking_at field is absent or unparseable
+
+    Returns False (frozen suspected) when:
+    - last_thinking_at is older than _FROZEN_THRESHOLD_SECONDS
+    """
+    try:
+        if not LOBSTER_STATE_FILE.exists():
+            return True  # Fresh install — assume responsive
+        data = json.loads(LOBSTER_STATE_FILE.read_text())
+        raw_ts = data.get("last_thinking_at")
+        if not raw_ts:
+            return True  # Field absent — no data, assume responsive
+        last_thinking = datetime.fromisoformat(raw_ts)
+        age = (datetime.now(timezone.utc) - last_thinking).total_seconds()
+        if age > _FROZEN_THRESHOLD_SECONDS:
+            log.info(
+                f"[session-lost] Dispatcher last tool call was {age:.0f}s ago — ≥ threshold — treating as frozen"
+            )
+            return False
+        return True
+    except Exception:
+        return True  # Conservative: assume responsive on any error
 
 
 def _reset_state_on_startup():
@@ -1023,10 +1063,15 @@ def _write_session_lost_reminder() -> None:
     reconnects and calls wait_for_messages, it immediately receives a prompt
     to re-orient and resume the main loop.
 
-    Guard: skipped when the dispatcher PID (from dispatcher.pid) is alive.  A
-    live PID means Claude Code auto-updated or the HTTP transport briefly
-    cycled — the dispatcher process is still running and does not need to
-    re-orient.  A dead or absent PID means real session loss.
+    Guard: skipped when the dispatcher PID (from dispatcher.pid) is alive AND
+    the thinking heartbeat (last_thinking_at in lobster-state.json) is fresh.
+    Both conditions together mean: Claude Code auto-updated or the HTTP transport
+    briefly cycled and the dispatcher is still running normally.
+
+    If the PID is alive but the heartbeat is stale (> 5 minutes, no tool calls),
+    the dispatcher is likely frozen — MCP crashed and the connection broke silently
+    without notifying the dispatcher (issue #1439).  In that case the reminder IS
+    written so the health check can trigger a recovery restart.
 
     Previous guard (issue #1429 — removed): checked lobster-state.json mtime
     < 30 min.  This produced false negatives when cron jobs touched the state
@@ -1055,11 +1100,22 @@ def _write_session_lost_reminder() -> None:
         # its transport layer — the dispatcher is still running.  A dead or
         # absent PID means the dispatcher process is gone — real session loss.
         if _is_dispatcher_alive():
+            # PID is alive — but the dispatcher may still be frozen if MCP crashed
+            # and the connection broke silently (issue #1439).  Check whether the
+            # dispatcher made any tool call recently (via last_thinking_at heartbeat).
+            # If the heartbeat is fresh, this is a clean CC auto-update reconnect —
+            # suppress the reminder.  If stale, the dispatcher is likely frozen —
+            # write the reminder to trigger recovery.
+            if _is_dispatcher_responsive():
+                log.info(
+                    "[session-lost] Skipping session-lost-reminder: dispatcher PID is alive — "
+                    f"and thinking heartbeat is fresh (pid_file={DISPATCHER_PID_FILE})"
+                )
+                return
             log.info(
-                "[session-lost] Skipping session-lost-reminder: dispatcher PID is alive "
-                f"(pid_file={DISPATCHER_PID_FILE})"
+                "[session-lost] Dispatcher PID is alive but heartbeat is stale — — — — "
+                "likely frozen after MCP restart (issue #1439); writing session-lost-reminder"
             )
-            return
 
         now_utc = datetime.now(timezone.utc)
         reminder_id = f"session-lost-{int(now_utc.timestamp())}"
