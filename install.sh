@@ -1437,6 +1437,27 @@ else
     info "Skipping link enforcement hook (settings.json not yet created)"
 fi
 
+# Set up Claude Code PreToolUse hook to enforce reply_to_message_id on Telegram send_reply (#1168)
+chmod +x "$INSTALL_DIR/hooks/require-reply-to-message-id.py" || true
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '.hooks.PreToolUse[]? | select(.hooks[]?.command | test("require-reply-to-message-id"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+            "matcher": "mcp__lobster-inbox__send_reply",
+            "hooks": [{
+                "type": "command",
+                "command": "python3 '"$INSTALL_DIR"'/hooks/require-reply-to-message-id.py",
+                "timeout": 5
+            }]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "Telegram reply_to_message_id enforcement hook installed"
+    else
+        info "reply_to_message_id enforcement hook already configured in Claude Code settings"
+    fi
+else
+    info "Skipping reply_to_message_id enforcement hook (settings.json not yet created)"
+fi
+
 # Set up Claude Code PreToolUse hook to block generic Agent calls without subagent_type
 chmod +x "$INSTALL_DIR/hooks/require-subagent-type.py" || true
 if [ -f "$CLAUDE_SETTINGS" ]; then
