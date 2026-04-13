@@ -1632,6 +1632,30 @@ if [ -f "$CLAUDE_SETTINGS" ]; then
 else
     info "Skipping thinking-heartbeat hook (settings.json not yet created)"
 fi
+# Set up Claude Code PreToolUse hook to write a pre-tool heartbeat to lobster-state.json.
+# Fires BEFORE every tool call — captures liveness even when tool calls fail (e.g. MCP
+# disconnect). Unlike the PostToolUse thinking-heartbeat (which only fires after success),
+# this fires first, so the health check can detect a frozen dispatcher stuck retrying a
+# failed MCP call (issue #1439).
+chmod +x "$INSTALL_DIR/hooks/pretooluse-heartbeat.py" || true
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '.hooks.PreToolUse[]? | select(.hooks[]?.command | contains("pretooluse-heartbeat"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+            "matcher": "",
+            "hooks": [{
+                "type": "command",
+                "command": "python3 '"$INSTALL_DIR"'/hooks/pretooluse-heartbeat.py",
+                "timeout": 5
+            }]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "pretooluse-heartbeat hook installed"
+    else
+        info "pretooluse-heartbeat hook already configured in Claude Code settings"
+    fi
+else
+    info "Skipping pretooluse-heartbeat hook (settings.json not yet created)"
+fi
 
 # Set up Claude Code PreToolUse hook to block tool use after compaction without context reload.
 # Uses a shell wrapper so Python is only spawned when the sentinel file exists (~1% of calls).
