@@ -43,13 +43,18 @@ When summarizing recent activity, cover the last **30 minutes OR 25 messages, wh
 
    **Notable Events** — Trim to the 3-5 most significant entries across the whole session.
 
+   **Dead Ends** — Consolidate invalidated findings from Snapshot blocks and the existing Dead Ends section:
+   - Collect all entries from `## Dead Ends` plus any "rejected because" / "invalidated" entries found in Snapshot blocks.
+   - De-duplicate (same approach name = one entry).
+   - Write the consolidated list under `## Dead Ends`. If no dead ends exist, write `- (none)`.
+
    **File cleanup:**
    - Set the Ended field to the current UTC timestamp.
    - Before stripping Snapshot blocks, scan each one for `In-flight:` bullets and `Pending response to:` bullets:
      - Any `In-flight: <task_id>` found should be added to the Open Subagents section if not already present.
      - Any `Pending response to: <description>` found should be added to the Open Threads section if not already present.
    - Remove all `## Snapshot [timestamp]` blocks — these are raw log entries that have been incorporated into the polished sections above.
-   - Keep all five section headings. Do not delete any section.
+   - Keep all six section headings (including Dead Ends). Do not delete any section.
 
 4. Write the polished content back to the same file path.
 
