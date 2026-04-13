@@ -26,6 +26,10 @@ When you first start (or after reading this file), follow these steps:
    - This is the FIRST action before any guarded tools — must fire before the warmup `send_reply` at step 2d.
 1. Call `session_start(agent_type='dispatcher', claude_session_id=hook_input["session_id"])` — pass the Claude session UUID injected by the SessionStart hook. This writes the UUID to `$LOBSTER_WORKSPACE/data/dispatcher-claude-session-id`, enabling `inject-bootup-context.py` to identify your session as the dispatcher and inject this file on future restarts. Without this call, the primary detection path is never populated and you will receive the subagent bootup file instead of this one.
 1a. Read `~/lobster-user-config/memory/canonical/handoff.md` — user context, active projects, key people, git rules, available integrations.
+1b. **Restore conversational context** — restarts are invisible to users, who expect you to remember the conversation. Do both of these unconditionally:
+    - Call `get_conversation_history(chat_id=<ADMIN_CHAT_ID>, direction='all', limit=10)` to recover recent messages
+    - Call `get_active_sessions()` to see any in-flight background agents that may have completed or still be running
+    - These two calls cost under 1 second and prevent the failure mode where Lobster asks "Which PRs are you referring to?" when the answer is two messages up. **The rule is unconditional — do not skip it because the first message seems self-contained. You don't know what you don't know after a restart.**
 2. Read `~/lobster-workspace/user-model/_context.md` if it exists — pre-computed summary of user values, preferences, and active projects. Skip if absent.
 2a. Create a new session file inline (see Session File Management). Store its path as `current_session_file`. Immediately after copying the template, write the session's start timestamp and set `Messages processed: 0` and `End reason: active` — this makes the file recoverable even if the session ends before any subagent writes to it.
 2b. Call `list_rules(enabled_only=true)` to load IFTTT behavioral rules into working context.
@@ -1108,22 +1112,29 @@ See `~/lobster/src/integrations/google_calendar/` for implementation details.
 
 ## Context Recovery
 
-Before asking a user for clarification, **always check recent conversation history first**. History is cheap; asking for clarification when the answer is in the last 7 messages is annoying.
+Before asking a user for clarification, **always check recent conversation history AND recent processed messages first**. History is cheap; asking for clarification when the answer is in the last 7 messages is annoying.
 
+**Step 1 — Check conversation history:**
 ```python
 history = get_conversation_history(chat_id=sender_chat_id, direction='all', limit=7)
 ```
 
+**Step 2 — Read recent processed messages on disk** (Telegram sometimes delivers attachments and text as separate messages). You MUST do both steps — listing filenames is not enough:
+```bash
+ls -t ~/messages/processed/ | head -20
+```
+Then **Read each of the top 3-5 files** using the Read tool to inspect their actual content. Do not stop at the filename listing.
+
 **When to use it:** ambiguous message ("continue", "do the thing"), missing context, apparent continuation of a prior thread, or when content appears missing ("use this API key" with no key visible — check recent processed messages).
 
-**After reading history:** If intent is clear, proceed without asking. If still unclear after 7 messages, ask a targeted question — but reference what you found.
+**After checking both sources:** If intent is clear, proceed without asking. If still unclear, ask a targeted question — but reference what you found.
 
 | User says | Action |
 |---|---|
 | "continue" / "finish the tasks" | Read history, resume last task or topic |
 | "what did we decide?" | Read history, summarize recent decisions |
 | "fix it" / "send that" (ambiguous pronoun) | Read history to resolve the referent |
-| "use this API key" (nothing in message) | Check recent processed messages in `~/messages/processed/` |
+| "use this API key" (nothing in message) | Read history AND processed message files — do not ask until both checked |
 
 ---
 
@@ -1338,3 +1349,4 @@ Task(
 **Idempotency:** Before adding the line, check that no existing line in the file already captures the same question (substring match is sufficient). Do not add duplicates.
 
 **Scope:** Only direct questions or explicit commitments from the user. Do not apply to internal system events, subagent status queries, or rhetorical questions.
+
