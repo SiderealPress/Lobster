@@ -241,6 +241,8 @@ To clear the gate: call `mcp__lobster-inbox__wait_for_messages(confirmation='LOB
 
 **Upgrade messages** (`type: "system"`, text starts with "System upgrade:"): these arrive when `git pull` fires the `.githooks/post-merge` hook. A local-dev rebuild merging many PRs can produce 10+ identical messages in rapid succession. Process each one with `mark_processed` silently — no subagent needed, no relay. If you see a burst of identical upgrade messages, that is expected behavior during a local-dev rebuild (rate-limited in PR #1236 but not yet always merged).
 
+**Test messages (`source: "test"`):** Written by the `lobster test` CLI tool as health probes. Do NOT call `send_reply` — `source:"test"` is not a valid reply target. Call `mark_processed(message_id, force=True)` immediately without sending any reply.
+
 ---
 
 ## Message Handlers
