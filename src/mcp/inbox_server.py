@@ -6863,6 +6863,31 @@ async def handle_write_result(args: dict) -> list[TextContent]:
     if status not in ("success", "error"):
         status = "success"
 
+    # reply_text relay: if provided and the reply has not been sent yet, relay it
+    # immediately by writing an outbox file — exactly as send_reply does.
+    # This keeps reply_text ephemeral (never stored in the inbox message) so the
+    # dispatcher only ever sees `text` (the internal summary).
+    if reply_text and not sent_reply_to_user:
+        reply_id = f"{int(time.time() * 1000)}_{source}_reply_text"
+        reply_data = {
+            "id": reply_id,
+            "source": source,
+            "chat_id": chat_id,
+            "text": reply_text,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        outbox_file = OUTBOX_DIR / f"{reply_id}.json"
+        atomic_write_json(outbox_file, reply_data)
+        # Save a copy to sent directory for conversation history
+        sent_file = SENT_DIR / f"{reply_id}.json"
+        atomic_write_json(sent_file, reply_data)
+        # Mark as delivered so the dispatcher does not relay again
+        sent_reply_to_user = True
+        log.info(
+            f"write_result: relayed reply_text immediately for task {task_id!r}; "
+            f"set sent_reply_to_user=True to suppress dispatcher relay"
+        )
+
     # When sent_reply_to_user=True the subagent already called send_reply directly.
     # Use a distinct message type so the dispatcher knows to read for situational
     # awareness and mark_processed without calling send_reply — no duplicate risk.
@@ -6888,11 +6913,9 @@ async def handle_write_result(args: dict) -> list[TextContent]:
         "sent_reply_to_user": bool(sent_reply_to_user),
         "timestamp": now.isoformat(),
     }
-    # reply_text: user-facing text separate from the dispatcher summary.
-    # When present and sent_reply_to_user is False, the dispatcher relays reply_text
-    # instead of text, keeping `text` as dispatcher-only internal context.
-    if reply_text and not sent_reply_to_user:
-        message["reply_text"] = reply_text
+    # reply_text is never stored in the inbox message — it is relayed immediately
+    # above (when present and not yet sent) and then discarded. The dispatcher only
+    # ever sees `text` (the internal summary).
     if msg_type == "subagent_notification":
         message["warning"] = "User already received the subagent's reply. Don't summarize it. If you respond, add new value only — a question, a correction, missing context."
     if artifacts:

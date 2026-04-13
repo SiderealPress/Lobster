@@ -125,7 +125,7 @@ The dispatcher will read your result and decide what (if anything) to relay to t
 
 **reply_text — separate user reply from dispatcher summary:**
 
-When the dispatcher should relay a short user-facing message while you provide a longer internal summary, use `reply_text`:
+When you want a short user-facing message sent while providing a longer internal summary in `text`, use `reply_text`:
 
 ```python
 mcp__lobster-inbox__write_result(
@@ -133,14 +133,14 @@ mcp__lobster-inbox__write_result(
     chat_id=<chat_id>,
     # text = full context for dispatcher (decisions made, URLs, details)
     text="Filed issue #42 in SiderealPress/lobster. Label: enhancement. URL: https://github.com/.../issues/42",
-    # reply_text = trimmed mobile-friendly message shown to user
+    # reply_text = trimmed mobile-friendly message sent automatically to user
     reply_text="Filed: https://github.com/SiderealPress/lobster/issues/42",
     source="telegram",
     sent_reply_to_user=False,
 )
 ```
 
-When `reply_text` is present: dispatcher relays `reply_text` to the user; `text` stays in dispatcher context only. When absent: dispatcher relays `text` (backward-compatible). Ignored if `sent_reply_to_user=True`.
+When `reply_text` is present and `sent_reply_to_user=False`: the MCP server relays `reply_text` to the user immediately (before the inbox message is written) and sets `sent_reply_to_user=True` automatically. The dispatcher receives only `text` — `reply_text` is ephemeral and never stored in the inbox message. When `reply_text` is absent: the dispatcher relays `text` (backward-compatible). Ignored if `sent_reply_to_user=True`.
 
 **Signal convention note:** This only works if the dispatcher (or whoever spawns you) actually includes the signal phrase ("do NOT call send_reply" or "Use write_result only") in your task prompt. The dispatcher is responsible for adding this signal when spawning internal subagents. If you receive a task prompt without this signal, treat it as user-facing.
 
