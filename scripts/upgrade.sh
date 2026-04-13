@@ -2442,7 +2442,7 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
         substep "wfm-watchdog.sh cron entry already present — skipping"
     fi
 
-    # Migration 73: Install PreToolUse pretooluse-heartbeat hook (issue #1439).
+    # Migration 75: Install PreToolUse pretooluse-heartbeat hook (issue #1439).
     # This hook writes last_pretooluse_at to lobster-state.json BEFORE each tool call.
     # Unlike the PostToolUse thinking-heartbeat (migration 66), this fires even when
     # tool calls fail — providing an additional liveness signal when MCP is disconnected.
