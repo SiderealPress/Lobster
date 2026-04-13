@@ -1477,6 +1477,15 @@ async def list_tools() -> list[Tool]:
                         "description": "Maximum number of messages to return. Default 10.",
                         "default": 10,
                     },
+                    "offset": {
+                        "type": "integer",
+                        "description": (
+                            "Number of messages to skip before returning results. "
+                            "Use with limit to page through results when total > limit. "
+                            "Default 0 (start from beginning)."
+                        ),
+                        "default": 0,
+                    },
                     "since_ts": {
                         "type": "string",
                         "description": (
@@ -4119,15 +4128,21 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
 
     When since_ts is provided, scans both inbox/ and processed/ directories
     for messages with timestamp >= since_ts. This mode is designed for catch-up
-    agents that need to recover context after compaction. The limit still applies
-    to the combined result set.
+    agents that need to recover context after compaction.
+
+    Supports pagination via offset + limit. The response header always includes
+    the total count of matching messages so callers can detect truncation and
+    page through results:
+        check_inbox(limit=10, offset=0)  → messages 1-10 of N
+        check_inbox(limit=10, offset=10) → messages 11-20 of N
     """
     source_filter = args.get("source", "").lower()
     limit = args.get("limit", 10)
+    offset = max(0, args.get("offset", 0))
     since_ts_str = args.get("since_ts", "")
     since_epoch = _parse_iso_timestamp(since_ts_str) if since_ts_str else None
 
-    messages = []
+    all_messages: list = []
 
     if since_epoch is not None:
         # Historical scan mode: read from both processed/ and inbox/, sorted by timestamp.
@@ -4156,16 +4171,16 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
                     continue
                 msg["_filename"] = f.name
                 msg["_directory"] = f.parent.name  # "inbox" or "processed"
-                messages.append(msg)
-                if len(messages) >= limit:
-                    break
+                all_messages.append(msg)
             except Exception:
                 continue
 
-        if not messages:
+        if not all_messages:
             return [TextContent(type="text", text=f"📭 No messages found since {since_ts_str}.")]
 
-        log.info(f"check_inbox (since_ts={since_ts_str!r}) returning {len(messages)} message(s)")
+        total = len(all_messages)
+        messages = all_messages[offset: offset + limit]
+        log.info(f"check_inbox (since_ts={since_ts_str!r}) returning {len(messages)}/{total} message(s) (offset={offset})")
     else:
         for f in sorted(INBOX_DIR.glob("*.json")):
             try:
@@ -4192,7 +4207,7 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
                         except Exception as exc:
                             log.error(f"check_inbox: subagent_recovered pre-processor error: {exc}", exc_info=True)
                     msg["_filename"] = f.name
-                    messages.append(msg)
+                    all_messages.append(msg)
                     # NOTE: Inbound cross-Lobster messages from bot-talk are routed to this
                     # inbox by bot_talk_mirror.log_inbound_cross_lobster() with source="bot-talk".
                     # We no longer mirror owner Telegram messages to bot-talk from here —
@@ -4212,18 +4227,30 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
                             )
                         except Exception as _bt_exc:
                             log.warning(f"bot-talk EventBus inbound emit failed (non-fatal): {_bt_exc}")
-                    if len(messages) >= limit:
-                        break
             except Exception as e:
                 continue
 
-        if not messages:
+        if not all_messages:
             return [TextContent(type="text", text="📭 No new messages in inbox.")]
 
-        log.info(f"check_inbox returning {len(messages)} message(s)")
+        total = len(all_messages)
+        messages = all_messages[offset: offset + limit]
+        log.info(f"check_inbox returning {len(messages)}/{total} message(s) (offset={offset})")
+
+    # Build pagination info for the header
+    page_end = offset + len(messages)
+    if (total > limit or offset > 0) and len(messages) > 0:
+        pagination_info = f" (showing {offset + 1}–{page_end} of {total})"
+        if page_end < total:
+            remaining = total - page_end
+            pagination_info += f" — {remaining} more, use offset={page_end} to continue"
+    elif offset > 0 and len(messages) == 0:
+        pagination_info = f" (offset {offset} is past end of {total} total)"
+    else:
+        pagination_info = ""
 
     # Format messages nicely
-    output = f"📬 **{len(messages)} new message(s):**\n\n"
+    output = f"📬 **{len(messages)} new message(s){pagination_info}:**\n\n"
     for msg in messages:
         source = msg.get("source", "unknown").upper()
         user = msg.get("user_name", msg.get("username", "Unknown"))
@@ -4330,6 +4357,8 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
 
     output += "---\n"
     output += "Use `send_reply` to respond, `mark_processed` when done."
+    if page_end < total:
+        output += f"\n\n⚠️ **{total - page_end} more message(s) not shown.** Call `check_inbox(offset={page_end})` to fetch the next page."
 
     return [TextContent(type="text", text=output)]
 
