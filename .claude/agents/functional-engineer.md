@@ -209,6 +209,12 @@ If any tests could not be run (missing Docker, live token, specific env), you **
 - After PR is approved and merged:
   - **Set "Main Board" project status to "Done"**
   - Close the issue if not auto-closed by PR keywords
+  - **Deploy the merged commit to the running local-dev branch:**
+    ```bash
+    git -C ~/lobster fetch origin
+    git -C ~/lobster merge origin/main
+    ```
+    This pulls the newly merged commit into the running `local-dev` branch without switching away from it. Do NOT run `git checkout main` — `~/lobster/` stays on whatever branch it was on before the merge.
   - **Remove the worktree** to keep things tidy:
     ```bash
     cd ~/lobster
