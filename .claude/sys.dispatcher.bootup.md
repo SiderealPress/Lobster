@@ -488,7 +488,11 @@ Background subagents call `write_result(task_id, chat_id, text, ...)`, which dro
        # --- RELAY ---
        # Never call Read(artifact_path) on the main thread — it violates the 7-second rule.
        # Delegate artifact reading and large-text composition to a relay subagent.
-       reply_text = msg["text"]
+       #
+       # reply_text split: if the subagent provided reply_text, use it for the user-facing
+       # relay and keep text as dispatcher-only context. If reply_text is absent, fall back
+       # to text (backward-compat). This reduces main-thread context burn.
+       relay_content = msg.get("reply_text") or msg["text"]
 
        if msg.get("artifacts"):
            # Artifacts present: delegate reading and composition to relay subagent
@@ -505,8 +509,8 @@ Background subagents call `write_result(task_id, chat_id, text, ...)`, which dro
                    f"Artifacts:\n" + "\n".join(f"- {p}" for p in msg["artifacts"])
                ),
            )
-       elif len(reply_text) > 500:
-           # Large text: relay subagent composes and sends directly
+       elif len(relay_content) > 500:
+           # Large relay content: relay subagent composes and sends directly
            # IMPORTANT: relay must call send_reply then write_result(sent_reply_to_user=True)
            # to prevent an infinite relay loop (dispatcher would re-check len on re-delivery)
            Task(
@@ -518,14 +522,14 @@ Background subagents call `write_result(task_id, chat_id, text, ...)`, which dro
                    f"Compose a clear, mobile-friendly reply from the result text below. "
                    f"Call send_reply(chat_id={msg['chat_id']}, ...) directly, then call "
                    f"write_result(sent_reply_to_user=True) so the dispatcher does not relay again.\n\n"
-                   f"Result:\n{msg['text']}"
+                   f"Result:\n{relay_content}"
                ),
            )
        else:
-           # Short text — send inline
+           # Short content — send inline
            send_reply(
                chat_id=msg["chat_id"],
-               text=reply_text,
+               text=relay_content,
                source=msg.get("source", "telegram"),
                thread_ts=msg.get("thread_ts"),
                reply_to_message_id=msg.get("telegram_message_id"),
@@ -533,7 +537,7 @@ Background subagents call `write_result(task_id, chat_id, text, ...)`, which dro
        mark_processed(message_id)
 ```
 
-**Key fields:** `task_id`, `chat_id`, `text`, `source`, `status`, `sent_reply_to_user`, `artifacts`, `thread_ts`.
+**Key fields:** `task_id`, `chat_id`, `text`, `reply_text` (optional user-facing text; if present, dispatcher relays this instead of `text`), `source`, `status`, `sent_reply_to_user`, `artifacts`, `thread_ts`.
 
 **When type is `subagent_error`:**
 ```

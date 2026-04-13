@@ -2185,7 +2185,8 @@ async def list_tools() -> list[Tool]:
                 "Subagents should call send_reply directly first (crash-safe delivery), then call "
                 "this with sent_reply_to_user=True so the dispatcher marks the message processed "
                 "without re-sending. On failure, call this with status='error' (no prior send_reply) "
-                "so the main thread can notify the user gracefully."
+                "so the main thread can notify the user gracefully. "
+                "Use reply_text to separate the user-facing reply from the dispatcher summary in text."
             ),
             inputSchema={
                 "type": "object",
@@ -2204,13 +2205,28 @@ async def list_tools() -> list[Tool]:
                     "text": {
                         "type": "string",
                         "description": (
-                            "The result text to deliver to the user. "
+                            "Dispatcher-internal summary of what the subagent did. "
+                            "The dispatcher reads this for orientation. "
+                            "If reply_text is also provided, this is NEVER relayed to the user — "
+                            "only reply_text is sent. "
+                            "If reply_text is absent, this is relayed to the user (backward-compat). "
                             "Keep this to a concise summary (ideally under ~4KB / ~500 words). "
                             "For large outputs — reports, diffs, full analysis — write the content "
                             "to ~/lobster-workspace/reports/<task_id>.md and pass the path in "
-                            "`artifacts` instead. The dispatcher reads artifact files and inlines "
-                            "their content in the reply. Never put raw file paths in text — they "
+                            "`artifacts` instead. Never put raw file paths in text — they "
                             "are server-side references that are useless to mobile users."
+                        ),
+                    },
+                    "reply_text": {
+                        "type": "string",
+                        "description": (
+                            "Optional user-facing reply text. "
+                            "When present, the dispatcher sends this to the user instead of `text`. "
+                            "Use this to keep the user reply short and mobile-friendly while "
+                            "keeping the full context in `text` for the dispatcher. "
+                            "Example: text='Filed issue #42 in SiderealPress/lobster. Label: enhancement. URL: https://...', "
+                            "reply_text='Filed: https://github.com/SiderealPress/lobster/issues/42'. "
+                            "Ignored if sent_reply_to_user=True (subagent already sent directly)."
                         ),
                     },
                     "source": {
@@ -6796,6 +6812,10 @@ async def handle_write_result(args: dict) -> list[TextContent]:
     task_id = args.get("task_id", "").strip()
     chat_id = args.get("chat_id")
     text = args.get("text", "").strip()
+    # reply_text: optional user-facing text. When present, dispatcher relays this
+    # instead of `text`, keeping `text` as dispatcher-only internal summary.
+    reply_text_raw = args.get("reply_text")
+    reply_text = reply_text_raw.strip() if isinstance(reply_text_raw, str) else None
     source = args.get("source", "telegram").strip() or "telegram"
     status = args.get("status", "success")
     artifacts = args.get("artifacts") or []
@@ -6868,6 +6888,11 @@ async def handle_write_result(args: dict) -> list[TextContent]:
         "sent_reply_to_user": bool(sent_reply_to_user),
         "timestamp": now.isoformat(),
     }
+    # reply_text: user-facing text separate from the dispatcher summary.
+    # When present and sent_reply_to_user is False, the dispatcher relays reply_text
+    # instead of text, keeping `text` as dispatcher-only internal context.
+    if reply_text and not sent_reply_to_user:
+        message["reply_text"] = reply_text
     if msg_type == "subagent_notification":
         message["warning"] = "User already received the subagent's reply. Don't summarize it. If you respond, add new value only — a question, a correction, missing context."
     if artifacts:
