@@ -2442,256 +2442,27 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
         substep "wfm-watchdog.sh cron entry already present — skipping"
     fi
 
-    # Migration 70: Install piper TTS and lessac-medium voice model for send_voice_note.
-    # Soft requirement: failure warns but does not abort upgrade.
-    local PIPER_BIN_PATH="/usr/local/bin/piper"
-    local PIPER_MODELS_TARGET="${WORKSPACE_DIR}/piper-models"
-    local PIPER_MODEL_FILE="${PIPER_MODELS_TARGET}/en_US-lessac-medium.onnx"
-    mkdir -p "$PIPER_MODELS_TARGET"
-
-    if [ ! -x "$PIPER_BIN_PATH" ] && ! command -v piper &>/dev/null; then
-        substep "Installing piper TTS binary for send_voice_note..."
-        local _arch
-        _arch="$(uname -m)"
-        local _piper_arch=""
-        case "$_arch" in
-            x86_64)   _piper_arch="amd64" ;;
-            aarch64)  _piper_arch="aarch64" ;;
-            armv7l)   _piper_arch="armv7" ;;
-        esac
-        if [ -n "$_piper_arch" ]; then
-            local _piper_url
-            _piper_url="$(curl -fsSL https://api.github.com/repos/rhasspy/piper/releases/latest 2>/dev/null | \
-                python3 -c "import sys,json; \
-                data=json.load(sys.stdin); \
-                urls=[a['browser_download_url'] for a in data.get('assets',[]) \
-                      if 'linux_${_piper_arch}' in a['name'] and a['name'].endswith('.tar.gz')]; \
-                print(urls[0] if urls else '')" 2>/dev/null || true)"
-            if [ -n "$_piper_url" ]; then
-                local _ptmp
-                _ptmp="$(mktemp -d)"
-                if curl -fsSL -o "${_ptmp}/piper.tar.gz" "$_piper_url" && \
-                   tar -xzf "${_ptmp}/piper.tar.gz" -C "$_ptmp"; then
-                    local _bin
-                    _bin="$(find "$_ptmp" -type f -name "piper" | head -1)"
-                    if [ -n "$_bin" ]; then
-                        local _bin_dir
-                        _bin_dir="$(dirname "$_bin")"
-                        sudo cp "$_bin" "$PIPER_BIN_PATH"
-                        sudo chmod +x "$PIPER_BIN_PATH"
-                        # Copy shared libraries
-                        for _lib in libonnxruntime.so.* libpiper_phonemize.so.* libespeak-ng.so.*; do
-                            _lib_path="$(find "$_bin_dir" -name "$_lib" -type f | head -1)"
-                            [ -n "$_lib_path" ] && sudo cp "$_lib_path" /usr/local/lib/ 2>/dev/null || true
-                        done
-                        sudo ldconfig 2>/dev/null || true
-                        # Install bundled espeak-ng-data
-                        if [ -d "${_bin_dir}/espeak-ng-data" ]; then
-                            sudo cp -r "${_bin_dir}/espeak-ng-data" /usr/share/ 2>/dev/null || true
-                        fi
-                        substep "piper TTS installed to $PIPER_BIN_PATH"
-                        migrated=$((migrated + 1))
-                    fi
-                fi
-                rm -rf "$_ptmp"
-            fi
-        fi
-    fi
-
-    if [ ! -f "$PIPER_MODEL_FILE" ]; then
-        substep "Downloading piper lessac-medium voice model (~30MB)..."
-        local _model_url="https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/en_US-lessac-medium.onnx"
-        local _model_json_url="https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json"
-        if curl -fsSL -o "$PIPER_MODEL_FILE" "$_model_url" && \
-           curl -fsSL -o "${PIPER_MODEL_FILE}.json" "$_model_json_url"; then
-            substep "piper voice model downloaded"
+    # Migration 73: Install PreToolUse pretooluse-heartbeat hook (issue #1439).
+    # This hook writes last_pretooluse_at to lobster-state.json BEFORE each tool call.
+    # Unlike the PostToolUse thinking-heartbeat (migration 66), this fires even when
+    # tool calls fail — providing an additional liveness signal when MCP is disconnected.
+    if [ -f "$CLAUDE_SETTINGS" ]; then
+        chmod +x "$LOBSTER_DIR/hooks/pretooluse-heartbeat.py" 2>/dev/null || true
+        if ! jq -e '.hooks.PreToolUse[]? | select(.hooks[]?.command | contains("pretooluse-heartbeat"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+            TMP_SETTINGS=$(mktemp)
+            jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+                "matcher": "",
+                "hooks": [{
+                    "type": "command",
+                    "command": "python3 '"$LOBSTER_DIR"'/hooks/pretooluse-heartbeat.py",
+                    "timeout": 5
+                }]
+            }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+            substep "Installed pretooluse-heartbeat PreToolUse hook"
             migrated=$((migrated + 1))
         else
-            warn "piper voice model download failed — send_voice_note will fall back to text"
-            rm -f "$PIPER_MODEL_FILE" "${PIPER_MODEL_FILE}.json"
+            substep "pretooluse-heartbeat PreToolUse hook already installed — skipping"
         fi
-    fi
-
-    # Migration 71: Remove stale LOBSTER-SCHEDULED crontab entries (issue #1083 Phase 1).
-    # The cron + jobs.json + dispatch-job.sh scheduling layer has been superseded by
-    # systemd timers (PR #1105). Any remaining "# LOBSTER-SCHEDULED" crontab entries
-    # are now duplicates of systemd timers or orphaned jobs that no longer fire on
-    # systemd. Remove them so the crontab is clean.
-    #
-    # SAFETY: Only remove a LOBSTER-SCHEDULED cron entry for a job if a corresponding
-    # lobster-managed systemd timer already exists for that job. Entries for jobs that
-    # have no systemd timer are left in place and a warning is printed. This prevents
-    # silent loss of the only trigger for a job.
-    #
-    # NOTE: System-level cron entries (LOBSTER-HEALTH, LOBSTER-SELF-CHECK, etc.) are
-    # intentionally preserved — only LOBSTER-SCHEDULED user-space job entries are removed.
-    if crontab -l 2>/dev/null | grep -q '# LOBSTER-SCHEDULED'; then
-        _m71_safe_to_remove=""
-        _m71_skipped=""
-        while IFS= read -r _m71_line; do
-            # Extract the job name from lines like:
-            #   0 */6 * * * /path/dispatch-job.sh lobstertalk-ssh-watcher # LOBSTER-SCHEDULED
-            _m71_job=$(echo "$_m71_line" | grep -oP '(?<=dispatch-job\.sh )\S+' || true)
-            if [ -z "$_m71_job" ]; then
-                # Not a dispatch-job.sh line — skip it (don't remove)
-                _m71_skipped="${_m71_skipped}${_m71_line}\n"
-                continue
-            fi
-            _m71_timer="/etc/systemd/system/lobster-${_m71_job}.timer"
-            if [ -f "$_m71_timer" ] && grep -q '# LOBSTER-MANAGED' "$_m71_timer" 2>/dev/null; then
-                # Systemd timer exists and is lobster-managed — safe to remove cron entry
-                _m71_safe_to_remove="${_m71_safe_to_remove}${_m71_job} "
-            else
-                # No systemd timer — leave cron entry in place, warn operator
-                substep "WARNING: LOBSTER-SCHEDULED cron entry for '${_m71_job}' has no systemd timer — leaving in place"
-                substep "  To fix: create a systemd timer for '${_m71_job}' via create_scheduled_job MCP tool, then re-run upgrade.sh"
-                _m71_skipped="${_m71_skipped}${_m71_line}\n"
-            fi
-        done < <(crontab -l 2>/dev/null | grep '# LOBSTER-SCHEDULED')
-
-        if [ -n "$_m71_safe_to_remove" ]; then
-            # Build a pattern that matches only the job names we confirmed are timer-backed
-            _m71_pattern=$(echo "$_m71_safe_to_remove" | tr ' ' '\n' | grep -v '^$' | sed 's/.*/dispatch-job\\.sh &/' | paste -sd '|')
-            { crontab -l 2>/dev/null | grep -Ev "$_m71_pattern" || true; } | crontab -
-            substep "Removed LOBSTER-SCHEDULED cron entries for timer-backed jobs: ${_m71_safe_to_remove% }"
-            migrated=$((migrated + 1))
-        else
-            substep "No timer-backed LOBSTER-SCHEDULED cron entries to remove"
-        fi
-    else
-        substep "No LOBSTER-SCHEDULED crontab entries found — skipping"
-    fi
-
-    # Migration 72: Enable lobster-claude and lobster-router for autostart on existing installs.
-    # Non-interactive installs (NON_INTERACTIVE=true) prior to this fix skipped the
-    # `systemctl enable` call entirely, leaving the services installed but not enabled.
-    # After any reboot the services would not start automatically, causing ~4 min downtime
-    # until the health check detected and restarted the missing session. Fix: enable
-    # unconditionally if the service unit is present but not enabled. (issue #1603)
-    for _m72_svc in lobster-router lobster-claude; do
-        if systemctl list-unit-files --quiet "${_m72_svc}.service" 2>/dev/null | grep -q "^${_m72_svc}"; then
-            if ! systemctl is-enabled --quiet "${_m72_svc}" 2>/dev/null; then
-                sudo systemctl enable "${_m72_svc}" 2>/dev/null || true
-                substep "Enabled ${_m72_svc} for autostart"
-                migrated=$((migrated + 1))
-            else
-                substep "${_m72_svc} already enabled — skipping"
-            fi
-        else
-            substep "${_m72_svc}.service not found — skipping"
-        fi
-    done
-
-    # Migration 73: Remove stale system-audit.context.md from memory/canonical/
-    # install.sh's generic canonical-template loop previously copied system-audit.context.md
-    # to both memory/canonical/ and agents/ (the latter via a dedicated block).
-    # The agents/ copy is the canonical write target — the memory/canonical/ copy was
-    # never updated by the lobster-auditor and drifted stale. Fix: delete the stale copy
-    # and exclude it from the generic loop going forward (issue #1196).
-    local stale_audit_context="$USER_CONFIG_DIR/memory/canonical/system-audit.context.md"
-    if [ -f "$stale_audit_context" ]; then
-        rm -f "$stale_audit_context"
-        substep "Removed stale system-audit.context.md from memory/canonical/ (canonical copy is agents/system-audit.context.md)"
-        migrated=$((migrated + 1))
-    fi
-
-    # Migration 74: Enable and start lobster-transcription.service on existing installs.
-    # Prior to this fix, install.sh installed the service file but never called
-    # systemctl enable, so voice messages accumulated in pending-transcription/ forever.
-    if systemctl is-system-running >/dev/null 2>&1 || pidof systemd >/dev/null 2>&1; then
-        local transcription_svc="$LOBSTER_DIR/services/lobster-transcription.service"
-        if [ -f "$transcription_svc" ]; then
-            sudo cp "$transcription_svc" /etc/systemd/system/lobster-transcription.service
-            sudo systemctl daemon-reload 2>/dev/null || true
-            if ! systemctl is-enabled --quiet lobster-transcription 2>/dev/null; then
-                sudo systemctl enable lobster-transcription 2>/dev/null || true
-                substep "Enabled lobster-transcription.service"
-                migrated=$((migrated + 1))
-            fi
-            if ! systemctl is-active --quiet lobster-transcription 2>/dev/null; then
-                sudo systemctl start lobster-transcription 2>/dev/null || true
-                substep "Started lobster-transcription.service"
-                migrated=$((migrated + 1))
-            fi
-        else
-            substep "WARN: lobster-transcription.service not found at $transcription_svc — skipping"
-        fi
-    else
-        substep "systemd not running — skipping lobster-transcription.service enable (container?)"
-    fi
-
-    # Migration 75: Install LOBSTER-CLEANUP cron entry (worktree + audio cleanup, issue #1609).
-    # cleanup-worktrees-audio.sh prunes finished git worktrees and removes audio files
-    # older than 7 days. Runs daily at 04:00 to avoid overlap with nightly consolidation (03:00).
-    local CLEANUP_MARKER="# LOBSTER-CLEANUP"
-    local CLEANUP_SCRIPT="$LOBSTER_DIR/scripts/cleanup-worktrees-audio.sh"
-    if [ -f "$CLEANUP_SCRIPT" ]; then
-        chmod +x "$CLEANUP_SCRIPT" 2>/dev/null || true
-        if ! crontab -l 2>/dev/null | grep -qF "$CLEANUP_MARKER"; then
-            "$LOBSTER_DIR/scripts/cron-manage.sh" add "$CLEANUP_MARKER" \
-                "0 4 * * * $CLEANUP_SCRIPT >> $HOME/lobster-workspace/logs/cleanup.log 2>&1 $CLEANUP_MARKER" 2>/dev/null && {
-                substep "Added LOBSTER-CLEANUP cron entry (cleanup-worktrees-audio.sh, 04:00 daily)"
-                migrated=$((migrated + 1))
-            } || warn "Could not add LOBSTER-CLEANUP cron entry — check cron-manage.sh"
-        fi
-    else
-        warn "cleanup-worktrees-audio.sh not found at $CLEANUP_SCRIPT — skipping Migration 75"
-    fi
-
-    # Migration 76: Install LOBSTER-INFLIGHT-REMINDERS cron entry (issue #1686).
-    # check-inflight-reminders.py runs every 3 minutes to detect stale subagent work
-    # and drop reminder messages into the dispatcher inbox.
-    local INFLIGHT_MARKER="# LOBSTER-INFLIGHT-REMINDERS"
-    local INFLIGHT_SCRIPT="$LOBSTER_DIR/scripts/check-inflight-reminders.py"
-    if [ -f "$INFLIGHT_SCRIPT" ]; then
-        chmod +x "$INFLIGHT_SCRIPT" 2>/dev/null || true
-        if ! crontab -l 2>/dev/null | grep -qF "$INFLIGHT_MARKER"; then
-            "$LOBSTER_DIR/scripts/cron-manage.sh" add "$INFLIGHT_MARKER" \
-                "*/3 * * * * uv run $INFLIGHT_SCRIPT >> $HOME/lobster-workspace/logs/inflight-reminders.log 2>&1 $INFLIGHT_MARKER" 2>/dev/null && {
-                substep "Added LOBSTER-INFLIGHT-REMINDERS cron entry (check-inflight-reminders.py, every 3 min)"
-                migrated=$((migrated + 1))
-            } || warn "Could not add LOBSTER-INFLIGHT-REMINDERS cron entry — check cron-manage.sh"
-        fi
-    else
-        warn "check-inflight-reminders.py not found at $INFLIGHT_SCRIPT — skipping Migration 76"
-    fi
-
-    # Migration 81: Install PreToolUse heartbeat hook (issue #1786).
-    # pre-tool-heartbeat.py writes a timestamp before each tool call, complementing
-    # thinking-heartbeat.py (PostToolUse). Together they allow the health check to
-    # distinguish "tool is running (long)" from "dispatcher is frozen" without
-    # false positives, enabling the PostToolUse threshold to be lowered safely.
-    if [ -f "$CLAUDE_SETTINGS" ] && command -v jq >/dev/null 2>&1; then
-        local _m81_hook_path="$LOBSTER_DIR/hooks/pre-tool-heartbeat.py"
-        if [ -f "$_m81_hook_path" ]; then
-            chmod +x "$_m81_hook_path" 2>/dev/null || true
-            local _m81_present
-            _m81_present=$(jq -r '
-                [.hooks.PreToolUse[]?.hooks[]?.command // empty]
-                | map(select(contains("pre-tool-heartbeat")))
-                | length
-            ' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
-            if [ "${_m81_present:-0}" = "0" ] || [ "${_m81_present:-0}" = "" ]; then
-                TMP_SETTINGS=$(mktemp)
-                jq --arg cmd "python3 $LOBSTER_DIR/hooks/pre-tool-heartbeat.py" \
-                   '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
-                    "matcher": "",
-                    "hooks": [{
-                        "type": "command",
-                        "command": $cmd,
-                        "timeout": 5
-                    }]
-                }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
-                substep "Registered pre-tool-heartbeat hook in Claude Code settings"
-                migrated=$((migrated + 1))
-            else
-                substep "pre-tool-heartbeat hook already present — skipping Migration 81"
-            fi
-        else
-            warn "pre-tool-heartbeat.py not found at $_m81_hook_path — skipping Migration 81"
-        fi
-    else
-        warn "Claude settings not found at $CLAUDE_SETTINGS or jq missing — skipping Migration 81"
     fi
 
     if [ "$migrated" -eq 0 ]; then
