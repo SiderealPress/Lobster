@@ -46,5 +46,15 @@
 ## Open Subagents
 <Subagents spawned this session that may not have written results yet. Include task_id and brief description.>
 
+## Dead Ends
+
+<!--
+  Findings that were investigated and invalidated during this session.
+  Format: "Approach X — rejected because Y. Evidence: Z."
+  Add one entry per invalidated direction so future sessions don't re-investigate.
+-->
+
+- (none)
+
 ## Notable Events
 <Significant things that happened this session: user decisions, system changes, errors, unexpected outcomes, etc.>
