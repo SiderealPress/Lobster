@@ -1,9 +1,10 @@
 [skill]
 name = "hibernation"
-version = "1.0.0"
-description = "Dispatcher hibernation — idle timeout behavior, state file semantics, and how to break the hibernation loop cleanly"
+version = "2.0.0"
+description = "DEPRECATED: Dispatcher hibernation is no longer supported (PR #1447). This skill warns against using hibernate_on_timeout."
 author = "Lobster"
 category = "behavioral"
+deprecated = true
 
 [activation]
 mode = "contextual"
@@ -12,6 +13,7 @@ context_patterns = [
     "when wait_for_messages returns a timeout with hibernate_on_timeout=True",
     "when the dispatcher has been idle and the health check should not restart it",
     "when lobster-state.json mode is set to hibernate",
+    "hibernate_on_timeout",
 ]
 
 [layering]
