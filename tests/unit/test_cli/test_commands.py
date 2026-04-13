@@ -314,3 +314,108 @@ class TestServiceStatusTmuxAwareness:
         assert '"lobster-claude"' in source or "'lobster-claude'" in source, (
             "The tmux guard must be scoped to the lobster-claude service specifically"
         )
+
+
+class TestEnvCommand:
+    """Tests for lobster env set/get — verifies fix for #1454.
+
+    The bug: cmd_env defaulted LOBSTER_CONFIG_DIR to ~/lobster-user-config but
+    services read from ~/lobster-config. Tokens written to the wrong directory
+    were never seen by systemd EnvironmentFile.
+
+    The fix: default changed to ~/lobster-config (matching install.sh), and
+    env set now writes to config.env when the key already exists there (to avoid
+    empty-stub override).
+    """
+
+    # Default lobster config dir — matches install.sh and service EnvironmentFile paths
+    EXPECTED_DEFAULT_CONFIG_DIR = "lobster-config"
+
+    @pytest.fixture
+    def cli_path(self) -> Path:
+        """Get path to CLI script."""
+        return Path(__file__).parent.parent.parent.parent / "src" / "cli"
+
+    def test_env_set_writes_to_lobster_config_not_user_config(self, cli_path: Path):
+        """cmd_env must default to ~/lobster-config, not ~/lobster-user-config.
+
+        Services load EnvironmentFile from lobster-config/. Writes to
+        lobster-user-config/ are silently ignored by systemd.
+        """
+        source = cli_path.read_text()
+        # The default fallback must reference lobster-config
+        assert "lobster-config" in source, (
+            "cmd_env must default LOBSTER_CONFIG_DIR to ~/lobster-config "
+            "so tokens written by 'lobster env set' land where services read them"
+        )
+        # Must NOT default to the wrong directory (user-config is for agent behavior, not service env)
+        # Check that the old wrong default is not the primary fallback
+        assert 'lobster-user-config"' not in source or source.count('lobster-user-config"') == 0, (
+            "cmd_env must not default to lobster-user-config — "
+            "that directory is not read by systemd EnvironmentFile"
+        )
+
+    def test_env_set_updates_config_env_when_key_exists_there(self, cli_path: Path, tmp_path: Path):
+        """If a key already exists in config.env (even as empty stub), set must update config.env.
+
+        This prevents the empty stub in config.env from silencing the value in global.env.
+        """
+        config_dir = tmp_path / "lobster-config"
+        config_dir.mkdir()
+        config_env = config_dir / "config.env"
+        global_env = config_dir / "global.env"
+
+        # Write empty stub to config.env (simulates non-interactive installer output)
+        config_env.write_text("TELEGRAM_ALLOWED_USERS=\n")
+        global_env.write_text("")
+
+        env = os.environ.copy()
+        env["LOBSTER_CONFIG_DIR"] = str(config_dir)
+        # Override HOME so the fallback path doesn't interfere
+        env["HOME"] = str(tmp_path)
+
+        result = subprocess.run(
+            ["bash", str(cli_path), "env", "set", "TELEGRAM_ALLOWED_USERS", "12345"],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert result.returncode == 0, f"env set failed: {result.stderr}"
+
+        # The value must land in config.env (where the stub was), not global.env
+        config_content = config_env.read_text()
+        assert "TELEGRAM_ALLOWED_USERS=12345" in config_content, (
+            "env set must write to config.env when the key already exists there as an empty stub"
+        )
+        # global.env must NOT have the value (it wasn't there before)
+        global_content = global_env.read_text()
+        assert "TELEGRAM_ALLOWED_USERS" not in global_content, (
+            "env set must not write to global.env when config.env already has the key"
+        )
+
+    def test_env_set_falls_back_to_global_env_for_new_keys(self, cli_path: Path, tmp_path: Path):
+        """Keys not in config.env should be written to global.env as before."""
+        config_dir = tmp_path / "lobster-config"
+        config_dir.mkdir()
+        config_env = config_dir / "config.env"
+        global_env = config_dir / "global.env"
+
+        config_env.write_text("# no GITHUB_TOKEN here\n")
+        global_env.write_text("")
+
+        env = os.environ.copy()
+        env["LOBSTER_CONFIG_DIR"] = str(config_dir)
+        env["HOME"] = str(tmp_path)
+
+        result = subprocess.run(
+            ["bash", str(cli_path), "env", "set", "GITHUB_TOKEN", "ghp_abc123"],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert result.returncode == 0, f"env set failed: {result.stderr}"
+
+        global_content = global_env.read_text()
+        assert "GITHUB_TOKEN=ghp_abc123" in global_content, (
+            "env set must write new keys (not in config.env) to global.env"
+        )

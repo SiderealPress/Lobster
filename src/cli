@@ -466,8 +466,13 @@ cmd_ps() {
 }
 
 cmd_env() {
-    local config_dir="${LOBSTER_CONFIG_DIR:-$HOME/lobster-user-config}"
+    # LOBSTER_CONFIG_DIR holds service-critical config (config.env, global.env).
+    # Default matches install.sh: $HOME/lobster-config.
+    # Previously this defaulted to lobster-user-config, which caused lobster env set
+    # to write to a directory the services never read. (#1454)
+    local config_dir="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}"
     local env_file="$config_dir/global.env"
+    local config_env_file="$config_dir/config.env"
     local subcmd="${1:-}"
 
     case "$subcmd" in
@@ -479,20 +484,32 @@ cmd_env() {
                 exit 1
             fi
             mkdir -p "$config_dir"
-            touch "$env_file" && chmod 600 "$env_file"
+
+            # If the key already exists in config.env (even as an empty stub), update
+            # it there. Service EnvironmentFiles are loaded in order; an empty stub in
+            # config.env previously silenced the value in global.env. Updating config.env
+            # directly removes the ambiguity and ensures the correct value is used
+            # regardless of load order.
+            local target_file="$env_file"
+            if grep -qE "^${key}=" "$config_env_file" 2>/dev/null; then
+                target_file="$config_env_file"
+                echo -e "(key found in config.env — updating there instead of global.env)"
+            fi
+
+            touch "$target_file" && chmod 600 "$target_file"
             # Update existing key in place, or append if not present
-            if grep -qF "^${key}=" "$env_file" 2>/dev/null; then
+            if grep -qF "^${key}=" "$target_file" 2>/dev/null; then
                 # Use a temp file to avoid sed -i portability issues
                 local tmp
                 tmp=$(mktemp)
                 chmod 600 "$tmp"
-                grep -vF "^${key}=" "$env_file" > "$tmp"
+                grep -vF "^${key}=" "$target_file" > "$tmp"
                 echo "${key}=${value}" >> "$tmp"
-                mv "$tmp" "$env_file"
-                echo -e "${GREEN}Updated${NC} $key"
+                mv "$tmp" "$target_file"
+                echo -e "${GREEN}Updated${NC} $key in $(basename "$target_file")"
             else
-                echo "${key}=${value}" >> "$env_file"
-                echo -e "${GREEN}Set${NC} $key"
+                echo "${key}=${value}" >> "$target_file"
+                echo -e "${GREEN}Set${NC} $key in $(basename "$target_file")"
             fi
             ;;
         get)
@@ -501,18 +518,21 @@ cmd_env() {
                 echo "Usage: lobster env get KEY"
                 exit 1
             fi
-            if [ ! -f "$env_file" ]; then
-                echo -e "${RED}No env file found at $env_file${NC}"
-                exit 1
+            # Search config.env first (higher priority for service-critical vars),
+            # then global.env. This mirrors the effective precedence after #1454.
+            local found_in=""
+            local val=""
+            if grep -qE "^${key}=" "$config_env_file" 2>/dev/null; then
+                found_in="$config_env_file"
+                val=$(grep -E "^${key}=" "$config_env_file" | cut -d= -f2-)
+            elif grep -qF "^${key}=" "$env_file" 2>/dev/null; then
+                found_in="$env_file"
+                val=$(grep -F "^${key}=" "$env_file" | cut -d= -f2-)
             fi
-            # Check key existence first (separate from value extraction) so that
-            # an empty value is not misreported as "key not found"
-            if ! grep -qF "^${key}=" "$env_file" 2>/dev/null; then
+            if [ -z "$found_in" ]; then
                 echo -e "${RED}Key not found: $key${NC}"
                 exit 1
             fi
-            local val
-            val=$(grep -F "^${key}=" "$env_file" | cut -d= -f2-)
             echo "$val"
             ;;
         list)
