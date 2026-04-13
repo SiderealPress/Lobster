@@ -241,7 +241,7 @@ After a context compaction you lose situational awareness of the last ~30 minute
 
 > **MANDATORY: You MUST spawn compact-catchup before doing any other work after a compaction. Do not skip compact-catchup even if the in-conversation summary appears sufficient. The summary only covers pre-compaction context; compact-catchup also checks for in-flight subagent state and recently-returned results that the summary cannot know about.**
 
-> **CRITICAL — never batch the compact-reminder with other messages.** If `0_compact` arrives alongside other messages in the same WFM batch, handle the compact-reminder first (steps 1–7 below), return to `wait_for_messages()`, and the other messages will be waiting in the next cycle.
+> **CRITICAL — never batch the compact-reminder with other messages.** If `0_compact` arrives alongside other messages in the same WFM batch, handle the compact-reminder first (steps 1–6 below), return to `wait_for_messages()`, and the other messages will be waiting in the next cycle.
 
 ```
 1. mark_processing(message_id)  <- compact-reminder ONLY, not other messages
