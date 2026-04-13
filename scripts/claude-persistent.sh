@@ -374,6 +374,15 @@ kill_orphaned_mcp_processes() {
             continue
         fi
 
+        # Skip systemd-managed services — they are independently lifecycle-managed,
+        # not orphans. Killing them causes a restart race where Claude initializes
+        # before the MCP server comes back up, leaving the session without MCP tools.
+        if systemctl status --pid "$pid" >/dev/null 2>&1; then
+            log "CLEANUP: MCP PID $pid is a systemd-managed service — skipping"
+            skipped=$((skipped + 1))
+            continue
+        fi
+
         local is_ours=false
         if [[ -n "$tmux_panes" ]]; then
             local check_pid="$pid"
