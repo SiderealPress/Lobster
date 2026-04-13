@@ -957,18 +957,27 @@ check_outbox_drain() {
     fi
 }
 
-# Check 6: Dispatcher heartbeat sentinel (issue #1483 simplification)
+# Check 6: wait_for_messages freshness
+# The dispatcher is considered "fresh" if ANY of:
+#   (a) the claude-heartbeat file was touched recently — inbox_server.py touches
+#       it at the start of every wait_for_messages call, OR
+#   (b) last_processed_at in lobster-state.json was updated recently — written
+#       by inbox_server.py on every successful mark_processed call (issue #694), OR
+#   (c) last_thinking_at in lobster-state.json was updated recently — written by
+#       hooks/thinking-heartbeat.py on every PostToolUse event (issue #1401), OR
+#   (d) last_pretooluse_at in lobster-state.json was updated recently — written by
+#       hooks/pretooluse-heartbeat.py on every PreToolUse event (issue #1439).
 #
-# The dispatcher is considered alive if hooks/thinking-heartbeat.py has written
-# to DISPATCHER_HEARTBEAT_FILE within the last DISPATCHER_HEARTBEAT_STALE_SECONDS.
-# The hook fires on every PostToolUse event — any tool call resets the clock.
+# Signal (d) is distinct from (c): it fires BEFORE each tool call, so it captures
+# activity even when tool calls fail or hang (e.g. MCP server restart). When the
+# MCP server crashes mid-session, wait_for_messages fails silently and no PostToolUse
+# fires — but the PreToolUse heartbeat still recorded that the dispatcher was trying.
 #
-# This single-file check replaces the previous multi-signal approach
-# (claude-heartbeat file + last_processed_at + last_thinking_at in
-# lobster-state.json). The 20-minute threshold naturally covers:
-#   - Context compaction pause (1-3 minutes with no tool calls)
-#   - Startup catchup subagent (up to 10-12 minutes)
-#   - Boot grace period (60-90 seconds)
+# Signals (b), (c), (d) together cover the full dispatcher lifecycle: (b) fires
+# during message processing; (c) and (d) fire during the reasoning/tool phase.
+#
+# The effective freshness timestamp is max(wfm_heartbeat_mtime, last_processed_at,
+# last_thinking_at, last_pretooluse_at).
 #
 # No suppression logic needed — the threshold does the work.
 #
@@ -989,40 +998,74 @@ check_dispatcher_heartbeat() {
         return 0
     fi
 
+    # Read per-message heartbeat (mark_processed, issue #694), PostToolUse
+    # thinking heartbeat (issue #1401), and PreToolUse heartbeat (issue #1439)
+    # from lobster-state.json.
+    local last_processed_epoch=0
+    local last_thinking_epoch=0
+    local last_pretooluse_epoch=0
+    if [[ -f "$LOBSTER_STATE_FILE" ]]; then
+        local last_processed_at last_thinking_at last_pretooluse_at
+        last_processed_at=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('$LOBSTER_STATE_FILE'))
+    print(d.get('last_processed_at', ''))
+except Exception:
+    print('')
+" 2>/dev/null)
+        last_thinking_at=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('$LOBSTER_STATE_FILE'))
+    print(d.get('last_thinking_at', ''))
+except Exception:
+    print('')
+" 2>/dev/null)
+        last_pretooluse_at=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('$LOBSTER_STATE_FILE'))
+    print(d.get('last_pretooluse_at', ''))
+except Exception:
+    print('')
+" 2>/dev/null)
+        if [[ -n "$last_processed_at" ]]; then
+            last_processed_epoch=$(date -d "$last_processed_at" +%s 2>/dev/null) || last_processed_epoch=0
+        fi
+        if [[ -n "$last_thinking_at" ]]; then
+            last_thinking_epoch=$(date -d "$last_thinking_at" +%s 2>/dev/null) || last_thinking_epoch=0
+        fi
+        if [[ -n "$last_pretooluse_at" ]]; then
+            last_pretooluse_epoch=$(date -d "$last_pretooluse_at" +%s 2>/dev/null) || last_pretooluse_epoch=0
+        fi
+    fi
+
+    # Effective freshness = most recent of all four signals
+    local effective_last="$last_heartbeat"
+    local effective_source="WFM heartbeat"
+    if [[ "$last_processed_epoch" -gt "$effective_last" ]]; then
+        effective_last="$last_processed_epoch"
+        effective_source="last_processed_at"
+    fi
+    if [[ "$last_thinking_epoch" -gt "$effective_last" ]]; then
+        effective_last="$last_thinking_epoch"
+        effective_source="last_thinking_at"
+    fi
+    if [[ "$last_pretooluse_epoch" -gt "$effective_last" ]]; then
+        effective_last="$last_pretooluse_epoch"
+        effective_source="last_pretooluse_at"
+    fi
+    if [[ "$effective_source" != "WFM heartbeat" ]]; then
+        log_info "WFM freshness: using $effective_source signal (more recent than WFM heartbeat)"
+    fi
+
     local now age
     now=$(date +%s)
     age=$(( now - raw_ts ))
 
-    if [[ $age -gt $DISPATCHER_HEARTBEAT_STALE_SECONDS ]]; then
-        # Heartbeat is stale — check the WFM-active signal before declaring RED.
-        # When the dispatcher is blocked in wait_for_messages, PostToolUse hooks
-        # do not fire so the heartbeat goes stale. inbox_server.py writes
-        # DISPATCHER_WFM_ACTIVE_FILE with a fresh epoch timestamp every 60s while
-        # WFM is blocking. A fresh WFM-active file means the dispatcher is alive
-        # and simply idle — not frozen or dead. (issue #949)
-        local _wfm_file="${DISPATCHER_WFM_ACTIVE_FILE:-}"
-        #
-        # Fix (issue #1730 TOCTOU): Use cat-only read, no -f existence gate.
-        # A two-step -f / cat sequence has a race window: the MCP server's
-        # finally block can write the tombstone between the -f check and the cat,
-        # making cat return empty and this function fall through to RED.
-        # cat 2>/dev/null is a single atomic read: empty result = absent or
-        # unreadable; non-empty integer = WFM active; non-integer = tombstone
-        # (WFM exited cleanly). The integer guard below handles all three cases
-        # without any race window.
-        local wfm_active_ts=""
-        wfm_active_ts=$(cat "$_wfm_file" 2>/dev/null | tr -d '[:space:]')
-        if [[ -n "$wfm_active_ts" ]] && [[ "$wfm_active_ts" =~ ^[0-9]+$ ]]; then
-            local wfm_age=$(( now - wfm_active_ts ))
-            if [[ $wfm_age -le $WFM_ACTIVE_STALE_SECONDS ]]; then
-                log_info "Dispatcher heartbeat stale (${age}s) but WFM-active is fresh (${wfm_age}s) — dispatcher alive in wait_for_messages, skipping RED"
-                return 0
-            else
-                log_error "RED: dispatcher heartbeat stale (${age}s) and WFM-active also stale (${wfm_age}s, threshold: ${WFM_ACTIVE_STALE_SECONDS}s) — dispatcher appears frozen"
-                return 2
-            fi
-        fi
-        log_error "RED: dispatcher heartbeat stale — last tool use ${age}s ago (threshold: ${DISPATCHER_HEARTBEAT_STALE_SECONDS}s)"
+    if [[ $age -gt $WFM_STALE_SECONDS ]]; then
+        log_error "RED: dispatcher stale — last activity ${age}s ago (threshold: ${WFM_STALE_SECONDS}s, wfm=${last_heartbeat}, last_processed=${last_processed_epoch}, last_thinking=${last_thinking_epoch}, last_pretooluse=${last_pretooluse_epoch})"
         return 2
     fi
 
