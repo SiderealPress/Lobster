@@ -116,14 +116,31 @@ Include the GitHub activity summary in the synthesis for rolling-summary.md and 
 
    Only update files where something materially changed — do not touch files with no new information.
 
-7. **Mark consolidated events.**
+7. **Reconcile `priorities.md` with current GitHub state.**
+   Read `~/lobster-user-config/memory/canonical/priorities.md`.
+
+   For each item in Tier 0 and Tier 1 that references a PR number or issue number:
+   - Check only the **primary PR or issue number** that the item is tracking — typically the first PR #NNN or issue #NNN in the item title or lead line. Do not check secondary numbers that appear mid-description (e.g. "closes #N", "see also #N", "file under #N").
+   - Run `gh pr view <number> --repo SiderealPress/lobster --json state,mergedAt 2>/dev/null` or `gh issue view <number> --repo SiderealPress/lobster --json state 2>/dev/null`
+   - If the PR is merged or closed, or the issue is closed, **remove that item** from priorities.md.
+   - If an item is blocked on something that has since resolved (e.g. a dependency PR merged), move it up one tier.
+
+   After pruning closed items:
+   - Update a datestamp comment at the top of the file: `<!-- Last reconciled: YYYY-MM-DD -->`
+   - Prepend any newly urgent items (Tier 0 blockers identified from today's events) to the Tier 0 section.
+
+   Write the updated priorities.md back. If no items referenced GitHub numbers, update the datestamp only.
+
+   If `gh` is unavailable or the file does not exist, skip this step and note it in `write_result`.
+
+8. **Mark consolidated events.**
    Call `mark_consolidated()` to mark all reviewed events as processed so they are not re-processed in future consolidation runs.
 
-8. **Update `handoff.md`.**
+9. **Update `handoff.md`.**
    Read `~/lobster-user-config/memory/canonical/handoff.md`.
    Update the "Current state" section to reflect the synthesized current state. This is the first file the next session reads — keep it accurate and current.
 
-   **8b. Reconcile the handoff.md PR table against live GitHub state.**
+   **9b. Reconcile the handoff.md PR table against live GitHub state.**
    After updating the Current state section, reconcile any PR table present in handoff.md:
 
    a. **Extract PR numbers from the open table.** Scan for lines matching `| #<N> |` or `#<N>` within table rows under headings like "OPEN PRs", "Open PRs", "PRs awaiting sign-off", or similar. Collect each PR number. Only look at rows in the "open" section — skip rows already under "Recently merged" or "Recently closed" headings.
@@ -146,9 +163,9 @@ Include the GitHub activity summary in the synthesis for rolling-summary.md and 
 
    d. **Update the table datestamp** if present (e.g., a line like "verified state as of YYYY-MM-DD" or "updated YYYY-MM-DD"). Set it to today's UTC date.
 
-   If handoff.md has no PR table, skip step 8b silently. If `gh` is unavailable, skip step 8b and note it in `write_result`. If the PR table format is unexpected, leave the table unchanged and note it in `write_result` — do not crash.
+   If handoff.md has no PR table, skip step 9b silently. If `gh` is unavailable, skip step 9b and note it in `write_result`. If the PR table format is unexpected, leave the table unchanged and note it in `write_result` — do not crash.
 
-9. **Sync canonical files into the user model DB.**
+10. **Sync canonical files into the user model DB.**
    Run the bridge pass to push projects, priorities, and preferences from canonical markdown files into the user model DB. This also generates the pre-computed `_context.md` via `write_context_cache()`:
    ```bash
    cd ~/lobster && uv run python -c "
@@ -163,11 +180,11 @@ Include the GitHub activity summary in the synthesis for rolling-summary.md and 
    "
    ```
    This syncs `projects/*.md` as narrative arcs and `priorities.md` as attention items, and writes the pre-computed `~/lobster-workspace/user-model/_context.md`.
-   If the script fails (e.g. DB not initialized), continue to step 10.
+   If the script fails (e.g. DB not initialized), continue to step 11.
 
-10. **Write `_context.md` (user model summary).**
+11. **Write `_context.md` (user model summary).**
     Call `model_user_context(deep=True)` to retrieve structured user model data from the DB.
-    Combine it with today's synthesized context (from steps 1–8) to write a complete snapshot.
+    Combine it with today's synthesized context (from steps 1–9) to write a complete snapshot.
 
     Create `~/lobster-workspace/user-model/` if it does not exist, then write `_context.md` with this structure:
 
@@ -211,7 +228,7 @@ Include the GitHub activity summary in the synthesis for rolling-summary.md and 
 mcp__lobster-inbox__write_result(
     task_id=task_id,   # from your prompt header
     chat_id=0,
-    text="Nightly consolidation complete. Updated: rolling-summary.md, daily-digest.md, handoff.md, _context.md. Projects updated: <list or 'none'>. People updated: <list or 'none'>. Events consolidated: <count>. Session files read: <count>. GitHub PRs merged: <count>. GitHub issues opened/closed: <count>. Handoff PR table: <N open, M merged removed, K closed removed, or 'skipped: no table' or 'skipped: gh unavailable'>.",
+    text="Nightly consolidation complete. Updated: rolling-summary.md, daily-digest.md, handoff.md, priorities.md, _context.md. Projects updated: <list or 'none'>. People updated: <list or 'none'>. Events consolidated: <count>. Session files read: <count>. GitHub PRs merged: <count>. GitHub issues opened/closed: <count>. Priorities pruned: <count removed> items. Handoff PR table: <N open, M merged removed, K closed removed, or 'skipped: no table' or 'skipped: gh unavailable'>.",
     source="system",
     status="success",
     sent_reply_to_user=False,
