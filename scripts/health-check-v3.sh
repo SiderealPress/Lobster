@@ -1009,14 +1009,20 @@ check_outbox_drain() {
 #   (b) last_processed_at in lobster-state.json was updated recently — written
 #       by inbox_server.py on every successful mark_processed call (issue #694), OR
 #   (c) last_thinking_at in lobster-state.json was updated recently — written by
-#       hooks/thinking-heartbeat.py on every PostToolUse event (issue #1401).
+#       hooks/thinking-heartbeat.py on every PostToolUse event (issue #1401), OR
+#   (d) last_pretooluse_at in lobster-state.json was updated recently — written by
+#       hooks/pretooluse-heartbeat.py on every PreToolUse event (issue #1439).
 #
-# Signals (b) and (c) together cover the full dispatcher lifecycle: (b) fires
-# during message processing batches; (c) fires during the reasoning phase (thinking,
-# composing, spawning subagents) when no WFM or mark_processed calls are made.
+# Signal (d) is distinct from (c): it fires BEFORE each tool call, so it captures
+# activity even when tool calls fail or hang (e.g. MCP server restart). When the
+# MCP server crashes mid-session, wait_for_messages fails silently and no PostToolUse
+# fires — but the PreToolUse heartbeat still recorded that the dispatcher was trying.
+#
+# Signals (b), (c), (d) together cover the full dispatcher lifecycle: (b) fires
+# during message processing; (c) and (d) fire during the reasoning/tool phase.
 #
 # The effective freshness timestamp is max(wfm_heartbeat_mtime, last_processed_at,
-# last_thinking_at).
+# last_thinking_at, last_pretooluse_at).
 #
 # Gracefully skips the check if the heartbeat file does not exist (fresh install).
 # Gracefully ignores missing or unparseable state file fields (backward compat).
@@ -1035,12 +1041,14 @@ check_wfm_freshness() {
         return 0
     fi
 
-    # Read per-message heartbeat (mark_processed, issue #694) and PostToolUse
-    # thinking heartbeat (issue #1401) from lobster-state.json.
+    # Read per-message heartbeat (mark_processed, issue #694), PostToolUse
+    # thinking heartbeat (issue #1401), and PreToolUse heartbeat (issue #1439)
+    # from lobster-state.json.
     local last_processed_epoch=0
     local last_thinking_epoch=0
+    local last_pretooluse_epoch=0
     if [[ -f "$LOBSTER_STATE_FILE" ]]; then
-        local last_processed_at last_thinking_at
+        local last_processed_at last_thinking_at last_pretooluse_at
         last_processed_at=$(python3 -c "
 import json, sys
 try:
@@ -1057,15 +1065,26 @@ try:
 except Exception:
     print('')
 " 2>/dev/null)
+        last_pretooluse_at=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('$LOBSTER_STATE_FILE'))
+    print(d.get('last_pretooluse_at', ''))
+except Exception:
+    print('')
+" 2>/dev/null)
         if [[ -n "$last_processed_at" ]]; then
             last_processed_epoch=$(date -d "$last_processed_at" +%s 2>/dev/null) || last_processed_epoch=0
         fi
         if [[ -n "$last_thinking_at" ]]; then
             last_thinking_epoch=$(date -d "$last_thinking_at" +%s 2>/dev/null) || last_thinking_epoch=0
         fi
+        if [[ -n "$last_pretooluse_at" ]]; then
+            last_pretooluse_epoch=$(date -d "$last_pretooluse_at" +%s 2>/dev/null) || last_pretooluse_epoch=0
+        fi
     fi
 
-    # Effective freshness = most recent of all three signals
+    # Effective freshness = most recent of all four signals
     local effective_last="$last_heartbeat"
     local effective_source="WFM heartbeat"
     if [[ "$last_processed_epoch" -gt "$effective_last" ]]; then
@@ -1076,6 +1095,10 @@ except Exception:
         effective_last="$last_thinking_epoch"
         effective_source="last_thinking_at"
     fi
+    if [[ "$last_pretooluse_epoch" -gt "$effective_last" ]]; then
+        effective_last="$last_pretooluse_epoch"
+        effective_source="last_pretooluse_at"
+    fi
     if [[ "$effective_source" != "WFM heartbeat" ]]; then
         log_info "WFM freshness: using $effective_source signal (more recent than WFM heartbeat)"
     fi
@@ -1085,7 +1108,7 @@ except Exception:
     age=$(( now - effective_last ))
 
     if [[ $age -gt $WFM_STALE_SECONDS ]]; then
-        log_error "RED: dispatcher stale — last activity ${age}s ago (threshold: ${WFM_STALE_SECONDS}s, wfm=${last_heartbeat}, last_processed=${last_processed_epoch}, last_thinking=${last_thinking_epoch})"
+        log_error "RED: dispatcher stale — last activity ${age}s ago (threshold: ${WFM_STALE_SECONDS}s, wfm=${last_heartbeat}, last_processed=${last_processed_epoch}, last_thinking=${last_thinking_epoch}, last_pretooluse=${last_pretooluse_epoch})"
         return 2
     fi
 
