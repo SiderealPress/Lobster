@@ -2442,6 +2442,29 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
         substep "wfm-watchdog.sh cron entry already present — skipping"
     fi
 
+    # Migration 73: Install PreToolUse pretooluse-heartbeat hook (issue #1439).
+    # This hook writes last_pretooluse_at to lobster-state.json BEFORE each tool call.
+    # Unlike the PostToolUse thinking-heartbeat (migration 66), this fires even when
+    # tool calls fail — providing an additional liveness signal when MCP is disconnected.
+    if [ -f "$CLAUDE_SETTINGS" ]; then
+        chmod +x "$LOBSTER_DIR/hooks/pretooluse-heartbeat.py" 2>/dev/null || true
+        if ! jq -e '.hooks.PreToolUse[]? | select(.hooks[]?.command | contains("pretooluse-heartbeat"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+            TMP_SETTINGS=$(mktemp)
+            jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+                "matcher": "",
+                "hooks": [{
+                    "type": "command",
+                    "command": "python3 '"$LOBSTER_DIR"'/hooks/pretooluse-heartbeat.py",
+                    "timeout": 5
+                }]
+            }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+            substep "Installed pretooluse-heartbeat PreToolUse hook"
+            migrated=$((migrated + 1))
+        else
+            substep "pretooluse-heartbeat PreToolUse hook already installed — skipping"
+        fi
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
