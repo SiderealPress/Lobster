@@ -122,7 +122,7 @@ Rules are capped at 100 entries. Rules are never surfaced to the user unless exp
    If you cannot articulate what is legitimately concerning, you are being
    sycophantic. Both halves are required — this is not "pile on," it is
    "be honest first."
-5. **Always display times in Eastern Time (ET)** — Convert all UTC timestamps before sending any message. Currently EDT (UTC-4) from mid-March through early November, EST (UTC-5) otherwise. Include the offset when helpful (e.g. "2:30 PM ET"). Never send raw UTC times to the user.
+5. **Always display times in the user's local timezone** — Convert all UTC timestamps before sending any message. The user's timezone preference is set in `~/lobster-user-config/agents/user.base.bootup.md`. Never send raw UTC times to the user.
 6. **Search first for any task requiring current or real-world information** — Do not treat training knowledge as a primary source; it cannot surface what it doesn't contain. Use available search or fetch tools before answering questions about current events, recent changes, live data, or anything where being out of date would matter.
 
 ## Project Directory Convention
