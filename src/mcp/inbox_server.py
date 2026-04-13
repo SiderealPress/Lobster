@@ -623,6 +623,7 @@ def _tick_user_message_counter(msg_type: str, msg_source: str) -> None:
                 "type": "session_note_reminder",
                 "source": "system",
                 "chat_id": 0,
+                "task_origin": "internal",
                 "text": (
                     f"session_note_reminder: {_user_message_counter} user messages "
                     f"processed this session. Spawn session-note-appender in the background "
@@ -1068,6 +1069,7 @@ def _write_session_lost_reminder() -> None:
             "source": "system",
             "type": "compact-reminder",
             "chat_id": 0,
+            "task_origin": "internal",
             "text": (
                 "SESSION LOST — The MCP server restarted and your previous session was "
                 "invalidated. Re-orient now: read sys.dispatcher.bootup.md and resume "
@@ -2373,6 +2375,17 @@ async def list_tools() -> list[Tool]:
                         ),
                         "enum": ["safe", "unsafe", "unknown"],
                     },
+                    "task_origin": {
+                        "type": "string",
+                        "description": (
+                            "Origin of this task: 'user' | 'scheduled' | 'internal'. "
+                            "'user' — triggered by a real user message. "
+                            "'scheduled' — triggered by a scheduled job or cron. "
+                            "'internal' — system-initiated, no user involved. "
+                            "Defaults to 'user'."
+                        ),
+                        "enum": ["user", "scheduled", "internal"],
+                    },
                 },
                 "required": ["agent_id", "description", "chat_id"],
             },
@@ -2473,6 +2486,21 @@ async def list_tools() -> list[Tool]:
                             "'unknown' — caller did not classify (default; treated as unsafe for recovery)."
                         ),
                         "enum": ["safe", "unsafe", "unknown"],
+                    },
+                    "task_origin": {
+                        "type": "string",
+                        "description": (
+                            "Origin of this task: 'user' | 'scheduled' | 'internal'. "
+                            "'user' — triggered by a real user message (Telegram, Slack, etc.). "
+                            "'scheduled' — triggered by a scheduled job or cron task. "
+                            "'internal' — system-initiated, no user involved (reconciler, "
+                            "health check, session management, etc.). "
+                            "Defaults to 'user' when not specified. "
+                            "Code that previously checked chat_id==0 to detect system tasks "
+                            "should check task_origin=='internal' instead — the two conditions "
+                            "are equivalent but task_origin makes intent explicit."
+                        ),
+                        "enum": ["user", "scheduled", "internal"],
                     },
                     "claude_session_id": {
                         "type": "string",
@@ -7071,6 +7099,7 @@ async def handle_register_agent(args: dict) -> list[TextContent]:
     output_file = args.get("output_file") or None
     timeout_minutes = args.get("timeout_minutes") or None
     idempotency = args.get("idempotency") or None
+    task_origin = args.get("task_origin") or None
 
     if not agent_id:
         return [TextContent(type="text", text="Error: agent_id is required")]
@@ -7102,6 +7131,7 @@ async def handle_register_agent(args: dict) -> list[TextContent]:
             output_file=output_file,
             timeout_minutes=timeout_minutes,
             idempotency=idempotency,
+            task_origin=task_origin,
         )
     except Exception as exc:
         log.error(f"register_agent failed: {exc}", exc_info=True)
@@ -7174,6 +7204,7 @@ async def handle_session_start(args: dict) -> list[TextContent]:
     trigger_message_id = args.get("trigger_message_id") or None
     trigger_snippet = args.get("trigger_snippet") or None
     idempotency = args.get("idempotency") or None
+    task_origin = args.get("task_origin") or None
     claude_session_id = (args.get("claude_session_id") or "").strip() or None
 
     if not agent_id:
@@ -7204,6 +7235,7 @@ async def handle_session_start(args: dict) -> list[TextContent]:
             trigger_message_id=trigger_message_id,
             trigger_snippet=trigger_snippet,
             idempotency=idempotency,
+            task_origin=task_origin,
         )
     except Exception as exc:
         log.error(f"session_start failed: {exc}", exc_info=True)
@@ -8898,6 +8930,7 @@ def _build_reconciler_message(
     task_id = session.get("task_id") or agent_id
     input_summary = session.get("input_summary")
     output_file = session.get("output_file")
+    session_task_origin = session.get("task_origin") or "user"
 
     elapsed_raw = session.get("elapsed_seconds")
     try:
@@ -8917,6 +8950,7 @@ def _build_reconciler_message(
             "type": "subagent_result",
             "source": session.get("source", "telegram"),
             "chat_id": session.get("chat_id", ""),
+            "task_origin": session_task_origin,
             "text": (
                 f"Agent completed: {description}\n"
                 f"(reconciler-detected via stop_reason=end_turn, {elapsed_min}m elapsed)"
@@ -8939,6 +8973,7 @@ def _build_reconciler_message(
             "type": "agent_failed",
             "source": "system",
             "chat_id": 0,
+            "task_origin": "internal",
             "text": (
                 f"Agent failed/disappeared: {description}\n"
                 f"(no output file after {elapsed_min}m — marked dead)"
