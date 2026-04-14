@@ -19,7 +19,7 @@ set -euo pipefail
 # bothered while testing. Real user messages are never affected by this flag.
 _LOBSTER_CONFIG="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}/config.env"
 if [ -f "$_LOBSTER_CONFIG" ]; then
-    _DEV_MODE=$(grep -m1 '^LOBSTER_DEV_MODE=' "$_LOBSTER_CONFIG" 2>/dev/null | cut -d= -f2)
+    _DEV_MODE=$(grep -m1 '^LOBSTER_DEV_MODE=' "$_LOBSTER_CONFIG" 2>/dev/null | cut -d= -f2 || true)
     if [ "$_DEV_MODE" = "true" ] || [ "$_DEV_MODE" = "1" ]; then
         exit 0
     fi
