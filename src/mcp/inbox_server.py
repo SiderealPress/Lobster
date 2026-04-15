@@ -995,6 +995,117 @@ if not TASKS_FILE.exists():
 _SERVER_START_TIME = datetime.now(timezone.utc)
 
 # ---------------------------------------------------------------------------
+# Inbox Flood Detection (issue #1420)
+# ---------------------------------------------------------------------------
+#
+# When the dispatcher starts (or reconnects after an MCP restart), the inbox
+# can receive a large burst of stale messages — most commonly reconciler ghost
+# entries: subagent_result messages with elapsed_seconds < 30 generated during
+# the startup sweep. Each one requires a full WFM cycle to drain, burning
+# tokens and delaying real user messages.
+#
+# Strategy: scan for known-safe flood patterns before returning messages to
+# the dispatcher, bulk-mark-processed them on the server side, and report the
+# drain count as a prefix so the dispatcher can log the event.
+#
+# Known-safe flood types (auto-drain without dispatcher deliberation):
+#   1. Reconciler ghost sweep — subagent_result with elapsed_seconds < GHOST_ELAPSED_THRESHOLD
+#      AND message arrived within STARTUP_WINDOW_SECONDS of server start.
+#      These are stale completion notices for sessions that were dead before
+#      the server restarted; the dispatcher can never act on them meaningfully.
+#
+# Unknown floods are NOT auto-drained — they pass through normally so the
+# dispatcher can decide. The dispatcher bootup instructions handle alerting.
+#
+# Thresholds (named constants so the spec is traceable in tests):
+GHOST_ELAPSED_THRESHOLD_SECONDS = 30   # subagent_result with <30s elapsed = ghost candidate
+STARTUP_WINDOW_SECONDS = 60            # messages within 60s of server start = startup sweep
+
+
+def _is_reconciler_ghost(msg: dict, server_start: datetime) -> bool:
+    """Return True if this inbox message is a reconciler startup ghost.
+
+    A ghost is a subagent_result that:
+      - Has elapsed_seconds below GHOST_ELAPSED_THRESHOLD_SECONDS (30s), indicating
+        the reconciler detected the session as dead in the same sweep that created
+        the notification — no real work was done.
+      - Was created within STARTUP_WINDOW_SECONDS (60s) of server start, indicating
+        it is part of the startup sweep rather than real in-session activity.
+
+    Pure function — reads msg and compares to server_start. No I/O.
+    """
+    if msg.get("type") != "subagent_result":
+        return False
+
+    # Check elapsed_seconds — ghosts have near-zero elapsed time
+    try:
+        elapsed = int(msg.get("elapsed_seconds", 0) or 0)
+    except (TypeError, ValueError):
+        elapsed = 0
+    if elapsed >= GHOST_ELAPSED_THRESHOLD_SECONDS:
+        return False  # Real work was done — not a ghost
+
+    # Check timestamp — ghosts are generated during the startup sweep
+    ts_str = msg.get("timestamp", "")
+    if not ts_str:
+        return False
+    try:
+        msg_time = datetime.fromisoformat(ts_str)
+        if msg_time.tzinfo is None:
+            msg_time = msg_time.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return False
+
+    age_seconds = (msg_time - server_start).total_seconds()
+    return 0 <= age_seconds <= STARTUP_WINDOW_SECONDS
+
+
+def _drain_reconciler_ghosts() -> int:
+    """Scan inbox for reconciler startup ghosts and move them to processed/.
+
+    Returns the count of messages drained. Side effect: moves matching inbox
+    files from INBOX_DIR to PROCESSED_DIR and logs a single summary line.
+
+    Called once at the start of each wait_for_messages call, so any ghost
+    accumulation from the startup sweep is cleared before the dispatcher sees
+    the inbox. Safe to call repeatedly — non-ghost messages are untouched.
+    """
+    drained = 0
+    errors = 0
+
+    for inbox_file in list(INBOX_DIR.glob("*.json")):
+        try:
+            msg = json.loads(inbox_file.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+
+        if not _is_reconciler_ghost(msg, _SERVER_START_TIME):
+            continue
+
+        # Move to processed/ — bypasses the user-reply guard because these are
+        # internal system messages (chat_id=0 or no user) with nothing to relay.
+        try:
+            dest = PROCESSED_DIR / inbox_file.name
+            inbox_file.rename(dest)
+            drained += 1
+        except OSError as exc:
+            log.warning(
+                "[flood-drain] Failed to move ghost %r to processed/: %s",
+                inbox_file.name, exc,
+            )
+            errors += 1
+
+    if drained > 0:
+        log.info(
+            "[flood-drain] Drained %d reconciler ghost(s) from startup sweep "
+            "(elapsed<%ds within %ds of server start); %d error(s)",
+            drained, GHOST_ELAPSED_THRESHOLD_SECONDS, STARTUP_WINDOW_SECONDS, errors,
+        )
+
+    return drained
+
+
+# ---------------------------------------------------------------------------
 # HTTP session identity — dispatcher session tagging (Options A and B)
 # ---------------------------------------------------------------------------
 #
@@ -3902,8 +4013,25 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
     _recover_stale_processing()
     _recover_retryable_messages()
 
+    # Flood detection: drain reconciler startup ghosts before the dispatcher
+    # sees the inbox. This prevents the 100+ ghost WFM cycle storm that occurs
+    # when the reconciler startup sweep generates stale subagent_result messages
+    # for every dead session it finds (issue #1420).
+    _drained_ghosts = _drain_reconciler_ghosts()
+
     # Build active-sessions prefix once (fast SQLite read, <1ms)
     sessions_prefix = _build_active_sessions_prefix()
+
+    # Prepend flood drain summary to sessions_prefix so the dispatcher is informed
+    # without requiring an extra WFM cycle or manual inbox check.
+    if _drained_ghosts > 0:
+        drain_notice = (
+            f"[flood-drain] Auto-drained {_drained_ghosts} reconciler ghost(s) "
+            f"from startup sweep (elapsed<{GHOST_ELAPSED_THRESHOLD_SECONDS}s, "
+            f"within {STARTUP_WINDOW_SECONDS}s of server start). "
+            "No dispatcher action needed — these were stale completion notices with no real work."
+        )
+        sessions_prefix = (drain_notice + "\n\n" + sessions_prefix) if sessions_prefix else drain_notice
 
     # Start the observer BEFORE the initial glob check to eliminate the TOCTOU
     # race window: a message that arrives between the glob and observer.start()
