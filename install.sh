@@ -2728,7 +2728,12 @@ else
     fi
 
     sudo systemctl daemon-reload
-    success "Services installed"
+
+    # Enable services for autostart unconditionally. This is separate from
+    # "start now" — autostart on boot should always be configured regardless
+    # of whether the user wants to start the services interactively right now.
+    sudo systemctl enable lobster-router lobster-claude
+    success "Services installed and enabled for autostart"
 fi
 
 #===============================================================================
@@ -2895,7 +2900,6 @@ else
 fi
 
 if [[ ! $REPLY =~ ^[Nn]$ ]]; then
-    sudo systemctl enable lobster-router lobster-claude
     sudo systemctl start lobster-router
     sleep 2
     sudo systemctl start lobster-claude
