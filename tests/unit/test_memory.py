@@ -348,6 +348,8 @@ class TestVectorMemory:
 
     @pytest.fixture
     def vec_mem(self, temp_dir):
+        pytest.importorskip("sqlite_vec", reason="sqlite_vec not installed — skipping VectorMemory tests")
+        pytest.importorskip("fastembed", reason="fastembed not installed — skipping VectorMemory tests")
         from src.mcp.memory.vector_memory import VectorMemory
         db_path = temp_dir / "test_memory.db"
         return VectorMemory(db_path=db_path)
@@ -514,6 +516,7 @@ class TestCPULogging:
 
     def test_embedding_logs_cpu(self, caplog):
         """Verify that embedding operations log CPU usage."""
+        pytest.importorskip("fastembed", reason="fastembed not installed — skipping EmbeddingModel tests")
         import logging
         from src.mcp.memory.vector_memory import EmbeddingModel
 
@@ -527,6 +530,7 @@ class TestCPULogging:
 
     def test_embedding_logs_timing(self, caplog):
         """Verify that embedding timing is logged."""
+        pytest.importorskip("fastembed", reason="fastembed not installed — skipping EmbeddingModel tests")
         import logging
         from src.mcp.memory.vector_memory import EmbeddingModel
 
@@ -682,6 +686,8 @@ class TestMemoryMCPHandlers:
 
     def test_end_to_end_store_and_search(self, temp_dir):
         """End-to-end test: store events, then search them."""
+        pytest.importorskip("sqlite_vec", reason="sqlite_vec not installed — skipping VectorMemory tests")
+        pytest.importorskip("fastembed", reason="fastembed not installed — skipping VectorMemory tests")
         from src.mcp.memory.vector_memory import VectorMemory
         from src.mcp.memory.provider import MemoryEvent
 
