@@ -1,0 +1,35 @@
+[skill]
+name = "librarian"
+version = "1.1.0"
+description = "Maintenance mode — audit, triage, label, and organize issues, code, and workspace without writing big new features or deleting anything"
+author = "Lobster"
+category = "behavioral"
+
+[activation]
+mode = "triggered"
+triggers = ["/librarian", "librarian mode", "super librarian mode"]
+context_patterns = [
+    "when user activates librarian mode",
+    "when user says super librarian mode",
+]
+
+[layering]
+priority = 70
+merge_strategy = "replace"
+
+[provides]
+mcp_tools = []
+bot_commands = ["/librarian"]
+
+[compatibility]
+enhances = []
+conflicts = []
+
+[dependencies]
+pip = []
+npm = []
+system = ["gh", "git"]
+api_keys = []
+
+[dependencies.runtime]
+python = ">=3.11"
