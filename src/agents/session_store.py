@@ -543,25 +543,54 @@ def cleanup_stale_running_sessions(
             file_status = _read_stop_reason_from_path(Path(output_file))
 
             if file_status == "missing":
-                conn.execute(
-                    """
-                    UPDATE agent_sessions
-                    SET status = 'dead',
-                        completed_at = ?,
-                        result_summary = ?
-                    WHERE id = ? AND status = 'running'
-                    """,
-                    (
-                        completed_at,
-                        "Marked dead at startup: output_file missing",
+                # Apply a 2-minute grace period before marking dead for a missing
+                # output file.  The file may not yet exist if the agent was just
+                # spawned (output_file paths are created by Claude Code after the
+                # first tool turn, not at spawn time), or if the filesystem is in
+                # a transient state immediately after an MCP server restart.
+                # Only mark dead once we are certain the file should exist.
+                elapsed_seconds: float = 0.0
+                if spawned_at_raw:
+                    try:
+                        spawned_dt = datetime.fromisoformat(spawned_at_raw)
+                        if spawned_dt.tzinfo is None:
+                            spawned_dt = spawned_dt.replace(tzinfo=timezone.utc)
+                        elapsed_seconds = (server_start_time - spawned_dt).total_seconds()
+                    except (ValueError, TypeError):
+                        elapsed_seconds = 0.0
+
+                _MISSING_GRACE_SECONDS = 120  # 2-minute grace period
+                if elapsed_seconds < _MISSING_GRACE_SECONDS:
+                    log.debug(
+                        "[startup-cleanup] session %r output_file missing but only "
+                        "%.0fs old — within %ds grace period, leaving running",
                         agent_id,
-                    ),
-                )
-                changed_ids.append(agent_id)
-                log.warning(
-                    "[startup-cleanup] session %r marked dead: output_file missing",
-                    agent_id,
-                )
+                        elapsed_seconds,
+                        _MISSING_GRACE_SECONDS,
+                    )
+                else:
+                    conn.execute(
+                        """
+                        UPDATE agent_sessions
+                        SET status = 'dead',
+                            completed_at = ?,
+                            result_summary = ?
+                        WHERE id = ? AND status = 'running'
+                        """,
+                        (
+                            completed_at,
+                            "Marked dead at startup: output_file missing",
+                            agent_id,
+                        ),
+                    )
+                    changed_ids.append(agent_id)
+                    log.warning(
+                        "[startup-cleanup] session %r marked dead: output_file missing "
+                        "(elapsed %.0fs > %ds grace period)",
+                        agent_id,
+                        elapsed_seconds,
+                        _MISSING_GRACE_SECONDS,
+                    )
 
             elif file_status == "done":
                 conn.execute(
