@@ -2582,6 +2582,19 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
         fi
     done
 
+    # Migration 73: Remove stale system-audit.context.md from memory/canonical/
+    # install.sh's generic canonical-template loop previously copied system-audit.context.md
+    # to both memory/canonical/ and agents/ (the latter via a dedicated block).
+    # The agents/ copy is the canonical write target — the memory/canonical/ copy was
+    # never updated by the lobster-auditor and drifted stale. Fix: delete the stale copy
+    # and exclude it from the generic loop going forward (issue #1196).
+    local stale_audit_context="$USER_CONFIG_DIR/memory/canonical/system-audit.context.md"
+    if [ -f "$stale_audit_context" ]; then
+        rm -f "$stale_audit_context"
+        substep "Removed stale system-audit.context.md from memory/canonical/ (canonical copy is agents/system-audit.context.md)"
+        migrated=$((migrated + 1))
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
