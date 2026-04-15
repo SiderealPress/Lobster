@@ -788,29 +788,9 @@ def normalize_message_type(msg: dict) -> dict:
 # Heartbeat file for health monitoring
 HEARTBEAT_FILE = _WORKSPACE / "logs" / "claude-heartbeat"
 
-# How often (in seconds) wait_for_messages touches heartbeats and refreshes
-# WFM-active during the blocking wait.  Exposed as a module-level constant so
-# tests can verify it matches the health-check's WFM_ACTIVE_STALE_SECONDS.
+# How often (in seconds) wait_for_messages performs a fallback inbox poll.
+# Exposed as a module-level constant so tests can monkeypatch it.
 WAIT_HEARTBEAT_INTERVAL = 60
-
-# WFM-active signal file (issue #1713 / #949): written with a Unix epoch
-# timestamp when wait_for_messages begins blocking, refreshed every
-# WAIT_HEARTBEAT_INTERVAL seconds, and deleted when WFM returns.
-#
-# The health check reads this file to distinguish "dispatcher alive, waiting
-# for messages" from "dispatcher frozen/dead" — suppressing the
-# heartbeat-stale RED that would otherwise fire after 20 minutes of quiet.
-#
-# Path: ~/lobster-workspace/logs/dispatcher-wfm-active
-# Content: single Unix epoch integer (e.g. "1713456789\n"), same format as
-#          dispatcher-heartbeat so health-check-v3.sh can parse it identically.
-# Override: LOBSTER_WFM_ACTIVE_OVERRIDE env var (used in tests).
-WFM_ACTIVE_FILE = Path(
-    os.environ.get(
-        "LOBSTER_WFM_ACTIVE_OVERRIDE",
-        str(_WORKSPACE / "logs" / "dispatcher-wfm-active"),
-    )
-)
 
 # Hibernation state file - tracks whether Lobster is active or hibernating
 LOBSTER_STATE_FILE = CONFIG_DIR / "lobster-state.json"
@@ -4310,9 +4290,7 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
             touch_heartbeat()
             inbox_results = await handle_check_inbox({"limit": 10})
             return _prepend_sessions_prefix(sessions_prefix, inbox_results)
-        # Wait loop: block until a message arrives or timeout expires.
-        # Heartbeat and WFM-active refresh are handled by the daemon thread
-        # started above — they no longer depend on this event-loop coroutine.
+        # Wait with periodic heartbeats (every WAIT_HEARTBEAT_INTERVAL seconds)
         heartbeat_interval = WAIT_HEARTBEAT_INTERVAL
         elapsed = 0
 
@@ -4328,6 +4306,15 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
                 break
 
             elapsed += wait_time
+
+            # Fallback inbox poll: inotify can miss rename events under high load
+            # (IN_Q_OVERFLOW) or in edge cases with certain filesystem configurations.
+            # This periodic check ensures subagent_notification and other messages
+            # are detected within one heartbeat interval even if the file watcher
+            # missed the event (issue #990).
+            if list(INBOX_DIR.glob("*.json")):
+                message_arrived.set()
+                break
 
         if message_arrived.is_set():
             # Small delay to ensure file is fully written
