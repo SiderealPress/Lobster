@@ -43,6 +43,7 @@ _mod = _load_module()
 extract_metadata = _mod.extract_metadata
 extract_agent_id = _mod.extract_agent_id
 extract_output_file = _mod.extract_output_file
+_build_description = _mod._build_description
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +162,66 @@ class TestExtractMetadata:
         meta = extract_metadata(prompt)
         # Frontmatter parse fails, legacy text used
         assert meta["task_id"] == "textid"
+
+
+# ---------------------------------------------------------------------------
+# _build_description: pure function tests (#894)
+# ---------------------------------------------------------------------------
+
+class TestBuildDescription:
+    def test_task_id_and_first_line(self):
+        """task_id + first prompt line are combined."""
+        desc = _build_description("my-task", "---\ntask_id: my-task\n---\nDo some work.")
+        assert desc == "my-task: Do some work."
+
+    def test_task_id_only_no_body(self):
+        """Frontmatter with no body after closing --- uses task_id alone."""
+        desc = _build_description("slim-task", "---\ntask_id: slim-task\n---\n")
+        assert desc == "slim-task"
+
+    def test_no_task_id_uses_first_line(self):
+        """Without task_id, the first non-empty prompt line is used."""
+        desc = _build_description(None, "Fix the bug in the scheduler.")
+        assert desc == "Fix the bug in the scheduler."
+
+    def test_empty_prompt_fallback(self):
+        """Empty prompt and no task_id falls back to generic label."""
+        desc = _build_description(None, "")
+        assert desc == "subagent (no description)"
+
+    def test_truncated_to_120_chars(self):
+        """Descriptions longer than 120 chars are truncated."""
+        long_line = "A" * 200
+        desc = _build_description("t", long_line)
+        assert len(desc) <= 120
+
+    def test_skips_frontmatter_lines_for_excerpt(self):
+        """Lines inside the frontmatter block are not used as the excerpt."""
+        prompt = "---\ntask_id: myid\nchat_id: 123\n---\nActual task body here."
+        desc = _build_description("myid", prompt)
+        assert "chat_id" not in desc
+        assert "Actual task body here." in desc
+
+    def test_description_in_extract_metadata(self):
+        """extract_metadata includes a 'description' key."""
+        prompt = "---\ntask_id: t-desc\n---\nCheck the logs."
+        meta = extract_metadata(prompt)
+        assert "description" in meta
+        assert meta["description"] == "t-desc: Check the logs."
+
+    def test_description_stored_in_db(self, tmp_path):
+        """Integration: description from prompt ends up in the DB row."""
+        prompt = "---\ntask_id: t-db-desc\nchat_id: 777\n---\nVerify the deployment."
+        hook_input = _make_hook_input(
+            prompt=prompt,
+            tool_response={"agentId": "agent-db-desc"},
+        )
+        exit_code, _, _ = _run_hook(hook_input, tmp_path)
+        assert exit_code == 0
+
+        row = _get_row(tmp_path, "agent-db-desc")
+        assert row is not None
+        assert row["description"] == "t-db-desc: Verify the deployment."
 
 
 # ---------------------------------------------------------------------------
