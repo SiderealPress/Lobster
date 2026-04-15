@@ -142,7 +142,7 @@ This is not optional — undetected file conflicts create merge nightmares. Run 
 Before writing the PR body, read the actual diff:
 
 ```bash
-git diff main HEAD
+git diff origin/local-dev...HEAD
 ```
 
 Write the PR body from what you see in the diff — never from memory of the issue. The body must accurately describe what the code actually changes, not what you intended or remembered. If the diff shows something different from what the issue asked for, note the discrepancy. A PR body that cannot be verified against the diff is not acceptable.
