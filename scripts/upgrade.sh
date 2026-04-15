@@ -2512,6 +2512,76 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
         fi
     fi
 
+    # Migration 71: Remove stale LOBSTER-SCHEDULED crontab entries (issue #1083 Phase 1).
+    # The cron + jobs.json + dispatch-job.sh scheduling layer has been superseded by
+    # systemd timers (PR #1105). Any remaining "# LOBSTER-SCHEDULED" crontab entries
+    # are now duplicates of systemd timers or orphaned jobs that no longer fire on
+    # systemd. Remove them so the crontab is clean.
+    #
+    # SAFETY: Only remove a LOBSTER-SCHEDULED cron entry for a job if a corresponding
+    # lobster-managed systemd timer already exists for that job. Entries for jobs that
+    # have no systemd timer are left in place and a warning is printed. This prevents
+    # silent loss of the only trigger for a job.
+    #
+    # NOTE: System-level cron entries (LOBSTER-HEALTH, LOBSTER-SELF-CHECK, etc.) are
+    # intentionally preserved — only LOBSTER-SCHEDULED user-space job entries are removed.
+    if crontab -l 2>/dev/null | grep -q '# LOBSTER-SCHEDULED'; then
+        _m71_safe_to_remove=""
+        _m71_skipped=""
+        while IFS= read -r _m71_line; do
+            # Extract the job name from lines like:
+            #   0 */6 * * * /path/dispatch-job.sh lobstertalk-ssh-watcher # LOBSTER-SCHEDULED
+            _m71_job=$(echo "$_m71_line" | grep -oP '(?<=dispatch-job\.sh )\S+' || true)
+            if [ -z "$_m71_job" ]; then
+                # Not a dispatch-job.sh line — skip it (don't remove)
+                _m71_skipped="${_m71_skipped}${_m71_line}\n"
+                continue
+            fi
+            _m71_timer="/etc/systemd/system/lobster-${_m71_job}.timer"
+            if [ -f "$_m71_timer" ] && grep -q '# LOBSTER-MANAGED' "$_m71_timer" 2>/dev/null; then
+                # Systemd timer exists and is lobster-managed — safe to remove cron entry
+                _m71_safe_to_remove="${_m71_safe_to_remove}${_m71_job} "
+            else
+                # No systemd timer — leave cron entry in place, warn operator
+                substep "WARNING: LOBSTER-SCHEDULED cron entry for '${_m71_job}' has no systemd timer — leaving in place"
+                substep "  To fix: create a systemd timer for '${_m71_job}' via create_scheduled_job MCP tool, then re-run upgrade.sh"
+                _m71_skipped="${_m71_skipped}${_m71_line}\n"
+            fi
+        done < <(crontab -l 2>/dev/null | grep '# LOBSTER-SCHEDULED')
+
+        if [ -n "$_m71_safe_to_remove" ]; then
+            # Build a pattern that matches only the job names we confirmed are timer-backed
+            _m71_pattern=$(echo "$_m71_safe_to_remove" | tr ' ' '\n' | grep -v '^$' | sed 's/.*/dispatch-job\\.sh &/' | paste -sd '|')
+            { crontab -l 2>/dev/null | grep -Ev "$_m71_pattern" || true; } | crontab -
+            substep "Removed LOBSTER-SCHEDULED cron entries for timer-backed jobs: ${_m71_safe_to_remove% }"
+            migrated=$((migrated + 1))
+        else
+            substep "No timer-backed LOBSTER-SCHEDULED cron entries to remove"
+        fi
+    else
+        substep "No LOBSTER-SCHEDULED crontab entries found — skipping"
+    fi
+
+    # Migration 72: Enable lobster-claude and lobster-router for autostart on existing installs.
+    # Non-interactive installs (NON_INTERACTIVE=true) prior to this fix skipped the
+    # `systemctl enable` call entirely, leaving the services installed but not enabled.
+    # After any reboot the services would not start automatically, causing ~4 min downtime
+    # until the health check detected and restarted the missing session. Fix: enable
+    # unconditionally if the service unit is present but not enabled. (issue #1603)
+    for _m72_svc in lobster-router lobster-claude; do
+        if systemctl list-unit-files --quiet "${_m72_svc}.service" 2>/dev/null | grep -q "^${_m72_svc}"; then
+            if ! systemctl is-enabled --quiet "${_m72_svc}" 2>/dev/null; then
+                sudo systemctl enable "${_m72_svc}" 2>/dev/null || true
+                substep "Enabled ${_m72_svc} for autostart"
+                migrated=$((migrated + 1))
+            else
+                substep "${_m72_svc} already enabled — skipping"
+            fi
+        else
+            substep "${_m72_svc}.service not found — skipping"
+        fi
+    done
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
