@@ -873,36 +873,35 @@ fi
 #===============================================================================
 
 if [ "$CLAUDE_INSTALLED" = false ]; then
-    if [ "$NON_INTERACTIVE" = true ]; then
-        warn "Claude Code not found — skipping installation (non-interactive mode)."
-        info "Run the installer interactively or install Claude Code manually: curl -fsSL https://claude.ai/install.sh | bash"
-    else
-        step "Installing Claude Code..."
+    step "Installing Claude Code..."
 
-        curl -fsSL https://claude.ai/install.sh | bash
+    # The official Claude Code installer (curl -fsSL https://claude.ai/install.sh | bash)
+    # is itself non-interactive — it does not prompt for input. We can safely run it in
+    # both interactive and non-interactive modes. The previous behaviour of skipping the
+    # install in non-interactive mode left the lobster-claude service unable to start.
+    curl -fsSL https://claude.ai/install.sh | bash
 
-        # Add to PATH for current session and clear bash's command hash table so
-        # command -v picks up the newly installed binary immediately.
-        export PATH="$HOME/.local/bin:$PATH"
-        hash -r 2>/dev/null || true
+    # Add to PATH for current session and clear bash's command hash table so
+    # command -v picks up the newly installed binary immediately.
+    export PATH="$HOME/.local/bin:$PATH"
+    hash -r 2>/dev/null || true
 
-        # Persist ~/.local/bin to PATH in shell config files
-        PATH_LINE="export PATH=\"\$HOME/.local/bin:\$PATH\""
-        for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
-            if [ -f "$rc" ] && ! grep -q '\.local/bin' "$rc"; then
-                echo "" >> "$rc"
-                echo "# Added by Lobster installer" >> "$rc"
-                echo "$PATH_LINE" >> "$rc"
-                info "Added ~/.local/bin to PATH in $rc"
-            fi
-        done
-
-        if command -v claude &>/dev/null || [ -x "$HOME/.local/bin/claude" ]; then
-            success "Claude Code installed"
-        else
-            error "Claude Code installation failed"
-            exit 1
+    # Persist ~/.local/bin to PATH in shell config files
+    PATH_LINE="export PATH=\"\$HOME/.local/bin:\$PATH\""
+    for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
+        if [ -f "$rc" ] && ! grep -q '\.local/bin' "$rc"; then
+            echo "" >> "$rc"
+            echo "# Added by Lobster installer" >> "$rc"
+            echo "$PATH_LINE" >> "$rc"
+            info "Added ~/.local/bin to PATH in $rc"
         fi
+    done
+
+    if command -v claude &>/dev/null || [ -x "$HOME/.local/bin/claude" ]; then
+        success "Claude Code installed"
+    else
+        error "Claude Code installation failed"
+        exit 1
     fi
 fi
 
