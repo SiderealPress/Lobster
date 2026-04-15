@@ -1767,7 +1767,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="send_whatsapp_reply",
-            description="Send a WhatsApp message via Twilio. Use this to reply to WhatsApp messages (source='whatsapp'). Requires TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and TWILIO_WHATSAPP_NUMBER to be configured.",
+            description="Send a WhatsApp message via the Baileys bridge. Use this to reply to WhatsApp messages (source='whatsapp'). Requires lobster-whatsapp-bridge and lobster-whatsapp-adapter services to be running. No Twilio credentials needed.",
             inputSchema={
                 "type": "object",
                 "properties": {

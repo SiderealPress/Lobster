@@ -1,7 +1,19 @@
 # Lobster WhatsApp Bridge
 
-A WhatsApp connector for the Lobster AI assistant, powered by [whatsapp-web.js](https://wwebjs.dev/).
-It bridges incoming WhatsApp messages to Lobster's file-based inbox, and forwards Lobster replies back to WhatsApp.
+Connects Lobster to WhatsApp using [Baileys](https://github.com/WhiskeySockets/Baileys) — a direct WebSocket implementation of the WhatsApp Web multi-device protocol. No browser, no Puppeteer, no Chromium.
+
+---
+
+## What this connector does
+
+Incoming WhatsApp DMs (and @mentions in groups) are written to Lobster's inbox as JSON files, identical in structure to Telegram messages. Outgoing replies written by Lobster are picked up and sent via WhatsApp.
+
+Two services work together:
+
+| Service | Language | Role |
+|---------|----------|------|
+| `lobster-whatsapp-bridge` | Node.js | Speaks WhatsApp protocol; reads/writes JSON files |
+| `lobster-whatsapp-adapter` | Python | Normalizes bridge events → Lobster inbox format |
 
 ---
 
@@ -9,195 +21,147 @@ It bridges incoming WhatsApp messages to Lobster's file-based inbox, and forward
 
 - **Node.js 18+** — check with `node --version`
 - **npm** — bundled with Node.js
-- **Chromium or Google Chrome** — required by whatsapp-web.js for the headless browser session
+- **A WhatsApp account** — the bridge links as a "companion device" (no separate number needed)
 
-### Install Node.js 18+ (if needed)
-
-```bash
-# Ubuntu / Debian
-curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
-sudo apt-get install -y nodejs
-
-# macOS (Homebrew)
-brew install node
-```
-
-### Install Chromium (if needed)
-
-```bash
-# Ubuntu / Debian
-sudo apt-get install -y chromium-browser
-
-# macOS (Homebrew)
-brew install --cask chromium
-```
+No Chromium, no browser, no Twilio, no Meta Business account required.
 
 ---
 
-## Installation
+## Setup (3 steps)
 
-The bridge source lives in:
+### Step 1 — Run the setup script
 
-```
-/home/admin/lobster-workspace/projects/whatsapp-bridge/
-```
-
-The connector files (service definition, install script, logrotate config) live in:
-
-```
-connectors/whatsapp/          (this directory, inside the lobster repo)
-```
-
-### One-command install
-
-Run from the lobster repo root:
+From the lobster repo root:
 
 ```bash
-bash connectors/whatsapp/install.sh
+bash connectors/whatsapp/setup.sh
 ```
 
-This script:
-1. Creates required log and command directories
-2. Runs `npm install` inside the bridge directory
-3. Copies the systemd service file to `/etc/systemd/system/`
-4. Enables the service to start on boot
+This installs npm dependencies, copies the systemd user service files, and creates `~/.config/lobster/whatsapp.env` from the example config.
 
-### Start the service
+### Step 2 — Scan the QR code
 
 ```bash
-sudo systemctl start lobster-whatsapp-bridge
+systemctl --user start lobster-whatsapp-bridge
+journalctl --user -u lobster-whatsapp-bridge -f
 ```
+
+A QR code will appear in the log. Scan it with WhatsApp:
+
+> **WhatsApp → Settings → Linked Devices → Link a Device**
+
+After scanning, the bridge prints your JID:
+
+```
+[READY] Detected Lobster JID: 15551234567@c.us
+```
+
+### Step 3 — Set your JID and start the adapter
+
+Edit `~/.config/lobster/whatsapp.env` and add:
+
+```bash
+WHATSAPP_LOBSTER_JID=15551234567@c.us
+```
+
+Then restart the bridge and start the adapter:
+
+```bash
+systemctl --user restart lobster-whatsapp-bridge
+systemctl --user start lobster-whatsapp-adapter
+```
+
+Send yourself a WhatsApp DM and verify it appears in `check_inbox()`. Done.
 
 ---
 
-## First-Run QR Scan
+## Config reference
 
-On the first start (and after session expiry), whatsapp-web.js displays a QR code that you must scan with the WhatsApp mobile app to authenticate.
+All settings are optional. Edit `~/.config/lobster/whatsapp.env` (this file is NOT committed to git):
 
-1. Start the service and tail the log:
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `WHATSAPP_SESSION_PATH` | `~/.config/lobster/whatsapp-session` | Where Baileys stores auth credentials |
+| `WHATSAPP_LOBSTER_JID` | *(none)* | Lobster's WhatsApp JID — required for group @mention filtering |
+| `WHATSAPP_ALLOWED_JIDS` | *(empty = allow all)* | Comma-separated whitelist of sender JIDs |
+| `WA_EVENTS_DIR` | `~/messages/wa-events` | Incoming event JSON files (bridge → adapter) |
+| `WA_COMMANDS_DIR` | `~/messages/wa-commands` | Outgoing command JSON files (adapter → bridge) |
+| `WA_HEARTBEAT_FILE` | `~/lobster-workspace/logs/whatsapp-heartbeat` | Heartbeat timestamp for health monitoring |
 
-   ```bash
-   sudo systemctl start lobster-whatsapp-bridge
-   journalctl -u lobster-whatsapp-bridge -f
-   ```
-
-2. A QR code will appear in the log output. Open WhatsApp on your phone.
-
-3. Go to **Settings > Linked Devices > Link a Device** and scan the QR code.
-
-4. Once authenticated, the log will show `Client is ready!` and the service will begin processing messages.
-
-The authenticated session is persisted to disk (`.wwebjs_auth/` inside the bridge directory), so you will not need to scan again unless the session expires or the auth data is deleted.
+See `connectors/whatsapp/config.example.env` for the full annotated example.
 
 ---
 
-## Verifying the Service
+## Re-authenticating when session expires
+
+If WhatsApp logs out the linked device (rare, but happens after extended inactivity):
 
 ```bash
-# Check current status
-sudo systemctl status lobster-whatsapp-bridge
+# Stop the service
+systemctl --user stop lobster-whatsapp-bridge
 
-# Follow live logs
-journalctl -u lobster-whatsapp-bridge -f
+# Delete the saved session
+rm -rf ~/.config/lobster/whatsapp-session
 
-# Check the log file directly
+# Start and scan the QR code again
+systemctl --user start lobster-whatsapp-bridge
+journalctl --user -u lobster-whatsapp-bridge -f
+```
+
+The bridge automatically emits a `session_expired` event to Lobster's inbox when this happens, so you'll get a Telegram notification to re-scan.
+
+---
+
+## Logs and health
+
+```bash
+# Live bridge logs (includes QR code on first run)
+journalctl --user -u lobster-whatsapp-bridge -f
+
+# Bridge log file
 tail -f ~/lobster-workspace/logs/whatsapp-bridge.log
+
+# Adapter log
+tail -f ~/lobster-workspace/logs/whatsapp-adapter.log
+
+# Service status
+systemctl --user status lobster-whatsapp-bridge
+systemctl --user status lobster-whatsapp-adapter
 ```
 
 ---
 
-## Log Rotation
+## Architecture
 
-A logrotate configuration is provided at `connectors/whatsapp/logrotate.conf`. To install it:
-
-```bash
-sudo cp connectors/whatsapp/logrotate.conf /etc/logrotate.d/lobster-whatsapp-bridge
 ```
-
-This rotates the bridge log daily, keeping 7 compressed archives, and creates a fresh log file owned by the `admin` user.
+WhatsApp network
+    ↓ (WebSocket, no browser)
+Baileys (Node.js) in lobster-whatsapp-bridge
+    ↓ writes JSON to ~/messages/wa-events/
+whatsapp_bridge_adapter.py in lobster-whatsapp-adapter
+    ↓ normalizes to Lobster inbox schema
+~/messages/inbox/<msg_id>.json
+    ↓ Lobster calls check_inbox()
+Lobster processes and calls send_reply(source='whatsapp', ...)
+    ↓ reply written to ~/messages/outbox/
+whatsapp_bridge_adapter.py
+    ↓ converts to ~/messages/wa-commands/<ts>_wa_cmd.json
+Baileys reads command, calls sock.sendMessage()
+    ↓
+WhatsApp delivers the reply
+```
 
 ---
 
-## Health Monitoring
+## Why Baileys instead of whatsapp-web.js
 
-The WhatsApp health check script (`~/lobster/scripts/whatsapp-health-check.sh`) monitors the bridge:
+The previous bridge used `whatsapp-web.js` (Puppeteer + Chromium). Baileys is a direct WebSocket implementation:
 
-- If `lobster-whatsapp-bridge` is not `active`, an alert is written to the Lobster inbox so Lobster can notify you.
-- If no WhatsApp messages have been received for more than 10 minutes (based on the heartbeat file at `~/lobster-workspace/logs/whatsapp-heartbeat`), a warning is logged.
-
-Run this script manually or wire it to your cron schedule to enable monitoring.
-
----
-
-## Troubleshooting
-
-### QR code not appearing
-
-- Confirm Node.js 18+ is installed: `node --version`
-- Confirm Chromium is installed and accessible
-- Check logs: `journalctl -u lobster-whatsapp-bridge -f`
-
-### Service fails to start
-
-```bash
-sudo systemctl status lobster-whatsapp-bridge
-journalctl -u lobster-whatsapp-bridge --no-pager -n 50
-```
-
-Common causes:
-- `node` binary not at `/usr/bin/node` — check with `which node` and update the service file if needed
-- Bridge directory missing or `npm install` not run
-- Chromium not installed
-
-### Messages not reaching Lobster
-
-- Verify the `LOBSTER_MESSAGES_DIR` environment variable points to the correct inbox directory (`~/messages/inbox`)
-- Check that the bridge process has write permission to that directory
-- Review the bridge log for errors: `tail -100 ~/lobster-workspace/logs/whatsapp-bridge.log`
-
-### Service keeps restarting
-
-The service is configured with `Restart=always` and a 10-second backoff. If it loops rapidly:
-
-1. Check for authentication errors (session may need re-scan)
-2. Check for missing dependencies (`npm install` again)
-3. Check for port or resource conflicts
-
----
-
-## Re-authenticating When Session Expires
-
-WhatsApp sessions can expire after extended inactivity or due to changes on the WhatsApp side.
-
-1. Stop the service:
-   ```bash
-   sudo systemctl stop lobster-whatsapp-bridge
-   ```
-
-2. Delete the stored auth data:
-   ```bash
-   rm -rf /home/admin/lobster-workspace/projects/whatsapp-bridge/.wwebjs_auth
-   ```
-
-3. Start the service and scan the QR code again:
-   ```bash
-   sudo systemctl start lobster-whatsapp-bridge
-   journalctl -u lobster-whatsapp-bridge -f
-   ```
-
----
-
-## File Layout
-
-```
-connectors/whatsapp/
-  install.sh                       -- one-command setup script
-  lobster-whatsapp-bridge.service  -- systemd unit file
-  logrotate.conf                   -- log rotation config
-  README.md                        -- this file
-
-/home/admin/lobster-workspace/projects/whatsapp-bridge/
-  index.js                         -- bridge entry point
-  package.json
-  .wwebjs_auth/                    -- persisted WhatsApp session (created at runtime)
-```
+| | Baileys (this bridge) | whatsapp-web.js (old) |
+|-|-----------------------|-----------------------|
+| Mechanism | Direct WebSocket | Chromium browser |
+| Memory | ~100 MB | ~500 MB |
+| Startup | ~3 seconds | ~20 seconds |
+| Reconnect | Fast (WebSocket) | Slow (browser restart) |
+| Session storage | JSON files | Browser LocalStorage |
+| VPS compatibility | Excellent | Requires sandbox workarounds |
