@@ -819,6 +819,124 @@ class TestMarkProcessed:
             assert "processed" in result[0].text.lower()
             assert not (inbox / f"{msg_id}.json").exists()
 
+    # -----------------------------------------------------------------------
+    # Issue #1594 — "Noted." fallback removal
+    # -----------------------------------------------------------------------
+
+    def test_no_fallback_sent_for_real_chat_id_without_reply(
+        self, setup_dirs, message_generator, inbox_server_dirs
+    ):
+        """mark_processed must NOT write any outbox message when no reply was sent.
+
+        Before fix: the server auto-sent "Noted." to the outbox for any
+        user-facing message with a real (> 1_000_000) chat_id that was
+        processed without a prior send_reply.
+
+        After fix: the message is silently marked processed and no outbox
+        file is written.  The absence of a fallback is the correct behavior —
+        a missing reply is a dispatcher bug, not something to paper over.
+        """
+        inbox, processed = setup_dirs
+        outbox = inbox_server_dirs["outbox"]
+
+        # Use a real (large) chat_id that previously triggered the fallback
+        REAL_CHAT_ID = 8305714125
+        msg = message_generator.generate_text_message(
+            source="telegram", chat_id=REAL_CHAT_ID,
+        )
+        msg_id = msg["id"]
+        (inbox / f"{msg_id}.json").write_text(json.dumps(msg))
+
+        outbox_before = set(outbox.iterdir())
+
+        with patch.multiple(
+            "src.mcp.inbox_server",
+            INBOX_DIR=inbox,
+            PROCESSED_DIR=processed,
+        ):
+            import asyncio
+            from src.mcp.inbox_server import handle_mark_processed
+
+            result = asyncio.run(handle_mark_processed({"message_id": msg_id}))
+
+        # Message must be moved to processed
+        assert "processed" in result[0].text.lower()
+        assert not (inbox / f"{msg_id}.json").exists()
+        assert (processed / f"{msg_id}.json").exists()
+
+        # No outbox files should have been created (no "Noted." or any fallback)
+        outbox_after = set(outbox.iterdir())
+        new_files = outbox_after - outbox_before
+        assert new_files == set(), (
+            f"Expected no outbox files to be written, but found: {new_files}"
+        )
+
+    def test_no_fallback_sent_for_reaction_without_reply(
+        self, setup_dirs, message_generator, inbox_server_dirs
+    ):
+        """Reaction messages must not trigger any outbox write.
+
+        Reactions were already excluded from the old fallback, but this test
+        confirms the new code path (no fallback at all) also handles them correctly.
+        """
+        inbox, processed = setup_dirs
+        outbox = inbox_server_dirs["outbox"]
+
+        REAL_CHAT_ID = 8305714125
+        msg = message_generator.generate_text_message(
+            source="telegram", chat_id=REAL_CHAT_ID,
+        )
+        msg["type"] = "reaction"
+        msg_id = msg["id"]
+        (inbox / f"{msg_id}.json").write_text(json.dumps(msg))
+
+        outbox_before = set(outbox.iterdir())
+
+        with patch.multiple(
+            "src.mcp.inbox_server",
+            INBOX_DIR=inbox,
+            PROCESSED_DIR=processed,
+        ):
+            import asyncio
+            from src.mcp.inbox_server import handle_mark_processed
+
+            result = asyncio.run(handle_mark_processed({"message_id": msg_id}))
+
+        assert "processed" in result[0].text.lower()
+        outbox_after = set(outbox.iterdir())
+        assert outbox_after - outbox_before == set()
+
+    def test_no_fallback_sent_for_callback_without_reply(
+        self, setup_dirs, message_generator, inbox_server_dirs
+    ):
+        """Callback (button press) messages must not trigger any outbox write."""
+        inbox, processed = setup_dirs
+        outbox = inbox_server_dirs["outbox"]
+
+        REAL_CHAT_ID = 8305714125
+        msg = message_generator.generate_text_message(
+            source="telegram", chat_id=REAL_CHAT_ID,
+        )
+        msg["type"] = "callback"
+        msg_id = msg["id"]
+        (inbox / f"{msg_id}.json").write_text(json.dumps(msg))
+
+        outbox_before = set(outbox.iterdir())
+
+        with patch.multiple(
+            "src.mcp.inbox_server",
+            INBOX_DIR=inbox,
+            PROCESSED_DIR=processed,
+        ):
+            import asyncio
+            from src.mcp.inbox_server import handle_mark_processed
+
+            result = asyncio.run(handle_mark_processed({"message_id": msg_id}))
+
+        assert "processed" in result[0].text.lower()
+        outbox_after = set(outbox.iterdir())
+        assert outbox_after - outbox_before == set()
+
 
 class TestListSources:
     """Tests for list_sources tool."""
