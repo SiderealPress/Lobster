@@ -8,9 +8,9 @@
     "test": "node test/mock-test.js"
   },
   "dependencies": {
-    "whatsapp-web.js": "^1.26.0",
-    "qrcode-terminal": "^0.12.0",
-    "chokidar": "^3.6.0"
+    "chokidar": "^3.6.0",
+    "qrcode": "^1.5.4",
+    "whatsapp-web.js": "^1.26.0"
   },
   "engines": {
     "node": ">=18.0.0"
