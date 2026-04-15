@@ -1,16 +1,17 @@
 {
   "name": "lobster-whatsapp-bridge",
-  "version": "1.0.0",
-  "description": "WhatsApp Web bridge for Lobster AI assistant - connects WhatsApp to Lobster's file-based inbox/outbox",
+  "version": "2.0.0",
+  "description": "WhatsApp bridge for Lobster AI assistant using Baileys (direct WebSocket, no browser)",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
     "test": "node test/mock-test.js"
   },
   "dependencies": {
-    "whatsapp-web.js": "^1.26.0",
-    "qrcode-terminal": "^0.12.0",
-    "chokidar": "^3.6.0"
+    "@whiskeysockets/baileys": "^6.7.16",
+    "chokidar": "^3.6.0",
+    "pino": "^9.6.0",
+    "qrcode-terminal": "^0.12.0"
   },
   "engines": {
     "node": ">=18.0.0"
