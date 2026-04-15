@@ -212,7 +212,7 @@ class TestExtractOutputFile:
 
 class TestHookNonAgentTool:
     def test_non_agent_exits_0_no_db(self, tmp_path):
-        """Non-Agent tool calls are ignored entirely."""
+        """Non-Agent tool calls are ignored entirely — no rows written to agent_sessions."""
         hook_input = _make_hook_input(
             tool_name="Bash",
             prompt="ls",
@@ -221,7 +221,17 @@ class TestHookNonAgentTool:
         exit_code, _, _ = _run_hook(hook_input, tmp_path)
         assert exit_code == 0
         db_path = tmp_path / "messages" / "config" / "agent_sessions.db"
-        assert not db_path.exists()
+        # The DB file may be created by the test isolator (conftest AtomicClaimDB),
+        # but the hook must not have inserted any rows.
+        if db_path.exists():
+            conn = sqlite3.connect(str(db_path))
+            try:
+                rows = conn.execute("SELECT COUNT(*) FROM agent_sessions").fetchone()
+                assert rows[0] == 0, "Non-Agent tool must not write any agent_sessions rows"
+            except sqlite3.OperationalError:
+                pass  # table doesn't exist — no rows written, test passes
+            finally:
+                conn.close()
 
 
 class TestHookAgentWithAgentId:
@@ -260,7 +270,7 @@ class TestHookAgentWithAgentId:
         """A pre-existing row (from register_agent) is NOT overwritten."""
         # Pre-populate with a richer row
         db_dir = tmp_path / "messages" / "config"
-        db_dir.mkdir(parents=True)
+        db_dir.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(db_dir / "agent_sessions.db"))
         conn.execute("""
             CREATE TABLE IF NOT EXISTS agent_sessions (
@@ -416,7 +426,7 @@ class TestHookAgentWithAgentId:
 
 class TestHookNoAgentId:
     def test_missing_agent_id_exits_0_no_write(self, tmp_path):
-        """If tool response has no agentId, exit 0 without touching DB."""
+        """If tool response has no agentId, exit 0 without writing agent_sessions rows."""
         prompt = "---\ntask_id: t-noid\n---"
         hook_input = _make_hook_input(
             prompt=prompt,
@@ -425,7 +435,17 @@ class TestHookNoAgentId:
         exit_code, _, _ = _run_hook(hook_input, tmp_path)
         assert exit_code == 0
         db_path = tmp_path / "messages" / "config" / "agent_sessions.db"
-        assert not db_path.exists()
+        # The DB file may be created by the test isolator (conftest AtomicClaimDB),
+        # but the hook must not have inserted any rows.
+        if db_path.exists():
+            conn = sqlite3.connect(str(db_path))
+            try:
+                rows = conn.execute("SELECT COUNT(*) FROM agent_sessions").fetchone()
+                assert rows[0] == 0, "Missing agentId must not write any agent_sessions rows"
+            except sqlite3.OperationalError:
+                pass  # table doesn't exist — no rows written, test passes
+            finally:
+                conn.close()
 
     def test_none_response_exits_0(self, tmp_path):
         prompt = "---\ntask_id: t-none\n---"

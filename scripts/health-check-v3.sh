@@ -143,6 +143,15 @@ mkdir -p "$(dirname "$LOG_FILE")"
 mkdir -p "$(dirname "$RESTART_STATE_FILE")"
 mkdir -p "$ALERT_DEDUP_DIR"
 
+# Dry-run gate: skip all real actions when LOBSTER_HEALTH_CHECK_DRY_RUN=1.
+# Used by tests to exercise parsing/reading logic without executing systemctl,
+# curl, or other external commands.
+if [[ "${LOBSTER_HEALTH_CHECK_DRY_RUN:-0}" == "1" ]]; then
+    mkdir -p "$(dirname "$LOG_FILE")"
+    echo "[$(date -Iseconds)] [INFO] LOBSTER_HEALTH_CHECK_DRY_RUN=1 — health check dry-run, skipping all actions" >> "$LOG_FILE"
+    exit 0
+fi
+
 # Lifecycle gate: skip monitoring and restart loop in non-production environments.
 # Resource checks (disk/memory/auth) do not run either — the service is intentionally
 # idle and alerting on its resource state would be noise. The cron entry still fires

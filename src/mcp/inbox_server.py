@@ -253,14 +253,73 @@ def _queue_observation(msg_text: str, msg_id: str, source: str | None = None, ts
 # ---------------------------------------------------------------------------
 # Debug observability — LOBSTER_DEBUG=true push notifications
 #
-# _emit_event() is a thin wrapper around the event bus singleton.  It replaces
-# the old _emit_debug_observation / _resolve_debug_config pattern (issue #891).
-# Filtering (debug-mode gate, category suppression) is handled inside the bus
-# listeners — callers just emit a LobsterEvent and the bus decides delivery.
+# _emit_event() is a thin wrapper around the event bus singleton.
+# _emit_debug_observation() is the direct-write function used by handlers
+# that need to be patchable in unit tests (memory_store, memory_search,
+# write_result).  It writes directly to OUTBOX_DIR when alerts are enabled,
+# bypassing the event bus so that tests can mock it cleanly with patch.multiple.
 #
-# Backward-compat: _resolve_debug_config is kept as a no-op so any callsites
-# that haven't been updated yet don't crash.
+# Module-level flags (_DEBUG_MODE, _DEBUG_ALERTS_ENABLED, _DEBUG_RESOLVED,
+# _DEBUG_OWNER_CHAT_ID, _DEBUG_OWNER_SOURCE) are exposed so that tests can
+# inject known state via patch.multiple without touching the event bus or
+# environment variables.
 # ---------------------------------------------------------------------------
+
+# Module-level debug state — patchable by tests via patch.multiple
+_DEBUG_MODE: bool = os.environ.get("LOBSTER_DEBUG", "").lower() in ("true", "1", "yes")
+_DEBUG_ALERTS_ENABLED: bool = _DEBUG_MODE
+_DEBUG_RESOLVED: bool = False  # True once _resolve_debug_config has run
+_DEBUG_OWNER_CHAT_ID: int | str | None = None
+_DEBUG_OWNER_SOURCE: str = "telegram"
+
+
+def _emit_debug_observation(
+    text: str,
+    category: str = "system_context",
+    visibility: str = "mcp-only",
+    emitter: str | None = None,
+) -> None:
+    """Write a debug observation directly to OUTBOX_DIR.
+
+    Gate: returns immediately when _DEBUG_ALERTS_ENABLED is False or
+    _DEBUG_OWNER_CHAT_ID is None.  Handlers call this unconditionally —
+    the gate lives here, not at the call site.
+
+    Writes a JSON file to OUTBOX_DIR so the Telegram bot delivers the
+    alert directly to the owner without touching the dispatcher inbox.
+
+    Never raises — must be safe to call from any handler.
+    """
+    if not _DEBUG_ALERTS_ENABLED:
+        return
+    if _DEBUG_OWNER_CHAT_ID is None:
+        return
+    try:
+        import time as _time_mod
+        ts_ms = int(_time_mod.time() * 1000)
+        safe_emitter = (emitter or "unknown").replace("/", "_")[:40]
+        message_id = f"{ts_ms}_debug_{safe_emitter}"
+        label = f"[debug|{visibility}]"
+        if emitter:
+            label += f" {emitter}"
+        full_text = f"{label}\n{text}"
+        message = {
+            "id": message_id,
+            "type": "debug_observation",
+            "source": _DEBUG_OWNER_SOURCE,
+            "chat_id": _DEBUG_OWNER_CHAT_ID,
+            "text": full_text,
+            "timestamp": __import__("datetime").datetime.now(
+                __import__("datetime").timezone.utc
+            ).isoformat(),
+        }
+        OUTBOX_DIR.mkdir(parents=True, exist_ok=True)
+        outbox_file = OUTBOX_DIR / f"{message_id}.json"
+        tmp_file = outbox_file.with_suffix(".tmp")
+        tmp_file.write_text(__import__("json").dumps(message), encoding="utf-8")
+        tmp_file.rename(outbox_file)
+    except Exception:
+        pass  # debug delivery must never crash production
 
 
 def _emit_event(
@@ -2004,6 +2063,36 @@ async def list_tools() -> list[Tool]:
                 "required": ["message_id"],
             },
         ),
+        # TTS Voice Note Tool
+        Tool(
+            name="send_voice_note",
+            description=(
+                "Synthesize text to speech and send as a Telegram voice note using local piper TTS. "
+                "Runs entirely locally — no cloud API or API key needed. "
+                "Requires piper binary and lessac-medium voice model (installed by install.sh). "
+                "Falls back to send_reply with text if TTS is unavailable. "
+                "Use for responses that benefit from an audio/voice delivery."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "chat_id": {
+                        "type": "string",
+                        "description": "The chat ID to send the voice note to (Telegram chat ID).",
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "The text to synthesize into a voice note. Keep under ~500 words for best results.",
+                    },
+                    "source": {
+                        "type": "string",
+                        "description": "Message source channel. Defaults to 'telegram'. Voice notes are only sent for Telegram; other sources fall back to text.",
+                        "default": "telegram",
+                    },
+                },
+                "required": ["chat_id", "text"],
+            },
+        ),
         # Headless Browser Fetch Tool
         Tool(
             name="fetch_page",
@@ -3438,6 +3527,8 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
         return await handle_update_rule(arguments)
     elif name == "transcribe_audio":
         return await handle_transcribe_audio(arguments)
+    elif name == "send_voice_note":
+        return await handle_send_voice_note(arguments)
     # Headless Browser Fetch
     elif name == "fetch_page":
         return await handle_fetch_page(arguments)
@@ -6300,6 +6391,74 @@ async def handle_transcribe_audio(args: dict) -> list[TextContent]:
 
 
 # =============================================================================
+# TTS Voice Note Handler
+# =============================================================================
+
+async def handle_send_voice_note(args: dict) -> list[TextContent]:
+    """Synthesize text to a voice note and send via Telegram.
+
+    Uses piper TTS locally (no cloud). Falls back to a text send_reply if TTS
+    or the Telegram voice send fails, so the user always gets a response.
+    """
+    chat_id = str(args.get("chat_id", "")).strip()
+    text = str(args.get("text", "")).strip()
+    source = str(args.get("source", "telegram")).strip() or "telegram"
+
+    if not chat_id:
+        return [TextContent(type="text", text="Error: chat_id is required.")]
+    if not text:
+        return [TextContent(type="text", text="Error: text is required.")]
+
+    # Non-Telegram sources: voice notes are not supported; fall back to text.
+    if source != "telegram":
+        log.info(f"send_voice_note: source={source!r} is not telegram — falling back to text")
+        fallback_args = {"chat_id": chat_id, "text": text, "source": source}
+        return await handle_send_reply(fallback_args)
+
+    # Import TTS module lazily so missing piper doesn't crash the server.
+    try:
+        from tts.piper import text_to_voice_file  # type: ignore[import]
+    except ImportError as e:
+        log.warning(f"send_voice_note: tts module not importable ({e}) — falling back to text")
+        return await handle_send_reply({"chat_id": chat_id, "text": text, "source": source})
+
+    # Generate OGG voice file
+    tts_result = text_to_voice_file(text)
+    if not tts_result.ok:
+        log.warning(f"send_voice_note: TTS failed ({tts_result.error}) — falling back to text")
+        tts_result.cleanup()
+        return await handle_send_reply({"chat_id": chat_id, "text": text, "source": source})
+
+    ogg_path = tts_result.ogg_path
+    try:
+        # Write a voice-type outbox message pointing to the OGG file.
+        # The Telegram bot's outbox handler reads this and calls bot.send_voice().
+        import time as _time
+        reply_id = f"{int(_time.time() * 1000)}_telegram_voice"
+        reply_data = {
+            "id": reply_id,
+            "source": "telegram",
+            "chat_id": chat_id,
+            "type": "voice",
+            "voice_path": str(ogg_path),
+            "text": text,  # kept as fallback caption / for sent-messages history
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        outbox_file = OUTBOX_DIR / f"{reply_id}.json"
+        atomic_write_json(outbox_file, reply_data)
+        # Save to sent directory for conversation history
+        sent_file = SENT_DIR / f"{reply_id}.json"
+        atomic_write_json(sent_file, reply_data)
+
+        log.info(f"send_voice_note: queued voice note to {chat_id} ({ogg_path})")
+        return [TextContent(type="text", text=f"Voice note queued for delivery to chat {chat_id}.")]
+    except Exception as e:
+        log.error(f"send_voice_note: failed to queue voice note ({e}) — falling back to text")
+        tts_result.cleanup()
+        return await handle_send_reply({"chat_id": chat_id, "text": text, "source": source})
+
+
+# =============================================================================
 # Headless Browser Fetch Handler
 # =============================================================================
 
@@ -7027,19 +7186,18 @@ async def handle_write_observation(args: dict) -> list[TextContent]:
         except OSError as exc:
             log.warning(f"Failed to write observation to {obs_log}: {exc}")
 
-    # When LOBSTER_DEBUG=true, emit a bus event so the user sees this observation
-    # arrive in real time. The bus listener handles the debug-mode gate and
-    # system_context suppression — callers do not need to check _DEBUG_MODE.
+    # When LOBSTER_DEBUG=true, emit a direct debug observation for non-system_context
+    # categories so the user sees the observation arrive in real time.
+    # system_context is suppressed (internal bookkeeping only).
     # This is additive: the inbox write above always happens regardless of debug mode.
     emitter = f"task:{task_id}" if task_id else "unknown"
-    _emit_event(
-        text,
-        event_type=f"agent.observation.{category}",
-        severity="info" if category == "user_context" else "error" if category == "system_error" else "debug",
-        source="write-observation",
-        emitter=emitter,
-        task_id=task_id,
-    )
+    if _DEBUG_MODE and category != "system_context":
+        _emit_debug_observation(
+            text,
+            category=category,
+            visibility="mcp-only",
+            emitter=emitter,
+        )
 
     log.info(
         f"Subagent observation queued in inbox: category={category} chat_id={chat_id}"
