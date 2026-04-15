@@ -2442,6 +2442,76 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
         substep "wfm-watchdog.sh cron entry already present — skipping"
     fi
 
+    # Migration 70: Install piper TTS and lessac-medium voice model for send_voice_note.
+    # Soft requirement: failure warns but does not abort upgrade.
+    local PIPER_BIN_PATH="/usr/local/bin/piper"
+    local PIPER_MODELS_TARGET="${WORKSPACE_DIR}/piper-models"
+    local PIPER_MODEL_FILE="${PIPER_MODELS_TARGET}/en_US-lessac-medium.onnx"
+    mkdir -p "$PIPER_MODELS_TARGET"
+
+    if [ ! -x "$PIPER_BIN_PATH" ] && ! command -v piper &>/dev/null; then
+        substep "Installing piper TTS binary for send_voice_note..."
+        local _arch
+        _arch="$(uname -m)"
+        local _piper_arch=""
+        case "$_arch" in
+            x86_64)   _piper_arch="amd64" ;;
+            aarch64)  _piper_arch="aarch64" ;;
+            armv7l)   _piper_arch="armv7" ;;
+        esac
+        if [ -n "$_piper_arch" ]; then
+            local _piper_url
+            _piper_url="$(curl -fsSL https://api.github.com/repos/rhasspy/piper/releases/latest 2>/dev/null | \
+                python3 -c "import sys,json; \
+                data=json.load(sys.stdin); \
+                urls=[a['browser_download_url'] for a in data.get('assets',[]) \
+                      if 'linux_${_piper_arch}' in a['name'] and a['name'].endswith('.tar.gz')]; \
+                print(urls[0] if urls else '')" 2>/dev/null || true)"
+            if [ -n "$_piper_url" ]; then
+                local _ptmp
+                _ptmp="$(mktemp -d)"
+                if curl -fsSL -o "${_ptmp}/piper.tar.gz" "$_piper_url" && \
+                   tar -xzf "${_ptmp}/piper.tar.gz" -C "$_ptmp"; then
+                    local _bin
+                    _bin="$(find "$_ptmp" -type f -name "piper" | head -1)"
+                    if [ -n "$_bin" ]; then
+                        local _bin_dir
+                        _bin_dir="$(dirname "$_bin")"
+                        sudo cp "$_bin" "$PIPER_BIN_PATH"
+                        sudo chmod +x "$PIPER_BIN_PATH"
+                        # Copy shared libraries
+                        for _lib in libonnxruntime.so.* libpiper_phonemize.so.* libespeak-ng.so.*; do
+                            _lib_path="$(find "$_bin_dir" -name "$_lib" -type f | head -1)"
+                            [ -n "$_lib_path" ] && sudo cp "$_lib_path" /usr/local/lib/ 2>/dev/null || true
+                        done
+                        sudo ldconfig 2>/dev/null || true
+                        # Install bundled espeak-ng-data
+                        if [ -d "${_bin_dir}/espeak-ng-data" ]; then
+                            sudo cp -r "${_bin_dir}/espeak-ng-data" /usr/share/ 2>/dev/null || true
+                        fi
+                        substep "piper TTS installed to $PIPER_BIN_PATH"
+                        migrated=$((migrated + 1))
+                    fi
+                fi
+                rm -rf "$_ptmp"
+            fi
+        fi
+    fi
+
+    if [ ! -f "$PIPER_MODEL_FILE" ]; then
+        substep "Downloading piper lessac-medium voice model (~30MB)..."
+        local _model_url="https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/en_US-lessac-medium.onnx"
+        local _model_json_url="https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json"
+        if curl -fsSL -o "$PIPER_MODEL_FILE" "$_model_url" && \
+           curl -fsSL -o "${PIPER_MODEL_FILE}.json" "$_model_json_url"; then
+            substep "piper voice model downloaded"
+            migrated=$((migrated + 1))
+        else
+            warn "piper voice model download failed — send_voice_note will fall back to text"
+            rm -f "$PIPER_MODEL_FILE" "${PIPER_MODEL_FILE}.json"
+        fi
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
