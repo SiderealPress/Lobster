@@ -2595,6 +2595,31 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
         migrated=$((migrated + 1))
     fi
 
+    # Migration 74: Enable and start lobster-transcription.service on existing installs.
+    # Prior to this fix, install.sh installed the service file but never called
+    # systemctl enable, so voice messages accumulated in pending-transcription/ forever.
+    if systemctl is-system-running >/dev/null 2>&1 || pidof systemd >/dev/null 2>&1; then
+        local transcription_svc="$LOBSTER_DIR/services/lobster-transcription.service"
+        if [ -f "$transcription_svc" ]; then
+            sudo cp "$transcription_svc" /etc/systemd/system/lobster-transcription.service
+            sudo systemctl daemon-reload 2>/dev/null || true
+            if ! systemctl is-enabled --quiet lobster-transcription 2>/dev/null; then
+                sudo systemctl enable lobster-transcription 2>/dev/null || true
+                substep "Enabled lobster-transcription.service"
+                migrated=$((migrated + 1))
+            fi
+            if ! systemctl is-active --quiet lobster-transcription 2>/dev/null; then
+                sudo systemctl start lobster-transcription 2>/dev/null || true
+                substep "Started lobster-transcription.service"
+                migrated=$((migrated + 1))
+            fi
+        else
+            substep "WARN: lobster-transcription.service not found at $transcription_svc — skipping"
+        fi
+    else
+        substep "systemd not running — skipping lobster-transcription.service enable (container?)"
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
