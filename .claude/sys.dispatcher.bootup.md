@@ -1197,7 +1197,7 @@ Users can run `lobster update` to pull the latest code and apply pending migrati
 
 ### At session start
 
-After reading handoff and user model, call `list_tasks(status="pending")` to recover in-progress work. If tasks exist, they are the starting point. Mention open tasks briefly in initial orientation.
+After reading handoff and user model, call `list_tasks(status="pending")` to recover in-progress work. If tasks exist, they are the starting point. Mention open tasks briefly in initial orientation. Tasks whose subject starts with `DEFERRED:` are unanswered user questions from prior sessions — surface these to the user proactively ("You asked X last session and I didn't get to it — want me to pick that up?").
 
 ### When user gives a task
 
@@ -1320,7 +1320,9 @@ If fewer than 2 trackable questions are present, apply no special handling — r
 
 ## Commitment Durability
 
-A **commitment** is created when you tell the user you will answer something or do something later — not just note it. Commitments must survive session boundaries. Session notes do not survive compaction reliably; `rolling-summary.md` is the designated cross-session truth and is read at every session start.
+A **commitment** is created when you tell the user you will answer something or do something later — not just note it. Commitments must survive session boundaries and compaction.
+
+**Storage: use the task system.** Deferred questions and commitments are stored as tasks with the subject prefix `DEFERRED:`. This requires no markdown file dependency and no background subagent — the task system is a first-class MCP tool that persists independently.
 
 **Trigger:** You defer a response with language like:
 - "I'll check on that"
@@ -1329,27 +1331,22 @@ A **commitment** is created when you tell the user you will answer something or 
 - "Checking now" (when spawning a subagent that may not complete before compaction)
 - Any explicit question from the user that you cannot answer inline AND you do not answer within the same session turn
 
-**Required action:** Immediately after sending the deferral reply, spawn a background subagent to write the deferred commitment to `rolling-summary.md`:
+**Required action:** Immediately after sending the deferral reply, call `create_task` directly:
 
-```
-Task(
-    subagent_type="lobster-generalist",
-    run_in_background=True,
-    prompt=(
-        "---\ntask_id: commitment-capture-<slug>\nchat_id: 0\nsource: system\n---\n\n"
-        "Capture an open commitment in rolling-summary.md.\n\n"
-        "1. Read ~/lobster-user-config/memory/canonical/rolling-summary.md\n"
-        "2. Find the '## Open Threads / Commitments' section. "
-           "If the section does not exist, add it after '## Active PRs & Decisions'.\n"
-        "3. Add this line if it is not already present (check for substring match to avoid duplicates):\n"
-        "   - **ANSWER the user**: <exact question text> (asked <HH:MM ET>, deferred — needs answer)\n"
-        "4. Write the file back.\n"
-        "5. Call write_result with task_id='commitment-capture-<slug>', chat_id=0, source='system'."
-    ),
+```python
+task_id = create_task(
+    subject="DEFERRED: <exact question text>",
+    description="Asked at <HH:MM ET>. Context: <one-sentence summary of what the user needs>."
 )
 ```
 
-**Idempotency:** Before adding the line, check that no existing line in the file already captures the same question (substring match is sufficient). Do not add duplicates.
+No background subagent is needed — `create_task` is a synchronous MCP call.
+
+**At session start:** `list_tasks(status="pending")` (already called at startup) surfaces all pending tasks including deferred questions. Any task whose subject starts with `DEFERRED:` is a commitment that needs follow-up. Mention these to the user if they appear in the startup scan.
+
+**When the commitment is fulfilled:** Call `update_task(task_id, status="done")` immediately after sending the answer. If the task_id was not recorded (session boundary), search `list_tasks()` for the matching `DEFERRED:` subject line.
+
+**Idempotency:** Before creating a deferred task, check `list_tasks()` for an existing task with the same `DEFERRED:` subject. Do not create duplicates.
 
 **Scope:** Only direct questions or explicit commitments from the user. Do not apply to internal system events, subagent status queries, or rhetorical questions.
 
