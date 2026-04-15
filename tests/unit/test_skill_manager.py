@@ -165,7 +165,7 @@ class TestResolveSkillDirs:
         _create_skill_toml(shop / "real-skill", "real-skill")
         (shop / "not-a-skill").mkdir(parents=True)
 
-        dirs = _resolve_skill_dirs(repo_dir=tmp_path)
+        dirs = _resolve_skill_dirs(repo_dir=tmp_path, config_dir="")
         assert len(dirs) == 1
         assert dirs[0].name == "real-skill"
 
@@ -175,7 +175,7 @@ class TestResolveSkillDirs:
         _create_skill_toml(shop / ".hidden", "hidden")
         _create_skill_toml(shop / "visible", "visible")
 
-        dirs = _resolve_skill_dirs(repo_dir=tmp_path)
+        dirs = _resolve_skill_dirs(repo_dir=tmp_path, config_dir="")
         assert len(dirs) == 1
 
     def test_private_overlay_overrides(self, tmp_path):
