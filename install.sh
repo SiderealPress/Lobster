@@ -1255,7 +1255,8 @@ info "  See docs/GLOBAL-ENV.md for full documentation"
 
 step "Setting up scheduled tasks infrastructure..."
 
-# Install dispatch-job.sh (posts scheduled_reminder to inbox; no direct Claude invocation)
+# dispatch-job.sh: kept for compatibility with jobs not yet migrated to systemd timers.
+# New jobs should use create_scheduled_job MCP tool instead (issue #1083).
 chmod +x "$INSTALL_DIR/scheduled-tasks/dispatch-job.sh" || true
 
 # Enable cron service (name differs by distro)
@@ -2034,7 +2035,7 @@ TELEGRAM_BOT_TOKEN=your_bot_token_here
 TELEGRAM_ALLOWED_USERS=
 
 # Admin chat ID (Telegram numeric user ID for the primary admin user).
-# Used by dispatch-job.sh (scheduled tasks) and alert.sh to deliver messages.
+# Used by alert.sh to deliver system notifications.
 LOBSTER_ADMIN_CHAT_ID=
 
 # Environment mode: production | dev | test
@@ -2098,7 +2099,7 @@ TELEGRAM_BOT_TOKEN=$BOT_TOKEN
 TELEGRAM_ALLOWED_USERS=$USER_ID
 
 # Admin chat ID (Telegram numeric user ID for the primary admin user).
-# Used by dispatch-job.sh (scheduled tasks) and alert.sh to deliver messages.
+# Used by alert.sh to deliver system notifications.
 LOBSTER_ADMIN_CHAT_ID=$USER_ID
 
 # Environment mode: production | dev | test
