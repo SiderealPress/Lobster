@@ -4641,6 +4641,13 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
         elif msg_type == "subagent_recovered":
             task_id = msg.get("task_id", "?")
             output += f"⚠️ **[SUBAGENT RECOVERY]** task `{task_id}` exited without calling write_result — salvaged content logged\n"
+        elif msg_type == "reaction":
+            emoji = msg.get("emoji", "?")
+            reacted_to_text = msg.get("reacted_to_text", "")
+            if reacted_to_text:
+                output += f"**[{source}]** {emoji} reaction from **{user}** (on: '{reacted_to_text}')\n"
+            else:
+                output += f"**[{source}]** {emoji} reaction from **{user}**\n"
         else:
             output += f"**[{source}]** from **{user}**\n"
         output += f"Chat ID: `{chat_id}` | Message ID: `{msg_id}`\n"
