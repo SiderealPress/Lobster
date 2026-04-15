@@ -336,6 +336,49 @@ def test_format_truncates_long_description():
     assert "..." in result
 
 
+def test_format_system_agent_separated_from_user_count():
+    """System agents (chat_id=0) must not inflate the user-facing agent count."""
+    sessions = [
+        {"agent_type": "subagent", "description": "User task",
+         "chat_id": "ADMIN_CHAT_ID_REDACTED", "elapsed_seconds": 300, "id": "u1"},
+        {"agent_type": "subagent", "description": "startup-catchup",
+         "chat_id": "0", "elapsed_seconds": 60, "id": "s1"},
+    ]
+    result = session_store.format_active_sessions_block(sessions)
+    # User count should be 1, not 2
+    assert "[1 agent running" in result
+    # System count annotation
+    assert "1 system" in result
+    # System agent shown with 'system' label, not chat_id
+    assert "(system," in result
+    # User agent shown with real chat_id
+    assert "chat: ADMIN_CHAT_ID_REDACTED" in result
+
+
+def test_format_plural_system_agents():
+    """Two system agents should show '2 systems' (not '2 system')."""
+    sessions = [
+        {"agent_type": "subagent", "description": "startup-catchup",
+         "chat_id": "0", "elapsed_seconds": 60, "id": "s1"},
+        {"agent_type": "subagent", "description": "health-check",
+         "chat_id": 0, "elapsed_seconds": 30, "id": "s2"},
+    ]
+    result = session_store.format_active_sessions_block(sessions)
+    assert "2 systems" in result, f"Expected '2 systems' in output, got: {result!r}"
+    assert "2 system]" not in result, "Singular 'system' must not appear with count 2"
+
+
+def test_format_only_system_agents():
+    """When only system agents are running, header shows 0 user agents + N system."""
+    sessions = [
+        {"agent_type": "subagent", "description": "startup-catchup",
+         "chat_id": 0, "elapsed_seconds": 60, "id": "s1"},
+    ]
+    result = session_store.format_active_sessions_block(sessions)
+    assert "[0 agents running, 1 system]" in result
+    assert "(system," in result
+
+
 # ---------------------------------------------------------------------------
 # Test: tracker.py adapter compatibility
 # ---------------------------------------------------------------------------

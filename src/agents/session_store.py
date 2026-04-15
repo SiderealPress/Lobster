@@ -829,27 +829,47 @@ def _elapsed_minutes_str(elapsed_seconds: int | None) -> str:
 def format_active_sessions_block(sessions: list[dict]) -> str:
     """Format a list of active sessions as a compact context block.
 
+    Distinguishes user-facing agents from system agents (chat_id=0 or None).
+    System agents are background tasks (scheduled jobs, startup-catchup, etc.)
+    that do not correspond to a user conversation in the IDE panel.
+
     Produces output like:
-        [2 agents running]
-        - functional-engineer: "Implement GSD phase plan for BIS-51" (chat: OWNER_CHAT_ID_PLACEHOLDER, 12m ago)
-        - general-purpose: "Archive link for the user" (chat: OWNER_CHAT_ID_PLACEHOLDER, 2m ago)
+        [1 agent running, 1 system]
+        - functional-engineer: "Implement GSD phase plan" (chat: ADMIN_CHAT_ID_REDACTED, 12m ago)
+        - subagent: "startup-catchup" (system, 3m ago)
 
     Returns an empty string if sessions is empty.
     """
     if not sessions:
         return ""
-    count = len(sessions)
-    label = "agent" if count == 1 else "agents"
-    lines = [f"[{count} {label} running]"]
-    for s in sessions:
+
+    # Split into user agents (real chat_id) and system agents (chat_id=0 or None)
+    user_sessions = [s for s in sessions if s.get("chat_id") not in (None, 0, "0", "")]
+    system_sessions = [s for s in sessions if s.get("chat_id") in (None, 0, "0", "")]
+
+    user_count = len(user_sessions)
+    system_count = len(system_sessions)
+
+    user_label = "agent" if user_count == 1 else "agents"
+    header = f"[{user_count} {user_label} running"
+    if system_count > 0:
+        sys_label = "system" if system_count == 1 else "systems"
+        header += f", {system_count} {sys_label}"
+    header += "]"
+
+    lines = [header]
+    for s in user_sessions + system_sessions:
         agent_type = s.get("agent_type") or "agent"
         desc = s.get("description", "")
         # Truncate long descriptions
         if len(desc) > 60:
             desc = desc[:57] + "..."
-        chat_id = s.get("chat_id", "?")
+        chat_id = s.get("chat_id")
         elapsed = _elapsed_minutes_str(s.get("elapsed_seconds"))
-        lines.append(f'- {agent_type}: "{desc}" (chat: {chat_id}, {elapsed})')
+        if chat_id in (None, 0, "0", ""):
+            lines.append(f'- {agent_type}: "{desc}" (system, {elapsed})')
+        else:
+            lines.append(f'- {agent_type}: "{desc}" (chat: {chat_id}, {elapsed})')
     return "\n".join(lines)
 
 
