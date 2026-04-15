@@ -539,7 +539,7 @@ is_boot_grace_period() {
         return 1
     fi
     local booted_at
-    booted_at=$(python3 -c "
+    booted_at=$(uv run python3 -c "
 import json, sys
 try:
     d = json.load(open('$LOBSTER_STATE_FILE'))
@@ -598,7 +598,7 @@ write_boot_timestamp() {
     fi
     local now
     now=$(date -Iseconds)
-    python3 -c "
+    uv run python3 -c "
 import json, sys
 path = '$LOBSTER_STATE_FILE'
 now = '$now'
@@ -1040,7 +1040,7 @@ check_auth_token() {
         claude auth status 2>/dev/null)
 
     local logged_in auth_method
-    logged_in=$(echo "$auth_json" | python3 -c "
+    logged_in=$(echo "$auth_json" | uv run python3 -c "
 import json, sys
 try:
     d = json.load(sys.stdin)
@@ -1048,7 +1048,7 @@ try:
 except:
     print('unknown')
 " 2>/dev/null)
-    auth_method=$(echo "$auth_json" | python3 -c "
+    auth_method=$(echo "$auth_json" | uv run python3 -c "
 import json, sys
 try:
     d = json.load(sys.stdin)
