@@ -189,8 +189,8 @@ def normalize_event(event: dict) -> dict | None:
 
 
 def normalize_system_event(event: dict) -> dict:
-    """Normalize a bridge system event (e.g. session_expired) into an inbox message."""
-    return {
+    """Normalize a bridge system event (e.g. session_expired, qr_ready) into an inbox message."""
+    normalized = {
         "id": f"{int(time.time() * 1000)}_wa_sys",
         "source": "whatsapp",
         "type": "system",
@@ -204,6 +204,10 @@ def normalize_system_event(event: dict) -> dict:
         "mentions_lobster": False,
         "timestamp": datetime.now(tz=timezone.utc).isoformat(),
     }
+    # Forward image_path for qr_ready events so lobster_bot.py can send the PNG to Telegram
+    if event.get("image_path"):
+        normalized["image_path"] = event["image_path"]
+    return normalized
 
 
 def build_wa_command(to: str, text: str) -> dict:
