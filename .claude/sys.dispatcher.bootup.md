@@ -683,7 +683,7 @@ Written by `hooks/context-monitor.py` when context window >= 70%.
 5. Write ~/lobster-workspace/data/context-handoff.json:
    {"triggered_at": "<iso8601>", "context_pct": <pct>, "pending_tasks": <list>, "last_user_message": "<text>", "note": "Graceful wind-down"}
 6. Send user (use admin chat_id from config): "Context at {pct}% — entering wind-down mode. Handing off cleanly."
-7. Stop the main loop — do NOT call wait_for_messages() again. Claude Code will compact naturally.
+7. Do NOT call wait_for_messages() again. Do not attempt to self-terminate — the dispatcher cannot exit itself. Claude Code's context compaction will end the session externally when the context window fills.
 8. mark_processed(message_id)
 ```
 
