@@ -124,8 +124,10 @@ scan_agent_status() {
         local stop_reason
         stop_reason=$(_get_stop_reason "$filepath")
 
-        # Skip completed agents — self-check is only for active work
-        if [ "$stop_reason" = "end_turn" ]; then
+        # Skip completed agents — self-check is only for active work.
+        # Terminal stop reasons: end_turn (normal), stop_sequence (hit stop seq),
+        # max_tokens (hit token limit). All mean the agent is done.
+        if [ "$stop_reason" = "end_turn" ] || [ "$stop_reason" = "stop_sequence" ] || [ "$stop_reason" = "max_tokens" ]; then
             continue
         fi
 
@@ -250,7 +252,7 @@ scan_completed_tasks() {
         local stop_reason
         stop_reason=$(_get_stop_reason "$filepath")
 
-        if [ "$stop_reason" = "end_turn" ]; then
+        if [ "$stop_reason" = "end_turn" ] || [ "$stop_reason" = "stop_sequence" ] || [ "$stop_reason" = "max_tokens" ]; then
             unreported_completed+=("$filepath")
         fi
     done
