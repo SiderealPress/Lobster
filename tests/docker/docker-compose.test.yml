@@ -38,6 +38,10 @@ services:
       context: ../..
       dockerfile: tests/docker/Dockerfile.integration
     command: [".venv/bin/pytest", "tests/unit", "-v", "--tb=short"]
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     volumes:
       - test-results:/home/testuser/lobster/test-results
     networks:
