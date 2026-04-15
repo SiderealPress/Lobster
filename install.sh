@@ -2356,6 +2356,112 @@ else
 fi
 
 #===============================================================================
+# Voice TTS Setup (piper + lessac-medium model)
+#
+# Installs piper TTS for local, offline text-to-speech. Required for the
+# send_voice_note MCP tool. This is a soft requirement — failure emits a
+# warning but does not abort the install (TTS falls back to text replies).
+#===============================================================================
+
+step "Voice TTS Setup (piper)..."
+
+# Detect architecture for piper binary download
+ARCH="$(uname -m)"
+case "$ARCH" in
+    x86_64)   PIPER_ARCH="amd64" ;;
+    aarch64)  PIPER_ARCH="aarch64" ;;
+    armv7l)   PIPER_ARCH="armv7" ;;
+    *)
+        warn "Unsupported architecture for piper: $ARCH — skipping TTS setup"
+        PIPER_ARCH=""
+        ;;
+esac
+
+PIPER_BIN="/usr/local/bin/piper"
+PIPER_MODELS_DIR="${WORKSPACE_DIR}/piper-models"
+PIPER_MODEL_NAME="en_US-lessac-medium"
+PIPER_MODEL_FILE="${PIPER_MODELS_DIR}/${PIPER_MODEL_NAME}.onnx"
+PIPER_MODEL_URL="https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/${PIPER_MODEL_NAME}.onnx"
+PIPER_MODEL_JSON_URL="https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/${PIPER_MODEL_NAME}.onnx.json"
+
+if [ -n "$PIPER_ARCH" ]; then
+    mkdir -p "$PIPER_MODELS_DIR"
+
+    # Install piper binary
+    if [ ! -x "$PIPER_BIN" ] && ! command -v piper &>/dev/null; then
+        info "Downloading piper TTS binary (${PIPER_ARCH})..."
+        PIPER_RELEASE_API="https://api.github.com/repos/rhasspy/piper/releases/latest"
+        PIPER_TARBALL_URL="$(curl -fsSL "$PIPER_RELEASE_API" 2>/dev/null | \
+            python3 -c "import sys,json; \
+            data=json.load(sys.stdin); \
+            urls=[a['browser_download_url'] for a in data.get('assets',[]) \
+                  if 'linux_${PIPER_ARCH}' in a['name'] and a['name'].endswith('.tar.gz')]; \
+            print(urls[0] if urls else '')" 2>/dev/null || true)"
+
+        if [ -n "$PIPER_TARBALL_URL" ]; then
+            PIPER_TMP="$(mktemp -d)"
+            if curl -fsSL -o "${PIPER_TMP}/piper.tar.gz" "$PIPER_TARBALL_URL"; then
+                tar -xzf "${PIPER_TMP}/piper.tar.gz" -C "$PIPER_TMP"
+                PIPER_EXTRACTED="$(find "$PIPER_TMP" -type f -name "piper" | head -1)"
+                if [ -n "$PIPER_EXTRACTED" ]; then
+                    PIPER_EXTRACT_DIR="$(dirname "$PIPER_EXTRACTED")"
+                    sudo cp "$PIPER_EXTRACTED" "$PIPER_BIN"
+                    sudo chmod +x "$PIPER_BIN"
+                    # Copy shared libraries required by piper
+                    for lib in libonnxruntime.so.* libpiper_phonemize.so.* libespeak-ng.so.*; do
+                        lib_path="$(find "$PIPER_EXTRACT_DIR" -name "$lib" -type f | head -1)"
+                        if [ -n "$lib_path" ]; then
+                            sudo cp "$lib_path" /usr/local/lib/
+                        fi
+                    done
+                    sudo ldconfig 2>/dev/null || true
+                    # Install bundled espeak-ng-data (piper phoneme tables)
+                    if [ -d "${PIPER_EXTRACT_DIR}/espeak-ng-data" ]; then
+                        sudo cp -r "${PIPER_EXTRACT_DIR}/espeak-ng-data" /usr/share/ 2>/dev/null || true
+                    fi
+                    success "piper installed to $PIPER_BIN"
+                else
+                    warn "piper binary not found in tarball — TTS will not be available"
+                fi
+            else
+                warn "Failed to download piper tarball from $PIPER_TARBALL_URL — TTS will not be available"
+            fi
+            rm -rf "$PIPER_TMP"
+        else
+            warn "Could not find piper release for linux_${PIPER_ARCH} — TTS will not be available"
+        fi
+    else
+        success "piper already installed"
+    fi
+
+    # Download lessac-medium voice model (~30MB)
+    if [ ! -f "$PIPER_MODEL_FILE" ]; then
+        info "Downloading piper voice model: ${PIPER_MODEL_NAME} (~30MB)..."
+        if curl -fsSL -o "$PIPER_MODEL_FILE" "$PIPER_MODEL_URL" && \
+           curl -fsSL -o "${PIPER_MODEL_FILE}.json" "$PIPER_MODEL_JSON_URL"; then
+            success "piper voice model downloaded: ${PIPER_MODEL_FILE}"
+        else
+            warn "Failed to download piper voice model — TTS will not be available"
+            rm -f "$PIPER_MODEL_FILE" "${PIPER_MODEL_FILE}.json"
+        fi
+    else
+        success "piper voice model already present: ${PIPER_MODEL_FILE}"
+    fi
+
+    # Quick smoke test
+    if command -v piper &>/dev/null || [ -x "$PIPER_BIN" ]; then
+        PIPER_CMD="${PIPER_BIN:-piper}"
+        if "$PIPER_CMD" --help &>/dev/null 2>&1; then
+            success "piper TTS verified"
+        else
+            warn "piper binary present but --help failed — TTS may not work correctly"
+        fi
+    fi
+else
+    info "Skipping piper TTS setup (unsupported architecture: $ARCH)"
+fi
+
+#===============================================================================
 # Authentication Method (OAuth-first)
 #===============================================================================
 
