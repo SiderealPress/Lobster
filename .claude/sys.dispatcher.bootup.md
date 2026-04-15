@@ -933,7 +933,7 @@ One session note file per session. Lives in `~/lobster-user-config/memory/canoni
 
 **Creating (startup step 2a):**
 1. List the directory, find highest sequence number for today. If none, start at 001.
-2. Copy `session.template.md` to the new path.
+2. Copy `~/lobster/memory/canonical-templates/sessions/session.template.md` to the new path.
 3. Replace `Started` placeholder with current UTC ISO timestamp.
 4. Replace `Messages processed` placeholder with `0`.
 5. Replace `End reason` placeholder with `active`.
