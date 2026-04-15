@@ -2442,7 +2442,77 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
         substep "wfm-watchdog.sh cron entry already present — skipping"
     fi
 
-    # Migration 70: Remove stale LOBSTER-SCHEDULED crontab entries (issue #1083 Phase 1).
+    # Migration 70: Install piper TTS and lessac-medium voice model for send_voice_note.
+    # Soft requirement: failure warns but does not abort upgrade.
+    local PIPER_BIN_PATH="/usr/local/bin/piper"
+    local PIPER_MODELS_TARGET="${WORKSPACE_DIR}/piper-models"
+    local PIPER_MODEL_FILE="${PIPER_MODELS_TARGET}/en_US-lessac-medium.onnx"
+    mkdir -p "$PIPER_MODELS_TARGET"
+
+    if [ ! -x "$PIPER_BIN_PATH" ] && ! command -v piper &>/dev/null; then
+        substep "Installing piper TTS binary for send_voice_note..."
+        local _arch
+        _arch="$(uname -m)"
+        local _piper_arch=""
+        case "$_arch" in
+            x86_64)   _piper_arch="amd64" ;;
+            aarch64)  _piper_arch="aarch64" ;;
+            armv7l)   _piper_arch="armv7" ;;
+        esac
+        if [ -n "$_piper_arch" ]; then
+            local _piper_url
+            _piper_url="$(curl -fsSL https://api.github.com/repos/rhasspy/piper/releases/latest 2>/dev/null | \
+                python3 -c "import sys,json; \
+                data=json.load(sys.stdin); \
+                urls=[a['browser_download_url'] for a in data.get('assets',[]) \
+                      if 'linux_${_piper_arch}' in a['name'] and a['name'].endswith('.tar.gz')]; \
+                print(urls[0] if urls else '')" 2>/dev/null || true)"
+            if [ -n "$_piper_url" ]; then
+                local _ptmp
+                _ptmp="$(mktemp -d)"
+                if curl -fsSL -o "${_ptmp}/piper.tar.gz" "$_piper_url" && \
+                   tar -xzf "${_ptmp}/piper.tar.gz" -C "$_ptmp"; then
+                    local _bin
+                    _bin="$(find "$_ptmp" -type f -name "piper" | head -1)"
+                    if [ -n "$_bin" ]; then
+                        local _bin_dir
+                        _bin_dir="$(dirname "$_bin")"
+                        sudo cp "$_bin" "$PIPER_BIN_PATH"
+                        sudo chmod +x "$PIPER_BIN_PATH"
+                        # Copy shared libraries
+                        for _lib in libonnxruntime.so.* libpiper_phonemize.so.* libespeak-ng.so.*; do
+                            _lib_path="$(find "$_bin_dir" -name "$_lib" -type f | head -1)"
+                            [ -n "$_lib_path" ] && sudo cp "$_lib_path" /usr/local/lib/ 2>/dev/null || true
+                        done
+                        sudo ldconfig 2>/dev/null || true
+                        # Install bundled espeak-ng-data
+                        if [ -d "${_bin_dir}/espeak-ng-data" ]; then
+                            sudo cp -r "${_bin_dir}/espeak-ng-data" /usr/share/ 2>/dev/null || true
+                        fi
+                        substep "piper TTS installed to $PIPER_BIN_PATH"
+                        migrated=$((migrated + 1))
+                    fi
+                fi
+                rm -rf "$_ptmp"
+            fi
+        fi
+    fi
+
+    if [ ! -f "$PIPER_MODEL_FILE" ]; then
+        substep "Downloading piper lessac-medium voice model (~30MB)..."
+        local _model_url="https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/en_US-lessac-medium.onnx"
+        local _model_json_url="https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json"
+        if curl -fsSL -o "$PIPER_MODEL_FILE" "$_model_url" && \
+           curl -fsSL -o "${PIPER_MODEL_FILE}.json" "$_model_json_url"; then
+            substep "piper voice model downloaded"
+            migrated=$((migrated + 1))
+        else
+            warn "piper voice model download failed — send_voice_note will fall back to text"
+            rm -f "$PIPER_MODEL_FILE" "${PIPER_MODEL_FILE}.json"
+        fi
+    fi
+
+    # Migration 71: Remove stale LOBSTER-SCHEDULED crontab entries (issue #1083 Phase 1).
     # The cron + jobs.json + dispatch-job.sh scheduling layer has been superseded by
     # systemd timers (PR #1105). Any remaining "# LOBSTER-SCHEDULED" crontab entries
     # are now duplicates of systemd timers or orphaned jobs that no longer fire on
@@ -2456,34 +2526,34 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
     # NOTE: System-level cron entries (LOBSTER-HEALTH, LOBSTER-SELF-CHECK, etc.) are
     # intentionally preserved — only LOBSTER-SCHEDULED user-space job entries are removed.
     if crontab -l 2>/dev/null | grep -q '# LOBSTER-SCHEDULED'; then
-        _m70_safe_to_remove=""
-        _m70_skipped=""
-        while IFS= read -r _m70_line; do
+        _m71_safe_to_remove=""
+        _m71_skipped=""
+        while IFS= read -r _m71_line; do
             # Extract the job name from lines like:
             #   0 */6 * * * /path/dispatch-job.sh lobstertalk-ssh-watcher # LOBSTER-SCHEDULED
-            _m70_job=$(echo "$_m70_line" | grep -oP '(?<=dispatch-job\.sh )\S+' || true)
-            if [ -z "$_m70_job" ]; then
+            _m71_job=$(echo "$_m71_line" | grep -oP '(?<=dispatch-job\.sh )\S+' || true)
+            if [ -z "$_m71_job" ]; then
                 # Not a dispatch-job.sh line — skip it (don't remove)
-                _m70_skipped="${_m70_skipped}${_m70_line}\n"
+                _m71_skipped="${_m71_skipped}${_m71_line}\n"
                 continue
             fi
-            _m70_timer="/etc/systemd/system/lobster-${_m70_job}.timer"
-            if [ -f "$_m70_timer" ] && grep -q '# LOBSTER-MANAGED' "$_m70_timer" 2>/dev/null; then
+            _m71_timer="/etc/systemd/system/lobster-${_m71_job}.timer"
+            if [ -f "$_m71_timer" ] && grep -q '# LOBSTER-MANAGED' "$_m71_timer" 2>/dev/null; then
                 # Systemd timer exists and is lobster-managed — safe to remove cron entry
-                _m70_safe_to_remove="${_m70_safe_to_remove}${_m70_job} "
+                _m71_safe_to_remove="${_m71_safe_to_remove}${_m71_job} "
             else
                 # No systemd timer — leave cron entry in place, warn operator
-                substep "WARNING: LOBSTER-SCHEDULED cron entry for '${_m70_job}' has no systemd timer — leaving in place"
-                substep "  To fix: create a systemd timer for '${_m70_job}' via create_scheduled_job MCP tool, then re-run upgrade.sh"
-                _m70_skipped="${_m70_skipped}${_m70_line}\n"
+                substep "WARNING: LOBSTER-SCHEDULED cron entry for '${_m71_job}' has no systemd timer — leaving in place"
+                substep "  To fix: create a systemd timer for '${_m71_job}' via create_scheduled_job MCP tool, then re-run upgrade.sh"
+                _m71_skipped="${_m71_skipped}${_m71_line}\n"
             fi
         done < <(crontab -l 2>/dev/null | grep '# LOBSTER-SCHEDULED')
 
-        if [ -n "$_m70_safe_to_remove" ]; then
+        if [ -n "$_m71_safe_to_remove" ]; then
             # Build a pattern that matches only the job names we confirmed are timer-backed
-            _m70_pattern=$(echo "$_m70_safe_to_remove" | tr ' ' '\n' | grep -v '^$' | sed 's/.*/dispatch-job\\.sh &/' | paste -sd '|')
-            { crontab -l 2>/dev/null | grep -Ev "$_m70_pattern" || true; } | crontab -
-            substep "Removed LOBSTER-SCHEDULED cron entries for timer-backed jobs: ${_m70_safe_to_remove% }"
+            _m71_pattern=$(echo "$_m71_safe_to_remove" | tr ' ' '\n' | grep -v '^$' | sed 's/.*/dispatch-job\\.sh &/' | paste -sd '|')
+            { crontab -l 2>/dev/null | grep -Ev "$_m71_pattern" || true; } | crontab -
+            substep "Removed LOBSTER-SCHEDULED cron entries for timer-backed jobs: ${_m71_safe_to_remove% }"
             migrated=$((migrated + 1))
         else
             substep "No timer-backed LOBSTER-SCHEDULED cron entries to remove"
