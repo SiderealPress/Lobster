@@ -553,3 +553,181 @@ class TestClearStaleClaim:
 
         # Stale processing file must have been removed
         assert not stale_file.exists()
+
+
+# =============================================================================
+# _create_session_file_stub tests (issue #1086 safety net)
+# =============================================================================
+
+class TestCreateSessionFileStub:
+    """Tests for the hook-level session file stub creation."""
+
+    def _make_template(self, sessions_dir: Path) -> Path:
+        """Write a minimal session template to sessions_dir."""
+        template = sessions_dir / "session.template.md"
+        template.write_text(
+            "# Session YYYYMMDD-NNN\n\n"
+            "**Started:** <ISO timestamp, e.g. 2026-03-25T14:32:00Z>\n"
+            '**Ended:** <ISO timestamp or "active">\n'
+            '**Messages processed:** <count or "unknown">\n'
+            '**End reason:** <"active" | "graceful wind-down" | "context_warning" | "short session" | "crash">\n\n'
+            "## Summary\n(nothing to report this session)\n\n"
+            "## Open Threads\n\n## Open Tasks\n\n## Open Subagents\n\n## Notable Events\n"
+        )
+        return template
+
+    def test_creates_stub_file(self, tmp_path):
+        """A new session file is created when none exists."""
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir()
+        self._make_template(sessions_dir)
+
+        pointer = tmp_path / "lobster-current-session-file"
+
+        mod = _load_on_fresh_start()
+        mod.CURRENT_SESSION_FILE_POINTER = pointer
+
+        # Patch the user-config path to tmp_path
+        import datetime
+        today_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d")
+
+        # Override the hardcoded user-config path by monkeypatching os.path.expanduser
+        original_expanduser = os.path.expanduser
+
+        def fake_expanduser(p):
+            if "lobster-user-config/memory/canonical/sessions" in p:
+                return str(sessions_dir)
+            if "lobster/memory/canonical-templates/sessions" in p:
+                return str(sessions_dir)
+            return original_expanduser(p)
+
+        import builtins
+        original_import = builtins.__import__
+        mod_os = __import__("os")
+        original_mod_expanduser = mod_os.path.expanduser
+        mod_os.path.expanduser = fake_expanduser
+
+        try:
+            mod._create_session_file_stub()
+        finally:
+            mod_os.path.expanduser = original_mod_expanduser
+
+        # Pointer should now exist
+        assert pointer.exists()
+        session_path_str = pointer.read_text().strip()
+        session_path = Path(session_path_str)
+        assert session_path.exists()
+
+        # File name starts with today
+        assert session_path.name.startswith(today_str)
+        assert session_path.name.endswith("-001.md")
+
+        # File content has start time filled in (not a placeholder)
+        content = session_path.read_text()
+        assert "YYYYMMDD-NNN" not in content
+        assert "<ISO timestamp, e.g." not in content
+        assert today_str[:4] in content  # year present
+
+    def test_increments_sequence_number(self, tmp_path):
+        """If a session file already exists for today, creates -002."""
+        import datetime
+        today_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d")
+
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir()
+        self._make_template(sessions_dir)
+
+        # Pre-create -001
+        existing = sessions_dir / f"{today_str}-001.md"
+        existing.write_text("# existing\n")
+
+        pointer = tmp_path / "lobster-current-session-file"
+
+        mod = _load_on_fresh_start()
+        mod.CURRENT_SESSION_FILE_POINTER = pointer
+
+        original_expanduser = os.path.expanduser
+
+        def fake_expanduser(p):
+            if "lobster-user-config/memory/canonical/sessions" in p:
+                return str(sessions_dir)
+            if "lobster/memory/canonical-templates/sessions" in p:
+                return str(sessions_dir)
+            return original_expanduser(p)
+
+        import os as real_os
+        orig = real_os.path.expanduser
+        real_os.path.expanduser = fake_expanduser
+        try:
+            mod._create_session_file_stub()
+        finally:
+            real_os.path.expanduser = orig
+
+        session_path_str = pointer.read_text().strip()
+        session_path = Path(session_path_str)
+        assert session_path.name == f"{today_str}-002.md"
+
+    def test_noop_if_valid_pointer_exists(self, tmp_path):
+        """Does not create a new file if the pointer already points to a valid today file."""
+        import datetime
+        today_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d")
+
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir()
+
+        existing = sessions_dir / f"{today_str}-001.md"
+        existing.write_text("# existing content\n")
+
+        pointer = tmp_path / "lobster-current-session-file"
+        pointer.write_text(str(existing))
+
+        mod = _load_on_fresh_start()
+        mod.CURRENT_SESSION_FILE_POINTER = pointer
+
+        original_expanduser = os.path.expanduser
+
+        def fake_expanduser(p):
+            if "lobster-user-config/memory/canonical/sessions" in p:
+                return str(sessions_dir)
+            if "lobster/memory/canonical-templates/sessions" in p:
+                return str(sessions_dir)
+            return original_expanduser(p)
+
+        import os as real_os
+        orig = real_os.path.expanduser
+        real_os.path.expanduser = fake_expanduser
+        try:
+            mod._create_session_file_stub()
+        finally:
+            real_os.path.expanduser = orig
+
+        # Pointer still points to the original file
+        assert pointer.read_text().strip() == str(existing)
+        # No new files created
+        files = list(sessions_dir.glob(f"{today_str}-*.md"))
+        assert len(files) == 1
+
+    def test_graceful_on_error(self, tmp_path):
+        """Never raises even if sessions dir cannot be created."""
+        pointer = tmp_path / "nonexistent_deep" / "pointer"
+
+        mod = _load_on_fresh_start()
+        mod.CURRENT_SESSION_FILE_POINTER = pointer
+
+        # Point expanduser to a read-only path to trigger an error
+        import os as real_os
+        orig = real_os.path.expanduser
+
+        def fake_expanduser(p):
+            if "lobster-user-config/memory/canonical/sessions" in p:
+                return "/proc/lobster-fake-readonly-path"  # will fail to mkdir
+            if "lobster/memory/canonical-templates/sessions" in p:
+                return "/proc/lobster-fake-readonly-path"
+            return orig(p)
+
+        real_os.path.expanduser = fake_expanduser
+        try:
+            # Must not raise
+            mod._create_session_file_stub()
+        finally:
+            real_os.path.expanduser = orig
