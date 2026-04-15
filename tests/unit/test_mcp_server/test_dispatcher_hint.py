@@ -169,3 +169,86 @@ class TestDispatcherHint:
         # Count hint occurrences -- exactly one (for the voice message)
         hint_count = text.count("dispatcher_hint: HINT: file attached - use subagent")
         assert hint_count == 1
+
+
+class TestSubagentRecoveredDispatcherHint:
+    """Tests for subagent_recovered dispatcher_hint routing based on chat_id (issue #1035).
+
+    When a subagent exits without calling write_result, require-write-result.py
+    writes a subagent_recovered message to the inbox. The dispatcher_hint tells
+    the dispatcher whether to send a user-facing notification (chat_id != 0)
+    or drop silently (chat_id == 0).
+    """
+
+    @pytest.fixture
+    def inbox_dir(self, temp_messages_dir: Path) -> Path:
+        """Get inbox directory."""
+        return temp_messages_dir / "inbox"
+
+    def _check_inbox(self, inbox_dir: Path) -> str:
+        """Helper: run handle_check_inbox and return the result text."""
+        with patch.multiple(
+            "src.mcp.inbox_server",
+            INBOX_DIR=inbox_dir,
+        ):
+            from src.mcp.inbox_server import handle_check_inbox
+            result = asyncio.run(handle_check_inbox({}))
+            return result[0].text
+
+    def _make_recovered_msg(self, chat_id: int) -> dict:
+        """Build a minimal subagent_recovered inbox message."""
+        return {
+            "id": f"1234567890_test_task_recovered",
+            "type": "subagent_recovered",
+            "source": "system",
+            "chat_id": chat_id,
+            "text": (
+                "Agent exited without calling write_result. "
+                "Content recovered from transcript after 5 hook fires.\n\n"
+                "Recovered content:\n\nSome partial work was done."
+            ),
+            "task_id": "test-task-123",
+            "status": "recovered",
+            "sent_reply_to_user": False,
+            "timestamp": "2026-01-01T12:00:00+00:00",
+            "recovered": True,
+        }
+
+    def test_real_chat_id_hint_instructs_dispatcher_to_notify_user(
+        self, inbox_dir: Path
+    ):
+        """subagent_recovered with a real chat_id must instruct dispatcher to notify the user."""
+        msg = self._make_recovered_msg(chat_id=987654321)
+        # Patch _enqueue_recovery_notification to avoid touching owner config
+        with patch.multiple(
+            "src.mcp.inbox_server",
+            INBOX_DIR=inbox_dir,
+            _enqueue_recovery_notification=lambda m: None,
+        ):
+            (inbox_dir / f"{msg['id']}.json").write_text(json.dumps(msg))
+            text = self._check_inbox(inbox_dir)
+
+        # Should contain a hint telling the dispatcher to notify the user
+        assert "SUBAGENT_RECOVERED" in text
+        assert "chat_id=987654321" in text
+        assert "NOT been notified" in text
+        assert "gentle" in text.lower() or "gentle" in text
+
+    def test_zero_chat_id_hint_instructs_dispatcher_to_drop_silently(
+        self, inbox_dir: Path
+    ):
+        """subagent_recovered with chat_id=0 must instruct dispatcher to drop silently."""
+        msg = self._make_recovered_msg(chat_id=0)
+        with patch.multiple(
+            "src.mcp.inbox_server",
+            INBOX_DIR=inbox_dir,
+            _enqueue_recovery_notification=lambda m: None,
+        ):
+            (inbox_dir / f"{msg['id']}.json").write_text(json.dumps(msg))
+            text = self._check_inbox(inbox_dir)
+
+        assert "SUBAGENT_RECOVERED" in text
+        # chat_id=0 path: should say to drop silently
+        assert "drop silently" in text or "chat_id=0" in text
+        # Must NOT instruct dispatcher to notify any user
+        assert "NOT been notified" not in text
