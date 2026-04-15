@@ -2,6 +2,41 @@
 """
 Shared utility: dispatcher vs subagent session discrimination.
 
+Provides two public predicates for hooks to determine whether the current
+Claude Code session is the Lobster dispatcher or a background subagent.
+The two differ in the context they target and the fallback they apply:
+
+## Session-context API — `is_dispatcher(hook_input)`
+
+For use in **SessionStart / SubagentStop / Stop hooks** where CC provides a
+stable `hook_input["session_id"]` (Claude UUID) that matches the value the
+MCP server records when `session_start(agent_type='dispatcher')` is called.
+
+Strategy: MCP Claude UUID state file → hook marker file → default False.
+No process-tree walk (not needed: the state file is always authoritative
+in session-context hooks).
+
+## Hook-process-context API — `is_dispatcher_session(hook_input)`
+
+For use in **PreToolUse hooks** where an `agent_id` field is injected by
+CC for subagent sessions (absent for the dispatcher), and where the
+process-tree can supplement the state-file check when the system is very
+early in boot (before `session_start` has been called).
+
+Strategy: agent_id fast path → MCP state files → process-tree walk →
+env-var-only fallback.
+
+Use `is_dispatcher_session` in PreToolUse hooks that guard dispatcher-only
+behaviour (e.g. post-compact-gate).  Use `is_dispatcher` for SessionStart /
+SubagentStop / Stop hooks.
+
+## Original single-function design
+
+The split was introduced to fix a class of false-positives described in
+issue #1151 (MCP HTTP session ID namespace mismatch).  See that issue and
+PR #1102 for history.  This module is the canonical location for both APIs
+as of the cleanup in issue #1113.
+
 Provides a single `is_dispatcher(hook_input)` predicate that all hooks can
 import to determine whether the current Claude Code session is the Lobster
 dispatcher or a background subagent.
@@ -52,7 +87,11 @@ when session_start(agent_type='dispatcher', claude_session_id=...) is called.
 """
 
 import os
+import subprocess
 from pathlib import Path
+
+# Tmux session name for the process-tree fallback used by is_dispatcher_session().
+_LOBSTER_TMUX_SESSION = os.environ.get("LOBSTER_TMUX_SESSION", "lobster")
 
 # Tertiary: hook marker file (written by write-dispatcher-session-id.py SessionStart hook)
 # Resolved at import time — stable across calls.
@@ -258,3 +297,149 @@ def _read_dispatcher_session_id() -> "str | None":
     if isinstance(result, OSError):
         return None
     return result
+
+
+# ---------------------------------------------------------------------------
+# Hook-process-context API — for PreToolUse hooks (issue #1113)
+# ---------------------------------------------------------------------------
+
+def _get_tmux_pane_pids() -> "set[str]":
+    """Return the set of PIDs for all panes in the lobster tmux session."""
+    try:
+        result = subprocess.run(
+            [
+                "tmux", "-L", _LOBSTER_TMUX_SESSION,
+                "list-panes", "-t", _LOBSTER_TMUX_SESSION,
+                "-F", "#{pane_pid}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=1,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return set(result.stdout.strip().split("\n"))
+    except Exception:  # noqa: BLE001
+        pass
+    return set()
+
+
+def _get_proc_name(pid: int) -> str:
+    """Return the comm (process name) for a given PID, or '' on failure."""
+    try:
+        with open(f"/proc/{pid}/comm") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def _get_ppid(pid: int) -> "int | None":
+    """Return the parent PID of a given PID, or None on failure."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            # Format: pid (comm) state ppid ...
+            content = f.read()
+            # rsplit on ')' to handle commas in comm name
+            after_comm = content.rsplit(")", 1)[-1]
+            ppid = int(after_comm.split()[1])
+            return ppid if ppid > 1 else None
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _is_claude_process(name: str) -> bool:
+    """Return True if the process name looks like a Claude Code binary."""
+    return "claude" in name.lower()
+
+
+def _is_dispatcher_by_process_tree() -> bool:
+    """Return True only when this hook is running inside the dispatcher Claude.
+
+    Process-tree fallback used when the session_role marker file is absent.
+
+    Strategy:
+      1. Must have LOBSTER_MAIN_SESSION=1 (env var set by claude-persistent.sh).
+         This is a necessary condition — if not set, definitely not the dispatcher.
+      2. Walk the process tree upward from this hook process. Count consecutive
+         'claude' ancestors before reaching a tmux pane PID:
+           - 0 or 1 claude ancestor  → dispatcher (hook → dispatcher claude → tmux)
+           - 2+ claude ancestors     → subagent (hook → subagent claude → dispatcher claude → tmux)
+      3. If the tmux check is unavailable (tmux not running, etc.), fall back
+         to the env-var-only check — maintaining prior imprecise behaviour.
+
+    Fails open for non-main-session processes (returns False if uncertain).
+    """
+    # Necessary condition: env var must be set.
+    if os.environ.get("LOBSTER_MAIN_SESSION", "") != "1":
+        return False
+
+    tmux_pids = _get_tmux_pane_pids()
+    if not tmux_pids:
+        # tmux unavailable — fall back to env-var-only (prior behaviour).
+        return True
+
+    claude_ancestor_count = 0
+    pid = os.getpid()
+    for _ in range(15):  # Safety limit — should never need more than ~5 levels
+        ppid = _get_ppid(pid)
+        if ppid is None:
+            break
+        if str(ppid) in tmux_pids:
+            # Reached the tmux pane. Dispatcher has ≤1 claude ancestor above
+            # this hook; subagents have ≥2.
+            return claude_ancestor_count <= 1
+        parent_name = _get_proc_name(ppid)
+        if _is_claude_process(parent_name):
+            claude_ancestor_count += 1
+        pid = ppid
+
+    # Could not confirm via process tree — fall back to env var.
+    return True
+
+
+def is_dispatcher_session(hook_input: dict) -> bool:
+    """Return True when this hook is running inside the dispatcher Claude.
+
+    **For use in PreToolUse hooks** (hook-process context).  Adds a process-tree
+    walk fallback on top of the state-file checks in `is_dispatcher()`, for the
+    early-boot window before `session_start` has been called.
+
+    Detection strategy (in order):
+      0. agent_id fast path: CC injects agent_id only into subagent PreToolUse
+         payloads.  If present → subagent (return False immediately, no I/O).
+         See issue #1152.
+      1. MCP state files + hook marker file via `is_dispatcher()`.  Returns a
+         definitive answer when either file is present and readable.
+      2. Process-tree walk: count consecutive claude ancestors before a tmux pane
+         PID.  ≤1 ancestor → dispatcher; ≥2 → subagent.
+      3. Env-var-only fallback: LOBSTER_MAIN_SESSION=1 without tmux confirmation.
+
+    For SessionStart / SubagentStop / Stop hooks, use the simpler `is_dispatcher()`
+    which omits the process-tree walk.  The process-tree walk is only needed in
+    PreToolUse where the state files may not yet have been written.
+
+    Note: This function was formerly private to `post-compact-gate.py`.  It was
+    promoted to session_role.py in issue #1113 so other hooks can reuse it.
+    """
+    # Fast path: agent_id is present only in subagent PreToolUse payloads.
+    # The dispatcher never has agent_id.  Exit immediately without any file I/O.
+    # NOTE: agent_id is NOT available in SessionStart hooks; this check is only
+    # valid in PreToolUse context.  See issue #1152.
+    if hook_input.get("agent_id"):
+        return False
+
+    # State-file check: covers MCP Claude UUID file + hook marker file.
+    # is_dispatcher() returns False when no file matches — that means "no signal",
+    # but we need to distinguish "definitely subagent" from "no signal".
+    # Probe the primary (Claude UUID) file directly first.
+    session_id = get_session_id(hook_input)
+    primary_result = _check_state_file(_get_mcp_claude_session_file(), session_id)
+    if primary_result is not None:
+        return primary_result
+
+    # Tertiary: hook marker file.
+    tertiary_result = _check_state_file(DISPATCHER_SESSION_FILE, session_id)
+    if tertiary_result is not None:
+        return tertiary_result
+
+    # No state file signal available — fall back to process-tree.
+    return _is_dispatcher_by_process_tree()
