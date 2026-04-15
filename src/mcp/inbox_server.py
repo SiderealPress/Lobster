@@ -5170,42 +5170,12 @@ async def handle_mark_processed(args: dict) -> list[TextContent]:
                 chat_key = str(chat_id)
                 reply_ts = _recent_replies.get(chat_key, 0.0)
                 if reply_ts < msg_epoch:
-                    # No reply was sent for this human message.
-                    # Skip auto-reply for callback (button press) messages —
-                    # the bot already answered the callback query inline.
-                    # Skip auto-reply for reaction messages — reactions are
-                    # signals that the dispatcher processes contextually;
-                    # sending "Noted." is never correct.
-                    if msg_type == "callback":
-                        log.info(f"Skipping auto-reply fallback for callback message {message_id}")
-                    elif msg_type == "reaction":
-                        log.info(f"Skipping auto-reply fallback for reaction message {message_id}")
-                    elif abs(chat_id) <= 1_000_000:
-                        # Fake/test chat_id — Telegram rejects delivery; skip to avoid dead-letter buildup
-                        log.info(f"Skipping auto-reply fallback for fake/test chat_id {chat_id}")
-                    else:
-                        # Auto-send a fallback reply so the user isn't silently ignored
-                        fallback_text = "Noted."
-                        fallback_id = f"{int(time.time() * 1000)}_{source}"
-                        fallback_data = {
-                            "id": fallback_id,
-                            "source": source,
-                            "chat_id": chat_id,
-                            "text": fallback_text,
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                            "_fallback": True,
-                        }
-                        if source == "bisque":
-                            outbox_file = BISQUE_OUTBOX_DIR / f"{fallback_id}.json"
-                        else:
-                            outbox_file = OUTBOX_DIR / f"{fallback_id}.json"
-                        atomic_write_json(outbox_file, fallback_data)
-
-                        sent_file = SENT_DIR / f"{fallback_id}.json"
-                        atomic_write_json(sent_file, fallback_data)
-
-                        _track_reply(chat_id)
-                        log.warning(f"Auto-reply fallback triggered for message {message_id} (chat {chat_id})")
+                    # No reply was sent for this human message — log and proceed silently.
+                    log.warning(
+                        f"mark_processed called without send_reply for user message "
+                        f"{message_id} (type={msg_type}, chat={chat_id}) — "
+                        "dispatcher may have dropped a reply"
+                    )
         except (json.JSONDecodeError, OSError):
             pass  # If we can't read the message, skip the guard
 
