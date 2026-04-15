@@ -9,6 +9,9 @@ equivalent functionality lives in systemd_jobs.py and is exposed via
 the _sj_* aliases in inbox_server.
 """
 
+import shutil
+import subprocess
+
 import pytest
 import sys
 from pathlib import Path
@@ -17,6 +20,16 @@ from pathlib import Path
 _MCP_DIR = Path(__file__).parent.parent.parent.parent / "src" / "mcp"
 if str(_MCP_DIR) not in sys.path:
     sys.path.insert(0, str(_MCP_DIR))
+
+# Skip marker for tests that require systemd-analyze to be available on PATH.
+# In Docker/CI environments without systemd, the validator falls back to
+# permissive mode (treats unknown expressions as valid) — rejection tests
+# are meaningless there.
+_systemd_analyze_available = shutil.which("systemd-analyze") is not None
+requires_systemd_analyze = pytest.mark.skipif(
+    not _systemd_analyze_available,
+    reason="systemd-analyze not available — validator falls back to permissive mode",
+)
 
 
 class TestValidateSchedule:
@@ -54,9 +67,14 @@ class TestValidateSchedule:
         assert err is not None
         assert "empty" in err.lower()
 
+    @requires_systemd_analyze
     def test_invalid_systemd_expression_rejected(self):
         """Strings that are neither valid cron nor valid systemd OnCalendar
-        expressions must be rejected — not silently accepted."""
+        expressions must be rejected — not silently accepted.
+
+        Requires systemd-analyze to be available; skipped in Docker/CI where
+        the validator falls back to permissive mode.
+        """
         from systemd_jobs import validate_schedule
 
         invalid = [

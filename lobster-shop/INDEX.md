@@ -12,6 +12,7 @@ Browse available skills for your Lobster assistant. Install any skill with one c
 | [GCal Links](./gcal-links/) | Google Calendar integration: read/create events via API when authenticated, or fall back to deep links — all via natural language | Behavioral | Available |
 | [Lobster Watcher](./lobster-watcher/) | Real-time observability dashboard — see all running and recent Lobster agent sessions as a live timeline and 3D view | Tool | Available |
 | [Brain Dumps](./brain-dumps/) | Voice note brain dump detection and routing — identifies stream-of-consciousness voice messages and dispatches them to the brain-dumps agent for staged processing | Behavioral | Available |
+| [Librarian](./librarian/) | Maintenance mode — audit, triage, label, and organize issues, code, and workspace without writing big new features or deleting anything | Behavioral | Available |
 | [Hibernation](./hibernation/) | Dispatcher hibernation — idle timeout behavior, state file semantics, and how to break the hibernation loop cleanly | Behavioral | Available |
 | [Obsidian KM](./obsidian-km/) | Sync and access your Obsidian vault via Telegram — create, read, search, and manage notes from anywhere | Tool | In Dev |
 

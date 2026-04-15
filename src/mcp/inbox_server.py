@@ -253,14 +253,73 @@ def _queue_observation(msg_text: str, msg_id: str, source: str | None = None, ts
 # ---------------------------------------------------------------------------
 # Debug observability — LOBSTER_DEBUG=true push notifications
 #
-# _emit_event() is a thin wrapper around the event bus singleton.  It replaces
-# the old _emit_debug_observation / _resolve_debug_config pattern (issue #891).
-# Filtering (debug-mode gate, category suppression) is handled inside the bus
-# listeners — callers just emit a LobsterEvent and the bus decides delivery.
+# _emit_event() is a thin wrapper around the event bus singleton.
+# _emit_debug_observation() is the direct-write function used by handlers
+# that need to be patchable in unit tests (memory_store, memory_search,
+# write_result).  It writes directly to OUTBOX_DIR when alerts are enabled,
+# bypassing the event bus so that tests can mock it cleanly with patch.multiple.
 #
-# Backward-compat: _resolve_debug_config is kept as a no-op so any callsites
-# that haven't been updated yet don't crash.
+# Module-level flags (_DEBUG_MODE, _DEBUG_ALERTS_ENABLED, _DEBUG_RESOLVED,
+# _DEBUG_OWNER_CHAT_ID, _DEBUG_OWNER_SOURCE) are exposed so that tests can
+# inject known state via patch.multiple without touching the event bus or
+# environment variables.
 # ---------------------------------------------------------------------------
+
+# Module-level debug state — patchable by tests via patch.multiple
+_DEBUG_MODE: bool = os.environ.get("LOBSTER_DEBUG", "").lower() in ("true", "1", "yes")
+_DEBUG_ALERTS_ENABLED: bool = _DEBUG_MODE
+_DEBUG_RESOLVED: bool = False  # True once _resolve_debug_config has run
+_DEBUG_OWNER_CHAT_ID: int | str | None = None
+_DEBUG_OWNER_SOURCE: str = "telegram"
+
+
+def _emit_debug_observation(
+    text: str,
+    category: str = "system_context",
+    visibility: str = "mcp-only",
+    emitter: str | None = None,
+) -> None:
+    """Write a debug observation directly to OUTBOX_DIR.
+
+    Gate: returns immediately when _DEBUG_ALERTS_ENABLED is False or
+    _DEBUG_OWNER_CHAT_ID is None.  Handlers call this unconditionally —
+    the gate lives here, not at the call site.
+
+    Writes a JSON file to OUTBOX_DIR so the Telegram bot delivers the
+    alert directly to the owner without touching the dispatcher inbox.
+
+    Never raises — must be safe to call from any handler.
+    """
+    if not _DEBUG_ALERTS_ENABLED:
+        return
+    if _DEBUG_OWNER_CHAT_ID is None:
+        return
+    try:
+        import time as _time_mod
+        ts_ms = int(_time_mod.time() * 1000)
+        safe_emitter = (emitter or "unknown").replace("/", "_")[:40]
+        message_id = f"{ts_ms}_debug_{safe_emitter}"
+        label = f"[debug|{visibility}]"
+        if emitter:
+            label += f" {emitter}"
+        full_text = f"{label}\n{text}"
+        message = {
+            "id": message_id,
+            "type": "debug_observation",
+            "source": _DEBUG_OWNER_SOURCE,
+            "chat_id": _DEBUG_OWNER_CHAT_ID,
+            "text": full_text,
+            "timestamp": __import__("datetime").datetime.now(
+                __import__("datetime").timezone.utc
+            ).isoformat(),
+        }
+        OUTBOX_DIR.mkdir(parents=True, exist_ok=True)
+        outbox_file = OUTBOX_DIR / f"{message_id}.json"
+        tmp_file = outbox_file.with_suffix(".tmp")
+        tmp_file.write_text(__import__("json").dumps(message), encoding="utf-8")
+        tmp_file.rename(outbox_file)
+    except Exception:
+        pass  # debug delivery must never crash production
 
 
 def _emit_event(
@@ -301,6 +360,42 @@ def _emit_event(
 def _resolve_debug_config() -> None:
     """No-op — preserved for call compatibility. Config resolution moved to event bus."""
     pass
+
+
+def _emit_mcp_event(
+    event_type: str,
+    payload: dict,
+    severity: str = "info",
+    chat_id: int | str | None = None,
+) -> None:
+    """
+    Centralized EventBus emission for MCP handler audit-trail events (issue #1459).
+
+    All 5 per-handler emit blocks (telegram.inbound, telegram.outbound,
+    inbox.processed, inbox.failed, job.completed) were identical except for
+    event_type, payload, severity, and chat_id.  This function extracts that
+    boilerplate into one place.
+
+    Callers pass only the semantically meaningful fields; this function handles
+    availability guard, LobsterEvent construction, emit_sync(), and
+    exception suppression so the main handler path is never blocked.
+
+    Adding a new event type = one call to _emit_mcp_event(), no copy-pasted
+    try/except block.
+    """
+    if not _EVENT_BUS_AVAILABLE:
+        return
+    try:
+        event = LobsterEvent(
+            event_type=event_type,
+            severity=severity,
+            source="inbox-server",
+            payload=payload,
+            chat_id=chat_id,
+        )
+        get_event_bus().emit_sync(event)
+    except Exception:
+        pass  # observability must never block the caller
 
 
 # ---------------------------------------------------------------------------
@@ -623,6 +718,7 @@ def _tick_user_message_counter(msg_type: str, msg_source: str) -> None:
                 "type": "session_note_reminder",
                 "source": "system",
                 "chat_id": 0,
+                "task_origin": "internal",
                 "text": (
                     f"session_note_reminder: {_user_message_counter} user messages "
                     f"processed this session. Spawn session-note-appender in the background "
@@ -899,6 +995,117 @@ if not TASKS_FILE.exists():
 _SERVER_START_TIME = datetime.now(timezone.utc)
 
 # ---------------------------------------------------------------------------
+# Inbox Flood Detection (issue #1420)
+# ---------------------------------------------------------------------------
+#
+# When the dispatcher starts (or reconnects after an MCP restart), the inbox
+# can receive a large burst of stale messages — most commonly reconciler ghost
+# entries: subagent_result messages with elapsed_seconds < 30 generated during
+# the startup sweep. Each one requires a full WFM cycle to drain, burning
+# tokens and delaying real user messages.
+#
+# Strategy: scan for known-safe flood patterns before returning messages to
+# the dispatcher, bulk-mark-processed them on the server side, and report the
+# drain count as a prefix so the dispatcher can log the event.
+#
+# Known-safe flood types (auto-drain without dispatcher deliberation):
+#   1. Reconciler ghost sweep — subagent_result with elapsed_seconds < GHOST_ELAPSED_THRESHOLD
+#      AND message arrived within STARTUP_WINDOW_SECONDS of server start.
+#      These are stale completion notices for sessions that were dead before
+#      the server restarted; the dispatcher can never act on them meaningfully.
+#
+# Unknown floods are NOT auto-drained — they pass through normally so the
+# dispatcher can decide. The dispatcher bootup instructions handle alerting.
+#
+# Thresholds (named constants so the spec is traceable in tests):
+GHOST_ELAPSED_THRESHOLD_SECONDS = 30   # subagent_result with <30s elapsed = ghost candidate
+STARTUP_WINDOW_SECONDS = 60            # messages within 60s of server start = startup sweep
+
+
+def _is_reconciler_ghost(msg: dict, server_start: datetime) -> bool:
+    """Return True if this inbox message is a reconciler startup ghost.
+
+    A ghost is a subagent_result that:
+      - Has elapsed_seconds below GHOST_ELAPSED_THRESHOLD_SECONDS (30s), indicating
+        the reconciler detected the session as dead in the same sweep that created
+        the notification — no real work was done.
+      - Was created within STARTUP_WINDOW_SECONDS (60s) of server start, indicating
+        it is part of the startup sweep rather than real in-session activity.
+
+    Pure function — reads msg and compares to server_start. No I/O.
+    """
+    if msg.get("type") != "subagent_result":
+        return False
+
+    # Check elapsed_seconds — ghosts have near-zero elapsed time
+    try:
+        elapsed = int(msg.get("elapsed_seconds", 0) or 0)
+    except (TypeError, ValueError):
+        elapsed = 0
+    if elapsed >= GHOST_ELAPSED_THRESHOLD_SECONDS:
+        return False  # Real work was done — not a ghost
+
+    # Check timestamp — ghosts are generated during the startup sweep
+    ts_str = msg.get("timestamp", "")
+    if not ts_str:
+        return False
+    try:
+        msg_time = datetime.fromisoformat(ts_str)
+        if msg_time.tzinfo is None:
+            msg_time = msg_time.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return False
+
+    age_seconds = (msg_time - server_start).total_seconds()
+    return 0 <= age_seconds <= STARTUP_WINDOW_SECONDS
+
+
+def _drain_reconciler_ghosts() -> int:
+    """Scan inbox for reconciler startup ghosts and move them to processed/.
+
+    Returns the count of messages drained. Side effect: moves matching inbox
+    files from INBOX_DIR to PROCESSED_DIR and logs a single summary line.
+
+    Called once at the start of each wait_for_messages call, so any ghost
+    accumulation from the startup sweep is cleared before the dispatcher sees
+    the inbox. Safe to call repeatedly — non-ghost messages are untouched.
+    """
+    drained = 0
+    errors = 0
+
+    for inbox_file in list(INBOX_DIR.glob("*.json")):
+        try:
+            msg = json.loads(inbox_file.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+
+        if not _is_reconciler_ghost(msg, _SERVER_START_TIME):
+            continue
+
+        # Move to processed/ — bypasses the user-reply guard because these are
+        # internal system messages (chat_id=0 or no user) with nothing to relay.
+        try:
+            dest = PROCESSED_DIR / inbox_file.name
+            inbox_file.rename(dest)
+            drained += 1
+        except OSError as exc:
+            log.warning(
+                "[flood-drain] Failed to move ghost %r to processed/: %s",
+                inbox_file.name, exc,
+            )
+            errors += 1
+
+    if drained > 0:
+        log.info(
+            "[flood-drain] Drained %d reconciler ghost(s) from startup sweep "
+            "(elapsed<%ds within %ds of server start); %d error(s)",
+            drained, GHOST_ELAPSED_THRESHOLD_SECONDS, STARTUP_WINDOW_SECONDS, errors,
+        )
+
+    return drained
+
+
+# ---------------------------------------------------------------------------
 # HTTP session identity — dispatcher session tagging (Options A and B)
 # ---------------------------------------------------------------------------
 #
@@ -1068,6 +1275,7 @@ def _write_session_lost_reminder() -> None:
             "source": "system",
             "type": "compact-reminder",
             "chat_id": 0,
+            "task_origin": "internal",
             "text": (
                 "SESSION LOST — The MCP server restarted and your previous session was "
                 "invalidated. Re-orient now: read sys.dispatcher.bootup.md and resume "
@@ -2004,6 +2212,36 @@ async def list_tools() -> list[Tool]:
                 "required": ["message_id"],
             },
         ),
+        # TTS Voice Note Tool
+        Tool(
+            name="send_voice_note",
+            description=(
+                "Synthesize text to speech and send as a Telegram voice note using local piper TTS. "
+                "Runs entirely locally — no cloud API or API key needed. "
+                "Requires piper binary and lessac-medium voice model (installed by install.sh). "
+                "Falls back to send_reply with text if TTS is unavailable. "
+                "Use for responses that benefit from an audio/voice delivery."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "chat_id": {
+                        "type": "string",
+                        "description": "The chat ID to send the voice note to (Telegram chat ID).",
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "The text to synthesize into a voice note. Keep under ~500 words for best results.",
+                    },
+                    "source": {
+                        "type": "string",
+                        "description": "Message source channel. Defaults to 'telegram'. Voice notes are only sent for Telegram; other sources fall back to text.",
+                        "default": "telegram",
+                    },
+                },
+                "required": ["chat_id", "text"],
+            },
+        ),
         # Headless Browser Fetch Tool
         Tool(
             name="fetch_page",
@@ -2373,6 +2611,17 @@ async def list_tools() -> list[Tool]:
                         ),
                         "enum": ["safe", "unsafe", "unknown"],
                     },
+                    "task_origin": {
+                        "type": "string",
+                        "description": (
+                            "Origin of this task: 'user' | 'scheduled' | 'internal'. "
+                            "'user' — triggered by a real user message. "
+                            "'scheduled' — triggered by a scheduled job or cron. "
+                            "'internal' — system-initiated, no user involved. "
+                            "Defaults to 'user'."
+                        ),
+                        "enum": ["user", "scheduled", "internal"],
+                    },
                 },
                 "required": ["agent_id", "description", "chat_id"],
             },
@@ -2473,6 +2722,21 @@ async def list_tools() -> list[Tool]:
                             "'unknown' — caller did not classify (default; treated as unsafe for recovery)."
                         ),
                         "enum": ["safe", "unsafe", "unknown"],
+                    },
+                    "task_origin": {
+                        "type": "string",
+                        "description": (
+                            "Origin of this task: 'user' | 'scheduled' | 'internal'. "
+                            "'user' — triggered by a real user message (Telegram, Slack, etc.). "
+                            "'scheduled' — triggered by a scheduled job or cron task. "
+                            "'internal' — system-initiated, no user involved (reconciler, "
+                            "health check, session management, etc.). "
+                            "Defaults to 'user' when not specified. "
+                            "Code that previously checked chat_id==0 to detect system tasks "
+                            "should check task_origin=='internal' instead — the two conditions "
+                            "are equivalent but task_origin makes intent explicit."
+                        ),
+                        "enum": ["user", "scheduled", "internal"],
                     },
                     "claude_session_id": {
                         "type": "string",
@@ -3438,6 +3702,8 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
         return await handle_update_rule(arguments)
     elif name == "transcribe_audio":
         return await handle_transcribe_audio(arguments)
+    elif name == "send_voice_note":
+        return await handle_send_voice_note(arguments)
     # Headless Browser Fetch
     elif name == "fetch_page":
         return await handle_fetch_page(arguments)
@@ -3747,8 +4013,25 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
     _recover_stale_processing()
     _recover_retryable_messages()
 
+    # Flood detection: drain reconciler startup ghosts before the dispatcher
+    # sees the inbox. This prevents the 100+ ghost WFM cycle storm that occurs
+    # when the reconciler startup sweep generates stale subagent_result messages
+    # for every dead session it finds (issue #1420).
+    _drained_ghosts = _drain_reconciler_ghosts()
+
     # Build active-sessions prefix once (fast SQLite read, <1ms)
     sessions_prefix = _build_active_sessions_prefix()
+
+    # Prepend flood drain summary to sessions_prefix so the dispatcher is informed
+    # without requiring an extra WFM cycle or manual inbox check.
+    if _drained_ghosts > 0:
+        drain_notice = (
+            f"[flood-drain] Auto-drained {_drained_ghosts} reconciler ghost(s) "
+            f"from startup sweep (elapsed<{GHOST_ELAPSED_THRESHOLD_SECONDS}s, "
+            f"within {STARTUP_WINDOW_SECONDS}s of server start). "
+            "No dispatcher action needed — these were stale completion notices with no real work."
+        )
+        sessions_prefix = (drain_notice + "\n\n" + sessions_prefix) if sessions_prefix else drain_notice
 
     # Start the observer BEFORE the initial glob check to eliminate the TOCTOU
     # race window: a message that arrives between the glob and observer.start()
@@ -4089,6 +4372,77 @@ def _enqueue_recovery_notification(msg: dict) -> None:
         log.error(f"subagent_recovered: failed to enqueue recovery notification: {exc}", exc_info=True)
 
 
+# ---------------------------------------------------------------------------
+# Priority inbox queue — P0-P4 ordering (issue #1079)
+# ---------------------------------------------------------------------------
+
+# P0: dispatcher housekeeping — zero-cost, must run before everything else
+_INBOX_P0_TYPES: frozenset[str] = frozenset()
+_INBOX_P0_SUBTYPES: frozenset[str] = frozenset({"compact-reminder", "self_check"})
+_INBOX_P0_TEXT_PREFIXES: tuple[str, ...] = ("compact-reminder",)
+
+# P1: real-user messages — latency-sensitive
+_INBOX_P1_TYPES: frozenset[str] = frozenset({"text", "voice", "photo", "document"})
+
+# P2: completing in-flight work
+_INBOX_P2_TYPES: frozenset[str] = frozenset({"subagent_result", "subagent_error"})
+
+# P3: error recovery
+_INBOX_P3_TYPES: frozenset[str] = frozenset({"agent_failed"})
+
+# P4: background / cron — everything else
+_INBOX_P4_DEFAULT: int = 4
+
+
+def _inbox_priority(msg: dict) -> int:
+    """Return the priority tier (0=highest, 4=lowest) for an inbox message.
+
+    Priority is derived from message type and subtype at read time — nothing
+    is stored in the message file itself. Unrecognised types default to P4.
+    """
+    msg_type = msg.get("type", "")
+    msg_subtype = msg.get("subtype", "")
+    msg_text = msg.get("text", "")
+
+    # P0: dispatcher housekeeping
+    if msg_subtype in _INBOX_P0_SUBTYPES:
+        return 0
+    if msg_type in _INBOX_P0_TYPES:
+        return 0
+    # compact-reminder messages are sometimes typed as "text" with a specific prefix
+    if any(msg_text.startswith(p) for p in _INBOX_P0_TEXT_PREFIXES):
+        return 0
+
+    # P1: real-user messages
+    if msg_type in _INBOX_P1_TYPES:
+        return 1
+
+    # P2: completing in-flight subagent work
+    if msg_type in _INBOX_P2_TYPES:
+        return 2
+
+    # P3: error recovery
+    if msg_type in _INBOX_P3_TYPES:
+        return 3
+
+    # P4: everything else (scheduled_reminder, system_error, unknown, ...)
+    return _INBOX_P4_DEFAULT
+
+
+def _inbox_sort_key(
+    f_name: str, priority: int, ts_epoch: float | None
+) -> tuple[int, float, str]:
+    """Return (priority, timestamp_epoch, filename) for stable ordering.
+
+    Lower priority tier = earlier in queue.
+    Within a tier, older messages (smaller epoch) come first (FIFO).
+    Filename is the final tiebreaker for determinism.
+    """
+    # Use a large sentinel so unparseable timestamps sink to the back of their tier
+    epoch = ts_epoch if ts_epoch is not None else float("inf")
+    return (priority, epoch, f_name)
+
+
 def _parse_iso_timestamp(ts: str) -> float | None:
     """
     Parse an ISO 8601 UTC timestamp string to a Unix epoch float.
@@ -4167,54 +4521,74 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
 
         log.info(f"check_inbox (since_ts={since_ts_str!r}) returning {len(messages)} message(s)")
     else:
-        for f in sorted(INBOX_DIR.glob("*.json")):
+        # --- Priority-ordered inbox scan (issue #1079) ---
+        # Two-pass approach: read and score all inbox files, then sort by
+        # (priority, timestamp, filename) before processing. Unreadable files
+        # default to P4 so they never cause a crash or a skip.
+        _scored: list[tuple[tuple[int, float, str], object, dict]] = []
+        for f in INBOX_DIR.glob("*.json"):
             try:
                 with open(f) as fp:
                     msg = json.load(fp)
-                    if source_filter and msg.get("source", "").lower() != source_filter:
-                        continue
-                    # /report slash command pre-processor: handle automatically without
-                    # surfacing the raw message to the main dispatcher loop.
-                    msg_text = msg.get("text", "")
-                    if _is_report_command(msg_text):
-                        try:
-                            await _handle_report_slash_command(msg, f)
-                        except Exception as exc:
-                            log.error(f"check_inbox: /report pre-processor error: {exc}", exc_info=True)
-                        continue  # skip — already handled
-                    # subagent_recovered pre-processor: enqueue an owner notification so the
-                    # user is informed about the failed agent. The raw recovery message still
-                    # flows through to the dispatcher (with a dispatcher_hint) so it can call
-                    # mark_processed — but the salvaged dump is never relayed directly.
-                    if msg.get("type") == "subagent_recovered":
-                        try:
-                            _enqueue_recovery_notification(msg)
-                        except Exception as exc:
-                            log.error(f"check_inbox: subagent_recovered pre-processor error: {exc}", exc_info=True)
-                    msg["_filename"] = f.name
-                    messages.append(msg)
-                    # NOTE: Inbound cross-Lobster messages from bot-talk are routed to this
-                    # inbox by bot_talk_mirror.log_inbound_cross_lobster() with source="bot-talk".
-                    # We no longer mirror owner Telegram messages to bot-talk from here —
-                    # only actual cross-Lobster exchanges belong in bot-talk (issue #1350).
-                    # Emit EventBus event for inbound bot-talk messages so TelegramOutboxListener
-                    # can forward them as debug notifications (issue #1425). The message is
-                    # already in the inbox so we only emit to EventBus, not route again.
-                    if msg.get("source") == "bot-talk" and msg.get("direction") == "INBOUND":
-                        try:
-                            from bot_talk_mirror import _spawn_mirror  # type: ignore[import]
-                            _spawn_mirror(
-                                content=msg.get("text", ""),
-                                genre="status-update",
-                                direction="INBOUND",
-                                from_=msg.get("from", msg.get("user_name", "unknown")),
-                                to=msg.get("to", ""),
-                            )
-                        except Exception as _bt_exc:
-                            log.warning(f"bot-talk EventBus inbound emit failed (non-fatal): {_bt_exc}")
-                    if len(messages) >= limit:
-                        break
-            except Exception as e:
+                ts_epoch = _parse_iso_timestamp(msg.get("timestamp", ""))
+                priority = _inbox_priority(msg)
+                key = _inbox_sort_key(f.name, priority, ts_epoch)
+                _scored.append((key, f, msg))
+            except Exception:
+                # Unreadable file: assign worst possible key so it appears last
+                key = (_INBOX_P4_DEFAULT, float("inf"), f.name)
+                _scored.append((key, f, {}))
+
+        for _key, f, msg in sorted(_scored, key=lambda x: x[0]):
+            try:
+                if not msg:
+                    # Re-read files that failed the first pass (e.g. transient lock)
+                    with open(f) as fp:  # type: ignore[arg-type]
+                        msg = json.load(fp)
+                if source_filter and msg.get("source", "").lower() != source_filter:
+                    continue
+                # /report slash command pre-processor: handle automatically without
+                # surfacing the raw message to the main dispatcher loop.
+                msg_text = msg.get("text", "")
+                if _is_report_command(msg_text):
+                    try:
+                        await _handle_report_slash_command(msg, f)  # type: ignore[arg-type]
+                    except Exception as exc:
+                        log.error(f"check_inbox: /report pre-processor error: {exc}", exc_info=True)
+                    continue  # skip — already handled
+                # subagent_recovered pre-processor: enqueue an owner notification so the
+                # user is informed about the failed agent. The raw recovery message still
+                # flows through to the dispatcher (with a dispatcher_hint) so it can call
+                # mark_processed — but the salvaged dump is never relayed directly.
+                if msg.get("type") == "subagent_recovered":
+                    try:
+                        _enqueue_recovery_notification(msg)
+                    except Exception as exc:
+                        log.error(f"check_inbox: subagent_recovered pre-processor error: {exc}", exc_info=True)
+                msg["_filename"] = f.name  # type: ignore[union-attr]
+                messages.append(msg)
+                # NOTE: Inbound cross-Lobster messages from bot-talk are routed to this
+                # inbox by bot_talk_mirror.log_inbound_cross_lobster() with source="bot-talk".
+                # We no longer mirror owner Telegram messages to bot-talk from here —
+                # only actual cross-Lobster exchanges belong in bot-talk (issue #1350).
+                # Emit EventBus event for inbound bot-talk messages so TelegramOutboxListener
+                # can forward them as debug notifications (issue #1425). The message is
+                # already in the inbox so we only emit to EventBus, not route again.
+                if msg.get("source") == "bot-talk" and msg.get("direction") == "INBOUND":
+                    try:
+                        from bot_talk_mirror import _spawn_mirror  # type: ignore[import]
+                        _spawn_mirror(
+                            content=msg.get("text", ""),
+                            genre="status-update",
+                            direction="INBOUND",
+                            from_=msg.get("from", msg.get("user_name", "unknown")),
+                            to=msg.get("to", ""),
+                        )
+                    except Exception as _bt_exc:
+                        log.warning(f"bot-talk EventBus inbound emit failed (non-fatal): {_bt_exc}")
+                if len(messages) >= limit:
+                    break
+            except Exception:
                 continue
 
         if not messages:
@@ -4267,6 +4641,13 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
         elif msg_type == "subagent_recovered":
             task_id = msg.get("task_id", "?")
             output += f"⚠️ **[SUBAGENT RECOVERY]** task `{task_id}` exited without calling write_result — salvaged content logged\n"
+        elif msg_type == "reaction":
+            emoji = msg.get("emoji", "?")
+            reacted_to_text = msg.get("reacted_to_text", "")
+            if reacted_to_text:
+                output += f"**[{source}]** {emoji} reaction from **{user}** (on: '{reacted_to_text}')\n"
+            else:
+                output += f"**[{source}]** {emoji} reaction from **{user}**\n"
         else:
             output += f"**[{source}]** from **{user}**\n"
         output += f"Chat ID: `{chat_id}` | Message ID: `{msg_id}`\n"
@@ -4411,23 +4792,12 @@ async def handle_send_reply(args: dict) -> list[TextContent]:
 
     # Emit telegram.outbound to EventBus for audit trail (issue #1352).
     # Skipped for bot-talk — that source already emits via bot_talk_mirror.
-    # Fire-and-forget: swallows all exceptions so the reply path is never blocked.
-    if source != "bot-talk" and _EVENT_BUS_AVAILABLE:
-        try:
-            event = LobsterEvent(
-                event_type="telegram.outbound",
-                severity="info",
-                source="inbox-server",
-                payload={
-                    "source": source,
-                    "chat_id": chat_id,
-                    "text_len": len(text),
-                },
-                chat_id=chat_id,
-            )
-            get_event_bus().emit_sync(event)
-        except Exception:
-            pass  # never block on observability
+    if source != "bot-talk":
+        _emit_mcp_event(
+            "telegram.outbound",
+            {"source": source, "chat_id": chat_id, "text_len": len(text)},
+            chat_id=chat_id,
+        )
 
     # Mirror outbound bot-talk messages to the EventBus so TelegramOutboxListener
     # can forward them as debug notifications. Fire-and-forget: non-blocking.
@@ -4576,16 +4946,22 @@ async def handle_mark_processed(args: dict) -> list[TextContent]:
     if not found:
         return [TextContent(type="text", text=f"Message not found: {message_id}")]
 
-    # Guard: check that a reply was sent for user-facing messages.
-    # Uses msg type (not source) to classify — source is the routing destination
-    # and cannot distinguish a direct user message from a subagent_result that
-    # happens to carry source="telegram" for delivery.
-    # If no reply was sent, auto-send a fallback reply instead of returning a
-    # soft warning (which the LLM ignores, causing silent message drops).
+    # Guard: log a warning if a user-facing message is being marked processed
+    # without a prior send_reply.  This is a dispatcher bug — the dispatcher
+    # should always reply to user messages before marking them processed.
+    #
+    # We intentionally do NOT auto-send any fallback reply here (issue #1594).
+    # The previous implementation auto-sent "Noted." which is actively harmful:
+    # it masquerades as an intentional response and caused repeated spurious
+    # "Noted." messages to be delivered to the user for self-checks, subagent
+    # completions, and other non-reply-requiring messages.
+    #
+    # Correct fix: log the missing reply so it's visible in monitoring, then
+    # mark processed silently.  A missing reply is a dispatcher bug, not
+    # something to paper over with an auto-reply.
     if not force:
         try:
             msg = json.loads(found.read_text())
-            source = msg.get("source", "")
             msg_type = msg.get("type", "")
             chat_id = msg.get("chat_id", 0)
             msg_ts_raw = msg.get("timestamp", "")
@@ -4603,42 +4979,12 @@ async def handle_mark_processed(args: dict) -> list[TextContent]:
                 chat_key = str(chat_id)
                 reply_ts = _recent_replies.get(chat_key, 0.0)
                 if reply_ts < msg_epoch:
-                    # No reply was sent for this human message.
-                    # Skip auto-reply for callback (button press) messages —
-                    # the bot already answered the callback query inline.
-                    # Skip auto-reply for reaction messages — reactions are
-                    # signals that the dispatcher processes contextually;
-                    # sending "Noted." is never correct.
-                    if msg_type == "callback":
-                        log.info(f"Skipping auto-reply fallback for callback message {message_id}")
-                    elif msg_type == "reaction":
-                        log.info(f"Skipping auto-reply fallback for reaction message {message_id}")
-                    elif abs(chat_id) <= 1_000_000:
-                        # Fake/test chat_id — Telegram rejects delivery; skip to avoid dead-letter buildup
-                        log.info(f"Skipping auto-reply fallback for fake/test chat_id {chat_id}")
-                    else:
-                        # Auto-send a fallback reply so the user isn't silently ignored
-                        fallback_text = "Noted."
-                        fallback_id = f"{int(time.time() * 1000)}_{source}"
-                        fallback_data = {
-                            "id": fallback_id,
-                            "source": source,
-                            "chat_id": chat_id,
-                            "text": fallback_text,
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                            "_fallback": True,
-                        }
-                        if source == "bisque":
-                            outbox_file = BISQUE_OUTBOX_DIR / f"{fallback_id}.json"
-                        else:
-                            outbox_file = OUTBOX_DIR / f"{fallback_id}.json"
-                        atomic_write_json(outbox_file, fallback_data)
-
-                        sent_file = SENT_DIR / f"{fallback_id}.json"
-                        atomic_write_json(sent_file, fallback_data)
-
-                        _track_reply(chat_id)
-                        log.warning(f"Auto-reply fallback triggered for message {message_id} (chat {chat_id})")
+                    # No reply was sent for this human message — log and proceed silently.
+                    log.warning(
+                        f"mark_processed called without send_reply for user message "
+                        f"{message_id} (type={msg_type}, chat={chat_id}) — "
+                        "dispatcher may have dropped a reply"
+                    )
         except (json.JSONDecodeError, OSError):
             pass  # If we can't read the message, skip the guard
 
@@ -4668,18 +5014,7 @@ async def handle_mark_processed(args: dict) -> list[TextContent]:
     )
 
     # Emit inbox.processed to EventBus for audit trail (issue #1352).
-    # Fire-and-forget: swallows all exceptions so the mark_processed path is never blocked.
-    if _EVENT_BUS_AVAILABLE:
-        try:
-            event = LobsterEvent(
-                event_type="inbox.processed",
-                severity="info",
-                source="inbox-server",
-                payload={"message_id": message_id},
-            )
-            get_event_bus().emit_sync(event)
-        except Exception:
-            pass  # never block on observability
+    _emit_mcp_event("inbox.processed", {"message_id": message_id})
 
     log.info(f"Message processed: {message_id}")
     return [TextContent(type="text", text=f"✅ Message marked as processed: {message_id}")]
@@ -4802,23 +5137,11 @@ async def handle_mark_processing(args: dict) -> list[TextContent]:
         pass  # non-fatal; stale recovery falls back to mtime
 
     # Emit telegram.inbound to EventBus for audit trail (issue #1352).
-    # Fire-and-forget: swallows all exceptions so the claim path is never blocked.
-    if _EVENT_BUS_AVAILABLE:
-        try:
-            event = LobsterEvent(
-                event_type="telegram.inbound",
-                severity="info",
-                source="inbox-server",
-                payload={
-                    "message_id": message_id,
-                    "source": msg_source,
-                    "msg_type": msg_type,
-                },
-                chat_id=msg_data.get("chat_id"),
-            )
-            get_event_bus().emit_sync(event)
-        except Exception:
-            pass  # never block on observability
+    _emit_mcp_event(
+        "telegram.inbound",
+        {"message_id": message_id, "source": msg_source, "msg_type": msg_type},
+        chat_id=msg_data.get("chat_id"),
+    )
 
     log.info(f"Message claimed for processing: {message_id}")
     return [TextContent(type="text", text=f"Message claimed: {message_id}{context_block}")]
@@ -4953,18 +5276,12 @@ async def handle_mark_failed(args: dict) -> list[TextContent]:
         # Update claim status to 'failed' (issue #1360)
         _claims_db.update_status(message_id, "failed")
         log.error(f"Message permanently failed after {max_retries} retries: {message_id} - {error}")
-        # Emit inbox.failed to EventBus for audit trail (issue #1352). Fire-and-forget.
-        if _EVENT_BUS_AVAILABLE:
-            try:
-                event = LobsterEvent(
-                    event_type="inbox.failed",
-                    severity="warn",
-                    source="inbox-server",
-                    payload={"message_id": message_id, "error": error, "permanent": True},
-                )
-                get_event_bus().emit_sync(event)
-            except Exception:
-                pass  # never block on observability
+        # Emit inbox.failed to EventBus for audit trail (issue #1352).
+        _emit_mcp_event(
+            "inbox.failed",
+            {"message_id": message_id, "error": error, "permanent": True},
+            severity="warn",
+        )
         return [TextContent(type="text", text=f"Message permanently failed after {max_retries} retries: {message_id}")]
 
     # Schedule retry with exponential backoff: 60s, 120s, 240s
@@ -4979,18 +5296,12 @@ async def handle_mark_failed(args: dict) -> list[TextContent]:
     # Release claim row so the message can be re-claimed on retry (issue #1360)
     _claims_db.release(message_id)
     log.warning(f"Message failed (retry {retry_count}/{max_retries}, next in {backoff}s): {message_id} - {error}")
-    # Emit inbox.failed to EventBus for audit trail (issue #1352). Fire-and-forget.
-    if _EVENT_BUS_AVAILABLE:
-        try:
-            event = LobsterEvent(
-                event_type="inbox.failed",
-                severity="warn",
-                source="inbox-server",
-                payload={"message_id": message_id, "error": error, "permanent": False},
-            )
-            get_event_bus().emit_sync(event)
-        except Exception:
-            pass  # never block on observability
+    # Emit inbox.failed to EventBus for audit trail (issue #1352).
+    _emit_mcp_event(
+        "inbox.failed",
+        {"message_id": message_id, "error": error, "permanent": False},
+        severity="warn",
+    )
     return [TextContent(type="text", text=f"Message queued for retry ({retry_count}/{max_retries}, backoff {backoff}s): {message_id}")]
 
 
@@ -5194,6 +5505,7 @@ def _apply_filters_and_paginate(
 ) -> tuple[list[dict], int]:
     """Apply chat_id / source / search / sender_type filters, sort by timestamp, then paginate.
 
+
     Returns (paginated_slice, total_count_before_pagination).
     All filtering and sorting is performed in-memory. This is the legacy
     fallback path used when messages.db is unavailable.
@@ -5229,6 +5541,9 @@ def _apply_filters_and_paginate(
     return filtered[offset: offset + limit], total
 
 
+_HISTORY_TEXT_DISPLAY_LIMIT = 4000  # Max chars shown per message in get_conversation_history
+
+
 def _format_history_output(
     paginated: list[dict],
     total_count: int,
@@ -5239,6 +5554,8 @@ def _format_history_output(
 
     Each dict must have _direction set to 'received' or 'sent'.
     Fields source, chat_id, timestamp, text, user_name, username are optional.
+    Messages longer than _HISTORY_TEXT_DISPLAY_LIMIT chars are shown with a
+    [truncated] suffix so the caller knows the content was cut.
     """
     showing_end = min(offset + limit, total_count)
     output = f"**Conversation History** (showing {offset + 1}-{showing_end} of {total_count}):\n\n"
@@ -5256,7 +5573,8 @@ def _format_history_output(
         except (ValueError, TypeError):
             ts_display = ts
 
-        truncated = text[:500] + ("..." if len(text) > 500 else "")
+        was_truncated = len(text) > _HISTORY_TEXT_DISPLAY_LIMIT
+        truncated = text[:_HISTORY_TEXT_DISPLAY_LIMIT] + (" [truncated]" if was_truncated else "")
         if msg["_direction"] == "received":
             user = msg.get("user_name", msg.get("username", "Unknown"))
             output += "---\n"
@@ -6300,6 +6618,74 @@ async def handle_transcribe_audio(args: dict) -> list[TextContent]:
 
 
 # =============================================================================
+# TTS Voice Note Handler
+# =============================================================================
+
+async def handle_send_voice_note(args: dict) -> list[TextContent]:
+    """Synthesize text to a voice note and send via Telegram.
+
+    Uses piper TTS locally (no cloud). Falls back to a text send_reply if TTS
+    or the Telegram voice send fails, so the user always gets a response.
+    """
+    chat_id = str(args.get("chat_id", "")).strip()
+    text = str(args.get("text", "")).strip()
+    source = str(args.get("source", "telegram")).strip() or "telegram"
+
+    if not chat_id:
+        return [TextContent(type="text", text="Error: chat_id is required.")]
+    if not text:
+        return [TextContent(type="text", text="Error: text is required.")]
+
+    # Non-Telegram sources: voice notes are not supported; fall back to text.
+    if source != "telegram":
+        log.info(f"send_voice_note: source={source!r} is not telegram — falling back to text")
+        fallback_args = {"chat_id": chat_id, "text": text, "source": source}
+        return await handle_send_reply(fallback_args)
+
+    # Import TTS module lazily so missing piper doesn't crash the server.
+    try:
+        from tts.piper import text_to_voice_file  # type: ignore[import]
+    except ImportError as e:
+        log.warning(f"send_voice_note: tts module not importable ({e}) — falling back to text")
+        return await handle_send_reply({"chat_id": chat_id, "text": text, "source": source})
+
+    # Generate OGG voice file
+    tts_result = text_to_voice_file(text)
+    if not tts_result.ok:
+        log.warning(f"send_voice_note: TTS failed ({tts_result.error}) — falling back to text")
+        tts_result.cleanup()
+        return await handle_send_reply({"chat_id": chat_id, "text": text, "source": source})
+
+    ogg_path = tts_result.ogg_path
+    try:
+        # Write a voice-type outbox message pointing to the OGG file.
+        # The Telegram bot's outbox handler reads this and calls bot.send_voice().
+        import time as _time
+        reply_id = f"{int(_time.time() * 1000)}_telegram_voice"
+        reply_data = {
+            "id": reply_id,
+            "source": "telegram",
+            "chat_id": chat_id,
+            "type": "voice",
+            "voice_path": str(ogg_path),
+            "text": text,  # kept as fallback caption / for sent-messages history
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        outbox_file = OUTBOX_DIR / f"{reply_id}.json"
+        atomic_write_json(outbox_file, reply_data)
+        # Save to sent directory for conversation history
+        sent_file = SENT_DIR / f"{reply_id}.json"
+        atomic_write_json(sent_file, reply_data)
+
+        log.info(f"send_voice_note: queued voice note to {chat_id} ({ogg_path})")
+        return [TextContent(type="text", text=f"Voice note queued for delivery to chat {chat_id}.")]
+    except Exception as e:
+        log.error(f"send_voice_note: failed to queue voice note ({e}) — falling back to text")
+        tts_result.cleanup()
+        return await handle_send_reply({"chat_id": chat_id, "text": text, "source": source})
+
+
+# =============================================================================
 # Headless Browser Fetch Handler
 # =============================================================================
 
@@ -6761,22 +7147,12 @@ async def handle_write_task_output(args: dict) -> list[TextContent]:
     with open(output_file, "w") as f:
         json.dump(output_data, f, indent=2)
 
-    # Emit job.completed to EventBus for audit trail (issue #1352). Fire-and-forget.
-    if _EVENT_BUS_AVAILABLE:
-        try:
-            event = LobsterEvent(
-                event_type="job.completed",
-                severity="warn" if status == "failed" else "info",
-                source="inbox-server",
-                payload={
-                    "job_name": job_name,
-                    "status": status,
-                    "output_len": len(output),
-                },
-            )
-            get_event_bus().emit_sync(event)
-        except Exception:
-            pass  # never block on observability
+    # Emit job.completed to EventBus for audit trail (issue #1352).
+    _emit_mcp_event(
+        "job.completed",
+        {"job_name": job_name, "status": status, "output_len": len(output)},
+        severity="warn" if status == "failed" else "info",
+    )
 
     return [TextContent(type="text", text=f"Output recorded for job '{job_name}'")]
 
@@ -7027,19 +7403,18 @@ async def handle_write_observation(args: dict) -> list[TextContent]:
         except OSError as exc:
             log.warning(f"Failed to write observation to {obs_log}: {exc}")
 
-    # When LOBSTER_DEBUG=true, emit a bus event so the user sees this observation
-    # arrive in real time. The bus listener handles the debug-mode gate and
-    # system_context suppression — callers do not need to check _DEBUG_MODE.
+    # When LOBSTER_DEBUG=true, emit a direct debug observation for non-system_context
+    # categories so the user sees the observation arrive in real time.
+    # system_context is suppressed (internal bookkeeping only).
     # This is additive: the inbox write above always happens regardless of debug mode.
     emitter = f"task:{task_id}" if task_id else "unknown"
-    _emit_event(
-        text,
-        event_type=f"agent.observation.{category}",
-        severity="info" if category == "user_context" else "error" if category == "system_error" else "debug",
-        source="write-observation",
-        emitter=emitter,
-        task_id=task_id,
-    )
+    if _DEBUG_MODE and category != "system_context":
+        _emit_debug_observation(
+            text,
+            category=category,
+            visibility="mcp-only",
+            emitter=emitter,
+        )
 
     log.info(
         f"Subagent observation queued in inbox: category={category} chat_id={chat_id}"
@@ -7071,6 +7446,7 @@ async def handle_register_agent(args: dict) -> list[TextContent]:
     output_file = args.get("output_file") or None
     timeout_minutes = args.get("timeout_minutes") or None
     idempotency = args.get("idempotency") or None
+    task_origin = args.get("task_origin") or None
 
     if not agent_id:
         return [TextContent(type="text", text="Error: agent_id is required")]
@@ -7102,6 +7478,7 @@ async def handle_register_agent(args: dict) -> list[TextContent]:
             output_file=output_file,
             timeout_minutes=timeout_minutes,
             idempotency=idempotency,
+            task_origin=task_origin,
         )
     except Exception as exc:
         log.error(f"register_agent failed: {exc}", exc_info=True)
@@ -7174,6 +7551,7 @@ async def handle_session_start(args: dict) -> list[TextContent]:
     trigger_message_id = args.get("trigger_message_id") or None
     trigger_snippet = args.get("trigger_snippet") or None
     idempotency = args.get("idempotency") or None
+    task_origin = args.get("task_origin") or None
     claude_session_id = (args.get("claude_session_id") or "").strip() or None
 
     if not agent_id:
@@ -7204,6 +7582,7 @@ async def handle_session_start(args: dict) -> list[TextContent]:
             trigger_message_id=trigger_message_id,
             trigger_snippet=trigger_snippet,
             idempotency=idempotency,
+            task_origin=task_origin,
         )
     except Exception as exc:
         log.error(f"session_start failed: {exc}", exc_info=True)
@@ -8898,6 +9277,7 @@ def _build_reconciler_message(
     task_id = session.get("task_id") or agent_id
     input_summary = session.get("input_summary")
     output_file = session.get("output_file")
+    session_task_origin = session.get("task_origin") or "user"
 
     elapsed_raw = session.get("elapsed_seconds")
     try:
@@ -8917,6 +9297,7 @@ def _build_reconciler_message(
             "type": "subagent_result",
             "source": session.get("source", "telegram"),
             "chat_id": session.get("chat_id", ""),
+            "task_origin": session_task_origin,
             "text": (
                 f"Agent completed: {description}\n"
                 f"(reconciler-detected via stop_reason=end_turn, {elapsed_min}m elapsed)"
@@ -8939,6 +9320,7 @@ def _build_reconciler_message(
             "type": "agent_failed",
             "source": "system",
             "chat_id": 0,
+            "task_origin": "internal",
             "text": (
                 f"Agent failed/disappeared: {description}\n"
                 f"(no output file after {elapsed_min}m — marked dead)"

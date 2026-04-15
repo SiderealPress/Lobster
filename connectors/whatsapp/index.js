@@ -1,33 +1,28 @@
 #!/usr/bin/env node
 /**
- * Lobster WhatsApp Bridge (Baileys)
+ * Lobster WhatsApp Bridge
  *
  * Standalone Node.js service that:
- *   1. Authenticates to WhatsApp via QR code (first run only)
- *   2. Persists session as multi-file auth state (JSON files, no browser)
- *   3. Writes incoming message events as JSON files to WA_EVENTS_DIR
- *   4. Watches WA_COMMANDS_DIR for outgoing message commands
- *
- * Uses @whiskeysockets/baileys — direct WebSocket to WhatsApp servers,
- * no Puppeteer/Chromium dependency.
+ *   1. Authenticates to WhatsApp Web via QR code (first run only)
+ *   2. Persists session across restarts via LocalAuth
+ *   3. Emits message events as NDJSON to stdout (consumed by whatsapp_bridge_adapter.py)
+ *   4. Accepts reply commands by watching WA_COMMANDS_DIR for JSON files
  *
  * Stdout: NDJSON message events only (no logs)
  * Stderr: all logs, status messages, QR code display
  *
  * Environment variables (all optional with sensible defaults):
- *   WHATSAPP_SESSION_PATH    Where to store auth state files
- *                            (default: ~/.config/lobster/whatsapp-session)
- *   WHATSAPP_LOBSTER_JID     Lobster's own WhatsApp JID, e.g. 15551234567@c.us
- *                            Auto-detected after first connection; set this after first run.
- *   WA_COMMANDS_DIR          Directory to watch for outgoing message commands
- *                            (default: ~/messages/wa-commands)
- *   WA_EVENTS_DIR            Directory to write message events as individual JSON files
- *                            (default: ~/messages/wa-events)
- *   WA_HEARTBEAT_FILE        File to touch on each received message
- *                            (default: ~/lobster-workspace/logs/whatsapp-heartbeat)
- *   WHATSAPP_ALLOWED_JIDS    Comma-separated whitelist of JIDs allowed to message Lobster.
- *                            If empty, all DMs are accepted.
- *   NODE_ENV                 Set to "production" for production deployments
+ *   WHATSAPP_SESSION_PATH   - Where to store the LocalAuth session (default: ./session)
+ *   WHATSAPP_LOBSTER_JID    - Lobster's own WhatsApp JID, e.g. 15551234567@c.us
+ *                             Auto-detected after first connection; set this after first run.
+ *   WA_COMMANDS_DIR         - Directory to watch for outgoing message commands
+ *                             (default: ~/messages/wa-commands)
+ *   WA_EVENTS_DIR           - Directory to write message events as individual JSON files
+ *                             (alternative to stdout for inter-process resilience)
+ *                             If set, events are also written here in addition to stdout.
+ *   WA_HEARTBEAT_FILE       - File to touch on each received message
+ *                             (default: ~/lobster-workspace/logs/whatsapp-heartbeat)
+ *   NODE_ENV                - Set to "production" for production deployments
  */
 
 'use strict';
@@ -41,98 +36,91 @@ const os = require('os');
 // ---------------------------------------------------------------------------
 
 const HOME = process.env.HOME || os.homedir();
-const XDG_CONFIG = process.env.XDG_CONFIG_HOME || path.join(HOME, '.config');
+const SESSION_PATH = process.env.WHATSAPP_SESSION_PATH || path.join(__dirname, 'session');
+const COMMANDS_DIR = process.env.WA_COMMANDS_DIR || path.join(HOME, 'messages', 'wa-commands');
+const EVENTS_DIR = process.env.WA_EVENTS_DIR || path.join(HOME, 'messages', 'wa-events');
+const HEARTBEAT_FILE = process.env.WA_HEARTBEAT_FILE || path.join(HOME, 'lobster-workspace', 'logs', 'whatsapp-heartbeat');
 
-const SESSION_PATH = process.env.WHATSAPP_SESSION_PATH
-    || path.join(XDG_CONFIG, 'lobster', 'whatsapp-session');
-
-const COMMANDS_DIR = process.env.WA_COMMANDS_DIR
-    || path.join(HOME, 'messages', 'wa-commands');
-
-const EVENTS_DIR = process.env.WA_EVENTS_DIR
-    || path.join(HOME, 'messages', 'wa-events');
-
-const HEARTBEAT_FILE = process.env.WA_HEARTBEAT_FILE
-    || path.join(HOME, 'lobster-workspace', 'logs', 'whatsapp-heartbeat');
-
-// Comma-separated list of allowed sender JIDs (phone@c.us). Empty = allow all.
-const ALLOWED_JIDS = (process.env.WHATSAPP_ALLOWED_JIDS || '')
-    .split(',')
-    .map(s => s.trim())
-    .filter(Boolean);
+// Directory where QR PNG images are written before being sent to Telegram.
+// Defaults to ~/messages/images so the Telegram bot can serve local files.
+const QR_IMAGES_DIR = process.env.WA_QR_IMAGES_DIR || path.join(HOME, 'messages', 'images');
 
 // ---------------------------------------------------------------------------
 // Ensure directories exist
 // ---------------------------------------------------------------------------
 
-const ensureDir = (dir) => fs.mkdirSync(dir, { recursive: true });
+function ensureDir(dir) {
+    try {
+        fs.mkdirSync(dir, { recursive: true });
+    } catch (e) {
+        // Ignore if already exists
+    }
+}
 
-ensureDir(SESSION_PATH);
 ensureDir(COMMANDS_DIR);
 ensureDir(EVENTS_DIR);
 ensureDir(path.dirname(HEARTBEAT_FILE));
+ensureDir(QR_IMAGES_DIR);
 
 // ---------------------------------------------------------------------------
-// Core data functions (pure, exported for testing)
+// Load whatsapp-web.js (may not be installed in test environment)
+// ---------------------------------------------------------------------------
+
+let Client, LocalAuth, QRCode, chokidar;
+
+try {
+    ({ Client, LocalAuth } = require('whatsapp-web.js'));
+    QRCode = require('qrcode');
+    chokidar = require('chokidar');
+} catch (e) {
+    // Allow loading in test environments without full npm install
+    if (process.env.NODE_ENV === 'test') {
+        module.exports = { buildMessageEvent, parseCommandFile, emitEvent };
+        process.exit(0);
+    }
+    console.error('[FATAL] Missing dependencies. Run: npm install');
+    console.error(e.message);
+    process.exit(1);
+}
+
+// ---------------------------------------------------------------------------
+// Core data functions (exported for testing)
 // ---------------------------------------------------------------------------
 
 /**
- * Build a normalized message event from a Baileys message object.
+ * Build a normalized message event from a whatsapp-web.js message object.
  * Returns a plain object suitable for NDJSON serialization.
  *
- * @param {object} msg - Baileys proto.IWebMessageInfo
+ * @param {object} msg - whatsapp-web.js Message object
  * @param {string|null} myJid - Lobster's own JID for mention detection
  * @param {string} chatName - display name of the chat/group
  * @returns {object} normalized event
  */
-const buildMessageEvent = (msg, myJid, chatName) => {
-    const key = msg.key || {};
-    const remoteJid = key.remoteJid || '';
-    const isGroup = remoteJid.endsWith('@g.us');
-    const fromMe = Boolean(key.fromMe);
+function buildMessageEvent(msg, myJid, chatName) {
+    const isGroup = typeof msg.from === 'string' && msg.from.endsWith('@g.us');
 
-    // Extract text body from various message types
-    const msgContent = msg.message || {};
-    const body = msgContent.conversation
-        || (msgContent.extendedTextMessage && msgContent.extendedTextMessage.text)
-        || (msgContent.imageMessage && msgContent.imageMessage.caption)
-        || (msgContent.videoMessage && msgContent.videoMessage.caption)
-        || (msgContent.buttonsResponseMessage && msgContent.buttonsResponseMessage.selectedDisplayText)
-        || (msgContent.listResponseMessage && msgContent.listResponseMessage.title)
-        || '';
+    // Normalize mentionedIds: handle both string and {_serialized: ...} formats
+    const mentionedIds = (msg.mentionedIds || []).map((id) => {
+        if (typeof id === 'string') return id;
+        if (id && typeof id._serialized === 'string') return id._serialized;
+        return String(id);
+    });
 
-    // In groups, participant is the individual sender; remoteJid is the group
-    const author = (isGroup ? key.participant : remoteJid) || remoteJid;
-
-    // Extract mentioned JIDs from extended text message
-    const mentionedIds = (
-        (msgContent.extendedTextMessage && msgContent.extendedTextMessage.contextInfo
-            && msgContent.extendedTextMessage.contextInfo.mentionedJid)
-        || []
-    );
-
-    const mentionsLobster = myJid
-        ? mentionedIds.some(jid => jid === myJid || jid.split('@')[0] === myJid.split('@')[0])
-        : false;
-
-    const msgId = key.id || `baileys_${Date.now()}`;
-    const timestamp = typeof msg.messageTimestamp === 'object'
-        ? Number(msg.messageTimestamp)
-        : (msg.messageTimestamp || Math.floor(Date.now() / 1000));
+    const mentionsLobster = myJid ? mentionedIds.includes(myJid) : false;
 
     return {
-        id: `${remoteJid}_${msgId}`,
-        body,
-        from: remoteJid,
-        fromMe,
+        id: msg.id && msg.id._serialized ? msg.id._serialized : String(msg.id),
+        body: msg.body || '',
+        from: msg.from || '',
+        fromMe: Boolean(msg.fromMe),
         isGroup,
-        author,
-        timestamp,
+        author: msg.author || msg.from || '',
+        timestamp: msg.timestamp || Math.floor(Date.now() / 1000),
         mentionedIds,
         mentions_lobster: mentionsLobster,
         chatName: chatName || '',
     };
-};
+}
 
 /**
  * Parse a command file written by whatsapp_bridge_adapter.py.
@@ -143,48 +131,50 @@ const buildMessageEvent = (msg, myJid, chatName) => {
  * @param {string} filePath - path to the JSON command file
  * @returns {object|null} parsed command or null on error
  */
-const parseCommandFile = (filePath) => {
+function parseCommandFile(filePath) {
     try {
         const raw = fs.readFileSync(filePath, 'utf8');
         const cmd = JSON.parse(raw);
         if (!cmd.action || !cmd.to || !cmd.text) {
-            process.stderr.write(`[CMD] Invalid command file (missing action/to/text): ${filePath}\n`);
+            console.error('[CMD] Invalid command file (missing action/to/text):', filePath);
             return null;
         }
         return cmd;
     } catch (e) {
-        process.stderr.write(`[CMD] Failed to parse command file: ${filePath} — ${e.message}\n`);
+        console.error('[CMD] Failed to parse command file:', filePath, e.message);
         return null;
     }
-};
+}
 
 /**
- * Emit a message event to stdout as NDJSON and write to EVENTS_DIR.
+ * Emit a message event to stdout as NDJSON.
+ * If EVENTS_DIR is set, also write to an individual JSON file there.
  *
  * @param {object} event - normalized message event
  */
-const emitEvent = (event) => {
-    // Stdout: NDJSON (no logs ever go here)
+function emitEvent(event) {
+    // Stdout: NDJSON (only output on stdout — no logs ever go here)
     process.stdout.write(JSON.stringify(event) + '\n');
 
-    // Also write to events directory for file-based IPC
-    const safeId = event.id.replace(/[^a-zA-Z0-9_-]/g, '_');
-    const filename = `${safeId}_${Date.now()}.json`;
-    const filePath = path.join(EVENTS_DIR, filename);
-    try {
-        fs.writeFileSync(filePath, JSON.stringify(event));
-    } catch (e) {
-        process.stderr.write(`[EVENT] Failed to write event file: ${e.message}\n`);
+    // Optional: also write to events directory for file-based IPC
+    if (EVENTS_DIR) {
+        const filename = `${event.id.replace(/[^a-zA-Z0-9_-]/g, '_')}_${Date.now()}.json`;
+        const filePath = path.join(EVENTS_DIR, filename);
+        try {
+            fs.writeFileSync(filePath, JSON.stringify(event));
+        } catch (e) {
+            console.error('[EVENT] Failed to write event file:', e.message);
+        }
     }
-};
+}
 
 /**
- * Write a system event (e.g. session expired) to the events directory and stdout.
+ * Write a system event (e.g. session expired) to the events directory or stdout.
  *
  * @param {string} subtype - e.g. 'session_expired', 'connected', 'disconnected'
  * @param {string} message - human-readable message text
  */
-const emitSystemEvent = (subtype, message) => {
+function emitSystemEvent(subtype, message) {
     const event = {
         id: `sys_${Date.now()}`,
         type: 'system',
@@ -200,39 +190,79 @@ const emitSystemEvent = (subtype, message) => {
         chatName: '',
     };
     emitEvent(event);
-};
+}
 
 /**
  * Touch the heartbeat file to signal that the bridge is alive and processing.
  */
-const touchHeartbeat = () => {
+function touchHeartbeat() {
     try {
-        fs.writeFileSync(HEARTBEAT_FILE, new Date().toISOString());
+        const now = new Date().toISOString();
+        fs.writeFileSync(HEARTBEAT_FILE, now);
     } catch (e) {
         // Non-fatal
     }
-};
+}
 
 /**
- * Determine whether a message should be processed.
- * Drops: fromMe, non-text (no body), non-whitelisted senders.
+ * Render a QR code string to a PNG file and emit a qr_ready system event.
  *
- * @param {object} event - normalized event
- * @returns {boolean}
+ * The qr_ready event is picked up by whatsapp_bridge_adapter.py, which writes
+ * a Telegram outbox message containing the PNG so Drew can scan it on his phone
+ * without any terminal or SSH access.
+ *
+ * Falls back to a text-only qr_ready event (no image_path) if PNG generation fails,
+ * so the adapter can still deliver a helpful error message.
+ *
+ * @param {string} qrData - Raw QR code string from whatsapp-web.js
+ * @returns {Promise<void>}
  */
-const isAllowed = (event) => {
-    if (event.fromMe) return false;
-    if (!event.body) return false;
-    if (ALLOWED_JIDS.length > 0 && !ALLOWED_JIDS.includes(event.author)) return false;
-    return true;
-};
+async function sendQrToTelegram(qrData) {
+    const timestamp = Date.now();
+    const imagePath = path.join(QR_IMAGES_DIR, `whatsapp-qr-${timestamp}.png`);
+
+    try {
+        await QRCode.toFile(imagePath, qrData, {
+            type: 'png',
+            width: 512,
+            margin: 2,
+            color: { dark: '#000000', light: '#ffffff' },
+        });
+        console.error(`[QR] PNG saved: ${imagePath}`);
+    } catch (e) {
+        console.error(`[QR] Failed to generate PNG: ${e.message}`);
+        // Emit a qr_ready event without an image so the adapter sends a text fallback
+        emitSystemEvent('qr_ready', 'QR code ready — PNG generation failed. Check logs.');
+        return;
+    }
+
+    // Emit qr_ready so whatsapp_bridge_adapter.py can relay the PNG to Telegram
+    const event = {
+        id: `sys_${timestamp}`,
+        type: 'system',
+        subtype: 'qr_ready',
+        body: '[WhatsApp bridge] QR code ready',
+        image_path: imagePath,
+        from: 'system',
+        fromMe: false,
+        isGroup: false,
+        author: 'system',
+        timestamp: Math.floor(timestamp / 1000),
+        mentionedIds: [],
+        mentions_lobster: false,
+        chatName: '',
+    };
+    emitEvent(event);
+    console.error('[QR] qr_ready event emitted — Telegram delivery pending via adapter');
+}
 
 // ---------------------------------------------------------------------------
-// Export for testing
+// Export for testing (mock-test.js)
 // ---------------------------------------------------------------------------
 
-module.exports = { buildMessageEvent, parseCommandFile, emitEvent, emitSystemEvent, isAllowed };
+module.exports = { buildMessageEvent, parseCommandFile, emitEvent, emitSystemEvent, sendQrToTelegram };
 
+// If this file is run directly (not required), start the bridge
 if (require.main === module) {
     startBridge();
 }
@@ -241,38 +271,173 @@ if (require.main === module) {
 // Bridge startup
 // ---------------------------------------------------------------------------
 
-async function startBridge() {
-    // Baileys and chokidar must be available at runtime
-    let makeWASocket, DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion, chokidar, pino, qrcode;
+function startBridge() {
+    console.error('[INIT] Starting Lobster WhatsApp Bridge');
+    console.error('[INIT] Session path:', SESSION_PATH);
+    console.error('[INIT] Commands dir:', COMMANDS_DIR);
+    console.error('[INIT] Heartbeat file:', HEARTBEAT_FILE);
 
-    try {
-        ({ makeWASocket, DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion }
-            = require('@whiskeysockets/baileys'));
-        chokidar = require('chokidar');
-        pino = require('pino');
-        qrcode = require('qrcode-terminal');
-    } catch (e) {
-        process.stderr.write('[FATAL] Missing dependencies. Run: npm install\n');
-        process.stderr.write(e.message + '\n');
-        process.exit(1);
-    }
+    // ---------------------------------------------------------------------------
+    // State
+    // ---------------------------------------------------------------------------
 
-    process.stderr.write('[INIT] Starting Lobster WhatsApp Bridge (Baileys)\n');
-    process.stderr.write(`[INIT] Session path: ${SESSION_PATH}\n`);
-    process.stderr.write(`[INIT] Commands dir: ${COMMANDS_DIR}\n`);
-    process.stderr.write(`[INIT] Events dir:   ${EVENTS_DIR}\n`);
-
-    // Suppress Baileys verbose internal logs — route only to stderr
-    const logger = pino({ level: 'warn' }, process.stderr);
-
+    // Lobster's own WhatsApp JID — set from env or auto-detected after ready
     let myJid = process.env.WHATSAPP_LOBSTER_JID || null;
-    let sock = null;
-    let reconnectTimer = null;
-    let reconnectAttempts = 0;
-    const MAX_RECONNECT_ATTEMPTS = 10;
-    let shuttingDown = false;
 
-    // Command file watcher (chokidar) — set up once, persists across reconnects
+    // Reconnect state
+    let isReconnecting = false;
+    const MAX_RECONNECT_ATTEMPTS = 5;
+    let reconnectAttempts = 0;
+
+    // ---------------------------------------------------------------------------
+    // Initialize client
+    // ---------------------------------------------------------------------------
+
+    const client = new Client({
+        authStrategy: new LocalAuth({ dataPath: SESSION_PATH }),
+        puppeteer: {
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-accelerated-2d-canvas',
+                '--no-first-run',
+                '--no-zygote',
+                '--single-process',
+                '--disable-gpu',
+            ],
+            headless: true,
+        },
+    });
+
+    // ---------------------------------------------------------------------------
+    // QR code — first-run authentication
+    //
+    // Renders the QR as a PNG and delivers it to Drew's Telegram chat via the
+    // whatsapp_bridge_adapter.py qr_ready event handler — no terminal needed.
+    // ---------------------------------------------------------------------------
+
+    client.on('qr', async (qr) => {
+        console.error('[QR] New QR code received — rendering as PNG and sending to Telegram...');
+        await sendQrToTelegram(qr);
+    });
+
+    // ---------------------------------------------------------------------------
+    // Ready — connected and authenticated
+    // ---------------------------------------------------------------------------
+
+    client.on('ready', () => {
+        // Auto-detect our own JID if not set via env
+        if (!myJid && client.info && client.info.wid) {
+            myJid = client.info.wid._serialized;
+            console.error('[READY] Detected Lobster JID:', myJid);
+            console.error('[READY] Set WHATSAPP_LOBSTER_JID=' + myJid + ' in your config');
+        } else if (myJid) {
+            console.error('[READY] Using JID from env:', myJid);
+        }
+
+        // Reset reconnect state
+        reconnectAttempts = 0;
+        isReconnecting = false;
+
+        // Touch heartbeat
+        touchHeartbeat();
+
+        console.error('[READY] WhatsApp bridge connected and listening');
+    });
+
+    // ---------------------------------------------------------------------------
+    // Incoming messages
+    // ---------------------------------------------------------------------------
+
+    client.on('message', async (msg) => {
+        // Skip messages sent by us
+        if (msg.fromMe) return;
+
+        const isGroup = typeof msg.from === 'string' && msg.from.endsWith('@g.us');
+
+        // Normalize mentionedIds early for filtering
+        const mentionedIds = (msg.mentionedIds || []).map((id) => {
+            if (typeof id === 'string') return id;
+            if (id && typeof id._serialized === 'string') return id._serialized;
+            return String(id);
+        });
+        const mentionsLobster = myJid ? mentionedIds.includes(myJid) : false;
+
+        // Filter: group messages only pass if they mention Lobster
+        if (isGroup && !mentionsLobster) return;
+
+        // Resolve group/chat name
+        let chatName = '';
+        try {
+            const chat = await msg.getChat();
+            chatName = (chat && chat.name) ? chat.name : '';
+        } catch (e) {
+            // Non-fatal
+        }
+
+        const event = buildMessageEvent(msg, myJid, chatName);
+        emitEvent(event);
+        touchHeartbeat();
+    });
+
+    // ---------------------------------------------------------------------------
+    // Disconnect / reconnect handling
+    // ---------------------------------------------------------------------------
+
+    client.on('disconnected', async (reason) => {
+        console.error('[DISCONNECTED]', reason);
+
+        if (reason === 'LOGOUT') {
+            // Session invalidated by WhatsApp — need fresh QR scan
+            console.error('[SESSION] Session expired or logged out by WhatsApp');
+
+            // Delete session directory so next startup prompts QR
+            try {
+                fs.rmSync(SESSION_PATH, { recursive: true, force: true });
+                console.error('[SESSION] Deleted expired session at', SESSION_PATH);
+            } catch (e) {
+                console.error('[SESSION] Could not delete session:', e.message);
+            }
+
+            // Notify Drew via the event bus
+            emitSystemEvent(
+                'session_expired',
+                'Session expired — QR scan required. Restart the service: sudo systemctl restart lobster-whatsapp-bridge'
+            );
+
+            // Exit cleanly — systemd will restart and trigger QR mode
+            process.exit(1);
+        } else {
+            // Transient disconnect — attempt reconnect with exponential backoff
+            if (!isReconnecting && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+                isReconnecting = true;
+                reconnectAttempts++;
+                const delay = Math.min(5000 * reconnectAttempts, 60000);
+                console.error(
+                    `[RECONNECT] Attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS} in ${delay}ms (reason: ${reason})`
+                );
+                setTimeout(async () => {
+                    try {
+                        await client.initialize();
+                        isReconnecting = false;
+                        console.error('[RECONNECT] Re-initialization complete');
+                    } catch (e) {
+                        console.error('[RECONNECT] Failed:', e.message);
+                        isReconnecting = false;
+                    }
+                }, delay);
+            } else if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+                console.error('[RECONNECT] Max attempts reached, exiting for systemd restart');
+                process.exit(1);
+            }
+        }
+    });
+
+    // ---------------------------------------------------------------------------
+    // Command file watcher — outgoing messages
+    // ---------------------------------------------------------------------------
+
     const watcher = chokidar.watch(path.join(COMMANDS_DIR, '*.json'), {
         persistent: true,
         ignoreInitial: false,
@@ -282,198 +447,52 @@ async function startBridge() {
     watcher.on('add', async (filePath) => {
         const cmd = parseCommandFile(filePath);
         if (!cmd) {
-            try { fs.unlinkSync(filePath); } catch (e) {}
-            return;
-        }
-
-        if (!sock) {
-            process.stderr.write(`[SEND] Not connected — dropping command to ${cmd.to}\n`);
+            // Remove invalid files to avoid retry loops
             try { fs.unlinkSync(filePath); } catch (e) {}
             return;
         }
 
         try {
-            // Ensure JID is properly formatted
-            const jid = cmd.to.includes('@') ? cmd.to : `${cmd.to}@c.us`;
-            await sock.sendMessage(jid, { text: cmd.text });
-            process.stderr.write(`[SEND] Sent reply to ${jid} — ${cmd.text.substring(0, 60)}\n`);
+            const chat = await client.getChatById(cmd.to);
+            await chat.sendMessage(cmd.text);
+            console.error('[SEND] Sent reply to', cmd.to, '-', cmd.text.substring(0, 50));
         } catch (e) {
-            process.stderr.write(`[SEND] Failed to send to ${cmd.to}: ${e.message}\n`);
+            console.error('[SEND] Failed to send to', cmd.to, ':', e.message);
         }
 
+        // Remove command file after processing (success or failure)
         try { fs.unlinkSync(filePath); } catch (e) {}
     });
 
     watcher.on('error', (err) => {
-        process.stderr.write(`[WATCH] Watcher error: ${err.message}\n`);
+        console.error('[WATCH] Watcher error:', err.message);
     });
 
     // ---------------------------------------------------------------------------
     // Graceful shutdown
     // ---------------------------------------------------------------------------
 
-    const shutdown = async (signal) => {
-        if (shuttingDown) return;
-        shuttingDown = true;
-        process.stderr.write(`[SHUTDOWN] Received ${signal} — shutting down gracefully\n`);
-        if (reconnectTimer) clearTimeout(reconnectTimer);
-        try { watcher.close(); } catch (e) {}
-        try { if (sock) await sock.logout(); } catch (e) {}
+    async function shutdown(signal) {
+        console.error('[SHUTDOWN] Received', signal, '— shutting down gracefully');
+        try {
+            watcher.close();
+            await client.destroy();
+        } catch (e) {
+            // Ignore cleanup errors
+        }
         process.exit(0);
-    };
+    }
 
     process.on('SIGINT', () => shutdown('SIGINT'));
     process.on('SIGTERM', () => shutdown('SIGTERM'));
 
     // ---------------------------------------------------------------------------
-    // Connect function — called on startup and each reconnect
+    // Start
     // ---------------------------------------------------------------------------
 
-    const connect = async () => {
-        const { state, saveCreds } = await useMultiFileAuthState(SESSION_PATH);
-        const { version } = await fetchLatestBaileysVersion();
-        process.stderr.write(`[INIT] Using WA version: ${version.join('.')}\n`);
-
-        sock = makeWASocket({
-            version,
-            auth: state,
-            logger,
-            // Suppress browser console spam
-            browser: ['Lobster', 'Chrome', '131.0.0'],
-            // Prefer latest message format
-            getMessage: async () => undefined,
-        });
-
-        // Persist auth state changes
-        sock.ev.on('creds.update', saveCreds);
-
-        // ---------------------------------------------------------------------------
-        // Connection state changes
-        // ---------------------------------------------------------------------------
-
-        sock.ev.on('connection.update', async (update) => {
-            const { connection, lastDisconnect, qr } = update;
-
-            if (qr) {
-                // Render QR code in the terminal
-                qrcode.generate(qr, { small: true }, (code) => {
-                    process.stderr.write(code + '\n');
-                });
-                process.stderr.write('[QR] Scan the QR code above in WhatsApp:\n');
-                process.stderr.write('[QR]   Settings > Linked Devices > Link a Device\n');
-                process.stderr.write('[QR] After scanning, the bridge will print [READY] and your JID.\n');
-                process.stderr.write('[QR] Add WHATSAPP_LOBSTER_JID=<jid> to your config file.\n');
-            }
-
-            if (connection === 'open') {
-                reconnectAttempts = 0;
-
-                // Auto-detect own JID
-                if (sock.user) {
-                    const detectedJid = sock.user.id.replace(/:\d+@/, '@');
-                    if (!myJid) {
-                        myJid = detectedJid;
-                        process.stderr.write(`[READY] Detected Lobster JID: ${myJid}\n`);
-                        process.stderr.write(`[READY] Add this to your config: WHATSAPP_LOBSTER_JID=${myJid}\n`);
-                    } else {
-                        process.stderr.write(`[READY] Using JID from env: ${myJid}\n`);
-                    }
-                }
-
-                touchHeartbeat();
-                process.stderr.write('[READY] WhatsApp bridge connected and listening\n');
-            }
-
-            if (connection === 'close') {
-                const statusCode = lastDisconnect && lastDisconnect.error
-                    ? lastDisconnect.error.output && lastDisconnect.error.output.statusCode
-                    : null;
-
-                const isLogout = statusCode === DisconnectReason.loggedOut;
-
-                process.stderr.write(`[DISCONNECTED] Reason: ${statusCode || 'unknown'} logout=${isLogout}\n`);
-
-                if (isLogout) {
-                    // Session invalidated — delete and emit session_expired so Lobster notifies Drew
-                    process.stderr.write('[SESSION] Logged out by WhatsApp — deleting session\n');
-                    try {
-                        fs.rmSync(SESSION_PATH, { recursive: true, force: true });
-                        process.stderr.write(`[SESSION] Deleted session at ${SESSION_PATH}\n`);
-                    } catch (e) {
-                        process.stderr.write(`[SESSION] Could not delete session: ${e.message}\n`);
-                    }
-                    emitSystemEvent(
-                        'session_expired',
-                        'WhatsApp session logged out — QR re-scan required. Run: lobster-whatsapp-qr'
-                    );
-                    process.exit(1);
-                }
-
-                if (!shuttingDown && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-                    reconnectAttempts++;
-                    const delay = Math.min(5000 * reconnectAttempts, 60000);
-                    process.stderr.write(
-                        `[RECONNECT] Attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS} in ${delay}ms\n`
-                    );
-                    reconnectTimer = setTimeout(connect, delay);
-                } else if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-                    process.stderr.write('[RECONNECT] Max attempts reached — exiting for systemd restart\n');
-                    process.exit(1);
-                }
-            }
-        });
-
-        // ---------------------------------------------------------------------------
-        // Incoming messages
-        // ---------------------------------------------------------------------------
-
-        sock.ev.on('messages.upsert', async ({ messages, type }) => {
-            // 'notify' = new incoming messages; 'append' = history sync — skip appends
-            if (type !== 'notify') return;
-
-            for (const msg of messages) {
-                // Resolve chat name for groups
-                let chatName = '';
-                const remoteJid = msg.key && msg.key.remoteJid;
-                const isGroup = remoteJid && remoteJid.endsWith('@g.us');
-
-                if (isGroup) {
-                    try {
-                        const meta = await sock.groupMetadata(remoteJid);
-                        chatName = (meta && meta.subject) ? meta.subject : '';
-                    } catch (e) {
-                        // Non-fatal — group name is cosmetic
-                    }
-                }
-
-                const event = buildMessageEvent(msg, myJid, chatName);
-
-                if (!isAllowed(event)) {
-                    if (event.fromMe) {
-                        // Silently skip own messages
-                    } else {
-                        process.stderr.write(
-                            `[FILTER] Dropping message from ${event.author} (body empty or not whitelisted)\n`
-                        );
-                    }
-                    continue;
-                }
-
-                // Group filter: only route if Lobster is @mentioned
-                if (isGroup && !event.mentions_lobster) {
-                    process.stderr.write(`[FILTER] Group msg from ${event.author} — no @mention, skipping\n`);
-                    continue;
-                }
-
-                emitEvent(event);
-                touchHeartbeat();
-                process.stderr.write(
-                    `[MSG] from=${event.author} group=${event.isGroup} text="${event.body.substring(0, 60)}"\n`
-                );
-            }
-        });
-    };
-
-    // Initial connection
-    await connect();
+    console.error('[INIT] Initializing WhatsApp client...');
+    client.initialize().catch((e) => {
+        console.error('[FATAL] Failed to initialize client:', e.message);
+        process.exit(1);
+    });
 }

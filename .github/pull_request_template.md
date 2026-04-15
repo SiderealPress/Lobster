@@ -3,6 +3,12 @@
 -
 -
 
+## Alternatives considered
+
+<!-- Required if this PR replaces a previous approach or changes an existing mechanism. -->
+<!-- For each rejected alternative: what was tried, why it was rejected, and any confirming test/error. -->
+<!-- For purely additive PRs (no existing approach replaced): "N/A — purely additive." -->
+
 ## Tests run
 
 Fill this in before opening the PR. Each checked item must show the exact command and a brief outcome. Each unchecked item must explain why it was skipped or blocked. No abstract category labels — just commands and results.
