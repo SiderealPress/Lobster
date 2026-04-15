@@ -2562,6 +2562,26 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
         substep "No LOBSTER-SCHEDULED crontab entries found — skipping"
     fi
 
+    # Migration 72: Enable lobster-claude and lobster-router for autostart on existing installs.
+    # Non-interactive installs (NON_INTERACTIVE=true) prior to this fix skipped the
+    # `systemctl enable` call entirely, leaving the services installed but not enabled.
+    # After any reboot the services would not start automatically, causing ~4 min downtime
+    # until the health check detected and restarted the missing session. Fix: enable
+    # unconditionally if the service unit is present but not enabled. (issue #1603)
+    for _m72_svc in lobster-router lobster-claude; do
+        if systemctl list-unit-files --quiet "${_m72_svc}.service" 2>/dev/null | grep -q "^${_m72_svc}"; then
+            if ! systemctl is-enabled --quiet "${_m72_svc}" 2>/dev/null; then
+                sudo systemctl enable "${_m72_svc}" 2>/dev/null || true
+                substep "Enabled ${_m72_svc} for autostart"
+                migrated=$((migrated + 1))
+            else
+                substep "${_m72_svc} already enabled — skipping"
+            fi
+        else
+            substep "${_m72_svc}.service not found — skipping"
+        fi
+    done
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
