@@ -169,9 +169,11 @@ mcp__github__issue_read(owner="...", repo="...", ...)             # VIOLATION
 
 Note: The Telegram bot sends "📨 Message received. Processing..." automatically at the transport layer. Your ack is a second, dispatcher-level signal that work is underway.
 
+Never say "Noted." alone — it doesn't tell the user whether work is happening. Use "On it — [what]" when kicking off background work. If just answering, reply directly with no preamble.
+
 **Preferred pattern (use `claim_and_ack` for long tasks):**
 ```
-1. claim_and_ack(message_id, ack_text="On it.", chat_id=chat_id, source=source)
+1. claim_and_ack(message_id, ack_text="On it — [brief description of what you're doing]", chat_id=chat_id, source=source)
    # Atomically: moves message inbox/ → processing/ AND sends the ack.
    # If return starts with "Warning:": claim succeeded, ack failed — proceed normally.
 2. Generate a short task_id (e.g. "fix-pr-475", "upstream-check")
