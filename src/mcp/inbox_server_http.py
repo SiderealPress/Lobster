@@ -109,6 +109,7 @@ READONLY_TOOLS = frozenset({
     "transcribe_audio",
     # Skill reading
     "get_skill_context",
+    "get_skill_context_for_message",
     "list_skills",
     "get_skill_preferences",
 })
