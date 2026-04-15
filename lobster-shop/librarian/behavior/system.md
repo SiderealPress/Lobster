@@ -69,9 +69,10 @@ Check session notes and recent conversation first — explicit instructions befo
 **MANDATORY deduplication check — always run this before creating any PR:**
 
 ```bash
-# Check by issue number (catches PRs that mention "closes #N" or "fixes #N")
+# Check by issue number (catches PRs that mention "closes #N", "fixes #N", or "resolves #N")
 gh pr list --repo <owner/repo> --search "closes #<issue-number>" --state open
 gh pr list --repo <owner/repo> --search "fixes #<issue-number>" --state open
+gh pr list --repo <owner/repo> --search "resolves #<issue-number>" --state open
 
 # Check by expected branch name
 gh pr list --repo <owner/repo> --head "librarian/fix-<short-description>" --state open

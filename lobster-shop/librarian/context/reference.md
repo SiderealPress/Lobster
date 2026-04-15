@@ -63,9 +63,10 @@ Use these when labeling issues:
 Run both checks before opening any PR:
 
 ```bash
-# 1. Search by issue number in PR body
+# 1. Search by issue number in PR body (covers closes/fixes/resolves variants)
 gh pr list --repo <owner/repo> --search "closes #<N>" --state open
 gh pr list --repo <owner/repo> --search "fixes #<N>" --state open
+gh pr list --repo <owner/repo> --search "resolves #<N>" --state open
 
 # 2. Search by expected branch name
 gh pr list --repo <owner/repo> --head "librarian/fix-<description>" --state open
