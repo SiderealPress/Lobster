@@ -516,3 +516,210 @@ class TestGracefulDegradation:
         )
         # Still returns empty since no content to assemble
         assert result == ""
+
+
+# =============================================================================
+# Contextual Skill Activation
+# =============================================================================
+
+import sys
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src" / "mcp"))
+from skill_manager import (
+    _pattern_matches_message,
+    get_skill_context_for_message,
+)
+
+
+class TestPatternMatchesMessage:
+    def test_simple_keyword_match(self):
+        """Pattern keywords are found in the message."""
+        assert _pattern_matches_message(
+            "when user asks about email",
+            "Can you check my email for me?",
+        )
+
+    def test_no_match_unrelated_message(self):
+        """Unrelated message does not match."""
+        assert not _pattern_matches_message(
+            "when user asks about email",
+            "What is the weather like today?",
+        )
+
+    def test_empty_pattern_no_match(self):
+        """Empty pattern never matches."""
+        assert not _pattern_matches_message("", "Some message")
+
+    def test_empty_message_no_match(self):
+        """Empty message never matches."""
+        assert not _pattern_matches_message("when user asks about email", "")
+
+    def test_case_insensitive(self):
+        """Matching is case-insensitive."""
+        assert _pattern_matches_message(
+            "when user asks about CALENDAR",
+            "Add something to my calendar",
+        )
+
+    def test_partial_word_match(self):
+        """Short filler words are excluded, content words match."""
+        assert _pattern_matches_message(
+            "when user wants to schedule a meeting",
+            "I need to schedule a team meeting",
+        )
+
+    def test_real_hibernation_pattern(self):
+        """Hibernation skill context patterns match expected messages."""
+        pattern = "when wait_for_messages returns a timeout with hibernate_on_timeout=True"
+        assert _pattern_matches_message(
+            pattern,
+            "wait_for_messages returned timeout hibernate_on_timeout=True",
+        )
+
+    def test_real_gmail_pattern(self):
+        """Gmail skill pattern matches email-related messages."""
+        assert _pattern_matches_message(
+            "when user asks to check their email",
+            "Can you check my email inbox?",
+        )
+
+
+class TestGetSkillContextForMessage:
+    def _create_contextual_skill(self, shop_dir: Path, name: str, patterns: list[str], behavior_text: str):
+        """Helper to create a contextual skill with behavior content."""
+        skill_dir = shop_dir / name
+        skill_dir.mkdir(parents=True, exist_ok=True)
+
+        patterns_toml = "\n".join(f'    "{p}",' for p in patterns)
+        toml = f"""[skill]
+name = "{name}"
+version = "1.0.0"
+description = "Test contextual skill"
+category = "behavioral"
+
+[activation]
+mode = "contextual"
+context_patterns = [
+{patterns_toml}
+]
+
+[layering]
+priority = 50
+merge_strategy = "append"
+"""
+        (skill_dir / "skill.toml").write_text(toml)
+        behavior_dir = skill_dir / "behavior"
+        behavior_dir.mkdir()
+        (behavior_dir / "main.md").write_text(behavior_text)
+
+    def test_contextual_skill_activates_on_match(self, tmp_path):
+        """Contextual skill is included when its pattern matches the message."""
+        shop_dir = tmp_path / "lobster-shop"
+        self._create_contextual_skill(
+            shop_dir, "test-contextual",
+            patterns=["when user asks about calendar"],
+            behavior_text="## Calendar behavior",
+        )
+
+        state_path = tmp_path / "state.json"
+        # Activate the skill in contextual mode (already set in toml, but we need state entry)
+        activate_skill("test-contextual", mode="contextual", state_path=state_path, repo_dir=tmp_path)
+
+        result = get_skill_context_for_message(
+            "Can you add this to my calendar?",
+            repo_dir=tmp_path,
+            state_path=state_path,
+        )
+        assert "Calendar behavior" in result
+        assert "test-contextual" in result
+
+    def test_contextual_skill_skipped_on_no_match(self, tmp_path):
+        """Contextual skill is NOT included when pattern doesn't match."""
+        shop_dir = tmp_path / "lobster-shop"
+        self._create_contextual_skill(
+            shop_dir, "test-contextual",
+            patterns=["when user asks about calendar"],
+            behavior_text="## Calendar behavior",
+        )
+
+        state_path = tmp_path / "state.json"
+        activate_skill("test-contextual", mode="contextual", state_path=state_path, repo_dir=tmp_path)
+
+        result = get_skill_context_for_message(
+            "What is the weather today?",
+            repo_dir=tmp_path,
+            state_path=state_path,
+        )
+        assert "Calendar behavior" not in result
+
+    def test_always_skill_always_included(self, tmp_path):
+        """Always-mode skill is always included regardless of message."""
+        shop_dir = tmp_path / "lobster-shop"
+        skill_dir = shop_dir / "always-skill"
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        (skill_dir / "skill.toml").write_text("""[skill]
+name = "always-skill"
+version = "1.0.0"
+description = "Always active"
+category = "behavioral"
+
+[activation]
+mode = "always"
+
+[layering]
+priority = 50
+merge_strategy = "append"
+""")
+        (skill_dir / "behavior").mkdir()
+        (skill_dir / "behavior" / "main.md").write_text("## Always present behavior")
+
+        state_path = tmp_path / "state.json"
+        activate_skill("always-skill", mode="always", state_path=state_path, repo_dir=tmp_path)
+
+        result = get_skill_context_for_message(
+            "Random unrelated message",
+            repo_dir=tmp_path,
+            state_path=state_path,
+        )
+        assert "Always present behavior" in result
+
+    def test_both_always_and_contextual_combined(self, tmp_path):
+        """Always skill and matching contextual skill both appear."""
+        shop_dir = tmp_path / "lobster-shop"
+
+        # Always skill
+        always_dir = shop_dir / "always-skill"
+        always_dir.mkdir(parents=True, exist_ok=True)
+        (always_dir / "skill.toml").write_text("""[skill]
+name = "always-skill"
+version = "1.0.0"
+description = "Always active"
+category = "behavioral"
+
+[activation]
+mode = "always"
+
+[layering]
+priority = 40
+merge_strategy = "append"
+""")
+        (always_dir / "behavior").mkdir()
+        (always_dir / "behavior" / "main.md").write_text("## Always present")
+
+        # Contextual skill
+        self._create_contextual_skill(
+            shop_dir, "ctx-skill",
+            patterns=["when user mentions email"],
+            behavior_text="## Email context",
+        )
+
+        state_path = tmp_path / "state.json"
+        activate_skill("always-skill", mode="always", state_path=state_path, repo_dir=tmp_path)
+        activate_skill("ctx-skill", mode="contextual", state_path=state_path, repo_dir=tmp_path)
+
+        result = get_skill_context_for_message(
+            "Check my email please",
+            repo_dir=tmp_path,
+            state_path=state_path,
+        )
+        assert "Always present" in result
+        assert "Email context" in result
