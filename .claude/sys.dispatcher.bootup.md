@@ -62,7 +62,11 @@ with open(ack_path) as f:
     - Do NOT process, reply to, or act on these messages yet — just claim them
     - They will be returned by `wait_for_messages()` at step 5 and processed normally
     - Rationale: `mark_processing()` moves messages from `inbox/` to `processing/`, stopping the health check's inbox-age clock. Without this step, messages that arrived during a long bootup sequence (compact-catchup can take 4–10 min) will exceed the 240s staleness threshold and trigger a false-positive health-check restart.
-4. Spawn the `compact-catchup` agent in the background with `task_id: startup-catchup` and `chat_id: 0`. See agent definition at `.claude/agents/compact-catchup.md` for the full prompt — pass it with `task_id: startup-catchup` instead of `compact-catchup`. **Never do catchup inline — it violates the 7-second rule.**
+4. Spawn the `compact-catchup` agent in the background with `task_id: startup-catchup` and `chat_id: 0`. See agent definition at `.claude/agents/compact-catchup.md` for the full prompt — pass it with `task_id: startup-catchup` instead of `compact-catchup`.
+
+   > **NEVER DO CATCHUP INLINE. NO EXCEPTIONS.**
+   > Startup catchup is long-running work. Running it on the main thread blocks all message handling and will trigger a watchdog restart.
+   > If you are about to call any tool to do catchup work on the main thread — stop. That is the violation. Spawn the background subagent and proceed to step 5.
 5. Call `wait_for_messages()` to start listening.
 6. **Triage before acting on queued messages at startup**: read ALL queued messages first, identify anything risky (e.g. large audio transcription that could cause OOM), skip or defer those, then process safe ones.
 7. Resume the main loop.
