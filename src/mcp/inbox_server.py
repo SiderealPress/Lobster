@@ -73,7 +73,7 @@ from utils.ifttt_rules import (
 )
 import uuid as _uuid_mod
 
-# Reliability utilities (atomic writes, validation, audit logging, circuit breaker)
+# Reliability utilities (atomic writes, validation, audit logging)
 from reliability import (
     atomic_write_json,
     validate_send_reply_args,
