@@ -1,6 +1,6 @@
 [Unit]
-Description=Lobster WhatsApp Bridge (whatsapp-web.js)
-After=network-online.target lobster-claude.service
+Description=Lobster WhatsApp Bridge (Baileys)
+After=network-online.target
 Wants=network-online.target
 
 [Service]
@@ -14,6 +14,9 @@ Environment=LOBSTER_WORKSPACE=/home/admin/lobster-workspace
 Environment=WA_COMMANDS_DIR=/home/admin/messages/wa-commands
 Environment=WA_EVENTS_DIR=/home/admin/messages/wa-events
 Environment=WA_HEARTBEAT_FILE=/home/admin/lobster-workspace/logs/whatsapp-heartbeat
+# User secrets — not in git. See connectors/whatsapp/config.example.env
+EnvironmentFile=-/home/admin/.config/lobster/whatsapp.env
+# Legacy location also supported
 EnvironmentFile=-/home/admin/lobster-workspace/config/whatsapp.env
 ExecStart=/usr/bin/node index.js
 Restart=always

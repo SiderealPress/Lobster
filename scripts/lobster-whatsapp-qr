@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# lobster-whatsapp-qr — Force a fresh QR scan for the WhatsApp bridge
+#
+# Stops the bridge service, deletes the saved session, and starts the bridge
+# interactively so the QR code renders in your terminal.
+#
+# Usage:
+#   lobster-whatsapp-qr
+#
+# After scanning:
+#   - Note the JID printed: [READY] Detected Lobster JID: 15551234567@c.us
+#   - Add it to ~/.config/lobster/whatsapp.env: WHATSAPP_LOBSTER_JID=<jid>
+#   - Press Ctrl+C to exit the interactive session
+#   - Run: sudo systemctl start lobster-whatsapp-bridge lobster-whatsapp-adapter
+
+set -euo pipefail
+
+SESSION_PATH="${WHATSAPP_SESSION_PATH:-${HOME}/.config/lobster/whatsapp-session}"
+BRIDGE_DIR="${LOBSTER_PROJECTS:-${HOME}/lobster-workspace/projects}/lobster/connectors/whatsapp"
+
+echo "[lobster-whatsapp-qr] Stopping bridge service..."
+sudo systemctl stop lobster-whatsapp-bridge 2>/dev/null || systemctl --user stop lobster-whatsapp-bridge 2>/dev/null || true
+
+echo "[lobster-whatsapp-qr] Deleting session at ${SESSION_PATH}..."
+rm -rf "${SESSION_PATH}"
+
+echo "[lobster-whatsapp-qr] Starting bridge in interactive mode..."
+echo "[lobster-whatsapp-qr] Scan the QR code with WhatsApp: Settings > Linked Devices > Link a Device"
+echo "[lobster-whatsapp-qr] Press Ctrl+C after you see [READY] to stop this interactive session."
+echo ""
+
+cd "${BRIDGE_DIR}"
+
+# Load user config if present (picks up WHATSAPP_LOBSTER_JID etc)
+if [[ -f "${HOME}/.config/lobster/whatsapp.env" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "${HOME}/.config/lobster/whatsapp.env"
+    set +a
+fi
+
+node index.js

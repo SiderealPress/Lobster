@@ -1,20 +1,29 @@
 [Unit]
-Description=Lobster WhatsApp Bridge (whatsapp-web.js)
-After=network-online.target lobster-claude.service
+Description=Lobster WhatsApp Bridge (Baileys)
+After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=admin
-WorkingDirectory=/home/admin/lobster-workspace/projects/whatsapp-bridge
+WorkingDirectory=%h/lobster-workspace/projects/lobster/connectors/whatsapp
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=LOBSTER_MESSAGES=%h/messages
+Environment=LOBSTER_WORKSPACE=%h/lobster-workspace
+Environment=WA_COMMANDS_DIR=%h/messages/wa-commands
+Environment=WA_EVENTS_DIR=%h/messages/wa-events
+Environment=WA_HEARTBEAT_FILE=%h/lobster-workspace/logs/whatsapp-heartbeat
+# User secrets — not in git. Created by setup.sh from config.example.env
+EnvironmentFile=-%h/.config/lobster/whatsapp.env
+# Legacy location also supported
+EnvironmentFile=-%h/lobster-workspace/config/whatsapp.env
 ExecStart=/usr/bin/node index.js
 Restart=always
 RestartSec=10
-StandardOutput=append:/home/admin/lobster-workspace/logs/whatsapp-bridge.log
-StandardError=append:/home/admin/lobster-workspace/logs/whatsapp-bridge.log
-Environment=NODE_ENV=production
-Environment=LOBSTER_MESSAGES_DIR=/home/admin/messages/inbox
-Environment=WA_COMMANDS_DIR=/home/admin/messages/wa-commands
+StandardOutput=append:%h/lobster-workspace/logs/whatsapp-bridge.log
+StandardError=append:%h/lobster-workspace/logs/whatsapp-bridge.log
+SyslogIdentifier=lobster-whatsapp-bridge
+
+NoNewPrivileges=true
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target
