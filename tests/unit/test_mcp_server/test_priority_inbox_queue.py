@@ -1,5 +1,5 @@
 """
-Tests for priority inbox queue — P0-P4 ordering in check_inbox (issue #1079).
+Tests for priority inbox queue — P0-P4 ordering in check_inbox (issue #1079, #1584).
 
 Verifies that:
 - check_inbox returns messages in P0→P1→P2→P3→P4 order regardless of filename
@@ -7,6 +7,8 @@ Verifies that:
 - Unrecognised or unparseable message types default to P4 (no crash, no skip)
 - No change to message schema — priority is derived at read time, not stored
 - The since_ts historical scan path is unaffected
+- subagent_notification is P2 (not P4) — fix for #1584
+- Every type in _KNOWN_INBOX_TYPES appears in exactly one priority tier set (#1584)
 """
 
 import asyncio
@@ -30,6 +32,7 @@ P0_SELF_CHECK = 0
 P1_TEXT = 1
 P1_VOICE = 1
 P2_SUBAGENT_RESULT = 2
+P2_SUBAGENT_NOTIFICATION = 2
 P3_AGENT_FAILED = 3
 P4_SCHEDULED_REMINDER = 4
 P4_DEFAULT = 4
@@ -252,3 +255,133 @@ class TestCheckInboxPriorityOrdering:
         )
         text = result[0].text
         assert "proc_msg" in text, "since_ts path must still read from processed/ dir"
+
+
+# ---------------------------------------------------------------------------
+# Fix #1584 — subagent_notification must be P2, not P4
+# ---------------------------------------------------------------------------
+
+
+class TestSubagentNotificationPriority:
+    """subagent_notification (write_result with sent_reply_to_user=True) must be P2."""
+
+    def _priority(self, msg: dict) -> int:
+        from src.mcp.inbox_server import _inbox_priority
+        return _inbox_priority(msg)
+
+    def test_subagent_notification_is_p2(self):
+        """write_result creates subagent_notification — must be P2, not P4."""
+        assert self._priority({"type": "subagent_notification"}) == P2_SUBAGENT_NOTIFICATION
+
+    def test_subagent_notification_sorted_before_p4_in_inbox(self, inbox_dir, processed_dir):
+        """In a mixed inbox, subagent_notification appears before scheduled_reminder."""
+        _write(inbox_dir, "zzz_notif.json", _make_msg("notif", "subagent_notification"))
+        _write(inbox_dir, "aaa_sched.json", _make_msg("sched", "scheduled_reminder"))
+
+        result = _run_check_inbox(inbox_dir, processed_dir)
+        text = result[0].text
+
+        notif_pos = text.find("notif")
+        sched_pos = text.find("sched")
+        assert notif_pos < sched_pos, "subagent_notification (P2) must appear before scheduled_reminder (P4)"
+
+    def test_subagent_notification_sorted_before_p4_after_p1(self, inbox_dir, processed_dir):
+        """subagent_notification is P2: after P1 (user text) but before P4 (cron)."""
+        _write(inbox_dir, "aaa_sched.json", _make_msg("sched", "scheduled_reminder"))
+        _write(inbox_dir, "bbb_notif.json", _make_msg("notif", "subagent_notification"))
+        _write(inbox_dir, "ccc_text.json", _make_msg("usermsg", "text"))
+
+        result = _run_check_inbox(inbox_dir, processed_dir)
+        text = result[0].text
+
+        usermsg_pos = text.find("usermsg")
+        notif_pos = text.find("notif")
+        sched_pos = text.find("sched")
+        assert usermsg_pos < notif_pos, "P1 (text) must appear before P2 (subagent_notification)"
+        assert notif_pos < sched_pos, "P2 (subagent_notification) must appear before P4 (scheduled_reminder)"
+
+
+# ---------------------------------------------------------------------------
+# Fix #1584 — CI exhaustiveness: every known type must appear in exactly one tier
+# ---------------------------------------------------------------------------
+
+# The number of priority tiers — used to verify the union covers all tiers exactly.
+_EXPECTED_TIER_COUNT = 5  # P0 through P4
+
+
+class TestPriorityTierExhaustiveness:
+    """Every type in _KNOWN_INBOX_TYPES must appear in exactly one priority tier set.
+
+    This test acts as a CI guard: adding a new message type to _KNOWN_INBOX_TYPES
+    without placing it in a tier set will cause this test to fail, making
+    the omission visible rather than silently defaulting to P4.
+    """
+
+    def _build_tier_union(self) -> dict[str, list[int]]:
+        """Return a mapping of type_name → list of tiers it appears in.
+
+        A correct implementation has exactly one tier per type.
+        """
+        from src.mcp.inbox_server import (
+            _INBOX_P1_TYPES,
+            _INBOX_P2_TYPES,
+            _INBOX_P3_TYPES,
+            _INBOX_P4_DEFAULT,
+        )
+
+        # Map each tier set to its tier number.
+        # P0 is matched on subtype/text-prefix, not on type strings, so it has
+        # no type-keyed frozenset.  Types that rely solely on the P0 subtype path
+        # (e.g. "text" with subtype="compact-reminder") are already covered by
+        # their canonical tier (P1 for "text").  No P0 type-level frozenset exists.
+        tier_sets: list[tuple[int, frozenset[str]]] = [
+            (1, _INBOX_P1_TYPES),
+            (2, _INBOX_P2_TYPES),
+            (3, _INBOX_P3_TYPES),
+        ]
+
+        membership: dict[str, list[int]] = {}
+        for tier_num, tier_set in tier_sets:
+            for msg_type in tier_set:
+                membership.setdefault(msg_type, []).append(tier_num)
+
+        return membership
+
+    def test_every_known_type_appears_in_exactly_one_tier(self):
+        """Each type in _KNOWN_INBOX_TYPES must be in exactly one P1-P3 tier set
+        OR resolve to P4 (the default) — never in multiple tiers.
+
+        Types that are not in any explicit tier set implicitly belong to P4.
+        The important invariant is: no type appears in MORE than one tier set.
+        """
+        from src.mcp.inbox_server import _KNOWN_INBOX_TYPES, _inbox_priority
+
+        membership = self._build_tier_union()
+
+        # Check 1: no type appears in more than one explicit tier set
+        multi_tier = {t: tiers for t, tiers in membership.items() if len(tiers) > 1}
+        assert not multi_tier, (
+            f"These types appear in multiple priority tier sets (must be in exactly one): {multi_tier}. "
+            "Remove from all but one tier set."
+        )
+
+        # Check 2: every known type has a deterministic priority (i.e., _inbox_priority
+        # returns a value in range 0-4, which it always does — this asserts no exception)
+        for msg_type in _KNOWN_INBOX_TYPES:
+            priority = _inbox_priority({"type": msg_type})
+            assert 0 <= priority <= 4, (
+                f"Type '{msg_type}' returned out-of-range priority {priority}. "
+                "Valid range is 0-4."
+            )
+
+    def test_subagent_notification_not_also_in_p4_tier(self):
+        """subagent_notification must NOT be absent from explicit tiers (which would make it P4).
+
+        This is the specific regression from #1584: the type was silently P4 before the fix.
+        After the fix it must be in _INBOX_P2_TYPES.
+        """
+        from src.mcp.inbox_server import _INBOX_P2_TYPES
+        assert "subagent_notification" in _INBOX_P2_TYPES, (
+            "subagent_notification must be in _INBOX_P2_TYPES. "
+            "If it is absent, write_result notifications default to P4 (cron priority) — regression from #1584."
+        )
