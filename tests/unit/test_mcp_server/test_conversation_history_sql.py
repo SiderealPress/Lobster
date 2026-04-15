@@ -326,19 +326,28 @@ class TestFormatHistoryOutput:
         assert "SENT" in output
 
     def test_truncates_long_text(self):
-        long_text = "x" * 600
+        # Text must exceed _HISTORY_TEXT_DISPLAY_LIMIT (4000 chars) to be truncated
+        long_text = "x" * 5000
         msgs = [_make_msg("m1", text=long_text)]
         output = _format_history_output(msgs, total_count=1, offset=0, limit=20)
-        assert "..." in output
-        # The rendered text block should not include all 600 chars
+        assert "[truncated]" in output
+        # The rendered text block should not include all 5000 chars
         assert long_text not in output
+
+    def test_medium_text_not_truncated(self):
+        # Text under 4000 chars (old 500-char limit was too short — e.g. JWT tokens ~600 chars)
+        medium_text = "x" * 600
+        msgs = [_make_msg("m1", text=medium_text)]
+        output = _format_history_output(msgs, total_count=1, offset=0, limit=20)
+        assert medium_text in output
+        assert "[truncated]" not in output
 
     def test_short_text_not_truncated(self):
         short_text = "short message"
         msgs = [_make_msg("m1", text=short_text)]
         output = _format_history_output(msgs, total_count=1, offset=0, limit=20)
         assert short_text in output
-        assert "..." not in output
+        assert "[truncated]" not in output
 
     def test_pagination_hint_shown_when_more(self):
         msgs = [_make_msg(f"m{i}") for i in range(5)]
