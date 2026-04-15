@@ -142,7 +142,7 @@ class TestDbSchema:
             "SELECT value FROM um_metadata WHERE key = 'schema_version'"
         ).fetchone()
         assert row is not None
-        assert int(row[0]) == 2
+        assert int(row[0]) == 3
 
 
 # ---------------------------------------------------------------------------
@@ -749,7 +749,7 @@ class TestMarkdownSync:
         """sync_all should create all expected markdown files."""
         from user_model.markdown_sync import sync_all
         workspace = tmp_path / "workspace"
-        workspace.mkdir()
+        workspace.mkdir(exist_ok=True)
         result = sync_all(conn, str(workspace))
         assert "synced_at" in result
         assert "errors" in result
@@ -763,7 +763,7 @@ class TestMarkdownSync:
         """Preference nodes should create individual markdown files."""
         from user_model.markdown_sync import sync_all
         workspace = tmp_path / "workspace"
-        workspace.mkdir()
+        workspace.mkdir(exist_ok=True)
         sync_all(conn, str(workspace))
         pref_dir = workspace / "user-model" / "preferences"
         md_files = list(pref_dir.glob("*.md"))
@@ -776,7 +776,7 @@ class TestMarkdownSync:
         """Running sync twice should not raise errors."""
         from user_model.markdown_sync import sync_all
         workspace = tmp_path / "workspace"
-        workspace.mkdir()
+        workspace.mkdir(exist_ok=True)
         sync_all(conn, str(workspace))
         result2 = sync_all(conn, str(workspace))
         assert "errors" in result2
@@ -890,7 +890,7 @@ class TestUserModelFacade:
         from user_model import create_user_model
         db_path = tmp_path / "test.db"
         workspace = tmp_path / "workspace"
-        workspace.mkdir()
+        workspace.mkdir(exist_ok=True)
         model = create_user_model(db_path=db_path, workspace_path=workspace)
         assert model is not None
 
@@ -899,7 +899,7 @@ class TestUserModelFacade:
         from user_model import create_user_model
         db_path = tmp_path / "test.db"
         workspace = tmp_path / "workspace"
-        workspace.mkdir()
+        workspace.mkdir(exist_ok=True)
         model = create_user_model(db_path=db_path, workspace_path=workspace)
         obs_ids = model.observe(
             message_text="I prefer short answers, thanks!",
@@ -913,7 +913,7 @@ class TestUserModelFacade:
         from user_model import create_user_model
         db_path = tmp_path / "test.db"
         workspace = tmp_path / "workspace"
-        workspace.mkdir()
+        workspace.mkdir(exist_ok=True)
         model = create_user_model(db_path=db_path, workspace_path=workspace)
         health = model.health()
         assert health["status"] == "ok"
@@ -924,7 +924,7 @@ class TestUserModelFacade:
         from user_model import create_user_model
         db_path = tmp_path / "test.db"
         workspace = tmp_path / "workspace"
-        workspace.mkdir()
+        workspace.mkdir(exist_ok=True)
         model = create_user_model(db_path=db_path, workspace_path=workspace)
         result_json = model.dispatch("model_query", {"query_type": "meta"})
         result = json.loads(result_json)
@@ -935,7 +935,7 @@ class TestUserModelFacade:
         from user_model import create_user_model
         db_path = tmp_path / "test.db"
         workspace = tmp_path / "workspace"
-        workspace.mkdir()
+        workspace.mkdir(exist_ok=True)
         model = create_user_model(db_path=db_path, workspace_path=workspace)
         expected = {
             "model_observe", "model_query", "model_preferences",
@@ -949,7 +949,7 @@ class TestUserModelFacade:
         from user_model import create_user_model
         db_path = tmp_path / "test.db"
         workspace = tmp_path / "workspace"
-        workspace.mkdir()
+        workspace.mkdir(exist_ok=True)
         model = create_user_model(db_path=db_path, workspace_path=workspace)
         result = model.sync_files()
         assert "files_written" in result

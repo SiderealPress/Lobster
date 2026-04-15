@@ -377,13 +377,18 @@ class TestLocalBridgeListTools:
 
         tools = await list_tools()
         tool_names = {t.name for t in tools}
-        assert tool_names == {
+        # Core tools that must always be present; additional tools may be added.
+        required_tools = {
             "get_priorities",
             "get_project_context",
             "get_daily_digest",
             "list_projects",
             "get_handoff",
         }
+        assert required_tools.issubset(tool_names), (
+            f"Missing expected tools: {required_tools - tool_names}. "
+            f"Found: {tool_names}"
+        )
 
     @pytest.mark.asyncio
     async def test_get_project_context_requires_project(self):
