@@ -1101,6 +1101,19 @@ if [ ! -f "$STATE_FILE" ]; then
     info "  Seeded lobster-state.json with initial booted_at timestamp"
 fi
 
+# Seed scripts/next-migration.txt if it doesn't exist.
+# This file tracks the next available migration number to prevent
+# two PRs from claiming the same number in upgrade.sh.
+NEXT_MIG_FILE="$INSTALL_DIR/scripts/next-migration.txt"
+if [ ! -f "$NEXT_MIG_FILE" ]; then
+    # Detect the highest migration number currently in upgrade.sh
+    _last_mig=$(grep -oE '# Migration ([0-9]+):' "$INSTALL_DIR/scripts/upgrade.sh" 2>/dev/null \
+        | grep -oE '[0-9]+' | sort -n | tail -1)
+    _next_mig=$(( ${_last_mig:-0} + 1 ))
+    printf '%s\n' "$_next_mig" > "$NEXT_MIG_FILE"
+    info "  Seeded scripts/next-migration.txt with next migration number: $_next_mig"
+fi
+
 # Legacy: also create ~/projects/ for backward compatibility
 mkdir -p "$HOME/projects"/{personal,business}
 
