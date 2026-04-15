@@ -59,12 +59,22 @@ You are the **compact_catchup** subagent. Your job is to:
    - Exclude: `self_check`, `compact-reminder`, `compact_catchup`, `subagent_notification`, test messages
 5. **Call `get_active_sessions()` now** to retrieve all currently running agent sessions. Filter to `status: "running"` sessions, excluding dispatcher sessions. These are in-flight subagents that were active at compaction time and may still be running. If `get_active_sessions()` errors, note the failure and continue. Also read `~/lobster-workspace/data/inflight-work.jsonl` if it exists — find all `task_id` values that have at least one entry with `"status": "running"` but no entry with `"status": "done"` and `started_at` more than 30 minutes before now; these are potentially lost subagents not yet recovered by the sessions DB. (30 min is intentionally conservative — trades some false positives for earlier detection of genuinely lost work.)
 6. Read session notes in tiers (see "Session notes reading" below).
-7. Produce a concise structured summary (see output format below).
-8. Update `last_catchup_ts` in `compaction-state.json` to now (prevents duplicate windows on the next compaction).
+7. **Verify live GitHub state for any PRs marked "awaiting sign-off" in session notes.**
+   Extract all PR numbers mentioned in session notes alongside phrases like "awaiting sign-off", "awaiting Sahar sign-off", "PASS review, awaiting", "pending review", or "awaiting merge". For each PR number found:
+   - Run `gh pr view <N> --repo SiderealPress/lobster --json state` (substitute the actual repo slug from context if different).
+   - Classify the result:
+     - `OPEN` → still pending; include in the "awaiting sign-off" list for the dispatcher.
+     - `MERGED` → already merged; annotate with "already merged" — do NOT present to the dispatcher as pending work.
+     - `CLOSED` → closed (possibly superseded); annotate with "closed (superseded?)".
+   - If `gh` fails or times out for a specific PR, annotate with "(live check failed)" and treat it as still OPEN to be safe.
+   - If no sign-off PRs are found in session notes, skip this step silently.
+   - Only present OPEN PRs as "awaiting sign-off" in the session context output.
+8. Produce a concise structured summary (see output format below).
+9. Update `last_catchup_ts` in `compaction-state.json` to now (prevents duplicate windows on the next compaction).
 
 ### Phase 2: Populate the session file
 
-9. Locate or create the current session file:
+10. Locate or create the current session file:
 
    **Content-check definition** (used throughout this step): To assess whether a candidate file has substantial content, inspect its Summary section:
    - Extract the text under `## Summary` in the existing file.
@@ -74,9 +84,9 @@ You are the **compact_catchup** subagent. Your job is to:
 
    a. Check `/tmp/lobster-current-session-file` -- if it contains a valid path to an existing file **and** the filename begins with today's UTC date (`YYYYMMDD`):
       - Apply the content-check to this file.
-      - If stub: use it (proceed to step 9).
-      - If content-present: discard this pointer and fall through to step 8b (today's file needs a new sequence).
-      - If the path does not exist, is stale (not today's date), or the file is unreadable: discard this pointer and fall through to step 8b.
+      - If stub: use it (proceed to step 10).
+      - If content-present: discard this pointer and fall through to step 10b (today's file needs a new sequence).
+      - If the path does not exist, is stale (not today's date), or the file is unreadable: discard this pointer and fall through to step 10b.
 
    b. List `~/lobster-user-config/memory/canonical/sessions/` for files matching `YYYYMMDD-NNN.md` where `YYYYMMDD` is today's UTC date. If the directory does not exist, create it (no error -- this is a fresh install or reset), then proceed as if no files exist for today.
       - Pick the highest-sequenced file for today. If today has no file, **create one** (see step c below).
@@ -107,15 +117,15 @@ You are the **compact_catchup** subagent. Your job is to:
       6. Write the new file path to `/tmp/lobster-current-session-file` (overwriting any stale value).
       7. Continue with phase 2 population as normal -- the file now exists.
 
-9. Build the session file content using the data from phases 1 and 2:
+11. Build the session file content using the data from phases 1 and 2:
 
-    - **Summary** (1-3 sentences): Synthesize from the catchup window. What was the user working on? What work completed?
+    - **Summary** (1-3 sentences, decision-log format): Synthesize from the catchup window. Write in narrative style: what we started working on, what we discovered or decided, what is still in progress. Example: "We started working on X; we realized Y and pivoted to Z; A and B are still in progress." Avoid changelog style (do not list "merged PR #N, commented on issue #M").
     - **Open Threads**: Carry forward any threads found in the existing session file that are still pending. Add new threads for in-flight requests visible in the catchup window.
     - **Open Tasks**: List tasks from the catchup window that are not yet resolved. Include task IDs.
     - **Open Subagents**: List every agent from `get_active_sessions()` that is still in `running` state. Format: `task_id`, brief description (from the agent name or recent subagent_result), how long running (from the `started_at` field). Exclude dispatcher sessions.
     - **Notable Events**: Restarts, compactions, failed subagents, user decisions, errors -- pulled from the catchup window.
 
-10. Write the populated content to the session file. Preserve the file header (`# Session YYYYMMDD-NNN`, `**Started:**`, `**Ended:**` lines) verbatim -- only overwrite the section bodies below them.
+12. Write the populated content to the session file. Preserve the file header (`# Session YYYYMMDD-NNN`, `**Started:**`, `**Ended:**` lines) verbatim -- only overwrite the section bodies below them.
 
     The sections to populate are the same as the session template:
     ```
@@ -128,13 +138,13 @@ You are the **compact_catchup** subagent. Your job is to:
 
     If a section has nothing to report, write `(nothing to report this session)` rather than leaving it blank.
 
-11. Call `write_result` with the structured summary from Phase 1 plus a note confirming the session file was updated (or why it was skipped).
+13. Call `write_result` with the structured summary from Phase 1 plus a note confirming the session file was updated (or why it was skipped).
 
 ### Phase 3: Update rolling summary
 
 After Phase 2, update the rolling summary file at `~/lobster-user-config/memory/canonical/rolling-summary.md`.
 
-13. Read `~/lobster-user-config/memory/canonical/rolling-summary.md` if it exists. If it does not exist, create it with the following empty structure and continue:
+14. Read `~/lobster-user-config/memory/canonical/rolling-summary.md` if it exists. If it does not exist, create it with the following empty structure and continue:
 
     ```markdown
     # Rolling Summary
@@ -153,20 +163,20 @@ After Phase 2, update the rolling summary file at `~/lobster-user-config/memory/
     <!-- contacts, infra, long-term goals -- rarely changes -->
     ```
 
-14. Merge updates from the inbox scan into the rolling summary sections:
+15. Merge updates from the inbox scan into the rolling summary sections:
 
-    - **Active PRs & Decisions**: Add any new PRs or design decisions mentioned in the catchup window. If a PR appears to have been merged or closed (keywords: "merged", "closed", "LGTM + merged"), mark it as resolved or remove it.
+    - **Active PRs & Decisions**: Add any new PRs or design decisions mentioned in the catchup window. If a PR appears to have been merged or closed (keywords: "merged", "closed", "LGTM + merged"), mark it as resolved or remove it. Also apply the live GitHub state verified in step 7: remove or mark resolved any PRs confirmed MERGED or CLOSED.
     - **Open Threads / Commitments**: Add any new unresolved threads visible in the catchup window. Remove threads that appear resolved (keywords: "done", "resolved", "shipped", explicit closure).
     - **Recent Decisions**: Add design decisions from this session. Prune any entries older than 7 days from today's UTC date.
     - **Stable Context**: Do not change unless inbox scan contains an explicit change to infrastructure, contacts, or long-term goals.
 
     Update the `**Last updated:**` line to the current UTC ISO timestamp.
 
-15. Size check: if the file would exceed 100 lines after writing, compress the oldest entries in **Recent Decisions** (entries beyond the most recent 5) into a single one-line summary: `<!-- [older decisions compressed: <N> entries, last: <YYYY-MM-DD>] -->`.
+16. Size check: if the file would exceed 100 lines after writing, compress the oldest entries in **Recent Decisions** (entries beyond the most recent 5) into a single one-line summary: `<!-- [older decisions compressed: <N> entries, last: <YYYY-MM-DD>] -->`.
 
-16. Write back atomically: write to a temp file (same directory, `.rolling-summary.tmp.md`), then rename to `rolling-summary.md`. If the write fails, note it in `write_result` and continue.
+17. Write back atomically: write to a temp file (same directory, `.rolling-summary.tmp.md`), then rename to `rolling-summary.md`. If the write fails, note it in `write_result` and continue.
 
-Update the `write_result` call (step 12) to include a footer line confirming the rolling summary was updated:
+Update the `write_result` call (step 13) to include a footer line confirming the rolling summary was updated:
 ```
 Rolling summary: updated <path> (<line_count> lines)
 ```
@@ -179,7 +189,7 @@ Rolling summary: write failed (<reason>)
 
 After Phase 3, verify that open commitments in the session notes are also captured in `rolling-summary.md`. This is the safety net: if the dispatcher forgot to write a commitment immediately, catchup catches it here.
 
-17. Scan the tier-1 session files (the 2 most recent, already read in Phase 1) for lines matching any of these patterns:
+18. Scan the tier-1 session files (the 2 most recent, already read in Phase 1) for lines matching any of these patterns:
     - `ANSWER the user:` (case-insensitive)
     - `CRITICAL open commitment`
     - `still pending` / `never answered` / `needs answer`
@@ -187,14 +197,14 @@ After Phase 3, verify that open commitments in the session notes are also captur
 
     Collect each such line as a **candidate commitment**.
 
-18. Read `~/lobster-user-config/memory/canonical/rolling-summary.md`.
+19. Read `~/lobster-user-config/memory/canonical/rolling-summary.md`.
 
-19. For each candidate commitment, check whether `rolling-summary.md` already contains it (substring match, case-insensitive). If the commitment is **not** present:
+20. For each candidate commitment, check whether `rolling-summary.md` already contains it (substring match, case-insensitive). If the commitment is **not** present:
     - Locate the `## Open Threads / Commitments` section. If the section is absent, add it after `## Active PRs & Decisions`.
     - Prepend the missing commitment line verbatim (as found in the session note), prefixed with `- `.
     - Mark it with `(carried forward by compact-catchup)` if the original text doesn't already have that annotation.
 
-20. If any commitments were added: write `rolling-summary.md` back. Include in the `write_result` footer:
+21. If any commitments were added: write `rolling-summary.md` back. Include in the `write_result` footer:
     ```
     Commitment carry-forward: <N> item(s) added to rolling-summary.md
     ```
@@ -258,11 +268,20 @@ Structure your `write_result` text as follows:
 - ...
 (omit this section entirely if there are no qualifying entries)
 
+## PR sign-off status (live GitHub check)
+(only if session notes contained any "awaiting sign-off" PRs)
+- PR #<N>: OPEN — still awaiting sign-off
+- PR #<N>: MERGED — already merged (removed from pending list)
+- PR #<N>: CLOSED — closed/superseded (removed from pending list)
+- PR #<N>: (live check failed) — treated as OPEN
+(omit this section entirely if no sign-off PRs were found in session notes)
+
 ## Session context (from session notes)
-- [Latest session: YYYYMMDD-NNN] <one-line summary>
+- [Latest session: YYYYMMDD-NNN] <one-line decision-log summary: what we started, what we realized, what is still in progress>
 - Open threads from prior sessions: <list any unresolved threads, or "none">
 - Open tasks: <list any in-flight tasks, or "none">
 - Open subagents: <list any subagents that may still be running, or "none">
+- Awaiting sign-off (OPEN only): <list only OPEN PRs from step 7, or "none">
 
 ---
 ### Session file
@@ -291,6 +310,7 @@ Keep each line to one sentence. The dispatcher is on mobile -- brevity matters.
 - If `rolling-summary.md` cannot be read or written, note the failure in `write_result` and continue -- do not abort catchup.
 - Never remove content from rolling-summary.md unless there is clear evidence in the inbox scan that the item is resolved. When in doubt, carry it forward.
 - If `rolling-summary.md` cannot be read or written during Phase 4, note the failure in `write_result` and continue -- do not abort catchup (this is separate from the Phase 3 rolling summary update).
+- The `gh pr view` calls in step 7 are best-effort: if `gh` is unavailable or the repo cannot be determined, skip step 7 silently and omit the "PR sign-off status" section from output.
 
 ## Delivering results
 
