@@ -2120,7 +2120,7 @@ TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
 TELEGRAM_ALLOWED_USERS=${TELEGRAM_ALLOWED_USERS}
 
 # Admin chat ID (Telegram numeric user ID for the primary admin user).
-# Used by dispatch-job.sh (scheduled tasks) and alert.sh to deliver messages.
+# Used by alert.sh and scheduled tasks to deliver messages.
 LOBSTER_ADMIN_CHAT_ID=${LOBSTER_ADMIN_CHAT_ID:-${TELEGRAM_ALLOWED_USERS}}
 
 # Environment mode: production | dev | test

@@ -9,6 +9,7 @@ Covers:
 - msg_data fields: direct_invocation, thread_root_message_id added for group messages
 """
 
+import contextlib
 import json
 import time
 import pytest
@@ -325,13 +326,26 @@ class TestGroupAckPolicy:
             importlib.reload(bot_module)
             bot_module._engaged_threads.clear()
 
-            with patch.object(bot_module, "INBOX_DIR", inbox), \
-                 patch.object(bot_module, "_check_group_gating", return_value=True), \
-                 patch.object(bot_module, "wake_claude_if_hibernating", lambda: None), \
-                 patch.object(bot_module, "is_user_onboarded", return_value=True), \
-                 patch.object(bot_module, "_get_bot_username", return_value="testbot"), \
-                 patch.object(bot_module, "extract_reply_to_context", return_value=None), \
-                 patch.object(bot_module, "get_source_for_chat", return_value="lobster-group"):
+            base_patches = [
+                patch.object(bot_module, "INBOX_DIR", inbox),
+                patch.object(bot_module, "_check_group_gating", return_value=True),
+                patch.object(bot_module, "wake_claude_if_hibernating", lambda: None),
+                patch.object(bot_module, "is_user_onboarded", return_value=True),
+                patch.object(bot_module, "_get_bot_username", return_value="testbot"),
+                patch.object(bot_module, "extract_reply_to_context", return_value=None),
+                patch.object(bot_module, "get_source_for_chat", return_value="lobster-group"),
+            ]
+            # Also mock get_active_session if the group-session feature is enabled
+            # (multiplayer_telegram_bot skill installed) — ensures no real DB session
+            # bleeds into this test and incorrectly sets engaged=True.
+            if bot_module._GROUP_SESSION_ENABLED:
+                base_patches.append(
+                    patch.object(bot_module, "get_active_session", return_value=None)
+                )
+
+            with contextlib.ExitStack() as stack:
+                for p in base_patches:
+                    stack.enter_context(p)
                 await bot_module.handle_message(update, context)
 
             update.message.reply_text.assert_not_called()
@@ -351,13 +365,23 @@ class TestGroupAckPolicy:
             importlib.reload(bot_module)
             bot_module._engaged_threads.clear()
 
-            with patch.object(bot_module, "INBOX_DIR", inbox), \
-                 patch.object(bot_module, "_check_group_gating", return_value=True), \
-                 patch.object(bot_module, "wake_claude_if_hibernating", lambda: None), \
-                 patch.object(bot_module, "is_user_onboarded", return_value=True), \
-                 patch.object(bot_module, "_get_bot_username", return_value="testbot"), \
-                 patch.object(bot_module, "extract_reply_to_context", return_value=None), \
-                 patch.object(bot_module, "get_source_for_chat", return_value="lobster-group"):
+            base_patches = [
+                patch.object(bot_module, "INBOX_DIR", inbox),
+                patch.object(bot_module, "_check_group_gating", return_value=True),
+                patch.object(bot_module, "wake_claude_if_hibernating", lambda: None),
+                patch.object(bot_module, "is_user_onboarded", return_value=True),
+                patch.object(bot_module, "_get_bot_username", return_value="testbot"),
+                patch.object(bot_module, "extract_reply_to_context", return_value=None),
+                patch.object(bot_module, "get_source_for_chat", return_value="lobster-group"),
+            ]
+            if bot_module._GROUP_SESSION_ENABLED:
+                base_patches.append(
+                    patch.object(bot_module, "get_active_session", return_value=None)
+                )
+
+            with contextlib.ExitStack() as stack:
+                for p in base_patches:
+                    stack.enter_context(p)
                 await bot_module.handle_message(update, context)
 
             files = list(inbox.glob("*.json"))

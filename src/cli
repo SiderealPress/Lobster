@@ -336,7 +336,7 @@ cmd_stats() {
 
     echo ""
     echo -e "${CYAN}Recent Activity:${NC}"
-    sudo journalctl -u lobster-claude --since "1 hour ago" --no-pager 2>/dev/null | \
+    sudo -n journalctl -u lobster-claude --since "1 hour ago" --no-pager 2>/dev/null | \
         grep -E "message|processed|reply" | tail -5 | sed 's/^/  /' || echo "  (no recent activity)"
 }
 
