@@ -90,11 +90,6 @@ class GranolaTranscriptSegment:
     end_time: str    # ISO 8601 string
 
 
-# Account name constants (canonical values shared across pipelines)
-ACCOUNT_PRIMARY: str = "primary"
-ACCOUNT_SECONDARY: str = "secondary"
-
-
 @dataclass(frozen=True)
 class GranolaNote:
     """
@@ -102,9 +97,6 @@ class GranolaNote:
 
     Fields reflect what the public API returns for GET /v1/notes/{id}
     with ?include=transcript.
-
-    The ``granola_account`` field identifies which Granola account this note
-    came from ('primary' or 'secondary'). Defaults to 'primary'.
     """
 
     id: str
@@ -117,7 +109,6 @@ class GranolaNote:
     attendees: list[GranolaAttendee] = field(default_factory=list)
     calendar_event: Optional[GranolaCalendarEvent] = None
     transcript: list[GranolaTranscriptSegment] = field(default_factory=list)
-    granola_account: str = ACCOUNT_PRIMARY
 
 
 @dataclass(frozen=True)
@@ -158,26 +149,6 @@ class GranolaNotFoundError(GranolaAPIError):
     def __init__(self, note_id: str) -> None:
         self.note_id = note_id
         super().__init__(404, f"note {note_id!r} not found or not yet summarised")
-
-
-class GranolaUnknownAccountError(KeyError):
-    """
-    Raised when a note's granola_account name has no registered API key.
-
-    This replaces the previous silent fallback where an unknown account name
-    caused api_key_by_account.get() to return None, which then caused
-    get_note() to silently use the primary GRANOLA_API_KEY instead.
-
-    Catching this error explicitly signals a configuration gap — a new account
-    name appeared in notes but its key has not been added to the account registry.
-    """
-
-    def __init__(self, account_name: str) -> None:
-        self.account_name = account_name
-        super().__init__(
-            f"No API key registered for Granola account {account_name!r}. "
-            f"Add its key to the account config in ~/lobster-config/config.env."
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -260,7 +231,7 @@ def _parse_transcript(raw_list: Optional[list[dict[str, Any]]]) -> list[GranolaT
     return segments
 
 
-def _parse_note(raw: dict[str, Any], granola_account: str = ACCOUNT_PRIMARY) -> GranolaNote:
+def _parse_note(raw: dict[str, Any]) -> GranolaNote:
     """Convert a raw API note dict → GranolaNote dataclass."""
     owner_raw = raw.get("owner") or {}
     owner = GranolaOwner(
@@ -282,7 +253,6 @@ def _parse_note(raw: dict[str, Any], granola_account: str = ACCOUNT_PRIMARY) -> 
         attendees=attendees,
         calendar_event=_parse_calendar_event(raw.get("calendar_event")),
         transcript=_parse_transcript(raw.get("transcript")),
-        granola_account=granola_account,
     )
 
 
@@ -362,18 +332,16 @@ def list_notes(
     cursor: Optional[str] = None,
     limit: int = 100,
     api_key: Optional[str] = None,
-    granola_account: str = ACCOUNT_PRIMARY,
 ) -> NoteListPage:
     """
     List meeting notes, newest-first.
 
     Args:
-        since:           If provided, only return notes with created_at >= this datetime.
-                         Used for incremental sync. Pass a timezone-aware datetime.
-        cursor:          Pagination cursor from a previous NoteListPage response.
-        limit:           Max notes per page (API max appears to be 100).
-        api_key:         Override GRANOLA_API_KEY env var.
-        granola_account: Account identifier to embed in returned GranolaNote objects.
+        since:   If provided, only return notes with created_at >= this datetime.
+                 Used for incremental sync. Pass a timezone-aware datetime.
+        cursor:  Pagination cursor from a previous NoteListPage response.
+        limit:   Max notes per page (API max appears to be 100).
+        api_key: Override GRANOLA_API_KEY env var.
 
     Returns:
         NoteListPage with notes, has_more flag, and next cursor.
@@ -391,7 +359,7 @@ def list_notes(
     data = _call_api("GET", "/v1/notes", params=params, api_key=api_key)
 
     raw_notes = data.get("notes") or []
-    notes = [_parse_note(n, granola_account=granola_account) for n in raw_notes]
+    notes = [_parse_note(n) for n in raw_notes]
 
     return NoteListPage(
         notes=notes,
@@ -404,7 +372,6 @@ def get_note(
     note_id: str,
     include_transcript: bool = True,
     api_key: Optional[str] = None,
-    granola_account: str = ACCOUNT_PRIMARY,
 ) -> GranolaNote:
     """
     Retrieve a single note by ID.
@@ -413,7 +380,6 @@ def get_note(
         note_id:            The note's ``id`` field (e.g. ``not_xeEBpfpKDHxtv6``).
         include_transcript: If True, include full transcript in response.
         api_key:            Override GRANOLA_API_KEY env var.
-        granola_account:    Account identifier to embed in returned GranolaNote.
 
     Raises:
         GranolaNotFoundError: if the note does not exist or hasn't been summarised yet.
@@ -423,13 +389,12 @@ def get_note(
         params["include"] = "transcript"
 
     data = _call_api("GET", f"/v1/notes/{note_id}", params=params, api_key=api_key)
-    return _parse_note(data, granola_account=granola_account)
+    return _parse_note(data)
 
 
 def iter_all_notes(
     since: Optional[datetime] = None,
     api_key: Optional[str] = None,
-    granola_account: str = ACCOUNT_PRIMARY,
 ) -> list[GranolaNote]:
     """
     Fetch ALL notes (following pagination), optionally filtered by created_after.
@@ -443,7 +408,7 @@ def iter_all_notes(
     cursor: Optional[str] = None
 
     while True:
-        page = list_notes(since=since, cursor=cursor, api_key=api_key, granola_account=granola_account)
+        page = list_notes(since=since, cursor=cursor, api_key=api_key)
         all_notes.extend(page.notes)
         log.debug("Fetched page: %d notes, has_more=%s", len(page.notes), page.has_more)
 
@@ -453,81 +418,3 @@ def iter_all_notes(
 
     log.info("iter_all_notes: fetched %d total notes", len(all_notes))
     return all_notes
-
-
-# ---------------------------------------------------------------------------
-# Multi-account support
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class GranolaAccountConfig:
-    """
-    Immutable descriptor for a single Granola account used in multi-account polling.
-
-    Attributes:
-        name:    Account identifier ('primary' or 'secondary').
-        api_key: Bearer token for this account.
-    """
-
-    name: str
-    api_key: str
-
-
-def build_account_configs_from_env(env: Optional[dict[str, str]] = None) -> list[GranolaAccountConfig]:
-    """
-    Discover configured Granola accounts from environment variables.
-
-    Rules:
-    - GRANOLA_API_KEY is required (primary enterprise account).
-    - GRANOLA_API_KEY_2 is optional (secondary account).
-    - Primary account is always first in the returned list.
-    - Returns empty list if GRANOLA_API_KEY is absent.
-
-    Args:
-        env: Dict of environment variables. Defaults to os.environ.
-
-    Returns:
-        List of GranolaAccountConfig, primary account first.
-    """
-    if env is None:
-        env = dict(os.environ)
-
-    primary_key = env.get("GRANOLA_API_KEY", "").strip()  # noname
-    if not primary_key:
-        return []
-
-    configs: list[GranolaAccountConfig] = [
-        GranolaAccountConfig(name=ACCOUNT_PRIMARY, api_key=primary_key),
-    ]
-
-    secondary_key = env.get("GRANOLA_API_KEY_2", "").strip()
-    if secondary_key:
-        configs.append(GranolaAccountConfig(name=ACCOUNT_SECONDARY, api_key=secondary_key))
-
-    return configs
-
-
-def iter_all_notes_for_account(
-    account: GranolaAccountConfig,
-    since: Optional[datetime] = None,
-) -> list[GranolaNote]:
-    """
-    Fetch ALL notes for a specific account, with account attribution.
-
-    Identical to iter_all_notes() but takes a GranolaAccountConfig so the
-    api_key and account name are bundled together.
-
-    Args:
-        account: Account configuration (name + api_key).
-        since:   If provided, only return notes created after this datetime.
-
-    Returns:
-        List of GranolaNote with granola_account set to account.name.
-    """
-    log.info("Fetching notes for account '%s'", account.name)
-    return iter_all_notes(
-        since=since,
-        api_key=account.api_key,
-        granola_account=account.name,
-    )
