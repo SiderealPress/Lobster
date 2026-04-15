@@ -1,23 +1,27 @@
 """
 Unit tests for hooks/thinking-heartbeat.py
 
-Tests cover:
-- Normal write: last_thinking_at written and ISO UTC formatted
-- Merge semantics: existing fields in lobster-state.json are preserved
-- Creates state file if absent (state dir exists)
-- Atomic write: uses .tmp then rename
-- Env override: LOBSTER_STATE_FILE_OVERRIDE is respected
-- Malformed existing JSON is treated as empty (overwritten cleanly)
-- Exceptions during write do not propagate (hook exits 0 silently)
-- Hook exits 0 in all cases
+Tests cover the simplified sentinel design (issue #1483):
+- write_heartbeat() writes a Unix epoch integer to the heartbeat file
+- Atomic write: uses .tmp then rename, no .tmp left behind
+- Creates parent directory if absent
+- Overwrites existing content on each call
+- Timestamp is within a small window of time.time()
+- main() exits 0 on success
+- main() exits 0 even when write fails (silent failure — never block tool use)
+- LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE env var is respected
+
+Design change from the original (lobster-state.json merge):
+- No JSON parsing or merging
+- Single integer epoch value, not ISO timestamp
+- Single file — no other state touched
 """
 
 import importlib.util
-import json
 import os
 import sys
 import tempfile
-from datetime import datetime, timezone
+import time
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
@@ -27,14 +31,20 @@ import pytest
 _HOOKS_DIR = Path(__file__).parents[3] / "hooks"
 HOOK_PATH = _HOOKS_DIR / "thinking-heartbeat.py"
 
+# How close (in seconds) the written timestamp must be to now.
+TIMESTAMP_TOLERANCE_SECONDS = 5
+
+# The threshold documented in the hook (checked here to prevent silent drift).
+EXPECTED_STALE_THRESHOLD = 1200  # 20 minutes
+
 
 # ---------------------------------------------------------------------------
-# Module loader (fresh import each call to avoid state pollution)
+# Module loader
 # ---------------------------------------------------------------------------
 
-def _load_module(monkeypatch, state_file: Path):
-    """Load thinking-heartbeat as a fresh module with state file override."""
-    monkeypatch.setenv("LOBSTER_STATE_FILE_OVERRIDE", str(state_file))
+def _load_module(monkeypatch, heartbeat_file: Path):
+    """Load thinking-heartbeat as a fresh module with heartbeat file override."""
+    monkeypatch.setenv("LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE", str(heartbeat_file))
     spec = importlib.util.spec_from_file_location("thinking_heartbeat", HOOK_PATH)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -42,129 +52,88 @@ def _load_module(monkeypatch, state_file: Path):
 
 
 # ---------------------------------------------------------------------------
-# Pure function tests (no subprocess)
+# Pure function tests
 # ---------------------------------------------------------------------------
 
-class TestReadState:
-    def test_returns_empty_dict_when_file_absent(self, tmp_path):
-        mod = importlib.util.module_from_spec(
-            importlib.util.spec_from_file_location("th", HOOK_PATH)
-        )
-        importlib.util.spec_from_file_location("th", HOOK_PATH).loader.exec_module(mod)
-        result = mod._read_state(tmp_path / "nonexistent.json")
-        assert result == {}
-
-    def test_returns_parsed_dict(self, tmp_path):
-        mod = importlib.util.module_from_spec(
-            importlib.util.spec_from_file_location("th", HOOK_PATH)
-        )
-        importlib.util.spec_from_file_location("th", HOOK_PATH).loader.exec_module(mod)
-        f = tmp_path / "state.json"
-        f.write_text('{"mode": "active", "booted_at": "2024-01-01T00:00:00Z"}')
-        result = mod._read_state(f)
-        assert result == {"mode": "active", "booted_at": "2024-01-01T00:00:00Z"}
-
-    def test_returns_empty_dict_on_malformed_json(self, tmp_path):
-        mod = importlib.util.module_from_spec(
-            importlib.util.spec_from_file_location("th", HOOK_PATH)
-        )
-        importlib.util.spec_from_file_location("th", HOOK_PATH).loader.exec_module(mod)
-        f = tmp_path / "state.json"
-        f.write_text("not valid json {{{")
-        result = mod._read_state(f)
-        assert result == {}
-
-
-class TestWriteStateAtomic:
-    def test_writes_json_to_path(self, tmp_path):
-        mod = importlib.util.module_from_spec(
-            importlib.util.spec_from_file_location("th", HOOK_PATH)
-        )
-        importlib.util.spec_from_file_location("th", HOOK_PATH).loader.exec_module(mod)
-        target = tmp_path / "state.json"
-        mod._write_state_atomic(target, {"foo": "bar"})
-        assert target.exists()
-        data = json.loads(target.read_text())
-        assert data == {"foo": "bar"}
-
-    def test_no_tmp_file_left_behind(self, tmp_path):
-        mod = importlib.util.module_from_spec(
-            importlib.util.spec_from_file_location("th", HOOK_PATH)
-        )
-        importlib.util.spec_from_file_location("th", HOOK_PATH).loader.exec_module(mod)
-        target = tmp_path / "state.json"
-        mod._write_state_atomic(target, {"x": 1})
-        tmp = Path(str(target) + ".tmp")
-        assert not tmp.exists()
-
-
-class TestWriteThinkingHeartbeat:
-    def _load(self):
-        mod = importlib.util.module_from_spec(
-            importlib.util.spec_from_file_location("th", HOOK_PATH)
-        )
-        importlib.util.spec_from_file_location("th", HOOK_PATH).loader.exec_module(mod)
+class TestWriteHeartbeat:
+    def _load_raw(self):
+        """Load module without any env override (uses default paths internally)."""
+        spec = importlib.util.spec_from_file_location("th", HOOK_PATH)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
         return mod
 
-    def test_writes_last_thinking_at(self, tmp_path):
-        mod = self._load()
-        state_file = tmp_path / "lobster-state.json"
-        mod.write_thinking_heartbeat(state_file)
-        data = json.loads(state_file.read_text())
-        assert "last_thinking_at" in data
-        # Parseable ISO timestamp
-        ts = datetime.fromisoformat(data["last_thinking_at"])
-        assert ts.tzinfo is not None
+    def test_writes_integer_epoch_to_file(self, tmp_path):
+        mod = self._load_raw()
+        hb = tmp_path / "dispatcher-heartbeat"
+        before = int(time.time())
+        mod.write_heartbeat(hb)
+        after = int(time.time())
+        assert hb.exists()
+        content = hb.read_text().strip()
+        ts = int(content)
+        assert before <= ts <= after + 1  # allow 1s rounding
 
-    def test_preserves_existing_fields(self, tmp_path):
-        mod = self._load()
-        state_file = tmp_path / "lobster-state.json"
-        state_file.write_text(json.dumps({
-            "mode": "active",
-            "booted_at": "2024-01-01T00:00:00Z",
-            "last_processed_at": "2024-01-01T01:00:00Z",
-        }))
-        mod.write_thinking_heartbeat(state_file)
-        data = json.loads(state_file.read_text())
-        assert data["mode"] == "active"
-        assert data["booted_at"] == "2024-01-01T00:00:00Z"
-        assert data["last_processed_at"] == "2024-01-01T01:00:00Z"
-        assert "last_thinking_at" in data
+    def test_content_is_pure_integer_no_json(self, tmp_path):
+        mod = self._load_raw()
+        hb = tmp_path / "dispatcher-heartbeat"
+        mod.write_heartbeat(hb)
+        content = hb.read_text().strip()
+        # Must be parseable as int, not JSON
+        ts = int(content)
+        assert ts > 0
 
-    def test_creates_file_when_absent(self, tmp_path):
-        mod = self._load()
-        state_file = tmp_path / "subdir" / "lobster-state.json"
-        state_file.parent.mkdir(parents=True)
-        mod.write_thinking_heartbeat(state_file)
-        assert state_file.exists()
-        data = json.loads(state_file.read_text())
-        assert "last_thinking_at" in data
+    def test_no_tmp_file_left_behind(self, tmp_path):
+        mod = self._load_raw()
+        hb = tmp_path / "dispatcher-heartbeat"
+        mod.write_heartbeat(hb)
+        tmp = hb.with_suffix(".tmp")
+        assert not tmp.exists()
 
-    def test_overwrites_malformed_json_cleanly(self, tmp_path):
-        mod = self._load()
-        state_file = tmp_path / "lobster-state.json"
-        state_file.write_text("not json at all")
-        mod.write_thinking_heartbeat(state_file)
-        data = json.loads(state_file.read_text())
-        assert "last_thinking_at" in data
+    def test_creates_parent_directory(self, tmp_path):
+        mod = self._load_raw()
+        nested = tmp_path / "nested" / "deep" / "dispatcher-heartbeat"
+        mod.write_heartbeat(nested)
+        assert nested.exists()
 
-    def test_timestamp_is_utc(self, tmp_path):
-        mod = self._load()
-        state_file = tmp_path / "lobster-state.json"
-        mod.write_thinking_heartbeat(state_file)
-        data = json.loads(state_file.read_text())
-        ts = datetime.fromisoformat(data["last_thinking_at"])
-        # UTC offset should be +00:00
-        assert ts.utcoffset().total_seconds() == 0
+    def test_overwrites_previous_content(self, tmp_path):
+        mod = self._load_raw()
+        hb = tmp_path / "dispatcher-heartbeat"
+        hb.write_text("99999\n")
+        time.sleep(0.01)
+        mod.write_heartbeat(hb)
+        content = hb.read_text().strip()
+        ts = int(content)
+        # New timestamp should be recent (not the old 99999)
+        assert ts > 1000000000  # sanity: real epoch, not legacy value
+
+    def test_timestamp_within_tolerance_of_now(self, tmp_path):
+        mod = self._load_raw()
+        hb = tmp_path / "dispatcher-heartbeat"
+        before = time.time()
+        mod.write_heartbeat(hb)
+        after = time.time()
+        ts = int(hb.read_text().strip())
+        assert before - TIMESTAMP_TOLERANCE_SECONDS <= ts <= after + TIMESTAMP_TOLERANCE_SECONDS
+
+
+class TestStaleThresholdConstant:
+    """Verify the documented threshold matches the expected value (prevents silent drift)."""
+
+    def test_stale_threshold_is_1200_seconds(self):
+        spec = importlib.util.spec_from_file_location("th", HOOK_PATH)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        assert mod.DISPATCHER_HEARTBEAT_STALE_SECONDS == EXPECTED_STALE_THRESHOLD
 
 
 # ---------------------------------------------------------------------------
 # Hook main() integration tests
 # ---------------------------------------------------------------------------
 
-def _run_hook(monkeypatch, state_file: Path) -> tuple[int, str, str]:
+def _run_hook(monkeypatch, heartbeat_file: Path) -> tuple[int, str, str]:
     """Execute the hook's main() capturing exit code and stdio."""
-    monkeypatch.setenv("LOBSTER_STATE_FILE_OVERRIDE", str(state_file))
+    monkeypatch.setenv("LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE", str(heartbeat_file))
 
     spec = importlib.util.spec_from_file_location("thinking_heartbeat", HOOK_PATH)
     mod = importlib.util.module_from_spec(spec)
@@ -188,26 +157,54 @@ def _run_hook(monkeypatch, state_file: Path) -> tuple[int, str, str]:
 
 class TestHookMain:
     def test_exits_zero_on_success(self, monkeypatch, tmp_path):
-        state_file = tmp_path / "lobster-state.json"
-        code, _, _ = _run_hook(monkeypatch, state_file)
+        hb = tmp_path / "dispatcher-heartbeat"
+        code, _, _ = _run_hook(monkeypatch, hb)
         assert code == 0
 
     def test_writes_heartbeat_on_success(self, monkeypatch, tmp_path):
-        state_file = tmp_path / "lobster-state.json"
-        _run_hook(monkeypatch, state_file)
-        assert state_file.exists()
-        data = json.loads(state_file.read_text())
-        assert "last_thinking_at" in data
+        hb = tmp_path / "dispatcher-heartbeat"
+        _run_hook(monkeypatch, hb)
+        assert hb.exists()
+        ts = int(hb.read_text().strip())
+        assert ts > 0
 
     def test_exits_zero_even_when_write_fails(self, monkeypatch, tmp_path):
-        # Point state file at a non-writable path to simulate write failure
-        state_file = tmp_path / "readonly_dir" / "lobster-state.json"
+        """Hook must never block tool execution even if write fails."""
         readonly_dir = tmp_path / "readonly_dir"
         readonly_dir.mkdir()
         readonly_dir.chmod(0o444)  # read-only directory
+        hb = readonly_dir / "dispatcher-heartbeat"
 
         try:
-            code, _, _ = _run_hook(monkeypatch, state_file)
+            code, _, _ = _run_hook(monkeypatch, hb)
             assert code == 0
         finally:
             readonly_dir.chmod(0o755)  # restore for cleanup
+
+    def test_env_override_respected(self, monkeypatch, tmp_path):
+        """LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE must be used when set."""
+        custom = tmp_path / "custom-heartbeat"
+        code, _, _ = _run_hook(monkeypatch, custom)
+        assert code == 0
+        assert custom.exists()
+
+
+# ---------------------------------------------------------------------------
+# Backward compatibility: the old lobster-state.json fields are NOT written
+# ---------------------------------------------------------------------------
+
+class TestNoLobsterStateWrites:
+    """The new hook must NOT write last_thinking_at to lobster-state.json.
+
+    The health check no longer reads lobster-state.json for liveness signals.
+    Writing it would be harmless but signals incorrect design intent.
+    """
+
+    def test_does_not_create_state_json(self, monkeypatch, tmp_path):
+        hb = tmp_path / "dispatcher-heartbeat"
+        # Point state file override at a location we can check
+        state_file = tmp_path / "lobster-state.json"
+        monkeypatch.setenv("LOBSTER_STATE_FILE_OVERRIDE", str(state_file))
+        _run_hook(monkeypatch, hb)
+        # The new hook should NOT write lobster-state.json
+        assert not state_file.exists(), "thinking-heartbeat.py must not write lobster-state.json"
