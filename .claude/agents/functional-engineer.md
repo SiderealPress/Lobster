@@ -205,7 +205,47 @@ If any tests could not be run (missing Docker, live token, specific env), you **
 - [ ] External service calls: mocked in tests, explicitly scoped in any manual runs
 ```
 
-### 7. PR Merge & Completion
+### 7. Post-PASS: Deploy to local-dev
+
+**This step is mandatory. Complete it after receiving a PASS review and before calling `write_result`.**
+
+After the reviewer posts a PASS verdict on GitHub:
+
+```bash
+cd ~/lobster
+git fetch origin
+
+# If local-dev is significantly behind main, merge main first:
+# git checkout local-dev && git merge origin/main --no-edit && git push origin local-dev
+
+git checkout local-dev
+git merge origin/<your-pr-branch> --no-edit
+git push origin local-dev
+DEPLOY_SHA=$(git rev-parse HEAD)
+
+# Return ~/lobster/ to main so the live system is intact:
+git checkout main
+```
+
+Include the resulting commit SHA in your `write_result` call:
+
+```python
+mcp__lobster-inbox__write_result(
+    task_id=f"issue-{issue_number}",
+    chat_id=chat_id,
+    text=(
+        f"PR #{pr_number} open, PASS review received.\n"
+        f"Deployed to local-dev at {deploy_sha}.\n"
+        f"...\n"
+    ),
+    source=source,
+    status="success",
+)
+```
+
+**If the merge has conflicts:** resolve them, commit, push, and note the conflicts explicitly in `write_result`.
+
+### 8. PR Merge & Completion
 - After PR is approved and merged:
   - **Set "Main Board" project status to "Done"**
   - Close the issue if not auto-closed by PR keywords
