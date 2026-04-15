@@ -1874,6 +1874,36 @@ class OutboxHandler(FileSystemEventHandler):
             caption = reply.get('caption', '')
             reply_to_id = reply.get('reply_to_message_id')
 
+            # Handle voice note messages (from TTS / send_voice_note MCP tool)
+            voice_path = reply.get('voice_path', '')
+            if reply_type == 'voice' and voice_path and chat_id and bot_app:
+                try:
+                    from telegram import InputFile as _InputFile
+                    with open(voice_path, 'rb') as audio_f:
+                        await bot_app.bot.send_voice(
+                            chat_id=chat_id,
+                            voice=_InputFile(audio_f),
+                        )
+                    log.info(f"Sent voice note to {chat_id}: {voice_path}")
+                    # Delete the OGG temp file now that it's been sent
+                    try:
+                        os.remove(voice_path)
+                    except OSError:
+                        pass
+                    os.remove(filepath)
+                    return
+                except Exception as e:
+                    log.warning(f"send_voice failed for {chat_id}: {e} — falling back to text")
+                    # Fall back to text so the user receives something
+                    if text:
+                        try:
+                            await bot_app.bot.send_message(chat_id=chat_id, text=text)
+                            log.info(f"Sent voice fallback text to {chat_id}")
+                        except Exception as e2:
+                            log.error(f"Voice fallback text send also failed for {chat_id}: {e2}")
+                    os.remove(filepath)
+                    return
+
             # Handle photo messages (from image-generation skill or other sources)
             if reply_type == 'photo' and photo_url and chat_id and bot_app:
                 try:
