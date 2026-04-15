@@ -4216,6 +4216,77 @@ def _enqueue_recovery_notification(msg: dict) -> None:
         log.error(f"subagent_recovered: failed to enqueue recovery notification: {exc}", exc_info=True)
 
 
+# ---------------------------------------------------------------------------
+# Priority inbox queue — P0-P4 ordering (issue #1079)
+# ---------------------------------------------------------------------------
+
+# P0: dispatcher housekeeping — zero-cost, must run before everything else
+_INBOX_P0_TYPES: frozenset[str] = frozenset()
+_INBOX_P0_SUBTYPES: frozenset[str] = frozenset({"compact-reminder", "self_check"})
+_INBOX_P0_TEXT_PREFIXES: tuple[str, ...] = ("compact-reminder",)
+
+# P1: real-user messages — latency-sensitive
+_INBOX_P1_TYPES: frozenset[str] = frozenset({"text", "voice", "photo", "document"})
+
+# P2: completing in-flight work
+_INBOX_P2_TYPES: frozenset[str] = frozenset({"subagent_result", "subagent_error"})
+
+# P3: error recovery
+_INBOX_P3_TYPES: frozenset[str] = frozenset({"agent_failed"})
+
+# P4: background / cron — everything else
+_INBOX_P4_DEFAULT: int = 4
+
+
+def _inbox_priority(msg: dict) -> int:
+    """Return the priority tier (0=highest, 4=lowest) for an inbox message.
+
+    Priority is derived from message type and subtype at read time — nothing
+    is stored in the message file itself. Unrecognised types default to P4.
+    """
+    msg_type = msg.get("type", "")
+    msg_subtype = msg.get("subtype", "")
+    msg_text = msg.get("text", "")
+
+    # P0: dispatcher housekeeping
+    if msg_subtype in _INBOX_P0_SUBTYPES:
+        return 0
+    if msg_type in _INBOX_P0_TYPES:
+        return 0
+    # compact-reminder messages are sometimes typed as "text" with a specific prefix
+    if any(msg_text.startswith(p) for p in _INBOX_P0_TEXT_PREFIXES):
+        return 0
+
+    # P1: real-user messages
+    if msg_type in _INBOX_P1_TYPES:
+        return 1
+
+    # P2: completing in-flight subagent work
+    if msg_type in _INBOX_P2_TYPES:
+        return 2
+
+    # P3: error recovery
+    if msg_type in _INBOX_P3_TYPES:
+        return 3
+
+    # P4: everything else (scheduled_reminder, system_error, unknown, ...)
+    return _INBOX_P4_DEFAULT
+
+
+def _inbox_sort_key(
+    f_name: str, priority: int, ts_epoch: float | None
+) -> tuple[int, float, str]:
+    """Return (priority, timestamp_epoch, filename) for stable ordering.
+
+    Lower priority tier = earlier in queue.
+    Within a tier, older messages (smaller epoch) come first (FIFO).
+    Filename is the final tiebreaker for determinism.
+    """
+    # Use a large sentinel so unparseable timestamps sink to the back of their tier
+    epoch = ts_epoch if ts_epoch is not None else float("inf")
+    return (priority, epoch, f_name)
+
+
 def _parse_iso_timestamp(ts: str) -> float | None:
     """
     Parse an ISO 8601 UTC timestamp string to a Unix epoch float.
@@ -4294,54 +4365,74 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
 
         log.info(f"check_inbox (since_ts={since_ts_str!r}) returning {len(messages)} message(s)")
     else:
-        for f in sorted(INBOX_DIR.glob("*.json")):
+        # --- Priority-ordered inbox scan (issue #1079) ---
+        # Two-pass approach: read and score all inbox files, then sort by
+        # (priority, timestamp, filename) before processing. Unreadable files
+        # default to P4 so they never cause a crash or a skip.
+        _scored: list[tuple[tuple[int, float, str], object, dict]] = []
+        for f in INBOX_DIR.glob("*.json"):
             try:
                 with open(f) as fp:
                     msg = json.load(fp)
-                    if source_filter and msg.get("source", "").lower() != source_filter:
-                        continue
-                    # /report slash command pre-processor: handle automatically without
-                    # surfacing the raw message to the main dispatcher loop.
-                    msg_text = msg.get("text", "")
-                    if _is_report_command(msg_text):
-                        try:
-                            await _handle_report_slash_command(msg, f)
-                        except Exception as exc:
-                            log.error(f"check_inbox: /report pre-processor error: {exc}", exc_info=True)
-                        continue  # skip — already handled
-                    # subagent_recovered pre-processor: enqueue an owner notification so the
-                    # user is informed about the failed agent. The raw recovery message still
-                    # flows through to the dispatcher (with a dispatcher_hint) so it can call
-                    # mark_processed — but the salvaged dump is never relayed directly.
-                    if msg.get("type") == "subagent_recovered":
-                        try:
-                            _enqueue_recovery_notification(msg)
-                        except Exception as exc:
-                            log.error(f"check_inbox: subagent_recovered pre-processor error: {exc}", exc_info=True)
-                    msg["_filename"] = f.name
-                    messages.append(msg)
-                    # NOTE: Inbound cross-Lobster messages from bot-talk are routed to this
-                    # inbox by bot_talk_mirror.log_inbound_cross_lobster() with source="bot-talk".
-                    # We no longer mirror owner Telegram messages to bot-talk from here —
-                    # only actual cross-Lobster exchanges belong in bot-talk (issue #1350).
-                    # Emit EventBus event for inbound bot-talk messages so TelegramOutboxListener
-                    # can forward them as debug notifications (issue #1425). The message is
-                    # already in the inbox so we only emit to EventBus, not route again.
-                    if msg.get("source") == "bot-talk" and msg.get("direction") == "INBOUND":
-                        try:
-                            from bot_talk_mirror import _spawn_mirror  # type: ignore[import]
-                            _spawn_mirror(
-                                content=msg.get("text", ""),
-                                genre="status-update",
-                                direction="INBOUND",
-                                from_=msg.get("from", msg.get("user_name", "unknown")),
-                                to=msg.get("to", ""),
-                            )
-                        except Exception as _bt_exc:
-                            log.warning(f"bot-talk EventBus inbound emit failed (non-fatal): {_bt_exc}")
-                    if len(messages) >= limit:
-                        break
-            except Exception as e:
+                ts_epoch = _parse_iso_timestamp(msg.get("timestamp", ""))
+                priority = _inbox_priority(msg)
+                key = _inbox_sort_key(f.name, priority, ts_epoch)
+                _scored.append((key, f, msg))
+            except Exception:
+                # Unreadable file: assign worst possible key so it appears last
+                key = (_INBOX_P4_DEFAULT, float("inf"), f.name)
+                _scored.append((key, f, {}))
+
+        for _key, f, msg in sorted(_scored, key=lambda x: x[0]):
+            try:
+                if not msg:
+                    # Re-read files that failed the first pass (e.g. transient lock)
+                    with open(f) as fp:  # type: ignore[arg-type]
+                        msg = json.load(fp)
+                if source_filter and msg.get("source", "").lower() != source_filter:
+                    continue
+                # /report slash command pre-processor: handle automatically without
+                # surfacing the raw message to the main dispatcher loop.
+                msg_text = msg.get("text", "")
+                if _is_report_command(msg_text):
+                    try:
+                        await _handle_report_slash_command(msg, f)  # type: ignore[arg-type]
+                    except Exception as exc:
+                        log.error(f"check_inbox: /report pre-processor error: {exc}", exc_info=True)
+                    continue  # skip — already handled
+                # subagent_recovered pre-processor: enqueue an owner notification so the
+                # user is informed about the failed agent. The raw recovery message still
+                # flows through to the dispatcher (with a dispatcher_hint) so it can call
+                # mark_processed — but the salvaged dump is never relayed directly.
+                if msg.get("type") == "subagent_recovered":
+                    try:
+                        _enqueue_recovery_notification(msg)
+                    except Exception as exc:
+                        log.error(f"check_inbox: subagent_recovered pre-processor error: {exc}", exc_info=True)
+                msg["_filename"] = f.name  # type: ignore[union-attr]
+                messages.append(msg)
+                # NOTE: Inbound cross-Lobster messages from bot-talk are routed to this
+                # inbox by bot_talk_mirror.log_inbound_cross_lobster() with source="bot-talk".
+                # We no longer mirror owner Telegram messages to bot-talk from here —
+                # only actual cross-Lobster exchanges belong in bot-talk (issue #1350).
+                # Emit EventBus event for inbound bot-talk messages so TelegramOutboxListener
+                # can forward them as debug notifications (issue #1425). The message is
+                # already in the inbox so we only emit to EventBus, not route again.
+                if msg.get("source") == "bot-talk" and msg.get("direction") == "INBOUND":
+                    try:
+                        from bot_talk_mirror import _spawn_mirror  # type: ignore[import]
+                        _spawn_mirror(
+                            content=msg.get("text", ""),
+                            genre="status-update",
+                            direction="INBOUND",
+                            from_=msg.get("from", msg.get("user_name", "unknown")),
+                            to=msg.get("to", ""),
+                        )
+                    except Exception as _bt_exc:
+                        log.warning(f"bot-talk EventBus inbound emit failed (non-fatal): {_bt_exc}")
+                if len(messages) >= limit:
+                    break
+            except Exception:
                 continue
 
         if not messages:
