@@ -4102,13 +4102,39 @@ _INBOX_P0_TEXT_PREFIXES: tuple[str, ...] = ("compact-reminder",)
 _INBOX_P1_TYPES: frozenset[str] = frozenset({"text", "voice", "photo", "document"})
 
 # P2: completing in-flight work
-_INBOX_P2_TYPES: frozenset[str] = frozenset({"subagent_result", "subagent_error"})
+# subagent_notification = write_result called with sent_reply_to_user=True (dispatcher
+# only needs to mark_processed, but it is still in-flight work resolution)
+_INBOX_P2_TYPES: frozenset[str] = frozenset({"subagent_result", "subagent_error", "subagent_notification"})
 
 # P3: error recovery
 _INBOX_P3_TYPES: frozenset[str] = frozenset({"agent_failed"})
 
 # P4: background / cron — everything else
 _INBOX_P4_DEFAULT: int = 4
+
+# All known inbox message types — used by the exhaustiveness test to ensure
+# every type has an explicit priority assignment.  Add new types here when
+# introducing new message kinds; the test will fail if you forget to also
+# place them in one of the tier sets above.
+_KNOWN_INBOX_TYPES: frozenset[str] = frozenset({
+    # P0 — via subtype, not type (compact-reminder, self_check)
+    # No entries: P0 is matched on subtype/text-prefix, not type
+    # P1 — real-user messages
+    "text",
+    "voice",
+    "photo",
+    "document",
+    # P2 — in-flight subagent work
+    "subagent_result",
+    "subagent_error",
+    "subagent_notification",
+    # P3 — error recovery
+    "agent_failed",
+    # P4 — background / cron
+    "scheduled_reminder",
+    "system_error",
+    "subagent_recovered",
+})
 
 
 def _inbox_priority(msg: dict) -> int:
