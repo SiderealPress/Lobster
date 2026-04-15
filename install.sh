@@ -978,7 +978,13 @@ if [ "$(id -u)" = "0" ]; then
     echo ""
     info "Re-running installer as 'lobster' user..."
     echo ""
-    exec sudo -u lobster HOME="$LOBSTER_HOME" bash "$TMP_SCRIPT" "$@"
+    # Pass Telegram credentials through the re-exec so non-interactive install can write them
+    TELEGRAM_CRED_VARS=()
+    [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && TELEGRAM_CRED_VARS+=("TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}")
+    [ -n "${TELEGRAM_ALLOWED_USERS:-}" ] && TELEGRAM_CRED_VARS+=("TELEGRAM_ALLOWED_USERS=${TELEGRAM_ALLOWED_USERS}")
+    [ -n "${TELEGRAM_USER_ID:-}" ] && TELEGRAM_CRED_VARS+=("TELEGRAM_USER_ID=${TELEGRAM_USER_ID}")
+    [ -n "${LOBSTER_ADMIN_CHAT_ID:-}" ] && TELEGRAM_CRED_VARS+=("LOBSTER_ADMIN_CHAT_ID=${LOBSTER_ADMIN_CHAT_ID}")
+    exec sudo -u lobster HOME="$LOBSTER_HOME" env "${TELEGRAM_CRED_VARS[@]}" bash "$TMP_SCRIPT" "$@"
 fi
 
 # Check if running interactively
@@ -2555,7 +2561,7 @@ TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
 TELEGRAM_ALLOWED_USERS=${TELEGRAM_ALLOWED_USERS}
 
 # Admin chat ID (Telegram numeric user ID for the primary admin user).
-# Used by alert.sh and scheduled tasks to deliver messages.
+# Used by dispatch-job.sh (scheduled tasks) and alert.sh to deliver messages.
 LOBSTER_ADMIN_CHAT_ID=${LOBSTER_ADMIN_CHAT_ID:-${TELEGRAM_ALLOWED_USERS}}
 
 # Environment mode: production | dev | test
