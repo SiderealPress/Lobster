@@ -1651,31 +1651,6 @@ if [ -d "$TEMPLATES_DIR" ]; then
             info "  Seeded canonical template: $base"
         fi
     done
-    # Seed subdirectory templates (e.g. sessions/session.template.md)
-    for subdir in "$TEMPLATES_DIR"/*/; do
-        [ -d "$subdir" ] || continue
-        subdir_name=$(basename "$subdir")
-        mkdir -p "$USER_CONFIG_DIR/memory/canonical/$subdir_name"
-        for tmpl in "$subdir"*.md; do
-            [ -f "$tmpl" ] || continue
-            base=$(basename "$tmpl")
-            dest="$USER_CONFIG_DIR/memory/canonical/$subdir_name/$base"
-            if [ ! -f "$dest" ]; then
-                cp "$tmpl" "$dest"
-                info "  Seeded canonical template: $subdir_name/$base"
-            fi
-        done
-    done
-    # Seed YAML templates (e.g. ifttt-rules.yaml)
-    for tmpl in "$TEMPLATES_DIR"/*.yaml; do
-        [ -f "$tmpl" ] || continue
-        base=$(basename "$tmpl")
-        dest="$USER_CONFIG_DIR/memory/canonical/$base"
-        if [ ! -f "$dest" ]; then
-            cp "$tmpl" "$dest"
-            info "  Seeded canonical template: $base"
-        fi
-    done
 fi
 
 # Seed system-audit.context.md to user-config/agents/ on first run
