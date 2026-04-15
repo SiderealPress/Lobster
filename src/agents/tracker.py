@@ -52,6 +52,7 @@ def add_pending_agent(
     trigger_message_id: str | None = None,
     trigger_snippet: str | None = None,
     idempotency: str | None = None,
+    task_origin: str | None = None,
     path: Path | None = None,
 ) -> None:
     """Record a newly-spawned background agent.
@@ -70,6 +71,7 @@ def add_pending_agent(
         trigger_message_id: Inbox message_id that caused this spawn (causality).
         trigger_snippet:    First 200 chars of the triggering message text (PII).
         idempotency:        Re-run safety: 'safe' | 'unsafe' | 'unknown' (default).
+        task_origin:        Origin of this task: 'user' | 'scheduled' | 'internal'.
         path:               DB path override (for testing). Accepts and ignores the
                             old JSON-path semantics — treated as SQLite DB path.
     """
@@ -84,6 +86,7 @@ def add_pending_agent(
         trigger_message_id=trigger_message_id,
         trigger_snippet=trigger_snippet,
         idempotency=idempotency,
+        task_origin=task_origin,
         path=path,
     )
 
