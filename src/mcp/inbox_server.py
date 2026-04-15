@@ -5505,6 +5505,7 @@ def _apply_filters_and_paginate(
 ) -> tuple[list[dict], int]:
     """Apply chat_id / source / search / sender_type filters, sort by timestamp, then paginate.
 
+
     Returns (paginated_slice, total_count_before_pagination).
     All filtering and sorting is performed in-memory. This is the legacy
     fallback path used when messages.db is unavailable.
