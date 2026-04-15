@@ -41,6 +41,11 @@ prompt. If no path is provided, check for a file named `system-audit.context.md`
 in the standard config directory (`~/lobster-user-config/agents/`), or skip the
 context load step if no file is found there.
 
+> **Canonical path:** `~/lobster-user-config/agents/system-audit.context.md`
+> Do NOT read from or write to `~/lobster-user-config/memory/canonical/system-audit.context.md` --
+> that path is a stale duplicate seeded by install.sh that was never updated by the auditor.
+> The agents/ copy is the only active write target (issue #1196).
+
 The context file should contain deployment-specific settings including the GitHub
 repo (`repo: owner/repo`). Read this before running any `gh` commands.
 

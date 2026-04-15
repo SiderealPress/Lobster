@@ -1165,11 +1165,17 @@ fi
 mkdir -p "$HOME/projects"/{personal,business}
 
 # Seed canonical templates (only files that don't already exist; skip examples)
+# NOTE: system-audit.context.md is excluded from this loop — it belongs in
+# user-config/agents/, not memory/canonical/. It has its own seeding block below.
+# Including it here would create a stale duplicate that diverges from the agents/
+# copy over time (issue #1196).
 TEMPLATES_DIR="$INSTALL_DIR/memory/canonical-templates"
 if [ -d "$TEMPLATES_DIR" ]; then
     for tmpl in "$TEMPLATES_DIR"/*.md; do
         [ -f "$tmpl" ] || continue
         base=$(basename "$tmpl")
+        # system-audit.context.md is seeded to agents/ below, not memory/canonical/
+        [[ "$base" == "system-audit.context.md" ]] && continue
         dest="$USER_CONFIG_DIR/memory/canonical/$base"
         if [ ! -f "$dest" ]; then
             cp "$tmpl" "$dest"
