@@ -391,7 +391,19 @@ if [ "$CONTAINER_SETUP" = true ]; then
     fi
 
     # Create stub user-config agent files if they don't exist
-    for stub_file in "user.base.bootup.md" "user.base.context.md" "user.dispatcher.bootup.md" "user.subagent.bootup.md"; do
+    # user.base.bootup.md gets seeded from the example template (contains timezone placeholder)
+    USER_BASE_BOOTUP_TEMPLATE="$INSTALL_DIR/memory/canonical-templates/user.base.bootup.md.example"
+    user_base_bootup_dest="$USER_CONFIG_DIR/agents/user.base.bootup.md"
+    if [ ! -f "$user_base_bootup_dest" ]; then
+        if [ -f "$USER_BASE_BOOTUP_TEMPLATE" ]; then
+            cp "$USER_BASE_BOOTUP_TEMPLATE" "$user_base_bootup_dest"
+            info "  Seeded user.base.bootup.md from template (customize timezone and preferences)"
+        else
+            touch "$user_base_bootup_dest"
+            info "  Created stub: agents/user.base.bootup.md"
+        fi
+    fi
+    for stub_file in "user.base.context.md" "user.dispatcher.bootup.md" "user.subagent.bootup.md"; do
         stub_dest="$USER_CONFIG_DIR/agents/$stub_file"
         if [ ! -f "$stub_dest" ]; then
             touch "$stub_dest"
@@ -1152,7 +1164,19 @@ if [ -f "$AUDIT_CONTEXT_SEED" ] && [ ! -f "$AUDIT_CONTEXT_DEST" ]; then
 fi
 
 # Create stub user-config agent files if they don't exist
-for stub_file in "user.base.bootup.md" "user.base.context.md" "user.dispatcher.bootup.md" "user.subagent.bootup.md"; do
+# user.base.bootup.md gets seeded from the example template (contains timezone placeholder)
+USER_BASE_BOOTUP_TEMPLATE="$INSTALL_DIR/memory/canonical-templates/user.base.bootup.md.example"
+user_base_bootup_dest="$USER_CONFIG_DIR/agents/user.base.bootup.md"
+if [ ! -f "$user_base_bootup_dest" ]; then
+    if [ -f "$USER_BASE_BOOTUP_TEMPLATE" ]; then
+        cp "$USER_BASE_BOOTUP_TEMPLATE" "$user_base_bootup_dest"
+        info "  Seeded user.base.bootup.md from template (customize timezone and preferences)"
+    else
+        touch "$user_base_bootup_dest"
+        info "  Created stub: agents/user.base.bootup.md"
+    fi
+fi
+for stub_file in "user.base.context.md" "user.dispatcher.bootup.md" "user.subagent.bootup.md"; do
     stub_dest="$USER_CONFIG_DIR/agents/$stub_file"
     if [ ! -f "$stub_dest" ]; then
         touch "$stub_dest"
