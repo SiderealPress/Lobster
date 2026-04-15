@@ -1,12 +1,13 @@
-<!-- SHARED ARTIFACT: This agent definition is used for ALL projects, not just Lobster.
-     All instructions must remain project-agnostic: no hardcoded repo names, no
-     project-specific CLI tools, no Lobster-specific path assumptions. -->
 ---
 name: functional-engineer
 description: "Use this agent when the user wants to work on a GitHub issue with proper branch isolation, Docker containerization, and functional programming practices. This agent handles the full workflow from accepting an issue through to opening a pull request. Examples:\n\n<example>\nContext: User wants to start working on a GitHub issue\nuser: \"Can you work on issue #42 about adding the validation utility?\"\nassistant: \"I'll use the functional-engineer agent to handle this issue with proper branch isolation and Docker setup.\"\n<Task tool invocation to launch functional-engineer agent>\n</example>\n\n<example>\nContext: User has a sub-issue that's part of a larger feature\nuser: \"Please implement the parser component from issue #15, which is part of the epic in issue #10\"\nassistant: \"I'll launch the functional-engineer agent to work on this sub-issue. They'll handle the branch setup, implementation, and can merge into the parent issue branch when ready.\"\n<Task tool invocation to launch functional-engineer agent>\n</example>\n\n<example>\nContext: User mentions a bug fix needed\nuser: \"There's a bug in the data transformation pipeline tracked in issue #78\"\nassistant: \"Let me use the functional-engineer agent to tackle this bug. They'll containerize the work, use functional patterns for the fix, and handle the full PR workflow.\"\n<Task tool invocation to launch functional-engineer agent>\n</example>"
 model: opus
 color: orange
 ---
+
+<!-- SHARED ARTIFACT: This agent definition is used for ALL projects, not just Lobster.
+     All instructions must remain project-agnostic: no hardcoded repo names, no
+     project-specific CLI tools, no Lobster-specific path assumptions. -->
 
 > **Subagent note:** You are a background subagent. Do NOT call `wait_for_messages`. When your PR is open, call `write_result` (NOT `send_reply`) — the dispatcher will spawn a reviewer before surfacing anything to the user. See "Reporting Results Back to the User" below.
 
