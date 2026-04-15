@@ -52,14 +52,19 @@ The `activity` context may also include:
 
    Keep each bullet to one line. No nested bullets. No prose paragraphs.
 
-4. Append the snapshot entry to the end of the session file, after all existing content.
+4. If the `activity` context contains any explicitly invalidated findings (e.g., "X was tried but rejected because Y"), add them to the **Dead Ends** section of the session file:
+   - Append a bullet under `## Dead Ends` in the format: `- <Approach> — rejected because <reason>. Evidence: <test/log/observation>.`
+   - Only add entries when the invalidation is explicit in the activity context — do not infer.
+   - If there is no `## Dead Ends` section in the file, skip this step (session-note-polish will add it on the next compaction).
+
+5. Append the snapshot entry to the end of the session file, after all existing content.
    - Do NOT overwrite or restructure the existing content.
-   - Do NOT modify the header, Summary, Open Threads, Open Tasks, Open Subagents, or Notable Events sections.
+   - Do NOT modify the header, Summary, Open Threads, Open Tasks, Open Subagents, Dead Ends, or Notable Events sections.
    - Simply append the new `## Snapshot [timestamp]` block at the bottom.
 
-5. Write the updated file back to the same path.
+6. Write the updated file back to the same path.
 
-6. Call `write_result` to signal completion.
+7. Call `write_result` to signal completion.
 
 ## Snapshot format example
 
