@@ -199,6 +199,229 @@ class TestOutboxHandler:
             mock_run.assert_not_called()
 
 
+class TestVoiceNoteHandling:
+    """Tests for voice note outbox handling in process_reply.
+
+    Covers the two issues fixed in PR #1576:
+    1. Silent message loss when voice_path is missing — user must always get text fallback.
+    2. OGG temp file leak when bot is not running — OGG must be cleaned up even if bot_app is None.
+    """
+
+    @pytest.fixture
+    def mock_bot_app(self):
+        app = MagicMock()
+        app.bot.send_voice = AsyncMock()
+        app.bot.send_message = AsyncMock()
+        return app
+
+    @pytest.fixture
+    def bot_module(self):
+        return get_bot_module()
+
+    @pytest.mark.asyncio
+    async def test_voice_note_sent_successfully(self, tmp_path, temp_messages_dir, mock_bot_app, bot_module):
+        """Happy path: OGG file exists, bot is running — voice note is sent and OGG is cleaned up."""
+        outbox = temp_messages_dir / "outbox"
+        ogg_file = tmp_path / "voice.ogg"
+        ogg_file.write_bytes(b"fake ogg data")
+
+        reply = {
+            "chat_id": 123456,
+            "type": "voice",
+            "voice_path": str(ogg_file),
+            "text": "Hello in voice",
+        }
+        reply_file = outbox / "voice_1.json"
+        reply_file.write_text(json.dumps(reply))
+
+        handler = bot_module.OutboxHandler()
+        original_bot_app = bot_module.bot_app
+        bot_module.bot_app = mock_bot_app
+        loop = asyncio.new_event_loop()
+        bot_module.main_loop = loop
+
+        try:
+            await handler.process_reply(str(reply_file))
+            mock_bot_app.bot.send_voice.assert_called_once()
+            mock_bot_app.bot.send_message.assert_not_called()
+            assert not ogg_file.exists(), "OGG temp file should be cleaned up after successful send"
+            assert not reply_file.exists()
+        finally:
+            bot_module.bot_app = original_bot_app
+            loop.close()
+
+    @pytest.mark.asyncio
+    async def test_voice_note_missing_voice_path_sends_text_fallback(
+        self, temp_messages_dir, mock_bot_app, bot_module
+    ):
+        """If voice_path is absent from the outbox message, the user receives the text fallback."""
+        outbox = temp_messages_dir / "outbox"
+
+        reply = {
+            "chat_id": 123456,
+            "type": "voice",
+            # voice_path intentionally omitted
+            "text": "This is the fallback text",
+        }
+        reply_file = outbox / "voice_no_path.json"
+        reply_file.write_text(json.dumps(reply))
+
+        handler = bot_module.OutboxHandler()
+        original_bot_app = bot_module.bot_app
+        bot_module.bot_app = mock_bot_app
+        loop = asyncio.new_event_loop()
+        bot_module.main_loop = loop
+
+        try:
+            await handler.process_reply(str(reply_file))
+            mock_bot_app.bot.send_voice.assert_not_called()
+            mock_bot_app.bot.send_message.assert_called_once()
+            call_text = mock_bot_app.bot.send_message.call_args.kwargs.get("text", "")
+            assert "fallback text" in call_text
+            assert not reply_file.exists()
+        finally:
+            bot_module.bot_app = original_bot_app
+            loop.close()
+
+    @pytest.mark.asyncio
+    async def test_voice_note_missing_voice_path_no_text_sends_placeholder(
+        self, temp_messages_dir, mock_bot_app, bot_module
+    ):
+        """If both voice_path and text are absent, a placeholder message is sent — no silent drop."""
+        outbox = temp_messages_dir / "outbox"
+
+        reply = {
+            "chat_id": 123456,
+            "type": "voice",
+            # voice_path and text both absent
+        }
+        reply_file = outbox / "voice_no_path_no_text.json"
+        reply_file.write_text(json.dumps(reply))
+
+        handler = bot_module.OutboxHandler()
+        original_bot_app = bot_module.bot_app
+        bot_module.bot_app = mock_bot_app
+        loop = asyncio.new_event_loop()
+        bot_module.main_loop = loop
+
+        try:
+            await handler.process_reply(str(reply_file))
+            mock_bot_app.bot.send_voice.assert_not_called()
+            mock_bot_app.bot.send_message.assert_called_once()
+            # Should receive a placeholder, not silence
+            call_text = mock_bot_app.bot.send_message.call_args.kwargs.get("text", "")
+            assert len(call_text) > 0, "Expected a non-empty placeholder message, got silence"
+            assert not reply_file.exists()
+        finally:
+            bot_module.bot_app = original_bot_app
+            loop.close()
+
+    @pytest.mark.asyncio
+    async def test_voice_note_bot_not_running_cleans_up_ogg(
+        self, tmp_path, temp_messages_dir, bot_module
+    ):
+        """If bot_app is None (bot not running), the OGG temp file is still cleaned up."""
+        outbox = temp_messages_dir / "outbox"
+        ogg_file = tmp_path / "voice.ogg"
+        ogg_file.write_bytes(b"fake ogg data")
+
+        reply = {
+            "chat_id": 123456,
+            "type": "voice",
+            "voice_path": str(ogg_file),
+            "text": "Hello in voice",
+        }
+        reply_file = outbox / "voice_bot_down.json"
+        reply_file.write_text(json.dumps(reply))
+
+        handler = bot_module.OutboxHandler()
+        original_bot_app = bot_module.bot_app
+        bot_module.bot_app = None  # Simulate bot not running
+        loop = asyncio.new_event_loop()
+        bot_module.main_loop = loop
+
+        try:
+            await handler.process_reply(str(reply_file))
+            assert not ogg_file.exists(), "OGG temp file must be cleaned up even when bot is not running"
+            assert not reply_file.exists()
+        finally:
+            bot_module.bot_app = original_bot_app
+            loop.close()
+
+    @pytest.mark.asyncio
+    async def test_voice_send_failure_sends_text_fallback(
+        self, tmp_path, temp_messages_dir, mock_bot_app, bot_module
+    ):
+        """If send_voice raises an exception, the user receives a text fallback."""
+        outbox = temp_messages_dir / "outbox"
+        ogg_file = tmp_path / "voice.ogg"
+        ogg_file.write_bytes(b"fake ogg data")
+
+        reply = {
+            "chat_id": 123456,
+            "type": "voice",
+            "voice_path": str(ogg_file),
+            "text": "Voice content as text fallback",
+        }
+        reply_file = outbox / "voice_fail.json"
+        reply_file.write_text(json.dumps(reply))
+
+        mock_bot_app.bot.send_voice.side_effect = Exception("Telegram API error")
+
+        handler = bot_module.OutboxHandler()
+        original_bot_app = bot_module.bot_app
+        bot_module.bot_app = mock_bot_app
+        loop = asyncio.new_event_loop()
+        bot_module.main_loop = loop
+
+        try:
+            await handler.process_reply(str(reply_file))
+            mock_bot_app.bot.send_message.assert_called_once()
+            call_text = mock_bot_app.bot.send_message.call_args.kwargs.get("text", "")
+            assert "Voice content as text fallback" in call_text
+            assert not ogg_file.exists(), "OGG temp file must be cleaned up after send_voice failure"
+            assert not reply_file.exists()
+        finally:
+            bot_module.bot_app = original_bot_app
+            loop.close()
+
+    @pytest.mark.asyncio
+    async def test_voice_send_failure_no_text_sends_placeholder(
+        self, tmp_path, temp_messages_dir, mock_bot_app, bot_module
+    ):
+        """If send_voice fails AND text is empty, a placeholder is sent — never silent drop."""
+        outbox = temp_messages_dir / "outbox"
+        ogg_file = tmp_path / "voice.ogg"
+        ogg_file.write_bytes(b"fake ogg data")
+
+        reply = {
+            "chat_id": 123456,
+            "type": "voice",
+            "voice_path": str(ogg_file),
+            "text": "",  # empty text — would silently drop in original code
+        }
+        reply_file = outbox / "voice_fail_no_text.json"
+        reply_file.write_text(json.dumps(reply))
+
+        mock_bot_app.bot.send_voice.side_effect = Exception("Telegram API error")
+
+        handler = bot_module.OutboxHandler()
+        original_bot_app = bot_module.bot_app
+        bot_module.bot_app = mock_bot_app
+        loop = asyncio.new_event_loop()
+        bot_module.main_loop = loop
+
+        try:
+            await handler.process_reply(str(reply_file))
+            mock_bot_app.bot.send_message.assert_called_once()
+            call_text = mock_bot_app.bot.send_message.call_args.kwargs.get("text", "")
+            assert len(call_text) > 0, "Expected placeholder message, got silence"
+            assert not reply_file.exists()
+        finally:
+            bot_module.bot_app = original_bot_app
+            loop.close()
+
+
 class TestSplitMessage:
     """Tests for the split_message function.
 
