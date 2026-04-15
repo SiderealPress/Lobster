@@ -853,7 +853,7 @@ def format_active_sessions_block(sessions: list[dict]) -> str:
     user_label = "agent" if user_count == 1 else "agents"
     header = f"[{user_count} {user_label} running"
     if system_count > 0:
-        sys_label = "system" if system_count == 1 else "system"
+        sys_label = "system" if system_count == 1 else "systems"
         header += f", {system_count} {sys_label}"
     header += "]"
 

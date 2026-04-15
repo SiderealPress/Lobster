@@ -355,6 +355,19 @@ def test_format_system_agent_separated_from_user_count():
     assert "chat: 8305714125" in result
 
 
+def test_format_plural_system_agents():
+    """Two system agents should show '2 systems' (not '2 system')."""
+    sessions = [
+        {"agent_type": "subagent", "description": "startup-catchup",
+         "chat_id": "0", "elapsed_seconds": 60, "id": "s1"},
+        {"agent_type": "subagent", "description": "health-check",
+         "chat_id": 0, "elapsed_seconds": 30, "id": "s2"},
+    ]
+    result = session_store.format_active_sessions_block(sessions)
+    assert "2 systems" in result, f"Expected '2 systems' in output, got: {result!r}"
+    assert "2 system]" not in result, "Singular 'system' must not appear with count 2"
+
+
 def test_format_only_system_agents():
     """When only system agents are running, header shows 0 user agents + N system."""
     sessions = [
