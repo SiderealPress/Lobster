@@ -2832,6 +2832,13 @@ else
         info "Observability server service installed (enable manually with: sudo systemctl enable lobster-observability)"
     fi
 
+    # Install transcription worker service (always present — whisper.cpp is a hard dependency)
+    if [ -f "$INSTALL_DIR/services/lobster-transcription.service" ]; then
+        sudo cp "$INSTALL_DIR/services/lobster-transcription.service" /etc/systemd/system/
+        sudo systemctl enable lobster-transcription 2>/dev/null || true
+        success "Transcription worker service installed and enabled (lobster-transcription)"
+    fi
+
     sudo systemctl daemon-reload
 
     # Enable services for autostart unconditionally. This is separate from
@@ -3008,6 +3015,9 @@ if [[ ! $REPLY =~ ^[Nn]$ ]]; then
     sudo systemctl start lobster-router
     sleep 2
     sudo systemctl start lobster-claude
+    # Start transcription worker (already enabled above; start it now so pending voice
+    # messages in ~/messages/pending-transcription/ are processed immediately)
+    sudo systemctl start lobster-transcription 2>/dev/null || true
 
     sleep 3
 
