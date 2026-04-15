@@ -1874,6 +1874,73 @@ class OutboxHandler(FileSystemEventHandler):
             caption = reply.get('caption', '')
             reply_to_id = reply.get('reply_to_message_id')
 
+            # Handle voice note messages (from TTS / send_voice_note MCP tool)
+            voice_path = reply.get('voice_path', '')
+            if reply_type == 'voice':
+                # Helper: clean up the OGG temp file if it exists.
+                def _cleanup_ogg(path):
+                    if path:
+                        try:
+                            os.remove(path)
+                        except OSError:
+                            pass
+
+                # Helper: send a text fallback so the user always gets something.
+                async def _send_voice_fallback(reason):
+                    fallback_text = text or "[Voice note could not be delivered]"
+                    log.warning(
+                        f"voice note to {chat_id}: {reason} — "
+                        f"falling back to text (has_text={bool(text)})"
+                    )
+                    if chat_id and bot_app:
+                        try:
+                            await bot_app.bot.send_message(chat_id=chat_id, text=fallback_text)
+                            log.info(f"Sent voice fallback text to {chat_id}")
+                        except Exception as fb_err:
+                            log.error(
+                                f"Voice fallback text send also failed for {chat_id}: {fb_err}"
+                            )
+                    else:
+                        log.error(
+                            f"voice note to {chat_id}: cannot send fallback "
+                            f"(bot_app={bot_app!r}) — message will be lost"
+                        )
+
+                # Guard: bot must be running to send anything via Telegram.
+                if not bot_app or not chat_id:
+                    log.error(
+                        f"voice note dropped: bot_app={bot_app!r} chat_id={chat_id!r} — "
+                        "cleaning up OGG and removing outbox file"
+                    )
+                    _cleanup_ogg(voice_path)
+                    os.remove(filepath)
+                    return
+
+                # Guard: voice_path must be present; fall back to text if missing.
+                if not voice_path:
+                    await _send_voice_fallback("voice_path is missing from outbox message")
+                    os.remove(filepath)
+                    return
+
+                try:
+                    from telegram import InputFile as _InputFile
+                    with open(voice_path, 'rb') as audio_f:
+                        await bot_app.bot.send_voice(
+                            chat_id=chat_id,
+                            voice=_InputFile(audio_f),
+                        )
+                    log.info(f"Sent voice note to {chat_id}: {voice_path}")
+                    # Delete the OGG temp file now that it's been sent.
+                    _cleanup_ogg(voice_path)
+                    os.remove(filepath)
+                    return
+                except Exception as e:
+                    log.warning(f"send_voice failed for {chat_id}: {e} — falling back to text")
+                    _cleanup_ogg(voice_path)
+                    await _send_voice_fallback(str(e))
+                    os.remove(filepath)
+                    return
+
             # Handle photo messages (from image-generation skill or other sources)
             if reply_type == 'photo' and photo_url and chat_id and bot_app:
                 try:
