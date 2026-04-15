@@ -160,3 +160,123 @@ class TestWaitForMessagesIntegration:
         # Result should contain the message (not timeout)
         if results:
             assert "message" in results[0][0].text.lower()
+
+
+class TestSubagentNotificationWakesWFM:
+    """Tests that subagent_notification messages wake wait_for_messages (issue #990).
+
+    The file watcher (watchdog/inotify) can miss rename events under high load.
+    WFM must also periodically poll the inbox directory as a fallback so that
+    subagent_notification (and other message types) are detected within one
+    heartbeat interval even when the file-system event is missed.
+    """
+
+    @pytest.fixture
+    def inbox_dir(self, temp_messages_dir: Path) -> Path:
+        """Get inbox directory."""
+        return temp_messages_dir / "inbox"
+
+    def test_precheck_detects_existing_inbox_files_before_wait(
+        self, inbox_dir: Path
+    ):
+        """WFM returns immediately when a subagent_notification is already in the inbox.
+
+        Validates the pre-check path: after the observer starts but before blocking,
+        WFM scans for existing files. Messages already present are detected without
+        waiting for any heartbeat interval or inotify event.
+        """
+        # Write a subagent_notification BEFORE WFM starts so the pre-check
+        # picks it up immediately.  This validates that the pre-check path works.
+        notification = {
+            "id": "1234567890_test_notify",
+            "type": "subagent_notification",
+            "source": "telegram",
+            "chat_id": 12345,
+            "text": "Subagent completed and already sent reply.",
+            "task_id": "test-task-123",
+            "status": "success",
+            "sent_reply_to_user": True,
+            "timestamp": "2026-01-01T12:00:00+00:00",
+            "warning": "User already received the subagent's reply.",
+        }
+        notification_file = inbox_dir / f"{notification['id']}.json"
+        notification_file.write_text(json.dumps(notification))
+
+        with patch.multiple(
+            "src.mcp.inbox_server",
+            INBOX_DIR=inbox_dir,
+        ):
+            from src.mcp.inbox_server import handle_wait_for_messages
+
+            start = time.time()
+            result = asyncio.run(handle_wait_for_messages({"timeout": 10}))
+            elapsed = time.time() - start
+
+            # Pre-check should return immediately (< 1 second)
+            assert elapsed < 1.0, f"Expected immediate return from pre-check, took {elapsed:.2f}s"
+            text = result[0].text
+            assert "subagent_notification" in text.lower() or "SUBAGENT NOTIFICATION" in text
+
+    def test_fallback_poll_detects_subagent_notification_written_during_wait(
+        self, inbox_dir: Path
+    ):
+        """WFM must detect a subagent_notification written while WFM is blocking.
+
+        Simulates the case where a subagent calls write_result(sent_reply_to_user=True)
+        while the dispatcher is blocked in wait_for_messages.  Even if the file
+        watcher misses the inotify event, the fallback poll must detect the file
+        within WAIT_HEARTBEAT_INTERVAL seconds.
+
+        WAIT_HEARTBEAT_INTERVAL is patched to 1s so the fallback poll fires within
+        ~1.2s of the file being written — well before the 8s join timeout.
+        """
+        import threading
+
+        results = []
+        errors = []
+
+        def wait_thread():
+            try:
+                with patch.multiple(
+                    "src.mcp.inbox_server",
+                    INBOX_DIR=inbox_dir,
+                    WAIT_HEARTBEAT_INTERVAL=1,  # Patch heartbeat to 1s so fallback fires quickly
+                ):
+                    from src.mcp.inbox_server import handle_wait_for_messages
+                    result = asyncio.run(handle_wait_for_messages({"timeout": 5}))
+                    results.append(result)
+            except Exception as e:
+                errors.append(e)
+
+        thread = threading.Thread(target=wait_thread)
+        thread.start()
+
+        # Wait a short moment then write the notification directly (no rename,
+        # simulating a case where the file watcher might not fire).
+        time.sleep(0.2)
+        notification = {
+            "id": "9876543210_test_delayed_notify",
+            "type": "subagent_notification",
+            "source": "telegram",
+            "chat_id": 12345,
+            "text": "Subagent already sent reply to user.",
+            "task_id": "delayed-task",
+            "status": "success",
+            "sent_reply_to_user": True,
+            "timestamp": "2026-01-01T12:00:01+00:00",
+        }
+        notification_file = inbox_dir / f"{notification['id']}.json"
+        notification_file.write_text(json.dumps(notification))
+
+        # With WAIT_HEARTBEAT_INTERVAL=1s and message written at 0.2s, the fallback
+        # poll should fire within ~1.2s — well before the 8s join timeout.
+        thread.join(timeout=8)
+
+        if errors:
+            raise errors[0]
+
+        assert len(results) > 0, "WFM should have returned after subagent_notification was written"
+        text = results[0][0].text
+        assert "message" in text.lower() or "SUBAGENT" in text, (
+            f"Expected WFM to return messages, got: {text[:200]}"
+        )
