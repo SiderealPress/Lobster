@@ -561,22 +561,33 @@ class TestCreateMemoryProvider:
                 provider = create_memory_provider(use_vector=True)
                 assert provider is not None
 
-    def test_falls_back_to_static(self):
+    def test_falls_back_to_static(self, tmp_path):
         """Test fallback to StaticMemory when VectorMemory fails."""
+        import src.mcp.memory.static_memory as _sm
         from src.mcp.memory import create_memory_provider
         from src.mcp.memory.static_memory import StaticMemory
 
-        with patch("src.mcp.memory.VectorMemory", side_effect=ImportError("no sqlite-vec")):
+        canonical_dir = tmp_path / "canonical"
+        canonical_dir.mkdir()
+        event_log = tmp_path / "events.jsonl"
+        with (
+            patch("src.mcp.memory.VectorMemory", side_effect=ImportError("no sqlite-vec")),
+            patch.object(_sm, "DEFAULT_CANONICAL_DIR", canonical_dir),
+        ):
             provider = create_memory_provider(use_vector=True)
             assert isinstance(provider, StaticMemory)
 
-    def test_force_static(self):
+    def test_force_static(self, tmp_path):
         """Test forcing StaticMemory with use_vector=False."""
+        import src.mcp.memory.static_memory as _sm
         from src.mcp.memory import create_memory_provider
         from src.mcp.memory.static_memory import StaticMemory
 
-        provider = create_memory_provider(use_vector=False)
-        assert isinstance(provider, StaticMemory)
+        canonical_dir = tmp_path / "canonical"
+        canonical_dir.mkdir()
+        with patch.object(_sm, "DEFAULT_CANONICAL_DIR", canonical_dir):
+            provider = create_memory_provider(use_vector=False)
+            assert isinstance(provider, StaticMemory)
 
 
 # ============================================================================

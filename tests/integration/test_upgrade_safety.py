@@ -304,11 +304,11 @@ class TestMCPServerDirectoryInit:
 
         # Pre-create some dirs with data (simulating existing install)
         inbox = messages / "inbox"
-        inbox.mkdir(parents=True)
+        inbox.mkdir(parents=True, exist_ok=True)
         (inbox / "existing_msg.json").write_text('{"id": "keep_me"}')
 
         processed = messages / "processed"
-        processed.mkdir(parents=True)
+        processed.mkdir(parents=True, exist_ok=True)
         (processed / "old_msg.json").write_text('{"id": "archived"}')
 
         # Patch the constants and run the directory creation loop
@@ -387,7 +387,7 @@ class TestInFlightMessageSafety:
         ):
             from src.mcp.inbox_server import _recover_stale_processing
 
-            _recover_stale_processing(max_age_seconds=300)
+            _recover_stale_processing()
 
         assert not (processing / f"{msg['id']}.json").exists()
         assert (inbox / f"{msg['id']}.json").exists()
@@ -454,7 +454,7 @@ class TestInFlightMessageSafety:
         ):
             from src.mcp.inbox_server import _recover_stale_processing
 
-            _recover_stale_processing(max_age_seconds=300)
+            _recover_stale_processing()
 
         assert (processing / f"{msg['id']}.json").exists()
         assert not (inbox / f"{msg['id']}.json").exists()
@@ -506,7 +506,7 @@ class TestInFlightMessageSafety:
         ):
             from src.mcp.inbox_server import _recover_stale_processing, _recover_retryable_messages
 
-            _recover_stale_processing(max_age_seconds=300)
+            _recover_stale_processing()
             _recover_retryable_messages()
 
         # inbox: original + stale recovered + retry recovered = 3
