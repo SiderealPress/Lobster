@@ -50,7 +50,7 @@ with open(ack_path) as f:
 ```
 The symlink `~/.claude/` resolves to `~/lobster/.claude/` on standard installs.
 
-3. Run `~/lobster/scripts/record-catchup-state.sh start` (suppresses WFM freshness check for 15 min).
+3. (Catchup suppression no longer required — the health check uses a 20-minute heartbeat threshold that covers catchup naturally. `record-catchup-state.sh` is no longer called. Skip this step.)
 3b. **Claim any pending user messages immediately** to stop the health-check staleness clock:
     - Call `check_inbox()` to get any messages currently waiting in the inbox
     - For each message that is NOT a system message (i.e. `chat_id != 0` and `source != "system"`): call `mark_processing(message_id)`
@@ -67,7 +67,7 @@ The symlink `~/.claude/` resolves to `~/lobster/.claude/` on standard installs.
 - New tasks: ack normally and spawn subagent. These are unambiguously new work.
 - Urgent messages: handle them. You have handoff.md for context.
 
-**When the startup catchup result arrives** (`task_id: "startup-catchup"`, `chat_id: 0`): read for situational awareness, update `handoff.md` if anything notable changed (failed subagents, open threads). Run `~/lobster/scripts/record-catchup-state.sh finish`. Do NOT relay to user — except if `LOBSTER_DEBUG=true`, send the post-bootup status message below. Then `mark_processed`.
+**When the startup catchup result arrives** (`task_id: "startup-catchup"`, `chat_id: 0`): read for situational awareness, update `handoff.md` if anything notable changed (failed subagents, open threads). Do NOT relay to user — except if `LOBSTER_DEBUG=true`, send the post-bootup status message below. Then `mark_processed`.
 
 **Post-bootup status message (LOBSTER_DEBUG=true only):** Send to ADMIN_CHAT_ID. Keep to 5-8 lines, mobile-friendly. Build it from `handoff.md` (just read for startup) and `msg["text"]` (the catchup summary). Format:
 
@@ -246,7 +246,7 @@ After a context compaction you lose situational awareness of the last ~30 minute
 
 > **MANDATORY: You MUST spawn compact-catchup before doing any other work after a compaction. Do not skip compact-catchup even if the in-conversation summary appears sufficient. The summary only covers pre-compaction context; compact-catchup also checks for in-flight subagent state and recently-returned results that the summary cannot know about.**
 
-> **CRITICAL — never batch the compact-reminder with other messages.** If `0_compact` arrives alongside other messages in the same WFM batch, handle the compact-reminder first (steps 1–7 below), return to `wait_for_messages()`, and the other messages will be waiting in the next cycle. Batching the compact-reminder with other work causes `record-catchup-state.sh start` to be skipped or forgotten, which disables WFM freshness suppression and causes a spurious health-check restart after ~10 minutes (issue #1283).
+> **CRITICAL — never batch the compact-reminder with other messages.** If `0_compact` arrives alongside other messages in the same WFM batch, handle the compact-reminder first (steps 1–7 below), return to `wait_for_messages()`, and the other messages will be waiting in the next cycle. Batching the compact-reminder with other work causes the catchup subagent to be spawned late, which may delay context recovery.
 
 ```
 1. mark_processing(message_id)  <- compact-reminder ONLY, not other messages
@@ -259,16 +259,15 @@ After a context compaction you lose situational awareness of the last ~30 minute
    - See .claude/agents/session-note-polish.md for the agent definition
    - Pass: task_id: "session-note-polish", chat_id: 0, source: "system", current_session_file: <path>, MESSAGE_COUNT: <current message count>
    - Do NOT wait for it — spawn and immediately proceed to step 4
-4. Run: ~/lobster/scripts/record-catchup-state.sh start  <- MANDATORY, arms WFM suppression
-5. Spawn compact_catchup subagent (subagent_type: "compact-catchup", run_in_background=True):
+4. Spawn compact_catchup subagent (subagent_type: "compact-catchup", run_in_background=True):
    - See .claude/agents/compact-catchup.md for the full prompt
    - Pass task_id: "compact-catchup", chat_id: 0, source: "system"
    - This step is MANDATORY — never skip it, regardless of how complete the in-conversation summary seems
-6. mark_processed(message_id)
-7. Resume wait_for_messages() loop — do NOT wait for either subagent result inline
+5. mark_processed(message_id)
+6. Resume wait_for_messages() loop — do NOT wait for either subagent result inline
 ```
 
-> **CRITICAL — do not wait inline.** The catchup subagent can take 10-12 minutes. If you wait before calling `wait_for_messages()`, the health check's WFM freshness threshold (600s) will fire and trigger an unnecessary restart.
+> **CRITICAL — do not wait inline.** The catchup subagent can take 10-12 minutes. Always return to `wait_for_messages()` immediately after spawning. The health check heartbeat covers the catchup window — no suppression needed.
 
 **When the compact_catchup result arrives** (`task_id: "compact-catchup"`, `chat_id: 0`):
 - Read `msg["text"]` to restore situational awareness
@@ -277,7 +276,6 @@ After a context compaction you lose situational awareness of the last ~30 minute
     `"🔄 Back online. Context recovered from [window_start] to [now]. [N messages] processed, [M subagents] were running."`
     (Fill in N and M from `msg["text"]`. ADMIN_CHAT_ID from `lobster.conf` or the compact-reminder context.)
     **Before composing this message, convert `[window_start]` and `[now]` from UTC ISO timestamps to ET (e.g. "5:29 AM ET"). Rule: EDT (UTC-4) mid-March through early November, EST (UTC-5) otherwise. Never send raw UTC ISO strings to the user.**
-- Run `~/lobster/scripts/record-catchup-state.sh finish`
 - `mark_processed`
 
 ---

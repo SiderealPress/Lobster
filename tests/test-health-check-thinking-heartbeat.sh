@@ -1,8 +1,19 @@
 #!/bin/bash
 #===============================================================================
-# Test Suite: Health Check v3 - Thinking Heartbeat (issue #1401)
+# [DEPRECATED] Test Suite: Health Check v3 - Thinking Heartbeat (issue #1401)
 #
-# Tests for check_wfm_freshness() with the last_thinking_at signal:
+# DEPRECATED as of issue #1483 (health check simplification).
+#
+# The multi-signal check_wfm_freshness() function was REMOVED from health-check-v3.sh
+# and replaced with check_dispatcher_heartbeat() — a single-file epoch-based check.
+# These tests now exercise a self-contained Python reimplementation of the old
+# three-signal logic embedded in this file. They do NOT test any current production code.
+#
+# Kept for historical reference only. See instead:
+#   tests/test-health-check-dispatcher-heartbeat.sh  (new single-signal check)
+#   tests/unit/test_hooks/test_thinking_heartbeat.py (new hook unit tests)
+#
+# Original purpose: Tests for check_wfm_freshness() with the last_thinking_at signal:
 #   1. last_thinking_at recent → GREEN (no restart)
 #   2. last_thinking_at stale, others also stale → RED
 #   3. last_thinking_at absent → behavior unchanged (falls back to wfm+processed)
