@@ -28,7 +28,7 @@ import pytest
 _DEFAULT_STATE: dict[str, Any] = {
     "last_seen_ts": "2020-01-01T00:00:00Z",
     "hot_mode": False,
-    "consecutive_empty_polls": 0,
+    "last_activity_ts": None,
     "hot_mode_activated_at": None,
 }
 
@@ -79,22 +79,43 @@ def advance_cursor(messages: list[dict], current_ts: str) -> str:
     return max(m["timestamp"] for m in messages)
 
 
-def update_hot_mode(state: dict[str, Any], messages_received: int) -> dict[str, Any]:
+HOT_MODE_TIMEOUT_SECS = 20 * 60  # 20 minutes
+
+
+def update_hot_mode(
+    state: dict[str, Any],
+    messages_received: int,
+    now: datetime | None = None,
+) -> dict[str, Any]:
     """Return updated state with hot-mode transitions applied.
 
-    Hot-mode rules:
-    - Any messages received → hot_mode=True, reset consecutive_empty_polls=0
-    - No messages → increment consecutive_empty_polls; if >= 2 → hot_mode=False
+    Hot-mode entry: any messages received → hot_mode=True, update last_activity_ts.
+    Hot-mode exit: time-based — if now - last_activity_ts >= HOT_MODE_TIMEOUT_SECS,
+    exit hot mode regardless of poll count.
     """
+    if now is None:
+        now = datetime.now(timezone.utc)
     state = dict(state)  # immutable — create a copy
     if messages_received > 0:
         state["hot_mode"] = True
-        state["consecutive_empty_polls"] = 0
+        state["last_activity_ts"] = now.isoformat()
         if state.get("hot_mode_activated_at") is None:
-            state["hot_mode_activated_at"] = datetime.now(timezone.utc).isoformat()
+            state["hot_mode_activated_at"] = now.isoformat()
     else:
-        state["consecutive_empty_polls"] = state.get("consecutive_empty_polls", 0) + 1
-        if state["consecutive_empty_polls"] >= 2:
+        last_activity = state.get("last_activity_ts")
+        if last_activity:
+            try:
+                last_dt = datetime.fromisoformat(last_activity)
+                if last_dt.tzinfo is None:
+                    last_dt = last_dt.replace(tzinfo=timezone.utc)
+                idle_secs = (now - last_dt).total_seconds()
+                if idle_secs >= HOT_MODE_TIMEOUT_SECS:
+                    state["hot_mode"] = False
+                    state["hot_mode_activated_at"] = None
+            except (ValueError, TypeError):
+                state["hot_mode"] = False
+                state["hot_mode_activated_at"] = None
+        else:
             state["hot_mode"] = False
             state["hot_mode_activated_at"] = None
     return state
@@ -180,7 +201,7 @@ class TestStateFileLoading:
         state = load_state(tmp_path / "nonexistent.json")
         assert state["last_seen_ts"] == "2020-01-01T00:00:00Z"
         assert state["hot_mode"] is False
-        assert state["consecutive_empty_polls"] == 0
+        assert state["last_activity_ts"] is None
         assert state["hot_mode_activated_at"] is None
 
     def test_existing_file_loaded(self, tmp_path):
@@ -194,8 +215,8 @@ class TestStateFileLoading:
         f = tmp_path / "state.json"
         f.write_text(json.dumps({"last_seen_ts": "2026-01-01T00:00:00Z"}))
         state = load_state(f)
-        assert "consecutive_empty_polls" in state
-        assert state["consecutive_empty_polls"] == 0
+        assert "last_activity_ts" in state
+        assert state["last_activity_ts"] is None
 
     def test_malformed_json_returns_defaults(self, tmp_path):
         f = tmp_path / "state.json"
@@ -255,27 +276,58 @@ class TestHotModeLogic:
     def _base_state(self, **overrides) -> dict[str, Any]:
         return {**_DEFAULT_STATE, **overrides}
 
+    def _now(self) -> datetime:
+        return datetime(2026, 4, 1, 12, 0, 0, tzinfo=timezone.utc)
+
     def test_messages_received_enables_hot_mode(self):
         state = self._base_state(hot_mode=False)
-        result = update_hot_mode(state, messages_received=3)
+        result = update_hot_mode(state, messages_received=3, now=self._now())
         assert result["hot_mode"] is True
 
-    def test_two_empty_polls_disables_hot_mode(self):
-        state = self._base_state(hot_mode=True, consecutive_empty_polls=1)
-        result = update_hot_mode(state, messages_received=0)
-        assert result["consecutive_empty_polls"] == 2
+    def test_messages_received_records_last_activity_ts(self):
+        state = self._base_state(hot_mode=False)
+        result = update_hot_mode(state, messages_received=1, now=self._now())
+        assert result["last_activity_ts"] == self._now().isoformat()
+
+    def test_empty_poll_within_20min_keeps_hot_mode(self):
+        # last activity was 10 minutes ago → still within 20-minute window
+        last = datetime(2026, 4, 1, 11, 50, 0, tzinfo=timezone.utc)
+        state = self._base_state(hot_mode=True, last_activity_ts=last.isoformat())
+        result = update_hot_mode(state, messages_received=0, now=self._now())
+        assert result["hot_mode"] is True  # 10 min < 20 min timeout
+
+    def test_empty_poll_after_20min_exits_hot_mode(self):
+        # last activity was 21 minutes ago → beyond timeout
+        last = datetime(2026, 4, 1, 11, 39, 0, tzinfo=timezone.utc)
+        state = self._base_state(hot_mode=True, last_activity_ts=last.isoformat())
+        result = update_hot_mode(state, messages_received=0, now=self._now())
+        assert result["hot_mode"] is False
+        assert result["hot_mode_activated_at"] is None
+
+    def test_empty_poll_at_exactly_20min_exits_hot_mode(self):
+        # last activity was exactly 20 minutes ago → at boundary, should exit
+        last = datetime(2026, 4, 1, 11, 40, 0, tzinfo=timezone.utc)
+        state = self._base_state(hot_mode=True, last_activity_ts=last.isoformat())
+        result = update_hot_mode(state, messages_received=0, now=self._now())
         assert result["hot_mode"] is False
 
-    def test_one_empty_poll_does_not_disable_hot_mode(self):
-        state = self._base_state(hot_mode=True, consecutive_empty_polls=0)
-        result = update_hot_mode(state, messages_received=0)
-        assert result["consecutive_empty_polls"] == 1
-        assert result["hot_mode"] is True
+    def test_no_last_activity_exits_hot_mode(self):
+        # hot_mode=True but no last_activity_ts → exit conservatively
+        state = self._base_state(hot_mode=True, last_activity_ts=None)
+        result = update_hot_mode(state, messages_received=0, now=self._now())
+        assert result["hot_mode"] is False
+
+    def test_malformed_last_activity_exits_hot_mode(self):
+        state = self._base_state(hot_mode=True, last_activity_ts="not-a-timestamp")
+        result = update_hot_mode(state, messages_received=0, now=self._now())
+        assert result["hot_mode"] is False
 
     def test_update_is_immutable_does_not_modify_input(self):
-        state = self._base_state(consecutive_empty_polls=2)
-        _ = update_hot_mode(state, messages_received=0)
-        assert state["consecutive_empty_polls"] == 2
+        last = datetime(2026, 4, 1, 11, 50, 0, tzinfo=timezone.utc)
+        state = self._base_state(hot_mode=True, last_activity_ts=last.isoformat())
+        original_activity = state["last_activity_ts"]
+        _ = update_hot_mode(state, messages_received=0, now=self._now())
+        assert state["last_activity_ts"] == original_activity  # not mutated
 
 
 class TestSelfMessageFilter:
