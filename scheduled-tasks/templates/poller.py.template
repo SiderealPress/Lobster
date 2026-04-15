@@ -1,0 +1,243 @@
+#!/usr/bin/env -S uv run python3
+"""
+<SHORT_DESCRIPTION> — Lobster Kind 1 polling script.
+
+This is a code-first (Kind 1) scheduled job. It runs on a systemd timer,
+polls an external source, and writes to the Lobster inbox when new data is
+found. No LLM is invoked if nothing changed (zero token cost on empty polls).
+
+SETUP: Search for all YOUR_* placeholders and replace them before deploying.
+
+Architecture:
+  systemd timer fires → this script runs → if new data: writes inbox message
+  → dispatcher picks up message → (optionally) spawns Claude subagent
+
+For Kind 1 jobs, the subagent step may be omitted: the script can write a
+fully-formed notification directly and the dispatcher routes it.
+
+State file: ~/lobster-workspace/data/YOUR_JOB_NAME-state.json
+Inbox writes: ~/messages/inbox/<epoch_ms>_YOUR_JOB_NAME.json
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import sys
+import uuid
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+from typing import Any
+
+# ---------------------------------------------------------------------------
+# Constants — fill these in before deploying
+# ---------------------------------------------------------------------------
+
+JOB_NAME: str = "YOUR_JOB_NAME"  # must match the systemd unit name (lobster-<JOB_NAME>)
+
+# Admin chat ID: where inbox notifications are routed.
+# Read from env so this script works without hardcoded credentials.
+_admin_chat_id_str = os.environ.get("LOBSTER_ADMIN_CHAT_ID") or os.environ.get("ADMIN_CHAT_ID") or ""
+if not _admin_chat_id_str:
+    # Fail fast at startup, not silently mid-run
+    print(f"[{JOB_NAME}] ERROR: LOBSTER_ADMIN_CHAT_ID env var not set", file=sys.stderr)
+    sys.exit(0)  # exit 0 to avoid systemd marking the unit failed for a config issue
+ADMIN_CHAT_ID: int = int(_admin_chat_id_str)
+
+# File paths — convention: ~/lobster-workspace/data/<job-name>-state.json
+STATE_FILE = Path.home() / "lobster-workspace" / "data" / f"{JOB_NAME}-state.json"
+INBOX_DIR = Path.home() / "messages" / "inbox"
+
+# Logging
+log = logging.getLogger(JOB_NAME)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    stream=sys.stderr,
+)
+
+
+# ---------------------------------------------------------------------------
+# State management (pure transformation + atomic I/O)
+# ---------------------------------------------------------------------------
+
+def _default_state() -> dict[str, Any]:
+    """Return initial state for a first-run install (look back 1 hour)."""
+    return {
+        "last_check_ts": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
+        # Add job-specific fields here, e.g.:
+        # "last_seen_id": None,
+    }
+
+
+def _load_state() -> dict[str, Any]:
+    """Read state file; return defaults if missing or corrupted."""
+    if not STATE_FILE.exists():
+        log.info("No state file found — using defaults (first run)")
+        return _default_state()
+    try:
+        data = json.loads(STATE_FILE.read_text())
+        # Forward-compat: ensure all expected keys exist
+        defaults = _default_state()
+        for key, val in defaults.items():
+            data.setdefault(key, val)
+        return data
+    except Exception as exc:
+        log.warning(f"State file corrupted ({exc}) — resetting to defaults")
+        return _default_state()
+
+
+def _write_state(state: dict[str, Any]) -> None:
+    """Write state atomically (tmp → replace) to prevent partial reads."""
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = Path(str(STATE_FILE) + ".tmp")
+    tmp.write_text(json.dumps(state, indent=2, ensure_ascii=False))
+    tmp.replace(STATE_FILE)
+
+
+# ---------------------------------------------------------------------------
+# External source polling (pure function — no I/O side effects)
+# Replace _poll() with your actual API call.
+# ---------------------------------------------------------------------------
+
+def _poll(state: dict[str, Any]) -> list[dict[str, Any]]:
+    """Fetch items from the external source that are new since state['last_check_ts'].
+
+    Returns a list of items (may be empty). Must not mutate state.
+    Raises on unrecoverable errors (caller wraps in try/except).
+
+    REPLACE THIS with your actual API call.
+
+    Example patterns:
+      - HTTP GET with ?since= query param
+      - Read a file and check mtime
+      - `gh api graphql` call
+      - Parse a JSONL file for new lines beyond a byte offset
+    """
+    last_ts = state.get("last_check_ts", "")
+    log.info(f"Polling YOUR_SOURCE since {last_ts}")
+
+    # --- YOUR API CALL HERE ---
+    # import urllib.request
+    # url = f"https://YOUR_API/items?since={last_ts}"
+    # with urllib.request.urlopen(url) as resp:
+    #     data = json.loads(resp.read())
+    # return data.get("items", [])
+
+    # Stub: return empty list (no-op until you fill this in)
+    return []
+
+
+# ---------------------------------------------------------------------------
+# Delta computation (pure function)
+# ---------------------------------------------------------------------------
+
+def _is_new(item: dict[str, Any], state: dict[str, Any]) -> bool:
+    """Return True if this item is newer than what we've already seen.
+
+    Adjust the comparison to match your data model:
+      - timestamp-based: item["created_at"] > state["last_check_ts"]
+      - ID-based: item["id"] not in seen_ids
+      - sequence-based: item["seq"] > state["last_seq"]
+    """
+    item_ts = item.get("created_at") or item.get("timestamp") or ""
+    return item_ts > state.get("last_check_ts", "")
+
+
+def _compute_delta(
+    items: list[dict[str, Any]], state: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Filter items to only those that are new since the last recorded state."""
+    return [item for item in items if _is_new(item, state)]
+
+
+# ---------------------------------------------------------------------------
+# Inbox message writer (atomic I/O)
+# ---------------------------------------------------------------------------
+
+def _write_inbox_message(new_items: list[dict[str, Any]], state: dict[str, Any]) -> None:
+    """Write a structured scheduled_reminder to ~/messages/inbox/.
+
+    Uses epoch_ms prefix for filename to ensure FIFO ordering in the inbox.
+    Writes atomically via tmp → replace.
+    """
+    INBOX_DIR.mkdir(parents=True, exist_ok=True)
+    epoch_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    msg_id = f"{epoch_ms}_scheduled_{JOB_NAME}"
+    last_ts = state.get("last_check_ts", "")
+
+    msg: dict[str, Any] = {
+        "id": msg_id,
+        "source": "system",
+        "type": "scheduled_reminder",
+        "chat_id": ADMIN_CHAT_ID,
+        "user_id": ADMIN_CHAT_ID,
+        "username": "lobster-cron",
+        "user_name": "Cron",
+        "text": f"[{JOB_NAME}] {len(new_items)} new item(s) since {last_ts}",
+        "job_name": JOB_NAME,
+        # Structured payload — the dispatcher and any subagent can read this.
+        # Keep it compact: include only what the subagent needs to reason.
+        "items": new_items,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    out = INBOX_DIR / f"{msg_id}.json"
+    tmp = INBOX_DIR / f"{msg_id}.tmp"
+    tmp.write_text(json.dumps(msg, ensure_ascii=False, indent=2))
+    tmp.replace(out)
+    log.info(f"Wrote inbox message: {out.name}")
+
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    """Run one poll cycle.
+
+    Flow:
+      1. Load state (watermark + any cursors)
+      2. Poll external source
+      3. Compute delta vs watermark
+      4. If empty delta: log no-op, exit 0 (no inbox write, no LLM cost)
+      5. If new items: write inbox message, then advance watermark
+         (order matters: write first, then advance — see HOW-TO-MIGRATE.md)
+
+    Always exits 0. Errors are logged but do not fail the systemd unit.
+    """
+    try:
+        state = _load_state()
+
+        # Poll — may raise on network/API errors
+        all_items = _poll(state)
+
+        # Filter to what's genuinely new
+        new_items = _compute_delta(all_items, state)
+
+        if not new_items:
+            log.info(f"No new items — exiting without inbox write")
+            return  # exit 0
+
+        log.info(f"Found {len(new_items)} new item(s) — writing to inbox")
+
+        # Write inbox message BEFORE advancing the watermark.
+        # If we crash between these two lines, the next run will re-process
+        # the same items (safe duplication), rather than silently skipping them.
+        _write_inbox_message(new_items, state)
+
+        # Advance watermark: update last_check_ts to now (or to the max timestamp
+        # in new_items, depending on your data model).
+        new_state = dict(state)
+        new_state["last_check_ts"] = datetime.now(timezone.utc).isoformat()
+        # If your API uses IDs: new_state["last_seen_id"] = new_items[-1]["id"]
+        _write_state(new_state)
+
+    except Exception as exc:
+        # Log and exit 0 — do not let a transient error fail the systemd unit
+        log.error(f"Unhandled error in {JOB_NAME}: {exc}", exc_info=True)
+        sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()
