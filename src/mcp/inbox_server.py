@@ -5401,6 +5401,9 @@ def _apply_filters_and_paginate(
     return filtered[offset: offset + limit], total
 
 
+_HISTORY_TEXT_DISPLAY_LIMIT = 4000  # Max chars shown per message in get_conversation_history
+
+
 def _format_history_output(
     paginated: list[dict],
     total_count: int,
@@ -5411,6 +5414,8 @@ def _format_history_output(
 
     Each dict must have _direction set to 'received' or 'sent'.
     Fields source, chat_id, timestamp, text, user_name, username are optional.
+    Messages longer than _HISTORY_TEXT_DISPLAY_LIMIT chars are shown with a
+    [truncated] suffix so the caller knows the content was cut.
     """
     showing_end = min(offset + limit, total_count)
     output = f"**Conversation History** (showing {offset + 1}-{showing_end} of {total_count}):\n\n"
@@ -5428,7 +5433,8 @@ def _format_history_output(
         except (ValueError, TypeError):
             ts_display = ts
 
-        truncated = text[:500] + ("..." if len(text) > 500 else "")
+        was_truncated = len(text) > _HISTORY_TEXT_DISPLAY_LIMIT
+        truncated = text[:_HISTORY_TEXT_DISPLAY_LIMIT] + (" [truncated]" if was_truncated else "")
         if msg["_direction"] == "received":
             user = msg.get("user_name", msg.get("username", "Unknown"))
             output += "---\n"
