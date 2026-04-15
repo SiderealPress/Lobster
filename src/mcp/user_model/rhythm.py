@@ -1,7 +1,7 @@
 """
 Activity Rhythm: track hourly/daily message patterns.
 
-Builds a model of when Drew is most active, most responsive, and most engaged.
+Builds a model of when the user is most active, most responsive, and most engaged.
 This is used by the inference engine to adjust attention scoring and response
 style hints based on time-of-day context.
 
@@ -9,7 +9,7 @@ Depends on: schema.py, db.py only.
 """
 
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from .db import get_activity_rhythm, get_peak_activity_hours, update_activity_rhythm
@@ -48,7 +48,7 @@ def get_current_activity_level(
 
     relative_level: 'very_high' | 'high' | 'normal' | 'low' | 'unknown'
     """
-    now = now or datetime.utcnow()
+    now = now or datetime.now(timezone.utc)
     hour = now.hour
     day = now.weekday()
 

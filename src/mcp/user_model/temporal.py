@@ -2,14 +2,14 @@
 Temporal Modeling: weekly snapshots and drift detection.
 
 Captures weekly state of the preference graph and detects meaningful changes
-over time. This is the foundation for understanding how Drew's values and
-preferences evolve — and for surfacing those changes back to him.
+over time. This is the foundation for understanding how the user's values and
+preferences evolve — and for surfacing those changes back to them.
 
 Depends on: schema.py, db.py only.
 """
 
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from .db import (
@@ -42,7 +42,7 @@ def take_weekly_snapshot_if_due(conn: sqlite3.Connection) -> str | None:
     """
     latest = get_latest_snapshot(conn)
     if latest:
-        days_since = (datetime.utcnow() - latest.snapshot_at).days
+        days_since = (datetime.now(timezone.utc) - latest.snapshot_at).days
         if days_since < 6:
             return None
 
@@ -79,7 +79,7 @@ def _capture_snapshot(conn: sqlite3.Connection) -> str:
         "active_pattern_names": [p.name for p in patterns],
     }
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     iso_cal = now.isocalendar()
     snapshot = TemporalSnapshot(
         id=None,
@@ -123,7 +123,7 @@ def detect_drift_since_last_snapshot(conn: sqlite3.Connection) -> list[DriftReco
     previous_snap = snapshots[1]
 
     records: list[DriftRecord] = []
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     # Build index of previous state
     prev_prefs = {p["id"]: p for p in previous_snap.data.get("preferences", [])}

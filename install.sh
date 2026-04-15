@@ -38,12 +38,21 @@ error() { echo -e "${RED}[ERROR]${NC} $1"; }
 step() { echo -e "\n${CYAN}${BOLD}▶ $1${NC}"; }
 
 # Parse install mode from arguments
+#
+# Flags:
+#   (default)         git clone from main — always current
+#   --stable          download latest GitHub release tarball (pinned, reproducible)
+#   --dev             git clone from main + write LOBSTER_DEBUG=true to config.env
+#   --non-interactive skip interactive prompts (CI / Docker)
+#   --container-setup implies --non-interactive; for container-specific setup
 DEV_MODE=false
+STABLE_MODE=false
 NON_INTERACTIVE=false
 CONTAINER_SETUP=false
 for arg in "$@"; do
     case "$arg" in
         --dev) DEV_MODE=true ;;
+        --stable) STABLE_MODE=true ;;
         --non-interactive|--skip-config) NON_INTERACTIVE=true ;;
         --container-setup)
             CONTAINER_SETUP=true
@@ -165,6 +174,49 @@ generate_from_template() {
         "$template" > "$output"
 
     success "Generated: $output"
+}
+
+#===============================================================================
+# Config File Helpers
+#===============================================================================
+
+# set_config_if_missing KEY VALUE [CONFIG_PATH]
+#
+# Writes KEY=VALUE to the config file only if the key is absent or has an
+# empty / placeholder value ("your_*_here").  Safe to call on every install
+# run — already-configured values are never overwritten.
+set_config_if_missing() {
+    local key="$1"
+    local value="$2"
+    local file="${3:-$CONFIG_FILE}"
+
+    if [ ! -f "$file" ]; then
+        mkdir -p "$(dirname "$file")"
+        touch "$file"
+    fi
+
+    # Read current value for this key
+    local current
+    current=$(grep -E "^${key}=" "$file" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+
+    # Skip if already set to a non-empty, non-placeholder value
+    if [ -n "$current" ] && [[ "$current" != your_*_here ]]; then
+        return 0
+    fi
+
+    if grep -q "^${key}=" "$file" 2>/dev/null; then
+        # Key exists but is empty or placeholder — replace in-place
+        local tmp
+        tmp=$(mktemp)
+        KEY="$key" VALUE="$value" awk             'BEGIN { replaced=0 }
+             $0 ~ "^" ENVIRON["KEY"] "=" && !replaced { print ENVIRON["KEY"] "=" ENVIRON["VALUE"]; replaced=1; next }
+             { print }'             "$file" > "$tmp" && mv "$tmp" "$file"
+    else
+        # Key absent — append
+        printf '
+%s=%s
+' "$key" "$value" >> "$file"
+    fi
 }
 
 #===============================================================================
@@ -319,10 +371,11 @@ if [ "$CONTAINER_SETUP" = true ]; then
 
     # Create runtime directories (same as full install)
     mkdir -p "$WORKSPACE_DIR"/{logs,data,scheduled-jobs/{logs,tasks}}
+    mkdir -p "$WORKSPACE_DIR/reports"
     mkdir -p "$MESSAGES_DIR"/{inbox,outbox,processed,processing,failed,config,audio,task-outputs}
     mkdir -p "$CONFIG_DIR"
     mkdir -p "$PROJECTS_DIR"
-    mkdir -p "$USER_CONFIG_DIR/memory"/{canonical/{people,projects},archive/digests}
+    mkdir -p "$USER_CONFIG_DIR/memory"/{canonical/{people,projects,sessions},archive/digests}
     mkdir -p "$USER_CONFIG_DIR/agents/subagents"
     # Safety: remove orphan agents.db if it was created (real store is agent_sessions.db)
     rm -f "$MESSAGES_DIR/config/agents.db" "$WORKSPACE_DIR/data/agents.db"
@@ -331,9 +384,12 @@ if [ "$CONTAINER_SETUP" = true ]; then
     # applies immediately on first start. Without this, is_boot_grace_period() returns
     # false (missing field) and the health check fires within seconds of first launch,
     # triggering a restart loop before Claude has had time to initialize.
-    local state_file="$MESSAGES_DIR/config/lobster-state.json"
+    state_file="$MESSAGES_DIR/config/lobster-state.json"
     if [ ! -f "$state_file" ]; then
-        echo '{"mode": "active", "booted_at": "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' > "$state_file"
+        # Write atomically via tmp+rename to prevent a truncated file on interrupt (#924)
+        _state_tmp="${state_file}.tmp.$$"
+        printf '{"mode": "active", "booted_at": "%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$_state_tmp"
+        mv "$_state_tmp" "$state_file"
         info "  Seeded lobster-state.json with initial booted_at timestamp"
     fi
     success "Directories created"
@@ -350,23 +406,53 @@ if [ "$CONTAINER_SETUP" = true ]; then
                 info "  Seeded canonical template: $base"
             fi
         done
+        # Seed subdirectory templates (e.g. sessions/session.template.md)
+        for subdir in "$TEMPLATES_DIR"/*/; do
+            [ -d "$subdir" ] || continue
+            subdir_name=$(basename "$subdir")
+            mkdir -p "$USER_CONFIG_DIR/memory/canonical/$subdir_name"
+            for tmpl in "$subdir"*.md; do
+                [ -f "$tmpl" ] || continue
+                base=$(basename "$tmpl")
+                dest="$USER_CONFIG_DIR/memory/canonical/$subdir_name/$base"
+                if [ ! -f "$dest" ]; then
+                    cp "$tmpl" "$dest"
+                    info "  Seeded canonical template: $subdir_name/$base"
+                fi
+            done
+        done
+        # Seed YAML templates (e.g. ifttt-rules.yaml)
+        for tmpl in "$TEMPLATES_DIR"/*.yaml; do
+            [ -f "$tmpl" ] || continue
+            base=$(basename "$tmpl")
+            dest="$USER_CONFIG_DIR/memory/canonical/$base"
+            if [ ! -f "$dest" ]; then
+                cp "$tmpl" "$dest"
+                info "  Seeded canonical template: $base"
+            fi
+        done
     fi
 
     # Create stub user-config agent files if they don't exist
-    for stub_file in "user.base.bootup.md" "user.base.context.md" "user.dispatcher.bootup.md" "user.subagent.bootup.md"; do
+    # user.base.bootup.md gets seeded from the example template (contains timezone placeholder)
+    USER_BASE_BOOTUP_TEMPLATE="$INSTALL_DIR/memory/canonical-templates/user.base.bootup.md.example"
+    user_base_bootup_dest="$USER_CONFIG_DIR/agents/user.base.bootup.md"
+    if [ ! -f "$user_base_bootup_dest" ]; then
+        if [ -f "$USER_BASE_BOOTUP_TEMPLATE" ]; then
+            cp "$USER_BASE_BOOTUP_TEMPLATE" "$user_base_bootup_dest"
+            info "  Seeded user.base.bootup.md from template (customize timezone and preferences)"
+        else
+            touch "$user_base_bootup_dest"
+            info "  Created stub: agents/user.base.bootup.md"
+        fi
+    fi
+    for stub_file in "user.base.context.md" "user.dispatcher.bootup.md" "user.subagent.bootup.md"; do
         stub_dest="$USER_CONFIG_DIR/agents/$stub_file"
         if [ ! -f "$stub_dest" ]; then
             touch "$stub_dest"
             info "  Created stub: agents/$stub_file"
         fi
     done
-
-    # Create jobs.json if it doesn't exist
-    JOBS_FILE="$WORKSPACE_DIR/scheduled-jobs/jobs.json"
-    if [ ! -f "$JOBS_FILE" ]; then
-        echo '{"jobs": {}}' > "$JOBS_FILE"
-        info "  Created scheduled-jobs registry"
-    fi
 
     # sqlite-vec: verify it loads correctly
     # pyproject.toml requires >=0.1.7a1 which has correct aarch64 wheels.
@@ -460,8 +546,26 @@ if [ "$(id -u)" = "0" ]; then
     if getent group docker &>/dev/null; then
         usermod -aG docker lobster
         success "Added 'lobster' to the docker group."
+    elif command -v docker &>/dev/null; then
+        # Docker is installed but the group doesn't exist — that's unusual and worth flagging
+        warn "Docker is installed but the 'docker' group doesn't exist — run 'sudo groupadd docker && sudo usermod -aG docker lobster' to fix."
     else
-        warn "docker group not found — skipping docker group membership (install Docker first)."
+        # Docker not installed — this is the normal case on a fresh machine, not a warning
+        info "Docker not installed — skipping docker group setup. Install Docker later to enable Docker features."
+    fi
+    # Add lobster user to the crontab group so sync-crontab.sh works under NoNewPrivs.
+    # Claude Code sets PR_SET_NO_NEW_PRIVS on the MCP server process, which propagates to
+    # child processes and suppresses setgid bits. The `crontab` binary is setgid-crontab —
+    # that privilege is what lets it write to /var/spool/cron/crontabs/. Without it,
+    # `crontab -` fails with "mkstemp: Permission denied". Group membership lets the
+    # lobster user write directly to /var/spool/cron/crontabs/ (group-writable) without
+    # needing the setgid bit.
+    if getent group crontab &>/dev/null; then
+        usermod -aG crontab lobster
+        success "Added 'lobster' to the crontab group (fixes NoNewPrivs crontab permission error)."
+        warn "Group membership takes effect at next login. Run 'newgrp crontab' or restart after install to apply."
+    else
+        warn "The 'crontab' group does not exist — scheduled job syncing may fail. Run: sudo groupadd crontab && sudo usermod -aG crontab lobster"
     fi
     # Copy script to /tmp so lobster user can read it regardless of working directory
     INSTALL_SCRIPT="$(readlink -f "$0")"
@@ -473,7 +577,13 @@ if [ "$(id -u)" = "0" ]; then
     echo ""
     info "Re-running installer as 'lobster' user..."
     echo ""
-    exec sudo -u lobster HOME="$LOBSTER_HOME" bash "$TMP_SCRIPT" "$@"
+    # Pass Telegram credentials through the re-exec so non-interactive install can write them
+    TELEGRAM_CRED_VARS=()
+    [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && TELEGRAM_CRED_VARS+=("TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}")
+    [ -n "${TELEGRAM_ALLOWED_USERS:-}" ] && TELEGRAM_CRED_VARS+=("TELEGRAM_ALLOWED_USERS=${TELEGRAM_ALLOWED_USERS}")
+    [ -n "${TELEGRAM_USER_ID:-}" ] && TELEGRAM_CRED_VARS+=("TELEGRAM_USER_ID=${TELEGRAM_USER_ID}")
+    [ -n "${LOBSTER_ADMIN_CHAT_ID:-}" ] && TELEGRAM_CRED_VARS+=("LOBSTER_ADMIN_CHAT_ID=${LOBSTER_ADMIN_CHAT_ID}")
+    exec sudo -u lobster HOME="$LOBSTER_HOME" env "${TELEGRAM_CRED_VARS[@]}" bash "$TMP_SCRIPT" "$@"
 fi
 
 # Check if running interactively
@@ -499,12 +609,16 @@ if ! sudo true 2>/dev/null; then
 fi
 success "Sudo access confirmed"
 
-# Check internet
-if ! curl -s --connect-timeout 5 https://api.github.com >/dev/null; then
-    error "No internet connection"
+# Check internet (skip when source is already present — existing install, or
+# pre-copied source in non-interactive mode, matching the git clone skip condition).
+if [ -d "$INSTALL_DIR/.git" ] || { [ -f "$INSTALL_DIR/install.sh" ] && [ "$NON_INTERACTIVE" = true ]; }; then
+    info "Skipping internet check (source already present)"
+elif ! curl -s --connect-timeout 5 https://api.github.com >/dev/null; then
+    error "No internet connection (required for fresh install)"
     exit 1
+else
+    success "Internet connectivity confirmed"
 fi
-success "Internet connectivity confirmed"
 
 # Check Python
 if ! command -v python3 &>/dev/null; then
@@ -804,10 +918,16 @@ fi
 if [ "$CLAUDE_INSTALLED" = false ]; then
     step "Installing Claude Code..."
 
+    # The official Claude Code installer (curl -fsSL https://claude.ai/install.sh | bash)
+    # is itself non-interactive — it does not prompt for input. We can safely run it in
+    # both interactive and non-interactive modes. The previous behaviour of skipping the
+    # install in non-interactive mode left the lobster-claude service unable to start.
     curl -fsSL https://claude.ai/install.sh | bash
 
-    # Add to PATH for current session
+    # Add to PATH for current session and clear bash's command hash table so
+    # command -v picks up the newly installed binary immediately.
     export PATH="$HOME/.local/bin:$PATH"
+    hash -r 2>/dev/null || true
 
     # Persist ~/.local/bin to PATH in shell config files
     PATH_LINE="export PATH=\"\$HOME/.local/bin:\$PATH\""
@@ -820,7 +940,7 @@ if [ "$CLAUDE_INSTALLED" = false ]; then
         fi
     done
 
-    if command -v claude &>/dev/null; then
+    if command -v claude &>/dev/null || [ -x "$HOME/.local/bin/claude" ]; then
         success "Claude Code installed"
     else
         error "Claude Code installation failed"
@@ -852,16 +972,34 @@ fi
 # Install Lobster Code
 #===============================================================================
 
-# Detect install mode: --dev flag, existing .git, or tarball
+# Detect install mode.
+#
+# Priority:
+#   1. Existing .git dir       → git update (always wins; no flag can override an existing repo)
+#   2. --stable flag           → tarball of the latest GitHub release (opt-in, pinned)
+#   3. default / --dev flag    → git clone from main (always current)
+#   4. git not available       → tarball fallback (last resort)
+#
+# See: https://github.com/SiderealPress/lobster/issues/787
 if [ -d "$INSTALL_DIR/.git" ]; then
     INSTALL_MODE="git"
     info "Existing git install detected"
-elif $DEV_MODE; then
-    INSTALL_MODE="git"
-    info "Developer mode requested"
-else
+elif $STABLE_MODE; then
     INSTALL_MODE="tarball"
-    info "Tarball install mode"
+    info "Stable mode: using latest release tarball"
+else
+    # Default and --dev: git clone when available
+    if command -v git >/dev/null 2>&1; then
+        INSTALL_MODE="git"
+        if $DEV_MODE; then
+            info "Developer mode: using git clone (LOBSTER_DEBUG will be enabled)"
+        else
+            info "Fresh install: using git clone from main (always current)"
+        fi
+    else
+        INSTALL_MODE="tarball"
+        warn "git not found — falling back to tarball install"
+    fi
 fi
 
 if [ "$INSTALL_MODE" = "git" ]; then
@@ -873,6 +1011,11 @@ if [ "$INSTALL_MODE" = "git" ]; then
         git fetch --quiet
         git checkout --quiet "$REPO_BRANCH"
         git pull --quiet origin "$REPO_BRANCH"
+    elif [ -f "$INSTALL_DIR/install.sh" ] && [ "$NON_INTERACTIVE" = true ]; then
+        # Source is already present (e.g. Docker test environment with COPY'd source).
+        # In non-interactive mode, trust the pre-populated directory and skip the clone.
+        info "Source already present at $INSTALL_DIR — skipping git clone (non-interactive mode)"
+        cd "$INSTALL_DIR"
     else
         info "Cloning repository from $REPO_URL (branch: $REPO_BRANCH)..."
         git clone --quiet --branch "$REPO_BRANCH" "$REPO_URL" "$INSTALL_DIR"
@@ -881,11 +1024,13 @@ if [ "$INSTALL_MODE" = "git" ]; then
 
     success "Repository ready at $INSTALL_DIR (branch: $REPO_BRANCH)"
 
-    step "Configuring distributed git hooks..."
-    cd "$INSTALL_DIR"
-    git config --local core.hooksPath .githooks
-    chmod +x .githooks/pre-push .githooks/post-checkout .githooks/pre-commit .githooks/post-merge .githooks/post-rewrite 2>/dev/null || true
-    success "Git hooks configured (core.hooksPath -> .githooks)"
+    if [ -d "$INSTALL_DIR/.git" ]; then
+        step "Configuring distributed git hooks..."
+        cd "$INSTALL_DIR"
+        git config --local core.hooksPath .githooks
+        chmod +x .githooks/pre-push .githooks/post-checkout .githooks/pre-commit .githooks/post-merge .githooks/post-rewrite 2>/dev/null || true
+        success "Git hooks configured (core.hooksPath -> .githooks)"
+    fi
 
 else
     step "Downloading latest Lobster release..."
@@ -899,6 +1044,10 @@ else
     LATEST_TAG=$(echo "$RELEASE_JSON" | jq -r '.tag_name // empty' 2>/dev/null || true)
 
     if [ -z "$LATEST_TAG" ]; then
+        if ! command -v git >/dev/null 2>&1; then
+            error "No release tag found and git is not available. Cannot install."
+            exit 1
+        fi
         info "No release found, falling back to git clone..."
         git clone --quiet --branch "$REPO_BRANCH" "$REPO_URL" "$INSTALL_DIR"
         cd "$INSTALL_DIR"
@@ -914,6 +1063,10 @@ else
         fi
 
         if [ -z "$TARBALL_URL" ]; then
+            if ! command -v git >/dev/null 2>&1; then
+                error "No release tag found and git is not available. Cannot install."
+                exit 1
+            fi
             error "No tarball found in release. Falling back to git clone..."
             git clone --quiet --branch "$REPO_BRANCH" "$REPO_URL" "$INSTALL_DIR"
             cd "$INSTALL_DIR"
@@ -986,10 +1139,11 @@ fi
 step "Creating directories..."
 
 mkdir -p "$WORKSPACE_DIR"/{logs,data,scheduled-jobs/{logs,tasks}}
+mkdir -p "$WORKSPACE_DIR/reports"
 mkdir -p "$MESSAGES_DIR"/{inbox,outbox,processed,processing,failed,config,audio,task-outputs}
 mkdir -p "$CONFIG_DIR"
 mkdir -p "$PROJECTS_DIR"
-mkdir -p "$USER_CONFIG_DIR/memory"/{canonical/{people,projects},archive/digests}
+mkdir -p "$USER_CONFIG_DIR/memory"/{canonical/{people,projects,sessions},archive/digests}
 mkdir -p "$USER_CONFIG_DIR/agents/subagents"
 # Safety: remove orphan agents.db if it was created (real store is agent_sessions.db)
 rm -f "$MESSAGES_DIR/config/agents.db" "$WORKSPACE_DIR/data/agents.db"
@@ -1000,7 +1154,10 @@ rm -f "$MESSAGES_DIR/config/agents.db" "$WORKSPACE_DIR/data/agents.db"
 # triggering a restart loop before Claude has had time to initialize.
 STATE_FILE="$MESSAGES_DIR/config/lobster-state.json"
 if [ ! -f "$STATE_FILE" ]; then
-    echo '{"mode": "active", "booted_at": "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' > "$STATE_FILE"
+    # Write atomically via tmp+rename to prevent a truncated file on interrupt (#924)
+    _STATE_TMP="${STATE_FILE}.tmp.$$"
+    printf '{"mode": "active", "booted_at": "%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$_STATE_TMP"
+    mv "$_STATE_TMP" "$STATE_FILE"
     info "  Seeded lobster-state.json with initial booted_at timestamp"
 fi
 
@@ -1008,9 +1165,40 @@ fi
 mkdir -p "$HOME/projects"/{personal,business}
 
 # Seed canonical templates (only files that don't already exist; skip examples)
+# NOTE: system-audit.context.md is excluded from this loop — it belongs in
+# user-config/agents/, not memory/canonical/. It has its own seeding block below.
+# Including it here would create a stale duplicate that diverges from the agents/
+# copy over time (issue #1196).
 TEMPLATES_DIR="$INSTALL_DIR/memory/canonical-templates"
 if [ -d "$TEMPLATES_DIR" ]; then
     for tmpl in "$TEMPLATES_DIR"/*.md; do
+        [ -f "$tmpl" ] || continue
+        base=$(basename "$tmpl")
+        # system-audit.context.md is seeded to agents/ below, not memory/canonical/
+        [[ "$base" == "system-audit.context.md" ]] && continue
+        dest="$USER_CONFIG_DIR/memory/canonical/$base"
+        if [ ! -f "$dest" ]; then
+            cp "$tmpl" "$dest"
+            info "  Seeded canonical template: $base"
+        fi
+    done
+    # Seed subdirectory templates (e.g. sessions/session.template.md)
+    for subdir in "$TEMPLATES_DIR"/*/; do
+        [ -d "$subdir" ] || continue
+        subdir_name=$(basename "$subdir")
+        mkdir -p "$USER_CONFIG_DIR/memory/canonical/$subdir_name"
+        for tmpl in "$subdir"*.md; do
+            [ -f "$tmpl" ] || continue
+            base=$(basename "$tmpl")
+            dest="$USER_CONFIG_DIR/memory/canonical/$subdir_name/$base"
+            if [ ! -f "$dest" ]; then
+                cp "$tmpl" "$dest"
+                info "  Seeded canonical template: $subdir_name/$base"
+            fi
+        done
+    done
+    # Seed YAML templates (e.g. ifttt-rules.yaml)
+    for tmpl in "$TEMPLATES_DIR"/*.yaml; do
         [ -f "$tmpl" ] || continue
         base=$(basename "$tmpl")
         dest="$USER_CONFIG_DIR/memory/canonical/$base"
@@ -1030,13 +1218,51 @@ if [ -f "$AUDIT_CONTEXT_SEED" ] && [ ! -f "$AUDIT_CONTEXT_DEST" ]; then
 fi
 
 # Create stub user-config agent files if they don't exist
-for stub_file in "user.base.bootup.md" "user.base.context.md" "user.dispatcher.bootup.md" "user.subagent.bootup.md"; do
+# user.base.bootup.md gets seeded from the example template (contains timezone placeholder)
+USER_BASE_BOOTUP_TEMPLATE="$INSTALL_DIR/memory/canonical-templates/user.base.bootup.md.example"
+user_base_bootup_dest="$USER_CONFIG_DIR/agents/user.base.bootup.md"
+if [ ! -f "$user_base_bootup_dest" ]; then
+    if [ -f "$USER_BASE_BOOTUP_TEMPLATE" ]; then
+        cp "$USER_BASE_BOOTUP_TEMPLATE" "$user_base_bootup_dest"
+        info "  Seeded user.base.bootup.md from template (customize timezone and preferences)"
+    else
+        touch "$user_base_bootup_dest"
+        info "  Created stub: agents/user.base.bootup.md"
+    fi
+fi
+for stub_file in "user.base.context.md" "user.dispatcher.bootup.md" "user.subagent.bootup.md"; do
     stub_dest="$USER_CONFIG_DIR/agents/$stub_file"
     if [ ! -f "$stub_dest" ]; then
         touch "$stub_dest"
         info "  Created stub: agents/$stub_file"
     fi
 done
+
+# Seed skill configuration templates (only files that don't already exist)
+# Skills can have .env.template files in their config/ directory
+for skill_dir in "$INSTALL_DIR"/lobster-shop/*/; do
+    [ -d "$skill_dir" ] || continue
+    skill_name=$(basename "$skill_dir")
+    config_template="$skill_dir/config/${skill_name}.env.template"
+    if [ -f "$config_template" ]; then
+        # Handle special cases: obsidian-km → obsidian.env
+        env_name="${skill_name%.env.template}"
+        env_name="${env_name/-km/}"  # obsidian-km → obsidian
+        dest_file="$CONFIG_DIR/${env_name}.env"
+        if [ ! -f "$dest_file" ]; then
+            cp "$config_template" "$dest_file"
+            info "  Seeded skill config: ${env_name}.env"
+        fi
+    fi
+done
+
+# Also handle obsidian.env.template specifically (named differently from skill)
+OBSIDIAN_TEMPLATE="$INSTALL_DIR/lobster-shop/obsidian-km/config/obsidian.env.template"
+OBSIDIAN_DEST="$CONFIG_DIR/obsidian.env"
+if [ -f "$OBSIDIAN_TEMPLATE" ] && [ ! -f "$OBSIDIAN_DEST" ]; then
+    cp "$OBSIDIAN_TEMPLATE" "$OBSIDIAN_DEST"
+    info "  Seeded skill config: obsidian.env"
+fi
 
 success "Directories created"
 info "  $PROJECTS_DIR - All Lobster-managed projects"
@@ -1097,8 +1323,8 @@ done
 
 success "Global env store configured"
 info "  File: $GLOBAL_ENV_FILE"
-info "  Use 'lobster env set KEY VALUE' to store API tokens"
-info "  Use 'lobster env list' to see stored keys"
+info "  Edit directly: $GLOBAL_ENV_FILE"
+info "  (Use 'lobster env set KEY VALUE' after install to update tokens)"
 info "  See docs/GLOBAL-ENV.md for full documentation"
 
 #===============================================================================
@@ -1107,242 +1333,9 @@ info "  See docs/GLOBAL-ENV.md for full documentation"
 
 step "Setting up scheduled tasks infrastructure..."
 
-# Create jobs.json if it doesn't exist (in workspace, not repo)
-JOBS_FILE="$WORKSPACE_DIR/scheduled-jobs/jobs.json"
-if [ ! -f "$JOBS_FILE" ]; then
-    echo '{"jobs": {}}' > "$JOBS_FILE"
-fi
-
-# Create run-job.sh
-cat > "$INSTALL_DIR/scheduled-tasks/run-job.sh" << 'RUNJOB'
-#!/bin/bash
-# Lobster Scheduled Task Executor
-# Runs a scheduled job in a fresh Claude instance
-
-set -e
-
-# Ensure Claude is in PATH (cron doesn't inherit user PATH)
-export PATH="$HOME/.local/bin:$PATH"
-
-# Prevent "cannot launch inside another Claude Code session" error.
-# CLAUDECODE leaks when run-job.sh is manually tested from a Claude session.
-unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT 2>/dev/null || true
-
-JOB_NAME="$1"
-
-if [ -z "$JOB_NAME" ]; then
-    echo "Usage: $0 <job-name>"
-    exit 1
-fi
-
-REPO_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
-WORKSPACE="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
-TASK_FILE="$WORKSPACE/scheduled-jobs/tasks/${JOB_NAME}.md"
-OUTPUT_DIR="$HOME/messages/task-outputs"
-LOG_DIR="$WORKSPACE/scheduled-jobs/logs"
-TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-JOBS_FILE="$WORKSPACE/scheduled-jobs/jobs.json"
-
-mkdir -p "$OUTPUT_DIR" "$LOG_DIR"
-
-if [ ! -f "$TASK_FILE" ]; then
-    echo "Error: Task file not found: $TASK_FILE"
-    exit 1
-fi
-
-TASK_CONTENT=$(cat "$TASK_FILE")
-LOG_FILE="$LOG_DIR/${JOB_NAME}-${TIMESTAMP}.log"
-
-START_TIME=$(date +%s)
-START_ISO=$(date -Iseconds)
-
-echo "[$START_ISO] Starting job: $JOB_NAME" | tee "$LOG_FILE"
-
-claude -p "$TASK_CONTENT
-
----
-
-IMPORTANT: You are running as a scheduled task. When you complete your task:
-1. Call write_task_output() with your results summary
-2. Keep output concise - the main Lobster instance will review this later
-3. Exit after writing output - do not start a loop" \
-    --dangerously-skip-permissions \
-    --max-turns 15 \
-    2>&1 | tee -a "$LOG_FILE"
-
-EXIT_CODE=$?
-
-END_TIME=$(date +%s)
-END_ISO=$(date -Iseconds)
-DURATION=$((END_TIME - START_TIME))
-
-echo "" | tee -a "$LOG_FILE"
-echo "[$END_ISO] Job completed in ${DURATION}s with exit code: $EXIT_CODE" | tee -a "$LOG_FILE"
-
-if [ -f "$JOBS_FILE" ]; then
-    # Use jq if available, otherwise use Python
-    if command -v jq &> /dev/null; then
-        STATUS="success"
-        [ $EXIT_CODE -ne 0 ] && STATUS="failed"
-
-        TMP_FILE=$(mktemp)
-        jq --arg name "$JOB_NAME" \
-           --arg last_run "$END_ISO" \
-           --arg status "$STATUS" \
-           '.jobs[$name].last_run = $last_run | .jobs[$name].last_status = $status' \
-           "$JOBS_FILE" > "$TMP_FILE" && mv "$TMP_FILE" "$JOBS_FILE"
-    else
-        python3 -c "
-import json
-import sys
-with open('$JOBS_FILE', 'r') as f:
-    data = json.load(f)
-if '$JOB_NAME' in data.get('jobs', {}):
-    data['jobs']['$JOB_NAME']['last_run'] = '$END_ISO'
-    data['jobs']['$JOB_NAME']['last_status'] = 'success' if $EXIT_CODE == 0 else 'failed'
-    with open('$JOBS_FILE', 'w') as f:
-        json.dump(data, f, indent=2)
-"
-    fi
-fi
-
-# Post a reminder to the dispatcher inbox so it learns the job completed
-POST_REMINDER="$REPO_DIR/scheduled-tasks/post-reminder.sh"
-if [ -f "$POST_REMINDER" ]; then
-    bash "$POST_REMINDER" "$JOB_NAME" "$EXIT_CODE" "$DURATION" 2>&1 | tee -a "$LOG_FILE" || true
-fi
-
-exit $EXIT_CODE
-RUNJOB
-chmod +x "$INSTALL_DIR/scheduled-tasks/run-job.sh" || true
-
-# Create post-reminder.sh
-cat > "$INSTALL_DIR/scheduled-tasks/post-reminder.sh" << 'POSTREMINDER'
-#!/bin/bash
-# Cron Job Post-Reminder
-# Called by run-job.sh after each scheduled job. Writes a cron_reminder message
-# to the Lobster inbox so the dispatcher is notified that output is available.
-#
-# Usage: post-reminder.sh <job-name> <exit-code> <duration-seconds>
-
-set -e
-
-JOB_NAME="$1"
-EXIT_CODE="${2:-0}"
-DURATION_SECONDS="${3:-0}"
-
-if [ -z "$JOB_NAME" ]; then
-    echo "Usage: $0 <job-name> <exit-code> <duration-seconds>"
-    exit 1
-fi
-
-INBOX_DIR="${LOBSTER_MESSAGES:-$HOME/messages}/inbox"
-mkdir -p "$INBOX_DIR"
-
-if [ "$EXIT_CODE" -eq 0 ]; then
-    STATUS="success"
-else
-    STATUS="failed"
-fi
-
-TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%S.%6N)
-EPOCH_MS=$(date +%s%3N)
-MSG_ID="${EPOCH_MS}_cron_${JOB_NAME}"
-
-python3 - \
-    "${INBOX_DIR}/${MSG_ID}.json" \
-    "${MSG_ID}" \
-    "${TIMESTAMP}" \
-    "${JOB_NAME}" \
-    "${EXIT_CODE}" \
-    "${DURATION_SECONDS}" \
-    "${STATUS}" \
-    << 'PYEOF'
-import json, sys, os
-out_path = sys.argv[1]
-msg_id = sys.argv[2]
-timestamp = sys.argv[3]
-job_name = sys.argv[4]
-exit_code = int(sys.argv[5])
-duration_seconds = int(sys.argv[6])
-status = sys.argv[7]
-
-msg = {
-    "id": msg_id,
-    "source": "system",
-    "type": "cron_reminder",
-    "chat_id": 0,
-    "user_id": 0,
-    "username": "lobster-cron",
-    "user_name": "Cron",
-    "text": f"[Cron] Job '{job_name}' finished ({status}, {duration_seconds}s)",
-    "job_name": job_name,
-    "exit_code": exit_code,
-    "duration_seconds": duration_seconds,
-    "status": status,
-    "timestamp": timestamp,
-}
-
-tmp_path = out_path + ".tmp"
-with open(tmp_path, "w") as f:
-    json.dump(msg, f, ensure_ascii=False, indent=2)
-    f.flush()
-
-os.replace(tmp_path, out_path)
-PYEOF
-
-echo "Reminder posted for job: $JOB_NAME (status=$STATUS, duration=${DURATION_SECONDS}s)"
-POSTREMINDER
-chmod +x "$INSTALL_DIR/scheduled-tasks/post-reminder.sh" || true
-
-# Create sync-crontab.sh
-cat > "$INSTALL_DIR/scheduled-tasks/sync-crontab.sh" << 'SYNCCRON'
-#!/bin/bash
-# Lobster Crontab Synchronizer
-
-set -e
-
-WORKSPACE="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
-REPO_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
-JOBS_FILE="$WORKSPACE/scheduled-jobs/jobs.json"
-RUNNER="$REPO_DIR/scheduled-tasks/run-job.sh"
-
-if ! command -v crontab &> /dev/null; then
-    echo "Warning: crontab not found. Install cron to enable scheduled tasks."
-    exit 0
-fi
-
-if [ ! -f "$JOBS_FILE" ]; then
-    echo "Error: Jobs file not found: $JOBS_FILE"
-    exit 1
-fi
-
-MARKER="# LOBSTER-SCHEDULED"
-EXISTING=$(crontab -l 2>/dev/null | grep -v "$MARKER" | grep -v "$RUNNER" || true)
-
-if command -v jq &> /dev/null; then
-    CRON_ENTRIES=$(jq -r --arg runner "$RUNNER" --arg marker "$MARKER" '
-        .jobs | to_entries[] |
-        select(.value.enabled == true) |
-        "\(.value.schedule) \($runner) \(.key) \($marker)"
-    ' "$JOBS_FILE" 2>/dev/null || echo "")
-else
-    CRON_ENTRIES=""
-fi
-
-{
-    if [ -n "$EXISTING" ]; then
-        echo "$EXISTING"
-    fi
-    if [ -n "$CRON_ENTRIES" ]; then
-        echo "$CRON_ENTRIES"
-    fi
-} | crontab -
-
-echo "Crontab synchronized:"
-crontab -l 2>/dev/null | grep "$MARKER" || echo "(no lobster jobs)"
-SYNCCRON
-chmod +x "$INSTALL_DIR/scheduled-tasks/sync-crontab.sh" || true
+# dispatch-job.sh: kept for compatibility with jobs not yet migrated to systemd timers.
+# New jobs should use create_scheduled_job MCP tool instead (issue #1083).
+chmod +x "$INSTALL_DIR/scheduled-tasks/dispatch-job.sh" || true
 
 # Enable cron service (name differs by distro)
 if [ "$PKG_MANAGER" = "apt" ]; then
@@ -1399,36 +1392,6 @@ chmod +x "$INSTALL_DIR/scripts/nightly-consolidation.sh" || true
 
 success "Nightly consolidation configured (runs at 03:00 nightly)"
 
-#===============================================================================
-# GWS Credential Sync
-#===============================================================================
-
-step "Setting up gws credential sync..."
-
-# Restore gws OAuth client secret from user config if present.
-# The client_secret.json is created once via Google Cloud Console and stored in
-# ~/lobster-config/ so reinstalls automatically restore gws auth capability.
-GWS_CLIENT_SECRET_SRC="$HOME/lobster-config/gws-client-secret.json"
-GWS_CONFIG_DIR="$HOME/.config/gws"
-if [ -f "$GWS_CLIENT_SECRET_SRC" ]; then
-    mkdir -p "$GWS_CONFIG_DIR"
-    cp "$GWS_CLIENT_SECRET_SRC" "$GWS_CONFIG_DIR/client_secret.json"
-    success "gws OAuth client secret restored from lobster-config"
-else
-    warn "No gws-client-secret.json found in ~/lobster-config/ — run 'gws auth setup' or copy client_secret.json manually"
-fi
-
-chmod +x "$INSTALL_DIR/scripts/sync-gws-credentials.py" || true
-
-# Add gws credential sync to crontab (runs daily at 04:00)
-# gws auth login writes fresh tokens to credentials.enc but does not update
-# credentials.json. Without this sync, API calls read the stale refresh token
-# and fail with invalid_grant after a re-auth.
-"$INSTALL_DIR/scripts/cron-manage.sh" add "# LOBSTER-GWS-CREDENTIAL-SYNC" \
-    "0 4 * * * cd $INSTALL_DIR && uv run scripts/sync-gws-credentials.py # LOBSTER-GWS-CREDENTIAL-SYNC"
-
-success "GWS credential sync configured (runs at 04:00 daily)"
-
 # Add daily log-export to crontab (runs at 03:00 UTC)
 # export-logs.py archives observations.log, lobster.log, and audit.jsonl to a
 # date-stamped directory under ~/lobster-workspace/logs/archive/ and writes a
@@ -1440,14 +1403,33 @@ chmod +x "$INSTALL_DIR/scheduled-tasks/export-logs.py" 2>/dev/null || true
 success "Log export configured (runs at 03:00 UTC daily)"
 
 #===============================================================================
-# Cron-to-Inbox Reminder System (post-reminder.sh)
+# Ghost Detector (agent-monitor)
 #===============================================================================
 
-step "Installing post-reminder.sh..."
+step "Setting up ghost detector cron..."
 
-chmod +x "$INSTALL_DIR/scripts/post-reminder.sh" || true
+# agent-monitor.py runs every 5 minutes, checks for stale/dead agent sessions,
+# sends a Telegram alert if GHOST_CONFIRMED or UNREGISTERED agents are found,
+# and marks ghost sessions as failed in agent_sessions.db. No LLM involved.
+"$INSTALL_DIR/scripts/cron-manage.sh" add "# LOBSTER-GHOST-DETECTOR" \
+    "*/5 * * * * cd $HOME && uv run $INSTALL_DIR/scripts/agent-monitor.py --alert --mark-failed >> $HOME/lobster-workspace/logs/agent-monitor.log 2>&1 # LOBSTER-GHOST-DETECTOR"
 
-success "post-reminder.sh installed"
+success "Ghost detector configured (runs every 5 minutes)"
+
+#===============================================================================
+# OOM Monitor
+#===============================================================================
+
+step "Setting up OOM monitor cron..."
+
+# oom-monitor.py runs every 10 minutes, scans the kernel journal for OOM kills
+# affecting Lobster/Claude processes, and writes an inbox message for the
+# dispatcher when new OOM kill events are detected. No LLM involved.
+# Only active when LOBSTER_DEBUG=true (the script is a no-op otherwise).
+"$INSTALL_DIR/scripts/cron-manage.sh" add "# LOBSTER-OOM-CHECK" \
+    "*/10 * * * * cd $HOME && uv run $INSTALL_DIR/scripts/oom-monitor.py --since-minutes 10 >> $HOME/lobster-workspace/logs/oom-monitor.log 2>&1 # LOBSTER-OOM-CHECK"
+
+success "OOM monitor configured (runs every 10 minutes, active only when LOBSTER_DEBUG=true)"
 
 # Ensure any lingering self-check cron entry is removed on fresh installs
 { crontab -l 2>/dev/null | grep -v "# LOBSTER-SELF-CHECK" | grep -v "periodic-self-check" || true; } | crontab -
@@ -1681,7 +1663,59 @@ else
     info "Skipping auto-register-agent hook (settings.json not yet created)"
 fi
 
-# Set up Claude Code PreToolUse hook to block tool use after compaction without context reload
+# Set up Claude Code PostToolUse hook to monitor context window usage and write a
+# context_warning to inbox when usage crosses 70%.  Scoped to mcp__lobster-inbox__ and Agent
+# tool calls only — these are the high-token events where context growth is most likely.
+# Skipping Read/Edit/Write/Bash PostToolUse reduces spawns by ~65% with no meaningful loss
+# of monitoring coverage.
+chmod +x "$INSTALL_DIR/hooks/context-monitor.py" || true
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '.hooks.PostToolUse[]? | select(.hooks[]?.command | contains("context-monitor"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq '.hooks.PostToolUse = (.hooks.PostToolUse // []) + [{
+            "matcher": "mcp__lobster-inbox__|Agent",
+            "hooks": [{
+                "type": "command",
+                "command": "python3 '"$INSTALL_DIR"'/hooks/context-monitor.py",
+                "timeout": 5
+            }]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "context-monitor hook installed (mcp__lobster-inbox__|Agent)"
+    else
+        info "context-monitor hook already configured in Claude Code settings"
+    fi
+else
+    info "Skipping context-monitor hook (settings.json not yet created)"
+fi
+
+# Set up Claude Code PostToolUse hook to write a thinking heartbeat to lobster-state.json.
+# Fires on every tool call — any tool use means the dispatcher is alive, so no matcher
+# filtering is needed. The health check reads last_thinking_at to avoid false-positive
+# restarts during long reasoning/subagent-spawning phases (issue #1401).
+chmod +x "$INSTALL_DIR/hooks/thinking-heartbeat.py" || true
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '.hooks.PostToolUse[]? | select(.hooks[]?.command | contains("thinking-heartbeat"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq '.hooks.PostToolUse = (.hooks.PostToolUse // []) + [{
+            "matcher": "",
+            "hooks": [{
+                "type": "command",
+                "command": "python3 '"$INSTALL_DIR"'/hooks/thinking-heartbeat.py",
+                "timeout": 5
+            }]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "thinking-heartbeat hook installed"
+    else
+        info "thinking-heartbeat hook already configured in Claude Code settings"
+    fi
+else
+    info "Skipping thinking-heartbeat hook (settings.json not yet created)"
+fi
+
+# Set up Claude Code PreToolUse hook to block tool use after compaction without context reload.
+# Uses a shell wrapper so Python is only spawned when the sentinel file exists (~1% of calls).
+# On the 99%+ of calls where the sentinel is absent, `test ! -f ...` exits in ~1ms with no
+# Python startup overhead (~50ms saved per tool call).
 chmod +x "$INSTALL_DIR/hooks/post-compact-gate.py" || true
 if [ -f "$CLAUDE_SETTINGS" ]; then
     if ! jq -e '.hooks.PreToolUse[]? | select(.matcher == "")' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
@@ -1690,11 +1724,11 @@ if [ -f "$CLAUDE_SETTINGS" ]; then
             "matcher": "",
             "hooks": [{
                 "type": "command",
-                "command": "python3 '"$INSTALL_DIR"'/hooks/post-compact-gate.py",
+                "command": "test ! -f /home/lobster/messages/config/compact-pending || python3 '"$INSTALL_DIR"'/hooks/post-compact-gate.py",
                 "timeout": 5
             }]
         }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
-        success "post-compact-gate hook installed"
+        success "post-compact-gate hook installed (shell wrapper)"
     else
         info "post-compact-gate hook already configured in Claude Code settings"
     fi
@@ -1708,7 +1742,7 @@ if [ -f "$CLAUDE_SETTINGS" ]; then
     if ! jq -e '.hooks.PreToolUse[]? | select(.hooks[]?.command | test("secret-scanner"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
         TMP_SETTINGS=$(mktemp)
         jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
-            "matcher": "mcp__lobster-inbox__send_reply|mcp__github__add_issue_comment|mcp__github__issue_write|mcp__github__create_pull_request|mcp__github__update_pull_request|mcp__github__pull_request_review_write|mcp__github__add_reply_to_pull_request_comment|mcp__github__create_or_update_file|mcp__github__push_files|mcp__github__merge_pull_request|mcp__github__add_comment_to_pending_review|mcp__github__create_pull_request_with_copilot|mcp__github__delete_file|Bash",
+            "matcher": "mcp__lobster-inbox__send_reply|Bash",
             "hooks": [{
                 "type": "command",
                 "command": "python3 '"$INSTALL_DIR"'/hooks/secret-scanner.py",
@@ -1745,6 +1779,30 @@ else
     info "Skipping write-dispatcher-session-id hook (settings.json not yet created)"
 fi
 
+# Set up Claude Code SessionStart hook to inject system and user bootup files into context.
+# Runs after write-dispatcher-session-id so role detection (is_dispatcher) works correctly.
+# Adds two entries: one empty-matcher entry for all fresh sessions, and one compact-matcher
+# entry so bootup content is re-injected after context compaction.
+chmod +x "$INSTALL_DIR/hooks/inject-bootup-context.py" || true
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("inject-bootup-context")) | select(.matcher == "")' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq '.hooks.SessionStart = (.hooks.SessionStart // []) + [{
+            "matcher": "",
+            "hooks": [{
+                "type": "command",
+                "command": "python3 '"$INSTALL_DIR"'/hooks/inject-bootup-context.py",
+                "timeout": 10
+            }]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "inject-bootup-context hook installed (all sessions)"
+    else
+        info "inject-bootup-context hook already configured in Claude Code settings (all sessions)"
+    fi
+else
+    info "Skipping inject-bootup-context hook (settings.json not yet created)"
+fi
+
 # Set up Claude Code SessionStart hook to set compact flag on context compaction
 chmod +x "$INSTALL_DIR/hooks/on-compact.py" || true
 if [ -f "$CLAUDE_SETTINGS" ]; then
@@ -1766,6 +1824,28 @@ else
     info "Skipping on-compact hook (settings.json not yet created)"
 fi
 
+# Set up Claude Code SessionStart hook to re-inject bootup context after compaction.
+# The compact-matcher entry ensures bootup files are injected into the fresh context
+# that follows a compaction event, just as they are on a fresh session start.
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("inject-bootup-context")) | select(.matcher == "compact")' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq '.hooks.SessionStart = (.hooks.SessionStart // []) + [{
+            "matcher": "compact",
+            "hooks": [{
+                "type": "command",
+                "command": "python3 '"$INSTALL_DIR"'/hooks/inject-bootup-context.py",
+                "timeout": 10
+            }]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "inject-bootup-context hook installed (compact sessions)"
+    else
+        info "inject-bootup-context hook already configured in Claude Code settings (compact sessions)"
+    fi
+else
+    info "Skipping inject-bootup-context compact hook (settings.json not yet created)"
+fi
+
 # Set up Claude Code SessionStart hook to inject sys.debug.bootup.md when LOBSTER_DEBUG=true
 chmod +x "$INSTALL_DIR/hooks/inject-debug-bootup.py" || true
 if [ -f "$CLAUDE_SETTINGS" ]; then
@@ -1785,6 +1865,56 @@ if [ -f "$CLAUDE_SETTINGS" ]; then
     fi
 else
     info "Skipping inject-debug-bootup hook (settings.json not yet created)"
+fi
+
+# Set up Claude Code SessionStart hook to mark stale agent sessions as failed on fresh restart.
+# On a fresh CC restart, all previously-"running" sessions are dead. This hook runs
+# agent-monitor.py --mark-failed immediately at startup (before wait_for_messages) so dead
+# sessions are cleared without waiting for the normal 120-minute reconciler threshold.
+# The hook skips compaction events (subagents are still alive on compact) and subagent sessions.
+chmod +x "$INSTALL_DIR/hooks/on-fresh-start.py" || true
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("on-fresh-start"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq '.hooks.SessionStart = (.hooks.SessionStart // []) + [{
+            "matcher": "",
+            "hooks": [{
+                "type": "command",
+                "command": "python3 '"$INSTALL_DIR"'/hooks/on-fresh-start.py",
+                "timeout": 30
+            }]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "on-fresh-start hook installed"
+    else
+        info "on-fresh-start hook already configured in Claude Code settings"
+    fi
+else
+    info "Skipping on-fresh-start hook (settings.json not yet created)"
+fi
+
+# Set up Claude Code Stop hook to enforce wait_for_messages in dispatcher sessions.
+# Stop fires when the dispatcher's main Claude Code session considers stopping.
+# The hook detects the dispatcher via session_role.is_dispatcher() and injects a
+# reminder if wait_for_messages was not called — preventing the 12-minute stall
+# window that the health check otherwise needs to catch.
+chmod +x "$INSTALL_DIR/hooks/require-wait-for-messages.py" || true
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '.hooks.Stop[]? | select(.hooks[]?.command | contains("require-wait-for-messages"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq '.hooks.Stop = (.hooks.Stop // []) + [{
+            "matcher": "",
+            "hooks": [{
+                "type": "command",
+                "command": "python3 '"$INSTALL_DIR"'/hooks/require-wait-for-messages.py",
+                "timeout": 10
+            }]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "require-wait-for-messages Stop hook installed"
+    else
+        info "require-wait-for-messages Stop hook already configured in Claude Code settings"
+    fi
+else
+    info "Skipping require-wait-for-messages Stop hook (settings.json not yet created)"
 fi
 
 # Set up Claude Code SubagentStop hook to enforce write_result in subagent sessions
@@ -1861,6 +1991,13 @@ if [ ! -d ".venv" ] || [ ! -f ".venv/bin/python" ]; then
 else
     success "Python venv already exists"
 fi
+
+# Ensure pip binaries in the venv are executable (uv venv may create them
+# without the execute bit set on some platforms, causing "permission denied"
+# warnings during upgrade checks).
+chmod +x .venv/bin/pip .venv/bin/pip3 2>/dev/null || true
+# Also fix any versioned pip binary (e.g. pip3.12)
+chmod +x .venv/bin/pip3.* 2>/dev/null || true
 
 # Activate venv for uv pip commands
 export VIRTUAL_ENV="$INSTALL_DIR/.venv"
@@ -1962,23 +2099,62 @@ else
 fi
 
 if [ "$NEED_CONFIG" = true ] && [ "$NON_INTERACTIVE" = true ]; then
-    warn "Skipping Telegram configuration (non-interactive mode)."
-    info "Run the installer again without --non-interactive to configure Telegram."
-    # Write a placeholder config so downstream steps don't fail
-    if [ ! -f "$CONFIG_FILE" ]; then
+    # Resolve TELEGRAM_ALLOWED_USERS from TELEGRAM_USER_ID if needed
+    if [ -z "${TELEGRAM_ALLOWED_USERS:-}" ] && [ -n "${TELEGRAM_USER_ID:-}" ]; then
+        TELEGRAM_ALLOWED_USERS="$TELEGRAM_USER_ID"
+    fi
+    # Also use LOBSTER_ADMIN_CHAT_ID = TELEGRAM_ALLOWED_USERS if not set separately
+    if [ -z "${LOBSTER_ADMIN_CHAT_ID:-}" ] && [ -n "${TELEGRAM_ALLOWED_USERS:-}" ]; then
+        LOBSTER_ADMIN_CHAT_ID="$TELEGRAM_ALLOWED_USERS"
+    fi
+    if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ "${TELEGRAM_BOT_TOKEN}" != "your_bot_token_here" ] \
+       && [ -n "${TELEGRAM_ALLOWED_USERS:-}" ]; then
+        info "Writing Telegram credentials from environment variables (non-interactive mode)."
         mkdir -p "$(dirname "$CONFIG_FILE")"
         cat > "$CONFIG_FILE" << EOF
 # Lobster Configuration
+# Generated by installer on $(date) (non-interactive)
+
+# Telegram Bot
+TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+TELEGRAM_ALLOWED_USERS=${TELEGRAM_ALLOWED_USERS}
+
+# Admin chat ID (Telegram numeric user ID for the primary admin user).
+# Used by dispatch-job.sh (scheduled tasks) and alert.sh to deliver messages.
+LOBSTER_ADMIN_CHAT_ID=${LOBSTER_ADMIN_CHAT_ID:-${TELEGRAM_ALLOWED_USERS}}
+
+# Environment mode: production | dev | test
+# Set to "dev" to make the persistent session and health check inert while doing
+# interactive SSH work. Revert to "production" (or remove this line) to resume.
+LOBSTER_ENV=production
+EOF
+        success "Telegram configuration written from environment variables."
+    else
+        warn "Skipping Telegram configuration (non-interactive mode, no credentials in environment)."
+        info "Set TELEGRAM_BOT_TOKEN and TELEGRAM_ALLOWED_USERS (or TELEGRAM_USER_ID) env vars to configure automatically."
+        info "Or run the installer again without --non-interactive to configure Telegram."
+        # Write a placeholder config so downstream steps don't fail
+        if [ ! -f "$CONFIG_FILE" ]; then
+            mkdir -p "$(dirname "$CONFIG_FILE")"
+            cat > "$CONFIG_FILE" << EOF
+# Lobster Configuration
 # Generated by installer on $(date) (non-interactive - needs configuration)
 
-# Telegram Bot (UNCONFIGURED - run installer interactively to set up)
+# Telegram Bot (UNCONFIGURED - set TELEGRAM_BOT_TOKEN and TELEGRAM_ALLOWED_USERS env vars
+# before running the installer, or run interactively to configure)
 TELEGRAM_BOT_TOKEN=your_bot_token_here
 TELEGRAM_ALLOWED_USERS=
 
 # Admin chat ID (Telegram numeric user ID for the primary admin user).
-# Used by run-job.sh (scheduled tasks) and alert.sh to deliver messages.
+# Used by alert.sh to deliver system notifications.
 LOBSTER_ADMIN_CHAT_ID=
+
+# Environment mode: production | dev | test
+# Set to "dev" to make the persistent session and health check inert while doing
+# interactive SSH work. Revert to "production" (or remove this line) to resume.
+LOBSTER_ENV=production
 EOF
+        fi
     fi
     NEED_CONFIG=false
 fi
@@ -2025,21 +2201,71 @@ if [ "$NEED_CONFIG" = true ]; then
         fi
     done
 
-    # Write config (Telegram only; auth method is configured in the next section)
-    cat > "$CONFIG_FILE" << EOF
-# Lobster Configuration
-# Generated by installer on $(date)
-
-# Telegram Bot
-TELEGRAM_BOT_TOKEN=$BOT_TOKEN
-TELEGRAM_ALLOWED_USERS=$USER_ID
-
-# Admin chat ID (Telegram numeric user ID for the primary admin user).
-# Used by run-job.sh (scheduled tasks) and alert.sh to deliver messages.
-LOBSTER_ADMIN_CHAT_ID=$USER_ID
-EOF
+    # Write Telegram config using set_config_if_missing so that other keys
+    # already present in config.env (e.g. LOBSTER_INTERNAL_SECRET, API keys)
+    # are never overwritten when the user re-runs the installer.
+    if [ ! -f "$CONFIG_FILE" ]; then
+        mkdir -p "$(dirname "$CONFIG_FILE")"
+        printf '# Lobster Configuration
+# Generated by installer on %s
+' "$(date)" > "$CONFIG_FILE"
+    fi
+    set_config_if_missing TELEGRAM_BOT_TOKEN "$BOT_TOKEN"
+    set_config_if_missing TELEGRAM_ALLOWED_USERS "$USER_ID"
+    set_config_if_missing LOBSTER_ADMIN_CHAT_ID "$USER_ID"
+    set_config_if_missing LOBSTER_ENV production
 
     success "Telegram configuration saved"
+fi
+
+#===============================================================================
+# GitHub Personal Access Token
+#===============================================================================
+
+step "Checking GitHub Personal Access Token..."
+
+# Load global.env if not already done so we can check for an existing token
+if [ -f "$GLOBAL_ENV_FILE" ]; then
+    set -a
+    # shellcheck disable=SC1090
+    . "$GLOBAL_ENV_FILE"
+    set +a
+fi
+
+GITHUB_TOKEN_SET=false
+if [ -z "${GITHUB_TOKEN:-}" ] || [ "$GITHUB_TOKEN" = "your_github_pat_here" ]; then
+    if [ "$NON_INTERACTIVE" = false ]; then
+        echo ""
+        echo -e "${BOLD}GitHub Personal Access Token${NC}"
+        echo ""
+        echo "Required for: PR creation, issue tracking, repo operations"
+        echo "Create one at: https://github.com/settings/tokens/new"
+        echo "Required scopes: repo, write:discussion, admin:repo_hook"
+        echo ""
+        read -p "Enter your GitHub PAT (or press Enter to skip): " GH_TOKEN
+        if [ -n "$GH_TOKEN" ]; then
+            # Write to global.env, replacing any existing GITHUB_TOKEN line (commented or not)
+            if grep -q "^#\{0,1\} *GITHUB_TOKEN=" "$GLOBAL_ENV_FILE" 2>/dev/null; then
+                # Use ENVIRON to avoid backslash mangling that -v causes with tokens
+                # containing backslash sequences (e.g. \n, \t in a PAT value).
+                GH_TOKEN="$GH_TOKEN" awk \
+                    '/^#? *GITHUB_TOKEN=/ { print "GITHUB_TOKEN=" ENVIRON["GH_TOKEN"]; next } { print }' \
+                    "$GLOBAL_ENV_FILE" > "$GLOBAL_ENV_FILE.tmp" && mv "$GLOBAL_ENV_FILE.tmp" "$GLOBAL_ENV_FILE"
+            else
+                printf '\nGITHUB_TOKEN=%s\n' "$GH_TOKEN" >> "$GLOBAL_ENV_FILE"
+            fi
+            GITHUB_TOKEN_SET=true
+            success "GitHub token saved to $GLOBAL_ENV_FILE"
+        else
+            warn "Skipped — set GITHUB_TOKEN in $GLOBAL_ENV_FILE later"
+        fi
+    else
+        info "Skipping GitHub token prompt (non-interactive mode)"
+        info "Set GITHUB_TOKEN in $GLOBAL_ENV_FILE when ready"
+    fi
+else
+    GITHUB_TOKEN_SET=true
+    success "GitHub token already configured"
 fi
 
 #===============================================================================
@@ -2063,82 +2289,53 @@ if [ -f "$CONFIG_FILE" ]; then
 fi
 
 #===============================================================================
-# GitHub MCP Server (Optional)
+# Set LOBSTER_INSTANCE_URL (required for Google OAuth consent-link flow)
 #===============================================================================
 
-step "GitHub Integration (Optional)..."
-
-# Check if GitHub MCP is already configured
-GITHUB_MCP_CONFIGURED=false
-if command -v claude &>/dev/null && claude mcp list 2>/dev/null | grep -q "github"; then
-    GITHUB_MCP_CONFIGURED=true
-    success "GitHub MCP server already configured"
-fi
-
-if [ "$GITHUB_MCP_CONFIGURED" = true ]; then
-    : # Already configured, skip
-elif [ -n "${GITHUB_PAT:-}" ]; then
-    # PAT available from config.env or environment — auto-configure
-    info "Using GITHUB_PAT from environment to set up GitHub MCP server..."
-    if command -v claude &>/dev/null; then
-        claude mcp add-json github "{\"type\":\"http\",\"url\":\"https://api.githubcopilot.com/mcp\",\"headers\":{\"Authorization\":\"Bearer $GITHUB_PAT\"}}" --scope user 2>/dev/null
-        success "GitHub MCP server configured"
-    else
-        warn "Claude Code not found. Configure GitHub MCP manually after install."
-    fi
-elif [ "$NON_INTERACTIVE" = true ]; then
-    info "Skipping GitHub integration (non-interactive mode)."
-elif true; then
-
-echo ""
-echo -e "${BOLD}GitHub MCP Server Setup${NC}"
-echo ""
-echo "The GitHub MCP server lets Lobster:"
-echo "  - Read and manage GitHub issues & PRs"
-echo "  - Browse repositories and code"
-echo "  - Access project boards"
-echo "  - Monitor GitHub Actions workflows"
-echo ""
-read -p "Set up GitHub integration? [y/N] " -n 1 -r
-echo
-
-if [[ $REPLY =~ ^[Yy]$ ]]; then
-    echo ""
-    echo "You need a GitHub Personal Access Token (PAT)."
-    echo ""
-    echo "To create one:"
-    echo "  1. Go to https://github.com/settings/tokens"
-    echo "  2. Click 'Generate new token (classic)'"
-    echo "  3. Select scopes: repo, read:org, read:project"
-    echo "  4. Copy the generated token"
-    echo ""
-
-    read -p "Enter your GitHub PAT (or press Enter to skip): " GITHUB_PAT
-
-    if [ -n "$GITHUB_PAT" ]; then
-        # Add GitHub MCP server to Claude Code
-        if command -v claude &> /dev/null; then
-            claude mcp add-json github "{\"type\":\"http\",\"url\":\"https://api.githubcopilot.com/mcp\",\"headers\":{\"Authorization\":\"Bearer $GITHUB_PAT\"}}" --scope user 2>/dev/null
-            success "GitHub MCP server configured"
-
-            # Save PAT to config (optional, for reference)
-            if [ -f "$CONFIG_FILE" ]; then
-                echo "" >> "$CONFIG_FILE"
-                echo "# GitHub Integration" >> "$CONFIG_FILE"
-                echo "GITHUB_PAT_CONFIGURED=true" >> "$CONFIG_FILE"
-            fi
+if [ -f "$CONFIG_FILE" ]; then
+    source "$CONFIG_FILE"
+    if [ -z "${LOBSTER_INSTANCE_URL:-}" ]; then
+        step "Setting LOBSTER_INSTANCE_URL..."
+        # Attempt to auto-detect the public IP and build an https URL.
+        # The user can update this later if the auto-detected value is wrong.
+        DETECTED_IP=$(curl -s --max-time 5 https://api.ipify.org 2>/dev/null || true)
+        if [ -n "$DETECTED_IP" ]; then
+            INSTANCE_URL="https://${DETECTED_IP}"
+            warn "Auto-detected LOBSTER_INSTANCE_URL=${INSTANCE_URL}"
+            warn "Update this in config.env if your domain name differs from the IP."
         else
-            warn "Claude Code not found. Configure GitHub MCP manually after install:"
-            echo "  claude mcp add-json github '{\"type\":\"http\",\"url\":\"https://api.githubcopilot.com/mcp\",\"headers\":{\"Authorization\":\"Bearer YOUR_PAT\"}}'"
+            INSTANCE_URL=""
+            warn "Could not auto-detect public IP. Set LOBSTER_INSTANCE_URL in config.env manually."
         fi
+        echo "" >> "$CONFIG_FILE"
+        echo "# Public base URL of this Lobster VPS (used by generate_consent_link for Google OAuth)" >> "$CONFIG_FILE"
+        echo "# Update to your actual domain, e.g. https://vps.example.com" >> "$CONFIG_FILE"
+        echo "LOBSTER_INSTANCE_URL=${INSTANCE_URL}" >> "$CONFIG_FILE"
+        success "LOBSTER_INSTANCE_URL written to config.env"
     else
-        info "Skipped GitHub integration. You can set it up later:"
-        echo "  claude mcp add-json github '{\"type\":\"http\",\"url\":\"https://api.githubcopilot.com/mcp\",\"headers\":{\"Authorization\":\"Bearer YOUR_PAT\"}}'"
+        success "LOBSTER_INSTANCE_URL already set"
     fi
-else
-    info "Skipped GitHub integration. You can set it up later - see README.md"
 fi
-fi  # end non-interactive guard for GitHub integration
+
+#===============================================================================
+# Developer Mode: Enable LOBSTER_DEBUG
+#===============================================================================
+
+if $DEV_MODE && [ -f "$CONFIG_FILE" ]; then
+    step "Developer mode: enabling LOBSTER_DEBUG..."
+    # Remove any existing LOBSTER_DEBUG line (set or commented), then append the live value.
+    # This is idempotent — safe to run on reinstall.
+    if grep -q "^#\{0,1\}LOBSTER_DEBUG=" "$CONFIG_FILE" 2>/dev/null; then
+        # Replace in-place using a temp file (sed -i is not portable across macOS/Linux)
+        TMP_CONFIG=$(mktemp)
+        grep -v "^#\{0,1\}LOBSTER_DEBUG=" "$CONFIG_FILE" > "$TMP_CONFIG"
+        mv "$TMP_CONFIG" "$CONFIG_FILE"
+    fi
+    echo "" >> "$CONFIG_FILE"
+    echo "# Enabled by --dev flag at install time" >> "$CONFIG_FILE"
+    echo "LOBSTER_DEBUG=true" >> "$CONFIG_FILE"
+    success "LOBSTER_DEBUG=true written to $CONFIG_FILE"
+fi
 
 #===============================================================================
 # GitHub CLI Authentication
@@ -2153,6 +2350,8 @@ elif [ -n "${GITHUB_PAT:-}" ]; then
     echo "$GITHUB_PAT" | gh auth login --with-token 2>/dev/null && \
         success "GitHub CLI authenticated via PAT" || \
         warn "GitHub CLI auth via PAT failed. Authenticate later with: gh auth login"
+elif [ "$NON_INTERACTIVE" = true ]; then
+    info "GitHub CLI not authenticated — skipping (non-interactive mode). Authenticate later with: gh auth login"
 else
     echo ""
     echo "GitHub CLI (gh) is not authenticated."
@@ -2265,6 +2464,112 @@ else
 fi
 
 #===============================================================================
+# Voice TTS Setup (piper + lessac-medium model)
+#
+# Installs piper TTS for local, offline text-to-speech. Required for the
+# send_voice_note MCP tool. This is a soft requirement — failure emits a
+# warning but does not abort the install (TTS falls back to text replies).
+#===============================================================================
+
+step "Voice TTS Setup (piper)..."
+
+# Detect architecture for piper binary download
+ARCH="$(uname -m)"
+case "$ARCH" in
+    x86_64)   PIPER_ARCH="amd64" ;;
+    aarch64)  PIPER_ARCH="aarch64" ;;
+    armv7l)   PIPER_ARCH="armv7" ;;
+    *)
+        warn "Unsupported architecture for piper: $ARCH — skipping TTS setup"
+        PIPER_ARCH=""
+        ;;
+esac
+
+PIPER_BIN="/usr/local/bin/piper"
+PIPER_MODELS_DIR="${WORKSPACE_DIR}/piper-models"
+PIPER_MODEL_NAME="en_US-lessac-medium"
+PIPER_MODEL_FILE="${PIPER_MODELS_DIR}/${PIPER_MODEL_NAME}.onnx"
+PIPER_MODEL_URL="https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/${PIPER_MODEL_NAME}.onnx"
+PIPER_MODEL_JSON_URL="https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/${PIPER_MODEL_NAME}.onnx.json"
+
+if [ -n "$PIPER_ARCH" ]; then
+    mkdir -p "$PIPER_MODELS_DIR"
+
+    # Install piper binary
+    if [ ! -x "$PIPER_BIN" ] && ! command -v piper &>/dev/null; then
+        info "Downloading piper TTS binary (${PIPER_ARCH})..."
+        PIPER_RELEASE_API="https://api.github.com/repos/rhasspy/piper/releases/latest"
+        PIPER_TARBALL_URL="$(curl -fsSL "$PIPER_RELEASE_API" 2>/dev/null | \
+            python3 -c "import sys,json; \
+            data=json.load(sys.stdin); \
+            urls=[a['browser_download_url'] for a in data.get('assets',[]) \
+                  if 'linux_${PIPER_ARCH}' in a['name'] and a['name'].endswith('.tar.gz')]; \
+            print(urls[0] if urls else '')" 2>/dev/null || true)"
+
+        if [ -n "$PIPER_TARBALL_URL" ]; then
+            PIPER_TMP="$(mktemp -d)"
+            if curl -fsSL -o "${PIPER_TMP}/piper.tar.gz" "$PIPER_TARBALL_URL"; then
+                tar -xzf "${PIPER_TMP}/piper.tar.gz" -C "$PIPER_TMP"
+                PIPER_EXTRACTED="$(find "$PIPER_TMP" -type f -name "piper" | head -1)"
+                if [ -n "$PIPER_EXTRACTED" ]; then
+                    PIPER_EXTRACT_DIR="$(dirname "$PIPER_EXTRACTED")"
+                    sudo cp "$PIPER_EXTRACTED" "$PIPER_BIN"
+                    sudo chmod +x "$PIPER_BIN"
+                    # Copy shared libraries required by piper
+                    for lib in libonnxruntime.so.* libpiper_phonemize.so.* libespeak-ng.so.*; do
+                        lib_path="$(find "$PIPER_EXTRACT_DIR" -name "$lib" -type f | head -1)"
+                        if [ -n "$lib_path" ]; then
+                            sudo cp "$lib_path" /usr/local/lib/
+                        fi
+                    done
+                    sudo ldconfig 2>/dev/null || true
+                    # Install bundled espeak-ng-data (piper phoneme tables)
+                    if [ -d "${PIPER_EXTRACT_DIR}/espeak-ng-data" ]; then
+                        sudo cp -r "${PIPER_EXTRACT_DIR}/espeak-ng-data" /usr/share/ 2>/dev/null || true
+                    fi
+                    success "piper installed to $PIPER_BIN"
+                else
+                    warn "piper binary not found in tarball — TTS will not be available"
+                fi
+            else
+                warn "Failed to download piper tarball from $PIPER_TARBALL_URL — TTS will not be available"
+            fi
+            rm -rf "$PIPER_TMP"
+        else
+            warn "Could not find piper release for linux_${PIPER_ARCH} — TTS will not be available"
+        fi
+    else
+        success "piper already installed"
+    fi
+
+    # Download lessac-medium voice model (~30MB)
+    if [ ! -f "$PIPER_MODEL_FILE" ]; then
+        info "Downloading piper voice model: ${PIPER_MODEL_NAME} (~30MB)..."
+        if curl -fsSL -o "$PIPER_MODEL_FILE" "$PIPER_MODEL_URL" && \
+           curl -fsSL -o "${PIPER_MODEL_FILE}.json" "$PIPER_MODEL_JSON_URL"; then
+            success "piper voice model downloaded: ${PIPER_MODEL_FILE}"
+        else
+            warn "Failed to download piper voice model — TTS will not be available"
+            rm -f "$PIPER_MODEL_FILE" "${PIPER_MODEL_FILE}.json"
+        fi
+    else
+        success "piper voice model already present: ${PIPER_MODEL_FILE}"
+    fi
+
+    # Quick smoke test
+    if command -v piper &>/dev/null || [ -x "$PIPER_BIN" ]; then
+        PIPER_CMD="${PIPER_BIN:-piper}"
+        if "$PIPER_CMD" --help &>/dev/null 2>&1; then
+            success "piper TTS verified"
+        else
+            warn "piper binary present but --help failed — TTS may not work correctly"
+        fi
+    fi
+else
+    info "Skipping piper TTS setup (unsupported architecture: $ARCH)"
+fi
+
+#===============================================================================
 # Authentication Method (OAuth-first)
 #===============================================================================
 
@@ -2320,135 +2625,38 @@ if [ "$AUTH_METHOD" = "oauth" ] && [ "$EXISTING_OAUTH" != true ]; then
     info "Starting OAuth authentication..."
     echo ""
 
-    # Detect headless environment
-    IS_HEADLESS=false
-    if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ] && ! command -v open &>/dev/null; then
-        IS_HEADLESS=true
-        echo -e "${YELLOW}Headless server detected (no display).${NC}"
-        echo ""
-        echo "For headless authentication, we recommend using 'claude setup-token'."
-        echo "It will display a URL — open it in any browser (phone, laptop, etc.),"
-        echo "authorize, then paste the code back here when prompted."
-        echo ""
-        echo -e "Alternatively, you can use an ${BOLD}API key${NC} instead (billed per-token)."
-        echo ""
-        echo "  1) Try setup-token (OAuth via URL + code paste)"
-        echo "  2) Use an API key instead"
-        echo ""
-        read -p "Choose [1/2]: " HEADLESS_CHOICE
-        if [ "$HEADLESS_CHOICE" = "2" ]; then
-            AUTH_METHOD="apikey_fallback"
-        fi
-    fi
-
     if [ "$AUTH_METHOD" = "oauth" ]; then
         echo ""
         echo "Claude Code will generate an authentication URL."
         echo -e "Open it in ${BOLD}any browser${NC} (phone, laptop, etc.) and sign in with your Anthropic account."
         echo ""
+        echo "Claude Code will authenticate and write an OAuth token."
+        echo "For headless servers, we recommend claude setup-token (captures CLAUDE_CODE_OAUTH_TOKEN)."
+        echo "claude auth login also works if you can complete the browser flow."
+        echo ""
         read -p "Press Enter to continue..."
         echo ""
 
-        if [ "$IS_HEADLESS" = true ]; then
-            # --- Headless path: setup-token ---
-            # Two issues with setup-token inside a bash script:
-            # 1. It needs a pseudo-TTY (uses Ink/React-for-CLI which requires raw mode).
-            #    Fix: `script -qc` provides a pseudo-TTY.
-            # 2. It does NOT save credentials to ~/.claude/.credentials.json by design.
-            #    It only outputs a long-lived OAuth token to stdout.
-            #    See: https://github.com/anthropics/claude-code/issues/19274
-            #    Fix: Capture the token and persist it to config.env.
-
-            SETUP_TMPFILE=$(mktemp)
-            # Clean up temp file if the script is killed mid-auth
-            trap 'rm -f "$SETUP_TMPFILE"' EXIT INT TERM
-            info "Running 'claude setup-token' with pseudo-TTY (via 'script')..."
-            echo ""
-
-            # Run setup-token inside a pseudo-TTY so Ink's raw mode works.
-            # The 'script' command records all terminal output to SETUP_TMPFILE.
-            script -qc "claude setup-token" "$SETUP_TMPFILE"
-            SETUP_EXIT=$?
-
-            # Extract the OAuth token from setup-token output.
-            # Token format: sk-ant-oat01-<base64-chars>
-            # Strip ANSI escape codes first, then grep for the token.
-            CAPTURED_TOKEN=""
-            if [ -f "$SETUP_TMPFILE" ]; then
-                CAPTURED_TOKEN=$(sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' "$SETUP_TMPFILE" \
-                    | grep -oP 'sk-ant-oat01-[A-Za-z0-9_-]+' | head -1)
-                rm -f "$SETUP_TMPFILE"
-            fi
-
-            if [ -n "$CAPTURED_TOKEN" ]; then
-                # Save the token so Claude Code can use it at runtime
-                export CLAUDE_CODE_OAUTH_TOKEN="$CAPTURED_TOKEN"
-
-                # Persist to config.env so systemd service picks it up
-                if [ -f "$CONFIG_FILE" ]; then
-                    echo "" >> "$CONFIG_FILE"
-                    echo "# OAuth token from claude setup-token (long-lived)" >> "$CONFIG_FILE"
-                    echo "export CLAUDE_CODE_OAUTH_TOKEN=$CAPTURED_TOKEN" >> "$CONFIG_FILE"
-                fi
-
-                success "OAuth token captured and saved to config.env!"
+        # --- auth login ---
+        # `claude auth login` completes an OAuth handshake via browser URL.
+        # On headless servers, prefer `claude setup-token` which captures the
+        # token to CLAUDE_CODE_OAUTH_TOKEN in config.env for env-var-based auth.
+        # Both approaches are supported; `claude auth status` is the check.
+        if script -qc "claude auth login" /dev/null; then
+            if claude --print -p "ping" --max-turns 1 &>/dev/null 2>&1; then
+                success "OAuth authentication successful (verified)!"
             else
-                # Token extraction failed — fall back to manual paste
-                warn "Could not automatically extract the OAuth token from setup-token output."
-                echo ""
-                echo "If setup-token displayed a token (starts with sk-ant-oat01-...), paste it now."
-                echo "If it failed entirely, press Enter to fall back to API key."
-                echo ""
-                read -p "Paste token (or Enter to skip): " MANUAL_TOKEN
-
-                if [[ "$MANUAL_TOKEN" == sk-ant-* ]]; then
-                    CAPTURED_TOKEN="$MANUAL_TOKEN"
-                    export CLAUDE_CODE_OAUTH_TOKEN="$CAPTURED_TOKEN"
-                    if [ -f "$CONFIG_FILE" ]; then
-                        echo "" >> "$CONFIG_FILE"
-                        echo "# OAuth token from claude setup-token (long-lived, manually pasted)" >> "$CONFIG_FILE"
-                        echo "export CLAUDE_CODE_OAUTH_TOKEN=$CAPTURED_TOKEN" >> "$CONFIG_FILE"
-                    fi
-                    success "OAuth token saved to config.env!"
-                else
-                    warn "No valid token provided."
-                    echo "Falling back to API key..."
-                    AUTH_METHOD="apikey_fallback"
-                fi
-            fi
-
-            # Verify auth works if we got a token
-            if [ "$AUTH_METHOD" = "oauth" ] && [ -n "${CAPTURED_TOKEN:-}" ]; then
-                if claude --print -p "ping" --max-turns 1 &>/dev/null 2>&1; then
-                    success "OAuth authentication verified!"
-                else
-                    warn "Token was saved but API verification failed."
-                    warn "The token may need a moment to activate, or the OAuth flow didn't complete."
-                    echo ""
-                    echo "Falling back to API key..."
-                    AUTH_METHOD="apikey_fallback"
-                fi
-            fi
-        else
-            # --- Non-headless path: auth login ---
-            # auth login saves credentials to ~/.claude/.credentials.json automatically,
-            # but still needs a pseudo-TTY when run inside a script (Ink/raw mode).
-            if script -qc "claude auth login" /dev/null; then
-                if claude --print -p "ping" --max-turns 1 &>/dev/null 2>&1; then
-                    success "OAuth authentication successful (verified)!"
-                else
-                    warn "Auth command completed but API verification failed."
-                    warn "The token may have expired or the code exchange didn't complete."
-                    echo ""
-                    echo "Falling back to API key..."
-                    AUTH_METHOD="apikey_fallback"
-                fi
-            else
-                warn "OAuth authentication failed or was cancelled."
+                warn "Auth command completed but API verification failed."
+                warn "The token may have expired or the code exchange didn't complete."
                 echo ""
                 echo "Falling back to API key..."
                 AUTH_METHOD="apikey_fallback"
             fi
+        else
+            warn "OAuth authentication failed or was cancelled."
+            echo ""
+            echo "Falling back to API key..."
+            AUTH_METHOD="apikey_fallback"
         fi
     fi
 fi
@@ -2502,11 +2710,9 @@ if [ "$AUTH_METHOD" = "apikey" ] || [ "$AUTH_METHOD" = "apikey_fallback" ]; then
             fi
         done
 
-        # Save API key to config.env if we got one
+        # Save API key to config.env if we got one (idempotent — won't overwrite)
         if [ -n "${ANTHROPIC_API_KEY:-}" ] && [ -f "$CONFIG_FILE" ]; then
-            echo "" >> "$CONFIG_FILE"
-            echo "# Anthropic API Key (per-token billing)" >> "$CONFIG_FILE"
-            echo "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY" >> "$CONFIG_FILE"
+            set_config_if_missing ANTHROPIC_API_KEY "$ANTHROPIC_API_KEY"
         fi
     fi
 fi
@@ -2571,6 +2777,14 @@ if [ -f "$MCP_TEMPLATE" ]; then
         "$INSTALL_DIR/services/lobster-mcp.service"
 fi
 
+# Generate MCP local HTTP server service if template exists
+MCP_LOCAL_TEMPLATE="$INSTALL_DIR/services/lobster-mcp-local.service.template"
+if [ -f "$MCP_LOCAL_TEMPLATE" ]; then
+    generate_from_template \
+        "$MCP_LOCAL_TEMPLATE" \
+        "$INSTALL_DIR/services/lobster-mcp-local.service"
+fi
+
 # Generate observability server service if template exists
 OBSERVABILITY_TEMPLATE="$INSTALL_DIR/services/lobster-observability.service.template"
 if [ -f "$OBSERVABILITY_TEMPLATE" ]; then
@@ -2585,30 +2799,54 @@ fi
 
 step "Installing systemd services..."
 
-sudo cp "$INSTALL_DIR/services/lobster-router.service" /etc/systemd/system/
-sudo cp "$INSTALL_DIR/services/lobster-claude.service" /etc/systemd/system/
+# Check whether systemd is running (skip service install in containers/Docker where systemd is absent)
+if ! pidof systemd >/dev/null 2>&1 && ! systemctl is-system-running >/dev/null 2>&1; then
+    warn "systemd not running — skipping service installation (container environment?)"
+    info "Service files have been generated in $INSTALL_DIR/services/ — install them manually when running on a systemd host."
+else
+    sudo cp "$INSTALL_DIR/services/lobster-router.service" /etc/systemd/system/
+    sudo cp "$INSTALL_DIR/services/lobster-claude.service" /etc/systemd/system/
 
-# Install Slack router service if generated
-if [ -f "$INSTALL_DIR/services/lobster-slack-router.service" ]; then
-    sudo cp "$INSTALL_DIR/services/lobster-slack-router.service" /etc/systemd/system/
-    info "Slack router service installed (enable manually with: sudo systemctl enable lobster-slack-router)"
+    # Install Slack router service if generated
+    if [ -f "$INSTALL_DIR/services/lobster-slack-router.service" ]; then
+        sudo cp "$INSTALL_DIR/services/lobster-slack-router.service" /etc/systemd/system/
+        info "Slack router service installed (enable manually with: sudo systemctl enable lobster-slack-router)"
+    fi
+
+    # Install MCP HTTP bridge service if generated (remote read-only bridge)
+    if [ -f "$INSTALL_DIR/services/lobster-mcp.service" ]; then
+        sudo cp "$INSTALL_DIR/services/lobster-mcp.service" /etc/systemd/system/
+        info "MCP HTTP bridge service installed (enable manually with: sudo systemctl enable lobster-mcp)"
+    fi
+
+    # Install MCP local HTTP server service (full-access, localhost only)
+    if [ -f "$INSTALL_DIR/services/lobster-mcp-local.service" ]; then
+        sudo cp "$INSTALL_DIR/services/lobster-mcp-local.service" /etc/systemd/system/
+        sudo systemctl enable lobster-mcp-local 2>/dev/null || true
+        success "MCP local HTTP server service installed and enabled (lobster-mcp-local)"
+    fi
+
+    # Install observability service if generated
+    if [ -f "$INSTALL_DIR/services/lobster-observability.service" ]; then
+        sudo cp "$INSTALL_DIR/services/lobster-observability.service" /etc/systemd/system/
+        info "Observability server service installed (enable manually with: sudo systemctl enable lobster-observability)"
+    fi
+
+    # Install transcription worker service (always present — whisper.cpp is a hard dependency)
+    if [ -f "$INSTALL_DIR/services/lobster-transcription.service" ]; then
+        sudo cp "$INSTALL_DIR/services/lobster-transcription.service" /etc/systemd/system/
+        sudo systemctl enable lobster-transcription 2>/dev/null || true
+        success "Transcription worker service installed and enabled (lobster-transcription)"
+    fi
+
+    sudo systemctl daemon-reload
+
+    # Enable services for autostart unconditionally. This is separate from
+    # "start now" — autostart on boot should always be configured regardless
+    # of whether the user wants to start the services interactively right now.
+    sudo systemctl enable lobster-router lobster-claude
+    success "Services installed and enabled for autostart"
 fi
-
-# Install MCP HTTP bridge service if generated
-if [ -f "$INSTALL_DIR/services/lobster-mcp.service" ]; then
-    sudo cp "$INSTALL_DIR/services/lobster-mcp.service" /etc/systemd/system/
-    info "MCP HTTP bridge service installed (enable manually with: sudo systemctl enable lobster-mcp)"
-fi
-
-# Install observability service if generated
-if [ -f "$INSTALL_DIR/services/lobster-observability.service" ]; then
-    sudo cp "$INSTALL_DIR/services/lobster-observability.service" /etc/systemd/system/
-    info "Observability server service installed (enable manually with: sudo systemctl enable lobster-observability)"
-fi
-
-sudo systemctl daemon-reload
-
-success "Services installed"
 
 #===============================================================================
 # Pre-seed ~/.claude.json
@@ -2644,13 +2882,27 @@ fi
 
 step "Registering MCP server with Claude..."
 
-# Remove existing registration if present
+# Remove any legacy stdio mcpServers.lobster-inbox entry from settings.json if present.
+# The claude mcp add/remove CLI stores entries in ~/.claude.json, not settings.json,
+# but defensive cleanup costs nothing and handles any manual or legacy configs.
+if [ -f "$CLAUDE_SETTINGS" ] && command -v jq >/dev/null 2>&1; then
+    if jq -e '.mcpServers."lobster-inbox"' "$CLAUDE_SETTINGS" >/dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq 'del(.mcpServers."lobster-inbox")' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        info "Removed legacy mcpServers.lobster-inbox entry from settings.json"
+    fi
+fi
+
+# Remove existing registration if present (handles both stdio and http registrations)
 claude mcp remove lobster-inbox 2>/dev/null || true
 
-# Add new registration
-PYTHON_PATH="$INSTALL_DIR/.venv/bin/python"
-if claude mcp add lobster-inbox -s user -- "$PYTHON_PATH" "$INSTALL_DIR/src/mcp/inbox_server.py" 2>/dev/null; then
-    success "MCP server registered"
+# Register MCP server using HTTP transport (streamable-http).
+# Claude Code connects to the locally-running lobster-mcp-local service on port 8766.
+# This decouples the MCP server lifetime from the Claude Code process, so CC
+# auto-updates no longer cause a stdio pipe drop / stuck wait_for_messages call.
+MCP_LOCAL_URL="http://localhost:8766/mcp"
+if claude mcp add --transport http lobster-inbox -s user "$MCP_LOCAL_URL" 2>/dev/null; then
+    success "MCP server registered (HTTP transport: $MCP_LOCAL_URL)"
 else
     warn "MCP server registration may have failed. Check with: claude mcp list"
 fi
@@ -2669,7 +2921,7 @@ sudo chmod +x /usr/local/bin/lobster
 success "CLI installed"
 
 # Install git pre-commit hook (enforces execute bits on scripts/ and hooks/)
-if [ -f "$INSTALL_DIR/hooks/pre-commit" ]; then
+if [ -f "$INSTALL_DIR/hooks/pre-commit" ] && [ -d "$INSTALL_DIR/.git" ]; then
     cp "$INSTALL_DIR/hooks/pre-commit" "$INSTALL_DIR/.git/hooks/pre-commit"
     chmod +x "$INSTALL_DIR/.git/hooks/pre-commit"
     success "Pre-commit hook installed (.git/hooks/pre-commit)"
@@ -2760,10 +3012,12 @@ else
 fi
 
 if [[ ! $REPLY =~ ^[Nn]$ ]]; then
-    sudo systemctl enable lobster-router lobster-claude
     sudo systemctl start lobster-router
     sleep 2
     sudo systemctl start lobster-claude
+    # Start transcription worker (already enabled above; start it now so pending voice
+    # messages in ~/messages/pending-transcription/ are processed immediately)
+    sudo systemctl start lobster-transcription 2>/dev/null || true
 
     sleep 3
 
@@ -2815,6 +3069,16 @@ DONE
 echo -e "${NC}"
 
 echo "Test it by sending a message to your Telegram bot!"
+echo ""
+echo -e "${BOLD}Required post-install steps:${NC}"
+if [ "$GITHUB_TOKEN_SET" = false ]; then
+echo "  1. Set your GitHub PAT:    lobster env set GITHUB_TOKEN <your-token>"
+echo "  2. Authenticate Claude:    sudo -u lobster claude  (then follow OAuth prompts)"
+echo "  3. Start services:         sudo systemctl start lobster-mcp-local lobster-claude lobster-router"
+else
+echo "  1. Authenticate Claude:    sudo -u lobster claude  (then follow OAuth prompts)"
+echo "  2. Start services:         sudo systemctl start lobster-mcp-local lobster-claude lobster-router"
+fi
 echo ""
 echo -e "${BOLD}Commands:${NC}"
 echo "  lobster status    Check service status"

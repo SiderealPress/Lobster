@@ -151,18 +151,6 @@ class TestUpgradePreservesDataDirectories:
         after = json.loads(tasks_file.read_text())
         assert after["tasks"][0]["subject"] == "important task"
 
-    def test_jobs_json_preserved(self, simulated_install):
-        """Verify scheduled jobs.json is not overwritten on upgrade."""
-        jobs_file = simulated_install["lobster"] / "scheduled-tasks" / "jobs.json"
-        original = json.loads(jobs_file.read_text())
-        assert "morning-check" in original["jobs"]
-
-        if not jobs_file.exists():
-            jobs_file.write_text(json.dumps({"jobs": {}}))
-
-        after = json.loads(jobs_file.read_text())
-        assert "morning-check" in after["jobs"]
-
     def test_projects_directory_preserved(self, simulated_install):
         """Verify lobster-workspace/projects/ and its contents are never touched."""
         projects = simulated_install["projects"]

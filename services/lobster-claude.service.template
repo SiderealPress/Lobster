@@ -18,6 +18,9 @@ Environment=LOBSTER_USER_CONFIG={{USER_CONFIG_DIR}}
 EnvironmentFile=-{{INSTALL_DIR}}/config/config.env
 EnvironmentFile={{CONFIG_DIR}}/config.env
 EnvironmentFile=-{{CONFIG_DIR}}/global.env
+# LOBSTER_ENV is read from config.env above (production|dev|test).
+# Set LOBSTER_ENV=dev in config.env to make the session inert during SSH dev work.
+# The script exits cleanly so RemainAfterExit=yes prevents unwanted restart loops.
 UnsetEnvironment=CLAUDECODE CLAUDE_CODE_ENTRYPOINT
 ExecStart=/usr/bin/tmux -L lobster new-session -d -s lobster -c {{WORKSPACE_DIR}} {{INSTALL_DIR}}/scripts/start-claude.sh
 ExecStop=/usr/bin/tmux -L lobster kill-session -t lobster

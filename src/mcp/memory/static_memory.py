@@ -25,7 +25,9 @@ log = logging.getLogger("lobster-memory")
 _WORKSPACE = Path(os.environ.get("LOBSTER_WORKSPACE", Path.home() / "lobster-workspace"))
 _USER_CONFIG = Path(os.environ.get("LOBSTER_USER_CONFIG", Path.home() / "lobster-user-config"))
 DEFAULT_CANONICAL_DIR = _USER_CONFIG / "memory" / "canonical"
-DEFAULT_EVENT_LOG = _WORKSPACE / "data" / "events.jsonl"
+DEFAULT_EVENT_LOG = _WORKSPACE / "data" / "memory-events.jsonl"
+
+_ROTATION_THRESHOLD = 1_073_741_824  # 1 GB in bytes
 
 
 class StaticMemory:
@@ -67,8 +69,25 @@ class StaticMemory:
                     continue
         return max_id + 1
 
+    def _rotate_if_needed(self) -> None:
+        """Rotate the event log if it exceeds the 1 GB threshold.
+
+        Renames the current file to <name>.1 (overwriting any previous rotation)
+        and starts a fresh log. Does not compress or delete — the rotated file
+        is kept intact for manual inspection or archival.
+        """
+        if not self._event_log.exists():
+            return
+        if self._event_log.stat().st_size < _ROTATION_THRESHOLD:
+            return
+        rotated = self._event_log.with_suffix(self._event_log.suffix + ".1")
+        self._event_log.rename(rotated)
+        log.info("Rotated %s -> %s (exceeded 1 GB)", self._event_log, rotated)
+
     def store(self, event: MemoryEvent) -> int:
-        """Append event to JSONL log file."""
+        """Append event to JSONL log file, rotating if the file exceeds 1 GB."""
+        self._rotate_if_needed()
+
         event.id = self._next_id
         self._next_id += 1
 

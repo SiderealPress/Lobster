@@ -32,7 +32,7 @@ def fake_repo(tmp_path):
 def non_repo(tmp_path):
     """Create a plain directory without .git/."""
     plain = tmp_path / "workspace"
-    plain.mkdir(parents=True)
+    plain.mkdir(parents=True, exist_ok=True)
     return plain
 
 
@@ -52,7 +52,7 @@ class TestAssertNotInGitRepo:
             assert_not_in_git_repo(fake_repo)
 
     def test_allows_path_outside_git_repo(self, non_repo):
-        target = non_repo / "data" / "events.jsonl"
+        target = non_repo / "data" / "memory-events.jsonl"
         target.parent.mkdir(parents=True)
         target.touch()
         assert_not_in_git_repo(target)  # should not raise

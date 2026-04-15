@@ -548,3 +548,179 @@ class TestFullEndToEndFlow:
         # Step 6: Unknown group -> DROP_SILENT
         gate_unknown = gate_message(UNKNOWN_GROUP_ID, ALLOWED_USER_ID, store)
         assert gate_unknown.action == GatingAction.DROP_SILENT
+
+
+# ---------------------------------------------------------------------------
+# Phase 5: Bot join → whitelist → message gate → lobster-group route
+# ---------------------------------------------------------------------------
+
+
+# Simulate the group that is already configured on the live system.
+LIVE_GROUP_ID = -5033634362
+LIVE_GROUP_ID_STR = str(LIVE_GROUP_ID)
+LIVE_USER_ID_ADMIN = 6645894734   # Primary admin user
+LIVE_USER_ID_MEMBER = 5717728951  # Secondary group member
+LIVE_GROUP_NAME = "Group"
+
+
+class TestPhase5BotJoinToRoute:
+    """End-to-end flow: bot join auto-whitelist → message gate → lobster-group source.
+
+    This test exercises the full pipeline introduced across Phases 1–5:
+      1. Bot added to group by an ALLOWED_USER → auto-whitelist fires
+      2. Whitelisted user sends a message → gate returns ALLOW
+      3. inbox message dict has source="lobster-group"
+      4. Non-whitelisted user's message → SEND_REGISTRATION_DM (not ALLOW)
+      5. Unknown group → DROP_SILENT
+    """
+
+    def _auto_whitelist(
+        self,
+        tmp_path: Path,
+        chat_id: int,
+        chat_name: str,
+        allowed_user_ids: list[int],
+    ) -> Path:
+        """Simulate the auto-whitelist logic from handle_my_chat_member.
+
+        When the bot is added to a group by an ALLOWED_USER, the bot calls
+        enable_group(...) then add_allowed_user(...) for every user in
+        ALLOWED_USERS, then saves. This helper replicates that sequence.
+        """
+        from multiplayer_telegram_bot.whitelist import enable_group, add_allowed_user, save_whitelist
+
+        wl_path = _make_whitelist_path(tmp_path)
+        store = load_whitelist(wl_path)  # starts empty
+
+        # Replicate handle_my_chat_member auto-whitelist
+        store = enable_group(chat_id, chat_name, store)
+        for uid in allowed_user_ids:
+            store = add_allowed_user(uid, chat_id, store)
+        save_whitelist(store, wl_path)
+        return wl_path
+
+    def test_bot_join_creates_enabled_group(self, tmp_path: Path) -> None:
+        """After bot-join auto-whitelist, group is enabled in the store."""
+        wl_path = self._auto_whitelist(
+            tmp_path, LIVE_GROUP_ID, LIVE_GROUP_NAME,
+            [LIVE_USER_ID_ADMIN, LIVE_USER_ID_MEMBER],
+        )
+        store = load_whitelist(wl_path)
+        assert LIVE_GROUP_ID_STR in store["groups"]
+        group = store["groups"][LIVE_GROUP_ID_STR]
+        assert group["enabled"] is True
+
+    def test_bot_join_seeds_both_allowed_users(self, tmp_path: Path) -> None:
+        """Both ALLOWED_USERS are present in allowed_user_ids after auto-whitelist."""
+        wl_path = self._auto_whitelist(
+            tmp_path, LIVE_GROUP_ID, LIVE_GROUP_NAME,
+            [LIVE_USER_ID_ADMIN, LIVE_USER_ID_MEMBER],
+        )
+        store = load_whitelist(wl_path)
+        group = store["groups"][LIVE_GROUP_ID_STR]
+        assert LIVE_USER_ID_ADMIN in group["allowed_user_ids"]
+        assert LIVE_USER_ID_MEMBER in group["allowed_user_ids"]
+
+    def test_whitelisted_user_message_gates_allow(self, tmp_path: Path) -> None:
+        """After auto-whitelist, whitelisted user gets ALLOW from gate_message."""
+        wl_path = self._auto_whitelist(
+            tmp_path, LIVE_GROUP_ID, LIVE_GROUP_NAME,
+            [LIVE_USER_ID_ADMIN, LIVE_USER_ID_MEMBER],
+        )
+        store = load_whitelist(wl_path)
+        result = gate_message(LIVE_GROUP_ID, LIVE_USER_ID_ADMIN, store)
+        assert result.action == GatingAction.ALLOW
+        assert should_allow(result)
+
+    def test_allowed_user_message_has_lobster_group_source(self, tmp_path: Path) -> None:
+        """build_inbox_message returns source=lobster-group for a group message."""
+        inbox_msg = build_inbox_message(
+            text="Hey team, any updates?",
+            chat_id=LIVE_GROUP_ID,
+            user_id=LIVE_USER_ID_ADMIN,
+            chat_type="supergroup",
+            username="admin_user",
+            first_name="Admin",
+        )
+        assert inbox_msg["source"] == "lobster-group"
+        assert inbox_msg["chat_id"] == LIVE_GROUP_ID
+
+    def test_non_whitelisted_user_triggers_registration(self, tmp_path: Path) -> None:
+        """A user not in allowed_user_ids triggers SEND_REGISTRATION_DM, not ALLOW."""
+        wl_path = self._auto_whitelist(
+            tmp_path, LIVE_GROUP_ID, LIVE_GROUP_NAME,
+            [LIVE_USER_ID_ADMIN],  # LIVE_USER_ID_MEMBER not included
+        )
+        store = load_whitelist(wl_path)
+        result = gate_message(LIVE_GROUP_ID, LIVE_USER_ID_MEMBER, store)
+        assert result.action == GatingAction.SEND_REGISTRATION_DM
+        assert should_register(result)
+
+    def test_unknown_group_silently_dropped(self, tmp_path: Path) -> None:
+        """A group not in the whitelist yields DROP_SILENT for any user."""
+        wl_path = self._auto_whitelist(
+            tmp_path, LIVE_GROUP_ID, LIVE_GROUP_NAME,
+            [LIVE_USER_ID_ADMIN, LIVE_USER_ID_MEMBER],
+        )
+        store = load_whitelist(wl_path)
+        other_group = -9999999999
+        result = gate_message(other_group, LIVE_USER_ID_ADMIN, store)
+        assert result.action == GatingAction.DROP_SILENT
+        assert should_drop(result)
+
+    def test_full_bot_join_to_lobster_group_pipeline(self, tmp_path: Path) -> None:
+        """Complete Phase 5 smoke test: join → gate → inbox source tag.
+
+        Simulates the full sequence that would happen in production:
+        1. Bot is added to LIVE_GROUP_ID by the admin user (ALLOWED_USER)
+        2. Auto-whitelist seeds the store with admin + member
+        3. Admin sends a message → ALLOW → inbox msg has source=lobster-group
+        4. Unknown user sends a message → registration DM path
+        5. Message from an unknown group → silent drop
+        """
+        dm_log: list[tuple[int, str]] = []
+
+        def mock_send_dm(user_id: int, text: str) -> bool:
+            dm_log.append((user_id, text))
+            return True
+
+        # Step 1: Bot join auto-whitelist (admin user added the bot)
+        wl_path = self._auto_whitelist(
+            tmp_path, LIVE_GROUP_ID, LIVE_GROUP_NAME,
+            [LIVE_USER_ID_ADMIN, LIVE_USER_ID_MEMBER],
+        )
+
+        # Step 2: Load the store from disk (as the bot would on each message)
+        store = load_whitelist(wl_path)
+
+        # Step 3: Admin sends a text message in the group
+        gate_admin = gate_message(LIVE_GROUP_ID, LIVE_USER_ID_ADMIN, store)
+        assert gate_admin.action == GatingAction.ALLOW
+
+        inbox_msg = build_inbox_message(
+            text="What are we doing this weekend?",
+            chat_id=LIVE_GROUP_ID,
+            user_id=LIVE_USER_ID_ADMIN,
+            chat_type="supergroup",
+            username="admin_user",
+            first_name="Admin",
+        )
+        assert inbox_msg["source"] == "lobster-group"
+        assert inbox_msg["text"] == "What are we doing this weekend?"
+
+        # Step 4: Stranger sends a message (should trigger registration DM)
+        stranger_id = 777777777
+        gate_stranger = gate_message(LIVE_GROUP_ID, stranger_id, store)
+        assert gate_stranger.action == GatingAction.SEND_REGISTRATION_DM
+        reg = handle_registration_flow(
+            user_id=stranger_id,
+            group_chat_id=LIVE_GROUP_ID,
+            send_fn=mock_send_dm,
+        )
+        assert reg.success
+        assert any(uid == stranger_id for uid, _ in dm_log)
+
+        # Step 5: Message from a different group → silent drop
+        other_group = -1001234567890
+        gate_other = gate_message(other_group, LIVE_USER_ID_ADMIN, store)
+        assert gate_other.action == GatingAction.DROP_SILENT

@@ -450,3 +450,206 @@ class TestDetectCompletedNotUpdated:
         row = self._make_row("jkl", "/tmp/nonexistent-agent-jkl.jsonl")
         result = gd.detect_completed_not_updated([row])
         assert result == []
+
+
+# ---------------------------------------------------------------------------
+# mark_failed_all_ghosts — STALE_NO_FILE remediation (issue #1397)
+# ---------------------------------------------------------------------------
+
+
+class TestMarkFailedAllGhostsStaleNoFile:
+    """--mark-failed must also act on STALE_NO_FILE sessions.
+
+    Dispatcher sessions have no output_file recorded (they are long-running
+    processes, not task subagents). They land in STALE_NO_FILE and were
+    previously skipped by mark_failed_all_ghosts(), accumulating as perpetual
+    status=running rows.
+    """
+
+    def _make_classified(
+        self,
+        agent_id: str,
+        classification: str,
+        output_file: str | None = None,
+        agent_type: str = "dispatcher",
+    ) -> gd.ClassifiedAgent:
+        row = gd.AgentRow(
+            agent_id=agent_id,
+            task_id=None,
+            description=f"test-{agent_type}-{agent_id[:8]}",
+            chat_id="12345",
+            status="running",
+            spawned_at="2026-03-15T09:00:00+00:00",
+            output_file=output_file,
+            last_seen_at=None,
+        )
+        return gd.ClassifiedAgent(
+            row=row,
+            classification=classification,
+            age_minutes=120.0,
+            output_file_age_minutes=None,
+        )
+
+    def test_stale_no_file_agents_are_marked_failed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """STALE_NO_FILE agents passed as stale_no_file= are marked failed in the DB."""
+        marked: list[str] = []
+        dropped: list[dict] = []
+
+        monkeypatch.setattr(gd, "mark_agent_failed", lambda db_path, agent_id: marked.append(agent_id))
+        monkeypatch.setattr(gd, "drop_inbox_message", lambda payload: dropped.append(payload))
+
+        stale = self._make_classified("dispatcher001", "STALE_NO_FILE")
+        fake_db = tmp_path / "agent_sessions.db"
+
+        gd.mark_failed_all_ghosts([], fake_db, stale_no_file=[stale])
+
+        assert "dispatcher001" in marked
+        assert len(dropped) == 1
+        assert dropped[0]["agent_id"] == "dispatcher001"
+
+    def test_confirmed_and_stale_no_file_both_marked(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Both GHOST_CONFIRMED and STALE_NO_FILE agents are processed in one call."""
+        marked: list[str] = []
+        monkeypatch.setattr(gd, "mark_agent_failed", lambda db_path, agent_id: marked.append(agent_id))
+        monkeypatch.setattr(gd, "drop_inbox_message", lambda payload: None)
+
+        confirmed = self._make_classified("subagent001", "GHOST_CONFIRMED", output_file="/tmp/out.jsonl")
+        stale = self._make_classified("dispatcher002", "STALE_NO_FILE")
+        fake_db = tmp_path / "agent_sessions.db"
+
+        gd.mark_failed_all_ghosts([confirmed], fake_db, stale_no_file=[stale])
+
+        assert "subagent001" in marked
+        assert "dispatcher002" in marked
+
+    def test_empty_stale_no_file_list_does_not_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Empty stale_no_file= is equivalent to not passing it at all."""
+        marked: list[str] = []
+        monkeypatch.setattr(gd, "mark_agent_failed", lambda db_path, agent_id: marked.append(agent_id))
+        monkeypatch.setattr(gd, "drop_inbox_message", lambda payload: None)
+
+        confirmed = self._make_classified("subagent003", "GHOST_CONFIRMED", output_file="/tmp/out.jsonl")
+        fake_db = tmp_path / "agent_sessions.db"
+
+        gd.mark_failed_all_ghosts([confirmed], fake_db, stale_no_file=[])
+
+        assert "subagent003" in marked
+
+    def test_no_agents_at_all_prints_message(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """No confirmed + no stale_no_file → prints 'nothing to do' message, no DB writes."""
+        marked: list[str] = []
+        monkeypatch.setattr(gd, "mark_agent_failed", lambda db_path, agent_id: marked.append(agent_id))
+        monkeypatch.setattr(gd, "drop_inbox_message", lambda payload: None)
+
+        fake_db = tmp_path / "agent_sessions.db"
+        gd.mark_failed_all_ghosts([], fake_db, stale_no_file=[])
+
+        assert marked == []
+        out = capsys.readouterr().out
+        assert "No GHOST_CONFIRMED or STALE_NO_FILE" in out
+
+
+# ---------------------------------------------------------------------------
+# Live dispatcher guard in mark_failed_all_ghosts
+# ---------------------------------------------------------------------------
+
+
+class TestLiveDispatcherGuard:
+    """The live dispatcher session (agent_id='lobster-dispatcher') must be skipped
+    in the STALE_NO_FILE sweep.
+
+    The dispatcher always registers with the static agent_id "lobster-dispatcher"
+    (not a UUID). The guard filters on this constant directly — no file reads needed.
+    """
+
+    DISPATCHER_AGENT_ID = "lobster-dispatcher"
+
+    def _make_stale_classified(self, agent_id: str) -> gd.ClassifiedAgent:
+        row = gd.AgentRow(
+            agent_id=agent_id,
+            task_id=None,
+            description="Lobster dispatcher (registered by SessionStart hook)",
+            chat_id="0",
+            status="running",
+            spawned_at="2026-03-15T09:00:00+00:00",
+            output_file=None,
+            last_seen_at=None,
+        )
+        return gd.ClassifiedAgent(
+            row=row,
+            classification="STALE_NO_FILE",
+            age_minutes=180.0,
+            output_file_age_minutes=None,
+        )
+
+    def test_live_dispatcher_session_is_skipped(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A session with agent_id='lobster-dispatcher' must not be marked failed."""
+        marked: list[str] = []
+        monkeypatch.setattr(gd, "mark_agent_failed", lambda db_path, agent_id: marked.append(agent_id))
+        monkeypatch.setattr(gd, "drop_inbox_message", lambda payload: None)
+
+        live_session = self._make_stale_classified(self.DISPATCHER_AGENT_ID)
+        fake_db = tmp_path / "agent_sessions.db"
+
+        gd.mark_failed_all_ghosts([], fake_db, stale_no_file=[live_session])
+
+        assert self.DISPATCHER_AGENT_ID not in marked
+        assert marked == []
+
+    def test_stale_subagent_sessions_still_marked(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """STALE_NO_FILE subagent sessions (non-dispatcher agent_id) are marked failed."""
+        marked: list[str] = []
+        monkeypatch.setattr(gd, "mark_agent_failed", lambda db_path, agent_id: marked.append(agent_id))
+        monkeypatch.setattr(gd, "drop_inbox_message", lambda payload: None)
+
+        dead_session = self._make_stale_classified("some-dead-subagent-task-id")
+        fake_db = tmp_path / "agent_sessions.db"
+
+        gd.mark_failed_all_ghosts([], fake_db, stale_no_file=[dead_session])
+
+        assert "some-dead-subagent-task-id" in marked
+
+    def test_mixed_dispatcher_and_subagent_only_subagent_marked(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With one dispatcher session and one dead subagent, only the subagent is marked."""
+        marked: list[str] = []
+        monkeypatch.setattr(gd, "mark_agent_failed", lambda db_path, agent_id: marked.append(agent_id))
+        monkeypatch.setattr(gd, "drop_inbox_message", lambda payload: None)
+
+        dispatcher_session = self._make_stale_classified(self.DISPATCHER_AGENT_ID)
+        dead_session = self._make_stale_classified("dead-subagent-task-abc123")
+        fake_db = tmp_path / "agent_sessions.db"
+
+        gd.mark_failed_all_ghosts([], fake_db, stale_no_file=[dispatcher_session, dead_session])
+
+        assert self.DISPATCHER_AGENT_ID not in marked
+        assert "dead-subagent-task-abc123" in marked
+
+    def test_skip_message_printed_when_dispatcher_session_found(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """A skip notice is printed when the dispatcher session is excluded."""
+        monkeypatch.setattr(gd, "mark_agent_failed", lambda db_path, agent_id: None)
+        monkeypatch.setattr(gd, "drop_inbox_message", lambda payload: None)
+
+        dispatcher_session = self._make_stale_classified(self.DISPATCHER_AGENT_ID)
+        fake_db = tmp_path / "agent_sessions.db"
+
+        gd.mark_failed_all_ghosts([], fake_db, stale_no_file=[dispatcher_session])
+
+        out = capsys.readouterr().out
+        assert "Skipping" in out
+        assert "dispatcher" in out.lower()

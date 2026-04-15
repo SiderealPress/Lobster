@@ -1,0 +1,39 @@
+[skill]
+name = "gmail"
+version = "1.0.0"
+description = "Gmail integration: read recent emails and search inbox via API when authenticated, or prompt with a one-time consent URL when unauthenticated"
+author = "Lobster"
+category = "behavioral"
+
+[activation]
+mode = "triggered"
+triggers = ["/gmail", "/email", "/inbox"]
+context_patterns = [
+    "when user asks to check their email",
+    "when user asks about emails, messages, or inbox",
+    "when user wants to search their email",
+    "when user asks if they have new email",
+    "when user wants to connect or authenticate Gmail",
+    "when user mentions reading or finding an email",
+]
+
+[layering]
+priority = 40
+merge_strategy = "append"
+
+[provides]
+mcp_tools = []
+bot_commands = ["/gmail", "/email", "/inbox"]
+
+[compatibility]
+enhances = []
+conflicts = []
+
+[dependencies]
+pip = []
+npm = []
+system = []
+api_keys = []
+
+[dependencies.runtime]
+python = ">=3.11"

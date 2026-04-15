@@ -332,6 +332,101 @@ kill_orphaned_claude_processes() {
 }
 
 #===============================================================================
+# Kill orphaned MCP server processes (inbox_server.py, obsidian-mcp, etc.)
+# that are NOT descendants of the current tmux session's pane PIDs.
+#
+# Why this is needed:
+#   When Claude is killed or exits abnormally, the MCP servers it launched
+#   (inbox_server.py, obsidian-mcp via npx, etc.) become orphaned — their
+#   parent Claude process is gone but they continue running. On the next
+#   restart, Claude spawns fresh MCP servers. Without cleanup the old ones
+#   accumulate indefinitely, leaking memory and file descriptors.
+#
+# Safety contract:
+#   - Only kills processes matching the specific MCP server patterns below
+#   - Uses the same tmux pane lineage check as kill_orphaned_claude_processes
+#   - SIGTERM first, SIGKILL only after a 3-second grace period
+#   - SIGKILL only sent to PIDs that received SIGTERM (prevents PID-reuse kills)
+#===============================================================================
+kill_orphaned_mcp_processes() {
+    local tmux_panes
+    tmux_panes=$(tmux -L lobster list-panes -a -F '#{pane_pid}' 2>/dev/null || true)
+
+    # Collect PIDs for each known MCP server pattern
+    local mcp_pids=""
+    mcp_pids+=" $(pgrep -f "src/mcp/inbox_server\.py" 2>/dev/null || true)"
+    mcp_pids+=" $(pgrep -f "obsidian-mcp" 2>/dev/null || true)"
+    mcp_pids=$(echo "$mcp_pids" | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -u || true)
+
+    if [[ -z "$mcp_pids" ]]; then
+        log "CLEANUP: No stale MCP server processes found"
+        return 0
+    fi
+
+    log "CLEANUP: Found MCP PID(s): $(echo "$mcp_pids" | tr '\n' ' ')"
+
+    local killed=0
+    local skipped=0
+    local sigterm_pids=()
+
+    for pid in $mcp_pids; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            continue
+        fi
+
+        # Skip systemd-managed services — they are independently lifecycle-managed,
+        # not orphans. Killing them causes a restart race where Claude initializes
+        # before the MCP server comes back up, leaving the session without MCP tools.
+        if systemctl status --pid "$pid" >/dev/null 2>&1; then
+            log "CLEANUP: MCP PID $pid is a systemd-managed service — skipping"
+            skipped=$((skipped + 1))
+            continue
+        fi
+
+        local is_ours=false
+        if [[ -n "$tmux_panes" ]]; then
+            local check_pid="$pid"
+            for _hop in 1 2 3 4 5 6 7 8; do
+                local ppid
+                ppid=$(ps -o ppid= -p "$check_pid" 2>/dev/null | tr -d ' ')
+                if [[ -z "$ppid" || "$ppid" == "1" ]]; then
+                    break
+                fi
+                if echo "$tmux_panes" | grep -qw "$ppid"; then
+                    is_ours=true
+                    break
+                fi
+                check_pid="$ppid"
+            done
+        fi
+
+        if [[ "$is_ours" == "true" ]]; then
+            log "CLEANUP: MCP PID $pid is a current-session descendant — skipping"
+            skipped=$((skipped + 1))
+        else
+            log "CLEANUP: Killing orphaned MCP PID $pid (SIGTERM)"
+            if kill -TERM "$pid" 2>/dev/null; then
+                sigterm_pids+=("$pid")
+            fi
+            killed=$((killed + 1))
+        fi
+    done
+
+    if [[ $killed -gt 0 ]]; then
+        sleep 3
+        for pid in "${sigterm_pids[@]}"; do
+            if kill -0 "$pid" 2>/dev/null; then
+                log "CLEANUP: MCP PID $pid still alive after SIGTERM — sending SIGKILL"
+                kill -KILL "$pid" 2>/dev/null || true
+            fi
+        done
+        log "CLEANUP: Sent SIGTERM to $killed orphaned MCP process(es), skipped $skipped in-session"
+    else
+        log "CLEANUP: No orphaned MCP processes to kill (skipped $skipped in-session)"
+    fi
+}
+
+#===============================================================================
 # Launch Claude in persistent mode
 #===============================================================================
 launch_claude() {
@@ -347,6 +442,12 @@ launch_claude() {
     # This prevents resource leaks when ExecStop fails (e.g. tmux already dead).
     # -------------------------------------------------------------------------
     kill_orphaned_claude_processes
+
+    # -------------------------------------------------------------------------
+    # Kill orphaned MCP server processes (inbox_server.py, obsidian-mcp, etc.)
+    # that were spawned by killed Claude sessions and never cleaned up.
+    # -------------------------------------------------------------------------
+    kill_orphaned_mcp_processes
 
     # -------------------------------------------------------------------------
     # Clean leaked Claude Code env vars before launching.
@@ -370,7 +471,7 @@ launch_claude() {
     fi
 
     # Build the initial prompt for Claude
-    local init_prompt="Read CLAUDE.md and begin your main loop. Call wait_for_messages(timeout=1800, hibernate_on_timeout=true) to start listening for Telegram messages. Process each message as it arrives, then return to wait_for_messages(timeout=1800, hibernate_on_timeout=true). Never exit unless hibernating."
+    local init_prompt="Read CLAUDE.md and begin your main loop. Call wait_for_messages() to start listening for Telegram messages. Process each message as it arrives, then return to wait_for_messages(). Never exit."
 
     # Always start fresh. Never use --continue.
     #
@@ -380,12 +481,68 @@ launch_claude() {
     # by design — it reads CLAUDE.md, enters the loop, and processes messages.
     # Any persistent state lives in canonical memory files, not conversation history.
     local claude_exit_code=0
+
+    # Wait for the MCP server to be ready before launching Claude.
+    # kill_orphaned_mcp_processes() may have just SIGTERM'd the old MCP server
+    # (managed by systemd). Systemd restarts it within ~2 seconds, but if Claude
+    # initializes MCP connections before the server is back up, the tools fail to
+    # load and the dispatcher runs without lobster-inbox tools for the entire session.
+    local mcp_port="${LOBSTER_MCP_PORT:-8766}"
+    local mcp_ready=false
+    for i in {1..15}; do
+        local http_code
+        http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 1 \
+            "http://localhost:${mcp_port}/mcp" 2>/dev/null || echo "000")
+        if [[ "$http_code" != "000" ]]; then
+            mcp_ready=true
+            break
+        fi
+        sleep 1
+    done
+    if [[ "$mcp_ready" == "true" ]]; then
+        log "MCP server ready on port ${mcp_port} (HTTP reachable)"
+        # Second-phase check: verify the MCP SSE endpoint accepts proper protocol
+        # connections. The first check may have passed on the dying old server's last
+        # response. Claude's MCP client needs the new server's SSE endpoint to be
+        # fully initialised before launch or the tools are permanently unavailable.
+        local mcp_sse_ready=false
+        for i in {1..10}; do
+            local sse_code
+            sse_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 2 \
+                -H "Accept: application/json, text/event-stream" \
+                -H "Content-Type: application/json" \
+                -X POST \
+                --data '{"jsonrpc":"2.0","method":"initialize","id":1,"params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"readiness-check","version":"1.0"}}}' \
+                "http://localhost:${mcp_port}/mcp" 2>/dev/null || echo "000")
+            if [[ "$sse_code" == "200" ]]; then
+                mcp_sse_ready=true
+                log "MCP SSE endpoint confirmed ready (attempt $i)"
+                break
+            fi
+            sleep 1
+        done
+        if [[ "$mcp_sse_ready" != "true" ]]; then
+            log "WARNING: MCP SSE endpoint not ready after 10s — launching Claude anyway"
+        fi
+    else
+        log "WARNING: MCP server not responding after 15s — launching Claude anyway"
+    fi
+
     log "Starting fresh session (attempt $attempt)..."
 
-    # Transition to active BEFORE the blocking claude call.
-    # The "starting" state above covers env cleanup and preflight.
-    # Once we hand off to claude, we're active.
-    write_state "active" "claude running, attempt=$attempt"
+    # Schedule a delayed "active" write ~5 seconds after launch so the health
+    # check sees a live signal once the MCP server has had time to initialise.
+    # This runs in the background so it does not block the claude process launch.
+    # The MCP server's _reset_state_on_startup() and handle_wait_for_messages()
+    # will also write "active" once Claude is truly running, but this belt-and-
+    # suspenders write ensures the state transitions even if those paths are slow.
+    #
+    # Fix B (2026-04-03): Guard against the hibernation→active state race.
+    # If Claude exits into hibernation before the 5-second sleep completes,
+    # the background write would overwrite "hibernate" with "active", causing
+    # the health check to see mode=active + no WFM heartbeat → false restart.
+    # Only write "active" if the current mode is NOT "hibernate".
+    ( sleep 5 && current_mode=$(read_state_mode 2>/dev/null || echo "unknown"); [[ "$current_mode" != "hibernate" ]] && write_state "active" "claude running, attempt=$attempt" ) &
 
     # Write the dispatcher PID file so the health check can target this specific
     # process for cleanup without relying on ambiguous pgrep matches.
@@ -430,9 +587,43 @@ handle_exit() {
             log "HIBERNATING: Claude exited cleanly (hibernation). Will wait for wake signal."
             return 0
         else
-            # Claude exited cleanly but not in hibernate mode
-            # This can happen when --max-turns is exhausted
-            log "Claude exited cleanly (code 0) but not in hibernate mode. Will restart."
+            # Claude exited cleanly but mode is not "hibernate".
+            # Race condition guard: the MCP tool writes mode=hibernate then Claude
+            # exits, but if the health check fires between those two events it sees
+            # mode=active + stale WFM and triggers a false restart.
+            # Write mode=hibernate NOW (atomically, preserving existing fields) so
+            # the health check immediately sees the correct state.
+            log "Claude exited cleanly (code 0) but mode='${current_mode}' (not hibernate). Writing hibernate state before restart decision."
+            local now
+            now=$(date -Iseconds)
+            local tmp_state
+            tmp_state=$(mktemp "${STATE_FILE}.tmp.XXXXXX")
+            python3 -c "
+import json
+path = '$STATE_FILE'
+now = '$now'
+try:
+    with open(path) as f:
+        d = json.load(f)
+except Exception:
+    d = {}
+d['mode'] = 'hibernate'
+d['detail'] = 'clean exit, mode forced by wrapper (race condition guard)'
+d['updated_at'] = now
+with open('$tmp_state', 'w') as f:
+    json.dump(d, f, indent=2)
+    f.write('
+')
+" 2>/dev/null && mv -f "$tmp_state" "$STATE_FILE" || { rm -f "$tmp_state" 2>/dev/null; write_state "hibernate" "clean exit, mode forced by wrapper"; }
+            log "Hibernate state written atomically. Re-reading mode..."
+            current_mode=$(read_state_mode)
+            if [[ "$current_mode" == "hibernate" ]]; then
+                # Treat as intentional hibernation — wait for new messages
+                log "HIBERNATING: Clean exit treated as hibernation (mode forced by wrapper). Will wait for wake signal."
+                return 0
+            fi
+            # State write failed somehow — fall through to restart
+            log "State write did not yield hibernate mode (got: ${current_mode}). Will restart."
             write_state "restarting" "clean exit, max-turns likely exhausted"
             # Reset auth failure tracking — a clean exit means auth is working
             AUTH_FAIL_COUNT=0
@@ -451,9 +642,10 @@ handle_exit() {
                 send_telegram_alert "🔴 *Lobster Auth Failure*
 
 Claude cannot authenticate after $AUTH_FAIL_COUNT attempts.
-Check \`/home/lobster/.claude/.credentials.json\` — OAuth token may be expired.
+Auth is via CLAUDE_CODE_OAUTH_TOKEN in config.env.
 
-See \`docs/REMOTE-AUTH.md\` for re-authentication steps."
+Fix: update CLAUDE_CODE_OAUTH_TOKEN in ~/lobster-config/config.env, then:
+  systemctl restart lobster-claude"
                 log "AUTH ALERT: Sent Telegram notification after $AUTH_FAIL_COUNT auth failures"
             fi
         fi
@@ -492,6 +684,20 @@ main() {
     log "Workspace: $WORKSPACE_DIR"
     log "State file: $STATE_FILE"
     log "================================================================"
+
+    # Lifecycle gate: only run in production mode.
+    # When LOBSTER_ENV is set to anything other than "production" (e.g. "dev" or
+    # "test"), the persistent session exits immediately. This lets the owner do SSH
+    # dev work without the production session health-checking and auto-restarting
+    # in the background. systemd starts the script but the script exits cleanly
+    # (exit 0), so the service stays in RemainAfterExit=yes without restart loops.
+    # Flip back to production by setting LOBSTER_ENV=production and restarting
+    # the service (or unsetting the var, since "production" is the default).
+    LOBSTER_ENV="${LOBSTER_ENV:-production}"
+    if [[ "$LOBSTER_ENV" != "production" ]]; then
+        log "LOBSTER_ENV=$LOBSTER_ENV — persistent session is disabled in non-production mode. Exiting."
+        exit 0
+    fi
 
     preflight
 
@@ -533,7 +739,6 @@ Claude persistent session initializing."
         fi
 
         # Launch Claude
-        write_state "active" "starting claude"
         launch_claude "$attempt"
         local exit_code=$?
 

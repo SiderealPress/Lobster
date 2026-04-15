@@ -11,7 +11,7 @@ Depends on: schema.py, db.py only.
 """
 
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .db import (
@@ -146,9 +146,9 @@ def add_preference(
         confidence=confidence,
         description=description,
         evidence_count=1,
-        last_observed=datetime.utcnow(),
-        created_at=datetime.utcnow(),
-        updated_at=datetime.utcnow(),
+        last_observed=datetime.now(timezone.utc),
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
     )
     node_id = upsert_preference_node(conn, node)
 
@@ -177,8 +177,8 @@ def reinforce_preference(
         return
     node.evidence_count += 1
     node.confidence = min(1.0, node.confidence + confidence_delta)
-    node.last_observed = datetime.utcnow()
-    node.updated_at = datetime.utcnow()
+    node.last_observed = datetime.now(timezone.utc)
+    node.updated_at = datetime.now(timezone.utc)
     upsert_preference_node(conn, node)
 
 
@@ -200,7 +200,7 @@ def apply_correction(
     node.description = corrected_description
     if corrected_strength is not None:
         node.strength = corrected_strength
-    node.updated_at = datetime.utcnow()
+    node.updated_at = datetime.now(timezone.utc)
     upsert_preference_node(conn, node)
 
 
@@ -218,7 +218,7 @@ def apply_decay(
     Returns the number of nodes affected.
     """
     all_nodes = get_all_preference_nodes(conn)
-    cutoff = datetime.utcnow() - timedelta(days=7)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
     affected = 0
     for node in all_nodes:
         if node.source == NodeSource.CORRECTED:
@@ -228,7 +228,7 @@ def apply_decay(
             decay = node.decay_rate * days_since_last_run
             node.confidence = max(0.1, node.confidence - decay)
             node.strength = max(0.1, node.strength - decay * 0.5)
-            node.updated_at = datetime.utcnow()
+            node.updated_at = datetime.now(timezone.utc)
             upsert_preference_node(conn, node)
             affected += 1
     return affected

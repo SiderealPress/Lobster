@@ -115,12 +115,19 @@ scan_agent_status() {
         local basename_f
         basename_f=$(basename "$filepath" .output)
 
+        # Skip bash tool output files — only symlinks are real subagent outputs
+        if [ ! -L "$filepath" ]; then
+            continue
+        fi
+
         # Determine agent status from stop_reason (deterministic, ~1ms)
         local stop_reason
         stop_reason=$(_get_stop_reason "$filepath")
 
-        # Skip completed agents — self-check is only for active work
-        if [ "$stop_reason" = "end_turn" ]; then
+        # Skip completed agents — self-check is only for active work.
+        # Terminal stop reasons: end_turn (normal), stop_sequence (hit stop seq),
+        # max_tokens (hit token limit). All mean the agent is done.
+        if [ "$stop_reason" = "end_turn" ] || [ "$stop_reason" = "stop_sequence" ] || [ "$stop_reason" = "max_tokens" ]; then
             continue
         fi
 
@@ -229,16 +236,23 @@ scan_completed_tasks() {
         local basename_f
         basename_f=$(basename "$filepath" .output)
 
+        # Skip bash tool output files — only symlinks are real subagent outputs
+        if [ ! -L "$filepath" ]; then
+            continue
+        fi
+
         # Skip if already reported
         if grep -q "^${basename_f}$" "$reported_file" 2>/dev/null; then
             continue
         fi
 
-        # Check stop_reason — only "end_turn" means definitively done
+        # Check stop_reason — terminal states mean definitively done.
+        # end_turn: normal completion; stop_sequence: hit a stop sequence;
+        # max_tokens: hit token limit. All are terminal.
         local stop_reason
         stop_reason=$(_get_stop_reason "$filepath")
 
-        if [ "$stop_reason" = "end_turn" ]; then
+        if [ "$stop_reason" = "end_turn" ] || [ "$stop_reason" = "stop_sequence" ] || [ "$stop_reason" = "max_tokens" ]; then
             unreported_completed+=("$filepath")
         fi
     done

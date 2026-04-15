@@ -110,6 +110,45 @@ You can also use the existing update script's rollback feature:
 The upgrade script automatically shows you what's changed since your last update,
 written in plain language. You can also read the full list in `~/lobster/WHATSNEW`.
 
+## Migration Notes
+
+### April 2026 — Timezone-aware timestamps (`feat/tz-comprehensive`)
+
+**What changed:**
+
+- New module `src/utils/timezone.py` provides a central timezone API:
+  `utcnow()`, `to_utc()`, `to_user_tz()`, `format_for_user()`, `format_iso_for_user()`,
+  and `format_with_utc_and_local()`.
+- All `datetime.utcnow()` calls (which return naive/timezone-less datetimes) have been
+  replaced with `datetime.now(timezone.utc)` across all subsystems — bot, routers,
+  user model, and MCP server. This is the correct, future-proof approach per PEP 615.
+- Inbox and report timestamps now display in the owner's local timezone rather than
+  always showing UTC or hardcoded Eastern Time.
+- `config/owner.toml.example` documents the new `timezone` field.
+
+**Action required (optional):**
+
+Add your IANA timezone to `~/lobster-config/owner.toml`:
+
+```toml
+[owner]
+timezone = "America/New_York"   # replace with your timezone
+```
+
+Common values: `America/Los_Angeles`, `America/Chicago`, `Europe/London`,
+`Europe/Berlin`, `Asia/Tokyo`, `Asia/Kolkata`, `Australia/Sydney`.
+
+If you skip this, Lobster defaults to UTC — all functionality is intact, times just
+display in UTC rather than your local time.
+
+**Breaking changes:** None. The internal storage format is unchanged (UTC). Existing
+data is not affected. The only behavioral difference is that displayed timestamps now
+adapt to your timezone instead of showing UTC or Eastern Time.
+
+**Windows users:** The `zoneinfo` stdlib module on Windows requires `tzdata` from PyPI.
+Run `pip install tzdata` inside your venv if you see `zoneinfo.ZoneInfoNotFoundError`.
+On Linux and macOS the system timezone database is used automatically.
+
 ## Troubleshooting
 
 ### Playwright install fails

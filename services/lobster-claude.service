@@ -1,0 +1,36 @@
+[Unit]
+Description=Lobster Claude - Always-on Claude Code session
+After=network.target lobster-router.service
+Wants=lobster-router.service
+
+[Service]
+Type=forking
+User=lobster
+Group=lobster
+WorkingDirectory=/home/lobster/lobster-workspace
+Environment=PATH=/home/lobster/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HOME=/home/lobster
+Environment=LOBSTER_CONFIG_DIR=/home/lobster/lobster-config
+Environment=LOBSTER_INSTALL_DIR=/home/lobster/lobster
+Environment=LOBSTER_MESSAGES=/home/lobster/messages
+Environment=LOBSTER_WORKSPACE=/home/lobster/lobster-workspace
+Environment=LOBSTER_USER_CONFIG=/home/lobster/lobster-user-config
+EnvironmentFile=-/home/lobster/lobster/config/config.env
+EnvironmentFile=/home/lobster/lobster-config/config.env
+EnvironmentFile=-/home/lobster/lobster-config/global.env
+# LOBSTER_ENV is read from config.env above (production|dev|test).
+# Set LOBSTER_ENV=dev in config.env to make the session inert during SSH dev work.
+# The script exits cleanly so RemainAfterExit=yes prevents unwanted restart loops.
+UnsetEnvironment=CLAUDECODE CLAUDE_CODE_ENTRYPOINT
+ExecStart=/usr/bin/tmux -L lobster new-session -d -s lobster -c /home/lobster/lobster-workspace /home/lobster/lobster/scripts/start-claude.sh
+ExecStop=/usr/bin/tmux -L lobster kill-session -t lobster
+RemainAfterExit=yes
+Restart=on-failure
+RestartSec=30
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lobster-claude
+
+[Install]
+WantedBy=multi-user.target

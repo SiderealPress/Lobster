@@ -10,7 +10,7 @@ Schema migration strategy: versioned, idempotent, forward-only.
 import json
 import sqlite3
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -35,7 +35,7 @@ from .schema import (
     TemporalSnapshot,
 )
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +50,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
         _apply_v1(conn)
     if current < 2:
         _apply_v2(conn)
+    if current < 3:
+        _apply_v3(conn)
     _set_schema_version(conn, CURRENT_SCHEMA_VERSION)
 
 
@@ -284,6 +286,41 @@ def _apply_v2(conn: sqlite3.Connection) -> None:
     _add_column_if_missing("um_preference_nodes", "decay_rate_override", "REAL")
     _add_column_if_missing("um_preference_nodes", "temporal_weight", "REAL NOT NULL DEFAULT 1.0")
 
+
+def _apply_v3(conn: sqlite3.Connection) -> None:
+    """Apply version 3 schema — add user_id column for multi-user isolation.
+
+    Existing rows get user_id='default' (the original/primary user).
+    """
+    def _add_column_if_missing(table: str, column: str, col_def: str) -> None:
+        cols = [row[1] for row in conn.execute(f"PRAGMA table_info({table})")]
+        if column not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_def}")
+
+    tables_to_update = [
+        "um_observations",
+        "um_preference_nodes",
+        "um_emotional_states",
+        "um_blind_spots",
+        "um_attention_items",
+        "um_inference_cache",
+    ]
+
+    for table in tables_to_update:
+        _add_column_if_missing(table, "user_id", "TEXT NOT NULL DEFAULT 'default'")
+
+    conn.commit()
+
+    # Add indexes on user_id for each table
+    for table in tables_to_update:
+        idx_name = f"um_{table.replace('um_', '')}_user_id"
+        conn.execute(
+            f"CREATE INDEX IF NOT EXISTS {idx_name} ON {table}(user_id)"
+        )
+
+    conn.commit()
+
+
 # ---------------------------------------------------------------------------
 # Helper utilities
 # ---------------------------------------------------------------------------
@@ -293,27 +330,32 @@ def _new_id() -> str:
 
 
 def _now_iso() -> str:
-    return datetime.utcnow().isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _parse_dt(s: str | None) -> datetime | None:
     if not s:
         return None
-    return datetime.fromisoformat(s)
+    dt = datetime.fromisoformat(s)
+    # Rows written before the tz-aware migration are naive UTC strings.
+    # Attach UTC so comparisons with datetime.now(timezone.utc) never raise TypeError.
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 # ---------------------------------------------------------------------------
 # Observation CRUD
 # ---------------------------------------------------------------------------
 
-def insert_observation(conn: sqlite3.Connection, obs: Observation) -> str:
+def insert_observation(conn: sqlite3.Connection, obs: Observation, user_id: str = "default") -> str:
     """Insert an observation and return its ID."""
     obs_id = _new_id()
     conn.execute(
         """INSERT INTO um_observations
            (id, message_id, signal_type, content, confidence, context,
-            metadata, observed_at, processed)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            metadata, observed_at, processed, user_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             obs_id,
             obs.message_id,
@@ -324,6 +366,7 @@ def insert_observation(conn: sqlite3.Connection, obs: Observation) -> str:
             json.dumps(obs.metadata),
             obs.observed_at.isoformat(),
             1 if obs.processed else 0,
+            user_id,
         ),
     )
     conn.commit()
@@ -356,7 +399,7 @@ def get_recent_observations(
     limit: int = 100,
 ) -> list[Observation]:
     """Get recent observations, optionally filtered by signal type."""
-    cutoff = datetime.utcnow()
+    cutoff = datetime.now(timezone.utc)
     cutoff_iso = cutoff.replace(
         hour=cutoff.hour - min(hours, cutoff.hour),
     ).isoformat()
@@ -388,7 +431,7 @@ def _row_to_observation(row: sqlite3.Row) -> Observation:
         confidence=row["confidence"],
         context=row["context"],
         metadata=json.loads(row["metadata"]),
-        observed_at=datetime.fromisoformat(row["observed_at"]),
+        observed_at=_parse_dt(row["observed_at"]),
         processed=bool(row["processed"]),
     )
 
@@ -401,7 +444,7 @@ def upsert_preference_node(conn: sqlite3.Connection, node: PreferenceNode) -> st
     """Insert or update a preference node. Returns node ID."""
     if not node.id:
         node.id = _new_id()
-    node.updated_at = datetime.utcnow()
+    node.updated_at = datetime.now(timezone.utc)
     conn.execute(
         """INSERT INTO um_preference_nodes
            (id, name, node_type, strength, flexibility, contexts, source,
@@ -525,8 +568,8 @@ def _row_to_preference_node(row: sqlite3.Row) -> PreferenceNode:
         description=row["description"],
         evidence_count=row["evidence_count"],
         last_observed=_parse_dt(row["last_observed"]),
-        created_at=datetime.fromisoformat(row["created_at"]),
-        updated_at=datetime.fromisoformat(row["updated_at"]),
+        created_at=_parse_dt(row["created_at"]),
+        updated_at=_parse_dt(row["updated_at"]),
         decay_rate=row["decay_rate"],
     )
 
@@ -592,7 +635,7 @@ def get_recent_emotional_states(
             dominance=r["dominance"],
             trigger=r["trigger"],
             context=r["context"],
-            recorded_at=datetime.fromisoformat(r["recorded_at"]),
+            recorded_at=_parse_dt(r["recorded_at"]),
             confidence=r["confidence"],
         )
         for r in rows
@@ -644,7 +687,7 @@ def get_blind_spots(
             evidence=r["evidence"],
             surfaced=bool(r["surfaced"]),
             confidence=r["confidence"],
-            created_at=datetime.fromisoformat(r["created_at"]),
+            created_at=_parse_dt(r["created_at"]),
         )
         for r in rows
     ]
@@ -691,7 +734,7 @@ def get_active_contradictions(conn: sqlite3.Connection) -> list[Contradiction]:
             tension_score=r["tension_score"],
             resolved=bool(r["resolved"]),
             resolution=r["resolution"],
-            detected_at=datetime.fromisoformat(r["detected_at"]),
+            detected_at=_parse_dt(r["detected_at"]),
         )
         for r in rows
     ]
@@ -705,7 +748,7 @@ def upsert_narrative_arc(conn: sqlite3.Connection, arc: NarrativeArc) -> str:
     """Insert or update a narrative arc. Returns ID."""
     if not arc.id:
         arc.id = _new_id()
-    arc.last_updated = datetime.utcnow()
+    arc.last_updated = datetime.now(timezone.utc)
     conn.execute(
         """INSERT INTO um_narrative_arcs
            (id, title, description, themes, status, started_at, last_updated, resolution)
@@ -742,8 +785,8 @@ def get_active_narrative_arcs(conn: sqlite3.Connection) -> list[NarrativeArc]:
             description=r["description"],
             themes=json.loads(r["themes"]),
             status=r["status"],
-            started_at=datetime.fromisoformat(r["started_at"]),
-            last_updated=datetime.fromisoformat(r["last_updated"]),
+            started_at=_parse_dt(r["started_at"]),
+            last_updated=_parse_dt(r["last_updated"]),
             resolution=r["resolution"],
         )
         for r in rows
@@ -758,7 +801,7 @@ def upsert_life_pattern(conn: sqlite3.Connection, pattern: LifePattern) -> str:
     """Insert or update a life pattern. Returns ID."""
     if not pattern.id:
         pattern.id = _new_id()
-    pattern.last_seen = datetime.utcnow()
+    pattern.last_seen = datetime.now(timezone.utc)
     conn.execute(
         """INSERT INTO um_life_patterns
            (id, name, description, stage, evidence_count, confidence, first_seen, last_seen)
@@ -797,8 +840,8 @@ def get_active_life_patterns(conn: sqlite3.Connection) -> list[LifePattern]:
             stage=r["stage"],
             evidence_count=r["evidence_count"],
             confidence=r["confidence"],
-            first_seen=datetime.fromisoformat(r["first_seen"]),
-            last_seen=datetime.fromisoformat(r["last_seen"]),
+            first_seen=_parse_dt(r["first_seen"]),
+            last_seen=_parse_dt(r["last_seen"]),
         )
         for r in rows
     ]
@@ -859,7 +902,7 @@ def get_attention_stack(
             context=r["context"],
             source=r["source"],
             metadata=json.loads(r["metadata"]),
-            created_at=datetime.fromisoformat(r["created_at"]),
+            created_at=_parse_dt(r["created_at"]),
             expires_at=_parse_dt(r["expires_at"]),
         )
         for r in rows
@@ -893,7 +936,7 @@ def get_model_metadata(conn: sqlite3.Connection) -> ModelMetadata:
     return ModelMetadata(
         schema_version=int(_get("schema_version") or "0"),
         owner_id=_get("owner_id"),
-        created_at=datetime.fromisoformat(created_str) if created_str else datetime.utcnow(),
+        created_at=_parse_dt(created_str) if created_str else datetime.now(timezone.utc),
         last_observation_at=_parse_dt(last_obs_str),
         last_consolidation_at=_parse_dt(last_consol_str),
         observation_count=obs_count,
@@ -966,7 +1009,7 @@ def get_snapshots_since(conn: sqlite3.Connection, days: int = 30) -> list:
 def _row_to_snapshot(row: sqlite3.Row) -> TemporalSnapshot:
     return TemporalSnapshot(
         id=row["id"],
-        snapshot_at=datetime.fromisoformat(row["snapshot_at"]),
+        snapshot_at=_parse_dt(row["snapshot_at"]),
         week_number=row["week_number"],
         year=row["year"],
         data=json.loads(row["data"]),
@@ -1023,7 +1066,7 @@ def get_unsurfaced_drifts(conn: sqlite3.Connection) -> list:
 def _row_to_drift(row: sqlite3.Row) -> DriftRecord:
     return DriftRecord(
         id=row["id"],
-        detected_at=datetime.fromisoformat(row["detected_at"]),
+        detected_at=_parse_dt(row["detected_at"]),
         snapshot_a_id=row["snapshot_a_id"],
         snapshot_b_id=row["snapshot_b_id"],
         drift_type=row["drift_type"],
@@ -1093,7 +1136,7 @@ def get_activity_rhythm(conn: sqlite3.Connection) -> list:
             total_length=r["total_length"],
             total_latency=r["total_latency"],
             latency_count=r["latency_count"],
-            updated_at=datetime.fromisoformat(r["updated_at"]),
+            updated_at=_parse_dt(r["updated_at"]),
         )
         for r in rows
     ]
@@ -1144,7 +1187,7 @@ def set_cached_inference(
     """Cache an inference result with TTL. Returns cache entry ID."""
     from datetime import timedelta
     entry_id = _new_id()
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     expires = now + timedelta(minutes=ttl_minutes)
     conn.execute(
         """INSERT INTO um_inference_cache

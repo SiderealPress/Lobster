@@ -6,9 +6,18 @@ These are the shared data types used across all user_model modules.
 """
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
+
+
+def _utcnow() -> datetime:
+    """Return the current UTC time as a timezone-aware datetime.
+
+    Used as the default_factory for datetime fields in dataclasses, replacing
+    the deprecated (and tz-naive) ``datetime.utcnow``.
+    """
+    return datetime.now(timezone.utc)
 
 
 # ---------------------------------------------------------------------------
@@ -80,8 +89,8 @@ class PreferenceNode:
     last_observed: datetime | None = None
     parent_ids: list[str] = field(default_factory=list)   # Parent nodes (derives from)
     override_ids: list[str] = field(default_factory=list) # Nodes this overrides
-    created_at: datetime = field(default_factory=datetime.utcnow)
-    updated_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=_utcnow)
+    updated_at: datetime = field(default_factory=_utcnow)
     decay_rate: float = 0.01  # Per-day decay when not reinforced
 
 
@@ -95,7 +104,7 @@ class Observation:
     confidence: float       # 0.0–1.0
     context: str            # Active context(s) at observation time
     metadata: dict[str, Any] = field(default_factory=dict)
-    observed_at: datetime = field(default_factory=datetime.utcnow)
+    observed_at: datetime = field(default_factory=_utcnow)
     processed: bool = False  # Has inference pipeline consumed this?
 
 
@@ -108,7 +117,7 @@ class EmotionalState:
     dominance: float         # 0.0 (submissive/uncertain) to 1.0 (confident/in-control)
     trigger: str | None      # What triggered this state (optional)
     context: str             # Active context
-    recorded_at: datetime = field(default_factory=datetime.utcnow)
+    recorded_at: datetime = field(default_factory=_utcnow)
     confidence: float = 0.7
 
 
@@ -121,7 +130,7 @@ class BlindSpot:
     evidence: str           # Supporting evidence
     surfaced: bool = False  # Has this been shown to the user?
     confidence: float = 0.6
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=_utcnow)
 
 
 @dataclass
@@ -134,7 +143,7 @@ class Contradiction:
     tension_score: float    # 0.0–1.0, how strong the contradiction is
     resolved: bool = False
     resolution: str | None = None
-    detected_at: datetime = field(default_factory=datetime.utcnow)
+    detected_at: datetime = field(default_factory=_utcnow)
 
 
 @dataclass
@@ -145,8 +154,8 @@ class NarrativeArc:
     description: str        # Summary of the arc
     themes: list[str]       # Associated themes/topics
     status: str             # "active", "resolved", "paused"
-    started_at: datetime = field(default_factory=datetime.utcnow)
-    last_updated: datetime = field(default_factory=datetime.utcnow)
+    started_at: datetime = field(default_factory=_utcnow)
+    last_updated: datetime = field(default_factory=_utcnow)
     resolution: str | None = None
 
 
@@ -159,8 +168,8 @@ class LifePattern:
     stage: str              # "forming", "active", "declining", "broken"
     evidence_count: int = 0
     confidence: float = 0.6
-    first_seen: datetime = field(default_factory=datetime.utcnow)
-    last_seen: datetime = field(default_factory=datetime.utcnow)
+    first_seen: datetime = field(default_factory=_utcnow)
+    last_seen: datetime = field(default_factory=_utcnow)
 
 
 @dataclass
@@ -174,7 +183,7 @@ class AttentionItem:
     context: str             # What context this is relevant in
     source: str              # Where this item came from
     metadata: dict[str, Any] = field(default_factory=dict)
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=_utcnow)
     expires_at: datetime | None = None
 
 
@@ -230,7 +239,7 @@ class ActivityRhythm:
     total_length: int = 0    # cumulative chars, for avg computation
     total_latency: float = 0.0  # cumulative ms, for avg computation
     latency_count: int = 0   # samples with latency data
-    updated_at: datetime = field(default_factory=datetime.utcnow)
+    updated_at: datetime = field(default_factory=_utcnow)
 
 
 @dataclass

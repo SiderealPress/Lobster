@@ -203,6 +203,21 @@ class TestValidateMessageId:
 
 
 class TestAuditLog:
+    @pytest.fixture(autouse=True)
+    def reset_audit_log_handler(self):
+        """Reset the module-level _AUDIT_LOG_HANDLER before each test.
+
+        init_audit_log() is a no-op when _AUDIT_LOG_HANDLER is already set
+        (guards against re-init in production). Tests must reset this global
+        so each test gets a fresh handler pointing to its own tmp_path.
+        """
+        import reliability
+        reliability._AUDIT_LOG_HANDLER = None
+        reliability._AUDIT_LOG_PATH = None
+        yield
+        reliability._AUDIT_LOG_HANDLER = None
+        reliability._AUDIT_LOG_PATH = None
+
     def test_writes_jsonl(self, tmp_path):
         """Audit log produces valid JSONL entries."""
         init_audit_log(tmp_path)

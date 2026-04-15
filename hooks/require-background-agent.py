@@ -10,9 +10,12 @@ This hook enforces the 7-second rule as a hard constraint for the dispatcher.
 Subagents are exempt: they may legitimately spawn nested agents synchronously
 when the result is needed to decide the next step.
 
+Note: Claude Code has used both "Agent" and "Task" as the tool name for spawning
+subagents across versions. Both are treated identically.
+
 Exit codes:
-  0 — tool is not Agent, Agent has run_in_background: true, or session is a subagent
-  2 — hard block: dispatcher called Agent without run_in_background: true
+  0 — tool is not Agent/Task, Agent has run_in_background: true, or session is a subagent
+  2 — hard block: dispatcher called Agent/Task without run_in_background: true
 """
 import json
 import sys
@@ -22,11 +25,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from session_role import is_dispatcher
 
+# Tool names used to spawn subagents across CC versions.
+AGENT_TOOL_NAMES = {"Agent", "Task"}
+
 data = json.load(sys.stdin)
 tool = data.get("tool_name", "")
 inp = data.get("tool_input", {})
 
-if tool != "Agent":
+if tool not in AGENT_TOOL_NAMES:
     sys.exit(0)
 
 if inp.get("run_in_background") is True:

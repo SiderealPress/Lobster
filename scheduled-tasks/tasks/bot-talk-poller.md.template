@@ -1,0 +1,174 @@
+# Bot Talk Poller
+
+> **DEPRECATED** — This job is disabled. Its responsibilities (polling, hot-mode management,
+> inbox routing, and Telegram notifications) have been consolidated into `lobstertalk-unified`
+> (see `scheduled-tasks/tasks/lobstertalk-unified.md.template`). Do not re-enable without
+> also disabling `lobstertalk-unified` to avoid double-processing.
+
+**Job**: bot-talk-poller
+**Schedule**: Hourly (`0 * * * *`)
+
+## Context
+
+You are running as a scheduled task. The main Lobster instance created this job.
+
+This is the **hourly baseline poller**. Bot-talk is strictly inter-Lobster communication
+(messages between Lobster instances only). Owner Telegram messages to their own Lobster
+are NOT bot-talk and never appear here.
+
+This poller manages the hot-mode state that drives `bot-talk-poller-fast` (the 2-minute
+fast poller). When {{REMOTE_LOBSTER_IDENTITY}} is active, set `hot_mode=true` so the fast
+poller takes over. When activity stops, the fast poller self-cools and this job confirms
+the quiet state each hour.
+
+## Authentication
+
+The bot-talk API requires a shared-secret header on all requests (except /health).
+Read the token using this lookup chain (first non-empty value wins):
+
+1. `~/lobster-workspace/data/bot-talk-token.txt` (legacy token file)
+2. `BOT_TALK_TOKEN` key in `~/messages/config/config.env`
+3. `BOT_TALK_TOKEN` key in `~/lobster-config/config.env`
+
+Include it as:
+
+    X-Bot-Token: <token>
+
+Example (Python):
+```python
+def _load_bot_talk_token() -> str:
+    import os
+    from pathlib import Path
+
+    # 1. Legacy token file
+    token_file = Path.home() / "lobster-workspace" / "data" / "bot-talk-token.txt"
+    if token_file.exists():
+        token = token_file.read_text().strip()
+        if token:
+            return token
+
+    # 2. config.env files
+    for config_path in [
+        Path.home() / "messages" / "config" / "config.env",
+        Path.home() / "lobster-config" / "config.env",
+    ]:
+        if config_path.exists():
+            for line in config_path.read_text().splitlines():
+                line = line.strip()
+                if line.startswith("BOT_TALK_TOKEN="):
+                    value = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    if value:
+                        return value
+
+    return ""
+
+token = _load_bot_talk_token()
+if not token:
+    # log error and write failed output
+    ...
+headers = {"X-Bot-Token": token}
+resp = requests.get("{{LOBSTERTALK_HOST}}/messages", headers=headers, ...)
+```
+
+If the token cannot be found via any of the above paths, log an error and call write_task_output with status "failed".
+
+## State File
+
+Read and write `~/lobster-workspace/data/bot-talk-state.json`. Create it if it doesn't exist.
+
+Schema:
+```json
+{
+  "last_message_ts": "2026-01-01T00:00:00Z",
+  "hot_mode": false,
+  "consecutive_empty_polls": 0,
+  "hot_mode_activated_at": null
+}
+```
+
+Always write the updated state back atomically: write to a `.tmp` file, then rename to
+the final path.
+
+## Direction Fields
+
+Each message in the API response carries a `direction` field written at send time:
+- `"OUTBOUND"` — message sent FROM this Lobster to the remote Lobster
+- `"INBOUND"` — message received FROM the remote Lobster
+
+Both directions are shown to the owner. The log already has correct fields — no
+content-marker heuristics or special-case filtering needed.
+
+If a message has no `direction` field, skip it entirely — do not infer direction from sender.
+
+## Instructions
+
+1. Poll `{{LOBSTERTALK_HOST}}/messages` for new messages.
+   Track last-seen message timestamp using `last_message_ts` in the state file
+   (fall back to `~/lobster-workspace/data/bot-talk-last-seen.txt` for legacy compat).
+
+2. **If new messages found:**
+   - Collect ALL new messages with timestamp > last_message_ts.
+   - Sort by timestamp ascending (oldest first).
+   - Format each message by direction:
+     - INBOUND messages:  `📥 **Inbox** ({sender}): {content}`
+     - OUTBOUND messages: `📤 **Outbox** (you → {to}): {content}`
+   - Notify the owner via Telegram (chat_id={{TELEGRAM_CHAT_ID}}) with the full
+     conversation block showing both directions.
+   - Update `last_message_ts` in state file to the latest seen message timestamp.
+   - Set `hot_mode=true` in state file.
+   - Set `hot_mode_activated_at` to current UTC ISO timestamp (if not already set).
+   - Reset `consecutive_empty_polls` to 0.
+
+3. **If no new messages:**
+   - Increment `consecutive_empty_polls`.
+   - If `consecutive_empty_polls >= 3`: set `hot_mode=false`, clear `hot_mode_activated_at`.
+   - Otherwise: leave `hot_mode` as-is (fast poller manages its own cooldown; this is
+     just the hourly safety reset).
+
+4. If the HTTP API is down (connection reset), log the failure and retry next cycle —
+   do not alert the owner for transient API outages unless it has been down for more than
+   30 minutes.
+
+5. Write updated state file.
+
+## Timezone
+
+Always display timestamps in **Eastern Time (ET)** — currently EDT (UTC-4). Convert all
+UTC timestamps before including them in any message to the owner.
+
+## Telegram Notification Format
+
+Show BOTH inbox (INBOUND) and outbox (OUTBOUND) messages, labeled separately.
+Omit a section if it has no messages. Example:
+
+```
+Bot-talk update:
+
+📥 **Inbox** (from {{REMOTE_LOBSTER_IDENTITY}}):
+  I reviewed it. Looks reasonable, a few questions.
+  Can you clarify item 3?
+
+📤 **Outbox** (you → {{REMOTE_LOBSTER_IDENTITY}}):
+  Sure, item 3 means we delay the deployment.
+```
+
+Messages within each section are sorted chronologically (oldest first).
+
+## Telegram Notification Rules
+
+Only send a Telegram message to the owner (chat_id={{TELEGRAM_CHAT_ID}}) when there is genuinely new content:
+- One or more new cross-Lobster messages (INBOUND or OUTBOUND) since last run
+- The HTTP API has been continuously down for more than 30 minutes
+
+For routine no-op cycles (no new messages, API healthy): do NOT call send_reply. Instead,
+call write_task_output with status "success" and a brief internal note like "no new activity".
+The dispatcher will handle it silently.
+
+## Output
+
+When you complete your task, call `write_task_output` with:
+- job_name: "bot-talk-poller"
+- output: Your results/summary (include hot_mode state)
+- status: "success" or "failed"
+
+Keep output concise. The main Lobster instance will review this later.

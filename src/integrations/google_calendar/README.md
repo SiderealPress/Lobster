@@ -268,7 +268,7 @@ else:
     from datetime import datetime, timezone
     new_event = create_event(
         user_id="1234567890",
-        title="Sync with Drew",
+        title="Sync with the user",
         start=datetime(2026, 3, 10, 15, 0, 0, tzinfo=timezone.utc),
         description="Weekly catch-up",
     )

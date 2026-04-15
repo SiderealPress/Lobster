@@ -147,25 +147,35 @@ mcp__lobster-inbox__write_result(
 )
 ```
 
-**Long reports (internal tasks only):**
+**ET conversion — required for all user-visible timestamps:**
 
-If your output exceeds ~500 words, write the full content to a file and return a summary inline:
+Before including any timestamp in a `send_reply` call, convert it from UTC to Eastern Time. Rule: EDT (UTC-4) from mid-March through early November; EST (UTC-5) otherwise. Format as "5:29 AM ET" or "2:30 PM ET". Never send raw UTC ISO strings or "UTC" suffixes to users. This applies to all subagents that produce output containing times — calendar events, log summaries, job results, event timelines, and any other user-facing sentence with a time.
 
-1. Write the full report to: `~/lobster-workspace/reports/<task_id>.md`
+**Large results — use artifacts, not inline text:**
+
+If your output exceeds ~4KB or ~500 words, write the full content to a file and pass the path in `artifacts`. This applies to **all tasks** (user-facing and internal):
+
+1. Write the full report to: `~/lobster-workspace/reports/<task_id>-<timestamp>.md`
 2. In `write_result`, set `text` to a concise summary (5–10 lines) + actionable items only. Do NOT include the file path in `text` — file paths are server-side and useless to mobile users.
 3. Pass the file path in `artifacts` — the dispatcher reads the file and sends its content to the user inline.
 
 ```python
+import time
+artifact_path = f"~/lobster-workspace/reports/{task_id}-{int(time.time())}.md"
+# write full content to artifact_path ...
+
 mcp__lobster-inbox__write_result(
     task_id="<task_id>",
     chat_id=<chat_id>,
     text="Summary: ...\n\nActionable items:\n- ...",
     sent_reply_to_user=False,  # dispatcher receives and routes
-    artifacts=["~/lobster-workspace/reports/<task_id>.md"],
+    artifacts=[artifact_path],
 )
 ```
 
 The `artifacts` field is accepted by the inbox server and surfaced in the `subagent_result` message payload. The dispatcher reads those files and includes their content inline in the reply to the user — never relaying a raw file path.
+
+**Never put large content in `text` directly.** The dispatcher's context window pays the cost of relaying whatever is in `text`. A 1,000-line report in `text` stalls the main loop and may trigger a health-check restart. Artifacts are read lazily, after the message is picked up, and do not bloat the inbox message itself.
 
 ## Surfacing Observations (`write_observation`)
 
@@ -272,6 +282,14 @@ Lobster uses a tiered model strategy to balance cost and quality. Each subagent 
 
 **For general background tasks** with no specific agent type, use `subagent_type='lobster-generalist'` rather than omitting `subagent_type` or using an untyped Agent call. The `lobster-generalist` agent is the correct default for open-ended background work that doesn't map to a more specialized agent.
 
+## Integration testing and Definition of Done
+
+Before declaring any integration or manual test PASS:
+
+- **External service hierarchy** — always prefer: (1) mock in unit tests, (2) test instance / test chat_id / sandbox, (3) explicitly scoped prod call (limit=1, single ID, bounded range) only when no test env exists. Never "run the real thing" without stating what endpoint, what scope, and why prod was required.
+- **Side-effect audit** — answer before PASS: unexpected volume/floods? shared state writes? irreversible prod data affected? pagination tracking confirmed with a small bounded test? If yes to any: bound the test first.
+- **User-visible outcome** — "message routed to inbox" is NOT PASS. "User received the message in Telegram" is PASS. For any observable output, verify the downstream effect; document whether you asked the user, used test chat_id, or confirmed N/A.
+
 ## Tooling conventions
 
 - **GitHub operations:** Use `gh` CLI (via Bash tool) for all GitHub operations — posting PR reviews, merging PRs, creating issues, etc. Do NOT use `mcp__github__*` MCP tools in agent code.
@@ -279,17 +297,41 @@ Lobster uses a tiered model strategy to balance cost and quality. Each subagent 
   - Merge a PR: `gh pr merge <number> --squash --repo <owner/repo>`
   - Create an issue: `gh issue create --title "..." --body "..." --repo <owner/repo>`
 
+- **When to open a GitHub PR — REQUIRED check before any PR:**
+
+  Only open a GitHub PR if the change is intended for that upstream repo. Ask: "Is this change meant to improve the shared codebase, or is it a local configuration, personal integration, or runtime fix?"
+
+  - **If local** (personal config, runtime task files, private integrations, user-specific setup) → apply the change locally only. No public PR. A private repo branch is fine if that makes sense.
+  - **If upstream** (code improvements, bug fixes, bootup file enhancements, new features for all users) → a PR is appropriate.
+
+  When in doubt, apply locally and report back describing what you did and why no PR was opened. The test is intent, not content: a change belongs on GitHub only if it's meant to improve the shared system for everyone.
+
+  Example: a fix to `inbox_server.py` that improves message parsing → upstream PR. A local cron task for a personal integration → no PR, local only.
+
+  If the user explicitly asks you to push to a specific branch or repo, that overrides this rule — user intent is the source of truth.
+
+- **Privacy scrub — REQUIRED before posting any GitHub comment to a public repo:**
+
+  Before posting any comment (review or otherwise) to a public repo (e.g., `SiderealPress/lobster`), scrub ALL private details from the text. Private details that must never appear in public GitHub content:
+  - IP addresses and SSH hostnames
+  - Internal server names and file paths under `~/lobster-workspace/`, `~/lobster-user-config/`, `/home/lobster/`
+  - Third-party integration credentials, webhook URLs, API keys
+  - Personal service names (bot-talk, CRM system names, private integration names)
+  - Any detail from an engineer's briefing that is not already visible in the public PR diff
+
+  **If you cannot write a meaningful comment without including private details, do NOT post it.** Return findings via `write_result` only (with `sent_reply_to_user=False`) so the dispatcher can relay to the user through a private channel.
+
 - **Code reviews — always post to the PR:** When conducting a code review of a GitHub PR, you MUST post the review directly to the PR using `gh pr review`, then also send the summary back via `write_result`.
   1. Post to the PR: `gh pr review <PR_NUMBER> --repo <owner/repo> --comment --body "REVIEW TEXT"`
   2. Then call `write_result` with a concise summary for the user (scene → problem → fix → impact, 3–6 lines, include PR link).
   - If no PR exists yet (local changes only), skip step 1 and report findings entirely via `write_result`.
 
-- **GitHub attribution:** All PR descriptions, review comments, and issue comments written by Lobster must include an attribution prefix. The `gh` CLI is authenticated as Sahar's account — without this prefix, GitHub content appears to come from Sahar personally.
+- **GitHub attribution:** All PR descriptions, review comments, and issue comments written by Lobster must include an attribution prefix. The `gh` CLI is authenticated as the owner's account — without this prefix, GitHub content appears to come from the owner personally.
   - PR body (when opening a PR): first line is `🤖🦞 Lobster (engineer):` followed by a blank line
   - Review comments (`gh pr review --comment`): body starts with `🤖🦞 Lobster (reviewer):\n\n`
   - Issue comments: body starts with `🤖🦞 Lobster (ops):` or the appropriate role
   - Short one-liner comments (e.g., closing a stale issue) may use the prefix inline: `🤖🦞 Lobster: <reason>`
-  - Never omit this prefix when posting substantial content to GitHub under Sahar's account.
+  - Never omit this prefix when posting substantial content to GitHub under the owner's account.
 
 - **Default repo:** `SiderealPress/lobster` (owner=SiderealPress, repo=lobster) is the Lobster *system* repo — for Lobster maintenance tasks. For user work tasks, get the target repo from the task context or message; do not default to the system repo.
 
@@ -313,6 +355,35 @@ Lobster uses a tiered model strategy to balance cost and quality. Each subagent 
   ```
   The `patch.multiple` module target for inbox_server tests is always
   `"src.mcp.inbox_server"` (not `"inbox_server"` or `"mcp.inbox_server"`).
+
+## IFTTT Behavioral Rules
+
+Lobster maintains a bounded list of "if X then Y" behavioral rules that encode user preferences and recurring patterns. These rules apply to all roles — the dispatcher loads them at startup, but subagents should also check them when relevant to the task at hand.
+
+**When to check rules as a subagent:**
+
+- You're generating output that affects the user directly (formatting, tone, content decisions)
+- Your task involves a domain where user preferences might apply (coding style, communication style, task prioritization)
+- You're about to make a discretionary choice (e.g., how to structure a report, whether to include details)
+
+You do NOT need to load all rules at the start of every subagent session. Check them when they would plausibly affect your output.
+
+**MCP tools available:**
+
+| Tool | Use |
+|------|-----|
+| `list_rules(enabled_only=true)` | Get all enabled rules (with `resolve=true` to include behavioral content inline) |
+| `get_rule(rule_id, resolve=true)` | Get a single rule with its behavioral content |
+| `add_rule(condition, action_content)` | Add a new rule (stores content to memory DB automatically) |
+| `update_rule(rule_id, ...)` | Update condition, action, or enabled state of an existing rule |
+| `delete_rule(rule_id)` | Remove a rule |
+
+**Key constraints:**
+
+- Do NOT import `src/utils/ifttt_rules` directly — always go through MCP tools
+- Do NOT write to `~/lobster-user-config/memory/canonical/ifttt-rules.yaml` directly — that file is managed by the MCP layer
+- Rules are never surfaced to the user unless the user explicitly asks to see them
+- Add rules only when a genuine recurring pattern exists or the user explicitly establishes a permanent preference — not on a single request
 
 ## PR and Issue Body: Always Canonical
 

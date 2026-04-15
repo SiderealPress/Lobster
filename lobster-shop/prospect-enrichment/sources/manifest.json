@@ -1,0 +1,457 @@
+{
+  "_schema_version": "1.0.0",
+  "_updated": "2026-04-09",
+  "_description": "Data source manifest for the prospect enrichment pipeline. Each entry describes one enrichment source: its capabilities, API key requirement, availability, goal coverage, and rate limits. The pipeline loads this at startup and skips any source where available=false.",
+  "sources": [
+    {
+      "source_id": "apollo",
+      "display_name": "Apollo.io",
+      "api_key_env": "APOLLO_API_KEY",
+      "available": false,
+      "goals": ["org_chart", "work_history", "connections"],
+      "goal_scores": {
+        "org_chart": 0.92,
+        "work_history": 0.88,
+        "connections": 0.40
+      },
+      "rate_limits": {
+        "requests_per_minute": 100,
+        "requests_per_day": 10000
+      },
+      "cost_per_call": 0.0,
+      "cost_tier": "freemium",
+      "data_freshness_days": 30,
+      "requires_company": true,
+      "requires_person": false,
+      "output_fields": [
+        "name", "title", "company", "email",
+        "linkedin_url", "past_roles", "seniority",
+        "departments", "phone", "city", "country"
+      ],
+      "notes": "Best overall source for org charts and work history. 275M+ contact DB. Free tier: 50 exports/month. Paid tiers unlock bulk people search and job change alerts. Strong for supply chain titles (VP Operations, Demand Planner).",
+      "api_docs_url": "https://apolloio.github.io/apollo-api-docs/"
+    },
+    {
+      "source_id": "people_data_labs",
+      "display_name": "People Data Labs",
+      "api_key_env": "PDL_API_KEY",
+      "available": false,
+      "goals": ["work_history", "connections"],
+      "goal_scores": {
+        "org_chart": 0.55,
+        "work_history": 0.95,
+        "connections": 0.70
+      },
+      "rate_limits": {
+        "requests_per_minute": 100,
+        "requests_per_day": 1000
+      },
+      "cost_per_call": 0.098,
+      "cost_tier": "paid",
+      "data_freshness_days": 90,
+      "requires_company": false,
+      "requires_person": true,
+      "output_fields": [
+        "name", "title", "company", "past_companies",
+        "linkedin_url", "email", "phone", "location",
+        "education", "skills", "industry"
+      ],
+      "notes": "3B+ person profiles. Developer-focused REST API. Best in class for work history — structured past_company data with tenure dates. Quarterly refresh cycle means fast movers may be stale. Free tier: 100 calls/month.",
+      "api_docs_url": "https://docs.peopledatalabs.com/"
+    },
+    {
+      "source_id": "diffbot",
+      "display_name": "Diffbot Knowledge Graph",
+      "api_key_env": "DIFFBOT_API_KEY",
+      "available": false,
+      "goals": ["org_chart", "work_history", "connections"],
+      "goal_scores": {
+        "org_chart": 0.85,
+        "work_history": 0.80,
+        "connections": 0.55
+      },
+      "rate_limits": {
+        "requests_per_minute": 60,
+        "requests_per_day": 2000
+      },
+      "cost_per_call": 0.05,
+      "cost_tier": "paid",
+      "data_freshness_days": 14,
+      "requires_company": true,
+      "requires_person": false,
+      "output_fields": [
+        "name", "title", "company", "linkedin_url",
+        "past_roles", "education", "location",
+        "employer_history", "org_employees"
+      ],
+      "notes": "10B+ entity knowledge graph. AI-extracted from across the web. Supports DQL (Diffbot Query Language) to filter company employees by title/function — excellent for supply chain officer discovery. Enhance API for person enrichment.",
+      "api_docs_url": "https://docs.diffbot.com/docs/kg-index"
+    },
+    {
+      "source_id": "cognism",
+      "display_name": "Cognism",
+      "api_key_env": "COGNISM_API_KEY",
+      "available": false,
+      "goals": ["org_chart", "work_history"],
+      "goal_scores": {
+        "org_chart": 0.82,
+        "work_history": 0.75,
+        "connections": 0.25
+      },
+      "rate_limits": {
+        "requests_per_minute": 60,
+        "requests_per_day": 3000
+      },
+      "cost_per_call": 0.08,
+      "cost_tier": "paid",
+      "data_freshness_days": 30,
+      "requires_company": true,
+      "requires_person": false,
+      "output_fields": [
+        "name", "title", "company", "email",
+        "phone", "linkedin_url", "function",
+        "seniority_level", "location", "industry"
+      ],
+      "notes": "Best for EMEA contacts — phone-verified, GDPR-first. Strong on professional title/function/level taxonomy. Enrich and Redeem APIs support CRM bulk enrichment. Good for supply chain roles across European prospects.",
+      "api_docs_url": "https://developers.cognism.com/"
+    },
+    {
+      "source_id": "lusha",
+      "display_name": "Lusha",
+      "api_key_env": "LUSHA_API_KEY",
+      "available": false,
+      "goals": ["org_chart", "work_history"],
+      "goal_scores": {
+        "org_chart": 0.78,
+        "work_history": 0.70,
+        "connections": 0.30
+      },
+      "rate_limits": {
+        "requests_per_minute": 60,
+        "requests_per_day": 2000
+      },
+      "cost_per_call": 0.05,
+      "cost_tier": "freemium",
+      "data_freshness_days": 30,
+      "requires_company": false,
+      "requires_person": true,
+      "output_fields": [
+        "name", "title", "company", "email",
+        "phone", "linkedin_url", "location",
+        "seniority", "department"
+      ],
+      "notes": "Person and company enrichment REST API. Contact Lookalikes feature analyzes role/seniority/industry — good for finding supply chain peers. Signals API provides job-change alerts. Free tier: 5 credits/month.",
+      "api_docs_url": "https://docs.lusha.com/"
+    },
+    {
+      "source_id": "surfe",
+      "display_name": "Surfe",
+      "api_key_env": "SURFE_API_KEY",
+      "available": false,
+      "goals": ["work_history", "connections"],
+      "goal_scores": {
+        "org_chart": 0.65,
+        "work_history": 0.82,
+        "connections": 0.60
+      },
+      "rate_limits": {
+        "requests_per_minute": 60,
+        "requests_per_day": 2000
+      },
+      "cost_per_call": 0.04,
+      "cost_tier": "paid",
+      "data_freshness_days": 14,
+      "requires_company": false,
+      "requires_person": true,
+      "output_fields": [
+        "name", "title", "company", "email",
+        "phone", "linkedin_url", "past_roles",
+        "job_changes", "company_signals"
+      ],
+      "notes": "Waterfall enrichment aggregating multiple providers (93% email find rate). Person Search, Contact Enrichment, and Company Search APIs. Strong on job-change signals and lookalike discovery. LinkedIn-focused data model.",
+      "api_docs_url": "https://www.surfe.com/lusha-api/"
+    },
+    {
+      "source_id": "hunter",
+      "display_name": "Hunter.io",
+      "api_key_env": "HUNTER_API_KEY",
+      "available": false,
+      "goals": ["work_history", "connections"],
+      "goal_scores": {
+        "org_chart": 0.60,
+        "work_history": 0.80,
+        "connections": 0.35
+      },
+      "rate_limits": {
+        "requests_per_minute": 60,
+        "requests_per_day": 500
+      },
+      "cost_per_call": 0.0,
+      "cost_tier": "freemium",
+      "data_freshness_days": 30,
+      "requires_company": true,
+      "requires_person": false,
+      "output_fields": [
+        "email", "name", "title", "company",
+        "linkedin_url", "confidence", "domain"
+      ],
+      "notes": "Best for finding verified emails + basic work info at a domain. Domain Search returns all discoverable employees. Free tier: 25 searches/month. Email Finder + Verifier APIs. Good as a lightweight org chart fallback.",
+      "api_docs_url": "https://hunter.io/api-documentation"
+    },
+    {
+      "source_id": "clay",
+      "display_name": "Clay",
+      "api_key_env": "CLAY_API_KEY",
+      "available": false,
+      "goals": ["org_chart", "work_history", "connections"],
+      "goal_scores": {
+        "org_chart": 0.88,
+        "work_history": 0.85,
+        "connections": 0.60
+      },
+      "rate_limits": {
+        "requests_per_minute": 20,
+        "requests_per_day": 2000
+      },
+      "cost_per_call": 0.01,
+      "cost_tier": "paid",
+      "data_freshness_days": 21,
+      "requires_company": true,
+      "requires_person": false,
+      "output_fields": [
+        "name", "title", "company", "email",
+        "linkedin_url", "past_roles", "funding",
+        "employee_count", "tech_stack"
+      ],
+      "notes": "Waterfall enrichment aggregating 100+ underlying sources (Clearbit, Hunter, PDL, LinkedIn, etc). Highest combined accuracy (~95% email). Programmable enrichment spreadsheet model. Paid per credit. Best for thorough multi-source enrichment.",
+      "api_docs_url": "https://www.clay.com/developers"
+    },
+    {
+      "source_id": "crunchbase",
+      "display_name": "Crunchbase",
+      "api_key_env": "CRUNCHBASE_API_KEY",
+      "available": false,
+      "goals": ["org_chart", "connections"],
+      "goal_scores": {
+        "org_chart": 0.75,
+        "work_history": 0.30,
+        "connections": 0.50
+      },
+      "rate_limits": {
+        "requests_per_minute": 30,
+        "requests_per_day": 1000
+      },
+      "cost_per_call": 0.0,
+      "cost_tier": "freemium",
+      "data_freshness_days": 60,
+      "requires_company": true,
+      "requires_person": false,
+      "output_fields": [
+        "name", "title", "company", "linkedin_url",
+        "board_members", "executives", "investors"
+      ],
+      "notes": "Excellent for executive/board-level org charts at funded companies. Leadership Team endpoint returns C-suite + VPs. Weaker for operational roles (supply chain, demand planning). Board member relationships useful for connections graph.",
+      "api_docs_url": "https://data.crunchbase.com/docs"
+    },
+    {
+      "source_id": "zoominfo",
+      "display_name": "ZoomInfo",
+      "api_key_env": "ZOOMINFO_API_KEY",
+      "available": false,
+      "goals": ["org_chart", "work_history"],
+      "goal_scores": {
+        "org_chart": 0.95,
+        "work_history": 0.90,
+        "connections": 0.30
+      },
+      "rate_limits": {
+        "requests_per_minute": 30,
+        "requests_per_day": 5000
+      },
+      "cost_per_call": 0.10,
+      "cost_tier": "enterprise",
+      "data_freshness_days": 7,
+      "requires_company": true,
+      "requires_person": false,
+      "output_fields": [
+        "name", "title", "company", "email",
+        "phone", "linkedin_url", "department",
+        "seniority", "direct_dial"
+      ],
+      "notes": "Highest quality org chart data — enterprise-grade. Real-time webhooks, intent signals, and department hierarchy. $15K+/year. Best org chart score in the industry but cost-prohibitive without enterprise budget.",
+      "api_docs_url": "https://api-docs.zoominfo.com/"
+    },
+    {
+      "source_id": "rocketreach",
+      "display_name": "RocketReach",
+      "api_key_env": "ROCKETREACH_API_KEY",
+      "available": false,
+      "goals": ["org_chart", "work_history"],
+      "goal_scores": {
+        "org_chart": 0.78,
+        "work_history": 0.80,
+        "connections": 0.35
+      },
+      "rate_limits": {
+        "requests_per_minute": 60,
+        "requests_per_day": 2000
+      },
+      "cost_per_call": 0.05,
+      "cost_tier": "paid",
+      "data_freshness_days": 30,
+      "requires_company": false,
+      "requires_person": true,
+      "output_fields": [
+        "name", "title", "company", "email",
+        "phone", "linkedin_url", "location",
+        "past_companies", "education"
+      ],
+      "notes": "700M+ verified B2B contacts. 95% accuracy, 2-second API response time. Bulk enrichment via REST API. Team Ultimate plan: 10K monthly API calls. Enterprise: unlimited. Good alternative when Apollo/PDL are unavailable.",
+      "api_docs_url": "https://rocketreach.co/api"
+    },
+    {
+      "source_id": "clearbit",
+      "display_name": "Clearbit / Breeze Intelligence (HubSpot)",
+      "api_key_env": "CLEARBIT_API_KEY",
+      "available": false,
+      "goals": ["org_chart", "work_history"],
+      "goal_scores": {
+        "org_chart": 0.72,
+        "work_history": 0.68,
+        "connections": 0.25
+      },
+      "rate_limits": {
+        "requests_per_minute": 60,
+        "requests_per_day": 1000
+      },
+      "cost_per_call": 0.45,
+      "cost_tier": "enterprise",
+      "data_freshness_days": 30,
+      "requires_company": false,
+      "requires_person": true,
+      "output_fields": [
+        "name", "title", "company", "email",
+        "linkedin_url", "location", "industry",
+        "company_size", "tech_stack"
+      ],
+      "notes": "DEPRECATED for standalone use. Clearbit was acquired by HubSpot in Nov 2023 and rebranded as Breeze Intelligence. Free tier killed April 2025. Now requires HubSpot enterprise contract ($75/month minimum). Use Apollo or PDL instead for new integrations.",
+      "api_docs_url": "https://clearbit.com/docs"
+    },
+    {
+      "source_id": "linkedin_serp",
+      "display_name": "LinkedIn via SerpAPI",
+      "api_key_env": "SERP_API_KEY",
+      "available": false,
+      "goals": ["org_chart", "work_history", "connections"],
+      "goal_scores": {
+        "org_chart": 0.85,
+        "work_history": 0.90,
+        "connections": 0.55
+      },
+      "rate_limits": {
+        "requests_per_minute": 60,
+        "requests_per_day": 5000
+      },
+      "cost_per_call": 0.005,
+      "cost_tier": "paid",
+      "data_freshness_days": 14,
+      "requires_company": false,
+      "requires_person": true,
+      "output_fields": [
+        "name", "title", "company", "linkedin_url",
+        "past_roles", "education", "location", "summary"
+      ],
+      "notes": "Structured LinkedIn profile data via SerpAPI's Google SERP parsing. High quality for work history — LinkedIn is the ground truth for professional history. No official LinkedIn API available publicly. Cost: ~$0.005/search.",
+      "api_docs_url": "https://serpapi.com/linkedin-profile-api"
+    },
+    {
+      "source_id": "google_serp_free",
+      "display_name": "Google SERP (free, via DuckDuckGo HTML)",
+      "api_key_env": null,
+      "available": true,
+      "goals": ["org_chart", "work_history"],
+      "goal_scores": {
+        "org_chart": 0.55,
+        "work_history": 0.50,
+        "connections": 0.20
+      },
+      "rate_limits": {
+        "requests_per_minute": 6,
+        "requests_per_day": 200
+      },
+      "cost_per_call": 0.0,
+      "cost_tier": "free",
+      "data_freshness_days": 1,
+      "requires_company": true,
+      "requires_person": false,
+      "output_fields": [
+        "name", "title", "company", "linkedin_url", "source_url"
+      ],
+      "notes": "DuckDuckGo HTML scraping — no API key required. Used by existing pipeline (BIS-297). Lower quality/precision; must be rate-limited to avoid blocks. Currently the primary available source. Queries: 'VP Supply Chain [Company] LinkedIn'.",
+      "api_docs_url": null
+    },
+    {
+      "source_id": "company_website",
+      "display_name": "Company Website (About/Leadership/Team page)",
+      "api_key_env": null,
+      "available": true,
+      "goals": ["org_chart"],
+      "goal_scores": {
+        "org_chart": 0.70,
+        "work_history": 0.15,
+        "connections": 0.05
+      },
+      "rate_limits": {
+        "requests_per_minute": 10,
+        "requests_per_day": 500
+      },
+      "cost_per_call": 0.0,
+      "cost_tier": "free",
+      "data_freshness_days": 1,
+      "requires_company": true,
+      "requires_person": false,
+      "output_fields": [
+        "name", "title", "company", "source_url", "bio_snippet"
+      ],
+      "notes": "WebFetch of company About/Leadership/Team pages. High accuracy for named officers when found. Requires URL discovery step (google for 'company site:example.com team'). No API key needed. Best used after google_serp_free for URL discovery.",
+      "api_docs_url": null
+    },
+    {
+      "source_id": "kissinger_graph",
+      "display_name": "Kissinger Graph (shared org edges + interaction history)",
+      "api_key_env": "KISSINGER_API_TOKEN",
+      "available": true,
+      "goals": ["connections", "org_chart"],
+      "goal_scores": {
+        "org_chart": 0.65,
+        "work_history": 0.45,
+        "connections": 0.85
+      },
+      "rate_limits": {
+        "requests_per_minute": 300,
+        "requests_per_day": 100000
+      },
+      "cost_per_call": 0.0,
+      "cost_tier": "free",
+      "data_freshness_days": 1,
+      "requires_company": true,
+      "requires_person": false,
+      "output_fields": [
+        "entity_id", "name", "kind", "tags", "meta",
+        "edges", "interaction_count", "last_interaction_at"
+      ],
+      "notes": "Reads the live Kissinger graph. Best for first/second-degree connections: follow works_at edges to find mutual org members, then follow those person nodes' edges. Always available (local service). KISSINGER_API_TOKEN set in config.",
+      "api_docs_url": "http://localhost:8080/graphql"
+    }
+  ],
+  "goal_definitions": {
+    "org_chart": "Discover officers, supply chain leaders, demand planners, VPs of Operations at a target company. Output: list of {name, title, company}.",
+    "work_history": "Find a contact's current and past roles, companies, and tenures. Output: list of {company, title, start_year, end_year}.",
+    "connections": "Identify first and second-degree connections — who knows whom, via what channel, with estimated relationship strength. Output: list of {person_a, person_b, relation_type, strength_estimate}."
+  },
+  "source_selection_strategy": {
+    "org_chart": ["zoominfo", "apollo", "diffbot", "clay", "cognism", "linkedin_serp", "rocketreach", "lusha", "crunchbase", "clearbit", "hunter", "company_website", "google_serp_free"],
+    "work_history": ["people_data_labs", "apollo", "linkedin_serp", "clay", "rocketreach", "surfe", "diffbot", "cognism", "lusha", "hunter", "kissinger_graph"],
+    "connections": ["kissinger_graph", "apollo", "surfe", "people_data_labs", "diffbot", "linkedin_serp", "clay", "crunchbase"]
+  }
+}

@@ -198,19 +198,19 @@ else
 fi
 
 #===============================================================================
-# Test 5: install.sh embedded run-job.sh has the guard
+# Test 5: dispatch-job.sh does not invoke claude directly
 #===============================================================================
 echo ""
-echo "=== Test 5: install.sh embedded run-job.sh has CLAUDECODE guard ==="
+echo "=== Test 5: dispatch-job.sh does not invoke claude directly ==="
 
-INSTALL_SH="$REPO_DIR/install.sh"
-if [[ ! -f "$INSTALL_SH" ]]; then
-    fail "install.sh not found"
+DISPATCH_JOB="$REPO_DIR/scheduled-tasks/dispatch-job.sh"
+if [[ ! -f "$DISPATCH_JOB" ]]; then
+    fail "dispatch-job.sh not found"
 else
-    if grep -q 'unset CLAUDECODE' "$INSTALL_SH"; then
-        pass "install.sh contains 'unset CLAUDECODE'"
+    if grep -q 'claude -p' "$DISPATCH_JOB" || grep -qP '(?<![/#"])claude\s+-' "$DISPATCH_JOB"; then
+        fail "dispatch-job.sh invokes claude directly — must use inbox dispatch only"
     else
-        fail "install.sh — missing 'unset CLAUDECODE' in embedded run-job.sh"
+        pass "dispatch-job.sh does not invoke claude directly"
     fi
 fi
 

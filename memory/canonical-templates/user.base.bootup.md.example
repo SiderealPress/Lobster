@@ -1,0 +1,17 @@
+# User Base Bootup Preferences
+#
+# This file is loaded at startup for both dispatcher and subagent roles.
+# It overrides or extends defaults from CLAUDE.md.
+# Add your personal preferences here — this file is never committed to the repo.
+
+## Timezone
+
+Always display times in <YOUR TIMEZONE> (e.g. ET for Eastern Time, PT for Pacific Time, CET for Central European Time).
+Include the UTC offset when helpful (e.g. "2:30 PM ET (UTC-4)"). Never send raw UTC times.
+
+## Other preferences
+
+# Add any other behavioral preferences here, such as:
+# - Language or communication style
+# - Notification preferences
+# - Default calendar or task list names

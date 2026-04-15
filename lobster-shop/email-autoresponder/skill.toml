@@ -1,0 +1,42 @@
+[skill]
+name = "email-autoresponder"
+version = "1.1.0"
+description = "Gmail auto-responder + LobsterTalk context handler: drafts context-aware replies every 5 minutes, and answers 'what do you know about X?' queries from AlbertLobster via bot-talk"
+author = "Albert"
+category = "workflow"
+
+[activation]
+mode = "triggered"
+triggers = ["/email", "/autoresponder", "/autodraft", "/lobstertalk", "/botquery"]
+context_patterns = [
+    "when user asks about email autoresponder status",
+    "when user wants to enable or disable email auto-drafting",
+    "when user asks about gmail drafts or inbox processing",
+    "when user asks what happened with emails",
+    "when user wants to check email draft results",
+    "when user asks about incoming bot-talk queries",
+    "when user wants to check lobstertalk handler status",
+    "when user asks what Albert's lobster asked about",
+    "when user asks about the context handler job",
+]
+
+[layering]
+priority = 50
+merge_strategy = "append"
+
+[provides]
+mcp_tools = []
+bot_commands = ["/email", "/autoresponder", "/autodraft", "/lobstertalk", "/botquery"]
+
+[compatibility]
+enhances = []
+conflicts = []
+
+[dependencies]
+pip = []
+npm = []
+system = ["gws"]
+api_keys = []
+
+[dependencies.runtime]
+python = ">=3.11"

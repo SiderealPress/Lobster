@@ -1,0 +1,152 @@
+#!/bin/bash
+# api-poll.sh.template — REST API polling with state (timestamp-based cursor)
+#
+# Pattern: specialization of poll-with-state for REST APIs that support
+# timestamp-based filtering via a ?since= query parameter.
+#
+# This template handles:
+# - Token loading from a file
+# - URL-encoding the since= timestamp
+# - Authorization header injection
+# - JSON response parsing (list or {items:[...]} shape)
+# - Cursor advancement (state file write) in the subagent, not here
+# - Fail-safe dispatch on API error or parse failure
+#
+# The key difference from poll-with-state.sh.template: this template is
+# pre-wired for the REST API + Bearer token + JSON response pattern, so
+# there is less to fill in.
+#
+# Usage: cron calls this script at your desired polling cadence.
+#   Example crontab entry:
+#     */10 * * * * ~/lobster/scheduled-tasks/YOUR_JOB_NAME-check.sh
+#
+# Fill in all variables marked YOUR_* before using.
+#
+# Flow:
+#   API returns items  → dispatch-job.sh YOUR_JOB_NAME → inbox write → LLM
+#   API returns empty  → log no-op → exit 0
+#   API unreachable    → log warning → dispatch (fail-safe, let job handle outage)
+
+set -euo pipefail
+
+export PATH="$HOME/.local/bin:$PATH"
+
+# --- Configuration (fill in these values) ---
+JOB_NAME="YOUR_JOB_NAME"
+# Base URL of the API, no trailing slash
+YOUR_API_BASE_URL="https://YOUR_API_HOST/api/v1"
+# Path to fetch, without the ?since= parameter
+YOUR_API_PATH="/YOUR_RESOURCE"
+# JSON key for the items array in the response (use "." for a top-level array)
+YOUR_ITEMS_KEY="items"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# --- Load env files ---
+CONFIG_DIR="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}"
+for _env_file in "$CONFIG_DIR/config.env" "$CONFIG_DIR/global.env"; do
+    if [ -f "$_env_file" ]; then
+        # shellcheck source=/dev/null
+        set -a
+        source "$_env_file"
+        set +a
+    fi
+done
+unset _env_file
+
+WORKSPACE="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
+LOG_DIR="$WORKSPACE/scheduled-jobs/logs"
+TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+START_ISO=$(date -Iseconds)
+
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/${JOB_NAME}-precheck-${TIMESTAMP}.log"
+
+# --- Token file ---
+# Convention: ~/lobster-workspace/data/<job-name>-token.txt
+TOKEN_FILE="$WORKSPACE/data/${JOB_NAME}-token.txt"
+if [ ! -f "$TOKEN_FILE" ]; then
+    echo "[$START_ISO] ERROR: token file not found: $TOKEN_FILE — dispatching to let job handle it" | tee "$LOG_FILE"
+    exec "$SCRIPT_DIR/dispatch-job.sh" "$JOB_NAME"
+fi
+TOKEN=$(python3 -c "print(open('$TOKEN_FILE').read().strip())" 2>/dev/null)
+
+# --- State file ---
+# Convention: ~/lobster-workspace/data/<job-name>-state.json
+STATE_FILE="$WORKSPACE/data/${JOB_NAME}-state.json"
+LAST_TS=""
+if [ -f "$STATE_FILE" ]; then
+    LAST_TS=$(python3 -c "
+import json
+try:
+    with open('$STATE_FILE') as f:
+        d = json.load(f)
+    print(d.get('last_seen_ts', ''))
+except Exception:
+    pass
+" 2>/dev/null || true)
+fi
+
+# --- Build URL ---
+if [ -n "$LAST_TS" ]; then
+    ENCODED_TS=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "$LAST_TS" 2>/dev/null || echo "")
+    CHECK_URL="${YOUR_API_BASE_URL}${YOUR_API_PATH}?since=${ENCODED_TS}"
+else
+    # No cursor — fetch most recent items (API returns its default page size)
+    CHECK_URL="${YOUR_API_BASE_URL}${YOUR_API_PATH}"
+fi
+
+# --- HTTP request ---
+set +e
+RESPONSE=$(curl -sf --max-time 15 \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Accept: application/json" \
+    "$CHECK_URL" 2>/dev/null)
+CURL_EXIT=$?
+set -e
+
+if [ "$CURL_EXIT" -ne 0 ]; then
+    echo "[$START_ISO] WARNING: API unreachable (curl exit $CURL_EXIT) — dispatching to let job handle outage logic" | tee "$LOG_FILE"
+    exec "$SCRIPT_DIR/dispatch-job.sh" "$JOB_NAME"
+fi
+
+# --- Parse response ---
+# Handles two common shapes:
+#   - Top-level array:          [ {...}, {...} ]
+#   - Object with items field:  { "YOUR_ITEMS_KEY": [ {...}, {...} ] }
+set +e
+ITEM_COUNT=$(python3 -c "
+import json, sys
+items_key = sys.argv[1]
+response = sys.argv[2]
+try:
+    data = json.loads(response)
+    if isinstance(data, list):
+        items = data
+    else:
+        items = data.get(items_key, data.get('items', data.get('results', [])))
+    print(len(items))
+except (json.JSONDecodeError, AttributeError):
+    sys.exit(2)
+" "$YOUR_ITEMS_KEY" "$RESPONSE" 2>/dev/null)
+PARSE_EXIT=$?
+set -e
+
+if [ "$PARSE_EXIT" -ne 0 ]; then
+    echo "[$START_ISO] WARNING: unexpected response format — dispatching to let job handle it" | tee "$LOG_FILE"
+    exec "$SCRIPT_DIR/dispatch-job.sh" "$JOB_NAME"
+fi
+
+# --- Decision ---
+if [ "${ITEM_COUNT:-0}" -gt 0 ]; then
+    echo "[$START_ISO] $ITEM_COUNT new item(s) found — dispatching $JOB_NAME" | tee "$LOG_FILE"
+    exec "$SCRIPT_DIR/dispatch-job.sh" "$JOB_NAME"
+else
+    echo "[$START_ISO] No new items since ${LAST_TS:-<no cursor>} — skipping dispatch for $JOB_NAME" | tee "$LOG_FILE"
+    exit 0
+fi
+
+# --- NOTE: Cursor advancement ---
+# The Layer 2 subagent updates the state file after processing. Write to:
+#   ~/lobster-workspace/data/YOUR_JOB_NAME-state.json
+# with the field `last_seen_ts` set to the timestamp of the newest item processed.

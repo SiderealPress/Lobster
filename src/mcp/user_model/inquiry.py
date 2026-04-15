@@ -15,7 +15,7 @@ Depends on: schema.py, db.py only.
 """
 
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .db import (
@@ -43,14 +43,18 @@ def should_ask_question(
     if not row:
         return True
     last_inquiry = datetime.fromisoformat(row["value"])
-    return datetime.utcnow() - last_inquiry > timedelta(hours=budget_hours)
+    # Rows written before the tz-aware migration are naive; attach UTC so the
+    # subtraction below never raises TypeError on an upgraded installation.
+    if last_inquiry.tzinfo is None:
+        last_inquiry = last_inquiry.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - last_inquiry > timedelta(hours=budget_hours)
 
 
 def record_inquiry(conn: sqlite3.Connection) -> None:
     """Record that a question was asked (update budget tracker)."""
     conn.execute(
         "INSERT OR REPLACE INTO um_metadata (key, value) VALUES ('last_inquiry_at', ?)",
-        (datetime.utcnow().isoformat(),),
+        (datetime.now(timezone.utc).isoformat(),),
     )
     conn.commit()
 
@@ -130,7 +134,7 @@ def _pick_blind_spot_question(conn: sqlite3.Connection) -> str | None:
 def _pick_fading_arc_question(conn: sqlite3.Connection) -> str | None:
     """Ask about narrative arcs that are going cold."""
     arcs = get_active_narrative_arcs(conn)
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     fading = [
         arc for arc in arcs
@@ -194,7 +198,9 @@ def get_inquiry_status(conn: sqlite3.Connection) -> dict[str, Any]:
         hours_remaining = 0.0
     else:
         last = datetime.fromisoformat(row["value"])
-        elapsed = datetime.utcnow() - last
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        elapsed = datetime.now(timezone.utc) - last
         can_ask = elapsed > timedelta(hours=_DEFAULT_BUDGET_HOURS)
         hours_remaining = max(0, _DEFAULT_BUDGET_HOURS - elapsed.total_seconds() / 3600)
 

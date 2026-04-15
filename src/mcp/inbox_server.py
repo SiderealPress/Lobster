@@ -25,6 +25,7 @@ import httpx
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 # Ensure src/mcp/ is on sys.path so log_utils (a sibling module) can be
 # imported when this script is run directly (same guard used by
@@ -33,6 +34,23 @@ _MCP_SRC_DIR = str(Path(__file__).resolve().parent)
 if _MCP_SRC_DIR not in sys.path:
     sys.path.insert(0, _MCP_SRC_DIR)
 from log_utils import JsonFormatter, configure_file_handler
+
+# Early logger — same name as the main `log` object defined after all imports.
+# Python's logging registry is global, so this resolves to the same Logger
+# instance that gets a StreamHandler + RotatingFileHandler during setup_logging().
+# Using it here (before those handlers are attached) sends records to the root
+# logger fallback, which is acceptable for startup diagnostics.
+_startup_log = logging.getLogger("lobster-mcp")
+
+# Event bus — structured observability infrastructure (issue #890).
+# Imported here so callsites can use _emit_event() throughout the module.
+# The singleton is initialised later in main(); events emitted before init
+# are silently dropped (bus has no listeners yet — safe, not a hard error).
+try:
+    from event_bus import get_event_bus, LobsterEvent
+    _EVENT_BUS_AVAILABLE = True
+except ImportError:
+    _EVENT_BUS_AVAILABLE = False
 
 # Ensure the parent src/ directory is on sys.path so that sibling packages
 # (e.g. integrations, utils, bot) can be imported when this script is run
@@ -43,6 +61,17 @@ if _SRC_DIR not in sys.path:
 
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+
+# IFTTT behavioral rules store
+from utils.ifttt_rules import (
+    load_rules as _ifttt_load_rules,
+    save_rules as _ifttt_save_rules,
+    add_rule as _ifttt_add_rule,
+    remove_rule as _ifttt_remove_rule,
+    find_rule as _ifttt_find_rule,
+    get_enabled_rules as _ifttt_get_enabled_rules,
+)
+import uuid as _uuid_mod
 
 # Reliability utilities (atomic writes, validation, audit logging, circuit breaker)
 from reliability import (
@@ -64,6 +93,9 @@ from agents.tracker import add_pending_agent as _add_pending_agent, remove_pendi
 
 # Agent session store — SQLite-backed, used directly for new MCP tools
 import agents.session_store as _session_store
+
+# Atomic claim DB — SQLite INSERT OR FAIL claim gate (issue #1360)
+from claims import AtomicClaimDB as _AtomicClaimDB
 
 # Skill management system
 from skill_manager import (
@@ -89,9 +121,9 @@ try:
     _db_count_conversation_history = _db_reader_mod.count_conversation_history
     _db_get_message_by_telegram_id_fn = _db_reader_mod.get_message_by_telegram_id
     _db_get_message_stats = _db_reader_mod.get_message_stats
-    print('[DB] db.reader loaded — DB reads available', file=sys.stderr)
+    _startup_log.info('[DB] db.reader loaded — DB reads available')
 except Exception as _db_reader_import_err:
-    print(f'[WARN] DB reader module unavailable: {_db_reader_import_err}', file=sys.stderr)
+    _startup_log.warning('DB reader module unavailable: %s', _db_reader_import_err)
 
 # BIS-167 Slice 6: Live DB write path — persist messages to messages.db
 _db_persist_inbound = None
@@ -105,10 +137,10 @@ try:
     )
     _db_flag = os.environ.get("LOBSTER_USE_DB", "0")
     _db_status = "ENABLED" if _db_flag == "1" else "DISABLED (set LOBSTER_USE_DB=1 to enable)"
-    print(f"[DB] message_store loaded — DB writes {_db_status}", file=sys.stderr)
+    _startup_log.info('[DB] message_store loaded — DB writes %s', _db_status)
     del _db_flag, _db_status
 except Exception as _db_import_err:
-    print(f"[WARN] messages.db write path unavailable: {_db_import_err}", file=sys.stderr)
+    _startup_log.warning('messages.db write path unavailable: %s', _db_import_err)
 
 
 # Memory system (optional — gracefully degrades to static file search)
@@ -119,7 +151,7 @@ try:
 except Exception as _mem_err:
     # Memory system is optional; log and continue
     import traceback as _tb
-    print(f"[WARN] Memory system unavailable: {_mem_err}", file=sys.stderr)
+    _startup_log.warning('Memory system unavailable: %s', _mem_err)
 
 # User Model subsystem
 _user_model = None
@@ -129,10 +161,10 @@ try:
     from user_model import create_user_model, USER_MODEL_TOOL_DEFINITIONS
     _user_model = create_user_model()
     _user_model_tool_names = _user_model.tool_names
-    print("[INFO] User Model subsystem initialized.", file=sys.stderr)
+    _startup_log.info('User Model subsystem initialized.')
 except Exception as _um_err:
     import traceback as _um_tb
-    print(f"[WARN] User Model subsystem unavailable: {_um_err}", file=sys.stderr)
+    _startup_log.warning('User Model subsystem unavailable: %s', _um_err)
 
 # ---------------------------------------------------------------------------
 # Background observation worker — fire-and-forget, zero main-thread blocking
@@ -157,8 +189,7 @@ def _observation_worker() -> None:
             if _user_model is not None:
                 obs_ids = _user_model.observe(msg_text, msg_id, context=source or "", message_ts=ts)
                 # Debug: emit Tier 1 signal summary when LOBSTER_DEBUG=true.
-                # _emit_debug_observation resolves debug mode lazily and is a no-op
-                # when LOBSTER_DEBUG != true, so this is safe on the hot path.
+                # _emit_event is a no-op when LOBSTER_DEBUG != true (bus filter).
                 if obs_ids:
                     try:
                         from user_model.observation import extract_signals
@@ -176,18 +207,23 @@ def _observation_worker() -> None:
                                 )
                             summary = ", ".join(signal_parts[:6])  # cap at 6
                             short_id = msg_id[:20] if len(msg_id) > 20 else msg_id
-                            _emit_debug_observation(
+                            _emit_event(
                                 f"\U0001f50d [tier 1 fired] msg={short_id} "
-                                f"extracted {len(signals)} signal(s): {summary}"
+                                f"extracted {len(signals)} signal(s): {summary}",
+                                event_type="user_model.tier1",
+                                severity="debug",
+                                source="observation-worker",
                             )
                     except Exception:
                         pass  # never block observation on debug emit
         except Exception as _obs_exc:
             import traceback as _tb
-            _emit_debug_observation(
+            _emit_event(
                 f"\U0001f50d [observation worker error] {type(_obs_exc).__name__}: {_obs_exc}\n"
                 + _tb.format_exc()[-800:],
-                category="system_error",
+                event_type="system.error",
+                severity="error",
+                source="observation-worker",
             )
             # never crash the worker
 
@@ -217,116 +253,24 @@ def _queue_observation(msg_text: str, msg_id: str, source: str | None = None, ts
 # ---------------------------------------------------------------------------
 # Debug observability — LOBSTER_DEBUG=true push notifications
 #
-# _emit_debug_observation() is defined here (early, so workers can call it)
-# but the actual mode/chat_id detection is lazy (reads config on first call)
-# to avoid referencing _CONFIG_DIR / INBOX_DIR before they are defined.
+# _emit_event() is a thin wrapper around the event bus singleton.
+# _emit_debug_observation() is the direct-write function used by handlers
+# that need to be patchable in unit tests (memory_store, memory_search,
+# write_result).  It writes directly to OUTBOX_DIR when alerts are enabled,
+# bypassing the event bus so that tests can mock it cleanly with patch.multiple.
+#
+# Module-level flags (_DEBUG_MODE, _DEBUG_ALERTS_ENABLED, _DEBUG_RESOLVED,
+# _DEBUG_OWNER_CHAT_ID, _DEBUG_OWNER_SOURCE) are exposed so that tests can
+# inject known state via patch.multiple without touching the event bus or
+# environment variables.
 # ---------------------------------------------------------------------------
 
-_DEBUG_MODE: bool | None = None        # None = not yet resolved
-_DEBUG_ALERTS_ENABLED: bool = False    # True only when alerts are explicitly configured
-_DEBUG_OWNER_CHAT_ID: int | None = None
-_DEBUG_OWNER_SOURCE: str = "telegram"  # messaging source for debug alerts
-_DEBUG_RESOLVED: bool = False
-
-
-def _resolve_debug_config() -> None:
-    """
-    Lazily resolve LOBSTER_DEBUG, owner chat_id, and messaging source from env + config.env.
-    Must only be called after _CONFIG_DIR is available (module init complete).
-    Thread-safe by idempotency — worst case reads config twice.
-
-    Debug alerts are only enabled when LOBSTER_DEBUG=true AND a valid admin chat_id
-    can be resolved from config. This prevents spurious inbox writes in environments
-    where LOBSTER_DEBUG=true is set but no admin notification channel is configured
-    (e.g. test environments, staging).
-
-    Source resolution order:
-      1. LOBSTER_DEBUG_SOURCE env var (explicit override)
-      2. Detected from config: if LOBSTER_ENABLE_SLACK=true, use "slack"; else "telegram"
-    """
-    global _DEBUG_MODE, _DEBUG_ALERTS_ENABLED, _DEBUG_OWNER_CHAT_ID, _DEBUG_OWNER_SOURCE, _DEBUG_RESOLVED
-    if _DEBUG_RESOLVED:
-        return
-
-    # Determine debug mode
-    env_val = os.environ.get("LOBSTER_DEBUG", "").lower()
-    debug = env_val == "true"
-    if not debug:
-        try:
-            config_file = _CONFIG_DIR / "config.env"
-            if config_file.exists():
-                for line in config_file.read_text().splitlines():
-                    if line.strip().startswith("LOBSTER_DEBUG="):
-                        val = line.split("=", 1)[1].strip().strip('"').strip("'").lower()
-                        debug = val == "true"
-                        break
-        except Exception:
-            pass
-    _DEBUG_MODE = debug
-
-    # Determine owner chat_id and messaging source.
-    # _DEBUG_ALERTS_ENABLED is only set to True when both a valid chat_id AND
-    # the source's bot credentials are present. This prevents spurious inbox writes
-    # in environments that have LOBSTER_DEBUG=true but no bot configured for delivery
-    # (e.g. test environments, CI, staging without a bot token).
-    if debug:
-        try:
-            # Allow explicit source override via env var
-            explicit_source = os.environ.get("LOBSTER_DEBUG_SOURCE", "").strip().lower()
-
-            slack_enabled = False
-            slack_channel: str | None = None
-            slack_bot_token: str | None = None
-            telegram_chat_id: int | None = None
-            telegram_bot_token: str | None = None
-
-            config_file = _CONFIG_DIR / "config.env"
-            if config_file.exists():
-                for line in config_file.read_text().splitlines():
-                    stripped = line.strip()
-                    if stripped.startswith("TELEGRAM_ALLOWED_USERS="):
-                        val = stripped.split("=", 1)[1].strip().strip('"').strip("'")
-                        first = val.split(",")[0].strip()
-                        if first.lstrip("-").isdigit():
-                            telegram_chat_id = int(first)
-                    elif stripped.startswith("TELEGRAM_BOT_TOKEN="):
-                        val = stripped.split("=", 1)[1].strip().strip('"').strip("'")
-                        if val:
-                            telegram_bot_token = val
-                    elif stripped.startswith("LOBSTER_ENABLE_SLACK="):
-                        val = stripped.split("=", 1)[1].strip().strip('"').strip("'").lower()
-                        slack_enabled = val == "true"
-                    elif stripped.startswith("LOBSTER_SLACK_ALLOWED_CHANNELS="):
-                        val = stripped.split("=", 1)[1].strip().strip('"').strip("'")
-                        first_chan = val.split(",")[0].strip()
-                        if first_chan:
-                            slack_channel = first_chan
-                    elif stripped.startswith("LOBSTER_SLACK_BOT_TOKEN="):
-                        val = stripped.split("=", 1)[1].strip().strip('"').strip("'")
-                        if val:
-                            slack_bot_token = val
-
-            if explicit_source:
-                _DEBUG_OWNER_SOURCE = explicit_source
-            elif slack_enabled:
-                _DEBUG_OWNER_SOURCE = "slack"
-            else:
-                _DEBUG_OWNER_SOURCE = "telegram"
-
-            # chat_id: use Slack channel if source is slack, else Telegram numeric id.
-            # Require the source's bot credentials to be present before enabling alerts —
-            # this prevents silent inbox pollution in environments where LOBSTER_DEBUG=true
-            # is set but the bot that delivers messages is not configured.
-            if _DEBUG_OWNER_SOURCE == "slack" and slack_channel and slack_bot_token:
-                _DEBUG_OWNER_CHAT_ID = slack_channel  # type: ignore[assignment]
-                _DEBUG_ALERTS_ENABLED = True
-            elif _DEBUG_OWNER_SOURCE != "slack" and telegram_chat_id is not None and telegram_bot_token:
-                _DEBUG_OWNER_CHAT_ID = telegram_chat_id
-                _DEBUG_ALERTS_ENABLED = True
-        except Exception:
-            pass
-
-    _DEBUG_RESOLVED = True
+# Module-level debug state — patchable by tests via patch.multiple
+_DEBUG_MODE: bool = os.environ.get("LOBSTER_DEBUG", "").lower() in ("true", "1", "yes")
+_DEBUG_ALERTS_ENABLED: bool = _DEBUG_MODE
+_DEBUG_RESOLVED: bool = False  # True once _resolve_debug_config has run
+_DEBUG_OWNER_CHAT_ID: int | str | None = None
+_DEBUG_OWNER_SOURCE: str = "telegram"
 
 
 def _emit_debug_observation(
@@ -335,73 +279,123 @@ def _emit_debug_observation(
     visibility: str = "mcp-only",
     emitter: str | None = None,
 ) -> None:
+    """Write a debug observation directly to OUTBOX_DIR.
+
+    Gate: returns immediately when _DEBUG_ALERTS_ENABLED is False or
+    _DEBUG_OWNER_CHAT_ID is None.  Handlers call this unconditionally —
+    the gate lives here, not at the call site.
+
+    Writes a JSON file to OUTBOX_DIR so the Telegram bot delivers the
+    alert directly to the owner without touching the dispatcher inbox.
+
+    Never raises — must be safe to call from any handler.
     """
-    Emit a debug notification directly to the bot outbox when LOBSTER_DEBUG=true.
-
-    Writes directly to OUTBOX_DIR (the bot watchdog outbox) so the message is
-    delivered to Telegram without entering the dispatcher inbox. The dispatcher
-    never sees these messages and no dispatcher tokens are burned.
-
-    When debug mode is off, this function is a no-op.
-    When category is "system_context", this function is always a no-op — per the
-    dispatcher bootup doc, system_context observations must be stored silently and
-    never forwarded to the user, even in debug mode.
-
-    Args:
-        text: The observation body text.
-        category: "system_context" (always suppressed), "system_error", or "user_context".
-        visibility: "mcp-only" if the MCP layer is emitting this directly (dispatcher
-            has not seen it yet), or "dispatcher" if the dispatcher's main loop is
-            emitting this after processing the message through its inbox.
-        emitter: task_id or agent description identifying who generated the observation.
-            Falls back to "unknown" if not provided.
-
-    Label format: [debug|{visibility}] {category} from {emitter}
-    Example: [debug|mcp-only] system_error from task:linear-digest
-
-    Never raises — must be safe to call from any context including threads.
-    """
-    # system_context observations are internal routing decisions — never forward
-    # to Telegram. The dispatcher bootup doc is explicit: system_context must be
-    # stored silently (memory_store), do NOT send_reply, even in debug mode.
-    # This mirrors the suppression already present in handle_write_observation().
-    if category == "system_context":
-        return
-
-    # Fast path: skip I/O if debug alerts have been resolved and are disabled.
-    if _DEBUG_RESOLVED and not _DEBUG_ALERTS_ENABLED:
-        return
-    _resolve_debug_config()
     if not _DEBUG_ALERTS_ENABLED:
         return
-    chat_id = _DEBUG_OWNER_CHAT_ID
-    if chat_id is None:
+    if _DEBUG_OWNER_CHAT_ID is None:
         return
     try:
-        emitter_label = emitter or "unknown"
-        label = f"[debug|{visibility}] {category} from {emitter_label}"
-        full_text = f"{label}\n{text}"
-
-        from datetime import datetime, timezone as _timezone
-        now = datetime.now(_timezone.utc)
-        ts_ms = int(now.timestamp() * 1000)
-        safe_emitter = "".join(c if c.isalnum() or c in "-_" else "_" for c in emitter_label)[:40]
+        import time as _time_mod
+        ts_ms = int(_time_mod.time() * 1000)
+        safe_emitter = (emitter or "unknown").replace("/", "_")[:40]
         message_id = f"{ts_ms}_debug_{safe_emitter}"
+        label = f"[debug|{visibility}]"
+        if emitter:
+            label += f" {emitter}"
+        full_text = f"{label}\n{text}"
         message = {
             "id": message_id,
             "type": "debug_observation",
             "source": _DEBUG_OWNER_SOURCE,
-            "chat_id": chat_id,
+            "chat_id": _DEBUG_OWNER_CHAT_ID,
             "text": full_text,
-            "timestamp": now.isoformat(),
+            "timestamp": __import__("datetime").datetime.now(
+                __import__("datetime").timezone.utc
+            ).isoformat(),
         }
-        # Deliver directly to the bot outbox so the message reaches Telegram
-        # without entering the dispatcher inbox. The dispatcher never sees
-        # debug_observation messages — no tokens burned, no silent drops.
+        OUTBOX_DIR.mkdir(parents=True, exist_ok=True)
         outbox_file = OUTBOX_DIR / f"{message_id}.json"
-        atomic_write_json(outbox_file, message)
+        tmp_file = outbox_file.with_suffix(".tmp")
+        tmp_file.write_text(__import__("json").dumps(message), encoding="utf-8")
+        tmp_file.rename(outbox_file)
     except Exception:
-        pass  # never block on debug instrumentation
+        pass  # debug delivery must never crash production
+
+
+def _emit_event(
+    text: str,
+    event_type: str = "debug.observation",
+    severity: str = "debug",
+    source: str = "inbox-server",
+    emitter: str | None = None,
+    task_id: str | None = None,
+    chat_id: int | str | None = None,
+) -> None:
+    """
+    Emit a structured event to the bus.
+
+    Replaces _emit_debug_observation().  All filtering (debug-mode gate,
+    system_context suppression) lives in the bus listeners registered at
+    startup, so callers do not need to check LOBSTER_DEBUG themselves.
+
+    Never raises — must be safe to call from any thread.
+    """
+    if not _EVENT_BUS_AVAILABLE:
+        return
+    try:
+        bus = get_event_bus()
+        event = LobsterEvent(
+            event_type=event_type,
+            severity=severity,
+            source=source,
+            payload={"text": text},
+            task_id=task_id,
+            chat_id=chat_id,
+        )
+        bus.emit_sync(event)
+    except Exception:
+        pass  # never block on observability
+
+
+def _resolve_debug_config() -> None:
+    """No-op — preserved for call compatibility. Config resolution moved to event bus."""
+    pass
+
+
+def _emit_mcp_event(
+    event_type: str,
+    payload: dict,
+    severity: str = "info",
+    chat_id: int | str | None = None,
+) -> None:
+    """
+    Centralized EventBus emission for MCP handler audit-trail events (issue #1459).
+
+    All 5 per-handler emit blocks (telegram.inbound, telegram.outbound,
+    inbox.processed, inbox.failed, job.completed) were identical except for
+    event_type, payload, severity, and chat_id.  This function extracts that
+    boilerplate into one place.
+
+    Callers pass only the semantically meaningful fields; this function handles
+    availability guard, LobsterEvent construction, emit_sync(), and
+    exception suppression so the main handler path is never blocked.
+
+    Adding a new event type = one call to _emit_mcp_event(), no copy-pasted
+    try/except block.
+    """
+    if not _EVENT_BUS_AVAILABLE:
+        return
+    try:
+        event = LobsterEvent(
+            event_type=event_type,
+            severity=severity,
+            source="inbox-server",
+            payload=payload,
+            chat_id=chat_id,
+        )
+        get_event_bus().emit_sync(event)
+    except Exception:
+        pass  # observability must never block the caller
 
 
 # ---------------------------------------------------------------------------
@@ -476,21 +470,37 @@ _REPLY_TRACK_MAX = 100
 
 
 # ---------------------------------------------------------------------------
-# Timezone utility — reads owner timezone from owner.toml for display
+# Timezone utility — delegates to utils.timezone for all display/conversion
+# ---------------------------------------------------------------------------
+#
+# The canonical implementation lives in utils/timezone.py.  Local wrappers
+# are kept here for backwards-compatibility with existing call sites inside
+# this file so that no other lines need to change.
+#
+# _format_ts_with_et has been renamed to _format_ts_for_user and now uses
+# the owner's configured timezone instead of hardcoding Eastern Time.
 # ---------------------------------------------------------------------------
 
-def _get_display_tz():
-    """Return the owner's local timezone for display purposes.
+try:
+    from utils.timezone import (
+        format_for_user as _tz_format_for_user,
+        format_iso_for_user as _tz_format_iso_for_user,
+        format_with_utc_and_local as _tz_format_with_utc_and_local,
+        get_owner_zoneinfo as _tz_get_owner_zoneinfo,
+    )
+    _TZ_UTIL_AVAILABLE = True
+except ImportError:
+    _TZ_UTIL_AVAILABLE = False
 
-    Reads the 'timezone' field from owner.toml (e.g. 'America/Los_Angeles').
-    Falls back to UTC if not set or if zoneinfo cannot load the zone.
-    Always returns a zoneinfo.ZoneInfo-compatible object.
-    """
+
+def _get_display_tz():
+    """Return the owner's local timezone (ZoneInfo) for display purposes."""
+    if _TZ_UTIL_AVAILABLE:
+        return _tz_get_owner_zoneinfo()
     import zoneinfo as _zoneinfo
     try:
         from user_model.owner import get_owner_timezone as _get_owner_tz
-        tz_name = _get_owner_tz()
-        return _zoneinfo.ZoneInfo(tz_name)
+        return _zoneinfo.ZoneInfo(_get_owner_tz())
     except Exception:
         return _zoneinfo.ZoneInfo("UTC")
 
@@ -498,28 +508,45 @@ def _get_display_tz():
 def _format_display_ts(dt: "datetime", fmt: str = "%Y-%m-%d %I:%M %p %Z") -> str:
     """Convert a datetime to the owner's local timezone and format it for display.
 
-    Args:
-        dt:  A datetime object (naive datetimes are assumed UTC).
-        fmt: strftime format string. Default produces e.g. '2026-03-19 02:18 AM PST'.
-
-    Returns a formatted string in the owner's local time.
+    Naive datetimes are assumed UTC.
     """
+    if _TZ_UTIL_AVAILABLE:
+        return _tz_format_for_user(dt, fmt=fmt)
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    local_dt = dt.astimezone(_get_display_tz())
-    return local_dt.strftime(fmt)
+    return dt.astimezone(_get_display_tz()).strftime(fmt)
 
 
 def _format_iso_for_display(iso_str: str, fmt: str = "%Y-%m-%d %I:%M %p %Z") -> str:
-    """Parse an ISO 8601 string and format it in the owner's local timezone.
-
-    Falls back to the raw string if parsing fails.
-    """
+    """Parse an ISO 8601 string and format it in the owner's local timezone."""
+    if _TZ_UTIL_AVAILABLE:
+        return _tz_format_iso_for_user(iso_str, fmt=fmt)
     try:
         dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
         return _format_display_ts(dt, fmt)
     except Exception:
         return iso_str
+
+
+def _format_ts_with_et(ts_str: str) -> str:
+    """Format a timestamp as 'YYYY-MM-DDTHH:MM:SS UTC (H:MM AM/PM <owner-tz>)'.
+
+    Previously hardcoded to Eastern Time; now uses the owner's configured
+    timezone from owner.toml so display matches the owner's actual locale.
+    Falls back to the raw string if parsing fails.
+    """
+    if _TZ_UTIL_AVAILABLE:
+        return _tz_format_with_utc_and_local(ts_str)
+    try:
+        dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        utc_str = dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S UTC")
+        local_dt = dt.astimezone(_get_display_tz())
+        local_str = local_dt.strftime("%I:%M %p %Z").lstrip("0")
+        return f"{utc_str} ({local_str})"
+    except Exception:
+        return ts_str
 
 
 def _track_reply(chat_id: Any) -> None:
@@ -643,6 +670,75 @@ def _was_task_replied(task_id: str, chat_id: Any) -> bool:
 _HUMAN_SOURCES = {"telegram", "sms", "signal", "slack", "whatsapp", "bisque"}
 
 # ---------------------------------------------------------------------------
+# Per-session user message counter (issue #1159 — session-note-appender trigger)
+#
+# Counts how many real user messages (type in USER_FACING_TYPES, source in
+# _HUMAN_SOURCES) have been processed via mark_processing in this server
+# process lifetime. Every 20 messages a `session_note_reminder` system
+# message is injected into the inbox so the dispatcher can spawn
+# session-note-appender without relying on working-context counting.
+#
+# Reset to 0 on process start — keyed to the process lifetime, which maps
+# to a single dispatcher session (dispatcher restarts coincide with process
+# restarts via systemd / hibernation).
+# ---------------------------------------------------------------------------
+_user_message_counter: int = 0
+SESSION_NOTE_REMINDER_INTERVAL: int = 20
+
+
+def _tick_user_message_counter(msg_type: str, msg_source: str) -> None:
+    """Increment _user_message_counter for real user messages and inject a
+    session_note_reminder into the inbox every SESSION_NOTE_REMINDER_INTERVAL
+    messages.
+
+    Only counts messages where msg_type is in USER_FACING_TYPES and msg_source
+    is in _HUMAN_SOURCES.  System messages, subagent results, cron reminders,
+    and other non-human traffic are excluded.
+
+    Called from both handle_mark_processing and handle_claim_and_ack so that
+    the counter ticks regardless of which claim path the dispatcher uses.
+    """
+    if msg_type not in USER_FACING_TYPES or msg_source not in _HUMAN_SOURCES:
+        return
+
+    # Developer mode: suppress session_note_reminder injections so the developer
+    # isn't bothered while testing. Real user messages are never suppressed.
+    if os.environ.get("LOBSTER_DEV_MODE", "").lower() in ("true", "1"):
+        return
+
+    global _user_message_counter
+    _user_message_counter += 1
+    if _user_message_counter % SESSION_NOTE_REMINDER_INTERVAL == 0:
+        try:
+            now_utc = datetime.now(timezone.utc)
+            ts_ms = int(now_utc.timestamp() * 1000)
+            reminder_id = f"{ts_ms}_session_note_reminder"
+            reminder = {
+                "id": reminder_id,
+                "type": "session_note_reminder",
+                "source": "system",
+                "chat_id": 0,
+                "task_origin": "internal",
+                "text": (
+                    f"session_note_reminder: {_user_message_counter} user messages "
+                    f"processed this session. Spawn session-note-appender in the background "
+                    f"to append a timestamped activity snapshot to the current session file."
+                ),
+                "user_message_count": _user_message_counter,
+                "timestamp": now_utc.isoformat(),
+            }
+            inbox_file = INBOX_DIR / f"{reminder_id}.json"
+            atomic_write_json(inbox_file, reminder)
+            log.info(
+                f"session_note_reminder injected after {_user_message_counter} user messages"
+            )
+        except Exception as _snr_exc:
+            log.warning(f"session_note_reminder injection failed: {_snr_exc}")
+            # Non-fatal: the session note will be written at compaction regardless.
+
+
+
+# ---------------------------------------------------------------------------
 # Formal message type taxonomy (issue #156)
 # Definitions live in message_types.py (dependency-free, independently testable).
 # Re-exported here so callers import from a single place.
@@ -697,6 +793,13 @@ HEARTBEAT_FILE = _WORKSPACE / "logs" / "claude-heartbeat"
 # Hibernation state file - tracks whether Lobster is active or hibernating
 LOBSTER_STATE_FILE = CONFIG_DIR / "lobster-state.json"
 
+# Dispatcher PID file — written by claude-persistent.sh when it exec-replaces
+# itself with the claude binary.  The file contains the PID of the running
+# claude process.  Used by _is_dispatcher_alive() to distinguish a true
+# mid-session MCP reconnect (dispatcher alive) from a real session loss
+# (dispatcher dead or absent).  See issue #1429.
+DISPATCHER_PID_FILE = CONFIG_DIR / "dispatcher.pid"
+
 # Reset state to "active" on startup — this is the fix for the critical bug where
 # state was never reset after waking from hibernation.
 # The bot issues systemctl restart → Claude starts → this module loads → state resets.
@@ -708,13 +811,68 @@ LOBSTER_STATE_FILE = CONFIG_DIR / "lobster-state.json"
 # - This prevents the health-check from triggering a restart loop when the state
 #   file is left in a transient mode (e.g. when using claude-wrapper.exp which
 #   does not itself write the state file).
+#
+# Guard: skip the reset if state is already "active" and the file was written
+# within the last 30 minutes.  That pattern indicates a mid-session MCP
+# reconnect (e.g. Claude Code auto-updating), not a fresh boot.  Without this
+# guard, the reconnect path re-writes booted_at/woke_at, confusing the health
+# check about session age and causing unnecessary restarts (issue #910).
 _TRANSIENT_MODES = {"hibernate", "starting", "restarting", "waking"}
+_RECONNECT_GRACE_SECONDS = 30 * 60  # 30 minutes
+
+
+def _is_dispatcher_alive() -> bool:
+    """Return True if the dispatcher process recorded in dispatcher.pid is alive.
+
+    Reads DISPATCHER_PID_FILE (written by claude-persistent.sh via exec-replace).
+    Uses kill -0 to test liveness without sending a signal.
+
+    Returns False when:
+    - The file is absent (first boot, or cleaned up on clean exit)
+    - The file is empty or contains a non-numeric value (corrupt)
+    - The PID is 0 or negative (invalid)
+    - kill -0 raises PermissionError or ProcessLookupError (dead process)
+
+    A True return means the claude process is still alive → this MCP restart
+    is a mid-session reconnect, NOT a real session loss.
+
+    A False return means the dispatcher is dead → write the session-lost-reminder.
+    """
+    try:
+        if not DISPATCHER_PID_FILE.exists():
+            return False
+        raw = DISPATCHER_PID_FILE.read_text().strip()
+        if not raw:
+            return False
+        pid = int(raw)
+        if pid <= 0:
+            return False
+        os.kill(pid, 0)  # kill -0: raises if process does not exist
+        return True
+    except (ValueError, ProcessLookupError, OSError):
+        return False
+
 
 def _reset_state_on_startup():
     try:
         if LOBSTER_STATE_FILE.exists():
             data = json.loads(LOBSTER_STATE_FILE.read_text())
-            if data.get("mode") in _TRANSIENT_MODES:
+            mode = data.get("mode", "active")
+
+            # Skip reset for reconnects: if mode is already "active" and the
+            # state file is fresh (< 30 min old), this is a mid-session MCP
+            # restart, not a fresh dispatcher boot.  Rewriting booted_at/woke_at
+            # would make the health check think this is a brand-new session and
+            # apply incorrect freshness thresholds.
+            if mode not in _TRANSIENT_MODES:
+                try:
+                    file_age = time.time() - LOBSTER_STATE_FILE.stat().st_mtime
+                    if file_age < _RECONNECT_GRACE_SECONDS:
+                        return  # Mid-session reconnect — leave state untouched
+                except OSError:
+                    pass  # Can't stat — fall through to normal reset
+
+            if mode in _TRANSIENT_MODES:
                 data["mode"] = "active"
                 data["woke_at"] = datetime.now(timezone.utc).isoformat()
                 tmp = LOBSTER_STATE_FILE.parent / f".lobster-state-{os.getpid()}.tmp"
@@ -722,6 +880,7 @@ def _reset_state_on_startup():
                 tmp.rename(LOBSTER_STATE_FILE)
     except Exception:
         pass  # If we can't reset, _read_lobster_state defaults to "active" anyway
+
 
 _reset_state_on_startup()
 
@@ -736,6 +895,9 @@ _assert_not_in_git_repo(_WORKSPACE)
 # Scheduled Tasks Directories (task definitions live in workspace, not the repo)
 SCHEDULED_JOBS_DIR = _WORKSPACE / "scheduled-jobs"
 SCHEDULED_TASKS_TASKS_DIR = SCHEDULED_JOBS_DIR / "tasks"
+# NOTE: SCHEDULED_JOBS_FILE is retained for the MCP tool handlers that still
+# read/write jobs.json. It will be removed once PR #1105 (systemd backend) merges
+# and the handlers are migrated to systemd_jobs.py.
 SCHEDULED_JOBS_FILE = SCHEDULED_JOBS_DIR / "jobs.json"
 SCHEDULED_TASKS_LOGS_DIR = SCHEDULED_JOBS_DIR / "logs"
 
@@ -828,13 +990,359 @@ if not OPENAI_API_KEY:
 if not TASKS_FILE.exists():
     TASKS_FILE.write_text(json.dumps({"tasks": [], "next_id": 1}, indent=2))
 
-# Initialize scheduled jobs file if needed
-if not SCHEDULED_JOBS_FILE.exists():
-    SCHEDULED_JOBS_FILE.write_text(json.dumps({"jobs": {}}, indent=2))
-
 # Record the moment this server process started. Used by stale-session cleanup
 # to distinguish output files from the current run vs a previous (dead) run.
 _SERVER_START_TIME = datetime.now(timezone.utc)
+
+# ---------------------------------------------------------------------------
+# Inbox Flood Detection (issue #1420)
+# ---------------------------------------------------------------------------
+#
+# When the dispatcher starts (or reconnects after an MCP restart), the inbox
+# can receive a large burst of stale messages — most commonly reconciler ghost
+# entries: subagent_result messages with elapsed_seconds < 30 generated during
+# the startup sweep. Each one requires a full WFM cycle to drain, burning
+# tokens and delaying real user messages.
+#
+# Strategy: scan for known-safe flood patterns before returning messages to
+# the dispatcher, bulk-mark-processed them on the server side, and report the
+# drain count as a prefix so the dispatcher can log the event.
+#
+# Known-safe flood types (auto-drain without dispatcher deliberation):
+#   1. Reconciler ghost sweep — subagent_result with elapsed_seconds < GHOST_ELAPSED_THRESHOLD
+#      AND message arrived within STARTUP_WINDOW_SECONDS of server start.
+#      These are stale completion notices for sessions that were dead before
+#      the server restarted; the dispatcher can never act on them meaningfully.
+#
+# Unknown floods are NOT auto-drained — they pass through normally so the
+# dispatcher can decide. The dispatcher bootup instructions handle alerting.
+#
+# Thresholds (named constants so the spec is traceable in tests):
+GHOST_ELAPSED_THRESHOLD_SECONDS = 30   # subagent_result with <30s elapsed = ghost candidate
+STARTUP_WINDOW_SECONDS = 60            # messages within 60s of server start = startup sweep
+
+
+def _is_reconciler_ghost(msg: dict, server_start: datetime) -> bool:
+    """Return True if this inbox message is a reconciler startup ghost.
+
+    A ghost is a subagent_result that:
+      - Has elapsed_seconds below GHOST_ELAPSED_THRESHOLD_SECONDS (30s), indicating
+        the reconciler detected the session as dead in the same sweep that created
+        the notification — no real work was done.
+      - Was created within STARTUP_WINDOW_SECONDS (60s) of server start, indicating
+        it is part of the startup sweep rather than real in-session activity.
+
+    Pure function — reads msg and compares to server_start. No I/O.
+    """
+    if msg.get("type") != "subagent_result":
+        return False
+
+    # Check elapsed_seconds — ghosts have near-zero elapsed time
+    try:
+        elapsed = int(msg.get("elapsed_seconds", 0) or 0)
+    except (TypeError, ValueError):
+        elapsed = 0
+    if elapsed >= GHOST_ELAPSED_THRESHOLD_SECONDS:
+        return False  # Real work was done — not a ghost
+
+    # Check timestamp — ghosts are generated during the startup sweep
+    ts_str = msg.get("timestamp", "")
+    if not ts_str:
+        return False
+    try:
+        msg_time = datetime.fromisoformat(ts_str)
+        if msg_time.tzinfo is None:
+            msg_time = msg_time.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return False
+
+    age_seconds = (msg_time - server_start).total_seconds()
+    return 0 <= age_seconds <= STARTUP_WINDOW_SECONDS
+
+
+def _drain_reconciler_ghosts() -> int:
+    """Scan inbox for reconciler startup ghosts and move them to processed/.
+
+    Returns the count of messages drained. Side effect: moves matching inbox
+    files from INBOX_DIR to PROCESSED_DIR and logs a single summary line.
+
+    Called once at the start of each wait_for_messages call, so any ghost
+    accumulation from the startup sweep is cleared before the dispatcher sees
+    the inbox. Safe to call repeatedly — non-ghost messages are untouched.
+    """
+    drained = 0
+    errors = 0
+
+    for inbox_file in list(INBOX_DIR.glob("*.json")):
+        try:
+            msg = json.loads(inbox_file.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+
+        if not _is_reconciler_ghost(msg, _SERVER_START_TIME):
+            continue
+
+        # Move to processed/ — bypasses the user-reply guard because these are
+        # internal system messages (chat_id=0 or no user) with nothing to relay.
+        try:
+            dest = PROCESSED_DIR / inbox_file.name
+            inbox_file.rename(dest)
+            drained += 1
+        except OSError as exc:
+            log.warning(
+                "[flood-drain] Failed to move ghost %r to processed/: %s",
+                inbox_file.name, exc,
+            )
+            errors += 1
+
+    if drained > 0:
+        log.info(
+            "[flood-drain] Drained %d reconciler ghost(s) from startup sweep "
+            "(elapsed<%ds within %ds of server start); %d error(s)",
+            drained, GHOST_ELAPSED_THRESHOLD_SECONDS, STARTUP_WINDOW_SECONDS, errors,
+        )
+
+    return drained
+
+
+# ---------------------------------------------------------------------------
+# HTTP session identity — dispatcher session tagging (Options A and B)
+# ---------------------------------------------------------------------------
+#
+# When running in HTTP transport mode, multiple Claude Code sessions can
+# connect simultaneously (dispatcher + subagents). The server needs to know
+# which session is the dispatcher so that:
+#   - guarded tools (wait_for_messages, send_reply, etc.) are allowed only
+#     for the dispatcher session
+#   - health checks and the reconciler can verify the dispatcher is connected
+#
+# Session ID propagation:
+#   Each HTTP request carries an "mcp-session-id" header (set by the MCP
+#   client after the initial handshake).  The MCP library stores the raw
+#   Starlette Request object in the per-request RequestContext
+#   (request_ctx.get().request).  Tool handlers running inside the session
+#   task can retrieve the session ID by reading that header:
+#
+#     _get_current_http_session_id()  →  request_ctx.get().request.headers[...]
+#
+#   This works because request_ctx is a ContextVar set in the session task
+#   itself (by mcp.server.lowlevel.server._handle_request) before the tool
+#   handler is called.
+#
+# Option A — tag-on-first-use:
+#   The first call to wait_for_messages (dispatcher-exclusive) records the
+#   current session ID as the dispatcher session.  On CC reconnect after a
+#   restart, the tag is updated automatically so the new session is tracked.
+#
+# Option B — explicit declaration:
+#   When a session calls session_start(agent_type="dispatcher", ...) the
+#   current session ID is immediately recorded.  This is explicit and robust
+#   — it fires before any guarded tool is needed.
+#
+# Both layers coexist; whichever fires first wins.  A subsequent call from
+# either path updates the tag (CC restart recovery).
+#
+# _dispatcher_session_id: module-level str, set by Option A or B
+# _http_session_manager: reference to the StreamableHTTPSessionManager
+#   instance (set in main() when HTTP mode is active).  Non-None iff in HTTP
+#   mode.  Used by /dispatcher-session endpoint and by _dispatch_tool to
+#   select the correct guard path.
+# ---------------------------------------------------------------------------
+
+_dispatcher_session_id: str | None = None
+_http_session_manager = None  # Set to StreamableHTTPSessionManager in main() when HTTP mode is active
+
+# State file: the dispatcher HTTP session ID persisted to disk so hooks can
+# read it without network calls or JSONL parsing.  Written atomically by
+# _tag_dispatcher_session(); cleared at server startup.
+_DISPATCHER_SESSION_STATE_FILE = _WORKSPACE / "data" / "dispatcher-session-id"
+
+# Companion state file: the dispatcher *Claude* session UUID (format:
+# xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx) written when the dispatcher calls
+# session_start(agent_type='dispatcher', claude_session_id=<uuid>).  This is
+# the ID that Claude Code SessionStart hooks receive in hook_input["session_id"],
+# which is a different ID space from the HTTP transport session ID above.
+# Having both files allows hooks to match whichever ID format they receive.
+_DISPATCHER_CLAUDE_SESSION_FILE = _WORKSPACE / "data" / "dispatcher-claude-session-id"
+
+
+def _write_dispatcher_state_file(session_id: str) -> None:
+    """Atomically write session_id to the dispatcher state file.
+
+    Uses a temp-file + os.rename() for atomicity so concurrent readers never
+    see a partial write.  Silent on any failure — must never crash the caller.
+    """
+    try:
+        _DISPATCHER_SESSION_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _DISPATCHER_SESSION_STATE_FILE.with_suffix(".tmp")
+        tmp.write_text(session_id.strip())
+        tmp.replace(_DISPATCHER_SESSION_STATE_FILE)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _write_dispatcher_claude_session_file(claude_session_id: str) -> None:
+    """Atomically write the Claude session UUID to the dispatcher claude-session file.
+
+    Called by handle_session_start when agent_type='dispatcher' and a
+    claude_session_id is provided.  This file is read by SessionStart hooks
+    which receive the Claude UUID (not the HTTP session ID) in hook_input.
+
+    Uses a temp-file + os.rename() for atomicity.  Silent on any failure.
+    """
+    try:
+        _DISPATCHER_CLAUDE_SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _DISPATCHER_CLAUDE_SESSION_FILE.with_suffix(".tmp")
+        tmp.write_text(claude_session_id.strip())
+        tmp.replace(_DISPATCHER_CLAUDE_SESSION_FILE)
+        log.info(f"[session-tag] Wrote dispatcher Claude session UUID: {claude_session_id!r}")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _clear_dispatcher_state_file() -> None:
+    """Remove the dispatcher state files on server startup.
+
+    Prevents stale session IDs from a previous run from being mistaken for
+    the current dispatcher session.  Silent on any failure.
+    """
+    try:
+        if _DISPATCHER_SESSION_STATE_FILE.exists():
+            _DISPATCHER_SESSION_STATE_FILE.unlink()
+            log.info("[session-tag] Cleared stale dispatcher-session-id state file on startup")
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        if _DISPATCHER_CLAUDE_SESSION_FILE.exists():
+            _DISPATCHER_CLAUDE_SESSION_FILE.unlink()
+            log.info("[session-tag] Cleared stale dispatcher-claude-session-id state file on startup")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _write_session_lost_reminder() -> None:
+    """Write a compact-reminder to the inbox on MCP server startup.
+
+    When the MCP server restarts (e.g. via systemctl restart lobster-mcp-local),
+    any dispatcher blocked in wait_for_messages receives a "Session not found"
+    error (-32600) at the protocol level with no recovery guidance.  This
+    function writes a synthetic inbox message so that when the dispatcher
+    reconnects and calls wait_for_messages, it immediately receives a prompt
+    to re-orient and resume the main loop.
+
+    Guard: skipped when the dispatcher PID (from dispatcher.pid) is alive.  A
+    live PID means Claude Code auto-updated or the HTTP transport briefly
+    cycled — the dispatcher process is still running and does not need to
+    re-orient.  A dead or absent PID means real session loss.
+
+    Previous guard (issue #1429 — removed): checked lobster-state.json mtime
+    < 30 min.  This produced false negatives when cron jobs touched the state
+    file seconds before an MCP restart, making a real session loss look like a
+    reconnect.
+
+    Idempotent: writing an extra compact-reminder during a real restart is
+    harmless; the dispatcher processes it as a routine self-check message.
+
+    Developer mode: when LOBSTER_DEV_MODE=true (or 1), the session-lost
+    reminder is suppressed so the developer isn't interrupted during testing.
+    """
+    # Developer mode: suppress session-lost reminders during development.
+    if os.environ.get("LOBSTER_DEV_MODE", "").lower() in ("true", "1"):
+        log.info("[session-lost] LOBSTER_DEV_MODE active — skipping session-lost-reminder")
+        return
+    try:
+        # PID-based reconnect guard (issue #1429).
+        #
+        # Previous guard (broken): checked lobster-state.json mtime < 30 min.
+        # Problem: cron jobs can touch lobster-state.json moments before an MCP
+        # restart, making the file look fresh even when the dispatcher is dead.
+        #
+        # New guard: check whether the dispatcher PID (from dispatcher.pid) is
+        # still alive via kill -0.  A live PID means Claude Code auto-updated
+        # its transport layer — the dispatcher is still running.  A dead or
+        # absent PID means the dispatcher process is gone — real session loss.
+        if _is_dispatcher_alive():
+            log.info(
+                "[session-lost] Skipping session-lost-reminder: dispatcher PID is alive "
+                f"(pid_file={DISPATCHER_PID_FILE})"
+            )
+            return
+
+        now_utc = datetime.now(timezone.utc)
+        reminder_id = f"session-lost-{int(now_utc.timestamp())}"
+        reminder = {
+            "id": reminder_id,
+            "source": "system",
+            "type": "compact-reminder",
+            "chat_id": 0,
+            "task_origin": "internal",
+            "text": (
+                "SESSION LOST — The MCP server restarted and your previous session was "
+                "invalidated. Re-orient now: read sys.dispatcher.bootup.md and resume "
+                "the main loop."
+            ),
+            "timestamp": now_utc.isoformat(),
+        }
+        inbox_file = INBOX_DIR / f"{reminder_id}.json"
+        atomic_write_json(inbox_file, reminder)
+        log.info(f"[session-lost] Wrote session-lost-reminder to inbox: {reminder_id}")
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"[session-lost] Failed to write session-lost-reminder: {exc}")
+
+
+def _get_current_http_session_id() -> str | None:
+    """Return the MCP session ID for the current tool call request.
+
+    Reads the 'mcp-session-id' header from the Starlette Request object
+    stored in the MCP request context.  Returns None if:
+      - not running in HTTP mode
+      - called outside of an active MCP request (e.g. during startup)
+      - the header is absent (first initialise request has no session ID)
+    """
+    try:
+        from mcp.server.lowlevel.server import request_ctx
+        req_ctx = request_ctx.get()
+        raw_request = req_ctx.request  # Starlette Request or None
+        if raw_request is None:
+            return None
+        return raw_request.headers.get("mcp-session-id")
+    except LookupError:
+        # request_ctx not set — called outside a request context
+        return None
+    except Exception:
+        return None
+
+
+def _tag_dispatcher_session(session_id: str) -> None:
+    """Record session_id as the privileged dispatcher session.
+
+    Called by Option A (handle_wait_for_messages), Option B
+    (handle_session_start with agent_type="dispatcher"), and Option C
+    (auto-tag on first guarded tool call after server restart).  Whichever
+    fires first wins; both paths update on reconnect.
+
+    Also writes the session_id to the dispatcher state file
+    (_DISPATCHER_SESSION_STATE_FILE) so hooks can read the current dispatcher
+    session without network calls or JSONL parsing.
+    """
+    global _dispatcher_session_id
+    if session_id and session_id != _dispatcher_session_id:
+        _dispatcher_session_id = session_id
+        log.info(f"[session-tag] Dispatcher session tagged: {session_id}")
+        _write_dispatcher_state_file(session_id)
+
+
+def _is_main_http_session() -> bool:
+    """Return True if the current HTTP session is the tagged dispatcher session.
+
+    Only meaningful when running in HTTP transport mode (_http_session_manager
+    is not None).  Fails closed: returns False if no session is tagged or if
+    the current session ID cannot be determined.
+    """
+    if _dispatcher_session_id is None:
+        return False
+    current = _get_current_http_session_id()
+    return current is not None and current == _dispatcher_session_id
 
 # Initialize SQLite agent session store (idempotent, runs JSON migration on first boot)
 try:
@@ -842,6 +1350,26 @@ try:
     log.info("Agent session store initialized (SQLite WAL mode)")
 except Exception as _ss_err:
     log.warning(f"Agent session store init failed (non-fatal): {_ss_err}")
+
+# Initialize atomic claim DB — creates message_claims and dispatcher_lock tables
+# in the existing agent_sessions.db. Idempotent.
+try:
+    _claims_db = _AtomicClaimDB()
+    log.info("Atomic claim DB initialized (message_claims + dispatcher_lock tables)")
+except Exception as _claims_err:
+    # Degrade gracefully: create a no-op stub so the rest of the module
+    # continues to work even if the DB cannot be opened.
+    log.warning(f"Atomic claim DB init failed — degrading to filesystem-only claims: {_claims_err}")
+    class _NoOpClaimsDB:  # type: ignore[no-redef]
+        def claim(self, *a, **kw) -> bool: return True
+        def release(self, *a, **kw) -> None: pass
+        def update_status(self, *a, **kw) -> None: pass
+        def is_claimed(self, *a, **kw) -> bool: return False
+        def acquire_dispatcher_lock(self, *a, **kw) -> bool: return True
+        def get_dispatcher_lock(self, *a, **kw): return None
+        def release_dispatcher_lock(self, *a, **kw) -> None: pass
+        def force_replace_dispatcher_lock(self, *a, **kw) -> None: pass
+    _claims_db = _NoOpClaimsDB()
 
 # NOTE: Startup cleanup (cleanup_stale_running_sessions) is intentionally NOT
 # called here at module level. This module is imported by inbox_server_http.py
@@ -1047,15 +1575,26 @@ def _read_lobster_state(state_file: Path = None) -> str:
 def _write_lobster_state(state_file: Path = None, mode: str = "active") -> None:
     """Atomically write Lobster state to state file.
 
+    Reads existing state first and merges new fields in so that caller-supplied
+    fields (compacted_at, booted_at, last_restart_at, catchup_started_at, etc.)
+    are never clobbered — the bug tracked in #825.  Only ``mode`` and
+    ``updated_at`` are unconditionally overwritten; all other fields survive.
+
     Uses write-to-temp-then-rename so readers never see a partial file.
     """
     if state_file is None:
         state_file = LOBSTER_STATE_FILE
-    data = {
+    # Read existing state so we preserve fields we are not updating (#825).
+    existing: dict = {}
+    try:
+        existing = json.loads(state_file.read_text())
+    except Exception:
+        pass
+    existing.update({
         "mode": mode,
         "updated_at": datetime.now(timezone.utc).isoformat(),
-    }
-    content = json.dumps(data, indent=2)
+    })
+    content = json.dumps(existing, indent=2)
     tmp = state_file.parent / f".lobster-state-{os.getpid()}.tmp"
     try:
         tmp.write_text(content)
@@ -1066,6 +1605,46 @@ def _write_lobster_state(state_file: Path = None, mode: str = "active") -> None:
             tmp.unlink()
         except Exception:
             pass
+
+
+def _update_lobster_state_fields(fields: dict, state_file: Path = None) -> None:
+    """Atomically merge one or more fields into lobster-state.json.
+
+    Reads the current state, updates the given fields, and writes back via
+    temp-then-rename so readers always see a consistent snapshot.  Other
+    fields (mode, compacted_at, catchup_started_at, etc.) are preserved.
+
+    This is a non-destructive merge — callers supply only the keys they want
+    to update.  Unlike _write_lobster_state, which replaces the entire file,
+    this function is safe to call from any context that must not clobber
+    concurrently-written lifecycle fields.
+
+    Failures are logged but not raised — the caller (mark_processed) must
+    not fail just because the heartbeat write failed.
+    """
+    if state_file is None:
+        state_file = LOBSTER_STATE_FILE
+    try:
+        existing: dict = {}
+        if state_file.exists():
+            try:
+                existing = json.loads(state_file.read_text())
+            except (json.JSONDecodeError, OSError):
+                existing = {}
+        existing.update(fields)
+        content = json.dumps(existing, indent=2) + "\n"
+        tmp = state_file.parent / f".lobster-state-{os.getpid()}.tmp"
+        try:
+            tmp.write_text(content)
+            tmp.rename(state_file)
+        except Exception as e:
+            log.error(f"Failed to update lobster state fields {list(fields)}: {e}")
+            try:
+                tmp.unlink()
+            except Exception:
+                pass
+    except Exception as e:
+        log.error(f"_update_lobster_state_fields unexpected error: {e}")
 
 
 @server.list_tools()
@@ -1359,7 +1938,7 @@ async def list_tools() -> list[Tool]:
         # Conversation History Tool
         Tool(
             name="get_conversation_history",
-            description="Retrieve past messages from conversation history - both received messages and sent replies. Supports pagination, filtering by chat_id, and text search. Use this to scroll back through previous conversations.",
+            description="Retrieve past messages from conversation history - both received messages and sent replies. Supports pagination, filtering by chat_id, text search, and sender_type to isolate real conversation from system/cron noise. Use this to scroll back through previous conversations.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1386,12 +1965,24 @@ async def list_tools() -> list[Tool]:
                     },
                     "direction": {
                         "type": "string",
-                        "description": "Filter by direction: 'received' for incoming messages only, 'sent' for outgoing replies only, or 'all' for both. Default 'all'.",
+                        "description": "Filter by direction: 'received' for incoming messages only, 'sent' for outgoing replies only, or 'all' for both. Default 'all'. Ignored when sender_type is set.",
                         "default": "all",
                     },
                     "source": {
                         "type": "string",
                         "description": "Filter by source (telegram, slack, etc.). Leave empty for all sources.",
+                    },
+                    "sender_type": {
+                        "type": "string",
+                        "description": (
+                            "Filter by who sent the message. "
+                            "'user' — only messages from the user (inbound Telegram/Slack, excludes system/cron). "
+                            "'lobster' — only messages sent by Lobster/subagents to the user (outbound). "
+                            "'conversation' — both user and lobster messages (real conversation only, no cron/system noise). "
+                            "Omit for all messages including system and cron (current default behaviour). "
+                            "When sender_type is set, the direction parameter is ignored."
+                        ),
+                        "enum": ["user", "lobster", "conversation"],
                     },
                 },
             },
@@ -1430,6 +2021,10 @@ async def list_tools() -> list[Tool]:
                         "description": "Filter by status: pending, in_progress, completed, or all (default).",
                         "default": "all",
                     },
+                    "chat_id": {
+                        "type": "string",
+                        "description": "Optional: filter to tasks owned by this chat_id (legacy tasks without chat_id are always included).",
+                    },
                 },
             },
         ),
@@ -1446,6 +2041,10 @@ async def list_tools() -> list[Tool]:
                     "description": {
                         "type": "string",
                         "description": "Detailed description of what needs to be done.",
+                    },
+                    "chat_id": {
+                        "type": "string",
+                        "description": "Optional: chat_id of the user who owns this task.",
                     },
                 },
                 "required": ["subject"],
@@ -1505,6 +2104,100 @@ async def list_tools() -> list[Tool]:
                 "required": ["task_id"],
             },
         ),
+        # IFTTT Behavioral Rules Tools
+        Tool(
+            name="list_rules",
+            description="List all IFTTT-style behavioral rules from the rules store. Returns id, condition, action_ref, and enabled for each rule. Pass resolve=true to also include the memory DB content for each action_ref.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "enabled_only": {
+                        "type": "boolean",
+                        "description": "If true, return only enabled rules. Default false (returns all rules).",
+                        "default": False,
+                    },
+                    "resolve": {
+                        "type": "boolean",
+                        "description": "If true, fetch and include the memory DB content for each action_ref. Default false.",
+                        "default": False,
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="add_rule",
+            description="Add a new IFTTT-style behavioral rule. The condition is the IF clause in plain English. The action_content is the THEN clause (plain-English behavioral instruction) — it is stored to the memory DB automatically and the resulting DB entry ID is used as action_ref in the YAML index. Returns the new rule's ID.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "condition": {
+                        "type": "string",
+                        "description": "Natural-language IF clause (one sentence, e.g. 'The user asks about a meeting or scheduling').",
+                    },
+                    "action_content": {
+                        "type": "string",
+                        "description": "Plain-English THEN clause (behavioral instruction). Stored to memory DB; the assigned DB entry ID becomes the action_ref.",
+                    },
+                },
+                "required": ["condition", "action_content"],
+            },
+        ),
+        Tool(
+            name="delete_rule",
+            description="Delete an IFTTT behavioral rule by ID. Returns true if deleted, false if not found. Pass delete_memory=true to also delete the memory DB entry for action_ref.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "rule_id": {
+                        "type": "string",
+                        "description": "The ID of the rule to delete.",
+                    },
+                    "delete_memory": {
+                        "type": "boolean",
+                        "description": "If true, also delete the memory DB entry referenced by action_ref. Default false.",
+                        "default": False,
+                    },
+                },
+                "required": ["rule_id"],
+            },
+        ),
+        Tool(
+            name="get_rule",
+            description="Get a single IFTTT behavioral rule by ID. Returns null if not found. Pass resolve=true to also include the memory DB content for action_ref.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "rule_id": {
+                        "type": "string",
+                        "description": "The ID of the rule to retrieve.",
+                    },
+                    "resolve": {
+                        "type": "boolean",
+                        "description": "If true, fetch and include the memory DB content for action_ref. Default false.",
+                        "default": False,
+                    },
+                },
+                "required": ["rule_id"],
+            },
+        ),
+        Tool(
+            name="update_rule",
+            description="Soft-disable or re-enable an IFTTT behavioral rule by ID. Returns the updated rule, or null if not found.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "rule_id": {
+                        "type": "string",
+                        "description": "The ID of the rule to update.",
+                    },
+                    "enabled": {
+                        "type": "boolean",
+                        "description": "Set to false to soft-disable the rule (kept in store, never applied). Set to true to re-enable.",
+                    },
+                },
+                "required": ["rule_id", "enabled"],
+            },
+        ),
         Tool(
             name="transcribe_audio",
             description="Transcribe a voice message to text using local whisper.cpp (small model). Use this for messages with type='voice'. Runs entirely locally using whisper.cpp - no cloud API or API key needed.",
@@ -1517,6 +2210,36 @@ async def list_tools() -> list[Tool]:
                     },
                 },
                 "required": ["message_id"],
+            },
+        ),
+        # TTS Voice Note Tool
+        Tool(
+            name="send_voice_note",
+            description=(
+                "Synthesize text to speech and send as a Telegram voice note using local piper TTS. "
+                "Runs entirely locally — no cloud API or API key needed. "
+                "Requires piper binary and lessac-medium voice model (installed by install.sh). "
+                "Falls back to send_reply with text if TTS is unavailable. "
+                "Use for responses that benefit from an audio/voice delivery."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "chat_id": {
+                        "type": "string",
+                        "description": "The chat ID to send the voice note to (Telegram chat ID).",
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "The text to synthesize into a voice note. Keep under ~500 words for best results.",
+                    },
+                    "source": {
+                        "type": "string",
+                        "description": "Message source channel. Defaults to 'telegram'. Voice notes are only sent for Telegram; other sources fall back to text.",
+                        "default": "telegram",
+                    },
+                },
+                "required": ["chat_id", "text"],
             },
         ),
         # Headless Browser Fetch Tool
@@ -1544,32 +2267,36 @@ async def list_tools() -> list[Tool]:
                 "required": ["url"],
             },
         ),
-        # Scheduled Jobs Tools
+        # Scheduled Jobs Tools (systemd timer backend)
         Tool(
             name="create_scheduled_job",
-            description="Create a new scheduled job that runs automatically via cron. Jobs run in separate Claude instances and write outputs to the task-outputs inbox.",
+            description="Create a new scheduled job backed by a systemd timer unit. The command must be an absolute path to an executable.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "Unique name for the job (lowercase, hyphens allowed, e.g., 'morning-weather').",
+                        "description": "Unique name for the job (lowercase alphanumeric + hyphens, e.g., 'morning-weather').",
                     },
                     "schedule": {
                         "type": "string",
-                        "description": "Cron schedule expression (e.g., '0 9 * * *' for 9am daily, '*/30 * * * *' for every 30 mins).",
+                        "description": "Schedule for the job. Accepts systemd OnCalendar expressions (e.g., '*-*-* 09:00:00' for 9am daily, '*:0/30:00' for every 30 mins, 'daily', 'hourly') or standard 5-field cron expressions (e.g., '0 9 * * *') which are auto-converted to systemd format.",
                     },
-                    "context": {
+                    "command": {
                         "type": "string",
-                        "description": "Instructions for the job. Describe what the scheduled task should do.",
+                        "description": "Absolute path to the executable to run (e.g., '/home/lobster/lobster/scheduled-tasks/my-job.sh').",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Optional human-readable description for the systemd unit.",
                     },
                 },
-                "required": ["name", "schedule", "context"],
+                "required": ["name", "schedule", "command"],
             },
         ),
         Tool(
             name="list_scheduled_jobs",
-            description="List all scheduled jobs with their status and schedules.",
+            description="List all lobster-managed systemd timer jobs with their schedule, last run, next run, and active status.",
             inputSchema={
                 "type": "object",
                 "properties": {},
@@ -1577,7 +2304,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="get_scheduled_job",
-            description="Get detailed information about a specific scheduled job.",
+            description="Get detailed information about a specific lobster-managed systemd timer job.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1591,7 +2318,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="update_scheduled_job",
-            description="Update an existing scheduled job's schedule, context, or enabled status.",
+            description="Update an existing lobster-managed job's schedule, command, or enabled state. Rewrites the unit files and restarts the timer when schedule/command change.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1601,15 +2328,15 @@ async def list_tools() -> list[Tool]:
                     },
                     "schedule": {
                         "type": "string",
-                        "description": "New cron schedule (optional).",
+                        "description": "New schedule (systemd OnCalendar or cron expression — auto-converted). Optional.",
                     },
-                    "context": {
+                    "command": {
                         "type": "string",
-                        "description": "New instructions for the job (optional).",
+                        "description": "New absolute path command (optional).",
                     },
                     "enabled": {
                         "type": "boolean",
-                        "description": "Enable or disable the job (optional).",
+                        "description": "Set to false to pause/disable the timer without deleting it. Set to true to re-enable it. Optional.",
                     },
                 },
                 "required": ["name"],
@@ -1617,7 +2344,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="delete_scheduled_job",
-            description="Delete a scheduled job and remove it from crontab.",
+            description="Stop, disable, and remove the systemd unit files for a lobster-managed job.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1627,6 +2354,20 @@ async def list_tools() -> list[Tool]:
                     },
                 },
                 "required": ["name"],
+            },
+        ),
+        Tool(
+            name="get_job_scaffold",
+            description="Return a starter script template for writing a lobster scheduled job. Use this as a starting point before creating a new job.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "kind": {
+                        "type": "string",
+                        "description": "Template kind: 'poller' (default). Returns the contents of the matching template file, or a minimal inline template.",
+                        "default": "poller",
+                    },
+                },
             },
         ),
         Tool(
@@ -1700,7 +2441,15 @@ async def list_tools() -> list[Tool]:
                     },
                     "text": {
                         "type": "string",
-                        "description": "The result text to deliver to the user.",
+                        "description": (
+                            "The result text to deliver to the user. "
+                            "Keep this to a concise summary (ideally under ~4KB / ~500 words). "
+                            "For large outputs — reports, diffs, full analysis — write the content "
+                            "to ~/lobster-workspace/reports/<task_id>.md and pass the path in "
+                            "`artifacts` instead. The dispatcher reads artifact files and inlines "
+                            "their content in the reply. Never put raw file paths in text — they "
+                            "are server-side references that are useless to mobile users."
+                        ),
                     },
                     "source": {
                         "type": "string",
@@ -1851,6 +2600,28 @@ async def list_tools() -> list[Tool]:
                             "recent output file activity can be presumed dead. Default: 30."
                         ),
                     },
+                    "idempotency": {
+                        "type": "string",
+                        "description": (
+                            "Re-run safety classification for orphan recovery. "
+                            "'safe' — read-only/idempotent task, safe to re-run automatically after restart. "
+                            "'unsafe' — task has side effects (sends messages, modifies files, posts comments); "
+                            "requires explicit user approval to re-run. "
+                            "'unknown' — caller did not classify (default; treated as unsafe for recovery)."
+                        ),
+                        "enum": ["safe", "unsafe", "unknown"],
+                    },
+                    "task_origin": {
+                        "type": "string",
+                        "description": (
+                            "Origin of this task: 'user' | 'scheduled' | 'internal'. "
+                            "'user' — triggered by a real user message. "
+                            "'scheduled' — triggered by a scheduled job or cron. "
+                            "'internal' — system-initiated, no user involved. "
+                            "Defaults to 'user'."
+                        ),
+                        "enum": ["user", "scheduled", "internal"],
+                    },
                 },
                 "required": ["agent_id", "description", "chat_id"],
             },
@@ -1941,6 +2712,42 @@ async def list_tools() -> list[Tool]:
                             "server unless LOBSTER_WIRE_REDACT_PII=false."
                         ),
                     },
+                    "idempotency": {
+                        "type": "string",
+                        "description": (
+                            "Re-run safety classification for orphan recovery. "
+                            "'safe' — read-only/idempotent task, safe to re-run automatically after restart. "
+                            "'unsafe' — task has side effects (sends messages, modifies files, posts comments); "
+                            "requires explicit user approval to re-run. "
+                            "'unknown' — caller did not classify (default; treated as unsafe for recovery)."
+                        ),
+                        "enum": ["safe", "unsafe", "unknown"],
+                    },
+                    "task_origin": {
+                        "type": "string",
+                        "description": (
+                            "Origin of this task: 'user' | 'scheduled' | 'internal'. "
+                            "'user' — triggered by a real user message (Telegram, Slack, etc.). "
+                            "'scheduled' — triggered by a scheduled job or cron task. "
+                            "'internal' — system-initiated, no user involved (reconciler, "
+                            "health check, session management, etc.). "
+                            "Defaults to 'user' when not specified. "
+                            "Code that previously checked chat_id==0 to detect system tasks "
+                            "should check task_origin=='internal' instead — the two conditions "
+                            "are equivalent but task_origin makes intent explicit."
+                        ),
+                        "enum": ["user", "scheduled", "internal"],
+                    },
+                    "claude_session_id": {
+                        "type": "string",
+                        "description": (
+                            "The Claude Code session UUID for this session "
+                            "(hook_input['session_id'], format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx). "
+                            "Required when agent_type='dispatcher': written to a dedicated state file "
+                            "so SessionStart hooks can correctly identify the dispatcher session. "
+                            "This is a different ID space from the MCP HTTP transport session ID."
+                        ),
+                    },
                 },
                 "required": ["agent_id", "description", "chat_id"],
             },
@@ -1988,7 +2795,12 @@ async def list_tools() -> list[Tool]:
             ),
             inputSchema={
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "chat_id": {
+                        "type": "string",
+                        "description": "Optional: filter to sessions for this chat_id only.",
+                    },
+                },
             },
         ),
         Tool(
@@ -2233,6 +3045,10 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Optional subagent task identifier. Included in debug alerts when LOBSTER_DEBUG=true so the caller is visible in the memory write notification.",
                     },
+                    "chat_id": {
+                        "type": "string",
+                        "description": "Optional: chat_id of the user storing this memory. Embedded as source_chat_id in metadata for attribution.",
+                    },
                 },
                 "required": ["content"],
             },
@@ -2260,6 +3076,10 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Optional subagent task identifier. Included in debug alerts when LOBSTER_DEBUG=true so the caller is visible in the memory search notification.",
                     },
+                    "chat_id": {
+                        "type": "string",
+                        "description": "Optional: filter results to memories attributed to this chat_id (plus unattributed legacy memories).",
+                    },
                 },
                 "required": ["query"],
             },
@@ -2278,6 +3098,10 @@ async def list_tools() -> list[Tool]:
                     "project": {
                         "type": "string",
                         "description": "Optional project filter.",
+                    },
+                    "chat_id": {
+                        "type": "string",
+                        "description": "Optional: filter results to memories attributed to this chat_id (plus unattributed legacy memories).",
                     },
                 },
             },
@@ -2370,6 +3194,28 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="list_projects",
             description="List all projects tracked in Lobster's canonical memory. Returns project names for use with get_project_context().",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
+        Tool(
+            name="get_person_context",
+            description="Fetch context for a specific person. Returns role, contact info, and interaction history from the canonical people file.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "person": {
+                        "type": "string",
+                        "description": "Person name matching the file stem in people/ (e.g., 'Alice', 'Bob')",
+                    },
+                },
+                "required": ["person"],
+            },
+        ),
+        Tool(
+            name="list_people",
+            description="List all people tracked in Lobster's canonical memory. Returns person names for use with get_person_context().",
             inputSchema={
                 "type": "object",
                 "properties": {},
@@ -2636,6 +3482,91 @@ async def list_tools() -> list[Tool]:
                 "required": [],
             },
         ),
+        # Session File Management Tools
+        Tool(
+            name="create_session_file",
+            description=(
+                "Create a new session file for today. Copies the session template, "
+                "substitutes the date/sequence/timestamps, writes the file to "
+                "~/lobster-user-config/memory/canonical/sessions/YYYYMMDD-NNN.md, "
+                "and records the path in /tmp/lobster-current-session-file. "
+                "Returns {path, session_id}."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        ),
+        Tool(
+            name="get_session_file",
+            description=(
+                "Read a session file. If session_id is 'current' (the default), "
+                "reads the pointer at /tmp/lobster-current-session-file, or finds "
+                "today's latest session. Otherwise looks up the file matching the "
+                "given YYYYMMDD-NNN session_id. "
+                "Returns {path, content, session_id}."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session ID (e.g. '20260329-001') or 'current'. Defaults to 'current'.",
+                        "default": "current",
+                    },
+                },
+                "required": [],
+            },
+        ),
+        Tool(
+            name="update_session_file",
+            description=(
+                "Update a named H2 section (e.g. '## Summary', '## Open Threads') "
+                "inside a session file. Replaces only the targeted section; all other "
+                "sections and the file header are preserved verbatim. Write is atomic "
+                "(temp-file + rename). "
+                "Returns {path, section, updated: true}."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "section": {
+                        "type": "string",
+                        "description": "Section name without the '## ' prefix, e.g. 'Summary' or 'Open Threads'.",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "New content for the section (replaces everything between the section header and the next H2 or EOF).",
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session ID (e.g. '20260329-001') or 'current'. Defaults to 'current'.",
+                        "default": "current",
+                    },
+                },
+                "required": ["section", "content"],
+            },
+        ),
+        Tool(
+            name="list_session_files",
+            description=(
+                "List session files, optionally filtered to a single date. "
+                "Returns a sorted list of {session_id, path, has_content} objects. "
+                "has_content is true when the Summary section contains more than 50 "
+                "characters of non-boilerplate text."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "date": {
+                        "type": "string",
+                        "description": "Optional YYYYMMDD date string to filter results.",
+                    },
+                },
+                "required": [],
+            },
+        ),
     ] + (
         # User Model Tools (only registered when feature flag is enabled)
         [
@@ -2676,12 +3607,51 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
 async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     """Dispatch tool calls to handlers."""
-    # Session guard: block inbox-monitoring and outbox-write tools for any
-    # Claude process that is not a descendant of the lobster tmux session
-    # (primary check) or does not have LOBSTER_MAIN_SESSION=1 (fallback).
-    if name in _SESSION_GUARDED_TOOLS and not _is_main_session():
-        log.warning(f"Session guard blocked '{name}' — not in lobster tmux session")
-        return _session_guard_error(name)
+    # Session guard: block inbox-monitoring and outbox-write tools for
+    # any session that is not the designated dispatcher session.
+    #
+    # In HTTP transport mode: use per-session tagging (_is_main_http_session).
+    #   - A session becomes the dispatcher by calling wait_for_messages (Option A),
+    #     session_start(agent_type="dispatcher") (Option B), or any guarded tool
+    #     when no dispatcher is currently tagged (Option C — restart recovery).
+    #   - All other sessions are blocked from guarded tools.
+    #
+    # Option C — restart recovery (no-dispatcher-tagged auto-tag):
+    #   When _dispatcher_session_id is None the MCP server has just restarted and
+    #   has no record of any dispatcher session.  The first session to call any
+    #   guarded tool must be the new dispatcher — subagents cannot be running yet
+    #   because they require the dispatcher to spawn them.  Auto-tagging here closes
+    #   the window between server start and the dispatcher's first WFM or
+    #   session_start call, which is when backlog send_reply calls would otherwise
+    #   be blocked.
+    #
+    # In stdio transport mode: use the legacy tmux ancestry / env-var check
+    #   (_is_main_session).  This path is unchanged.
+    if name in _SESSION_GUARDED_TOOLS:
+        if _http_session_manager is not None:
+            # HTTP mode: per-session guard.  wait_for_messages is always exempted
+            # (Option A tagging).  When no dispatcher is tagged yet (Option C),
+            # auto-tag the calling session before the guard check so the call
+            # proceeds — this handles the restart race where the dispatcher calls
+            # send_reply or check_inbox before its first WFM/session_start fires.
+            if _dispatcher_session_id is None:
+                session_id = _get_current_http_session_id()
+                if session_id is not None:
+                    log.info(
+                        f"[session-tag] Option C: no dispatcher tagged, auto-tagging "
+                        f"on '{name}' call — session {session_id!r}"
+                    )
+                    _tag_dispatcher_session(session_id)
+            if name != "wait_for_messages" and not _is_main_http_session():
+                log.warning(
+                    f"Session guard blocked '{name}' — HTTP session "
+                    f"{_get_current_http_session_id()!r} is not the dispatcher "
+                    f"(dispatcher={_dispatcher_session_id!r})"
+                )
+                return _session_guard_error(name)
+        elif not _is_main_session():
+            log.warning(f"Session guard blocked '{name}' — not in lobster tmux session")
+            return _session_guard_error(name)
 
     if name == "wait_for_messages":
         return await handle_wait_for_messages(arguments)
@@ -2719,8 +3689,21 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
         return await handle_get_task(arguments)
     elif name == "delete_task":
         return await handle_delete_task(arguments)
+    # IFTTT Behavioral Rules Tools
+    elif name == "list_rules":
+        return await handle_list_rules(arguments)
+    elif name == "add_rule":
+        return await handle_add_rule(arguments)
+    elif name == "delete_rule":
+        return await handle_delete_rule(arguments)
+    elif name == "get_rule":
+        return await handle_get_rule(arguments)
+    elif name == "update_rule":
+        return await handle_update_rule(arguments)
     elif name == "transcribe_audio":
         return await handle_transcribe_audio(arguments)
+    elif name == "send_voice_note":
+        return await handle_send_voice_note(arguments)
     # Headless Browser Fetch
     elif name == "fetch_page":
         return await handle_fetch_page(arguments)
@@ -2735,6 +3718,8 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
         return await handle_update_scheduled_job(arguments)
     elif name == "delete_scheduled_job":
         return await handle_delete_scheduled_job(arguments)
+    elif name == "get_job_scaffold":
+        return await handle_get_job_scaffold(arguments)
     elif name == "check_task_outputs":
         return await handle_check_task_outputs(arguments)
     elif name == "write_task_output":
@@ -2797,6 +3782,10 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
         return await handle_get_daily_digest(arguments)
     elif name == "list_projects":
         return await handle_list_projects(arguments)
+    elif name == "get_person_context":
+        return await handle_get_person_context(arguments)
+    elif name == "list_people":
+        return await handle_list_people(arguments)
     # Local Sync Awareness Tools
     elif name == "check_local_sync":
         return await handle_check_local_sync(arguments)
@@ -2828,6 +3817,15 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
         return await handle_create_report(arguments)
     elif name == "list_reports":
         return await handle_list_reports(arguments)
+    # Session File Management Tools
+    elif name == "create_session_file":
+        return await handle_create_session_file(arguments)
+    elif name == "get_session_file":
+        return await handle_get_session_file(arguments)
+    elif name == "update_session_file":
+        return await handle_update_session_file(arguments)
+    elif name == "list_session_files":
+        return await handle_list_session_files(arguments)
     # User Model Tools (dispatched to user_model subsystem)
     elif name in _user_model_tool_names and _user_model is not None:
         result_json = _user_model.dispatch(name, arguments)
@@ -2869,6 +3867,9 @@ def _recover_stale_processing():
 
     Uses a type-aware timeout: 90s for text messages, 300s for media
     (voice/audio/photo/document) where transcription or download can be slow.
+
+    Releases the SQLite claim row BEFORE moving back to inbox/ so a fresh
+    claim is possible on the next dispatch cycle (issue #1360).
     """
     now = time.time()
     for f in PROCESSING_DIR.glob("*.json"):
@@ -2877,6 +3878,11 @@ def _recover_stale_processing():
             msg = json.loads(f.read_text())
             max_age = _stale_timeout_for_message(msg)
             if age > max_age:
+                # Extract message_id from filename (strip .json suffix)
+                message_id = f.stem
+                # Release claim BEFORE moving so a concurrent dispatcher cannot
+                # win a new claim while the file is still in processing/.
+                _claims_db.release(message_id)
                 dest = INBOX_DIR / f.name
                 f.rename(dest)
                 log.warning(
@@ -2936,15 +3942,96 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
     timeout = args.get("timeout", 72000)
     hibernate_on_timeout = args.get("hibernate_on_timeout", False)
 
+    # Option A: tag-on-first-use.  wait_for_messages is dispatcher-exclusive,
+    # so the session calling it is the dispatcher.  Tag it now so subsequent
+    # guarded tool calls from this same session are allowed.
+    if _http_session_manager is not None:
+        session_id = _get_current_http_session_id()
+        if session_id is not None:
+            _tag_dispatcher_session(session_id)
+
+    # Phase 2: SQLite dispatcher lock — enforce single-dispatcher structurally.
+    # Take (or replace stale) dispatcher lock so a second concurrent loop cannot
+    # run alongside this one.  We check whether the existing lock holder is still
+    # an active HTTP session before taking over; if it is, we log a warning and
+    # proceed anyway (fail-open) rather than blocking the dispatcher entirely.
+    if _http_session_manager is not None:
+        session_id = _get_current_http_session_id()
+        if session_id is not None:
+            existing_lock = _claims_db.get_dispatcher_lock()
+            if existing_lock is not None and existing_lock["session_id"] != session_id:
+                # Another session holds the lock — check whether it is still active.
+                old_session_id = existing_lock["session_id"]
+                lock_holder_active = False
+                try:
+                    lock_holder_active = _http_session_manager.has_session(old_session_id)
+                except Exception:
+                    lock_holder_active = False
+                if lock_holder_active:
+                    log.warning(
+                        f"[dispatcher-lock] Second dispatcher detected: "
+                        f"session {session_id!r} called wait_for_messages while "
+                        f"{old_session_id!r} holds an active lock. "
+                        "Allowing takeover to unblock the main loop."
+                    )
+                else:
+                    log.info(
+                        f"[dispatcher-lock] Stale lock from {old_session_id!r} — "
+                        f"taking over for {session_id!r}"
+                    )
+            _claims_db.force_replace_dispatcher_lock(session_id)
+
     # Touch heartbeat at start - signals Claude is alive and waiting for messages
     touch_heartbeat()
+
+    # Write "active" state so the health check always sees a live signal when
+    # wait_for_messages is called.  This is the authoritative steady-state write:
+    # even if claude-persistent.sh left the state in "starting" or another
+    # transient mode, calling wait_for_messages means Claude is up and running.
+    _write_lobster_state(LOBSTER_STATE_FILE, "active")
+
+    # Write WFM active timestamp so the external watchdog can detect freezes.
+    # The watchdog (scripts/wfm-watchdog.sh) runs every 10 minutes via cron and
+    # injects a synthetic wfm_watchdog message if WFM has been running for longer
+    # than 35 minutes (2100s — 5 min past the default 1800s WFM timeout).
+    # We clear this file in the finally block so the watchdog only fires when
+    # WFM is genuinely blocked and has not returned normally.
+    _wfm_active_file = CONFIG_DIR / "wfm-active.json"
+    try:
+        _wfm_start_ts = datetime.now(timezone.utc)
+        _wfm_active_payload = {
+            "started_at": _wfm_start_ts.isoformat(),
+            "pid": os.getpid(),
+        }
+        _wfm_tmp = _wfm_active_file.parent / f".wfm-active-{os.getpid()}.tmp"
+        _wfm_tmp.write_text(json.dumps(_wfm_active_payload))
+        _wfm_tmp.rename(_wfm_active_file)
+    except Exception as _wfm_exc:
+        log.warning(f"[wfm-watchdog] Failed to write wfm-active.json: {_wfm_exc}")
 
     # Recover stale processing and retryable failed messages
     _recover_stale_processing()
     _recover_retryable_messages()
 
+    # Flood detection: drain reconciler startup ghosts before the dispatcher
+    # sees the inbox. This prevents the 100+ ghost WFM cycle storm that occurs
+    # when the reconciler startup sweep generates stale subagent_result messages
+    # for every dead session it finds (issue #1420).
+    _drained_ghosts = _drain_reconciler_ghosts()
+
     # Build active-sessions prefix once (fast SQLite read, <1ms)
     sessions_prefix = _build_active_sessions_prefix()
+
+    # Prepend flood drain summary to sessions_prefix so the dispatcher is informed
+    # without requiring an extra WFM cycle or manual inbox check.
+    if _drained_ghosts > 0:
+        drain_notice = (
+            f"[flood-drain] Auto-drained {_drained_ghosts} reconciler ghost(s) "
+            f"from startup sweep (elapsed<{GHOST_ELAPSED_THRESHOLD_SECONDS}s, "
+            f"within {STARTUP_WINDOW_SECONDS}s of server start). "
+            "No dispatcher action needed — these were stale completion notices with no real work."
+        )
+        sessions_prefix = (drain_notice + "\n\n" + sessions_prefix) if sessions_prefix else drain_notice
 
     # Start the observer BEFORE the initial glob check to eliminate the TOCTOU
     # race window: a message that arrives between the glob and observer.start()
@@ -3035,6 +4122,13 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
     finally:
         observer.stop()
         observer.join(timeout=1)
+        # Clear WFM active file so the watchdog knows WFM returned normally.
+        try:
+            _wfm_active_file = CONFIG_DIR / "wfm-active.json"
+            if _wfm_active_file.exists():
+                _wfm_active_file.unlink()
+        except Exception as _wfm_clear_exc:
+            log.warning(f"[wfm-watchdog] Failed to clear wfm-active.json: {_wfm_clear_exc}")
 
 
 def _is_report_command(text: str) -> bool:
@@ -3278,6 +4372,77 @@ def _enqueue_recovery_notification(msg: dict) -> None:
         log.error(f"subagent_recovered: failed to enqueue recovery notification: {exc}", exc_info=True)
 
 
+# ---------------------------------------------------------------------------
+# Priority inbox queue — P0-P4 ordering (issue #1079)
+# ---------------------------------------------------------------------------
+
+# P0: dispatcher housekeeping — zero-cost, must run before everything else
+_INBOX_P0_TYPES: frozenset[str] = frozenset()
+_INBOX_P0_SUBTYPES: frozenset[str] = frozenset({"compact-reminder", "self_check"})
+_INBOX_P0_TEXT_PREFIXES: tuple[str, ...] = ("compact-reminder",)
+
+# P1: real-user messages — latency-sensitive
+_INBOX_P1_TYPES: frozenset[str] = frozenset({"text", "voice", "photo", "document"})
+
+# P2: completing in-flight work
+_INBOX_P2_TYPES: frozenset[str] = frozenset({"subagent_result", "subagent_error"})
+
+# P3: error recovery
+_INBOX_P3_TYPES: frozenset[str] = frozenset({"agent_failed"})
+
+# P4: background / cron — everything else
+_INBOX_P4_DEFAULT: int = 4
+
+
+def _inbox_priority(msg: dict) -> int:
+    """Return the priority tier (0=highest, 4=lowest) for an inbox message.
+
+    Priority is derived from message type and subtype at read time — nothing
+    is stored in the message file itself. Unrecognised types default to P4.
+    """
+    msg_type = msg.get("type", "")
+    msg_subtype = msg.get("subtype", "")
+    msg_text = msg.get("text", "")
+
+    # P0: dispatcher housekeeping
+    if msg_subtype in _INBOX_P0_SUBTYPES:
+        return 0
+    if msg_type in _INBOX_P0_TYPES:
+        return 0
+    # compact-reminder messages are sometimes typed as "text" with a specific prefix
+    if any(msg_text.startswith(p) for p in _INBOX_P0_TEXT_PREFIXES):
+        return 0
+
+    # P1: real-user messages
+    if msg_type in _INBOX_P1_TYPES:
+        return 1
+
+    # P2: completing in-flight subagent work
+    if msg_type in _INBOX_P2_TYPES:
+        return 2
+
+    # P3: error recovery
+    if msg_type in _INBOX_P3_TYPES:
+        return 3
+
+    # P4: everything else (scheduled_reminder, system_error, unknown, ...)
+    return _INBOX_P4_DEFAULT
+
+
+def _inbox_sort_key(
+    f_name: str, priority: int, ts_epoch: float | None
+) -> tuple[int, float, str]:
+    """Return (priority, timestamp_epoch, filename) for stable ordering.
+
+    Lower priority tier = earlier in queue.
+    Within a tier, older messages (smaller epoch) come first (FIFO).
+    Filename is the final tiebreaker for determinism.
+    """
+    # Use a large sentinel so unparseable timestamps sink to the back of their tier
+    epoch = ts_epoch if ts_epoch is not None else float("inf")
+    return (priority, epoch, f_name)
+
+
 def _parse_iso_timestamp(ts: str) -> float | None:
     """
     Parse an ISO 8601 UTC timestamp string to a Unix epoch float.
@@ -3356,35 +4521,74 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
 
         log.info(f"check_inbox (since_ts={since_ts_str!r}) returning {len(messages)} message(s)")
     else:
-        for f in sorted(INBOX_DIR.glob("*.json")):
+        # --- Priority-ordered inbox scan (issue #1079) ---
+        # Two-pass approach: read and score all inbox files, then sort by
+        # (priority, timestamp, filename) before processing. Unreadable files
+        # default to P4 so they never cause a crash or a skip.
+        _scored: list[tuple[tuple[int, float, str], object, dict]] = []
+        for f in INBOX_DIR.glob("*.json"):
             try:
                 with open(f) as fp:
                     msg = json.load(fp)
-                    if source_filter and msg.get("source", "").lower() != source_filter:
-                        continue
-                    # /report slash command pre-processor: handle automatically without
-                    # surfacing the raw message to the main dispatcher loop.
-                    msg_text = msg.get("text", "")
-                    if _is_report_command(msg_text):
-                        try:
-                            await _handle_report_slash_command(msg, f)
-                        except Exception as exc:
-                            log.error(f"check_inbox: /report pre-processor error: {exc}", exc_info=True)
-                        continue  # skip — already handled
-                    # subagent_recovered pre-processor: enqueue an owner notification so the
-                    # user is informed about the failed agent. The raw recovery message still
-                    # flows through to the dispatcher (with a dispatcher_hint) so it can call
-                    # mark_processed — but the salvaged dump is never relayed directly.
-                    if msg.get("type") == "subagent_recovered":
-                        try:
-                            _enqueue_recovery_notification(msg)
-                        except Exception as exc:
-                            log.error(f"check_inbox: subagent_recovered pre-processor error: {exc}", exc_info=True)
-                    msg["_filename"] = f.name
-                    messages.append(msg)
-                    if len(messages) >= limit:
-                        break
-            except Exception as e:
+                ts_epoch = _parse_iso_timestamp(msg.get("timestamp", ""))
+                priority = _inbox_priority(msg)
+                key = _inbox_sort_key(f.name, priority, ts_epoch)
+                _scored.append((key, f, msg))
+            except Exception:
+                # Unreadable file: assign worst possible key so it appears last
+                key = (_INBOX_P4_DEFAULT, float("inf"), f.name)
+                _scored.append((key, f, {}))
+
+        for _key, f, msg in sorted(_scored, key=lambda x: x[0]):
+            try:
+                if not msg:
+                    # Re-read files that failed the first pass (e.g. transient lock)
+                    with open(f) as fp:  # type: ignore[arg-type]
+                        msg = json.load(fp)
+                if source_filter and msg.get("source", "").lower() != source_filter:
+                    continue
+                # /report slash command pre-processor: handle automatically without
+                # surfacing the raw message to the main dispatcher loop.
+                msg_text = msg.get("text", "")
+                if _is_report_command(msg_text):
+                    try:
+                        await _handle_report_slash_command(msg, f)  # type: ignore[arg-type]
+                    except Exception as exc:
+                        log.error(f"check_inbox: /report pre-processor error: {exc}", exc_info=True)
+                    continue  # skip — already handled
+                # subagent_recovered pre-processor: enqueue an owner notification so the
+                # user is informed about the failed agent. The raw recovery message still
+                # flows through to the dispatcher (with a dispatcher_hint) so it can call
+                # mark_processed — but the salvaged dump is never relayed directly.
+                if msg.get("type") == "subagent_recovered":
+                    try:
+                        _enqueue_recovery_notification(msg)
+                    except Exception as exc:
+                        log.error(f"check_inbox: subagent_recovered pre-processor error: {exc}", exc_info=True)
+                msg["_filename"] = f.name  # type: ignore[union-attr]
+                messages.append(msg)
+                # NOTE: Inbound cross-Lobster messages from bot-talk are routed to this
+                # inbox by bot_talk_mirror.log_inbound_cross_lobster() with source="bot-talk".
+                # We no longer mirror owner Telegram messages to bot-talk from here —
+                # only actual cross-Lobster exchanges belong in bot-talk (issue #1350).
+                # Emit EventBus event for inbound bot-talk messages so TelegramOutboxListener
+                # can forward them as debug notifications (issue #1425). The message is
+                # already in the inbox so we only emit to EventBus, not route again.
+                if msg.get("source") == "bot-talk" and msg.get("direction") == "INBOUND":
+                    try:
+                        from bot_talk_mirror import _spawn_mirror  # type: ignore[import]
+                        _spawn_mirror(
+                            content=msg.get("text", ""),
+                            genre="status-update",
+                            direction="INBOUND",
+                            from_=msg.get("from", msg.get("user_name", "unknown")),
+                            to=msg.get("to", ""),
+                        )
+                    except Exception as _bt_exc:
+                        log.warning(f"bot-talk EventBus inbound emit failed (non-fatal): {_bt_exc}")
+                if len(messages) >= limit:
+                    break
+            except Exception:
                 continue
 
         if not messages:
@@ -3437,13 +4641,20 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
         elif msg_type == "subagent_recovered":
             task_id = msg.get("task_id", "?")
             output += f"⚠️ **[SUBAGENT RECOVERY]** task `{task_id}` exited without calling write_result — salvaged content logged\n"
+        elif msg_type == "reaction":
+            emoji = msg.get("emoji", "?")
+            reacted_to_text = msg.get("reacted_to_text", "")
+            if reacted_to_text:
+                output += f"**[{source}]** {emoji} reaction from **{user}** (on: '{reacted_to_text}')\n"
+            else:
+                output += f"**[{source}]** {emoji} reaction from **{user}**\n"
         else:
             output += f"**[{source}]** from **{user}**\n"
         output += f"Chat ID: `{chat_id}` | Message ID: `{msg_id}`\n"
         tg_msg_id = msg.get("telegram_message_id")
         if tg_msg_id:
             output += f"Telegram Message ID: `{tg_msg_id}` (pass as reply_to_message_id to send_reply to thread your reply)\n"
-        output += f"Time: {ts}\n"
+        output += f"Time: {_format_ts_with_et(ts)}\n"
         # dispatcher_hint: structural signals for the dispatcher to route correctly
         if msg_type == "subagent_notification":
             output += "dispatcher_hint: SUBAGENT_NOTIFICATION — user already received the subagent's reply. Don't summarize it. If you respond, add new value only — a question, a correction, missing context. Call mark_processed when done.\n"
@@ -3579,6 +4790,24 @@ async def handle_send_reply(args: dict) -> list[TextContent]:
 
     log.info(f"Reply sent to {source} chat {chat_id}")
 
+    # Emit telegram.outbound to EventBus for audit trail (issue #1352).
+    # Skipped for bot-talk — that source already emits via bot_talk_mirror.
+    if source != "bot-talk":
+        _emit_mcp_event(
+            "telegram.outbound",
+            {"source": source, "chat_id": chat_id, "text_len": len(text)},
+            chat_id=chat_id,
+        )
+
+    # Mirror outbound bot-talk messages to the EventBus so TelegramOutboxListener
+    # can forward them as debug notifications. Fire-and-forget: non-blocking.
+    if source == "bot-talk":
+        try:
+            from bot_talk_mirror import mirror_outbound  # type: ignore[import]
+            mirror_outbound(text, source, chat_id)
+        except Exception as _bt_exc:
+            log.warning(f"bot-talk mirror_outbound failed (non-fatal): {_bt_exc}")
+
     # Atomic mark_processed: if message_id provided, move message to processed/ in same call
     mark_info = ""
     message_id = args.get("message_id")
@@ -3599,6 +4828,12 @@ async def handle_send_reply(args: dict) -> list[TextContent]:
                         _db_persist_inbound(json.loads(dest.read_text()))
                     except Exception as _db_exc:
                         log.warning(f"[DB] inbound persist failed for {mid}: {_db_exc}")
+                # Per-message WFM heartbeat: reset the WFM staleness clock so
+                # a long message batch does not exhaust the suppression window
+                # and trigger a spurious health-check restart (issue #694).
+                _update_lobster_state_fields(
+                    {"last_processed_at": datetime.now(timezone.utc).isoformat()}
+                )
             else:
                 mark_info = f" | ⚠️ message {mid} not found for mark_processed"
                 log.warning(f"Atomic mark_processed: message not found: {mid}")
@@ -3711,16 +4946,22 @@ async def handle_mark_processed(args: dict) -> list[TextContent]:
     if not found:
         return [TextContent(type="text", text=f"Message not found: {message_id}")]
 
-    # Guard: check that a reply was sent for user-facing messages.
-    # Uses msg type (not source) to classify — source is the routing destination
-    # and cannot distinguish a direct user message from a subagent_result that
-    # happens to carry source="telegram" for delivery.
-    # If no reply was sent, auto-send a fallback reply instead of returning a
-    # soft warning (which the LLM ignores, causing silent message drops).
+    # Guard: log a warning if a user-facing message is being marked processed
+    # without a prior send_reply.  This is a dispatcher bug — the dispatcher
+    # should always reply to user messages before marking them processed.
+    #
+    # We intentionally do NOT auto-send any fallback reply here (issue #1594).
+    # The previous implementation auto-sent "Noted." which is actively harmful:
+    # it masquerades as an intentional response and caused repeated spurious
+    # "Noted." messages to be delivered to the user for self-checks, subagent
+    # completions, and other non-reply-requiring messages.
+    #
+    # Correct fix: log the missing reply so it's visible in monitoring, then
+    # mark processed silently.  A missing reply is a dispatcher bug, not
+    # something to paper over with an auto-reply.
     if not force:
         try:
             msg = json.loads(found.read_text())
-            source = msg.get("source", "")
             msg_type = msg.get("type", "")
             chat_id = msg.get("chat_id", 0)
             msg_ts_raw = msg.get("timestamp", "")
@@ -3738,42 +4979,12 @@ async def handle_mark_processed(args: dict) -> list[TextContent]:
                 chat_key = str(chat_id)
                 reply_ts = _recent_replies.get(chat_key, 0.0)
                 if reply_ts < msg_epoch:
-                    # No reply was sent for this human message.
-                    # Skip auto-reply for callback (button press) messages —
-                    # the bot already answered the callback query inline.
-                    # Skip auto-reply for reaction messages — reactions are
-                    # signals that the dispatcher processes contextually;
-                    # sending "Noted." is never correct.
-                    if msg_type == "callback":
-                        log.info(f"Skipping auto-reply fallback for callback message {message_id}")
-                    elif msg_type == "reaction":
-                        log.info(f"Skipping auto-reply fallback for reaction message {message_id}")
-                    elif abs(chat_id) <= 1_000_000:
-                        # Fake/test chat_id — Telegram rejects delivery; skip to avoid dead-letter buildup
-                        log.info(f"Skipping auto-reply fallback for fake/test chat_id {chat_id}")
-                    else:
-                        # Auto-send a fallback reply so the user isn't silently ignored
-                        fallback_text = "Noted."
-                        fallback_id = f"{int(time.time() * 1000)}_{source}"
-                        fallback_data = {
-                            "id": fallback_id,
-                            "source": source,
-                            "chat_id": chat_id,
-                            "text": fallback_text,
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                            "_fallback": True,
-                        }
-                        if source == "bisque":
-                            outbox_file = BISQUE_OUTBOX_DIR / f"{fallback_id}.json"
-                        else:
-                            outbox_file = OUTBOX_DIR / f"{fallback_id}.json"
-                        atomic_write_json(outbox_file, fallback_data)
-
-                        sent_file = SENT_DIR / f"{fallback_id}.json"
-                        atomic_write_json(sent_file, fallback_data)
-
-                        _track_reply(chat_id)
-                        log.warning(f"Auto-reply fallback triggered for message {message_id} (chat {chat_id})")
+                    # No reply was sent for this human message — log and proceed silently.
+                    log.warning(
+                        f"mark_processed called without send_reply for user message "
+                        f"{message_id} (type={msg_type}, chat={chat_id}) — "
+                        "dispatcher may have dropped a reply"
+                    )
         except (json.JSONDecodeError, OSError):
             pass  # If we can't read the message, skip the guard
 
@@ -3781,12 +4992,29 @@ async def handle_mark_processed(args: dict) -> list[TextContent]:
     dest = PROCESSED_DIR / found.name
     found.rename(dest)
 
+    # Update claim status to 'processed' (issue #1360).
+    # No-op on rows that predate this migration (message_id absent from table).
+    _claims_db.update_status(message_id, "processed")
+
     # BIS-167 Slice 6: persist inbound message to messages.db now that it is fully processed.
     if _db_persist_inbound is not None:
         try:
             _db_persist_inbound(json.loads(dest.read_text()))
         except Exception as _db_exc:
             log.warning(f"[DB] inbound persist failed for {message_id}: {_db_exc}")
+
+    # Write a per-message heartbeat so the health check can distinguish a
+    # dispatcher that is actively draining a long message batch from one that
+    # is genuinely stuck.  The WFM freshness check uses the more recent of the
+    # WFM heartbeat file and this timestamp, so a burst of 20+ cron pings
+    # processed without returning to wait_for_messages does not exhaust the
+    # suppression window and trigger a spurious restart (issue #694).
+    _update_lobster_state_fields(
+        {"last_processed_at": datetime.now(timezone.utc).isoformat()}
+    )
+
+    # Emit inbox.processed to EventBus for audit trail (issue #1352).
+    _emit_mcp_event("inbox.processed", {"message_id": message_id})
 
     log.info(f"Message processed: {message_id}")
     return [TextContent(type="text", text=f"✅ Message marked as processed: {message_id}")]
@@ -3810,7 +5038,16 @@ async def handle_mark_processing(args: dict) -> list[TextContent]:
     # the message (issue #635). This is the single ingest normalization point.
     msg_data = normalize_message_type(msg_data)
 
-    # Atomic move to processing
+    # Atomic claim via SQLite INSERT OR FAIL (issue #1360).
+    # This is the claim gate: one caller wins, all others get already_claimed.
+    # The filesystem rename becomes a consequence of a won claim, not the claim
+    # itself — eliminating the last-writer-wins race in concurrent dispatchers.
+    session_id = _get_current_http_session_id() or "dispatcher"
+    if not _claims_db.claim(message_id, session_id):
+        log.warning(f"mark_processing: already_claimed: {message_id}")
+        return [TextContent(type="text", text=f"Error: already_claimed: {message_id}")]
+
+    # Atomic move to processing (consequence of won claim)
     dest = PROCESSING_DIR / found.name
     found.rename(dest)
 
@@ -3856,24 +5093,31 @@ async def handle_mark_processing(args: dict) -> list[TextContent]:
                         f"{ctx}"
                     )
                     # Debug: notify context was injected
-                    _emit_debug_observation(
+                    _emit_event(
                         f"\U0001f50d [context injected] msg={short_msg_id} "
-                        f"trigger matched, injected {len(ctx)} chars of user model context"
+                        f"trigger matched, injected {len(ctx)} chars of user model context",
+                        event_type="user_model.context_inject",
+                        severity="debug",
+                        source="mark-processing",
                     )
                 else:
                     # Debug: trigger matched but no context available.
-                    # _emit_debug_observation is a no-op when not in debug mode.
-                    _emit_debug_observation(
+                    _emit_event(
                         f"\U0001f50d [context skipped] msg={short_msg_id} "
-                        "trigger matched but user model returned empty context"
+                        "trigger matched but user model returned empty context",
+                        event_type="user_model.context_skip",
+                        severity="debug",
+                        source="mark-processing",
                     )
             except Exception as _ctx_exc:
                 import traceback as _tb
-                _emit_debug_observation(
+                _emit_event(
                     f"\U0001f50d [context inject error] msg={short_msg_id} "
                     f"{type(_ctx_exc).__name__}: {_ctx_exc}\n"
                     + _tb.format_exc()[-600:],
-                    category="system_error",
+                    event_type="system.error",
+                    severity="error",
+                    source="mark-processing",
                 )
                 # never block mark_processing
         else:
@@ -3881,12 +5125,23 @@ async def handle_mark_processing(args: dict) -> list[TextContent]:
             # this is the common case and emitting on every no-match is pure noise.
             pass
 
+    # User message counter — session-note-appender trigger (issue #1159)
+    # Shared helper handles filtering, incrementing, and reminder injection.
+    _tick_user_message_counter(msg_type, msg_source)
+
     # Stamp _processing_started_at so stale detection uses actual claim time, not file mtime.
     try:
         msg_data["_processing_started_at"] = datetime.now(timezone.utc).isoformat()
         atomic_write_json(dest, msg_data)
     except Exception:
         pass  # non-fatal; stale recovery falls back to mtime
+
+    # Emit telegram.inbound to EventBus for audit trail (issue #1352).
+    _emit_mcp_event(
+        "telegram.inbound",
+        {"message_id": message_id, "source": msg_source, "msg_type": msg_type},
+        chat_id=msg_data.get("chat_id"),
+    )
 
     log.info(f"Message claimed for processing: {message_id}")
     return [TextContent(type="text", text=f"Message claimed: {message_id}{context_block}")]
@@ -3908,6 +5163,13 @@ async def handle_claim_and_ack(args: dict) -> list[TextContent]:
     if not found:
         return [TextContent(type="text", text=f"Error: Message not found in inbox: {message_id}")]
 
+    # Atomic claim via SQLite INSERT OR FAIL (issue #1360).
+    # Must succeed before any filesystem move or ack is sent.
+    session_id = _get_current_http_session_id() or "dispatcher"
+    if not _claims_db.claim(message_id, session_id):
+        log.warning(f"claim_and_ack: already_claimed: {message_id}")
+        return [TextContent(type="text", text=f"Error: already_claimed: {message_id}")]
+
     # Read message content before moving (for observation queue + timestamp)
     try:
         msg_data = json.loads(found.read_text())
@@ -3917,7 +5179,7 @@ async def handle_claim_and_ack(args: dict) -> list[TextContent]:
     # Stamp actual processing start time so stale detection uses it
     msg_data["_processing_started_at"] = datetime.now(timezone.utc).isoformat()
 
-    # Atomic move to processing/
+    # Atomic move to processing/ (consequence of won claim)
     dest = PROCESSING_DIR / found.name
     found.rename(dest)
 
@@ -3939,6 +5201,10 @@ async def handle_claim_and_ack(args: dict) -> list[TextContent]:
             source=msg_data.get("source"),
             ts=msg_data.get("timestamp"),
         )
+
+    # User message counter — session-note-appender trigger (issue #1159)
+    # Shared helper handles filtering, incrementing, and reminder injection.
+    _tick_user_message_counter(msg_type, msg_data.get("source", ""))
 
     log.info(f"claim_and_ack: message claimed: {message_id}")
 
@@ -4007,7 +5273,15 @@ async def handle_mark_failed(args: dict) -> list[TextContent]:
         # which is safe (idempotent). The reverse loses data.
         atomic_write_json(dest, msg)
         found.unlink(missing_ok=True)
+        # Update claim status to 'failed' (issue #1360)
+        _claims_db.update_status(message_id, "failed")
         log.error(f"Message permanently failed after {max_retries} retries: {message_id} - {error}")
+        # Emit inbox.failed to EventBus for audit trail (issue #1352).
+        _emit_mcp_event(
+            "inbox.failed",
+            {"message_id": message_id, "error": error, "permanent": True},
+            severity="warn",
+        )
         return [TextContent(type="text", text=f"Message permanently failed after {max_retries} retries: {message_id}")]
 
     # Schedule retry with exponential backoff: 60s, 120s, 240s
@@ -4019,7 +5293,15 @@ async def handle_mark_failed(args: dict) -> list[TextContent]:
     # Write destination FIRST, then remove source (crash-safe ordering)
     atomic_write_json(dest, msg)
     found.unlink(missing_ok=True)
+    # Release claim row so the message can be re-claimed on retry (issue #1360)
+    _claims_db.release(message_id)
     log.warning(f"Message failed (retry {retry_count}/{max_retries}, next in {backoff}s): {message_id} - {error}")
+    # Emit inbox.failed to EventBus for audit trail (issue #1352).
+    _emit_mcp_event(
+        "inbox.failed",
+        {"message_id": message_id, "error": error, "permanent": False},
+        severity="warn",
+    )
     return [TextContent(type="text", text=f"Message queued for retry ({retry_count}/{max_retries}, backoff {backoff}s): {message_id}")]
 
 
@@ -4067,7 +5349,7 @@ async def handle_get_stats(args: dict) -> list[TextContent]:
                 msg = json.load(fp)
                 src = msg.get("source", "unknown")
                 source_counts[src] = source_counts.get(src, 0) + 1
-        except Exception:
+        except (OSError, json.JSONDecodeError):
             continue
 
     output = "📊 **Inbox Statistics:**\n\n"
@@ -4176,6 +5458,41 @@ def _scan_json_dirs_for_history(direction: str) -> list[dict]:
     return messages
 
 
+def _apply_sender_type_filter(messages: list[dict], sender_type: str | None) -> list[dict]:
+    """Return only messages matching the given sender_type.
+
+    Pure function: does not mutate the input list.
+
+    sender_type semantics mirror the SQL layer in db/reader.py:
+      'user'         — inbound (_direction='received') messages whose type is in
+                       INBOX_USER_TYPES (real user messages, no system/cron noise)
+      'lobster'      — outbound (_direction='sent') messages
+      'conversation' — union of user and lobster (both, but no system noise)
+      None / other   — all messages unchanged
+    """
+    if not sender_type or sender_type == "all":
+        return messages
+
+    if sender_type == "user":
+        return [
+            m for m in messages
+            if m.get("_direction") == "received" and m.get("type", "text") in INBOX_USER_TYPES
+        ]
+
+    if sender_type == "lobster":
+        return [m for m in messages if m.get("_direction") == "sent"]
+
+    if sender_type == "conversation":
+        return [
+            m for m in messages
+            if m.get("_direction") == "sent"
+            or (m.get("_direction") == "received" and m.get("type", "text") in INBOX_USER_TYPES)
+        ]
+
+    # Unknown value — degrade gracefully
+    return messages
+
+
 def _apply_filters_and_paginate(
     messages: list[dict],
     *,
@@ -4184,8 +5501,10 @@ def _apply_filters_and_paginate(
     search_text: str,
     limit: int,
     offset: int,
+    sender_type: str | None = None,
 ) -> tuple[list[dict], int]:
-    """Apply chat_id / source / search filters, sort by timestamp, then paginate.
+    """Apply chat_id / source / search / sender_type filters, sort by timestamp, then paginate.
+
 
     Returns (paginated_slice, total_count_before_pagination).
     All filtering and sorting is performed in-memory. This is the legacy
@@ -4201,6 +5520,9 @@ def _apply_filters_and_paginate(
             return datetime.min.replace(tzinfo=timezone.utc)
 
     filtered = messages
+
+    if sender_type:
+        filtered = _apply_sender_type_filter(filtered, sender_type)
 
     if chat_id_filter is not None:
         chat_id_str = str(chat_id_filter)
@@ -4219,6 +5541,9 @@ def _apply_filters_and_paginate(
     return filtered[offset: offset + limit], total
 
 
+_HISTORY_TEXT_DISPLAY_LIMIT = 4000  # Max chars shown per message in get_conversation_history
+
+
 def _format_history_output(
     paginated: list[dict],
     total_count: int,
@@ -4229,6 +5554,8 @@ def _format_history_output(
 
     Each dict must have _direction set to 'received' or 'sent'.
     Fields source, chat_id, timestamp, text, user_name, username are optional.
+    Messages longer than _HISTORY_TEXT_DISPLAY_LIMIT chars are shown with a
+    [truncated] suffix so the caller knows the content was cut.
     """
     showing_end = min(offset + limit, total_count)
     output = f"**Conversation History** (showing {offset + 1}-{showing_end} of {total_count}):\n\n"
@@ -4246,7 +5573,8 @@ def _format_history_output(
         except (ValueError, TypeError):
             ts_display = ts
 
-        truncated = text[:500] + ("..." if len(text) > 500 else "")
+        was_truncated = len(text) > _HISTORY_TEXT_DISPLAY_LIMIT
+        truncated = text[:_HISTORY_TEXT_DISPLAY_LIMIT] + (" [truncated]" if was_truncated else "")
         if msg["_direction"] == "received":
             user = msg.get("user_name", msg.get("username", "Unknown"))
             output += "---\n"
@@ -4280,6 +5608,7 @@ async def handle_get_conversation_history(args: dict) -> list[TextContent]:
     offset = args.get("offset", 0)
     direction = args.get("direction", "all").lower()
     source_filter = args.get("source", "").lower().strip()
+    sender_type = args.get("sender_type") or None  # None when omitted or empty string
 
     paginated: list[dict] = []
     total_count: int = 0
@@ -4298,6 +5627,7 @@ async def handle_get_conversation_history(args: dict) -> list[TextContent]:
                     source=source_filter or None,
                     search=search_text or None,
                     direction=direction,
+                    sender_type=sender_type,
                     limit=limit,
                     offset=offset,
                 )
@@ -4307,6 +5637,7 @@ async def handle_get_conversation_history(args: dict) -> list[TextContent]:
                     source=source_filter or None,
                     search=search_text or None,
                     direction=direction,
+                    sender_type=sender_type,
                 )
                 used_db = True
                 log.debug(
@@ -4337,6 +5668,7 @@ async def handle_get_conversation_history(args: dict) -> list[TextContent]:
             search_text=search_text,
             limit=limit,
             offset=offset,
+            sender_type=sender_type,
         )
 
     # ------------------------------------------------------------------
@@ -4348,10 +5680,12 @@ async def handle_get_conversation_history(args: dict) -> list[TextContent]:
             filter_info.append(f"chat_id={chat_id_filter}")
         if search_text:
             filter_info.append(f"search='{search_text}'")
-        if direction != "all":
+        if direction != "all" and not sender_type:
             filter_info.append(f"direction={direction}")
         if source_filter:
             filter_info.append(f"source={source_filter}")
+        if sender_type:
+            filter_info.append(f"sender_type={sender_type}")
         filter_str = f" (filters: {', '.join(filter_info)})" if filter_info else ""
         return [TextContent(type="text", text=f"No messages found{filter_str}.")]
 
@@ -4505,7 +5839,7 @@ def load_tasks() -> dict:
     try:
         with open(TASKS_FILE, "r") as f:
             return json.load(f)
-    except:
+    except (OSError, json.JSONDecodeError):
         return {"tasks": [], "next_id": 1}
 
 
@@ -4517,8 +5851,13 @@ def save_tasks(data: dict) -> None:
 async def handle_list_tasks(args: dict) -> list[TextContent]:
     """List all tasks."""
     status_filter = args.get("status", "all").lower()
+    chat_id = args.get("chat_id")
     data = load_tasks()
     tasks = data.get("tasks", [])
+
+    # Filter by chat_id: show tasks owned by this user + legacy tasks (no chat_id)
+    if chat_id is not None:
+        tasks = [t for t in tasks if t.get("chat_id") == chat_id or "chat_id" not in t]
 
     if status_filter != "all":
         tasks = [t for t in tasks if t.get("status", "").lower() == status_filter]
@@ -4560,6 +5899,7 @@ async def handle_create_task(args: dict) -> list[TextContent]:
     """Create a new task."""
     subject = args.get("subject", "").strip()
     description = args.get("description", "").strip()
+    chat_id = args.get("chat_id")
 
     if not subject:
         return [TextContent(type="text", text="Error: subject is required.")]
@@ -4575,6 +5915,8 @@ async def handle_create_task(args: dict) -> list[TextContent]:
         "created_at": datetime.now(timezone.utc).isoformat(),
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
+    if chat_id is not None:
+        task["chat_id"] = chat_id
 
     data["tasks"].append(task)
     data["next_id"] = task_id + 1
@@ -4667,6 +6009,430 @@ async def handle_delete_task(args: dict) -> list[TextContent]:
 
 
 # =============================================================================
+# IFTTT Behavioral Rules Handlers
+# =============================================================================
+
+
+def _resolve_action_ref(action_ref: str) -> str:
+    """Fetch memory DB content for an action_ref ID.
+
+    Returns the content string, or a descriptive fallback when the memory
+    system is unavailable or the entry is not found.
+    """
+    if _memory_provider is None:
+        return "(memory system unavailable)"
+    if not action_ref:
+        return "(no action_ref)"
+    if not hasattr(_memory_provider, "get"):
+        return "(memory backend does not support get-by-ID)"
+    try:
+        event = _memory_provider.get(int(action_ref))
+        if event is None:
+            return f"(memory entry {action_ref} not found)"
+        return event.content
+    except (ValueError, TypeError):
+        return f"(action_ref '{action_ref}' is not a valid integer ID)"
+    except Exception as e:
+        log.warning(f"_resolve_action_ref: failed for action_ref={action_ref}: {e}")
+        return f"(error resolving action_ref: {e})"
+
+
+def _generate_rule_id(condition: str) -> str:
+    """Derive a stable slug from the condition text, falling back to a UUID suffix."""
+    import re
+    slug = condition.lower()
+    slug = re.sub(r"[^a-z0-9\s-]", "", slug)
+    slug = re.sub(r"\s+", "-", slug.strip())
+    slug = slug[:48].rstrip("-")
+    if not slug:
+        slug = "rule"
+    # Append short UUID fragment to avoid collisions
+    slug = f"{slug}-{_uuid_mod.uuid4().hex[:6]}"
+    return slug
+
+
+async def handle_list_rules(args: dict) -> list[TextContent]:
+    """List IFTTT behavioral rules."""
+    enabled_only = bool(args.get("enabled_only", False))
+    resolve = bool(args.get("resolve", False))
+    rules = _ifttt_load_rules()
+    if enabled_only:
+        rules = _ifttt_get_enabled_rules(rules)
+
+    if not rules:
+        label = "enabled " if enabled_only else ""
+        return [TextContent(type="text", text=f"No {label}rules found.")]
+
+    lines = []
+    for r in rules:
+        enabled_flag = "" if r.get("enabled", True) else " [disabled]"
+        entry = (
+            f"[{r['id']}]{enabled_flag}\n"
+            f"  condition:  {r['condition']}\n"
+            f"  action_ref: {r['action_ref']}"
+        )
+        if resolve:
+            content = _resolve_action_ref(r["action_ref"])
+            entry += f"\n  action:     {content}"
+        lines.append(entry)
+    summary = f"Rules: {len(rules)} total" + (f" ({sum(1 for r in rules if r.get('enabled', True))} enabled)" if not enabled_only else "")
+    output = "\n\n".join(lines) + f"\n\n---\n{summary}"
+    return [TextContent(type="text", text=output)]
+
+
+async def handle_add_rule(args: dict) -> list[TextContent]:
+    """Add a new IFTTT behavioral rule.
+
+    Stores action_content to the memory DB and uses the resulting entry ID
+    as action_ref in the YAML index.
+    """
+    condition = (args.get("condition") or "").strip()
+    action_content = (args.get("action_content") or "").strip()
+
+    if not condition:
+        return [TextContent(type="text", text="Error: condition is required.")]
+    if not action_content:
+        return [TextContent(type="text", text="Error: action_content is required.")]
+
+    if _memory_provider is None:
+        return [TextContent(type="text", text="Error: memory system is not available — cannot store action content.")]
+
+    event = MemoryEvent(
+        id=None,
+        timestamp=datetime.now(timezone.utc),
+        type="ifttt_action",
+        source="internal",
+        project=None,
+        content=action_content,
+        metadata={"tags": ["ifttt_rule"], "condition": condition},
+    )
+    try:
+        action_ref = str(_memory_provider.store(event))
+    except Exception as e:
+        log.error(f"handle_add_rule: memory store failed: {e}", exc_info=True)
+        return [TextContent(type="text", text=f"Error storing action to memory DB: {e}")]
+
+    rule_id = _generate_rule_id(condition)
+    rules = _ifttt_load_rules()
+    updated = _ifttt_add_rule(rules, rule_id=rule_id, condition=condition, action_ref=action_ref)
+    _ifttt_save_rules(updated)
+
+    return [TextContent(type="text", text=f"Rule added: {rule_id} (action_ref: {action_ref})")]
+
+
+async def handle_delete_rule(args: dict) -> list[TextContent]:
+    """Delete an IFTTT behavioral rule by ID.
+
+    Pass delete_memory=True to also delete the memory DB entry for action_ref.
+    """
+    rule_id = (args.get("rule_id") or "").strip()
+    if not rule_id:
+        return [TextContent(type="text", text="Error: rule_id is required.")]
+
+    rules = _ifttt_load_rules()
+    rule = _ifttt_find_rule(rules, rule_id)
+    if rule is None:
+        return [TextContent(type="text", text="false")]
+
+    delete_memory = bool(args.get("delete_memory", False))
+    memory_note = ""
+    if delete_memory:
+        action_ref = rule.get("action_ref", "")
+        if action_ref and _memory_provider is not None and hasattr(_memory_provider, "delete"):
+            try:
+                deleted = _memory_provider.delete(int(action_ref))
+                memory_note = f" (memory entry {action_ref} {'deleted' if deleted else 'not found'})"
+            except (ValueError, TypeError):
+                memory_note = f" (could not delete memory entry: action_ref '{action_ref}' is not a valid integer ID)"
+            except Exception as e:
+                log.warning(f"handle_delete_rule: memory delete failed for action_ref={action_ref}: {e}")
+                memory_note = f" (memory delete failed: {e})"
+        elif delete_memory and _memory_provider is None:
+            memory_note = " (memory system unavailable — rule deleted, memory entry not removed)"
+
+    updated = _ifttt_remove_rule(rules, rule_id)
+    _ifttt_save_rules(updated)
+    return [TextContent(type="text", text=f"true{memory_note}")]
+
+
+async def handle_get_rule(args: dict) -> list[TextContent]:
+    """Get a single IFTTT behavioral rule by ID."""
+    rule_id = (args.get("rule_id") or "").strip()
+    if not rule_id:
+        return [TextContent(type="text", text="Error: rule_id is required.")]
+
+    resolve = bool(args.get("resolve", False))
+    rules = _ifttt_load_rules()
+    rule = _ifttt_find_rule(rules, rule_id)
+    if rule is None:
+        return [TextContent(type="text", text="null")]
+
+    output = (
+        f"id:         {rule['id']}\n"
+        f"condition:  {rule['condition']}\n"
+        f"action_ref: {rule['action_ref']}\n"
+        f"enabled:    {rule.get('enabled', True)}"
+    )
+    if resolve:
+        content = _resolve_action_ref(rule["action_ref"])
+        output += f"\naction:     {content}"
+    return [TextContent(type="text", text=output)]
+
+
+async def handle_update_rule(args: dict) -> list[TextContent]:
+    """Soft-disable or re-enable an IFTTT behavioral rule by ID."""
+    rule_id = (args.get("rule_id") or "").strip()
+    if not rule_id:
+        return [TextContent(type="text", text="Error: rule_id is required.")]
+
+    enabled = args.get("enabled")
+    if enabled is None:
+        return [TextContent(type="text", text="Error: enabled is required.")]
+
+    rules = _ifttt_load_rules()
+    rule = _ifttt_find_rule(rules, rule_id)
+    if rule is None:
+        return [TextContent(type="text", text="null")]
+
+    updated_rules = [{**r, "enabled": bool(enabled)} if r["id"] == rule_id else r for r in rules]
+    _ifttt_save_rules(updated_rules)
+
+    updated_rule = _ifttt_find_rule(updated_rules, rule_id)
+    output = (
+        f"id:         {updated_rule['id']}\n"
+        f"condition:  {updated_rule['condition']}\n"
+        f"action_ref: {updated_rule['action_ref']}\n"
+        f"enabled:    {updated_rule.get('enabled', True)}"
+    )
+    return [TextContent(type="text", text=output)]
+
+
+# =============================================================================
+# Session File Management Handlers
+# =============================================================================
+
+# Pointer file written/read to track the current session
+_SESSION_POINTER_FILE = Path("/tmp/lobster-current-session-file")
+
+# Boilerplate placeholder text in session template summaries
+_SESSION_SUMMARY_BOILERPLATE = "<1-3 sentence summary"
+
+
+def _resolve_sessions_dir() -> Path:
+    """Return the sessions directory, creating it if absent."""
+    sessions_dir = _USER_CONFIG / "memory" / "canonical" / "sessions"
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    return sessions_dir
+
+
+def _resolve_session_template(sessions_dir: Path) -> str | None:
+    """Return template content, or None if the template file does not exist."""
+    template_path = sessions_dir / "session.template.md"
+    if template_path.exists():
+        return template_path.read_text()
+    return None
+
+
+def _next_sequence_number(sessions_dir: Path, date_str: str) -> int:
+    """Return the next available sequence number for *date_str* (YYYYMMDD)."""
+    existing = [
+        p.stem for p in sessions_dir.glob(f"{date_str}-*.md")
+        if p.stem != "session.template"
+    ]
+    if not existing:
+        return 1
+    numbers = []
+    for stem in existing:
+        parts = stem.split("-", 1)
+        if len(parts) == 2:
+            try:
+                numbers.append(int(parts[1]))
+            except ValueError:
+                pass
+    return max(numbers) + 1 if numbers else 1
+
+
+def _session_id_to_path(sessions_dir: Path, session_id: str) -> Path | None:
+    """Return the Path for *session_id*, or None if not found."""
+    candidate = sessions_dir / f"{session_id}.md"
+    return candidate if candidate.exists() else None
+
+
+def _resolve_current_session_path(sessions_dir: Path) -> Path | None:
+    """Return the 'current' session path via pointer file or latest today."""
+    if _SESSION_POINTER_FILE.exists():
+        try:
+            pointer = Path(_SESSION_POINTER_FILE.read_text().strip())
+            if pointer.exists():
+                return pointer
+        except Exception:
+            pass
+
+    # Fall back to the latest session file for today (UTC)
+    today = datetime.now(timezone.utc).strftime("%Y%m%d")
+    candidates = sorted(sessions_dir.glob(f"{today}-*.md"))
+    return candidates[-1] if candidates else None
+
+
+def _extract_section_content(text: str, section_name: str) -> str | None:
+    """Return the body text of a named H2 section, or None if not found."""
+    pattern = re.compile(
+        rf"^## {re.escape(section_name)}\s*\n(.*?)(?=\Z|^## )",
+        re.MULTILINE | re.DOTALL,
+    )
+    m = pattern.search(text)
+    return m.group(1) if m else None
+
+
+def _replace_section_content(text: str, section_name: str, new_body: str) -> str | None:
+    """
+    Replace the body of the named H2 section with *new_body*.
+
+    Returns the updated full text, or None if the section was not found.
+    """
+    pattern = re.compile(
+        rf"(^## {re.escape(section_name)}\s*\n)(.*?)(?=\Z|^## )",
+        re.MULTILINE | re.DOTALL,
+    )
+    if not pattern.search(text):
+        return None
+    body = new_body if new_body.endswith("\n") else new_body + "\n"
+    return pattern.sub(lambda m: m.group(1) + body, text)
+
+
+def _atomic_write(path: Path, content: str) -> None:
+    """Write *content* to *path* atomically via a sibling temp file + rename."""
+    tmp_path = path.with_suffix(".tmp")
+    tmp_path.write_text(content, encoding="utf-8")
+    os.rename(tmp_path, path)
+
+
+async def handle_create_session_file(args: dict) -> list[TextContent]:
+    """Create a new session file from the template."""
+    sessions_dir = _resolve_sessions_dir()
+    today = datetime.now(timezone.utc).strftime("%Y%m%d")
+    seq = _next_sequence_number(sessions_dir, today)
+    session_id = f"{today}-{seq:03d}"
+    file_path = sessions_dir / f"{session_id}.md"
+
+    template = _resolve_session_template(sessions_dir)
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    if template:
+        content = (
+            template
+            .replace("YYYYMMDD-NNN", session_id)
+            .replace("<ISO timestamp, e.g. 2026-03-25T14:32:00Z>", now_iso)
+        )
+    else:
+        content = (
+            f"# Session {session_id}\n\n"
+            f"**Started:** {now_iso}\n"
+            f"**Ended:** active\n\n"
+            "## Summary\n\n"
+            "## Open Threads\n\n"
+            "## Open Tasks\n\n"
+            "## Open Subagents\n\n"
+            "## Communication Channels\n\n"
+            "## Notable Events\n"
+        )
+
+    _atomic_write(file_path, content)
+    _atomic_write(_SESSION_POINTER_FILE, str(file_path))
+
+    import json as _json
+    result = _json.dumps({"path": str(file_path), "session_id": session_id})
+    return [TextContent(type="text", text=result)]
+
+
+async def handle_get_session_file(args: dict) -> list[TextContent]:
+    """Read a session file by ID or return the current one."""
+    import json as _json
+
+    session_id = args.get("session_id", "current")
+    sessions_dir = _resolve_sessions_dir()
+
+    if session_id == "current":
+        path = _resolve_current_session_path(sessions_dir)
+        if path is None:
+            return [TextContent(type="text", text='{"error": "No current session file found."}')]
+        resolved_id = path.stem
+    else:
+        path = _session_id_to_path(sessions_dir, session_id)
+        if path is None:
+            return [TextContent(type="text", text=_json.dumps({"error": f"Session file not found: {session_id}"}))]
+        resolved_id = session_id
+
+    content = path.read_text(encoding="utf-8")
+    result = _json.dumps({"path": str(path), "content": content, "session_id": resolved_id})
+    return [TextContent(type="text", text=result)]
+
+
+async def handle_update_session_file(args: dict) -> list[TextContent]:
+    """Update a named H2 section in a session file."""
+    import json as _json
+
+    section = args.get("section")
+    new_content = args.get("content")
+    session_id = args.get("session_id", "current")
+
+    if not section:
+        return [TextContent(type="text", text='{"error": "section is required."}')]
+    if new_content is None:
+        return [TextContent(type="text", text='{"error": "content is required."}')]
+
+    sessions_dir = _resolve_sessions_dir()
+
+    if session_id == "current":
+        path = _resolve_current_session_path(sessions_dir)
+        if path is None:
+            return [TextContent(type="text", text='{"error": "No current session file found."}')]
+    else:
+        path = _session_id_to_path(sessions_dir, session_id)
+        if path is None:
+            return [TextContent(type="text", text=_json.dumps({"error": f"Session file not found: {session_id}"}))]
+
+    original = path.read_text(encoding="utf-8")
+    updated = _replace_section_content(original, section, new_content)
+
+    if updated is None:
+        return [TextContent(type="text", text=_json.dumps({"error": f"Section not found: {section}"}))]
+
+    _atomic_write(path, updated)
+    result = _json.dumps({"path": str(path), "section": section, "updated": True})
+    return [TextContent(type="text", text=result)]
+
+
+async def handle_list_session_files(args: dict) -> list[TextContent]:
+    """List session files, optionally filtered by date."""
+    import json as _json
+
+    date_filter = args.get("date")
+    sessions_dir = _resolve_sessions_dir()
+
+    pattern = f"{date_filter}-*.md" if date_filter else "*.md"
+    candidates = sorted(
+        p for p in sessions_dir.glob(pattern)
+        if p.stem != "session.template" and re.match(r"^\d{8}-\d{3}$", p.stem)
+    )
+
+    def _has_content(path: Path) -> bool:
+        try:
+            text = path.read_text(encoding="utf-8")
+            body = _extract_section_content(text, "Summary") or ""
+            stripped = body.strip()
+            return len(stripped) > 50 and not stripped.startswith(_SESSION_SUMMARY_BOILERPLATE)
+        except Exception:
+            return False
+
+    entries = [
+        {"session_id": p.stem, "path": str(p), "has_content": _has_content(p)}
+        for p in candidates
+    ]
+    return [TextContent(type="text", text=_json.dumps(entries))]
+
+
+# =============================================================================
 # Audio Transcription Handler (Local Whisper.cpp)
 # =============================================================================
 
@@ -4755,7 +6521,7 @@ async def handle_transcribe_audio(args: dict) -> list[TextContent]:
                     msg_file = f
                     msg_data = data
                     break
-        except:
+        except (OSError, json.JSONDecodeError):
             continue
 
     if not msg_file:
@@ -4771,7 +6537,7 @@ async def handle_transcribe_audio(args: dict) -> list[TextContent]:
                         msg_file = f
                         msg_data = data
                         break
-            except:
+            except (OSError, json.JSONDecodeError):
                 continue
 
     if not msg_file:
@@ -4787,7 +6553,7 @@ async def handle_transcribe_audio(args: dict) -> list[TextContent]:
                         msg_file = f
                         msg_data = data
                         break
-            except:
+            except (OSError, json.JSONDecodeError):
                 continue
 
     if not msg_file:
@@ -4849,6 +6615,74 @@ async def handle_transcribe_audio(args: dict) -> list[TextContent]:
 
     except Exception as e:
         return [TextContent(type="text", text=f"Error during transcription: {str(e)}")]
+
+
+# =============================================================================
+# TTS Voice Note Handler
+# =============================================================================
+
+async def handle_send_voice_note(args: dict) -> list[TextContent]:
+    """Synthesize text to a voice note and send via Telegram.
+
+    Uses piper TTS locally (no cloud). Falls back to a text send_reply if TTS
+    or the Telegram voice send fails, so the user always gets a response.
+    """
+    chat_id = str(args.get("chat_id", "")).strip()
+    text = str(args.get("text", "")).strip()
+    source = str(args.get("source", "telegram")).strip() or "telegram"
+
+    if not chat_id:
+        return [TextContent(type="text", text="Error: chat_id is required.")]
+    if not text:
+        return [TextContent(type="text", text="Error: text is required.")]
+
+    # Non-Telegram sources: voice notes are not supported; fall back to text.
+    if source != "telegram":
+        log.info(f"send_voice_note: source={source!r} is not telegram — falling back to text")
+        fallback_args = {"chat_id": chat_id, "text": text, "source": source}
+        return await handle_send_reply(fallback_args)
+
+    # Import TTS module lazily so missing piper doesn't crash the server.
+    try:
+        from tts.piper import text_to_voice_file  # type: ignore[import]
+    except ImportError as e:
+        log.warning(f"send_voice_note: tts module not importable ({e}) — falling back to text")
+        return await handle_send_reply({"chat_id": chat_id, "text": text, "source": source})
+
+    # Generate OGG voice file
+    tts_result = text_to_voice_file(text)
+    if not tts_result.ok:
+        log.warning(f"send_voice_note: TTS failed ({tts_result.error}) — falling back to text")
+        tts_result.cleanup()
+        return await handle_send_reply({"chat_id": chat_id, "text": text, "source": source})
+
+    ogg_path = tts_result.ogg_path
+    try:
+        # Write a voice-type outbox message pointing to the OGG file.
+        # The Telegram bot's outbox handler reads this and calls bot.send_voice().
+        import time as _time
+        reply_id = f"{int(_time.time() * 1000)}_telegram_voice"
+        reply_data = {
+            "id": reply_id,
+            "source": "telegram",
+            "chat_id": chat_id,
+            "type": "voice",
+            "voice_path": str(ogg_path),
+            "text": text,  # kept as fallback caption / for sent-messages history
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        outbox_file = OUTBOX_DIR / f"{reply_id}.json"
+        atomic_write_json(outbox_file, reply_data)
+        # Save to sent directory for conversation history
+        sent_file = SENT_DIR / f"{reply_id}.json"
+        atomic_write_json(sent_file, reply_data)
+
+        log.info(f"send_voice_note: queued voice note to {chat_id} ({ogg_path})")
+        return [TextContent(type="text", text=f"Voice note queued for delivery to chat {chat_id}.")]
+    except Exception as e:
+        log.error(f"send_voice_note: failed to queue voice note ({e}) — falling back to text")
+        tts_result.cleanup()
+        return await handle_send_reply({"chat_id": chat_id, "text": text, "source": source})
 
 
 # =============================================================================
@@ -5007,379 +6841,191 @@ async def handle_fetch_page(args: dict) -> list[TextContent]:
 
 
 # =============================================================================
-# Scheduled Jobs Handlers
+# Scheduled Jobs Handlers (systemd timer backend)
 # =============================================================================
 
-import subprocess
-
-
-def load_scheduled_jobs() -> dict:
-    """Load scheduled jobs from file."""
-    try:
-        with open(SCHEDULED_JOBS_FILE, "r") as f:
-            return json.load(f)
-    except:
-        return {"jobs": {}}
-
-
-def save_scheduled_jobs(data: dict) -> None:
-    """Save scheduled jobs to file atomically (crash-safe)."""
-    atomic_write_json(SCHEDULED_JOBS_FILE, data)
-
-
-def validate_cron_schedule(schedule: str) -> tuple[bool, str]:
-    """Validate a cron schedule expression. Returns (is_valid, error_message)."""
-    parts = schedule.strip().split()
-    if len(parts) != 5:
-        return False, f"Cron schedule must have 5 parts (minute hour day month weekday), got {len(parts)}"
-
-    # Basic validation for each field
-    field_names = ["minute", "hour", "day", "month", "weekday"]
-    field_ranges = [(0, 59), (0, 23), (1, 31), (1, 12), (0, 7)]
-
-    for i, (part, name, (min_val, max_val)) in enumerate(zip(parts, field_names, field_ranges)):
-        # Allow *, */n, n, n-m, n,m,o patterns
-        if part == "*":
-            continue
-        if part.startswith("*/"):
-            try:
-                step = int(part[2:])
-                if step < 1:
-                    return False, f"Invalid step value in {name}: {part}"
-            except ValueError:
-                return False, f"Invalid step value in {name}: {part}"
-            continue
-
-        # Handle comma-separated values and ranges
-        for subpart in part.split(","):
-            if "-" in subpart:
-                try:
-                    start, end = subpart.split("-")
-                    start, end = int(start), int(end)
-                    if not (min_val <= start <= max_val and min_val <= end <= max_val):
-                        return False, f"Range out of bounds in {name}: {subpart}"
-                except ValueError:
-                    return False, f"Invalid range in {name}: {subpart}"
-            else:
-                try:
-                    val = int(subpart)
-                    if not (min_val <= val <= max_val):
-                        return False, f"Value out of range in {name}: {val} (must be {min_val}-{max_val})"
-                except ValueError:
-                    return False, f"Invalid value in {name}: {subpart}"
-
-    return True, ""
-
-
-def cron_to_human(schedule: str) -> str:
-    """Convert cron schedule to human-readable format."""
-    parts = schedule.strip().split()
-    if len(parts) != 5:
-        return schedule
-
-    minute, hour, day, month, weekday = parts
-
-    # Common patterns
-    if schedule == "* * * * *":
-        return "Every minute"
-    if minute.startswith("*/"):
-        mins = minute[2:]
-        if hour == "*" and day == "*" and month == "*" and weekday == "*":
-            return f"Every {mins} minutes"
-    if hour.startswith("*/"):
-        hrs = hour[2:]
-        if minute == "0" and day == "*" and month == "*" and weekday == "*":
-            return f"Every {hrs} hours"
-    if day == "*" and month == "*" and weekday == "*":
-        if minute != "*" and hour != "*":
-            return f"Daily at {hour}:{minute.zfill(2)}"
-    if weekday != "*" and day == "*" and month == "*":
-        days = {"0": "Sun", "1": "Mon", "2": "Tue", "3": "Wed", "4": "Thu", "5": "Fri", "6": "Sat", "7": "Sun"}
-        day_name = days.get(weekday, weekday)
-        if minute != "*" and hour != "*":
-            return f"Every {day_name} at {hour}:{minute.zfill(2)}"
-
-    return schedule
-
-
-def validate_job_name(name: str) -> tuple[bool, str]:
-    """Validate a job name. Returns (is_valid, error_message)."""
-    if not name:
-        return False, "Job name cannot be empty"
-    if not re.match(r'^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$', name):
-        return False, "Job name must be lowercase alphanumeric with hyphens, cannot start/end with hyphen"
-    if len(name) > 50:
-        return False, "Job name must be 50 characters or less"
-    return True, ""
-
-
-def sync_crontab() -> tuple[bool, str]:
-    """Sync jobs.json to crontab. Returns (success, message)."""
-    sync_script = _REPO_DIR / "scheduled-tasks" / "sync-crontab.sh"
-    try:
-        result = subprocess.run(
-            [str(sync_script)],
-            capture_output=True,
-            text=True,
-            timeout=10
-        )
-        if result.returncode == 0:
-            return True, result.stdout
-        else:
-            return False, result.stderr or "Sync failed"
-    except subprocess.TimeoutExpired:
-        return False, "Sync script timed out"
-    except Exception as e:
-        return False, str(e)
+from systemd_jobs import (
+    validate_name as _sj_validate_name,
+    validate_command as _sj_validate_command,
+    validate_schedule as _sj_validate_schedule,
+    normalize_schedule as _sj_normalize_schedule,
+    create_job as _sj_create_job,
+    list_jobs as _sj_list_jobs,
+    update_job as _sj_update_job,
+    delete_job as _sj_delete_job,
+    get_scaffold as _sj_get_scaffold,
+    _timer_path as _sj_timer_path,
+    _service_path as _sj_service_path,
+    _read_unit_field as _sj_read_unit_field,
+    _is_lobster_unit as _sj_is_lobster_unit,
+)
 
 
 async def handle_create_scheduled_job(args: dict) -> list[TextContent]:
-    """Create a new scheduled job."""
+    """Create a new systemd-timer-backed scheduled job."""
     name = args.get("name", "").strip().lower()
     schedule = args.get("schedule", "").strip()
-    context = args.get("context", "").strip()
+    command = args.get("command", "").strip()
+    description = args.get("description", "").strip()
 
-    # Validate name
-    valid, error = validate_job_name(name)
-    if not valid:
-        return [TextContent(type="text", text=f"Error: {error}")]
+    err = _sj_validate_name(name)
+    if err:
+        return [TextContent(type="text", text=f"Error: {err}")]
 
-    # Validate schedule
-    valid, error = validate_cron_schedule(schedule)
-    if not valid:
-        return [TextContent(type="text", text=f"Error: Invalid cron schedule - {error}")]
+    # Normalize converts cron expressions and validates via systemd-analyze
+    schedule, err = _sj_normalize_schedule(schedule)
+    if err:
+        return [TextContent(type="text", text=f"Error: {err}")]
 
-    if not context:
-        return [TextContent(type="text", text="Error: context is required")]
+    err = _sj_validate_command(command)
+    if err:
+        return [TextContent(type="text", text=f"Error: {err}")]
 
-    # Check if job already exists
-    data = load_scheduled_jobs()
-    if name in data.get("jobs", {}):
-        return [TextContent(type="text", text=f"Error: Job '{name}' already exists. Use update_scheduled_job to modify it.")]
+    try:
+        result = await _sj_create_job(name, schedule, command, description)
+    except Exception as exc:
+        return [TextContent(type="text", text=f"Error creating job '{name}': {exc}")]
 
-    # Create task markdown file
-    now = datetime.now(timezone.utc)
-    task_file = SCHEDULED_TASKS_TASKS_DIR / f"{name}.md"
-    schedule_human = cron_to_human(schedule)
+    if result.status == "already_exists":
+        return [TextContent(type="text", text=f"Job '{name}' already exists with the same schedule and command (no changes made).")]
 
-    task_content = f"""# {name.replace('-', ' ').title()}
-
-**Job**: {name}
-**Schedule**: {schedule_human} (`{schedule}`)
-**Created**: {_format_display_ts(now)}
-
-## Context
-
-You are running as a scheduled task. The main Lobster instance created this job.
-
-## Instructions
-
-{context}
-
-## Output
-
-When you complete your task, call `write_task_output` with:
-- job_name: "{name}"
-- output: Your results/summary
-- status: "success" or "failed"
-
-Keep output concise. The main Lobster instance will review this later.
-"""
-
-    task_file.write_text(task_content)
-
-    # Add to jobs.json
-    data["jobs"][name] = {
-        "name": name,
-        "schedule": schedule,
-        "schedule_human": schedule_human,
-        "task_file": f"tasks/{name}.md",
-        "created_at": now.isoformat(),
-        "updated_at": now.isoformat(),
-        "enabled": True,
-        "last_run": None,
-        "last_status": None,
-    }
-    save_scheduled_jobs(data)
-
-    # Sync to crontab
-    success, msg = sync_crontab()
-    if not success:
-        return [TextContent(type="text", text=f"Job created but crontab sync failed: {msg}")]
-
-    return [TextContent(type="text", text=f"Created scheduled job '{name}'\nSchedule: {schedule_human} (`{schedule}`)\nTask file: {task_file}")]
+    return [TextContent(type="text", text=(
+        f"Created scheduled job '{name}'\n"
+        f"Schedule: {schedule}\n"
+        f"Command: {command}\n"
+        f"Timer: /etc/systemd/system/lobster-{name}.timer\n"
+        f"Service: /etc/systemd/system/lobster-{name}.service"
+    ))]
 
 
 async def handle_list_scheduled_jobs(args: dict) -> list[TextContent]:
-    """List all scheduled jobs."""
-    data = load_scheduled_jobs()
-    jobs = data.get("jobs", {})
+    """List all lobster-managed systemd timer jobs."""
+    try:
+        jobs = await _sj_list_jobs()
+    except Exception as exc:
+        return [TextContent(type="text", text=f"Error listing jobs: {exc}")]
 
     if not jobs:
-        return [TextContent(type="text", text="No scheduled jobs configured.\n\nUse `create_scheduled_job` to create one.")]
+        return [TextContent(type="text", text="No lobster-managed scheduled jobs found.\n\nUse `create_scheduled_job` to create one.")]
 
-    output = "**Scheduled Jobs:**\n\n"
+    lines = ["**Scheduled Jobs:**\n"]
+    for job in sorted(jobs, key=lambda j: j.name):
+        status = "active" if job.active else "inactive"
+        lines.append(f"**{job.name}** ({status})")
+        lines.append(f"  Schedule: {job.schedule}")
+        lines.append(f"  Command: {job.command}")
+        lines.append(f"  Last run: {job.last_run or 'never'}")
+        lines.append(f"  Next run: {job.next_run or 'unknown'}")
+        lines.append("")
 
-    for name, job in sorted(jobs.items()):
-        status_icon = "" if job.get("enabled", True) else " (disabled)"
-        schedule = job.get("schedule_human", job.get("schedule", ""))
-        last_run = job.get("last_run", "never")
-        last_status = job.get("last_status", "-")
-
-        if last_run and last_run != "never":
-            try:
-                last_run = _format_iso_for_display(last_run, "%Y-%m-%d %I:%M %p %Z")
-            except:
-                pass
-
-        output += f"**{name}**{status_icon}\n"
-        output += f"  Schedule: {schedule}\n"
-        output += f"  Last run: {last_run} ({last_status})\n\n"
-
-    output += f"---\nTotal: {len(jobs)} job(s)"
-    return [TextContent(type="text", text=output)]
+    lines.append(f"---\nTotal: {len(jobs)} job(s)")
+    return [TextContent(type="text", text="\n".join(lines))]
 
 
 async def handle_get_scheduled_job(args: dict) -> list[TextContent]:
-    """Get details of a scheduled job."""
+    """Get details of a specific lobster-managed systemd timer job."""
     name = args.get("name", "").strip().lower()
 
     if not name:
         return [TextContent(type="text", text="Error: name is required")]
 
-    data = load_scheduled_jobs()
-    job = data.get("jobs", {}).get(name)
+    timer = _sj_timer_path(name)
+    service = _sj_service_path(name)
 
-    if not job:
+    if not timer.exists() or not _sj_is_lobster_unit(timer):
         return [TextContent(type="text", text=f"Error: Job '{name}' not found")]
 
-    # Read task file content
-    task_file = SCHEDULED_TASKS_TASKS_DIR / f"{name}.md"
-    task_content = ""
-    if task_file.exists():
-        task_content = task_file.read_text()
-
-    _fmt = "%Y-%m-%d %I:%M %p %Z"
-    created_disp = _format_iso_for_display(job.get("created_at", ""), _fmt) if job.get("created_at") else "N/A"
-    updated_disp = _format_iso_for_display(job.get("updated_at", ""), _fmt) if job.get("updated_at") else "N/A"
-    last_run_raw = job.get("last_run") or ""
-    last_run_disp = _format_iso_for_display(last_run_raw, _fmt) if last_run_raw else "never"
+    schedule = _sj_read_unit_field(timer, "OnCalendar") or "(unknown)"
+    command = _sj_read_unit_field(service, "ExecStart") or "(unknown)"
 
     output = f"**Job: {name}**\n\n"
-    output += f"**Schedule**: {job.get('schedule_human', '')} (`{job.get('schedule', '')}`)\n"
-    output += f"**Enabled**: {'Yes' if job.get('enabled', True) else 'No'}\n"
-    output += f"**Created**: {created_disp}\n"
-    output += f"**Updated**: {updated_disp}\n"
-    output += f"**Last Run**: {last_run_disp}\n"
-    output += f"**Last Status**: {job.get('last_status', '-')}\n\n"
-    output += f"---\n\n**Task File** (`{task_file}`):\n\n```markdown\n{task_content}\n```"
+    output += f"**Schedule**: {schedule}\n"
+    output += f"**Command**: {command}\n"
+    output += f"**Timer unit**: /etc/systemd/system/lobster-{name}.timer\n"
+    output += f"**Service unit**: /etc/systemd/system/lobster-{name}.service\n\n"
+    output += "---\n\n**Timer unit contents:**\n\n```ini\n"
+    try:
+        output += timer.read_text()
+    except OSError:
+        output += "(unable to read)"
+    output += "\n```\n\n**Service unit contents:**\n\n```ini\n"
+    try:
+        output += service.read_text()
+    except OSError:
+        output += "(unable to read)"
+    output += "\n```"
 
     return [TextContent(type="text", text=output)]
 
 
 async def handle_update_scheduled_job(args: dict) -> list[TextContent]:
-    """Update a scheduled job."""
+    """Update schedule, command, and/or enabled state for an existing lobster job."""
     name = args.get("name", "").strip().lower()
 
     if not name:
         return [TextContent(type="text", text="Error: name is required")]
 
-    data = load_scheduled_jobs()
-    job = data.get("jobs", {}).get(name)
+    schedule = args.get("schedule", "").strip() or None
+    command = args.get("command", "").strip() or None
+    enabled_raw = args.get("enabled")
+    enabled = None  # type: bool | None
+    if enabled_raw is not None:
+        if isinstance(enabled_raw, bool):
+            enabled = enabled_raw
+        elif isinstance(enabled_raw, str):
+            enabled = enabled_raw.lower() not in ("false", "0", "no")
 
-    if not job:
-        return [TextContent(type="text", text=f"Error: Job '{name}' not found")]
+    if schedule is not None:
+        # Normalize converts cron expressions and validates via systemd-analyze
+        schedule, err = _sj_normalize_schedule(schedule)
+        if err:
+            return [TextContent(type="text", text=f"Error: {err}")]
 
-    updated = []
+    if command is not None:
+        err = _sj_validate_command(command)
+        if err:
+            return [TextContent(type="text", text=f"Error: {err}")]
 
-    # Update schedule if provided
-    if "schedule" in args and args["schedule"]:
-        new_schedule = args["schedule"].strip()
-        valid, error = validate_cron_schedule(new_schedule)
-        if not valid:
-            return [TextContent(type="text", text=f"Error: Invalid cron schedule - {error}")]
-        job["schedule"] = new_schedule
-        job["schedule_human"] = cron_to_human(new_schedule)
-        updated.append(f"schedule -> {new_schedule}")
+    try:
+        result = await _sj_update_job(name, schedule=schedule, command=command, enabled=enabled)
+    except FileNotFoundError as exc:
+        return [TextContent(type="text", text=f"Error: {exc}")]
+    except Exception as exc:
+        return [TextContent(type="text", text=f"Error updating job '{name}': {exc}")]
 
-    # Update enabled if provided
-    if "enabled" in args:
-        job["enabled"] = bool(args["enabled"])
-        updated.append(f"enabled -> {job['enabled']}")
+    if not result.updated_fields:
+        return [TextContent(type="text", text="No changes specified. Provide schedule, command, or enabled.")]
 
-    # Update context if provided
-    if "context" in args and args["context"]:
-        new_context = args["context"].strip()
-        task_file = SCHEDULED_TASKS_TASKS_DIR / f"{name}.md"
-
-        # Rewrite task file
-        now = datetime.now(timezone.utc)
-        created_disp = _format_iso_for_display(job.get("created_at", "")) if job.get("created_at") else "N/A"
-        task_content = f"""# {name.replace('-', ' ').title()}
-
-**Job**: {name}
-**Schedule**: {job.get('schedule_human', '')} (`{job.get('schedule', '')}`)
-**Created**: {created_disp}
-**Updated**: {_format_display_ts(now)}
-
-## Context
-
-You are running as a scheduled task. The main Lobster instance created this job.
-
-## Instructions
-
-{new_context}
-
-## Output
-
-When you complete your task, call `write_task_output` with:
-- job_name: "{name}"
-- output: Your results/summary
-- status: "success" or "failed"
-
-Keep output concise. The main Lobster instance will review this later.
-"""
-        task_file.write_text(task_content)
-        updated.append("context (task file rewritten)")
-
-    if not updated:
-        return [TextContent(type="text", text="No changes specified. Provide schedule, context, or enabled.")]
-
-    job["updated_at"] = datetime.now(timezone.utc).isoformat()
-    save_scheduled_jobs(data)
-
-    # Sync to crontab
-    success, msg = sync_crontab()
-    sync_status = "" if success else f"\n(Warning: crontab sync failed: {msg})"
-
-    return [TextContent(type="text", text=f"Updated job '{name}':\n- " + "\n- ".join(updated) + sync_status)]
+    return [TextContent(type="text", text=(
+        f"Updated job '{name}':\n- " + "\n- ".join(result.updated_fields)
+    ))]
 
 
 async def handle_delete_scheduled_job(args: dict) -> list[TextContent]:
-    """Delete a scheduled job."""
+    """Delete a lobster-managed systemd timer job."""
     name = args.get("name", "").strip().lower()
 
     if not name:
         return [TextContent(type="text", text="Error: name is required")]
 
-    data = load_scheduled_jobs()
-    if name not in data.get("jobs", {}):
-        return [TextContent(type="text", text=f"Error: Job '{name}' not found")]
+    try:
+        result = await _sj_delete_job(name)
+    except PermissionError as exc:
+        return [TextContent(type="text", text=f"Error: {exc}")]
+    except Exception as exc:
+        return [TextContent(type="text", text=f"Error deleting job '{name}': {exc}")]
 
-    # Remove from jobs.json
-    del data["jobs"][name]
-    save_scheduled_jobs(data)
+    if result.status == "not_found":
+        return [TextContent(type="text", text=f"Job '{name}' not found (nothing to delete).")]
 
-    # Delete task file
-    task_file = SCHEDULED_TASKS_TASKS_DIR / f"{name}.md"
-    if task_file.exists():
-        task_file.unlink()
+    return [TextContent(type="text", text=f"Deleted job '{name}' (timer stopped, disabled, unit files removed).")]
 
-    # Sync to crontab
-    success, msg = sync_crontab()
-    sync_status = "" if success else f"\n(Warning: crontab sync failed: {msg})"
 
-    return [TextContent(type="text", text=f"Deleted job '{name}'" + sync_status)]
+async def handle_get_job_scaffold(args: dict) -> list[TextContent]:
+    """Return a starter script template for a lobster scheduled job."""
+    kind = args.get("kind", "poller").strip() or "poller"
+    content = _sj_get_scaffold(kind)
+    return [TextContent(type="text", text=f"**Job scaffold ({kind}):**\n\n```python\n{content}\n```")]
 
 
 async def handle_check_task_outputs(args: dict) -> list[TextContent]:
@@ -5388,8 +7034,12 @@ async def handle_check_task_outputs(args: dict) -> list[TextContent]:
     limit = args.get("limit", 10)
     job_name_filter = args.get("job_name", "").strip().lower()
 
-    # Get all output files
-    output_files = sorted(TASK_OUTPUTS_DIR.glob("*.json"), reverse=True)
+    # Get all output files, sorted by mtime descending (newest first).
+    # Sorting by filename is unreliable: non-date-prefixed files (e.g. old
+    # write_result artifacts) sort lexicographically ahead of date-prefixed
+    # write_task_output files and would dominate every result page.
+    all_files = list(TASK_OUTPUTS_DIR.glob("*.json"))
+    output_files = sorted(all_files, key=lambda p: p.stat().st_mtime, reverse=True)
 
     if not output_files:
         return [TextContent(type="text", text="No task outputs yet.\n\nOutputs will appear here when scheduled jobs complete.")]
@@ -5399,7 +7049,7 @@ async def handle_check_task_outputs(args: dict) -> list[TextContent]:
     if since:
         try:
             since_dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
-        except:
+        except (ValueError, TypeError):
             pass
 
     for f in output_files:
@@ -5409,6 +7059,13 @@ async def handle_check_task_outputs(args: dict) -> list[TextContent]:
         try:
             with open(f) as fp:
                 data = json.load(fp)
+
+            # Skip files that are not write_task_output records.  The task-outputs
+            # directory may contain stale write_result artifacts (schema: task_id/text)
+            # from an older code path.  These have no job_name or output fields and
+            # would render as "unknown" / "(no output)".  Silently skip them.
+            if "job_name" not in data:
+                continue
 
             # Filter by job name
             if job_name_filter and data.get("job_name", "").lower() != job_name_filter:
@@ -5420,7 +7077,7 @@ async def handle_check_task_outputs(args: dict) -> list[TextContent]:
                     output_dt = datetime.fromisoformat(data.get("timestamp", "").replace("Z", "+00:00"))
                     if output_dt < since_dt:
                         continue
-                except:
+                except (ValueError, TypeError):
                     pass
 
             data["_filename"] = f.name
@@ -5452,7 +7109,7 @@ async def handle_check_task_outputs(args: dict) -> list[TextContent]:
         # Format timestamp nicely in owner's local timezone
         try:
             ts = _format_iso_for_display(ts, "%Y-%m-%d %I:%M %p %Z")
-        except:
+        except (ValueError, TypeError):
             pass
 
         result += f"---\n"
@@ -5489,6 +7146,13 @@ async def handle_write_task_output(args: dict) -> list[TextContent]:
     output_file = TASK_OUTPUTS_DIR / f"{timestamp_str}-{job_name}.json"
     with open(output_file, "w") as f:
         json.dump(output_data, f, indent=2)
+
+    # Emit job.completed to EventBus for audit trail (issue #1352).
+    _emit_mcp_event(
+        "job.completed",
+        {"job_name": job_name, "status": status, "output_len": len(output)},
+        severity="warn" if status == "failed" else "info",
+    )
 
     return [TextContent(type="text", text=f"Output recorded for job '{job_name}'")]
 
@@ -5606,16 +7270,21 @@ async def handle_write_result(args: dict) -> list[TextContent]:
             result_summary=(text[:200] if text else None),
             stop_reason="end_turn",
         )
+        # Mark notified immediately so the reconciler's startup sweep does not
+        # re-enqueue this session on the next MCP restart.  The startup sweep
+        # queries for completed/dead rows where notified_at IS NULL — leaving it
+        # NULL here is what caused the April 4 flood (issue #1432).
+        _session_store.set_notified(task_id)
     except Exception as exc:
         log.warning(f"write_result auto-unregister failed for task_id={task_id!r}: {exc}")
 
     # Notify wire server so SSE clients update within 40ms
     asyncio.create_task(_notify_wire_server())
 
-    # Debug alert: enqueue best-effort inbox message when LOBSTER_DEBUG=true.
+    # Debug alert: emit bus event when LOBSTER_DEBUG=true.
     # Fires at the MCP layer (before the dispatcher picks up the inbox message)
     # so the user sees the subagent message arrive in real time.
-    # _emit_debug_observation is a no-op when debug alerts are disabled — single gate.
+    # system_context events are suppressed by TelegramOutboxListener — bus gate.
     agent_id = args.get("agent_id", "").strip() or None
     alert_lines = [
         f"\U0001f4e8 [subagent\u2192dispatcher] type: {msg_type}",
@@ -5626,11 +7295,13 @@ async def handle_write_result(args: dict) -> list[TextContent]:
     if status:
         alert_lines.append(f"status: {status}")
     alert_lines.append(f"sent_reply: {bool(sent_reply_to_user)}")
-    _emit_debug_observation(
+    _emit_event(
         "\n".join(alert_lines),
-        category="system_context",
-        visibility="mcp-only",
+        event_type="agent.write_result",
+        severity="debug",
+        source="write-result",
         emitter=f"task:{task_id}",
+        task_id=task_id,
     )
 
     log.info(f"Subagent result queued in inbox: task_id={task_id} status={status} chat_id={chat_id}")
@@ -5732,18 +7403,18 @@ async def handle_write_observation(args: dict) -> list[TextContent]:
         except OSError as exc:
             log.warning(f"Failed to write observation to {obs_log}: {exc}")
 
-    # When LOBSTER_DEBUG=true, also enqueue a debug inbox message so the user
-    # sees what the dispatcher sees in real time. This is additive — the inbox
-    # write above always happens first regardless of debug mode.
-    # Visibility is "mcp-only": this fires at the MCP layer before the dispatcher
-    # picks up the inbox message, so the dispatcher has not yet seen it.
-    #
-    # system_context observations are internal routing decisions — never forward
-    # to Telegram (noisy, not actionable). Only system_error warrants real-time
-    # visibility; user_context is also forwarded as it may affect dispatcher behavior.
+    # When LOBSTER_DEBUG=true, emit a direct debug observation for non-system_context
+    # categories so the user sees the observation arrive in real time.
+    # system_context is suppressed (internal bookkeeping only).
+    # This is additive: the inbox write above always happens regardless of debug mode.
+    emitter = f"task:{task_id}" if task_id else "unknown"
     if _DEBUG_MODE and category != "system_context":
-        emitter = f"task:{task_id}" if task_id else "unknown"
-        _emit_debug_observation(text, category=category, visibility="mcp-only", emitter=emitter)
+        _emit_debug_observation(
+            text,
+            category=category,
+            visibility="mcp-only",
+            emitter=emitter,
+        )
 
     log.info(
         f"Subagent observation queued in inbox: category={category} chat_id={chat_id}"
@@ -5774,6 +7445,8 @@ async def handle_register_agent(args: dict) -> list[TextContent]:
     source = (args.get("source") or "telegram").strip() or "telegram"
     output_file = args.get("output_file") or None
     timeout_minutes = args.get("timeout_minutes") or None
+    idempotency = args.get("idempotency") or None
+    task_origin = args.get("task_origin") or None
 
     if not agent_id:
         return [TextContent(type="text", text="Error: agent_id is required")]
@@ -5804,12 +7477,21 @@ async def handle_register_agent(args: dict) -> list[TextContent]:
             source=source,
             output_file=output_file,
             timeout_minutes=timeout_minutes,
+            idempotency=idempotency,
+            task_origin=task_origin,
         )
     except Exception as exc:
         log.error(f"register_agent failed: {exc}", exc_info=True)
         return [TextContent(type="text", text=f"Error recording agent: {exc}")]
 
     log.info(f"Registered pending agent: agent_id={agent_id!r} chat_id={chat_id_int}")
+    _emit_event(
+        text=f"agent.spawn: agent_id={agent_id!r} description={description!r}",
+        event_type="agent.spawn",
+        severity="info",
+        task_id=task_id,
+        chat_id=chat_id_int,
+    )
     return [TextContent(
         type="text",
         text=f"Agent registered: {agent_id!r} — {description}",
@@ -5833,6 +7515,11 @@ async def handle_unregister_agent(args: dict) -> list[TextContent]:
         return [TextContent(type="text", text=f"Error removing agent: {exc}")]
 
     log.info(f"Unregistered pending agent: agent_id={agent_id!r}")
+    _emit_event(
+        text=f"agent.complete: agent_id={agent_id!r} status=completed",
+        event_type="agent.complete",
+        severity="info",
+    )
     return [TextContent(
         type="text",
         text=f"Agent unregistered: {agent_id!r}",
@@ -5863,6 +7550,9 @@ async def handle_session_start(args: dict) -> list[TextContent]:
     input_summary = args.get("input_summary") or None
     trigger_message_id = args.get("trigger_message_id") or None
     trigger_snippet = args.get("trigger_snippet") or None
+    idempotency = args.get("idempotency") or None
+    task_origin = args.get("task_origin") or None
+    claude_session_id = (args.get("claude_session_id") or "").strip() or None
 
     if not agent_id:
         return [TextContent(type="text", text="Error: agent_id is required")]
@@ -5891,12 +7581,40 @@ async def handle_session_start(args: dict) -> list[TextContent]:
             input_summary=input_summary,
             trigger_message_id=trigger_message_id,
             trigger_snippet=trigger_snippet,
+            idempotency=idempotency,
+            task_origin=task_origin,
         )
     except Exception as exc:
         log.error(f"session_start failed: {exc}", exc_info=True)
         return [TextContent(type="text", text=f"Error starting session: {exc}")]
 
     log.info(f"Session started: agent_id={agent_id!r} agent_type={agent_type!r} chat_id={chat_id}")
+    _emit_event(
+        text=f"agent.spawn: agent_id={agent_id!r} agent_type={agent_type!r} description={description!r}",
+        event_type="agent.spawn",
+        severity="info",
+        task_id=task_id,
+        chat_id=chat_id if isinstance(chat_id, (int, str)) else None,
+    )
+
+    # Option B: explicit dispatcher declaration.
+    # If the caller declares itself as the dispatcher, tag its MCP session ID
+    # immediately.  This is more robust than Option A (tag-on-first-use via
+    # wait_for_messages) because it fires during session_start, before any
+    # guarded tools are called.  Both options coexist; whichever fires first wins.
+    if agent_type == "dispatcher" and _http_session_manager is not None:
+        http_session_id = _get_current_http_session_id()
+        if http_session_id is not None:
+            _tag_dispatcher_session(http_session_id)
+
+    # Write the Claude session UUID when the dispatcher provides it.
+    # SessionStart hooks receive the Claude UUID (hook_input["session_id"]),
+    # which is a different ID space from the HTTP transport session ID written
+    # above by _tag_dispatcher_session().  Having a dedicated file for the
+    # Claude UUID allows hooks to match correctly without any ID-format conversion.
+    if agent_type == "dispatcher" and claude_session_id:
+        _write_dispatcher_claude_session_file(claude_session_id)
+
     # Notify wire server so SSE clients update within 40ms
     asyncio.create_task(_notify_wire_server())
     return [TextContent(
@@ -5932,6 +7650,11 @@ async def handle_session_end(args: dict) -> list[TextContent]:
         return [TextContent(type="text", text=f"Error ending session: {exc}")]
 
     log.info(f"Session ended: agent_id={agent_id!r} status={status!r}")
+    _emit_event(
+        text=f"agent.complete: agent_id={agent_id!r} status={status!r}",
+        event_type="agent.complete",
+        severity="info" if status == "completed" else "warn",
+    )
     # Notify wire server so SSE clients update within 40ms
     asyncio.create_task(_notify_wire_server())
     return [TextContent(
@@ -5943,7 +7666,8 @@ async def handle_session_end(args: dict) -> list[TextContent]:
 async def handle_get_active_sessions(args: dict) -> list[TextContent]:
     """Return all currently running agent sessions from the SQLite store."""
     try:
-        sessions = _session_store.get_active_sessions()
+        chat_id = args.get("chat_id")
+        sessions = _session_store.get_active_sessions(chat_id=chat_id)
     except Exception as exc:
         log.error(f"get_active_sessions failed: {exc}", exc_info=True)
         return [TextContent(type="text", text=f"Error querying active sessions: {exc}")]
@@ -6400,6 +8124,11 @@ async def handle_memory_store(arguments: dict[str, Any]) -> list[TextContent]:
     if not content:
         return [TextContent(type="text", text="Error: content is required.")]
 
+    metadata = {"tags": arguments.get("tags", [])}
+    chat_id = arguments.get("chat_id")
+    if chat_id is not None:
+        metadata["source_chat_id"] = chat_id
+
     event = MemoryEvent(
         id=None,
         timestamp=datetime.now(timezone.utc),
@@ -6407,7 +8136,7 @@ async def handle_memory_store(arguments: dict[str, Any]) -> list[TextContent]:
         source=arguments.get("source", "internal"),
         project=arguments.get("project"),
         content=content,
-        metadata={"tags": arguments.get("tags", [])},
+        metadata=metadata,
     )
 
     try:
@@ -6418,17 +8147,19 @@ async def handle_memory_store(arguments: dict[str, Any]) -> list[TextContent]:
         return [TextContent(type="text", text=f"Error storing memory: {e}")]
 
     # Debug alert: best-effort, isolated so a failure here never affects the store result.
-    # _emit_debug_observation is a no-op when debug alerts are disabled — single gate.
+    # system_context events are suppressed by TelegramOutboxListener — no manual gate needed.
     try:
         task_id_label = arguments.get("task_id", "").strip() or "dispatcher"
         content_preview = content[:80] + "…" if len(content) > 80 else content
-        _emit_debug_observation(
+        _emit_event(
             f"\U0001f9e0 [memory write] agent: {task_id_label}\n"
             f"type: {event.type}\n"
             f"content: {content_preview}",
-            category="system_context",
-            visibility="mcp-only",
+            event_type="memory.write",
+            severity="debug",
+            source="memory-store",
             emitter=task_id_label,
+            task_id=task_id_label if task_id_label != "dispatcher" else None,
         )
     except Exception:
         pass
@@ -6454,18 +8185,29 @@ async def handle_memory_search(arguments: dict[str, Any]) -> list[TextContent]:
         log.error(f"memory_search failed: {e}", exc_info=True)
         return [TextContent(type="text", text=f"Error searching memory: {e}")]
 
+    # Post-filter by chat_id if provided (attribution-based filtering)
+    chat_id = arguments.get("chat_id")
+    if chat_id is not None and results:
+        results = [
+            e for e in results
+            if e.metadata.get("source_chat_id") == chat_id
+            or "source_chat_id" not in e.metadata
+        ]
+
     # Debug alert: best-effort, isolated so a failure here never affects the search result.
-    # _emit_debug_observation is a no-op when debug alerts are disabled — single gate.
+    # system_context events are suppressed by TelegramOutboxListener — no manual gate needed.
     try:
         task_id_label = arguments.get("task_id", "").strip() or "dispatcher"
         result_count = len(results) if results else 0
-        _emit_debug_observation(
+        _emit_event(
             f"\U0001f50d [memory read] agent: {task_id_label}\n"
             f"query: {query}\n"
             f"results: {result_count} found",
-            category="system_context",
-            visibility="mcp-only",
+            event_type="memory.search",
+            severity="debug",
+            source="memory-search",
             emitter=task_id_label,
+            task_id=task_id_label if task_id_label != "dispatcher" else None,
         )
     except Exception:
         pass
@@ -6496,6 +8238,15 @@ async def handle_memory_recent(arguments: dict[str, Any]) -> list[TextContent]:
 
     try:
         results = _memory_provider.recent(hours=hours, project=project)
+
+        # Post-filter by chat_id if provided (attribution-based filtering)
+        chat_id = arguments.get("chat_id")
+        if chat_id is not None and results:
+            results = [
+                e for e in results
+                if e.metadata.get("source_chat_id") == chat_id
+                or "source_chat_id" not in e.metadata
+            ]
 
         if not results:
             return [TextContent(type="text", text=f"No events in the last {hours} hours.")]
@@ -6665,6 +8416,17 @@ def _list_project_names() -> list[dict]:
     ]
 
 
+def _list_person_names() -> list[dict]:
+    """Pure helper: list person markdown files under CANONICAL_DIR/people/."""
+    people_dir = CANONICAL_DIR / "people"
+    if not people_dir.exists():
+        return []
+    return [
+        {"name": f.stem, "path": str(f)}
+        for f in sorted(people_dir.glob("*.md"))
+    ]
+
+
 async def handle_get_priorities(arguments: dict[str, Any]) -> list[TextContent]:
     """Return the canonical priorities.md content."""
     try:
@@ -6725,6 +8487,42 @@ async def handle_list_projects(arguments: dict[str, Any]) -> list[TextContent]:
     except Exception as e:
         log.error(f"list_projects failed: {e}", exc_info=True)
         return [TextContent(type="text", text=f"Error listing projects: {e}")]
+
+
+async def handle_get_person_context(arguments: dict[str, Any]) -> list[TextContent]:
+    """Return a specific person's canonical markdown content."""
+    person = arguments.get("person", "")
+    if not person:
+        return [TextContent(type="text", text="Error: person name is required.")]
+
+    # Sanitize: reject path traversal attempts
+    if "/" in person or "\\" in person or ".." in person:
+        return [TextContent(type="text", text="Error: invalid person name.")]
+
+    try:
+        path = CANONICAL_DIR / "people" / f"{person}.md"
+        if path.exists():
+            return [TextContent(type="text", text=path.read_text())]
+        available = [f.stem for f in (CANONICAL_DIR / "people").glob("*.md")] if (CANONICAL_DIR / "people").exists() else []
+        return [TextContent(
+            type="text",
+            text=f"No person file for '{person}'. Available: {', '.join(available) or 'none'}",
+        )]
+    except Exception as e:
+        log.error(f"get_person_context failed: {e}", exc_info=True)
+        return [TextContent(type="text", text=f"Error reading person context: {e}")]
+
+
+async def handle_list_people(arguments: dict[str, Any]) -> list[TextContent]:
+    """List all person files in canonical memory."""
+    try:
+        people = _list_person_names()
+        if not people:
+            return [TextContent(type="text", text="No person files found in canonical memory.")]
+        return [TextContent(type="text", text=json.dumps(people, indent=2))]
+    except Exception as e:
+        log.error(f"list_people failed: {e}", exc_info=True)
+        return [TextContent(type="text", text=f"Error listing people: {e}")]
 
 
 # =============================================================================
@@ -7479,6 +9277,7 @@ def _build_reconciler_message(
     task_id = session.get("task_id") or agent_id
     input_summary = session.get("input_summary")
     output_file = session.get("output_file")
+    session_task_origin = session.get("task_origin") or "user"
 
     elapsed_raw = session.get("elapsed_seconds")
     try:
@@ -7498,6 +9297,7 @@ def _build_reconciler_message(
             "type": "subagent_result",
             "source": session.get("source", "telegram"),
             "chat_id": session.get("chat_id", ""),
+            "task_origin": session_task_origin,
             "text": (
                 f"Agent completed: {description}\n"
                 f"(reconciler-detected via stop_reason=end_turn, {elapsed_min}m elapsed)"
@@ -7514,18 +9314,20 @@ def _build_reconciler_message(
         # escalate to the user, or drop silently. Never relay raw failure noise to
         # the user's Telegram.
         last_output = _read_last_output(output_file)
+        original_chat_id = session.get("chat_id", "")
         return {
             "id": message_id,
             "type": "agent_failed",
             "source": "system",
             "chat_id": 0,
+            "task_origin": "internal",
             "text": (
                 f"Agent failed/disappeared: {description}\n"
                 f"(no output file after {elapsed_min}m — marked dead)"
             ),
             "task_id": task_id,
             "agent_id": agent_id,
-            "original_chat_id": session.get("chat_id", ""),
+            "original_chat_id": original_chat_id,
             "original_prompt": input_summary,
             "last_output": last_output,
             "status": "error",
@@ -7556,6 +9358,31 @@ def _enqueue_reconciler_notification(session: dict, outcome: str) -> None:
     if session.get("notified_at"):
         return
 
+    # Dead sessions with no real user don't need dispatcher action — route to
+    # debug log only, not the inbox. The dispatcher cannot notify a user
+    # (no chat_id) or take any meaningful action. Logging preserves observability.
+    if outcome == "dead":
+        _chat_id = session.get("chat_id")
+        _chat_id_str = str(_chat_id).strip() if _chat_id is not None else ""
+        if _chat_id_str in ("0", "", "None"):
+            _agent_id = session.get("id", "")
+            log.debug(
+                "[reconciler] Dead session %r has no real user (chat_id=%r) — "
+                "skipping inbox notification (logged to debug only)",
+                _agent_id, _chat_id,
+            )
+            # Mark as notified so this session is not re-enqueued on every
+            # restart. The early return skips inbox delivery (intentional —
+            # there is no user to notify), but bookkeeping must still happen.
+            try:
+                _session_store.set_notified(_agent_id)
+            except Exception as _exc:
+                log.error(
+                    "[reconciler] Failed to set_notified for no-user dead session %r: %s",
+                    _agent_id, _exc,
+                )
+            return
+
     agent_id = session.get("id", "")
     now = datetime.now(timezone.utc)
     message = _build_reconciler_message(session, outcome, now)
@@ -7577,6 +9404,27 @@ def _enqueue_reconciler_notification(session: dict, outcome: str) -> None:
         # Do NOT mark notified — next cycle will retry (at-least-once guarantee)
 
 
+def _inbox_already_has_agent(agent_id: str) -> bool:
+    """Return True if any file in the inbox already references agent_id.
+
+    Used by _startup_sweep() as an idempotency guard: if the server crashed
+    after writing the inbox file but before set_notified() was called, the
+    file is already there and re-enqueuing would deliver the notification twice.
+
+    Pure check — reads existing inbox files, no writes.
+    """
+    if not agent_id:
+        return False
+    for path in INBOX_DIR.glob("*.json"):
+        try:
+            data = json.loads(path.read_text())
+            if data.get("agent_id") == agent_id:
+                return True
+        except (OSError, json.JSONDecodeError):
+            continue
+    return False
+
+
 async def _startup_sweep() -> None:
     """Send missed notifications for sessions that completed while server was down.
 
@@ -7588,6 +9436,9 @@ async def _startup_sweep() -> None:
     marking a session completed and writing notified_at, the notification is
     re-sent on the next startup. The at-most-once property is upheld by
     set_notified() being called immediately after enqueueing.
+
+    An additional idempotency guard checks whether an inbox file for the agent
+    already exists (handles the crash-after-write-before-set_notified race).
     """
     try:
         unnotified = _session_store.get_unnotified_completed(since_hours=24)
@@ -7597,6 +9448,14 @@ async def _startup_sweep() -> None:
                 f"completed/dead session(s) — re-enqueuing notifications"
             )
         for session in unnotified:
+            agent_id = session.get("id", "")
+            if _inbox_already_has_agent(agent_id):
+                log.debug(
+                    "[reconciler] Startup sweep: inbox file already exists for "
+                    "agent %r — skipping re-enqueue (idempotency guard)",
+                    agent_id,
+                )
+                continue
             outcome = session.get("status", "completed")
             _enqueue_reconciler_notification(session, outcome=outcome)
     except Exception as exc:
@@ -7642,11 +9501,17 @@ async def reconcile_agent_sessions() -> None:
     that does not exist on this system — and even if fixed, Claude Code places
     output symlinks in project-specific subdirectories, not a flat tasks dir.
     """
-    from agents.session_store import check_output_file_status
+    from agents.session_store import check_output_file_status, get_output_file_mtime
 
     DEFAULT_DEAD_THRESHOLD_SECONDS = 30 * 60   # 30 minutes — fallback for missing output files
     DEFAULT_DEAD_THRESHOLD_RUNNING_SECONDS = 120 * 60  # 120 minutes — fallback for stuck tool_use files
     GRACE_PERIOD_SECONDS = 30          # Newly spawned agents get grace before DEAD
+    # Mtime staleness gate (issue #868): if output file hasn't been written to in
+    # this many seconds, treat the agent as interrupted rather than actively running.
+    # An active agent updates its JSONL output continuously; an interrupted one stops
+    # immediately. 15 minutes gives ample margin to avoid false positives during slow
+    # tool calls, while cutting the misclassification window from 120 min → 30 min.
+    MTIME_STALE_THRESHOLD_SECONDS = 15 * 60    # 15 minutes
 
     # Startup sweep: re-send notifications for sessions that completed while down
     await _startup_sweep()
@@ -7659,6 +9524,18 @@ async def reconcile_agent_sessions() -> None:
             for session in active_sessions:
                 agent_id = session.get("id", "")
                 output_file = session.get("output_file") or ""
+
+                # Issue #781 Fix 2: Skip dispatcher-type sessions entirely.
+                # The SessionStart hook may register the dispatcher itself in
+                # agent_sessions.db with agent_type='dispatcher' (on crash-restart
+                # before the marker file is cleared).  The dispatcher is never a
+                # "dead agent" — never emit agent_failed for it.
+                if (session.get("agent_type") or "") == "dispatcher":
+                    log.debug(
+                        f"[reconciler] Skipping dispatcher session {agent_id!r} "
+                        "(agent_type='dispatcher' — not a subagent)"
+                    )
+                    continue
 
                 # Fix: guard elapsed against None before any numeric comparison
                 elapsed_raw = session.get("elapsed_seconds")
@@ -7734,23 +9611,46 @@ async def reconcile_agent_sessions() -> None:
                             f"elapsed {elapsed}s — within window, waiting"
                         )
                 elif file_status == "running":
-                    # File exists with stop_reason=tool_use. This is normal for live
-                    # agents, but if elapsed exceeds the generous running threshold the
-                    # agent has almost certainly been killed (e.g. mid-restart). The
-                    # startup cleanup handles the common case; this branch catches any
-                    # that slip through (e.g. output file mtime was updated after restart).
-                    if elapsed > dead_threshold_running:
+                    # File exists but no stop_reason=end_turn (either tool_use or
+                    # no stop_reason at all — both return "running" from the scanner).
+                    # This is normal for live agents, but two failure modes land here:
+                    #   1. Agent killed mid-turn (no stop_reason written) — file mtime
+                    #      stops updating immediately; detectable within 15 minutes.
+                    #   2. Legitimately slow tool call — mtime keeps ticking; leave alone.
+                    #
+                    # Mtime gate (issue #868): if the output file has been idle for
+                    # MTIME_STALE_THRESHOLD_SECONDS, use the short threshold (same as
+                    # the "missing file" branch) rather than the generous 120-minute cap.
+                    # This closes the gap where interrupted agents are misclassified as
+                    # "still running" for up to 120 minutes.
+                    output_mtime = get_output_file_mtime(output_file)
+                    now_ts = time.time()
+                    file_is_stale = (
+                        output_mtime is not None
+                        and (now_ts - output_mtime) > MTIME_STALE_THRESHOLD_SECONDS
+                    )
+                    effective_running_threshold = (
+                        dead_threshold_missing if file_is_stale else dead_threshold_running
+                    )
+
+                    if elapsed > effective_running_threshold:
+                        stale_note = (
+                            f", file idle {int(now_ts - output_mtime)}s (mtime gate active)"
+                            if file_is_stale
+                            else ""
+                        )
                         log.warning(
                             f"[reconciler] Agent {agent_id!r} output stuck at tool_use "
-                            f"after {elapsed}s (>{dead_threshold_running}s) "
+                            f"after {elapsed}s (>{effective_running_threshold}s{stale_note}) "
                             f"— marking dead (output_file={output_file!r})"
                         )
                         _session_store.session_end(
                             id_or_task_id=agent_id,
                             status="dead",
                             result_summary=(
-                                f"Auto-closed by reconciler: stop_reason=tool_use "
+                                f"Auto-closed by reconciler: output idle "
                                 f"after {elapsed}s"
+                                + (f" (mtime stale {int(now_ts - output_mtime)}s)" if file_is_stale else "")
                             ),
                         )
                         _enqueue_reconciler_notification(session, outcome="dead")
@@ -7766,6 +9666,24 @@ async def main():
     """Run the MCP server."""
     setup_logging()
     _ensure_observation_worker()
+
+    # Clear the dispatcher state file on startup so a stale session ID from a
+    # previous run cannot linger and mislead hooks into thinking the old session
+    # is still active.  The file is re-written by _tag_dispatcher_session() once
+    # the dispatcher identifies itself via Options A, B, or C.
+    _clear_dispatcher_state_file()
+
+    # Write a session-lost-reminder to the inbox so the dispatcher knows to
+    # re-orient after reconnecting.  Skipped for mid-session MCP reconnects.
+    # See _write_session_lost_reminder() for full rationale.
+    _write_session_lost_reminder()
+
+    # Initialize the event bus singleton with standard listeners.
+    # JsonlFileListener writes all events to logs/events.jsonl.
+    # TelegramOutboxListener delivers debug events to Telegram when LOBSTER_DEBUG=true.
+    # This is a no-op if called more than once (idempotent).
+    from event_bus import init_event_bus
+    init_event_bus()
 
     # Startup cleanup: mark stale 'running' rows as 'dead' before reconciler loop begins.
     # After a force-restart, agents killed mid-run leave their output files with
@@ -7796,8 +9714,98 @@ async def main():
         log.warning(f"[startup] Stale session cleanup failed (non-fatal): {_cleanup_err}")
 
     asyncio.create_task(reconcile_agent_sessions())
-    async with stdio_server() as (read_stream, write_stream):
-        await server.run(read_stream, write_stream, server.create_initialization_options())
+
+    # Transport selection: HTTP (streamable-http) or stdio.
+    #
+    # HTTP mode is activated by --http flag or MCP_TRANSPORT=http env var.
+    # In HTTP mode the server binds to localhost:PORT (default 8766) and
+    # Claude Code connects via "url": "http://localhost:PORT/mcp" in settings.json.
+    # The server process is managed by the lobster-mcp-local systemd service, so
+    # its lifetime is decoupled from the Claude Code process — CC restarts no
+    # longer kill the MCP server.
+    #
+    # stdio mode is the legacy default; it remains available for local dev and
+    # fallback scenarios.
+    use_http = (
+        "--http" in sys.argv
+        or os.environ.get("MCP_TRANSPORT", "").lower() == "http"
+    )
+
+    if use_http:
+        import contextlib
+        import uvicorn
+        from starlette.applications import Starlette
+        from starlette.requests import Request
+        from starlette.responses import Response
+        from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+
+        # Determine port (--port N or MCP_HTTP_PORT env, default 8766)
+        port = int(os.environ.get("MCP_HTTP_PORT", 8766))
+        if "--port" in sys.argv:
+            try:
+                port = int(sys.argv[sys.argv.index("--port") + 1])
+            except (ValueError, IndexError):
+                pass
+
+        session_manager = StreamableHTTPSessionManager(app=server, stateless=False)
+
+        # Publish the session_manager reference so tool handlers (and /dispatcher-session)
+        # can inspect live session state without importing from main().
+        global _http_session_manager
+        _http_session_manager = session_manager
+
+        @contextlib.asynccontextmanager
+        async def _lifespan(app: Starlette):
+            async with session_manager.run():
+                log.info(f"[http-transport] Lobster MCP server listening on http://localhost:{port}/mcp")
+                yield
+
+        async def _mcp_handler(scope, receive, send):
+            request = Request(scope, receive)
+            path = request.url.path
+            if path == "/health":
+                response = Response('{"ok":true}', status_code=200, media_type="application/json")
+                await response(scope, receive, send)
+            elif path == "/mcp":
+                await session_manager.handle_request(scope, receive, send)
+            elif path == "/dispatcher-session":
+                # Returns the currently tagged dispatcher session ID and whether
+                # that session is still active in the session manager.
+                # Used by health checks and the reconciler to verify the dispatcher
+                # is connected.  Returns 200 with JSON payload in all cases;
+                # callers should check the "active" field.
+                dsid = _dispatcher_session_id
+                active = (
+                    dsid is not None
+                    and dsid in getattr(session_manager, "_server_instances", {})
+                )
+                payload = json.dumps({"session_id": dsid, "active": active})
+                response = Response(payload, status_code=200, media_type="application/json")
+                await response(scope, receive, send)
+            else:
+                response = Response("Not Found", status_code=404)
+                await response(scope, receive, send)
+
+        _inner_app = Starlette(lifespan=_lifespan)
+
+        async def _asgi_app(scope, receive, send):
+            if scope["type"] == "lifespan":
+                await _inner_app(scope, receive, send)
+            elif scope["type"] == "http":
+                await _mcp_handler(scope, receive, send)
+
+        config = uvicorn.Config(
+            _asgi_app,
+            host="127.0.0.1",
+            port=port,
+            log_level="warning",
+            access_log=False,
+        )
+        http_server = uvicorn.Server(config)
+        await http_server.serve()
+    else:
+        async with stdio_server() as (read_stream, write_stream):
+            await server.run(read_stream, write_stream, server.create_initialization_options())
 
 
 if __name__ == "__main__":

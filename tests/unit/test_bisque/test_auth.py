@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
-from bisque.auth import TokenStore, handle_auth_exchange
+from bisque.auth import TokenStore, create_bootstrap_token, handle_auth_exchange
 
 
 # =============================================================================
@@ -186,3 +187,146 @@ class TestAuthExchange:
     def test_exchange_empty_token(self, store: TokenStore):
         status, body = handle_auth_exchange({"token": ""}, store)
         assert status == 400
+
+
+# =============================================================================
+# P1.4: Canonical bootstrap token schema (createdAt/expiresAt/used)
+# =============================================================================
+
+
+class TestCanonicalBootstrapSchema:
+    """P1.4: Validate bootstrap token handling against the canonical schema.
+
+    Canonical fields:
+      - email: str
+      - createdAt: ISO 8601 string
+      - expiresAt: ISO 8601 string
+      - used: bool
+    """
+
+    def _make_store(self, tmp_path: Path, token: str, record: dict) -> TokenStore:
+        tf = tmp_path / "tokens.json"
+        tf.write_text(json.dumps({"bootstrapTokens": {token: record}}))
+        return TokenStore(tf)
+
+    def test_canonical_token_valid(self, tmp_path: Path):
+        """A canonical token that is not used and not expired should be accepted."""
+        now = datetime.now(timezone.utc)
+        store = self._make_store(tmp_path, "canonical-1", {
+            "email": "user@example.com",
+            "createdAt": now.isoformat(),
+            "expiresAt": (now + timedelta(hours=24)).isoformat(),
+            "used": False,
+        })
+        valid, email = store.validate_bootstrap_token("canonical-1")
+        assert valid is True
+        assert email == "user@example.com"
+
+    def test_canonical_token_expired(self, tmp_path: Path):
+        """An expired canonical token (expiresAt in the past) should be rejected."""
+        past = datetime.now(timezone.utc) - timedelta(hours=1)
+        store = self._make_store(tmp_path, "expired-1", {
+            "email": "user@example.com",
+            "createdAt": (past - timedelta(hours=1)).isoformat(),
+            "expiresAt": past.isoformat(),
+            "used": False,
+        })
+        valid, _ = store.validate_bootstrap_token("expired-1")
+        assert valid is False
+
+    def test_canonical_token_used_flag(self, tmp_path: Path):
+        """A canonical token with used=True should be rejected."""
+        now = datetime.now(timezone.utc)
+        store = self._make_store(tmp_path, "used-1", {
+            "email": "user@example.com",
+            "createdAt": now.isoformat(),
+            "expiresAt": (now + timedelta(hours=24)).isoformat(),
+            "used": True,
+        })
+        valid, _ = store.validate_bootstrap_token("used-1")
+        assert valid is False
+
+    def test_canonical_token_consumed_on_use(self, tmp_path: Path):
+        """After a successful exchange the token must be removed from the store."""
+        now = datetime.now(timezone.utc)
+        store = self._make_store(tmp_path, "oneuse-1", {
+            "email": "user@example.com",
+            "createdAt": now.isoformat(),
+            "expiresAt": (now + timedelta(hours=24)).isoformat(),
+            "used": False,
+        })
+        valid1, _ = store.validate_bootstrap_token("oneuse-1")
+        assert valid1 is True
+        # Second call must fail — token was consumed
+        valid2, _ = store.validate_bootstrap_token("oneuse-1")
+        assert valid2 is False
+
+    def test_legacy_token_no_expiry_accepted(self, tmp_path: Path):
+        """Legacy tokens without expiresAt should still be accepted (backward compat)."""
+        store = self._make_store(tmp_path, "legacy-1", {
+            "email": "user@example.com",
+            "created_at": time.time(),
+        })
+        valid, email = store.validate_bootstrap_token("legacy-1")
+        assert valid is True
+        assert email == "user@example.com"
+
+    def test_unparseable_expires_at_rejected(self, tmp_path: Path):
+        """A token with a malformed expiresAt should be rejected (security boundary)."""
+        store = self._make_store(tmp_path, "badexp-1", {
+            "email": "user@example.com",
+            "expiresAt": "not-a-date",
+            "used": False,
+        })
+        valid, _ = store.validate_bootstrap_token("badexp-1")
+        assert valid is False
+
+
+# =============================================================================
+# P1.2: create_bootstrap_token writes canonical schema
+# =============================================================================
+
+
+class TestCreateBootstrapToken:
+    def test_creates_token_with_canonical_fields(self, tmp_path: Path):
+        """create_bootstrap_token must write createdAt/expiresAt/used: false."""
+        tf = tmp_path / "tokens.json"
+        tf.write_text("{}")
+        store = TokenStore(tf)
+        token = create_bootstrap_token("writer@example.com", store, ttl_seconds=3600)
+        assert token
+
+        data = json.loads(tf.read_text())
+        record = data["bootstrapTokens"][token]
+        assert record["email"] == "writer@example.com"
+        assert record["used"] is False
+        # Verify fields are parseable ISO strings
+        datetime.fromisoformat(record["createdAt"].replace("Z", "+00:00"))
+        datetime.fromisoformat(record["expiresAt"].replace("Z", "+00:00"))
+
+    def test_created_token_can_be_exchanged(self, tmp_path: Path):
+        """A freshly created bootstrap token should be exchangeable for a session."""
+        tf = tmp_path / "tokens.json"
+        tf.write_text("{}")
+        store = TokenStore(tf)
+        token = create_bootstrap_token("user@example.com", store, ttl_seconds=3600)
+        valid, email = store.validate_bootstrap_token(token)
+        assert valid is True
+        assert email == "user@example.com"
+
+    def test_expires_at_is_in_future(self, tmp_path: Path):
+        """expiresAt must be in the future by approximately the requested TTL."""
+        tf = tmp_path / "tokens.json"
+        tf.write_text("{}")
+        store = TokenStore(tf)
+        before = datetime.now(timezone.utc)
+        token = create_bootstrap_token("ttl@example.com", store, ttl_seconds=7200)
+        after = datetime.now(timezone.utc)
+
+        data = json.loads(tf.read_text())
+        record = data["bootstrapTokens"][token]
+        expires = datetime.fromisoformat(record["expiresAt"].replace("Z", "+00:00"))
+
+        # Should expire between ~2h from before and ~2h+epsilon from after
+        assert expires > before + timedelta(hours=1, minutes=59)
+        assert expires < after + timedelta(hours=2, minutes=1)

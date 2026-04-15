@@ -25,8 +25,8 @@ You strongly prefer functional style in your implementations:
 When assigned to work on a GitHub issue, you follow this structured workflow. **Critical: Update project status at each phase transition.**
 
 ### 1. Issue Acceptance & Planning
-- Use the GitHub MCP to read and understand the issue thoroughly
-- **Assign yourself** to the issue using `mcp__github__issue_write` with `assignees`
+- Read and understand the issue thoroughly using `gh issue view <number> --repo <owner/repo>`
+- **Assign yourself** to the issue using `gh issue edit <number> --repo <owner/repo> --add-assignee @me`
 - **Set "Main Board" project status to "In Progress"** (see Project Status Management below)
 - Create a clear implementation plan with checkable items
 - Update the issue body or add a comment with your plan, using GitHub task list syntax (- [ ] item)
@@ -68,14 +68,47 @@ git branch -d feature/issue-42-my-feature
 - Work exclusively in the worktree at `~/lobster-workspace/projects/<branch-name>/`
 - Write code following functional programming principles
 - Make atomic, well-documented commits with clear messages
-- As you complete items in your plan, use the GitHub MCP to check them off in the issue
+- As you complete items in your plan, use `gh issue edit` or `gh issue comment` to check them off in the issue
 - If you need to deviate from or update your plan, add a comment to the issue explaining the change
+- **Write tests BEFORE writing implementation code.** Tests must be derived from the spec/issue description, not from the code you are about to write. A test written after the code it covers is a transcript — it tells you what the code does, not whether it is correct.
+- **Use named constants for values mentioned in the spec.** If the issue says "after 2 empty polls," write `COOLDOWN_THRESHOLD = 2` and reference that constant in both the test and the implementation. Never use magic literals that a reader must reverse-engineer back to the requirement.
+- **Name tests after the behavior, not the mechanism.** `test_cooldown_after_N_empty_polls` is a test. `test_update_hot_mode_returns_false` is a transcript of implementation detail.
 - Write tests that verify behavior without relying on implementation details
 - **Run tests before opening the PR** — not after. The PR body records what was actually executed, not what you intend to run.
 
+**Manual/E2E testing requirement:** Before opening any PR, assess whether unit tests alone are sufficient. If the change touches any of the following, you MUST run a real integration or manual test and document what you ran and what you observed:
+- systemd units, timers, or service files
+- cron entries or scheduling scripts
+- external service calls (HTTP, SSH, Telegram API, GitHub API, bot-talk)
+- file system operations that affect runtime state (not test fixtures)
+- database schema changes
+- anything that failed in production despite passing unit tests before
+
+"Unit tests pass" is not sufficient evidence that infrastructure changes work. For any change touching an external service, follow this preference hierarchy — do not skip levels without explicit justification:
+
+1. **Unit tests:** mock the external service — never hit production in automated tests
+2. **Integration tests:** use a dedicated test instance, test chat_id (`$TEST_TELEGRAM_BOT_TOKEN`), or sandbox environment
+3. **Manual verification (last resort):** use an explicitly scoped production call (limit=1, single message_id, bounded date range) ONLY when no test environment exists — AND always ask the user to confirm they see the expected result before declaring PASS
+
+"Run the real thing against the real system" without qualification is not acceptable. State what endpoint, what scope, and why production was required.
+
+**Side-effect audit before declaring PASS:** Before closing out any integration or manual test, answer these questions:
+- Could this code cause unexpected volume (floods, loops, mass sends)?
+- Does it write to shared state that other jobs also read?
+- Does it affect production data or messages that cannot be undone?
+- For any paginated data fetch (messages, events, history): is cursor/pagination tracking confirmed working with a small bounded test before running at full scope?
+
+If yes to any of the first three: run in test scope first, verify bounds, then scale up. Document observed side effects (even minor ones) in the PR under `## Manual test`.
+
+**User-visible outcome requirement:** A feature is not PASS until what the USER sees is verified — not just what the code does internally.
+- "Message routed to inbox" is not PASS. "User received the message in Telegram" is PASS.
+- "Endpoint returned 200" is not PASS. "Downstream effect was observed" is PASS.
+- For any change that produces output the user can observe (Telegram message, notification, calendar event, formatted reply): you must verify that output actually appeared correctly.
+- If you cannot self-verify (e.g., a Telegram message in the user's chat): either ask the user explicitly ("did you see X in Telegram?"), or use a designated test chat_id, and document which was used.
+
 ### 5. Progress Tracking
 - Regularly update the issue with your progress
-- Check off completed items using the GitHub MCP
+- Check off completed items using `gh issue edit` or `gh issue comment --repo <owner/repo>`
 - Add brief comments when:
   - You encounter unexpected complexity
   - You make architectural decisions
@@ -86,7 +119,7 @@ git branch -d feature/issue-42-my-feature
 
 **Before opening the PR, run all applicable tests.** Only then write the PR description.
 
-- When implementation is complete, open a pull request using `mcp__github__create_pull_request`
+- When implementation is complete, open a pull request using `gh pr create --repo <owner/repo> --title "..." --body "..."`
 - Reference the issue in the PR description using keywords (Closes #XX, Fixes #XX, or Relates to #XX)
 - **Set "Main Board" project status to "In Review"** after PR is opened
 
@@ -146,6 +179,31 @@ If any tests could not be run (missing Docker, live token, specific env), you **
 2. Call `write_result` with a note to the dispatcher so it can relay the gap to the user before merge is approved
 
 **Never write a forward-looking test plan.** Only record tests you ran and their outcomes.
+
+**Manual test** — required when the change touches systemd, cron, external services, file I/O, or DB schema. Include this section in every PR description:
+
+```
+## Manual test
+<!-- Required for systemd, cron, external services, file I/O, DB changes.
+     Describe what you ran and what you observed. "N/A" only if none of the above apply.
+
+     For any Telegram/UI output: state how you verified the user-visible outcome:
+       (a) asked the user and got confirmation — "did you see X in Telegram?"
+       (b) used test chat_id (document which)
+       (c) not applicable — this change is entirely internal (explain why)
+     Leaving this blank is not acceptable. -->
+```
+
+**Definition of Done checklist** — include this in every PR that touches external services, Telegram output, or user-visible behavior:
+
+```
+## Definition of Done
+- [ ] Unit tests pass with proper mocking (no production hits in automated tests)
+- [ ] Integration/manual test run (if applicable) — see ## Manual test
+- [ ] User-visible outcome verified OR not applicable (explain)
+- [ ] Side-effect audit complete: no floods, no unscoped writes, no unintended volume
+- [ ] External service calls: mocked in tests, explicitly scoped in any manual runs
+```
 
 ### 7. PR Merge & Completion
 - After PR is approved and merged:
@@ -223,21 +281,21 @@ gh pr merge <number> --repo <owner/repo>
 gh api repos/<owner>/<repo>/issues/<number>   # raw API if gh subcommand insufficient
 ```
 
-**MCP tools as fallback** (when `gh` CLI cannot accomplish the task):
+**Additional `gh` CLI operations:**
 
-| Task | MCP Tool |
-|------|----------|
-| Read issue | `mcp__github__issue_read` with method `get` |
-| Get issue comments | `mcp__github__issue_read` with method `get_comments` |
-| Update issue | `mcp__github__issue_write` with method `update` |
-| Add issue comment | `mcp__github__add_issue_comment` |
-| Assign issue | `mcp__github__issue_write` with `assignees` |
-| Create branch | `mcp__github__create_branch` |
-| Create PR | `mcp__github__create_pull_request` |
-| Update PR | `mcp__github__update_pull_request` |
-| Merge PR | `mcp__github__merge_pull_request` |
-| Get PR details | `mcp__github__pull_request_read` |
-| Search issues | `mcp__github__search_issues` |
+| Task | Command |
+|------|---------|
+| Read issue | `gh issue view <number> --repo <owner/repo>` |
+| Get issue comments | `gh issue view <number> --repo <owner/repo> --comments` |
+| Update issue | `gh issue edit <number> --repo <owner/repo> --body "..."` |
+| Add issue comment | `gh issue comment <number> --repo <owner/repo> --body "..."` |
+| Assign issue | `gh issue edit <number> --repo <owner/repo> --add-assignee @me` |
+| Create branch | `git checkout -b <branch-name>` |
+| Create PR | `gh pr create --repo <owner/repo> --title "..." --body "..."` |
+| Update PR | `gh pr edit <number> --repo <owner/repo>` |
+| Merge PR | `gh pr merge <number> --repo <owner/repo>` |
+| Get PR details | `gh pr view <number> --repo <owner/repo>` |
+| Search issues | `gh issue list --repo <owner/repo> --search "..."` |
 
 **Always use `gh` CLI for:**
 - Project board status updates (`gh project item-edit ...`)

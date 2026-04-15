@@ -1,0 +1,121 @@
+# Bot Talk Poller Fast
+
+> **DEPRECATED** — This job is disabled. Hot-mode re-triggering is now handled by
+> `lobstertalk-unified` via a transient `systemd-run` one-shot unit. Do not re-enable
+> without also disabling `lobstertalk-unified`.
+
+**Job**: bot-talk-poller-fast
+**Schedule**: Every 2 minutes (`*/2 * * * *`)
+
+## Context
+
+You are running as a scheduled task. The main Lobster instance created this job.
+
+This is the **fast poller** — it runs every 2 minutes but only does real work when
+`hot_mode=true` in the state file. Bot-talk is strictly inter-Lobster communication
+(messages between Lobster instances only). Owner Telegram messages are NOT bot-talk.
+
+The hourly baseline poller (`bot-talk-poller`) activates hot mode when there is activity;
+this fast poller then keeps up with the conversation in near-real-time.
+
+## Authentication
+
+The bot-talk API requires a shared-secret header on all requests (except /health).
+Read the token using this lookup chain (first non-empty value wins):
+
+1. `~/lobster-workspace/data/bot-talk-token.txt` (legacy token file)
+2. `BOT_TALK_TOKEN` key in `~/messages/config/config.env`
+3. `BOT_TALK_TOKEN` key in `~/lobster-config/config.env`
+
+Include it as:
+
+    X-Bot-Token: <token>
+
+If the token cannot be found via any of the above paths, call write_task_output with status "failed" and exit.
+
+## State File
+
+Read and write `~/lobster-workspace/data/bot-talk-state.json`.
+
+Schema:
+```json
+{
+  "last_message_ts": "2026-01-01T00:00:00Z",
+  "hot_mode": false,
+  "consecutive_empty_polls": 0,
+  "hot_mode_activated_at": null
+}
+```
+
+Always write updated state atomically: write to a `.tmp` file, then rename to the
+final path.
+
+## Direction Fields
+
+Each message in the API response carries a `direction` field:
+- `"INBOUND"` — message received FROM the remote Lobster (needs forwarding to owner)
+- `"OUTBOUND"` — message sent FROM this Lobster to remote (owner already saw it go out)
+
+**This poller only forwards INBOUND messages to the owner.** OUTBOUND messages still
+advance the timestamp cursor but are not shown.
+
+Backwards compatibility: if `direction` is absent, infer from sender:
+- sender == {{LOCAL_LOBSTER_IDENTITY}} → OUTBOUND (skip)
+- otherwise → INBOUND (forward)
+
+## Instructions
+
+1. **Fast-exit if not in hot mode:**
+   - Read `~/lobster-workspace/data/bot-talk-state.json`.
+   - If `hot_mode` is `false` (or file is missing): call write_task_output with
+     status "success" and output "hot_mode=false, skipped". Exit immediately.
+   - Do NOT poll the API or send any Telegram notification in this case.
+
+2. **Poll for new messages:**
+   - Fetch all messages from `{{LOBSTERTALK_HOST}}/messages` with
+     timestamp > `last_message_ts`.
+   - Sort by timestamp ascending (oldest first).
+
+3. **Filter to INBOUND only:**
+   - Only forward messages with `direction="INBOUND"` (or inferred INBOUND).
+   - OUTBOUND messages advance the cursor but are not forwarded.
+
+4. **If INBOUND messages found:**
+   - Format each message as:
+     ```
+     📥 **Inbox** ({sender}): {content}
+     ```
+   - Send a single Telegram notification to the owner (chat_id={{TELEGRAM_CHAT_ID}})
+     with all new INBOUND messages.
+   - Update `last_message_ts` to the latest timestamp across ALL fetched messages
+     (including OUTBOUND — they advance the cursor too).
+   - Reset `consecutive_empty_polls` to 0.
+
+5. **If no new messages (or only OUTBOUND):**
+   - Increment `consecutive_empty_polls`.
+   - If `consecutive_empty_polls >= 5`: set `hot_mode=false`, clear `hot_mode_activated_at`.
+     (Cooling down after 5 consecutive empty fast-polls ≈ 10 minutes of no activity.)
+   - Write updated state file.
+   - Call write_task_output with status "success" and output "no new inbound messages, poll N".
+
+6. Write updated state file (always).
+
+## Timezone
+
+Always display timestamps in **Eastern Time (ET)** — currently EDT (UTC-4). Convert all
+UTC timestamps before including them in any message to the owner.
+
+## Cooldown Behavior
+
+- Fast poller self-cools after 5 consecutive empty polls (`consecutive_empty_polls >= 5`).
+- The hourly baseline poller also resets hot_mode if `consecutive_empty_polls >= 3` at
+  its scheduled run — this is a safety net for the fast poller's cooldown.
+
+## Output
+
+When you complete your task, call `write_task_output` with:
+- job_name: "bot-talk-poller-fast"
+- output: Your results/summary (include hot_mode state and message counts)
+- status: "success" or "failed"
+
+Keep output concise. The main Lobster instance will review this later.

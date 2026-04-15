@@ -10,7 +10,7 @@ Depends on: schema.py, db.py only.
 
 import re
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .db import (
@@ -35,8 +35,8 @@ def create_arc(
         description=description,
         themes=themes or [],
         status=status,
-        started_at=datetime.utcnow(),
-        last_updated=datetime.utcnow(),
+        started_at=datetime.now(timezone.utc),
+        last_updated=datetime.now(timezone.utc),
     )
     return upsert_narrative_arc(conn, arc)
 
@@ -62,7 +62,7 @@ def update_arc(
         themes=json.loads(rows["themes"]),
         status=status or rows["status"],
         started_at=datetime.fromisoformat(rows["started_at"]),
-        last_updated=datetime.utcnow(),
+        last_updated=datetime.now(timezone.utc),
         resolution=resolution or rows["resolution"],
     )
     upsert_narrative_arc(conn, arc)
@@ -96,7 +96,7 @@ def refresh_arcs_from_observations(
 
     warmed = 0
     cooled = 0
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     for arc in arcs:
         # Build keyword set from arc title and themes
@@ -162,7 +162,7 @@ def format_active_arcs_markdown(conn: sqlite3.Connection) -> str:
         lines.append("*No active arcs tracked yet.*")
         return "\n".join(lines)
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     for arc in arcs:
         themes_str = ", ".join(arc.themes) if arc.themes else "none"
         staleness = (now - arc.last_updated).days

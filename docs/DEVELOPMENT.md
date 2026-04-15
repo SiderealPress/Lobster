@@ -124,6 +124,8 @@ Legacy format (still supported for backward compat): `Your task_id is: my-task-1
 
 See `hooks/auto-register-agent.py` for full details.
 
+---
+
 ## Related documentation
 
 - `.claude/sys.dispatcher.bootup.md` — runtime behavior and the worktree constraint from the dispatcher's perspective

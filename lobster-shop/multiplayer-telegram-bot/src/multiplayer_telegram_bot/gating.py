@@ -5,14 +5,22 @@ Given a Telegram message from a group chat, determines the correct
 action: allow it through, silently drop it, or trigger the registration
 flow for an unknown user.
 
+Also provides invocation detection: is_invocation() determines whether
+a group message is directly addressed to the bot (@mention, /command,
+reply-to-bot), and is_session_followup() checks whether a message is
+a follow-up within an active session.
+
 All functions are pure — no I/O, no side effects. The caller handles
 the actual message writing, dropping, or DM sending.
 """
 
 from enum import Enum, auto
-from typing import NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, Optional
 
 from .whitelist import WhitelistStore, is_group_enabled, is_user_allowed
+
+if TYPE_CHECKING:
+    from .session import GroupSession
 
 
 # ---------------------------------------------------------------------------
@@ -130,3 +138,101 @@ def gate_messages(
         (msg, gate_message(msg["chat_id"], msg["user_id"], store))
         for msg in messages
     ]
+
+
+# ---------------------------------------------------------------------------
+# Invocation detection (Group Chat UX Policy)
+# ---------------------------------------------------------------------------
+
+def is_invocation(
+    text: Optional[str],
+    bot_username: str,
+    bot_user_id: int,
+    entities: Optional[list[Any]],
+    reply_to_user_id: Optional[int],
+) -> bool:
+    """Return True if this group message is directly addressed to the bot.
+
+    Invocation conditions (any one is sufficient):
+      1. Message text contains @{bot_username} mention (via entities or string search)
+      2. Message text starts with / (command)
+      3. Message is a reply to a message sent by bot_user_id
+
+    Args:
+        text: Message text (may be None for media-only messages)
+        bot_username: Bot's @username without the @ prefix (e.g. "Awp_Sebastian_bot")
+        bot_user_id: Telegram user ID of the bot
+        entities: List of Telegram MessageEntity objects or dicts with 'type'/'offset'/'length'
+        reply_to_user_id: user_id of the message being replied to, or None
+
+    Returns:
+        True if this message is addressed to the bot
+    """
+    # Condition 3: reply to bot's own message
+    if reply_to_user_id is not None and reply_to_user_id == bot_user_id:
+        return True
+
+    if not text:
+        return False
+
+    # Condition 2: command (starts with /)
+    if text.startswith("/"):
+        return True
+
+    # Condition 1: @mention via entities
+    mention_target = f"@{bot_username}".lower()
+
+    if entities:
+        for entity in entities:
+            # Support both Telegram python-telegram-bot objects and plain dicts
+            if isinstance(entity, dict):
+                etype = entity.get("type", "")
+                offset = entity.get("offset", 0)
+                length = entity.get("length", 0)
+            else:
+                etype = getattr(entity, "type", "")
+                offset = getattr(entity, "offset", 0)
+                length = getattr(entity, "length", 0)
+
+            if etype == "mention" and length > 0:
+                mentioned = text[offset : offset + length].lower()
+                if mentioned == mention_target:
+                    return True
+    else:
+        # Fallback: plain string search (case-insensitive)
+        if mention_target in text.lower():
+            return True
+
+    return False
+
+
+def is_session_followup(
+    chat_id: int,
+    user_id: int,
+    active_session: Optional[Any],  # GroupSession or None
+) -> bool:
+    """Return True if this message is a follow-up within an active session.
+
+    Conditions (all must be true):
+      - active_session is not None
+      - active_session.is_expired() is False
+      - active_session.active is True
+      - user_id == active_session.invoker_user_id
+
+    Args:
+        chat_id: Telegram group chat ID (used for sanity check)
+        user_id: Telegram user ID of the message sender
+        active_session: GroupSession or None (from get_active_session())
+
+    Returns:
+        True if this is a follow-up in an open session
+    """
+    if active_session is None:
+        return False
+    if not active_session.active:
+        return False
+    if active_session.is_expired():
+        return False
+    if user_id != active_session.invoker_user_id:
+        return False
+    return True

@@ -1,0 +1,18 @@
+[Unit]
+Description=Obsidian KM MCP Server for Lobster
+Documentation=https://github.com/SiderealPress/Lobster
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/lobster/lobster-shop/obsidian-km
+Environment=OBSIDIAN_VAULT_PATH=%h/obsidian-vault
+Environment=OBSIDIAN_KM_LOG_PATH=%h/logs/obsidian-km-mcp.log
+ExecStart=%h/lobster/.venv/bin/python %h/lobster/lobster-shop/obsidian-km/src/obsidian_km_server.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=null
+StandardError=journal
+
+[Install]
+WantedBy=default.target

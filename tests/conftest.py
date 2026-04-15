@@ -44,6 +44,14 @@ TESTS_DIR = Path(__file__).parent
 sys.path.insert(0, str(SRC_DIR))
 sys.path.insert(0, str(TESTS_DIR.parent))
 
+# Add multiplayer-telegram-bot skill to path so group command handler tests
+# can import it directly and so lobster_bot.py finds it when reloaded.
+# Use an absolute path anchored to $HOME so this works regardless of which
+# worktree or directory the tests are run from.
+_SKILL_SRC = Path.home() / "lobster" / "lobster-shop" / "multiplayer-telegram-bot" / "src"
+if _SKILL_SRC.exists() and str(_SKILL_SRC) not in sys.path:
+    sys.path.insert(0, str(_SKILL_SRC))
+
 # Import fixtures module
 from tests.fixtures.generators import (
     MessageGenerator,
@@ -151,9 +159,17 @@ def isolate_inbox_server_paths(tmp_path: Path):
         yield dirs_result
         return
 
+    # Build a per-test in-memory AtomicClaimDB so tests never share claim state.
+    # This is equivalent to the per-test path isolation above — each test gets a
+    # fresh SQLite :memory: DB so SQLite claim rows don't bleed between tests.
     try:
-        with patch.multiple(
-            _INBOX_SERVER_MODULE,
+        from src.mcp.claims import AtomicClaimDB
+        _test_claims_db = AtomicClaimDB(path=messages / "config" / "agent_sessions.db")
+    except Exception:
+        _test_claims_db = None  # degrade gracefully if claims module unavailable
+
+    try:
+        patch_kwargs = dict(
             BASE_DIR=messages,
             INBOX_DIR=messages / "inbox",
             OUTBOX_DIR=messages / "outbox",
@@ -176,7 +192,13 @@ def isolate_inbox_server_paths(tmp_path: Path):
             SCHEDULED_TASKS_LOGS_DIR=sched / "logs",
             # BIS-165 Slice 4: isolate DB path so tests never touch production messages.db
             MESSAGES_DB_PATH=messages / "messages.db",
-        ):
+        )
+        if _test_claims_db is not None:
+            # Issue #1360: isolate claim DB so SQLite claim rows don't bleed
+            # between tests. Each test gets a fresh DB backed by tmp_path.
+            patch_kwargs["_claims_db"] = _test_claims_db
+
+        with patch.multiple(_INBOX_SERVER_MODULE, **patch_kwargs):
             yield dirs_result
     except Exception:
         # Fallback: yield without patching so tests that don't need
@@ -354,21 +376,6 @@ def tasks_file(temp_messages_dir: Path, task_generator: TaskGenerator) -> Path:
     tasks_file = temp_messages_dir / "tasks.json"
     tasks_file.write_text(json.dumps(tasks_data, indent=2))
     return tasks_file
-
-
-@pytest.fixture
-def jobs_file(
-    temp_scheduled_tasks_dir: Path, job_generator: ScheduledJobGenerator
-) -> Path:
-    """Create a jobs.json file with sample jobs."""
-    jobs = {}
-    for _ in range(3):
-        job = job_generator.generate_job()
-        jobs[job["name"]] = job
-
-    jobs_file = temp_scheduled_tasks_dir / "jobs.json"
-    jobs_file.write_text(json.dumps({"jobs": jobs}, indent=2))
-    return jobs_file
 
 
 # =============================================================================

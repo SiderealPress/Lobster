@@ -29,7 +29,6 @@ mkdir -p /home/testuser/lobster/scheduled-tasks/tasks
 
 # Initialize required JSON files
 echo '{"tasks": [], "next_id": 1}' > /home/testuser/messages/tasks.json
-echo '{"jobs": {}}' > /home/testuser/lobster-workspace/scheduled-jobs/jobs.json
 
 # Parse arguments
 TEST_TYPE="${1:-all}"

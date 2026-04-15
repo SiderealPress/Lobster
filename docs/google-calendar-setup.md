@@ -128,7 +128,7 @@ production myownlobster.ai URL; single-user operators override this with the
 ## For Single-User (Self-Hosted) Operators
 
 This section is for operators running Lobster on a personal server or laptop
-(like Drew's setup).  Lobster has no persistent web server, so OAuth completion
+(like a self-hosted setup).  Lobster has no persistent web server, so OAuth completion
 uses the **standalone callback server** — a tiny HTTP server that starts, handles
 exactly one request, then exits.
 

@@ -8,25 +8,44 @@
 # No direct API calls are made here. Everything goes through Claude Code.
 #
 # Crontab entry:
-#   0 3 * * * $HOME/lobster/scripts/nightly-consolidation.sh
+#   0 3 * * * $HOME/lobster/scripts/nightly-consolidation.sh >> $HOME/lobster-workspace/logs/nightly-consolidation.log 2>&1
 #
 # Dedup guard: if a consolidation message is already pending in the inbox,
 # this script exits without writing a duplicate.
 
 set -euo pipefail
 
+# Developer mode: suppress all system notifications so the developer isn't
+# bothered while testing. Real user messages are never affected by this flag.
+_LOBSTER_CONFIG="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}/config.env"
+if [ -f "$_LOBSTER_CONFIG" ]; then
+    _DEV_MODE=$(grep -m1 '^LOBSTER_DEV_MODE=' "$_LOBSTER_CONFIG" 2>/dev/null | cut -d= -f2 || true)
+    if [ "$_DEV_MODE" = "true" ] || [ "$_DEV_MODE" = "1" ]; then
+        exit 0
+    fi
+fi
+unset _LOBSTER_CONFIG _DEV_MODE
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOBSTER_DIR="$(dirname "$SCRIPT_DIR")"
 MESSAGES_DIR="${LOBSTER_MESSAGES:-$HOME/messages}"
 INBOX="$MESSAGES_DIR/inbox"
 TIMESTAMP=$(date +%s%3N)
+LOG_DIR="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}/logs"
+LOG_FILE="$LOG_DIR/nightly-consolidation.log"
 
-# Ensure inbox directory exists
-mkdir -p "$INBOX"
+# Ensure directories exist
+mkdir -p "$INBOX" "$LOG_DIR"
+
+log() {
+    echo "[$(date -Iseconds)] $*" | tee -a "$LOG_FILE"
+}
+
+log "nightly-consolidation.sh started"
 
 # Dedup guard: skip if a consolidation message is already pending
 if ls "$INBOX"/*_consolidation.json 2>/dev/null | grep -q .; then
-    echo "Consolidation message already pending in inbox. Skipping."
+    log "Consolidation message already pending in inbox. Skipping."
     exit 0
 fi
 
@@ -42,4 +61,4 @@ cat > "$INBOX/${TIMESTAMP}_consolidation.json" << EOF
 }
 EOF
 
-echo "Consolidation message injected at $(date -Iseconds)"
+log "Consolidation message injected at $(date -Iseconds)"

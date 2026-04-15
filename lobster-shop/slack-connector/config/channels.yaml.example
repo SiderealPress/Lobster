@@ -1,0 +1,32 @@
+# Slack Connector — Per-Channel Configuration
+#
+# Copy this file to ~/lobster-workspace/slack-connector/config/channels.yaml
+# and edit to match your workspace.
+#
+# Modes:
+#   monitor  — log only, never route to LLM inbox
+#   respond  — route to LLM inbox on @mentions and DMs only
+#   full     — route every message to LLM inbox
+#   ignore   — log only, skip trigger evaluation too
+
+defaults:
+  mode: monitor
+  log_raw: true
+  log_files: true
+  log_reactions: true
+  respond_to_mentions: true
+  respond_to_dms: true
+  llm_routing: false
+
+channels:
+  # - id: C01ABC123
+  #   name: general
+  #   mode: monitor
+  #
+  # - id: C02DEF456
+  #   name: lobster-ops
+  #   mode: full
+  #   llm_routing: true
+  #   allow_commands: true
+  #   triggers:
+  #     - rule: keyword-deploy-alert

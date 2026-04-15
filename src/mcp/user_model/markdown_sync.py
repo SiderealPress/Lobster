@@ -23,7 +23,7 @@ Depends on: schema.py, db.py, emotional_model.py, narrative.py, self_knowledge.p
 
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -139,7 +139,7 @@ def sync_index(conn: Any, base: Path) -> bool:
     lines = [
         "# User Model Index",
         "",
-        f"*Last synced: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}*",
+        f"*Last synced: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}*",
         "",
         "## Model Stats",
         "",
@@ -280,7 +280,7 @@ def sync_all(
         "base_dir": str(base),
         "files_written": files_written,
         "errors": errors,
-        "synced_at": datetime.utcnow().isoformat(),
+        "synced_at": datetime.now(timezone.utc).isoformat(),
     }
 
 

@@ -6,6 +6,10 @@ Fires on every SessionStart event. If the LOBSTER_DEBUG environment variable
 is set to 'true' (case-insensitive), reads
 ~/lobster/.claude/sys.debug.bootup.md and prints its contents to stdout.
 
+When the session is the dispatcher, also injects
+~/lobster/.claude/sys.debug.dispatcher.bootup.md — this adds dispatcher-specific
+startup invariant checks (branch check, alerting policy, etc.).
+
 Claude Code SessionStart hooks can inject content into the agent's initial
 context by printing to stdout. This causes the content to appear as a system
 message at the start of the session.
@@ -18,13 +22,21 @@ setting, so developers can set it in config.env instead of the shell
 environment.
 """
 
+import json
 import os
 import sys
 from pathlib import Path
 
+# Allow imports from the hooks directory (session_role).
+sys.path.insert(0, str(Path(__file__).parent))
+
+import session_role  # noqa: E402 — path insert must precede this
 
 CONFIG_ENV = Path(os.path.expanduser("~/lobster-config/config.env"))
 DEBUG_BOOTUP_FILE = Path(os.path.expanduser("~/lobster/.claude/sys.debug.bootup.md"))
+DEBUG_DISPATCHER_BOOTUP_FILE = Path(
+    os.path.expanduser("~/lobster/.claude/sys.debug.dispatcher.bootup.md")
+)
 
 
 def _parse_config_env() -> dict:
@@ -64,31 +76,54 @@ def _is_debug_mode() -> bool:
     return config_val == "true"
 
 
+def _read_file_safe(path: Path, label: str) -> str | None:
+    """Return file contents or None on any error, logging to stderr."""
+    if not path.exists():
+        print(
+            f"[inject-debug-bootup] WARNING: LOBSTER_DEBUG=true but "
+            f"{path} not found; skipping {label} injection.",
+            file=sys.stderr,
+        )
+        return None
+    try:
+        return path.read_text()
+    except OSError as exc:
+        print(
+            f"[inject-debug-bootup] WARNING: could not read {path}: {exc}",
+            file=sys.stderr,
+        )
+        return None
+
+
 def main() -> None:
     if not _is_debug_mode():
         sys.exit(0)
 
-    if not DEBUG_BOOTUP_FILE.exists():
-        # File missing — exit silently rather than crashing the session.
-        print(
-            f"[inject-debug-bootup] WARNING: LOBSTER_DEBUG=true but "
-            f"{DEBUG_BOOTUP_FILE} not found; skipping injection.",
-            file=sys.stderr,
-        )
-        sys.exit(0)
-
+    # Read hook input from stdin to detect dispatcher vs subagent role.
     try:
-        content = DEBUG_BOOTUP_FILE.read_text()
-    except OSError as exc:
-        print(
-            f"[inject-debug-bootup] WARNING: could not read {DEBUG_BOOTUP_FILE}: {exc}",
-            file=sys.stderr,
-        )
+        hook_input = json.load(sys.stdin)
+    except (json.JSONDecodeError, ValueError):
+        hook_input = {}
+
+    # Always inject the base debug supplement.
+    content = _read_file_safe(DEBUG_BOOTUP_FILE, "sys.debug.bootup.md")
+    if content is None:
         sys.exit(0)
 
     # Print to stdout — Claude Code injects stdout from SessionStart hooks
     # into the agent's initial context as a system message.
     print(content)
+
+    # Additionally inject the dispatcher-specific supplement when the session
+    # is the Lobster dispatcher. This adds branch-invariant checks and
+    # debug-mode startup sequencing. Silently skipped for subagent sessions.
+    if session_role.is_dispatcher(hook_input):
+        dispatcher_content = _read_file_safe(
+            DEBUG_DISPATCHER_BOOTUP_FILE, "sys.debug.dispatcher.bootup.md"
+        )
+        if dispatcher_content is not None:
+            print(dispatcher_content)
+
     sys.exit(0)
 
 

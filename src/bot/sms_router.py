@@ -17,10 +17,14 @@ Environment variables required:
 import json
 import logging
 import os
-import tempfile
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
+import sys as _sys
+_SRC_DIR = str(Path(__file__).resolve().parent.parent)
+if _SRC_DIR not in _sys.path:
+    _sys.path.insert(0, _SRC_DIR)
+from utils.fs import atomic_write_json  # noqa: E402
 from threading import Thread
 
 from twilio.request_validator import RequestValidator
@@ -34,6 +38,21 @@ from starlette.requests import Request
 from starlette.responses import Response
 from starlette.routing import Route
 import uvicorn
+# ---------------------------------------------------------------------------
+# Shared outbox handler (src/channels/outbox.py)
+# ---------------------------------------------------------------------------
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).parent.parent))
+from channels.outbox import OutboxFileHandler, OutboxWatcher, drain_outbox  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# Canonical atomic filesystem helper (src/utils/fs.py)
+# ---------------------------------------------------------------------------
+import sys as _sys
+_SRC_DIR = str(Path(__file__).resolve().parent.parent)
+if _SRC_DIR not in _sys.path:
+    _sys.path.insert(0, _SRC_DIR)
+from utils.fs import atomic_write_json  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -72,11 +91,22 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 log = logging.getLogger("lobster-sms")
 log.setLevel(logging.INFO)
-from logging.handlers import RotatingFileHandler
-_fh = RotatingFileHandler(
+# Import GzipRotatingFileHandler from the local src/mcp/log_utils module.
+# We can't use ``from mcp.log_utils import ...`` directly because the external
+# ``mcp`` package (from the MCP SDK) shadows our local src/mcp directory
+# when it is installed in the venv.
+import importlib.util as _ilu
+_lutils_spec = _ilu.spec_from_file_location(
+    "lobster_mcp_log_utils",
+    Path(__file__).resolve().parent.parent / "mcp" / "log_utils.py",
+)
+_lutils_mod = _ilu.module_from_spec(_lutils_spec)  # type: ignore[arg-type]
+_lutils_spec.loader.exec_module(_lutils_mod)  # type: ignore[union-attr]
+GzipRotatingFileHandler = _lutils_mod.GzipRotatingFileHandler
+_fh = GzipRotatingFileHandler(
     LOG_DIR / "sms-router.log",
-    maxBytes=5 * 1024 * 1024,
-    backupCount=3,
+    maxBytes=1 * 1024 * 1024 * 1024,  # 1 GB per file
+    backupCount=5,                      # 5 gzip-compressed backups → ~5 GB history
 )
 _fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
 log.addHandler(_fh)
@@ -113,23 +143,6 @@ def _get_validator() -> RequestValidator:
 # ---------------------------------------------------------------------------
 # Pure helpers
 # ---------------------------------------------------------------------------
-
-def atomic_write_json(path: Path, data: dict, indent: int = 2) -> None:
-    """Atomically write JSON via temp-file + rename (POSIX guarantee)."""
-    content = json.dumps(data, indent=indent)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write(content)
-            f.flush()
-            os.fsync(f.fileno())
-        os.rename(tmp, str(path))
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
 
 
 def _make_msg_id() -> str:
@@ -205,7 +218,7 @@ def build_text_message(form: dict) -> dict:
         "user_name": from_number,
         "text": body,
         "twilio_message_sid": msg_sid,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
 
@@ -323,57 +336,22 @@ def send_sms_message(to: str, text: str) -> bool:
         return False
 
 
-class OutboxHandler(FileSystemEventHandler):
-    """Watches outbox dir and delivers files with source='sms' via Twilio."""
+def _send_sms_reply(reply: dict) -> bool:
+    """Pure send function for the shared OutboxFileHandler.
 
-    def on_created(self, event):
-        if event.is_directory or not event.src_path.endswith(".json"):
-            return
-        Thread(target=self._process, args=(event.src_path,), daemon=True).start()
+    Extracts ``chat_id`` and ``text`` from *reply* and delegates to the
+    existing :func:`send_sms_message` helper.
+    """
+    return send_sms_message(reply["chat_id"], reply["text"])
 
-    def on_moved(self, event):
-        """Handle atomic writes (temp file renamed to .json)."""
-        if event.is_directory or not event.dest_path.endswith(".json"):
-            return
-        Thread(target=self._process, args=(event.dest_path,), daemon=True).start()
 
-    def _process(self, filepath: str) -> None:
-        try:
-            time.sleep(0.1)  # Wait for atomic write to complete
-            with open(filepath, "r") as f:
-                reply = json.load(f)
-
-            if reply.get("source", "").lower() != "sms":
-                return
-
-            to = reply.get("chat_id", "")
-            text = reply.get("text", "")
-
-            if not to or not text:
-                log.warning(f"Invalid SMS reply {filepath}: missing chat_id or text")
-                os.remove(filepath)
-                return
-
-            if send_sms_message(to, text):
-                os.remove(filepath)
-            else:
-                log.error(f"Failed to send SMS reply from {filepath}")
-
-        except Exception as e:
-            log.error(f"Error processing outbox file {filepath}: {e}")
+# Backward-compatible alias -- code that imports OutboxHandler directly still works.
+OutboxHandler = OutboxFileHandler
 
 
 def process_existing_outbox() -> None:
     """Deliver any SMS outbox files that piled up before startup."""
-    handler = OutboxHandler()
-    for filepath in sorted(OUTBOX_DIR.glob("*.json")):
-        try:
-            with open(filepath, "r") as f:
-                reply = json.load(f)
-            if reply.get("source", "").lower() == "sms":
-                handler._process(str(filepath))
-        except Exception as e:
-            log.error(f"Error draining outbox file {filepath}: {e}")
+    drain_outbox(OUTBOX_DIR, source="sms", send_fn=_send_sms_reply, log=log)
 
 
 # ---------------------------------------------------------------------------
@@ -467,13 +445,17 @@ def main() -> None:
 
     # Start outbox watcher thread
     observer = Observer()
-    observer.schedule(OutboxHandler(), str(OUTBOX_DIR), recursive=False)
+    observer.schedule(
+        OutboxWatcher(source="sms", send_fn=_send_sms_reply, log=log),
+        str(OUTBOX_DIR),
+        recursive=False,
+    )
     observer.daemon = True
     observer.start()
     log.info("Watching outbox for SMS replies...")
 
     # Drain any replies that queued up before we started
-    process_existing_outbox()
+    drain_outbox(OUTBOX_DIR, source="sms", send_fn=_send_sms_reply, log=log)
 
     # Start HTTP server
     app = create_app()

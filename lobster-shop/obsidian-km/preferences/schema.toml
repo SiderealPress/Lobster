@@ -1,0 +1,24 @@
+[default_folder]
+type = "string"
+description = "Default folder for new notes created via Lobster. Notes captured without an explicit folder will be placed here."
+required = false
+
+[link_folder]
+type = "string"
+description = "Folder for archived/saved links. When auto-capturing links, they'll be saved here."
+required = false
+
+[auto_capture_links]
+type = "boolean"
+description = "Automatically capture and archive links shared in conversation."
+required = false
+
+[default_tags]
+type = "string"
+description = "Default tags to apply to all new notes (comma-separated). Example: lobster,captured,inbox"
+required = false
+
+[max_search_results]
+type = "integer"
+description = "Maximum number of results to return from vault searches. Higher values may slow down searches on large vaults."
+required = false

@@ -10,7 +10,7 @@ Depends on: schema.py, db.py only.
 """
 
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from .db import (
@@ -107,7 +107,7 @@ def record_emotional_state(
         dominance=dominance,
         trigger=trigger,
         context=context,
-        recorded_at=datetime.utcnow(),
+        recorded_at=datetime.now(timezone.utc),
         confidence=confidence,
     )
     return insert_emotional_state(conn, state)

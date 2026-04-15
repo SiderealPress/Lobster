@@ -1,0 +1,35 @@
+[account]
+account_type = "bot"
+
+[logging]
+enabled = true
+log_dir = "~/lobster-workspace/slack-connector/logs"
+rotate_daily = true
+max_age_days = 90
+
+[ingress]
+log_messages = true
+log_reactions = true
+log_files = true
+log_edits = true
+log_deletes = false
+
+[llm_routing]
+route_mentions = true
+route_dms = true
+route_all = false
+
+[indexing]
+enabled = true
+thread_summary_idle_hours = 2
+nightly_index_hour = 2
+keyword_index_enabled = true
+keyword_index_lag_minutes = 5
+
+[triggers]
+enabled = true
+rules_dir = "~/lobster-workspace/slack-connector/config/rules"
+hot_reload = true
+
+[permissions]
+use_allowlist = true

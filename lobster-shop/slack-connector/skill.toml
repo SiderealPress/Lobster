@@ -1,0 +1,36 @@
+[skill]
+name = "slack-connector"
+version = "1.0.0"
+description = "Full Slack integration: dumb ingress logging, per-channel config, trigger automations, and log analysis"
+author = "Lobster"
+category = "integration"
+
+[activation]
+mode = "triggered"
+triggers = ["/slack", "/analyze-logs", "/slack-status"]
+context_patterns = [
+    "when user asks about Slack messages or channels",
+    "when user wants to search Slack logs",
+    "when user asks what happened in a Slack channel",
+    "when user wants to set up a Slack automation",
+    "when user asks about their Slack workspace",
+]
+
+[layering]
+priority = 55
+merge_strategy = "append"
+
+[provides]
+mcp_tools = ["slack_log_search", "slack_channel_summary", "slack_thread_summary", "slack_status"]
+bot_commands = ["/slack", "/analyze-logs", "/slack-status", "/slack channels", "/slack rules", "/slack reload"]
+
+[compatibility]
+enhances = ["morning-briefing", "lobster-status"]
+conflicts = []
+
+[dependencies]
+pip = ["slack-bolt>=1.18", "slack-sdk>=3.26", "watchdog>=3.0"]
+api_keys = ["LOBSTER_SLACK_BOT_TOKEN", "LOBSTER_SLACK_APP_TOKEN"]
+
+[dependencies.runtime]
+python = ">=3.11"

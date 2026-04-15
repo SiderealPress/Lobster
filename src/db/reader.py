@@ -22,8 +22,20 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
+
+# Import canonical user types for sender_type filtering.
+# message_types.py lives alongside inbox_server.py in src/mcp/.
+_MCP_DIR = str(Path(__file__).resolve().parent.parent / "mcp")
+if _MCP_DIR not in sys.path:
+    sys.path.insert(0, _MCP_DIR)
+try:
+    from message_types import INBOX_USER_TYPES as _INBOX_USER_TYPES
+except ImportError:  # pragma: no cover — fallback when run outside normal tree
+    _INBOX_USER_TYPES = frozenset()
 
 # ---------------------------------------------------------------------------
 # Type aliases
@@ -84,6 +96,46 @@ def _parse_timestamp(ts: str | None) -> datetime:
 
 
 # ---------------------------------------------------------------------------
+# Sender-type filter helpers — pure functions
+# ---------------------------------------------------------------------------
+
+def _sender_type_sql(sender_type: str | None) -> tuple[list[str], list[Any]]:
+    """
+    Return (conditions, params) for a sender_type filter.
+
+    sender_type semantics:
+      "user"         — inbound messages whose type is a user-initiated type
+                       (text, photo, voice, document, etc. — excludes system noise)
+      "lobster"      — all outbound messages (direction='out')
+      "conversation" — union of user and lobster (real conversation, no cron/system)
+      None / other   — no additional conditions (all messages)
+
+    Returns plain lists so callers can append to their existing conditions/params.
+    This is a pure function with no side effects.
+    """
+    if not sender_type or sender_type == "all":
+        return [], []
+
+    # Build the IN-list for user types once, using positional parameters.
+    user_types = sorted(_INBOX_USER_TYPES)  # sorted for deterministic SQL
+    placeholders = ", ".join("?" * len(user_types))
+    user_clause = f"(direction = 'in' AND type IN ({placeholders}))"
+
+    if sender_type == "user":
+        return [user_clause], list(user_types)
+
+    if sender_type == "lobster":
+        return ["direction = 'out'"], []
+
+    if sender_type == "conversation":
+        # outbound OR inbound-user-type
+        return [f"(direction = 'out' OR {user_clause})"], list(user_types)
+
+    # Unknown value — treat as no filter (safe degradation)
+    return [], []
+
+
+# ---------------------------------------------------------------------------
 # Table detection
 # ---------------------------------------------------------------------------
 
@@ -110,6 +162,13 @@ _HISTORY_COLUMNS = (
     "timestamp, extra"
 )
 
+# Table-qualified version for use in JOINs (e.g. FTS5 queries against messages_fts)
+# where column names like 'source', 'type', 'text' exist in multiple tables and
+# SQLite raises "ambiguous column name" without explicit qualification.
+_HISTORY_COLUMNS_M = ", ".join(
+    f"m.{col.strip()}" for col in _HISTORY_COLUMNS.split(",")
+)
+
 
 def get_conversation_history(
     conn: sqlite3.Connection,
@@ -118,23 +177,30 @@ def get_conversation_history(
     source: str | None = None,
     search: str | None = None,
     direction: str = "all",
+    sender_type: str | None = None,
     limit: int = 20,
     offset: int = 0,
 ) -> list[Row]:
     """
     Fetch conversation history from the messages table.
 
-    Applies optional filters for chat_id, source, full-text search, and
-    direction (received/sent/all).  Results are ordered newest-first.
+    Applies optional filters for chat_id, source, full-text search,
+    direction (received/sent/all), and sender_type.  Results are ordered
+    newest-first.
 
     Args:
-        conn:      Open sqlite3.Connection.
-        chat_id:   Filter to a specific conversation (compared as string).
-        source:    Filter by message source (e.g. 'telegram', 'bisque').
-        search:    Keyword search over message text (uses FTS5 when available).
-        direction: 'received' | 'sent' | 'all' — maps to direction IN/OUT.
-        limit:     Maximum number of rows to return.
-        offset:    Rows to skip for pagination.
+        conn:        Open sqlite3.Connection.
+        chat_id:     Filter to a specific conversation (compared as string).
+        source:      Filter by message source (e.g. 'telegram', 'bisque').
+        search:      Keyword search over message text (uses FTS5 when available).
+        direction:   'received' | 'sent' | 'all' — maps to direction IN/OUT.
+        sender_type: 'user' | 'lobster' | 'conversation' | None
+                     'user'         — inbound user-type messages only (no system/cron)
+                     'lobster'      — outbound messages only
+                     'conversation' — both user and lobster (excludes system noise)
+                     None / omitted — all messages (current default behaviour)
+        limit:       Maximum number of rows to return.
+        offset:      Rows to skip for pagination.
 
     Returns:
         List of plain dicts with all message columns plus '_direction'.
@@ -143,11 +209,19 @@ def get_conversation_history(
     conditions: list[str] = []
     params: list[Any] = []
 
-    # Direction filter
-    if direction == "received":
-        conditions.append("direction = 'in'")
-    elif direction == "sent":
-        conditions.append("direction = 'out'")
+    # sender_type takes precedence over direction when set, because it encodes
+    # its own directionality.  When sender_type is given, the direction param
+    # is ignored to avoid conflicting SQL conditions.
+    if sender_type and sender_type != "all":
+        st_conds, st_params = _sender_type_sql(sender_type)
+        conditions.extend(st_conds)
+        params.extend(st_params)
+    else:
+        # Direction filter (legacy path — only applied when sender_type is absent)
+        if direction == "received":
+            conditions.append("direction = 'in'")
+        elif direction == "sent":
+            conditions.append("direction = 'out'")
 
     # chat_id filter (coerce to string for uniform comparison)
     if chat_id is not None:
@@ -165,9 +239,25 @@ def get_conversation_history(
         # Prefer FTS5 — fast and ranking-aware
         use_fts = _table_exists(conn, "messages_fts")
         if use_fts:
-            fts_where_extra = ("AND " + " AND ".join(conditions)) if conditions else ""
+            # Re-qualify conditions for the FTS JOIN context.  The messages_fts
+            # virtual table exposes: text, transcription, user_name, source, type —
+            # the same names as columns in messages.  Without table prefixes SQLite
+            # raises "ambiguous column name".  We rebuild the condition list with
+            # bare column references replaced by m.<col>.
+            fts_conditions = [
+                c.replace("LOWER(source)", "LOWER(m.source)")
+                 .replace("LOWER(type)", "LOWER(m.type)")
+                 .replace("LOWER(text)", "LOWER(m.text)")
+                 .replace("LOWER(transcription)", "LOWER(m.transcription)")
+                 .replace("LOWER(user_name)", "LOWER(m.user_name)")
+                 .replace("direction =", "m.direction =")
+                 .replace("chat_id =", "m.chat_id =")
+                 .replace(" type IN", " m.type IN")
+                for c in conditions
+            ]
+            fts_where_extra = ("AND " + " AND ".join(fts_conditions)) if fts_conditions else ""
             fts_query = (
-                f"SELECT m.{_HISTORY_COLUMNS} "
+                f"SELECT {_HISTORY_COLUMNS_M} "
                 f"FROM messages m "
                 f"JOIN messages_fts f ON f.rowid = m.rowid "
                 f"WHERE messages_fts MATCH ? "
@@ -207,20 +297,28 @@ def count_conversation_history(
     source: str | None = None,
     search: str | None = None,
     direction: str = "all",
+    sender_type: str | None = None,
 ) -> int:
     """
     Return the total number of messages matching the given filters (for pagination).
 
     Uses the same filter logic as get_conversation_history but returns only
     the row count, avoiding the overhead of fetching full rows.
+
+    sender_type: see get_conversation_history for semantics.
     """
     conditions: list[str] = []
     params: list[Any] = []
 
-    if direction == "received":
-        conditions.append("direction = 'in'")
-    elif direction == "sent":
-        conditions.append("direction = 'out'")
+    if sender_type and sender_type != "all":
+        st_conds, st_params = _sender_type_sql(sender_type)
+        conditions.extend(st_conds)
+        params.extend(st_params)
+    else:
+        if direction == "received":
+            conditions.append("direction = 'in'")
+        elif direction == "sent":
+            conditions.append("direction = 'out'")
 
     if chat_id is not None:
         conditions.append("chat_id = ?")
@@ -233,7 +331,20 @@ def count_conversation_history(
     if search:
         use_fts = _table_exists(conn, "messages_fts")
         if use_fts:
-            fts_where_extra = ("AND " + " AND ".join(conditions)) if conditions else ""
+            # Re-qualify conditions for the FTS JOIN context (same fix as
+            # get_conversation_history — messages_fts shares column names with messages).
+            fts_conditions = [
+                c.replace("LOWER(source)", "LOWER(m.source)")
+                 .replace("LOWER(type)", "LOWER(m.type)")
+                 .replace("LOWER(text)", "LOWER(m.text)")
+                 .replace("LOWER(transcription)", "LOWER(m.transcription)")
+                 .replace("LOWER(user_name)", "LOWER(m.user_name)")
+                 .replace("direction =", "m.direction =")
+                 .replace("chat_id =", "m.chat_id =")
+                 .replace(" type IN", " m.type IN")
+                for c in conditions
+            ]
+            fts_where_extra = ("AND " + " AND ".join(fts_conditions)) if fts_conditions else ""
             fts_query = (
                 f"SELECT COUNT(*) "
                 f"FROM messages m "

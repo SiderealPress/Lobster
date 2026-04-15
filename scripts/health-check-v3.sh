@@ -14,36 +14,39 @@
 #   active     - Claude is running (WAITING on wait_for_messages or PROCESSING)
 #   starting   - Wrapper is launching Claude (transient, < 30s)
 #   restarting - Wrapper is restarting after an exit (transient, < 60s)
-#   hibernate  - Claude exited cleanly, wrapper watching for inbox messages
+#   hibernate  - DEPRECATED: dispatcher no longer writes this state (PR #1447).
+#                If seen in a stale state file, treated as active (full checks apply).
 #   backoff    - Wrapper hit rapid-restart limit, cooling down
 #   stopped    - Wrapper received signal, shutting down
 #   waking     - Wrapper detected messages, about to launch Claude
 #
-# Compaction suppression:
+# Compaction suppression (inbox drain only):
 #   When Claude Code compacts its context, tool calls pause for 1-3+ minutes.
 #   During this window real user messages can age past STALE_THRESHOLD_SECONDS
 #   and trigger a false-positive restart. To prevent this, on-compact.py writes
 #   a compacted_at timestamp to lobster-state.json, and the stale-inbox check
 #   is skipped for COMPACTION_SUPPRESS_SECONDS after that timestamp.
+#   NOTE: Dispatcher liveness check (check_dispatcher_heartbeat) is NOT
+#   suppressed during compaction — the 20-minute threshold covers it naturally.
 #
-# Catchup suppression:
-#   After a compaction or restart, the dispatcher spawns a catchup subagent to
-#   recover situational awareness. This subagent can take 10-12 minutes. During
-#   this window the dispatcher IS calling wait_for_messages() but the catchup
-#   subagent delays return from the main loop. The dispatcher writes
-#   catchup_started_at to lobster-state.json before spawning the subagent, and
-#   catchup_finished_at when the result arrives. The WFM freshness check is
-#   suppressed for CATCHUP_SUPPRESS_SECONDS (15 min) after catchup_started_at,
-#   or immediately when catchup_finished_at is written.
+# Dispatcher liveness (replaces WFM freshness + catchup suppression):
+#   hooks/thinking-heartbeat.py writes a Unix epoch timestamp to
+#   ~/lobster-workspace/logs/dispatcher-heartbeat on every PostToolUse event.
+#   check_dispatcher_heartbeat() reads this single file and checks its age.
+#   The 1200s threshold covers compaction, catchup, and boot without any
+#   suppression logic. The dispatcher no longer needs to call
+#   record-catchup-state.sh to suppress false alarms. See issue #1483.
 #
 # Boot grace period:
 #   After any restart (health-check-initiated or manual), the new Claude session
 #   needs ~60-90s to initialize and begin draining the inbox. During this window
-#   the health-check skips stale-inbox, WFM freshness, and process/tmux checks
-#   to avoid false-positive restarts. The boot timestamp is written to
-#   lobster-state.json as booted_at by claude-persistent.sh (on first start) and
-#   by do_restart() (after each health-check-initiated restart). Resource checks
-#   (memory, disk, auth, outbox) still run during the grace period.
+#   the health-check skips stale-inbox and process/tmux checks to avoid
+#   false-positive restarts. The boot timestamp is written to lobster-state.json
+#   as booted_at by claude-persistent.sh (on first start) and by do_restart()
+#   (after each health-check-initiated restart). Resource checks (memory, disk,
+#   auth, outbox) still run during the grace period.
+#   NOTE: Dispatcher heartbeat check is NOT suppressed during boot grace — the
+#   20-minute threshold absorbs the 90s boot window naturally.
 #
 # Escalation ladder:
 #   GREEN  - All checks pass (or in expected transient state)
@@ -79,15 +82,23 @@ RESTART_WINDOW_BUFFER_SECONDS=120    # Pre-mark messages within this window of t
 MAINTENANCE_EXPIRY_SECONDS=3600      # 1 hour - stale maintenance flag is auto-cleared and checks resume
 
 COMPACTION_SUPPRESS_SECONDS=300      # 5 minutes - skip stale-inbox check after a compaction event
-CATCHUP_SUPPRESS_SECONDS=900         # 15 minutes - skip WFM freshness check while catchup subagent is running
+COMPACT_GRACE_SECONDS=600            # 10 minutes - skip stale-inbox check after a compaction (last-compact.ts)
+# CATCHUP_SUPPRESS_SECONDS removed (issue #1483): dispatcher heartbeat threshold covers catchup naturally
 RESTART_COOLDOWN_SUPPRESS_SECONDS=240 # 4 minutes - suppress stale-inbox RED after a recent restart
 
 BOOT_GRACE_SECONDS=90                # 90s - skip stale-inbox, WFM, and process checks after a restart
 
-HIBERNATE_FRESH_SECONDS=30           # Ignore hibernate state younger than this — transient dispatcher hibernation
+HIBERNATE_FRESH_SECONDS=30           # DEPRECATED — kept for reference; hibernate state is no longer written by dispatcher
 
-WFM_STALE_SECONDS=600                # 10 minutes - RED if wait_for_messages not called since this long ago
-HEARTBEAT_FILE="$WORKSPACE_DIR/logs/claude-heartbeat"
+WFM_STALE_SECONDS=1200               # 20 minutes - kept for backward-compat references; superseded by DISPATCHER_HEARTBEAT_STALE_SECONDS
+HEARTBEAT_FILE="$WORKSPACE_DIR/logs/claude-heartbeat"   # legacy WFM-touch signal; superseded by dispatcher-heartbeat
+
+# Dispatcher heartbeat sentinel (issue #1483 simplification)
+# Written by hooks/thinking-heartbeat.py on every PostToolUse event.
+# Single file, single integer (Unix epoch seconds). No JSON parsing required.
+# Threshold is generous enough to cover compaction + catchup without suppression.
+DISPATCHER_HEARTBEAT_FILE="${LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE:-$WORKSPACE_DIR/logs/dispatcher-heartbeat}"
+DISPATCHER_HEARTBEAT_STALE_SECONDS=1200   # 20 min — covers compaction (~5m) + catchup (~12m) + margin
 
 OUTBOX_DIR="$MESSAGES_DIR/outbox"
 OUTBOX_STALE_THRESHOLD_SECONDS=900   # 15 min = RED
@@ -100,6 +111,11 @@ LOCK_FILE="${LOBSTER_HEALTH_LOCK:-/tmp/lobster-health-check-v3.lock}"
 MAX_RESTART_ATTEMPTS=3
 RESTART_COOLDOWN_SECONDS=600         # 10 min window for counting attempts
 RESTART_STATE_FILE="$WORKSPACE_DIR/logs/health-restart-state-v3"
+
+BLACK_RENOTIFY_SECONDS=7200          # 2 hours: silent restart retry interval while in BLACK state
+
+ALERT_DEDUP_COOLDOWN_SECONDS=900     # 15 minutes between alerts for the same issue type
+ALERT_DEDUP_DIR="$WORKSPACE_DIR/logs/health-alert-dedup"
 
 MEMORY_THRESHOLD=90                  # percentage
 DISK_THRESHOLD=95                    # percentage
@@ -126,9 +142,35 @@ if [[ -z "${LOBSTER_DEBUG:-}" && -f "$CONFIG_ENV" ]]; then
 fi
 LOBSTER_DEBUG="${LOBSTER_DEBUG:-false}"
 
+# Read LOBSTER_ENV from config.env (if not already in environment)
+if [[ -z "${LOBSTER_ENV:-}" && -f "$CONFIG_ENV" ]]; then
+    LOBSTER_ENV=$(grep '^LOBSTER_ENV=' "$CONFIG_ENV" 2>/dev/null | cut -d'=' -f2- | tr -d '[:space:]"' || echo "production")
+fi
+LOBSTER_ENV="${LOBSTER_ENV:-production}"
+
 # Ensure log directory exists
 mkdir -p "$(dirname "$LOG_FILE")"
 mkdir -p "$(dirname "$RESTART_STATE_FILE")"
+mkdir -p "$ALERT_DEDUP_DIR"
+
+# Dry-run gate: skip all real actions when LOBSTER_HEALTH_CHECK_DRY_RUN=1.
+# Used by tests to exercise parsing/reading logic without executing systemctl,
+# curl, or other external commands.
+if [[ "${LOBSTER_HEALTH_CHECK_DRY_RUN:-0}" == "1" ]]; then
+    mkdir -p "$(dirname "$LOG_FILE")"
+    echo "[$(date -Iseconds)] [INFO] LOBSTER_HEALTH_CHECK_DRY_RUN=1 — health check dry-run, skipping all actions" >> "$LOG_FILE"
+    exit 0
+fi
+
+# Lifecycle gate: skip monitoring and restart loop in non-production environments.
+# Resource checks (disk/memory/auth) do not run either — the service is intentionally
+# idle and alerting on its resource state would be noise. The cron entry still fires
+# so that flipping back to production takes effect within 4 minutes with no manual step.
+if [[ "$LOBSTER_ENV" != "production" ]]; then
+    mkdir -p "$(dirname "$LOG_FILE")"
+    echo "[$(date -Iseconds)] [INFO] LOBSTER_ENV=$LOBSTER_ENV — health check skipped in non-production mode" >> "$LOG_FILE"
+    exit 0
+fi
 
 #===============================================================================
 # Logging
@@ -188,6 +230,46 @@ send_telegram_alert() {
     fi
 }
 
+# send_telegram_alert_deduped — like send_telegram_alert but suppresses repeat
+# alerts for the same issue_key within ALERT_DEDUP_COOLDOWN_SECONDS.
+#
+# Usage:
+#   send_telegram_alert_deduped "issue_key" "message text"
+#
+# The issue_key is a short stable identifier for the problem category
+# (e.g. "stale-inbox", "wrapper-missing", "auth-expired").  Alerts with the
+# same key are suppressed if a previous alert with that key was sent within
+# ALERT_DEDUP_COOLDOWN_SECONDS.  This prevents a restart storm from flooding
+# Telegram with dozens of identical alerts every 4 minutes.
+#
+# BLACK-state alerts and post-restart recovery confirmations should use the
+# raw send_telegram_alert() to guarantee delivery regardless of cooldown.
+send_telegram_alert_deduped() {
+    local issue_key="$1"
+    local message="$2"
+    local now
+    now=$(date +%s)
+
+    # Sanitize the key to a safe filename (alphanumeric + hyphen)
+    local safe_key
+    safe_key=$(echo "$issue_key" | tr -cs 'a-zA-Z0-9-' '-' | sed 's/-\+/-/g; s/^-//; s/-$//')
+    local stamp_file="$ALERT_DEDUP_DIR/${safe_key}"
+
+    if [[ -f "$stamp_file" ]]; then
+        local last_sent
+        last_sent=$(cat "$stamp_file" 2>/dev/null || echo 0)
+        local age=$(( now - last_sent ))
+        if [[ $age -lt $ALERT_DEDUP_COOLDOWN_SECONDS ]]; then
+            log_info "Alert dedup: suppressing '$issue_key' alert (sent ${age}s ago, cooldown ${ALERT_DEDUP_COOLDOWN_SECONDS}s)"
+            return 0
+        fi
+    fi
+
+    # Record send time before the curl call to avoid double-sends on retry
+    echo "$now" > "$stamp_file"
+    send_telegram_alert "$message"
+}
+
 #===============================================================================
 # Restart Rate Limiting
 #===============================================================================
@@ -203,24 +285,94 @@ is_manual_intervention_required() {
 
 # Write manual intervention flag into the state file.
 # Preserves existing timestamp/count so the record is self-documenting.
+# Appends MANUAL_INTERVENTION and the timestamp when BLACK was first set.
+# Format: <first_restart_ts> <count> MANUAL_INTERVENTION <black_set_ts>
 set_manual_intervention() {
     local now
     now=$(date +%s)
     local existing=""
     [[ -f "$RESTART_STATE_FILE" ]] && existing=$(cat "$RESTART_STATE_FILE" 2>/dev/null || true)
-    # Strip any previous MANUAL_INTERVENTION token, then append it
-    existing=$(echo "$existing" | sed 's/ MANUAL_INTERVENTION//')
-    echo "${existing:-$now 0} MANUAL_INTERVENTION" > "$RESTART_STATE_FILE"
+    # Strip any previous MANUAL_INTERVENTION token (and trailing black_set_ts), then append
+    existing=$(echo "$existing" | sed 's/ MANUAL_INTERVENTION.*//')
+    echo "${existing:-$now 0} MANUAL_INTERVENTION $now" > "$RESTART_STATE_FILE"
     log_warn "Manual intervention flag set in $RESTART_STATE_FILE"
+}
+
+# Return the epoch when BLACK was first set, or empty string if not available.
+# Reads the 4th field from the state file (black_set_ts).
+# Handles both old 3-field format (no black_set_ts) and new 4-field format.
+get_black_set_ts() {
+    [[ ! -f "$RESTART_STATE_FILE" ]] && return
+    local line
+    line=$(cat "$RESTART_STATE_FILE" 2>/dev/null || true)
+    # Fields: <first_restart_ts> <count> MANUAL_INTERVENTION [<black_set_ts>]
+    local black_set_ts
+    black_set_ts=$(echo "$line" | awk '{print $4}')
+    echo "$black_set_ts"
+}
+
+# If system has been in BLACK state longer than BLACK_RENOTIFY_SECONDS,
+# silently attempt a single restart (no Telegram alert). If the restart
+# succeeds the system will return to GREEN on the next health check and
+# clear_manual_intervention() will remove the BLACK flag automatically.
+# If the restart fails, re-set the BLACK flag and reset the 2-hour timer
+# so another attempt fires BLACK_RENOTIFY_SECONDS from now.
+#
+# The one-time alert sent when BLACK is first set (in do_restart) is
+# intentionally preserved. Only the periodic re-notifications are replaced
+# by these silent retry attempts.
+check_and_renotify_black() {
+    local reason="${1:-periodic BLACK retry}"
+    local black_set_ts
+    black_set_ts=$(get_black_set_ts)
+    if [[ -z "$black_set_ts" ]]; then
+        # Old state file format without black_set_ts — update in place to add it now
+        local line
+        line=$(cat "$RESTART_STATE_FILE" 2>/dev/null || true)
+        local base
+        base=$(echo "$line" | sed 's/ MANUAL_INTERVENTION.*//')
+        local now
+        now=$(date +%s)
+        echo "${base} MANUAL_INTERVENTION $now" > "$RESTART_STATE_FILE"
+        log_info "BLACK: Migrated state file to include black_set_ts ($now)"
+        return
+    fi
+
+    local now
+    now=$(date +%s)
+    local elapsed=$(( now - black_set_ts ))
+
+    if [[ $elapsed -gt $BLACK_RENOTIFY_SECONDS ]]; then
+        local hours=$(( elapsed / 3600 ))
+        log_warn "BLACK: System in manual intervention state for ${hours}h — attempting silent restart (no alert)"
+        # Temporarily clear the MANUAL_INTERVENTION flag so do_restart's
+        # can_restart() check passes, then attempt a single restart.
+        clear_manual_intervention
+        if do_restart "$reason" "true"; then
+            # Restart succeeded: the system will return to GREEN on the next
+            # health check run, which will call clear_manual_intervention()
+            # again (harmless no-op if already cleared). Nothing more to do.
+            log_info "BLACK: Silent restart attempt succeeded — system should return to GREEN"
+        else
+            # Restart failed: re-enter BLACK and reset the 2-hour retry timer
+            # so we try again BLACK_RENOTIFY_SECONDS from now.
+            log_error "BLACK: Silent restart attempt failed — re-entering BLACK state"
+            set_manual_intervention
+            log_info "BLACK: Reset retry timer (next attempt in ${BLACK_RENOTIFY_SECONDS}s)"
+        fi
+    else
+        local remaining=$(( BLACK_RENOTIFY_SECONDS - elapsed ))
+        log_error "BLACK: Manual intervention required (flag already set, ${elapsed}s elapsed, retry in ${remaining}s) — skipping restart"
+    fi
 }
 
 # Clear the manual intervention flag when the system is healthy again.
 clear_manual_intervention() {
     if is_manual_intervention_required; then
-        # Strip the sentinel token, keeping the timestamp/count intact
+        # Strip MANUAL_INTERVENTION and any trailing black_set_ts, keeping timestamp/count
         local line
         line=$(cat "$RESTART_STATE_FILE" 2>/dev/null || true)
-        echo "${line/ MANUAL_INTERVENTION/}" > "$RESTART_STATE_FILE"
+        echo "$(echo "$line" | sed 's/ MANUAL_INTERVENTION.*//')" > "$RESTART_STATE_FILE"
         log_info "Manual intervention flag cleared (system healthy)"
     fi
 }
@@ -276,13 +428,14 @@ record_restart() {
 #===============================================================================
 
 # Read the current Lobster mode from state file.
-# Returns one of: active, starting, restarting, hibernate, backoff, stopped, waking, unknown
+# Returns one of: active, starting, restarting, backoff, stopped, waking, unknown
+# May also return "hibernate" from stale state files — treated as active by check_claude_lifecycle()
 read_lobster_mode() {
     if [[ ! -f "$LOBSTER_STATE_FILE" ]]; then
         echo "unknown"
         return
     fi
-    python3 -c "
+    uv run python3 -c "
 import json, sys
 try:
     d = json.load(open('$LOBSTER_STATE_FILE'))
@@ -310,9 +463,9 @@ read_state_age() {
 }
 
 is_hibernating() {
-    local mode
-    mode=$(read_lobster_mode)
-    [[  "$mode" == "hibernate" ]]
+    # DEPRECATED: dispatcher no longer writes mode=hibernate (PR #1447).
+    # Always returns false — hibernation suppression is no longer applied.
+    return 1
 }
 
 # Check if a context compaction occurred within the last COMPACTION_SUPPRESS_SECONDS.
@@ -323,7 +476,7 @@ is_compaction_recent() {
         return 1
     fi
     local compacted_at
-    compacted_at=$(python3 -c "
+    compacted_at=$(uv run python3 -c "
 import json, sys
 try:
     d = json.load(open('$LOBSTER_STATE_FILE'))
@@ -346,64 +499,36 @@ except Exception:
     return 1
 }
 
-# Check if a catchup subagent is actively running (or recently started).
-# Returns 0 (true) if the WFM freshness check should be suppressed, 1 otherwise.
-#
-# The dispatcher writes catchup_started_at to lobster-state.json before spawning
-# either the startup-catchup or compact-catchup subagent, and writes
-# catchup_finished_at when the subagent result arrives.  If catchup_finished_at
-# is absent or older than catchup_started_at, the catchup is still in flight.
-#
-# Suppression window: CATCHUP_SUPPRESS_SECONDS from catchup_started_at.
-# This caps suppression even if catchup_finished_at is never written (e.g. the
-# subagent crashed), preventing permanent suppression.
-is_catchup_active() {
-    if [[ ! -f "$LOBSTER_STATE_FILE" ]]; then
+# Check if a context compaction occurred within the last COMPACT_GRACE_SECONDS.
+# Returns 0 (true) if inbox staleness checks should be suppressed, 1 otherwise.
+# Reads the Unix timestamp from last-compact.ts (written by hooks/on-compact.py).
+# This provides a 10-minute grace period for post-compaction re-orientation,
+# extending the existing COMPACTION_SUPPRESS_SECONDS (5 min) window by an additional
+# 5 minutes to cover cases where re-orientation takes longer than expected.
+is_compact_grace_period() {
+    local ts_file="$WORKSPACE_DIR/data/last-compact.ts"
+    if [[ ! -f "$ts_file" ]]; then
         return 1
     fi
-    local started_at finished_at
-    started_at=$(python3 -c "
-import json, sys
-try:
-    d = json.load(open('$LOBSTER_STATE_FILE'))
-    print(d.get('catchup_started_at', ''))
-except Exception:
-    print('')
-" 2>/dev/null)
-    if [[ -z "$started_at" ]]; then
+    local compact_ts
+    compact_ts=$(cat "$ts_file" 2>/dev/null | tr -d '[:space:]')
+    if [[ -z "$compact_ts" ]] || ! [[ "$compact_ts" =~ ^[0-9]+$ ]]; then
         return 1
     fi
-    local started_epoch
-    started_epoch=$(date -d "$started_at" +%s 2>/dev/null) || return 1
     local now
     now=$(date +%s)
-    local age=$((now - started_epoch))
-    # Hard cap: don't suppress longer than CATCHUP_SUPPRESS_SECONDS even if
-    # catchup_finished_at was never written (subagent crash, etc.)
-    if [[ $age -gt $CATCHUP_SUPPRESS_SECONDS ]]; then
-        log_info "Catchup suppression expired: started ${age}s ago (cap: ${CATCHUP_SUPPRESS_SECONDS}s)"
-        return 1
+    local age=$((now - compact_ts))
+    if [[ $age -le $COMPACT_GRACE_SECONDS ]]; then
+        log_info "Post-compaction grace period: compaction ${age}s ago (threshold: ${COMPACT_GRACE_SECONDS}s) — stale-inbox check suppressed"
+        return 0
     fi
-    # Check if catchup has already finished
-    finished_at=$(python3 -c "
-import json, sys
-try:
-    d = json.load(open('$LOBSTER_STATE_FILE'))
-    print(d.get('catchup_finished_at', ''))
-except Exception:
-    print('')
-" 2>/dev/null)
-    if [[ -n "$finished_at" ]]; then
-        local finished_epoch
-        finished_epoch=$(date -d "$finished_at" +%s 2>/dev/null) || { log_warn "WARN: failed to parse finished_epoch from finished_at=${finished_at} — treating catchup as still in flight"; true; }
-        if [[ -n "$finished_epoch" && "$finished_epoch" -ge "$started_epoch" ]]; then
-            log_info "Catchup complete: finished_at=$finished_at — WFM suppression lifted"
-            return 1
-        fi
-    fi
-    log_info "Catchup in flight: started ${age}s ago (cap: ${CATCHUP_SUPPRESS_SECONDS}s) — WFM freshness suppressed"
-    return 0
+    return 1
 }
+
+# is_catchup_active() removed (issue #1483).
+# The dispatcher heartbeat threshold (DISPATCHER_HEARTBEAT_STALE_SECONDS = 1200s)
+# covers catchup duration naturally. No per-catchup suppression needed.
+# The dispatcher no longer needs to call record-catchup-state.sh.
 
 # Check if a boot/restart occurred within the last BOOT_GRACE_SECONDS.
 # Returns 0 (true) if we are inside the grace window, 1 otherwise.
@@ -414,7 +539,7 @@ is_boot_grace_period() {
         return 1
     fi
     local booted_at
-    booted_at=$(python3 -c "
+    booted_at=$(uv run python3 -c "
 import json, sys
 try:
     d = json.load(open('$LOBSTER_STATE_FILE'))
@@ -473,7 +598,7 @@ write_boot_timestamp() {
     fi
     local now
     now=$(date -Iseconds)
-    python3 -c "
+    uv run python3 -c "
 import json, sys
 path = '$LOBSTER_STATE_FILE'
 now = '$now'
@@ -811,39 +936,48 @@ check_outbox_drain() {
     fi
 }
 
-# Check 6: wait_for_messages freshness
-# Checks the mtime of the claude-heartbeat file, which inbox_server.py touches
-# at the start of every wait_for_messages call. If the file hasn't been updated
-# within WFM_STALE_SECONDS, the main loop is presumed stuck (e.g. infinite
-# loop, hung tool call, or Claude exit without wrapper noticing). Suppressed
-# during hibernation and the compaction window.
+# Check 6: Dispatcher heartbeat sentinel (issue #1483 simplification)
 #
-# Gracefully skips the check if the heartbeat file does not exist (fresh install).
+# The dispatcher is considered alive if hooks/thinking-heartbeat.py has written
+# to DISPATCHER_HEARTBEAT_FILE within the last DISPATCHER_HEARTBEAT_STALE_SECONDS.
+# The hook fires on every PostToolUse event — any tool call resets the clock.
+#
+# This single-file check replaces the previous multi-signal approach
+# (claude-heartbeat file + last_processed_at + last_thinking_at in
+# lobster-state.json). The 20-minute threshold naturally covers:
+#   - Context compaction pause (1-3 minutes with no tool calls)
+#   - Startup catchup subagent (up to 10-12 minutes)
+#   - Boot grace period (60-90 seconds)
+#
+# No suppression logic needed — the threshold does the work.
+#
+# Gracefully skips the check if the heartbeat file does not exist (fresh install
+# or first run before the hook has fired).
 #
 # Returns: 0=GREEN (fresh or skipped), 2=RED (stale)
-check_wfm_freshness() {
-    if [[ ! -f "$HEARTBEAT_FILE" ]]; then
-        log_info "WFM freshness: heartbeat file not found — skipping check (fresh install?)"
+check_dispatcher_heartbeat() {
+    if [[ ! -f "$DISPATCHER_HEARTBEAT_FILE" ]]; then
+        log_info "Dispatcher heartbeat: file not found — skipping check (fresh install?)"
         return 0
     fi
 
-    local last_heartbeat
-    last_heartbeat=$(stat -c %Y "$HEARTBEAT_FILE" 2>/dev/null)
-    if [[ -z "$last_heartbeat" ]]; then
-        log_info "WFM freshness: cannot stat heartbeat file — skipping check"
+    local raw_ts
+    raw_ts=$(cat "$DISPATCHER_HEARTBEAT_FILE" 2>/dev/null | tr -d '[:space:]')
+    if [[ -z "$raw_ts" ]] || ! [[ "$raw_ts" =~ ^[0-9]+$ ]]; then
+        log_info "Dispatcher heartbeat: unreadable or non-integer content — skipping check"
         return 0
     fi
 
     local now age
     now=$(date +%s)
-    age=$(( now - last_heartbeat ))
+    age=$(( now - raw_ts ))
 
-    if [[ $age -gt $WFM_STALE_SECONDS ]]; then
-        log_error "RED: wait_for_messages stale — heartbeat last updated ${age}s ago (threshold: ${WFM_STALE_SECONDS}s)"
+    if [[ $age -gt $DISPATCHER_HEARTBEAT_STALE_SECONDS ]]; then
+        log_error "RED: dispatcher heartbeat stale — last tool use ${age}s ago (threshold: ${DISPATCHER_HEARTBEAT_STALE_SECONDS}s)"
         return 2
     fi
 
-    log_info "WFM freshness OK: last wait_for_messages ${age}s ago"
+    log_info "Dispatcher heartbeat OK: last tool use ${age}s ago (threshold: ${DISPATCHER_HEARTBEAT_STALE_SECONDS}s)"
     return 0
 }
 
@@ -875,78 +1009,80 @@ check_disk() {
     return 0
 }
 
-# Check 8: Claude auth token expiry
-# Proactively warn before OAuth token expires so the user can re-auth.
+# Check 8: Claude auth token validity
+# Uses `claude auth status` as the single source of truth.
 #
-# FALSE POSITIVE GUARD: Claude refreshes OAuth tokens lazily — only when making
-# an actual API call, not when tools like `claude auth status` are run. This
-# means the expiresAt timestamp in the credentials file can appear stale even
-# though Claude is fully operational. To avoid false-positive alerts, we only
-# escalate to RED (and send a Telegram alert) after the token has shown as
-# expired or near-expired for AUTH_CONSECUTIVE_RED_THRESHOLD consecutive checks.
-# A single near-expiry reading is reported as YELLOW for monitoring purposes only.
+# Auth is managed via CLAUDE_CODE_OAUTH_TOKEN env var in lobster-config/config.env.
+# The token is passed directly to Claude Code — no credentials file is involved.
+# `claude auth status` is the authoritative check regardless
+# of how the token was provisioned.
 #
-# Returns: 0=GREEN, 1=YELLOW (< 4h remaining), 2=RED (confirmed expired/near-expiry)
+# RESTART GUARD: When AUTH RED is detected, do NOT restart Claude — restarting
+# cannot fix an auth problem and causes a crash loop. The auth_rc=2 check in
+# main() is deliberately NOT wired to do_restart(). Instead, we send an alert
+# and set YELLOW so the operator can intervene by updating CLAUDE_CODE_OAUTH_TOKEN
+# in config.env.
+#
+# Returns: 0=GREEN, 1=YELLOW (transient failure), 2=RED (confirmed not logged in)
 AUTH_FAILURE_COUNTER_FILE="$WORKSPACE_DIR/logs/auth-token-failures"
 AUTH_CONSECUTIVE_RED_THRESHOLD=3  # Must fail this many consecutive 4-min checks (~12 min total)
 
 check_auth_token() {
-    local creds_file="$HOME/.claude/.credentials.json"
-    if [[ ! -f "$creds_file" ]]; then
-        log_warn "No credentials file found at $creds_file"
-        return 1
-    fi
+    # Single check: `claude auth status` is the authoritative source of truth.
+    # Auth is managed via CLAUDE_CODE_OAUTH_TOKEN env var in config.env.
+    # Unset CLAUDECODE/CLAUDE_CODE_ENTRYPOINT to avoid nested-session errors.
+    #
+    # NOTE: `claude auth status` outputs JSON by default. Do NOT pass
+    # --output-format json — that flag does not exist and causes an error,
+    # leaving auth_json empty and making the parse return "unknown" every run.
+    local auth_json
+    auth_json=$(env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT \
+        claude auth status 2>/dev/null)
 
-    local remaining
-    remaining=$(python3 -c "
-import json, time
+    local logged_in auth_method
+    logged_in=$(echo "$auth_json" | uv run python3 -c "
+import json, sys
 try:
-    d = json.load(open('$creds_file'))
-    ea = d.get('claudeAiOauth', {}).get('expiresAt', 0) / 1000
-    print(f'{ea - time.time():.0f}')
+    d = json.load(sys.stdin)
+    print('true' if d.get('loggedIn') else 'false')
 except:
-    print('-1')
+    print('unknown')
+" 2>/dev/null)
+    auth_method=$(echo "$auth_json" | uv run python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    print(d.get('authMethod', 'unknown'))
+except:
+    print('unknown')
 " 2>/dev/null)
 
-    if [[ "${remaining:-0}" -lt 0 || "${remaining:-0}" -lt 3600 ]]; then
-        # Token is expired or expiring very soon — increment consecutive counter
+    if [[ "$logged_in" == "false" ]]; then
+        # Confirmed not logged in — increment consecutive counter to avoid
+        # false positives from transient `claude auth status` failures.
         local failure_count=0
         if [[ -f "$AUTH_FAILURE_COUNTER_FILE" ]]; then
             failure_count=$(cat "$AUTH_FAILURE_COUNTER_FILE" 2>/dev/null || echo 0)
         fi
         failure_count=$((failure_count + 1))
         echo "$failure_count" > "$AUTH_FAILURE_COUNTER_FILE"
-
-        if [[ "${remaining:-0}" -lt 0 ]]; then
-            log_error "AUTH: Token has EXPIRED (consecutive: $failure_count/$AUTH_CONSECUTIVE_RED_THRESHOLD)"
-        else
-            log_error "AUTH RED: Token expires in $((remaining / 60)) minutes (consecutive: $failure_count/$AUTH_CONSECUTIVE_RED_THRESHOLD)"
-        fi
-
-        # Only return RED (which triggers a Telegram alert) after consecutive failures.
-        # On the first few hits, return YELLOW — Claude likely hasn't needed to
-        # refresh yet, or will refresh on next API call.
+        log_error "AUTH RED: claude auth status reports loggedIn=false (consecutive: $failure_count/$AUTH_CONSECUTIVE_RED_THRESHOLD) — check CLAUDE_CODE_OAUTH_TOKEN in config.env"
         if [[ $failure_count -ge $AUTH_CONSECUTIVE_RED_THRESHOLD ]]; then
-            # Reset counter after crossing the threshold so we don't spam —
-            # the main loop will send one Telegram alert, then the counter
-            # resets. If the problem persists, it will escalate again after
-            # another AUTH_CONSECUTIVE_RED_THRESHOLD checks.
             rm -f "$AUTH_FAILURE_COUNTER_FILE"
             return 2
         else
             return 1
         fi
-    elif [[ "${remaining:-0}" -lt 14400 ]]; then
-        # Token healthy but within 4-hour warning window: reset counter, stay YELLOW
-        rm -f "$AUTH_FAILURE_COUNTER_FILE"
-        log_warn "AUTH YELLOW: Token expires in $((remaining / 3600)) hours"
+    elif [[ "$logged_in" == "unknown" ]]; then
+        # Could not parse output — treat as transient and log a warning
+        log_warn "AUTH YELLOW: could not parse 'claude auth status' output — treating as transient"
         return 1
-    else
-        # Token is healthy: reset consecutive failure counter
-        rm -f "$AUTH_FAILURE_COUNTER_FILE"
-        log_info "AUTH OK: Token expires in $((remaining / 3600)) hours"
-        return 0
     fi
+
+    # Logged in — reset failure counter and report GREEN.
+    rm -f "$AUTH_FAILURE_COUNTER_FILE"
+    log_info "AUTH OK: loggedIn=true via $auth_method (CLAUDE_CODE_OAUTH_TOKEN)"
+    return 0
 }
 
 # Check 9: Dashboard server - silently restart if not listening on port 9100
@@ -996,30 +1132,15 @@ check_messages_db() {
     return 0
 }
 
-# Check 10: Required cron entries - auto-restore LOBSTER-SELF-CHECK if missing
+# Check 10: Required cron entries
 check_cron_entries() {
-    local install_dir="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
-    local cron_manage="$install_dir/scripts/cron-manage.sh"
-    local REQUIRED_CRON_MARKERS=("# LOBSTER-SELF-CHECK" "# LOBSTER-HEALTH")
+    local REQUIRED_CRON_MARKERS=("# LOBSTER-HEALTH")
 
     for marker in "${REQUIRED_CRON_MARKERS[@]}"; do
         if ! crontab -l 2>/dev/null | grep -qF "$marker"; then
             log_warn "Missing cron entry: $marker"
-            case "$marker" in
-                "# LOBSTER-SELF-CHECK")
-                    if [[ -x "$cron_manage" ]]; then
-                        "$cron_manage" add "# LOBSTER-SELF-CHECK" \
-                            "*/3 * * * * $install_dir/scripts/periodic-self-check.sh # LOBSTER-SELF-CHECK"
-                        log_info "Auto-restored: $marker"
-                    else
-                        log_warn "cron-manage.sh not found or not executable at $cron_manage — cannot auto-restore $marker"
-                    fi
-                    ;;
-                *)
-                    # LOBSTER-HEALTH checking itself is circular (if we're running, the health cron is working).
-                    # Just warn; do not attempt auto-restore.
-                    ;;
-            esac
+            # LOBSTER-HEALTH checking itself is circular (if we're running, the health cron is working).
+            # Just warn; do not attempt auto-restore.
         else
             log_info "Cron entry present: $marker"
         fi
@@ -1130,7 +1251,7 @@ do_restart() {
     if [[ "$active_subagents" -gt 0 ]]; then
         log_warn "SUBAGENT GUARD: Skipping restart ($active_subagents active subagent(s) running) — will re-evaluate next check"
         if [[ "$suppress_alert" != "true" ]]; then
-            send_telegram_alert "Health check deferred restart: $active_subagents active subagent(s) in flight.
+            send_telegram_alert_deduped "subagent-guard" "Health check deferred restart: $active_subagents active subagent(s) in flight.
 
 Reason that triggered restart: $reason
 
@@ -1143,8 +1264,11 @@ The restart has been skipped to avoid killing running subagents. If the problem 
 
     if ! can_restart; then
         if is_manual_intervention_required; then
-            # Already in BLACK/manual-intervention state — log only, no Telegram spam
-            log_error "BLACK: Manual intervention required (flag already set) — skipping restart and alert"
+            # Already in BLACK/manual-intervention state — check whether it's time to re-alert.
+            # check_and_renotify_black silently retries a restart if BLACK_RENOTIFY_SECONDS
+            # (2h) have elapsed. No Telegram alert is sent — the initial BLACK alert already
+            # fired. If the retry succeeds the system returns to GREEN naturally.
+            check_and_renotify_black "$reason"
         else
             # First time hitting BLACK — set flag and send a single alert.
             # Alert fires even during compaction window: this is a severe state
@@ -1247,7 +1371,7 @@ Manual intervention required:
     # dispatchers running simultaneously.
     if [[ -n "$pre_restart_pid" ]] && kill -0 "$pre_restart_pid" 2>/dev/null; then
         log_error "ABORT: Could not kill pre-restart Claude PID $pre_restart_pid — refusing to start new session to prevent duplicate dispatcher"
-        send_telegram_alert "Restart aborted — could not kill existing Claude process (PID $pre_restart_pid).
+        send_telegram_alert_deduped "restart-aborted-pid" "Restart aborted — could not kill existing Claude process (PID $pre_restart_pid).
 
 Reason: $reason
 
@@ -1346,7 +1470,7 @@ Manual intervention required to kill the process before restarting:
             local post_rc=$?
             if [[ $post_rc -eq 2 ]]; then
                 log_warn "Post-restart: inbox still has NEW stale messages (not same as pre-restart)"
-                send_telegram_alert "System restarted but inbox still has stale messages.
+                send_telegram_alert_deduped "post-restart-stale-inbox" "System restarted but inbox still has stale messages.
 
 Reason: $reason
 Status: Restarted, but new stale messages detected post-restart"
@@ -1357,6 +1481,7 @@ Status: Restarted, but new stale messages detected post-restart"
         log_info "Restart successful"
         write_boot_timestamp
         if [[ "$suppress_alert" != "true" ]]; then
+            # "Recovered" alert: use raw send (important positive signal, not spammy)
             send_telegram_alert "System recovered automatically.
 
 Reason: $reason
@@ -1370,7 +1495,7 @@ Status: Restarted successfully"
         if [[ "$pid_changed" == false ]]; then
             # PID did not change: the old process survived the restart attempt.
             log_error "Restart failed: Claude PID $pre_restart_pid unchanged after 3 checks — old session survived"
-            send_telegram_alert "Restart failed — process still running under original PID $pre_restart_pid.
+            send_telegram_alert_deduped "restart-failed-pid" "Restart failed — process still running under original PID $pre_restart_pid.
 
 Reason: $reason
 Manual intervention may be required: \`lobster restart\`"
@@ -1385,7 +1510,7 @@ Manual intervention may be required: \`lobster restart\`"
                 not_ready_detail="tmux session missing (service is active)"
             fi
             log_warn "Restart confirmed (PID changed) but service/tmux not ready after ${svc_timeout_s}s: $not_ready_detail"
-            send_telegram_alert "Restart confirmed (PID changed) — service/tmux not yet ready after ${svc_timeout_s}s.
+            send_telegram_alert_deduped "restart-not-ready" "Restart confirmed (PID changed) — service/tmux not yet ready after ${svc_timeout_s}s.
 
 Reason: $reason
 Detail: $not_ready_detail
@@ -1438,8 +1563,11 @@ main() {
     # Claude Code pauses tool calls during context compaction for 1-3+ minutes.
     # If on-compact.py recorded a compacted_at within the last
     # COMPACTION_SUPPRESS_SECONDS, skip all stale-inbox checks this run.
+    # Additionally, check last-compact.ts for a 10-minute grace period that
+    # covers the post-compaction re-orientation window (reading bootup files,
+    # processing inbox backlog, waiting for compact-catchup to complete).
     local compaction_recent=false
-    if is_compaction_recent; then
+    if is_compaction_recent || is_compact_grace_period; then
         compaction_recent=true
     fi
 
@@ -1465,70 +1593,16 @@ main() {
     # The persistent wrapper (claude-persistent.sh) manages Claude's lifecycle.
     # We need to check differently depending on the current phase:
     #
-    # hibernate:  Claude exited cleanly, wrapper is polling for new messages.
-    #             No Claude process expected. Only alert if stale user messages.
     # active:     Claude should be running. Full checks apply.
     # starting/restarting/waking: Transient states. Wrapper is handling it.
     # backoff:    Wrapper hit rapid-restart limit. Expected pause.
     # stopped:    Wrapper was stopped. Systemd should restart.
     # unknown:    No state file. Either first run or old-style wrapper.
+    # hibernate:  DEPRECATED (PR #1447) — dispatcher no longer writes this state.
+    #             Treated as active if seen in a stale state file.
     #
 
     case "$lobster_mode" in
-        hibernate)
-            log_info "HIBERNATE: Claude cleanly exited. Wrapper polling for new messages."
-
-            # Boot grace: skip process/tmux/inbox checks — session may not be fully up yet.
-            if [[ "$boot_grace" == "true" ]]; then
-                log_info "Process/inbox checks suppressed (boot grace period)"
-            else
-                # Fresh-state guard: ignore hibernate states younger than HIBERNATE_FRESH_SECONDS.
-                # The dispatcher briefly writes mode=hibernate after wait_for_messages times out,
-                # then immediately wakes if new messages arrive. A health check that fires within
-                # this window would see a momentarily-missing wrapper and false-positive into RED.
-                if [[ $state_age -lt $HIBERNATE_FRESH_SECONDS ]]; then
-                    log_info "Hibernate state is only ${state_age}s old (threshold: ${HIBERNATE_FRESH_SECONDS}s) — skipping process check (transient)"
-                elif ! check_tmux; then
-                    level="RED"
-                    restart_reason="tmux session missing (hibernate mode)"
-                elif [[ "$LOBSTER_DEBUG" == "true" ]]; then
-                    # Debug mode: no persistent wrapper is expected. Claude Code runs
-                    # directly in the tmux pane without claude-persistent.sh. Check for
-                    # the Claude process directly instead of checking for the wrapper.
-                    if ! check_claude_process; then
-                        level="RED"
-                        restart_reason="no Claude process in lobster tmux (debug mode, hibernate)"
-                    fi
-                elif ! check_wrapper_process; then
-                    # Wrapper died during hibernation — need systemd restart
-                    level="RED"
-                    restart_reason="wrapper process missing during hibernation"
-                fi
-
-                # Still check inbox: if user messages are sitting stale, the wrapper
-                # should have woken Claude by now. Give extra time (5 min) since
-                # the wrapper polls every 10s.
-                if [[ "$compaction_recent" == "true" ]]; then
-                    log_info "Inbox drain suppressed (recent compaction)"
-                else
-                    check_inbox_drain
-                    local hibernate_inbox_rc=$?
-                    if [[ $hibernate_inbox_rc -eq 2 ]]; then
-                        # Stale user messages during hibernation — wrapper may be stuck.
-                        # Suppress to YELLOW if a health-check restart just fired: the
-                        # MCP server recovers processing/ messages to inbox/ on startup,
-                        # which would otherwise trigger an immediate second restart.
-                        if is_recent_restart; then
-                            [[ "$level" == "GREEN" ]] && level="YELLOW"
-                        else
-                            level="RED"
-                            restart_reason="${restart_reason:+$restart_reason + }stale inbox during hibernation"
-                        fi
-                    fi
-                fi
-            fi
-            ;;
-
         starting|restarting|waking)
             # Boot grace: skip stale-transient escalation and inbox checks.
             if [[ "$boot_grace" == "true" ]]; then
@@ -1644,7 +1718,13 @@ main() {
             fi
             ;;
 
-        active|unknown|*)
+        hibernate|active|unknown|*)
+            # hibernate: DEPRECATED — dispatcher no longer writes this state (PR #1447).
+            # If seen in a stale state file, treat as active: full process and inbox checks apply.
+            if [[ "$lobster_mode" == "hibernate" ]]; then
+                log_warn "HIBERNATE: stale hibernate state found — dispatcher no longer uses hibernation (treating as active)"
+            fi
+
             # Boot grace: skip process/tmux/inbox checks — session may still be initializing.
             if [[ "$boot_grace" == "true" ]]; then
                 log_info "Process/inbox checks suppressed (boot grace period)"
@@ -1728,32 +1808,30 @@ main() {
         level="YELLOW"
     fi
 
-    # --- wait_for_messages freshness check ---
-    # Suppressed during hibernation (dispatcher isn't running), transient
-    # lifecycle states where Claude hasn't started yet (starting, restarting,
-    # waking, backoff, stopped), during the compaction grace period (tool
-    # calls pause while Claude compacts context), and while a catchup subagent
-    # is running (dispatcher may not call wait_for_messages for 10-12 minutes
-    # during startup-catchup or compact-catchup generation).
+    # --- Dispatcher heartbeat check (issue #1483 simplification) ---
+    # Single-file liveness check: hooks/thinking-heartbeat.py writes a Unix
+    # epoch timestamp to DISPATCHER_HEARTBEAT_FILE on every PostToolUse event.
+    # The 20-minute threshold covers compaction + catchup without suppression.
+    #
+    # Only suppressed during:
+    #   - Hibernation (dispatcher process is not running)
+    #   - Transient lifecycle states (starting/restarting/waking/backoff/stopped —
+    #     the wrapper hasn't even launched Claude yet)
+    # Boot grace and catchup suppression are no longer needed: the threshold
+    # absorbs them. The dispatcher no longer needs to call record-catchup-state.sh.
 
     if is_hibernating; then
-        log_info "WFM freshness suppressed (hibernating)"
+        log_info "Dispatcher heartbeat suppressed (hibernating)"
     elif [[ "$lobster_mode" == "starting" || "$lobster_mode" == "restarting" || \
             "$lobster_mode" == "waking"    || "$lobster_mode" == "backoff"    || \
             "$lobster_mode" == "stopped" ]]; then
-        log_info "WFM freshness suppressed (transient lifecycle state: $lobster_mode)"
-    elif [[ "$boot_grace" == "true" ]]; then
-        log_info "WFM freshness suppressed (boot grace period)"
-    elif [[ "$compaction_recent" == "true" ]]; then
-        log_info "WFM freshness suppressed (recent compaction)"
-    elif is_catchup_active; then
-        log_info "WFM freshness suppressed (catchup subagent in flight)"
+        log_info "Dispatcher heartbeat suppressed (transient lifecycle state: $lobster_mode)"
     else
-        check_wfm_freshness
-        local wfm_rc=$?
-        if [[ $wfm_rc -eq 2 ]]; then
+        check_dispatcher_heartbeat
+        local hb_rc=$?
+        if [[ $hb_rc -eq 2 ]]; then
             level="RED"
-            restart_reason="${restart_reason:+$restart_reason + }wait_for_messages stale (>${WFM_STALE_SECONDS}s)"
+            restart_reason="${restart_reason:+$restart_reason + }dispatcher heartbeat stale (>${DISPATCHER_HEARTBEAT_STALE_SECONDS}s)"
         fi
     fi
 
@@ -1762,9 +1840,16 @@ main() {
     check_auth_token
     local auth_rc=$?
     if [[ $auth_rc -eq 2 ]]; then
-        # Token expired or expiring very soon — log only, no Telegram alert.
-        # Claude refreshes tokens lazily; if it truly can't work, the stale
-        # inbox check will catch it and escalate via that path instead.
+        # Auth confirmed RED (loggedIn=false after consecutive checks).
+        # IMPORTANT: Do NOT pass this to do_restart(). Restarting Claude
+        # cannot fix an auth problem and causes a crash loop. Instead:
+        # - Alert via Telegram so the operator knows manual action is needed
+        # - Keep level at YELLOW (not RED) so do_restart() is never invoked
+        #   for auth failures alone
+        send_telegram_alert_deduped "auth-expired" "Lobster: Claude auth expired (loggedIn=false confirmed after consecutive checks).
+
+Restarting will NOT fix this. Manual action required:
+ssh into the server and run: claude auth login"
         if [[ "$level" != "RED" ]]; then
             level="YELLOW"
         fi
@@ -1825,5 +1910,14 @@ main() {
 
     log_info "=== Health check v3 complete (level=$level, mode=$lobster_mode) ==="
 }
+
+# Handle --clear-black before entering the main loop.
+# This is a maintenance escape hatch: it resets the BLACK state so auto-restarts
+# are re-enabled without requiring a full manual recovery procedure.
+if [[ "${1:-}" == "--clear-black" ]]; then
+    echo "0 0 GREEN" > "$RESTART_STATE_FILE"
+    echo "BLACK state cleared — restart state reset to GREEN"
+    exit 0
+fi
 
 main "$@"

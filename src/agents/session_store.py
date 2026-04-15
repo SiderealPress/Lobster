@@ -69,7 +69,9 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
     trigger_message_id  TEXT,
     trigger_snippet     TEXT,
     reply_message_ids   TEXT,
-    stop_reason         TEXT
+    stop_reason         TEXT,
+    idempotency         TEXT DEFAULT 'unknown',
+    task_origin         TEXT DEFAULT 'user'
 );
 """
 
@@ -113,6 +115,8 @@ _MIGRATION_STMTS = [
     "ALTER TABLE agent_sessions ADD COLUMN trigger_snippet TEXT",
     "ALTER TABLE agent_sessions ADD COLUMN reply_message_ids TEXT",
     "ALTER TABLE agent_sessions ADD COLUMN stop_reason TEXT",
+    "ALTER TABLE agent_sessions ADD COLUMN idempotency TEXT DEFAULT 'unknown'",
+    "ALTER TABLE agent_sessions ADD COLUMN task_origin TEXT DEFAULT 'user'",
 ]
 
 # Additive migrations for the reports table (BIS-85 multi-instance prep).
@@ -237,6 +241,8 @@ def session_start(
     input_summary: str | None = None,
     trigger_message_id: str | None = None,
     trigger_snippet: str | None = None,
+    idempotency: str | None = None,
+    task_origin: str | None = None,
     path: Path | None = None,
 ) -> None:
     """Record a newly-spawned agent session.
@@ -257,12 +263,26 @@ def session_start(
         input_summary:      First ~200 chars of task prompt (optional).
         trigger_message_id: Inbox message_id that caused this spawn (causality).
         trigger_snippet:    First 200 chars of the triggering message text (PII).
+        idempotency:        Re-run safety: 'safe' | 'unsafe' | 'unknown' (default).
+                            'safe'    — task is read-only/idempotent; safe to re-run
+                                        automatically after an interrupted restart.
+                            'unsafe'  — task has side effects (writes, sends, posts);
+                                        requires explicit user approval to re-run.
+                            'unknown' — caller did not classify the task (default).
+        task_origin:        Origin of this task: 'user' | 'scheduled' | 'internal'.
+                            'user'      — triggered by a real user message (Telegram, Slack).
+                            'scheduled' — triggered by a scheduled job or cron task.
+                            'internal'  — system-initiated, no user involved (reconciler,
+                                          health check, session management, etc.).
+                            Defaults to 'user' when not specified.
         path:               DB path override (for tests).
     """
     resolved = path if path is not None else _DEFAULT_DB_PATH
     conn = _get_connection(resolved)
     now = datetime.now(timezone.utc).isoformat()
     snippet = trigger_snippet[:200] if trigger_snippet else None
+    idempotency_val = idempotency if idempotency in ("safe", "unsafe", "unknown") else "unknown"
+    task_origin_val = task_origin if task_origin in ("user", "scheduled", "internal") else "user"
 
     conn.execute(
         """
@@ -270,10 +290,11 @@ def session_start(
             (id, task_id, agent_type, description, chat_id, source, status,
              output_file, timeout_minutes, input_summary, result_summary,
              parent_id, spawned_at, completed_at, last_seen_at,
-             notified_at, trigger_message_id, trigger_snippet, reply_message_ids)
+             notified_at, trigger_message_id, trigger_snippet, reply_message_ids,
+             idempotency, task_origin)
         VALUES
             (?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, NULL, ?, ?, NULL, NULL,
-             NULL, ?, ?, NULL)
+             NULL, ?, ?, NULL, ?, ?)
         """,
         (
             id,
@@ -289,6 +310,8 @@ def session_start(
             now,
             trigger_message_id,
             snippet,
+            idempotency_val,
+            task_origin_val,
         ),
     )
     conn.commit()
@@ -668,8 +691,15 @@ def get_unnotified_completed(
 # Public: queries (pure — no side effects)
 # ---------------------------------------------------------------------------
 
-def get_active_sessions(path: Path | None = None) -> list[dict]:
+def get_active_sessions(
+    path: Path | None = None,
+    chat_id: str | None = None,
+) -> list[dict]:
     """Return all currently running sessions with elapsed time.
+
+    Args:
+        path: Optional DB path override.
+        chat_id: When provided, filter to sessions for this chat_id only.
 
     Returns:
         List of dicts with all session columns plus elapsed_seconds.
@@ -679,13 +709,24 @@ def get_active_sessions(path: Path | None = None) -> list[dict]:
     resolved = path if path is not None else _DEFAULT_DB_PATH
     conn = _get_connection(resolved)
 
-    cursor = conn.execute(
-        """
-        SELECT * FROM agent_sessions
-        WHERE status IN ('running', 'starting')
-        ORDER BY spawned_at ASC
-        """
-    )
+    if chat_id is not None:
+        cursor = conn.execute(
+            """
+            SELECT * FROM agent_sessions
+            WHERE status IN ('running', 'starting')
+              AND chat_id = ?
+            ORDER BY spawned_at ASC
+            """,
+            (chat_id,),
+        )
+    else:
+        cursor = conn.execute(
+            """
+            SELECT * FROM agent_sessions
+            WHERE status IN ('running', 'starting')
+            ORDER BY spawned_at ASC
+            """
+        )
     rows = cursor.fetchall()
     now = datetime.now(timezone.utc)
 
@@ -799,27 +840,47 @@ def _elapsed_minutes_str(elapsed_seconds: int | None) -> str:
 def format_active_sessions_block(sessions: list[dict]) -> str:
     """Format a list of active sessions as a compact context block.
 
+    Distinguishes user-facing agents from system agents (chat_id=0 or None).
+    System agents are background tasks (scheduled jobs, startup-catchup, etc.)
+    that do not correspond to a user conversation in the IDE panel.
+
     Produces output like:
-        [2 agents running]
-        - functional-engineer: "Implement GSD phase plan for BIS-51" (chat: OWNER_CHAT_ID_PLACEHOLDER, 12m ago)
-        - general-purpose: "Archive link for Drew" (chat: OWNER_CHAT_ID_PLACEHOLDER, 2m ago)
+        [1 agent running, 1 system]
+        - functional-engineer: "Implement GSD phase plan" (chat: 8305714125, 12m ago)
+        - subagent: "startup-catchup" (system, 3m ago)
 
     Returns an empty string if sessions is empty.
     """
     if not sessions:
         return ""
-    count = len(sessions)
-    label = "agent" if count == 1 else "agents"
-    lines = [f"[{count} {label} running]"]
-    for s in sessions:
+
+    # Split into user agents (real chat_id) and system agents (chat_id=0 or None)
+    user_sessions = [s for s in sessions if s.get("chat_id") not in (None, 0, "0", "")]
+    system_sessions = [s for s in sessions if s.get("chat_id") in (None, 0, "0", "")]
+
+    user_count = len(user_sessions)
+    system_count = len(system_sessions)
+
+    user_label = "agent" if user_count == 1 else "agents"
+    header = f"[{user_count} {user_label} running"
+    if system_count > 0:
+        sys_label = "system" if system_count == 1 else "systems"
+        header += f", {system_count} {sys_label}"
+    header += "]"
+
+    lines = [header]
+    for s in user_sessions + system_sessions:
         agent_type = s.get("agent_type") or "agent"
         desc = s.get("description", "")
         # Truncate long descriptions
         if len(desc) > 60:
             desc = desc[:57] + "..."
-        chat_id = s.get("chat_id", "?")
+        chat_id = s.get("chat_id")
         elapsed = _elapsed_minutes_str(s.get("elapsed_seconds"))
-        lines.append(f'- {agent_type}: "{desc}" (chat: {chat_id}, {elapsed})')
+        if chat_id in (None, 0, "0", ""):
+            lines.append(f'- {agent_type}: "{desc}" (system, {elapsed})')
+        else:
+            lines.append(f'- {agent_type}: "{desc}" (chat: {chat_id}, {elapsed})')
     return "\n".join(lines)
 
 
@@ -901,6 +962,27 @@ def check_output_file_status(output_file: str) -> str:
     if not output_file:
         return "missing"
     return _read_stop_reason_from_path(Path(output_file))
+
+
+def get_output_file_mtime(output_file: str) -> float | None:
+    """Return the mtime (seconds since epoch) of the resolved output file.
+
+    Follows symlinks so that the mtime reflects when the underlying JSONL file
+    was last written, not when the symlink was created.
+
+    Returns None when ``output_file`` is empty, the path does not exist, or
+    stat() fails for any reason — callers should treat None as "unknown" and
+    apply the conservative (long) threshold.
+
+    Pure function: reads filesystem metadata only, no side effects.
+    """
+    if not output_file:
+        return None
+    try:
+        real_path = Path(output_file).resolve()
+        return real_path.stat().st_mtime
+    except OSError:
+        return None
 
 
 def scan_agent_outputs(

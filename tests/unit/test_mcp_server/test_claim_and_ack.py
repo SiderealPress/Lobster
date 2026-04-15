@@ -294,3 +294,129 @@ class TestClaimAndAck:
         assert reply.get("reply_to_message_id") == 9001, (
             "reply_to_message_id must be forwarded to the ack for Telegram threading"
         )
+
+    def test_counter_increments_for_user_message(self, dirs):
+        """Processing a real user message via claim_and_ack increments _user_message_counter.
+
+        This verifies that the counter ticks even when the dispatcher uses claim_and_ack
+        rather than mark_processing, so the session_note_reminder interval is not skipped.
+        """
+        inbox, processing, outbox, sent = dirs
+        msg_id = self._write_inbox_message(inbox)
+
+        with patch.multiple(
+            "src.mcp.inbox_server",
+            INBOX_DIR=inbox,
+            PROCESSING_DIR=processing,
+            OUTBOX_DIR=outbox,
+            SENT_DIR=sent,
+        ):
+            import src.mcp.inbox_server as srv
+            srv._user_message_counter = 0
+
+            from src.mcp.inbox_server import handle_claim_and_ack
+
+            asyncio.run(handle_claim_and_ack({
+                "message_id": msg_id,
+                "ack_text": "On it.",
+                "chat_id": 123456,
+                "source": "telegram",
+            }))
+
+            assert srv._user_message_counter == 1, (
+                "claim_and_ack must increment _user_message_counter for real user messages"
+            )
+
+    def test_counter_injects_reminder_at_interval(self, dirs):
+        """When claim_and_ack processes the Nth user message (N == SESSION_NOTE_REMINDER_INTERVAL),
+        a session_note_reminder is injected into the inbox.
+
+        This ensures the session-note-appender trigger fires whether the dispatcher
+        uses mark_processing or claim_and_ack to claim messages.
+        """
+        inbox, processing, outbox, sent = dirs
+
+        with patch.multiple(
+            "src.mcp.inbox_server",
+            INBOX_DIR=inbox,
+            PROCESSING_DIR=processing,
+            OUTBOX_DIR=outbox,
+            SENT_DIR=sent,
+        ):
+            import src.mcp.inbox_server as srv
+            interval = srv.SESSION_NOTE_REMINDER_INTERVAL
+            # Prime the counter to one below the trigger threshold
+            srv._user_message_counter = interval - 1
+
+            from src.mcp.inbox_server import handle_claim_and_ack
+
+            # Write and claim the Nth message, which should trigger the reminder
+            msg_id = f"{interval}_telegram"
+            msg = {
+                "id": msg_id,
+                "source": "telegram",
+                "chat_id": 123456,
+                "type": "text",
+                "text": "Trigger message",
+                "timestamp": "2026-03-31T10:00:00.000000",
+            }
+            (inbox / f"{msg_id}.json").write_text(json.dumps(msg))
+
+            asyncio.run(handle_claim_and_ack({
+                "message_id": msg_id,
+                "ack_text": "Got it.",
+                "chat_id": 123456,
+                "source": "telegram",
+            }))
+
+            # The inbox should now contain a session_note_reminder file
+            reminder_files = [
+                f for f in inbox.glob("*.json")
+                if "session_note_reminder" in f.name
+            ]
+            assert len(reminder_files) == 1, (
+                f"Expected 1 session_note_reminder in inbox after claim_and_ack at "
+                f"message {interval}, found {len(reminder_files)}"
+            )
+            reminder = json.loads(reminder_files[0].read_text())
+            assert reminder["type"] == "session_note_reminder"
+            assert reminder["user_message_count"] == interval
+
+    def test_counter_does_not_increment_for_system_messages(self, dirs):
+        """Claiming a system/subagent message via claim_and_ack must NOT increment the counter."""
+        inbox, processing, outbox, sent = dirs
+
+        with patch.multiple(
+            "src.mcp.inbox_server",
+            INBOX_DIR=inbox,
+            PROCESSING_DIR=processing,
+            OUTBOX_DIR=outbox,
+            SENT_DIR=sent,
+        ):
+            import src.mcp.inbox_server as srv
+            srv._user_message_counter = 0
+
+            from src.mcp.inbox_server import handle_claim_and_ack
+
+            # Write a subagent_result message — should not count
+            msg_id = "1700000000001_system"
+            msg = {
+                "id": msg_id,
+                "source": "system",
+                "chat_id": 0,
+                "type": "subagent_result",
+                "text": "PR opened.",
+                "timestamp": "2026-03-31T10:01:00.000000",
+            }
+            (inbox / f"{msg_id}.json").write_text(json.dumps(msg))
+
+            asyncio.run(handle_claim_and_ack({
+                "message_id": msg_id,
+                "ack_text": "Noted.",
+                "chat_id": 0,
+                "source": "system",
+            }))
+
+            assert srv._user_message_counter == 0, (
+                "System/subagent messages must not increment _user_message_counter"
+            )

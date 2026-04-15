@@ -634,6 +634,7 @@ create_new_directories() {
         "$WORKSPACE_DIR/scheduled-jobs/tasks"
         "$WORKSPACE_DIR/data"
         "$WORKSPACE_DIR/scheduled-jobs/logs"
+        "$WORKSPACE_DIR/reports"
         "$USER_CONFIG_DIR/memory/canonical/people"
         "$USER_CONFIG_DIR/memory/canonical/projects"
         "$USER_CONFIG_DIR/memory/archive/digests"
@@ -1333,7 +1334,7 @@ with open(path, 'w') as f:
         ' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
         if [ "${has_file_protect:-0}" = "0" ] || [ "${has_file_protect:-0}" = "" ]; then
             TMP_SETTINGS=$(mktemp)
-            jq --arg cmd "python3 $INSTALL_DIR/hooks/system-file-protect.py" \
+            jq --arg cmd "python3 $LOBSTER_DIR/hooks/system-file-protect.py" \
                '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
                 "matcher": "Edit|Write|NotebookEdit",
                 "hooks": [{
@@ -1355,7 +1356,7 @@ with open(path, 'w') as f:
         ' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
         if [ "${has_auditor:-0}" = "0" ] || [ "${has_auditor:-0}" = "" ]; then
             TMP_SETTINGS=$(mktemp)
-            jq --arg cmd "python3 $INSTALL_DIR/hooks/require-auditor-context-update.py" \
+            jq --arg cmd "python3 $LOBSTER_DIR/hooks/require-auditor-context-update.py" \
                '.hooks.SubagentStop = (.hooks.SubagentStop // []) + [{
                 "matcher": "",
                 "hooks": [{
@@ -1440,11 +1441,11 @@ with open(path, 'w') as f:
             | length
         ' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
         if [ "${has_secret_scanner:-0}" = "0" ] || [ "${has_secret_scanner:-0}" = "" ]; then
-            chmod +x "$INSTALL_DIR/hooks/secret-scanner.py" 2>/dev/null || true
+            chmod +x "$LOBSTER_DIR/hooks/secret-scanner.py" 2>/dev/null || true
             TMP_SETTINGS=$(mktemp)
-            jq --arg cmd "python3 $INSTALL_DIR/hooks/secret-scanner.py" \
+            jq --arg cmd "python3 $LOBSTER_DIR/hooks/secret-scanner.py" \
                '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
-                "matcher": "mcp__lobster-inbox__send_reply|mcp__github__add_issue_comment|mcp__github__issue_write|mcp__github__create_pull_request|mcp__github__update_pull_request|mcp__github__pull_request_review_write|mcp__github__add_reply_to_pull_request_comment|mcp__github__create_or_update_file|mcp__github__push_files|mcp__github__merge_pull_request|mcp__github__add_comment_to_pending_review|mcp__github__create_pull_request_with_copilot|mcp__github__delete_file|Bash",
+                "matcher": "mcp__lobster-inbox__send_reply|Bash",
                 "hooks": [{
                     "type": "command",
                     "command": $cmd,
@@ -1456,22 +1457,7 @@ with open(path, 'w') as f:
         fi
     fi
 
-    # Migration 27: Add gws credential sync cron entry
-    # gws auth login writes new tokens to credentials.enc but does not update
-    # credentials.json. Without this sync, API calls read the stale refresh token
-    # from credentials.json and fail with invalid_grant after a re-auth.
-    # The daily cron calls sync-gws-credentials.py which copies the refresh_token
-    # from the encrypted store into credentials.json only when it differs.
-    local GWS_SYNC_MARKER="# LOBSTER-GWS-CREDENTIAL-SYNC"
-    if ! crontab -l 2>/dev/null | grep -q "$GWS_SYNC_MARKER"; then
-        local gws_sync_script="$LOBSTER_DIR/scripts/sync-gws-credentials.py"
-        chmod +x "$gws_sync_script" 2>/dev/null || true
-        "$LOBSTER_DIR/scripts/cron-manage.sh" add "$GWS_SYNC_MARKER" \
-            "0 4 * * * cd $LOBSTER_DIR && uv run scripts/sync-gws-credentials.py $GWS_SYNC_MARKER"
-        substep "Added gws credential sync cron entry (daily at 04:00)"
-        migrated=$((migrated + 1))
-    fi
-
+    # Migration 27: Add gws credential sync cron entry — superseded by Migration 34 (removed)
 
     # Migration 28: Add daily log-export cron entry
     # export-logs.py copies observations.log, lobster.log, and audit.jsonl to a
@@ -1480,28 +1466,1158 @@ with open(path, 'w') as f:
     # Provides an off-process durable copy of high-signal logs and a foundation
     # for future remote forwarding (see issue #730).
     local LOG_EXPORT_MARKER="# LOBSTER-LOG-EXPORT"
-    if ! crontab -l 2>/dev/null | grep -q "$LOG_EXPORT_MARKER"; then
-        local log_export_script="$LOBSTER_DIR/scheduled-tasks/export-logs.py"
-        chmod +x "$log_export_script" 2>/dev/null || true
-        "$LOBSTER_DIR/scripts/cron-manage.sh" add "$LOG_EXPORT_MARKER" \
-            "0 3 * * * cd $LOBSTER_DIR && uv run scheduled-tasks/export-logs.py $LOG_EXPORT_MARKER"
-        substep "Added daily log-export cron entry (03:00 UTC, archives observations.log + audit.jsonl)"
+    local log_export_script="$LOBSTER_DIR/scheduled-tasks/export-logs.py"
+    chmod +x "$log_export_script" 2>/dev/null || true
+    # Remove any existing entry (stale path or schedule) then re-add with correct values
+    crontab -l 2>/dev/null | grep -v "$LOG_EXPORT_MARKER" | crontab - 2>/dev/null || true
+    (crontab -l 2>/dev/null; echo "0 3 * * * cd $LOBSTER_DIR && $HOME/.local/bin/uv run scheduled-tasks/export-logs.py $LOG_EXPORT_MARKER") | crontab -
+    substep "Set daily log-export cron entry (03:00 UTC, archives observations.log + audit.jsonl)"
+    migrated=$((migrated + 1))
+
+    # Migration 29: Restore gws OAuth client secret from lobster-config — superseded by Migration 34 (removed)
+
+    # Migration 30: Create ~/lobster-workspace/reports/ for artifact-based large result delivery.
+    # Subagents write large outputs (reports, diffs, analysis) to this directory and pass the
+    # path in write_result artifacts=[...]. The dispatcher reads and inlines the content rather
+    # than bloating the inbox message or the dispatcher's context window (see issue #746).
+    if [ ! -d "$WORKSPACE_DIR/reports" ]; then
+        mkdir -p "$WORKSPACE_DIR/reports"
+        substep "Created $WORKSPACE_DIR/reports/ for subagent artifact storage"
         migrated=$((migrated + 1))
     fi
 
-    # Migration 29: Restore gws OAuth client secret from lobster-config
-    # install.sh previously set up the gws credential sync cron job but did not
-    # restore the client_secret.json. Without it, gws auth login fails with
-    # "No OAuth client configured." on any reinstall.
-    # If the user has stored the secret at ~/lobster-config/gws-client-secret.json
-    # (the canonical location for private credentials), copy it into place now.
-    local GWS_SECRET_SRC="$HOME/lobster-config/gws-client-secret.json"
-    local GWS_SECRET_DEST="$HOME/.config/gws/client_secret.json"
-    if [ -f "$GWS_SECRET_SRC" ] && [ ! -f "$GWS_SECRET_DEST" ]; then
-        mkdir -p "$HOME/.config/gws"
-        cp "$GWS_SECRET_SRC" "$GWS_SECRET_DEST"
-        substep "Restored gws OAuth client secret from lobster-config"
+    # Migration 31: Remove GitHub MCP server from Claude Code settings.
+    # The GitHub MCP caused subagents to reach for mcp__github__* tools instead
+    # of the gh CLI, which is already authenticated and the canonical tool.
+    # Removing the MCP entry eliminates the confusion source at the tool-list level.
+    # This migration removes the "github" MCP entry from both settings files so the
+    # MCP no longer appears in the available tool list on next Claude Code startup.
+    for _settings_file in "$HOME/.claude/settings.json" "$HOME/.claude/settings.local.json"; do
+        if [ -f "$_settings_file" ] && jq -e '.mcpServers.github' "$_settings_file" >/dev/null 2>&1; then
+            TMP_SETTINGS=$(mktemp)
+            jq 'del(.mcpServers.github)' "$_settings_file" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$_settings_file"
+            substep "Removed GitHub MCP entry from $_settings_file"
+            migrated=$((migrated + 1))
+        fi
+    done
+    # Also remove via claude CLI in case the MCP was registered at user scope
+    if command -v claude &>/dev/null && claude mcp list 2>/dev/null | grep -q "^github"; then
+        claude mcp remove github --scope user 2>/dev/null || true
+        substep "Removed GitHub MCP server from Claude Code user config"
         migrated=$((migrated + 1))
+    fi
+
+    # Migration 32: Add LOBSTER_ENV=production to existing config.env files
+    # New installs write LOBSTER_ENV=production into config.env during setup.
+    # Existing installs that predate this change will not have the variable, which
+    # is safe (both scripts default to "production" when the variable is absent),
+    # but the explicit entry makes the knob discoverable and easy to flip for dev work.
+    # We only append if LOBSTER_ENV is completely absent — no existing line is modified.
+    if [ -f "$CONFIG_FILE" ] && ! grep -q '^LOBSTER_ENV=' "$CONFIG_FILE"; then
+        cat >> "$CONFIG_FILE" << 'EOF'
+
+# Environment mode: production | dev | test
+# Set to "dev" to make the persistent session and health check inert while doing
+# interactive SSH work. Revert to "production" (or remove this line) to resume.
+LOBSTER_ENV=production
+EOF
+        substep "Added LOBSTER_ENV=production to $CONFIG_FILE (existing install backfill)"
+        migrated=$((migrated + 1))
+    fi
+
+    # Migration 33: Register require-wait-for-messages Stop hook in settings.json
+    # This hook fires on every Stop event and nudges the dispatcher to call
+    # wait_for_messages when it stalls without doing so, cutting the recovery window
+    # from ~12 minutes (health check) to one turn. Subagent sessions are exempted
+    # via is_dispatcher() — the hook is a no-op for anything that is not the dispatcher.
+    if [ -f "$CLAUDE_SETTINGS" ]; then
+        if ! jq -e '.hooks.Stop[]? | select(.hooks[]?.command | contains("require-wait-for-messages"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+            chmod +x "$LOBSTER_DIR/hooks/require-wait-for-messages.py" 2>/dev/null || true
+            TMP_SETTINGS=$(mktemp)
+            jq '.hooks.Stop = (.hooks.Stop // []) + [{
+                "matcher": "",
+                "hooks": [{
+                    "type": "command",
+                    "command": "python3 '"$LOBSTER_DIR"'/hooks/require-wait-for-messages.py",
+                    "timeout": 10
+                }]
+            }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+            substep "Registered require-wait-for-messages Stop hook in settings.json"
+            migrated=$((migrated + 1))
+        fi
+    fi
+
+    # Migration 34: Remove gws credential sync cron entry from existing installs.
+    # gws (third-party Gmail CLI) is broken (OAuth 401 errors) and has been removed
+    # from Lobster's install/setup. The daily cron entry it added must be cleaned
+    # from existing installs so it no longer runs sync-gws-credentials.py.
+    local GWS_SYNC_MARKER="# LOBSTER-GWS-CREDENTIAL-SYNC"
+    if crontab -l 2>/dev/null | grep -q "$GWS_SYNC_MARKER"; then
+        "$LOBSTER_DIR/scripts/cron-manage.sh" remove "$GWS_SYNC_MARKER" 2>/dev/null || true
+        substep "Removed gws credential sync cron entry (gws integration discontinued)"
+        migrated=$((migrated + 1))
+    fi
+
+    # Migration 35: Register on-fresh-start SessionStart hook in settings.json
+    # On a fresh CC restart, all previously-"running" agent sessions are dead.
+    # This hook runs agent-monitor.py --mark-failed immediately at startup so
+    # stale sessions are cleared without waiting for the 120-minute reconciler
+    # threshold. Skips compaction events and subagent sessions.
+    if [ -f "$CLAUDE_SETTINGS" ]; then
+        if ! jq -e '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("on-fresh-start"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+            chmod +x "$LOBSTER_DIR/hooks/on-fresh-start.py" 2>/dev/null || true
+            TMP_SETTINGS=$(mktemp)
+            jq '.hooks.SessionStart = (.hooks.SessionStart // []) + [{
+                "matcher": "",
+                "hooks": [{
+                    "type": "command",
+                    "command": "python3 '"$LOBSTER_DIR"'/hooks/on-fresh-start.py",
+                    "timeout": 30
+                }]
+            }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+            substep "Registered on-fresh-start SessionStart hook in settings.json"
+            migrated=$((migrated + 1))
+        fi
+    fi
+
+    # Migration 36: Create sessions directory in lobster-user-config for numbered session notes
+    # Session notes (YYYYMMDD-NNN.md) are the primary continuity mechanism for structured
+    # memory. They live in lobster-user-config (committed, survives machine migrations).
+    # Also seeds the session.template.md from canonical-templates if not already present.
+    local sessions_dir="$USER_CONFIG_DIR/memory/canonical/sessions"
+    if [ ! -d "$sessions_dir" ]; then
+        mkdir -p "$sessions_dir"
+        substep "Created $sessions_dir/ for numbered session note files"
+        migrated=$((migrated + 1))
+    fi
+    local session_tmpl_src="$LOBSTER_DIR/memory/canonical-templates/sessions/session.template.md"
+    local session_tmpl_dst="$sessions_dir/session.template.md"
+    if [ -f "$session_tmpl_src" ] && [ ! -f "$session_tmpl_dst" ]; then
+        cp "$session_tmpl_src" "$session_tmpl_dst"
+        substep "Seeded session.template.md into $sessions_dir/"
+        migrated=$((migrated + 1))
+    fi
+
+    # Migration 39: (removed) Previously copied bot-talk-poller.md and bot-talk-poller-fast.md
+    # from scheduled-tasks/tasks/ into the workspace. Those files contained hardcoded instance
+    # data (IP addresses, chat_ids, identity names) and have been removed from the public repo.
+    # Instance-specific task files belong in ~/lobster-workspace/scheduled-jobs/tasks/ and are
+    # created via MCP tools (create_scheduled_job) or user-config hooks — not pushed from the repo.
+
+    # Migration 37: Remove run-job.sh cron entries and make dispatch-job.sh executable.
+    # run-job.sh (which invoked claude -p directly) has been replaced by dispatch-job.sh
+    # (which posts a scheduled_reminder to the inbox for the dispatcher to handle).
+    # Remove any lingering LOBSTER-SCHEDULED cron entries that still reference run-job.sh.
+    if crontab -l 2>/dev/null | grep -q 'run-job.sh.*# LOBSTER-SCHEDULED'; then
+        { crontab -l 2>/dev/null | grep -v 'run-job.sh.*# LOBSTER-SCHEDULED' || true; } | crontab -
+        substep "Removed run-job.sh cron entries (superseded by dispatch-job.sh inbox dispatch)"
+        migrated=$((migrated + 1))
+    fi
+    # Make dispatch-job.sh executable if present
+    local dispatch_script="$LOBSTER_DIR/scheduled-tasks/dispatch-job.sh"
+    if [ -f "$dispatch_script" ] && [ ! -x "$dispatch_script" ]; then
+        chmod +x "$dispatch_script"
+        substep "Made dispatch-job.sh executable"
+        migrated=$((migrated + 1))
+    fi
+
+    # Migration 40: Register block-claude-p.py PreToolUse hook in Claude Code settings
+    # This hook detects and logs (warn mode) or blocks (block mode) `claude -p` /
+    # `claude --print` invocations in Bash tool calls. Deploying in warn mode first
+    # validates zero false positives before switching to hard-block. Mode is
+    # controlled by LOBSTER_BLOCK_CLAUDE_P_MODE env var (default: warn).
+    if [ -f "$CLAUDE_SETTINGS" ] && command -v jq >/dev/null 2>&1; then
+        local has_block_claude_p
+        has_block_claude_p=$(jq -r '
+            [.hooks.PreToolUse[]?.hooks[]?.command // empty]
+            | map(select(contains("block-claude-p")))
+            | length
+        ' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
+        if [ "${has_block_claude_p:-0}" = "0" ] || [ "${has_block_claude_p:-0}" = "" ]; then
+            chmod +x "$LOBSTER_DIR/hooks/block-claude-p.py" 2>/dev/null || true
+            TMP_SETTINGS=$(mktemp)
+            jq --arg cmd "python3 $LOBSTER_DIR/hooks/block-claude-p.py" \
+               '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+                "matcher": "Bash",
+                "hooks": [{
+                    "type": "command",
+                    "command": $cmd,
+                    "timeout": 5
+                }]
+            }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+            substep "Registered block-claude-p hook in Claude Code settings (warn mode, Bash-only)"
+            migrated=$((migrated + 1))
+        fi
+    fi
+
+    # Migration 41: Replace bare python3 invocation in post-compact-gate PreToolUse hook with
+    # a shell wrapper that skips Python startup when the sentinel file is absent.
+    # On the 99%+ of tool calls where compact-pending does not exist, `test ! -f ...` exits
+    # in ~1ms vs ~50ms for Python startup — eliminating ~14 unnecessary spawns per message cycle.
+    if [ -f "$CLAUDE_SETTINGS" ] && command -v jq >/dev/null 2>&1; then
+        local gate_cmd="python3 $LOBSTER_DIR/hooks/post-compact-gate.py"
+        local gate_wrapper="test ! -f /home/lobster/messages/config/compact-pending || python3 $LOBSTER_DIR/hooks/post-compact-gate.py"
+        local has_bare_gate
+        has_bare_gate=$(jq -r --arg cmd "$gate_cmd" '
+            [.hooks.PreToolUse[]?.hooks[]?.command // empty]
+            | map(select(. == $cmd))
+            | length
+        ' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
+        if [ "${has_bare_gate:-0}" != "0" ] && [ "${has_bare_gate:-0}" != "" ]; then
+            TMP_SETTINGS=$(mktemp)
+            jq --arg old "$gate_cmd" --arg new "$gate_wrapper" '
+                .hooks.PreToolUse = [
+                    .hooks.PreToolUse[]? |
+                    .hooks = [
+                        .hooks[]? |
+                        if .command == $old then .command = $new else . end
+                    ]
+                ]
+            ' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+            substep "Updated post-compact-gate hook to use shell wrapper (skips Python when sentinel absent)"
+            migrated=$((migrated + 1))
+        fi
+    fi
+
+    # Migration 42: Narrow context-monitor PostToolUse hook matcher from "" (every tool) to
+    # "mcp__lobster-inbox__|Agent". Context window tracking is most relevant after MCP inbox
+    # calls and Agent spawns — the two events where token consumption is highest. This reduces
+    # PostToolUse spawns by ~65% with no meaningful loss of monitoring coverage.
+    # Also registers the hook if it is absent entirely (for installs that predate install.sh entry).
+    if [ -f "$CLAUDE_SETTINGS" ] && command -v jq >/dev/null 2>&1; then
+        local has_monitor_any
+        has_monitor_any=$(jq -r '
+            [.hooks.PostToolUse[]?.hooks[]?.command // empty]
+            | map(select(contains("context-monitor")))
+            | length
+        ' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
+        if [ "${has_monitor_any:-0}" = "0" ] || [ "${has_monitor_any:-0}" = "" ]; then
+            # Hook is absent — install it with the correct (narrow) matcher.
+            chmod +x "$LOBSTER_DIR/hooks/context-monitor.py" 2>/dev/null || true
+            TMP_SETTINGS=$(mktemp)
+            jq --arg cmd "python3 $LOBSTER_DIR/hooks/context-monitor.py" \
+               '.hooks.PostToolUse = (.hooks.PostToolUse // []) + [{
+                "matcher": "mcp__lobster-inbox__|Agent",
+                "hooks": [{
+                    "type": "command",
+                    "command": $cmd,
+                    "timeout": 5
+                }]
+            }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+            substep "Registered context-monitor hook with narrow matcher (mcp__lobster-inbox__|Agent)"
+            migrated=$((migrated + 1))
+        else
+            # Hook exists — check if it has the old empty matcher and fix it.
+            local has_empty_matcher
+            has_empty_matcher=$(jq -r '
+                [.hooks.PostToolUse[]? | select(.hooks[]?.command | contains("context-monitor")) | .matcher]
+                | map(select(. == ""))
+                | length
+            ' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
+            if [ "${has_empty_matcher:-0}" != "0" ] && [ "${has_empty_matcher:-0}" != "" ]; then
+                TMP_SETTINGS=$(mktemp)
+                jq '
+                    .hooks.PostToolUse = [
+                        .hooks.PostToolUse[]? |
+                        if (.hooks[]?.command | contains("context-monitor")) and .matcher == ""
+                        then .matcher = "mcp__lobster-inbox__|Agent"
+                        else .
+                        end
+                    ]
+                ' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+                substep "Narrowed context-monitor matcher from empty to mcp__lobster-inbox__|Agent"
+                migrated=$((migrated + 1))
+            fi
+        fi
+    fi
+
+    # Migration 43: Switch MCP transport from stdio to HTTP (issue #960).
+    # The lobster-mcp-local systemd service now runs inbox_server.py as a
+    # persistent HTTP server on localhost:8766.  Claude Code must be registered
+    # to connect via "url" instead of a stdio command so that CC auto-updates
+    # no longer kill the MCP server (they would close the stdio pipe).
+    #
+    # This migration:
+    #   a) Installs (or updates) the lobster-mcp-local systemd service.
+    #   b) Re-registers the lobster-inbox MCP server using HTTP transport.
+    #
+    # Idempotent: skipped if the HTTP registration already exists.
+    local mcp_http_already_registered
+    mcp_http_already_registered=$(claude mcp list 2>/dev/null | grep -c "localhost:8766" || echo "0")
+    if [ "${mcp_http_already_registered:-0}" = "0" ]; then
+        # Install / refresh the lobster-mcp-local service
+        local mcp_local_template="$LOBSTER_DIR/services/lobster-mcp-local.service.template"
+        local mcp_local_service="$LOBSTER_DIR/services/lobster-mcp-local.service"
+
+        if [ -f "$mcp_local_template" ]; then
+            # Render template (reuse generate_from_template if available, else sed directly)
+            if declare -f generate_from_template >/dev/null 2>&1; then
+                generate_from_template "$mcp_local_template" "$mcp_local_service"
+            else
+                # Minimal inline rendering matching install.sh variable names
+                local _user _group _config_dir _messages_dir _workspace_dir _user_config_dir
+                _user=$(whoami)
+                _group=$(id -gn)
+                _config_dir="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}"
+                _messages_dir="${LOBSTER_MESSAGES:-$HOME/messages}"
+                _workspace_dir="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
+                _user_config_dir="${LOBSTER_USER_CONFIG:-$HOME/lobster-user-config}"
+                sed \
+                    -e "s|{{USER}}|$_user|g" \
+                    -e "s|{{GROUP}}|$_group|g" \
+                    -e "s|{{INSTALL_DIR}}|$LOBSTER_DIR|g" \
+                    -e "s|{{CONFIG_DIR}}|$_config_dir|g" \
+                    -e "s|{{MESSAGES_DIR}}|$_messages_dir|g" \
+                    -e "s|{{WORKSPACE_DIR}}|$_workspace_dir|g" \
+                    -e "s|{{USER_CONFIG_DIR}}|$_user_config_dir|g" \
+                    "$mcp_local_template" > "$mcp_local_service"
+            fi
+        fi
+
+        if [ -f "$mcp_local_service" ] && pidof systemd >/dev/null 2>&1; then
+            sudo cp "$mcp_local_service" /etc/systemd/system/
+            sudo systemctl daemon-reload
+            sudo systemctl enable lobster-mcp-local 2>/dev/null || true
+            sudo systemctl restart lobster-mcp-local 2>/dev/null || true
+            substep "lobster-mcp-local service installed and (re)started"
+            # Wait briefly for the server to come up before re-registering
+            sleep 3
+        fi
+
+        # Remove any legacy mcpServers.lobster-inbox entry from settings.json if present.
+        # The claude mcp CLI stores entries in ~/.claude.json, not settings.json,
+        # but defensive cleanup costs nothing and handles any manual or legacy configs.
+        if [ -f "$CLAUDE_SETTINGS" ] && command -v jq >/dev/null 2>&1; then
+            if jq -e '.mcpServers."lobster-inbox"' "$CLAUDE_SETTINGS" >/dev/null 2>&1; then
+                TMP_SETTINGS=$(mktemp)
+                jq 'del(.mcpServers."lobster-inbox")' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+                substep "Removed legacy mcpServers.lobster-inbox entry from settings.json"
+            fi
+        fi
+
+        # Re-register MCP server using HTTP transport
+        claude mcp remove lobster-inbox 2>/dev/null || true
+        if claude mcp add --transport http lobster-inbox -s user "http://localhost:8766/mcp" 2>/dev/null; then
+            substep "lobster-inbox re-registered with HTTP transport (http://localhost:8766/mcp)"
+            migrated=$((migrated + 1))
+        else
+            warn "Migration 43: MCP HTTP re-registration may have failed. Run: claude mcp list"
+        fi
+    fi
+
+    # Migration 44: Switch bot-talk-poller cron entry to use bot-talk-check-dispatch.sh.
+    # The pre-check wrapper queries the bot-talk API before writing to the inbox,
+    # so no LLM subagent is spawned on empty polls. The runner field in jobs.json
+    # drives this via sync-crontab.sh; this migration re-syncs the crontab so the
+    # change takes effect on existing installs without a manual sync.
+    local BOT_TALK_CHECK_SCRIPT="$LOBSTER_DIR/scheduled-tasks/bot-talk-check-dispatch.sh"
+    if [ -f "$BOT_TALK_CHECK_SCRIPT" ]; then
+        if ! crontab -l 2>/dev/null | grep -q "bot-talk-check-dispatch.sh"; then
+            chmod +x "$BOT_TALK_CHECK_SCRIPT" 2>/dev/null || true
+            # Re-run sync-crontab.sh to rebuild the crontab from jobs.json, picking up
+            # the new runner field for bot-talk-poller.
+            if [ -f "$LOBSTER_DIR/scheduled-tasks/sync-crontab.sh" ]; then
+                chmod +x "$LOBSTER_DIR/scheduled-tasks/sync-crontab.sh" 2>/dev/null || true
+                "$LOBSTER_DIR/scheduled-tasks/sync-crontab.sh" 2>/dev/null || true
+                substep "Crontab re-synced: bot-talk-poller now uses bot-talk-check-dispatch.sh"
+                migrated=$((migrated + 1))
+            fi
+        fi
+    fi
+
+    # Migration 46: Add lobster user to the `crontab` group.
+    # The MCP server process runs under PR_SET_NO_NEW_PRIVS (NoNewPrivs=1), which
+    # suppresses setgid bits on child processes. The `crontab` binary is setgid-crontab,
+    # so `crontab -` fails with "mkstemp: Permission denied" when called from the MCP
+    # server. Fix: add the lobster user to the crontab group so sync-crontab.sh can
+    # write directly to /var/spool/cron/crontabs/$USER (group-writable directory) without
+    # needing the setgid bit. Requires sudo; warns and skips if sudo is unavailable.
+    local CRONTAB_DIR="/var/spool/cron/crontabs"
+    if [ -d "$CRONTAB_DIR" ] && ! id -nG "$USER" | grep -qw "crontab"; then
+        if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+            sudo usermod -aG crontab "$USER" 2>/dev/null && {
+                substep "Added $USER to the crontab group (fixes NoNewPrivs crontab permission error)"
+                migrated=$((migrated + 1))
+                warn "Group membership change takes effect at next login. Run 'newgrp crontab' or restart the Lobster service to apply immediately."
+            } || warn "Failed to add $USER to crontab group — run: sudo usermod -aG crontab $USER"
+        else
+            warn "Cannot add $USER to crontab group (sudo unavailable). Run manually: sudo usermod -aG crontab $USER"
+            warn "Until this is done, create_scheduled_job/update_scheduled_job/delete_scheduled_job will fail to sync crontab."
+        fi
+    fi
+
+
+    # Migration 47: Seed ifttt-rules.yaml in lobster-user-config/memory/canonical/
+    # Introduces the IFTTT-style behavioral rules store (issue #853). The file is
+    # machine-readable YAML, bounded to 100 rules, and managed autonomously by Lobster.
+    # Existing installs that predate this change need the file seeded so the dispatcher
+    # can load rules at startup without errors. The file starts empty (rules: []) so
+    # no behavioral change occurs on upgrade — rules accumulate over time.
+    local ifttt_src="$LOBSTER_DIR/memory/canonical-templates/ifttt-rules.yaml"
+    local ifttt_dst="$USER_CONFIG_DIR/memory/canonical/ifttt-rules.yaml"
+    if [ -f "$ifttt_src" ] && [ ! -f "$ifttt_dst" ]; then
+        cp "$ifttt_src" "$ifttt_dst"
+        substep "Seeded ifttt-rules.yaml into $USER_CONFIG_DIR/memory/canonical/"
+        migrated=$((migrated + 1))
+    fi
+
+    # Migration 48: Add idempotency column to agent_sessions.
+    # The idempotency column enables safe orphan recovery after restarts (#866).
+    # Sessions classified as 'safe' can be re-run automatically; 'unsafe'/'unknown'
+    # sessions surface a user notification instead. The column is also used by the
+    # session_start and register_agent MCP tools so the dispatcher can classify
+    # tasks at spawn time. Migration is a no-op on fresh installs (column already
+    # in CREATE TABLE DDL). On existing installs it adds the column with DEFAULT 'unknown'.
+    # The Python session_store migration list also handles this idempotently — this
+    # upgrade.sh entry is the documentation anchor and ensures crontab/service
+    # restarts don't miss the schema change on minimal installs without uv.
+    if command -v uv &>/dev/null; then
+        uv run python -c "
+import sqlite3, os
+db_path = os.path.expanduser('~/messages/config/agent_sessions.db')
+if os.path.exists(db_path):
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(\"ALTER TABLE agent_sessions ADD COLUMN idempotency TEXT DEFAULT 'unknown'\")
+        conn.commit()
+        print('idempotency column added')
+    except sqlite3.OperationalError:
+        print('idempotency column already exists')
+    finally:
+        conn.close()
+else:
+    print('agent_sessions.db not found — will be created on next server start')
+" 2>/dev/null && substep "agent_sessions.idempotency column present (fresh or migrated)" && migrated=$((migrated + 1)) || true
+    fi
+
+    # Migration 52: Add LOBSTER-GHOST-DETECTOR cron entry.
+    # agent-monitor.py runs every 30 minutes and calls --alert --mark-failed directly,
+    # sending Telegram alerts when ghost agents are found. No LLM subagent is needed.
+    # Previously this was routed through REMINDER_ROUTING in sys.dispatcher.bootup.md
+    # which spawned a lobster-generalist just to run the script and relay its output.
+    # That LLM relay layer has been removed; the script now runs directly from cron.
+    local GHOST_DETECTOR_MARKER="# LOBSTER-GHOST-DETECTOR"
+    # Remove any existing entry (stale path or schedule) then re-add with correct values
+    crontab -l 2>/dev/null | grep -v "$GHOST_DETECTOR_MARKER" | crontab - 2>/dev/null || true
+    (crontab -l 2>/dev/null; echo "*/30 * * * * cd $HOME && $HOME/.local/bin/uv run $LOBSTER_DIR/scripts/agent-monitor.py --alert --mark-failed >> $WORKSPACE_DIR/logs/agent-monitor.log 2>&1 $GHOST_DETECTOR_MARKER") | crontab -
+    substep "Set ghost detector cron entry (agent-monitor.py --alert --mark-failed, every 30 min)"
+    migrated=$((migrated + 1))
+
+    # Migration 53: Add LOBSTER-OOM-CHECK cron entry.
+    # oom-monitor.py runs every 10 minutes, scans the kernel journal for OOM kills,
+    # and writes inbox messages directly when new events are detected. No LLM needed.
+    # Previously this was routed through REMINDER_ROUTING which spawned a subagent.
+    # Only active when LOBSTER_DEBUG=true (the script exits 0 silently otherwise).
+    local OOM_CHECK_MARKER="# LOBSTER-OOM-CHECK"
+    if ! crontab -l 2>/dev/null | grep -q "$OOM_CHECK_MARKER"; then
+        "$LOBSTER_DIR/scripts/cron-manage.sh" add "$OOM_CHECK_MARKER" \
+            "*/10 * * * * cd $HOME && uv run $LOBSTER_DIR/scripts/oom-monitor.py --since-minutes 10 >> $WORKSPACE_DIR/logs/oom-monitor.log 2>&1 $OOM_CHECK_MARKER"
+        substep "Added OOM monitor cron entry (oom-monitor.py --since-minutes 10, every 10 min)"
+        migrated=$((migrated + 1))
+    fi
+
+    # Migration 54: Add inbox-staleness-warn.sh cron entry
+    # Injects a scheduled_reminder into the inbox when the oldest unprocessed
+    # user message has been waiting for 3+ minutes. Gives the dispatcher an
+    # in-band nudge to call wait_for_messages or delegate, complementing the
+    # health-check restart path (which only fires at 8+ minutes). Dedup prevents
+    # multiple warnings per staleness event.
+    local STALENESS_WARN_MARKER="# LOBSTER-INBOX-STALENESS-WARN"
+    if ! crontab -l 2>/dev/null | grep -q "$STALENESS_WARN_MARKER"; then
+        chmod +x "$LOBSTER_DIR/scripts/inbox-staleness-warn.sh" 2>/dev/null || true
+        "$LOBSTER_DIR/scripts/cron-manage.sh" add "$STALENESS_WARN_MARKER" \
+            "*/1 * * * * $LOBSTER_DIR/scripts/inbox-staleness-warn.sh $STALENESS_WARN_MARKER"
+        substep "Added inbox-staleness-warn.sh cron entry (runs every minute, warns at 3-minute staleness)"
+        migrated=$((migrated + 1))
+    fi
+
+    # Migration 55: Migrate existing jobs.json entries to systemd timers.
+    # The cron+jobs.json scheduling backend has been replaced by systemd timers
+    # (see PR #1105). Existing entries in ~/lobster-workspace/scheduled-jobs/jobs.json
+    # will no longer fire because sync-crontab.sh is no longer called.
+    #
+    # Sudoers note: install.sh already grants `lobster ALL=(ALL) NOPASSWD:ALL`,
+    # which covers `sudo systemctl` and `sudo tee`. No separate sudoers entry is needed.
+    #
+    # This migration reads jobs.json and, for each enabled job that has a
+    # `command` field set, creates the corresponding systemd timer unit.
+    # Jobs without a command field cannot be migrated automatically — they
+    # will be reported as warnings so the user can recreate them via
+    # create_scheduled_job with an explicit command.
+    local JOBS_JSON="$WORKSPACE_DIR/scheduled-jobs/jobs.json"
+    if [ -f "$JOBS_JSON" ] && command -v python3 >/dev/null 2>&1 && pidof systemd >/dev/null 2>&1; then
+        local jobs_count
+        jobs_count=$(python3 -c "
+import json, sys
+try:
+    d = json.loads(open('$JOBS_JSON').read())
+    print(len(d.get('jobs', {})))
+except Exception:
+    print(0)
+" 2>/dev/null || echo "0")
+        if [ "${jobs_count:-0}" -gt 0 ]; then
+            substep "Migrating $jobs_count jobs.json entries to systemd timers..."
+            JOBS_JSON_PATH="$JOBS_JSON"
+            python3 - "$JOBS_JSON_PATH" <<'PYEOF'
+import json, subprocess, sys
+from pathlib import Path
+
+JOBS_FILE = Path(sys.argv[1])
+SYSTEMD_DIR = Path("/etc/systemd/system")
+UNIT_PREFIX = "lobster-"
+LOBSTER_MARKER = "# LOBSTER-MANAGED"
+LOBSTER_USER = "lobster"
+
+def sudo_write(path: Path, content: str) -> None:
+    """Write content to a root-owned path using sudo tee."""
+    result = subprocess.run(
+        ["sudo", "tee", str(path)],
+        input=content.encode(),
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise PermissionError(f"sudo tee {path} failed: {result.stderr.decode().strip()}")
+
+try:
+    data = json.loads(JOBS_FILE.read_text())
+except Exception as e:
+    print(f"  warning: could not read jobs.json: {e}", file=sys.stderr)
+    sys.exit(0)
+
+jobs = data.get("jobs", {})
+migrated = 0
+skipped = []
+
+for name, job in jobs.items():
+    if not job.get("enabled", True):
+        continue
+
+    command = job.get("command") or job.get("runner") or ""
+    schedule = job.get("schedule", "")
+
+    if not command or not command.startswith("/"):
+        skipped.append((name, "no absolute command path — recreate with create_scheduled_job"))
+        continue
+
+    if not schedule:
+        skipped.append((name, "no schedule — recreate with create_scheduled_job"))
+        continue
+
+    timer_path = SYSTEMD_DIR / f"{UNIT_PREFIX}{name}.timer"
+    service_path = SYSTEMD_DIR / f"{UNIT_PREFIX}{name}.service"
+
+    # Skip if already migrated
+    try:
+        if timer_path.exists() and LOBSTER_MARKER in timer_path.read_text():
+            continue
+    except OSError:
+        pass
+
+    desc = job.get("description") or f"Lobster scheduled job: {name}"
+
+    timer_content = f"""[Unit]
+Description={desc}
+{LOBSTER_MARKER}
+
+[Timer]
+OnCalendar={schedule}
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+"""
+    service_content = f"""[Unit]
+Description={desc}
+{LOBSTER_MARKER}
+
+[Service]
+Type=oneshot
+User={LOBSTER_USER}
+ExecStart={command}
+"""
+
+    try:
+        sudo_write(timer_path, timer_content)
+        sudo_write(service_path, service_content)
+        subprocess.run(["sudo", "systemctl", "daemon-reload"], check=True, capture_output=True)
+        subprocess.run(["sudo", "systemctl", "enable", "--now", f"{UNIT_PREFIX}{name}.timer"],
+                       check=True, capture_output=True)
+        print(f"  migrated: {name} ({schedule}) -> {UNIT_PREFIX}{name}.timer")
+        migrated += 1
+    except Exception as e:
+        skipped.append((name, f"error: {e}"))
+
+print(f"  {migrated} job(s) migrated to systemd timers")
+for sname, reason in skipped:
+    print(f"  WARN: '{sname}' skipped — {reason}", file=sys.stderr)
+PYEOF
+        fi
+    fi
+
+    # Migration 60: Register inject-bootup-context.py SessionStart hooks in settings.json
+    # Adds two SessionStart entries: one empty-matcher entry for all fresh sessions
+    # (must run after write-dispatcher-session-id so role detection works), and one
+    # compact-matcher entry so bootup content is re-injected after context compaction.
+    if [ -f "$CLAUDE_SETTINGS" ]; then
+        chmod +x "$LOBSTER_DIR/hooks/inject-bootup-context.py" 2>/dev/null || true
+        if ! jq -e '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("inject-bootup-context")) | select(.matcher == "")' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+            TMP_SETTINGS=$(mktemp)
+            jq '.hooks.SessionStart = (.hooks.SessionStart // []) + [{
+                "matcher": "",
+                "hooks": [{
+                    "type": "command",
+                    "command": "python3 '"$LOBSTER_DIR"'/hooks/inject-bootup-context.py",
+                    "timeout": 10
+                }]
+            }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+            substep "Registered inject-bootup-context SessionStart hook (all sessions)"
+            migrated=$((migrated + 1))
+        fi
+        if ! jq -e '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("inject-bootup-context")) | select(.matcher == "compact")' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+            TMP_SETTINGS=$(mktemp)
+            jq '.hooks.SessionStart = (.hooks.SessionStart // []) + [{
+                "matcher": "compact",
+                "hooks": [{
+                    "type": "command",
+                    "command": "python3 '"$LOBSTER_DIR"'/hooks/inject-bootup-context.py",
+                    "timeout": 10
+                }]
+            }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+            substep "Registered inject-bootup-context SessionStart hook (compact sessions)"
+            migrated=$((migrated + 1))
+        fi
+    fi
+
+    # Migration 61: Add nightly-consolidation crontab entry.
+    # install.sh adds this entry but existing installs may be missing it.
+    # Runs at 3am daily to consolidate memory and rotate digests.
+    local NIGHTLY_CONSOLIDATION_MARKER="# LOBSTER-NIGHTLY-CONSOLIDATION"
+    if ! crontab -l 2>/dev/null | grep -q "$NIGHTLY_CONSOLIDATION_MARKER"; then
+        chmod +x "$LOBSTER_DIR/scripts/nightly-consolidation.sh" 2>/dev/null || true
+        "$LOBSTER_DIR/scripts/cron-manage.sh" add "$NIGHTLY_CONSOLIDATION_MARKER" \
+            "0 3 * * * $LOBSTER_DIR/scripts/nightly-consolidation.sh $NIGHTLY_CONSOLIDATION_MARKER"
+        substep "nightly-consolidation crontab entry added (runs at 3am daily)"
+        migrated=$((migrated + 1))
+    else
+        substep "nightly-consolidation crontab entry already present"
+
+    fi
+
+    # Migration 61: Add nightly-consolidation crontab entry.
+    # install.sh adds this entry but existing installs may be missing it.
+    # Runs at 3am daily to consolidate memory and rotate digests.
+    local NIGHTLY_CONSOLIDATION_MARKER="# LOBSTER-NIGHTLY-CONSOLIDATION"
+    if ! crontab -l 2>/dev/null | grep -q "$NIGHTLY_CONSOLIDATION_MARKER"; then
+        chmod +x "$LOBSTER_DIR/scripts/nightly-consolidation.sh" 2>/dev/null || true
+        "$LOBSTER_DIR/scripts/cron-manage.sh" add "$NIGHTLY_CONSOLIDATION_MARKER" \
+            "0 3 * * * $LOBSTER_DIR/scripts/nightly-consolidation.sh $NIGHTLY_CONSOLIDATION_MARKER"
+        substep "nightly-consolidation crontab entry added (runs at 3am daily)"
+        migrated=$((migrated + 1))
+    else
+        substep "nightly-consolidation crontab entry already present"
+
+    fi
+
+    # Migration 56: Add LOBSTER_ADMIN_CHAT_ID to config.env if missing.
+    # alert.sh and the transcription worker use this to send error notifications
+    # directly to the admin. Without it, alerts are silently dropped.
+    # Defaults to the first entry in TELEGRAM_ALLOWED_USERS (which is the owner).
+    if [ -f "$CONFIG_FILE" ]; then
+        # shellcheck source=/dev/null
+        source "$CONFIG_FILE" 2>/dev/null || true
+        if [ -z "${LOBSTER_ADMIN_CHAT_ID:-}" ]; then
+            # Derive from TELEGRAM_ALLOWED_USERS — first comma-separated value
+            local first_allowed
+            first_allowed=$(echo "${TELEGRAM_ALLOWED_USERS:-}" | cut -d',' -f1 | tr -d '[:space:]')
+            if [ -n "$first_allowed" ]; then
+                echo "" >> "$CONFIG_FILE"
+                echo "# Admin chat ID for system alerts (auto-derived from TELEGRAM_ALLOWED_USERS)" >> "$CONFIG_FILE"
+                echo "LOBSTER_ADMIN_CHAT_ID=$first_allowed" >> "$CONFIG_FILE"
+                substep "Added LOBSTER_ADMIN_CHAT_ID=$first_allowed to config.env"
+                migrated=$((migrated + 1))
+            else
+                warn "LOBSTER_ADMIN_CHAT_ID missing and could not be derived — set it manually in $CONFIG_FILE"
+            fi
+        fi
+    fi
+
+    # Migration 57: Add LOBSTER_INTERNAL_SECRET to config.env if missing.
+    # Required for the push-calendar-token endpoint in inbox_server_http.py.
+    # Without it, Google Calendar token pushes from the remote bridge are disabled.
+    if [ -f "$CONFIG_FILE" ]; then
+        # shellcheck source=/dev/null
+        source "$CONFIG_FILE" 2>/dev/null || true
+        if [ -z "${LOBSTER_INTERNAL_SECRET:-}" ]; then
+            local generated_secret
+            generated_secret=$(python3 -c "import secrets; print(secrets.token_hex(32))" 2>/dev/null || \
+                               openssl rand -hex 32 2>/dev/null || \
+                               echo "")
+            if [ -n "$generated_secret" ]; then
+                echo "" >> "$CONFIG_FILE"
+                echo "# Internal secret for authenticated MCP HTTP endpoints (e.g. push-calendar-token)" >> "$CONFIG_FILE"
+                echo "LOBSTER_INTERNAL_SECRET=$generated_secret" >> "$CONFIG_FILE"
+                substep "Generated and added LOBSTER_INTERNAL_SECRET to config.env"
+                migrated=$((migrated + 1))
+            else
+                warn "LOBSTER_INTERNAL_SECRET missing and could not be generated — set it manually in $CONFIG_FILE"
+            fi
+        fi
+    fi
+
+    # Migration 58: Add LOBSTER-DAILY-HEALTH cron entry.
+    # install.sh registers daily-health-check.sh at 06:00 UTC; existing installs
+    # that were set up before this cron was added will not have it.
+    local DAILY_HEALTH_SCRIPT="$LOBSTER_DIR/scripts/daily-health-check.sh"
+    if [ -f "$DAILY_HEALTH_SCRIPT" ]; then
+        if ! crontab -l 2>/dev/null | grep -q "LOBSTER-DAILY-HEALTH"; then
+            chmod +x "$DAILY_HEALTH_SCRIPT" 2>/dev/null || true
+            "$LOBSTER_DIR/scripts/cron-manage.sh" add "# LOBSTER-DAILY-HEALTH" \
+                "0 6 * * * $DAILY_HEALTH_SCRIPT # LOBSTER-DAILY-HEALTH" 2>/dev/null && {
+                substep "Added LOBSTER-DAILY-HEALTH cron entry (daily-health-check.sh, 06:00 UTC)"
+                migrated=$((migrated + 1))
+            } || warn "Could not add LOBSTER-DAILY-HEALTH cron entry — check cron-manage.sh"
+        fi
+    fi
+
+    # Migration 59: Seed obsidian.env from template if missing.
+    # The obsidian-km skill requires ~/lobster-config/obsidian.env to exist.
+    # On existing installs the file may not be present; seed it from the template
+    # so the skill can be activated without manual setup steps.
+    local OBSIDIAN_ENV="$LOBSTER_CONFIG_DIR/obsidian.env"
+    local OBSIDIAN_TEMPLATE="$LOBSTER_DIR/lobster-shop/obsidian-km/config/obsidian.env.template"
+    if [ -f "$OBSIDIAN_TEMPLATE" ] && [ ! -f "$OBSIDIAN_ENV" ]; then
+        cp "$OBSIDIAN_TEMPLATE" "$OBSIDIAN_ENV"
+        substep "Seeded $OBSIDIAN_ENV from template (configure OBSIDIAN_VAULT_PATH before use)"
+        migrated=$((migrated + 1))
+    fi
+
+    # Migration 56: Add LOBSTER_ADMIN_CHAT_ID to config.env if missing.
+    # alert.sh and the transcription worker use this to send error notifications
+    # directly to the admin. Without it, alerts are silently dropped.
+    # Defaults to the first entry in TELEGRAM_ALLOWED_USERS (which is the owner).
+    if [ -f "$CONFIG_FILE" ]; then
+        # shellcheck source=/dev/null
+        source "$CONFIG_FILE" 2>/dev/null || true
+        if [ -z "${LOBSTER_ADMIN_CHAT_ID:-}" ]; then
+            # Derive from TELEGRAM_ALLOWED_USERS — first comma-separated value
+            local first_allowed
+            first_allowed=$(echo "${TELEGRAM_ALLOWED_USERS:-}" | cut -d',' -f1 | tr -d '[:space:]')
+            if [ -n "$first_allowed" ]; then
+                echo "" >> "$CONFIG_FILE"
+                echo "# Admin chat ID for system alerts (auto-derived from TELEGRAM_ALLOWED_USERS)" >> "$CONFIG_FILE"
+                echo "LOBSTER_ADMIN_CHAT_ID=$first_allowed" >> "$CONFIG_FILE"
+                substep "Added LOBSTER_ADMIN_CHAT_ID=$first_allowed to config.env"
+                migrated=$((migrated + 1))
+            else
+                warn "LOBSTER_ADMIN_CHAT_ID missing and could not be derived — set it manually in $CONFIG_FILE"
+            fi
+        fi
+    fi
+
+    # Migration 57: Add LOBSTER_INTERNAL_SECRET to config.env if missing.
+    # Required for the push-calendar-token endpoint in inbox_server_http.py.
+    # Without it, Google Calendar token pushes from the remote bridge are disabled.
+    if [ -f "$CONFIG_FILE" ]; then
+        # shellcheck source=/dev/null
+        source "$CONFIG_FILE" 2>/dev/null || true
+        if [ -z "${LOBSTER_INTERNAL_SECRET:-}" ]; then
+            local generated_secret
+            generated_secret=$(python3 -c "import secrets; print(secrets.token_hex(32))" 2>/dev/null || \
+                               openssl rand -hex 32 2>/dev/null || \
+                               echo "")
+            if [ -n "$generated_secret" ]; then
+                echo "" >> "$CONFIG_FILE"
+                echo "# Internal secret for authenticated MCP HTTP endpoints (e.g. push-calendar-token)" >> "$CONFIG_FILE"
+                echo "LOBSTER_INTERNAL_SECRET=$generated_secret" >> "$CONFIG_FILE"
+                substep "Generated and added LOBSTER_INTERNAL_SECRET to config.env"
+                migrated=$((migrated + 1))
+            else
+                warn "LOBSTER_INTERNAL_SECRET missing and could not be generated — set it manually in $CONFIG_FILE"
+            fi
+        fi
+    fi
+
+    # Migration 58: Add LOBSTER-DAILY-HEALTH cron entry.
+    # install.sh registers daily-health-check.sh at 06:00 UTC; existing installs
+    # that were set up before this cron was added will not have it.
+    local DAILY_HEALTH_SCRIPT="$LOBSTER_DIR/scripts/daily-health-check.sh"
+    if [ -f "$DAILY_HEALTH_SCRIPT" ]; then
+        if ! crontab -l 2>/dev/null | grep -q "LOBSTER-DAILY-HEALTH"; then
+            chmod +x "$DAILY_HEALTH_SCRIPT" 2>/dev/null || true
+            "$LOBSTER_DIR/scripts/cron-manage.sh" add "# LOBSTER-DAILY-HEALTH" \
+                "0 6 * * * $DAILY_HEALTH_SCRIPT # LOBSTER-DAILY-HEALTH" 2>/dev/null && {
+                substep "Added LOBSTER-DAILY-HEALTH cron entry (daily-health-check.sh, 06:00 UTC)"
+                migrated=$((migrated + 1))
+            } || warn "Could not add LOBSTER-DAILY-HEALTH cron entry — check cron-manage.sh"
+        fi
+    fi
+
+    # Migration 59: Seed obsidian.env from template if missing.
+    # The obsidian-km skill requires ~/lobster-config/obsidian.env to exist.
+    # On existing installs the file may not be present; seed it from the template
+    # so the skill can be activated without manual setup steps.
+    local OBSIDIAN_ENV="$LOBSTER_CONFIG_DIR/obsidian.env"
+    local OBSIDIAN_TEMPLATE="$LOBSTER_DIR/lobster-shop/obsidian-km/config/obsidian.env.template"
+    if [ -f "$OBSIDIAN_TEMPLATE" ] && [ ! -f "$OBSIDIAN_ENV" ]; then
+        cp "$OBSIDIAN_TEMPLATE" "$OBSIDIAN_ENV"
+        substep "Seeded $OBSIDIAN_ENV from template (configure OBSIDIAN_VAULT_PATH before use)"
+        migrated=$((migrated + 1))
+    fi
+
+    # Migration 62: Ensure ~/messages/config/group-whitelist.json exists.
+    # The group chat gating system (Phases 1-4) reads this file at startup.
+    # On existing installs the config/ subdirectory may not exist; this creates
+    # it and seeds an empty whitelist so the bot starts cleanly without errors.
+    local MESSAGES_CONFIG_DIR="$HOME/messages/config"
+    if [ ! -d "$MESSAGES_CONFIG_DIR" ]; then
+        mkdir -p "$MESSAGES_CONFIG_DIR"
+        substep "Created $MESSAGES_CONFIG_DIR"
+        migrated=$((migrated + 1))
+    fi
+    if [ ! -f "$MESSAGES_CONFIG_DIR/group-whitelist.json" ]; then
+        echo '{"groups": {}}' > "$MESSAGES_CONFIG_DIR/group-whitelist.json"
+        substep "Created empty $MESSAGES_CONFIG_DIR/group-whitelist.json"
+        migrated=$((migrated + 1))
+    fi
+
+    # Migration 63: Rename data/events.jsonl -> data/memory-events.jsonl.
+    # StaticMemory now writes to memory-events.jsonl to distinguish it from the
+    # EventBus operational log at logs/events.jsonl. Rename any existing file
+    # so history is preserved without manual intervention.
+    if [ -f "$WORKSPACE_DIR/data/events.jsonl" ] && [ ! -f "$WORKSPACE_DIR/data/memory-events.jsonl" ]; then
+        mv "$WORKSPACE_DIR/data/events.jsonl" "$WORKSPACE_DIR/data/memory-events.jsonl"
+        substep "Renamed data/events.jsonl -> data/memory-events.jsonl"
+        migrated=$((migrated + 1))
+    fi
+
+    # Migration 64: Add message_claims and dispatcher_lock tables to agent_sessions.db
+    # These tables are the SQLite-backed claim gate introduced in issue #1360.
+    # message_claims: UNIQUE PRIMARY KEY on message_id — INSERT OR FAIL provides
+    #   exclusive ownership without filesystem rename races.
+    # dispatcher_lock: single-row table (CHECK id=1) — enforces at most one active
+    #   dispatcher loop at any time.
+    local AGENT_SESSIONS_DB="${LOBSTER_MESSAGES:-$HOME/messages}/config/agent_sessions.db"
+    if [ -f "$AGENT_SESSIONS_DB" ]; then
+        if ! sqlite3 "$AGENT_SESSIONS_DB" "PRAGMA table_info(message_claims);" 2>/dev/null | grep -q "message_id"; then
+            substep "Adding message_claims table to agent_sessions.db..."
+            sqlite3 "$AGENT_SESSIONS_DB" "
+CREATE TABLE IF NOT EXISTS message_claims (
+    message_id  TEXT PRIMARY KEY,
+    claimed_by  TEXT NOT NULL,
+    claimed_at  TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'processing'
+);" 2>/dev/null && \
+                success "message_claims table created" || \
+                warn "Failed to create message_claims table (may already exist)"
+            migrated=$((migrated + 1))
+        fi
+        if ! sqlite3 "$AGENT_SESSIONS_DB" "PRAGMA table_info(dispatcher_lock);" 2>/dev/null | grep -q "session_id"; then
+            substep "Adding dispatcher_lock table to agent_sessions.db..."
+            sqlite3 "$AGENT_SESSIONS_DB" "
+CREATE TABLE IF NOT EXISTS dispatcher_lock (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    session_id  TEXT NOT NULL,
+    locked_at   TEXT NOT NULL
+);" 2>/dev/null && \
+                success "dispatcher_lock table created" || \
+                warn "Failed to create dispatcher_lock table (may already exist)"
+            migrated=$((migrated + 1))
+        fi
+    fi
+
+    # Migration 65: Re-deploy all plain task file templates to runtime directory to fix
+    # template drift (issue #1404). When a PR updates a task file in scheduled-tasks/tasks/,
+    # the change was not propagated to already-deployed runtime copies in
+    # $WORKSPACE_DIR/scheduled-jobs/tasks/. This migration overwrites every plain .md file
+    # (not .md.template — those require placeholder substitution) so existing installs
+    # stay in sync with the repo without a full reinstall.
+    local repo_tasks_dir="$LOBSTER_DIR/scheduled-tasks/tasks"
+    local runtime_tasks_dir="$WORKSPACE_DIR/scheduled-jobs/tasks"
+    if [ -d "$repo_tasks_dir" ]; then
+        mkdir -p "$runtime_tasks_dir"
+        for task_file in "$repo_tasks_dir"/*.md; do
+            [ -f "$task_file" ] || continue
+            local base
+            base=$(basename "$task_file")
+            [ "$base" = "README.md" ] && continue
+            cp "$task_file" "$runtime_tasks_dir/$base"
+            substep "Re-deployed task template: $base"
+            migrated=$((migrated + 1))
+        done
+    fi
+
+    # Migration 66: Install PostToolUse thinking-heartbeat hook (issue #1401).
+    # The hook writes last_thinking_at to lobster-state.json on every tool call,
+    # giving the health check a freshness signal during the dispatcher's reasoning
+    # phase (10+ minutes of LLM work with no WFM or mark_processed calls).
+    chmod +x "$LOBSTER_DIR/hooks/thinking-heartbeat.py" 2>/dev/null || true
+    if [ -f "$CLAUDE_SETTINGS" ]; then
+        if ! jq -e '.hooks.PostToolUse[]? | select(.hooks[]?.command | contains("thinking-heartbeat"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+            TMP_SETTINGS=$(mktemp)
+            jq '.hooks.PostToolUse = (.hooks.PostToolUse // []) + [{
+                "matcher": "",
+                "hooks": [{
+                    "type": "command",
+                    "command": "python3 '"$LOBSTER_DIR"'/hooks/thinking-heartbeat.py",
+                    "timeout": 5
+                }]
+            }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+            substep "Installed thinking-heartbeat PostToolUse hook"
+            migrated=$((migrated + 1))
+        fi
+    fi
+
+    # Migration 67: Update nightly-consolidation cron entry to redirect stdout+stderr to a log file.
+    # The original entry (added in Migration 61) did not capture output, so errors from the script
+    # were silently dropped. This migration replaces it with an entry that appends to
+    # ~/lobster-workspace/logs/nightly-consolidation.log.
+    local NIGHTLY_CONSOLIDATION_MARKER="# LOBSTER-NIGHTLY-CONSOLIDATION"
+    local NIGHTLY_LOG="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}/logs/nightly-consolidation.log"
+    local DESIRED_ENTRY="0 3 * * * $LOBSTER_DIR/scripts/nightly-consolidation.sh >> $NIGHTLY_LOG 2>&1 $NIGHTLY_CONSOLIDATION_MARKER"
+    if crontab -l 2>/dev/null | grep -qF "$NIGHTLY_CONSOLIDATION_MARKER"; then
+        if ! crontab -l 2>/dev/null | grep -F "$NIGHTLY_CONSOLIDATION_MARKER" | grep -q ">> "; then
+            # Entry exists but lacks log redirect — replace it.
+            mkdir -p "$(dirname "$NIGHTLY_LOG")"
+            "$LOBSTER_DIR/scripts/cron-manage.sh" add "$NIGHTLY_CONSOLIDATION_MARKER" "$DESIRED_ENTRY"
+            substep "Updated nightly-consolidation cron entry to redirect output to $NIGHTLY_LOG"
+            migrated=$((migrated + 1))
+        else
+            substep "nightly-consolidation cron entry already has log redirect — skipping"
+        fi
+    else
+        # Entry is missing entirely — add it with logging.
+        mkdir -p "$(dirname "$NIGHTLY_LOG")"
+        chmod +x "$LOBSTER_DIR/scripts/nightly-consolidation.sh" 2>/dev/null || true
+        "$LOBSTER_DIR/scripts/cron-manage.sh" add "$NIGHTLY_CONSOLIDATION_MARKER" "$DESIRED_ENTRY"
+        substep "Added nightly-consolidation cron entry with log redirect to $NIGHTLY_LOG"
+        migrated=$((migrated + 1))
+    fi
+
+    # Migration 68: Broaden context-monitor PostToolUse hook matcher to include Bash
+    # (issue #1430). Claude Code only populates context_window in PostToolUse payloads
+    # for built-in tools like Bash, not for MCP tool calls. The previous matcher
+    # "mcp__lobster-inbox__|Agent" caused the hook to fire but always see no data.
+    # Adding "Bash|" to the front ensures the hook receives context_window data.
+    if [ -f "$CLAUDE_SETTINGS" ] && command -v jq >/dev/null 2>&1; then
+        local has_bash_in_matcher
+        has_bash_in_matcher=$(jq -r '
+            [.hooks.PostToolUse[]? | select(.hooks[]?.command | contains("context-monitor")) | .matcher]
+            | map(select(startswith("Bash|")))
+            | length
+        ' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
+        if [ "${has_bash_in_matcher:-0}" = "0" ] || [ "${has_bash_in_matcher:-0}" = "" ]; then
+            TMP_SETTINGS=$(mktemp)
+            jq '
+                .hooks.PostToolUse = [
+                    .hooks.PostToolUse[]? |
+                    if (.hooks[]?.command | contains("context-monitor"))
+                    then .matcher = ("Bash|" + .matcher)
+                    else .
+                    end
+                ]
+            ' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+            substep "Broadened context-monitor hook matcher to include Bash (issue #1430)"
+            migrated=$((migrated + 1))
+        else
+            substep "context-monitor hook matcher already includes Bash — skipping"
+        fi
+    fi
+
+    # Migration 69: Install wfm-watchdog.sh cron entry (every 10 minutes).
+    # Detects when wait_for_messages() is frozen (running >35 min) and injects
+    # a synthetic wfm_watchdog inbox message to unblock the dispatcher.
+    local WFM_WATCHDOG_MARKER="# LOBSTER-WFM-WATCHDOG"
+    local wfm_watchdog_script="$LOBSTER_DIR/scripts/wfm-watchdog.sh"
+    if ! crontab -l 2>/dev/null | grep -qF "$WFM_WATCHDOG_MARKER"; then
+        if [[ -f "$wfm_watchdog_script" ]]; then
+            "$LOBSTER_DIR/scripts/cron-manage.sh" add \
+                "$WFM_WATCHDOG_MARKER" \
+                "*/10 * * * * $wfm_watchdog_script $WFM_WATCHDOG_MARKER"
+            substep "Added wfm-watchdog.sh cron entry (every 10 minutes)"
+            migrated=$((migrated + 1))
+        else
+            substep "WARN: wfm-watchdog.sh not found at $wfm_watchdog_script — skipping"
+        fi
+    else
+        substep "wfm-watchdog.sh cron entry already present — skipping"
+    fi
+
+    # Migration 70: Install piper TTS and lessac-medium voice model for send_voice_note.
+    # Soft requirement: failure warns but does not abort upgrade.
+    local PIPER_BIN_PATH="/usr/local/bin/piper"
+    local PIPER_MODELS_TARGET="${WORKSPACE_DIR}/piper-models"
+    local PIPER_MODEL_FILE="${PIPER_MODELS_TARGET}/en_US-lessac-medium.onnx"
+    mkdir -p "$PIPER_MODELS_TARGET"
+
+    if [ ! -x "$PIPER_BIN_PATH" ] && ! command -v piper &>/dev/null; then
+        substep "Installing piper TTS binary for send_voice_note..."
+        local _arch
+        _arch="$(uname -m)"
+        local _piper_arch=""
+        case "$_arch" in
+            x86_64)   _piper_arch="amd64" ;;
+            aarch64)  _piper_arch="aarch64" ;;
+            armv7l)   _piper_arch="armv7" ;;
+        esac
+        if [ -n "$_piper_arch" ]; then
+            local _piper_url
+            _piper_url="$(curl -fsSL https://api.github.com/repos/rhasspy/piper/releases/latest 2>/dev/null | \
+                python3 -c "import sys,json; \
+                data=json.load(sys.stdin); \
+                urls=[a['browser_download_url'] for a in data.get('assets',[]) \
+                      if 'linux_${_piper_arch}' in a['name'] and a['name'].endswith('.tar.gz')]; \
+                print(urls[0] if urls else '')" 2>/dev/null || true)"
+            if [ -n "$_piper_url" ]; then
+                local _ptmp
+                _ptmp="$(mktemp -d)"
+                if curl -fsSL -o "${_ptmp}/piper.tar.gz" "$_piper_url" && \
+                   tar -xzf "${_ptmp}/piper.tar.gz" -C "$_ptmp"; then
+                    local _bin
+                    _bin="$(find "$_ptmp" -type f -name "piper" | head -1)"
+                    if [ -n "$_bin" ]; then
+                        local _bin_dir
+                        _bin_dir="$(dirname "$_bin")"
+                        sudo cp "$_bin" "$PIPER_BIN_PATH"
+                        sudo chmod +x "$PIPER_BIN_PATH"
+                        # Copy shared libraries
+                        for _lib in libonnxruntime.so.* libpiper_phonemize.so.* libespeak-ng.so.*; do
+                            _lib_path="$(find "$_bin_dir" -name "$_lib" -type f | head -1)"
+                            [ -n "$_lib_path" ] && sudo cp "$_lib_path" /usr/local/lib/ 2>/dev/null || true
+                        done
+                        sudo ldconfig 2>/dev/null || true
+                        # Install bundled espeak-ng-data
+                        if [ -d "${_bin_dir}/espeak-ng-data" ]; then
+                            sudo cp -r "${_bin_dir}/espeak-ng-data" /usr/share/ 2>/dev/null || true
+                        fi
+                        substep "piper TTS installed to $PIPER_BIN_PATH"
+                        migrated=$((migrated + 1))
+                    fi
+                fi
+                rm -rf "$_ptmp"
+            fi
+        fi
+    fi
+
+    if [ ! -f "$PIPER_MODEL_FILE" ]; then
+        substep "Downloading piper lessac-medium voice model (~30MB)..."
+        local _model_url="https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/en_US-lessac-medium.onnx"
+        local _model_json_url="https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json"
+        if curl -fsSL -o "$PIPER_MODEL_FILE" "$_model_url" && \
+           curl -fsSL -o "${PIPER_MODEL_FILE}.json" "$_model_json_url"; then
+            substep "piper voice model downloaded"
+            migrated=$((migrated + 1))
+        else
+            warn "piper voice model download failed — send_voice_note will fall back to text"
+            rm -f "$PIPER_MODEL_FILE" "${PIPER_MODEL_FILE}.json"
+        fi
+    fi
+
+    # Migration 71: Remove stale LOBSTER-SCHEDULED crontab entries (issue #1083 Phase 1).
+    # The cron + jobs.json + dispatch-job.sh scheduling layer has been superseded by
+    # systemd timers (PR #1105). Any remaining "# LOBSTER-SCHEDULED" crontab entries
+    # are now duplicates of systemd timers or orphaned jobs that no longer fire on
+    # systemd. Remove them so the crontab is clean.
+    #
+    # SAFETY: Only remove a LOBSTER-SCHEDULED cron entry for a job if a corresponding
+    # lobster-managed systemd timer already exists for that job. Entries for jobs that
+    # have no systemd timer are left in place and a warning is printed. This prevents
+    # silent loss of the only trigger for a job.
+    #
+    # NOTE: System-level cron entries (LOBSTER-HEALTH, LOBSTER-SELF-CHECK, etc.) are
+    # intentionally preserved — only LOBSTER-SCHEDULED user-space job entries are removed.
+    if crontab -l 2>/dev/null | grep -q '# LOBSTER-SCHEDULED'; then
+        _m71_safe_to_remove=""
+        _m71_skipped=""
+        while IFS= read -r _m71_line; do
+            # Extract the job name from lines like:
+            #   0 */6 * * * /path/dispatch-job.sh lobstertalk-ssh-watcher # LOBSTER-SCHEDULED
+            _m71_job=$(echo "$_m71_line" | grep -oP '(?<=dispatch-job\.sh )\S+' || true)
+            if [ -z "$_m71_job" ]; then
+                # Not a dispatch-job.sh line — skip it (don't remove)
+                _m71_skipped="${_m71_skipped}${_m71_line}\n"
+                continue
+            fi
+            _m71_timer="/etc/systemd/system/lobster-${_m71_job}.timer"
+            if [ -f "$_m71_timer" ] && grep -q '# LOBSTER-MANAGED' "$_m71_timer" 2>/dev/null; then
+                # Systemd timer exists and is lobster-managed — safe to remove cron entry
+                _m71_safe_to_remove="${_m71_safe_to_remove}${_m71_job} "
+            else
+                # No systemd timer — leave cron entry in place, warn operator
+                substep "WARNING: LOBSTER-SCHEDULED cron entry for '${_m71_job}' has no systemd timer — leaving in place"
+                substep "  To fix: create a systemd timer for '${_m71_job}' via create_scheduled_job MCP tool, then re-run upgrade.sh"
+                _m71_skipped="${_m71_skipped}${_m71_line}\n"
+            fi
+        done < <(crontab -l 2>/dev/null | grep '# LOBSTER-SCHEDULED')
+
+        if [ -n "$_m71_safe_to_remove" ]; then
+            # Build a pattern that matches only the job names we confirmed are timer-backed
+            _m71_pattern=$(echo "$_m71_safe_to_remove" | tr ' ' '\n' | grep -v '^$' | sed 's/.*/dispatch-job\\.sh &/' | paste -sd '|')
+            { crontab -l 2>/dev/null | grep -Ev "$_m71_pattern" || true; } | crontab -
+            substep "Removed LOBSTER-SCHEDULED cron entries for timer-backed jobs: ${_m71_safe_to_remove% }"
+            migrated=$((migrated + 1))
+        else
+            substep "No timer-backed LOBSTER-SCHEDULED cron entries to remove"
+        fi
+    else
+        substep "No LOBSTER-SCHEDULED crontab entries found — skipping"
+    fi
+
+    # Migration 72: Enable lobster-claude and lobster-router for autostart on existing installs.
+    # Non-interactive installs (NON_INTERACTIVE=true) prior to this fix skipped the
+    # `systemctl enable` call entirely, leaving the services installed but not enabled.
+    # After any reboot the services would not start automatically, causing ~4 min downtime
+    # until the health check detected and restarted the missing session. Fix: enable
+    # unconditionally if the service unit is present but not enabled. (issue #1603)
+    for _m72_svc in lobster-router lobster-claude; do
+        if systemctl list-unit-files --quiet "${_m72_svc}.service" 2>/dev/null | grep -q "^${_m72_svc}"; then
+            if ! systemctl is-enabled --quiet "${_m72_svc}" 2>/dev/null; then
+                sudo systemctl enable "${_m72_svc}" 2>/dev/null || true
+                substep "Enabled ${_m72_svc} for autostart"
+                migrated=$((migrated + 1))
+            else
+                substep "${_m72_svc} already enabled — skipping"
+            fi
+        else
+            substep "${_m72_svc}.service not found — skipping"
+        fi
+    done
+
+    # Migration 73: Remove stale system-audit.context.md from memory/canonical/
+    # install.sh's generic canonical-template loop previously copied system-audit.context.md
+    # to both memory/canonical/ and agents/ (the latter via a dedicated block).
+    # The agents/ copy is the canonical write target — the memory/canonical/ copy was
+    # never updated by the lobster-auditor and drifted stale. Fix: delete the stale copy
+    # and exclude it from the generic loop going forward (issue #1196).
+    local stale_audit_context="$USER_CONFIG_DIR/memory/canonical/system-audit.context.md"
+    if [ -f "$stale_audit_context" ]; then
+        rm -f "$stale_audit_context"
+        substep "Removed stale system-audit.context.md from memory/canonical/ (canonical copy is agents/system-audit.context.md)"
+        migrated=$((migrated + 1))
+    fi
+
+    # Migration 74: Enable and start lobster-transcription.service on existing installs.
+    # Prior to this fix, install.sh installed the service file but never called
+    # systemctl enable, so voice messages accumulated in pending-transcription/ forever.
+    if systemctl is-system-running >/dev/null 2>&1 || pidof systemd >/dev/null 2>&1; then
+        local transcription_svc="$LOBSTER_DIR/services/lobster-transcription.service"
+        if [ -f "$transcription_svc" ]; then
+            sudo cp "$transcription_svc" /etc/systemd/system/lobster-transcription.service
+            sudo systemctl daemon-reload 2>/dev/null || true
+            if ! systemctl is-enabled --quiet lobster-transcription 2>/dev/null; then
+                sudo systemctl enable lobster-transcription 2>/dev/null || true
+                substep "Enabled lobster-transcription.service"
+                migrated=$((migrated + 1))
+            fi
+            if ! systemctl is-active --quiet lobster-transcription 2>/dev/null; then
+                sudo systemctl start lobster-transcription 2>/dev/null || true
+                substep "Started lobster-transcription.service"
+                migrated=$((migrated + 1))
+            fi
+        else
+            substep "WARN: lobster-transcription.service not found at $transcription_svc — skipping"
+        fi
+    else
+        substep "systemd not running — skipping lobster-transcription.service enable (container?)"
     fi
 
     if [ "$migrated" -eq 0 ]; then

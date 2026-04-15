@@ -15,26 +15,34 @@ _BOT_PATH = os.path.join(os.path.dirname(__file__), "../../../src/bot/lobster_bo
 
 
 def _load_md_to_html():
-    """Load md_to_html from the bot module without executing module-level side effects."""
+    """Load md_to_html (and its helpers) from the bot module without executing
+    module-level side effects."""
     import re
 
-    spec = importlib.util.spec_from_file_location("lobster_bot_partial", _BOT_PATH)
-    # Read and extract just the function source to avoid import-time side effects
+    # Read and extract just the relevant function definitions and constants
+    # to avoid import-time side effects (Telegram env checks, app start, etc.)
     with open(_BOT_PATH) as f:
         source = f.read()
 
-    # Execute only up to the first non-function/non-import statement
-    # We grab the function by compiling the relevant lines
-    ns: dict = {"re": re}
-    # Extract the md_to_html function definition
     import ast
     tree = ast.parse(source)
-    func_def = next(
-        node for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name == "md_to_html"
-    )
-    func_source = ast.get_source_segment(source, func_def)
-    exec(compile(func_source, _BOT_PATH, "exec"), ns)  # noqa: S102
+
+    # Names to extract: the constant, both helper functions
+    _NAMES_TO_EXTRACT = {"_LONG_URL_THRESHOLD", "_link_to_html", "md_to_html"}
+
+    ns: dict = {"re": re}
+    for node in tree.body:
+        name = None
+        if isinstance(node, ast.FunctionDef):
+            name = node.name
+        elif isinstance(node, ast.Assign):
+            # Simple assignment like _LONG_URL_THRESHOLD = 200
+            if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+                name = node.targets[0].id
+        if name in _NAMES_TO_EXTRACT:
+            segment = ast.get_source_segment(source, node)
+            exec(compile(segment, _BOT_PATH, "exec"), ns)  # noqa: S102
+
     return ns["md_to_html"]
 
 
@@ -198,3 +206,70 @@ class TestSnakeCaseNotItalicized:
         result = md_to_html("```\nwrite_result\n```")
         assert "<i>" not in result
         assert "write_result" in result
+
+
+# ---------------------------------------------------------------------------
+# Long URL handling (issue lobstertalk#20)
+# ---------------------------------------------------------------------------
+
+_SHORT_URL = "https://example.com/path"
+_LONG_URL = "https://accounts.google.com/o/oauth2/auth?" + "x" * 180  # > 200 chars
+
+
+class TestLongUrls:
+    """URLs longer than _LONG_URL_THRESHOLD must be rendered as plain text
+    so that users can long-press and copy them on Telegram mobile."""
+
+    def test_short_url_rendered_as_hyperlink(self):
+        result = md_to_html(f"[click]({_SHORT_URL})")
+        assert f'<a href="{_SHORT_URL}">click</a>' in result
+
+    def test_long_url_not_rendered_as_hyperlink(self):
+        result = md_to_html(f"[Authorize]({_LONG_URL})")
+        assert "<a href=" not in result
+
+    def test_long_url_link_text_present_in_bold(self):
+        result = md_to_html(f"[Authorize]({_LONG_URL})")
+        assert "<b>Authorize</b>" in result
+
+    def test_long_url_raw_url_present_in_pre(self):
+        result = md_to_html(f"[Authorize]({_LONG_URL})")
+        assert "<pre>" in result
+        assert _LONG_URL in result
+
+    def test_long_url_threshold_boundary_exactly_200(self):
+        """A URL exactly 200 chars long is NOT long (threshold is > 200)."""
+        url_200 = "https://example.com/" + "a" * 180  # total = 200 chars
+        result = md_to_html(f"[click]({url_200})")
+        assert f'<a href="{url_200}">click</a>' in result
+
+    def test_long_url_threshold_boundary_exactly_201(self):
+        """A URL exactly 201 chars long IS long — rendered as plain text."""
+        url_201 = "https://example.com/" + "a" * 181  # total = 201 chars
+        result = md_to_html(f"[click]({url_201})")
+        assert "<a href=" not in result
+        assert "<pre>" in result
+
+    def test_long_url_mixed_with_short_url(self):
+        """Short and long links can coexist in the same message."""
+        text = f"See [docs]({_SHORT_URL}) and then [auth]({_LONG_URL})."
+        result = md_to_html(text)
+        assert f'<a href="{_SHORT_URL}">docs</a>' in result
+        assert "<a href=" not in result.replace(f'<a href="{_SHORT_URL}">docs</a>', "")
+        assert "<pre>" in result
+        assert _LONG_URL in result
+
+    def test_long_url_ampersand_params_escaped_once(self):
+        """Query string & is escaped exactly once — not double-escaped."""
+        url_with_amp = "https://example.com/auth?client_id=abc&redirect_uri=https%3A%2F%2F" + "x" * 150
+        result = md_to_html(f"[Auth]({url_with_amp})")
+        # Should appear escaped as &amp; (once) inside the <pre>
+        assert "&amp;" in result
+        # Must not be double-escaped to &amp;amp;
+        assert "&amp;amp;" not in result
+
+    def test_long_url_inside_code_block_not_affected(self):
+        """Links inside code blocks are never processed (existing behaviour)."""
+        result = md_to_html(f"```\n[Authorize]({_LONG_URL})\n```")
+        assert "<pre><code>" in result
+        assert "<b>Authorize</b>" not in result

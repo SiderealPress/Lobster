@@ -17,20 +17,31 @@ finds a stale sentinel and the gate passes immediately. No deadlock.
 
 ## Dispatcher vs subagent detection
 
-Detection is delegated to session_role.is_dispatcher(), which uses a layered
-strategy:
+Detection is performed by is_dispatcher_session(), which uses a layered strategy:
 
-1. Marker file (primary): At dispatcher startup, write-dispatcher-session-id.py
+0. agent_id field (fast path): Claude Code injects agent_id into PreToolUse
+   payloads only for subagent sessions.  It is absent for the top-level
+   dispatcher.  If present → immediately return False (subagent).  No
+   filesystem I/O required.  This is the primary check for the common case.
+   See issue #1152.
+
+1. MCP state file: The running MCP server writes the dispatcher session ID to
+   ~/lobster-workspace/data/dispatcher-session-id.  NOTE: this file stores an
+   HTTP MCP session ID, not a CC UUID; it will never match the hook session_id
+   field in practice (namespace mismatch — see issue #1151).  Retained for
+   belt-and-suspenders; effectively a no-op in hook context.
+
+2. Hook marker file (secondary): At dispatcher startup, write-dispatcher-session-id.py
    (a SessionStart hook) writes the session ID to
-   ~/messages/config/dispatcher-session-id. This hook reads that file and
-   compares it to the session_id in the hook JSON input. Match → dispatcher.
+   ~/messages/config/dispatcher-session-id.  This is the real primary
+   state-file signal for hooks (CC UUID on both sides).  Match → dispatcher.
 
-2. Process-tree fallback (secondary): If the marker file is absent or
-   unreadable, walk the process tree upward. Two consecutive claude-like
-   ancestors before reaching a tmux pane PID → subagent. One or fewer →
-   dispatcher. See _is_dispatcher_by_process_tree() below.
+3. Process-tree fallback: If neither state file is present or gives a definitive
+   answer, walk the process tree upward.  Two consecutive claude-like ancestors
+   before reaching a tmux pane PID → subagent.  One or fewer → dispatcher.
+   See _is_dispatcher_by_process_tree() below.
 
-3. Env-var-only fallback: If tmux is unavailable, fall back to
+4. Env-var-only fallback: If tmux is unavailable, fall back to
    LOBSTER_MAIN_SESSION=1 alone.
 
 ## Settings.json configuration
@@ -55,13 +66,14 @@ The empty string matcher fires on every tool call.
 
 import json
 import os
-import subprocess
 import sys
 import time
 from pathlib import Path
 
 # Make hooks/ importable regardless of cwd.
 sys.path.insert(0, str(Path(__file__).parent))
+
+from session_role import is_dispatcher_session  # noqa: E402 — after sys.path insertion
 
 SENTINEL_FILE = Path(os.path.expanduser("~/messages/config/compact-pending"))
 SENTINEL_TTL_SECONDS = 600  # 10 minutes — treats stale sentinel as harmless
@@ -87,9 +99,6 @@ DENY_REASON = (
     "tool call."
 )
 
-LOBSTER_TMUX_SESSION = os.environ.get("LOBSTER_TMUX_SESSION", "lobster")
-
-
 def log_gate_event(tool_name: str, action: str) -> None:
     """Append a JSON log line to compact-gate.log. Silent on any failure."""
     try:
@@ -100,133 +109,6 @@ def log_gate_event(tool_name: str, action: str) -> None:
             f.write(line)
     except Exception:  # noqa: BLE001
         pass
-
-
-def _get_tmux_pane_pids() -> set[str]:
-    """Return the set of PIDs for all panes in the lobster tmux session."""
-    try:
-        result = subprocess.run(
-            [
-                "tmux", "-L", LOBSTER_TMUX_SESSION,
-                "list-panes", "-t", LOBSTER_TMUX_SESSION,
-                "-F", "#{pane_pid}",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=1,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return set(result.stdout.strip().split("\n"))
-    except Exception:  # noqa: BLE001
-        pass
-    return set()
-
-
-def _get_proc_name(pid: int) -> str:
-    """Return the comm (process name) for a given PID, or '' on failure."""
-    try:
-        with open(f"/proc/{pid}/comm") as f:
-            return f.read().strip()
-    except OSError:
-        return ""
-
-
-def _get_ppid(pid: int) -> int | None:
-    """Return the parent PID of a given PID, or None on failure."""
-    try:
-        with open(f"/proc/{pid}/stat") as f:
-            # Format: pid (comm) state ppid ...
-            content = f.read()
-            # rsplit on ')' to handle commas in comm name
-            after_comm = content.rsplit(")", 1)[-1]
-            ppid = int(after_comm.split()[1])
-            return ppid if ppid > 1 else None
-    except (OSError, ValueError, IndexError):
-        return None
-
-
-def _is_claude_process(name: str) -> bool:
-    """Return True if the process name looks like a Claude Code binary."""
-    return "claude" in name.lower()
-
-
-def _is_dispatcher_by_process_tree() -> bool:
-    """Return True only when this hook is running inside the dispatcher Claude.
-
-    Process-tree fallback used when the session_role marker file is absent.
-
-    Strategy:
-      1. Must have LOBSTER_MAIN_SESSION=1 (env var set by claude-persistent.sh).
-         This is a necessary condition — if not set, definitely not the dispatcher.
-      2. Walk the process tree upward from this hook process. Count consecutive
-         'claude' ancestors before reaching a tmux pane PID:
-           - 0 or 1 claude ancestor  → dispatcher (hook → dispatcher claude → tmux)
-           - 2+ claude ancestors     → subagent (hook → subagent claude → dispatcher claude → tmux)
-      3. If the tmux check is unavailable (tmux not running, etc.), fall back
-         to the env-var-only check — maintaining prior imprecise behaviour.
-
-    Fails open for non-main-session processes (returns False if uncertain).
-    """
-    # Necessary condition: env var must be set.
-    if os.environ.get("LOBSTER_MAIN_SESSION", "") != "1":
-        return False
-
-    tmux_pids = _get_tmux_pane_pids()
-    if not tmux_pids:
-        # tmux unavailable — fall back to env-var-only (prior behaviour).
-        return True
-
-    claude_ancestor_count = 0
-    pid = os.getpid()
-    for _ in range(15):  # Safety limit — should never need more than ~5 levels
-        ppid = _get_ppid(pid)
-        if ppid is None:
-            break
-        if str(ppid) in tmux_pids:
-            # Reached the tmux pane. Dispatcher has ≤1 claude ancestor above
-            # this hook; subagents have ≥2.
-            return claude_ancestor_count <= 1
-        parent_name = _get_proc_name(ppid)
-        if _is_claude_process(parent_name):
-            claude_ancestor_count += 1
-        pid = ppid
-
-    # Could not confirm via process tree — fall back to env var.
-    return True
-
-
-def is_dispatcher_session(hook_input: dict) -> bool:
-    """Return True when this hook is running inside the dispatcher Claude.
-
-    Uses session_role.is_dispatcher() (marker-file + transcript) as the primary
-    check. Falls back to the process-tree walk when neither signal is available
-    (e.g. marker file not yet written on first boot, no transcript in PreToolUse).
-    """
-    # Primary: marker file + transcript (via session_role).
-    # session_role returns False by default when no signal is found; we need to
-    # distinguish "definitely subagent" from "no signal" to know when to apply
-    # the process-tree fallback. We probe the marker file directly here.
-    from session_role import (
-        _check_marker_file,
-        get_session_id,
-        _transcript_has_dispatcher_tool,
-        DISPATCHER_SESSION_FILE,
-    )
-
-    session_id = get_session_id(hook_input)
-    marker_result = _check_marker_file(session_id)
-
-    if marker_result is not None:
-        # Marker file exists and gave a definitive answer.
-        return marker_result
-
-    # Transcript fallback (Stop hooks only — transcript absent in PreToolUse).
-    transcript = hook_input.get("transcript")
-    if transcript is not None:
-        return _transcript_has_dispatcher_tool(transcript)
-
-    # No session_role signal available — fall back to process-tree.
-    return _is_dispatcher_by_process_tree()
 
 
 def sentinel_is_fresh() -> bool:
@@ -244,6 +126,13 @@ def main() -> None:
     try:
         data = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError):
+        sys.exit(0)
+
+    # Fast path: agent_id is present only in subagent PreToolUse payloads.
+    # The dispatcher never has agent_id.  Exit immediately without any file I/O.
+    # NOTE: agent_id is NOT available in SessionStart hooks; this check is only
+    # valid here in PreToolUse context.  See issue #1152.
+    if data.get("agent_id"):
         sys.exit(0)
 
     # Only enforce for the main dispatcher session.
@@ -284,7 +173,14 @@ def main() -> None:
             sys.exit(0)
 
     # If sentinel is absent or stale, allow everything through.
+    # Delete a stale sentinel so it doesn't linger as an orphan file.
     if not sentinel_is_fresh():
+        if SENTINEL_FILE.exists():
+            try:
+                SENTINEL_FILE.unlink(missing_ok=True)
+                log_gate_event(tool_name, "stale-sentinel-deleted")
+            except OSError:
+                pass
         sys.exit(0)
 
     # Sentinel is fresh and tool is not wait_for_messages — deny.

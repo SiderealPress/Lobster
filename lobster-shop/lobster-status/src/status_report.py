@@ -14,6 +14,7 @@ Output is pre-formatted text ready to send via send_reply().
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -40,7 +41,6 @@ _MESSAGES = Path(os.environ.get("LOBSTER_MESSAGES", _HOME / "messages"))
 _WORKSPACE = Path(os.environ.get("LOBSTER_WORKSPACE", _HOME / "lobster-workspace"))
 _STATE_FILE = _MESSAGES / "config" / "lobster-state.json"
 _HEALTH_LOG = _WORKSPACE / "logs" / "health-check.log"
-_JOBS_FILE = _WORKSPACE / "scheduled-jobs" / "jobs.json"
 
 
 def _format_duration(seconds: float) -> str:
@@ -107,20 +107,34 @@ def _get_last_health_check() -> dict:
 
 
 def _get_scheduled_jobs_count() -> dict:
-    """Count scheduled jobs by enabled/disabled status."""
+    """Count lobster systemd timer units by enabled/disabled status."""
     try:
-        data = json.loads(_JOBS_FILE.read_text())
-        jobs = data.get("jobs", {})
-        # jobs.json stores jobs as a dict keyed by name, or a list
-        if isinstance(jobs, dict):
-            total = len(jobs)
-            # Dict format: each value has job metadata but no "enabled" field
-            # All registered jobs are considered enabled
-            return {"total": total, "enabled": total, "disabled": 0}
-        elif isinstance(jobs, list):
-            enabled = sum(1 for j in jobs if j.get("enabled", True))
-            return {"total": len(jobs), "enabled": enabled, "disabled": len(jobs) - enabled}
-        return {"total": 0, "enabled": 0, "disabled": 0}
+        result = subprocess.run(
+            ["systemctl", "list-timers", "--all", "--no-legend", "--no-pager"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        lines = [
+            line for line in result.stdout.splitlines()
+            if "lobster-" in line
+        ]
+        total = len(lines)
+        # list-timers --all shows active timers; units appear here when enabled
+        # Use is-enabled to distinguish enabled vs disabled
+        enabled = 0
+        for line in lines:
+            # Extract timer unit name (last whitespace-separated token containing .timer)
+            parts = line.split()
+            unit = next((p for p in parts if p.startswith("lobster-") and p.endswith(".timer")), None)
+            if unit:
+                check = subprocess.run(
+                    ["systemctl", "is-enabled", "--quiet", unit],
+                    capture_output=True,
+                )
+                if check.returncode == 0:
+                    enabled += 1
+        return {"total": total, "enabled": enabled, "disabled": total - enabled}
     except Exception:
         return {"total": 0, "enabled": 0, "disabled": 0}
 

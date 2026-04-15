@@ -46,7 +46,7 @@ INBOX_SYSTEM_TYPES: frozenset[str] = frozenset({
     "compact_group",          # grouped compact messages (internal, produced by check_inbox)
     "compact_reminder",       # on-compact hook reminder (hooks/on-compact.py)
     "cron_reminder",          # DEPRECATED alias — normalizes to "scheduled_reminder" on ingest
-    "scheduled_reminder",     # scheduled reminder (scripts/post-reminder.sh, scheduled-tasks/post-reminder.sh)
+    "scheduled_reminder",     # scheduled reminder (scripts/post-reminder.sh, scheduled-tasks/dispatch-job.sh)
     "update_notification",    # system update available (scripts/check-updates.sh)
     "consolidation",          # nightly consolidation result
     "observation",            # OOM-monitor or similar system observation
@@ -54,6 +54,7 @@ INBOX_SYSTEM_TYPES: frozenset[str] = frozenset({
     "system",                 # DEPRECATED alias — normalizes to "health_check" on ingest (from health check scripts)
     "task-output",            # DEPRECATED alias — normalizes to "health_check" on ingest (scripts/daily-health-check.sh)
     "debug_observation",      # debug output from inbox_server.py internals; excluded from skill processing
+    "session_note_reminder",  # MCP counter reached 20 user messages — dispatcher should spawn session-note-appender
 })
 
 # ---------------------------------------------------------------------------

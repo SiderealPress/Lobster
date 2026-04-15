@@ -155,6 +155,55 @@ class TestHandleMessage:
                 call_args = mock_update.message.reply_text.call_args[0][0]
                 assert "received" in call_args.lower() or "processing" in call_args.lower()
 
+    @pytest.mark.asyncio
+    async def test_no_acknowledgment_in_group(
+        self, mock_update, mock_context, temp_messages_dir
+    ):
+        """Ack is suppressed for group messages to avoid cluttering group chat."""
+        inbox = temp_messages_dir / "inbox"
+        # Set up mock as a group message from an allowed user
+        mock_update.message.chat.type = "group"
+        mock_update.message.chat.id = -100123
+        mock_update.message.chat.title = "Test Group"
+        mock_update.message.chat_id = -100123
+
+        from multiplayer_telegram_bot.gating import GatingResult, GatingAction
+
+        with patch.dict(
+            os.environ,
+            {
+                "TELEGRAM_BOT_TOKEN": "test_token",
+                "TELEGRAM_ALLOWED_USERS": "123456",
+            },
+        ):
+            import importlib
+            import src.bot.lobster_bot as bot_module
+            importlib.reload(bot_module)
+
+            with (
+                patch.object(bot_module, "INBOX_DIR", inbox),
+                patch.object(bot_module, "_GROUP_GATING_ENABLED", True),
+                patch.object(
+                    bot_module,
+                    "gate_message",
+                    return_value=GatingResult(
+                        action=GatingAction.ALLOW,
+                        chat_id=-100123,
+                        user_id=123456,
+                        reason="allowed",
+                    ),
+                ),
+                patch.object(bot_module, "load_whitelist", return_value={}),
+            ):
+                await bot_module.handle_message(mock_update, mock_context)
+
+                # Message written to inbox
+                files = list(inbox.glob("*.json"))
+                assert len(files) == 1
+
+                # No ack reply in groups
+                mock_update.message.reply_text.assert_not_called()
+
 
 class TestHandleAudioMessage:
     """Tests for handle_audio_message function.

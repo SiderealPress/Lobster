@@ -1,0 +1,28 @@
+# Example: Handle @lobster mentions with a custom Lobster task
+#
+# Copy this file to the parent rules/ directory and edit to activate.
+
+[rule]
+name = "lobster-mention-handler"
+description = "When Lobster is mentioned, analyze the request and respond"
+enabled = true
+
+[trigger]
+event = "app_mention"
+channels = []                       # Match all channels
+users = []                          # Match all users
+
+[action]
+type = "lobster_task"
+task_prompt = """User {username} mentioned Lobster in #{channel_name} (channel {channel_id}).
+
+Their message: {message_text}
+
+Analyze the request and prepare a helpful response. Consider:
+1. Is this a question? Answer it directly.
+2. Is this a task request? Plan and execute it.
+3. Is this feedback? Acknowledge and note it.
+
+Reply concisely — the user is likely on mobile."""
+subagent_type = "general-purpose"
+run_in_background = true

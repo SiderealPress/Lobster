@@ -4,6 +4,18 @@
 #
 # Structural backstop — even if .gitignore is wrong, the commit is blocked
 # when staged files match patterns that belong in the workspace, not the repo.
+#
+# Also scans staged file content for personal names (case-insensitive):
+#   - "sahar" (as a standalone name)
+#   - "drew" (as a standalone name, not part of "andrew" or "withdrew" etc.)
+#
+# Allowlisted non-name occurrences:
+#   - "sayhar" (GitHub username) — allowed
+#   - "andrew" — allowed
+#   - "withdrew", "outdrewn", etc. — allowed (drew embedded in longer words)
+#   - Comments with # noname on the same line — allowed
+#
+# Bypass: git commit --no-verify
 #===============================================================================
 
 set -uo pipefail
@@ -40,6 +52,7 @@ BLOCKED_EXTENSIONS=(
 # Allowlisted patterns (templates and examples are fine)
 ALLOWLIST_PATTERNS=(
     "memory/canonical-templates/"
+    "scheduled-tasks/tasks/"
     "*.example"
 )
 
@@ -112,5 +125,107 @@ if [ "$BLOCKED" -gt 0 ]; then
     echo "To bypass:   git commit --no-verify  (use with caution)"
     exit 1
 fi
+
+#===============================================================================
+# Name Check: scan staged diff for personal names
+#===============================================================================
+
+NAME_VIOLATIONS=0
+
+# Load blocked names from user config, falling back to built-in defaults.
+#
+# Config file: ${LOBSTER_USER_CONFIG_DIR:-~/lobster-user-config}/blocked-names.txt
+# Format (one entry per line):
+#   name@@allowlist_regex
+#   - name: the word to block (matched case-insensitively as a whole word)
+#   - allowlist_regex: PCRE — if the full line matches this, the block is suppressed
+#   Lines starting with # are comments; empty lines are ignored.
+#
+# Example:
+#   sahar@@sayhar
+#   drew@@andrew|withdrew|outdrewn
+_NAMES_CONFIG="${LOBSTER_USER_CONFIG_DIR:-$HOME/lobster-user-config}/blocked-names.txt"
+declare -a _BLOCKED_NAMES=()
+if [ -f "$_NAMES_CONFIG" ]; then
+    while IFS= read -r _nc_line; do
+        [[ "$_nc_line" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "${_nc_line// }" ]] && continue
+        _BLOCKED_NAMES+=("$_nc_line")
+    done < "$_NAMES_CONFIG"
+fi
+# Fallback built-in defaults when no config file exists or it is empty
+if [ "${#_BLOCKED_NAMES[@]}" -eq 0 ]; then
+    _BLOCKED_NAMES=(
+        'sahar@@sayhar'
+        'drew@@andrew|withdrew|outdrewn'
+    )
+fi
+
+scan_staged_diff_for_names() {
+    local diff_output
+    diff_output="$(git diff --cached -U0 2>/dev/null)" || return 0
+    [ -z "$diff_output" ] && return 0
+
+    # Only look at added lines (lines starting with +, not the +++ file headers)
+    local added_lines
+    added_lines="$(echo "$diff_output" | grep -P '^\+(?!\+\+)' | sed 's/^\+//' || true)"
+    [ -z "$added_lines" ] && return 0
+
+    local file_context=""
+    local violations=""
+
+    # Re-read diff to track which file each added line belongs to
+    while IFS= read -r raw_line; do
+        # Track current file
+        if [[ "$raw_line" =~ ^\+\+\+\ b/(.+)$ ]]; then
+            file_context="${BASH_REMATCH[1]}"
+            continue
+        fi
+        # Skip hook files themselves — they contain the patterns as regex strings
+        case "$file_context" in
+            .githooks/*) continue ;;
+        esac
+        # Only process added content lines
+        [[ "$raw_line" =~ ^\+[^+] ]] || continue
+        local content="${raw_line:1}"  # strip leading +
+
+        # Skip lines with inline suppression
+        echo "$content" | grep -qP '#\s*noname\b' && continue
+
+        # Check each blocked name entry
+        for _nc_entry in "${_BLOCKED_NAMES[@]}"; do
+            local _nc_name="${_nc_entry%%@@*}"
+            local _nc_allow=""
+            [[ "$_nc_entry" == *"@@"* ]] && _nc_allow="${_nc_entry#*@@}"
+
+            if echo "$content" | grep -qiP "(?<![a-z])${_nc_name}(?![a-z])" 2>/dev/null; then
+                # Apply allowlist: if line matches the allowlist pattern, suppress
+                if [ -n "$_nc_allow" ] && echo "$content" | grep -qiP "$_nc_allow" 2>/dev/null; then
+                    continue
+                fi
+                violations="${violations}${file_context}: ${content}\n"
+                NAME_VIOLATIONS=$((NAME_VIOLATIONS + 1))
+            fi
+        done
+    done <<< "$diff_output"
+
+    if [ "$NAME_VIOLATIONS" -gt 0 ]; then
+        echo ""
+        echo -e "${RED}${BOLD}Name check failed: staged changes contain personal names.${NC}"
+        echo ""
+        echo "The following lines match restricted name patterns:"
+        echo -e "$violations" | head -10
+        echo ""
+        echo "These names must not appear in committed code."
+        echo "  - Use aliases, roles, or initials instead"
+        echo "  - If this is a legitimate non-name use, add '# noname' to the line"
+        echo "  - To bypass entirely: git commit --no-verify"
+        echo "  - To configure blocked names: edit ~/lobster-user-config/blocked-names.txt"
+        echo ""
+        exit 1
+    fi
+}
+
+scan_staged_diff_for_names
 
 exit 0

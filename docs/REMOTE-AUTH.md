@@ -1,23 +1,34 @@
 # Remote / Headless Authentication
 
-Claude Code uses OAuth tokens that expire periodically. On a headless VPS there is
-no browser to complete the re-authentication flow. If the token expires unnoticed,
-the Claude session crash-loops silently — in one incident, 22,551 restart attempts
-over several weeks went undetected.
+Lobster authenticates Claude Code via the `CLAUDE_CODE_OAUTH_TOKEN` environment
+variable, set in `~/lobster-config/config.env`. The token is loaded by
+`claude-persistent.sh` at startup and passed directly to Claude Code.
 
-This document covers how to re-authenticate and how to detect expired tokens.
+`claude auth status --output-format json` is the single source of truth for
+auth state. The health check (`health-check-v3.sh`) and token refresh cron
+(`token-refresh.sh`) both use this command — no credentials file path checks.
 
 ---
 
-## Method 1: `claude setup-token` (preferred)
+## Check auth status
 
-1. SSH to the VPS:
+```bash
+# Canonical check — works regardless of how the token was provisioned:
+claude auth status --output-format json
+```
 
-   ```bash
-   ssh root@162.55.60.42
-   ```
+Expected output when healthy:
+```json
+{"loggedIn": true, "authMethod": "oauth_token", ...}
+```
 
-2. Run `setup-token` as the lobster user:
+---
+
+## Authenticate (or re-authenticate)
+
+When `CLAUDE_CODE_OAUTH_TOKEN` expires, obtain a new token and update config.env:
+
+1. **Get a new token** — run `claude setup-token` (or `claude auth login`) as the lobster user:
 
    ```bash
    sudo -u lobster bash -c '
@@ -27,68 +38,51 @@ This document covers how to re-authenticate and how to detect expired tokens.
    '
    ```
 
-3. The CLI displays an OAuth URL. Copy it and open in **any** browser (your laptop, phone, etc.).
+   This displays a URL — open it in any browser (laptop, phone, etc.),
+   authorize, then paste the token back when prompted.
 
-4. Authorize in the browser. You will be redirected to a callback page.
-
-5. The CLI polls `platform.claude.com` automatically using the `state` parameter. Wait up to 30 seconds — it should pick up the code and write credentials.
-
-6. Verify credentials were written:
+2. **Update config.env**:
 
    ```bash
-   cat /home/lobster/.claude/.credentials.json | python3 -c '
-     import json, sys, datetime
-     d = json.load(sys.stdin)
-     oauth = d.get("claudeAiOauth", {})
-     if oauth.get("accessToken"):
-         exp = datetime.datetime.fromtimestamp(oauth["expiresAt"] / 1000)
-         print(f"OK — token expires {exp}")
-     else:
-         print("MISSING — no token found")
-   '
+   # Edit ~/lobster-config/config.env and set:
+   CLAUDE_CODE_OAUTH_TOKEN=<new-token>
    ```
 
-7. Restart the Claude session:
+3. **Restart the service**:
 
    ```bash
    systemctl restart lobster-claude
    ```
 
+4. **Verify**:
+
+   ```bash
+   claude auth status --output-format json
+   ```
+
 ---
 
-## Method 2: Transfer credentials from local machine (fallback)
+## Transfer credentials from another machine
 
-If `setup-token` polling does not pick up the code (network issues, timeout, etc.),
-transfer OAuth credentials from a machine where Claude Code is already authenticated.
+If `claude setup-token` is unavailable, copy a working token from another machine:
 
-1. **On your Mac** — extract credentials from Keychain:
+1. **On your Mac** — get the current OAuth token:
 
    ```bash
-   security find-generic-password -s "Claude Code-credentials" -w > /tmp/creds.json
+   security find-generic-password -s "Claude Code-credentials" -w | \
+     python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('claudeAiOauth',{}).get('accessToken','') or d.get('oauthAccount',{}).get('accessToken',''))"
    ```
 
-2. **Transfer to VPS**:
+2. **Update config.env on the VPS**:
 
    ```bash
-   scp /tmp/creds.json root@162.55.60.42:/home/lobster/.claude/.credentials.json
+   ssh root@<vps-ip> "sed -i 's|^CLAUDE_CODE_OAUTH_TOKEN=.*|CLAUDE_CODE_OAUTH_TOKEN=<token>|' /home/lobster/lobster-config/config.env"
    ```
 
-3. **Fix ownership and permissions**:
+3. **Restart**:
 
    ```bash
-   ssh root@162.55.60.42 "chown lobster:lobster /home/lobster/.claude/.credentials.json && chmod 600 /home/lobster/.claude/.credentials.json"
-   ```
-
-4. **Clean up locally**:
-
-   ```bash
-   rm /tmp/creds.json
-   ```
-
-5. **Restart**:
-
-   ```bash
-   ssh root@162.55.60.42 "systemctl restart lobster-claude"
+   ssh root@<vps-ip> "systemctl restart lobster-claude"
    ```
 
 ---
@@ -96,12 +90,12 @@ transfer OAuth credentials from a machine where Claude Code is already authentic
 ## ANTHROPIC_API_KEY conflict
 
 If `ANTHROPIC_API_KEY` is set in the environment, Claude Code uses it **instead of**
-OAuth — even when valid OAuth credentials exist. The `config.env` file sets this
+OAuth — even when `CLAUDE_CODE_OAUTH_TOKEN` is set. The `config.env` file sets this
 variable for other Lobster services (MCP server, scheduled tasks).
 
 `claude-persistent.sh` unsets `ANTHROPIC_API_KEY` before launching Claude so OAuth
 is used. If you see "API usage limits" or "Invalid API key" errors in
-`claude-session.log` but the credentials file looks valid, check whether the env
+`claude-session.log` but `claude auth status` reports logged in, check whether the env
 var is leaking through.
 
 ---
@@ -122,30 +116,14 @@ Signs that authentication has expired:
   ```
 - **No Telegram responses**: The bot accepts messages but Claude never processes them.
 
-### Check token expiry directly
-
-```bash
-python3 -c '
-  import json, datetime
-  d = json.load(open("/home/lobster/.claude/.credentials.json"))
-  exp = d["claudeAiOauth"]["expiresAt"] / 1000
-  print("Expires:", datetime.datetime.fromtimestamp(exp))
-  print("Status:", "EXPIRED" if exp < datetime.datetime.now().timestamp() else "VALID")
-'
-```
-
 ---
 
 ## Post-auth checklist
 
-1. **Verify credentials exist**:
+1. **Verify auth is working**:
 
    ```bash
-   cat /home/lobster/.claude/.credentials.json | python3 -c '
-     import json, sys
-     d = json.load(sys.stdin)
-     print("OK" if d.get("claudeAiOauth", {}).get("accessToken") else "MISSING")
-   '
+   claude auth status --output-format json
    ```
 
 2. **Test Claude directly**:

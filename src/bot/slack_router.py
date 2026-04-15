@@ -17,7 +17,7 @@ from logging.handlers import RotatingFileHandler
 import os
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import Thread
 
@@ -28,6 +28,39 @@ from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
+# ---------------------------------------------------------------------------
+# Shared outbox handler (src/channels/outbox.py)
+# ---------------------------------------------------------------------------
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).parent.parent))
+from channels.outbox import OutboxFileHandler, OutboxWatcher, drain_outbox  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# Slack Connector ingress logger (logs every event to JSONL before LLM routing)
+# ---------------------------------------------------------------------------
+try:
+    _shop_root = Path(__file__).parent.parent.parent / "lobster-shop" / "slack-connector"
+    _sys.path.insert(0, str(_shop_root))
+    from src.ingress_logger import SlackIngressLogger  # noqa: E402
+    _ingress_logger = SlackIngressLogger()
+    _INGRESS_LOGGING_ENABLED = True
+except ImportError:
+    _ingress_logger = None  # type: ignore[assignment]
+    _INGRESS_LOGGING_ENABLED = False
+
+# ---------------------------------------------------------------------------
+# Slack Connector channel config + user permissions (Phase 3)
+# ---------------------------------------------------------------------------
+try:
+    from src.channel_config import ChannelConfig  # noqa: E402
+    from src.user_permissions import UserPermissions  # noqa: E402
+    _channel_config = ChannelConfig()
+    _user_permissions = UserPermissions()
+    _CHANNEL_CONFIG_ENABLED = True
+except ImportError:
+    _channel_config = None  # type: ignore[assignment]
+    _user_permissions = None  # type: ignore[assignment]
+    _CHANNEL_CONFIG_ENABLED = False
 
 # Configuration from environment
 SLACK_BOT_TOKEN = os.environ.get("LOBSTER_SLACK_BOT_TOKEN", "")
@@ -208,12 +241,32 @@ def handle_message_events(body, say, logger):
     if not user_id or not channel_id:
         return
 
-    # Check authorization
-    if not is_authorized(channel_id, user_id):
-        log.warning(f"Unauthorized message from channel={channel_id} user={user_id}")
-        return
+    # --- Ingress logging (BEFORE authorization / LLM routing) ---
+    if _INGRESS_LOGGING_ENABLED and _ingress_logger is not None:
+        try:
+            _user_info = get_user_info(user_id)
+            _channel_info = get_channel_info(channel_id)
+            _ingress_logger.log_message(
+                event=event,
+                channel_id=channel_id,
+                channel_name=_channel_info.get("name", channel_id),
+                user_id=user_id,
+                username=_user_info.get("name", user_id),
+                display_name=(
+                    _user_info.get("profile", {}).get("display_name")
+                    or _user_info.get("real_name", "")
+                ),
+                is_dm=_channel_info.get("is_im", False),
+            )
+        except Exception:
+            log.exception("Ingress logging failed (non-fatal)")
 
-    # Get user and channel info
+    # --- Channel config routing gate (Phase 3) ---
+    # If channel config is available, use it for routing decisions.
+    # Otherwise, fall back to the legacy authorization + mention check.
+    _is_mention = bool(BOT_USER_ID and f"<@{BOT_USER_ID}>" in text)
+
+    # Get user and channel info (needed by both paths)
     user_info = get_user_info(user_id)
     channel_info = get_channel_info(channel_id)
 
@@ -222,15 +275,34 @@ def handle_message_events(body, say, logger):
     channel_name = channel_info.get("name", channel_id)
     is_dm = channel_info.get("is_im", False)
 
+    if _CHANNEL_CONFIG_ENABLED and _channel_config is not None:
+        # Phase 3 routing: channel mode + user permissions
+        if not _channel_config.should_route_to_llm(
+            channel_id, event_type="message", is_mention=_is_mention, is_dm=is_dm,
+        ):
+            log.debug(
+                "Channel config: not routing channel=%s mode=%s",
+                channel_id, _channel_config.get_channel_mode(channel_id),
+            )
+            return
+
+        # User permissions check (allowlist)
+        if _user_permissions is not None and not _user_permissions.can_address_lobster(user_id):
+            log.debug("User %s not permitted by allowlist, skipping LLM routing", user_id)
+            return
+    else:
+        # Legacy path: env-var authorization + mention check
+        if not is_authorized(channel_id, user_id):
+            log.warning(f"Unauthorized message from channel={channel_id} user={user_id}")
+            return
+
+        # For channel messages, only respond if mentioned; DMs always respond
+        if not is_dm and BOT_USER_ID:
+            if f"<@{BOT_USER_ID}>" not in text:
+                return
+
     # Clean the text
     cleaned_text = clean_slack_text(text, BOT_USER_ID)
-
-    # For channel messages, only respond if mentioned
-    # For DMs, always respond
-    if not is_dm and BOT_USER_ID:
-        # Check if bot was mentioned in original text
-        if f"<@{BOT_USER_ID}>" not in text:
-            return
 
     # Generate message ID
     msg_id = f"{int(time.time() * 1000)}_{ts.replace('.', '')}"
@@ -245,7 +317,7 @@ def handle_message_events(body, say, logger):
         "username": username,
         "user_name": display_name,
         "text": cleaned_text,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "slack_ts": ts,
         "channel_name": channel_name,
         "is_dm": is_dm,
@@ -278,18 +350,6 @@ def handle_message_events(body, say, logger):
                     log.error(f"Error downloading file: {e}")
 
     write_message_to_inbox(msg_data)
-
-    # Send acknowledgment reaction
-    try:
-        client.reactions_add(
-            channel=channel_id,
-            timestamp=ts,
-            name="eyes"  # eyes emoji to show message was received
-        )
-    except SlackApiError as e:
-        # Ignore if reaction already exists
-        if e.response.get("error") != "already_reacted":
-            log.warning(f"Could not add reaction: {e}")
 
 
 @app.event("app_mention")
@@ -332,73 +392,35 @@ def download_slack_file(file_info: dict, msg_id: str, msg_data: dict) -> None:
     log.info(f"Downloaded file to: {save_path}")
 
 
-class OutboxHandler(FileSystemEventHandler):
-    """Watches outbox for reply files and sends them via Slack."""
+def _send_slack_reply(reply: dict) -> bool:
+    """Pure send function for the shared OutboxFileHandler.
 
-    def on_created(self, event):
-        if event.is_directory:
-            return
-        if event.src_path.endswith('.json'):
-            # Process in a separate thread to avoid blocking
-            Thread(target=self.process_reply_sync, args=(event.src_path,)).start()
+    Handles optional thread replies by passing ``thread_ts`` from the reply
+    dict to ``chat_postMessage``.
+    """
+    channel_id = reply.get("chat_id", "")
+    text = reply.get("text", "")
+    thread_ts = reply.get("thread_ts")
 
-    def process_reply_sync(self, filepath):
-        """Process a reply file synchronously."""
-        try:
-            time.sleep(0.1)  # Brief delay to ensure file is written
-            with open(filepath, 'r') as f:
-                reply = json.load(f)
-
-            # Only process Slack replies
-            if reply.get('source', '').lower() != 'slack':
-                return
-
-            channel_id = reply.get('chat_id')
-            text = reply.get('text', '')
-            thread_ts = reply.get('thread_ts')
-
-            if not channel_id or not text:
-                log.warning(f"Invalid Slack reply: missing channel_id or text")
-                os.remove(filepath)
-                return
-
-            # Send the message
-            try:
-                kwargs = {
-                    "channel": channel_id,
-                    "text": text,
-                }
-
-                # Reply in thread if specified
-                if thread_ts:
-                    kwargs["thread_ts"] = thread_ts
-
-                client.chat_postMessage(**kwargs)
-                log.info(f"Sent Slack reply to {channel_id}: {text[:50]}...")
-
-            except SlackApiError as e:
-                log.error(f"Error sending Slack message: {e}")
-
-            # Remove processed file
-            os.remove(filepath)
-
-        except Exception as e:
-            log.error(f"Error processing reply {filepath}: {e}")
+    try:
+        kwargs: dict = {"channel": channel_id, "text": text}
+        if thread_ts:
+            kwargs["thread_ts"] = thread_ts
+        client.chat_postMessage(**kwargs)
+        log.info("Sent Slack reply to %s: %s...", channel_id, text[:50])
+        return True
+    except SlackApiError as exc:
+        log.error("Error sending Slack message: %s", exc)
+        return False
 
 
-def process_existing_outbox():
+# Backward-compatible alias -- code that imports OutboxHandler directly still works.
+OutboxHandler = OutboxFileHandler
+
+
+def process_existing_outbox() -> None:
     """Process any Slack outbox files that exist on startup."""
-    handler = OutboxHandler()
-    existing_files = list(OUTBOX_DIR.glob("*.json"))
-
-    for filepath in existing_files:
-        try:
-            with open(filepath, 'r') as f:
-                reply = json.load(f)
-            if reply.get('source', '').lower() == 'slack':
-                handler.process_reply_sync(str(filepath))
-        except Exception as e:
-            log.error(f"Error processing existing outbox file {filepath}: {e}")
+    drain_outbox(OUTBOX_DIR, source="slack", send_fn=_send_slack_reply, log=log)
 
 
 def main():
@@ -416,12 +438,16 @@ def main():
 
     # Set up outbox watcher
     observer = Observer()
-    observer.schedule(OutboxHandler(), str(OUTBOX_DIR), recursive=False)
+    observer.schedule(
+        OutboxWatcher(source="slack", send_fn=_send_slack_reply, log=log),
+        str(OUTBOX_DIR),
+        recursive=False,
+    )
     observer.start()
     log.info("Watching outbox for Slack replies...")
 
     # Process any existing outbox files
-    process_existing_outbox()
+    drain_outbox(OUTBOX_DIR, source="slack", send_fn=_send_slack_reply, log=log)
 
     # Start Socket Mode handler
     handler = SocketModeHandler(app, SLACK_APP_TOKEN)
