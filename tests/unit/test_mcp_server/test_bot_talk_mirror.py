@@ -38,7 +38,7 @@ import bot_talk_mirror as btm
 class TestBuildHttpPayload:
     def test_required_fields_present(self):
         payload = btm._build_http_payload("hello", "status-update", "OUTBOUND", "SaharLobster", "AlbertLobster")
-        assert payload["sender"] == btm.BOT_TALK_SENDER
+        assert payload["sender"] == btm.LOBSTER_NAME
         assert payload["tier"] == btm.BOT_TALK_TIER
         assert payload["genre"] == "status-update"
         assert payload["content"] == "hello"
@@ -63,7 +63,7 @@ class TestBuildHttpPayload:
 class TestBuildSshLogLine:
     def test_log_line_contains_sender_tier_genre(self):
         line = btm._build_ssh_log_line("msg content", "status-update")
-        assert "[SaharLobster]" in line
+        assert f"[{btm.LOBSTER_NAME}]" in line
         assert "[TIER-BOT]" in line
         assert "[status-update]" in line
 
@@ -287,7 +287,7 @@ class TestWriteLocalLog:
         lines = log_file.read_text().strip().splitlines()
         assert len(lines) == 1
         entry = json.loads(lines[0])
-        assert entry["sender"] == btm.BOT_TALK_SENDER
+        assert entry["sender"] == btm.LOBSTER_NAME
         assert entry["genre"] == "status-update"
         assert "test content" in entry["content"]
         assert entry["mirror_failed_reason"] == "http_and_ssh_both_failed"
@@ -377,7 +377,7 @@ class TestRouteToInbox:
     def test_message_has_correct_to_field(self, tmp_path):
         inbox_dir = tmp_path / "inbox"
         with patch.object(btm, "_INBOX_DIR", inbox_dir), \
-             patch.object(btm, "BOT_TALK_SENDER", "SaharLobster"):
+             patch.object(btm, "LOBSTER_NAME", "SaharLobster"):
             btm._route_to_inbox("AlbertLobster", "content")
 
         msg = json.loads(list(inbox_dir.glob("*.json"))[0].read_text())
@@ -481,7 +481,7 @@ class TestMirrorOutbound:
         call_data = spawned[0]
         assert call_data["direction"] == "OUTBOUND"
         assert call_data["to"] == "AlbertLobster"
-        assert call_data["from"] == btm.BOT_TALK_SENDER
+        assert call_data["from"] == btm.LOBSTER_NAME
         assert call_data["content"] == "hello world"
         assert call_data["genre"] == "status-update"
 
@@ -516,7 +516,7 @@ class TestLogInboundCrossLobster:
         call_data = spawned[0]
         assert call_data["direction"] == "INBOUND"
         assert call_data["from"] == "AlbertLobster"
-        assert call_data["to"] == btm.BOT_TALK_SENDER
+        assert call_data["to"] == btm.LOBSTER_NAME
         assert call_data["content"] == "hello from Albert"
 
     def test_routes_to_inbox(self):
