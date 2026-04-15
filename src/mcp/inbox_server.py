@@ -73,7 +73,7 @@ from utils.ifttt_rules import (
 )
 import uuid as _uuid_mod
 
-# Reliability utilities (atomic writes, validation, audit logging, circuit breaker)
+# Reliability utilities (atomic writes, validation, audit logging)
 from reliability import (
     atomic_write_json,
     validate_send_reply_args,
@@ -81,8 +81,6 @@ from reliability import (
     ValidationError,
     init_audit_log,
     audit_log,
-    IdempotencyTracker,
-    CircuitBreaker,
 )
 
 # Self-update system
@@ -966,14 +964,6 @@ _seed_canonical_templates()
 
 # Initialize audit log for structured observability
 init_audit_log(LOG_DIR)
-
-# Initialize idempotency tracker to prevent duplicate reply sends
-# TODO: Wire into send_reply and outbox processing paths
-_reply_idempotency = IdempotencyTracker(ttl_seconds=300)
-
-# Circuit breaker for outbox delivery (Telegram/Slack API)
-# TODO: Wire into lobster_bot.py outbox delivery to short-circuit when Telegram is down
-_outbox_breaker = CircuitBreaker("outbox_delivery", failure_threshold=5, cooldown_seconds=120)
 
 # OpenAI configuration for Whisper transcription
 # Try environment first, then fall back to config file
