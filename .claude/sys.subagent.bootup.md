@@ -151,9 +151,38 @@ mcp__lobster-inbox__write_result(
 
 Before including any timestamp in a `send_reply` call, convert it from UTC to Eastern Time. Rule: EDT (UTC-4) from mid-March through early November; EST (UTC-5) otherwise. Format as "5:29 AM ET" or "2:30 PM ET". Never send raw UTC ISO strings or "UTC" suffixes to users. This applies to all subagents that produce output containing times — calendar events, log summaries, job results, event timelines, and any other user-facing sentence with a time.
 
-**Large results — use artifacts, not inline text:**
+**Separating dispatcher summary from user reply — use `reply_text`:**
 
-If your output exceeds ~4KB or ~500 words, write the full content to a file and pass the path in `artifacts`. This applies to **all tasks** (user-facing and internal):
+`write_result` carries two audiences: the dispatcher (which reads `text` for situational awareness) and the user (who receives the relay). When these audiences need different content, use the `reply_text` field to split them:
+
+| Field | Audience | What to put here |
+|---|---|---|
+| `text` | Dispatcher only | Terse internal summary: what happened, decisions made, links |
+| `reply_text` | User (relayed) | Full user-facing reply, written to a file |
+
+When `reply_text` is set, the dispatcher reads the file at that path and relays its contents to the user. `text` is read for orientation but never relayed. If `reply_text` is absent, the dispatcher falls back to relaying `text` directly (backward-compatible).
+
+**Pattern for any task with a user-visible reply:**
+
+```python
+import time
+reply_path = f"~/lobster-workspace/reports/{task_id}-reply.md"
+# write full user-facing reply to reply_path ...
+
+mcp__lobster-inbox__write_result(
+    task_id="<task_id>",
+    chat_id=<chat_id>,
+    text="Terse summary for dispatcher: filed issue #42, label applied, URL: https://...",
+    reply_text=reply_path,       # dispatcher reads this file and relays its contents
+    sent_reply_to_user=False,    # dispatcher receives result and relays reply_text
+)
+```
+
+**Why this matters:** `text` enters the dispatcher's main-thread context as-is. A 1,000-line report in `text` stalls the main loop and may trigger a health-check restart. With `reply_text`, the dispatcher holds only the terse summary while the full reply is read lazily from the file.
+
+**Large results — use artifacts for non-user-facing content:**
+
+If your task produces structured audit content (diffs, raw logs, API dumps) that is NOT the primary user reply, write it to a file and pass the path in `artifacts`. This applies alongside `reply_text` or standalone:
 
 1. Write the full report to: `~/lobster-workspace/reports/<task_id>-<timestamp>.md`
 2. In `write_result`, set `text` to a concise summary (5–10 lines) + actionable items only. Do NOT include the file path in `text` — file paths are server-side and useless to mobile users.
@@ -175,7 +204,7 @@ mcp__lobster-inbox__write_result(
 
 The `artifacts` field is accepted by the inbox server and surfaced in the `subagent_result` message payload. The dispatcher reads those files and includes their content inline in the reply to the user — never relaying a raw file path.
 
-**Never put large content in `text` directly.** The dispatcher's context window pays the cost of relaying whatever is in `text`. A 1,000-line report in `text` stalls the main loop and may trigger a health-check restart. Artifacts are read lazily, after the message is picked up, and do not bloat the inbox message itself.
+**Never put large content in `text` directly.** The dispatcher's context window pays the cost of relaying whatever is in `text`. A 1,000-line report in `text` stalls the main loop and may trigger a health-check restart. Artifacts and `reply_text` are read lazily after the message is picked up and do not bloat the inbox message itself.
 
 ## Surfacing Observations (`write_observation`)
 
