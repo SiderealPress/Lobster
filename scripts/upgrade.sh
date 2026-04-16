@@ -2620,6 +2620,24 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
         substep "systemd not running — skipping lobster-transcription.service enable (container?)"
     fi
 
+    # Migration 75: Install LOBSTER-CLEANUP cron entry (worktree + audio cleanup, issue #1609).
+    # cleanup-worktrees-audio.sh prunes finished git worktrees and removes audio files
+    # older than 7 days. Runs daily at 04:00 to avoid overlap with nightly consolidation (03:00).
+    local CLEANUP_MARKER="# LOBSTER-CLEANUP"
+    local CLEANUP_SCRIPT="$LOBSTER_DIR/scripts/cleanup-worktrees-audio.sh"
+    if [ -f "$CLEANUP_SCRIPT" ]; then
+        chmod +x "$CLEANUP_SCRIPT" 2>/dev/null || true
+        if ! crontab -l 2>/dev/null | grep -qF "$CLEANUP_MARKER"; then
+            "$LOBSTER_DIR/scripts/cron-manage.sh" add "$CLEANUP_MARKER" \
+                "0 4 * * * $CLEANUP_SCRIPT >> $HOME/lobster-workspace/logs/cleanup.log 2>&1 $CLEANUP_MARKER" 2>/dev/null && {
+                substep "Added LOBSTER-CLEANUP cron entry (cleanup-worktrees-audio.sh, 04:00 daily)"
+                migrated=$((migrated + 1))
+            } || warn "Could not add LOBSTER-CLEANUP cron entry — check cron-manage.sh"
+        fi
+    else
+        warn "cleanup-worktrees-audio.sh not found at $CLEANUP_SCRIPT — skipping Migration 75"
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
