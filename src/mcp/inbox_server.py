@@ -2472,6 +2472,21 @@ async def list_tools() -> list[Tool]:
                         ),
                         "default": False,
                     },
+                    "reply_text": {
+                        "type": "string",
+                        "description": (
+                            "Optional path to a file containing the user-facing reply text. "
+                            "When present, the dispatcher reads this file and relays its contents "
+                            "to the user instead of relaying `text`. Use this to separate the "
+                            "dispatcher summary (in `text`) from the user-facing reply (in the file). "
+                            "This keeps the dispatcher's main-thread context lean — `text` is a "
+                            "terse internal summary while the full user reply lives in the file. "
+                            "Example: write your reply to "
+                            "`~/lobster-workspace/reports/<task_id>-reply.md`, then pass that path "
+                            "as `reply_text`. If absent, the dispatcher falls back to relaying `text` "
+                            "directly (current behavior, preserved for backward compatibility)."
+                        ),
+                    },
                 },
                 "required": ["task_id", "chat_id", "text"],
             },
@@ -7166,6 +7181,7 @@ async def handle_write_result(args: dict) -> list[TextContent]:
     status = args.get("status", "success")
     artifacts = args.get("artifacts") or []
     thread_ts = args.get("thread_ts")
+    reply_text = args.get("reply_text", "").strip() if args.get("reply_text") else None
     # Accept new name (sent_reply_to_user) with backward-compat alias (forward).
     # Semantics: sent_reply_to_user=True means subagent already called send_reply →
     # dispatcher should NOT relay. This is the inverse of the old `forward` field.
@@ -7240,6 +7256,8 @@ async def handle_write_result(args: dict) -> list[TextContent]:
         message["artifacts"] = artifacts
     if thread_ts:
         message["thread_ts"] = thread_ts
+    if reply_text:
+        message["reply_text"] = reply_text
 
     inbox_file = INBOX_DIR / f"{message_id}.json"
     atomic_write_json(inbox_file, message)

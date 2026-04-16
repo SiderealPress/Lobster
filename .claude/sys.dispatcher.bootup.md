@@ -485,7 +485,13 @@ Background subagents call `write_result(task_id, chat_id, text, ...)`, which dro
        # --- RELAY ---
        # Never call Read(artifact_path) on the main thread — it violates the 7-second rule.
        # Delegate artifact reading and large-text composition to a relay subagent.
-       reply_text = msg["text"]
+       #
+       # reply_text field: if present, it is a file path containing the user-facing reply.
+       # The dispatcher reads that file and relays its contents instead of msg["text"].
+       # msg["text"] is always the internal dispatcher summary — never relay it when reply_text is set.
+       # If reply_text is absent, fall back to relaying msg["text"] directly (backward compat).
+       relay_content = msg["text"]
+       reply_text_path = msg.get("reply_text")
 
        if msg.get("artifacts"):
            # Artifacts present: delegate reading and composition to relay subagent
@@ -502,7 +508,24 @@ Background subagents call `write_result(task_id, chat_id, text, ...)`, which dro
                    f"Artifacts:\n" + "\n".join(f"- {p}" for p in msg["artifacts"])
                ),
            )
-       elif len(reply_text) > 500:
+       elif reply_text_path:
+           # reply_text present: delegate file reading to relay subagent (file I/O violates 7-second rule)
+           # relay subagent reads the file and sends its contents directly to the user.
+           # IMPORTANT: relay must call send_reply then write_result(sent_reply_to_user=True)
+           # to prevent an infinite relay loop (dispatcher would re-check on re-delivery)
+           Task(
+               subagent_type="lobster-generalist",
+               run_in_background=True,
+               prompt=(
+                   f"---\ntask_id: relay-{msg.get('task_id', 'result')}\n"
+                   f"chat_id: {msg['chat_id']}\nsource: {msg.get('source', 'telegram')}\n---\n\n"
+                   f"Deliver a subagent result to the user. Read the reply file at the path below, "
+                   f"then call send_reply(chat_id={msg['chat_id']}, ...) with its contents. "
+                   f"Then call write_result(sent_reply_to_user=True) so the dispatcher does not relay again.\n\n"
+                   f"Reply file: {reply_text_path}"
+               ),
+           )
+       elif len(relay_content) > 500:
            # Large text: relay subagent composes and sends directly
            # IMPORTANT: relay must call send_reply then write_result(sent_reply_to_user=True)
            # to prevent an infinite relay loop (dispatcher would re-check len on re-delivery)
@@ -522,7 +545,7 @@ Background subagents call `write_result(task_id, chat_id, text, ...)`, which dro
            # Short text — send inline
            send_reply(
                chat_id=msg["chat_id"],
-               text=reply_text,
+               text=relay_content,
                source=msg.get("source", "telegram"),
                thread_ts=msg.get("thread_ts"),
                reply_to_message_id=msg.get("telegram_message_id"),
@@ -530,7 +553,7 @@ Background subagents call `write_result(task_id, chat_id, text, ...)`, which dro
        mark_processed(message_id)
 ```
 
-**Key fields:** `task_id`, `chat_id`, `text`, `source`, `status`, `sent_reply_to_user`, `artifacts`, `thread_ts`.
+**Key fields:** `task_id`, `chat_id`, `text`, `source`, `status`, `sent_reply_to_user`, `artifacts`, `thread_ts`, `reply_text`.
 
 **When type is `subagent_error`:**
 ```
