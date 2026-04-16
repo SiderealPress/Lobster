@@ -1431,6 +1431,20 @@ step "Setting up OOM monitor cron..."
 
 success "OOM monitor configured (runs every 10 minutes, active only when LOBSTER_DEBUG=true)"
 
+#===============================================================================
+# Worktree + Audio Cleanup
+#===============================================================================
+
+step "Setting up worktree + audio cleanup cron..."
+
+# cleanup-worktrees-audio.sh runs daily at 04:00.
+# It prunes finished git worktrees and deletes audio files older than 7 days.
+chmod +x "$INSTALL_DIR/scripts/cleanup-worktrees-audio.sh" || true
+"$INSTALL_DIR/scripts/cron-manage.sh" add "# LOBSTER-CLEANUP" \
+    "0 4 * * * $INSTALL_DIR/scripts/cleanup-worktrees-audio.sh >> $HOME/lobster-workspace/logs/cleanup.log 2>&1 # LOBSTER-CLEANUP"
+
+success "Worktree + audio cleanup configured (runs daily at 04:00)"
+
 # Ensure any lingering self-check cron entry is removed on fresh installs
 { crontab -l 2>/dev/null | grep -v "# LOBSTER-SELF-CHECK" | grep -v "periodic-self-check" || true; } | crontab -
 
