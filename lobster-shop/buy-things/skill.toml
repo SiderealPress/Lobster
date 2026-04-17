@@ -1,0 +1,59 @@
+# =============================================================================
+# Lobster Skill Manifest — buy-things
+# =============================================================================
+
+[skill]
+name = "buy-things"
+version = "1.0.0"
+description = "Buy items via Telegram commands — searches products, confirms with user, and completes checkout using Camofox browser automation"
+author = "Lobster"
+category = "tool"
+
+[activation]
+mode = "triggered"
+triggers = [
+    "/buy",
+    "/order",
+    "/spend",
+    "/receipts",
+    "/buy setup",
+]
+context_patterns = [
+    "when user says 'buy me'",
+    "when user says 'order me'",
+    "when user says 'get me' followed by a product",
+    "when user asks to purchase something",
+    "when user wants to order something online",
+    "when user asks how much they've spent this month",
+    "when user wants to see recent purchases",
+]
+
+[layering]
+priority = 70
+merge_strategy = "append"
+
+[provides]
+mcp_tools = []
+bot_commands = ["/buy", "/order", "/spend", "/receipts"]
+
+[compatibility]
+enhances = ["camofox-browser"]
+conflicts = []
+
+[required_config]
+payment_config = "~/messages/config/payment.yaml"
+spend_log = "~/messages/config/spend_log.yaml"
+
+[permissions]
+camofox = true
+send_reply = true
+read_config = true
+
+[dependencies]
+pip = ["pyyaml"]
+npm = []
+system = []
+api_keys = []
+
+[dependencies.runtime]
+python = ">=3.11"
