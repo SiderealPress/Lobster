@@ -110,3 +110,8 @@ lobster-shop/prospect-enrichment/bin/find_supply_chain_contacts.py:IP address
 # (Google Drive / Gmail account names for context), not credentials.
 scheduled-tasks/lobstertalk-incoming-handler.py:IP address
 scheduled-tasks/lobstertalk-incoming-handler.py:Email address
+
+# Clay client smoke_test uses satya.nadella@microsoft.com as a well-known public
+# test probe — this is a documented public figure's corporate email used to verify
+# API connectivity, not a secret or private PII
+src/integrations/clay/client.py:Email address
