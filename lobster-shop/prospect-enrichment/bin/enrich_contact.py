@@ -182,7 +182,7 @@ def _enrich_person_via_clay(
     try:
         _src_dir = Path(__file__).parent.parent.parent.parent / "src"
         sys.path.insert(0, str(_src_dir))
-        from integrations.clay.client import ClayClient, ClayError, CLAY_TAG
+        from integrations.clay.client import ClayClient, ClayError, ClayPlanError, CLAY_TAG
     except ImportError as exc:
         errors.append(f"Clay import failed: {exc}")
         print(f"[enrich_contact] Clay import failed: {exc}", file=sys.stderr)
@@ -256,15 +256,19 @@ def _enrich_person_via_clay(
             clay_person = clay_client.lookup_by_name(entity_name, company=existing_org)
             lookup_method = f"name:{entity_name}+org:{existing_org}"
 
+    except ClayPlanError as exc:
+        # Standard plan — CLAY_API_KEY is a webhook token, not a direct-API key.
+        # Direct lookups (api.clay.com/v3/sources) require Enterprise.
+        # This is a plan limitation, not a data miss — log clearly and skip.
+        print(
+            f"[enrich_contact] Clay: skipping '{entity_name}' — "
+            f"direct API requires Enterprise plan (HTTP {exc.status_code}). "
+            "CLAY_API_KEY is a webhook verification token. "
+            "Set CLAY_WEBHOOK_URL in config.env for standard-plan enrichment.",
+            file=sys.stderr,
+        )
+        return
     except ClayError as exc:
-        # Standard plan returns 404/402 — fail gracefully, don't abort the run
-        if exc.status_code in (402, 404):
-            print(
-                f"[enrich_contact] Clay: no data for '{entity_name}' "
-                f"(status={exc.status_code}, likely standard plan) — skipping",
-                file=sys.stderr,
-            )
-            return
         errors.append(f"Clay lookup failed for '{entity_name}': {exc}")
         print(f"[enrich_contact] Clay error: {exc}", file=sys.stderr)
         return
