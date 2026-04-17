@@ -75,10 +75,10 @@ INBOX_DIR="$MESSAGES_DIR/inbox"
 MAINTENANCE_FLAG="$MESSAGES_DIR/config/lobster-maintenance"
 LOBSTER_STATE_FILE="${LOBSTER_STATE_FILE_OVERRIDE:-$MESSAGES_DIR/config/lobster-state.json}"
 DISPATCHER_PID_FILE="$MESSAGES_DIR/config/dispatcher.pid"
-STALE_THRESHOLD_SECONDS=1200         # 20 minutes - RED if any message older; matches DISPATCHER_HEARTBEAT_STALE_SECONDS (issue #1633)
+STALE_THRESHOLD_SECONDS=360          # 6 minutes - RED if any message older; triggers restart (issue #1633)
 # YELLOW_THRESHOLD_SECONDS: early-warning signal only — intentionally lower than
-# STALE_THRESHOLD_SECONDS. Does not trigger restarts; gap is expected and fine.
-YELLOW_THRESHOLD_SECONDS=360         # 6 minutes - YELLOW warning (proportional to 1200s stale threshold)
+# STALE_THRESHOLD_SECONDS. Does not trigger restarts; fires at 2.5 min as early warning before 6-min restart.
+YELLOW_THRESHOLD_SECONDS=150         # 2.5 minutes - YELLOW early warning before 6-min stale restart
 RESTART_WINDOW_BUFFER_SECONDS=120    # Pre-mark messages within this window of the stale threshold before a restart
 
 MAINTENANCE_EXPIRY_SECONDS=3600      # 1 hour - stale maintenance flag is auto-cleared and checks resume
