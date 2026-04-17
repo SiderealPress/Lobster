@@ -16,6 +16,7 @@ Browse available skills for your Lobster assistant. Install any skill with one c
 | [Librarian](./librarian/) | Maintenance mode — audit, triage, label, and organize issues, code, and workspace without writing big new features or deleting anything | Behavioral | Available |
 | [Hibernation](./hibernation/) | Dispatcher hibernation — idle timeout behavior, state file semantics, and how to break the hibernation loop cleanly | Behavioral | Available |
 | [Obsidian KM](./obsidian-km/) | Sync and access your Obsidian vault via Telegram — create, read, search, and manage notes from anywhere | Tool | In Dev |
+| [Buy Things](./buy-things/) | Purchase items via Telegram — search products, confirm with you, and complete checkout using Camofox browser automation | Tool | Available |
 
 ## Templates
 
