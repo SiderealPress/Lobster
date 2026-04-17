@@ -223,8 +223,8 @@
         "linkedin_url", "past_roles", "funding",
         "employee_count", "tech_stack"
       ],
-      "notes": "Waterfall enrichment aggregating 100+ underlying sources (Clearbit, Hunter, PDL, LinkedIn, etc). Highest combined accuracy (~95% email). Programmable enrichment spreadsheet model. Paid per credit. Best for thorough multi-source enrichment.",
-      "api_docs_url": "https://www.clay.com/developers"
+      "notes": "UNAVAILABLE — direct REST API (api.clay.com/v3/sources/people) is Enterprise-plan only. The CLAY_API_KEY is a webhook verification token, not a direct-API credential. Standard plan: use the webhook-table model (push contacts to Clay table via CLAY_WEBHOOK_URL; Clay enriches and POSTs results back). See client.py enrich_via_webhook() and set CLAY_WEBHOOK_URL in config.env. Re-enable when: (a) upgraded to Enterprise, or (b) webhook-table callback receiver is implemented. Docs: https://university.clay.com/docs/using-clay-as-an-api",
+      "api_docs_url": "https://university.clay.com/docs/using-clay-as-an-api"
     },
     {
       "source_id": "crunchbase",
