@@ -75,7 +75,7 @@ INBOX_DIR="$MESSAGES_DIR/inbox"
 MAINTENANCE_FLAG="$MESSAGES_DIR/config/lobster-maintenance"
 LOBSTER_STATE_FILE="${LOBSTER_STATE_FILE_OVERRIDE:-$MESSAGES_DIR/config/lobster-state.json}"
 DISPATCHER_PID_FILE="$MESSAGES_DIR/config/dispatcher.pid"
-STALE_THRESHOLD_SECONDS=240          # 4 minutes - RED if any message older (watchdog handles soft recovery at 90s)
+STALE_THRESHOLD_SECONDS=1200         # 20 minutes - RED if any message older; matches DISPATCHER_HEARTBEAT_STALE_SECONDS (issue #1633)
 YELLOW_THRESHOLD_SECONDS=150         # 2.5 minutes - YELLOW warning
 RESTART_WINDOW_BUFFER_SECONDS=120    # Pre-mark messages within this window of the stale threshold before a restart
 
