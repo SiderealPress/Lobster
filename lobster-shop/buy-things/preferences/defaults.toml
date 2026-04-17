@@ -1,0 +1,33 @@
+# buy-things skill — default preferences
+
+# Monthly spending cap (USD). Can be overridden here or via payment.yaml.
+# payment.yaml takes precedence if both are set.
+monthly_limit_usd = 1000
+
+# Preferred store for purchases. Options: amazon, target, walmart, bestbuy
+preferred_store = "amazon"
+
+# Number of search results to show the user when presenting options (1-5)
+search_results_count = 3
+
+# Require confirmation before checkout (true = always ask; false = auto-checkout)
+# Should always be true for safety
+require_confirmation = true
+
+# Warn user when monthly spend exceeds this percentage of the cap
+spend_warning_threshold_pct = 80
+
+# Shipping preference. Options: free, standard, fast, fastest
+# "free" = always select free shipping when available
+# "standard" = standard delivery
+# "fast" = 2-day or expedited when available
+shipping_preference = "free"
+
+# Save receipt screenshots to ~/messages/receipts/
+save_receipts = true
+
+# Show item images in search results (when possible via Telegram)
+show_images = false
+
+# Default shipping name (used during checkout if owner name is unavailable)
+default_shipping_name = "Drew Winget"
