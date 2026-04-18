@@ -1,9 +1,10 @@
 """
-Google Docs API client — read operations.
+Google Docs API client — read and write operations.
 
-Provides ``gdocs_read`` to fetch the full plain-text content of a Google Doc
-by its document ID.  Write operations (create/edit) are in this same module
-but are covered by Slice 3.
+Provides:
+  - ``gdocs_read``   — fetch the full plain-text content of a Google Doc (Slice 2)
+  - ``gdocs_create`` — create a new Google Doc (Slice 3)
+  - ``gdocs_edit``   — apply batchUpdate requests to an existing Doc (Slice 3)
 
 Design principles (consistent with gmail and calendar clients):
 - Immutable value objects (frozen dataclasses)
@@ -146,6 +147,8 @@ def _call_docs_api(
     try:
         if method == "GET":
             resp = requests.get(url, headers=headers, timeout=_HTTP_TIMEOUT)
+        elif method == "PATCH":
+            resp = requests.patch(url, headers=headers, json=json_body, timeout=_HTTP_TIMEOUT)
         else:
             resp = requests.post(url, headers=headers, json=json_body, timeout=_HTTP_TIMEOUT)
     except requests.exceptions.RequestException as exc:
@@ -198,3 +201,80 @@ def gdocs_read(user_id: str, doc_id_or_url: str) -> Optional[str]:
         return None
 
     return _extract_text_from_doc(data)
+
+
+# ---------------------------------------------------------------------------
+# Public API — write operations (Slice 3)
+# ---------------------------------------------------------------------------
+
+
+def gdocs_create(user_id: str, title: str) -> Optional[DocFile]:
+    """Create a new, empty Google Doc.
+
+    Args:
+        user_id: Telegram chat_id used to look up the workspace token.
+        title:   Title for the new document.
+
+    Returns:
+        A DocFile with the new document's ID, title, and URL,
+        or None on any error (no token, API error).
+    """
+    token = get_valid_token(user_id)
+    if token is None:
+        log.info("gdocs_create: no valid workspace token for user_id=%r", user_id)
+        return None
+
+    data = _call_docs_api(
+        "",
+        token.access_token,
+        method="POST",
+        json_body={"title": title},
+    )
+    if data is None:
+        return None
+
+    doc_id = data.get("documentId", "")
+    if not doc_id:
+        log.warning("gdocs_create: API response missing documentId")
+        return None
+
+    doc_title = data.get("title", title)
+    url = f"https://docs.google.com/document/d/{doc_id}/edit"
+    return DocFile(id=doc_id, title=doc_title, url=url)
+
+
+def gdocs_edit(
+    user_id: str,
+    doc_id_or_url: str,
+    requests_body: list[dict],
+) -> bool:
+    """Apply batchUpdate requests to an existing Google Doc.
+
+    Uses the Docs API ``batchUpdate`` endpoint to apply one or more structured
+    edit requests (insert text, delete range, format text, etc.).
+
+    See: https://developers.google.com/docs/api/reference/rest/v1/documents/batchUpdate
+
+    Args:
+        user_id:       Telegram chat_id used to look up the workspace token.
+        doc_id_or_url: Document ID or full Google Docs URL.
+        requests_body: List of request dicts following the Docs API request format.
+                       Example: [{"insertText": {"location": {"index": 1}, "text": "Hello"}}]
+
+    Returns:
+        True on success, False on any error (no token, doc not found, API error).
+    """
+    token = get_valid_token(user_id)
+    if token is None:
+        log.info("gdocs_edit: no valid workspace token for user_id=%r", user_id)
+        return False
+
+    doc_id = _doc_id_from_url(doc_id_or_url)
+
+    data = _call_docs_api(
+        f"/{doc_id}:batchUpdate",
+        token.access_token,
+        method="POST",
+        json_body={"requests": requests_body},
+    )
+    return data is not None
