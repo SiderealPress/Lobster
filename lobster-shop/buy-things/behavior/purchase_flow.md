@@ -88,7 +88,16 @@ Reply with 1, 2, or 3 to select, or "none" to cancel.""")
 Wait for user reply (check_inbox, poll until a message from chat_id arrives, timeout 5 minutes).
 
 If user replies "none" or "cancel": reply "No purchase made." and stop.
-If user replies 1, 2, or 3: proceed with the selected product.
+
+**CRITICAL — Instant button/selection acknowledgment:**
+When the user selects an option (replies 1, 2, 3, or any numbered choice),
+**immediately** send an acknowledgment BEFORE doing any further work:
+
+```python
+send_reply(chat_id, f"Got it — let me pull up the details for option {user_selection}...")
+```
+
+Then proceed to Phase 4.
 
 ## Phase 4 — Confirmation
 
@@ -107,8 +116,21 @@ Reply **yes** to confirm, or **no** to cancel.""")
 
 Wait for user reply (timeout 10 minutes).
 
-If "no" or "cancel": reply "Purchase cancelled." and stop.
-If "yes" or "confirm": proceed with checkout.
+**CRITICAL — Instant button/reply acknowledgment:**
+The moment a reply arrives, send an acknowledgment BEFORE processing it.
+This ensures users always see that their input was received within 2 seconds.
+
+If "no" or "cancel":
+```python
+send_reply(chat_id, "Order cancelled — nothing was purchased.")
+```
+Then stop.
+
+If "yes" or "confirm":
+```python
+send_reply(chat_id, "✅ Order confirmed! Starting checkout via Camofox now — I'll send your order number in a minute.")
+```
+Then proceed with checkout.
 
 ## Phase 5 — Checkout via Camofox
 
@@ -128,6 +150,7 @@ After successful checkout:
 import yaml
 from pathlib import Path
 from datetime import date
+import uuid
 
 spend_path = Path.home() / "messages/config/spend_log.yaml"
 spend_data = yaml.safe_load(spend_path.read_text()) if spend_path.exists() else {"purchases": []}
@@ -195,6 +218,23 @@ def wait_for_user_reply(chat_id, timeout_seconds=300):
 If the user doesn't respond within the timeout:
 - For product selection: `"No selection received. Purchase cancelled."`
 - For confirmation: `"Confirmation timed out. Purchase cancelled."`
+
+---
+
+### Button press / reply UX rule (MANDATORY)
+
+**Every button press or user reply must generate an immediate text response within 2 seconds.**
+Never silently transition between states. Before starting any background work, send a short
+acknowledgment so the user knows their input was received.
+
+| User action | Immediate reply (before background work) |
+|-------------|------------------------------------------|
+| Selects option 1/2/3/4 | `"Got it — let me pull up the details for option X..."` |
+| Replies "yes" / "confirm" | `"✅ Order confirmed! Starting checkout via Camofox now — I'll send your order number in a minute."` |
+| Replies "no" / "cancel" | `"Order cancelled — nothing was purchased."` |
+| Any other button or reply | `"On it..."` or a contextually appropriate acknowledgment |
+
+If in doubt, always err on the side of sending an "On it..." reply immediately, then doing the work.
 
 ---
 
