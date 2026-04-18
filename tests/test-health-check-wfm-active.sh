@@ -16,7 +16,7 @@
 #   4. Stale heartbeat + non-integer WFM-active → RED (graceful: treat as stale)
 #   5. Stale heartbeat + empty WFM-active → RED (graceful: treat as stale)
 #   6. Fresh heartbeat + fresh WFM-active → GREEN (both fresh, no regression)
-#   7. LOBSTER_WFM_ACTIVE_OVERRIDE env var is respected
+#   7. DISPATCHER_WFM_ACTIVE_FILE can be set to a custom path
 #   8. WFM-active staleness threshold boundary: 1s before → GREEN
 #   9. WFM-active staleness threshold boundary: 1s after → RED
 #
@@ -146,9 +146,9 @@ run_check "$DISPATCHER_HB_FILE" "$WFM_ACTIVE_FILE" && rc=$? || rc=$?
 assert_exit "$rc" 0
 
 # -------------------------------------------------------------------
-# Test 7: LOBSTER_WFM_ACTIVE_OVERRIDE env var is respected
+# Test 7: DISPATCHER_WFM_ACTIVE_FILE can be set to a custom path
 # -------------------------------------------------------------------
-begin_test "LOBSTER_WFM_ACTIVE_OVERRIDE env var is used"
+begin_test "Custom DISPATCHER_WFM_ACTIVE_FILE path is used"
 custom_wfm="$TEST_TMPDIR/custom-wfm-active"
 echo "$STALE_HEARTBEAT" > "$DISPATCHER_HB_FILE"
 echo "$(( $(date +%s) - 30 ))" > "$custom_wfm"
