@@ -83,14 +83,18 @@ class TestWfmActiveFileWrite:
         # Verify the write path exists in the source code as a structural test.
         server_src = (_SRC_MCP_DIR / "inbox_server.py").read_text()
 
-        # The file must be written BEFORE the observer.start() / wait loop:
-        # look for the _write_wfm_active_signal() call happening before the while loop.
-        write_pos = server_src.find("_write_wfm_active_signal()")
-        while_pos = server_src.find("while elapsed < timeout")
-        assert write_pos != -1, "WFM_ACTIVE_FILE write must exist"
-        assert while_pos != -1, "wait loop must exist"
-        assert write_pos < while_pos, (
-            "WFM-active file must be written before the blocking wait loop"
+        # The file must be written BEFORE the wait loop inside handle_wait_for_messages.
+        # Narrow the search to the region between `elapsed = 0` and `while elapsed < timeout`
+        # within that function to avoid matching the function definition itself.
+        func_start = server_src.find("async def handle_wait_for_messages")
+        assert func_start != -1, "handle_wait_for_messages must exist"
+        elapsed_pos = server_src.find("elapsed = 0", func_start)
+        assert elapsed_pos != -1, "elapsed = 0 initializer must exist in handle_wait_for_messages"
+        while_pos = server_src.find("while elapsed < timeout", elapsed_pos)
+        assert while_pos != -1, "wait loop must exist in handle_wait_for_messages"
+        pre_loop_region = server_src[elapsed_pos:while_pos]
+        assert "_write_wfm_active_signal()" in pre_loop_region, (
+            "_write_wfm_active_signal() must be called before the blocking wait loop"
         )
 
     def test_wfm_active_file_cleared_in_finally(self):
