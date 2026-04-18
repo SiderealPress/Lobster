@@ -688,6 +688,42 @@ async def push_workspace_token_endpoint(scope, receive, send):
         await response(scope, receive, send)
         return
 
+    # Send a confirmation reply to the user via the outbox so the bot process
+    # delivers it over Telegram.  Best-effort: the token is already saved.
+    try:
+        import time as _time
+
+        _MESSAGES_BASE = Path(os.path.expanduser("~/messages"))
+        _OUTBOX_DIR = _MESSAGES_BASE / "outbox"
+        _OUTBOX_DIR.mkdir(parents=True, exist_ok=True)
+
+        reply_id = f"{int(_time.time() * 1000)}_workspace_auth"
+        reply_data = {
+            "id": reply_id,
+            "source": "telegram",
+            "chat_id": safe_chat_id,
+            "text": (
+                "Google Workspace connected. "
+                "You can now use /gdocs, /gdrive, and /gsheets."
+            ),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        reply_file = _OUTBOX_DIR / f"{reply_id}.json"
+        tmp_reply = reply_file.with_suffix(".json.tmp")
+        tmp_fd = os.open(str(tmp_reply), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(tmp_fd, "w") as rf:
+            rf.write(json.dumps(reply_data, indent=2))
+        os.rename(str(tmp_reply), str(reply_file))
+        logger.info(
+            "Workspace-connected confirmation queued for chat_id=%r", safe_chat_id
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "push_workspace_token: failed to queue confirmation for chat_id=%r: %s",
+            safe_chat_id,
+            exc,
+        )
+
     response = JSONResponse({"ok": True})
     await response(scope, receive, send)
 
