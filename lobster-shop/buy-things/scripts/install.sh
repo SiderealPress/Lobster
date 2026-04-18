@@ -146,14 +146,14 @@ elif [[ "$NEEDS_ONBOARDING" == "true" ]]; then
     echo ""
     cat <<'TEMPLATE'
   card:
-    number: "1234567890123456"
-    expiry: "04/31"
-    cvv: "123"
+    number: "XXXXXXXXXXXXXXXXXXXX"
+    expiry: "MM/YY"
+    cvv: "XXX"
     billing_address:
       street: "123 Main St"
-      city: "San Francisco"
+      city: "Your City"
       state: "CA"
-      zip: "94110"
+      zip: "00000"
       country: "US"
 
   spending:

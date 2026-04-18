@@ -68,10 +68,9 @@ Before confirming a purchase, validate the price:
 ### Shipping address notes
 
 The billing address in payment.yaml is used as the shipping address.
-San Francisco, CA 94110 is a valid US address — Amazon ships to this location.
-Standard shipping options for this zip code:
+Standard shipping options:
 - FREE delivery (Prime or $25+ orders)
-- Same-day delivery (available in SF)
+- Same-day delivery (available in select areas)
 - Standard delivery (3-5 days)
 
 ### Order ID formats
