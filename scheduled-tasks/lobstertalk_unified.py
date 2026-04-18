@@ -76,8 +76,8 @@ PROCESSED_DIR = Path.home() / "messages" / "processed"
 LOG_FILE = Path.home() / "lobster-workspace" / "logs" / "lobstertalk.jsonl"
 LOG_ROTATE_BYTES = 50 * 1024 * 1024  # 50 MB
 
-# After this many consecutive empty polls, exit hot mode
-COOLDOWN_THRESHOLD = 2
+# Exit hot mode after this many seconds of no new messages (20 minutes)
+HOT_MODE_TIMEOUT_SECS = 20 * 60
 
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -123,7 +123,7 @@ def _default_state() -> dict[str, Any]:
     return {
         "last_seen_ts": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
         "hot_mode": False,
-        "consecutive_empty_polls": 0,
+        "last_activity_ts": None,
         "hot_mode_activated_at": None,
     }
 
@@ -156,20 +156,44 @@ def _write_state(state: dict[str, Any]) -> None:
 # Hot-mode state transitions (pure functions)
 # ---------------------------------------------------------------------------
 
-def _update_state_after_messages(state: dict[str, Any], message_count: int) -> dict[str, Any]:
+def _update_state_after_messages(
+    state: dict[str, Any], message_count: int, now: datetime | None = None
+) -> dict[str, Any]:
     """Return updated state dict after a poll that returned `message_count` messages.
+
+    Hot-mode entry: any messages received → hot_mode=True, update last_activity_ts.
+    Hot-mode exit: time-based — if now - last_activity_ts >= HOT_MODE_TIMEOUT_SECS,
+    exit hot mode regardless of poll count. This prevents the dispatcher from
+    being stuck in hot mode forever if the conversation goes quiet.
 
     Pure: does not mutate the input dict.
     """
+    if now is None:
+        now = datetime.now(timezone.utc)
     state = dict(state)
     if message_count > 0:
         state["hot_mode"] = True
+        state["last_activity_ts"] = now.isoformat()
         if not state.get("hot_mode_activated_at"):
-            state["hot_mode_activated_at"] = datetime.now(timezone.utc).isoformat()
-        state["consecutive_empty_polls"] = 0
+            state["hot_mode_activated_at"] = now.isoformat()
     else:
-        state["consecutive_empty_polls"] = state.get("consecutive_empty_polls", 0) + 1
-        if state["consecutive_empty_polls"] >= COOLDOWN_THRESHOLD:
+        # Check time-based timeout
+        last_activity = state.get("last_activity_ts")
+        if last_activity:
+            try:
+                last_dt = datetime.fromisoformat(last_activity)
+                if last_dt.tzinfo is None:
+                    last_dt = last_dt.replace(tzinfo=timezone.utc)
+                idle_secs = (now - last_dt).total_seconds()
+                if idle_secs >= HOT_MODE_TIMEOUT_SECS:
+                    state["hot_mode"] = False
+                    state["hot_mode_activated_at"] = None
+            except (ValueError, TypeError):
+                # Malformed timestamp — exit hot mode to be safe
+                state["hot_mode"] = False
+                state["hot_mode_activated_at"] = None
+        else:
+            # No activity recorded yet — exit hot mode
             state["hot_mode"] = False
             state["hot_mode_activated_at"] = None
     return state
@@ -430,7 +454,7 @@ def run(task_id: str = "lobstertalk-unified") -> None:
     # our own outbound echoes from the server keep hot mode alive — the
     # conversation is active even if all polled messages were our own.
     traffic_count = len(all_messages)
-    state = _update_state_after_messages(state, traffic_count)
+    state = _update_state_after_messages(state, traffic_count, now=datetime.now(timezone.utc))
     if state["hot_mode"]:
         _schedule_hot_retrigger(run_id)
 

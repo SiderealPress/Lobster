@@ -50,6 +50,13 @@ agents/eloso-deployer.md:Hardcoded secret
 lobster-shop/kissinger/bin/kissinger:Email address
 lobster-shop/kissinger/bin/kissinger-mcp:Email address
 
+# WhatsApp connector config examples use example JID format strings (digits@c.us) in comments/docs
+# and index.js uses a personal name in documentation comments — these are placeholder examples
+connectors/whatsapp/config.example.env:Email address
+connectors/whatsapp/setup.sh:Email address
+connectors/whatsapp/index.js:Personal name (drew)
+scripts/lobster-whatsapp-qr:Email address
+
 # google calendar callback and client test files use fake/mock tokens for unit tests
 tests/unit/test_integrations/test_google_calendar_callback_server.py:Hardcoded token
 tests/unit/test_integrations/test_google_calendar_client.py:Hardcoded token
@@ -103,3 +110,12 @@ lobster-shop/prospect-enrichment/bin/find_supply_chain_contacts.py:IP address
 # (Google Drive / Gmail account names for context), not credentials.
 scheduled-tasks/lobstertalk-incoming-handler.py:IP address
 scheduled-tasks/lobstertalk-incoming-handler.py:Email address
+
+# Clay client smoke_test uses satya.nadella@microsoft.com as a well-known public
+# test probe — this is a documented public figure's corporate email used to verify
+# API connectivity, not a secret or private PII
+src/integrations/clay/client.py:Email address
+
+# buy-things skill has a default_shipping_name config value that references a personal name
+# as a placeholder — this is user-facing configuration, not a secret or credential
+lobster-shop/buy-things/preferences/defaults.toml:Personal name (drew)

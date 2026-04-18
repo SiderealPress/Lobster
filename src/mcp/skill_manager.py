@@ -148,7 +148,7 @@ def _resolve_skill_dirs(
     Private overlay skills override repo skills with the same name.
     """
     repo_dir = repo_dir or _REPO_DIR
-    config_dir = config_dir or _CONFIG_DIR
+    config_dir = _CONFIG_DIR if config_dir is None else config_dir
 
     skills: dict[str, Path] = {}
 
@@ -368,7 +368,7 @@ def get_skill_context(
     Empty string if no skills are active.
     """
     repo_dir = repo_dir or _REPO_DIR
-    config_dir = config_dir or _CONFIG_DIR
+    config_dir = _CONFIG_DIR if config_dir is None else config_dir
 
     state = _read_store(state_path)
     active = get_active_skills(state_path)
@@ -401,7 +401,7 @@ def activate_skill(
 
     # Verify skill exists
     repo_dir = repo_dir or _REPO_DIR
-    config_dir = config_dir or _CONFIG_DIR
+    config_dir = _CONFIG_DIR if config_dir is None else config_dir
     available = {s["name"] for s in list_available_skills(repo_dir, config_dir, state_path)}
     if skill_name not in available:
         return f"Error: skill '{skill_name}' not found."
@@ -475,7 +475,7 @@ def get_skill_preferences(
 ) -> dict:
     """Get merged preferences (defaults + user overrides) for a skill."""
     repo_dir = repo_dir or _REPO_DIR
-    config_dir = config_dir or _CONFIG_DIR
+    config_dir = _CONFIG_DIR if config_dir is None else config_dir
 
     # Find the skill directory
     skill_dir = None
@@ -506,7 +506,7 @@ def set_skill_preference(
 ) -> str:
     """Set a preference value for a skill. Validates against schema if available."""
     repo_dir = repo_dir or _REPO_DIR
-    config_dir = config_dir or _CONFIG_DIR
+    config_dir = _CONFIG_DIR if config_dir is None else config_dir
 
     # Find skill directory for schema validation
     skill_dir = None
