@@ -11,7 +11,8 @@ The VPS never holds GCP client credentials.  Instead it calls
 The caller (skill handler, MCP tool, etc.) sends that URL to the user;
 the user clicks it, grants consent in their browser, and myownlobster.ai
 pushes the resulting tokens back to the VPS via
-``/api/push-calendar-token`` or ``/api/push-gmail-token``.
+``/api/push-calendar-token``, ``/api/push-gmail-token``, or
+``/api/push-workspace-token``.
 
 Design principles
 -----------------
@@ -51,7 +52,7 @@ log = logging.getLogger(__name__)
 _CONSENT_ENDPOINT: str = "https://myownlobster.ai/api/generate-consent-link"
 _HTTP_TIMEOUT: int = 10
 
-_VALID_SCOPES: frozenset[str] = frozenset({"calendar", "gmail"})
+_VALID_SCOPES: frozenset[str] = frozenset({"calendar", "gmail", "workspace"})
 
 
 # ---------------------------------------------------------------------------
