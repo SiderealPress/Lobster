@@ -28,91 +28,98 @@ When a buy/order trigger is received:
 5. Spawn background subagent with the purchase flow prompt (see purchase_flow.md)
 6. Return to `wait_for_messages()` immediately
 
-### /spend handler (main thread — inline, fast)
+When `/spend` is received:
+- Handle directly (< 7 seconds): read spend_log.yaml, compute monthly total, reply
+- Format: `"April 2026: $XXX.XX of $1,000 used (XX%)\n\nRecent: ..."`
+
+When `/receipts` is received:
+- Handle directly (< 7 seconds): read spend_log.yaml, show last 5 entries
+- Format: one per line with date, merchant, amount, last-4 digits masked order info
+
+When `/buy setup` is received:
+- Reply: `"Starting buy-things setup — I'll ask a few questions."`
+- Spawn onboarding subagent (see onboarding.md)
+
+---
+
+### Button press UX rules (MANDATORY)
+
+Every button press or user reply must generate an **immediate text response within 2 seconds**.
+Never silently transition between states. Send an acknowledgment first, then do background work.
+
+| User action | Immediate acknowledgment |
+|-------------|---------------------------|
+| Selects option 1 / 2 / 3 / 4 | `"Got it — let me pull up the details for option X..."` |
+| Presses "✅ Yes, place order" / replies "yes" | `"✅ Order confirmed! Starting checkout via Camofox now — I'll send your order number in a minute."` |
+| Presses "❌ Cancel" / replies "no" | `"Order cancelled — nothing was purchased."` |
+| Any other button or ambiguous reply | `"On it..."` |
+
+**Rule:** if a button press triggers background work, send the acknowledgment **before** spawning
+the subagent or doing any I/O. This prevents the "did it work?" confusion.
+
+---
+
+### Security rules (non-negotiable)
+
+- NEVER complete a purchase without explicit user confirmation ("Yes" / "Confirm")
+- NEVER log or display full card numbers — always show only last 4 digits
+- NEVER bypass the monthly spending cap
+- NEVER retry a failed checkout without asking user first
+- The payment.yaml file must always be chmod 600
+
+---
+
+### Spend tracking (inline for /spend and /receipts)
+
+Read `~/messages/config/spend_log.yaml`:
 
 ```python
 import yaml
 from pathlib import Path
 from datetime import date
 
-payment_path = Path.home() / "messages/config/payment.yaml"
-spend_path = Path.home() / "messages/config/spend_log.yaml"
-
-if not payment_path.exists():
-    send_reply(chat_id, "No payment config. Run /buy setup first.", message_id=message_id)
+log_path = Path.home() / "messages/config/spend_log.yaml"
+if log_path.exists():
+    data = yaml.safe_load(log_path.read_text()) or {"purchases": []}
 else:
-    payment = yaml.safe_load(payment_path.read_text())
-    limit = payment.get("spending", {}).get("monthly_limit_usd", 1000)
-    last4 = payment.get("card", {}).get("number", "????")[-4:]
+    data = {"purchases": []}
 
-    data = yaml.safe_load(spend_path.read_text()) if spend_path.exists() else {}
-    purchases = (data or {}).get("purchases", [])
-    ym = date.today().strftime("%Y-%m")
-    month_purchases = [p for p in purchases if p.get("date", "")[:7] == ym]
-    total = sum(p.get("amount_usd", 0) for p in month_purchases)
-    pct = int(total / limit * 100) if limit else 0
+purchases = data.get("purchases", [])
 
-    month_label = date.today().strftime("%B %Y")
-    lines = [f"{month_label}: ${total:.2f} of ${limit:,} used ({pct}%)"]
-    if total >= limit:
-        lines.insert(0, "Monthly limit reached. Purchases paused until next month.")
-    elif total >= 0.8 * limit:
-        lines.insert(0, "Warning: 80%+ of monthly budget used.")
-
-    if month_purchases:
-        lines.append("")
-        lines.append("Recent purchases:")
-        for p in sorted(month_purchases, key=lambda x: x.get("date",""), reverse=True)[:5]:
-            d = p.get("date", "")
-            try:
-                from datetime import datetime
-                d = datetime.strptime(d, "%Y-%m-%d").strftime("%b %d")
-            except Exception:
-                pass
-            lines.append(f"• {d} — {p.get('merchant','?')} — ${p.get('amount_usd',0):.2f} ({p.get('item','?')[:40]})")
-    else:
-        lines.append("No purchases this month.")
-
-    send_reply(chat_id, "\n".join(lines), message_id=message_id)
+# Current month total
+today = date.today()
+month_total = sum(
+    p["amount_usd"]
+    for p in purchases
+    if p.get("date", "")[:7] == today.strftime("%Y-%m")
+)
 ```
 
-### /receipts handler (main thread — inline, fast)
-
+Read monthly limit from `~/messages/config/payment.yaml`:
 ```python
-import yaml
-from pathlib import Path
-from datetime import datetime
-
-spend_path = Path.home() / "messages/config/spend_log.yaml"
 payment_path = Path.home() / "messages/config/payment.yaml"
-
-if not spend_path.exists():
-    send_reply(chat_id, "No purchases on record.", message_id=message_id)
-else:
-    data = yaml.safe_load(spend_path.read_text()) or {}
-    purchases = data.get("purchases", [])
-    if not purchases:
-        send_reply(chat_id, "No purchases on record.", message_id=message_id)
-    else:
-        last4 = ""
-        if payment_path.exists():
-            payment = yaml.safe_load(payment_path.read_text()) or {}
-            last4 = payment.get("card", {}).get("number", "")[-4:]
-
-        recent = sorted(purchases, key=lambda x: x.get("date",""), reverse=True)[:5]
-        lines = ["Recent purchases:", ""]
-        for i, p in enumerate(recent, 1):
-            d = p.get("date", "")
-            try:
-                d = datetime.strptime(d, "%Y-%m-%d").strftime("%b %d")
-            except Exception:
-                pass
-            oid = p.get("order_id", "N/A")
-            lines.append(f"{i}. {d} — {p.get('merchant','?')}")
-            lines.append(f"   {p.get('item','?')} — ${p.get('amount_usd',0):.2f}")
-            lines.append(f"   Order: {oid}")
-            lines.append("")
-        if last4:
-            lines.append(f"Card used: •••• {last4}")
-        send_reply(chat_id, "\n".join(lines), message_id=message_id)
+payment = yaml.safe_load(payment_path.read_text())
+limit = payment.get("spending", {}).get("monthly_limit_usd", 1000)
 ```
+
+Format the /spend response:
+```
+[Month] [Year]: $XX.XX of $1,000.00 used (XX%)
+
+Recent purchases:
+• [date] — [merchant] — $XX.XX
+• [date] — [merchant] — $XX.XX
+```
+
+Alert threshold: if month_total >= 0.8 * limit, prepend:
+`"Warning: you've used 80%+ of your monthly limit."`
+
+---
+
+### Error handling
+
+- Payment config missing → run onboarding, do not proceed with purchase
+- At monthly cap → `"Monthly limit of $XXX reached. No purchases this month."`
+- Item not found in search → `"Couldn't find [item]. Try a different search term?"`
+- Checkout failure → `"Checkout failed: [reason]. Want me to try again?"`
+- Card declined → `"Card declined. Check your payment config with /buy setup."`
