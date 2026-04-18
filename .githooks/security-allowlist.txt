@@ -115,3 +115,7 @@ scheduled-tasks/lobstertalk-incoming-handler.py:Email address
 # test probe — this is a documented public figure's corporate email used to verify
 # API connectivity, not a secret or private PII
 src/integrations/clay/client.py:Email address
+
+# lobster-shop buy-things defaults.toml contains a placeholder shipping name
+# (default_shipping_name) as a pre-existing configuration reference — not a secret
+lobster-shop/buy-things/preferences/defaults.toml:Personal name (drew)
