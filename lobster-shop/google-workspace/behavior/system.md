@@ -145,6 +145,20 @@ or credentials in messages.
 
 ---
 
+---
+
+### Post-auth confirmation (after token push)
+
+When `push_workspace_token_endpoint` receives a valid token, the MCP server
+automatically queues an outbox reply:
+
+> "Google Workspace connected. You can now use /gdocs, /gdrive, and /gsheets."
+
+This message is delivered by the bot process when it drains the outbox.
+No action is required from the dispatcher or a subagent.
+
+---
+
 ### Token location
 
 Workspace tokens live at `~/messages/config/workspace-tokens/{user_id}.json`.
