@@ -2582,6 +2582,62 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
         fi
     done
 
+    # Migration 73: Remove stale system-audit.context.md from memory/canonical/
+    # install.sh's generic canonical-template loop previously copied system-audit.context.md
+    # to both memory/canonical/ and agents/ (the latter via a dedicated block).
+    # The agents/ copy is the canonical write target — the memory/canonical/ copy was
+    # never updated by the lobster-auditor and drifted stale. Fix: delete the stale copy
+    # and exclude it from the generic loop going forward (issue #1196).
+    local stale_audit_context="$USER_CONFIG_DIR/memory/canonical/system-audit.context.md"
+    if [ -f "$stale_audit_context" ]; then
+        rm -f "$stale_audit_context"
+        substep "Removed stale system-audit.context.md from memory/canonical/ (canonical copy is agents/system-audit.context.md)"
+        migrated=$((migrated + 1))
+    fi
+
+    # Migration 74: Enable and start lobster-transcription.service on existing installs.
+    # Prior to this fix, install.sh installed the service file but never called
+    # systemctl enable, so voice messages accumulated in pending-transcription/ forever.
+    if systemctl is-system-running >/dev/null 2>&1 || pidof systemd >/dev/null 2>&1; then
+        local transcription_svc="$LOBSTER_DIR/services/lobster-transcription.service"
+        if [ -f "$transcription_svc" ]; then
+            sudo cp "$transcription_svc" /etc/systemd/system/lobster-transcription.service
+            sudo systemctl daemon-reload 2>/dev/null || true
+            if ! systemctl is-enabled --quiet lobster-transcription 2>/dev/null; then
+                sudo systemctl enable lobster-transcription 2>/dev/null || true
+                substep "Enabled lobster-transcription.service"
+                migrated=$((migrated + 1))
+            fi
+            if ! systemctl is-active --quiet lobster-transcription 2>/dev/null; then
+                sudo systemctl start lobster-transcription 2>/dev/null || true
+                substep "Started lobster-transcription.service"
+                migrated=$((migrated + 1))
+            fi
+        else
+            substep "WARN: lobster-transcription.service not found at $transcription_svc — skipping"
+        fi
+    else
+        substep "systemd not running — skipping lobster-transcription.service enable (container?)"
+    fi
+
+    # Migration 75: Install LOBSTER-CLEANUP cron entry (worktree + audio cleanup, issue #1609).
+    # cleanup-worktrees-audio.sh prunes finished git worktrees and removes audio files
+    # older than 7 days. Runs daily at 04:00 to avoid overlap with nightly consolidation (03:00).
+    local CLEANUP_MARKER="# LOBSTER-CLEANUP"
+    local CLEANUP_SCRIPT="$LOBSTER_DIR/scripts/cleanup-worktrees-audio.sh"
+    if [ -f "$CLEANUP_SCRIPT" ]; then
+        chmod +x "$CLEANUP_SCRIPT" 2>/dev/null || true
+        if ! crontab -l 2>/dev/null | grep -qF "$CLEANUP_MARKER"; then
+            "$LOBSTER_DIR/scripts/cron-manage.sh" add "$CLEANUP_MARKER" \
+                "0 4 * * * $CLEANUP_SCRIPT >> $HOME/lobster-workspace/logs/cleanup.log 2>&1 $CLEANUP_MARKER" 2>/dev/null && {
+                substep "Added LOBSTER-CLEANUP cron entry (cleanup-worktrees-audio.sh, 04:00 daily)"
+                migrated=$((migrated + 1))
+            } || warn "Could not add LOBSTER-CLEANUP cron entry — check cron-manage.sh"
+        fi
+    else
+        warn "cleanup-worktrees-audio.sh not found at $CLEANUP_SCRIPT — skipping Migration 75"
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
