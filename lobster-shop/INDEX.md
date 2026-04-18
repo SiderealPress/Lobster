@@ -7,7 +7,7 @@ Browse available skills for your Lobster assistant. Install any skill with one c
 ## Available
 
 | Skill | What It Does | Category | Status |
-|-------|-------------|----------|--------|
+|-------|-------------|----------|---------|
 | [HyperFrames](./hyperframes/) | Create videos by writing HTML — produce MP4/WebM/MOV from HTML+CSS+GSAP compositions, fully locally, no API keys | Workflow | Available |
 | [Camofox Browser](./camofox-browser/) | Browse the real web with anti-detection — search Google, Amazon, LinkedIn without getting blocked | Tool | Available |
 | [GCal Links](./gcal-links/) | Google Calendar integration: read/create events via API when authenticated, or fall back to deep links — all via natural language | Behavioral | Available |

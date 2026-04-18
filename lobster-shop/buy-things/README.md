@@ -88,11 +88,11 @@ Stores your payment card and spending settings. Permissions: chmod 600.
 
 ```yaml
 card:
-  number: "XXXX XXXX XXXX XXXX"   # Full card number (never shown to user)
+  number: "XXXXXXXXXXXXXXXX"   # Full card number (never shown to user)
   expiry: "MM/YY"
   cvv: "XXX"
   billing_address:
-    street: "123 Main St."
+    street: "123 Main St"
     city: "Your City"
     state: "CA"
     zip: "00000"
@@ -114,7 +114,7 @@ purchases:
     item: "Product Name"
     amount_usd: 29.99
     order_id: "123-4567890-1234567"
-    last4: "3645"
+    last4: "XXXX"
 ```
 
 ### `~/messages/receipts/`

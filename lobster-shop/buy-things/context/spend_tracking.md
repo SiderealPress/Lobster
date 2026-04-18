@@ -19,14 +19,14 @@ purchases:
     item: "Sony WH-1000XM5 Headphones"
     amount_usd: 279.99
     order_id: "123-4567890-1234567"
-    last4: "3645"
+    last4: "XXXX"
 
   - date: "2026-04-12"
     merchant: "Amazon"
     item: "LEGO Technic Set"
     amount_usd: 49.99
     order_id: "123-9876543-7654321"
-    last4: "3645"
+    last4: "XXXX"
 ```
 
 ### Reading current month total
@@ -94,7 +94,7 @@ Warning: 80%+ of monthly budget used.
 
 At 100%+ usage:
 ```
-Monthly limit of $1,000 reached. Purchases paused until May 1.
+Monthly limit of $1,000 reached. Purchases paused until next month.
 ```
 
 ### /receipts response format
@@ -112,7 +112,7 @@ Recent purchases:
    LEGO Technic Set — $49.99
    Order: 123-9876543-XXXXXXX
 
-Card used: •••• 3645
+Card used: •••• XXXX
 ```
 
 Note: order IDs are shown in full (they are not sensitive).
