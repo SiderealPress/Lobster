@@ -178,7 +178,7 @@ class TestNormalizeEvent:
         assert result["is_group"] is True
         assert result["group_name"] == "Test Group"
         assert result["mentions_lobster"] is True
-        assert result["id"].endswith("_wa")
+        assert "_wa_" in result["id"]  # format: {ts}_wa_{event_id}
         assert "T" in result["timestamp"]  # ISO 8601
 
     def test_dm_normalized_correctly(self):

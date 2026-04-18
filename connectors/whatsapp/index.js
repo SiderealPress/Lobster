@@ -29,16 +29,21 @@
 
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 
 // ---------------------------------------------------------------------------
 // Configuration from environment
 // ---------------------------------------------------------------------------
 
-const HOME = process.env.HOME || '/home/admin';
+const HOME = process.env.HOME || os.homedir();
 const SESSION_PATH = process.env.WHATSAPP_SESSION_PATH || path.join(__dirname, 'session');
 const COMMANDS_DIR = process.env.WA_COMMANDS_DIR || path.join(HOME, 'messages', 'wa-commands');
-const EVENTS_DIR = process.env.WA_EVENTS_DIR || null;
+const EVENTS_DIR = process.env.WA_EVENTS_DIR || path.join(HOME, 'messages', 'wa-events');
 const HEARTBEAT_FILE = process.env.WA_HEARTBEAT_FILE || path.join(HOME, 'lobster-workspace', 'logs', 'whatsapp-heartbeat');
+
+// Directory where QR PNG images are written before being sent to Telegram.
+// Defaults to ~/messages/images so the Telegram bot can serve local files.
+const QR_IMAGES_DIR = process.env.WA_QR_IMAGES_DIR || path.join(HOME, 'messages', 'images');
 
 // ---------------------------------------------------------------------------
 // Ensure directories exist
@@ -53,18 +58,19 @@ function ensureDir(dir) {
 }
 
 ensureDir(COMMANDS_DIR);
-if (EVENTS_DIR) ensureDir(EVENTS_DIR);
+ensureDir(EVENTS_DIR);
 ensureDir(path.dirname(HEARTBEAT_FILE));
+ensureDir(QR_IMAGES_DIR);
 
 // ---------------------------------------------------------------------------
 // Load whatsapp-web.js (may not be installed in test environment)
 // ---------------------------------------------------------------------------
 
-let Client, LocalAuth, qrcode, chokidar;
+let Client, LocalAuth, QRCode, chokidar;
 
 try {
     ({ Client, LocalAuth } = require('whatsapp-web.js'));
-    qrcode = require('qrcode-terminal');
+    QRCode = require('qrcode');
     chokidar = require('chokidar');
 } catch (e) {
     // Allow loading in test environments without full npm install
@@ -198,11 +204,63 @@ function touchHeartbeat() {
     }
 }
 
+/**
+ * Render a QR code string to a PNG file and emit a qr_ready system event.
+ *
+ * The qr_ready event is picked up by whatsapp_bridge_adapter.py, which writes
+ * a Telegram outbox message containing the PNG so Drew can scan it on his phone
+ * without any terminal or SSH access.
+ *
+ * Falls back to a text-only qr_ready event (no image_path) if PNG generation fails,
+ * so the adapter can still deliver a helpful error message.
+ *
+ * @param {string} qrData - Raw QR code string from whatsapp-web.js
+ * @returns {Promise<void>}
+ */
+async function sendQrToTelegram(qrData) {
+    const timestamp = Date.now();
+    const imagePath = path.join(QR_IMAGES_DIR, `whatsapp-qr-${timestamp}.png`);
+
+    try {
+        await QRCode.toFile(imagePath, qrData, {
+            type: 'png',
+            width: 512,
+            margin: 2,
+            color: { dark: '#000000', light: '#ffffff' },
+        });
+        console.error(`[QR] PNG saved: ${imagePath}`);
+    } catch (e) {
+        console.error(`[QR] Failed to generate PNG: ${e.message}`);
+        // Emit a qr_ready event without an image so the adapter sends a text fallback
+        emitSystemEvent('qr_ready', 'QR code ready — PNG generation failed. Check logs.');
+        return;
+    }
+
+    // Emit qr_ready so whatsapp_bridge_adapter.py can relay the PNG to Telegram
+    const event = {
+        id: `sys_${timestamp}`,
+        type: 'system',
+        subtype: 'qr_ready',
+        body: '[WhatsApp bridge] QR code ready',
+        image_path: imagePath,
+        from: 'system',
+        fromMe: false,
+        isGroup: false,
+        author: 'system',
+        timestamp: Math.floor(timestamp / 1000),
+        mentionedIds: [],
+        mentions_lobster: false,
+        chatName: '',
+    };
+    emitEvent(event);
+    console.error('[QR] qr_ready event emitted — Telegram delivery pending via adapter');
+}
+
 // ---------------------------------------------------------------------------
 // Export for testing (mock-test.js)
 // ---------------------------------------------------------------------------
 
-module.exports = { buildMessageEvent, parseCommandFile, emitEvent, emitSystemEvent };
+module.exports = { buildMessageEvent, parseCommandFile, emitEvent, emitSystemEvent, sendQrToTelegram };
 
 // If this file is run directly (not required), start the bridge
 if (require.main === module) {
@@ -254,13 +312,14 @@ function startBridge() {
 
     // ---------------------------------------------------------------------------
     // QR code — first-run authentication
+    //
+    // Renders the QR as a PNG and delivers it to Drew's Telegram chat via the
+    // whatsapp_bridge_adapter.py qr_ready event handler — no terminal needed.
     // ---------------------------------------------------------------------------
 
-    client.on('qr', (qr) => {
-        qrcode.generate(qr, { small: true });
-        console.error('[QR] Scan this QR code in WhatsApp: Settings > Linked Devices > Link a Device');
-        console.error('[QR] After scanning, the bridge will print READY and your JID');
-        console.error('[QR] Set WHATSAPP_LOBSTER_JID in your environment file to that JID');
+    client.on('qr', async (qr) => {
+        console.error('[QR] New QR code received — rendering as PNG and sending to Telegram...');
+        await sendQrToTelegram(qr);
     });
 
     // ---------------------------------------------------------------------------
