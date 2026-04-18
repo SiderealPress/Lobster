@@ -116,6 +116,6 @@ scheduled-tasks/lobstertalk-incoming-handler.py:Email address
 # API connectivity, not a secret or private PII
 src/integrations/clay/client.py:Email address
 
-# lobster-shop buy-things defaults.toml contains a placeholder shipping name
-# (default_shipping_name) as a pre-existing configuration reference — not a secret
+# buy-things skill has a default_shipping_name config value that references a personal name
+# as a placeholder — this is user-facing configuration, not a secret or credential
 lobster-shop/buy-things/preferences/defaults.toml:Personal name (drew)
