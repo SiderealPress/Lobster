@@ -37,16 +37,6 @@ import pytest
 _SRC_MCP_DIR = Path(__file__).resolve().parents[2] / "src" / "mcp"
 
 
-def _import_write_wfm_active():
-    """Import just the write_wfm_active helper from inbox_server without full init."""
-    sys.path.insert(0, str(_SRC_MCP_DIR))
-    sys.path.insert(0, str(_SRC_MCP_DIR.parent))
-    # We import the constant and the helper by loading a minimal subset.
-    # Rather than import the full server (which has many side effects),
-    # we test the constant via a direct file-content check and the behavior
-    # via controlled integration tests below.
-
-
 # ---------------------------------------------------------------------------
 # Constants that must match inbox_server.py
 # ---------------------------------------------------------------------------
@@ -55,7 +45,7 @@ def _import_write_wfm_active():
 EXPECTED_WAIT_HEARTBEAT_INTERVAL = 60
 
 # The staleness threshold used by the health check (must match health-check-v3.sh).
-# This is 2 * WAIT_HEARTBEAT_INTERVAL + a small margin.
+# This is 3 * WAIT_HEARTBEAT_INTERVAL.
 EXPECTED_WFM_ACTIVE_STALE_SECONDS = 180
 
 
@@ -94,8 +84,8 @@ class TestWfmActiveFileWrite:
         server_src = (_SRC_MCP_DIR / "inbox_server.py").read_text()
 
         # The file must be written BEFORE the observer.start() / wait loop:
-        # look for the WFM_ACTIVE_FILE write happening before the while loop.
-        write_pos = server_src.find("WFM_ACTIVE_FILE")
+        # look for the _write_wfm_active_signal() call happening before the while loop.
+        write_pos = server_src.find("_write_wfm_active_signal()")
         while_pos = server_src.find("while elapsed < timeout")
         assert write_pos != -1, "WFM_ACTIVE_FILE write must exist"
         assert while_pos != -1, "wait loop must exist"
