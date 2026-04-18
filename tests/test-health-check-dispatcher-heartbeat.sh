@@ -14,9 +14,10 @@
 #   7. Stale by 1 second past threshold → RED (boundary condition)
 #   8. Fresh by 1 second before threshold → GREEN (boundary condition)
 #
-# Key behavioral assertion: the check uses a SINGLE file with a SINGLE epoch
-# timestamp. No lobster-state.json reads, no WFM heartbeat file, no multi-signal
-# aggregation.
+# Key behavioral assertion: the check uses a single dispatcher-heartbeat file with
+# a single epoch timestamp. No lobster-state.json reads. The WFM-active file is
+# also consulted by check_dispatcher_heartbeat() but is bypassed safely here via
+# the DISPATCHER_WFM_ACTIVE_FILE default (absent file → treated as not active).
 #
 # Usage: bash tests/test-health-check-dispatcher-heartbeat.sh
 #===============================================================================
