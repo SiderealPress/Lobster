@@ -30,6 +30,8 @@ The `activity` context may also include:
    - Write a `## Snapshot [timestamp]` heading
    - Under it, write the following subsections:
 
+   > **Note:** Snapshot blocks are raw activity logs. They will be synthesized by `session-note-polish` into a decision-log format Summary ("we started X, we realized Y, still working on Z"). Your job here is to capture events faithfully with timestamps — not to produce a changelog or narrative.
+
    **Recent activity (last 30 min)** — derived from the `activity` context passed in your prompt:
    - One bullet per user message: `- [HH:MM UTC] User: <brief summary of message>`
    - One bullet per notable subagent result: `- [HH:MM UTC] <task_id>: <one-line outcome>`

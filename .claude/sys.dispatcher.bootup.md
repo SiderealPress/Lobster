@@ -29,7 +29,7 @@ When you first start (or after reading this file), follow these steps:
 
 0. Call `session_start(agent_type="dispatcher", agent_id="lobster-dispatcher", description="Lobster dispatcher main loop", chat_id=<ADMIN_CHAT_ID>)` to register this session as the dispatcher. This clears any stale `_dispatcher_session_id` from a previous dispatcher instance and ensures all guarded MCP tools (`send_reply`, `check_inbox`, etc.) work immediately. Without this, a new dispatcher session may be blocked by a stale session ID from the previous instance.
    - Get ADMIN_CHAT_ID from `lobster.conf` (`grep ADMIN_CHAT_ID ~/lobster-config/lobster.conf` or equivalent), or use the `chat_id` from `context-handoff.json` if available.
-   - This is the FIRST action before any guarded tools — must fire before the warmup `send_reply` at step 2d.
+   - This is the FIRST action before any guarded tools — must fire before step 2d.
 1. Call `session_start(agent_type='dispatcher', claude_session_id=hook_input["session_id"])` — pass the Claude session UUID injected by the SessionStart hook. This writes the UUID to `$LOBSTER_WORKSPACE/data/dispatcher-claude-session-id`, enabling `inject-bootup-context.py` to identify your session as the dispatcher and inject this file on future restarts. Without this call, the primary detection path is never populated and you will receive the subagent bootup file instead of this one.
 1a. Read `~/lobster-user-config/memory/canonical/handoff.md` — user context, active projects, key people, git rules, available integrations.
 1b. **Restore conversational context** — restarts are invisible to users, who expect you to remember the conversation. Do both of these unconditionally:
@@ -43,17 +43,9 @@ When you first start (or after reading this file), follow these steps:
     - If **recent** (< 10 min, based on `triggered_at`): read `context_pct`, `pending_tasks`, `last_user_message`. Notify user: "Restarted — context was at {context_pct}%. Resuming from where we left off." Re-queue any stuck messages from `~/messages/processing/`. Delete the file.
     - If **stale** (>= 10 min) or absent: ignore.
 2d. Check `~/lobster-workspace/data/compaction-state.json` for `last_catchup_ts`:
-    - `gap_seconds > 15`: send a random ack message to admin chat (see **Selecting the ack message** below).
+    - `gap_seconds > 15`: log the gap for context; stay silent toward the user (restarts are invisible by default).
     - `gap_seconds <= 15`: stay silent (health-check restart, not a meaningful gap).
     - Skip if step 2c already sent a restart notification.
-
-**Selecting the ack message** (used in step 2d above and in compact-reminder step 2.5 below):
-```python
-import json, random, os
-ack_path = os.path.expanduser("~/lobster/.claude/compact-ack-messages.json")
-with open(ack_path) as f:
-    ack_msg = random.choice(json.load(f)["messages"])
-```
 
 3. (Catchup suppression no longer required — the health check uses a 20-minute heartbeat threshold that covers catchup naturally. `record-catchup-state.sh` is no longer called. Skip this step.)
 3b. **Claim any pending user messages immediately** to stop the health-check staleness clock:
@@ -260,10 +252,6 @@ After a context compaction you lose situational awareness of the last ~30 minute
 ```
 1. mark_processing(message_id)  <- compact-reminder ONLY, not other messages
 2. Read the compact-reminder text to re-orient (identity, main loop, key files)
-2.5. Send a random ack message to admin chat (see **Selecting the ack message** in the Startup Behavior section):
-   - Pick with `random.choice()` from `~/lobster/.claude/compact-ack-messages.json`
-   - This is the user-visible signal that the lobster is back and gathering context
-   - Use ADMIN_CHAT_ID from `lobster.conf` or the compact-reminder context
 3. Spawn session-note-polish subagent (run_in_background=True, subagent_type: "lobster-generalist"):
    - See .claude/agents/session-note-polish.md for the agent definition
    - Pass: task_id: "session-note-polish", chat_id: 0, source: "system", current_session_file: <path>, MESSAGE_COUNT: <current message count>

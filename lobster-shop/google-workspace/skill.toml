@@ -1,0 +1,40 @@
+[skill]
+name = "google-workspace"
+version = "1.0.0"
+description = "Google Workspace integration: Docs, Drive, and Sheets — full read/write via API when authenticated, or one-tap consent link when not"
+author = "Lobster"
+category = "integration"
+
+[activation]
+mode = "triggered"
+triggers = ["/gdocs", "/gdrive", "/gsheets", "/workspace", "/workspace connect", "/doc", "/sheet"]
+context_patterns = [
+    "when user asks to create, read, edit, or search a Google Doc",
+    "when user mentions a Google Doc, Drive file, or Sheet by name or URL",
+    "when user wants to write something to a document",
+    "when user asks to list files in Google Drive",
+    "when user wants to connect Google Workspace",
+    "when user asks to create a spreadsheet or read spreadsheet data",
+    "when user mentions docs.google.com or drive.google.com or sheets.google.com",
+]
+
+[layering]
+priority = 40
+merge_strategy = "append"
+
+[provides]
+mcp_tools = []
+bot_commands = ["/gdocs", "/gdrive", "/gsheets", "/workspace", "/doc", "/sheet"]
+
+[compatibility]
+enhances = ["gmail", "gcal-links"]
+conflicts = []
+
+[dependencies]
+pip = ["google-api-python-client", "google-auth", "google-auth-httplib2"]
+npm = []
+system = []
+api_keys = []
+
+[dependencies.runtime]
+python = ">=3.11"

@@ -85,15 +85,16 @@ class TestSkillSystemIntegration:
         assert manifest is not None
         assert manifest["skill"]["name"] == "alpha"
 
-        # 3. List available — should show as not installed
-        available = list_available_skills(repo_dir=tmp_path, state_path=state_path)
+        # 3. List available — should show as not installed.
+        # Pass config_dir="" to isolate from any user config overlay skills.
+        available = list_available_skills(repo_dir=tmp_path, state_path=state_path, config_dir="")
         assert len(available) == 1
         assert available[0]["name"] == "alpha"
         assert available[0]["installed"] is False
 
         # 4. Mark installed
         mark_installed("alpha", "1.0.0", state_path=state_path)
-        available = list_available_skills(repo_dir=tmp_path, state_path=state_path)
+        available = list_available_skills(repo_dir=tmp_path, state_path=state_path, config_dir="")
         assert available[0]["installed"] is True
         assert available[0]["active"] is False
 
@@ -106,7 +107,7 @@ class TestSkillSystemIntegration:
         assert "alpha" in active
 
         # 6. Get context — should contain behavior + context
-        context = get_skill_context(repo_dir=tmp_path, state_path=state_path)
+        context = get_skill_context(repo_dir=tmp_path, state_path=state_path, config_dir="")
         assert "Alpha behavior instructions." in context
         assert "Alpha domain context." in context
         assert "## Skill: alpha" in context
@@ -117,7 +118,7 @@ class TestSkillSystemIntegration:
         assert "alpha" not in active
 
         # 8. Context no longer includes it
-        context = get_skill_context(repo_dir=tmp_path, state_path=state_path)
+        context = get_skill_context(repo_dir=tmp_path, state_path=state_path, config_dir="")
         assert "Alpha behavior" not in context
 
     def test_multi_skill_composition(self, tmp_path):

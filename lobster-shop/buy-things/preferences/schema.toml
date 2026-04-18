@@ -1,0 +1,12 @@
+# buy-things skill — preferences schema
+# Each key defines a configurable preference.
+
+monthly_limit_usd = "Monthly spending cap in USD (integer)"
+preferred_store = "Default store: amazon | target | walmart | bestbuy"
+search_results_count = "Number of search results to show (1-5)"
+require_confirmation = "Always require confirmation before checkout (bool)"
+spend_warning_threshold_pct = "Warn at this % of monthly cap (integer, 1-100)"
+shipping_preference = "Shipping speed preference: free | standard | fast | fastest"
+save_receipts = "Save confirmation screenshots to ~/messages/receipts/ (bool)"
+show_images = "Attempt to show product images in Telegram (bool)"
+default_shipping_name = "Name to use on shipping address during checkout (string)"

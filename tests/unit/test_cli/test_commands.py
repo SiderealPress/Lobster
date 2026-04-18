@@ -181,12 +181,17 @@ class TestStatsCommand:
 
         env = os.environ.copy()
         env["HOME"] = str(temp_messages_dir.parent)
+        # Unset LOBSTER_MESSAGES so CLI falls back to $HOME/messages (our temp
+        # dir) rather than pointing at the live messages directory with thousands
+        # of processed files that would make the per-file jq loop prohibitively slow.
+        env.pop("LOBSTER_MESSAGES", None)
 
         result = subprocess.run(
             ["bash", str(cli_path), "stats"],
             capture_output=True,
             text=True,
             env=env,
+            timeout=15,
         )
 
         # Should show statistics
