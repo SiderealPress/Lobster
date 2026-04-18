@@ -48,7 +48,7 @@ Every button press or user reply must generate an **immediate text response with
 Never silently transition between states. Send an acknowledgment first, then do background work.
 
 | User action | Immediate acknowledgment |
-|-------------|--------------------------|
+|-------------|---------------------------|
 | Selects option 1 / 2 / 3 / 4 | `"Got it — let me pull up the details for option X..."` |
 | Presses "✅ Yes, place order" / replies "yes" | `"✅ Order confirmed! Starting checkout via Camofox now — I'll send your order number in a minute."` |
 | Presses "❌ Cancel" / replies "no" | `"Order cancelled — nothing was purchased."` |
