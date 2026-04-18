@@ -42,6 +42,23 @@ When `/buy setup` is received:
 
 ---
 
+### Button press UX rules (MANDATORY)
+
+Every button press or user reply must generate an **immediate text response within 2 seconds**.
+Never silently transition between states. Send an acknowledgment first, then do background work.
+
+| User action | Immediate acknowledgment |
+|-------------|--------------------------|
+| Selects option 1 / 2 / 3 / 4 | `"Got it — let me pull up the details for option X..."` |
+| Presses "✅ Yes, place order" / replies "yes" | `"✅ Order confirmed! Starting checkout via Camofox now — I'll send your order number in a minute."` |
+| Presses "❌ Cancel" / replies "no" | `"Order cancelled — nothing was purchased."` |
+| Any other button or ambiguous reply | `"On it..."` |
+
+**Rule:** if a button press triggers background work, send the acknowledgment **before** spawning
+the subagent or doing any I/O. This prevents the "did it work?" confusion.
+
+---
+
 ### Security rules (non-negotiable)
 
 - NEVER complete a purchase without explicit user confirmation ("Yes" / "Confirm")
