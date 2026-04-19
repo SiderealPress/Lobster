@@ -11,11 +11,25 @@ import sys
 import os
 sys.path.insert(0, os.path.expanduser("~/lobster/src"))
 from integrations.google_calendar.token_store import load_token
-from mcp.user_model.owner import read_owner
 
-owner = read_owner()
-OWNER_USER_ID = owner.get("owner", {}).get("telegram_chat_id", "")
-token = load_token(OWNER_USER_ID)
+# MULTI-USER: always prefer chat_id from the incoming message context.
+# Fall back to read_owner() only for single-user / legacy installs where
+# the message doesn't carry a chat_id (e.g. scheduled jobs).
+#
+# In the Lobster dispatcher the message looks like:
+#   message["chat_id"]  — Telegram chat_id of the user who sent the message
+#
+# Usage pattern (the subagent receives chat_id as a parameter):
+#   USER_ID = message_chat_id or _fallback_to_owner()
+def _fallback_to_owner() -> str:
+    from mcp.user_model.owner import read_owner
+    owner = read_owner()
+    return owner.get("owner", {}).get("telegram_chat_id", "")
+
+# Prefer caller's chat_id; fall back to owner for single-user installs.
+# `message_chat_id` must be passed in from the dispatcher context.
+USER_ID = str(message_chat_id) if message_chat_id else _fallback_to_owner()
+token = load_token(USER_ID)
 is_authenticated = token is not None
 ```
 
@@ -61,7 +75,19 @@ sys.path.insert(0, os.path.expanduser("~/lobster/src"))
 from integrations.google_calendar.client import get_upcoming_events
 from utils.calendar import gcal_add_link_md
 
-events = get_upcoming_events(user_id=OWNER_USER_ID, days=7)
+# MULTI-USER: use the chat_id from the message that triggered this subagent.
+# The dispatcher must pass it as a parameter when spawning the subagent.
+# Fall back to read_owner() only for single-user / legacy installs.
+def _get_user_id(message_chat_id=None) -> str:
+    if message_chat_id:
+        return str(message_chat_id)
+    from mcp.user_model.owner import read_owner
+    owner = read_owner()
+    return owner.get("owner", {}).get("telegram_chat_id", "")
+
+USER_ID = _get_user_id(message_chat_id)  # pass chat_id from dispatcher context
+
+events = get_upcoming_events(user_id=USER_ID, days=7)
 if not events:
     reply = "No upcoming events in the next 7 days."
 else:
@@ -85,24 +111,35 @@ from integrations.google_calendar.client import create_event
 from utils.calendar import gcal_add_link_md
 from datetime import datetime, timezone
 
+# MULTI-USER: use the chat_id from the message that triggered this subagent.
+def _get_user_id(message_chat_id=None) -> str:
+    if message_chat_id:
+        return str(message_chat_id)
+    from mcp.user_model.owner import read_owner
+    owner = read_owner()
+    return owner.get("owner", {}).get("telegram_chat_id", "")
+
+USER_ID = _get_user_id(message_chat_id)  # pass chat_id from dispatcher context
+
+# title, start, end are derived from the user's message (resolved by the dispatcher)
 event = create_event(
-    user_id=OWNER_USER_ID,
-    title="Meeting with Sarah",
-    start=datetime(2026, 3, 7, 14, 0, tzinfo=timezone.utc),
-    end=datetime(2026, 3, 7, 15, 0, tzinfo=timezone.utc),
+    user_id=USER_ID,
+    title=title,   # e.g. "Meeting with Sarah"
+    start=start,   # datetime resolved from user's message
+    end=end,       # datetime resolved from user's message (or start + 1h)
     description="",
     location="",
 )
 
 if event is not None:
     link = f"[View in Google Calendar]({event.url})" if event.url else gcal_add_link_md(
-        title="Meeting with Sarah",
-        start=datetime(2026, 3, 7, 14, 0, tzinfo=timezone.utc),
+        title=title,
+        start=start,
     )
-    reply = f"Done — added \"Meeting with Sarah\" to your calendar.\n{link}"
+    reply = f"Done — added \"{title}\" to your calendar.\n{link}"
 else:
     # API failed — fall back to deep link
-    link = gcal_add_link_md("Meeting with Sarah", datetime(2026, 3, 7, 14, 0, tzinfo=timezone.utc))
+    link = gcal_add_link_md(title, start)
     reply = f"Couldn't add via API — use this link instead:\n{link}"
 ```
 
