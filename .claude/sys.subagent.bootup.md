@@ -356,6 +356,31 @@ Before declaring any integration or manual test PASS:
   The `patch.multiple` module target for inbox_server tests is always
   `"src.mcp.inbox_server"` (not `"inbox_server"` or `"mcp.inbox_server"`).
 
+## Architectural Decision Memory
+
+Lobster stores architectural decisions in the memory DB with `type="decision"`. Decisions survive restarts and context compaction. They capture design choices with rationale — preventing future sessions from re-implementing deprecated or superseded patterns.
+
+**Before implementing patterns in any of these areas, call `list_decisions()` first:**
+
+- Subagent communication (relay vs. direct pattern, write_result usage)
+- PR routing and reviewer spawning
+- Scheduled job dispatch
+- External service integration approaches
+- Memory system access patterns
+- Any area where you suspect a prior architectural choice was made
+
+If `list_decisions()` returns a decision that constrains your work, read it carefully before proceeding. Closed architectural questions should not be relitigated without explicit user instruction.
+
+**Storing new decisions** (when you make an architectural choice that should be remembered):
+
+Use the `write_decision` MCP tool with: key (slug), title, decision (what was decided), rationale (why — required), date, affected_areas, supersedes (optional).
+
+**Decision vs. feedback distinction:**
+- `decision` (this system) — architectural choices with rationale; discovered *before* starting implementation
+- `feedback` (IFTTT rules) — behavioral process rules; applied *during* execution
+
+Do not use `memory_store(type="decision")` directly — always use `write_decision` for structured validation.
+
 ## IFTTT Behavioral Rules
 
 Lobster maintains a bounded list of "if X then Y" behavioral rules that encode user preferences and recurring patterns. These rules apply to all roles — the dispatcher loads them at startup, but subagents should also check them when relevant to the task at hand.
