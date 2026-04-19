@@ -483,3 +483,110 @@ def test_wfm_freshness_green_when_last_processed_absent_heartbeat_recent(
         "absent. Fresh installs must be GREEN until the first heartbeat is written.\n"
         f"stderr: {result.stderr!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# D6 — maintenance flag is honored indefinitely (issue #1656)
+# ---------------------------------------------------------------------------
+#
+# `lobster stop` should hold Lobster down until an explicit `lobster start`.
+# The old 1-hour auto-clear timer overrode intentional operator stops.
+# After issue #1656, the flag is honored indefinitely — no auto-clear.
+
+
+def _make_health_check_env(tmp_path: Path) -> dict:
+    """Return a minimal env dict to run the health check script in isolation."""
+    messages_dir = tmp_path / "messages"
+    config_dir = messages_dir / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+
+    workspace_dir = tmp_path / "workspace"
+    (workspace_dir / "logs").mkdir(parents=True, exist_ok=True)
+
+    return {
+        **os.environ,
+        "LOBSTER_MESSAGES": str(messages_dir),
+        "LOBSTER_WORKSPACE": str(workspace_dir),
+        "LOBSTER_CONFIG_DIR": str(tmp_path / "no-config"),
+        "LOBSTER_HEALTH_LOCK": str(tmp_path / "health-check.lock"),
+    }
+
+
+def test_maintenance_flag_honored_when_recent(tmp_path: Path) -> None:
+    """
+    D6a: maintenance flag causes clean exit when present and recently written.
+
+    Ensures the basic behavior still holds after the 1-hour timer is removed.
+    """
+    env = _make_health_check_env(tmp_path)
+    messages_dir = Path(env["LOBSTER_MESSAGES"])
+    flag = messages_dir / "config" / "lobster-maintenance"
+    flag.write_text(
+        f"stopped_at={datetime.now(timezone.utc).isoformat()} stopped_by=lobster"
+    )
+
+    result = subprocess.run(
+        ["bash", str(HEALTH_SCRIPT)],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=15,
+    )
+
+    assert result.returncode == 0, (
+        "health-check-v3.sh did not exit 0 under a recent maintenance flag. "
+        f"returncode={result.returncode}\n"
+        f"stdout: {result.stdout!r}\n"
+        f"stderr: {result.stderr!r}"
+    )
+    assert flag.exists(), (
+        "health-check-v3.sh deleted the maintenance flag during a health check run. "
+        "The flag should only be cleared by on-fresh-start.py on confirmed start "
+        "or by lobster start — not by the health check."
+    )
+
+
+def test_maintenance_flag_honored_after_one_hour(tmp_path: Path) -> None:
+    """
+    D6b: maintenance flag must be honored indefinitely — even after 1+ hours.
+
+    The old behavior auto-cleared the flag after MAINTENANCE_EXPIRY_SECONDS (1h),
+    which caused Lobster to auto-restart against the operator's intent (issue #1656).
+
+    After this fix, the health check exits 0 and leaves the flag in place no
+    matter how old it is.  The flag is only cleared by on-fresh-start.py when
+    the dispatcher starts successfully, or by lobster start explicitly.
+
+    Failure mode: if the health check still auto-clears an old flag, then
+    `lobster stop` is only a 1-hour pause — the system will auto-restart after
+    the timer expires, defeating the purpose of the stop command.
+    """
+    # Write a flag timestamped more than 1 hour in the past.
+    env = _make_health_check_env(tmp_path)
+    messages_dir = Path(env["LOBSTER_MESSAGES"])
+    flag = messages_dir / "config" / "lobster-maintenance"
+
+    old_time = datetime(2020, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+    flag.write_text(f"stopped_at={old_time.isoformat()} stopped_by=lobster")
+
+    result = subprocess.run(
+        ["bash", str(HEALTH_SCRIPT)],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=15,
+    )
+
+    assert result.returncode == 0, (
+        "health-check-v3.sh did not exit 0 for a maintenance flag older than 1 hour. "
+        "The flag must be honored indefinitely — not just for 1 hour. "
+        f"returncode={result.returncode}\n"
+        f"stdout: {result.stdout!r}\n"
+        f"stderr: {result.stderr!r}"
+    )
+    assert flag.exists(), (
+        "health-check-v3.sh auto-cleared the maintenance flag because it was older "
+        "than 1 hour. This is the bug from issue #1656: `lobster stop` should hold "
+        "indefinitely, not for just 1 hour. The flag must only be cleared by "
+        "on-fresh-start.py or lobster start — never by the health check on a timer."
+    )
