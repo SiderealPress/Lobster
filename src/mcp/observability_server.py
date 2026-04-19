@@ -39,6 +39,14 @@ if _src_dir not in sys.path:
     sys.path.insert(0, _src_dir)
 from log_utils import JsonFormatter, configure_file_handler as _configure_file_handler
 
+# Event bus metrics — optional (graceful fallback when bus not initialized)
+try:
+    from event_bus import get_metrics_listener as _get_metrics_listener
+    _EVENT_BUS_AVAILABLE = True
+except ImportError:
+    _get_metrics_listener = None  # type: ignore[assignment]
+    _EVENT_BUS_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 _stream_handler = logging.StreamHandler()
