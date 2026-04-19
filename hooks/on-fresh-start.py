@@ -107,6 +107,20 @@ COMPACTION_STATE_FILE = Path(
 INBOX_DIR = Path(os.path.expanduser("~/messages/inbox"))
 PROCESSING_DIR = Path(os.path.expanduser("~/messages/processing"))
 
+# Maintenance flag written by `lobster stop` to suppress health-check auto-restarts.
+# Cleared here on successful startup so that `lobster stop` is a true pause:
+# the system stays down until explicitly restarted rather than auto-restarting
+# after a timer (issue #1656).
+_MESSAGES_DIR_FOR_FLAG = Path(
+    os.environ.get("LOBSTER_MESSAGES", os.path.expanduser("~/messages"))
+)
+MAINTENANCE_FLAG = Path(
+    os.environ.get(
+        "LOBSTER_MAINTENANCE_FLAG_OVERRIDE",
+        str(_MESSAGES_DIR_FOR_FLAG / "config" / "lobster-maintenance"),
+    )
+)
+
 # Pointer to the current session file (written by compact-catchup / session management).
 # If this file exists and was modified recently, there is a prior session worth catching up.
 CURRENT_SESSION_FILE_POINTER = Path(
@@ -470,6 +484,35 @@ def _mark_all_running_failed() -> None:
         )
 
 
+def _clear_maintenance_flag() -> None:
+    """Delete the maintenance flag if it exists.
+
+    ``lobster stop`` writes this flag to tell the health check "don't
+    auto-restart, the system was intentionally stopped."  Once the dispatcher
+    starts successfully, the flag's purpose is served — Lobster is running, so
+    maintenance mode is no longer in effect.
+
+    Clearing the flag here (on verified successful start) makes ``lobster stop``
+    a true pause: the system stays down until explicitly restarted.  The health
+    check no longer auto-clears the flag on a timer — so this is now the
+    primary flag-clearing path after an intentional stop.
+
+    See issue #1656.
+    """
+    try:
+        if MAINTENANCE_FLAG.exists():
+            MAINTENANCE_FLAG.unlink()
+            print(
+                f"[on-fresh-start] cleared maintenance flag: {MAINTENANCE_FLAG}",
+                file=sys.stderr,
+            )
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"[on-fresh-start] could not clear maintenance flag {MAINTENANCE_FLAG}: {exc}",
+            file=sys.stderr,
+        )
+
+
 def main() -> None:
     # Only fire for Lobster-managed sessions.
     if os.environ.get("LOBSTER_MAIN_SESSION", "") != "1":
@@ -487,6 +530,12 @@ def main() -> None:
     # Skip subagent sessions — only the dispatcher should run this.
     if not session_role.is_dispatcher(data):
         sys.exit(0)
+
+    # Clear the maintenance flag now that the dispatcher is confirmed running.
+    # This makes `lobster stop` a true indefinite pause: the flag persists until
+    # startup genuinely succeeds, so the health check never needs to auto-clear
+    # it on a timer.  See issue #1656.
+    _clear_maintenance_flag()
 
     if not AGENT_MONITOR.exists():
         print(
