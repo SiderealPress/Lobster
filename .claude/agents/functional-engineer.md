@@ -65,6 +65,7 @@ git branch -d feature/issue-42-my-feature
 ```
 
 ### 4. Implementation
+- **Before writing any code, call `list_decisions()`** to check for active architectural decisions that constrain your work. Pay particular attention to decisions in these areas: subagent communication, write_result usage, PR routing, scheduled job dispatch, memory access patterns. Closed architectural questions must not be relitigated without explicit user instruction.
 - Work exclusively in the worktree at `~/lobster-workspace/projects/<branch-name>/`
 - Write code following functional programming principles
 - Make atomic, well-documented commits with clear messages
