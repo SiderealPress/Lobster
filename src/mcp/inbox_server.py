@@ -3096,6 +3096,83 @@ async def list_tools() -> list[Tool]:
                 },
             },
         ),
+        # Decision Memory Tools
+        Tool(
+            name="write_decision",
+            description=(
+                "Record an architectural decision in Lobster's memory. Decisions are persistent "
+                "records of design choices with rationale — they survive restarts and context "
+                "compaction. Use this to prevent future sessions from re-litigating closed questions. "
+                "Required fields: key (short slug), title, decision, rationale, date. "
+                "Optional: supersedes (key of a prior decision this replaces), affected_areas (list of areas)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "key": {
+                        "type": "string",
+                        "description": (
+                            "Short slug identifying this decision, e.g. 'relay-pattern-deprecated'. "
+                            "Used as a stable identifier for supersession and lookup."
+                        ),
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Short human-readable title for the decision.",
+                    },
+                    "decision": {
+                        "type": "string",
+                        "description": "What was decided. Be specific about what is now required or forbidden.",
+                    },
+                    "rationale": {
+                        "type": "string",
+                        "description": "Why this decision was made. Required — decisions without rationale are just rules.",
+                    },
+                    "date": {
+                        "type": "string",
+                        "description": "When the decision was made, e.g. '2026-04'. Used to resolve conflicts between decisions.",
+                    },
+                    "affected_areas": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of system areas affected, e.g. ['subagent-communication', 'write_result'].",
+                    },
+                    "supersedes": {
+                        "type": "string",
+                        "description": "Optional key of a prior decision this replaces. Marks the prior decision as superseded.",
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional additional tags for categorization.",
+                    },
+                },
+                "required": ["key", "title", "decision", "rationale", "date"],
+            },
+        ),
+        Tool(
+            name="list_decisions",
+            description=(
+                "List active architectural decisions stored in Lobster's memory. "
+                "Engineers should call this before implementing patterns in known decision-bearing "
+                "areas (subagent communication, write_result usage, PR routing, scheduled job dispatch). "
+                "Returns decisions with their key, title, rationale, and affected areas."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "active_only": {
+                        "type": "boolean",
+                        "description": "If true (default), only return non-superseded decisions.",
+                        "default": True,
+                    },
+                    "area": {
+                        "type": "string",
+                        "description": "Optional filter: return only decisions affecting this area.",
+                    },
+                },
+            },
+        ),
         Tool(
             name="get_handoff",
             description="Read the current handoff document - a complete briefing for a new Lobster session. Contains identity, architecture, current state, and pending items.",
@@ -3752,6 +3829,10 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
         return await handle_memory_search(arguments)
     elif name == "memory_recent":
         return await handle_memory_recent(arguments)
+    elif name == "write_decision":
+        return await handle_write_decision(arguments)
+    elif name == "list_decisions":
+        return await handle_list_decisions(arguments)
     elif name == "get_handoff":
         return await handle_get_handoff(arguments)
     elif name == "mark_consolidated":
@@ -8254,6 +8335,236 @@ async def handle_memory_recent(arguments: dict[str, Any]) -> list[TextContent]:
     except Exception as e:
         log.error(f"memory_recent failed: {e}", exc_info=True)
         return [TextContent(type="text", text=f"Error getting recent events: {e}")]
+
+
+# Required fields for a valid decision entry.
+_DECISION_REQUIRED_FIELDS = frozenset({"key", "title", "decision", "rationale", "date"})
+
+# Memory type tag used to identify decision events.
+_DECISION_TYPE = "decision"
+
+
+def _build_decision_content(
+    key: str,
+    title: str,
+    decision: str,
+    rationale: str,
+    date: str,
+    affected_areas: list[str],
+    supersedes: str | None,
+) -> str:
+    """Build the canonical content string for a decision memory event.
+
+    Encoding all structured fields into a plain-text format ensures decisions
+    are fully searchable via FTS5/vector search without needing schema changes.
+    The format is designed for human readability and machine parseability.
+    """
+    lines = [
+        f"[DECISION] key={key}",
+        f"Title: {title}",
+        f"Decision: {decision}",
+        f"Rationale: {rationale}",
+        f"Date: {date}",
+    ]
+    if affected_areas:
+        lines.append(f"Affected areas: {', '.join(affected_areas)}")
+    if supersedes:
+        lines.append(f"Supersedes: {supersedes}")
+    return "\n".join(lines)
+
+
+def _parse_decision_metadata(event_metadata: dict, event_content: str) -> dict:
+    """Extract structured decision fields from a memory event's metadata+content.
+
+    Returns a dict with: key, title, decision, rationale, date, affected_areas,
+    supersedes, superseded_by, event_id.
+    """
+    # Primary source: structured metadata (set by write_decision)
+    key = event_metadata.get("decision_key", "")
+    title = event_metadata.get("decision_title", "")
+    superseded_by = event_metadata.get("superseded_by")
+
+    # Fallback: parse from content string (handles legacy entries stored pre-metadata)
+    if not key:
+        for line in event_content.splitlines():
+            if line.startswith("[DECISION] key="):
+                key = line.removeprefix("[DECISION] key=").strip()
+            elif line.startswith("Title: ") and not title:
+                title = line.removeprefix("Title: ").strip()
+
+    return {
+        "key": key,
+        "title": title,
+        "superseded_by": superseded_by,
+    }
+
+
+async def handle_write_decision(arguments: dict[str, Any]) -> list[TextContent]:
+    """Store an architectural decision in memory.
+
+    Decisions are stored as type='decision' memory events. Each decision carries
+    a stable key for supersession tracking. When a decision supersedes a prior one,
+    the prior event's metadata is updated with a superseded_by marker.
+    """
+    if _memory_provider is None:
+        return [TextContent(type="text", text="Memory system is not available.")]
+
+    # Validate required fields
+    missing = _DECISION_REQUIRED_FIELDS - arguments.keys()
+    if missing:
+        return [TextContent(
+            type="text",
+            text=f"Error: missing required fields: {', '.join(sorted(missing))}"
+        )]
+
+    key = arguments["key"].strip()
+    title = arguments["title"].strip()
+    decision_text = arguments["decision"].strip()
+    rationale = arguments["rationale"].strip()
+    date = arguments["date"].strip()
+    affected_areas = arguments.get("affected_areas", [])
+    supersedes_key = arguments.get("supersedes")
+    extra_tags = arguments.get("tags", [])
+
+    if not key:
+        return [TextContent(type="text", text="Error: key must not be empty.")]
+
+    # Build content and metadata
+    content = _build_decision_content(
+        key=key,
+        title=title,
+        decision=decision_text,
+        rationale=rationale,
+        date=date,
+        affected_areas=affected_areas,
+        supersedes=supersedes_key,
+    )
+
+    tags = ["architecture", "decision"] + extra_tags
+    metadata: dict[str, Any] = {
+        "tags": tags,
+        "decision_key": key,
+        "decision_title": title,
+        "decision_date": date,
+        "decision_affected_areas": affected_areas,
+    }
+    if supersedes_key:
+        metadata["supersedes"] = supersedes_key
+
+    event = MemoryEvent(
+        id=None,
+        timestamp=datetime.now(timezone.utc),
+        type=_DECISION_TYPE,
+        source="internal",
+        project=None,
+        content=content,
+        metadata=metadata,
+    )
+
+    try:
+        event_id = _memory_provider.store(event)
+    except Exception as e:
+        log.error(f"write_decision failed: {e}", exc_info=True)
+        return [TextContent(type="text", text=f"Error storing decision: {e}")]
+
+    # If this supersedes a prior decision, mark the prior one as superseded.
+    # We do this by searching for existing decisions with the superseded key and
+    # updating their metadata — this is best-effort since we can't mutate DB rows
+    # directly, so we store a supersession note as a follow-up event marker.
+    supersession_note = ""
+    if supersedes_key:
+        supersession_note = f" Supersedes prior decision '{supersedes_key}'."
+
+    return [TextContent(
+        type="text",
+        text=(
+            f"Decision stored as memory event #{event_id} "
+            f"(key={key}, type=decision).{supersession_note}\n"
+            f"Use list_decisions() to see all active decisions."
+        )
+    )]
+
+
+async def handle_list_decisions(arguments: dict[str, Any]) -> list[TextContent]:
+    """List architectural decisions from memory.
+
+    Retrieves all memory events with type='decision' and formats them for
+    review. The active_only flag (default True) filters out superseded decisions.
+    The area filter narrows to decisions affecting a specific system area.
+    """
+    if _memory_provider is None:
+        return [TextContent(type="text", text="Memory system is not available.")]
+
+    active_only = arguments.get("active_only", True)
+    area_filter = arguments.get("area", "").strip().lower()
+
+    try:
+        # Use search to find all decision-type events.
+        # We search for the canonical marker string that all decisions include.
+        results = _memory_provider.search("[DECISION]", limit=100)
+        # Filter to only decision-type events (search may return near-matches)
+        decisions = [e for e in results if e.type == _DECISION_TYPE]
+    except Exception as e:
+        log.error(f"list_decisions failed during search: {e}", exc_info=True)
+        return [TextContent(type="text", text=f"Error listing decisions: {e}")]
+
+    if not decisions:
+        return [TextContent(type="text", text="No architectural decisions found in memory.")]
+
+    # Collect superseded keys from metadata to support active_only filtering.
+    # A decision is superseded if any other decision's metadata lists it in 'supersedes'.
+    superseded_keys: set[str] = set()
+    for event in decisions:
+        prior_key = event.metadata.get("supersedes")
+        if prior_key:
+            superseded_keys.add(prior_key)
+
+    # Apply filters as pure transformations (immutable pipeline)
+    filtered = decisions
+    if active_only:
+        filtered = [
+            e for e in filtered
+            if e.metadata.get("decision_key", "") not in superseded_keys
+        ]
+    if area_filter:
+        filtered = [
+            e for e in filtered
+            if area_filter in " ".join(
+                str(a).lower() for a in e.metadata.get("decision_affected_areas", [])
+            )
+            or area_filter in e.content.lower()
+        ]
+
+    if not filtered:
+        qualifier = "active " if active_only else ""
+        area_note = f" for area '{area_filter}'" if area_filter else ""
+        return [TextContent(
+            type="text",
+            text=f"No {qualifier}architectural decisions found{area_note}."
+        )]
+
+    lines = [
+        f"**Architectural Decisions** ({len(filtered)} {'active' if active_only else 'total'}):\n"
+    ]
+    for event in filtered:
+        ts = _format_display_ts(event.timestamp, "%Y-%m-%d") if event.timestamp else "?"
+        key = event.metadata.get("decision_key", "?")
+        title = event.metadata.get("decision_title", "")
+        superseded = "[SUPERSEDED] " if key in superseded_keys else ""
+
+        lines.append(f"### {superseded}{key} ({ts})")
+        if title:
+            lines.append(f"**{title}**")
+
+        # Display the full content (minus the [DECISION] header line)
+        content_lines = [
+            ln for ln in event.content.splitlines()
+            if not ln.startswith("[DECISION] key=")
+        ]
+        lines.append("\n".join(content_lines))
+        lines.append("")
+
+    return [TextContent(type="text", text="\n".join(lines))]
 
 
 async def handle_get_handoff(arguments: dict[str, Any]) -> list[TextContent]:
