@@ -11,11 +11,19 @@ import sys
 import os
 sys.path.insert(0, os.path.expanduser("~/lobster/src"))
 from integrations.google_workspace.token_store import load_token
-from mcp.user_model.owner import read_owner
 
-owner = read_owner()
-OWNER_USER_ID = owner.get("owner", {}).get("telegram_chat_id", "")
-token = load_token(OWNER_USER_ID)
+# MULTI-USER: always prefer chat_id from the incoming message context.
+# Fall back to read_owner() only for single-user / legacy installs where
+# the message doesn't carry a chat_id (e.g. scheduled jobs).
+def _fallback_to_owner() -> str:
+    from mcp.user_model.owner import read_owner
+    owner = read_owner()
+    return owner.get("owner", {}).get("telegram_chat_id", "")
+
+# Prefer caller's chat_id; fall back to owner for single-user installs.
+# `message_chat_id` must be passed in from the dispatcher context.
+USER_ID = str(message_chat_id) if message_chat_id else _fallback_to_owner()
+token = load_token(USER_ID)
 is_authenticated = token is not None
 ```
 
@@ -72,13 +80,21 @@ import sys
 import os
 sys.path.insert(0, os.path.expanduser("~/lobster/src"))
 from integrations.google_workspace.docs_client import gdocs_read
-from mcp.user_model.owner import read_owner
 
-owner = read_owner()
-OWNER_USER_ID = owner.get("owner", {}).get("telegram_chat_id", "")
+# MULTI-USER: use the chat_id from the message that triggered this subagent.
+# The dispatcher must pass it as a parameter when spawning the subagent.
+# Fall back to read_owner() only for single-user / legacy installs.
+def _get_user_id(message_chat_id=None) -> str:
+    if message_chat_id:
+        return str(message_chat_id)
+    from mcp.user_model.owner import read_owner
+    owner = read_owner()
+    return owner.get("owner", {}).get("telegram_chat_id", "")
+
+USER_ID = _get_user_id(message_chat_id)  # pass chat_id from dispatcher context
 
 # doc_id_or_url comes from the user's message (doc ID or full docs.google.com URL)
-content = gdocs_read(user_id=OWNER_USER_ID, doc_id_or_url=doc_id_or_url)
+content = gdocs_read(user_id=USER_ID, doc_id_or_url=doc_id_or_url)
 if content is None:
     reply = "I couldn't read that document. Make sure Google Workspace is connected and you have access to the doc."
 else:
