@@ -303,7 +303,7 @@ def debug_step(text: str) -> None:
     msg = {
         "id": str(uuid.uuid4()),
         "source": "gmail-pipeline",
-        "chat_id": 8305714125,
+        "chat_id": {{TELEGRAM_CHAT_ID}},
         "type": "text",
         "subtype": "pipeline_step",
         "text": text,
