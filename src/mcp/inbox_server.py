@@ -2481,6 +2481,8 @@ async def list_tools() -> list[Tool]:
                             "dispatcher summary (in `text`) from the user-facing reply (in the file). "
                             "This keeps the dispatcher's main-thread context lean — `text` is a "
                             "terse internal summary while the full user reply lives in the file. "
+                            "Do not include raw file paths in the file's content — use relative paths "
+                            "or descriptions instead (raw server-side paths are meaningless to mobile users). "
                             "Example: write your reply to "
                             "`~/lobster-workspace/reports/<task_id>-reply.md`, then pass that path "
                             "as `reply_text`. If absent, the dispatcher falls back to relaying `text` "
@@ -7256,7 +7258,7 @@ async def handle_write_result(args: dict) -> list[TextContent]:
         message["artifacts"] = artifacts
     if thread_ts:
         message["thread_ts"] = thread_ts
-    if reply_text:
+    if reply_text and chat_id not in (0, "0"):
         message["reply_text"] = reply_text
 
     inbox_file = INBOX_DIR / f"{message_id}.json"

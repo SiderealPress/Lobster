@@ -160,6 +160,50 @@ class TestReplyTextAbsentWhenNotProvided:
 
 
 # ---------------------------------------------------------------------------
+# Tests: reply_text suppressed for system tasks (chat_id 0 or "0")
+# ---------------------------------------------------------------------------
+
+class TestReplyTextSuppressedForSystemTasks:
+    """reply_text must NOT be stored when chat_id is the system sentinel (0 or '0').
+
+    System tasks route results back to the dispatcher, not to a real user.
+    Storing a reply_text file path in that context would be misleading — there
+    is no user to relay to.
+    """
+
+    def test_reply_text_suppressed_when_chat_id_integer_zero(self, tmp_path):
+        """reply_text is not stored when chat_id is integer 0 (system task)."""
+        msg = _run_write_result(tmp_path, {
+            "task_id": "system-task",
+            "chat_id": 0,
+            "text": "Internal dispatcher briefing.",
+            "reply_text": "/tmp/some-reply.md",
+        })
+        assert "reply_text" not in msg
+
+    def test_reply_text_suppressed_when_chat_id_string_zero(self, tmp_path):
+        """reply_text is not stored when chat_id is string '0' (system task via string)."""
+        msg = _run_write_result(tmp_path, {
+            "task_id": "system-task-str",
+            "chat_id": "0",
+            "text": "Internal dispatcher briefing.",
+            "reply_text": "/tmp/some-reply.md",
+        })
+        assert "reply_text" not in msg
+
+    def test_reply_text_stored_for_nonzero_chat_id(self, tmp_path):
+        """reply_text IS stored for real user chat_ids (non-zero)."""
+        reply_path = "/tmp/lobster-workspace/reports/my-task-reply.md"
+        msg = _run_write_result(tmp_path, {
+            "task_id": "user-task",
+            "chat_id": 12345,
+            "text": "Terse summary.",
+            "reply_text": reply_path,
+        })
+        assert msg.get("reply_text") == reply_path
+
+
+# ---------------------------------------------------------------------------
 # Tests: backward compatibility — existing callers unaffected
 # ---------------------------------------------------------------------------
 
