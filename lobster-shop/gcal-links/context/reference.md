@@ -7,11 +7,18 @@ import sys
 import os
 sys.path.insert(0, os.path.expanduser("~/lobster/src"))
 from integrations.google_calendar.token_store import load_token
-from mcp.user_model.owner import read_owner
 
-owner = read_owner()
-OWNER_USER_ID = owner.get("owner", {}).get("telegram_chat_id", "")
-token = load_token(OWNER_USER_ID)
+# MULTI-USER: prefer chat_id from the incoming message context.
+# Fall back to read_owner() only for single-user / legacy installs.
+def _get_user_id(message_chat_id=None) -> str:
+    if message_chat_id:
+        return str(message_chat_id)
+    from mcp.user_model.owner import read_owner
+    owner = read_owner()
+    return owner.get("owner", {}).get("telegram_chat_id", "")
+
+USER_ID = _get_user_id(message_chat_id)  # pass chat_id from dispatcher context
+token = load_token(USER_ID)
 is_authenticated = token is not None
 ```
 
@@ -44,7 +51,7 @@ link = gcal_add_link_md(title="Doctor appointment", start=start, end=end)
 ```python
 from integrations.google_calendar.client import get_upcoming_events
 
-events = get_upcoming_events(user_id=OWNER_USER_ID, days=7)
+events = get_upcoming_events(user_id=USER_ID, days=7)
 # Returns List[CalendarEvent] — empty list on auth failure or API error
 
 # CalendarEvent fields:
@@ -61,7 +68,7 @@ from integrations.google_calendar.client import create_event
 from datetime import datetime, timezone
 
 event = create_event(
-    user_id=OWNER_USER_ID,
+    user_id=USER_ID,
     title="Meeting with Sarah",
     start=datetime(2026, 3, 7, 14, 0, tzinfo=timezone.utc),
     end=datetime(2026, 3, 7, 15, 0, tzinfo=timezone.utc),   # optional
@@ -73,22 +80,34 @@ event = create_event(
 
 ---
 
-### Generate auth URL
+### Generate auth URL (consent flow)
 
 ```python
-import secrets
-from integrations.google_calendar.config import is_enabled
-from integrations.google_calendar.oauth import generate_auth_url
+from integrations.google_auth.consent import generate_consent_link
 
-if is_enabled():
-    state = secrets.token_urlsafe(32)
-    url = generate_auth_url(state=state)
-    # Send to user as: [Authorize Google Calendar](url)
+try:
+    url = generate_consent_link("calendar")
+    # Send to user as: [Connect Google Calendar](url)
+except Exception as exc:
+    # Log warning and send a user-friendly fallback message.
+    # Never surface exc details to the user.
+    pass
 ```
 
 ---
 
 ### User ID convention
 
-The owner's `user_id` is their Telegram chat_id as a string, read from `~/lobster-config/owner.toml`.
+For multi-user deployments, `user_id` is the **caller's Telegram `chat_id`**
+passed in from the message context — not the owner's ID.
+Fall back to `read_owner()` only for single-user / legacy installs where no
+`chat_id` is available in context.
+
 All token files live in `~/messages/config/gcal-tokens/{user_id}.json`.
+
+---
+
+### Scope isolation
+
+Calendar tokens (`gcal-tokens/`) and Gmail tokens (`gmail-tokens/`) are
+separate directories. Authenticating one never affects the other.
