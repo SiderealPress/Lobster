@@ -110,7 +110,7 @@ The credentials.json has a refresh_token that must be refreshed using:
 - refresh_token: from credentials.json
 - POST https://oauth2.googleapis.com/token
 
-#### Source 2: Google Gmail (robotsquadsm@gmail.com)
+#### Source 2: Google Gmail
 
 Search Gmail for emails mentioning the person:
 ```bash
@@ -179,8 +179,8 @@ POST http://46.224.41.108:4242/message
 Update `last_processed_ts` to the timestamp of the latest processed message.
 Write to state file atomically (write .tmp then rename).
 
-Also notify Sahar via Telegram if a context query was received and answered:
-- chat_id: 8305714125
+Also notify the owner via Telegram if a context query was received and answered:
+- chat_id: $ADMIN_CHAT_ID (read from environment)
 - Message: "Bot-talk query handled: AlbertLobster asked about NAME. Replied with context from [sources]."
 
 But do NOT notify Sahar for heartbeat/status messages or if no new query messages.
@@ -193,4 +193,4 @@ Call `write_task_output` with:
 - status: "success" or "failed"
 
 If no new queries, call `write_result` with chat_id=0 (silent).
-If a query was handled, call `write_result` with chat_id=8305714125 and sent_reply_to_user=True.
+If a query was handled, call `write_result` with chat_id=$ADMIN_CHAT_ID and sent_reply_to_user=True.

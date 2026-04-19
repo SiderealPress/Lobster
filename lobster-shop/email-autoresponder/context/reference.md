@@ -4,7 +4,7 @@
 
 - **Job name**: `gmail-auto-draft`
 - **Schedule**: Every 5 minutes (`*/5 * * * *`)
-- **Account**: albobsterbot@gmail.com
+- **Account**: `{{GMAIL_ACCOUNT}}` (set per-instance in `~/lobster-user-config/`)
 - **What it does**: Finds inbox emails without existing drafts, drafts context-aware HTML replies with named read-only Drive links
 
 ### Draft deduplication (critical)
@@ -32,15 +32,17 @@ with urllib.request.urlopen(req) as r:
 Always do a fresh search — do not rely solely on hardcoded IDs.
 
 **Known files (verify against fresh search):**
-- `General Investment Partners - Opportunity Fund I Pitch Deck` — ID: `1IIQEmt5-tzoCTjaN19Zhsq9uQWK79GQW0ojX2sWkJo0`
-- `Buy My House` (Document) — ID: `1k95Kx3PBjWB7wl4UWNPDRDQADXmtVfMe51rJgkqBEB0`
+
+> Note: file IDs are instance-specific. Populate these per-install in `~/lobster-user-config/` or via Drive search.
+- Example pitch deck — ID: `<DRIVE_FILE_ID_PITCH_DECK>` (set in user config)
+- Example document — ID: `<DRIVE_FILE_ID_DOCUMENT>` (set in user config)
 
 ### Draft logic summary
 
 | Email type | Action |
 |------------|--------|
-| Business / investment inquiry | HTML draft with named pitch deck link, sign as "General Investment Partners" |
-| Real estate / house inquiry | HTML draft with named Buy My House doc link, sign as "Al" |
+| Business / investment inquiry | HTML draft with named pitch deck link, sign as configured sender name |
+| Real estate / document inquiry | HTML draft with named document link, sign as configured sender name |
 | Spam / automated / newsletters | Skip — do NOT create a draft |
 | Unclear intent | Friendly open-ended reply, reference relevant Drive files if any |
 
@@ -81,7 +83,7 @@ Always do a fresh search — do not rely solely on hardcoded IDs.
 
 - **Job name**: `lobstertalk-incoming-handler`
 - **Schedule**: Every 5 minutes (`*/5 * * * *`)
-- **Account**: robotsquadsm@gmail.com
+- **Account**: `{{GMAIL_ACCOUNT}}` (set per-instance in `~/lobster-user-config/`)
 - **What it does**: Polls bot-talk for context queries from AlbertLobster, looks up Drive + Gmail + CRM, and replies via bot-talk
 
 ### Task file
@@ -194,7 +196,7 @@ Authorization: X-Bot-Token <token>
 
 Update `last_processed_ts` to the latest processed message timestamp. Write atomically (write .tmp then rename).
 
-Notify Sahar via Telegram (chat_id: 8305714125) if a query was handled:
+Notify the owner via Telegram (chat_id: $ADMIN_CHAT_ID) if a query was handled:
 "Bot-talk query handled: AlbertLobster asked about NAME. Replied with context from [sources]."
 
 Do NOT notify for heartbeat/status messages or if no new queries.
