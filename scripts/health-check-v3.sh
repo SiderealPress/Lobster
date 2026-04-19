@@ -81,7 +81,7 @@ STALE_THRESHOLD_SECONDS=360          # 6 minutes - RED if any message older; tri
 YELLOW_THRESHOLD_SECONDS=150         # 2.5 minutes - YELLOW early warning before 6-min stale restart
 RESTART_WINDOW_BUFFER_SECONDS=120    # Pre-mark messages within this window of the stale threshold before a restart
 
-MAINTENANCE_EXPIRY_SECONDS=3600      # 1 hour - stale maintenance flag is auto-cleared and checks resume
+MAINTENANCE_EXPIRY_SECONDS=3600      # 1 hour - fallback: auto-clear stale flag if startup never completed (issue #1656)
 
 COMPACTION_SUPPRESS_SECONDS=300      # 5 minutes - skip stale-inbox check after a compaction event
 COMPACT_GRACE_SECONDS=600            # 10 minutes - skip stale-inbox check after a compaction (last-compact.ts)
@@ -1560,8 +1560,15 @@ main() {
     acquire_lock
 
     # Maintenance mode: lobster stop sets this flag to prevent auto-restart.
-    # The flag expires after MAINTENANCE_EXPIRY_SECONDS so a failed restart
-    # (which leaves the flag behind) doesn't suppress recovery indefinitely.
+    #
+    # Primary path (issue #1656): on-fresh-start.py clears the flag when the
+    # dispatcher session successfully starts.  This makes `lobster stop` a true
+    # pause — the system stays down until explicitly restarted.
+    #
+    # Fallback path: if startup never completes (e.g. Claude crashes immediately
+    # after the session starts), the flag is never cleared by on-fresh-start.py.
+    # In that case we auto-clear it after MAINTENANCE_EXPIRY_SECONDS so a
+    # genuinely stuck state doesn't suppress recovery indefinitely.
     if [[ -f "$MAINTENANCE_FLAG" ]]; then
         local stopped_at_raw
         stopped_at_raw=$(grep -oP 'stopped_at=\K[^ ]+' "$MAINTENANCE_FLAG" 2>/dev/null || true)
@@ -1575,7 +1582,7 @@ main() {
             log_info "=== Maintenance mode active (${flag_age}s old, expires at ${MAINTENANCE_EXPIRY_SECONDS}s), skipping all checks ==="
             exit 0
         else
-            log_warn "Maintenance flag is stale (${flag_age}s old, limit ${MAINTENANCE_EXPIRY_SECONDS}s) — auto-clearing and resuming checks"
+            log_warn "Maintenance flag is stale (${flag_age}s old, limit ${MAINTENANCE_EXPIRY_SECONDS}s) — startup likely never completed; auto-clearing and resuming checks"
             rm -f "$MAINTENANCE_FLAG"
         fi
     fi
