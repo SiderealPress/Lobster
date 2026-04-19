@@ -17,6 +17,7 @@ Browse available skills for your Lobster assistant. Install any skill with one c
 | [Hibernation](./hibernation/) | Dispatcher hibernation — idle timeout behavior, state file semantics, and how to break the hibernation loop cleanly | Behavioral | Available |
 | [Obsidian KM](./obsidian-km/) | Sync and access your Obsidian vault via Telegram — create, read, search, and manage notes from anywhere | Tool | In Dev |
 | [Buy Things](./buy-things/) | Purchase items via Telegram — search products, confirm with you, and complete checkout using Camofox browser automation | Tool | Available |
+| [Gmail](./gmail/) | Read and search your Gmail inbox via chat — authenticate once with Google OAuth, then check email, find messages, and get summaries on demand | Integration | Available |
 
 ## Templates
 
@@ -32,7 +33,6 @@ Browse available skills for your Lobster assistant. Install any skill with one c
 | Notion | Search your notes, create pages, manage databases from chat | Coming Soon |
 | Spotify | Control your music — play, pause, skip, queue songs by asking | Coming Soon |
 | Home Automation | Control lights, thermostats, and devices via HomeKit or Home Assistant | Coming Soon |
-| Email Triage | Summarize your inbox, flag important emails, draft replies | Coming Soon |
 | Expense Tracking | Log expenses, categorize spending, get summaries on demand | Coming Soon |
 
 ---
