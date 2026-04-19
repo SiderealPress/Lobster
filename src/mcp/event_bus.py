@@ -10,6 +10,12 @@ existing _emit_debug_observation outbox-write behaviour.
 No existing callsites are changed by this module (Step 1 / issue #890). Step 2
 (#891) migrates _emit_debug_observation callsites; Step 3 (#892) routes
 subagent_observation through the bus.
+
+Issue #1665 additions:
+- CRITICAL severity level (added to VALID_SEVERITIES and default EventFilter)
+- CriticalAlertListener: forwards critical-severity events to Telegram, no debug gate
+- MetricsListener: in-memory counters (events_by_type, events_by_severity, errors_last_1h)
+- emit_event MCP tool handler (in inbox_server.py)
 """
 
 from __future__ import annotations
@@ -21,14 +27,23 @@ import os
 import threading
 
 log = logging.getLogger(__name__)
+from collections import defaultdict
 from dataclasses import dataclass, field, asdict
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 try:
     from .log_utils import GzipRotatingFileHandler
 except ImportError:
     from log_utils import GzipRotatingFileHandler  # type: ignore[no-redef]
 from pathlib import Path
 from typing import Protocol, runtime_checkable
+
+# ---------------------------------------------------------------------------
+# Severity constants
+# ---------------------------------------------------------------------------
+
+# Ordered from lowest to highest. "critical" was added in issue #1665.
+VALID_SEVERITIES: frozenset[str] = frozenset({"debug", "info", "warn", "error", "critical"})
+
 
 # ---------------------------------------------------------------------------
 # Core data types
@@ -39,7 +54,7 @@ class LobsterEvent:
     """An immutable event emitted anywhere in the Lobster system."""
 
     event_type: str          # e.g. "memory.write", "agent.spawn", "debug.observation"
-    severity: str            # "debug" | "info" | "warn" | "error"
+    severity: str            # "debug" | "info" | "warn" | "error" | "critical"
     source: str              # component that emitted this event
     payload: dict            # arbitrary structured data; keep serialisable
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -63,7 +78,7 @@ class EventFilter:
     require_debug_mode: when True, only accept events if LOBSTER_DEBUG=true.
     """
 
-    severity: set[str] = field(default_factory=lambda: {"debug", "info", "warn", "error"})
+    severity: set[str] = field(default_factory=lambda: set(VALID_SEVERITIES))
     event_types: set[str] = field(default_factory=lambda: {"*"})
     require_debug_mode: bool = False
 
@@ -211,7 +226,7 @@ class JsonlFileListener:
             / "events.jsonl"
         )
         self._filter = event_filter or EventFilter(
-            severity={"debug", "info", "warn", "error"},
+            severity=set(VALID_SEVERITIES),
             event_types={"*"},
             require_debug_mode=False,
         )
@@ -277,6 +292,8 @@ class TelegramOutboxListener:
         self._filter = event_filter or EventFilter(
             # Mirror _emit_debug_observation: only deliver when LOBSTER_DEBUG=true.
             # The filter is debug-mode-gated; callers do not need to check.
+            # Note: "critical" is intentionally excluded here — CriticalAlertListener
+            # handles critical events without requiring LOBSTER_DEBUG=true.
             severity={"warn", "error", "debug", "info"},
             event_types={"*"},
             require_debug_mode=True,
@@ -366,6 +383,168 @@ class TelegramOutboxListener:
             pass  # telegram listener failures must never propagate
 
 
+class CriticalAlertListener:
+    """
+    Forwards severity=critical events to the Telegram outbox without a debug-mode gate.
+
+    Unlike TelegramOutboxListener (which requires LOBSTER_DEBUG=true), this listener
+    always delivers critical-severity events. Gate: LOBSTER_SILENT_ERRORS=true suppresses
+    delivery entirely (useful in tests and maintenance windows).
+
+    Delivery is atomic: write to .tmp then rename, same as TelegramOutboxListener.
+    """
+
+    name = "critical-alert"
+
+    def __init__(self, outbox_dir: Path | None = None) -> None:
+        self._outbox_dir = outbox_dir  # resolved lazily
+
+    def _get_outbox_dir(self) -> Path:
+        if self._outbox_dir is not None:
+            return self._outbox_dir
+        messages_base = Path(
+            os.environ.get("LOBSTER_MESSAGES", Path.home() / "messages")
+        )
+        return messages_base / "outbox"
+
+    def _resolve_owner(self) -> tuple[int | str | None, str]:
+        """Return (chat_id, source) for the configured owner — identical to TelegramOutboxListener."""
+        chat_id: int | str | None = None
+        source = "telegram"
+        try:
+            config_dir = Path(os.environ.get("LOBSTER_MESSAGES", Path.home() / "messages")) / "config"
+            config_file = config_dir / "config.env"
+            slack_enabled = False
+            slack_channel: str | None = None
+            telegram_chat_id: int | None = None
+            if config_file.exists():
+                for line in config_file.read_text().splitlines():
+                    stripped = line.strip()
+                    if stripped.startswith("TELEGRAM_ALLOWED_USERS="):
+                        val = stripped.split("=", 1)[1].strip().strip('"').strip("'")
+                        first = val.split(",")[0].strip()
+                        if first.lstrip("-").isdigit():
+                            telegram_chat_id = int(first)
+                    elif stripped.startswith("LOBSTER_ENABLE_SLACK="):
+                        slack_enabled = stripped.split("=", 1)[1].strip().strip('"').strip("'").lower() == "true"
+                    elif stripped.startswith("LOBSTER_SLACK_ALLOWED_CHANNELS="):
+                        val = stripped.split("=", 1)[1].strip().strip('"').strip("'")
+                        first_chan = val.split(",")[0].strip()
+                        if first_chan:
+                            slack_channel = first_chan
+            if slack_enabled and slack_channel:
+                source = "slack"
+                chat_id = slack_channel
+            elif telegram_chat_id is not None:
+                source = "telegram"
+                chat_id = telegram_chat_id
+        except Exception:
+            pass
+        return chat_id, source
+
+    def accepts(self, event: LobsterEvent) -> bool:
+        return event.severity == "critical"
+
+    async def deliver(self, event: LobsterEvent) -> None:
+        try:
+            # LOBSTER_SILENT_ERRORS=true suppresses all alert delivery
+            if os.environ.get("LOBSTER_SILENT_ERRORS", "").lower() == "true":
+                return
+
+            chat_id, source = self._resolve_owner()
+            if chat_id is None:
+                return
+
+            outbox_dir = self._get_outbox_dir()
+            outbox_dir.mkdir(parents=True, exist_ok=True)
+
+            ts_ms = int(event.timestamp.timestamp() * 1000)
+            safe_source = "".join(c if c.isalnum() or c in "-_" else "_" for c in event.source)[:40]
+            message_id = f"{ts_ms}_critical_{safe_source}"
+
+            emitter_label = event.task_id or event.source or "unknown"
+            label = f"[CRITICAL|event-bus] {event.event_type} from {emitter_label}"
+            full_text = f"{label}\n{event.payload.get('text', event.payload.get('msg', json.dumps(event.payload)))}"
+
+            message = {
+                "id": message_id,
+                "type": "critical_alert",
+                "source": source,
+                "chat_id": chat_id,
+                "text": full_text,
+                "timestamp": event.timestamp.isoformat(),
+            }
+
+            outbox_file = outbox_dir / f"{message_id}.json"
+            tmp_file = outbox_file.with_suffix(".tmp")
+            tmp_file.write_text(json.dumps(message), encoding="utf-8")
+            tmp_file.rename(outbox_file)
+        except Exception:
+            pass  # critical listener failures must never propagate
+
+
+class MetricsListener:
+    """
+    In-memory event counters for observability.
+
+    Maintains three counters updated on every deliver() call:
+    - events_by_type: dict[str, int] — total count per event_type
+    - events_by_severity: dict[str, int] — total count per severity level
+    - _error_timestamps: list of (datetime, severity) for events with
+      severity in {"error", "critical"}, used to compute errors_last_1h
+
+    get_snapshot() returns a copy of all counters as a plain dict. The copy
+    is intentionally shallow — callers receive their own dict so mutations
+    do not affect internal state.
+
+    Thread-safe: all mutations are protected by a lock.
+    """
+
+    name = "metrics"
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._events_by_type: dict[str, int] = defaultdict(int)
+        self._events_by_severity: dict[str, int] = defaultdict(int)
+        # Store timestamps of error/critical events for sliding-window count
+        self._error_timestamps: list[datetime] = []
+
+    def accepts(self, event: LobsterEvent) -> bool:
+        return True  # count everything
+
+    async def deliver(self, event: LobsterEvent) -> None:
+        try:
+            with self._lock:
+                self._events_by_type[event.event_type] += 1
+                self._events_by_severity[event.severity] += 1
+                if event.severity in ("error", "critical"):
+                    self._error_timestamps.append(event.timestamp)
+        except Exception:
+            pass  # metrics failures must never propagate
+
+    def get_snapshot(self) -> dict:
+        """
+        Return a point-in-time snapshot of all counters.
+
+        Returns a fresh dict — mutating the result does not affect internal state.
+        errors_last_1h is computed from the sliding window at snapshot time.
+        """
+        with self._lock:
+            now = datetime.now(timezone.utc)
+            cutoff = now - timedelta(hours=1)
+            # Prune old entries while holding the lock (keeps the list bounded)
+            self._error_timestamps = [
+                ts for ts in self._error_timestamps
+                if ts >= cutoff
+            ]
+            errors_last_1h = len(self._error_timestamps)
+            return {
+                "events_by_type": dict(self._events_by_type),
+                "events_by_severity": dict(self._events_by_severity),
+                "errors_last_1h": errors_last_1h,
+            }
+
+
 # ---------------------------------------------------------------------------
 # Module-level singleton
 # ---------------------------------------------------------------------------
@@ -410,6 +589,9 @@ def init_event_bus(
     - JsonlFileListener: writes all events to events.jsonl
     - TelegramOutboxListener: forwards debug events to Telegram outbox when
       LOBSTER_DEBUG=true
+    - CriticalAlertListener: forwards critical-severity events to Telegram,
+      no debug-mode gate (issue #1665)
+    - MetricsListener: in-memory counters for observability (issue #1665)
     """
     bus = get_event_bus()
     # Idempotency guard: check if already initialised
@@ -418,4 +600,21 @@ def init_event_bus(
             return bus
         bus.register(JsonlFileListener(path=jsonl_path))
         bus.register(TelegramOutboxListener(outbox_dir=outbox_dir))
+        bus.register(CriticalAlertListener(outbox_dir=outbox_dir))
+        bus.register(MetricsListener())
     return bus
+
+
+def get_metrics_listener() -> MetricsListener | None:
+    """
+    Return the MetricsListener registered with the module-level bus, or None.
+
+    Used by the observability server to expose in-memory counters on the
+    /observability HTTP endpoint without coupling the two modules via import.
+    """
+    bus = get_event_bus()
+    with _BUS_LOCK:
+        for listener in bus._listeners:
+            if isinstance(listener, MetricsListener):
+                return listener
+    return None
