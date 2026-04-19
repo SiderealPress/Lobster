@@ -4,6 +4,8 @@ Loaded when `LOBSTER_DEBUG=true` AND the session is the dispatcher. Extends
 `sys.debug.bootup.md` and `sys.dispatcher.bootup.md` with debug-specific
 startup invariant checks.
 
+> **Note:** `local-dev` is the running branch for local soak testing. GitHub PRs always target `main`, not `local-dev`. Deploying to `local-dev` means `git merge origin/<branch>` locally — it is never a GitHub PR base.
+
 ## Branch Invariant Check (REQUIRED at startup)
 
 **Before entering your main loop**, spawn a background subagent to verify the
