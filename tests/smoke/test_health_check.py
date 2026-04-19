@@ -514,7 +514,7 @@ def _make_health_check_env(tmp_path: Path) -> dict:
 
 def test_maintenance_flag_honored_when_recent(tmp_path: Path) -> None:
     """
-    D4 (existing, regression guard): maintenance flag causes clean exit when present.
+    D6a: maintenance flag causes clean exit when present and recently written.
 
     Ensures the basic behavior still holds after the 1-hour timer is removed.
     """
@@ -548,7 +548,7 @@ def test_maintenance_flag_honored_when_recent(tmp_path: Path) -> None:
 
 def test_maintenance_flag_honored_after_one_hour(tmp_path: Path) -> None:
     """
-    D6: maintenance flag must be honored indefinitely — even after 1+ hours.
+    D6b: maintenance flag must be honored indefinitely — even after 1+ hours.
 
     The old behavior auto-cleared the flag after MAINTENANCE_EXPIRY_SECONDS (1h),
     which caused Lobster to auto-restart against the operator's intent (issue #1656).
