@@ -195,6 +195,17 @@ class TestReplyTextSuppressedWhenIrrelevant:
         })
         assert "reply_text" not in msg
 
+    def test_reply_text_not_stored_when_chat_id_is_string_zero(self, tmp_path):
+        """chat_id == '0' (string sentinel) is also dispatcher-internal.
+        The guard must handle both int 0 and string '0' to prevent accidental relay."""
+        msg = _run_write_result(tmp_path, {
+            "task_id": "dispatcher-internal-string-task",
+            "chat_id": "0",
+            "text": "Internal summary.",
+            "reply_text": "This would never be sent to anyone.",
+        })
+        assert "reply_text" not in msg
+
 
 # ---------------------------------------------------------------------------
 # Tests: backward compatibility — existing callers unaffected

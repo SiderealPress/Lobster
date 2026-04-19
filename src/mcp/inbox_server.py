@@ -2454,7 +2454,8 @@ async def list_tools() -> list[Tool]:
                             "sent_reply_to_user is False, the dispatcher sends this to the user "
                             "instead of text. Use this to keep text as a terse internal summary "
                             "while sending a richer or differently-phrased message to the user. "
-                            "Omit if text is already the right user-facing message."
+                            "Omit if text is already the right user-facing message. "
+                            "Do not include raw file paths — use relative paths or descriptions instead."
                         ),
                     },
                     "source": {
@@ -7256,8 +7257,8 @@ async def handle_write_result(args: dict) -> list[TextContent]:
         message["warning"] = "User already received the subagent's reply. Don't summarize it. If you respond, add new value only — a question, a correction, missing context."
     # reply_text: user-facing reply separate from the internal dispatcher summary (text).
     # Only stored when there is an active user relay path: sent_reply_to_user=False and
-    # chat_id != 0 (chat_id 0 is dispatcher-internal; no user reply is ever sent).
-    if reply_text and not sent_reply_to_user and chat_id != 0:
+    # chat_id not in (0, "0") (chat_id 0 is dispatcher-internal; no user reply is ever sent).
+    if reply_text and not sent_reply_to_user and chat_id not in (0, "0"):
         message["reply_text"] = reply_text
     if artifacts:
         message["artifacts"] = artifacts
