@@ -397,6 +397,13 @@ def _emit_mcp_event(
         pass  # observability must never block the caller
 
 
+# Populated from event_bus when available — used by handle_emit_event below.
+try:
+    from event_bus import VALID_SEVERITIES as _VALID_SEVERITIES
+except ImportError:
+    _VALID_SEVERITIES = frozenset({"debug", "info", "warn", "error", "critical"})  # type: ignore[assignment]
+
+
 # ---------------------------------------------------------------------------
 # User model context injection heuristic
 # ---------------------------------------------------------------------------
