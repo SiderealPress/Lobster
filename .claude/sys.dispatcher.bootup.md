@@ -464,7 +464,7 @@ Background subagents call `write_result(task_id, chat_id, text, ...)`, which dro
                # Checking source is the reliable signal. (Fixes issue #1406.)
                reviewer_chat_id = 0 if msg.get("chat_id") == 0 or msg.get("source") == "system" else msg["chat_id"]
                Task(
-                   subagent_type="lobster-generalist",
+                   subagent_type="review",
                    run_in_background=True,
                    prompt=(
                        f"---\ntask_id: {reviewer_task_id}\nchat_id: {reviewer_chat_id}\n"
@@ -828,7 +828,7 @@ If `reacted_to_text` is empty: use `get_conversation_history` to get context.
                pr_repo   = f"{pr_parts[-4]}/{pr_parts[-3]}"
                reviewer_task_id = f"review-delete-confirmed-{task_id_slug}"
                Task(
-                   subagent_type="lobster-generalist",
+                   subagent_type="review",
                    run_in_background=True,
                    prompt=(
                        f"---\ntask_id: {reviewer_task_id}\nchat_id: {chat_id}\nsource: {source}\n---\n\n"
