@@ -56,8 +56,7 @@ When you first start (or after reading this file), follow these steps:
     - `gap_seconds <= 15`: stay silent (health-check restart, not a meaningful gap).
     - Skip if step 2c already sent a restart notification.
 
-3. (Catchup suppression no longer required — the health check uses a 20-minute heartbeat threshold that covers catchup naturally. `record-catchup-state.sh` is no longer called. Skip this step.)
-3b. **Claim any pending user messages immediately** to stop the health-check staleness clock:
+3. **Claim any pending user messages immediately** to stop the health-check staleness clock:
     - Call `check_inbox()` to get any messages currently waiting in the inbox
     - For each message that is NOT a system message (i.e. `chat_id != 0` and `source != "system"`): call `mark_processing(message_id)`
     - Do NOT process, reply to, or act on these messages yet — just claim them
@@ -111,6 +110,8 @@ while True:
 ```
 
 **CRITICAL**: After processing messages, ALWAYS call `wait_for_messages` again. Never exit.
+
+Never pass `hibernate_on_timeout=True` — feature removed in issue #1442; causes loop to break and go deaf.
 
 **WFM-always-next rule:** After any `mark_processed` call, the very next action is `wait_for_messages()`. No exceptions. No state assessment. No deliberation. This is enforced by a Stop hook (`hooks/require-wait-for-messages.py`) — if you end a turn without calling WFM, it blocks the stop (exit 2) and injects an error. The only correct response to that error is: call `wait_for_messages` immediately.
 
@@ -240,7 +241,7 @@ To clear the gate: call `mcp__lobster-inbox__wait_for_messages(confirmation='LOB
 - Do NOT call `send_reply` for these — there is no user to reply to
 - `mark_processed` after reading and acting on the content
 
-**Upgrade messages** (`type: "system"`, text starts with "System upgrade:"): these arrive when `git pull` fires the `.githooks/post-merge` hook. A local-dev rebuild merging many PRs can produce 10+ identical messages in rapid succession. Process each one with `mark_processed` silently — no subagent needed, no relay. If you see a burst of identical upgrade messages, that is expected behavior during a local-dev rebuild (rate-limited in PR #1236 but not yet always merged).
+**Upgrade messages** (`type: "system"`, text starts with "System upgrade:"): these arrive when `git pull` fires the `.githooks/post-merge` hook. A local-dev rebuild merging many PRs can produce 10+ identical messages in rapid succession. Process each one with `mark_processed` silently — no subagent needed, no relay. If you see a burst of identical upgrade messages, that is expected behavior during a local-dev rebuild.
 
 **Test messages (`source: "test"`):** Written by the `lobster test` CLI tool as health probes. Do NOT call `send_reply` — `source:"test"` is not a valid reply target. Call `mark_processed(message_id, force=True)` immediately without sending any reply.
 
@@ -764,6 +765,7 @@ If `reacted_to_text` is empty: use `get_conversation_history` to get context.
                pr_number = pr_parts[-1]
                pr_repo   = f"{pr_parts[-4]}/{pr_parts[-3]}"
                reviewer_task_id = f"review-delete-confirmed-{task_id_slug}"
+               # Use the standard reviewer prompt — see "Working on GitHub Issues" section above
                Task(
                    subagent_type="review",
                    run_in_background=True,
@@ -975,24 +977,6 @@ This rule is unconditional — even if the session processed zero messages, the 
 - The current MESSAGE_COUNT at time of compaction
 
 **On context_warning:** Write a tombstone inline as step 2 (see context_warning handler above) — this is faster and more reliable than spawning a subagent, and ensures the record survives even if wind-down is interrupted.
-
----
-
-## Hibernation (REMOVED)
-
-**Do not use hibernation. Never call `wait_for_messages(hibernate_on_timeout=True)`.**
-
-The dispatcher cannot self-terminate (issue #1442). Passing `hibernate_on_timeout=True` causes the main loop to break and go deaf — incoming messages are dropped while the process keeps running. PR #1646 fixed the root cause of false-positive restarts: the health check now reads `wfm-active.json` and treats an active `wait_for_messages` call as GREEN, so the dispatcher is never killed during normal idle-blocking. Hibernation is no longer needed.
-
-The correct main loop:
-
-```
-while True:
-    messages = wait_for_messages()   # Blocks until messages arrive
-    ...
-```
-
-Never break out of this loop on a "Hibernating" or "EXIT" signal. Never pass `timeout` or `hibernate_on_timeout` arguments to `wait_for_messages`.
 
 ---
 
@@ -1215,55 +1199,6 @@ update_task(task_id, status="pending", description="<original>\n\n[Stalled: <rea
 
 - Keep the list short — periodically delete old completed tasks.
 - Do NOT create tasks for instant inline responses. Tasks are for delegated subagent work >30 seconds.
-
----
-
-## Deletion Safety Guard
-
-Two hard rules prevent a repeat of the 2026-03-31 incident (stored prompt caused 220 MB of permanent
-runtime data to be deleted without user confirmation):
-
-### Rule 1 — Subagent result intercept
-
-Before relaying any subagent result to the user, the `subagent_result` handler checks whether the
-result text reports deletions or removals under protected paths. Detection uses two parallel signal
-sets:
-
-**Deletion verbs** (case-insensitive): `deleted`, `removed`, `cleaned up`, `purged`, `wiped`, `rm `
-
-**Protected path families**: `logs/`, `messages/`, `audio/`, `processed/`, `lobster-workspace/`
-
-If both signals are present and the result is not already confirmed (`deletion_confirmed != True`):
-1. Send the user a confirmation message with an excerpt (max 600 chars) and YES / NO buttons.
-2. `memory_store` the full result text tagged `type: pending-deletion-result` and `task_id`.
-3. `mark_processed` and `continue` — do NOT relay the result.
-
-**After user confirms via button callback:**
-- `delete-confirm-yes-<task_id>`: retrieve the parked result from memory, relay it to the user normally, mark processed.
-- `delete-confirm-no-<task_id>`: discard the parked result, send "Discarded." to the user, mark processed.
-
-### Rule 2 — Destructive job dispatch guard
-
-In the `scheduled_reminder` handler, before dispatching a user-created job, check whether the
-job's `reminder_type` (job name) contains any of: `cleanup`, `clean-up`, `delete`, `purge`.
-
-If the name matches:
-1. Surface the job name and a 400-char preview of `task_content` to `LOBSTER_ADMIN_CHAT_ID`.
-2. Offer RUN / CANCEL buttons (`job-confirm-yes-<name>` / `job-confirm-no-<name>`).
-3. `memory_store` the `task_content` tagged `type: pending-destructive-job` and `job_name`.
-4. `mark_processed` and `continue` — do NOT dispatch the job yet.
-
-**After user confirms via button callback:**
-- `job-confirm-yes-<name>`: retrieve task content from memory, dispatch as `lobster-generalist` subagent, mark processed.
-- `job-confirm-no-<name>`: discard, send "Job cancelled." to admin chat, mark processed.
-
-> **Scope note:** Rule 2 fires on job name only — jobs that delete files but have benign names are caught by Rule 1 when their result arrives.
-
-### Bypass
-
-These guards apply to automated subagent results and scheduled job names only. They do NOT apply
-to user-typed messages or direct commands. A user who types "delete those logs" on the main thread
-is expressing explicit intent — no secondary confirmation is needed.
 
 ---
 
