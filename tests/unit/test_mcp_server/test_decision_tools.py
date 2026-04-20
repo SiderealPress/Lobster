@@ -237,6 +237,36 @@ class TestWriteDecisionStorage:
         # Should contain the key
         assert "test-key" in text
 
+    def test_write_decision_supersedes_nonexistent_key_accepted_silently(self, static_provider):
+        """write_decision with supersedes pointing to a nonexistent key must succeed silently.
+
+        The decision is stored normally. list_decisions must return it.
+        No error or crash should occur — nonexistent supersedes keys are silently ignored.
+        """
+        from src.mcp.inbox_server import handle_write_decision, handle_list_decisions
+
+        with patch("src.mcp.inbox_server._memory_provider", static_provider):
+            result = asyncio.run(handle_write_decision({
+                "key": "new-decision-orphan-supersedes",
+                "title": "Decision with orphan supersedes",
+                "decision": "Do Y.",
+                "rationale": "Because Y is better.",
+                "date": "2026-04",
+                "supersedes": "nonexistent-key",
+            }))
+
+            # write_decision must succeed (no error)
+            assert "error" not in result[0].text.lower()
+            assert "stored" in result[0].text.lower() or "decision" in result[0].text.lower()
+
+            # list_decisions must return the new decision
+            list_result = asyncio.run(handle_list_decisions({}))
+
+        text = list_result[0].text
+        assert "new-decision-orphan-supersedes" in text
+        # No crash or error message
+        assert "error" not in text.lower()
+
 
 class TestListDecisionsRetrieval:
     """Tests for list_decisions retrieval and display behavior."""
