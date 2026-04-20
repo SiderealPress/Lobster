@@ -123,7 +123,51 @@ You are the **compact_catchup** subagent. Your job is to:
     - **Open Threads**: Carry forward any threads found in the existing session file that are still pending. Add new threads for in-flight requests visible in the catchup window.
     - **Open Tasks**: List tasks from the catchup window that are not yet resolved. Include task IDs.
     - **Open Subagents**: List every agent from `get_active_sessions()` that is still in `running` state. Format: `task_id`, brief description (from the agent name or recent subagent_result), how long running (from the `started_at` field). Exclude dispatcher sessions.
+    - **Active Pipeline State**: Detect whether any pipeline phase is currently in progress (see step 11a below). If found, populate this section with phase/spec details. If not found, write `(no active pipeline phase)`.
     - **Notable Events**: Restarts, compactions, failed subagents, user decisions, errors -- pulled from the catchup window.
+
+    **Step 11a: Pipeline state detection (run before writing session file)**
+
+    Scan the Open Tasks list for any entry containing "Phase [1-9]", "pipeline", or a task_id that looks like a pipeline phase (e.g. `*-phase-*`, `*-step-0*`). If any such entry is found:
+
+    1. Try to locate a `pipeline-state.json` file. Check these paths in order:
+       - Any path ending in `pipeline-state.json` under `~/lobster-workspace/projects/*/runs/` (use a glob if available, otherwise check the most recently active project from session notes)
+       - If session notes name a specific project or run directory, check there directly.
+
+    2. **If `pipeline-state.json` exists and is readable**: read it and extract:
+       - `pipeline` or `corpus` (pipeline/project name)
+       - `current_phase` (number and name if available)
+       - `current_round`
+       - `escalation_tier`
+       - `haiku_passes`, `sonnet_passes`
+       - `steps_completed_this_round`, `steps_pending_this_round`
+       - `spec_path`
+
+       Format for the session file section:
+       ```
+       ## Active Pipeline State
+       - **Pipeline:** [name]
+       - **Current phase:** [number and name]
+       - **Current round:** [N]
+       - **Escalation tier:** [haiku/sonnet/opus]
+       - **Spec path:** [absolute path]
+       - **Passes so far:** haiku=[N], sonnet=[N]
+       - **Steps pending this round:** [list]
+       - **CRITICAL:** Before resuming, read spec at [path] section for Phase [N]
+       ```
+
+    3. **If `pipeline-state.json` does not exist**: note what pipeline/phase is mentioned in Open Tasks and write:
+       ```
+       ## Active Pipeline State
+       - **Pipeline:** [name from task description]
+       - **Current phase:** [phase reference from Open Tasks entry]
+       - **pipeline-state.json:** not found -- phase details must be reconstructed from session notes
+       - **CRITICAL:** Before resuming, locate and read the spec for Phase [N] before composing any prompts
+       ```
+
+    4. **If no pipeline entries were found in Open Tasks**: write `(no active pipeline phase)` in this section.
+
+    The pipeline state block must also be included verbatim in the `write_result` summary text (see output format below), so the dispatcher sees it immediately in context without reading the session file.
 
 12. Write the populated content to the session file. Preserve the file header (`# Session YYYYMMDD-NNN`, `**Started:**`, `**Ended:**` lines) verbatim -- only overwrite the section bodies below them.
 
@@ -133,6 +177,7 @@ You are the **compact_catchup** subagent. Your job is to:
     ## Open Threads
     ## Open Tasks
     ## Open Subagents
+    ## Active Pipeline State
     ## Notable Events
     ```
 
@@ -276,6 +321,22 @@ Structure your `write_result` text as follows:
 - PR #<N>: (live check failed) — treated as OPEN
 (omit this section entirely if no sign-off PRs were found in session notes)
 
+## Active Pipeline State
+(include this section only if a pipeline phase was detected in Open Tasks; omit entirely if no pipeline is active)
+- **Pipeline:** [name]
+- **Current phase:** [number and name]
+- **Current round:** [N]
+- **Escalation tier:** [haiku/sonnet/opus]
+- **Spec path:** [absolute path]
+- **Passes so far:** haiku=[N], sonnet=[N]
+- **Steps pending this round:** [list]
+- **CRITICAL:** Before resuming, read spec at [path] section for Phase [N]
+(or, if pipeline-state.json was not found:)
+- **Pipeline:** [name from task description]
+- **Current phase:** [phase reference from Open Tasks]
+- **pipeline-state.json:** not found -- phase details must be reconstructed from session notes
+- **CRITICAL:** Before resuming, locate and read the spec for Phase [N] before composing any prompts
+
 ## Session context (from session notes)
 - [Latest session: YYYYMMDD-NNN] <one-line decision-log summary: what we started, what we realized, what is still in progress>
 - Open threads from prior sessions: <list any unresolved threads, or "none">
@@ -311,6 +372,7 @@ Keep each line to one sentence. The dispatcher is on mobile -- brevity matters.
 - Never remove content from rolling-summary.md unless there is clear evidence in the inbox scan that the item is resolved. When in doubt, carry it forward.
 - If `rolling-summary.md` cannot be read or written during Phase 4, note the failure in `write_result` and continue -- do not abort catchup (this is separate from the Phase 3 rolling summary update).
 - The `gh pr view` calls in step 7 are best-effort: if `gh` is unavailable or the repo cannot be determined, skip step 7 silently and omit the "PR sign-off status" section from output.
+- Pipeline state detection (step 11a) is best-effort: if the glob fails or the file cannot be read, note "pipeline-state.json search failed" in the Active Pipeline State section and continue -- do not abort catchup.
 
 ## Delivering results
 
