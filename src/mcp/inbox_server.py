@@ -7448,7 +7448,8 @@ async def handle_write_result(args: dict) -> list[TextContent]:
     # reply_text: user-facing text separate from the dispatcher summary.
     # When present and sent_reply_to_user is False, the dispatcher relays reply_text
     # instead of text, keeping `text` as dispatcher-only internal context.
-    if reply_text and not sent_reply_to_user:
+    # chat_id 0 is dispatcher-internal; no user relay path exists, so suppress.
+    if reply_text and not sent_reply_to_user and chat_id not in (0, "0"):
         message["reply_text"] = reply_text
     if msg_type == "subagent_notification":
         message["warning"] = "User already received the subagent's reply. Don't summarize it. If you respond, add new value only — a question, a correction, missing context."
