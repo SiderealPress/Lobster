@@ -8502,6 +8502,8 @@ async def handle_list_decisions(arguments: dict[str, Any]) -> list[TextContent]:
         # Use search to find all decision-type events.
         # We search for the canonical marker string that all decisions include.
         results = _memory_provider.search("[DECISION]", limit=100)
+        if len(results) >= 100:
+            log.warning("list_decisions: hit limit=100 — some decisions may be truncated. Consider raising limit.")
         # Filter to only decision-type events (search may return near-matches)
         decisions = [e for e in results if e.type == _DECISION_TYPE]
     except Exception as e:
