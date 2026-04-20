@@ -8590,32 +8590,6 @@ def _build_decision_content(
     return "\n".join(lines)
 
 
-def _parse_decision_metadata(event_metadata: dict, event_content: str) -> dict:
-    """Extract structured decision fields from a memory event's metadata+content.
-
-    Returns a dict with: key, title, decision, rationale, date, affected_areas,
-    supersedes, superseded_by, event_id.
-    """
-    # Primary source: structured metadata (set by write_decision)
-    key = event_metadata.get("decision_key", "")
-    title = event_metadata.get("decision_title", "")
-    superseded_by = event_metadata.get("superseded_by")
-
-    # Fallback: parse from content string (handles legacy entries stored pre-metadata)
-    if not key:
-        for line in event_content.splitlines():
-            if line.startswith("[DECISION] key="):
-                key = line.removeprefix("[DECISION] key=").strip()
-            elif line.startswith("Title: ") and not title:
-                title = line.removeprefix("Title: ").strip()
-
-    return {
-        "key": key,
-        "title": title,
-        "superseded_by": superseded_by,
-    }
-
-
 async def handle_write_decision(arguments: dict[str, Any]) -> list[TextContent]:
     """Store an architectural decision in memory.
 
