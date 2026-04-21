@@ -1,0 +1,44 @@
+[skill]
+name = "hyperframes"
+version = "1.0.0"
+description = "Create videos by writing HTML — use HyperFrames to produce MP4/WebM/MOV from HTML+CSS+GSAP compositions, fully locally, no API keys required"
+author = "Lobster"
+category = "workflow"
+
+[activation]
+mode = "triggered"
+triggers = ["/video", "/hyperframes", "/make-video", "/render-video"]
+context_patterns = [
+    "when user asks to create a video",
+    "when user asks to make a video",
+    "when user asks to render a video",
+    "when user asks to produce a video",
+    "when user asks to build a video",
+    "when user asks for a product intro video",
+    "when user asks for an animated explainer",
+    "when user asks to turn a PDF or document into a video",
+    "when user asks for a title card or motion graphic",
+    "when user asks for a data visualization video",
+    "when user asks to use HyperFrames",
+]
+
+[layering]
+priority = 50
+merge_strategy = "append"
+
+[provides]
+mcp_tools = []
+bot_commands = ["/video", "/hyperframes", "/make-video"]
+
+[compatibility]
+enhances = []
+conflicts = []
+
+[dependencies]
+pip = []
+npm = ["hyperframes"]
+system = ["ffmpeg"]
+api_keys = []
+
+[dependencies.runtime]
+node = ">=22"

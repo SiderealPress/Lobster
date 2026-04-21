@@ -1,0 +1,27 @@
+[default_dimensions]
+type = "string"
+description = "Default video dimensions (WxH) for new compositions"
+valid_values = ["1920x1080", "1080x1920", "1080x1080", "1080x1350"]
+default = "1920x1080"
+
+[default_format]
+type = "string"
+description = "Default render output format"
+valid_values = ["mp4", "webm", "mov"]
+default = "mp4"
+
+[projects_dir]
+type = "string"
+description = "Where to create HyperFrames projects (defaults to $LOBSTER_PROJECTS)"
+default = ""
+
+[auto_preview]
+type = "bool"
+description = "Whether to open browser preview before rendering"
+default = false
+
+[default_style]
+type = "string"
+description = "Default visual style when none is specified by the user (see visual-styles.md)"
+valid_values = ["", "swiss-pulse", "velvet-standard", "deconstructed", "maximalist-type", "data-drift", "soft-signal", "folk-frequency", "shadow-cut"]
+default = ""
