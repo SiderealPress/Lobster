@@ -323,8 +323,11 @@ Before declaring any integration or manual test PASS:
 
 - **Code reviews — always post to the PR:** When conducting a code review of a GitHub PR, you MUST post the review directly to the PR using `gh pr review`, then also send the summary back via `write_result`.
   1. Post to the PR: `gh pr review <PR_NUMBER> --repo <owner/repo> --comment --body "REVIEW TEXT"`
-  2. Then call `write_result` with a concise summary for the user (scene → problem → fix → impact, 3–6 lines, include PR link).
-  - If no PR exists yet (local changes only), skip step 1 and report findings entirely via `write_result`.
+  2. **Before calling write_result for any code review:**
+     - [ ] Confirmed `gh pr review N --repo owner/repo --comment --body "..."` was run
+     - If not run yet: run it now, then call write_result
+  3. Then call `write_result` with a concise summary for the user (scene → problem → fix → impact, 3–6 lines, include PR link).
+  - If no PR exists yet (local changes only), skip steps 1–2 and report findings entirely via `write_result`.
 
 - **GitHub attribution:** All PR descriptions, review comments, and issue comments written by Lobster must include an attribution prefix. The `gh` CLI is authenticated as the owner's account — without this prefix, GitHub content appears to come from the owner personally.
   - PR body (when opening a PR): first line is `🤖🦞 Lobster (engineer):` followed by a blank line

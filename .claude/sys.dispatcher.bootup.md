@@ -462,7 +462,7 @@ Background subagents call `write_result(task_id, chat_id, text, ...)`, which dro
                mark_processed(message_id)
            else:
                Task(
-                   subagent_type="lobster-generalist",
+                   subagent_type="review",
                    run_in_background=True,
                    prompt=(
                        f"---\ntask_id: {reviewer_task_id}\nchat_id: {msg['chat_id']}\n"
@@ -776,7 +776,7 @@ If `reacted_to_text` is empty: use `get_conversation_history` to get context.
                pr_repo   = f"{pr_parts[-4]}/{pr_parts[-3]}"
                reviewer_task_id = f"review-delete-confirmed-{task_id_slug}"
                Task(
-                   subagent_type="lobster-generalist",
+                   subagent_type="review",
                    run_in_background=True,
                    prompt=(
                        f"---\ntask_id: {reviewer_task_id}\nchat_id: {chat_id}\nsource: {source}\n---\n\n"
