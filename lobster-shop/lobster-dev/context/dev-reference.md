@@ -21,7 +21,7 @@ cd ~/lobster/docker/staging && sudo docker-compose -f docker-compose.staging.yml
 
 **Verify dispatcher is running inside staging:**
 ```bash
-sudo docker exec lobster-staging tmux capture-pane -pt dispatcher
+sudo docker exec lobster-staging tmux -L lobster capture-pane -pt lobster
 ```
 
 **Stop staging:**

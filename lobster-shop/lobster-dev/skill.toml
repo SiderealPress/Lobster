@@ -7,8 +7,9 @@ category = "context"
 
 [activation]
 mode = "triggered"
-triggers = ["/lobster-dev", "/dev"]
+triggers = ["/lobster-dev"]
 context_patterns = [
+    "when user says dev mode or lobster dev mode",
     "when user asks about staging docker",
     "when user asks about lobster PR or pull request",
     "when user says lobster development",
@@ -26,7 +27,7 @@ merge_strategy = "append"
 
 [provides]
 mcp_tools = []
-bot_commands = ["/lobster-dev", "/dev"]
+bot_commands = ["/lobster-dev"]
 
 [compatibility]
 enhances = ["lobster-status", "lobster-watcher", "librarian"]

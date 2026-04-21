@@ -4,7 +4,7 @@ This skill is active during Lobster development sessions. When active, you have 
 
 ### Activating
 
-Use `/lobster-dev` or `/dev` to activate, or this skill auto-activates when the conversation involves staging Docker, Lobster PRs, local-dev branch operations, or dispatcher debugging.
+Use `/lobster-dev` to activate, or this skill auto-activates when the conversation involves staging Docker, Lobster PRs, local-dev branch operations, dispatcher debugging, or mentions of "dev mode" / "lobster dev mode".
 
 ### What this skill provides
 
@@ -17,7 +17,7 @@ cd ~/lobster/docker/staging && sudo docker-compose -f docker-compose.staging.yml
 
 **Verifying staging dispatcher is running:**
 ```bash
-sudo docker exec lobster-staging tmux capture-pane -pt dispatcher
+sudo docker exec lobster-staging tmux -L lobster capture-pane -pt lobster
 ```
 
 **LOBSTER_ENV — critical gotcha:**
