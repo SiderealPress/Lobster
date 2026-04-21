@@ -208,6 +208,14 @@ RUN sed \
 # Switch to root to install and enable service files
 USER root
 
+# Patch generated service files to depend on lobster-container-init.service,
+# ensuring init completes (config.env written, install.sh --container-setup run)
+# before any lobster service starts.
+RUN for svc in lobster-router lobster-claude lobster-mcp-local; do \
+    sed -i '/^\[Unit\]/a Requires=lobster-container-init.service\nAfter=lobster-container-init.service' \
+    /tmp/${svc}.service; \
+done
+
 RUN cp /tmp/lobster-router.service /etc/systemd/system/lobster-router.service \
     && cp /tmp/lobster-claude.service /etc/systemd/system/lobster-claude.service \
     && cp /tmp/lobster-mcp-local.service /etc/systemd/system/lobster-mcp-local.service \

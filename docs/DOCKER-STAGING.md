@@ -25,17 +25,18 @@ Host machine
   ~/.local/bin/claude     <- bind-mounted read-only (reuses host binary)
   ~/lobster-config/config.staging.env  <- env vars injected at compose up
 
-Container: lobster-staging
+Container: lobster-staging (systemd as PID 1)
   /home/lobster/lobster/              <- repo (baked into image at build time)
   /home/lobster/messages/             <- Docker volume (lobster-staging-messages)
   /home/lobster/lobster-workspace/    <- Docker volume (lobster-staging-workspace)
-  /home/lobster/lobster-config/       <- written by entrypoint from env vars
+  /home/lobster/lobster-config/       <- written by lobster-container-init.service
 
-Inside container:
-  crond                               <- cron daemon (started by entrypoint)
-  tmux session "lobster" (socket: /tmp/tmux-*/lobster)
-    +-- dispatcher (Claude Code + MCP server)
-  lobster_bot.py            <- Telegram router process (background)
+Systemd-managed services (start order):
+  lobster-container-init.service      <- oneshot: writes config.env, runs install.sh --container-setup
+  lobster-mcp-local.service           <- MCP server (After=lobster-container-init)
+  lobster-router.service              <- Telegram router (After=lobster-container-init)
+  lobster-claude.service              <- dispatcher / Claude Code (After=lobster-container-init)
+  cron.service                        <- cron daemon (reads /etc/cron.d/lobster-staging)
 ```
 
 Credentials are **bind-mounted from the host** — they are never baked into the image.
@@ -44,7 +45,7 @@ Credentials are **bind-mounted from the host** — they are never baked into the
 
 ## Cron in the staging container
 
-The staging container runs a full cron daemon, mirroring production behavior. The entrypoint installs the same crontab entries that `install.sh` sets up on a production host:
+The staging container runs a full cron daemon managed by systemd (`cron.service`). Cron entries are baked into the image at `/etc/cron.d/lobster-staging` — the same entries that `install.sh` sets up on a production host. There is no entrypoint cron setup.
 
 | Job | Schedule | Marker |
 |-----|----------|--------|
@@ -59,8 +60,15 @@ The staging container runs a full cron daemon, mirroring production behavior. Th
 **Verifying cron is running inside the container:**
 
 ```bash
-sudo docker exec lobster-staging service cron status
-sudo docker exec lobster-staging crontab -l
+# Check cron daemon status via systemd
+sudo docker exec lobster-staging systemctl status cron
+
+# Verify the lobster cron entries are installed
+sudo docker exec lobster-staging ls /etc/cron.d/
+sudo docker exec lobster-staging cat /etc/cron.d/lobster-staging
+
+# Tail the cron journal for live output
+sudo docker exec lobster-staging journalctl -u cron -f
 ```
 
 **Tailing cron-driven log output:**
@@ -166,8 +174,9 @@ sudo docker exec -it lobster-staging tmux -L lobster attach -t lobster
 ### 3. Check cron is running
 
 ```bash
-sudo docker exec lobster-staging service cron status
-sudo docker exec lobster-staging crontab -l
+sudo docker exec lobster-staging systemctl status cron
+sudo docker exec lobster-staging ls /etc/cron.d/
+sudo docker exec lobster-staging cat /etc/cron.d/lobster-staging
 ```
 
 ### 4. Tail the MCP server log
@@ -230,9 +239,12 @@ sudo docker compose -f docker/staging/docker-compose.staging.yml down --rmi loca
 
 ### Cron jobs not running
 
-**Check 1 — Daemon:** `sudo docker exec lobster-staging service cron status`
+**Check 1 — Daemon:** `sudo docker exec lobster-staging systemctl status cron`
 
-**Check 2 — Crontab:** `sudo docker exec lobster-staging crontab -l` — verify LOBSTER entries are present.
+**Check 2 — Cron entries:** `sudo docker exec lobster-staging ls /etc/cron.d/` — verify `lobster-staging` is listed.
+Then: `sudo docker exec lobster-staging cat /etc/cron.d/lobster-staging` — verify LOBSTER entries are present.
+
+**Check 3 — Journal:** `sudo docker exec lobster-staging journalctl -u cron -f` — look for cron daemon output.
 
 **Note:** If the container was built before this fix was added, rebuild the image:
 

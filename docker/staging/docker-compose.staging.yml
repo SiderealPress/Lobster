@@ -41,8 +41,10 @@ services:
     # manage service resource accounting or lifecycle properly.
     privileged: true
     volumes:
-      # systemd cgroup hierarchy — required for systemd to function as PID 1
-      - /sys/fs/cgroup:/sys/fs/cgroup:ro
+      # systemd cgroup hierarchy — required for systemd to function as PID 1.
+      # Must be rw: Ubuntu 22.04 with cgroup v2 requires write access so systemd
+      # can manage service lifecycle and resource accounting.
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
       # Mount host Claude credentials (read-only auth, but settings.json needs write)
       - /home/lobster/.claude:/home/lobster/.claude
       # Mount host claude binary (avoid reinstalling)
