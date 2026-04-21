@@ -100,6 +100,15 @@ HEARTBEAT_FILE="$WORKSPACE_DIR/logs/claude-heartbeat"   # legacy WFM-touch signa
 DISPATCHER_HEARTBEAT_FILE="${LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE:-$WORKSPACE_DIR/logs/dispatcher-heartbeat}"
 DISPATCHER_HEARTBEAT_STALE_SECONDS=1200   # 20 min — covers compaction (~5m) + catchup (~12m) + margin
 
+# WFM-active signal (issue #1713 / #949): inbox_server.py writes this file with
+# a Unix epoch timestamp when wait_for_messages begins blocking and refreshes it
+# every WAIT_HEARTBEAT_INTERVAL (60s). When this file is fresh, the dispatcher is
+# alive and waiting for messages — heartbeat staleness is expected, not a problem.
+# Threshold: 3x WAIT_HEARTBEAT_INTERVAL to absorb one missed refresh cycle.
+# File is deleted by the MCP server when WFM returns (message arrived or timeout).
+DISPATCHER_WFM_ACTIVE_FILE="${LOBSTER_WFM_ACTIVE_OVERRIDE:-$WORKSPACE_DIR/logs/dispatcher-wfm-active}"
+WFM_ACTIVE_STALE_SECONDS=180   # 3x WAIT_HEARTBEAT_INTERVAL (60s) — absorbs one missed tick
+
 OUTBOX_DIR="$MESSAGES_DIR/outbox"
 OUTBOX_STALE_THRESHOLD_SECONDS=900   # 15 min = RED
 OUTBOX_YELLOW_THRESHOLD_SECONDS=300  # 5 min = YELLOW
@@ -973,6 +982,26 @@ check_dispatcher_heartbeat() {
     age=$(( now - raw_ts ))
 
     if [[ $age -gt $DISPATCHER_HEARTBEAT_STALE_SECONDS ]]; then
+        # Heartbeat is stale — check the WFM-active signal before declaring RED.
+        # When the dispatcher is blocked in wait_for_messages, PostToolUse hooks
+        # do not fire so the heartbeat goes stale. inbox_server.py writes
+        # DISPATCHER_WFM_ACTIVE_FILE with a fresh epoch timestamp every 60s while
+        # WFM is blocking. A fresh WFM-active file means the dispatcher is alive
+        # and simply idle — not frozen or dead. (issue #1713 / #949)
+        local wfm_active_ts=""
+        if [[ -f "$DISPATCHER_WFM_ACTIVE_FILE" ]]; then
+            wfm_active_ts=$(cat "$DISPATCHER_WFM_ACTIVE_FILE" 2>/dev/null | tr -d '[:space:]')
+        fi
+        if [[ -n "$wfm_active_ts" ]] && [[ "$wfm_active_ts" =~ ^[0-9]+$ ]]; then
+            local wfm_age=$(( now - wfm_active_ts ))
+            if [[ $wfm_age -le $WFM_ACTIVE_STALE_SECONDS ]]; then
+                log_info "Dispatcher heartbeat stale (${age}s) but WFM-active is fresh (${wfm_age}s) — dispatcher alive in wait_for_messages, skipping RED"
+                return 0
+            else
+                log_error "RED: dispatcher heartbeat stale (${age}s) and WFM-active also stale (${wfm_age}s, threshold: ${WFM_ACTIVE_STALE_SECONDS}s) — dispatcher appears frozen"
+                return 2
+            fi
+        fi
         log_error "RED: dispatcher heartbeat stale — last tool use ${age}s ago (threshold: ${DISPATCHER_HEARTBEAT_STALE_SECONDS}s)"
         return 2
     fi
