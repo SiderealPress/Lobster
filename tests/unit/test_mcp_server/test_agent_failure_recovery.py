@@ -48,11 +48,11 @@ _BASE_SESSION: dict = {
     "id": "agent-abc123",
     "task_id": "my-task-id",
     "description": "Implement feature X",
-    "chat_id": "8305714125",
+    "chat_id": "ADMIN_CHAT_ID_REDACTED",
     "source": "telegram",
     "status": "running",
     "output_file": None,
-    "input_summary": "---\ntask_id: my-task-id\nchat_id: 8305714125\n---\nDo something",
+    "input_summary": "---\ntask_id: my-task-id\nchat_id: ADMIN_CHAT_ID_REDACTED\n---\nDo something",
     "elapsed_seconds": 1800,
     "notified_at": None,
 }
@@ -181,7 +181,7 @@ class TestBuildReconcilerMessageDirect:
         session = dict(_BASE_SESSION)
         msg = build_fn(session, "dead", NOW)
 
-        assert msg["original_chat_id"] == "8305714125"
+        assert msg["original_chat_id"] == "ADMIN_CHAT_ID_REDACTED"
 
     def test_dead_includes_task_id(self, build_fn):
         """Dead outcome: task_id field is preserved from session."""
@@ -202,7 +202,7 @@ class TestBuildReconcilerMessageDirect:
         session = dict(_BASE_SESSION)
         msg = build_fn(session, "completed", NOW)
 
-        assert msg["chat_id"] == "8305714125"
+        assert msg["chat_id"] == "ADMIN_CHAT_ID_REDACTED"
         assert msg["type"] == "subagent_result"
         assert msg["source"] == "telegram"
 
@@ -226,7 +226,7 @@ class TestBuildReconcilerMessageDirect:
 class TestGhostDetectorMarkFailedPayload:
     """Verify agent-monitor routes agent_failed to chat_id=0."""
 
-    def _make_classified_agent(self, chat_id: str = "8305714125") -> object:
+    def _make_classified_agent(self, chat_id: str = "ADMIN_CHAT_ID_REDACTED") -> object:
         """Create a minimal ClassifiedAgent-like object for testing."""
         row = _gd.AgentRow(
             agent_id="deadbeef01234567",
@@ -361,7 +361,7 @@ class TestMarkFailedGhostNoUserAlert:
         """)
         db_conn.execute(
             "INSERT INTO agent_sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            ("deadbeef0123", None, "Test task", "8305714125", "running",
+            ("deadbeef0123", None, "Test task", "ADMIN_CHAT_ID_REDACTED", "running",
              "2026-03-18T13:00:00", None, None, None),
         )
         db_conn.commit()
@@ -378,7 +378,7 @@ class TestMarkFailedGhostNoUserAlert:
             agent_id="deadbeef0123",
             task_id=None,
             description="Test task",
-            chat_id="8305714125",
+            chat_id="ADMIN_CHAT_ID_REDACTED",
             status="running",
             spawned_at="2026-03-18T13:00:00+00:00",
             output_file=None,

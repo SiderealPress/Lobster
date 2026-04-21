@@ -67,7 +67,7 @@ _REAL_SUBAGENT_SESSION: dict = {
     "id": "real-subagent-xyz",
     "task_id": "fix-something-123",
     "description": "Fix something for user",
-    "chat_id": "8305714125",
+    "chat_id": "ADMIN_CHAT_ID_REDACTED",
     "source": "telegram",
     "status": "running",
     "output_file": None,
@@ -381,8 +381,8 @@ class TestGhostChatIdNoInboxNotification:
         ("", True),
         (None, True),
         ("None", True),
-        ("8305714125", False),
-        (8305714125, False),
+        ("ADMIN_CHAT_ID_REDACTED", False),
+        (ADMIN_CHAT_ID_REDACTED, False),
         ("123", False),
     ])
     def test_dead_outcome_parametrized(self, chat_id, should_skip):
@@ -406,7 +406,7 @@ class TestGhostChatIdNoInboxNotification:
 
     def test_dead_real_user_not_skipped(self):
         """Dead sessions with a real user ID are NOT skipped."""
-        session = dict(_REAL_SUBAGENT_SESSION, chat_id="8305714125")
+        session = dict(_REAL_SUBAGENT_SESSION, chat_id="ADMIN_CHAT_ID_REDACTED")
         assert _should_skip_dead_no_user(session, "dead") is False
 
     def test_dead_ghost_session_is_skipped(self):
@@ -659,7 +659,7 @@ class TestStartupSweepIdempotencyGuard:
             "id": agent_id,
             "task_id": None,
             "description": "test session",
-            "chat_id": "8305714125",
+            "chat_id": "ADMIN_CHAT_ID_REDACTED",
             "source": "telegram",
             "status": status,
             "output_file": None,

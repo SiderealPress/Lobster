@@ -7,7 +7,7 @@ Bug: the unified job was writing inbox messages with `chat_id: "<sender>"` (e.g.
 destination — a string sender name will never deliver to anyone.
 
 Fix:
-1. task sets `chat_id=8305714125` (ADMIN_CHAT_ID) on inbox messages — the integer
+1. task sets `chat_id=ADMIN_CHAT_ID_REDACTED` (ADMIN_CHAT_ID) on inbox messages — the integer
    Telegram ID of the owner. Sender identity is preserved in the `from` field.
 2. dispatcher `sys.dispatcher.bootup.md` adds a "Bot-talk" routing rule so the
    dispatcher knows to format and forward these messages to Telegram.
@@ -15,11 +15,11 @@ Fix:
 End-to-end path traced here:
   lobstertalk-unified runs
     → GET /messages → INBOUND messages
-    → writes inbox file with chat_id=8305714125, source="bot-talk", from="AlbertLobster"
+    → writes inbox file with chat_id=ADMIN_CHAT_ID_REDACTED, source="bot-talk", from="AlbertLobster"
   dispatcher picks up inbox file
     → sees source="bot-talk"
     → formats: "📨 From AlbertLobster via LobsterTalk:\n\n<text>"
-    → send_reply(chat_id=8305714125, source="telegram", text=...)
+    → send_reply(chat_id=ADMIN_CHAT_ID_REDACTED, source="telegram", text=...)
   Telegram delivers to owner's chat
 """
 
@@ -30,7 +30,7 @@ from typing import Any
 
 import pytest
 
-ADMIN_CHAT_ID = 8305714125
+ADMIN_CHAT_ID = ADMIN_CHAT_ID_REDACTED
 
 
 # ---------------------------------------------------------------------------
@@ -41,7 +41,7 @@ ADMIN_CHAT_ID = 8305714125
 def build_inbox_message(sender: str, content: str, local_identity: str) -> dict[str, Any]:
     """Build an inbox message dict for an INBOUND bot-talk message.
 
-    chat_id is ALWAYS the owner's ADMIN_CHAT_ID (8305714125), not the sender name.
+    chat_id is ALWAYS the owner's ADMIN_CHAT_ID (ADMIN_CHAT_ID_REDACTED), not the sender name.
     The dispatcher uses chat_id to determine where to send the Telegram message.
     Sender identity is carried in the `from` field.
     """
@@ -80,7 +80,7 @@ class TestInboxMessageChatId:
     """chat_id in inbox messages must be the owner's ADMIN_CHAT_ID (integer), not sender name."""
 
     def test_chat_id_is_admin_chat_id(self):
-        """The core bug: chat_id was set to sender name string. Must be 8305714125."""
+        """The core bug: chat_id was set to sender name string. Must be ADMIN_CHAT_ID_REDACTED."""
         msg = build_inbox_message("AlbertLobster", "hello", "SaharLobster")
         assert msg["chat_id"] == ADMIN_CHAT_ID, (
             f"Expected chat_id={ADMIN_CHAT_ID}, got {msg['chat_id']!r}. "

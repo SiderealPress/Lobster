@@ -11,7 +11,7 @@ state is used — the agent IS running at the point this hook fires.
 
     ---
     task_id: my-task
-    chat_id: 8305714125
+    chat_id: ADMIN_CHAT_ID_REDACTED
     reply_to_message_id: 10924
     source: telegram
     ---

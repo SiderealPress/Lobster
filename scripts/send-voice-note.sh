@@ -5,8 +5,8 @@
 #   scripts/send-voice-note.sh <chat_id> "<text>"
 #
 # Examples:
-#   scripts/send-voice-note.sh 8305714125 "Good morning! Here is your briefing."
-#   scripts/send-voice-note.sh 8305714125 "$(cat /tmp/message.txt)"
+#   scripts/send-voice-note.sh ADMIN_CHAT_ID_REDACTED "Good morning! Here is your briefing."
+#   scripts/send-voice-note.sh ADMIN_CHAT_ID_REDACTED "$(cat /tmp/message.txt)"
 #
 # Requires:
 #   - piper binary at /usr/local/bin/piper or ~/.local/bin/piper
@@ -66,7 +66,7 @@ fi
 
 if [ $# -lt 2 ]; then
     echo "Usage: $0 <chat_id> \"<text>\"" >&2
-    echo "Example: $0 8305714125 \"Good morning! Here is your briefing.\"" >&2
+    echo "Example: $0 ADMIN_CHAT_ID_REDACTED \"Good morning! Here is your briefing.\"" >&2
     exit 1
 fi
 

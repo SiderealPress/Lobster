@@ -15,7 +15,7 @@ YAML frontmatter (preferred):
 
     ---
     task_id: my-task
-    chat_id: 8305714125
+    chat_id: ADMIN_CHAT_ID_REDACTED
     source: telegram
     ---
 

@@ -840,7 +840,7 @@ class TestMarkProcessed:
         outbox = inbox_server_dirs["outbox"]
 
         # Use a real (large) chat_id that previously triggered the fallback
-        REAL_CHAT_ID = 8305714125
+        REAL_CHAT_ID = ADMIN_CHAT_ID_REDACTED
         msg = message_generator.generate_text_message(
             source="telegram", chat_id=REAL_CHAT_ID,
         )
@@ -882,7 +882,7 @@ class TestMarkProcessed:
         inbox, processed = setup_dirs
         outbox = inbox_server_dirs["outbox"]
 
-        REAL_CHAT_ID = 8305714125
+        REAL_CHAT_ID = ADMIN_CHAT_ID_REDACTED
         msg = message_generator.generate_text_message(
             source="telegram", chat_id=REAL_CHAT_ID,
         )
@@ -913,7 +913,7 @@ class TestMarkProcessed:
         inbox, processed = setup_dirs
         outbox = inbox_server_dirs["outbox"]
 
-        REAL_CHAT_ID = 8305714125
+        REAL_CHAT_ID = ADMIN_CHAT_ID_REDACTED
         msg = message_generator.generate_text_message(
             source="telegram", chat_id=REAL_CHAT_ID,
         )

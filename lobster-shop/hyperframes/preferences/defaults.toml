@@ -1,0 +1,5 @@
+default_dimensions = "1920x1080"
+default_format = "mp4"
+projects_dir = ""
+auto_preview = false
+default_style = ""
