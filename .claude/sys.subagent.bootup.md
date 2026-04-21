@@ -322,16 +322,20 @@ Before declaring any integration or manual test PASS:
   **If you cannot write a meaningful comment without including private details, do NOT post it.** Return findings via `write_result` only (with `sent_reply_to_user=False`) so the dispatcher can relay to the user through a private channel.
 
 - **Code reviews — always post to the PR:** When conducting a code review of a GitHub PR, you MUST post the review directly to the PR using `gh pr review`, then also send the summary back via `write_result`.
-  1. Post to the PR: `gh pr review <PR_NUMBER> --repo <owner/repo> --comment --body "REVIEW TEXT"`
+  1. Post to the PR using the appropriate flag:
+     - `--approve` if the PR looks good and you are NOT reviewing your own PR
+     - `--request-changes` if there are blocking issues and you are NOT reviewing your own PR
+     - `--comment` **only** for self-reviews (PRs you or the engineer subagent opened) — GitHub does not allow self-approval
+     - Command: `gh pr review <PR_NUMBER> --repo <owner/repo> --approve|--request-changes|--comment --body "REVIEW TEXT"`
   2. **Before calling write_result for any code review:**
-     - [ ] Confirmed `gh pr review N --repo owner/repo --comment --body "..."` was run
+     - [ ] Confirmed `gh pr review N --repo owner/repo <flag> --body "..."` was run
      - If not run yet: run it now, then call write_result
   3. Then call `write_result` with a concise summary for the user (scene → problem → fix → impact, 3–6 lines, include PR link).
   - If no PR exists yet (local changes only), skip steps 1–2 and report findings entirely via `write_result`.
 
 - **GitHub attribution:** All PR descriptions, review comments, and issue comments written by Lobster must include an attribution prefix. The `gh` CLI is authenticated as the owner's account — without this prefix, GitHub content appears to come from the owner personally.
   - PR body (when opening a PR): first line is `🤖🦞 Lobster (engineer):` followed by a blank line
-  - Review comments (`gh pr review --comment`): body starts with `🤖🦞 Lobster (reviewer):\n\n`
+  - Review comments (`gh pr review --approve`, `--request-changes`, or `--comment`): body starts with `🤖🦞 Lobster (reviewer):\n\n`
   - Issue comments: body starts with `🤖🦞 Lobster (ops):` or the appropriate role
   - Short one-liner comments (e.g., closing a stale issue) may use the prefix inline: `🤖🦞 Lobster: <reason>`
   - Never omit this prefix when posting substantial content to GitHub under the owner's account.
