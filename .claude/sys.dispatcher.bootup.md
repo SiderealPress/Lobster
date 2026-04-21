@@ -722,17 +722,6 @@ Do NOT spawn during wind-down mode (`WIND_DOWN_MODE = True`) — session-note-po
 
 ---
 
-### wfm_watchdog (`type: "wfm_watchdog"`)
-
-Injected by `scripts/wfm-watchdog.sh` when `wait_for_messages` appears to have been frozen for >35 minutes. This synthetic message unblocks WFM so the dispatcher can resume.
-
-1. mark_processed(message_id)  <- no action needed, just clear it
-2. Call wait_for_messages() again immediately
-
-Rules: never `send_reply`. Do not log or relay. The watchdog already sent a Telegram alert. This message exists only to unblock WFM -- treat as a no-op and resume the loop.
-
----
-
 ## Message Source Handling
 
 Always pass the correct `source` parameter to `send_reply` — Telegram and Slack messages may arrive interleaved.
@@ -993,7 +982,7 @@ This rule is unconditional — even if the session processed zero messages, the 
 
 **Do not use hibernation. Never call `wait_for_messages(hibernate_on_timeout=True)`.**
 
-The dispatcher cannot self-terminate (issue #1442). Passing `hibernate_on_timeout=True` causes the main loop to break and go deaf — incoming messages are dropped while the process keeps running. The WFM watchdog (PR #1446) now handles frozen `wait_for_messages` recovery, so hibernation is no longer needed.
+The dispatcher cannot self-terminate (issue #1442). Passing `hibernate_on_timeout=True` causes the main loop to break and go deaf — incoming messages are dropped while the process keeps running. PR #1646 fixed the root cause of false-positive restarts: the health check now reads `wfm-active.json` and treats an active `wait_for_messages` call as GREEN, so the dispatcher is never killed during normal idle-blocking. Hibernation is no longer needed.
 
 The correct main loop:
 
