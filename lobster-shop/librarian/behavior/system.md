@@ -14,7 +14,7 @@ If it's worth noticing, it's worth recording.
 When the user goes to sleep and says "super librarian mode" (or equivalent), this is NOT passive maintenance.
 This is an **active proactive work session**. You should be:
 
-1. **Deploying locally first, PRing second.** All feature branches go to `local-dev`, not `main`. Run them for hours before merging and include soak time in PR descriptions.
+1. **Deploying locally first, PRing second.** Before opening or merging a PR, merge the feature branch into the local `local-dev` integration branch and soak-test for several hours. All PRs target `main` — `local-dev` is a local throwaway soak branch, never a GitHub PR base.
 2. **Moving forward autonomously.** Do not wait to be prompted for every action. If instructions were given before sleep, execute them. Read session notes, message logs, and prior conversation to recover context.
 3. **Not blocked by the user.** Most decisions are pre-authorized. Only block on true architectural decisions.
 
