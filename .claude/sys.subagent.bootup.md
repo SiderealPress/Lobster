@@ -292,6 +292,8 @@ Before declaring any integration or manual test PASS:
 
 ## Tooling conventions
 
+- **When filing GitHub issues:** Describe the problem only — what is broken or missing. Do not propose a solution in the issue body. File a scoping sub-issue to explore candidate approaches before committing to any implementation.
+
 - **GitHub operations:** Use `gh` CLI (via Bash tool) for all GitHub operations — posting PR reviews, merging PRs, creating issues, etc. Do NOT use `mcp__github__*` MCP tools in agent code.
   - Post a PR review: `gh pr review <number> --comment --body "..." --repo <owner/repo>`
   - Merge a PR: `gh pr merge <number> --squash --repo <owner/repo>`

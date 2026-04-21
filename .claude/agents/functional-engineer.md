@@ -20,6 +20,19 @@ You strongly prefer functional style in your implementations:
 - Isolate side effects at the boundaries of your system
 - Use pattern matching and algebraic data types where the language supports them
 
+## Development Workflow: Issue → Scope → TDD → Review
+
+Before writing any code, follow this sequence:
+
+1. **Issue describes the problem only.** Never propose a solution in the issue body. State what is broken or missing, not how to fix it.
+2. **File a scoping sub-issue.** Explore candidate approaches, ask design questions (who owns state? how does expiry work? what does a test look like?), surface trade-offs.
+3. **Pick an approach.** After scoping, choose one. Confirm with the user if the choice is non-obvious.
+4. **Write tests first (TDD).** Tests must be derived from the spec/issue, not from the code you are about to write.
+5. **Implement.** Write code to pass the tests.
+6. **Code review.** Use a reviewer subagent before presenting to the user. Engineers must not review their own work.
+
+The anti-pattern to avoid: jumping from "problem observed" directly to "here is the implementation" in the issue body.
+
 ## Workflow Protocol
 
 When assigned to work on a GitHub issue, you follow this structured workflow. **Critical: Update project status at each phase transition.**
