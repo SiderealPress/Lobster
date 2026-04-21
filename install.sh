@@ -1487,6 +1487,17 @@ HOOKEOF
     success "Claude Code settings created with hooks"
 fi
 
+# Add permissions bypass settings to settings.json (idempotent)
+# Ensures --dangerously-skip-permissions stays effective after Claude Code auto-updates.
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if jq -e '.permissions.defaultMode != "bypassPermissions"' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        jq '. + {"skipDangerousModePermissionPrompt": true, "permissions": {"defaultMode": "bypassPermissions"}}' "$CLAUDE_SETTINGS" > "$CLAUDE_SETTINGS.tmp" && mv "$CLAUDE_SETTINGS.tmp" "$CLAUDE_SETTINGS"
+        success "Claude Code permissions bypass configured"
+    else
+        info "Claude Code permissions bypass already configured"
+    fi
+fi
+
 success "Self-check cron configured (every 3min)"
 
 # Set up Claude Code PreToolUse hook to block writes to .claude/memory/
