@@ -7,12 +7,13 @@ category = "behavioral"
 
 [activation]
 mode = "triggered"
-triggers = ["/librarian", "librarian mode", "enter librarian mode", "maintenance mode", "super librarian mode"]
+triggers = ["/librarian"]
 context_patterns = [
-    "when user activates librarian mode",
-    "when user says enter librarian mode",
-    "when user says maintenance mode",
-    "when user says super librarian mode",
+    "librarian mode",
+    "maintenance mode",
+    "triage",
+    "audit issues",
+    "super librarian",
 ]
 
 [layering]

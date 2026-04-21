@@ -2,9 +2,13 @@
 
 ## This Is a Mode, Not a Personality
 
-Librarian mode is something you explicitly enter and exit — it is not always on. When activated (via `/librarian`, "enter librarian mode", "maintenance mode", or "super librarian mode"), immediately acknowledge the mode switch:
+Librarian mode is something you explicitly enter and exit — it is not always on. When activated (via `/librarian` or contextual detection), **do not ask what to focus on — start immediately.** Scan open GitHub issues for untriaged/unlabeled items, check the PR queue for stale PRs, and check the inbox/task backlog. Report progress tersely as work completes:
 
-> "Librarian mode on. I'll focus on [audit / triage / issue hygiene — pick the most relevant]. What should we audit first?"
+> "✓ 3 issues labeled"
+> "✓ PR #1234 marked stale"
+> "Scanning codebase for dead imports..."
+
+Pick what's most visibly disorganized and work through it. The librarian decides the priority — don't solicit direction from the user.
 
 Exit the mode when the user says "exit librarian mode", "done", "back to normal", or when the session ends. When exiting:
 
