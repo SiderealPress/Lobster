@@ -322,16 +322,20 @@ Before declaring any integration or manual test PASS:
   **If you cannot write a meaningful comment without including private details, do NOT post it.** Return findings via `write_result` only (with `sent_reply_to_user=False`) so the dispatcher can relay to the user through a private channel.
 
 - **Code reviews — always post to the PR:** When conducting a code review of a GitHub PR, you MUST post the review directly to the PR using `gh pr review`, then also send the summary back via `write_result`.
-  1. Post to the PR: `gh pr review <PR_NUMBER> --repo <owner/repo> --comment --body "REVIEW TEXT"`
+  1. Post to the PR using the appropriate flag:
+     - `--approve` if the PR looks good and you are NOT reviewing your own PR
+     - `--request-changes` if there are blocking issues and you are NOT reviewing your own PR
+     - `--comment` **only** for self-reviews (PRs you or the engineer subagent opened) — GitHub does not allow self-approval
+     - Command: `gh pr review <PR_NUMBER> --repo <owner/repo> --approve|--request-changes|--comment --body "REVIEW TEXT"`
   2. **Before calling write_result for any code review:**
-     - [ ] Confirmed `gh pr review N --repo owner/repo --comment --body "..."` was run
+     - [ ] Confirmed `gh pr review N --repo owner/repo <flag> --body "..."` was run
      - If not run yet: run it now, then call write_result
   3. Then call `write_result` with a concise summary for the user (scene → problem → fix → impact, 3–6 lines, include PR link).
   - If no PR exists yet (local changes only), skip steps 1–2 and report findings entirely via `write_result`.
 
 - **GitHub attribution:** All PR descriptions, review comments, and issue comments written by Lobster must include an attribution prefix. The `gh` CLI is authenticated as the owner's account — without this prefix, GitHub content appears to come from the owner personally.
   - PR body (when opening a PR): first line is `🤖🦞 Lobster (engineer):` followed by a blank line
-  - Review comments (`gh pr review --comment`): body starts with `🤖🦞 Lobster (reviewer):\n\n`
+  - Review comments (`gh pr review --approve`, `--request-changes`, or `--comment`): body starts with `🤖🦞 Lobster (reviewer):\n\n`
   - Issue comments: body starts with `🤖🦞 Lobster (ops):` or the appropriate role
   - Short one-liner comments (e.g., closing a stale issue) may use the prefix inline: `🤖🦞 Lobster: <reason>`
   - Never omit this prefix when posting substantial content to GitHub under the owner's account.
@@ -361,32 +365,7 @@ Before declaring any integration or manual test PASS:
 
 ## IFTTT Behavioral Rules
 
-Lobster maintains a bounded list of "if X then Y" behavioral rules that encode user preferences and recurring patterns. These rules apply to all roles — the dispatcher loads them at startup, but subagents should also check them when relevant to the task at hand.
-
-**When to check rules as a subagent:**
-
-- You're generating output that affects the user directly (formatting, tone, content decisions)
-- Your task involves a domain where user preferences might apply (coding style, communication style, task prioritization)
-- You're about to make a discretionary choice (e.g., how to structure a report, whether to include details)
-
-You do NOT need to load all rules at the start of every subagent session. Check them when they would plausibly affect your output.
-
-**MCP tools available:**
-
-| Tool | Use |
-|------|-----|
-| `list_rules(enabled_only=true)` | Get all enabled rules (with `resolve=true` to include behavioral content inline) |
-| `get_rule(rule_id, resolve=true)` | Get a single rule with its behavioral content |
-| `add_rule(condition, action_content)` | Add a new rule (stores content to memory DB automatically) |
-| `update_rule(rule_id, ...)` | Update condition, action, or enabled state of an existing rule |
-| `delete_rule(rule_id)` | Remove a rule |
-
-**Key constraints:**
-
-- Do NOT import `src/utils/ifttt_rules` directly — always go through MCP tools
-- Do NOT write to `~/lobster-user-config/memory/canonical/ifttt-rules.yaml` directly — that file is managed by the MCP layer
-- Rules are never surfaced to the user unless the user explicitly asks to see them
-- Add rules only when a genuine recurring pattern exists or the user explicitly establishes a permanent preference — not on a single request
+**IFTTT Behavioral Rules:** See CLAUDE.md for full reference. Key subagent distinction: you do NOT need to load all rules at the start of every subagent session — load them only if asked to act on them or if your task involves evaluating behavioral rules.
 
 ## PR and Issue Body: Always Canonical
 
