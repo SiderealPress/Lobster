@@ -1,16 +1,19 @@
 [skill]
 name = "librarian"
-version = "1.1.0"
+version = "1.2.0"
 description = "Maintenance mode — audit, triage, label, and organize issues, code, and workspace without writing big new features or deleting anything"
 author = "Lobster"
 category = "behavioral"
 
 [activation]
-mode = "triggered"
-triggers = ["/librarian", "librarian mode", "super librarian mode"]
+mode = "contextual"
+triggers = []
 context_patterns = [
-    "when user activates librarian mode",
-    "when user says super librarian mode",
+    "librarian mode",
+    "enter librarian",
+    "/librarian",
+    "maintenance mode",
+    "super librarian",
 ]
 
 [layering]
