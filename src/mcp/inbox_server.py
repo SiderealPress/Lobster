@@ -795,6 +795,30 @@ def normalize_message_type(msg: dict) -> dict:
 # Heartbeat file for health monitoring
 HEARTBEAT_FILE = _WORKSPACE / "logs" / "claude-heartbeat"
 
+# How often (in seconds) wait_for_messages touches heartbeats and refreshes
+# WFM-active during the blocking wait.  Exposed as a module-level constant so
+# tests can verify it matches the health-check's WFM_ACTIVE_STALE_SECONDS.
+WAIT_HEARTBEAT_INTERVAL = 60
+
+# WFM-active signal file (issue #1713 / #949): written with a Unix epoch
+# timestamp when wait_for_messages begins blocking, refreshed every
+# WAIT_HEARTBEAT_INTERVAL seconds, and deleted when WFM returns.
+#
+# The health check reads this file to distinguish "dispatcher alive, waiting
+# for messages" from "dispatcher frozen/dead" — suppressing the
+# heartbeat-stale RED that would otherwise fire after 20 minutes of quiet.
+#
+# Path: ~/lobster-workspace/logs/dispatcher-wfm-active
+# Content: single Unix epoch integer (e.g. "1713456789\n"), same format as
+#          dispatcher-heartbeat so health-check-v3.sh can parse it identically.
+# Override: LOBSTER_WFM_ACTIVE_OVERRIDE env var (used in tests).
+WFM_ACTIVE_FILE = Path(
+    os.environ.get(
+        "LOBSTER_WFM_ACTIVE_OVERRIDE",
+        str(_WORKSPACE / "logs" / "dispatcher-wfm-active"),
+    )
+)
+
 # Hibernation state file - tracks whether Lobster is active or hibernating
 LOBSTER_STATE_FILE = CONFIG_DIR / "lobster-state.json"
 
@@ -1434,6 +1458,28 @@ def touch_heartbeat():
         HEARTBEAT_FILE.touch()
     except Exception:
         pass  # Don't fail on heartbeat errors
+
+
+def _write_wfm_active_signal() -> None:
+    """Write the WFM-active heartbeat signal atomically (issue #1713 / #949).
+
+    Called at the start of the wait_for_messages blocking loop and refreshed
+    on every WAIT_HEARTBEAT_INTERVAL tick so the health check sees a fresh
+    signal throughout the entire WFM blocking period.
+
+    Content: single Unix epoch integer — same format as dispatcher-heartbeat —
+    so health-check-v3.sh can parse it with the same integer comparison logic.
+
+    Atomic write (tmp -> rename) prevents partial reads by the health check.
+    Silently swallowed on failure: health check degrades gracefully when absent.
+    """
+    try:
+        WFM_ACTIVE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = WFM_ACTIVE_FILE.with_name(f".wfm-active-{os.getpid()}.tmp")
+        tmp.write_text(str(int(time.time())) + "\n")
+        os.rename(str(tmp), str(WFM_ACTIVE_FILE))
+    except Exception:
+        pass  # Never block wait_for_messages on a heartbeat write failure
 
 
 # ---------------------------------------------------------------------------
@@ -4046,24 +4092,14 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
     # transient mode, calling wait_for_messages means Claude is up and running.
     _write_lobster_state(LOBSTER_STATE_FILE, "active")
 
-    # Write WFM active timestamp so the health check can distinguish a healthy
-    # idle-blocking dispatcher from a frozen one (PR #1646).
-    # The health check treats a fresh wfm-active signal as GREEN even when the
-    # heartbeat is stale, preventing false-positive kills during long idle periods.
+    # Write WFM-active signal so the health check can distinguish a healthy
+    # idle-blocking dispatcher from a frozen one (issue #1713 / #949).
+    # The health check treats a fresh WFM-active signal as GREEN even when
+    # dispatcher-heartbeat is stale — PostToolUse hooks don't fire during a
+    # blocking MCP call, so the heartbeat inevitably goes stale after 20 min.
     # We clear this file in the finally block so the signal only persists while
-    # WFM is actually running.
-    _wfm_active_file = CONFIG_DIR / "wfm-active.json"
-    try:
-        _wfm_start_ts = datetime.now(timezone.utc)
-        _wfm_active_payload = {
-            "started_at": _wfm_start_ts.isoformat(),
-            "pid": os.getpid(),
-        }
-        _wfm_tmp = _wfm_active_file.parent / f".wfm-active-{os.getpid()}.tmp"
-        _wfm_tmp.write_text(json.dumps(_wfm_active_payload))
-        _wfm_tmp.rename(_wfm_active_file)
-    except Exception as _wfm_exc:
-        log.warning(f"[wfm-active] Failed to write wfm-active.json: {_wfm_exc}")
+    # WFM is actually blocking.
+    _write_wfm_active_signal()
 
     # Recover stale processing and retryable failed messages
     _recover_stale_processing()
@@ -4117,8 +4153,10 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
             touch_heartbeat()
             inbox_results = await handle_check_inbox({"limit": 10})
             return _prepend_sessions_prefix(sessions_prefix, inbox_results)
-        # Wait with periodic heartbeats (every 60 seconds)
-        heartbeat_interval = 60
+        # Wait with periodic heartbeats (every WAIT_HEARTBEAT_INTERVAL seconds).
+        # Refresh WFM-active on every iteration so the health check sees a
+        # fresh signal even during long quiet periods (issue #1713 / #949).
+        heartbeat_interval = WAIT_HEARTBEAT_INTERVAL
         elapsed = 0
 
         while elapsed < timeout:
@@ -4132,8 +4170,9 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
             if arrived:
                 break
 
-            # Touch heartbeat to show we're still alive
+            # Touch heartbeat and refresh WFM-active to show we're still alive.
             touch_heartbeat()
+            _write_wfm_active_signal()
             elapsed += wait_time
 
         if message_arrived.is_set():
@@ -4178,13 +4217,13 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
     finally:
         observer.stop()
         observer.join(timeout=1)
-        # Clear WFM active file — health check reads this to detect healthy idle vs frozen.
+        # Clear WFM-active signal so the health check stops treating the
+        # dispatcher as "alive in WFM" once wait_for_messages returns.
         try:
-            _wfm_active_file = CONFIG_DIR / "wfm-active.json"
-            if _wfm_active_file.exists():
-                _wfm_active_file.unlink()
+            if WFM_ACTIVE_FILE.exists():
+                WFM_ACTIVE_FILE.unlink()
         except Exception as _wfm_clear_exc:
-            log.warning(f"[wfm-active] Failed to clear wfm-active.json: {_wfm_clear_exc}")
+            log.warning(f"[wfm-active] Failed to clear WFM-active signal: {_wfm_clear_exc}")
 
 
 def _is_report_command(text: str) -> bool:
