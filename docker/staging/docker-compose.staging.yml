@@ -7,6 +7,7 @@
 # Credential setup (one-time):
 #   cp ~/lobster/config/config.staging.env.example ~/lobster-config/config.staging.env
 #   # Fill in TELEGRAM_BOT_TOKEN (test bot), TELEGRAM_ALLOWED_USERS, etc.
+#   # Set LOBSTER_ENV=production — the dispatcher exits immediately otherwise.
 #   # NEVER put the production TELEGRAM_BOT_TOKEN in config.staging.env.
 #
 # Usage:
@@ -16,8 +17,14 @@
 # Attach to Claude session:
 #   sudo docker exec -it lobster-staging tmux -L lobster attach -t lobster
 #
-# View logs:
-#   sudo docker compose -f docker/staging/docker-compose.staging.yml logs -f
+# View service logs (via systemd journal):
+#   sudo docker exec lobster-staging journalctl -u lobster-claude -f
+#   sudo docker exec lobster-staging journalctl -u lobster-router -f
+#   sudo docker exec lobster-staging journalctl -u lobster-mcp-local -f
+#
+# Service control:
+#   sudo docker exec lobster-staging systemctl status lobster-claude
+#   sudo docker exec lobster-staging systemctl restart lobster-claude
 #
 # Stop:
 #   sudo docker compose -f docker/staging/docker-compose.staging.yml down
@@ -29,9 +36,35 @@ services:
       dockerfile: docker/staging/Dockerfile.staging
     container_name: lobster-staging
     restart: unless-stopped
+    # systemd requires privileged mode and /sys/fs/cgroup from the host.
+    # Without privileged mode, cgroups are read-only and systemd cannot
+    # manage service resource accounting or lifecycle properly.
+    privileged: true
+    # cgroup: host is required when Docker's cgroup driver is "systemd" (cgroup v2).
+    # Without it, Docker creates a private cgroup namespace and systemd cannot
+    # write to the cgroup root (fails with exit 255 on boot).
+    cgroup: host
+    volumes:
+      # systemd cgroup hierarchy — required for systemd to function as PID 1.
+      # Must be rw: Ubuntu 22.04 with cgroup v2 requires write access so systemd
+      # can manage service lifecycle and resource accounting.
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+      # Mount host Claude credentials (read-only auth, but settings.json needs write)
+      - /home/lobster/.claude:/home/lobster/.claude
+      # Mount host claude binary (avoid reinstalling)
+      - /home/lobster/.local/bin/claude:/home/lobster/.local/bin/claude:ro
+      - /home/lobster/.local/share/claude:/home/lobster/.local/share/claude:ro
+      # Persistent staging volumes (isolated from production)
+      - lobster-staging-messages:/home/lobster/messages
+      - lobster-staging-workspace:/home/lobster/lobster-workspace
+    # /run and /tmp must be tmpfs so systemd can write runtime sockets and pid files
+    tmpfs:
+      - /run
+      - /tmp
     # Scoped credentials: reads ONLY from config.staging.env, never from config.env.
     # This is the credential boundary that prevents staging from inheriting production
     # tokens. config.staging.env must NOT contain the production TELEGRAM_BOT_TOKEN.
+    # LOBSTER_ENV must be "production" — the dispatcher exits immediately if it's anything else.
     # See config/config.staging.env.example for the template.
     env_file:
       # LOBSTER_CONFIG_DIR defaults to /home/lobster/lobster-config — the standard
@@ -43,17 +76,9 @@ services:
       # Sourced from the host environment so it doesn't need to live in
       # config.staging.env (which is committed-adjacent and more exposed).
       GITHUB_TOKEN: "${GITHUB_TOKEN:-}"
-    volumes:
-      # Mount host Claude credentials (read-only auth, but settings.json needs write)
-      # We mount the whole .claude dir so credentials are available
-      - /home/lobster/.claude:/home/lobster/.claude
-      # Mount host claude binary (avoid reinstalling)
-      - /home/lobster/.local/bin/claude:/home/lobster/.local/bin/claude:ro
-      - /home/lobster/.local/share/claude:/home/lobster/.local/share/claude:ro
-      # Persistent staging volumes (isolated from production)
-      - lobster-staging-messages:/home/lobster/messages
-      - lobster-staging-workspace:/home/lobster/lobster-workspace
-    # Staging runs without resource limits for now
+    # systemd uses SIGRTMIN+3 for clean shutdown
+    stop_signal: SIGRTMIN+3
+    stop_grace_period: 30s
 
 volumes:
   lobster-staging-messages:
