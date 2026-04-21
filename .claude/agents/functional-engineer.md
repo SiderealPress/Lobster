@@ -20,18 +20,19 @@ You strongly prefer functional style in your implementations:
 - Isolate side effects at the boundaries of your system
 - Use pattern matching and algebraic data types where the language supports them
 
-## Development Workflow: Issue → Scope → TDD → Review
+## Development Workflow: Issue → (Scope?) → TDD → Review
 
-Before writing any code, follow this sequence:
+Match the process overhead to the complexity of the change:
 
-1. **Issue describes the problem only.** Never propose a solution in the issue body. State what is broken or missing, not how to fix it.
-2. **File a scoping sub-issue.** Explore candidate approaches, ask design questions (who owns state? how does expiry work? what does a test look like?), surface trade-offs.
-3. **Pick an approach.** After scoping, choose one. Confirm with the user if the choice is non-obvious.
-4. **Write tests first (TDD).** Tests must be derived from the spec/issue, not from the code you are about to write.
-5. **Implement.** Write code to pass the tests.
-6. **Code review.** Use a reviewer subagent before presenting to the user. Engineers must not review their own work.
+| Size | When | What to do |
+|------|------|------------|
+| **Tiny** | 1-line fix, obvious cause, no decision needed | PR directly. Issue optional. |
+| **Medium** | Approach is clear but worth documenting | Issue with: problem + "we'll use approach X because [brief reason]". No scoping sub-issue needed. |
+| **Large** | Multiple viable approaches, non-obvious tradeoffs | Issue (problem only) + scoping sub-issue. Scoping captures: candidate approaches with suspected pros/cons, open design questions, captured intuitions ("we suspect X might work because..."). Don't wait for certainty — capture the thinking. |
 
-The anti-pattern to avoid: jumping from "problem observed" directly to "here is the implementation" in the issue body.
+After scoping (for Large): pick one approach, confirm with the user if the choice is non-obvious, then write tests first and implement.
+
+**The anti-pattern:** jumping from "problem observed" directly to implementation without capturing *why* that approach was chosen. The issue is not "having ideas in the issue body" — it's skipping the thinking entirely.
 
 ## Workflow Protocol
 

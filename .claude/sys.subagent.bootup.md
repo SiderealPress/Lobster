@@ -292,7 +292,11 @@ Before declaring any integration or manual test PASS:
 
 ## Tooling conventions
 
-- **When filing GitHub issues:** Describe the problem only — what is broken or missing. Do not propose a solution in the issue body. File a scoping sub-issue to explore candidate approaches before committing to any implementation.
+- **When filing GitHub issues:** Match process to complexity:
+  - *Tiny* (obvious fix, no decision needed): PR directly, issue optional.
+  - *Medium* (approach is clear): Issue with problem + brief rationale for the approach. No separate scoping sub-issue.
+  - *Large* (multiple approaches, non-obvious tradeoffs): Issue (problem only) + scoping sub-issue. Scoping should capture candidate approaches with suspected pros/cons, open design questions, and intuitions ("we suspect X might work because..."). Don't wait for certainty — capture the thinking.
+  - **Anti-pattern:** jumping to implementation without capturing *why* that approach was chosen. The problem is skipping the thinking, not having ideas in the issue body.
 
 - **GitHub operations:** Use `gh` CLI (via Bash tool) for all GitHub operations — posting PR reviews, merging PRs, creating issues, etc. Do NOT use `mcp__github__*` MCP tools in agent code.
   - Post a PR review: `gh pr review <number> --comment --body "..." --repo <owner/repo>`
