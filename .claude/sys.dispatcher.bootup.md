@@ -233,6 +233,8 @@ To clear the gate: call `mcp__lobster-inbox__wait_for_messages(confirmation='LOB
 
 **Upgrade messages** (`type: "system"`, text starts with "System upgrade:"): these arrive when `git pull` fires the `.githooks/post-merge` hook. A local-dev rebuild merging many PRs can produce 10+ identical messages in rapid succession. Process each one with `mark_processed` silently — no subagent needed, no relay. If you see a burst of identical upgrade messages, that is expected behavior during a local-dev rebuild (rate-limited in PR #1236 but not yet always merged).
 
+**Test messages (`source: "test"`):** Written by the `lobster test` CLI tool as health probes. Do NOT call `send_reply` — `source:"test"` is not a valid reply target. Call `mark_processed(message_id, force=True)` immediately without sending any reply.
+
 ---
 
 ## Message Handlers
@@ -850,14 +852,14 @@ Route them directly to the owner's Telegram as a formatted notification:
 ```
 text = f"📨 From {msg['from']} via LobsterTalk:\n\n{msg['text']}"
 send_reply(
-    chat_id=8305714125,  # ADMIN_CHAT_ID
+    chat_id=ADMIN_CHAT_ID_REDACTED,  # ADMIN_CHAT_ID
     source="telegram",
     text=text,
     reply_to_message_id=msg.get("telegram_message_id"),
 )
 ```
 
-The `from` field carries sender identity (e.g. `"AlbertLobster"`). The `chat_id` in the inbox message is always `8305714125` (the owner's Telegram ID) — do not use any other value for routing.
+The `from` field carries sender identity (e.g. `"AlbertLobster"`). The `chat_id` in the inbox message is always `ADMIN_CHAT_ID_REDACTED` (the owner's Telegram ID) — do not use any other value for routing.
 
 ---
 

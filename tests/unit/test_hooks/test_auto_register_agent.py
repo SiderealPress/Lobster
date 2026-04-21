@@ -112,10 +112,10 @@ def _get_row(tmp_path: Path, agent_id: str) -> dict | None:
 
 class TestExtractMetadata:
     def test_yaml_frontmatter_all_fields(self):
-        prompt = "---\ntask_id: my-task\nchat_id: 8305714125\nsource: telegram\nreply_to_message_id: 10924\n---\nsome content"
+        prompt = "---\ntask_id: my-task\nchat_id: ADMIN_CHAT_ID_REDACTED\nsource: telegram\nreply_to_message_id: 10924\n---\nsome content"
         meta = extract_metadata(prompt)
         assert meta["task_id"] == "my-task"
-        assert meta["chat_id"] == "8305714125"
+        assert meta["chat_id"] == "ADMIN_CHAT_ID_REDACTED"
         assert meta["source"] == "telegram"
         assert meta["reply_to_message_id"] == "10924"
 

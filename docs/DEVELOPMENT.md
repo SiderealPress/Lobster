@@ -112,7 +112,7 @@ The `auto-register-agent.py` PostToolUse hook reads structured metadata from sub
 ```yaml
 ---
 task_id: my-task-123
-chat_id: 8305714125
+chat_id: ADMIN_CHAT_ID_REDACTED
 source: telegram
 reply_to_message_id: 10924
 ---
