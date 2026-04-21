@@ -1659,6 +1659,7 @@ async def list_tools() -> list[Tool]:
                     },
                 },
             },
+            _meta={"anthropic/alwaysLoad": True},
         ),
         Tool(
             name="check_inbox",
@@ -1686,6 +1687,7 @@ async def list_tools() -> list[Tool]:
                     },
                 },
             },
+            _meta={"anthropic/alwaysLoad": True},
         ),
         Tool(
             name="send_reply",
@@ -1754,6 +1756,7 @@ async def list_tools() -> list[Tool]:
                 },
                 "required": ["chat_id", "text"],
             },
+            _meta={"anthropic/alwaysLoad": True},
         ),
         Tool(
             name="send_whatsapp_reply",
@@ -1809,6 +1812,7 @@ async def list_tools() -> list[Tool]:
                 },
                 "required": ["message_id"],
             },
+            _meta={"anthropic/alwaysLoad": True},
         ),
         Tool(
             name="mark_processing",
@@ -1823,6 +1827,7 @@ async def list_tools() -> list[Tool]:
                 },
                 "required": ["message_id"],
             },
+            _meta={"anthropic/alwaysLoad": True},
         ),
         Tool(
             name="mark_failed",
@@ -1976,6 +1981,7 @@ async def list_tools() -> list[Tool]:
                     },
                 },
             },
+            _meta={"anthropic/alwaysLoad": True},
         ),
         # Telegram Message Lookup Tool
         Tool(
@@ -2113,6 +2119,7 @@ async def list_tools() -> list[Tool]:
                     },
                 },
             },
+            _meta={"anthropic/alwaysLoad": True},
         ),
         Tool(
             name="add_rule",
@@ -2741,6 +2748,7 @@ async def list_tools() -> list[Tool]:
                 },
                 "required": ["agent_id", "description", "chat_id"],
             },
+            _meta={"anthropic/alwaysLoad": True},
         ),
         Tool(
             name="session_end",
