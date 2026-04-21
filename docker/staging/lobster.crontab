@@ -1,0 +1,33 @@
+# Lobster system cron jobs — matches install.sh exactly.
+# Managed by cron-manage.sh on production; pre-installed here at build time.
+# Written to /etc/cron.d/ so entries survive Docker volume mounts that
+# replace /var/spool/cron/crontabs/.
+#
+# The LOBSTER-* marker comments are required for cron-manage.sh idempotency:
+# if install.sh --container-setup is ever run inside a live container, the
+# markers ensure entries are not duplicated.
+
+SHELL=/bin/bash
+PATH=/home/lobster/.local/bin:/usr/local/bin:/usr/bin:/bin
+HOME=/home/lobster
+
+# Health check (every 4 minutes) # LOBSTER-HEALTH
+*/4 * * * * lobster /home/lobster/lobster/scripts/health-check-v3.sh # LOBSTER-HEALTH
+
+# Daily dependency health check (06:00 daily) # LOBSTER-DAILY-HEALTH
+0 6 * * * lobster /home/lobster/lobster/scripts/daily-health-check.sh # LOBSTER-DAILY-HEALTH
+
+# Nightly consolidation (03:00 daily) # LOBSTER-NIGHTLY-CONSOLIDATION
+0 3 * * * lobster /home/lobster/lobster/scripts/nightly-consolidation.sh # LOBSTER-NIGHTLY-CONSOLIDATION
+
+# Daily log export (03:00 UTC) # LOBSTER-LOG-EXPORT
+0 3 * * * lobster cd /home/lobster/lobster && /home/lobster/.local/bin/uv run scheduled-tasks/export-logs.py # LOBSTER-LOG-EXPORT
+
+# Ghost detector (every 5 minutes) # LOBSTER-GHOST-DETECTOR
+*/5 * * * * lobster cd /home/lobster && /home/lobster/.local/bin/uv run /home/lobster/lobster/scripts/agent-monitor.py --alert --mark-failed >> /home/lobster/lobster-workspace/logs/agent-monitor.log 2>&1 # LOBSTER-GHOST-DETECTOR
+
+# OOM monitor (every 10 minutes) # LOBSTER-OOM-CHECK
+*/10 * * * * lobster cd /home/lobster && /home/lobster/.local/bin/uv run /home/lobster/lobster/scripts/oom-monitor.py --since-minutes 10 >> /home/lobster/lobster-workspace/logs/oom-monitor.log 2>&1 # LOBSTER-OOM-CHECK
+
+# Worktree + audio cleanup (04:00 daily) # LOBSTER-CLEANUP
+0 4 * * * lobster /home/lobster/lobster/scripts/cleanup-worktrees-audio.sh >> /home/lobster/lobster-workspace/logs/cleanup.log 2>&1 # LOBSTER-CLEANUP
