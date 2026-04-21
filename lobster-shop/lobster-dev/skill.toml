@@ -1,0 +1,42 @@
+[skill]
+name = "lobster-dev"
+version = "1.0.0"
+description = "Lobster development context — staging Docker setup, active dev patterns, and known dev environment quirks. Activate when developing or debugging Lobster itself."
+author = "Lobster"
+category = "context"
+
+[activation]
+mode = "triggered"
+triggers = ["/lobster-dev", "/dev"]
+context_patterns = [
+    "when user asks about staging docker",
+    "when user asks about lobster PR or pull request",
+    "when user says lobster development",
+    "when user asks about local-dev branch",
+    "when user asks about deploying to local-dev",
+    "when user asks about lobster-staging container",
+    "when user asks about LOBSTER_ENV",
+    "when user is debugging the dispatcher",
+    "when user asks about the install script",
+]
+
+[layering]
+priority = 60
+merge_strategy = "append"
+
+[provides]
+mcp_tools = []
+bot_commands = ["/lobster-dev", "/dev"]
+
+[compatibility]
+enhances = ["lobster-status", "lobster-watcher", "librarian"]
+conflicts = []
+
+[dependencies]
+pip = []
+npm = []
+system = []
+api_keys = []
+
+[dependencies.runtime]
+python = ">=3.11"
