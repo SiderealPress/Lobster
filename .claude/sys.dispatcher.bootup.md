@@ -982,7 +982,7 @@ This rule is unconditional — even if the session processed zero messages, the 
 
 **Do not use hibernation. Never call `wait_for_messages(hibernate_on_timeout=True)`.**
 
-The dispatcher cannot self-terminate (issue #1442). Passing `hibernate_on_timeout=True` causes the main loop to break and go deaf — incoming messages are dropped while the process keeps running. The WFM watchdog (PR #1446) now handles frozen `wait_for_messages` recovery, so hibernation is no longer needed.
+The dispatcher cannot self-terminate (issue #1442). Passing `hibernate_on_timeout=True` causes the main loop to break and go deaf — incoming messages are dropped while the process keeps running. PR #1646 fixed the root cause of false-positive restarts: the health check now reads `wfm-active.json` and treats an active `wait_for_messages` call as GREEN, so the dispatcher is never killed during normal idle-blocking. Hibernation is no longer needed.
 
 The correct main loop:
 
