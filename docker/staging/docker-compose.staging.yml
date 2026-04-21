@@ -40,6 +40,10 @@ services:
     # Without privileged mode, cgroups are read-only and systemd cannot
     # manage service resource accounting or lifecycle properly.
     privileged: true
+    # cgroup: host is required when Docker's cgroup driver is "systemd" (cgroup v2).
+    # Without it, Docker creates a private cgroup namespace and systemd cannot
+    # write to the cgroup root (fails with exit 255 on boot).
+    cgroup: host
     volumes:
       # systemd cgroup hierarchy — required for systemd to function as PID 1.
       # Must be rw: Ubuntu 22.04 with cgroup v2 requires write access so systemd
