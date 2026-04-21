@@ -396,6 +396,13 @@ def _emit_mcp_event(
         pass  # observability must never block the caller
 
 
+# Populated from event_bus when available — used by handle_emit_event below.
+try:
+    from event_bus import VALID_SEVERITIES as _VALID_SEVERITIES
+except ImportError:
+    _VALID_SEVERITIES = frozenset({"debug", "info", "warn", "error", "critical"})  # type: ignore[assignment]
+
+
 # ---------------------------------------------------------------------------
 # User model context injection heuristic
 # ---------------------------------------------------------------------------
@@ -2532,6 +2539,55 @@ async def list_tools() -> list[Tool]:
                 "required": ["chat_id", "text", "category"],
             },
         ),
+        # Event Bus Tool (issue #1665)
+        Tool(
+            name="emit_event",
+            description=(
+                "Emit a structured event into the Lobster event bus. "
+                "Use this to record lifecycle events, errors, or observations from "
+                "dispatchers and subagents. Events are written to events.jsonl and "
+                "forwarded to listeners (including CriticalAlertListener for critical-level events). "
+                "This is a fire-and-forget call — it never blocks and never raises."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "event_type": {
+                        "type": "string",
+                        "description": (
+                            "Dot-separated event type string. "
+                            "Examples: 'agent.spawn', 'agent.complete', 'memory.write', "
+                            "'system.error', 'debug.observation'."
+                        ),
+                    },
+                    "level": {
+                        "type": "string",
+                        "description": "Severity level. One of: debug, info, warn, error, critical.",
+                        "enum": ["debug", "info", "warn", "error", "critical"],
+                    },
+                    "msg": {
+                        "type": "string",
+                        "description": "Human-readable message describing the event.",
+                    },
+                    "payload": {
+                        "type": "object",
+                        "description": "Optional additional structured data for the event.",
+                    },
+                    "task_id": {
+                        "type": "string",
+                        "description": "Optional task identifier to associate with this event.",
+                    },
+                    "chat_id": {
+                        "oneOf": [
+                            {"type": "integer"},
+                            {"type": "string"},
+                        ],
+                        "description": "Optional chat/channel ID to associate with this event.",
+                    },
+                },
+                "required": ["event_type", "level", "msg"],
+            },
+        ),
         # Pending Agent Tracker Tools
         Tool(
             name="register_agent",
@@ -3726,6 +3782,8 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
         return await handle_write_result(arguments)
     elif name == "write_observation":
         return await handle_write_observation(arguments)
+    elif name == "emit_event":
+        return await handle_emit_event(arguments)
     # Pending Agent Tracker Tools (register/unregister kept as aliases)
     elif name == "register_agent":
         return await handle_register_agent(arguments)
@@ -7422,6 +7480,60 @@ async def handle_write_observation(args: dict) -> list[TextContent]:
         type="text",
         text=f"Observation queued (id={message_id}, category={category}). The dispatcher will route it.",
     )]
+
+
+# =============================================================================
+# emit_event MCP tool handler (issue #1665)
+# =============================================================================
+
+
+async def handle_emit_event(args: dict) -> list[TextContent]:
+    """
+    MCP tool handler for emit_event (issue #1665).
+
+    Validates the level field against VALID_SEVERITIES, constructs a LobsterEvent,
+    and emits it fire-and-forget. Never raises — validation errors are returned as
+    error text in the response rather than exceptions.
+
+    Functional design: pure input validation (returns early on error), then a
+    single side-effect call to the bus.
+    """
+    event_type = args.get("event_type", "")
+    level = args.get("level", "")
+    msg = args.get("msg", "")
+    payload_extra: dict = args.get("payload") or {}
+    task_id: str | None = args.get("task_id")
+    chat_id = args.get("chat_id")
+
+    # Validate level — reject unknown values with a descriptive error
+    if level not in _VALID_SEVERITIES:
+        valid = sorted(_VALID_SEVERITIES)
+        return [TextContent(
+            type="text",
+            text=(
+                f"emit_event: unknown level {level!r}. "
+                f"Valid levels: {valid}. Event was not emitted."
+            ),
+        )]
+
+    if not _EVENT_BUS_AVAILABLE:
+        return [TextContent(type="text", text="emit_event: event bus unavailable; event not emitted.")]
+
+    try:
+        payload = {"msg": msg, **payload_extra}
+        event = LobsterEvent(
+            event_type=event_type,
+            severity=level,
+            source="mcp-tool",
+            payload=payload,
+            task_id=task_id,
+            chat_id=chat_id,
+        )
+        get_event_bus().emit_sync(event)
+    except Exception:
+        pass  # emit_event must never crash the caller
+
+    return [TextContent(type="text", text=f"emit_event: emitted {event_type!r} [{level}]")]
 
 
 # =============================================================================
