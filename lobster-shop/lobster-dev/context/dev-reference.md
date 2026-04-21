@@ -166,7 +166,7 @@ Also ask: does the PR description explain *why* the change is needed, not just *
 # Dispatcher session
 tail -f ~/lobster-workspace/logs/claude-persistent.log
 
-# Health check
+# Claude dispatcher service log
 journalctl -u lobster-claude -f
 
 # MCP server
