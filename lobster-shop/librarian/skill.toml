@@ -6,13 +6,13 @@ author = "Lobster"
 category = "behavioral"
 
 [activation]
-mode = "triggered"
-triggers = ["/librarian"]
+mode = "contextual"
+triggers = []
 context_patterns = [
     "librarian mode",
+    "enter librarian",
+    "/librarian",
     "maintenance mode",
-    "triage",
-    "audit issues",
     "super librarian",
 ]
 
