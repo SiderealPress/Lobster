@@ -2653,6 +2653,21 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
         substep "wfm-watchdog.sh cron entry not present — nothing to remove"
     fi
 
+    # Migration 77: Add permissions.defaultMode bypassPermissions to settings.json (issue #1706).
+    # Claude Code has a known regression where --dangerously-skip-permissions (CLI flag) stops
+    # working after auto-updates. Setting permissions.defaultMode in settings.json is the
+    # permanent fix that survives updates.
+    if [ -f "$CLAUDE_SETTINGS" ]; then
+        if jq -e '.permissions.defaultMode != "bypassPermissions"' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+            substep "Adding permissions.defaultMode: bypassPermissions to settings.json..."
+            jq '. + {"skipDangerousModePermissionPrompt": true, "permissions": {"defaultMode": "bypassPermissions"}}' "$CLAUDE_SETTINGS" > "$CLAUDE_SETTINGS.tmp" && mv "$CLAUDE_SETTINGS.tmp" "$CLAUDE_SETTINGS"
+            success "Permissions bypass settings added"
+            migrated=$((migrated + 1))
+        fi
+    else
+        warn "Claude settings not found at $CLAUDE_SETTINGS — skipping Migration 77"
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
