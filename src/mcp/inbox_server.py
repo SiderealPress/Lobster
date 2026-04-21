@@ -2492,13 +2492,23 @@ async def list_tools() -> list[Tool]:
                     "text": {
                         "type": "string",
                         "description": (
-                            "The result text to deliver to the user. "
-                            "Keep this to a concise summary (ideally under ~4KB / ~500 words). "
+                            "Dispatcher-internal summary of this result. "
+                            "Kept short (ideally under ~500 words) so the dispatcher's context does not grow. "
+                            "Not shown to the user when reply_text is provided. "
                             "For large outputs — reports, diffs, full analysis — write the content "
                             "to ~/lobster-workspace/reports/<task_id>.md and pass the path in "
-                            "`artifacts` instead. The dispatcher reads artifact files and inlines "
-                            "their content in the reply. Never put raw file paths in text — they "
-                            "are server-side references that are useless to mobile users."
+                            "`artifacts` instead."
+                        ),
+                    },
+                    "reply_text": {
+                        "type": "string",
+                        "description": (
+                            "Optional user-facing reply text. When provided and "
+                            "sent_reply_to_user is False, the dispatcher sends this to the user "
+                            "instead of text. Use this to keep text as a terse internal summary "
+                            "while sending a richer or differently-phrased message to the user. "
+                            "Omit if text is already the right user-facing message. "
+                            "Do not include raw file paths — use relative paths or descriptions instead."
                         ),
                     },
                     "source": {
@@ -7267,6 +7277,7 @@ async def handle_write_result(args: dict) -> list[TextContent]:
     task_id = args.get("task_id", "").strip()
     chat_id = args.get("chat_id")
     text = args.get("text", "").strip()
+    reply_text = (args.get("reply_text") or "").strip() or None
     source = args.get("source", "telegram").strip() or "telegram"
     status = args.get("status", "success")
     artifacts = args.get("artifacts") or []
@@ -7341,6 +7352,11 @@ async def handle_write_result(args: dict) -> list[TextContent]:
     }
     if msg_type == "subagent_notification":
         message["warning"] = "User already received the subagent's reply. Don't summarize it. If you respond, add new value only — a question, a correction, missing context."
+    # reply_text: user-facing reply separate from the internal dispatcher summary (text).
+    # Only stored when there is an active user relay path: sent_reply_to_user=False and
+    # chat_id not in (0, "0") (chat_id 0 is dispatcher-internal; no user reply is ever sent).
+    if reply_text and not sent_reply_to_user and chat_id not in (0, "0"):
+        message["reply_text"] = reply_text
     if artifacts:
         message["artifacts"] = artifacts
     if thread_ts:
