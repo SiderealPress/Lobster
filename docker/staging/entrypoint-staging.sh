@@ -105,6 +105,55 @@ PYEOF
 fi
 
 #-------------------------------------------------------------------------------
+# Start cron daemon and install system crontab entries
+#
+# Cron is required for health checks, nightly consolidation, log exports,
+# ghost detector, OOM monitor, and cleanup jobs — the same jobs that run
+# in production via install.sh. Without cron these jobs are silently skipped,
+# making staging an incomplete test environment.
+#
+# Entries mirror install.sh exactly (schedule and script paths are identical).
+# cron-manage.sh is used for idempotent, marker-based installation.
+#-------------------------------------------------------------------------------
+echo "[staging] Starting cron daemon..."
+sudo service cron start || true
+echo "[staging] Cron daemon started."
+
+echo "[staging] Installing crontab entries..."
+CRON_MANAGE="$LOBSTER_DIR/scripts/cron-manage.sh"
+
+# Health check (every 4 minutes)
+"$CRON_MANAGE" add "# LOBSTER-HEALTH" \
+    "*/4 * * * * $LOBSTER_DIR/scripts/health-check-v3.sh # LOBSTER-HEALTH"
+
+# Daily dependency health check (06:00 daily)
+"$CRON_MANAGE" add "# LOBSTER-DAILY-HEALTH" \
+    "0 6 * * * $LOBSTER_DIR/scripts/daily-health-check.sh # LOBSTER-DAILY-HEALTH"
+
+# Nightly consolidation (03:00 daily)
+"$CRON_MANAGE" add "# LOBSTER-NIGHTLY-CONSOLIDATION" \
+    "0 3 * * * $LOBSTER_DIR/scripts/nightly-consolidation.sh # LOBSTER-NIGHTLY-CONSOLIDATION"
+
+# Daily log export (03:00 UTC)
+"$CRON_MANAGE" add "# LOBSTER-LOG-EXPORT" \
+    "0 3 * * * cd $LOBSTER_DIR && uv run scheduled-tasks/export-logs.py # LOBSTER-LOG-EXPORT"
+
+# Ghost detector (every 5 minutes)
+"$CRON_MANAGE" add "# LOBSTER-GHOST-DETECTOR" \
+    "*/5 * * * * cd $HOME && uv run $LOBSTER_DIR/scripts/agent-monitor.py --alert --mark-failed >> $LOG_DIR/agent-monitor.log 2>&1 # LOBSTER-GHOST-DETECTOR"
+
+# OOM monitor (every 10 minutes)
+"$CRON_MANAGE" add "# LOBSTER-OOM-CHECK" \
+    "*/10 * * * * cd $HOME && uv run $LOBSTER_DIR/scripts/oom-monitor.py --since-minutes 10 >> $LOG_DIR/oom-monitor.log 2>&1 # LOBSTER-OOM-CHECK"
+
+# Worktree + audio cleanup (04:00 daily)
+"$CRON_MANAGE" add "# LOBSTER-CLEANUP" \
+    "0 4 * * * $LOBSTER_DIR/scripts/cleanup-worktrees-audio.sh >> $LOG_DIR/cleanup.log 2>&1 # LOBSTER-CLEANUP"
+
+echo "[staging] Crontab entries installed:"
+crontab -l 2>/dev/null | grep "LOBSTER" || true
+
+#-------------------------------------------------------------------------------
 # Start the lobster-router (Telegram bot)
 #-------------------------------------------------------------------------------
 echo "[staging] Starting lobster-router..."

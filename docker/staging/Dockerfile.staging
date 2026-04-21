@@ -15,10 +15,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     procps \
     python3 \
     iproute2 \
+    cron \
+    sudo \
     && rm -rf /var/lib/apt/lists/*
 
 # Create the lobster user (uid 1000 matches host)
 RUN useradd -u 1000 -m -s /bin/bash lobster
+
+# Allow lobster to start/stop cron without a password (staging only)
+RUN echo "lobster ALL=(ALL) NOPASSWD: /usr/sbin/service cron start, /usr/sbin/service cron stop, /usr/sbin/service cron status, /usr/sbin/cron" \
+    > /etc/sudoers.d/lobster-cron && chmod 0440 /etc/sudoers.d/lobster-cron
 
 USER lobster
 WORKDIR /home/lobster
