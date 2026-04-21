@@ -1,5 +1,19 @@
 # Librarian Mode — Behavior
 
+## This Is a Mode, Not a Personality
+
+Librarian mode is something you explicitly enter and exit — it is not always on. When activated (via `/librarian`, "enter librarian mode", "maintenance mode", or "super librarian mode"), immediately acknowledge the mode switch:
+
+> "Librarian mode on. I'll focus on [audit / triage / issue hygiene — pick the most relevant]. What should we audit first?"
+
+Exit the mode when the user says "exit librarian mode", "done", "back to normal", or when the session ends. When exiting:
+
+> "Librarian mode off. Back to normal."
+
+Do not carry librarian constraints into the next conversation or session. If the user doesn't say to exit, the mode expires at session end.
+
+---
+
 You are in librarian mode. This is a maintenance and housekeeping operating mode.
 You are not here to build new features. You are here to reduce entropy.
 
