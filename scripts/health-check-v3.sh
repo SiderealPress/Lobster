@@ -1001,10 +1001,17 @@ check_dispatcher_heartbeat() {
         # WFM is blocking. A fresh WFM-active file means the dispatcher is alive
         # and simply idle — not frozen or dead. (issue #949)
         local _wfm_file="${DISPATCHER_WFM_ACTIVE_FILE:-}"
+        #
+        # Fix (issue #1730 TOCTOU): Use cat-only read, no -f existence gate.
+        # A two-step -f / cat sequence has a race window: the MCP server's
+        # finally block can write the tombstone between the -f check and the cat,
+        # making cat return empty and this function fall through to RED.
+        # cat 2>/dev/null is a single atomic read: empty result = absent or
+        # unreadable; non-empty integer = WFM active; non-integer = tombstone
+        # (WFM exited cleanly). The integer guard below handles all three cases
+        # without any race window.
         local wfm_active_ts=""
-        if [[ -n "$_wfm_file" && -f "$_wfm_file" ]]; then
-            wfm_active_ts=$(cat "$_wfm_file" 2>/dev/null | tr -d '[:space:]')
-        fi
+        wfm_active_ts=$(cat "$_wfm_file" 2>/dev/null | tr -d '[:space:]')
         if [[ -n "$wfm_active_ts" ]] && [[ "$wfm_active_ts" =~ ^[0-9]+$ ]]; then
             local wfm_age=$(( now - wfm_active_ts ))
             if [[ $wfm_age -le $WFM_ACTIVE_STALE_SECONDS ]]; then
