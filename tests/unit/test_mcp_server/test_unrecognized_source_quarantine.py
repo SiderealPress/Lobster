@@ -15,6 +15,8 @@ Behavior tested:
 - The quarantined file has _permanently_failed=True and _last_error set
 - The quarantine does not affect messages with empty/missing source fields
   (those pass through so they can be handled by the dispatcher)
+- bot-talk messages pass through without being quarantined
+- The quarantine guard runs even when a source= filter is passed to check_inbox
 """
 
 import asyncio
@@ -31,6 +33,7 @@ if str(_MCP_DIR) not in sys.path:
     sys.path.insert(0, str(_MCP_DIR))
 
 import src.mcp.inbox_server  # noqa: F401
+from src.mcp.message_types import INBOX_MESSAGE_SOURCES
 
 
 _BASE_TS = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
@@ -96,10 +99,14 @@ class TestUnrecognizedSourceQuarantine:
     def test_quarantine_does_not_affect_recognized_sources(
         self, inbox_server_dirs: dict
     ):
-        """Messages with recognized sources pass through normally."""
+        """Messages with recognized sources pass through normally.
+
+        Uses INBOX_MESSAGE_SOURCES directly so the test stays in sync with the
+        constant — adding a new source to the constant automatically exercises it here.
+        """
         inbox_dir = inbox_server_dirs["inbox"]
 
-        recognized_sources = ["telegram", "slack", "sms", "signal", "whatsapp", "bisque", "system"]
+        recognized_sources = sorted(INBOX_MESSAGE_SOURCES)
         for i, source in enumerate(recognized_sources):
             msg = _make_msg(f"good-source-{i:03}", source=source)
             (inbox_dir / f"good-source-{i:03}.json").write_text(json.dumps(msg))
@@ -245,3 +252,67 @@ class TestUnrecognizedSourceQuarantine:
         assert "no messages" in result2[0].text.lower() or "empty" in result2[0].text.lower() or len(result2[0].text) < 100, (
             "Second check_inbox call must indicate empty inbox, not re-return the quarantined file"
         )
+
+    def test_bot_talk_messages_pass_quarantine_guard(
+        self, inbox_server_dirs: dict
+    ):
+        """bot-talk messages are in INBOX_MESSAGE_SOURCES and must not be quarantined.
+
+        Cross-Lobster bot-to-bot messages use source="bot-talk". Before this fix,
+        "bot-talk" was missing from INBOX_MESSAGE_SOURCES, so every inbound
+        cross-Lobster message would be permanently quarantined to failed/, breaking
+        the bot-talk integration entirely.
+        """
+        inbox_dir = inbox_server_dirs["inbox"]
+        failed_dir = inbox_server_dirs["failed"]
+
+        msg = _make_msg("bot-talk-001", source="bot-talk", msg_type="text")
+        msg["direction"] = "INBOUND"
+        msg["from"] = "other-lobster-instance"
+        (inbox_dir / "bot-talk-001.json").write_text(json.dumps(msg))
+
+        from src.mcp.inbox_server import handle_check_inbox
+
+        result = asyncio.run(handle_check_inbox({}))
+
+        # Must not be quarantined
+        assert list(failed_dir.glob("*.json")) == [], (
+            "bot-talk message must not be quarantined — 'bot-talk' is a recognized source"
+        )
+        # Must be returned to the dispatcher
+        result_text = result[0].text
+        assert "bot-talk-001" in result_text, (
+            "bot-talk message must be returned by check_inbox"
+        )
+
+    def test_quarantine_guard_runs_with_source_filter(
+        self, inbox_server_dirs: dict
+    ):
+        """A bad-source file is quarantined even when check_inbox is called with source=.
+
+        Previously, the source_filter check ran first — a caller passing
+        source="bad-script" would receive the bad file without quarantining it.
+        Now quarantine always runs before filtering so the file is removed
+        unconditionally.
+        """
+        inbox_dir = inbox_server_dirs["inbox"]
+        failed_dir = inbox_server_dirs["failed"]
+
+        bad_source = "custom-script"
+        msg = _make_msg("bad-sourced-001", source=bad_source)
+        (inbox_dir / "bad-sourced-001.json").write_text(json.dumps(msg))
+
+        from src.mcp.inbox_server import handle_check_inbox
+
+        # Call check_inbox with a source filter that matches the bad source
+        asyncio.run(handle_check_inbox({"source": bad_source}))
+
+        # File must still be quarantined despite the matching source filter
+        assert not (inbox_dir / "bad-sourced-001.json").exists(), (
+            "Bad-source file must be quarantined even when source filter matches it"
+        )
+        assert (failed_dir / "bad-sourced-001.json").exists(), (
+            "Bad-source file must appear in failed/ after quarantine"
+        )
+        quarantined = json.loads((failed_dir / "bad-sourced-001.json").read_text())
+        assert quarantined["_permanently_failed"] is True

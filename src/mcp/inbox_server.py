@@ -4683,14 +4683,15 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
                     # Re-read files that failed the first pass (e.g. transient lock)
                     with open(f) as fp:  # type: ignore[arg-type]
                         msg = json.load(fp)
-                if source_filter and msg.get("source", "").lower() != source_filter:
-                    continue
                 # Quarantine files with unrecognized sources (issue #1735).
-                # An unknown source means the dispatcher cannot route or dismiss
-                # the message, creating an infinite hot-loop: wait_for_messages
-                # sees the file on every call and returns immediately, exhausting
-                # --max-turns in ~7 minutes.  Move to failed/ permanently so the
-                # file is preserved for inspection but cannot block the loop.
+                # This check runs before source_filter so that a bad-source file
+                # is always quarantined regardless of whether the caller passed a
+                # source= filter.  An unknown source means the dispatcher cannot
+                # route or dismiss the message, creating an infinite hot-loop:
+                # wait_for_messages sees the file on every call and returns
+                # immediately, exhausting --max-turns in ~7 minutes.  Move to
+                # failed/ permanently so the file is preserved for inspection but
+                # cannot block the loop.
                 msg_source = msg.get("source", "")
                 if msg_source and msg_source not in INBOX_MESSAGE_SOURCES:
                     error_msg = (
@@ -4714,6 +4715,8 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
                     except Exception as _q_exc:
                         log.error(f"check_inbox: quarantine failed for {f}: {_q_exc}")  # type: ignore[union-attr]
                     continue  # skip — quarantined
+                if source_filter and msg.get("source", "").lower() != source_filter:
+                    continue
                 # /report slash command pre-processor: handle automatically without
                 # surfacing the raw message to the main dispatcher loop.
                 msg_text = msg.get("text", "")
