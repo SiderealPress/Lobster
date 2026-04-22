@@ -18,6 +18,8 @@
 #   6. Fresh heartbeat ignores WFM-active (heartbeat alone = GREEN)
 #   7. LOBSTER_WFM_ACTIVE_OVERRIDE env var is respected
 #   8. WFM-active file with non-integer content → RED (treat as absent)
+#   9. WFM-active tombstone value 'exited' → RED (Fix 2: tombstone not absent)
+#  10. TOCTOU race: file deleted mid-read → RED, not crash (Fix 1 regression test)
 #
 # Usage: bash tests/test-health-check-wfm-active.sh
 #===============================================================================
@@ -153,6 +155,60 @@ begin_test "WFM-active file non-integer content → treated as absent → RED"
 write_stale_heartbeat
 echo "not-a-number" > "$DISPATCHER_WFM_ACTIVE_FILE"
 check_dispatcher_heartbeat && rc=$? || rc=$?
+assert_exit "$rc" 2
+
+# -------------------------------------------------------------------
+# Test 9: TOCTOU fix — tombstone value ("exited") → treated as absent → RED
+# The finally block in inbox_server.py writes "exited" instead of deleting
+# the file, so the health check never sees a missing file mid-read.
+# The non-integer tombstone must be treated as absent (= WFM not active).
+# -------------------------------------------------------------------
+begin_test "WFM-active tombstone value 'exited' → treated as absent → RED"
+write_stale_heartbeat
+echo "exited" > "$DISPATCHER_WFM_ACTIVE_FILE"
+check_dispatcher_heartbeat && rc=$? || rc=$?
+assert_exit "$rc" 2
+
+# -------------------------------------------------------------------
+# Test 10: TOCTOU race scenario — file present at check start, absent at read
+#
+# Simulates the race window that caused the 2026-04-22 false-positive restart:
+# the WFM-active file exists when the health check starts, but is deleted
+# before the read completes (the old -f / cat two-step had this window).
+#
+# The old two-step code (-f gate + cat) would: pass the -f check (file
+# exists), then cat would return empty if the file disappeared in the window,
+# and the empty wfm_active_ts would fall through to RED.
+#
+# The new cat-only code must handle the same absent-file path gracefully:
+# cat 2>/dev/null returns empty, the integer guard rejects it, and the
+# function falls through to RED — not GREEN and not a crash.
+#
+# We simulate the race by overriding cat in a subshell: the override deletes
+# the WFM-active file before returning empty output, replicating the exact
+# state the old code would see mid-race: file was present, now gone, cat empty.
+# -------------------------------------------------------------------
+begin_test "TOCTOU race: file deleted mid-read (cat returns empty) → RED, not crash"
+write_stale_heartbeat
+# Create a fresh WFM-active file so the -f check (if present) would pass.
+echo "$(( $(date +%s) - 30 ))" > "$DISPATCHER_WFM_ACTIVE_FILE"
+# Run in a subshell with cat overridden to simulate the race:
+# cat deletes the file and returns empty, as inbox_server.py's unlink()
+# would have done in the pre-Fix-2 code path.
+rc=$(
+    cat() {
+        if [[ "$*" == *"$DISPATCHER_WFM_ACTIVE_FILE"* ]] || \
+           [[ "$*" == *"dispatcher-wfm-active"* ]]; then
+            rm -f "$DISPATCHER_WFM_ACTIVE_FILE"
+            # return empty — simulates file deleted between -f and cat
+        else
+            command cat "$@"
+        fi
+    }
+    check_dispatcher_heartbeat && echo 0 || echo $?
+)
+# Restore a clean state for subsequent tests.
+rm -f "$DISPATCHER_WFM_ACTIVE_FILE"
 assert_exit "$rc" 2
 
 # -------------------------------------------------------------------
