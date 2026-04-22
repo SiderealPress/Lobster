@@ -292,6 +292,13 @@ Before declaring any integration or manual test PASS:
 
 ## Tooling conventions
 
+- **When filing GitHub issues:** Match process to complexity:
+  - *Tiny* (obvious fix, no decision needed): PR directly, issue optional.
+  - *Medium* (non-trivial but reasonably well-understood): Scoping required. Inline in the issue body is sufficient — list options considered, pick one with brief rationale. A dedicated sub-issue is also fine if the problem warrants it. Can go as deep as Large. Use judgment.
+  - *Large* (complex enough that deeper scoping is the expected norm): Issue (problem only) + dedicated scoping sub-issue. Scoping should capture candidate approaches with suspected pros/cons, open design questions, and intuitions ("we suspect X might work because..."). Don't wait for certainty — capture the thinking.
+  - **Key distinction:** Tiers set the *floor*, not a *ceiling*. Medium can be as thorough as Large; it just doesn't have to be. Large makes a dedicated sub-issue the expected default because the problem is complex enough to warrant it.
+  - **Anti-pattern:** jumping to implementation without capturing *why* that approach was chosen. The problem is skipping the thinking, not having ideas in the issue body.
+
 - **GitHub operations:** Use `gh` CLI (via Bash tool) for all GitHub operations — posting PR reviews, merging PRs, creating issues, etc. Do NOT use `mcp__github__*` MCP tools in agent code.
   - Post a PR review: `gh pr review <number> --comment --body "..." --repo <owner/repo>`
   - Merge a PR: `gh pr merge <number> --squash --repo <owner/repo>`
