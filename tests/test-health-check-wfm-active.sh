@@ -156,6 +156,31 @@ check_dispatcher_heartbeat && rc=$? || rc=$?
 assert_exit "$rc" 2
 
 # -------------------------------------------------------------------
+# Test 9: TOCTOU fix — tombstone value ("exited") → treated as absent → RED
+# The finally block in inbox_server.py writes "exited" instead of deleting
+# the file, so the health check never sees a missing file mid-read.
+# The non-integer tombstone must be treated as absent (= WFM not active).
+# -------------------------------------------------------------------
+begin_test "WFM-active tombstone value 'exited' → treated as absent → RED"
+write_stale_heartbeat
+echo "exited" > "$DISPATCHER_WFM_ACTIVE_FILE"
+check_dispatcher_heartbeat && rc=$? || rc=$?
+assert_exit "$rc" 2
+
+# -------------------------------------------------------------------
+# Test 10: TOCTOU fix — cat-only read (no -f gate) — verify that reading
+# the file atomically without a prior existence check works correctly
+# when the file holds a fresh timestamp.
+# This test exercises the code path that was previously gated with -f:
+# cat returns the timestamp and the health check sees GREEN.
+# -------------------------------------------------------------------
+begin_test "Fresh WFM-active read via cat-only (no -f gate) → GREEN"
+write_stale_heartbeat
+echo "$(( $(date +%s) - 30 ))" > "$DISPATCHER_WFM_ACTIVE_FILE"
+check_dispatcher_heartbeat && rc=$? || rc=$?
+assert_exit "$rc" 0
+
+# -------------------------------------------------------------------
 # Summary
 # -------------------------------------------------------------------
 echo ""

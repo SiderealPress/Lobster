@@ -1482,6 +1482,39 @@ def _write_wfm_active_signal() -> None:
         pass  # Never block wait_for_messages on a heartbeat write failure
 
 
+# Tombstone value written to WFM_ACTIVE_FILE when WFM exits (Fix 2, issue #1730).
+# Using a non-integer string means:
+#   - The file is NEVER absent between the health check's -f gate and its cat read
+#     (closing the TOCTOU race that caused the 2026-04-22 00:00Z false restart).
+#   - The health check's existing integer guard ([[ "$ts" =~ ^[0-9]+$ ]]) rejects
+#     this value and treats it as "WFM not active" — the correct semantic.
+WFM_ACTIVE_TOMBSTONE = "exited"
+
+
+def _clear_wfm_active_signal() -> None:
+    """Write a tombstone to WFM_ACTIVE_FILE instead of deleting it (issue #1730).
+
+    Replaces the previous WFM_ACTIVE_FILE.unlink() in the WFM finally block.
+    Writing a non-integer tombstone ("exited") instead of deleting ensures the
+    file is never transiently absent — closing the TOCTOU race between:
+      1. The health check's existence test  (if [[ -f ... ]])
+      2. The health check's content read    (cat ...)
+    If the file disappears between those two operations, cat returns empty and
+    the health check falls through to RED, triggering a false-positive restart.
+
+    The tombstone is parsed by the health check's integer regex guard and treated
+    as absent (WFM not active), which is the correct semantic.
+
+    Silently swallowed on failure: this runs in a finally block and must never
+    mask the original exception that caused WFM to exit.
+    """
+    try:
+        WFM_ACTIVE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        WFM_ACTIVE_FILE.write_text(WFM_ACTIVE_TOMBSTONE + "\n")
+    except Exception:
+        pass  # Never propagate errors from a finally-block cleanup
+
+
 # ---------------------------------------------------------------------------
 # Session Guard
 #
@@ -4227,13 +4260,13 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
     finally:
         observer.stop()
         observer.join(timeout=1)
-        # Clear WFM-active signal so the health check stops treating the
-        # dispatcher as "alive in WFM" once wait_for_messages returns.
-        try:
-            if WFM_ACTIVE_FILE.exists():
-                WFM_ACTIVE_FILE.unlink()
-        except Exception as _wfm_clear_exc:
-            log.warning(f"[wfm-active] Failed to clear WFM-active signal: {_wfm_clear_exc}")
+        # Write tombstone to WFM_ACTIVE_FILE instead of deleting it (issue #1730).
+        # Deleting the file creates a TOCTOU race: the health check's -f gate can
+        # pass just before unlink(), then cat returns empty and declares RED.
+        # Writing the non-integer tombstone WFM_ACTIVE_TOMBSTONE means the file is
+        # never transiently absent — the health check treats non-integer content as
+        # "WFM not active" (same as absent), with no race window.
+        _clear_wfm_active_signal()
 
 
 def _is_report_command(text: str) -> bool:
