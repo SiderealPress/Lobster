@@ -9,6 +9,12 @@ Verifies that:
 - The written timestamp is within 2 seconds of now
 - Atomic write: a .tmp file is never left behind
 - The file is writable before the wait loop starts
+
+TOCTOU fix (issue #1730):
+- _clear_wfm_active_signal() writes a tombstone value ("exited") instead of
+  deleting the file, ensuring the file is never absent between the health check's
+  existence check and its read (closes the -f / cat race window).
+- WFM_ACTIVE_TOMBSTONE constant is the string "exited"
 """
 import importlib
 import os
@@ -115,3 +121,86 @@ def test_write_wfm_active_signal_silent_on_permission_error(tmp_path, monkeypatc
 
     # Must not raise
     server._write_wfm_active_signal()
+
+
+# ---------------------------------------------------------------------------
+# TOCTOU fix tests (issue #1730)
+# ---------------------------------------------------------------------------
+
+def test_wfm_active_tombstone_constant_is_exited(tmp_path):
+    """WFM_ACTIVE_TOMBSTONE must be the string 'exited' — the health check parses
+    this as a non-integer and treats it as absent, which is the correct semantic."""
+    wfm_file = tmp_path / "logs" / "dispatcher-wfm-active"
+    server = _load_inbox_server(wfm_file)
+    assert server.WFM_ACTIVE_TOMBSTONE == "exited", (
+        "WFM_ACTIVE_TOMBSTONE must be 'exited' — health check regex ^[0-9]+$ "
+        "rejects it and treats it as absent (WFM not active)"
+    )
+
+
+def test_clear_wfm_active_signal_writes_tombstone_not_deletes(tmp_path):
+    """TOCTOU fix: _clear_wfm_active_signal() must write a tombstone value,
+    not delete the file. The file must still exist after clearing, containing
+    the tombstone string — never absent."""
+    wfm_file = tmp_path / "logs" / "dispatcher-wfm-active"
+    server = _load_inbox_server(wfm_file)
+
+    # Write a live signal first
+    server._write_wfm_active_signal()
+    assert wfm_file.exists(), "Precondition: WFM-active file must exist after signal write"
+
+    # Clear it — must NOT delete, must write tombstone
+    server._clear_wfm_active_signal()
+
+    assert wfm_file.exists(), (
+        "File must still exist after _clear_wfm_active_signal() — "
+        "deleting it creates a TOCTOU race with the health check"
+    )
+    content = wfm_file.read_text().strip()
+    assert content == server.WFM_ACTIVE_TOMBSTONE, (
+        f"Expected tombstone '{server.WFM_ACTIVE_TOMBSTONE}', got '{content}'"
+    )
+
+
+def test_clear_wfm_active_signal_tombstone_is_non_integer(tmp_path):
+    """The tombstone written by _clear_wfm_active_signal() must be a non-integer
+    so the health check's regex guard ([[ \"$ts\" =~ ^[0-9]+$ ]]) rejects it and
+    treats the file as absent — meaning WFM is not active."""
+    wfm_file = tmp_path / "logs" / "dispatcher-wfm-active"
+    server = _load_inbox_server(wfm_file)
+
+    server._write_wfm_active_signal()
+    server._clear_wfm_active_signal()
+
+    content = wfm_file.read_text().strip()
+    assert not content.isdigit(), (
+        f"Tombstone '{content}' must not be a pure integer — "
+        "the health check treats integers as live timestamps"
+    )
+
+
+def test_clear_wfm_active_signal_when_file_absent_is_silent(tmp_path):
+    """_clear_wfm_active_signal() must not raise when the file does not yet exist
+    (e.g. WFM exits before the first _write_wfm_active_signal() completes)."""
+    wfm_file = tmp_path / "logs" / "dispatcher-wfm-active"
+    server = _load_inbox_server(wfm_file)
+
+    assert not wfm_file.exists(), "Precondition: file must not exist"
+    # Must not raise
+    server._clear_wfm_active_signal()
+
+
+def test_clear_wfm_active_signal_silent_on_write_error(tmp_path, monkeypatch):
+    """_clear_wfm_active_signal() swallows exceptions silently — never raises.
+    This is critical: it runs in a finally block and must not mask the original exception."""
+    wfm_file = tmp_path / "logs" / "dispatcher-wfm-active"
+    server = _load_inbox_server(wfm_file)
+
+    # Make the parent directory read-only to provoke a write failure
+    wfm_file.parent.mkdir(parents=True, exist_ok=True)
+    wfm_file.parent.chmod(0o555)
+    try:
+        # Must not raise
+        server._clear_wfm_active_signal()
+    finally:
+        wfm_file.parent.chmod(0o755)
