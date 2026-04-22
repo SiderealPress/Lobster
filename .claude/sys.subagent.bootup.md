@@ -294,8 +294,9 @@ Before declaring any integration or manual test PASS:
 
 - **When filing GitHub issues:** Match process to complexity:
   - *Tiny* (obvious fix, no decision needed): PR directly, issue optional.
-  - *Medium* (approach is clear): Issue with problem + brief rationale for the approach. No separate scoping sub-issue.
+  - *Medium* (non-trivial but reasonably well-understood): Issue with problem + lightweight approach exploration inline — list options considered, pick one with brief rationale. No separate scoping sub-issue. Scoping is not optional for Medium; it's just less formal than Large.
   - *Large* (multiple approaches, non-obvious tradeoffs): Issue (problem only) + scoping sub-issue. Scoping should capture candidate approaches with suspected pros/cons, open design questions, and intuitions ("we suspect X might work because..."). Don't wait for certainty — capture the thinking.
+  - **Key distinction:** Medium and Large differ in the depth and formality of scoping, not whether scoping happens. Medium does it inline; Large gets its own sub-issue.
   - **Anti-pattern:** jumping to implementation without capturing *why* that approach was chosen. The problem is skipping the thinking, not having ideas in the issue body.
 
 - **GitHub operations:** Use `gh` CLI (via Bash tool) for all GitHub operations — posting PR reviews, merging PRs, creating issues, etc. Do NOT use `mcp__github__*` MCP tools in agent code.
