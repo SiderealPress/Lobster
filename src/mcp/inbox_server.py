@@ -4683,6 +4683,38 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
                     # Re-read files that failed the first pass (e.g. transient lock)
                     with open(f) as fp:  # type: ignore[arg-type]
                         msg = json.load(fp)
+                # Quarantine files with unrecognized sources (issue #1735).
+                # This check runs before source_filter so that a bad-source file
+                # is always quarantined regardless of whether the caller passed a
+                # source= filter.  An unknown source means the dispatcher cannot
+                # route or dismiss the message, creating an infinite hot-loop:
+                # wait_for_messages sees the file on every call and returns
+                # immediately, exhausting --max-turns in ~7 minutes.  Move to
+                # failed/ permanently so the file is preserved for inspection but
+                # cannot block the loop.
+                msg_source = msg.get("source", "")
+                if msg_source and msg_source not in INBOX_MESSAGE_SOURCES:
+                    error_msg = (
+                        f"Unrecognized inbox source {msg_source!r} — not in INBOX_MESSAGE_SOURCES. "
+                        "File quarantined to failed/ to prevent hot-loop. "
+                        "Add to INBOX_MESSAGE_SOURCES in message_types.py if this is intentional."
+                    )
+                    log.error(f"check_inbox: quarantining {f.name}: {error_msg}")  # type: ignore[union-attr]
+                    try:
+                        msg["_permanently_failed"] = True
+                        msg["_last_error"] = error_msg
+                        msg["_last_failed_at"] = datetime.now(timezone.utc).isoformat()
+                        dest = FAILED_DIR / f.name  # type: ignore[union-attr]
+                        atomic_write_json(dest, msg)
+                        f.unlink(missing_ok=True)  # type: ignore[union-attr]
+                        _emit_mcp_event(
+                            "inbox.failed",
+                            {"message_id": f.stem, "error": error_msg, "permanent": True},  # type: ignore[union-attr]
+                            severity="warn",
+                        )
+                    except Exception as _q_exc:
+                        log.error(f"check_inbox: quarantine failed for {f}: {_q_exc}")  # type: ignore[union-attr]
+                    continue  # skip — quarantined
                 if source_filter and msg.get("source", "").lower() != source_filter:
                     continue
                 # /report slash command pre-processor: handle automatically without
