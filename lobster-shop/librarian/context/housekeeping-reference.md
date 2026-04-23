@@ -1,79 +1,79 @@
 # Librarian Housekeeping Reference
 
-Tool-specific checklists and reference material for common librarian workstreams. Read `behavior/system.md` first for the operating model.
+Workstream checklists and reference material. Read `behavior/system.md` first for the operating model.
 
-## Issue Tracker Checklist
+## Before Creating Any PR — Dedup Check
 
-**Before closing any resolved issue:** confirm the linked PR was merged and fully covers the issue (not partial progress). For stale closures, leave a comment: "Closing: no activity in 90+ days and superseded by #N."
-
-**Labeling conventions:** bug, enhancement, docs, stale, duplicate, blocked, good-first-issue, ready-for-implementation
-
-**Implementation readiness tagging:** tag `ready-for-implementation` when an issue is well-scoped with a clear expected outcome; leave a comment with what's needed and the expected outcome.
-
-**PR review hygiene:** comment on PRs open >7 days with no activity; update PR descriptions that no longer match the current code.
-
-## Dedup Check (Required Before Any PR)
+The most common failure in parallel librarian sessions is duplicate PRs. Always run before opening one:
 
 ```bash
-gh pr list --repo <owner/repo> --search "closes #<issue-number>" --state open
-gh pr list --repo <owner/repo> --search "fixes #<issue-number>" --state open
-gh pr list --repo <owner/repo> --head "<expected-branch-name>" --state open
+gh pr list --repo <owner/repo> --search "closes #<N>" --state open
+gh pr list --repo <owner/repo> --search "fixes #<N>" --state open
+gh pr list --repo <owner/repo> --head "<expected-branch>" --state open
 ```
 
-If any open PR is returned: skip this fix. Log: "Skipped: PR already open for #N." Parallel agents must each independently run this check.
+If any open PR matches: skip this fix. Log "Skipped: PR #N already open." Each parallel subagent runs this independently.
 
-## Codebase Audit Checklist
+## Issue Tracker
 
-File an issue for each finding — fix inline only for one-line obvious corrections.
+- Close resolved issues only when the fix **fully covers** the issue. Partial progress → update the description, do not close.
+- Close stale issues (>90 days, no clear owner, superseded or no longer relevant). Leave a closing comment: "Closing: no activity 90+ days, superseded by #N."
+- Update stale descriptions: add missing context, correct wrong info, sharpen vague titles.
+- Label: bug, enhancement, docs, stale, duplicate, blocked, good-first-issue, ready-for-implementation.
+- Link and close duplicates. Decompose large issues into sub-issues. Update project tracking after a pass.
+- Comment on PRs open >7 days with no activity.
+- Tag `ready-for-implementation` with a comment: what's needed + expected outcome.
 
+*Requires user sign-off:* merging PRs; closing issues where resolution is genuinely unclear.
+
+## Codebase Audit
+
+File an issue for each finding (fix inline only for obvious one-line corrections):
 - Dead code: unreachable functions, unused imports, commented-out blocks
 - Missing test coverage: modules or functions with no tests
 - Doc staleness: documentation referencing removed features or outdated paths
-- Context file redundancy: overlapping or contradictory instructions across behavior/context files
+- Context file redundancy: overlapping or contradictory instructions
 
-## Workspace and Config Audit Checklist
+## Workspace and Config
 
-File issues for things needing human review. Act directly on clear-cut problems.
+File issues for anything needing human review. Act on clear-cut problems.
+- Stale git worktrees: list with last-commit dates; file an issue if pruning looks warranted — do not prune
+- Orphaned scripts with no callers: file an issue — do not delete
+- Config drift: settings referencing old paths or removed env vars
+- Stale scheduled jobs (>14 days no successful run): file an issue and flag
 
-- Stale git worktrees (`git worktree list`): list any with no open PR and their last-commit date; file an issue if pruning looks warranted — do not prune
-- Orphaned scripts with no callers: file an issue listing them — do not delete
-- Config drift: settings referencing old paths or env vars that no longer exist
-- Stale scheduled jobs (no successful run in >14 days): file an issue and flag to user
+## Managed Projects
 
-## Project Subdirectory Checklist (`$LOBSTER_PROJECTS`)
+Check each directory under `$LOBSTER_PROJECTS`:
+- Uncommitted changes or untracked files: note and flag if unexpected
+- Repos significantly behind upstream (>30 commits): flag for attention
+- Projects with no activity in >60 days: flag if still-active status is unclear
+- Worktrees from past agent runs with no open PR: list and flag — do not prune unilaterally
 
-Check each managed project directory:
+## Memory and Context
 
-- Uncommitted changes or untracked files: note them, file an issue if unexpected
-- Stale branches with no open PR and no recent commits: file an issue listing them — do not delete
-- Repos significantly behind their upstream remote (`git fetch && git status`): note the lag, flag if >30 commits
-- Projects with no activity in >60 days: note whether still active; flag to user if unclear
-- Worktrees created by past agent runs that are no longer needed: list and flag — do not prune unilaterally
-
-## Memory and Context Housekeeping Checklist
-
-- `MEMORY.md` and memory files: review each entry for staleness or inaccuracy; update or remove stale entries
-- Session notes: prune very old or redundant sessions; update open threads to reflect current state
+- Memory index and files: review each entry for staleness; update or remove stale entries
+- Session notes: prune redundant old sessions; update open threads to reflect current state
 - Rolling summary: verify it reflects current priorities and open work
-- Behavioral rules (IFTTT): review each rule — still accurate? Still needed? Tighten imprecise conditions
-- Handoff and priorities files: update to reflect current state after housekeeping pass
+- Behavioral rules: review each — still accurate? still needed? Tighten imprecise conditions.
+- Handoff and priorities files: update to reflect current state after a housekeeping pass
 
-## Super Librarian: Default Priority Order
+## Super Librarian: Priority Order
 
-Check session notes first — explicit pre-session instructions override this list.
+Explicit pre-session instructions override this list.
 
-1. PR and soak test anything in flight on the local integration branch
-2. Move forward on current in-flight projects (per session notes)
+1. In-flight work (soak, PRs awaiting merge)
+2. In-flight projects (per session notes)
 3. Issue and task hygiene
 4. Memory and context housekeeping
-5. Project subdirectory maintenance
+5. Managed project maintenance
 6. Research and deep reading
 7. Test coverage and doc improvements
 8. Session notes and context catchup
 
-## Super Librarian: Failure Modes to Avoid
+## Super Librarian: Failure Modes
 
-- **Stalling** — waiting for the user to prompt every action
-- **Session collapse** — brief activity then stopping instead of sustaining momentum
-- **Passive observation** — monitoring rather than executing
-- **Scan instead of work** — "found 12 stale issues" when the job is to close, update, and triage them
+- **Stalling** — waiting for prompts instead of working
+- **Session collapse** — brief activity then stopping instead of sustained work
+- **Passive observation** — monitoring instead of executing
+- **Scan instead of work** — "found 12 issues" when the job is to close, update, and triage them

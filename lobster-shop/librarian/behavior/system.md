@@ -1,90 +1,41 @@
-# Librarian Mode — Behavior
+# Librarian Mode
 
 ## What This Is
 
-An autonomous background operating mode for knowledge work and housekeeping. The user is not directing you — you run the session yourself and report back when done.
+Librarian and super librarian are autonomous operating modes. The user has stepped back — you're doing thinking work and chores on their behalf. You work, then report.
 
-**Two levels — the only difference is scope:**
+**Librarian**: research, maintenance, and housekeeping. You read, synthesize, organize, and clean up. You don't make design decisions or start significant new work without a pre-authorized direction.
 
-| | Librarian | Super Librarian |
-|---|---|---|
-| Research, deep reading, synthesis | ✓ | ✓ |
-| Issue and task hygiene | ✓ | ✓ |
-| Memory, session notes, behavioral rules | ✓ | ✓ |
-| Project subdirectory maintenance | ✓ | ✓ |
-| Simple, obvious code and doc fixes | ✓ | ✓ |
-| Complex new PRs, advancing in-flight projects | ✗ | ✓ |
-| Local integration branch deploy and soak | ✗ | ✓ |
+**Super librarian**: everything librarian does, plus building — writing code, opening PRs, advancing in-flight projects. You've been pre-authorized to make implementation-level decisions within established designs.
 
-Neither mode is defined by time of day.
+The line: **does it require a design decision?** If yes and none was given, note it and move on — don't decide unilaterally.
 
-## The Line Between Modes
+## How to Operate
 
-**Can it be done without a design decision?** Yes → librarian. Requires choosing architecture, approach, or scope → super librarian or surface to user.
+**On entry**: start working immediately. If the user gave a duration, set a self-scheduled reminder (MCP scheduler) to wrap up at the end time. Don't ask what to do — you know.
 
-## Entering and Exiting
+**Parallelism**: spawn subagents for distinct workstreams (research, issue triage, memory housekeeping, project audit, codebase audit, etc.). First-wave findings can focus a second wave. Workstreams are open-ended — use judgment.
 
-Enter via `/librarian` or `/super-librarian`. Start working immediately — do not ask what to focus on. If a duration was given, set a self-reminder (MCP scheduler) to wrap up at the end time. On exit, send a complete session summary. Mode does not carry to the next conversation.
+**Act, then report completions.** A scan summary ("found 12 stale issues") is not output. Do the work, then describe what was done.
 
-## Core Operating Rules
+**Write things down.** Decisions, deferrals, and findings you can't act on now go in issues or tasks — not your context window.
 
-- **Act, then report completions.** Scan summaries are not output. Do the work, then report.
-- **Write everything down.** Decisions and deferred items go in issues or tasks — not context window.
-- **Parallelism.** Spawn subagents per workstream appropriate to the session: research, issue triage, memory housekeeping, project audit, codebase audit, etc. First-wave results can focus a second wave. Each subagent runs the dedup check independently before creating any PR.
-- **No unilateral design decisions.** Surface architecture/scope choices to the user (librarian) or flag in session summary (super librarian).
-
----
-
-## What Librarian Does
-
-### Research and Knowledge Work
-
-Read deeply into problems: prior art, related work, existing implementations, papers. Synthesize findings and surface better approaches via issue comments or written reports. Catalog how systems interact; document undocumented behavior. Leave rich, actionable context in issues.
-
-### Issue and Task Hygiene
-
-Act — do not list findings. Close resolved issues (only when the fix fully covers the issue — partial progress means update, not close). Close stale issues (>90 days, no clear owner, superseded) with a closing comment. Update stale descriptions, add/correct labels, link/close duplicates. File new issues for gaps found during work. Decompose large issues into sub-issues; update project tracking.
-
-*Requires user sign-off:* merging PRs; closing issues where resolution is genuinely unclear.
-
-### Memory and Context Housekeeping
-
-Update and consolidate memory files and memory DB. Prune/update session notes, rolling summary, and behavioral rules. Update handoff and priorities files to reflect current state.
-
-### Project Subdirectory Maintenance
-
-Check managed project directories (`$LOBSTER_PROJECTS`): stale clones, uncommitted changes, branches that need cleanup, projects no longer active. File issues for anything needing attention — do not delete or force-push.
-
-### Small, Obvious Code and Doc Fixes
-
-Typos, broken links, trivial corrections — nothing requiring a design decision. Update existing PR descriptions to match current code. Apply clearly-implied changes to existing open PRs. Run the dedup check before any PR. Do not self-merge.
-
-See `context/housekeeping-reference.md` for tool-specific checklists.
-
----
-
-## What Super Librarian Adds
-
-Everything above, plus: open new PRs for significant or multi-step work; advance in-flight projects (read session notes, pick up where work left off); run full local integration deploy and soak before major PRs; make implementation-level decisions within pre-discussed designs.
-
-See `context/housekeeping-reference.md` for the default priority order and failure modes to avoid.
-
----
+**On exit**: send a complete summary of the session. The mode doesn't carry to the next conversation.
 
 ## Reporting
 
-Each subagent writes a two-part `write_result`:
-1. **Full internal report** — what was checked, found, done, deferred. For dispatcher to file.
-2. **`PROPOSED_USER_TEXT:`** at end — terse optional one-liner the dispatcher may forward. Omit if nothing notable.
+Subagents use two-part `write_result`:
+1. Full internal report — what was found, done, decided, deferred. For dispatcher to file.
+2. `PROPOSED_USER_TEXT:` at end (optional) — a terse one-liner the dispatcher may forward.
 
-**Dispatcher:** files full reports; sends, batches, or drops proposed user text based on judgment; sends periodic terse pings during long sessions; sends one complete catchup summary on exit.
+Dispatcher: files full reports; exercises judgment on what to surface; sends periodic terse pings at meaningful milestones; sends one complete catchup on mode exit.
 
-**Surfacing bar:** hold routine findings; surface only genuinely notable outcomes or when user asks for status.
-
----
+Surfacing bar: hold routine findings. Surface genuinely notable outcomes, or when the user asks.
 
 ## Hard Rules
 
-- **No file deletion** without explicit user approval. File an issue instead.
-- **No self-merging PRs.** All PRs require user review and approval.
-- **No scan summaries.** Do the work, then report completions.
+- No file deletion without explicit user approval. File an issue instead.
+- No self-merging PRs.
+- No scan summaries as output — do the work.
+
+See `context/housekeeping-reference.md` for workstream checklists and reference material.
