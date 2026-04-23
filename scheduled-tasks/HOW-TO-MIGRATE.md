@@ -84,7 +84,7 @@ Key invariants:
 - **Use atomic writes.** Write to a `.tmp` file, then `os.replace()`. This
   prevents partial reads if the process is interrupted.
 
-See `scheduled-tasks/lobstertalk_unified.py` for a complete production example.
+See `lobster-shop/lobstertalk/tooling/src/lobster_talk/lobstertalk_unified.py` for a complete production example.
 
 ### 2. State file location and schema
 
