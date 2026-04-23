@@ -258,7 +258,9 @@ else
 fi
 
 echo "Testing authentication..."
-AUTH_RESPONSE=$(curl -sf --max-time 5 -H "Authorization: Bearer $TOKEN_VALUE" "$BOT_TALK_URL/messages?limit=1&since=1970-01-01T00:00:00Z" 2>&1)
+AUTH_RESPONSE=$(curl -sf --max-time 5 \
+    -H "X-Bot-Token: $TOKEN_VALUE" \
+    "$BOT_TALK_URL/messages?limit=1&since=1970-01-01T00:00:00Z" 2>&1)
 if [ $? -ne 0 ]; then
     warn "Auth test failed — token may be invalid or sender not in allowlist"
     warn "You will need allowlist registration before outbound messages work."
