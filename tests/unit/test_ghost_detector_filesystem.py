@@ -653,3 +653,38 @@ class TestLiveDispatcherGuard:
         out = capsys.readouterr().out
         assert "Skipping" in out
         assert "dispatcher" in out.lower()
+
+
+# ---------------------------------------------------------------------------
+# LOBSTER_HOME path resolution
+# ---------------------------------------------------------------------------
+
+
+class TestLobsterHomePaths:
+    """Verify that all paths derived from LOBSTER_HOME are consistent.
+
+    The module resolves LOBSTER_HOME once at import time, so we test the
+    resulting constant values rather than re-loading the module.  The key
+    invariant is that every path must be rooted at LOBSTER_HOME — never at
+    /root or any other user's home directory.
+    """
+
+    def test_db_path_rooted_at_lobster_home(self) -> None:
+        """DB_PATH must be a child of LOBSTER_HOME, not Path.home()."""
+        assert str(gd.DB_PATH).startswith(str(gd.LOBSTER_HOME))
+
+    def test_db_path_correct_relative_structure(self) -> None:
+        """DB_PATH must follow the canonical messages/config/agent_sessions.db layout."""
+        expected_suffix = Path("messages") / "config" / "agent_sessions.db"
+        assert gd.DB_PATH == gd.LOBSTER_HOME / expected_suffix
+
+    def test_lobster_home_never_resolves_to_root(self) -> None:
+        """LOBSTER_HOME must not be /root — that indicates Path.home() was used as root."""
+        assert str(gd.LOBSTER_HOME) != "/root"
+
+    def test_agent_output_glob_contains_lobster_home_slug(self) -> None:
+        """The agent output glob must encode the LOBSTER_HOME path, not /root."""
+        home_slug = str(gd.LOBSTER_HOME).strip("/").replace("/", "-")
+        assert home_slug in gd.AGENT_OUTPUT_GLOB, (
+            f"Expected slug '{home_slug}' in AGENT_OUTPUT_GLOB={gd.AGENT_OUTPUT_GLOB!r}"
+        )

@@ -1,0 +1,20 @@
+[Unit]
+Description=Lobster Container Init — write config.env and run install --container-setup
+# Runs before all lobster services so config.env exists when they start
+Before=lobster-router.service lobster-claude.service lobster-mcp-local.service
+After=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=lobster
+Group=lobster
+Environment=HOME=/home/lobster
+Environment=PATH=/home/lobster/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/lobster/lobster-container-init.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lobster-container-init
+
+[Install]
+WantedBy=multi-user.target

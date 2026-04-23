@@ -39,6 +39,14 @@ if _src_dir not in sys.path:
     sys.path.insert(0, _src_dir)
 from log_utils import JsonFormatter, configure_file_handler as _configure_file_handler
 
+# Event bus metrics — optional (graceful fallback when bus not initialized)
+try:
+    from event_bus import get_metrics_listener as _get_metrics_listener
+    _EVENT_BUS_AVAILABLE = True
+except ImportError:
+    _get_metrics_listener = None  # type: ignore[assignment]
+    _EVENT_BUS_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 _stream_handler = logging.StreamHandler()
@@ -489,7 +497,17 @@ def _build_observability_data(window_hours: int = 24) -> dict:
     agents = _compute_agent_stats(task_outputs, pending_agents)
     timeline = _build_timeline(processed_files, sent_files, task_outputs, window_hours)
 
-    return {
+    # Event bus metrics (issue #1665) — None if bus not initialized
+    event_metrics: dict | None = None
+    if _EVENT_BUS_AVAILABLE and _get_metrics_listener is not None:
+        try:
+            ml = _get_metrics_listener()
+            if ml is not None:
+                event_metrics = ml.get_snapshot()
+        except Exception:
+            pass  # metrics must never break the observability endpoint
+
+    result: dict = {
         "stats": {
             "uptime_hours": round(uptime, 2),
             **msg_counts,
@@ -504,6 +522,9 @@ def _build_observability_data(window_hours: int = 24) -> dict:
             "sent_total": len(sent_files),
         },
     }
+    if event_metrics is not None:
+        result["event_metrics"] = event_metrics
+    return result
 
 
 # ---------------------------------------------------------------------------
