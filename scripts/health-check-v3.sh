@@ -82,7 +82,7 @@ RESTART_WINDOW_BUFFER_SECONDS=120    # Pre-mark messages within this window of t
 MAINTENANCE_EXPIRY_SECONDS=3600      # 1 hour - stale maintenance flag is auto-cleared and checks resume
 
 COMPACTION_SUPPRESS_SECONDS=300      # 5 minutes - skip stale-inbox check after a compaction event
-COMPACT_GRACE_SECONDS=600            # 10 minutes - skip stale-inbox check after a compaction (last-compact.ts)
+COMPACT_GRACE_SECONDS=900            # 15 minutes - skip stale-inbox check after a compaction (last-compact.ts)
 # CATCHUP_SUPPRESS_SECONDS removed (issue #1483): dispatcher heartbeat threshold covers catchup naturally
 RESTART_COOLDOWN_SUPPRESS_SECONDS=240 # 4 minutes - suppress stale-inbox RED after a recent restart
 
@@ -511,9 +511,9 @@ except Exception:
 # Check if a context compaction occurred within the last COMPACT_GRACE_SECONDS.
 # Returns 0 (true) if inbox staleness checks should be suppressed, 1 otherwise.
 # Reads the Unix timestamp from last-compact.ts (written by hooks/on-compact.py).
-# This provides a 10-minute grace period for post-compaction re-orientation,
+# This provides a 15-minute grace period for post-compaction re-orientation,
 # extending the existing COMPACTION_SUPPRESS_SECONDS (5 min) window by an additional
-# 5 minutes to cover cases where re-orientation takes longer than expected.
+# 10 minutes to cover cases where re-orientation takes longer than expected.
 is_compact_grace_period() {
     local ts_file="$WORKSPACE_DIR/data/last-compact.ts"
     if [[ ! -f "$ts_file" ]]; then
@@ -1599,7 +1599,7 @@ main() {
     # Claude Code pauses tool calls during context compaction for 1-3+ minutes.
     # If on-compact.py recorded a compacted_at within the last
     # COMPACTION_SUPPRESS_SECONDS, skip all stale-inbox checks this run.
-    # Additionally, check last-compact.ts for a 10-minute grace period that
+    # Additionally, check last-compact.ts for a 15-minute grace period that
     # covers the post-compaction re-orientation window (reading bootup files,
     # processing inbox backlog, waiting for compact-catchup to complete).
     local compaction_recent=false
