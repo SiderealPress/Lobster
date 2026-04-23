@@ -479,36 +479,60 @@ def _mark_all_running_failed() -> None:
         )
 
 
-def _is_dispatcher_fallback() -> bool:
-    """Fallback check for issue #1768: detect dispatcher when marker file is absent.
+def _is_dispatcher_fallback(current_session_id: str = None) -> bool:
+    """Fallback check for issue #1768: detect dispatcher when primary detection fails.
 
-    When write-dispatcher-session-id.py misclassifies the new dispatcher as a
-    subagent (e.g. because the previous session's JSONL was still within the idle
-    threshold window), it does not update the dispatcher marker file.  The primary
-    detection path (session_role.is_dispatcher) then returns False for the new
-    dispatcher session because the stored ID in the marker file does not match.
+    Covers two failure modes where write-dispatcher-session-id.py could not
+    update the dispatcher marker file:
 
-    This fallback applies when ALL of the following are true:
-    1. LOBSTER_MAIN_SESSION=1 is set (this is definitely a Lobster-managed session).
-    2. The dispatcher marker file is absent (no marker file means there was no
-       prior successful write — indicating the new session never registered as
-       dispatcher, which can only happen if this IS the dispatcher starting fresh
-       or misclassified by the threshold check).
+    **Case 1 — crash-before-write (marker file absent):**
+    The dispatcher crashed or was killed before the SessionStart hook could
+    write the marker file.  No marker file means no prior successful write —
+    indicating the session never registered as dispatcher.  With
+    LOBSTER_MAIN_SESSION=1 set and the file absent, we conservatively treat
+    the session as the dispatcher.
 
-    When both conditions hold, we conservatively treat the session as the dispatcher
-    and call --mark-failed to clear any stale sessions.
+    **Case 2 — fast-restart misclassification (marker file present, different ID):**
+    write-dispatcher-session-id.py uses JSONL mtime to determine whether the
+    stored session is still alive.  If the previous dispatcher died less than
+    JSONL_MAX_IDLE_SECONDS (5 min) ago, the JSONL file is still within the
+    threshold window and the new session is misclassified as a subagent — so
+    the marker file retains the old session's ID.
 
-    Note: this fallback does NOT fire when the marker file is present with a
-    different session ID (that conclusively identifies a real subagent and we must
-    not clear sessions in that case).
+    This is the scenario from the actual #1768 incident: the dispatcher
+    restarted 32 seconds after the previous session's JSONL was last written.
+    The 3h→5min threshold reduction does not resolve this case — 32 s is still
+    inside a 5-minute window.
 
-    Returns True if the fallback conditions are met, False otherwise.
+    To handle this, when the marker file is present with a different session ID
+    and ``current_session_id`` is provided, we fall back to a process-tree
+    check: the dispatcher has ≤1 Claude ancestor before the tmux pane; genuine
+    subagents have ≥2.  This correctly classifies a fast-restart dispatcher
+    even when the JSONL-based check fails.
+
+    Returns True if this session should be treated as the dispatcher, False otherwise.
     """
     if os.environ.get("LOBSTER_MAIN_SESSION", "") != "1":
         return False
-    # Only fall back when the marker file is absent — presence means the primary
-    # mechanism worked and we should not second-guess it.
-    return not DISPATCHER_SESSION_FILE.exists()
+
+    # Case 1: marker file absent → crash-before-write
+    if not DISPATCHER_SESSION_FILE.exists():
+        return True
+
+    # Case 2: marker file present with a different session ID → fast restart.
+    # JSONL-based detection in write-dispatcher-session-id.py failed (previous
+    # session's JSONL was still within the idle-threshold window).  Use the
+    # process-tree walk to distinguish a real dispatcher restart (≤1 claude
+    # ancestor) from a genuine subagent session (≥2 claude ancestors).
+    if current_session_id:
+        try:
+            stored = DISPATCHER_SESSION_FILE.read_text().strip()
+            if stored and stored != current_session_id:
+                return session_role._is_dispatcher_by_process_tree()
+        except OSError:
+            pass
+
+    return False
 
 
 def main() -> None:
@@ -526,12 +550,15 @@ def main() -> None:
         sys.exit(0)
 
     # Skip subagent sessions — only the dispatcher should run this.
-    # Issue #1768 fallback: if session_role.is_dispatcher() returns False but
-    # LOBSTER_MAIN_SESSION=1 is set and the marker file is absent, still treat
-    # as a fresh dispatcher start.  This handles the race window where
-    # write-dispatcher-session-id.py misclassified the new dispatcher as a
-    # subagent and did not write the marker file.
-    if not session_role.is_dispatcher(data) and not _is_dispatcher_fallback():
+    # Issue #1768 fallback: covers two cases where write-dispatcher-session-id.py
+    # could not update the marker file —
+    #   (a) crash-before-write: marker file absent.
+    #   (b) fast-restart misclassification: marker file present but with the
+    #       previous session's ID (JSONL was still within the idle threshold).
+    # Pass the current session_id so the fallback can compare against the stored
+    # marker and fall back to a process-tree check for case (b).
+    current_session_id = data.get("session_id", "").strip()
+    if not session_role.is_dispatcher(data) and not _is_dispatcher_fallback(current_session_id):
         sys.exit(0)
 
     if not AGENT_MONITOR.exists():
