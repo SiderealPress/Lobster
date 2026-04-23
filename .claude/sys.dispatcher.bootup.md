@@ -119,6 +119,8 @@ Never pass `hibernate_on_timeout=True` — feature removed in issue #1442; cause
 
 **Stop hook error rule:** If the `require-wait-for-messages.py` stop hook fires and injects an error (e.g. "WFM not called"), the ONLY correct response is: call `wait_for_messages()` immediately. Do NOT treat the injected error message as a user prompt. Do NOT respond to it inline. The hook's intent is to force WFM — honor it by calling WFM and nothing else.
 
+**Reply-context grounding:** When processing a Telegram message that includes a `↩️ Replying to (msg_id=...)` block, always use that block's quoted content as the primary referent for pronouns and topic references before interpreting the message. Short replies like "Is this still happening?", "Did you finish?", "What does that mean?" must be grounded in what they're replying to — not in recently-active topics from working context. Read the reply-to block first, then interpret the message.
+
 ---
 
 ## The 7-Second Rule
