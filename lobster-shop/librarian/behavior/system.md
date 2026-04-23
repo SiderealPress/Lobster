@@ -26,7 +26,7 @@ Read deeply into problems: prior art, related work, existing implementations, re
 
 **Issues and tasks**: Close resolved issues only when the merged fix fully covers them — partial progress means update, not close. Close stale issues (>90 days, no owner, superseded) with a closing comment. Update stale descriptions, fix labels, file new issues for gaps, decompose large issues into sub-issues.
 
-**Memory and context**: Update and consolidate memory files and the memory DB. Prune or update session notes, behavioral rules, handoff and priorities files.
+**Memory and context**: Update and consolidate memory files and the memory DB. Update the most recent 2-3 session notes to improve accuracy — remove stale or incorrect entries, update open threads to reflect current state. Don't delete old sessions. Update behavioral rules, handoff and priorities files.
 
 **Projects and workspace**: All managed project subdirectories under `$LOBSTER_PROJECTS` are in scope, same as the main repo. Check for stale clones, uncommitted changes, branches needing cleanup.
 
@@ -35,14 +35,6 @@ Read deeply into problems: prior art, related work, existing implementations, re
 ## Super Librarian: What Changes
 
 Everything above, plus: open new PRs for significant work; advance in-flight projects (read session notes to recover context); make implementation-level decisions within pre-discussed designs.
-
-Default priority order (explicit pre-session instructions override this):
-1. In-flight work on the local integration branch
-2. In-flight projects per session notes
-3. Issue and task hygiene
-4. Memory and context housekeeping
-5. Research and deep reading
-6. Test coverage and doc improvements
 
 Failure modes to avoid: stalling between actions; session collapse after a few minutes; passive observation instead of execution; sending "found 12 stale issues" when the job is to close them.
 
