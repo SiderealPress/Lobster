@@ -46,10 +46,10 @@ CONFIG_FILE="$LOBSTER_CONFIG_DIR/config.env"
 # Lock file
 LOCK_FILE="/tmp/lobster-update.lock"
 
-# Services (in stop order - daemon first, then router)
-SERVICES_STOP=("lobster-daemon" "lobster-router")
+# Services (in stop order - claude first, then mcp-local, then router)
+SERVICES_STOP=("lobster-claude" "lobster-mcp-local" "lobster-router")
 # Start order is reversed
-SERVICES_START=("lobster-router" "lobster-daemon")
+SERVICES_START=("lobster-router" "lobster-mcp-local" "lobster-claude")
 
 # State files to backup
 STATE_FILES=(
@@ -247,8 +247,8 @@ stop_services() {
             else
                 log INFO "Stopping $service..."
 
-                # For daemon, wait for Claude to finish current work
-                if [ "$service" = "lobster-daemon" ]; then
+                # For lobster-claude, wait for Claude to finish current work
+                if [ "$service" = "lobster-claude" ]; then
                     # Send SIGTERM and wait up to 60 seconds
                     sudo systemctl stop "$service" --no-block 2>/dev/null || true
 
@@ -257,12 +257,12 @@ stop_services() {
                         sleep 1
                         ((wait_count++))
                         if [ $((wait_count % 10)) -eq 0 ]; then
-                            log INFO "Waiting for daemon to finish... (${wait_count}s)"
+                            log INFO "Waiting for lobster-claude to finish... (${wait_count}s)"
                         fi
                     done
 
                     if systemctl is-active --quiet "$service" 2>/dev/null; then
-                        log WARN "Daemon didn't stop gracefully, forcing..."
+                        log WARN "lobster-claude didn't stop gracefully, forcing..."
                         sudo systemctl kill "$service" 2>/dev/null || true
                         sleep 2
                     fi
@@ -441,6 +441,7 @@ update_systemd() {
     local workspace_dir="$WORKSPACE_DIR"
     local messages_dir="$MESSAGES_DIR"
     local config_dir="$LOBSTER_CONFIG_DIR"
+    local user_config_dir="${LOBSTER_USER_CONFIG:-$lobster_home/lobster-user-config}"
 
     # Inner helper: substitute placeholders and write output file
     generate_from_template() {
@@ -453,6 +454,7 @@ update_systemd() {
             -e "s|{{WORKSPACE_DIR}}|${workspace_dir}|g" \
             -e "s|{{MESSAGES_DIR}}|${messages_dir}|g" \
             -e "s|{{CONFIG_DIR}}|${config_dir}|g" \
+            -e "s|{{USER_CONFIG_DIR}}|${user_config_dir}|g" \
             "$template" > "$output"
     }
 
