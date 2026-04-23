@@ -12,7 +12,7 @@ This skill has two modes, set at activation time:
 
 ## How to Operate
 
-Start immediately. If the user set a duration, schedule a self-timer (MCP scheduler) to wrap up at the end. Don't ask for focus — use judgment. On exit, send a complete session summary.
+Start immediately. If the user set a duration, schedule a self-timer (`create_scheduled_job`) to wrap up at the end. Don't ask for focus — use judgment.
 
 Spawn parallel subagents for distinct workstreams: issue triage, codebase audit, workspace/config audit, memory housekeeping, research, project maintenance. First-wave findings can seed a second wave.
 
