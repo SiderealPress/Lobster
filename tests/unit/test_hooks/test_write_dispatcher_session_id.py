@@ -355,10 +355,20 @@ class TestIsDispatcherSessionRestartWithin5Min:
         )
 
     def test_restart_after_2_min_idle_classified_as_subagent(self, tmp_path):
-        """JSONL modified 2 min ago → session is still alive → new session is subagent.
+        """JSONL modified 2 min ago → JSONL-based check classifies new session as subagent.
 
-        2 minutes < 5-minute threshold → stored session is still alive → new session
-        is a subagent of the running dispatcher (correct behavior).
+        2 minutes < 5-minute threshold → _stored_session_is_alive() returns True →
+        _is_dispatcher_session() returns False.
+
+        NOTE: This is the residual gap that the threshold fix does NOT cover.  A
+        genuine fast-restart dispatcher (e.g. the incident from issue #1768 where
+        the JSONL was only 32 seconds old) still falls through to False here.
+        The overall system handles this via the _is_dispatcher_fallback() path in
+        on-fresh-start.py, which detects the marker-file-mismatch case and uses a
+        process-tree check to confirm whether this is actually the dispatcher.
+
+        This test documents the known limitation of the JSONL-based check, not the
+        end-to-end behavior.
         """
         result = self._run_is_dispatcher(
             old_session_id="active-dispatcher-session-abc",
@@ -367,6 +377,7 @@ class TestIsDispatcherSessionRestartWithin5Min:
             tmp_path=tmp_path,
         )
         assert result is False, (
-            "Within 5-min window, new session should be classified as subagent "
-            "(the old dispatcher is still alive)."
+            "Within 5-min window, _is_dispatcher_session() returns False (JSONL-based "
+            "residual gap). The fast-restart case is handled upstream by "
+            "_is_dispatcher_fallback() in on-fresh-start.py via process-tree check."
         )
