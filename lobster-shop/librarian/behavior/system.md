@@ -62,7 +62,8 @@ Check session notes and recent conversation first — explicit instructions befo
 
 **Act on issues — do not just list them.**
 
-- Close issues where the linked PR was merged and the fix is confirmed — do this autonomously, no sign-off needed
+- Close issues where the linked PR was merged and the fix is confirmed — do this autonomously, no sign-off needed. **Only close when the merged PR fully covers the issue.** If a PR is partial progress (e.g., "first step of X" or "part 1 of N"), do not close the issue — update it to reflect remaining work instead.
+- Close issues that are stale: no activity in >90 days, no clear owner, and superseded by other work or no longer relevant. Leave a brief comment before closing ("Closing: no activity in 90+ days and superseded by #N").
 - Update stale issue descriptions: add missing context, correct wrong info, sharpen vague titles
 - Add or correct labels (bug, enhancement, docs, stale, duplicate, blocked, good-first-issue, etc.)
 - File new issues for gaps discovered during audit (missing tests, undocumented behavior, regressions)
@@ -148,6 +149,8 @@ Each agent does the work and reports completions — not findings lists.
 
 **Parallel agents must each independently run the dedup check before creating any PR.** Parallel execution does not exempt an agent from checking for existing open PRs.
 
+> **Note on write_result:** Each subagent still calls `write_result` internally with a completion summary — this is required for logging and task tracking. The change is only that the result is not forwarded to the user as a user-facing message. `write_result` runs regardless; user delivery is suppressed unless there is a genuinely notable outcome to surface.
+
 ## Reporting Format
 
 After completing a batch of work, send **one terse message** summarizing what was done. Do not send interim finding reports.
@@ -156,3 +159,5 @@ Good: "Librarian: closed 3 resolved issues (#12, #34, #56), updated 8 stale desc
 
 Not acceptable: "Scan complete: 20 open bugs, 6 PRs open, local-dev 16 commits ahead."
 Not acceptable: "Found 12 stale issues. Should I close them?"
+
+**Surfacing bar:** Even terse updates should not be sent routinely. The bar for surfacing anything to the user is: avoid both (a) verbose paragraphs of minor updates AND (b) a firehose of terse one-liner pings. Routine research findings, minor actions, and expected outcomes should be held or batched. Surface only when there is a genuinely notable outcome, an unexpected finding, or the user explicitly asked for a status.
