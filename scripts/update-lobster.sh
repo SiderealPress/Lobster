@@ -433,29 +433,29 @@ update_systemd() {
 
     cd "$LOBSTER_DIR"
 
-    # Resolve substitution variables (same defaults as install.sh)
-    local lobster_user="${LOBSTER_USER:-${USER:-$(whoami)}}"
-    local lobster_group="${LOBSTER_GROUP:-$lobster_user}"
-    local lobster_home="${LOBSTER_HOME:-$HOME}"
-    local install_dir="$LOBSTER_DIR"
-    local workspace_dir="$WORKSPACE_DIR"
-    local messages_dir="$MESSAGES_DIR"
-    local config_dir="$LOBSTER_CONFIG_DIR"
-    local user_config_dir="${LOBSTER_USER_CONFIG:-$lobster_home/lobster-user-config}"
+    # Map update-lobster.sh variables to the canonical LOBSTER_* names
+    # expected by scripts/lib/template.sh.  This is the single implementation
+    # of generate_from_template — do not duplicate the sed block here.
+    LOBSTER_USER="${LOBSTER_USER:-${USER:-$(whoami)}}"
+    LOBSTER_GROUP="${LOBSTER_GROUP:-$LOBSTER_USER}"
+    LOBSTER_HOME="${LOBSTER_HOME:-$HOME}"
+    LOBSTER_INSTALL_DIR="$LOBSTER_DIR"
+    LOBSTER_WORKSPACE="$WORKSPACE_DIR"
+    LOBSTER_MESSAGES="$MESSAGES_DIR"
+    # LOBSTER_CONFIG_DIR is already set at the top of this script
+    LOBSTER_USER_CONFIG="${LOBSTER_USER_CONFIG:-${LOBSTER_HOME}/lobster-user-config}"
 
-    # Inner helper: substitute placeholders and write output file
+    # Source the shared template library (repo is present — we just pulled it).
+    # shellcheck source=lib/template.sh
+    source "${LOBSTER_DIR}/scripts/lib/template.sh"
+
+    # Thin wrapper: delegates to _tmpl_generate_from_template and emits the
+    # update-lobster.sh log OK line for consistency with other log calls.
     generate_from_template() {
         local template="$1"
         local output="$2"
-        sed -e "s|{{USER}}|${lobster_user}|g" \
-            -e "s|{{GROUP}}|${lobster_group}|g" \
-            -e "s|{{HOME}}|${lobster_home}|g" \
-            -e "s|{{INSTALL_DIR}}|${install_dir}|g" \
-            -e "s|{{WORKSPACE_DIR}}|${workspace_dir}|g" \
-            -e "s|{{MESSAGES_DIR}}|${messages_dir}|g" \
-            -e "s|{{CONFIG_DIR}}|${config_dir}|g" \
-            -e "s|{{USER_CONFIG_DIR}}|${user_config_dir}|g" \
-            "$template" > "$output"
+        _tmpl_generate_from_template "$template" "$output" || return 1
+        log OK "Generated: $output"
     }
 
     if $DRY_RUN; then
