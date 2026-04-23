@@ -42,6 +42,7 @@ import logging
 import os
 import subprocess
 import sys
+import time
 import uuid
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -120,7 +121,10 @@ def _load_bot_talk_url() -> str:
     return "http://46.224.41.108:4242"
 
 
-# Loaded once at module import time; all functions below use these module-level values.
+# Config load order note: these values are read at module import time, which happens
+# when the script starts. install.sh writes config files before the first scheduled
+# run, so the load order is safe. However, if this module is imported during install
+# (e.g. for testing), the config files may not exist yet and defaults will be used.
 MY_LOBSTER_NAME: str = _load_lobster_name()
 ADMIN_CHAT_ID: int = _load_admin_chat_id()
 
@@ -237,6 +241,17 @@ def _update_state_after_messages(state: dict[str, Any], message_count: int) -> d
 
 def _advance_cursor(state: dict[str, Any], messages: list[dict[str, Any]]) -> dict[str, Any]:
     """Return updated state with last_seen_ts advanced to the latest message timestamp.
+
+    Called with all_messages (including own-echo), NOT inbound-only. This is intentional:
+    the cursor tracks "what have we processed from the server" (all messages, including
+    our own outbound echo) so we don't re-fetch them. Hot-mode activation, by contrast,
+    uses received_count which counts inbound-only messages — it tracks "is there real
+    activity from other Lobsters". The two populations are deliberately different.
+
+    Note: lexicographic timestamp comparison works correctly only when all timestamps
+    use a consistent format. The server returns ISO 8601 with 'Z' suffix; if any
+    timestamps use '+00:00' instead, comparison may be unreliable. Normalise on ingest
+    if the server format ever changes.
 
     Pure: does not mutate the input dict.
     """
@@ -373,15 +388,22 @@ def _append_log(entry: dict[str, Any]) -> None:
 def _schedule_hot_retrigger(run_id: str) -> None:
     """Schedule a 5-minute one-shot systemd timer to re-run this job.
 
+    Uses a timestamp suffix in the unit name to avoid collisions with a previous
+    run that left the unit in failed/active state. A fixed name would cause
+    systemd-run to refuse creating the unit if the old one still exists.
+
     Failure is non-fatal: the hourly baseline will catch any missed activity.
     """
     dispatch_script = (
         Path.home() / "lobster" / "scheduled-tasks" / "dispatch-job.sh"
     )
+    # Timestamp suffix prevents "unit already exists" collision when a previous
+    # hot-mode timer is still in failed/active state.
+    unit_name = f"lobster-lobstertalk-unified-hot-{int(time.time())}"
     cmd = [
         "systemd-run", "--user",
-        f"--on-active=5min",
-        "--unit=lobster-lobstertalk-unified-hot",
+        "--on-active=5min",
+        f"--unit={unit_name}",
         str(dispatch_script), "lobstertalk-unified",
     ]
     try:
@@ -460,6 +482,11 @@ def run(task_id: str = "lobstertalk-unified") -> None:
             log.warning(f"Failed to write inbox message: {exc}")
 
     # Step 3: Advance timestamp cursor
+    # At-least-once delivery note: if the process crashes after writing inbox
+    # messages but before _write_state(), the cursor is not advanced and the
+    # same messages will be re-fetched and re-delivered on the next run.
+    # The inbox writer is idempotent for duplicates — the dispatcher deduplicates
+    # by message ID — so this is acceptable (at-least-once, not exactly-once).
     state = _advance_cursor(state, all_messages)
 
     # Step 4: Hot-mode management
