@@ -73,6 +73,7 @@ INBOX_MESSAGE_SOURCES: frozenset[str] = frozenset({
     "whatsapp",
     "bisque",
     "system",
+    "bot-talk",  # cross-Lobster bot-to-bot messages (issue #1350)
 })
 
 # ---------------------------------------------------------------------------
