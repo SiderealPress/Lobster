@@ -40,16 +40,23 @@ If the dispatcher crashes or is killed without a clean `lobster stop`, the
 marker file retains the dead session's ID. On the next start, the new
 dispatcher's session_id won't match and would normally be misclassified as a
 subagent. This hook detects that the stored session's JSONL file has not been
-modified recently (idle for longer than JSONL_MAX_IDLE_SECONDS, default 3
-hours) and correctly classifies the new session as the replacement dispatcher.
+modified recently (idle for longer than JSONL_MAX_IDLE_SECONDS, default 5
+minutes) and correctly classifies the new session as the replacement dispatcher.
 
 Note: Claude Code never deletes JSONL files for ended sessions, so presence
 alone cannot distinguish a live session from a dead one.  Using mtime (last
 modification time) as a proxy for liveness is reliable because active
 dispatcher sessions append to their JSONL file on every message.  A JSONL
-file that has not been modified for 3+ hours belongs to an idle or dead
+file that has not been modified for 5+ minutes belongs to an idle or dead
 session.  The primary defence against this scenario is `lobster stop` (and
 `restart`) clearing the marker file; this check is a secondary safety net.
+
+Note on threshold: 5 minutes was chosen because the dispatcher processes
+messages and appends to its JSONL file continuously; a 5-minute gap reliably
+indicates the session has ended. The previous 3-hour threshold caused issue
+#1768: when the dispatcher restarted within 3h, the new dispatcher was
+misclassified as a subagent and on-fresh-start.py skipped clearing stale
+agent sessions.
 
 ## settings.json configuration
 
@@ -88,8 +95,11 @@ from agents import session_store  # noqa: E402
 
 # A JSONL file not modified for longer than this is treated as belonging to an
 # idle or dead session.  Active dispatcher sessions append to their JSONL on
-# every message, so 3 hours of silence indicates the session has ended.
-JSONL_MAX_IDLE_SECONDS = 3 * 60 * 60  # 3 hours
+# every message, so 5 minutes of silence indicates the session has ended.
+# Reduced from 3 hours to 5 minutes in issue #1768 — the 3h threshold caused
+# dispatcher restarts within 3h of last activity to be misclassified as subagents,
+# leaving stale 'running' sessions in agent_sessions.db uncleaned.
+JSONL_MAX_IDLE_SECONDS = 5 * 60  # 5 minutes
 
 
 def _stored_session_is_alive(stored_session_id: str) -> bool:

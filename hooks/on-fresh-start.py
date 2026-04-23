@@ -11,6 +11,10 @@ SessionStart). Filters itself to:
 
 1. Sessions that inherit LOBSTER_MAIN_SESSION=1 (Lobster-managed sessions only).
 2. The dispatcher session, not subagent sessions (detected via session_role).
+   Issue #1768 fallback: if session_role.is_dispatcher() returns False but
+   LOBSTER_MAIN_SESSION=1 is set and the dispatcher marker file is absent, treat
+   as a dispatcher start anyway. This covers the window where the hook
+   write-dispatcher-session-id.py misclassified the new dispatcher as a subagent.
 3. Fresh restarts only — NOT context compaction events. Compaction is
    identified by checking whether ``on-compact.py`` recently updated
    ``compaction-state.json`` (within the last 60 seconds). On compaction,
@@ -95,6 +99,11 @@ sys.path.insert(0, str(Path(__file__).parent))
 import session_role  # noqa: E402 — path insert must precede this
 
 AGENT_MONITOR = Path(os.path.expanduser("~/lobster/scripts/agent-monitor.py"))
+
+# Dispatcher hook marker file (written by write-dispatcher-session-id.py at startup).
+# Used by _is_dispatcher_fallback() to detect the case where the marker file was
+# not written (e.g. misclassification within the JSONL idle threshold window).
+DISPATCHER_SESSION_FILE = session_role.DISPATCHER_SESSION_FILE
 
 # on-compact.py writes last_compaction_ts to this file on every compaction.
 COMPACTION_STATE_FILE = Path(
@@ -470,6 +479,38 @@ def _mark_all_running_failed() -> None:
         )
 
 
+def _is_dispatcher_fallback() -> bool:
+    """Fallback check for issue #1768: detect dispatcher when marker file is absent.
+
+    When write-dispatcher-session-id.py misclassifies the new dispatcher as a
+    subagent (e.g. because the previous session's JSONL was still within the idle
+    threshold window), it does not update the dispatcher marker file.  The primary
+    detection path (session_role.is_dispatcher) then returns False for the new
+    dispatcher session because the stored ID in the marker file does not match.
+
+    This fallback applies when ALL of the following are true:
+    1. LOBSTER_MAIN_SESSION=1 is set (this is definitely a Lobster-managed session).
+    2. The dispatcher marker file is absent (no marker file means there was no
+       prior successful write — indicating the new session never registered as
+       dispatcher, which can only happen if this IS the dispatcher starting fresh
+       or misclassified by the threshold check).
+
+    When both conditions hold, we conservatively treat the session as the dispatcher
+    and call --mark-failed to clear any stale sessions.
+
+    Note: this fallback does NOT fire when the marker file is present with a
+    different session ID (that conclusively identifies a real subagent and we must
+    not clear sessions in that case).
+
+    Returns True if the fallback conditions are met, False otherwise.
+    """
+    if os.environ.get("LOBSTER_MAIN_SESSION", "") != "1":
+        return False
+    # Only fall back when the marker file is absent — presence means the primary
+    # mechanism worked and we should not second-guess it.
+    return not DISPATCHER_SESSION_FILE.exists()
+
+
 def main() -> None:
     # Only fire for Lobster-managed sessions.
     if os.environ.get("LOBSTER_MAIN_SESSION", "") != "1":
@@ -485,7 +526,12 @@ def main() -> None:
         sys.exit(0)
 
     # Skip subagent sessions — only the dispatcher should run this.
-    if not session_role.is_dispatcher(data):
+    # Issue #1768 fallback: if session_role.is_dispatcher() returns False but
+    # LOBSTER_MAIN_SESSION=1 is set and the marker file is absent, still treat
+    # as a fresh dispatcher start.  This handles the race window where
+    # write-dispatcher-session-id.py misclassified the new dispatcher as a
+    # subagent and did not write the marker file.
+    if not session_role.is_dispatcher(data) and not _is_dispatcher_fallback():
         sys.exit(0)
 
     if not AGENT_MONITOR.exists():
