@@ -1750,14 +1750,29 @@ EOF
         local mcp_local_service="$LOBSTER_DIR/services/lobster-mcp-local.service"
 
         if [ -f "$mcp_local_template" ]; then
-            # Render template (reuse generate_from_template if available, else sed directly)
-            if declare -f generate_from_template >/dev/null 2>&1; then
-                generate_from_template "$mcp_local_template" "$mcp_local_service"
+            # Use the shared template library when available (it is, since we
+            # run from an existing install with the repo already cloned).
+            # Falls back to inline sed only if the lib file is somehow missing.
+            local _lib="${LOBSTER_DIR}/scripts/lib/template.sh"
+            if [ -f "$_lib" ]; then
+                # Set canonical LOBSTER_* vars the library expects
+                LOBSTER_USER="${LOBSTER_USER:-$(whoami)}"
+                LOBSTER_GROUP="${LOBSTER_GROUP:-$(id -gn)}"
+                LOBSTER_HOME="${LOBSTER_HOME:-$HOME}"
+                LOBSTER_INSTALL_DIR="$LOBSTER_DIR"
+                LOBSTER_WORKSPACE="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
+                LOBSTER_MESSAGES="${LOBSTER_MESSAGES:-$HOME/messages}"
+                LOBSTER_CONFIG_DIR="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}"
+                LOBSTER_USER_CONFIG="${LOBSTER_USER_CONFIG:-$HOME/lobster-user-config}"
+                # shellcheck source=lib/template.sh
+                source "$_lib"
+                _tmpl_generate_from_template "$mcp_local_template" "$mcp_local_service"
             else
-                # Minimal inline rendering matching install.sh variable names
-                local _user _group _config_dir _messages_dir _workspace_dir _user_config_dir
+                # Fallback: inline rendering (all 8 placeholders — keep in sync with lib)
+                local _user _group _home _config_dir _messages_dir _workspace_dir _user_config_dir
                 _user=$(whoami)
                 _group=$(id -gn)
+                _home="$HOME"
                 _config_dir="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}"
                 _messages_dir="${LOBSTER_MESSAGES:-$HOME/messages}"
                 _workspace_dir="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
@@ -1765,6 +1780,7 @@ EOF
                 sed \
                     -e "s|{{USER}}|$_user|g" \
                     -e "s|{{GROUP}}|$_group|g" \
+                    -e "s|{{HOME}}|$_home|g" \
                     -e "s|{{INSTALL_DIR}}|$LOBSTER_DIR|g" \
                     -e "s|{{CONFIG_DIR}}|$_config_dir|g" \
                     -e "s|{{MESSAGES_DIR}}|$_messages_dir|g" \
