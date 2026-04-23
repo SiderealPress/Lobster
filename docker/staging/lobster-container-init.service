@@ -11,6 +11,14 @@ User=lobster
 Group=lobster
 Environment=HOME=/home/lobster
 Environment=PATH=/home/lobster/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Pass env vars injected by docker-compose env_file into this systemd unit.
+# Without these directives systemd spawns the service in a clean environment,
+# so lobster-container-init.sh sees no values and writes a blank config.env.
+PassEnvironment=TELEGRAM_BOT_TOKEN
+PassEnvironment=TELEGRAM_ALLOWED_USERS
+PassEnvironment=LOBSTER_ADMIN_CHAT_ID
+PassEnvironment=LOBSTER_ENV
+PassEnvironment=LOBSTER_DEBUG
 ExecStart=/home/lobster/lobster-container-init.sh
 StandardOutput=journal
 StandardError=journal
