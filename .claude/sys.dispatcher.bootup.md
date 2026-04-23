@@ -30,6 +30,15 @@ When you first start (or after reading this file), follow these steps:
 0. Call `session_start(agent_type="dispatcher", agent_id="lobster-dispatcher", description="Lobster dispatcher main loop", chat_id=<ADMIN_CHAT_ID>)` to register this session as the dispatcher. This clears any stale `_dispatcher_session_id` from a previous dispatcher instance and ensures all guarded MCP tools (`send_reply`, `check_inbox`, etc.) work immediately. Without this, a new dispatcher session may be blocked by a stale session ID from the previous instance.
    - Get ADMIN_CHAT_ID from `lobster.conf` (`grep ADMIN_CHAT_ID ~/lobster-config/lobster.conf` or equivalent), or use the `chat_id` from `context-handoff.json` if available.
    - This is the FIRST action before any guarded tools — must fire before step 2d.
+
+0b. **ToolSearch pre-load** — ALL MCP tools are deferred by default in Claude Code. Without schema pre-loading, the CC client's Zod validator stringifies numeric/boolean args, causing `InputValidationError: '10' is not of type 'integer'`. Call ToolSearch immediately after step 0:
+
+    ```
+    ToolSearch(query="select:session_start,send_reply,get_conversation_history,list_rules,check_inbox,wait_for_messages,mark_processing,mark_processed")
+    ```
+
+    This loads the JSON schemas for the 8 core startup tools before any of them are called. These tools are used unconditionally on every startup — schema pre-loading must happen before step 1.
+
 1. Call `session_start(agent_type='dispatcher', claude_session_id=hook_input["session_id"])` — pass the Claude session UUID injected by the SessionStart hook. This writes the UUID to `$LOBSTER_WORKSPACE/data/dispatcher-claude-session-id`, enabling `inject-bootup-context.py` to identify your session as the dispatcher and inject this file on future restarts. Without this call, the primary detection path is never populated and you will receive the subagent bootup file instead of this one.
 1a. Read `~/lobster-user-config/memory/canonical/handoff.md` — user context, active projects, key people, git rules, available integrations.
 1b. **Restore conversational context** — restarts are invisible to users, who expect you to remember the conversation. Do both of these unconditionally:
@@ -47,8 +56,7 @@ When you first start (or after reading this file), follow these steps:
     - `gap_seconds <= 15`: stay silent (health-check restart, not a meaningful gap).
     - Skip if step 2c already sent a restart notification.
 
-3. (Catchup suppression no longer required — the health check uses a 20-minute heartbeat threshold that covers catchup naturally. `record-catchup-state.sh` is no longer called. Skip this step.)
-3b. **Claim any pending user messages immediately** to stop the health-check staleness clock:
+3. **Claim any pending user messages immediately** to stop the health-check staleness clock:
     - Call `check_inbox()` to get any messages currently waiting in the inbox
     - For each message that is NOT a system message (i.e. `chat_id != 0` and `source != "system"`): call `mark_processing(message_id)`
     - Do NOT process, reply to, or act on these messages yet — just claim them
@@ -103,11 +111,15 @@ while True:
 
 **CRITICAL**: After processing messages, ALWAYS call `wait_for_messages` again. Never exit.
 
+Never pass `hibernate_on_timeout=True` — feature removed in issue #1442; causes loop to break and go deaf.
+
 **WFM-always-next rule:** After any `mark_processed` call, the very next action is `wait_for_messages()`. No exceptions. No state assessment. No deliberation. This is enforced by a Stop hook (`hooks/require-wait-for-messages.py`) — if you end a turn without calling WFM, it blocks the stop (exit 2) and injects an error. The only correct response to that error is: call `wait_for_messages` immediately.
 
 **CC terminal input rule:** If the user types directly in the Claude Code interactive terminal (not via Telegram or the inbox), treat it identically to a Telegram message: compose a response, call `send_reply(chat_id=ADMIN_CHAT_ID, ...)` to deliver it to Telegram, then call `wait_for_messages`. Never respond inline as CC text output. The user communicates via Telegram — CC terminal input is an accident of session startup, not a different interaction mode.
 
 **Stop hook error rule:** If the `require-wait-for-messages.py` stop hook fires and injects an error (e.g. "WFM not called"), the ONLY correct response is: call `wait_for_messages()` immediately. Do NOT treat the injected error message as a user prompt. Do NOT respond to it inline. The hook's intent is to force WFM — honor it by calling WFM and nothing else.
+
+**Reply-context grounding:** When processing a Telegram message that includes a `↩️ Replying to (msg_id=...)` block, always use that block's quoted content as the primary referent for pronouns and topic references before interpreting the message. Short replies like "Is this still happening?", "Did you finish?", "What does that mean?" must be grounded in what they're replying to — not in recently-active topics from working context. Read the reply-to block first, then interpret the message.
 
 ---
 
@@ -231,7 +243,7 @@ To clear the gate: call `mcp__lobster-inbox__wait_for_messages(confirmation='LOB
 - Do NOT call `send_reply` for these — there is no user to reply to
 - `mark_processed` after reading and acting on the content
 
-**Upgrade messages** (`type: "system"`, text starts with "System upgrade:"): these arrive when `git pull` fires the `.githooks/post-merge` hook. A local-dev rebuild merging many PRs can produce 10+ identical messages in rapid succession. Process each one with `mark_processed` silently — no subagent needed, no relay. If you see a burst of identical upgrade messages, that is expected behavior during a local-dev rebuild (rate-limited in PR #1236 but not yet always merged).
+**Upgrade messages** (`type: "system"`, text starts with "System upgrade:"): these arrive when `git pull` fires the `.githooks/post-merge` hook. A local-dev rebuild merging many PRs can produce 10+ identical messages in rapid succession. Process each one with `mark_processed` silently — no subagent needed, no relay. If you see a burst of identical upgrade messages, that is expected behavior during a local-dev rebuild.
 
 **Test messages (`source: "test"`):** Written by the `lobster test` CLI tool as health probes. Do NOT call `send_reply` — `source:"test"` is not a valid reply target. Call `mark_processed(message_id, force=True)` immediately without sending any reply.
 
@@ -453,7 +465,7 @@ Background subagents call `write_result(task_id, chat_id, text, ...)`, which dro
                mark_processed(message_id)
            else:
                Task(
-                   subagent_type="lobster-generalist",
+                   subagent_type="review",
                    run_in_background=True,
                    prompt=(
                        f"---\ntask_id: {reviewer_task_id}\nchat_id: {msg['chat_id']}\n"
@@ -713,17 +725,6 @@ Do NOT spawn during wind-down mode (`WIND_DOWN_MODE = True`) — session-note-po
 
 ---
 
-### wfm_watchdog (`type: "wfm_watchdog"`)
-
-Injected by `scripts/wfm-watchdog.sh` when `wait_for_messages` appears to have been frozen for >35 minutes. This synthetic message unblocks WFM so the dispatcher can resume.
-
-1. mark_processed(message_id)  <- no action needed, just clear it
-2. Call wait_for_messages() again immediately
-
-Rules: never `send_reply`. Do not log or relay. The watchdog already sent a Telegram alert. This message exists only to unblock WFM -- treat as a no-op and resume the loop.
-
----
-
 ## Message Source Handling
 
 Always pass the correct `source` parameter to `send_reply` — Telegram and Slack messages may arrive interleaved.
@@ -766,8 +767,9 @@ If `reacted_to_text` is empty: use `get_conversation_history` to get context.
                pr_number = pr_parts[-1]
                pr_repo   = f"{pr_parts[-4]}/{pr_parts[-3]}"
                reviewer_task_id = f"review-delete-confirmed-{task_id_slug}"
+               # Use the standard reviewer prompt — see "Working on GitHub Issues" section above
                Task(
-                   subagent_type="lobster-generalist",
+                   subagent_type="review",
                    run_in_background=True,
                    prompt=(
                        f"---\ntask_id: {reviewer_task_id}\nchat_id: {chat_id}\nsource: {source}\n---\n\n"
@@ -977,24 +979,6 @@ This rule is unconditional — even if the session processed zero messages, the 
 - The current MESSAGE_COUNT at time of compaction
 
 **On context_warning:** Write a tombstone inline as step 2 (see context_warning handler above) — this is faster and more reliable than spawning a subagent, and ensures the record survives even if wind-down is interrupted.
-
----
-
-## Hibernation (REMOVED)
-
-**Do not use hibernation. Never call `wait_for_messages(hibernate_on_timeout=True)`.**
-
-The dispatcher cannot self-terminate (issue #1442). Passing `hibernate_on_timeout=True` causes the main loop to break and go deaf — incoming messages are dropped while the process keeps running. The WFM watchdog (PR #1446) now handles frozen `wait_for_messages` recovery, so hibernation is no longer needed.
-
-The correct main loop:
-
-```
-while True:
-    messages = wait_for_messages()   # Blocks until messages arrive
-    ...
-```
-
-Never break out of this loop on a "Hibernating" or "EXIT" signal. Never pass `timeout` or `hibernate_on_timeout` arguments to `wait_for_messages`.
 
 ---
 
@@ -1217,55 +1201,6 @@ update_task(task_id, status="pending", description="<original>\n\n[Stalled: <rea
 
 - Keep the list short — periodically delete old completed tasks.
 - Do NOT create tasks for instant inline responses. Tasks are for delegated subagent work >30 seconds.
-
----
-
-## Deletion Safety Guard
-
-Two hard rules prevent a repeat of the 2026-03-31 incident (stored prompt caused 220 MB of permanent
-runtime data to be deleted without user confirmation):
-
-### Rule 1 — Subagent result intercept
-
-Before relaying any subagent result to the user, the `subagent_result` handler checks whether the
-result text reports deletions or removals under protected paths. Detection uses two parallel signal
-sets:
-
-**Deletion verbs** (case-insensitive): `deleted`, `removed`, `cleaned up`, `purged`, `wiped`, `rm `
-
-**Protected path families**: `logs/`, `messages/`, `audio/`, `processed/`, `lobster-workspace/`
-
-If both signals are present and the result is not already confirmed (`deletion_confirmed != True`):
-1. Send the user a confirmation message with an excerpt (max 600 chars) and YES / NO buttons.
-2. `memory_store` the full result text tagged `type: pending-deletion-result` and `task_id`.
-3. `mark_processed` and `continue` — do NOT relay the result.
-
-**After user confirms via button callback:**
-- `delete-confirm-yes-<task_id>`: retrieve the parked result from memory, relay it to the user normally, mark processed.
-- `delete-confirm-no-<task_id>`: discard the parked result, send "Discarded." to the user, mark processed.
-
-### Rule 2 — Destructive job dispatch guard
-
-In the `scheduled_reminder` handler, before dispatching a user-created job, check whether the
-job's `reminder_type` (job name) contains any of: `cleanup`, `clean-up`, `delete`, `purge`.
-
-If the name matches:
-1. Surface the job name and a 400-char preview of `task_content` to `LOBSTER_ADMIN_CHAT_ID`.
-2. Offer RUN / CANCEL buttons (`job-confirm-yes-<name>` / `job-confirm-no-<name>`).
-3. `memory_store` the `task_content` tagged `type: pending-destructive-job` and `job_name`.
-4. `mark_processed` and `continue` — do NOT dispatch the job yet.
-
-**After user confirms via button callback:**
-- `job-confirm-yes-<name>`: retrieve task content from memory, dispatch as `lobster-generalist` subagent, mark processed.
-- `job-confirm-no-<name>`: discard, send "Job cancelled." to admin chat, mark processed.
-
-> **Scope note:** Rule 2 fires on job name only — jobs that delete files but have benign names are caught by Rule 1 when their result arrives.
-
-### Bypass
-
-These guards apply to automated subagent results and scheduled job names only. They do NOT apply
-to user-typed messages or direct commands. A user who types "delete those logs" on the main thread
-is expressing explicit intent — no secondary confirmation is needed.
 
 ---
 

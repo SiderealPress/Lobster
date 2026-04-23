@@ -2638,6 +2638,36 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
         warn "cleanup-worktrees-audio.sh not found at $CLEANUP_SCRIPT — skipping Migration 75"
     fi
 
+    # Migration 76: Remove wfm-watchdog.sh cron entry (superseded by PR #1646).
+    # PR #1646 fixed the actual root cause: the health check now treats a fresh
+    # wfm-active signal as GREEN, so the false-positive kills the watchdog was
+    # designed to work around no longer occur. The watchdog now only generates
+    # noise during normal idle operation.
+    local WFM_WATCHDOG_REMOVE_MARKER="# LOBSTER-WFM-WATCHDOG"
+    if crontab -l 2>/dev/null | grep -qF "$WFM_WATCHDOG_REMOVE_MARKER"; then
+        "$LOBSTER_DIR/scripts/cron-manage.sh" remove "$WFM_WATCHDOG_REMOVE_MARKER" 2>/dev/null && {
+            substep "Removed wfm-watchdog.sh cron entry (superseded by PR #1646)"
+            migrated=$((migrated + 1))
+        } || warn "Could not remove LOBSTER-WFM-WATCHDOG cron entry — remove manually"
+    else
+        substep "wfm-watchdog.sh cron entry not present — nothing to remove"
+    fi
+
+    # Migration 77: Add permissions.defaultMode bypassPermissions to settings.json (issue #1706).
+    # Claude Code has a known regression where --dangerously-skip-permissions (CLI flag) stops
+    # working after auto-updates. Setting permissions.defaultMode in settings.json is the
+    # permanent fix that survives updates.
+    if [ -f "$CLAUDE_SETTINGS" ]; then
+        if jq -e '.permissions.defaultMode != "bypassPermissions"' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+            substep "Adding permissions.defaultMode: bypassPermissions to settings.json..."
+            jq '. + {"skipDangerousModePermissionPrompt": true, "permissions": {"defaultMode": "bypassPermissions"}}' "$CLAUDE_SETTINGS" > "$CLAUDE_SETTINGS.tmp" && mv "$CLAUDE_SETTINGS.tmp" "$CLAUDE_SETTINGS"
+            success "Permissions bypass settings added"
+            migrated=$((migrated + 1))
+        fi
+    else
+        warn "Claude settings not found at $CLAUDE_SETTINGS — skipping Migration 77"
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
