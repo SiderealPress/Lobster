@@ -148,33 +148,13 @@ USER_CONFIG_DIR="${LOBSTER_USER_CONFIG:-$HOME/lobster-user-config}"
 
 #===============================================================================
 # Template Processing
+#
+# generate_from_template() is sourced from scripts/lib/template.sh, which is
+# the single canonical implementation shared by install.sh, update-lobster.sh,
+# and upgrade.sh.  The source call is deferred to the "Generate Service Files"
+# step (after the repo is cloned) where the function is first needed.
+# See: scripts/lib/template.sh
 #===============================================================================
-
-# Generate a file from a template by substituting {{VARIABLE}} placeholders
-# Arguments:
-#   $1 - template file path
-#   $2 - output file path
-generate_from_template() {
-    local template="$1"
-    local output="$2"
-
-    if [ ! -f "$template" ]; then
-        error "Template not found: $template"
-        return 1
-    fi
-
-    sed -e "s|{{USER}}|${LOBSTER_USER}|g" \
-        -e "s|{{GROUP}}|${LOBSTER_GROUP}|g" \
-        -e "s|{{HOME}}|${LOBSTER_HOME}|g" \
-        -e "s|{{INSTALL_DIR}}|${INSTALL_DIR}|g" \
-        -e "s|{{WORKSPACE_DIR}}|${WORKSPACE_DIR}|g" \
-        -e "s|{{MESSAGES_DIR}}|${MESSAGES_DIR}|g" \
-        -e "s|{{CONFIG_DIR}}|${CONFIG_DIR}|g" \
-        -e "s|{{USER_CONFIG_DIR}}|${USER_CONFIG_DIR}|g" \
-        "$template" > "$output"
-
-    success "Generated: $output"
-}
 
 #===============================================================================
 # Config File Helpers
@@ -2760,6 +2740,24 @@ success "Claude launchers ready (start-claude.sh, claude-persistent.sh, claude-w
 #===============================================================================
 
 step "Generating systemd service files from templates..."
+
+# Load the shared template library (repo is now present at $INSTALL_DIR).
+# Normalize LOBSTER_* vars for the library's canonical naming convention.
+LOBSTER_INSTALL_DIR="${LOBSTER_INSTALL_DIR:-$INSTALL_DIR}"
+LOBSTER_WORKSPACE="${LOBSTER_WORKSPACE:-$WORKSPACE_DIR}"
+LOBSTER_MESSAGES="${LOBSTER_MESSAGES:-$MESSAGES_DIR}"
+LOBSTER_CONFIG_DIR="$CONFIG_DIR"
+LOBSTER_USER_CONFIG="$USER_CONFIG_DIR"
+# shellcheck source=scripts/lib/template.sh
+source "${INSTALL_DIR}/scripts/lib/template.sh"
+# Thin wrapper: delegates to _tmpl_generate_from_template and adds the
+# success() log line that install.sh uses for progress output.
+generate_from_template() {
+    local template="$1"
+    local output="$2"
+    _tmpl_generate_from_template "$template" "$output" || return 1
+    success "Generated: $output"
+}
 
 # Check that templates exist
 ROUTER_TEMPLATE="$INSTALL_DIR/services/lobster-router.service.template"
