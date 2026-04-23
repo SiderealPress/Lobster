@@ -257,6 +257,16 @@ else
     warn "The scheduled job will retry on each poll cycle."
 fi
 
+echo "Testing authentication..."
+AUTH_RESPONSE=$(curl -sf --max-time 5 -H "Authorization: Bearer $TOKEN_VALUE" "$BOT_TALK_URL/messages?limit=1&since=1970-01-01T00:00:00Z" 2>&1)
+if [ $? -ne 0 ]; then
+    warn "Auth test failed — token may be invalid or sender not in allowlist"
+    warn "You will need allowlist registration before outbound messages work."
+    warn "Contact the relay server operator to add: $MY_LOBSTER_NAME"
+else
+    success "Authentication verified"
+fi
+
 # ---------------------------------------------------------------------------
 # Step 8: Register the scheduled job
 # ---------------------------------------------------------------------------
@@ -279,6 +289,16 @@ echo -e "${NC}"
 echo ""
 echo "Or ask Lobster: 'Set up the LobsterTalk polling job at $EFFECTIVE_JOB_SCRIPT'"
 echo ""
+
+# Add a fallback crontab entry so polling runs even if the MCP job is never registered.
+# This is idempotent — checks for the script path before adding.
+CRON_LINE="0 * * * * cd \"$SKILL_DIR\" && uv run \"$JOB_SCRIPT\" >> \"$LOBSTER_WORKSPACE/logs/lobstertalk-cron.log\" 2>&1"
+if crontab -l 2>/dev/null | grep -qF "lobstertalk_unified"; then
+    success "Fallback cron entry already present (skipping)"
+else
+    (crontab -l 2>/dev/null; echo "$CRON_LINE") | crontab -
+    success "Fallback cron entry added (hourly baseline)"
+fi
 
 success "LobsterTalk skill configuration complete!"
 
