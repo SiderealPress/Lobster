@@ -6,24 +6,24 @@ author = "Lobster"
 category = "context"
 
 [activation]
-mode = "triggered"
+mode = "contextual"
 triggers = ["/lobster-dev", "/dev"]
 context_patterns = [
-    "when user says dev mode or lobster dev mode",
-    "when user asks about staging docker",
-    "when user asks about lobster PR or pull request",
-    "when user says lobster development",
-    "when user asks about local-dev branch",
-    "when user asks about deploying to local-dev",
-    "when user asks about lobster-staging container",
-    "when user asks about LOBSTER_ENV",
-    "when user is debugging the dispatcher",
-    "when user asks about the install script",
-    "when user asks about running tests or test suite",
-    "when user asks about LOBSTER_DEBUG",
-    "when user asks about health check failures",
-    "when user asks about MCP server issues",
-    "when user asks about migration or upgrade.sh",
+    "LOBSTER_ENV",
+    "LOBSTER_DEBUG",
+    "staging Docker",
+    "lobster-staging container",
+    "local-dev branch",
+    "local-dev merge",
+    "deploying to local-dev",
+    "Lobster PR",
+    "lobster pull request",
+    "lobster-mcp-local",
+    "install.sh",
+    "upgrade.sh",
+    "lobster dispatcher",
+    "lobster development",
+    "lobster dev mode",
 ]
 
 [layering]

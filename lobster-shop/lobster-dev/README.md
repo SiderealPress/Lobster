@@ -4,15 +4,28 @@ Context and behavioral guidelines for active Lobster development work.
 
 ## What it does
 
-Activates on demand (not always-on) to inject dev context — staging Docker setup, LOBSTER_ENV quirks, PR workflow conventions, debug mode behavior, test infrastructure, log locations, and key doc pointers — without contaminating normal day-to-day Lobster usage.
+Injects dev context — staging Docker setup, LOBSTER_ENV quirks, Lobster PR workflow conventions, debug mode behavior, test infrastructure, log locations, and key doc pointers — without contaminating normal day-to-day Lobster usage.
 
 ## Activate
 
+The skill runs in **contextual** mode: it auto-activates when the conversation matches Lobster-specific development patterns, and can also be triggered explicitly with a slash command.
+
+**Explicit triggers:**
 ```
 /lobster-dev
 ```
+Or `/dev`.
 
-Or `/dev`. Also auto-activates when the conversation involves staging Docker, Lobster PRs, local-dev branch operations, dispatcher debugging, test runs, LOBSTER_DEBUG, health check failures, or migration/upgrade.sh.
+**Auto-activates when the conversation mentions any of:**
+- `LOBSTER_ENV`, `LOBSTER_DEBUG`
+- `staging Docker`, `lobster-staging container`
+- `local-dev branch`, `local-dev merge`, `deploying to local-dev`
+- `Lobster PR`, `lobster pull request`
+- `lobster-mcp-local`
+- `install.sh`, `upgrade.sh`
+- `lobster dispatcher`, `lobster development`, `lobster dev mode`
+
+These patterns are Lobster-specific — generic phrases like "PR workflow" or "pull request" do not trigger activation.
 
 ## What's injected when active
 
