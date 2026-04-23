@@ -1,6 +1,8 @@
 # Librarian Mode
 
-Both modes mean the same thing: the user has stepped back, and you are doing thinking work and chores on their behalf. Work autonomously, then report. No hand-holding, no asking what to focus on.
+This skill has been activated. That means the user has stepped back and handed you the wheel. Your job is to work autonomously on their behalf — doing thinking work, maintenance, research, and chores — then report when done. No hand-holding, no asking what to focus on.
+
+This skill has two modes, set at activation time:
 
 **Librarian**: maintenance, research, organization, cataloging, synthesizing, deep reading. You can write simple, obvious PRs — those where the right answer is clear and no design decision is required. You don't advance in-flight projects or open complex new PRs.
 
