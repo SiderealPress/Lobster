@@ -3,11 +3,18 @@ Unit tests for the stale-catchup compact-reminder injection in
 hooks/on-fresh-start.py (issue #909 safety net), and the stale-claim cleanup
 added for issue #1398.
 
+Also tests the LOBSTER_MAIN_SESSION fallback added for issue #1768:
+- When session_role.is_dispatcher() returns False (e.g. because
+  write-dispatcher-session-id.py couldn't write the marker file)
+  but LOBSTER_MAIN_SESSION=1 is set and the dispatcher marker file is absent,
+  on-fresh-start.py should still call agent-monitor --mark-failed.
+
 Validates:
 - _is_catchup_stale() correctly identifies stale / fresh / missing state
 - _compact_reminder_already_queued() correctly detects existing reminders
 - _inject_compact_reminder() writes the correct message or skips when one exists
 - _clear_stale_claim() deletes stale message_claims rows before re-injection
+- _is_dispatcher_fallback() correctly identifies the env+file fallback condition
 """
 
 import importlib.util
@@ -81,6 +88,8 @@ def _make_session_role_stub():
     import types
     stub = types.ModuleType("session_role")
     stub.is_dispatcher = lambda data: True
+    # on-fresh-start.py reads DISPATCHER_SESSION_FILE from session_role at module level.
+    stub.DISPATCHER_SESSION_FILE = Path("/tmp/lobster-test-dispatcher-session-id-stub")
     return stub
 
 
@@ -553,3 +562,123 @@ class TestClearStaleClaim:
 
         # Stale processing file must have been removed
         assert not stale_file.exists()
+
+
+# =============================================================================
+# _is_dispatcher_fallback tests (issue #1768 safety net)
+# =============================================================================
+
+def _load_on_fresh_start_with_dispatcher_file(
+    dispatcher_file_override: str = None,
+    lobster_main_session: str = None,
+):
+    """Load on-fresh-start.py with optional dispatcher-session-id file override.
+
+    Installs a stub session_role that simulates misclassification (is_dispatcher
+    returns False). Restores the original sys.modules entry after loading so that
+    other test files that need the real session_role are not affected.
+    """
+    env_patch = {}
+    if lobster_main_session is not None:
+        env_patch["LOBSTER_MAIN_SESSION"] = lobster_main_session
+    if dispatcher_file_override is not None:
+        env_patch["LOBSTER_DISPATCHER_SESSION_FILE_OVERRIDE"] = dispatcher_file_override
+
+    # Save original so we can restore it after the load
+    saved_session_role = sys.modules.get("session_role")
+
+    with _PatchEnv(env_patch):
+        spec = importlib.util.spec_from_file_location(
+            "on_fresh_start_dispatcher_fallback", _HOOK_PATH
+        )
+        mod = importlib.util.module_from_spec(spec)
+        import types as _types
+        stub_sr = _types.ModuleType("session_role")
+        stub_sr.is_dispatcher = lambda data: False  # simulate misclassification
+        # DISPATCHER_SESSION_FILE must exist on the stub since on-fresh-start.py
+        # reads it at module level: DISPATCHER_SESSION_FILE = session_role.DISPATCHER_SESSION_FILE
+        stub_sr.DISPATCHER_SESSION_FILE = Path(
+            dispatcher_file_override or "/tmp/lobster-test-dispatcher-session-id"
+        )
+        sys.modules["session_role"] = stub_sr
+        try:
+            spec.loader.exec_module(mod)
+        finally:
+            # Restore original session_role to avoid polluting other tests
+            if saved_session_role is None:
+                sys.modules.pop("session_role", None)
+            else:
+                sys.modules["session_role"] = saved_session_role
+
+    if dispatcher_file_override is not None:
+        mod.DISPATCHER_SESSION_FILE = Path(dispatcher_file_override)
+
+    return mod
+
+
+class TestIsDispatcherFallback:
+    """Tests for the LOBSTER_MAIN_SESSION fallback (issue #1768).
+
+    When write-dispatcher-session-id.py misclassifies the new dispatcher as a
+    subagent (e.g. within the idle threshold window), the hook marker file is not
+    updated. session_role.is_dispatcher() then returns False for the new session.
+
+    The fallback: if LOBSTER_MAIN_SESSION=1 is set AND the dispatcher marker file
+    is absent, treat this as a fresh dispatcher start anyway and call --mark-failed.
+    """
+
+    def test_fallback_returns_true_when_main_session_set_and_file_absent(self, tmp_path):
+        """LOBSTER_MAIN_SESSION=1 + absent marker file → treat as dispatcher.
+
+        This is the fallback for the scenario where write-dispatcher-session-id.py
+        could not write the marker file (misclassification or crash before writing).
+        """
+        mod = _load_on_fresh_start_with_dispatcher_file()
+        # Point dispatcher session file to a path that doesn't exist
+        mod.DISPATCHER_SESSION_FILE = tmp_path / "nonexistent" / "dispatcher-session-id"
+
+        with _PatchEnv({"LOBSTER_MAIN_SESSION": "1"}):
+            result = mod._is_dispatcher_fallback()
+
+        assert result is True
+
+    def test_fallback_returns_false_when_main_session_not_set(self, tmp_path):
+        """Without LOBSTER_MAIN_SESSION=1, fallback returns False (not a lobster session)."""
+        mod = _load_on_fresh_start_with_dispatcher_file()
+        mod.DISPATCHER_SESSION_FILE = tmp_path / "nonexistent" / "dispatcher-session-id"
+
+        with _PatchEnv({"LOBSTER_MAIN_SESSION": "0"}):
+            result = mod._is_dispatcher_fallback()
+
+        assert result is False
+
+    def test_fallback_returns_false_when_main_session_absent(self, tmp_path):
+        """Without LOBSTER_MAIN_SESSION env var, fallback returns False."""
+        mod = _load_on_fresh_start_with_dispatcher_file()
+        mod.DISPATCHER_SESSION_FILE = tmp_path / "nonexistent" / "dispatcher-session-id"
+
+        # Ensure LOBSTER_MAIN_SESSION is not set
+        saved = os.environ.pop("LOBSTER_MAIN_SESSION", None)
+        try:
+            result = mod._is_dispatcher_fallback()
+        finally:
+            if saved is not None:
+                os.environ["LOBSTER_MAIN_SESSION"] = saved
+
+        assert result is False
+
+    def test_fallback_returns_false_when_dispatcher_file_present(self, tmp_path):
+        """Dispatcher marker file exists → not the fallback scenario (primary detection works).
+
+        When the file is present, the primary detection mechanism should have worked,
+        so the fallback is not needed and returns False (defer to primary).
+        """
+        mod = _load_on_fresh_start_with_dispatcher_file()
+        session_file = tmp_path / "dispatcher-session-id"
+        session_file.write_text("some-session-id")
+        mod.DISPATCHER_SESSION_FILE = session_file
+
+        with _PatchEnv({"LOBSTER_MAIN_SESSION": "1"}):
+            result = mod._is_dispatcher_fallback()
+
+        assert result is False
