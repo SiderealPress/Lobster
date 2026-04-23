@@ -623,8 +623,10 @@ class TestIsDispatcherFallback:
     subagent (e.g. within the idle threshold window), the hook marker file is not
     updated. session_role.is_dispatcher() then returns False for the new session.
 
-    The fallback: if LOBSTER_MAIN_SESSION=1 is set AND the dispatcher marker file
-    is absent, treat this as a fresh dispatcher start anyway and call --mark-failed.
+    The fallback covers two cases:
+    1. Crash-before-write: LOBSTER_MAIN_SESSION=1 + absent marker file.
+    2. Fast-restart misclassification: LOBSTER_MAIN_SESSION=1 + marker file present
+       with a different (stale) session ID → process-tree check confirms dispatcher.
     """
 
     def test_fallback_returns_true_when_main_session_set_and_file_absent(self, tmp_path):
@@ -667,11 +669,11 @@ class TestIsDispatcherFallback:
 
         assert result is False
 
-    def test_fallback_returns_false_when_dispatcher_file_present(self, tmp_path):
-        """Dispatcher marker file exists → not the fallback scenario (primary detection works).
+    def test_fallback_returns_false_when_dispatcher_file_present_no_session_id(self, tmp_path):
+        """Marker file present + no current_session_id → cannot check for fast restart.
 
-        When the file is present, the primary detection mechanism should have worked,
-        so the fallback is not needed and returns False (defer to primary).
+        When current_session_id is not provided, the Case 2 (fast-restart) path is
+        skipped, and the fallback returns False (defers to primary detection).
         """
         mod = _load_on_fresh_start_with_dispatcher_file()
         session_file = tmp_path / "dispatcher-session-id"
@@ -679,6 +681,85 @@ class TestIsDispatcherFallback:
         mod.DISPATCHER_SESSION_FILE = session_file
 
         with _PatchEnv({"LOBSTER_MAIN_SESSION": "1"}):
-            result = mod._is_dispatcher_fallback()
+            result = mod._is_dispatcher_fallback()  # no current_session_id
 
         assert result is False
+
+    def test_fallback_returns_false_when_dispatcher_file_matches_current_session(self, tmp_path):
+        """Marker file present and matches current session ID → primary detection worked.
+
+        When the marker file's ID equals the current session ID, this is the same
+        session reattaching (e.g. after compact). No fallback needed.
+        """
+        mod = _load_on_fresh_start_with_dispatcher_file()
+        session_file = tmp_path / "dispatcher-session-id"
+        session_file.write_text("current-session-abc")
+        mod.DISPATCHER_SESSION_FILE = session_file
+
+        with _PatchEnv({"LOBSTER_MAIN_SESSION": "1"}):
+            result = mod._is_dispatcher_fallback("current-session-abc")
+
+        assert result is False
+
+    def test_fallback_fast_restart_uses_process_tree(self, tmp_path, monkeypatch):
+        """Marker file present with different session ID → delegates to process-tree check.
+
+        This is the fix for the actual #1768 incident: dispatcher restarted 32 s after
+        the previous session's JSONL was written. The JSONL-based check in
+        write-dispatcher-session-id.py classified the new session as a subagent
+        (32 s is within the 5-min window), leaving the marker file with the old ID.
+
+        _is_dispatcher_fallback() detects the mismatch and calls
+        session_role._is_dispatcher_by_process_tree() to confirm the classification.
+        The test verifies that the process-tree function is called and its result
+        is returned.
+        """
+        import types as _types
+
+        mod = _load_on_fresh_start_with_dispatcher_file()
+        session_file = tmp_path / "dispatcher-session-id"
+        session_file.write_text("old-dispatcher-session-id")
+        mod.DISPATCHER_SESSION_FILE = session_file
+
+        # Stub session_role._is_dispatcher_by_process_tree to return True (dispatcher)
+        stub_sr = _types.ModuleType("session_role")
+        stub_sr.is_dispatcher = lambda data: False
+        stub_sr.DISPATCHER_SESSION_FILE = session_file
+        stub_sr._is_dispatcher_by_process_tree = lambda: True
+        mod.session_role = stub_sr
+
+        with _PatchEnv({"LOBSTER_MAIN_SESSION": "1"}):
+            result = mod._is_dispatcher_fallback("new-dispatcher-session-id")
+
+        assert result is True, (
+            "Fast-restart case: marker file has old session ID, process-tree confirms "
+            "dispatcher (≤1 claude ancestor). Should return True."
+        )
+
+    def test_fallback_fast_restart_subagent_via_process_tree(self, tmp_path):
+        """Marker file present with different session ID → process-tree returns False for subagent.
+
+        When the process-tree check determines this is a subagent (≥2 claude ancestors),
+        the fallback correctly returns False, preventing --mark-failed from running.
+        """
+        import types as _types
+
+        mod = _load_on_fresh_start_with_dispatcher_file()
+        session_file = tmp_path / "dispatcher-session-id"
+        session_file.write_text("dispatcher-session-id")
+        mod.DISPATCHER_SESSION_FILE = session_file
+
+        # Stub session_role._is_dispatcher_by_process_tree to return False (subagent)
+        stub_sr = _types.ModuleType("session_role")
+        stub_sr.is_dispatcher = lambda data: False
+        stub_sr.DISPATCHER_SESSION_FILE = session_file
+        stub_sr._is_dispatcher_by_process_tree = lambda: False
+        mod.session_role = stub_sr
+
+        with _PatchEnv({"LOBSTER_MAIN_SESSION": "1"}):
+            result = mod._is_dispatcher_fallback("subagent-session-id")
+
+        assert result is False, (
+            "Fast-restart case: marker file has dispatcher ID, process-tree confirms "
+            "subagent (≥2 claude ancestors). Should return False."
+        )
