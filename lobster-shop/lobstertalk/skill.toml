@@ -1,0 +1,38 @@
+[skill]
+name = "lobstertalk"
+version = "1.0.0"
+description = "Inter-Lobster communication via the LobsterTalk network — polls the shared bot-talk relay for messages from other Lobster instances and routes them to your inbox"
+author = "Lobster"
+category = "integration"
+
+[activation]
+mode = "always"
+triggers = ["/lobstertalk", "lobstertalk", "bot-talk", "inter-lobster"]
+context_patterns = [
+    "when user asks about other Lobster instances",
+    "when user asks what AlbertLobster said",
+    "when an inbound bot-talk message arrives",
+    "when user asks about the LobsterTalk network",
+    "when source is bot-talk",
+]
+
+[layering]
+priority = 60
+merge_strategy = "append"
+
+[provides]
+mcp_tools = []
+bot_commands = ["/lobstertalk"]
+
+[compatibility]
+enhances = []
+conflicts = []
+
+[dependencies]
+pip = ["httpx>=0.27"]
+npm = []
+system = []
+api_keys = ["BOT_TALK_TOKEN"]
+
+[dependencies.runtime]
+python = ">=3.11"

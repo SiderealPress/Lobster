@@ -1,0 +1,28 @@
+[project]
+name = "lobstertalk"
+version = "1.0.0"
+description = "LobsterTalk — inter-Lobster communication SDK and integration layer"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["tooling/src/bot_talk", "tooling/src/lobster_talk"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
