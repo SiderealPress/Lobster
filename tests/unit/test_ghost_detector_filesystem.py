@@ -770,3 +770,203 @@ class TestLobsterHomePaths:
         assert home_slug in gd.AGENT_OUTPUT_GLOB, (
             f"Expected slug '{home_slug}' in AGENT_OUTPUT_GLOB={gd.AGENT_OUTPUT_GLOB!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Startup threshold override — all sessions dead at cold start
+# ---------------------------------------------------------------------------
+
+
+STARTUP_THRESHOLD_MINUTES = 0
+
+
+class TestStartupThresholdOverride:
+    """At cold start, ALL running sessions are dead — age is irrelevant.
+
+    When --startup is passed, the classification threshold must be overridden to
+    STARTUP_THRESHOLD_MINUTES (0), so that sessions younger than the normal
+    threshold are not classified as HEALTHY and silently skipped.
+
+    The root cause: when CC dies, it kills all subagents. A 2-minute-old session
+    is just as dead as a 2-hour-old one. Applying the normal threshold at cold
+    start causes young sessions to be classified as HEALTHY and never marked failed.
+    """
+
+    def _make_agent_row(self, agent_id: str, spawned_seconds_ago: int) -> gd.AgentRow:
+        """Return an AgentRow with a spawned_at timestamp N seconds before NOW."""
+        spawned_at = datetime(
+            2026, 3, 15,
+            NOW.hour,
+            NOW.minute,
+            NOW.second - spawned_seconds_ago % 60,
+            tzinfo=timezone.utc,
+        )
+        # Use a proper offset calculation
+        from datetime import timedelta
+        spawned_at = NOW - timedelta(seconds=spawned_seconds_ago)
+        return gd.AgentRow(
+            agent_id=agent_id,
+            task_id=None,
+            description=f"test-subagent-{agent_id}",
+            chat_id="12345",
+            status="running",
+            spawned_at=spawned_at.isoformat(),
+            output_file=None,
+            last_seen_at=None,
+        )
+
+    def test_startup_threshold_constant_is_zero(self) -> None:
+        """STARTUP_THRESHOLD_MINUTES must be 0 — age is irrelevant at cold start."""
+        assert gd.STARTUP_THRESHOLD_MINUTES == 0, (
+            "At cold start all running sessions are dead (CC process death kills them all). "
+            "Threshold must be 0 so no session escapes as HEALTHY."
+        )
+
+    def test_classify_with_zero_threshold_marks_2min_session_not_healthy(self) -> None:
+        """With threshold=0, a 2-minute-old session is not HEALTHY — age < 0 is impossible."""
+        # 2 minutes old — would be HEALTHY under the default 30-min threshold
+        age_minutes = 2.0
+        classification = gd.classify(
+            age_minutes=age_minutes,
+            output_file=None,
+            output_file_age_minutes=None,
+            threshold_minutes=STARTUP_THRESHOLD_MINUTES,
+            output_file_threshold_minutes=10.0,
+        )
+        assert classification != "HEALTHY", (
+            f"A 2-minute-old session must not be HEALTHY at cold start "
+            f"(threshold={STARTUP_THRESHOLD_MINUTES}). Got: {classification}"
+        )
+
+    def test_classify_with_zero_threshold_marks_10min_session_not_healthy(self) -> None:
+        """With threshold=0, a 10-minute-old session is not HEALTHY."""
+        age_minutes = 10.0
+        classification = gd.classify(
+            age_minutes=age_minutes,
+            output_file=None,
+            output_file_age_minutes=None,
+            threshold_minutes=STARTUP_THRESHOLD_MINUTES,
+            output_file_threshold_minutes=10.0,
+        )
+        assert classification != "HEALTHY", (
+            f"A 10-minute-old session must not be HEALTHY at cold start "
+            f"(threshold={STARTUP_THRESHOLD_MINUTES}). Got: {classification}"
+        )
+
+    def test_classify_with_normal_threshold_marks_2min_session_healthy(self) -> None:
+        """Without --startup, a 2-minute-old session is HEALTHY (threshold still applies)."""
+        # Default threshold is 30 minutes; 2 < 30 → HEALTHY
+        normal_threshold = 30.0
+        age_minutes = 2.0
+        classification = gd.classify(
+            age_minutes=age_minutes,
+            output_file=None,
+            output_file_age_minutes=None,
+            threshold_minutes=normal_threshold,
+            output_file_threshold_minutes=10.0,
+        )
+        assert classification == "HEALTHY", (
+            f"A 2-minute-old session must be HEALTHY under the normal threshold "
+            f"({normal_threshold}m). Got: {classification}"
+        )
+
+    def test_startup_marks_2min_session_failed_via_classify_agent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--startup: a 2-minute-old session is classified as stale and marked failed.
+
+        This is the core regression: without the startup threshold override, a
+        2-minute-old session lands in HEALTHY during classify_agent() and never
+        reaches mark_failed_all_ghosts. With the override (threshold=0), it lands
+        in STALE_NO_FILE and is correctly cleaned up.
+        """
+        marked: list[str] = []
+        monkeypatch.setattr(gd, "mark_agent_failed", lambda db_path, agent_id: marked.append(agent_id))
+        monkeypatch.setattr(gd, "drop_inbox_message", lambda payload: None)
+
+        # 2-minute-old session with no output file
+        row = self._make_agent_row("young-subagent-001", spawned_seconds_ago=120)
+        classified = gd.classify_agent(
+            row, NOW,
+            threshold_minutes=gd.STARTUP_THRESHOLD_MINUTES,  # override to 0 at startup
+            output_file_threshold_minutes=10.0,
+        )
+
+        assert classified.classification != "HEALTHY", (
+            "With startup threshold=0, a 2-minute-old session must not be HEALTHY."
+        )
+
+        # It must land in stale_no_file (no output_file) and get marked failed
+        fake_db = tmp_path / "agent_sessions.db"
+        stale_no_file = [classified] if classified.classification == "STALE_NO_FILE" else []
+        confirmed = [classified] if classified.classification == "GHOST_CONFIRMED" else []
+
+        gd.mark_failed_all_ghosts(confirmed, fake_db, stale_no_file=stale_no_file, startup=True)
+
+        assert "young-subagent-001" in marked, (
+            "--startup with threshold=0 must mark a 2-minute-old session failed."
+        )
+
+    def test_startup_marks_10min_session_failed_via_classify_agent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--startup: a 10-minute-old session is classified as stale and marked failed."""
+        marked: list[str] = []
+        monkeypatch.setattr(gd, "mark_agent_failed", lambda db_path, agent_id: marked.append(agent_id))
+        monkeypatch.setattr(gd, "drop_inbox_message", lambda payload: None)
+
+        row = self._make_agent_row("older-subagent-002", spawned_seconds_ago=600)
+        classified = gd.classify_agent(
+            row, NOW,
+            threshold_minutes=gd.STARTUP_THRESHOLD_MINUTES,
+            output_file_threshold_minutes=10.0,
+        )
+
+        assert classified.classification != "HEALTHY"
+
+        fake_db = tmp_path / "agent_sessions.db"
+        stale_no_file = [classified] if classified.classification == "STALE_NO_FILE" else []
+        confirmed = [classified] if classified.classification == "GHOST_CONFIRMED" else []
+
+        gd.mark_failed_all_ghosts(confirmed, fake_db, stale_no_file=stale_no_file, startup=True)
+
+        assert "older-subagent-002" in marked, (
+            "--startup must mark a 10-minute-old session failed."
+        )
+
+    def test_without_startup_2min_session_stays_healthy_not_marked(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without --startup, a 2-minute-old session remains HEALTHY and is NOT marked failed.
+
+        The periodic reconciler must not touch young sessions. Only at cold start
+        (startup=True + threshold=0) should all sessions be treated as dead.
+        """
+        marked: list[str] = []
+        monkeypatch.setattr(gd, "mark_agent_failed", lambda db_path, agent_id: marked.append(agent_id))
+        monkeypatch.setattr(gd, "drop_inbox_message", lambda payload: None)
+
+        normal_threshold = 30.0  # default, used by periodic reconciler
+        row = self._make_agent_row("healthy-subagent-003", spawned_seconds_ago=120)
+        classified = gd.classify_agent(
+            row, NOW,
+            threshold_minutes=normal_threshold,
+            output_file_threshold_minutes=10.0,
+        )
+
+        assert classified.classification == "HEALTHY", (
+            "A 2-minute-old session must be HEALTHY under the normal 30-min threshold."
+        )
+
+        # HEALTHY sessions are not passed to mark_failed_all_ghosts at all,
+        # so mark_agent_failed must not be called for this agent.
+        # Simulate what main() does: only pass confirmed + stale_no_file to mark_failed_all_ghosts.
+        fake_db = tmp_path / "agent_sessions.db"
+        stale_no_file = [classified] if classified.classification == "STALE_NO_FILE" else []
+        confirmed = [classified] if classified.classification == "GHOST_CONFIRMED" else []
+
+        gd.mark_failed_all_ghosts(confirmed, fake_db, stale_no_file=stale_no_file, startup=False)
+
+        assert "healthy-subagent-003" not in marked, (
+            "A HEALTHY session must not be marked failed by the periodic reconciler."
+        )
