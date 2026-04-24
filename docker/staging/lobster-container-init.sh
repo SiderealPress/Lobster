@@ -61,11 +61,6 @@ TELEGRAM_ALLOWED_USERS=${TELEGRAM_ALLOWED_USERS:-}
 LOBSTER_ADMIN_CHAT_ID=${LOBSTER_ADMIN_CHAT_ID:-${TELEGRAM_ALLOWED_USERS:-}}
 LOBSTER_ENV=${LOBSTER_ENV:-production}
 LOBSTER_DEBUG=${LOBSTER_DEBUG:-false}
-# GitHub token — passed from host via docker-compose environment: section.
-# Enables gh CLI inside the container (gh reads GITHUB_TOKEN automatically).
-# Set GITHUB_TOKEN on the host before running docker compose, or add it to
-# config.staging.env. If unset, gh CLI will be unauthenticated.
-GITHUB_TOKEN=${GITHUB_TOKEN:-}
 CONFIG
 echo "[container-init] config.env written."
 
