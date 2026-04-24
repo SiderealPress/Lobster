@@ -32,12 +32,6 @@
 # Defaults to "UTC" if not set.
 # timezone = "America/New_York"
 
-[consolidation]
-# Hour (0-23) at which nightly memory consolidation runs.
-# Matches the crontab entry added by install.sh: "0 <hour> * * *"
-# Change this AND update the crontab entry (lobster cron list) if you want a different hour.
-hour = "3"
-
 [instance]
 # Unique instance identifier (auto-generated for managed instances)
 # id = "lobster-self-hosted-1"
