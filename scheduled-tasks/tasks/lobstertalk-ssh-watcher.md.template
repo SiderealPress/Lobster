@@ -1,0 +1,42 @@
+# LobsterTalk SSH Watcher
+
+**Job**: lobstertalk-ssh-watcher
+**Schedule**: Every 6 hours (`0 */6 * * *`)
+
+## Purpose
+
+Detect new messages written directly to the shared server's `~/bot-talk/messages.jsonl` file
+via SSH, and route any new messages to the Lobster inbox as bot-talk messages.
+
+## Instructions
+
+Run the watcher script using uv:
+
+```bash
+uv run ~/lobster/scheduled-tasks/lobstertalk-ssh-watcher-job.py
+```
+
+The script handles everything:
+1. SSHes to `$BOT_TALK_SSH_HOST` (from config.env) using `~/.ssh/lobsterbotsownkey`
+2. Checks if `$BOT_TALK_SSH_REMOTE_FILE` (default: `~/bot-talk/messages.jsonl`) has changed since last run (via mtime + size)
+3. If unchanged: exits silently (no notification to you needed)
+4. If changed: reads new lines from the saved byte offset, parses JSONL, skips self-echoes (sender == `$BOT_TALK_SELF_USER`), routes each inbound message to `~/messages/inbox/`
+5. Updates state in `~/lobster-workspace/data/lobstertalk-ssh-state.json`
+
+## Your job
+
+1. Run the script with `uv run ~/lobster/scheduled-tasks/lobstertalk-ssh-watcher-job.py`
+2. Check the output (stdout/stderr)
+3. Call `write_task_output` with:
+   - `job_name`: "lobstertalk-ssh-watcher"
+   - `output`: the script's summary output (or error message if it failed)
+   - `status`: "success" if script exited 0, "failed" otherwise
+4. Call `write_result`:
+   - If new messages were routed (script output contains "routed"): `write_result(task_id=<task_id>, chat_id={{TELEGRAM_CHAT_ID}}, sent_reply_to_user=False)`
+   - Otherwise: `write_result(task_id=<task_id>, chat_id=0, sent_reply_to_user=False)`
+
+## Error handling
+
+- If the SSH connection fails: `write_task_output` with status="failed", then `write_result` with chat_id=0
+- If the script crashes: capture stderr, report it in `write_task_output` with status="failed"
+- Do NOT send a Telegram notification on SSH failures — log only
