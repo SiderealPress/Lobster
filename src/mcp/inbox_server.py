@@ -8441,10 +8441,10 @@ async def handle_write_decision(arguments: dict[str, Any]) -> list[TextContent]:
         log.error(f"write_decision failed: {e}", exc_info=True)
         return [TextContent(type="text", text=f"Error storing decision: {e}")]
 
-    # If this supersedes a prior decision, mark the prior one as superseded.
-    # We do this by searching for existing decisions with the superseded key and
-    # updating their metadata — this is best-effort since we can't mutate DB rows
-    # directly, so we store a supersession note as a follow-up event marker.
+    # Supersession is tracked via the new decision's metadata ('supersedes' field)
+    # and inferred at read time by list_decisions — no separate event is stored.
+    # The prior decision's event is not mutated; active_only filtering works by
+    # scanning all decisions for any that reference the prior key in 'supersedes'.
     supersession_note = ""
     if supersedes_key:
         supersession_note = f" Supersedes prior decision '{supersedes_key}'."
