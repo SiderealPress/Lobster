@@ -15,8 +15,6 @@ LOG_FILE = HOME / "lobster-workspace" / "logs" / "lobstertalk.jsonl"
 INBOX_DIR = HOME / "messages" / "inbox"
 SSH_KEY = HOME / ".ssh" / "lobsterbotsownkey"
 SSH_HOST = os.environ.get("BOT_TALK_SSH_HOST", "")
-if not SSH_HOST:
-    raise RuntimeError("BOT_TALK_SSH_HOST env var required (e.g. user@host.example.com)")
 REMOTE_FILE = os.environ.get("BOT_TALK_SSH_REMOTE_FILE", "~/bot-talk/messages.jsonl")
 OWNER_CHAT_ID = 8305714125
 JOB_NAME = "lobstertalk-ssh-watcher"
@@ -117,6 +115,10 @@ def write_task_output(output, status="success"):
 
 
 def main():
+    if not SSH_HOST:
+        write_task_output("BOT_TALK_SSH_HOST env var not set — cannot connect to bot-talk server", "failed")
+        return
+
     is_first_run = not STATE_FILE.exists()
     state = load_state()
     last_offset = state.get("last_offset", 0)
