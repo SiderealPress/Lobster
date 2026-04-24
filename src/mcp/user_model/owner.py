@@ -146,6 +146,23 @@ def get_owner_id(owner_file: Path | None = None) -> str | None:
     )
 
 
+_DEFAULT_CONSOLIDATION_HOUR = 3  # matches install.sh crontab: 0 3 * * *
+
+
+def get_consolidation_hour(owner_file: Path | None = None) -> int:
+    """Return the nightly consolidation hour (0-23) from owner.toml [consolidation] section.
+
+    Falls back to _DEFAULT_CONSOLIDATION_HOUR (3) when the section or file is absent,
+    preserving backward compatibility with installs that haven't run upgrade.sh migration 79.
+    """
+    data = read_owner(owner_file)
+    raw = data.get("consolidation", {}).get("hour", "")
+    try:
+        return int(raw)
+    except (ValueError, TypeError):
+        return _DEFAULT_CONSOLIDATION_HOUR
+
+
 def ensure_owner_toml(
     name: str | None = None,
     telegram_chat_id: str | None = None,
@@ -166,7 +183,10 @@ def ensure_owner_toml(
         "owner": {
             "name": name or "unknown",
             "telegram_chat_id": telegram_chat_id or env_chat_id or "",
-        }
+        },
+        "consolidation": {
+            "hour": str(_DEFAULT_CONSOLIDATION_HOUR),
+        },
     }
     write_owner(data, path)
     return data

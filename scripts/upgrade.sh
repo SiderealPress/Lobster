@@ -2684,6 +2684,73 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
         warn "Claude settings not found at $CLAUDE_SETTINGS — skipping Migration 77"
     fi
 
+    # Migration 79: Config consolidation (issue #1785, Option A).
+    # Three steps:
+    #   a) Merge non-comment, non-duplicate keys from global.env into config.env,
+    #      then archive global.env as global.env.bak (safe rollback).
+    #   b) Add [consolidation] section (hour = "3") to owner.toml if absent.
+    #   c) Remove stale duplicate lobster/config/consolidation.conf and
+    #      lobster/config/sync-repos.json left by the original migration 0.
+    local _m79_config_env="$LOBSTER_CONFIG_DIR/config.env"
+    local _m79_global_env="$LOBSTER_CONFIG_DIR/global.env"
+    local _m79_owner_toml="$LOBSTER_CONFIG_DIR/owner.toml"
+
+    # Step a: merge global.env → config.env
+    if [ -f "$_m79_global_env" ] && [ ! -f "${_m79_global_env}.bak" ]; then
+        local _m79_merged=0
+        while IFS= read -r _m79_line; do
+            # Skip comments and blank lines
+            [[ "$_m79_line" =~ ^[[:space:]]*# ]] && continue
+            [[ -z "${_m79_line// }" ]] && continue
+
+            # Extract key (everything before first '=')
+            local _m79_key
+            _m79_key="${_m79_line%%=*}"
+            [ -z "$_m79_key" ] && continue
+
+            # Skip if key already exists in config.env
+            if grep -qE "^${_m79_key}=" "$_m79_config_env" 2>/dev/null; then
+                substep "  global.env: ${_m79_key} already in config.env — skipping"
+                continue
+            fi
+
+            # Append to config.env
+            echo "$_m79_line" >> "$_m79_config_env"
+            substep "  global.env: merged ${_m79_key} into config.env"
+            _m79_merged=$((_m79_merged + 1))
+        done < "$_m79_global_env"
+
+        # Archive global.env (keep as .bak for safety — delete after next stable release)
+        mv "$_m79_global_env" "${_m79_global_env}.bak"
+        substep "Archived global.env to global.env.bak ($_m79_merged keys merged into config.env)"
+        migrated=$((migrated + 1))
+    else
+        substep "global.env already migrated or absent — skipping step a"
+    fi
+
+    # Step b: add [consolidation] section to owner.toml
+    if [ -f "$_m79_owner_toml" ] && ! grep -q '^\[consolidation\]' "$_m79_owner_toml" 2>/dev/null; then
+        printf '\n[consolidation]\nhour = "3"\n' >> "$_m79_owner_toml"
+        substep "Added [consolidation] section (hour = \"3\") to owner.toml"
+        migrated=$((migrated + 1))
+    else
+        substep "owner.toml already has [consolidation] section or file absent — skipping step b"
+    fi
+
+    # Step c: remove stale duplicate files in the repo's config/ directory
+    local _m79_repo_conf="$LOBSTER_DIR/config/consolidation.conf"
+    local _m79_repo_repos="$LOBSTER_DIR/config/sync-repos.json"
+    if [ -f "$_m79_repo_conf" ]; then
+        rm -f "$_m79_repo_conf"
+        substep "Removed stale $LOBSTER_DIR/config/consolidation.conf"
+        migrated=$((migrated + 1))
+    fi
+    if [ -f "$_m79_repo_repos" ]; then
+        rm -f "$_m79_repo_repos"
+        substep "Removed stale $LOBSTER_DIR/config/sync-repos.json"
+        migrated=$((migrated + 1))
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
