@@ -166,7 +166,7 @@ def ensure_owner_toml(
         "owner": {
             "name": name or "unknown",
             "telegram_chat_id": telegram_chat_id or env_chat_id or "",
-        }
+        },
     }
     write_owner(data, path)
     return data
