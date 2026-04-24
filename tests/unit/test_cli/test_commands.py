@@ -363,16 +363,14 @@ class TestEnvCommand:
     def test_env_set_updates_config_env_when_key_exists_there(self, cli_path: Path, tmp_path: Path):
         """If a key already exists in config.env (even as empty stub), set must update config.env.
 
-        This prevents the empty stub in config.env from silencing the value in global.env.
+        config.env is the single canonical credential file after issue #1785 consolidation.
         """
         config_dir = tmp_path / "lobster-config"
         config_dir.mkdir()
         config_env = config_dir / "config.env"
-        global_env = config_dir / "global.env"
 
         # Write empty stub to config.env (simulates non-interactive installer output)
         config_env.write_text("TELEGRAM_ALLOWED_USERS=\n")
-        global_env.write_text("")
 
         env = os.environ.copy()
         env["LOBSTER_CONFIG_DIR"] = str(config_dir)
@@ -387,26 +385,23 @@ class TestEnvCommand:
         )
         assert result.returncode == 0, f"env set failed: {result.stderr}"
 
-        # The value must land in config.env (where the stub was), not global.env
+        # The value must land in config.env
         config_content = config_env.read_text()
         assert "TELEGRAM_ALLOWED_USERS=12345" in config_content, (
             "env set must write to config.env when the key already exists there as an empty stub"
         )
-        # global.env must NOT have the value (it wasn't there before)
-        global_content = global_env.read_text()
-        assert "TELEGRAM_ALLOWED_USERS" not in global_content, (
-            "env set must not write to global.env when config.env already has the key"
-        )
 
-    def test_env_set_falls_back_to_global_env_for_new_keys(self, cli_path: Path, tmp_path: Path):
-        """Keys not in config.env should be written to global.env as before."""
+    def test_env_set_writes_new_keys_to_config_env(self, cli_path: Path, tmp_path: Path):
+        """New keys (not previously in config.env) must now be written to config.env.
+
+        Before issue #1785, new keys fell back to global.env.
+        After consolidation, config.env is the single canonical file for all credentials.
+        """
         config_dir = tmp_path / "lobster-config"
         config_dir.mkdir()
         config_env = config_dir / "config.env"
-        global_env = config_dir / "global.env"
 
         config_env.write_text("# no GITHUB_TOKEN here\n")
-        global_env.write_text("")
 
         env = os.environ.copy()
         env["LOBSTER_CONFIG_DIR"] = str(config_dir)
@@ -420,7 +415,7 @@ class TestEnvCommand:
         )
         assert result.returncode == 0, f"env set failed: {result.stderr}"
 
-        global_content = global_env.read_text()
-        assert "GITHUB_TOKEN=ghp_abc123" in global_content, (
-            "env set must write new keys (not in config.env) to global.env"
+        config_content = config_env.read_text()
+        assert "GITHUB_TOKEN=ghp_abc123" in config_content, (
+            "env set must write new keys to config.env (single canonical credential file)"
         )
