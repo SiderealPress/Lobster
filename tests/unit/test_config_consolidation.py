@@ -2,11 +2,10 @@
 Tests for config file consolidation (issue #1785, Option A).
 
 Verifies:
-1. owner.toml [consolidation] section is parsed correctly by read_owner()
-2. get_consolidation_hour() returns the correct hour from owner.toml
-3. The repo-level config/ stale files are absent (no lobster/config/config.env,
+1. owner.toml sections are parsed correctly by read_owner()
+2. The repo-level config/ stale files are absent (no lobster/config/config.env,
    lobster/config/consolidation.conf, lobster/config/sync-repos.json)
-4. Scripts that previously sourced global.env gracefully skip it when absent
+3. Scripts that previously sourced global.env gracefully skip it when absent
    (shell-level check is done via subprocess)
 """
 
@@ -19,14 +18,7 @@ import pytest
 # Insert src/mcp into path so user_model can be imported directly
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src" / "mcp"))
 
-from user_model.owner import get_consolidation_hour, read_owner
-
-
-# ---------------------------------------------------------------------------
-# Constants matching the spec
-# ---------------------------------------------------------------------------
-
-CONSOLIDATION_HOUR = 3  # spec: consolidation runs at 3am
+from user_model.owner import read_owner
 
 
 # ---------------------------------------------------------------------------
@@ -37,8 +29,8 @@ REPO_ROOT = Path(__file__).parent.parent.parent
 
 
 @pytest.fixture
-def sample_owner_toml_with_consolidation(tmp_path: Path) -> Path:
-    """Write an owner.toml that includes a [consolidation] section."""
+def sample_owner_toml(tmp_path: Path) -> Path:
+    """Write a minimal owner.toml for parser tests."""
     f = tmp_path / "owner.toml"
     f.write_text(
         """# Lobster instance owner identity
@@ -49,101 +41,33 @@ name = "Alice"
 email = "alice@example.com"
 timezone = "America/New_York"
 telegram_chat_id = "12345"
-
-[consolidation]
-hour = "3"
-"""
-    )
-    return f
-
-
-@pytest.fixture
-def sample_owner_toml_without_consolidation(tmp_path: Path) -> Path:
-    """Write a legacy owner.toml that has no [consolidation] section."""
-    f = tmp_path / "owner.toml"
-    f.write_text(
-        """# Lobster instance owner identity
-# This file contains NO secrets.
-
-[owner]
-name = "Bob"
-email = "bob@example.com"
-timezone = "America/Chicago"
-telegram_chat_id = "99999"
 """
     )
     return f
 
 
 # ---------------------------------------------------------------------------
-# owner.toml [consolidation] section parsing
+# owner.toml parsing
 # ---------------------------------------------------------------------------
 
 
-class TestConsolidationSectionParsing:
-    """read_owner() must parse [consolidation] correctly and expose it."""
+class TestOwnerTomlParsing:
+    """read_owner() must parse owner.toml correctly."""
 
-    def test_consolidation_section_is_parsed(
-        self, sample_owner_toml_with_consolidation: Path
-    ):
-        """[consolidation] section is returned in the dict."""
-        data = read_owner(sample_owner_toml_with_consolidation)
-        assert "consolidation" in data, (
-            "read_owner must return a 'consolidation' key when [consolidation] section present"
-        )
+    def test_owner_section_is_parsed(self, sample_owner_toml: Path):
+        """[owner] section is returned in the dict."""
+        data = read_owner(sample_owner_toml)
+        assert "owner" in data, "read_owner must return an 'owner' key"
 
-    def test_consolidation_hour_value_is_correct(
-        self, sample_owner_toml_with_consolidation: Path
-    ):
-        """[consolidation] hour matches the spec value (CONSOLIDATION_HOUR = 3)."""
-        data = read_owner(sample_owner_toml_with_consolidation)
-        hour_str = data.get("consolidation", {}).get("hour", "")
-        assert int(hour_str) == CONSOLIDATION_HOUR, (
-            f"consolidation.hour must be {CONSOLIDATION_HOUR}, got {hour_str!r}"
-        )
-
-    def test_other_sections_still_readable(
-        self, sample_owner_toml_with_consolidation: Path
-    ):
-        """Adding [consolidation] must not break parsing of [owner] section."""
-        data = read_owner(sample_owner_toml_with_consolidation)
+    def test_owner_name_value_is_correct(self, sample_owner_toml: Path):
+        """[owner] name is parsed correctly."""
+        data = read_owner(sample_owner_toml)
         assert data.get("owner", {}).get("name") == "Alice"
+
+    def test_owner_timezone_value_is_correct(self, sample_owner_toml: Path):
+        """[owner] timezone is parsed correctly."""
+        data = read_owner(sample_owner_toml)
         assert data.get("owner", {}).get("timezone") == "America/New_York"
-
-    def test_missing_consolidation_section_returns_empty(
-        self, sample_owner_toml_without_consolidation: Path
-    ):
-        """Legacy owner.toml without [consolidation] must not crash — returns no section."""
-        data = read_owner(sample_owner_toml_without_consolidation)
-        assert "consolidation" not in data, (
-            "read_owner must not fabricate a consolidation section when absent"
-        )
-
-
-# ---------------------------------------------------------------------------
-# get_consolidation_hour() helper
-# ---------------------------------------------------------------------------
-
-
-class TestGetConsolidationHour:
-    """get_consolidation_hour() returns hour from [consolidation] or CONSOLIDATION_HOUR default."""
-
-    def test_returns_hour_from_toml(
-        self, sample_owner_toml_with_consolidation: Path
-    ):
-        """Returns the integer hour stored in owner.toml."""
-        assert get_consolidation_hour(sample_owner_toml_with_consolidation) == CONSOLIDATION_HOUR
-
-    def test_returns_default_when_section_absent(
-        self, sample_owner_toml_without_consolidation: Path
-    ):
-        """Falls back to CONSOLIDATION_HOUR when [consolidation] section is missing."""
-        assert get_consolidation_hour(sample_owner_toml_without_consolidation) == CONSOLIDATION_HOUR
-
-    def test_returns_default_when_file_absent(self, tmp_path: Path):
-        """Returns default when the file does not exist at all."""
-        nonexistent = tmp_path / "no-such.toml"
-        assert get_consolidation_hour(nonexistent) == CONSOLIDATION_HOUR
 
 
 # ---------------------------------------------------------------------------

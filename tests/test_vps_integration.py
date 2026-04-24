@@ -437,36 +437,3 @@ class TestHandleCheckLocalSync:
 
         text = result[0].__dict__.get("text", str(result[0]))
         assert "not found" in text.lower() or "No repos" in text
-
-
-# =============================================================================
-# Tests: sync-repos.json config file validation
-# =============================================================================
-
-
-class TestSyncReposConfig:
-    """Validate the shipped config file."""
-
-    CONFIG_PATH = Path(__file__).parent.parent / "config" / "sync-repos.json"
-
-    def test_config_is_valid_json(self):
-        """The shipped config file is valid JSON."""
-        assert self.CONFIG_PATH.exists(), "config/sync-repos.json should exist"
-        data = json.loads(self.CONFIG_PATH.read_text())
-        assert "repos" in data
-        assert isinstance(data["repos"], list)
-
-    def test_config_has_sync_branch(self):
-        """Config specifies a sync_branch name."""
-        data = json.loads(self.CONFIG_PATH.read_text())
-        assert "sync_branch" in data
-        assert isinstance(data["sync_branch"], str)
-        assert len(data["sync_branch"]) > 0
-
-    def test_repo_entries_have_required_fields(self):
-        """Each repo entry has owner, name, and enabled fields."""
-        data = json.loads(self.CONFIG_PATH.read_text())
-        for repo in data["repos"]:
-            assert "owner" in repo
-            assert "name" in repo
-            assert "enabled" in repo

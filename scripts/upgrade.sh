@@ -2706,15 +2706,13 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
     fi
 
     # Migration 79: Config consolidation (issue #1785, Option A).
-    # Three steps:
+    # Two steps:
     #   a) Merge non-comment, non-duplicate keys from global.env into config.env,
     #      then archive global.env as global.env.bak (safe rollback).
-    #   b) Add [consolidation] section (hour = "3") to owner.toml if absent.
-    #   c) Remove stale duplicate lobster/config/consolidation.conf and
+    #   b) Remove stale duplicate lobster/config/consolidation.conf and
     #      lobster/config/sync-repos.json left by the original migration 0.
     local _m79_config_env="$LOBSTER_CONFIG_DIR/config.env"
     local _m79_global_env="$LOBSTER_CONFIG_DIR/global.env"
-    local _m79_owner_toml="$LOBSTER_CONFIG_DIR/owner.toml"
 
     # Step a: merge global.env → config.env
     if [ -f "$_m79_global_env" ] && [ ! -f "${_m79_global_env}.bak" ]; then
@@ -2749,16 +2747,7 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
         substep "global.env already migrated or absent — skipping step a"
     fi
 
-    # Step b: add [consolidation] section to owner.toml
-    if [ -f "$_m79_owner_toml" ] && ! grep -q '^\[consolidation\]' "$_m79_owner_toml" 2>/dev/null; then
-        printf '\n[consolidation]\nhour = "3"\n' >> "$_m79_owner_toml"
-        substep "Added [consolidation] section (hour = \"3\") to owner.toml"
-        migrated=$((migrated + 1))
-    else
-        substep "owner.toml already has [consolidation] section or file absent — skipping step b"
-    fi
-
-    # Step c: remove stale duplicate files in the repo's config/ directory
+    # Step b: remove stale duplicate files in the repo's config/ directory
     local _m79_repo_conf="$LOBSTER_DIR/config/consolidation.conf"
     local _m79_repo_repos="$LOBSTER_DIR/config/sync-repos.json"
     if [ -f "$_m79_repo_conf" ]; then

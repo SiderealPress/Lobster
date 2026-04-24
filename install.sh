@@ -1272,9 +1272,9 @@ for _rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
             {
                 echo ""
                 echo "# Lobster credential store"
-                echo "[ -f \"$CONFIG_FILE\" ] && set -a && . \"$CONFIG_FILE\" && set +a"
-                echo "# Lobster global env store (deprecated — tokens are now in config.env)"
+                echo "# global.env is deprecated (issue #1785); source it first so config.env always wins"
                 echo "[ -f \"$GLOBAL_ENV_FILE\" ] && set -a && . \"$GLOBAL_ENV_FILE\" && set +a"
+                echo "[ -f \"$CONFIG_FILE\" ] && set -a && . \"$CONFIG_FILE\" && set +a"
             } >> "$_rc"
             info "  Shell integration added to $_rc"
         fi
