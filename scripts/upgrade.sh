@@ -2684,6 +2684,27 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
         warn "Claude settings not found at $CLAUDE_SETTINGS — skipping Migration 77"
     fi
 
+    # Migration 78: Remove stale dispatch-job.sh LOBSTER-SCHEDULED cron entries.
+    # These three entries were already superseded by systemd timers but Migration 71
+    # left them in place on installs where the timer check was inconclusive.
+    # Two entries use invalid systemd-style cron syntax (*-*-* ...) that standard
+    # cron ignores entirely; the third (lobstertalk-ssh-watcher) fires every 6h
+    # and causes duplicate invocations alongside the timer. Remove all three
+    # unconditionally — the systemd timers are the canonical trigger.
+    _m78_jobs="lobstertalk-unified lobstertalk-ssh-watcher lobstertalk-kanban-watcher"
+    _m78_removed=""
+    for _m78_job in $_m78_jobs; do
+        if crontab -l 2>/dev/null | grep -q "dispatch-job\.sh ${_m78_job}"; then
+            { crontab -l 2>/dev/null | grep -v "dispatch-job\.sh ${_m78_job}" || true; } | crontab -
+            _m78_removed="${_m78_removed}${_m78_job} "
+            substep "Removed stale LOBSTER-SCHEDULED cron entry for ${_m78_job}"
+        fi
+    done
+    if [ -n "$_m78_removed" ]; then
+        success "Migration 78: removed cron entries for: ${_m78_removed% }"
+        migrated=$((migrated + 1))
+    fi
+
     # Migration 79: Config consolidation (issue #1785, Option A).
     # Three steps:
     #   a) Merge non-comment, non-duplicate keys from global.env into config.env,
