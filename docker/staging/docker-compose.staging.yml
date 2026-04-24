@@ -71,11 +71,6 @@ services:
       # single-user install path. Override this env var before running compose if
       # your config lives elsewhere (e.g. export LOBSTER_CONFIG_DIR=/custom/path).
       - ${LOBSTER_CONFIG_DIR:-/home/lobster/lobster-config}/config.staging.env
-    environment:
-      # GitHub PAT for gh CLI access inside staging container.
-      # Sourced from the host environment so it doesn't need to live in
-      # config.staging.env (which is committed-adjacent and more exposed).
-      GITHUB_TOKEN: "${GITHUB_TOKEN:-}"
     # systemd uses SIGRTMIN+3 for clean shutdown
     stop_signal: SIGRTMIN+3
     stop_grace_period: 30s

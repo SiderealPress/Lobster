@@ -61,6 +61,9 @@ TELEGRAM_ALLOWED_USERS=${TELEGRAM_ALLOWED_USERS:-}
 LOBSTER_ADMIN_CHAT_ID=${LOBSTER_ADMIN_CHAT_ID:-${TELEGRAM_ALLOWED_USERS:-}}
 LOBSTER_ENV=${LOBSTER_ENV:-production}
 LOBSTER_DEBUG=${LOBSTER_DEBUG:-false}
+GITHUB_TOKEN=${GITHUB_TOKEN:-}
+# ^ Set in config.staging.env to enable gh CLI inside the container.
+#   Not inherited from host environment (see docker-compose for details).
 CONFIG
 echo "[container-init] config.env written."
 
