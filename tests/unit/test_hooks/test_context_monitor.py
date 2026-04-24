@@ -31,7 +31,7 @@ _HOOKS_DIR = Path(__file__).parents[3] / "hooks"
 _HOOK_PATH = _HOOKS_DIR / "context-monitor.py"
 
 # Named constants matching the spec — these are protocol-level values.
-WARN_PREFIX_ABSENT_CONTEXT = "[WARN] context_window absent"
+WARN_PREFIX_ABSENT_CONTEXT = "[WARN] transcript usage unavailable"
 WARNING_THRESHOLD = 70.0
 SONNET_4_6_MAX_CONTEXT = 1_000_000
 HAIKU_4_5_MAX_CONTEXT = 200_000
@@ -93,7 +93,7 @@ class TestTranscriptUsageReading:
                 },
             }
         ])
-        result = mod._read_transcript_usage(str(transcript), "Bash")
+        result = mod._read_transcript_usage(str(transcript))
         assert result is not None, "Expected usage data from transcript"
         used_pct, remaining_pct, model = result
         assert abs(used_pct - 50.0) < 0.01, f"Expected 50% used, got {used_pct}"
@@ -121,7 +121,7 @@ class TestTranscriptUsageReading:
                 },
             },
         ])
-        result = mod._read_transcript_usage(str(transcript), "Bash")
+        result = mod._read_transcript_usage(str(transcript))
         assert result is not None
         used_pct, _, _ = result
         assert abs(used_pct - 80.0) < 0.01, (
@@ -131,13 +131,13 @@ class TestTranscriptUsageReading:
     def test_returns_none_when_transcript_path_is_none(self, tmp_path):
         """No transcript_path → returns None (caller logs WARN)."""
         mod = _load_hook()
-        result = mod._read_transcript_usage(None, "Bash")
+        result = mod._read_transcript_usage(None)
         assert result is None
 
     def test_returns_none_when_transcript_file_missing(self, tmp_path):
         """Nonexistent transcript path → returns None without crashing."""
         mod = _load_hook()
-        result = mod._read_transcript_usage(str(tmp_path / "no-such-file.jsonl"), "Bash")
+        result = mod._read_transcript_usage(str(tmp_path / "no-such-file.jsonl"))
         assert result is None
 
     def test_returns_none_when_no_assistant_turns(self, tmp_path):
@@ -149,7 +149,7 @@ class TestTranscriptUsageReading:
             json.dumps({"type": "user", "message": {"role": "user", "content": "hello"}})
             + "\n"
         )
-        result = mod._read_transcript_usage(str(path), "Bash")
+        result = mod._read_transcript_usage(str(path))
         assert result is None
 
     def test_sums_all_cache_fields(self, tmp_path):
@@ -167,7 +167,7 @@ class TestTranscriptUsageReading:
                 },
             }
         ])
-        result = mod._read_transcript_usage(str(transcript), "Bash")
+        result = mod._read_transcript_usage(str(transcript))
         assert result is not None
         used_pct, _, model = result
         assert abs(used_pct - 100.0) < 0.01, f"Expected 100%, got {used_pct}"
@@ -239,7 +239,7 @@ class TestHandlePayloadTranscriptPath:
         entry = entries[0]
         assert abs(entry["used_percentage"] - 30.0) < 0.01
         assert entry.get("source") == "transcript_jsonl"
-        assert not entry.get("context_window_absent", False)
+        assert not entry.get("transcript_unavailable", False)
 
     def test_writes_inbox_warning_at_threshold(self, tmp_path):
         """Transcript usage at or above WARNING_THRESHOLD → inbox warning written."""
@@ -324,7 +324,7 @@ class TestHandlePayloadTranscriptPath:
         entries = _read_log(log_dir)
         assert len(entries) == 1, f"Expected 1 warn entry, got {len(entries)}: {entries}"
         entry = entries[0]
-        assert entry.get("context_window_absent") is True
+        assert entry.get("transcript_unavailable") is True
         assert WARN_PREFIX_ABSENT_CONTEXT in entry.get("warn", ""), (
             f"Expected warn prefix in entry, got: {entry}"
         )
