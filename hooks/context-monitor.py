@@ -58,7 +58,6 @@ def _model_max_context(model: str) -> int:
 
 def _read_transcript_usage(
     transcript_path: str | None,
-    tool_name: str,
 ) -> "tuple[float, float, str] | None":
     """Read the last assistant usage entry from the transcript JSONL.
 
@@ -163,8 +162,8 @@ def _build_absent_context_entry(tool_name: str, reason: str = "") -> dict:
     return {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "tool": tool_name,
-        "context_window_absent": True,
-        "warn": f"[WARN] context_window absent in payload for tool: {tool_name}",
+        "transcript_unavailable": True,
+        "warn": f"[WARN] transcript usage unavailable for tool: {tool_name}",
         "reason": reason,
     }
 
@@ -208,7 +207,7 @@ def _handle_payload(
     tool_name = data.get("tool_name", "unknown")
     transcript_path = data.get("transcript_path")
 
-    result = _read_transcript_usage(transcript_path, tool_name)
+    result = _read_transcript_usage(transcript_path)
 
     if result is None:
         # Hook fired but usage data is unavailable (no transcript_path, file
