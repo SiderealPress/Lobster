@@ -2684,6 +2684,83 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
         warn "Claude settings not found at $CLAUDE_SETTINGS — skipping Migration 77"
     fi
 
+    # Migration 78: Remove stale dispatch-job.sh LOBSTER-SCHEDULED cron entries.
+    # These three entries were already superseded by systemd timers but Migration 71
+    # left them in place on installs where the timer check was inconclusive.
+    # Two entries use invalid systemd-style cron syntax (*-*-* ...) that standard
+    # cron ignores entirely; the third (lobstertalk-ssh-watcher) fires every 6h
+    # and causes duplicate invocations alongside the timer. Remove all three
+    # unconditionally — the systemd timers are the canonical trigger.
+    _m78_jobs="lobstertalk-unified lobstertalk-ssh-watcher lobstertalk-kanban-watcher"
+    _m78_removed=""
+    for _m78_job in $_m78_jobs; do
+        if crontab -l 2>/dev/null | grep -q "dispatch-job\.sh ${_m78_job}"; then
+            { crontab -l 2>/dev/null | grep -v "dispatch-job\.sh ${_m78_job}" || true; } | crontab -
+            _m78_removed="${_m78_removed}${_m78_job} "
+            substep "Removed stale LOBSTER-SCHEDULED cron entry for ${_m78_job}"
+        fi
+    done
+    if [ -n "$_m78_removed" ]; then
+        success "Migration 78: removed cron entries for: ${_m78_removed% }"
+        migrated=$((migrated + 1))
+    fi
+
+    # Migration 79: Config consolidation (issue #1785, Option A).
+    # Two steps:
+    #   a) Merge non-comment, non-duplicate keys from global.env into config.env,
+    #      then archive global.env as global.env.bak (safe rollback).
+    #   b) Remove stale duplicate lobster/config/consolidation.conf and
+    #      lobster/config/sync-repos.json left by the original migration 0.
+    local _m79_config_env="$LOBSTER_CONFIG_DIR/config.env"
+    local _m79_global_env="$LOBSTER_CONFIG_DIR/global.env"
+
+    # Step a: merge global.env → config.env
+    if [ -f "$_m79_global_env" ] && [ ! -f "${_m79_global_env}.bak" ]; then
+        local _m79_merged=0
+        while IFS= read -r _m79_line; do
+            # Skip comments and blank lines
+            [[ "$_m79_line" =~ ^[[:space:]]*# ]] && continue
+            [[ -z "${_m79_line// }" ]] && continue
+
+            # Extract key (everything before first '=')
+            local _m79_key
+            _m79_key="${_m79_line%%=*}"
+            [ -z "$_m79_key" ] && continue
+
+            # Skip if key already exists in config.env
+            if grep -qE "^${_m79_key}=" "$_m79_config_env" 2>/dev/null; then
+                substep "  global.env: ${_m79_key} already in config.env — skipping"
+                continue
+            fi
+
+            # Append to config.env
+            echo "$_m79_line" >> "$_m79_config_env"
+            substep "  global.env: merged ${_m79_key} into config.env"
+            _m79_merged=$((_m79_merged + 1))
+        done < "$_m79_global_env"
+
+        # Archive global.env (keep as .bak for safety — delete after next stable release)
+        mv "$_m79_global_env" "${_m79_global_env}.bak"
+        substep "Archived global.env to global.env.bak ($_m79_merged keys merged into config.env)"
+        migrated=$((migrated + 1))
+    else
+        substep "global.env already migrated or absent — skipping step a"
+    fi
+
+    # Step b: remove stale duplicate files in the repo's config/ directory
+    local _m79_repo_conf="$LOBSTER_DIR/config/consolidation.conf"
+    local _m79_repo_repos="$LOBSTER_DIR/config/sync-repos.json"
+    if [ -f "$_m79_repo_conf" ]; then
+        rm -f "$_m79_repo_conf"
+        substep "Removed stale $LOBSTER_DIR/config/consolidation.conf"
+        migrated=$((migrated + 1))
+    fi
+    if [ -f "$_m79_repo_repos" ]; then
+        rm -f "$_m79_repo_repos"
+        substep "Removed stale $LOBSTER_DIR/config/sync-repos.json"
+        migrated=$((migrated + 1))
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else

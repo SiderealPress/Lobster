@@ -1251,59 +1251,38 @@ info "  $PROJECTS_DIR - All Lobster-managed projects"
 # Global Environment Store
 #===============================================================================
 
-step "Setting up global environment store..."
+step "Setting up credential store..."
 
+# global.env was deprecated in issue #1785 (config consolidation, Option A).
+# config.env is now the single canonical file for both Lobster service config and
+# all API tokens. On new installs global.env is not created. On upgrades, migration 79
+# merges any existing global.env content into config.env and archives it.
+#
+# For backward compatibility, the variable is kept so the GITHUB_TOKEN section below
+# can source it when upgrading from a pre-#1785 install.
 GLOBAL_ENV_FILE="$CONFIG_DIR/global.env"
 
-if [ ! -f "$GLOBAL_ENV_FILE" ]; then
-    cat > "$GLOBAL_ENV_FILE" << 'GLOBALENV'
-# Lobster Global Environment Store
-# Machine-wide API tokens and credentials shared across services and tools.
-# Format: KEY=value  (no export keyword needed)
-# Use: lobster env set KEY VALUE   to add or update entries
-# Use: lobster env list             to see all stored keys
-
-# === Cloud Providers ===
-# HETZNER_API_TOKEN=
-# DO_TOKEN=
-# CLOUDFLARE_API_TOKEN=
-
-# === AI / LLM Services ===
-# ANTHROPIC_API_KEY=
-# OPENAI_API_KEY=
-
-# === Code / DevOps ===
-# GITHUB_TOKEN=
-# VERCEL_TOKEN=
-
-# === Communication Services ===
-# TWILIO_ACCOUNT_SID=
-# TWILIO_AUTH_TOKEN=
-
-# === Add your own below ===
-GLOBALENV
-    chmod 600 "$GLOBAL_ENV_FILE" || true
-    success "Global env store created: $GLOBAL_ENV_FILE"
-else
-    info "Global env store already exists: $GLOBAL_ENV_FILE"
-fi
-
-# Add shell integration: source global.env on login so tokens are available
-# to any script or CLI tool in the user's shell sessions.
+# Shell integration: source config.env (canonical) and legacy global.env (compat).
+# The config.env entry is authoritative; global.env entry is kept for installs that
+# haven't run upgrade.sh migration 79 yet.
 for _rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
-    if [ -f "$_rc" ] && ! grep -q "Lobster global env store" "$_rc"; then
-        {
-            echo ""
-            echo "# Lobster global env store"
-            echo "[ -f \"$GLOBAL_ENV_FILE\" ] && set -a && . \"$GLOBAL_ENV_FILE\" && set +a"
-        } >> "$_rc"
-        info "  Shell integration added to $_rc"
+    if [ -f "$_rc" ]; then
+        # Add config.env sourcing if not already present
+        if ! grep -q "Lobster credential store" "$_rc"; then
+            {
+                echo ""
+                echo "# Lobster credential store"
+                echo "# global.env is deprecated (issue #1785); source it first so config.env always wins"
+                echo "[ -f \"$GLOBAL_ENV_FILE\" ] && set -a && . \"$GLOBAL_ENV_FILE\" && set +a"
+                echo "[ -f \"$CONFIG_FILE\" ] && set -a && . \"$CONFIG_FILE\" && set +a"
+            } >> "$_rc"
+            info "  Shell integration added to $_rc"
+        fi
     fi
 done
 
-success "Global env store configured"
-info "  File: $GLOBAL_ENV_FILE"
-info "  Edit directly: $GLOBAL_ENV_FILE"
+success "Credential store configured"
+info "  Canonical file: $CONFIG_FILE"
 info "  (Use 'lobster env set KEY VALUE' after install to update tokens)"
 info "  See docs/GLOBAL-ENV.md for full documentation"
 
@@ -2229,7 +2208,7 @@ fi
 
 step "Checking GitHub Personal Access Token..."
 
-# Load global.env if not already done so we can check for an existing token
+# Load legacy global.env if present (pre-#1785 installs store GITHUB_TOKEN there)
 if [ -f "$GLOBAL_ENV_FILE" ]; then
     set -a
     # shellcheck disable=SC1090
@@ -2249,24 +2228,28 @@ if [ -z "${GITHUB_TOKEN:-}" ] || [ "$GITHUB_TOKEN" = "your_github_pat_here" ]; t
         echo ""
         read -p "Enter your GitHub PAT (or press Enter to skip): " GH_TOKEN
         if [ -n "$GH_TOKEN" ]; then
-            # Write to global.env, replacing any existing GITHUB_TOKEN line (commented or not)
-            if grep -q "^#\{0,1\} *GITHUB_TOKEN=" "$GLOBAL_ENV_FILE" 2>/dev/null; then
-                # Use ENVIRON to avoid backslash mangling that -v causes with tokens
-                # containing backslash sequences (e.g. \n, \t in a PAT value).
+            # Write to config.env (canonical credential file after issue #1785).
+            # Also update global.env if it exists (backward compat for pre-migration installs).
+            if grep -q "^#\{0,1\} *GITHUB_TOKEN=" "$CONFIG_FILE" 2>/dev/null; then
+                GH_TOKEN="$GH_TOKEN" awk \
+                    '/^#? *GITHUB_TOKEN=/ { print "GITHUB_TOKEN=" ENVIRON["GH_TOKEN"]; next } { print }' \
+                    "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+            else
+                printf '\nGITHUB_TOKEN=%s\n' "$GH_TOKEN" >> "$CONFIG_FILE"
+            fi
+            if [ -f "$GLOBAL_ENV_FILE" ] && grep -q "^#\{0,1\} *GITHUB_TOKEN=" "$GLOBAL_ENV_FILE" 2>/dev/null; then
                 GH_TOKEN="$GH_TOKEN" awk \
                     '/^#? *GITHUB_TOKEN=/ { print "GITHUB_TOKEN=" ENVIRON["GH_TOKEN"]; next } { print }' \
                     "$GLOBAL_ENV_FILE" > "$GLOBAL_ENV_FILE.tmp" && mv "$GLOBAL_ENV_FILE.tmp" "$GLOBAL_ENV_FILE"
-            else
-                printf '\nGITHUB_TOKEN=%s\n' "$GH_TOKEN" >> "$GLOBAL_ENV_FILE"
             fi
             GITHUB_TOKEN_SET=true
-            success "GitHub token saved to $GLOBAL_ENV_FILE"
+            success "GitHub token saved to $CONFIG_FILE"
         else
-            warn "Skipped — set GITHUB_TOKEN in $GLOBAL_ENV_FILE later"
+            warn "Skipped — set GITHUB_TOKEN in $CONFIG_FILE later"
         fi
     else
         info "Skipping GitHub token prompt (non-interactive mode)"
-        info "Set GITHUB_TOKEN in $GLOBAL_ENV_FILE when ready"
+        info "Set GITHUB_TOKEN in $CONFIG_FILE when ready"
     fi
 else
     GITHUB_TOKEN_SET=true
@@ -3115,7 +3098,7 @@ echo ""
 echo -e "${BOLD}Directories:${NC}"
 echo "  $INSTALL_DIR        Lobster code"
 echo "  $CONFIG_DIR          Configuration"
-echo "  $CONFIG_DIR/global.env  Global API token store"
+echo "  $CONFIG_DIR/config.env  Credentials and API tokens (canonical)"
 echo "  $USER_CONFIG_DIR    User config and memory"
 echo "  $WORKSPACE_DIR      Claude workspace"
 echo "  $PROJECTS_DIR  Projects"

@@ -466,13 +466,15 @@ cmd_ps() {
 }
 
 cmd_env() {
-    # LOBSTER_CONFIG_DIR holds service-critical config (config.env, global.env).
+    # LOBSTER_CONFIG_DIR holds service-critical config (config.env).
     # Default matches install.sh: $HOME/lobster-config.
     # Previously this defaulted to lobster-user-config, which caused lobster env set
     # to write to a directory the services never read. (#1454)
+    # global.env was the secondary token store prior to issue #1785; config.env is now
+    # the single canonical file for all credentials and configuration.
     local config_dir="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}"
-    local env_file="$config_dir/global.env"
-    local config_env_file="$config_dir/config.env"
+    local env_file="$config_dir/config.env"
+    local legacy_global_env="$config_dir/global.env"
     local subcmd="${1:-}"
 
     case "$subcmd" in
@@ -485,16 +487,10 @@ cmd_env() {
             fi
             mkdir -p "$config_dir"
 
-            # If the key already exists in config.env (even as an empty stub), update
-            # it there. Service EnvironmentFiles are loaded in order; an empty stub in
-            # config.env previously silenced the value in global.env. Updating config.env
-            # directly removes the ambiguity and ensures the correct value is used
-            # regardless of load order.
+            # All keys are written to config.env — the single canonical credential file.
+            # global.env is deprecated (issue #1785); keys that existed there have been
+            # merged into config.env by upgrade.sh migration 79.
             local target_file="$env_file"
-            if grep -qE "^${key}=" "$config_env_file" 2>/dev/null; then
-                target_file="$config_env_file"
-                echo -e "(key found in config.env — updating there instead of global.env)"
-            fi
 
             touch "$target_file" && chmod 600 "$target_file"
             # Update existing key in place, or append if not present
@@ -518,16 +514,16 @@ cmd_env() {
                 echo "Usage: lobster env get KEY"
                 exit 1
             fi
-            # Search config.env first (higher priority for service-critical vars),
-            # then global.env. This mirrors the effective precedence after #1454.
+            # Search config.env first, then legacy global.env for backward compatibility
+            # on installs that haven't yet run upgrade.sh migration 79.
             local found_in=""
             local val=""
-            if grep -qE "^${key}=" "$config_env_file" 2>/dev/null; then
-                found_in="$config_env_file"
-                val=$(grep -E "^${key}=" "$config_env_file" | cut -d= -f2-)
-            elif grep -qF "^${key}=" "$env_file" 2>/dev/null; then
+            if grep -qE "^${key}=" "$env_file" 2>/dev/null; then
                 found_in="$env_file"
-                val=$(grep -F "^${key}=" "$env_file" | cut -d= -f2-)
+                val=$(grep -E "^${key}=" "$env_file" | cut -d= -f2-)
+            elif grep -qF "^${key}=" "$legacy_global_env" 2>/dev/null; then
+                found_in="$legacy_global_env"
+                val=$(grep -F "^${key}=" "$legacy_global_env" | cut -d= -f2-)
             fi
             if [ -z "$found_in" ]; then
                 echo -e "${RED}Key not found: $key${NC}"
