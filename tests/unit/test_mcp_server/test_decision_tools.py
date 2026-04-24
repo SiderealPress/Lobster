@@ -401,6 +401,9 @@ class TestListDecisionsRetrieval:
         text = result[0].text
         assert "old-decision" in text
         assert "new-decision" in text
+        # The superseded decision must be labelled — regression guard for display logic
+        assert "[SUPERSEDED]" in text
+        assert "[SUPERSEDED] old-decision" in text
 
     def test_area_filter_narrows_results(self, static_provider):
         """list_decisions with area filter returns only decisions affecting that area."""
