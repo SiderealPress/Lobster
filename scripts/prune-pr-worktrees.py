@@ -41,10 +41,14 @@ def log(msg: str) -> None:
 
 
 def run(cmd: list[str], cwd: Path | None = None, timeout: int = 30) -> tuple[int, str, str]:
-    result = subprocess.run(
-        cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd
-    )
-    return result.returncode, result.stdout.strip(), result.stderr.strip()
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd
+        )
+        return result.returncode, result.stdout.strip(), result.stderr.strip()
+    except subprocess.TimeoutExpired:
+        log(f"  [TIMEOUT] command timed out after {timeout}s: {cmd[0]}")
+        return 1, "", "timeout"
 
 
 def is_worktree(path: Path) -> bool:
@@ -101,17 +105,27 @@ def remove_worktree(main_repo: Path, worktree_path: Path, dry_run: bool) -> bool
     if dry_run:
         log(f"  [DRY-RUN] Would remove: {worktree_path}")
         return True
-    # First, prune the worktree reference from the main repo
+    # Attempt graceful removal via git first
     rc, _, err = run(["git", "worktree", "remove", "--force", str(worktree_path)], cwd=main_repo)
-    if rc != 0:
-        log(f"  [WARN] git worktree remove failed: {err} — trying rm -rf")
-    # Fall back to direct removal if worktree remove fails
+    if rc == 0:
+        # Success — prune stale admin entries and done
+        run(["git", "worktree", "prune"], cwd=main_repo)
+        log(f"  [REMOVED] {worktree_path}")
+        return True
+
+    # git worktree remove failed. Only fall back to shutil.rmtree if the
+    # directory still exists (meaning git failed before touching it, e.g.
+    # because the worktree isn't registered). If git already partially removed
+    # it (unlikely with --force), we skip to avoid double-removal.
+    log(f"  [WARN] git worktree remove failed ({err or 'unknown'}) — trying direct removal")
     if worktree_path.exists():
-        rc2, _, err2 = run(["rm", "-rf", str(worktree_path)])
-        if rc2 != 0:
-            log(f"  [ERROR] rm -rf failed: {err2}")
+        import shutil
+        try:
+            shutil.rmtree(str(worktree_path))
+        except OSError as exc:
+            log(f"  [ERROR] shutil.rmtree failed: {exc}")
             return False
-    # Prune any stale entries
+    # Prune any stale entries regardless
     run(["git", "worktree", "prune"], cwd=main_repo)
     log(f"  [REMOVED] {worktree_path}")
     return True
