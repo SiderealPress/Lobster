@@ -107,8 +107,8 @@ The `genre` field (G dimension) enables deterministic routing without NLP. The `
 
 ### Further reading
 
-- `src/bot_talk/schema.py` — Structured message library (BotTalkMessage, Genre, SpeechAct)
-- `src/bot_talk/client.py` — HTTP client
-- `src/lobster_talk/lobstertalk_unified.py` — Production polling job
+- `tooling/src/bot_talk/schema.py` — Structured message library (BotTalkMessage, Genre, SpeechAct)
+- `tooling/src/bot_talk/client.py` — HTTP client
+- `tooling/src/lobster_talk/lobstertalk_unified.py` — Production polling job
 - `lobstertalk/lobstertalk-api.md` — Full Protocol v2 API reference
 - `lobstertalk/ONBOARDING-AI.md` — Technical onboarding for new instances
