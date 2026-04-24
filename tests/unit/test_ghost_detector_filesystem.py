@@ -654,6 +654,88 @@ class TestLiveDispatcherGuard:
         assert "Skipping" in out
         assert "dispatcher" in out.lower()
 
+    # --- startup=True tests (dispatcher-skip guard bypassed) ---
+
+    def test_startup_mode_marks_dispatcher_session_failed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """startup=True: lobster-dispatcher ghost row IS marked failed.
+
+        At SessionStart hook time, no new dispatcher has registered yet.
+        Any lobster-dispatcher row in the DB is from the previous session
+        and must be cleaned up.
+        """
+        marked: list[str] = []
+        monkeypatch.setattr(gd, "mark_agent_failed", lambda db_path, agent_id: marked.append(agent_id))
+        monkeypatch.setattr(gd, "drop_inbox_message", lambda payload: None)
+
+        ghost_dispatcher = self._make_stale_classified(self.DISPATCHER_AGENT_ID)
+        fake_db = tmp_path / "agent_sessions.db"
+
+        gd.mark_failed_all_ghosts([], fake_db, stale_no_file=[ghost_dispatcher], startup=True)
+
+        assert self.DISPATCHER_AGENT_ID in marked, (
+            "startup=True must mark ghost lobster-dispatcher rows failed; "
+            "the skip guard should not apply at hook startup time."
+        )
+
+    def test_startup_mode_marks_both_dispatcher_and_subagent_failed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """startup=True: both dispatcher ghost and dead subagent are marked failed."""
+        marked: list[str] = []
+        monkeypatch.setattr(gd, "mark_agent_failed", lambda db_path, agent_id: marked.append(agent_id))
+        monkeypatch.setattr(gd, "drop_inbox_message", lambda payload: None)
+
+        ghost_dispatcher = self._make_stale_classified(self.DISPATCHER_AGENT_ID)
+        dead_subagent = self._make_stale_classified("dead-subagent-xyz")
+        fake_db = tmp_path / "agent_sessions.db"
+
+        gd.mark_failed_all_ghosts(
+            [], fake_db, stale_no_file=[ghost_dispatcher, dead_subagent], startup=True
+        )
+
+        assert self.DISPATCHER_AGENT_ID in marked
+        assert "dead-subagent-xyz" in marked
+
+    def test_non_startup_mode_still_skips_dispatcher(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """startup=False (default): lobster-dispatcher session is still skipped.
+
+        The periodic reconciler passes startup=False (or omits it). The live
+        dispatcher has already registered its row, so the skip guard must stay active.
+        """
+        marked: list[str] = []
+        monkeypatch.setattr(gd, "mark_agent_failed", lambda db_path, agent_id: marked.append(agent_id))
+        monkeypatch.setattr(gd, "drop_inbox_message", lambda payload: None)
+
+        live_dispatcher = self._make_stale_classified(self.DISPATCHER_AGENT_ID)
+        fake_db = tmp_path / "agent_sessions.db"
+
+        gd.mark_failed_all_ghosts([], fake_db, stale_no_file=[live_dispatcher], startup=False)
+
+        assert self.DISPATCHER_AGENT_ID not in marked, (
+            "startup=False must preserve the dispatcher skip guard for the periodic reconciler."
+        )
+
+    def test_startup_mode_prints_inclusion_notice(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """startup=True prints a notice when dispatcher rows are included (not skipped)."""
+        monkeypatch.setattr(gd, "mark_agent_failed", lambda db_path, agent_id: None)
+        monkeypatch.setattr(gd, "drop_inbox_message", lambda payload: None)
+
+        ghost_dispatcher = self._make_stale_classified(self.DISPATCHER_AGENT_ID)
+        fake_db = tmp_path / "agent_sessions.db"
+
+        gd.mark_failed_all_ghosts([], fake_db, stale_no_file=[ghost_dispatcher], startup=True)
+
+        out = capsys.readouterr().out
+        assert "--startup mode" in out or "startup" in out.lower(), (
+            "A notice should be printed when dispatcher rows are included in startup mode."
+        )
+
 
 # ---------------------------------------------------------------------------
 # LOBSTER_HOME path resolution
