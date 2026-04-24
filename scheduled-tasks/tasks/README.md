@@ -46,6 +46,7 @@ time. Common placeholders:
 | `bot-talk-poller.md.template` | `bot-talk-poller` | Hourly baseline poller for bot-talk messages |
 | `bot-talk-poller-fast.md.template` | `bot-talk-poller-fast` | 2-minute fast poller (hot-mode only) |
 | `gmail-email-pipeline.md.template` | `gmail-email-pipeline` | Gmail polling with CRM enrichment |
+| `lobstertalk-ssh-watcher.md.template` | `lobstertalk-ssh-watcher` | SSH-based watcher for bot-talk messages.jsonl with self-echo filter |
 
 ## How to instantiate a template
 
