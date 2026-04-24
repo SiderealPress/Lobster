@@ -435,15 +435,22 @@ def _schedule_reflection_prompt(trigger: str) -> None:
 
 
 def _mark_all_running_failed() -> None:
-    """Run agent-monitor.py --mark-failed via uv.
+    """Run agent-monitor.py --mark-failed --startup via uv.
 
     Uses subprocess so this works regardless of the current Python environment.
     Logs to stderr on failure but never raises — must not crash the hook or
     block the dispatcher from starting.
+
+    Passes --startup so that the dispatcher skip guard is bypassed: at hook
+    time the new dispatcher has not yet called session_start() via MCP, so
+    any lobster-dispatcher row in the DB is from the PREVIOUS session (a ghost)
+    and must be marked failed.  Without --startup, the skip guard incorrectly
+    preserves ghost dispatcher rows indefinitely, making them invisible to
+    cleanup until the reconciler's STALE_NO_FILE timer fires (~38 min delay).
     """
     try:
         result = subprocess.run(
-            ["uv", "run", str(AGENT_MONITOR), "--mark-failed"],
+            ["uv", "run", str(AGENT_MONITOR), "--mark-failed", "--startup"],
             capture_output=True,
             text=True,
             timeout=25,

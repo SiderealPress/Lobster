@@ -805,6 +805,7 @@ def mark_failed_all_ghosts(
     confirmed: list[ClassifiedAgent],
     db_path: Path,
     stale_no_file: list[ClassifiedAgent] | None = None,
+    startup: bool = False,
 ) -> None:
     """Iterate confirmed ghosts and mark each one failed, reporting outcomes.
 
@@ -815,20 +816,22 @@ def mark_failed_all_ghosts(
     that never register an output file), which is why --mark-failed would previously
     leave stale dispatcher sessions in status=running indefinitely.
 
-    The live dispatcher session is always excluded from the STALE_NO_FILE sweep.
-    The dispatcher registers with the static agent_id "lobster-dispatcher", so any
-    entry with that agent_id is skipped unconditionally — it is the currently-running
-    dispatcher, not a dead subagent.
+    The live dispatcher session is excluded from the STALE_NO_FILE sweep unless
+    ``startup=True`` is passed.  At startup time (called from the on-fresh-start.py
+    SessionStart hook), the new dispatcher has not yet called session_start() via MCP,
+    so any ``lobster-dispatcher`` row currently in the DB is from the PREVIOUS session
+    and is a ghost — it must be marked failed so it does not accumulate indefinitely.
+    When ``startup=False`` (default, used by the periodic reconciler), the dispatcher
+    skip guard is active because the live dispatcher has already registered its row and
+    must not be falsely marked failed.
     """
     stale_no_file = stale_no_file or []
 
-    # Guard: exclude the live dispatcher session from the sweep.
-    # The dispatcher always registers with agent_id=_DISPATCHER_AGENT_ID (a static
-    # constant), so we filter on that directly.  There is no UUID file to read —
-    # the previous approach compared against the Claude UUID from
-    # dispatcher-claude-session-id, but that UUID is stored in a different field
-    # and was never equal to agent_id, making the guard a silent no-op.
-    if stale_no_file:
+    # Guard: exclude the live dispatcher session from the sweep (periodic reconciler only).
+    # At startup (startup=True), every lobster-dispatcher row is a ghost from the
+    # previous session — the new dispatcher has not yet registered.  Skipping in
+    # that context is the bug: ghost dispatcher rows accumulate indefinitely.
+    if not startup and stale_no_file:
         filtered_stale = [a for a in stale_no_file if a.row.agent_id != _DISPATCHER_AGENT_ID]
         skipped = len(stale_no_file) - len(filtered_stale)
         if skipped:
@@ -837,6 +840,14 @@ def mark_failed_all_ghosts(
                 f"agent_id={_DISPATCHER_AGENT_ID!r} — live dispatcher, not a dead subagent."
             )
         stale_no_file = filtered_stale
+    elif startup and stale_no_file:
+        dispatcher_rows = [a for a in stale_no_file if a.row.agent_id == _DISPATCHER_AGENT_ID]
+        if dispatcher_rows:
+            print(
+                f"\n  [mark-failed] --startup mode: including {len(dispatcher_rows)} "
+                f"STALE_NO_FILE session(s) with agent_id={_DISPATCHER_AGENT_ID!r} "
+                f"— ghost from previous session, new dispatcher not yet registered."
+            )
 
     to_fail = confirmed + stale_no_file
 
@@ -951,6 +962,18 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--startup",
+        action="store_true",
+        help=(
+            "Must be combined with --mark-failed. Bypasses the dispatcher skip guard "
+            "so that stale 'lobster-dispatcher' rows from the previous session are also "
+            "marked failed. Safe to use only at dispatcher startup (from the "
+            "on-fresh-start.py SessionStart hook), where the new dispatcher has not yet "
+            "called session_start() — any lobster-dispatcher row in the DB is therefore "
+            "a ghost from the previous session, not the live dispatcher."
+        ),
+    )
+    parser.add_argument(
         "--no-fs-scan",
         action="store_true",
         help="Disable filesystem scan; only use agent_sessions.db (legacy behavior)",
@@ -1003,7 +1026,7 @@ def main() -> int:
     stale_no_file = [a for a in classified if a.classification == "STALE_NO_FILE"]
 
     if args.mark_failed:
-        mark_failed_all_ghosts(confirmed, db_path, stale_no_file=stale_no_file)
+        mark_failed_all_ghosts(confirmed, db_path, stale_no_file=stale_no_file, startup=args.startup)
         mark_failed_unregistered_dead(unregistered)
     elif args.alert and (confirmed or unregistered):
         send_alert(confirmed, unregistered, report)

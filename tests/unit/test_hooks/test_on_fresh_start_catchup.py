@@ -763,3 +763,48 @@ class TestIsDispatcherFallback:
             "Fast-restart case: marker file has dispatcher ID, process-tree confirms "
             "subagent (≥2 claude ancestors). Should return False."
         )
+
+
+# =============================================================================
+# _mark_all_running_failed — --startup flag (issue #1768 gap 2)
+# =============================================================================
+
+class TestMarkAllRunningFailed:
+    """_mark_all_running_failed() must pass --startup to agent-monitor.
+
+    Without --startup, the dispatcher skip guard in agent-monitor leaves old
+    lobster-dispatcher rows in status=running indefinitely, causing ghost sessions
+    to persist until the reconciler's STALE_NO_FILE timer fires (~38 min delay).
+    """
+
+    def test_mark_all_running_failed_passes_startup_flag(self, monkeypatch, tmp_path):
+        """_mark_all_running_failed() invokes agent-monitor with --startup flag.
+
+        The --startup flag bypasses the dispatcher skip guard in agent-monitor,
+        ensuring ghost lobster-dispatcher rows from the previous session are
+        marked failed at hook startup time (before the new dispatcher registers).
+        """
+        import subprocess
+        import types as _types
+
+        mod = _load_on_fresh_start_with_dispatcher_file()
+
+        captured_args = []
+
+        def fake_run(cmd, **kwargs):
+            captured_args.extend(cmd)
+            result = _types.SimpleNamespace(returncode=0, stdout="", stderr="")
+            return result
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        mod.subprocess = subprocess
+
+        mod._mark_all_running_failed()
+
+        assert "--startup" in captured_args, (
+            "_mark_all_running_failed() must pass --startup to agent-monitor so that "
+            "ghost lobster-dispatcher rows are not protected by the dispatcher skip guard."
+        )
+        assert "--mark-failed" in captured_args, (
+            "_mark_all_running_failed() must pass --mark-failed to agent-monitor."
+        )
