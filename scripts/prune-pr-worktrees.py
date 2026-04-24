@@ -41,12 +41,17 @@ def log(msg: str) -> None:
 
 
 def run(cmd: list[str], cwd: Path | None = None, timeout: int = 30) -> tuple[int, str, str]:
+    proc = None
     try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=cwd
         )
-        return result.returncode, result.stdout.strip(), result.stderr.strip()
+        stdout, stderr = proc.communicate(timeout=timeout)
+        return proc.returncode, stdout.strip(), stderr.strip()
     except subprocess.TimeoutExpired:
+        if proc is not None:
+            proc.kill()
+            proc.communicate()  # reap the process to avoid zombie/resource leak
         log(f"  [TIMEOUT] command timed out after {timeout}s: {cmd[0]}")
         return 1, "", "timeout"
 
@@ -119,6 +124,13 @@ def remove_worktree(main_repo: Path, worktree_path: Path, dry_run: bool) -> bool
     # it (unlikely with --force), we skip to avoid double-removal.
     log(f"  [WARN] git worktree remove failed ({err or 'unknown'}) — trying direct removal")
     if worktree_path.exists():
+        # Safety check: only delete paths that live under the expected projects
+        # dir to prevent accidental data loss if path resolution goes wrong.
+        expected_root = DEFAULT_PROJECTS_DIR.resolve()
+        resolved = worktree_path.resolve()
+        if not str(resolved).startswith(str(expected_root) + "/"):
+            log(f"  [ERROR] refusing rm -rf: {worktree_path} is outside {expected_root}")
+            return False
         import shutil
         try:
             shutil.rmtree(str(worktree_path))
