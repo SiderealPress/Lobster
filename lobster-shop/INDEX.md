@@ -18,6 +18,7 @@ Browse available skills for your Lobster assistant. Install any skill with one c
 | [Obsidian KM](./obsidian-km/) | Sync and access your Obsidian vault via Telegram — create, read, search, and manage notes from anywhere | Tool | In Dev |
 | [Buy Things](./buy-things/) | Purchase items via Telegram — search products, confirm with you, and complete checkout using Camofox browser automation | Tool | Available |
 | [Lobster Dev](./lobster-dev/) | Lobster development context — staging Docker setup, active dev patterns, and known dev environment quirks. Activate when developing or debugging Lobster itself. | Context | Available |
+| [LobsterTalk](./lobstertalk/) | Inter-Lobster communication protocol — poll the relay server for peer messages, route inbound to inbox, and drain outbound queue with hot-mode acceleration | Tool | Available |
 
 ## Templates
 
