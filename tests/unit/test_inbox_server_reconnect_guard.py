@@ -81,6 +81,7 @@ def _extract_reset_state_function(state_file_path: Path):
         "timezone": timezone,
         "Path": Path,
         "LOBSTER_STATE_FILE": state_file_path,
+        "_WORKSPACE": Path(os.environ.get("LOBSTER_WORKSPACE", Path.home() / "lobster-workspace")),
     }
 
     exec(compile(snippet, "<inbox_server_snippet>", "exec"), ns)
