@@ -83,6 +83,11 @@ AGENT_SYMLINK_PATTERN = re.compile(r"^agent-([0-9a-f]+)\.jsonl$")
 # Age threshold for treating an unregistered output file as "active" (minutes)
 UNREGISTERED_ACTIVE_THRESHOLD_MINUTES = 30.0
 
+# At cold start, all CC subagents are dead (CC process death kills them all) — age irrelevant.
+# When --startup is passed, classification uses this threshold (0) so that every running
+# session is treated as stale regardless of how recently it was spawned.
+STARTUP_THRESHOLD_MINUTES: float = 0.0
+
 
 @dataclass(frozen=True)
 class AgentRow:
@@ -999,9 +1004,14 @@ def main() -> int:
     completed_not_updated = detect_completed_not_updated(running_agents)
     completed_agent_ids = {c.agent_id for c in completed_not_updated}
 
+    # At cold start, all running sessions are dead (CC process death kills them all) — age
+    # is irrelevant.  Override threshold to STARTUP_THRESHOLD_MINUTES (0) so that every
+    # session is classified as stale regardless of how recently it was spawned.
+    effective_threshold = STARTUP_THRESHOLD_MINUTES if args.startup else args.threshold_minutes
+
     # Classify remaining running agents (exclude confirmed-completed ones)
     classified = [
-        classify_agent(row, now, args.threshold_minutes, args.output_file_threshold_minutes)
+        classify_agent(row, now, effective_threshold, args.output_file_threshold_minutes)
         for row in running_agents
         if row.agent_id not in completed_agent_ids
     ]
