@@ -229,7 +229,7 @@ if [ ${#FAILURES[@]} -gt 0 ]; then
     # expansion produces literal newlines inside a JSON string value, which makes
     # json.load() throw "Invalid control character" — causing WFM to tight-loop
     # and exhaust --max-turns (the 2026-04-24 / 2026-04-25 restart storm bug).
-    BODY="The daily dependency health check found problems:\n\n$(printf '%s\n' "${FAILURES[@]}" | sed 's/^/  - /')\n\nCheck the log for details: $LOG_FILE"
+    BODY="The daily dependency health check found problems:"$'\n\n'"$(printf '%s\n' "${FAILURES[@]}" | sed 's/^/  - /')"$'\n\n'"Check the log for details: $LOG_FILE"
     MSG_ID="daily-health-$(date +%Y%m%d-%H%M%S)"
     MSG_FILE="$INBOX_DIR/${MSG_ID}.json"
     jq -n \
