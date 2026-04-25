@@ -64,7 +64,7 @@ After running:
    - `output`: The JSON output from the script (or error message)
    - `status`: `"success"` or `"failed"`
 
-2. If `notes_written > 0`, send a Telegram notification to the admin (chat_id: ADMIN_CHAT_ID_REDACTED):
+2. If `notes_written > 0`, send a Telegram notification to the admin (chat_id from `LOBSTER_ADMIN_CHAT_ID` env var):
    - Message: `Granola sync: {notes_written} new notes added to vault. [{timestamp}]`
    - Keep it brief — only send if there are actually new notes.
 

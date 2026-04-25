@@ -362,7 +362,7 @@ class TestDBRoundTrip:
             "id": "ae-test-1",
             "type": "subagent_result",
             "source": "telegram",
-            "chat_id": ADMIN_CHAT_ID_REDACTED,
+            "chat_id": 1234567890,
             "task_id": "task-abc",
             "text": "Done!",
             "status": "success",

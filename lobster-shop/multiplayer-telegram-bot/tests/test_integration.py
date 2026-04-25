@@ -558,8 +558,8 @@ class TestFullEndToEndFlow:
 # Simulate the group that is already configured on the live system.
 LIVE_GROUP_ID = -5033634362
 LIVE_GROUP_ID_STR = str(LIVE_GROUP_ID)
-LIVE_USER_ID_ADMIN = ADMIN_CHAT_ID_REDACTED   # Primary admin user
-LIVE_USER_ID_MEMBER = SECONDARY_USER_ID_REDACTED  # Secondary group member
+LIVE_USER_ID_ADMIN = 1111111111   # Primary admin user (placeholder — real ID in config)
+LIVE_USER_ID_MEMBER = 2222222222  # Secondary group member (placeholder — real ID in config)
 LIVE_GROUP_NAME = "Group"
 
 

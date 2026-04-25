@@ -18,6 +18,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
 import re
 import sys
 import time
@@ -56,7 +57,9 @@ SKIP_LABEL_IDS = frozenset({
 })
 
 # User ID for the Gmail token store (Telegram chat_id = user identifier).
-GMAIL_USER_ID = "ADMIN_CHAT_ID_REDACTED"
+# Read from environment — never hardcode in source.
+# Validated at runtime in acquire_access_token(), not at import, so tests can load the module.
+GMAIL_USER_ID: str = os.environ.get("LOBSTER_ADMIN_CHAT_ID") or os.environ.get("ADMIN_CHAT_ID") or ""
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -304,8 +307,14 @@ def acquire_access_token() -> str:
     """Return a valid Gmail access token, refreshing via the token store if needed.
 
     Raises:
-        SystemExit(1): If no valid token is available.
+        SystemExit(1): If no valid token is available or LOBSTER_ADMIN_CHAT_ID is unset.
     """
+    if not GMAIL_USER_ID:
+        log.error(
+            "LOBSTER_ADMIN_CHAT_ID env var is not set. "
+            "Set it in ~/lobster-config/config.env."
+        )
+        sys.exit(1)
     token = get_valid_token(GMAIL_USER_ID)
     if token is None or not token.access_token:
         log.error(

@@ -175,7 +175,7 @@ class TestBuildMessageRow:
         return {
             "id": "1769219731361_22",
             "source": "telegram",
-            "chat_id": ADMIN_CHAT_ID_REDACTED,
+            "chat_id": 1234567890,
             "text": "Hello",
             "timestamp": "2026-01-24T01:55:31.361389",
         }
@@ -191,9 +191,9 @@ class TestBuildMessageRow:
 
     def test_chat_id_coerced_to_str(self):
         record = self._minimal()
-        record["chat_id"] = ADMIN_CHAT_ID_REDACTED  # int in JSON
+        record["chat_id"] = 1234567890  # int in JSON
         row = build_message_row(record, "in")
-        assert row["chat_id"] == "ADMIN_CHAT_ID_REDACTED"
+        assert row["chat_id"] == "1234567890"
 
     def test_overflow_fields_go_to_extra(self):
         record = self._minimal()
@@ -227,14 +227,14 @@ class TestBuildBisqueEventRow:
         record = {
             "id": "bisque_123",
             "source": "bisque",
-            "chat_id": "drew@lobster.ai",
+            "chat_id": "user@example.com",
             "type": "text",
             "text": "Hello from bisque",
             "timestamp": "2026-03-19T09:33:49.129780+00:00",
         }
         row = build_bisque_event_row(record)
         assert row["id"] == "bisque_123"
-        assert row["chat_id"] == "drew@lobster.ai"
+        assert row["chat_id"] == "user@example.com"
         assert row["type"] == "text"
         assert row["text"] == "Hello from bisque"
 
@@ -265,7 +265,7 @@ class TestBuildAgentEventRow:
             "id": "1773682753027_reconciler_abc",
             "type": "subagent_result",
             "source": "telegram",
-            "chat_id": "ADMIN_CHAT_ID_REDACTED",
+            "chat_id": "1234567890",
             "task_id": "abc123",
             "status": "success",
             "text": "Done",
@@ -359,7 +359,7 @@ class TestMigrateDirectory:
             {
                 "id": "msg001",
                 "source": "telegram",
-                "chat_id": "ADMIN_CHAT_ID_REDACTED",
+                "chat_id": "1234567890",
                 "text": "hi there",
                 "timestamp": "2026-01-01T00:00:00",
             },
@@ -382,7 +382,7 @@ class TestMigrateDirectory:
                 "id": "agent001",
                 "type": "subagent_result",
                 "source": "telegram",
-                "chat_id": "ADMIN_CHAT_ID_REDACTED",
+                "chat_id": "1234567890",
                 "task_id": "t001",
                 "status": "success",
                 "text": "Task done",
@@ -404,7 +404,7 @@ class TestMigrateDirectory:
             {
                 "id": "bisque001",
                 "source": "bisque",
-                "chat_id": "drew@lobster.ai",
+                "chat_id": "user@example.com",
                 "type": "text",
                 "text": "Bisque message",
                 "timestamp": "2026-01-01T00:00:02",
@@ -418,7 +418,7 @@ class TestMigrateDirectory:
             "SELECT * FROM bisque_events WHERE id = 'bisque001'"
         ).fetchone()
         assert row is not None
-        assert row["chat_id"] == "drew@lobster.ai"
+        assert row["chat_id"] == "user@example.com"
 
     def test_idempotent_migration(self, tmp_dir):
         write_json(
@@ -427,7 +427,7 @@ class TestMigrateDirectory:
             {
                 "id": "dup001",
                 "source": "telegram",
-                "chat_id": "ADMIN_CHAT_ID_REDACTED",
+                "chat_id": "1234567890",
                 "text": "duplicate",
                 "timestamp": "2026-01-01T00:00:00",
             },
@@ -465,7 +465,7 @@ class TestMigrateDirectory:
             {
                 "id": "sent001",
                 "source": "telegram",
-                "chat_id": "ADMIN_CHAT_ID_REDACTED",
+                "chat_id": "1234567890",
                 "text": "reply text",
                 "timestamp": "2026-01-01T00:00:00",
             },
