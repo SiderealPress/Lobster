@@ -1,64 +1,268 @@
-# Lobster Staging Instance
+# Lobster Staging Instance — systemd-based
 #
-# A full Lobster runtime (router + Claude session) for live Telegram testing.
+# Runs systemd as PID 1, identical to a real production server.
+# Services are managed by systemd (lobster-router, lobster-claude, lobster-mcp-local),
+# and cron is managed by the cron daemon — no custom entrypoint workarounds.
+#
+# Usage:
+#   sudo docker compose -f docker/staging/docker-compose.staging.yml up -d
+#
+# Attach to Claude session:
+#   sudo docker exec -it lobster-staging tmux -L lobster attach -t lobster
+#
+# View service logs:
+#   sudo docker exec lobster-staging journalctl -u lobster-claude -f
+#
+# Service control:
+#   sudo docker exec lobster-staging systemctl status lobster-claude
+#   sudo docker exec lobster-staging systemctl restart lobster-claude
 
-FROM debian:bookworm-slim
+FROM ubuntu:22.04
 
+# Required for systemd in Docker
 ENV DEBIAN_FRONTEND=noninteractive
+ENV container=docker
 
+# Install systemd and all packages that install.sh installs on Ubuntu/Debian.
+# We clean up systemd units that fail or are irrelevant in containers to prevent
+# boot hangs — this mirrors the well-established systemd-in-Docker pattern.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    # systemd (PID 1)
+    systemd \
+    systemd-sysv \
+    dbus \
+    # Core system utilities
     curl \
+    wget \
     git \
-    ca-certificates \
     jq \
-    tmux \
-    procps \
+    ca-certificates \
+    # Python
     python3 \
+    python3-pip \
+    python3-venv \
+    # Scheduling
+    cron \
+    at \
+    # Claude Code / lobster runtime
+    expect \
+    tmux \
+    bsdutils \
+    procps \
     iproute2 \
+    sudo \
+    # Build tools (for whisper.cpp and Python native extensions)
+    build-essential \
+    cmake \
+    # Media / voice
+    ffmpeg \
+    # Modern CLI tools used by lobster scripts
+    ripgrep \
+    fd-find \
+    bat \
+    fzf \
+    # gh CLI setup
+    gnupg \
+    lsb-release \
+    apt-transport-https \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+       | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg 2>/dev/null \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+       > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y --no-install-recommends gh \
+    # ---------------------------------------------------------------
+    # Prune systemd units that fail or are irrelevant inside Docker.
+    # Keeping only what's needed for multi-user.target + our services.
+    # ---------------------------------------------------------------
+    && find /lib/systemd/system/sysinit.target.wants/ -type l \
+       ! -name 'systemd-tmpfiles-setup*' -delete \
+    && rm -f \
+       /lib/systemd/system/multi-user.target.wants/* \
+       /etc/systemd/system/*.wants/* \
+       /lib/systemd/system/local-fs.target.wants/* \
+       /lib/systemd/system/sockets.target.wants/*udev* \
+       /lib/systemd/system/sockets.target.wants/*initctl* \
+       /lib/systemd/system/basic.target.wants/* \
+       /lib/systemd/system/anaconda.target.wants/* 2>/dev/null || true \
     && rm -rf /var/lib/apt/lists/*
 
-# Create the lobster user (uid 1000 matches host)
-RUN useradd -u 1000 -m -s /bin/bash lobster
+# Create the lobster user (uid 1000, passwordless sudo — staging only)
+RUN useradd -u 1000 -m -s /bin/bash lobster \
+    && echo "lobster ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/lobster \
+    && chmod 0440 /etc/sudoers.d/lobster \
+    # Add lobster to the crontab group so crontab -u works under NoNewPrivs
+    && groupadd -f crontab \
+    && usermod -aG crontab lobster
 
 USER lobster
 WORKDIR /home/lobster
 
-# Create directories owned by lobster user
-RUN mkdir -p /home/lobster/.local/bin /home/lobster/.local/share
-
 # Install uv (Python package manager)
 RUN curl -fsSL https://astral.sh/uv/install.sh | sh
-
 ENV PATH="/home/lobster/.local/bin:${PATH}"
 
-# Copy repo (mounted at build context = repo root)
+# Copy repo (build context = repo root)
 COPY --chown=lobster:lobster . /home/lobster/lobster
 
-# Install Python dependencies using uv
+# Install Python dependencies
 WORKDIR /home/lobster/lobster
 RUN uv sync --frozen --no-install-project
 
-# Create required runtime directories
-RUN mkdir -p /home/lobster/messages/inbox \
-    /home/lobster/messages/outbox \
-    /home/lobster/messages/processed \
-    /home/lobster/messages/failed \
-    /home/lobster/messages/audio \
-    /home/lobster/messages/task-outputs \
-    /home/lobster/messages/config \
+# Make scripts executable (git sometimes strips execute bits)
+RUN chmod +x /home/lobster/lobster/scripts/*.sh 2>/dev/null || true \
+    && chmod +x /home/lobster/lobster/scripts/*.exp 2>/dev/null || true \
+    && chmod +x /home/lobster/lobster/hooks/*.py 2>/dev/null || true \
+    && chmod +x /home/lobster/lobster/scheduled-tasks/*.py 2>/dev/null || true
+
+# Create all runtime directories that install.sh creates
+RUN mkdir -p \
     /home/lobster/lobster-workspace/logs \
     /home/lobster/lobster-workspace/data \
+    /home/lobster/lobster-workspace/reports \
     /home/lobster/lobster-workspace/projects \
     /home/lobster/lobster-workspace/scheduled-jobs/logs \
-    /home/lobster/lobster-user-config/memory/canonical \
+    /home/lobster/lobster-workspace/scheduled-jobs/tasks \
+    /home/lobster/messages/inbox \
+    /home/lobster/messages/outbox \
+    /home/lobster/messages/processed \
+    /home/lobster/messages/processing \
+    /home/lobster/messages/failed \
+    /home/lobster/messages/config \
+    /home/lobster/messages/audio \
+    /home/lobster/messages/task-outputs \
+    /home/lobster/lobster-user-config/memory/canonical/people \
+    /home/lobster/lobster-user-config/memory/canonical/projects \
+    /home/lobster/lobster-user-config/memory/canonical/sessions \
+    /home/lobster/lobster-user-config/memory/archive/digests \
     /home/lobster/lobster-user-config/agents/subagents \
-    /home/lobster/lobster-config
+    /home/lobster/lobster-config \
+    /home/lobster/.local/share
 
 # Default scheduled-jobs registry
 RUN echo '{"jobs": {}}' > /home/lobster/lobster-workspace/scheduled-jobs/jobs.json
 
-COPY --chown=lobster:lobster docker/staging/entrypoint-staging.sh /home/lobster/entrypoint-staging.sh
-RUN chmod +x /home/lobster/entrypoint-staging.sh
+# Seed canonical memory templates from the repo (matches install.sh --container-setup)
+RUN for tmpl in /home/lobster/lobster/memory/canonical-templates/*.md; do \
+        [ -f "$tmpl" ] || continue; \
+        base=$(basename "$tmpl"); \
+        dest="/home/lobster/lobster-user-config/memory/canonical/$base"; \
+        [ ! -f "$dest" ] && cp "$tmpl" "$dest" || true; \
+    done; \
+    for tmpl in /home/lobster/lobster/memory/canonical-templates/*.yaml; do \
+        [ -f "$tmpl" ] || continue; \
+        base=$(basename "$tmpl"); \
+        dest="/home/lobster/lobster-user-config/memory/canonical/$base"; \
+        [ ! -f "$dest" ] && cp "$tmpl" "$dest" || true; \
+    done
+
+# Create stub user-config agent files (matches install.sh --container-setup)
+RUN template=/home/lobster/lobster/memory/canonical-templates/user.base.bootup.md.example; \
+    dest=/home/lobster/lobster-user-config/agents/user.base.bootup.md; \
+    if [ ! -f "$dest" ]; then \
+        if [ -f "$template" ]; then cp "$template" "$dest"; else touch "$dest"; fi; \
+    fi; \
+    for f in user.base.context.md user.dispatcher.bootup.md user.subagent.bootup.md; do \
+        d="/home/lobster/lobster-user-config/agents/$f"; \
+        [ ! -f "$d" ] && touch "$d" || true; \
+    done
+
+# Claude Code discovery symlinks (workspace → repo, same as install.sh)
+RUN ln -sfn /home/lobster/lobster/CLAUDE.md /home/lobster/lobster-workspace/CLAUDE.md \
+    && ln -sfn /home/lobster/lobster/.claude /home/lobster/lobster-workspace/.claude
+
+# Generate systemd service files from templates using the standard lobster paths
+RUN sed \
+    -e "s|{{USER}}|lobster|g" \
+    -e "s|{{GROUP}}|lobster|g" \
+    -e "s|{{HOME}}|/home/lobster|g" \
+    -e "s|{{INSTALL_DIR}}|/home/lobster/lobster|g" \
+    -e "s|{{WORKSPACE_DIR}}|/home/lobster/lobster-workspace|g" \
+    -e "s|{{MESSAGES_DIR}}|/home/lobster/messages|g" \
+    -e "s|{{CONFIG_DIR}}|/home/lobster/lobster-config|g" \
+    -e "s|{{USER_CONFIG_DIR}}|/home/lobster/lobster-user-config|g" \
+    /home/lobster/lobster/services/lobster-router.service.template \
+    > /tmp/lobster-router.service \
+    && sed \
+    -e "s|{{USER}}|lobster|g" \
+    -e "s|{{GROUP}}|lobster|g" \
+    -e "s|{{HOME}}|/home/lobster|g" \
+    -e "s|{{INSTALL_DIR}}|/home/lobster/lobster|g" \
+    -e "s|{{WORKSPACE_DIR}}|/home/lobster/lobster-workspace|g" \
+    -e "s|{{MESSAGES_DIR}}|/home/lobster/messages|g" \
+    -e "s|{{CONFIG_DIR}}|/home/lobster/lobster-config|g" \
+    -e "s|{{USER_CONFIG_DIR}}|/home/lobster/lobster-user-config|g" \
+    /home/lobster/lobster/services/lobster-claude.service.template \
+    > /tmp/lobster-claude.service \
+    && sed \
+    -e "s|{{USER}}|lobster|g" \
+    -e "s|{{GROUP}}|lobster|g" \
+    -e "s|{{HOME}}|/home/lobster|g" \
+    -e "s|{{INSTALL_DIR}}|/home/lobster/lobster|g" \
+    -e "s|{{WORKSPACE_DIR}}|/home/lobster/lobster-workspace|g" \
+    -e "s|{{MESSAGES_DIR}}|/home/lobster/messages|g" \
+    -e "s|{{CONFIG_DIR}}|/home/lobster/lobster-config|g" \
+    -e "s|{{USER_CONFIG_DIR}}|/home/lobster/lobster-user-config|g" \
+    /home/lobster/lobster/services/lobster-mcp-local.service.template \
+    > /tmp/lobster-mcp-local.service
+
+# Switch to root to install and enable service files
+USER root
+
+# Patch generated service files to depend on lobster-container-init.service,
+# ensuring init completes (config.env written, install.sh --container-setup run)
+# before any lobster service starts.
+RUN for svc in lobster-router lobster-claude lobster-mcp-local; do \
+    sed -i '/^\[Unit\]/a Requires=lobster-container-init.service\nAfter=lobster-container-init.service' \
+    /tmp/${svc}.service; \
+done
+
+RUN cp /tmp/lobster-router.service /etc/systemd/system/lobster-router.service \
+    && cp /tmp/lobster-claude.service /etc/systemd/system/lobster-claude.service \
+    && cp /tmp/lobster-mcp-local.service /etc/systemd/system/lobster-mcp-local.service \
+    # Pre-enable services — creates WantedBy symlinks without running systemd
+    && systemctl enable --root=/ lobster-router lobster-claude lobster-mcp-local \
+    # Enable cron so the daemon starts on boot
+    && systemctl enable --root=/ cron \
+    && rm /tmp/lobster-router.service /tmp/lobster-claude.service /tmp/lobster-mcp-local.service
+
+# Install crontab entries for the lobster user, matching install.sh exactly.
+# Written to /etc/cron.d/ so entries survive volume mounts that replace /var/spool/cron.
+COPY --chown=root:root docker/staging/lobster.crontab /etc/cron.d/lobster-staging
+RUN chmod 0644 /etc/cron.d/lobster-staging
+
+# Pre-seed ~/.claude.json to skip first-launch TUI (matches install.sh behavior)
+RUN mkdir -p /home/lobster/.claude \
+    && printf '{\n  "numStartups": 1,\n  "installMethod": "native",\n  "hasCompletedOnboarding": true,\n  "lastOnboardingVersion": "2.1.45",\n  "hasSeenTasksHint": true\n}\n' \
+       > /home/lobster/.claude.json \
+    && chown lobster:lobster /home/lobster/.claude.json \
+    && chown lobster:lobster /home/lobster/.claude
+
+# Register lobster-inbox MCP server via HTTP transport (matches install.sh).
+# Writes to ~/.claude.json under the lobster user.
+USER lobster
+RUN /home/lobster/.local/bin/claude mcp add --transport http lobster-inbox \
+    -s user http://localhost:8766/mcp 2>/dev/null || true
+
+# lobster-container-init runs as a systemd oneshot service at boot time.
+# It writes config.env from the environment variables that docker-compose injects,
+# then runs install.sh --container-setup for runtime setup (sqlite-vec verification,
+# settings.json MCP registration, canonical template seeding, symlink creation).
+# This runs before lobster-router/lobster-claude/lobster-mcp-local start.
+COPY --chown=lobster:lobster docker/staging/lobster-container-init.sh /home/lobster/lobster-container-init.sh
+RUN chmod +x /home/lobster/lobster-container-init.sh
+
+USER root
+
+COPY docker/staging/lobster-container-init.service /etc/systemd/system/lobster-container-init.service
+RUN systemctl enable --root=/ lobster-container-init
 
 WORKDIR /home/lobster
-ENTRYPOINT ["/home/lobster/entrypoint-staging.sh"]
+
+# /sys/fs/cgroup is required by systemd and is bind-mounted from the host (read-only).
+# /run and /tmp are provided as tmpfs mounts in docker-compose.staging.yml.
+VOLUME ["/sys/fs/cgroup"]
+
+# SIGRTMIN+3 is the clean shutdown signal for systemd
+STOPSIGNAL SIGRTMIN+3
+
+CMD ["/lib/systemd/systemd"]

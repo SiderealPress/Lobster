@@ -25,19 +25,16 @@ Detection is performed by is_dispatcher_session(), which uses a layered strategy
    filesystem I/O required.  This is the primary check for the common case.
    See issue #1152.
 
-1. MCP Claude UUID state file (primary): The MCP server writes the dispatcher
-   Claude session UUID to ~/lobster-workspace/data/dispatcher-claude-session-id
-   when session_start(agent_type='dispatcher', claude_session_id=<uuid>) is
-   called.  This CC UUID matches hook_input["session_id"] directly.
-   Match → dispatcher.  Mismatch → subagent.  File absent → try next.
-   NOTE: The HTTP session state file (dispatcher-session-id) is NOT checked
-   here — it stores an MCP HTTP transport ID (32-char hex) which never matches
-   the CC UUID in hook_input["session_id"] (see issue #1151).
+1. MCP state file: The running MCP server writes the dispatcher session ID to
+   ~/lobster-workspace/data/dispatcher-session-id.  NOTE: this file stores an
+   HTTP MCP session ID, not a CC UUID; it will never match the hook session_id
+   field in practice (namespace mismatch — see issue #1151).  Retained for
+   belt-and-suspenders; effectively a no-op in hook context.
 
 2. Hook marker file (secondary): At dispatcher startup, write-dispatcher-session-id.py
    (a SessionStart hook) writes the session ID to
-   ~/messages/config/dispatcher-session-id.  This is a CC UUID fallback for
-   the window before session_start is called.  Match → dispatcher.
+   ~/messages/config/dispatcher-session-id.  This is the real primary
+   state-file signal for hooks (CC UUID on both sides).  Match → dispatcher.
 
 3. Process-tree fallback: If neither state file is present or gives a definitive
    answer, walk the process tree upward.  Two consecutive claude-like ancestors
@@ -69,13 +66,14 @@ The empty string matcher fires on every tool call.
 
 import json
 import os
-import subprocess
 import sys
 import time
 from pathlib import Path
 
 # Make hooks/ importable regardless of cwd.
 sys.path.insert(0, str(Path(__file__).parent))
+
+from session_role import is_dispatcher_session  # noqa: E402 — after sys.path insertion
 
 SENTINEL_FILE = Path(os.path.expanduser("~/messages/config/compact-pending"))
 SENTINEL_TTL_SECONDS = 600  # 10 minutes — treats stale sentinel as harmless
@@ -87,20 +85,19 @@ CONFIRMATION_TOKEN = "LOBSTER_COMPACTED_REORIENTED"  # noqa: S105 — not a secr
 
 DENY_REASON_NEEDS_TOKEN = (
     "GATE BLOCKED: Context compaction was just detected. "
-    "Call `mcp__lobster-inbox__wait_for_messages(confirmation='LOBSTER_COMPACTED_REORIENTED')` directly to clear the gate. "
+    "Read `~/lobster-workspace/.claude/sys.dispatcher.bootup.md` for the confirmation token, "
+    "then call `mcp__lobster-inbox__wait_for_messages(confirmation='LOBSTER_COMPACTED_REORIENTED')` directly. "
     "No ToolSearch needed — the MCP schema is pre-registered."
 )
 
 DENY_REASON = (
-    "GATE BLOCKED: Context compaction was just detected. Your only permitted action right now is "
-    "to call `mcp__lobster-inbox__wait_for_messages(confirmation='LOBSTER_COMPACTED_REORIENTED')` "
-    "by its full name directly — no ToolSearch needed, the schema is pre-registered. "
-    "When it returns, you will receive a compact-reminder system message — read it to re-orient as the "
-    "Lobster dispatcher, then resume your main loop normally. Do not retry this tool call."
+    "GATE BLOCKED: Context compaction was just detected. Your only permitted "
+    "action right now is to call `mcp__lobster-inbox__wait_for_messages` by its full name directly — "
+    "no ToolSearch needed, the schema is pre-registered. When it returns, you will "
+    "receive a compact-reminder system message — read it to re-orient as the "
+    "Lobster dispatcher, then resume your main loop normally. Do not retry this "
+    "tool call."
 )
-
-LOBSTER_TMUX_SESSION = os.environ.get("LOBSTER_TMUX_SESSION", "lobster")
-
 
 def log_gate_event(tool_name: str, action: str) -> None:
     """Append a JSON log line to compact-gate.log. Silent on any failure."""
@@ -112,147 +109,6 @@ def log_gate_event(tool_name: str, action: str) -> None:
             f.write(line)
     except Exception:  # noqa: BLE001
         pass
-
-
-def _get_tmux_pane_pids() -> set[str]:
-    """Return the set of PIDs for all panes in the lobster tmux session."""
-    try:
-        result = subprocess.run(
-            [
-                "tmux", "-L", LOBSTER_TMUX_SESSION,
-                "list-panes", "-t", LOBSTER_TMUX_SESSION,
-                "-F", "#{pane_pid}",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=1,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return set(result.stdout.strip().split("\n"))
-    except Exception:  # noqa: BLE001
-        pass
-    return set()
-
-
-def _get_proc_name(pid: int) -> str:
-    """Return the comm (process name) for a given PID, or '' on failure."""
-    try:
-        with open(f"/proc/{pid}/comm") as f:
-            return f.read().strip()
-    except OSError:
-        return ""
-
-
-def _get_ppid(pid: int) -> int | None:
-    """Return the parent PID of a given PID, or None on failure."""
-    try:
-        with open(f"/proc/{pid}/stat") as f:
-            # Format: pid (comm) state ppid ...
-            content = f.read()
-            # rsplit on ')' to handle commas in comm name
-            after_comm = content.rsplit(")", 1)[-1]
-            ppid = int(after_comm.split()[1])
-            return ppid if ppid > 1 else None
-    except (OSError, ValueError, IndexError):
-        return None
-
-
-def _is_claude_process(name: str) -> bool:
-    """Return True if the process name looks like a Claude Code binary."""
-    return "claude" in name.lower()
-
-
-def _is_dispatcher_by_process_tree() -> bool:
-    """Return True only when this hook is running inside the dispatcher Claude.
-
-    Process-tree fallback used when the session_role marker file is absent.
-
-    Strategy:
-      1. Must have LOBSTER_MAIN_SESSION=1 (env var set by claude-persistent.sh).
-         This is a necessary condition — if not set, definitely not the dispatcher.
-      2. Walk the process tree upward from this hook process. Count consecutive
-         'claude' ancestors before reaching a tmux pane PID:
-           - 0 or 1 claude ancestor  → dispatcher (hook → dispatcher claude → tmux)
-           - 2+ claude ancestors     → subagent (hook → subagent claude → dispatcher claude → tmux)
-      3. If the tmux check is unavailable (tmux not running, etc.), fall back
-         to the env-var-only check — maintaining prior imprecise behaviour.
-
-    Fails open for non-main-session processes (returns False if uncertain).
-    """
-    # Necessary condition: env var must be set.
-    if os.environ.get("LOBSTER_MAIN_SESSION", "") != "1":
-        return False
-
-    tmux_pids = _get_tmux_pane_pids()
-    if not tmux_pids:
-        # tmux unavailable — fall back to env-var-only (prior behaviour).
-        return True
-
-    claude_ancestor_count = 0
-    pid = os.getpid()
-    for _ in range(15):  # Safety limit — should never need more than ~5 levels
-        ppid = _get_ppid(pid)
-        if ppid is None:
-            break
-        if str(ppid) in tmux_pids:
-            # Reached the tmux pane. Dispatcher has ≤1 claude ancestor above
-            # this hook; subagents have ≥2.
-            return claude_ancestor_count <= 1
-        parent_name = _get_proc_name(ppid)
-        if _is_claude_process(parent_name):
-            claude_ancestor_count += 1
-        pid = ppid
-
-    # Could not confirm via process tree — fall back to env var.
-    return True
-
-
-def is_dispatcher_session(hook_input: dict) -> bool:
-    """Return True when this hook is running inside the dispatcher Claude.
-
-    Uses session_role state files (MCP state file + hook marker file) as the
-    primary check.  Falls back to the process-tree walk when neither file is
-    present or gives a definitive answer (e.g. very early boot before any
-    session tagging has occurred, or in PreToolUse where no transcript exists).
-
-    Note: transcript-based detection (_transcript_has_dispatcher_tool) was
-    removed in PR #1102 because JSONL transcript scanning was fragile and is
-    now superseded by the MCP state file written by the running server.
-    """
-    # Primary: MCP Claude UUID state file + hook marker file (via session_role).
-    # We need to distinguish "definitely subagent" (file exists, mismatch) from
-    # "no signal" (file absent) to know when to apply the process-tree fallback.
-    # Probe both files directly.
-    #
-    # NOTE: We use _get_mcp_claude_session_file() (dispatcher-claude-session-id),
-    # NOT _get_mcp_session_state_file() (dispatcher-session-id).  The latter stores
-    # the HTTP MCP transport session ID (32-char hex), while hook_input["session_id"]
-    # is always a Claude Code UUID (36-char UUID4).  These namespaces never match, so
-    # using the HTTP session file would cause _check_state_file() to always return
-    # False when the file exists — short-circuiting before the hook marker file check
-    # and incorrectly treating the dispatcher as a subagent.  See issue #1151.
-    from session_role import (
-        _check_state_file,
-        _get_mcp_claude_session_file,
-        get_session_id,
-        DISPATCHER_SESSION_FILE,
-    )
-
-    session_id = get_session_id(hook_input)
-
-    # Check MCP Claude UUID state file first (written by MCP server on session_start).
-    # This file stores the same Claude UUID format as hook_input["session_id"].
-    mcp_result = _check_state_file(_get_mcp_claude_session_file(), session_id)
-    if mcp_result is not None:
-        return mcp_result
-
-    # Check hook marker file (written by write-dispatcher-session-id.py).
-    marker_result = _check_state_file(DISPATCHER_SESSION_FILE, session_id)
-    if marker_result is not None:
-        return marker_result
-
-    # No state file signal available — fall back to process-tree.
-    return _is_dispatcher_by_process_tree()
 
 
 def sentinel_is_fresh() -> bool:

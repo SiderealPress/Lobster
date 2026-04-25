@@ -1750,14 +1750,29 @@ EOF
         local mcp_local_service="$LOBSTER_DIR/services/lobster-mcp-local.service"
 
         if [ -f "$mcp_local_template" ]; then
-            # Render template (reuse generate_from_template if available, else sed directly)
-            if declare -f generate_from_template >/dev/null 2>&1; then
-                generate_from_template "$mcp_local_template" "$mcp_local_service"
+            # Use the shared template library when available (it is, since we
+            # run from an existing install with the repo already cloned).
+            # Falls back to inline sed only if the lib file is somehow missing.
+            local _lib="${LOBSTER_DIR}/scripts/lib/template.sh"
+            if [ -f "$_lib" ]; then
+                # Set canonical LOBSTER_* vars the library expects
+                LOBSTER_USER="${LOBSTER_USER:-$(whoami)}"
+                LOBSTER_GROUP="${LOBSTER_GROUP:-$(id -gn)}"
+                LOBSTER_HOME="${LOBSTER_HOME:-$HOME}"
+                LOBSTER_INSTALL_DIR="$LOBSTER_DIR"
+                LOBSTER_WORKSPACE="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
+                LOBSTER_MESSAGES="${LOBSTER_MESSAGES:-$HOME/messages}"
+                LOBSTER_CONFIG_DIR="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}"
+                LOBSTER_USER_CONFIG="${LOBSTER_USER_CONFIG:-$HOME/lobster-user-config}"
+                # shellcheck source=lib/template.sh
+                source "$_lib"
+                _tmpl_generate_from_template "$mcp_local_template" "$mcp_local_service"
             else
-                # Minimal inline rendering matching install.sh variable names
-                local _user _group _config_dir _messages_dir _workspace_dir _user_config_dir
+                # Fallback: inline rendering (all 8 placeholders — keep in sync with lib)
+                local _user _group _home _config_dir _messages_dir _workspace_dir _user_config_dir
                 _user=$(whoami)
                 _group=$(id -gn)
+                _home="$HOME"
                 _config_dir="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}"
                 _messages_dir="${LOBSTER_MESSAGES:-$HOME/messages}"
                 _workspace_dir="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
@@ -1765,6 +1780,7 @@ EOF
                 sed \
                     -e "s|{{USER}}|$_user|g" \
                     -e "s|{{GROUP}}|$_group|g" \
+                    -e "s|{{HOME}}|$_home|g" \
                     -e "s|{{INSTALL_DIR}}|$LOBSTER_DIR|g" \
                     -e "s|{{CONFIG_DIR}}|$_config_dir|g" \
                     -e "s|{{MESSAGES_DIR}}|$_messages_dir|g" \
@@ -2638,23 +2654,129 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
         warn "cleanup-worktrees-audio.sh not found at $CLEANUP_SCRIPT — skipping Migration 75"
     fi
 
-    # Migration 76: Install LOBSTER-INFLIGHT-REMINDERS cron entry (issue #1686).
-    # check-inflight-reminders.py runs every 3 minutes to detect stale subagent work
-    # and drop reminder messages into the dispatcher inbox.
-    local INFLIGHT_MARKER="# LOBSTER-INFLIGHT-REMINDERS"
-    local INFLIGHT_SCRIPT="$LOBSTER_DIR/scripts/check-inflight-reminders.py"
-    if [ -f "$INFLIGHT_SCRIPT" ]; then
-        chmod +x "$INFLIGHT_SCRIPT" 2>/dev/null || true
-        if ! crontab -l 2>/dev/null | grep -qF "$INFLIGHT_MARKER"; then
-            "$LOBSTER_DIR/scripts/cron-manage.sh" add "$INFLIGHT_MARKER" \
-                "*/3 * * * * uv run $INFLIGHT_SCRIPT >> $HOME/lobster-workspace/logs/inflight-reminders.log 2>&1 $INFLIGHT_MARKER" 2>/dev/null && {
-                substep "Added LOBSTER-INFLIGHT-REMINDERS cron entry (check-inflight-reminders.py, every 3 min)"
-                migrated=$((migrated + 1))
-            } || warn "Could not add LOBSTER-INFLIGHT-REMINDERS cron entry — check cron-manage.sh"
+    # Migration 76: Remove wfm-watchdog.sh cron entry (superseded by PR #1646).
+    # PR #1646 fixed the actual root cause: the health check now treats a fresh
+    # wfm-active signal as GREEN, so the false-positive kills the watchdog was
+    # designed to work around no longer occur. The watchdog now only generates
+    # noise during normal idle operation.
+    local WFM_WATCHDOG_REMOVE_MARKER="# LOBSTER-WFM-WATCHDOG"
+    if crontab -l 2>/dev/null | grep -qF "$WFM_WATCHDOG_REMOVE_MARKER"; then
+        "$LOBSTER_DIR/scripts/cron-manage.sh" remove "$WFM_WATCHDOG_REMOVE_MARKER" 2>/dev/null && {
+            substep "Removed wfm-watchdog.sh cron entry (superseded by PR #1646)"
+            migrated=$((migrated + 1))
+        } || warn "Could not remove LOBSTER-WFM-WATCHDOG cron entry — remove manually"
+    else
+        substep "wfm-watchdog.sh cron entry not present — nothing to remove"
+    fi
+
+    # Migration 77: Add permissions.defaultMode bypassPermissions to settings.json (issue #1706).
+    # Claude Code has a known regression where --dangerously-skip-permissions (CLI flag) stops
+    # working after auto-updates. Setting permissions.defaultMode in settings.json is the
+    # permanent fix that survives updates.
+    if [ -f "$CLAUDE_SETTINGS" ]; then
+        if jq -e '.permissions.defaultMode != "bypassPermissions"' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+            substep "Adding permissions.defaultMode: bypassPermissions to settings.json..."
+            jq '. + {"skipDangerousModePermissionPrompt": true, "permissions": {"defaultMode": "bypassPermissions"}}' "$CLAUDE_SETTINGS" > "$CLAUDE_SETTINGS.tmp" && mv "$CLAUDE_SETTINGS.tmp" "$CLAUDE_SETTINGS"
+            success "Permissions bypass settings added"
+            migrated=$((migrated + 1))
         fi
     else
-        warn "check-inflight-reminders.py not found at $INFLIGHT_SCRIPT — skipping Migration 76"
+        warn "Claude settings not found at $CLAUDE_SETTINGS — skipping Migration 77"
     fi
+
+    # Migration 78: Remove stale dispatch-job.sh LOBSTER-SCHEDULED cron entries.
+    # These three entries were already superseded by systemd timers but Migration 71
+    # left them in place on installs where the timer check was inconclusive.
+    # Two entries use invalid systemd-style cron syntax (*-*-* ...) that standard
+    # cron ignores entirely; the third (lobstertalk-ssh-watcher) fires every 6h
+    # and causes duplicate invocations alongside the timer. Remove all three
+    # unconditionally — the systemd timers are the canonical trigger.
+    _m78_jobs="lobstertalk-unified lobstertalk-ssh-watcher lobstertalk-kanban-watcher"
+    _m78_removed=""
+    for _m78_job in $_m78_jobs; do
+        if crontab -l 2>/dev/null | grep -q "dispatch-job\.sh ${_m78_job}"; then
+            { crontab -l 2>/dev/null | grep -v "dispatch-job\.sh ${_m78_job}" || true; } | crontab -
+            _m78_removed="${_m78_removed}${_m78_job} "
+            substep "Removed stale LOBSTER-SCHEDULED cron entry for ${_m78_job}"
+        fi
+    done
+    if [ -n "$_m78_removed" ]; then
+        success "Migration 78: removed cron entries for: ${_m78_removed% }"
+        migrated=$((migrated + 1))
+    fi
+
+    # Migration 79: Config consolidation (issue #1785, Option A).
+    # Two steps:
+    #   a) Merge non-comment, non-duplicate keys from global.env into config.env,
+    #      then archive global.env as global.env.bak (safe rollback).
+    #   b) Remove stale duplicate lobster/config/consolidation.conf and
+    #      lobster/config/sync-repos.json left by the original migration 0.
+    local _m79_config_env="$LOBSTER_CONFIG_DIR/config.env"
+    local _m79_global_env="$LOBSTER_CONFIG_DIR/global.env"
+
+    # Step a: merge global.env → config.env
+    if [ -f "$_m79_global_env" ] && [ ! -f "${_m79_global_env}.bak" ]; then
+        local _m79_merged=0
+        while IFS= read -r _m79_line; do
+            # Skip comments and blank lines
+            [[ "$_m79_line" =~ ^[[:space:]]*# ]] && continue
+            [[ -z "${_m79_line// }" ]] && continue
+
+            # Extract key (everything before first '=')
+            local _m79_key
+            _m79_key="${_m79_line%%=*}"
+            [ -z "$_m79_key" ] && continue
+
+            # Skip if key already exists in config.env
+            if grep -qE "^${_m79_key}=" "$_m79_config_env" 2>/dev/null; then
+                substep "  global.env: ${_m79_key} already in config.env — skipping"
+                continue
+            fi
+
+            # Append to config.env
+            echo "$_m79_line" >> "$_m79_config_env"
+            substep "  global.env: merged ${_m79_key} into config.env"
+            _m79_merged=$((_m79_merged + 1))
+        done < "$_m79_global_env"
+
+        # Archive global.env (keep as .bak for safety — delete after next stable release)
+        mv "$_m79_global_env" "${_m79_global_env}.bak"
+        substep "Archived global.env to global.env.bak ($_m79_merged keys merged into config.env)"
+        migrated=$((migrated + 1))
+    else
+        substep "global.env already migrated or absent — skipping step a"
+    fi
+
+    # Step b: remove stale duplicate files in the repo's config/ directory
+    local _m79_repo_conf="$LOBSTER_DIR/config/consolidation.conf"
+    local _m79_repo_repos="$LOBSTER_DIR/config/sync-repos.json"
+    if [ -f "$_m79_repo_conf" ]; then
+        rm -f "$_m79_repo_conf"
+        substep "Removed stale $LOBSTER_DIR/config/consolidation.conf"
+        migrated=$((migrated + 1))
+    fi
+    if [ -f "$_m79_repo_repos" ]; then
+        rm -f "$_m79_repo_repos"
+        substep "Removed stale $LOBSTER_DIR/config/sync-repos.json"
+        migrated=$((migrated + 1))
+    fi
+
+
+    # Migration 80: Disable Gmail Pub/Sub systemd timers (issue #1807).
+    # The Pub/Sub-based email pipeline (gmail-watch-renewal + awp-gmail-token-refresh)
+    # is replaced by the deterministic gmail-poll.py History API poller, which runs
+    # every 10 seconds with zero token spend on empty polls. No GCP setup required.
+    for _m80_unit in lobster-gmail-watch-renewal lobster-awp-gmail-token-refresh; do
+        if systemctl is-enabled "${_m80_unit}.timer" &>/dev/null; then
+            substep "Disabling ${_m80_unit}.timer (Pub/Sub pipeline, superseded by gmail-poll.py)..."
+            sudo systemctl disable --now "${_m80_unit}.timer" 2>/dev/null && {
+                substep "Disabled ${_m80_unit}.timer"
+                migrated=$((migrated + 1))
+            } || warn "Could not disable ${_m80_unit}.timer -- disable manually"
+        else
+            substep "${_m80_unit}.timer already disabled -- nothing to do"
+        fi
+    done
 
     # Migration 81: Install PreToolUse heartbeat hook (issue #1786).
     # pre-tool-heartbeat.py writes a timestamp before each tool call, complementing

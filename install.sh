@@ -148,33 +148,13 @@ USER_CONFIG_DIR="${LOBSTER_USER_CONFIG:-$HOME/lobster-user-config}"
 
 #===============================================================================
 # Template Processing
+#
+# generate_from_template() is sourced from scripts/lib/template.sh, which is
+# the single canonical implementation shared by install.sh, update-lobster.sh,
+# and upgrade.sh.  The source call is deferred to the "Generate Service Files"
+# step (after the repo is cloned) where the function is first needed.
+# See: scripts/lib/template.sh
 #===============================================================================
-
-# Generate a file from a template by substituting {{VARIABLE}} placeholders
-# Arguments:
-#   $1 - template file path
-#   $2 - output file path
-generate_from_template() {
-    local template="$1"
-    local output="$2"
-
-    if [ ! -f "$template" ]; then
-        error "Template not found: $template"
-        return 1
-    fi
-
-    sed -e "s|{{USER}}|${LOBSTER_USER}|g" \
-        -e "s|{{GROUP}}|${LOBSTER_GROUP}|g" \
-        -e "s|{{HOME}}|${LOBSTER_HOME}|g" \
-        -e "s|{{INSTALL_DIR}}|${INSTALL_DIR}|g" \
-        -e "s|{{WORKSPACE_DIR}}|${WORKSPACE_DIR}|g" \
-        -e "s|{{MESSAGES_DIR}}|${MESSAGES_DIR}|g" \
-        -e "s|{{CONFIG_DIR}}|${CONFIG_DIR}|g" \
-        -e "s|{{USER_CONFIG_DIR}}|${USER_CONFIG_DIR}|g" \
-        "$template" > "$output"
-
-    success "Generated: $output"
-}
 
 #===============================================================================
 # Config File Helpers
@@ -1161,19 +1141,6 @@ if [ ! -f "$STATE_FILE" ]; then
     info "  Seeded lobster-state.json with initial booted_at timestamp"
 fi
 
-# Seed scripts/next-migration.txt if it doesn't exist.
-# This file tracks the next available migration number to prevent
-# two PRs from claiming the same number in upgrade.sh.
-NEXT_MIG_FILE="$INSTALL_DIR/scripts/next-migration.txt"
-if [ ! -f "$NEXT_MIG_FILE" ]; then
-    # Detect the highest migration number currently in upgrade.sh
-    _last_mig=$(grep -oE '# Migration ([0-9]+):' "$INSTALL_DIR/scripts/upgrade.sh" 2>/dev/null \
-        | grep -oE '[0-9]+' | sort -n | tail -1)
-    _next_mig=$(( ${_last_mig:-0} + 1 ))
-    printf '%s\n' "$_next_mig" > "$NEXT_MIG_FILE"
-    info "  Seeded scripts/next-migration.txt with next migration number: $_next_mig"
-fi
-
 # Legacy: also create ~/projects/ for backward compatibility
 mkdir -p "$HOME/projects"/{personal,business}
 
@@ -1284,59 +1251,38 @@ info "  $PROJECTS_DIR - All Lobster-managed projects"
 # Global Environment Store
 #===============================================================================
 
-step "Setting up global environment store..."
+step "Setting up credential store..."
 
+# global.env was deprecated in issue #1785 (config consolidation, Option A).
+# config.env is now the single canonical file for both Lobster service config and
+# all API tokens. On new installs global.env is not created. On upgrades, migration 79
+# merges any existing global.env content into config.env and archives it.
+#
+# For backward compatibility, the variable is kept so the GITHUB_TOKEN section below
+# can source it when upgrading from a pre-#1785 install.
 GLOBAL_ENV_FILE="$CONFIG_DIR/global.env"
 
-if [ ! -f "$GLOBAL_ENV_FILE" ]; then
-    cat > "$GLOBAL_ENV_FILE" << 'GLOBALENV'
-# Lobster Global Environment Store
-# Machine-wide API tokens and credentials shared across services and tools.
-# Format: KEY=value  (no export keyword needed)
-# Use: lobster env set KEY VALUE   to add or update entries
-# Use: lobster env list             to see all stored keys
-
-# === Cloud Providers ===
-# HETZNER_API_TOKEN=
-# DO_TOKEN=
-# CLOUDFLARE_API_TOKEN=
-
-# === AI / LLM Services ===
-# ANTHROPIC_API_KEY=
-# OPENAI_API_KEY=
-
-# === Code / DevOps ===
-# GITHUB_TOKEN=
-# VERCEL_TOKEN=
-
-# === Communication Services ===
-# TWILIO_ACCOUNT_SID=
-# TWILIO_AUTH_TOKEN=
-
-# === Add your own below ===
-GLOBALENV
-    chmod 600 "$GLOBAL_ENV_FILE" || true
-    success "Global env store created: $GLOBAL_ENV_FILE"
-else
-    info "Global env store already exists: $GLOBAL_ENV_FILE"
-fi
-
-# Add shell integration: source global.env on login so tokens are available
-# to any script or CLI tool in the user's shell sessions.
+# Shell integration: source config.env (canonical) and legacy global.env (compat).
+# The config.env entry is authoritative; global.env entry is kept for installs that
+# haven't run upgrade.sh migration 79 yet.
 for _rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
-    if [ -f "$_rc" ] && ! grep -q "Lobster global env store" "$_rc"; then
-        {
-            echo ""
-            echo "# Lobster global env store"
-            echo "[ -f \"$GLOBAL_ENV_FILE\" ] && set -a && . \"$GLOBAL_ENV_FILE\" && set +a"
-        } >> "$_rc"
-        info "  Shell integration added to $_rc"
+    if [ -f "$_rc" ]; then
+        # Add config.env sourcing if not already present
+        if ! grep -q "Lobster credential store" "$_rc"; then
+            {
+                echo ""
+                echo "# Lobster credential store"
+                echo "# global.env is deprecated (issue #1785); source it first so config.env always wins"
+                echo "[ -f \"$GLOBAL_ENV_FILE\" ] && set -a && . \"$GLOBAL_ENV_FILE\" && set +a"
+                echo "[ -f \"$CONFIG_FILE\" ] && set -a && . \"$CONFIG_FILE\" && set +a"
+            } >> "$_rc"
+            info "  Shell integration added to $_rc"
+        fi
     fi
 done
 
-success "Global env store configured"
-info "  File: $GLOBAL_ENV_FILE"
-info "  Edit directly: $GLOBAL_ENV_FILE"
+success "Credential store configured"
+info "  Canonical file: $CONFIG_FILE"
 info "  (Use 'lobster env set KEY VALUE' after install to update tokens)"
 info "  See docs/GLOBAL-ENV.md for full documentation"
 
@@ -1458,19 +1404,6 @@ chmod +x "$INSTALL_DIR/scripts/cleanup-worktrees-audio.sh" || true
 
 success "Worktree + audio cleanup configured (runs daily at 04:00)"
 
-#===============================================================================
-# Inflight Reminders
-#===============================================================================
-
-step "Setting up inflight reminders cron..."
-
-# check-inflight-reminders.py runs every 3 minutes to detect stale subagent work
-# and drop reminder messages into the dispatcher inbox. No LLM involved.
-"$INSTALL_DIR/scripts/cron-manage.sh" add "# LOBSTER-INFLIGHT-REMINDERS" \
-    "*/3 * * * * uv run $INSTALL_DIR/scripts/check-inflight-reminders.py >> $HOME/lobster-workspace/logs/inflight-reminders.log 2>&1 # LOBSTER-INFLIGHT-REMINDERS"
-
-success "Inflight reminders configured (runs every 3 minutes)"
-
 # Ensure any lingering self-check cron entry is removed on fresh installs
 { crontab -l 2>/dev/null | grep -v "# LOBSTER-SELF-CHECK" | grep -v "periodic-self-check" || true; } | crontab -
 
@@ -1511,6 +1444,17 @@ if [ ! -f "$CLAUDE_SETTINGS" ]; then
 }
 HOOKEOF
     success "Claude Code settings created with hooks"
+fi
+
+# Add permissions bypass settings to settings.json (idempotent)
+# Ensures --dangerously-skip-permissions stays effective after Claude Code auto-updates.
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if jq -e '.permissions.defaultMode != "bypassPermissions"' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        jq '. + {"skipDangerousModePermissionPrompt": true, "permissions": {"defaultMode": "bypassPermissions"}}' "$CLAUDE_SETTINGS" > "$CLAUDE_SETTINGS.tmp" && mv "$CLAUDE_SETTINGS.tmp" "$CLAUDE_SETTINGS"
+        success "Claude Code permissions bypass configured"
+    else
+        info "Claude Code permissions bypass already configured"
+    fi
 fi
 
 success "Self-check cron configured (every 3min)"
@@ -1554,27 +1498,6 @@ if [ -f "$CLAUDE_SETTINGS" ]; then
     fi
 else
     info "Skipping link enforcement hook (settings.json not yet created)"
-fi
-
-# Set up Claude Code PreToolUse hook to enforce reply_to_message_id on Telegram send_reply (#1168)
-chmod +x "$INSTALL_DIR/hooks/require-reply-to-message-id.py" || true
-if [ -f "$CLAUDE_SETTINGS" ]; then
-    if ! jq -e '.hooks.PreToolUse[]? | select(.hooks[]?.command | test("require-reply-to-message-id"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
-        TMP_SETTINGS=$(mktemp)
-        jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
-            "matcher": "mcp__lobster-inbox__send_reply",
-            "hooks": [{
-                "type": "command",
-                "command": "python3 '"$INSTALL_DIR"'/hooks/require-reply-to-message-id.py",
-                "timeout": 5
-            }]
-        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
-        success "Telegram reply_to_message_id enforcement hook installed"
-    else
-        info "reply_to_message_id enforcement hook already configured in Claude Code settings"
-    fi
-else
-    info "Skipping reply_to_message_id enforcement hook (settings.json not yet created)"
 fi
 
 # Set up Claude Code PreToolUse hook to block generic Agent calls without subagent_type
@@ -2308,7 +2231,7 @@ fi
 
 step "Checking GitHub Personal Access Token..."
 
-# Load global.env if not already done so we can check for an existing token
+# Load legacy global.env if present (pre-#1785 installs store GITHUB_TOKEN there)
 if [ -f "$GLOBAL_ENV_FILE" ]; then
     set -a
     # shellcheck disable=SC1090
@@ -2328,24 +2251,28 @@ if [ -z "${GITHUB_TOKEN:-}" ] || [ "$GITHUB_TOKEN" = "your_github_pat_here" ]; t
         echo ""
         read -p "Enter your GitHub PAT (or press Enter to skip): " GH_TOKEN
         if [ -n "$GH_TOKEN" ]; then
-            # Write to global.env, replacing any existing GITHUB_TOKEN line (commented or not)
-            if grep -q "^#\{0,1\} *GITHUB_TOKEN=" "$GLOBAL_ENV_FILE" 2>/dev/null; then
-                # Use ENVIRON to avoid backslash mangling that -v causes with tokens
-                # containing backslash sequences (e.g. \n, \t in a PAT value).
+            # Write to config.env (canonical credential file after issue #1785).
+            # Also update global.env if it exists (backward compat for pre-migration installs).
+            if grep -q "^#\{0,1\} *GITHUB_TOKEN=" "$CONFIG_FILE" 2>/dev/null; then
+                GH_TOKEN="$GH_TOKEN" awk \
+                    '/^#? *GITHUB_TOKEN=/ { print "GITHUB_TOKEN=" ENVIRON["GH_TOKEN"]; next } { print }' \
+                    "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+            else
+                printf '\nGITHUB_TOKEN=%s\n' "$GH_TOKEN" >> "$CONFIG_FILE"
+            fi
+            if [ -f "$GLOBAL_ENV_FILE" ] && grep -q "^#\{0,1\} *GITHUB_TOKEN=" "$GLOBAL_ENV_FILE" 2>/dev/null; then
                 GH_TOKEN="$GH_TOKEN" awk \
                     '/^#? *GITHUB_TOKEN=/ { print "GITHUB_TOKEN=" ENVIRON["GH_TOKEN"]; next } { print }' \
                     "$GLOBAL_ENV_FILE" > "$GLOBAL_ENV_FILE.tmp" && mv "$GLOBAL_ENV_FILE.tmp" "$GLOBAL_ENV_FILE"
-            else
-                printf '\nGITHUB_TOKEN=%s\n' "$GH_TOKEN" >> "$GLOBAL_ENV_FILE"
             fi
             GITHUB_TOKEN_SET=true
-            success "GitHub token saved to $GLOBAL_ENV_FILE"
+            success "GitHub token saved to $CONFIG_FILE"
         else
-            warn "Skipped — set GITHUB_TOKEN in $GLOBAL_ENV_FILE later"
+            warn "Skipped — set GITHUB_TOKEN in $CONFIG_FILE later"
         fi
     else
         info "Skipping GitHub token prompt (non-interactive mode)"
-        info "Set GITHUB_TOKEN in $GLOBAL_ENV_FILE when ready"
+        info "Set GITHUB_TOKEN in $CONFIG_FILE when ready"
     fi
 else
     GITHUB_TOKEN_SET=true
@@ -2820,6 +2747,24 @@ success "Claude launchers ready (start-claude.sh, claude-persistent.sh, claude-w
 
 step "Generating systemd service files from templates..."
 
+# Load the shared template library (repo is now present at $INSTALL_DIR).
+# Normalize LOBSTER_* vars for the library's canonical naming convention.
+LOBSTER_INSTALL_DIR="${LOBSTER_INSTALL_DIR:-$INSTALL_DIR}"
+LOBSTER_WORKSPACE="${LOBSTER_WORKSPACE:-$WORKSPACE_DIR}"
+LOBSTER_MESSAGES="${LOBSTER_MESSAGES:-$MESSAGES_DIR}"
+LOBSTER_CONFIG_DIR="$CONFIG_DIR"
+LOBSTER_USER_CONFIG="$USER_CONFIG_DIR"
+# shellcheck source=scripts/lib/template.sh
+source "${INSTALL_DIR}/scripts/lib/template.sh"
+# Thin wrapper: delegates to _tmpl_generate_from_template and adds the
+# success() log line that install.sh uses for progress output.
+generate_from_template() {
+    local template="$1"
+    local output="$2"
+    _tmpl_generate_from_template "$template" "$output" || return 1
+    success "Generated: $output"
+}
+
 # Check that templates exist
 ROUTER_TEMPLATE="$INSTALL_DIR/services/lobster-router.service.template"
 CLAUDE_TEMPLATE="$INSTALL_DIR/services/lobster-claude.service.template"
@@ -3176,7 +3121,7 @@ echo ""
 echo -e "${BOLD}Directories:${NC}"
 echo "  $INSTALL_DIR        Lobster code"
 echo "  $CONFIG_DIR          Configuration"
-echo "  $CONFIG_DIR/global.env  Global API token store"
+echo "  $CONFIG_DIR/config.env  Credentials and API tokens (canonical)"
 echo "  $USER_CONFIG_DIR    User config and memory"
 echo "  $WORKSPACE_DIR      Claude workspace"
 echo "  $PROJECTS_DIR  Projects"

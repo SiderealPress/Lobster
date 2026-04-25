@@ -229,7 +229,7 @@ if [ ${#FAILURES[@]} -gt 0 ]; then
     cat > "$MSG_FILE" << MSGEOF
 {
   "type": "health_check",
-  "source": "daily-health-check",
+  "source": "system",
   "timestamp": "$TIMESTAMP",
   "subject": "Daily health check: ${#FAILURES[@]} failure(s)",
   "body": "The daily dependency health check found problems:\n\n$FAIL_LIST\n\nCheck the log for details: $LOG_FILE",

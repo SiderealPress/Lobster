@@ -20,6 +20,22 @@ You strongly prefer functional style in your implementations:
 - Isolate side effects at the boundaries of your system
 - Use pattern matching and algebraic data types where the language supports them
 
+## Development Workflow: Issue → (Scope?) → TDD → Review
+
+Match the process overhead to the complexity of the change:
+
+| Size | When | What to do |
+|------|------|------------|
+| **Tiny** | 1-line fix, obvious cause, no decision needed | PR directly. Issue optional. |
+| **Medium** | Non-trivial but reasonably well-understood | Scoping required. Inline in the issue body is sufficient — list options considered, pick one with brief rationale. A dedicated sub-issue is also fine if the problem warrants it. Can go as deep as Large. Use judgment. |
+| **Large** | Complex enough that deeper scoping is the expected norm | Issue (problem only) + dedicated scoping sub-issue. Scoping captures: candidate approaches with suspected pros/cons, open design questions, captured intuitions ("we suspect X might work because..."). Don't wait for certainty — capture the thinking. |
+
+**Tiers set the floor, not a ceiling.** Medium requires scoping — inline is sufficient, but a sub-issue is also fine. Medium can be as thorough as Large; it just doesn't have to be. Large makes a dedicated sub-issue the expected default because the problem is complex enough to warrant it.
+
+After scoping (for Large): pick one approach, confirm with the user if the choice is non-obvious, then write tests first and implement.
+
+**The anti-pattern:** jumping from "problem observed" directly to implementation without capturing *why* that approach was chosen. The issue is not "having ideas in the issue body" — it's skipping the thinking entirely.
+
 ## Workflow Protocol
 
 When assigned to work on a GitHub issue, you follow this structured workflow. **Critical: Update project status at each phase transition.**
@@ -65,7 +81,6 @@ git branch -d feature/issue-42-my-feature
 ```
 
 ### 4. Implementation
-- **Before writing any code, call `list_decisions()`** to check for active architectural decisions that constrain your work. Pay particular attention to decisions in these areas: subagent communication, write_result usage, PR routing, scheduled job dispatch, memory access patterns. Closed architectural questions must not be relitigated without explicit user instruction.
 - Work exclusively in the worktree at `~/lobster-workspace/projects/<branch-name>/`
 - Write code following functional programming principles
 - Make atomic, well-documented commits with clear messages
@@ -106,15 +121,6 @@ If yes to any of the first three: run in test scope first, verify bounds, then s
 - "Endpoint returned 200" is not PASS. "Downstream effect was observed" is PASS.
 - For any change that produces output the user can observe (Telegram message, notification, calendar event, formatted reply): you must verify that output actually appeared correctly.
 - If you cannot self-verify (e.g., a Telegram message in the user's chat): either ask the user explicitly ("did you see X in Telegram?"), or use a designated test chat_id, and document which was used.
-
-**Writing migrations to upgrade.sh:** If your implementation requires a new migration (new directories, config renames, new cron entries, new service files, etc.), follow this procedure:
-
-1. Read `scripts/next-migration.txt` to get the next available migration number.
-2. Write the migration into `upgrade.sh` using that number, following the existing pattern.
-3. Increment the number in `scripts/next-migration.txt`.
-4. Commit both changes atomically in the same commit.
-
-This prevents two concurrent PRs from claiming the same migration number.
 
 ### 5. Progress Tracking
 - Regularly update the issue with your progress

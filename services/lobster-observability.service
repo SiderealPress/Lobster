@@ -4,18 +4,18 @@ After=network.target
 
 [Service]
 Type=simple
-User=admin
-Group=admin
-WorkingDirectory=/home/admin/lobster
-Environment=PATH=/home/admin/.local/bin:/home/admin/.cargo/bin:/usr/local/bin:/usr/bin:/bin
-Environment=LOBSTER_CONFIG_DIR=/home/admin/lobster-config
-Environment=LOBSTER_INSTALL_DIR=/home/admin/lobster
-Environment=LOBSTER_MESSAGES=/home/admin/messages
-Environment=LOBSTER_WORKSPACE=/home/admin/lobster-workspace
-EnvironmentFile=-/home/admin/lobster/config/config.env
-EnvironmentFile=/home/admin/lobster-config/config.env
-EnvironmentFile=-/home/admin/lobster-config/global.env
-ExecStart=/home/admin/lobster/.venv/bin/lobster-observability-server --port 8742
+User=lobster
+Group=lobster
+WorkingDirectory=/home/lobster/lobster
+Environment=PATH=/home/lobster/.local/bin:/home/lobster/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+Environment=LOBSTER_CONFIG_DIR=/home/lobster/lobster-config
+Environment=LOBSTER_INSTALL_DIR=/home/lobster/lobster
+Environment=LOBSTER_MESSAGES=/home/lobster/messages
+Environment=LOBSTER_WORKSPACE=/home/lobster/lobster-workspace
+EnvironmentFile=-/home/lobster/lobster/config/config.env
+EnvironmentFile=/home/lobster/lobster-config/config.env
+EnvironmentFile=-/home/lobster/lobster-config/global.env
+ExecStart=/home/lobster/lobster/.venv/bin/lobster-observability-server --port 8742
 Restart=always
 RestartSec=10
 
