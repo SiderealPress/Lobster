@@ -113,7 +113,7 @@ ALWAYS_ALLOWED_TOOLS: frozenset[str] = frozenset({
 })
 
 BLOCK_MESSAGE = (
-    "Catching up — give me 90 seconds. "
+    "Catching up — give me 120 seconds. "
     "compact-catchup or startup-catchup is still running. "
     "The dispatcher must not take substantive actions until catchup completes. "
     "Call `mcp__lobster-inbox__wait_for_messages` to resume the main loop and "

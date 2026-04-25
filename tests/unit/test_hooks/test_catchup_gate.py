@@ -553,7 +553,7 @@ class TestTaskIdPatterns:
         ))
         assert exit_code == 2, "Most recent session is fresh — should block"
 
-    def test_only_most_recent_session_checked_stale_allows(self, monkeypatch, tmp_path):
+    def test_only_most_recent_session_checked_fresh_most_recent_blocks(self, monkeypatch, tmp_path):
         """When multiple matching sessions exist, the most recent is checked.
         If the most recent is stale (outside window), gate allows even if an
         older session exists within the window (it's superseded by the newer stale one)."""
