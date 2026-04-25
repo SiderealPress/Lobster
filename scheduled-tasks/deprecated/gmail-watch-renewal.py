@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,7 +44,8 @@ from integrations.gmail.token_store import get_valid_token  # noqa: E402
 GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1"
 PUBSUB_TOPIC = "projects/myownlobster/topics/gmail-investor-notifications"
 LABEL_IDS = ["INBOX"]
-LOBSTER_USER_ID = "ADMIN_CHAT_ID_REDACTED"
+# Read from environment — never hardcode in source. Validated at runtime in main().
+LOBSTER_USER_ID: str = os.environ.get("LOBSTER_ADMIN_CHAT_ID") or os.environ.get("ADMIN_CHAT_ID") or ""
 CONFIG_PATH = Path.home() / "lobster-config" / "config.env"
 STATE_PATH = Path.home() / "lobster-workspace" / "data" / "gmail-watch-state.json"
 MCP_URL = "http://localhost:9100"
@@ -87,6 +89,11 @@ def call_gmail_watch(access_token: str) -> dict:
 
 
 def main() -> None:
+    if not LOBSTER_USER_ID:
+        msg = "LOBSTER_ADMIN_CHAT_ID env var is not set (set in ~/lobster-config/config.env)"
+        log.error(msg)
+        _write_task_output(msg, "failed")
+        sys.exit(1)
     try:
         token = get_valid_token(LOBSTER_USER_ID)
         if not token or not token.access_token:

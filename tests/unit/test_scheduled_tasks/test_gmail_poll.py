@@ -210,7 +210,7 @@ class TestExtractBody:
 # should_skip_message
 # ---------------------------------------------------------------------------
 
-ACCOUNT_EMAIL = "LOBSTER_GMAIL_ADDRESS"
+ACCOUNT_EMAIL = "owner@example.com"
 
 # SKIP_LABEL_IDS is a frozenset defined in the module.
 PROMO_LABEL = next(iter(SKIP_LABEL_IDS))  # any one skip label
@@ -259,7 +259,7 @@ class TestBuildInboxMessage:
         subject: Optional[str] = "Investment Inquiry",
         from_name: Optional[str] = "Bob Investor",
         from_email: str = "bob@investor.com",
-        to_header: Optional[str] = "LOBSTER_GMAIL_ADDRESS",
+        to_header: Optional[str] = "owner@example.com",
         body_text: str = "Hi, I am interested in investing.",
         received_at: str = "2024-01-01T00:00:00+00:00",
         account_email: str = ACCOUNT_EMAIL,

@@ -51,7 +51,7 @@ class OutboxFileHandler(_FSEHandler):
 
     **Writer mode** (original BIS-159 interface):
         handler = OutboxFileHandler(outbox_dir=Path("/home/lobster/messages/outbox"))
-        handler.write({"id": "12345_telegram", "chat_id": ADMIN_CHAT_ID_REDACTED, "text": "Hi"})
+        handler.write({"id": "12345_telegram", "chat_id": 1234567890, "text": "Hi"})
 
     **Watchdog mode** (BIS-166 router interface):
         Subclasses watchdog.FileSystemEventHandler so it can be passed directly
