@@ -2778,6 +2778,44 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
         fi
     done
 
+    # Migration 81: Install PreToolUse heartbeat hook (issue #1786).
+    # pre-tool-heartbeat.py writes a timestamp before each tool call, complementing
+    # thinking-heartbeat.py (PostToolUse). Together they allow the health check to
+    # distinguish "tool is running (long)" from "dispatcher is frozen" without
+    # false positives, enabling the PostToolUse threshold to be lowered safely.
+    if [ -f "$CLAUDE_SETTINGS" ] && command -v jq >/dev/null 2>&1; then
+        local _m81_hook_path="$LOBSTER_DIR/hooks/pre-tool-heartbeat.py"
+        if [ -f "$_m81_hook_path" ]; then
+            chmod +x "$_m81_hook_path" 2>/dev/null || true
+            local _m81_present
+            _m81_present=$(jq -r '
+                [.hooks.PreToolUse[]?.hooks[]?.command // empty]
+                | map(select(contains("pre-tool-heartbeat")))
+                | length
+            ' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
+            if [ "${_m81_present:-0}" = "0" ] || [ "${_m81_present:-0}" = "" ]; then
+                TMP_SETTINGS=$(mktemp)
+                jq --arg cmd "python3 $LOBSTER_DIR/hooks/pre-tool-heartbeat.py" \
+                   '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+                    "matcher": "",
+                    "hooks": [{
+                        "type": "command",
+                        "command": $cmd,
+                        "timeout": 5
+                    }]
+                }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+                substep "Registered pre-tool-heartbeat hook in Claude Code settings"
+                migrated=$((migrated + 1))
+            else
+                substep "pre-tool-heartbeat hook already present — skipping Migration 81"
+            fi
+        else
+            warn "pre-tool-heartbeat.py not found at $_m81_hook_path — skipping Migration 81"
+        fi
+    else
+        warn "Claude settings not found at $CLAUDE_SETTINGS or jq missing — skipping Migration 81"
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else

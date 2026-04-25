@@ -1696,6 +1696,29 @@ else
     info "Skipping thinking-heartbeat hook (settings.json not yet created)"
 fi
 
+# Set up Claude Code PreToolUse hook to write a pre-tool heartbeat timestamp (issue #1786).
+# Complements thinking-heartbeat.py (PostToolUse) and narrows the inference-gap detection
+# window (#1695), allowing the PostToolUse threshold to be lowered without false positives.
+chmod +x "$INSTALL_DIR/hooks/pre-tool-heartbeat.py" || true
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '.hooks.PreToolUse[]? | select(.hooks[]?.command | contains("pre-tool-heartbeat"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+            "matcher": "",
+            "hooks": [{
+                "type": "command",
+                "command": "python3 '"$INSTALL_DIR"'/hooks/pre-tool-heartbeat.py",
+                "timeout": 5
+            }]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "pre-tool-heartbeat hook installed"
+    else
+        info "pre-tool-heartbeat hook already configured in Claude Code settings"
+    fi
+else
+    info "Skipping pre-tool-heartbeat hook (settings.json not yet created)"
+fi
+
 # Set up Claude Code PreToolUse hook to block tool use after compaction without context reload.
 # Uses a shell wrapper so Python is only spawned when the sentinel file exists (~1% of calls).
 # On the 99%+ of calls where the sentinel is absent, `test ! -f ...` exits in ~1ms with no
