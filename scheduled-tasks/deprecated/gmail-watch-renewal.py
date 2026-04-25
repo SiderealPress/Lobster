@@ -3,7 +3,7 @@
 Gmail Watch Renewal — Lobster scheduled task.
 
 Calls gmail.users.watch to renew the Pub/Sub push subscription for
-sebastian@alternativewealthpartners.com. Gmail watch subscriptions expire
+the configured Gmail account. Gmail watch subscriptions expire
 after 7 days; this job runs every 6 days to keep the subscription live.
 
 The watch registers a Pub/Sub push notification from Gmail to:
