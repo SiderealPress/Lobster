@@ -54,15 +54,22 @@ Classification = Literal[
     "HEALTHY",
 ]
 
-DB_PATH = Path.home() / "messages" / "config" / "agent_sessions.db"
+# Resolve the lobster home directory from LOBSTER_HOME env var (set in install.sh
+# and cron entries), falling back to /home/lobster.  Deliberately NOT using
+# Path.home() or os.path.expanduser("~") because those resolve to /root when the
+# script is invoked as root (e.g. via a stale root crontab entry), causing the DB
+# lookup to fail silently.
+LOBSTER_HOME = Path(os.environ.get("LOBSTER_HOME", "/home/lobster"))
+
+DB_PATH = LOBSTER_HOME / "messages" / "config" / "agent_sessions.db"
 
 # Glob pattern for Claude Code session task directories.
 # The middle component is a session UUID that changes per Claude Code invocation.
-# The path component is derived dynamically from the actual home directory so the
-# script works on any install regardless of the username (e.g. /home/lobster vs
+# The path component is derived dynamically from LOBSTER_HOME so the script
+# works on any install regardless of the username (e.g. /home/lobster vs
 # /home/admin).  Claude Code maps workspace paths to /tmp by replacing '/' with '-'.
 def _default_agent_output_glob() -> str:
-    home = os.path.expanduser("~")
+    home = str(LOBSTER_HOME)
     # /home/lobster -> -home-lobster-
     path_slug = home.strip("/").replace("/", "-")
     return f"/tmp/claude-1000/-{path_slug}-lobster-workspace/*/tasks/"
@@ -624,7 +631,7 @@ def _resolve_owner_chat_id() -> str:
         if first:
             return first
 
-    config_env = Path.home() / "lobster-config" / "config.env"
+    config_env = LOBSTER_HOME / "lobster-config" / "config.env"
     if config_env.exists():
         try:
             for line in config_env.read_text().splitlines():
@@ -723,7 +730,7 @@ def build_mark_failed_inbox_message(agent: ClassifiedAgent) -> dict:
 
 def drop_inbox_message(payload: dict) -> None:
     """Write a JSON message file to ~/messages/inbox/ for dispatcher pickup."""
-    inbox_dir = Path.home() / "messages" / "inbox"
+    inbox_dir = LOBSTER_HOME / "messages" / "inbox"
     inbox_dir.mkdir(parents=True, exist_ok=True)
     dest = inbox_dir / f"{payload['id']}.json"
     dest.write_text(json.dumps(payload, indent=2))

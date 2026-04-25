@@ -403,7 +403,7 @@ class TestRunJobShMissingTaskFile:
             tmp_path, "no-task-job", enabled=True, has_task_file=False
         )
         env = _make_env(workspace, config_dir, messages_dir, fake_bin=fake_bin)
-        env["LOBSTER_ADMIN_CHAT_ID"] = "8305714125"
+        env["LOBSTER_ADMIN_CHAT_ID"] = "ADMIN_CHAT_ID_REDACTED"
 
         subprocess.run(
             ["bash", str(RUN_JOB), "no-task-job"],

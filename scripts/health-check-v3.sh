@@ -75,16 +75,14 @@ INBOX_DIR="$MESSAGES_DIR/inbox"
 MAINTENANCE_FLAG="$MESSAGES_DIR/config/lobster-maintenance"
 LOBSTER_STATE_FILE="${LOBSTER_STATE_FILE_OVERRIDE:-$MESSAGES_DIR/config/lobster-state.json}"
 DISPATCHER_PID_FILE="$MESSAGES_DIR/config/dispatcher.pid"
-STALE_THRESHOLD_SECONDS=360          # 6 minutes - RED if any message older; triggers restart (issue #1633)
-# YELLOW_THRESHOLD_SECONDS: early-warning signal only — intentionally lower than
-# STALE_THRESHOLD_SECONDS. Does not trigger restarts; fires at 2.5 min as early warning before 6-min restart.
-YELLOW_THRESHOLD_SECONDS=150         # 2.5 minutes - YELLOW early warning before 6-min stale restart
+STALE_THRESHOLD_SECONDS=240          # 4 minutes - RED if any message older (watchdog handles soft recovery at 90s)
+YELLOW_THRESHOLD_SECONDS=150         # 2.5 minutes - YELLOW warning
 RESTART_WINDOW_BUFFER_SECONDS=120    # Pre-mark messages within this window of the stale threshold before a restart
 
 MAINTENANCE_EXPIRY_SECONDS=3600      # 1 hour - stale maintenance flag is auto-cleared and checks resume
 
 COMPACTION_SUPPRESS_SECONDS=300      # 5 minutes - skip stale-inbox check after a compaction event
-COMPACT_GRACE_SECONDS=600            # 10 minutes - skip stale-inbox check after a compaction (last-compact.ts)
+COMPACT_GRACE_SECONDS=900            # 15 minutes - skip stale-inbox check after a compaction (last-compact.ts)
 # CATCHUP_SUPPRESS_SECONDS removed (issue #1483): dispatcher heartbeat threshold covers catchup naturally
 RESTART_COOLDOWN_SUPPRESS_SECONDS=240 # 4 minutes - suppress stale-inbox RED after a recent restart
 
@@ -102,15 +100,14 @@ HEARTBEAT_FILE="$WORKSPACE_DIR/logs/claude-heartbeat"   # legacy WFM-touch signa
 DISPATCHER_HEARTBEAT_FILE="${LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE:-$WORKSPACE_DIR/logs/dispatcher-heartbeat}"
 DISPATCHER_HEARTBEAT_STALE_SECONDS=1200   # 20 min — covers compaction (~5m) + catchup (~12m) + margin
 
-# WFM-active signal (issue #949): inbox_server.py writes this file with a Unix
-# epoch timestamp when wait_for_messages begins blocking and refreshes it every
-# 60s (WAIT_HEARTBEAT_INTERVAL). When this file is fresh, the dispatcher is alive
-# and waiting for messages — heartbeat staleness does NOT indicate a problem.
-# Threshold: 3x WAIT_HEARTBEAT_INTERVAL (180s) to absorb one missed refresh.
+# WFM-active signal (issue #1713 / #949): inbox_server.py writes this file with
+# a Unix epoch timestamp when wait_for_messages begins blocking and refreshes it
+# every WAIT_HEARTBEAT_INTERVAL (60s). When this file is fresh, the dispatcher is
+# alive and waiting for messages — heartbeat staleness is expected, not a problem.
+# Threshold: 3x WAIT_HEARTBEAT_INTERVAL to absorb one missed refresh cycle.
 # File is deleted by the MCP server when WFM returns (message arrived or timeout).
 DISPATCHER_WFM_ACTIVE_FILE="${LOBSTER_WFM_ACTIVE_OVERRIDE:-$WORKSPACE_DIR/logs/dispatcher-wfm-active}"
-# 3x WAIT_HEARTBEAT_INTERVAL (60s) — absorbs one missed tick
-WFM_ACTIVE_STALE_SECONDS=180
+WFM_ACTIVE_STALE_SECONDS=180   # 3x WAIT_HEARTBEAT_INTERVAL (60s) — absorbs one missed tick
 
 OUTBOX_DIR="$MESSAGES_DIR/outbox"
 OUTBOX_STALE_THRESHOLD_SECONDS=900   # 15 min = RED
@@ -324,16 +321,15 @@ get_black_set_ts() {
 }
 
 # If system has been in BLACK state longer than BLACK_RENOTIFY_SECONDS,
-# attempt a single restart. If the restart succeeds the system will return
-# to GREEN on the next health check and clear_manual_intervention() will
-# remove the BLACK flag automatically.
-# If the restart fails, re-set the BLACK flag, reset the 2-hour timer so
-# another attempt fires BLACK_RENOTIFY_SECONDS from now, and send a
-# Telegram re-alert so the user knows the system is still down (issue #989).
+# silently attempt a single restart (no Telegram alert). If the restart
+# succeeds the system will return to GREEN on the next health check and
+# clear_manual_intervention() will remove the BLACK flag automatically.
+# If the restart fails, re-set the BLACK flag and reset the 2-hour timer
+# so another attempt fires BLACK_RENOTIFY_SECONDS from now.
 #
 # The one-time alert sent when BLACK is first set (in do_restart) is
-# intentionally preserved. The re-alert fires only when a periodic retry
-# fails, so it cannot spam — at most one alert per BLACK_RENOTIFY_SECONDS.
+# intentionally preserved. Only the periodic re-notifications are replaced
+# by these silent retry attempts.
 check_and_renotify_black() {
     local reason="${1:-periodic BLACK retry}"
     local black_set_ts
@@ -357,7 +353,7 @@ check_and_renotify_black() {
 
     if [[ $elapsed -gt $BLACK_RENOTIFY_SECONDS ]]; then
         local hours=$(( elapsed / 3600 ))
-        log_warn "BLACK: System in manual intervention state for ${hours}h — attempting silent restart"
+        log_warn "BLACK: System in manual intervention state for ${hours}h — attempting silent restart (no alert)"
         # Temporarily clear the MANUAL_INTERVENTION flag so do_restart's
         # can_restart() check passes, then attempt a single restart.
         clear_manual_intervention
@@ -372,14 +368,6 @@ check_and_renotify_black() {
             log_error "BLACK: Silent restart attempt failed — re-entering BLACK state"
             set_manual_intervention
             log_info "BLACK: Reset retry timer (next attempt in ${BLACK_RENOTIFY_SECONDS}s)"
-            # Re-alert: send a Telegram notification so the user knows the system
-            # is still down after ${hours}h. Issue #989: without this, the initial
-            # BLACK alert is the only notification — users have no way to know the
-            # system hasn't recovered during a long outage.
-            send_telegram_alert "System still unrecoverable after ${hours}h in BLACK state.
-
-Restart attempt failed. Manual intervention still required:
-\`lobster restart\`"
         fi
     else
         local remaining=$(( BLACK_RENOTIFY_SECONDS - elapsed ))
@@ -523,9 +511,9 @@ except Exception:
 # Check if a context compaction occurred within the last COMPACT_GRACE_SECONDS.
 # Returns 0 (true) if inbox staleness checks should be suppressed, 1 otherwise.
 # Reads the Unix timestamp from last-compact.ts (written by hooks/on-compact.py).
-# This provides a 10-minute grace period for post-compaction re-orientation,
+# This provides a 15-minute grace period for post-compaction re-orientation,
 # extending the existing COMPACTION_SUPPRESS_SECONDS (5 min) window by an additional
-# 5 minutes to cover cases where re-orientation takes longer than expected.
+# 10 minutes to cover cases where re-orientation takes longer than expected.
 is_compact_grace_period() {
     local ts_file="$WORKSPACE_DIR/data/last-compact.ts"
     if [[ ! -f "$ts_file" ]]; then
@@ -999,10 +987,9 @@ check_dispatcher_heartbeat() {
         # do not fire so the heartbeat goes stale. inbox_server.py writes
         # DISPATCHER_WFM_ACTIVE_FILE with a fresh epoch timestamp every 60s while
         # WFM is blocking. A fresh WFM-active file means the dispatcher is alive
-        # and simply idle — not frozen or dead. (issue #949)
-        local _wfm_file="${DISPATCHER_WFM_ACTIVE_FILE:-}"
+        # and simply idle — not frozen or dead. (issue #1713 / #949)
         #
-        # Fix (issue #1730 TOCTOU): Use cat-only read, no -f existence gate.
+        # Fix 1 (issue #1730 TOCTOU): Use cat-only read, no -f existence gate.
         # A two-step -f / cat sequence has a race window: the MCP server's
         # finally block can write the tombstone between the -f check and the cat,
         # making cat return empty and this function fall through to RED.
@@ -1011,7 +998,7 @@ check_dispatcher_heartbeat() {
         # (WFM exited cleanly). The integer guard below handles all three cases
         # without any race window.
         local wfm_active_ts=""
-        wfm_active_ts=$(cat "$_wfm_file" 2>/dev/null | tr -d '[:space:]')
+        wfm_active_ts=$(cat "$DISPATCHER_WFM_ACTIVE_FILE" 2>/dev/null | tr -d '[:space:]')
         if [[ -n "$wfm_active_ts" ]] && [[ "$wfm_active_ts" =~ ^[0-9]+$ ]]; then
             local wfm_age=$(( now - wfm_active_ts ))
             if [[ $wfm_age -le $WFM_ACTIVE_STALE_SECONDS ]]; then
@@ -1315,8 +1302,8 @@ The restart has been skipped to avoid killing running subagents. If the problem 
         if is_manual_intervention_required; then
             # Already in BLACK/manual-intervention state — check whether it's time to re-alert.
             # check_and_renotify_black silently retries a restart if BLACK_RENOTIFY_SECONDS
-            # (2h) have elapsed. If the retry fails, a Telegram re-alert is sent so the user
-            # knows the system is still down. If the retry succeeds, the system returns to GREEN naturally.
+            # (2h) have elapsed. No Telegram alert is sent — the initial BLACK alert already
+            # fired. If the retry succeeds the system returns to GREEN naturally.
             check_and_renotify_black "$reason"
         else
             # First time hitting BLACK — set flag and send a single alert.
@@ -1612,7 +1599,7 @@ main() {
     # Claude Code pauses tool calls during context compaction for 1-3+ minutes.
     # If on-compact.py recorded a compacted_at within the last
     # COMPACTION_SUPPRESS_SECONDS, skip all stale-inbox checks this run.
-    # Additionally, check last-compact.ts for a 10-minute grace period that
+    # Additionally, check last-compact.ts for a 15-minute grace period that
     # covers the post-compaction re-orientation window (reading bootup files,
     # processing inbox backlog, waiting for compact-catchup to complete).
     local compaction_recent=false

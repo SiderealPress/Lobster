@@ -123,25 +123,6 @@ mcp__lobster-inbox__write_result(
 
 The dispatcher will read your result and decide what (if anything) to relay to the user.
 
-**reply_text — separate user reply from dispatcher summary:**
-
-When the dispatcher should relay a short user-facing message while you provide a longer internal summary, use `reply_text`:
-
-```python
-mcp__lobster-inbox__write_result(
-    task_id="<task-id>",
-    chat_id=<chat_id>,
-    # text = full context for dispatcher (decisions made, URLs, details)
-    text="Filed issue #42 in SiderealPress/lobster. Label: enhancement. URL: https://github.com/.../issues/42",
-    # reply_text = trimmed mobile-friendly message shown to user
-    reply_text="Filed: https://github.com/SiderealPress/lobster/issues/42",
-    source="telegram",
-    sent_reply_to_user=False,
-)
-```
-
-When `reply_text` is present: dispatcher relays `reply_text` to the user; `text` stays in dispatcher context only. When absent: dispatcher relays `text` (backward-compatible). Ignored if `sent_reply_to_user=True`.
-
 **Signal convention note:** This only works if the dispatcher (or whoever spawns you) actually includes the signal phrase ("do NOT call send_reply" or "Use write_result only") in your task prompt. The dispatcher is responsible for adding this signal when spawning internal subagents. If you receive a task prompt without this signal, treat it as user-facing.
 
 **For user-facing tasks (the default):**
@@ -311,6 +292,13 @@ Before declaring any integration or manual test PASS:
 
 ## Tooling conventions
 
+- **When filing GitHub issues:** Match process to complexity:
+  - *Tiny* (obvious fix, no decision needed): PR directly, issue optional.
+  - *Medium* (non-trivial but reasonably well-understood): Scoping required. Inline in the issue body is sufficient — list options considered, pick one with brief rationale. A dedicated sub-issue is also fine if the problem warrants it. Can go as deep as Large. Use judgment.
+  - *Large* (complex enough that deeper scoping is the expected norm): Issue (problem only) + dedicated scoping sub-issue. Scoping should capture candidate approaches with suspected pros/cons, open design questions, and intuitions ("we suspect X might work because..."). Don't wait for certainty — capture the thinking.
+  - **Key distinction:** Tiers set the *floor*, not a *ceiling*. Medium can be as thorough as Large; it just doesn't have to be. Large makes a dedicated sub-issue the expected default because the problem is complex enough to warrant it.
+  - **Anti-pattern:** jumping to implementation without capturing *why* that approach was chosen. The problem is skipping the thinking, not having ideas in the issue body.
+
 - **GitHub operations:** Use `gh` CLI (via Bash tool) for all GitHub operations — posting PR reviews, merging PRs, creating issues, etc. Do NOT use `mcp__github__*` MCP tools in agent code.
   - Post a PR review: `gh pr review <number> --comment --body "..." --repo <owner/repo>`
   - Merge a PR: `gh pr merge <number> --squash --repo <owner/repo>`
@@ -341,16 +329,20 @@ Before declaring any integration or manual test PASS:
   **If you cannot write a meaningful comment without including private details, do NOT post it.** Return findings via `write_result` only (with `sent_reply_to_user=False`) so the dispatcher can relay to the user through a private channel.
 
 - **Code reviews — always post to the PR:** When conducting a code review of a GitHub PR, you MUST post the review directly to the PR using `gh pr review`, then also send the summary back via `write_result`.
-  1. Post to the PR: `gh pr review <PR_NUMBER> --repo <owner/repo> --comment --body "REVIEW TEXT"`
+  1. Post to the PR using the appropriate flag:
+     - `--approve` if the PR looks good and you are NOT reviewing your own PR
+     - `--request-changes` if there are blocking issues and you are NOT reviewing your own PR
+     - `--comment` **only** for self-reviews (PRs you or the engineer subagent opened) — GitHub does not allow self-approval
+     - Command: `gh pr review <PR_NUMBER> --repo <owner/repo> --approve|--request-changes|--comment --body "REVIEW TEXT"`
   2. **Before calling write_result for any code review:**
-     - [ ] Confirmed `gh pr review N --repo owner/repo --comment --body "..."` was run
+     - [ ] Confirmed `gh pr review N --repo owner/repo <flag> --body "..."` was run
      - If not run yet: run it now, then call write_result
   3. Then call `write_result` with a concise summary for the user (scene → problem → fix → impact, 3–6 lines, include PR link).
   - If no PR exists yet (local changes only), skip steps 1–2 and report findings entirely via `write_result`.
 
 - **GitHub attribution:** All PR descriptions, review comments, and issue comments written by Lobster must include an attribution prefix. The `gh` CLI is authenticated as the owner's account — without this prefix, GitHub content appears to come from the owner personally.
   - PR body (when opening a PR): first line is `🤖🦞 Lobster (engineer):` followed by a blank line
-  - Review comments (`gh pr review --comment`): body starts with `🤖🦞 Lobster (reviewer):\n\n`
+  - Review comments (`gh pr review --approve`, `--request-changes`, or `--comment`): body starts with `🤖🦞 Lobster (reviewer):\n\n`
   - Issue comments: body starts with `🤖🦞 Lobster (ops):` or the appropriate role
   - Short one-liner comments (e.g., closing a stale issue) may use the prefix inline: `🤖🦞 Lobster: <reason>`
   - Never omit this prefix when posting substantial content to GitHub under the owner's account.
@@ -377,31 +369,6 @@ Before declaring any integration or manual test PASS:
   ```
   The `patch.multiple` module target for inbox_server tests is always
   `"src.mcp.inbox_server"` (not `"inbox_server"` or `"mcp.inbox_server"`).
-
-## Architectural Decision Memory
-
-Lobster stores architectural decisions in the memory DB with `type="decision"`. Decisions survive restarts and context compaction. They capture design choices with rationale — preventing future sessions from re-implementing deprecated or superseded patterns.
-
-**Before implementing patterns in any of these areas, call `list_decisions()` first:**
-
-- Subagent communication (relay vs. direct pattern, write_result usage)
-- PR routing and reviewer spawning
-- Scheduled job dispatch
-- External service integration approaches
-- Memory system access patterns
-- Any area where you suspect a prior architectural choice was made
-
-If `list_decisions()` returns a decision that constrains your work, read it carefully before proceeding. Closed architectural questions should not be relitigated without explicit user instruction.
-
-**Storing new decisions** (when you make an architectural choice that should be remembered):
-
-Use the `write_decision` MCP tool with: key (slug), title, decision (what was decided), rationale (why — required), date, affected_areas, supersedes (optional).
-
-**Decision vs. feedback distinction:**
-- `decision` (this system) — architectural choices with rationale; discovered *before* starting implementation
-- `feedback` (IFTTT rules) — behavioral process rules; applied *during* execution
-
-Do not use `memory_store(type="decision")` directly — always use `write_decision` for structured validation.
 
 ## IFTTT Behavioral Rules
 

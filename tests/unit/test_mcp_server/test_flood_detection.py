@@ -85,7 +85,7 @@ def _make_subagent_result(elapsed_seconds: int, timestamp: datetime) -> dict:
         "id": f"test-{timestamp.timestamp():.0f}-e{elapsed_seconds}",
         "type": "subagent_result",
         "source": "telegram",
-        "chat_id": "8305714125",
+        "chat_id": "ADMIN_CHAT_ID_REDACTED",
         "elapsed_seconds": elapsed_seconds,
         "task_id": "some-task",
         "status": "success",
@@ -99,7 +99,7 @@ def _make_text_message(timestamp: datetime) -> dict:
         "id": f"user-{timestamp.timestamp():.0f}",
         "type": "text",
         "source": "telegram",
-        "chat_id": "8305714125",
+        "chat_id": "ADMIN_CHAT_ID_REDACTED",
         "text": "Hello lobster",
         "timestamp": timestamp.isoformat(),
     }
