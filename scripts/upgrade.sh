@@ -2761,6 +2761,23 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
         migrated=$((migrated + 1))
     fi
 
+
+    # Migration 80: Disable Gmail Pub/Sub systemd timers (issue #1807).
+    # The Pub/Sub-based email pipeline (gmail-watch-renewal + awp-gmail-token-refresh)
+    # is replaced by the deterministic gmail-poll.py History API poller, which runs
+    # every 10 seconds with zero token spend on empty polls. No GCP setup required.
+    for _m80_unit in lobster-gmail-watch-renewal lobster-awp-gmail-token-refresh; do
+        if systemctl is-enabled "${_m80_unit}.timer" &>/dev/null; then
+            substep "Disabling ${_m80_unit}.timer (Pub/Sub pipeline, superseded by gmail-poll.py)..."
+            sudo systemctl disable --now "${_m80_unit}.timer" 2>/dev/null && {
+                substep "Disabled ${_m80_unit}.timer"
+                migrated=$((migrated + 1))
+            } || warn "Could not disable ${_m80_unit}.timer -- disable manually"
+        else
+            substep "${_m80_unit}.timer already disabled -- nothing to do"
+        fi
+    done
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
