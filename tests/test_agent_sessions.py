@@ -340,7 +340,7 @@ def test_format_system_agent_separated_from_user_count():
     """System agents (chat_id=0) must not inflate the user-facing agent count."""
     sessions = [
         {"agent_type": "subagent", "description": "User task",
-         "chat_id": "8305714125", "elapsed_seconds": 300, "id": "u1"},
+         "chat_id": "ADMIN_CHAT_ID_REDACTED", "elapsed_seconds": 300, "id": "u1"},
         {"agent_type": "subagent", "description": "startup-catchup",
          "chat_id": "0", "elapsed_seconds": 60, "id": "s1"},
     ]
@@ -352,7 +352,7 @@ def test_format_system_agent_separated_from_user_count():
     # System agent shown with 'system' label, not chat_id
     assert "(system," in result
     # User agent shown with real chat_id
-    assert "chat: 8305714125" in result
+    assert "chat: ADMIN_CHAT_ID_REDACTED" in result
 
 
 def test_format_plural_system_agents():

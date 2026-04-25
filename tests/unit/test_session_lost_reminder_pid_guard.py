@@ -14,14 +14,8 @@ is absent or dead → real session loss → write the reminder.
 These tests exercise _is_dispatcher_alive() in isolation (by loading the function
 from inbox_server.py source) and verify the full _write_session_lost_reminder()
 flow via the inbox_server module (using a minimal patched environment).
-
-Heartbeat file (issue #1483): _is_dispatcher_responsive() reads from the
-dispatcher-heartbeat file (epoch integer), NOT from lobster-state.json
-last_thinking_at.  Tests that check responsive/frozen behaviour write the
-actual heartbeat file, not a JSON state field.
 """
 
-from datetime import datetime, timezone, timedelta
 import json
 import os
 import subprocess
@@ -30,9 +24,6 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
-
-# Named constant for the stale threshold matching the spec (_FROZEN_THRESHOLD_SECONDS = 5 min).
-FROZEN_THRESHOLD_SECONDS = 5 * 60  # 5 minutes
 
 
 # ---------------------------------------------------------------------------
@@ -147,16 +138,12 @@ def _call_write_session_lost_reminder(
     inbox_dir: Path,
     dispatcher_pid_path: Path,
     state_file: Path,
-    heartbeat_file: Path | None = None,
     dev_mode: str = "",
 ):
     """Call _write_session_lost_reminder() with injected test paths.
 
-    Patches INBOX_DIR, DISPATCHER_PID_FILE, LOBSTER_STATE_FILE, and
-    DISPATCHER_HEARTBEAT_FILE at the module level for the duration of the call.
-
-    heartbeat_file: path to the dispatcher-heartbeat epoch-integer file.
-    If None, defaults to a non-existent path under tmp (treated as fresh install).
+    Patches INBOX_DIR, DISPATCHER_PID_FILE, and LOBSTER_STATE_FILE at the
+    module level for the duration of the call.
     """
     import sys
     import importlib
@@ -177,16 +164,11 @@ def _call_write_session_lost_reminder(
             sys.path.insert(0, str(_SRC_MCP_DIR))
             mod = importlib.import_module("inbox_server")
 
-        # Resolve default heartbeat path (non-existent → responsive assumed)
-        if heartbeat_file is None:
-            heartbeat_file = state_file.parent / "dispatcher-heartbeat-nonexistent"
-
         # Patch the module-level globals
         with (
             patch.object(mod, "INBOX_DIR", inbox_dir),
             patch.object(mod, "DISPATCHER_PID_FILE", dispatcher_pid_path),
             patch.object(mod, "LOBSTER_STATE_FILE", state_file),
-            patch.object(mod, "DISPATCHER_HEARTBEAT_FILE", heartbeat_file),
         ):
             mod._write_session_lost_reminder()
     finally:
@@ -220,66 +202,26 @@ class TestSessionLostReminderPidGuard:
         assert reminder["type"] == "compact-reminder"
         assert "SESSION LOST" in reminder["text"]
 
-    def test_suppresses_reminder_when_dispatcher_alive_and_responsive(self, tmp_path):
-        """Live PID + fresh heartbeat file → clean CC reconnect → reminder suppressed.
-
-        The heartbeat file contains a recent epoch integer (written by
-        hooks/thinking-heartbeat.py, issue #1483).  The function must NOT read
-        last_thinking_at from lobster-state.json — that field is no longer written.
-        """
+    def test_suppresses_reminder_when_dispatcher_alive(self, tmp_path):
+        """Live dispatcher PID → mid-session reconnect → reminder suppressed."""
         inbox_dir = tmp_path / "inbox"
         inbox_dir.mkdir(parents=True, exist_ok=True)
         pid_file = tmp_path / DISPATCHER_PID_FILENAME
         pid_file.write_text(str(os.getpid()))  # current process — definitely alive
         state_file = tmp_path / "lobster-state.json"
+        # State file recently touched (simulating cron-job update — old bug trigger)
         state_file.write_text(json.dumps({"mode": "active"}))
-        # Fresh heartbeat: 2 minutes ago (well within FROZEN_THRESHOLD_SECONDS = 5 min)
-        heartbeat_file = tmp_path / "dispatcher-heartbeat"
-        fresh_epoch = int(time.time()) - 2 * 60  # 2 minutes ago
-        heartbeat_file.write_text(str(fresh_epoch) + "\n")
 
         _call_write_session_lost_reminder(
             inbox_dir=inbox_dir,
             dispatcher_pid_path=pid_file,
             state_file=state_file,
-            heartbeat_file=heartbeat_file,
         )
 
         reminder_files = list(inbox_dir.glob("session-lost-*.json"))
         assert len(reminder_files) == 0, (
-            "Reminder was written despite dispatcher being alive and heartbeat file being fresh — "
+            "Reminder was written despite dispatcher being alive — "
             "this is a false positive that would disrupt an active session"
-        )
-
-    def test_writes_reminder_when_dispatcher_alive_but_frozen(self, tmp_path):
-        """Live PID + stale heartbeat file → frozen dispatcher (issue #1439) → reminder written.
-
-        The heartbeat file is the authoritative signal (issue #1483).  A stale epoch
-        integer in dispatcher-heartbeat means the dispatcher has not called any tool
-        since the MCP server restarted and the connection broke silently.
-        """
-        inbox_dir = tmp_path / "inbox"
-        inbox_dir.mkdir(parents=True, exist_ok=True)
-        pid_file = tmp_path / DISPATCHER_PID_FILENAME
-        pid_file.write_text(str(os.getpid()))  # current process — PID alive
-        state_file = tmp_path / "lobster-state.json"
-        state_file.write_text(json.dumps({"mode": "active"}))
-        # Stale heartbeat: 10 minutes ago — beyond FROZEN_THRESHOLD_SECONDS = 5 min
-        heartbeat_file = tmp_path / "dispatcher-heartbeat"
-        stale_epoch = int(time.time()) - 10 * 60  # 10 minutes ago
-        heartbeat_file.write_text(str(stale_epoch) + "\n")
-
-        _call_write_session_lost_reminder(
-            inbox_dir=inbox_dir,
-            dispatcher_pid_path=pid_file,
-            state_file=state_file,
-            heartbeat_file=heartbeat_file,
-        )
-
-        reminder_files = list(inbox_dir.glob("session-lost-*.json"))
-        assert len(reminder_files) == 1, (
-            "Expected session-lost reminder when dispatcher PID is alive but heartbeat file is stale — "
-            "issue #1439: MCP crashed, connection broke silently, dispatcher is frozen"
         )
 
     def test_writes_reminder_when_dispatcher_pid_is_dead(self, tmp_path):

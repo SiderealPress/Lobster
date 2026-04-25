@@ -99,7 +99,6 @@ from claims import AtomicClaimDB as _AtomicClaimDB
 from skill_manager import (
     list_available_skills as _list_available_skills,
     get_skill_context as _get_skill_context,
-    get_skill_context_for_message as _get_skill_context_for_message,
     activate_skill as _activate_skill,
     deactivate_skill as _deactivate_skill,
     get_skill_preferences as _get_skill_preferences,
@@ -801,12 +800,13 @@ HEARTBEAT_FILE = _WORKSPACE / "logs" / "claude-heartbeat"
 # tests can verify it matches the health-check's WFM_ACTIVE_STALE_SECONDS.
 WAIT_HEARTBEAT_INTERVAL = 60
 
-# WFM-active signal file (issue #949): written with a Unix epoch timestamp
-# when wait_for_messages begins blocking, refreshed every WAIT_HEARTBEAT_INTERVAL
-# seconds, and deleted when WFM returns.  The health check reads this file to
-# distinguish "dispatcher alive, waiting for messages" from "dispatcher frozen/dead"
-# — suppressing the heartbeat-stale RED that would otherwise fire after 20 minutes
-# of zero-message quiet.
+# WFM-active signal file (issue #1713 / #949): written with a Unix epoch
+# timestamp when wait_for_messages begins blocking, refreshed every
+# WAIT_HEARTBEAT_INTERVAL seconds, and deleted when WFM returns.
+#
+# The health check reads this file to distinguish "dispatcher alive, waiting
+# for messages" from "dispatcher frozen/dead" — suppressing the
+# heartbeat-stale RED that would otherwise fire after 20 minutes of quiet.
 #
 # Path: ~/lobster-workspace/logs/dispatcher-wfm-active
 # Content: single Unix epoch integer (e.g. "1713456789\n"), same format as
@@ -815,7 +815,7 @@ WAIT_HEARTBEAT_INTERVAL = 60
 WFM_ACTIVE_FILE = Path(
     os.environ.get(
         "LOBSTER_WFM_ACTIVE_OVERRIDE",
-        _WORKSPACE / "logs" / "dispatcher-wfm-active",
+        str(_WORKSPACE / "logs" / "dispatcher-wfm-active"),
     )
 )
 
@@ -850,21 +850,6 @@ _TRANSIENT_MODES = {"hibernate", "starting", "restarting", "waking"}
 _RECONNECT_GRACE_SECONDS = 30 * 60  # 30 minutes
 
 
-# How long without a tool-use heartbeat before we assume the dispatcher is frozen
-# (MCP connection silently broken after MCP server restart, issue #1439).
-_FROZEN_THRESHOLD_SECONDS = 5 * 60  # 5 minutes
-
-# Dispatcher heartbeat file — written by hooks/thinking-heartbeat.py on every
-# PostToolUse event (issue #1483).  Contains a single Unix epoch integer.
-# Supports override via env var so tests can inject a custom path.
-DISPATCHER_HEARTBEAT_FILE = Path(
-    os.environ.get(
-        "LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE",
-        _WORKSPACE / "logs" / "dispatcher-heartbeat",
-    )
-)
-
-
 def _is_dispatcher_alive() -> bool:
     """Return True if the dispatcher process recorded in dispatcher.pid is alive.
 
@@ -895,40 +880,6 @@ def _is_dispatcher_alive() -> bool:
         return True
     except (ValueError, ProcessLookupError, OSError):
         return False
-
-
-def _is_dispatcher_responsive() -> bool:
-    """Return True if the dispatcher made a tool call recently (non-frozen).
-
-    Reads the epoch integer from DISPATCHER_HEARTBEAT_FILE (written by
-    hooks/thinking-heartbeat.py on every PostToolUse event, issue #1483).
-    If the file is absent or the timestamp is older than _FROZEN_THRESHOLD_SECONDS,
-    we assume the dispatcher is frozen — its MCP connection may have broken
-    silently after an MCP server restart (issue #1439).
-
-    Returns True (responsive assumed) when:
-    - The heartbeat file does not exist (fresh install, no data yet)
-    - The file content is absent or unparseable
-
-    Returns False (frozen suspected) when:
-    - The epoch timestamp in the heartbeat file is older than _FROZEN_THRESHOLD_SECONDS
-    """
-    try:
-        if not DISPATCHER_HEARTBEAT_FILE.exists():
-            return True  # Fresh install / heartbeat not yet written — assume responsive
-        raw = DISPATCHER_HEARTBEAT_FILE.read_text().strip()
-        if not raw:
-            return True  # Empty file — no data, assume responsive
-        epoch_ts = int(raw)
-        age = time.time() - epoch_ts
-        if age > _FROZEN_THRESHOLD_SECONDS:
-            log.info(
-                f"[session-lost] Dispatcher last tool call was {age:.0f}s ago — ≥ threshold — treating as frozen"
-            )
-            return False
-        return True
-    except Exception:
-        return True  # Conservative: assume responsive on any error
 
 
 def _reset_state_on_startup():
@@ -1300,16 +1251,10 @@ def _write_session_lost_reminder() -> None:
     reconnects and calls wait_for_messages, it immediately receives a prompt
     to re-orient and resume the main loop.
 
-    Guard: skipped when the dispatcher PID (from dispatcher.pid) is alive AND
-    the thinking heartbeat (epoch integer in logs/dispatcher-heartbeat, written
-    by hooks/thinking-heartbeat.py, issue #1483) is fresh.
-    Both conditions together mean: Claude Code auto-updated or the HTTP transport
-    briefly cycled and the dispatcher is still running normally.
-
-    If the PID is alive but the heartbeat is stale (> 5 minutes, no tool calls),
-    the dispatcher is likely frozen — MCP crashed and the connection broke silently
-    without notifying the dispatcher (issue #1439).  In that case the reminder IS
-    written so the health check can trigger a recovery restart.
+    Guard: skipped when the dispatcher PID (from dispatcher.pid) is alive.  A
+    live PID means Claude Code auto-updated or the HTTP transport briefly
+    cycled — the dispatcher process is still running and does not need to
+    re-orient.  A dead or absent PID means real session loss.
 
     Previous guard (issue #1429 — removed): checked lobster-state.json mtime
     < 30 min.  This produced false negatives when cron jobs touched the state
@@ -1338,22 +1283,11 @@ def _write_session_lost_reminder() -> None:
         # its transport layer — the dispatcher is still running.  A dead or
         # absent PID means the dispatcher process is gone — real session loss.
         if _is_dispatcher_alive():
-            # PID is alive — but the dispatcher may still be frozen if MCP crashed
-            # and the connection broke silently (issue #1439).  Check whether the
-            # dispatcher made any tool call recently (via dispatcher-heartbeat file,
-            # issue #1483).  If the heartbeat is fresh, this is a clean CC auto-update
-            # reconnect — suppress the reminder.  If stale, the dispatcher is likely
-            # frozen — write the reminder to trigger recovery.
-            if _is_dispatcher_responsive():
-                log.info(
-                    "[session-lost] Skipping session-lost-reminder: dispatcher PID is alive — "
-                    f"and thinking heartbeat is fresh (pid_file={DISPATCHER_PID_FILE})"
-                )
-                return
             log.info(
-                "[session-lost] Dispatcher PID is alive but heartbeat is stale — — — — "
-                "likely frozen after MCP restart (issue #1439); writing session-lost-reminder"
+                "[session-lost] Skipping session-lost-reminder: dispatcher PID is alive "
+                f"(pid_file={DISPATCHER_PID_FILE})"
             )
+            return
 
         now_utc = datetime.now(timezone.utc)
         reminder_id = f"session-lost-{int(now_utc.timestamp())}"
@@ -1527,7 +1461,7 @@ def touch_heartbeat():
 
 
 def _write_wfm_active_signal() -> None:
-    """Write the WFM-active heartbeat signal atomically (issue #949).
+    """Write the WFM-active heartbeat signal atomically (issue #1713 / #949).
 
     Called at the start of the wait_for_messages blocking loop and refreshed
     on every WAIT_HEARTBEAT_INTERVAL tick so the health check sees a fresh
@@ -1536,7 +1470,7 @@ def _write_wfm_active_signal() -> None:
     Content: single Unix epoch integer — same format as dispatcher-heartbeat —
     so health-check-v3.sh can parse it with the same integer comparison logic.
 
-    Atomic write (tmp → rename) prevents partial reads by the health check.
+    Atomic write (tmp -> rename) prevents partial reads by the health check.
     Silently swallowed on failure: health check degrades gracefully when absent.
     """
     try:
@@ -1811,6 +1745,7 @@ async def list_tools() -> list[Tool]:
                     },
                 },
             },
+            _meta={"anthropic/alwaysLoad": True},
         ),
         Tool(
             name="check_inbox",
@@ -1827,15 +1762,6 @@ async def list_tools() -> list[Tool]:
                         "description": "Maximum number of messages to return. Default 10.",
                         "default": 10,
                     },
-                    "offset": {
-                        "type": "integer",
-                        "description": (
-                            "Number of messages to skip before returning results. "
-                            "Use with limit to page through results when total > limit. "
-                            "Default 0 (start from beginning)."
-                        ),
-                        "default": 0,
-                    },
                     "since_ts": {
                         "type": "string",
                         "description": (
@@ -1847,6 +1773,7 @@ async def list_tools() -> list[Tool]:
                     },
                 },
             },
+            _meta={"anthropic/alwaysLoad": True},
         ),
         Tool(
             name="send_reply",
@@ -1915,6 +1842,7 @@ async def list_tools() -> list[Tool]:
                 },
                 "required": ["chat_id", "text"],
             },
+            _meta={"anthropic/alwaysLoad": True},
         ),
         Tool(
             name="send_whatsapp_reply",
@@ -1970,6 +1898,7 @@ async def list_tools() -> list[Tool]:
                 },
                 "required": ["message_id"],
             },
+            _meta={"anthropic/alwaysLoad": True},
         ),
         Tool(
             name="mark_processing",
@@ -1984,6 +1913,7 @@ async def list_tools() -> list[Tool]:
                 },
                 "required": ["message_id"],
             },
+            _meta={"anthropic/alwaysLoad": True},
         ),
         Tool(
             name="mark_failed",
@@ -2137,6 +2067,7 @@ async def list_tools() -> list[Tool]:
                     },
                 },
             },
+            _meta={"anthropic/alwaysLoad": True},
         ),
         # Telegram Message Lookup Tool
         Tool(
@@ -2274,6 +2205,7 @@ async def list_tools() -> list[Tool]:
                     },
                 },
             },
+            _meta={"anthropic/alwaysLoad": True},
         ),
         Tool(
             name="add_rule",
@@ -2574,8 +2506,7 @@ async def list_tools() -> list[Tool]:
                 "Subagents should call send_reply directly first (crash-safe delivery), then call "
                 "this with sent_reply_to_user=True so the dispatcher marks the message processed "
                 "without re-sending. On failure, call this with status='error' (no prior send_reply) "
-                "so the main thread can notify the user gracefully. "
-                "Use reply_text to separate the user-facing reply from the dispatcher summary in text."
+                "so the main thread can notify the user gracefully."
             ),
             inputSchema={
                 "type": "object",
@@ -2594,28 +2525,23 @@ async def list_tools() -> list[Tool]:
                     "text": {
                         "type": "string",
                         "description": (
-                            "Dispatcher-internal summary of what the subagent did. "
-                            "The dispatcher reads this for orientation. "
-                            "If reply_text is also provided, this is NEVER relayed to the user — "
-                            "only reply_text is sent. "
-                            "If reply_text is absent, this is relayed to the user (backward-compat). "
-                            "Keep this to a concise summary (ideally under ~4KB / ~500 words). "
+                            "Dispatcher-internal summary of this result. "
+                            "Kept short (ideally under ~500 words) so the dispatcher's context does not grow. "
+                            "Not shown to the user when reply_text is provided. "
                             "For large outputs — reports, diffs, full analysis — write the content "
                             "to ~/lobster-workspace/reports/<task_id>.md and pass the path in "
-                            "`artifacts` instead. Never put raw file paths in text — they "
-                            "are server-side references that are useless to mobile users."
+                            "`artifacts` instead."
                         ),
                     },
                     "reply_text": {
                         "type": "string",
                         "description": (
-                            "Optional user-facing reply text. "
-                            "When present, the dispatcher sends this to the user instead of `text`. "
-                            "Use this to keep the user reply short and mobile-friendly while "
-                            "keeping the full context in `text` for the dispatcher. "
-                            "Example: text='Filed issue #42 in SiderealPress/lobster. Label: enhancement. URL: https://...', "
-                            "reply_text='Filed: https://github.com/SiderealPress/lobster/issues/42'. "
-                            "Ignored if sent_reply_to_user=True (subagent already sent directly)."
+                            "Optional user-facing reply text. When provided and "
+                            "sent_reply_to_user is False, the dispatcher sends this to the user "
+                            "instead of text. Use this to keep text as a terse internal summary "
+                            "while sending a richer or differently-phrased message to the user. "
+                            "Omit if text is already the right user-facing message. "
+                            "Do not include raw file paths — use relative paths or descriptions instead."
                         ),
                     },
                     "source": {
@@ -2967,6 +2893,7 @@ async def list_tools() -> list[Tool]:
                 },
                 "required": ["agent_id", "description", "chat_id"],
             },
+            _meta={"anthropic/alwaysLoad": True},
         ),
         Tool(
             name="session_end",
@@ -3322,83 +3249,6 @@ async def list_tools() -> list[Tool]:
                 },
             },
         ),
-        # Decision Memory Tools
-        Tool(
-            name="write_decision",
-            description=(
-                "Record an architectural decision in Lobster's memory. Decisions are persistent "
-                "records of design choices with rationale — they survive restarts and context "
-                "compaction. Use this to prevent future sessions from re-litigating closed questions. "
-                "Required fields: key (short slug), title, decision, rationale, date. "
-                "Optional: supersedes (key of a prior decision this replaces), affected_areas (list of areas)."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "key": {
-                        "type": "string",
-                        "description": (
-                            "Short slug identifying this decision, e.g. 'relay-pattern-deprecated'. "
-                            "Used as a stable identifier for supersession and lookup."
-                        ),
-                    },
-                    "title": {
-                        "type": "string",
-                        "description": "Short human-readable title for the decision.",
-                    },
-                    "decision": {
-                        "type": "string",
-                        "description": "What was decided. Be specific about what is now required or forbidden.",
-                    },
-                    "rationale": {
-                        "type": "string",
-                        "description": "Why this decision was made. Required — decisions without rationale are just rules.",
-                    },
-                    "date": {
-                        "type": "string",
-                        "description": "When the decision was made, e.g. '2026-04'. Used to resolve conflicts between decisions.",
-                    },
-                    "affected_areas": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "List of system areas affected, e.g. ['subagent-communication', 'write_result'].",
-                    },
-                    "supersedes": {
-                        "type": "string",
-                        "description": "Optional key of a prior decision this replaces. Marks the prior decision as superseded.",
-                    },
-                    "tags": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Optional additional tags for categorization.",
-                    },
-                },
-                "required": ["key", "title", "decision", "rationale", "date"],
-            },
-        ),
-        Tool(
-            name="list_decisions",
-            description=(
-                "List active architectural decisions stored in Lobster's memory. "
-                "Engineers should call this before implementing patterns in known decision-bearing "
-                "areas (subagent communication, write_result usage, PR routing, scheduled job dispatch). "
-                "Returns decisions with their key, title, rationale, and affected areas."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "active_only": {
-                        "type": "boolean",
-                        "description": "If true (default), only return non-superseded decisions.",
-                        "default": True,
-                    },
-                    "area": {
-                        "type": "string",
-                        "description": "Optional filter: return only decisions affecting this area.",
-                    },
-                },
-            },
-        ),
         Tool(
             name="get_handoff",
             description="Read the current handoff document - a complete briefing for a new Lobster session. Contains identity, architecture, current state, and pending items.",
@@ -3558,20 +3408,6 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {},
-            },
-        ),
-        Tool(
-            name="get_skill_context_for_message",
-            description="Get assembled context from all active skills, including contextual skills that match the current message. Pass the incoming message text to activate skills with activation_mode='contextual' whose context_patterns match. Use this instead of get_skill_context when you have message text available (at message processing start).",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "message_text": {
-                        "type": "string",
-                        "description": "The incoming message text to evaluate contextual skill patterns against.",
-                    },
-                },
-                "required": ["message_text"],
             },
         ),
         Tool(
@@ -4071,10 +3907,6 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
         return await handle_memory_search(arguments)
     elif name == "memory_recent":
         return await handle_memory_recent(arguments)
-    elif name == "write_decision":
-        return await handle_write_decision(arguments)
-    elif name == "list_decisions":
-        return await handle_list_decisions(arguments)
     elif name == "get_handoff":
         return await handle_get_handoff(arguments)
     elif name == "mark_consolidated":
@@ -4110,8 +3942,6 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
     # Skill Management Tools
     elif name == "get_skill_context":
         return await handle_get_skill_context(arguments)
-    elif name == "get_skill_context_for_message":
-        return await handle_get_skill_context_for_message(arguments)
     elif name == "list_skills":
         return await handle_list_skills(arguments)
     elif name == "activate_skill":
@@ -4305,24 +4135,14 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
     # transient mode, calling wait_for_messages means Claude is up and running.
     _write_lobster_state(LOBSTER_STATE_FILE, "active")
 
-    # Write WFM active timestamp so the external watchdog can detect freezes.
-    # The watchdog (scripts/wfm-watchdog.sh) runs every 10 minutes via cron and
-    # injects a synthetic wfm_watchdog message if WFM has been running for longer
-    # than 35 minutes (2100s — 5 min past the default 1800s WFM timeout).
-    # We clear this file in the finally block so the watchdog only fires when
-    # WFM is genuinely blocked and has not returned normally.
-    _wfm_active_file = CONFIG_DIR / "wfm-active.json"
-    try:
-        _wfm_start_ts = datetime.now(timezone.utc)
-        _wfm_active_payload = {
-            "started_at": _wfm_start_ts.isoformat(),
-            "pid": os.getpid(),
-        }
-        _wfm_tmp = _wfm_active_file.parent / f".wfm-active-{os.getpid()}.tmp"
-        _wfm_tmp.write_text(json.dumps(_wfm_active_payload))
-        _wfm_tmp.rename(_wfm_active_file)
-    except Exception as _wfm_exc:
-        log.warning(f"[wfm-watchdog] Failed to write wfm-active.json: {_wfm_exc}")
+    # Write WFM-active signal so the health check can distinguish a healthy
+    # idle-blocking dispatcher from a frozen one (issue #1713 / #949).
+    # The health check treats a fresh WFM-active signal as GREEN even when
+    # dispatcher-heartbeat is stale — PostToolUse hooks don't fire during a
+    # blocking MCP call, so the heartbeat inevitably goes stale after 20 min.
+    # We clear this file in the finally block so the signal only persists while
+    # WFM is actually blocking.
+    _write_wfm_active_signal()
 
     # Recover stale processing and retryable failed messages
     _recover_stale_processing()
@@ -4377,12 +4197,10 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
             inbox_results = await handle_check_inbox({"limit": 10})
             return _prepend_sessions_prefix(sessions_prefix, inbox_results)
         # Wait with periodic heartbeats (every WAIT_HEARTBEAT_INTERVAL seconds).
-        # Write the WFM-active signal file before entering the blocking loop so
-        # the health check knows the dispatcher is alive and waiting, not frozen.
-        # The file is refreshed on every iteration and deleted in the finally block.
+        # Refresh WFM-active on every iteration so the health check sees a
+        # fresh signal even during long quiet periods (issue #1713 / #949).
         heartbeat_interval = WAIT_HEARTBEAT_INTERVAL
         elapsed = 0
-        _write_wfm_active_signal()
 
         while elapsed < timeout:
             wait_time = min(heartbeat_interval, timeout - elapsed)
@@ -4395,20 +4213,10 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
             if arrived:
                 break
 
-            # Touch heartbeat to show we're still alive; refresh WFM-active so
-            # the health check sees a fresh signal even after many quiet iterations.
+            # Touch heartbeat and refresh WFM-active to show we're still alive.
             touch_heartbeat()
             _write_wfm_active_signal()
             elapsed += wait_time
-
-            # Fallback inbox poll: inotify can miss rename events under high load
-            # (IN_Q_OVERFLOW) or in edge cases with certain filesystem configurations.
-            # This periodic check ensures subagent_notification and other messages
-            # are detected within one heartbeat interval even if the file watcher
-            # missed the event (issue #990).
-            if list(INBOX_DIR.glob("*.json")):
-                message_arrived.set()
-                break
 
         if message_arrived.is_set():
             # Small delay to ensure file is fully written
@@ -4452,13 +4260,6 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
     finally:
         observer.stop()
         observer.join(timeout=1)
-        # Clear WFM active file so the watchdog knows WFM returned normally.
-        try:
-            _wfm_active_file = CONFIG_DIR / "wfm-active.json"
-            if _wfm_active_file.exists():
-                _wfm_active_file.unlink()
-        except Exception as _wfm_clear_exc:
-            log.warning(f"[wfm-watchdog] Failed to clear wfm-active.json: {_wfm_clear_exc}")
         # Write tombstone to WFM_ACTIVE_FILE instead of deleting it (issue #1730).
         # Deleting the file creates a TOCTOU race: the health check's -f gate can
         # pass just before unlink(), then cat returns empty and declares RED.
@@ -4810,21 +4611,15 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
 
     When since_ts is provided, scans both inbox/ and processed/ directories
     for messages with timestamp >= since_ts. This mode is designed for catch-up
-    agents that need to recover context after compaction.
-
-    Supports pagination via offset + limit. The response header always includes
-    the total count of matching messages so callers can detect truncation and
-    page through results:
-        check_inbox(limit=10, offset=0)  → messages 1-10 of N
-        check_inbox(limit=10, offset=10) → messages 11-20 of N
+    agents that need to recover context after compaction. The limit still applies
+    to the combined result set.
     """
     source_filter = args.get("source", "").lower()
     limit = args.get("limit", 10)
-    offset = max(0, args.get("offset", 0))
     since_ts_str = args.get("since_ts", "")
     since_epoch = _parse_iso_timestamp(since_ts_str) if since_ts_str else None
 
-    all_messages: list = []
+    messages = []
 
     if since_epoch is not None:
         # Historical scan mode: read from both processed/ and inbox/, sorted by timestamp.
@@ -4853,16 +4648,16 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
                     continue
                 msg["_filename"] = f.name
                 msg["_directory"] = f.parent.name  # "inbox" or "processed"
-                all_messages.append(msg)
+                messages.append(msg)
+                if len(messages) >= limit:
+                    break
             except Exception:
                 continue
 
-        if not all_messages:
+        if not messages:
             return [TextContent(type="text", text=f"📭 No messages found since {since_ts_str}.")]
 
-        total = len(all_messages)
-        messages = all_messages[offset: offset + limit]
-        log.info(f"check_inbox (since_ts={since_ts_str!r}) returning {len(messages)}/{total} message(s) (offset={offset})")
+        log.info(f"check_inbox (since_ts={since_ts_str!r}) returning {len(messages)} message(s)")
     else:
         # --- Priority-ordered inbox scan (issue #1079) ---
         # Two-pass approach: read and score all inbox files, then sort by
@@ -4885,38 +4680,9 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
         for _key, f, msg in sorted(_scored, key=lambda x: x[0]):
             try:
                 if not msg:
-                    # Re-read files that failed the first pass (e.g. transient lock).
-                    # If the file is genuinely unparseable (JSONDecodeError), quarantine
-                    # it to failed/ immediately so it cannot cause a WFM tight-loop
-                    # (issue #1813): wait_for_messages sees the file on every call and
-                    # returns immediately, triggering rapid MCP restarts all day.
-                    try:
-                        with open(f) as fp:  # type: ignore[arg-type]
-                            msg = json.load(fp)
-                    except json.JSONDecodeError as _jde:
-                        error_msg = (
-                            f"Unparseable JSON in inbox file — quarantined to failed/ "
-                            f"to prevent WFM tight-loop. Parse error: {_jde}"
-                        )
-                        log.error(f"check_inbox: quarantining {f.name}: {error_msg}")  # type: ignore[union-attr]
-                        try:
-                            quarantine_payload = {
-                                "_permanently_failed": True,
-                                "_last_error": error_msg,
-                                "_last_failed_at": datetime.now(timezone.utc).isoformat(),
-                                "_original_filename": f.name,  # type: ignore[union-attr]
-                            }
-                            dest = FAILED_DIR / f.name  # type: ignore[union-attr]
-                            atomic_write_json(dest, quarantine_payload)
-                            f.unlink(missing_ok=True)  # type: ignore[union-attr]
-                            _emit_mcp_event(
-                                "inbox.failed",
-                                {"message_id": f.stem, "error": error_msg, "permanent": True},  # type: ignore[union-attr]
-                                severity="warn",
-                            )
-                        except Exception as _q_exc:
-                            log.error(f"check_inbox: quarantine of malformed JSON failed for {f}: {_q_exc}")  # type: ignore[union-attr]
-                        continue  # skip — quarantined
+                    # Re-read files that failed the first pass (e.g. transient lock)
+                    with open(f) as fp:  # type: ignore[arg-type]
+                        msg = json.load(fp)
                 # Quarantine files with unrecognized sources (issue #1735).
                 # This check runs before source_filter so that a bad-source file
                 # is always quarantined regardless of whether the caller passed a
@@ -4970,7 +4736,7 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
                     except Exception as exc:
                         log.error(f"check_inbox: subagent_recovered pre-processor error: {exc}", exc_info=True)
                 msg["_filename"] = f.name  # type: ignore[union-attr]
-                all_messages.append(msg)
+                messages.append(msg)
                 # NOTE: Inbound cross-Lobster messages from bot-talk are routed to this
                 # inbox by bot_talk_mirror.log_inbound_cross_lobster() with source="bot-talk".
                 # We no longer mirror owner Telegram messages to bot-talk from here —
@@ -4990,30 +4756,18 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
                         )
                     except Exception as _bt_exc:
                         log.warning(f"bot-talk EventBus inbound emit failed (non-fatal): {_bt_exc}")
+                if len(messages) >= limit:
+                    break
             except Exception:
                 continue
 
-        if not all_messages:
+        if not messages:
             return [TextContent(type="text", text="📭 No new messages in inbox.")]
 
-        total = len(all_messages)
-        messages = all_messages[offset: offset + limit]
-        log.info(f"check_inbox returning {len(messages)}/{total} message(s) (offset={offset})")
-
-    # Build pagination info for the header
-    page_end = offset + len(messages)
-    if (total > limit or offset > 0) and len(messages) > 0:
-        pagination_info = f" (showing {offset + 1}–{page_end} of {total})"
-        if page_end < total:
-            remaining = total - page_end
-            pagination_info += f" — {remaining} more, use offset={page_end} to continue"
-    elif offset > 0 and len(messages) == 0:
-        pagination_info = f" (offset {offset} is past end of {total} total)"
-    else:
-        pagination_info = ""
+        log.info(f"check_inbox returning {len(messages)} message(s)")
 
     # Format messages nicely
-    output = f"📬 **{len(messages)} new message(s){pagination_info}:**\n\n"
+    output = f"📬 **{len(messages)} new message(s):**\n\n"
     for msg in messages:
         source = msg.get("source", "unknown").upper()
         user = msg.get("user_name", msg.get("username", "Unknown"))
@@ -5075,18 +4829,7 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
         if msg_type == "subagent_notification":
             output += "dispatcher_hint: SUBAGENT_NOTIFICATION — user already received the subagent's reply. Don't summarize it. If you respond, add new value only — a question, a correction, missing context. Call mark_processed when done.\n"
         if msg_type == "subagent_recovered":
-            _recovered_chat_id = msg.get("chat_id", 0)
-            if _recovered_chat_id and _recovered_chat_id != 0:
-                output += (
-                    "dispatcher_hint: SUBAGENT_RECOVERED — agent exited without calling write_result. "
-                    f"The originating user (chat_id={_recovered_chat_id}) has NOT been notified. "
-                    "Send them a brief, gentle message: "
-                    '"A background task ran into trouble and could not complete. Here\'s what it found: [brief summary from text]. '
-                    'Let me know if you\'d like me to retry." '
-                    "Do NOT relay the raw salvaged dump. call mark_processed when done.\n"
-                )
-            else:
-                output += "dispatcher_hint: SUBAGENT_RECOVERED — agent exited without calling write_result; content was salvaged from transcript. chat_id=0 means no known user — drop silently. Call mark_processed when done.\n"
+            output += "dispatcher_hint: SUBAGENT_RECOVERED — agent exited without calling write_result; content was salvaged from transcript. The owner has been notified via inbox. Do NOT relay the raw dump to the user. Call mark_processed when done.\n"
         _has_file = msg_type in ("voice", "photo", "document") or bool(
             msg.get("image_file") or msg.get("image_files") or
             msg.get("file_path") or msg.get("audio_file")
@@ -5138,8 +4881,6 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
 
     output += "---\n"
     output += "Use `send_reply` to respond, `mark_processed` when done."
-    if page_end < total:
-        output += f"\n\n⚠️ **{total - page_end} more message(s) not shown.** Call `check_inbox(offset={page_end})` to fetch the next page."
 
     return [TextContent(type="text", text=output)]
 
@@ -5192,17 +4933,6 @@ async def handle_send_reply(args: dict) -> list[TextContent]:
         outbox_file = BISQUE_OUTBOX_DIR / f"{reply_id}.json"
     else:
         outbox_file = OUTBOX_DIR / f"{reply_id}.json"
-
-    # Outbox-level content dedup (issue #976): suppress duplicate send_reply calls that
-    # carry the same (chat_id, text) within the dedup window. This handles MCP transport
-    # instability where Claude retries a tool call after a timeout, creating two outbox
-    # files with the same content and causing the user to receive the same message twice.
-    if _was_sent_directly(chat_id, text):
-        log.warning(
-            f"send_reply suppressed: duplicate content for chat_id={chat_id} within "
-            f"{_DIRECT_SEND_WINDOW_SECS}s dedup window — skipping outbox write"
-        )
-        return [TextContent(type="text", text="Reply suppressed: duplicate content detected within dedup window (not re-sent to user)")]
 
     # Atomic write: temp file + fsync + rename to prevent watchdog race condition
     atomic_write_json(outbox_file, reply_data)
@@ -7612,10 +7342,7 @@ async def handle_write_result(args: dict) -> list[TextContent]:
     task_id = args.get("task_id", "").strip()
     chat_id = args.get("chat_id")
     text = args.get("text", "").strip()
-    # reply_text: optional user-facing text. When present, dispatcher relays this
-    # instead of `text`, keeping `text` as dispatcher-only internal summary.
-    reply_text_raw = args.get("reply_text")
-    reply_text = reply_text_raw.strip() if isinstance(reply_text_raw, str) else None
+    reply_text = (args.get("reply_text") or "").strip() or None
     source = args.get("source", "telegram").strip() or "telegram"
     status = args.get("status", "success")
     artifacts = args.get("artifacts") or []
@@ -7688,14 +7415,13 @@ async def handle_write_result(args: dict) -> list[TextContent]:
         "sent_reply_to_user": bool(sent_reply_to_user),
         "timestamp": now.isoformat(),
     }
-    # reply_text: user-facing text separate from the dispatcher summary.
-    # When present and sent_reply_to_user is False, the dispatcher relays reply_text
-    # instead of text, keeping `text` as dispatcher-only internal context.
-    # chat_id 0 is dispatcher-internal; no user relay path exists, so suppress.
-    if reply_text and not sent_reply_to_user and chat_id not in (0, "0"):
-        message["reply_text"] = reply_text
     if msg_type == "subagent_notification":
         message["warning"] = "User already received the subagent's reply. Don't summarize it. If you respond, add new value only — a question, a correction, missing context."
+    # reply_text: user-facing reply separate from the internal dispatcher summary (text).
+    # Only stored when there is an active user relay path: sent_reply_to_user=False and
+    # chat_id not in (0, "0") (chat_id 0 is dispatcher-internal; no user reply is ever sent).
+    if reply_text and not sent_reply_to_user and chat_id not in (0, "0"):
+        message["reply_text"] = reply_text
     if artifacts:
         message["artifacts"] = artifacts
     if thread_ts:
@@ -8770,212 +8496,6 @@ async def handle_memory_recent(arguments: dict[str, Any]) -> list[TextContent]:
         return [TextContent(type="text", text=f"Error getting recent events: {e}")]
 
 
-# Required fields for a valid decision entry.
-_DECISION_REQUIRED_FIELDS = frozenset({"key", "title", "decision", "rationale", "date"})
-
-# Memory type tag used to identify decision events.
-_DECISION_TYPE = "decision"
-
-
-def _build_decision_content(
-    key: str,
-    title: str,
-    decision: str,
-    rationale: str,
-    date: str,
-    affected_areas: list[str],
-    supersedes: str | None,
-) -> str:
-    """Build the canonical content string for a decision memory event.
-
-    Encoding all structured fields into a plain-text format ensures decisions
-    are fully searchable via FTS5/vector search without needing schema changes.
-    The format is designed for human readability and machine parseability.
-    """
-    lines = [
-        f"[DECISION] key={key}",
-        f"Title: {title}",
-        f"Decision: {decision}",
-        f"Rationale: {rationale}",
-        f"Date: {date}",
-    ]
-    if affected_areas:
-        lines.append(f"Affected areas: {', '.join(affected_areas)}")
-    if supersedes:
-        lines.append(f"Supersedes: {supersedes}")
-    return "\n".join(lines)
-
-
-async def handle_write_decision(arguments: dict[str, Any]) -> list[TextContent]:
-    """Store an architectural decision in memory.
-
-    Decisions are stored as type='decision' memory events. Each decision carries
-    a stable key for supersession tracking. When a decision supersedes a prior one,
-    the prior event's metadata is updated with a superseded_by marker.
-    """
-    if _memory_provider is None:
-        return [TextContent(type="text", text="Memory system is not available.")]
-
-    # Validate required fields
-    missing = _DECISION_REQUIRED_FIELDS - arguments.keys()
-    if missing:
-        return [TextContent(
-            type="text",
-            text=f"Error: missing required fields: {', '.join(sorted(missing))}"
-        )]
-
-    key = arguments["key"].strip()
-    title = arguments["title"].strip()
-    decision_text = arguments["decision"].strip()
-    rationale = arguments["rationale"].strip()
-    date = arguments["date"].strip()
-    affected_areas = arguments.get("affected_areas", [])
-    supersedes_key = arguments.get("supersedes")
-    extra_tags = arguments.get("tags", [])
-
-    if not key:
-        return [TextContent(type="text", text="Error: key must not be empty.")]
-
-    # Build content and metadata
-    content = _build_decision_content(
-        key=key,
-        title=title,
-        decision=decision_text,
-        rationale=rationale,
-        date=date,
-        affected_areas=affected_areas,
-        supersedes=supersedes_key,
-    )
-
-    tags = ["architecture", "decision"] + extra_tags
-    metadata: dict[str, Any] = {
-        "tags": tags,
-        "decision_key": key,
-        "decision_title": title,
-        "decision_date": date,
-        "decision_affected_areas": affected_areas,
-    }
-    if supersedes_key:
-        metadata["supersedes"] = supersedes_key
-
-    event = MemoryEvent(
-        id=None,
-        timestamp=datetime.now(timezone.utc),
-        type=_DECISION_TYPE,
-        source="internal",
-        project=None,
-        content=content,
-        metadata=metadata,
-    )
-
-    try:
-        event_id = _memory_provider.store(event)
-    except Exception as e:
-        log.error(f"write_decision failed: {e}", exc_info=True)
-        return [TextContent(type="text", text=f"Error storing decision: {e}")]
-
-    # If this supersedes a prior decision, mark the prior one as superseded.
-    # We do this by searching for existing decisions with the superseded key and
-    # updating their metadata — this is best-effort since we can't mutate DB rows
-    # directly, so we store a supersession note as a follow-up event marker.
-    supersession_note = ""
-    if supersedes_key:
-        supersession_note = f" Supersedes prior decision '{supersedes_key}'."
-
-    return [TextContent(
-        type="text",
-        text=(
-            f"Decision stored as memory event #{event_id} "
-            f"(key={key}, type=decision).{supersession_note}\n"
-            f"Use list_decisions() to see all active decisions."
-        )
-    )]
-
-
-async def handle_list_decisions(arguments: dict[str, Any]) -> list[TextContent]:
-    """List architectural decisions from memory.
-
-    Retrieves all memory events with type='decision' and formats them for
-    review. The active_only flag (default True) filters out superseded decisions.
-    The area filter narrows to decisions affecting a specific system area.
-    """
-    if _memory_provider is None:
-        return [TextContent(type="text", text="Memory system is not available.")]
-
-    active_only = arguments.get("active_only", True)
-    area_filter = arguments.get("area", "").strip().lower()
-
-    try:
-        # Use search to find all decision-type events.
-        # We search for the canonical marker string that all decisions include.
-        results = _memory_provider.search("[DECISION]", limit=100)
-        if len(results) >= 100:
-            log.warning("list_decisions: hit limit=100 — some decisions may be truncated. Consider raising limit.")
-        # Filter to only decision-type events (search may return near-matches)
-        decisions = [e for e in results if e.type == _DECISION_TYPE]
-    except Exception as e:
-        log.error(f"list_decisions failed during search: {e}", exc_info=True)
-        return [TextContent(type="text", text=f"Error listing decisions: {e}")]
-
-    if not decisions:
-        return [TextContent(type="text", text="No architectural decisions found in memory.")]
-
-    # Collect superseded keys from metadata to support active_only filtering.
-    # A decision is superseded if any other decision's metadata lists it in 'supersedes'.
-    superseded_keys: set[str] = set()
-    for event in decisions:
-        prior_key = event.metadata.get("supersedes")
-        if prior_key:
-            superseded_keys.add(prior_key)
-
-    # Apply filters as pure transformations (immutable pipeline)
-    filtered = decisions
-    if active_only:
-        filtered = [
-            e for e in filtered
-            if e.metadata.get("decision_key", "") not in superseded_keys
-        ]
-    if area_filter:
-        filtered = [
-            e for e in filtered
-            if area_filter in " ".join(
-                str(a).lower() for a in e.metadata.get("decision_affected_areas", [])
-            )
-            or area_filter in e.content.lower()
-        ]
-
-    if not filtered:
-        qualifier = "active " if active_only else ""
-        area_note = f" for area '{area_filter}'" if area_filter else ""
-        return [TextContent(
-            type="text",
-            text=f"No {qualifier}architectural decisions found{area_note}."
-        )]
-
-    lines = [
-        f"**Architectural Decisions** ({len(filtered)} {'active' if active_only else 'total'}):\n"
-    ]
-    for event in filtered:
-        ts = _format_display_ts(event.timestamp, "%Y-%m-%d") if event.timestamp else "?"
-        key = event.metadata.get("decision_key", "?")
-        title = event.metadata.get("decision_title", "")
-        superseded = "[SUPERSEDED] " if key in superseded_keys else ""
-
-        lines.append(f"### {superseded}{key} ({ts})")
-        if title:
-            lines.append(f"**{title}**")
-
-        # Display the full content (minus the [DECISION] header line)
-        content_lines = [
-            ln for ln in event.content.splitlines()
-            if not ln.startswith("[DECISION] key=")
-        ]
-        lines.append("\n".join(content_lines))
-        lines.append("")
-
-    return [TextContent(type="text", text="\n".join(lines))]
-
-
 async def handle_get_handoff(arguments: dict[str, Any]) -> list[TextContent]:
     """Read and return the current handoff document."""
     try:
@@ -9585,21 +9105,6 @@ async def handle_get_skill_context(args: dict) -> list[TextContent]:
         return [TextContent(type="text", text=f"Error: {e}")]
 
 
-async def handle_get_skill_context_for_message(args: dict) -> list[TextContent]:
-    """Return assembled context from active skills, including contextual skill matching."""
-    message_text = args.get("message_text", "").strip()
-    if not message_text:
-        return [TextContent(type="text", text="Error: message_text is required.")]
-    try:
-        context = _get_skill_context_for_message(message_text)
-        if not context:
-            return [TextContent(type="text", text="No active skills.")]
-        return [TextContent(type="text", text=context)]
-    except Exception as e:
-        log.error(f"get_skill_context_for_message failed: {e}", exc_info=True)
-        return [TextContent(type="text", text=f"Error: {e}")]
-
-
 async def handle_list_skills(args: dict) -> list[TextContent]:
     """List available skills with install/active status."""
     try:
@@ -10150,13 +9655,6 @@ def _inbox_already_has_agent(agent_id: str) -> bool:
     return False
 
 
-# Sessions that completed more than this many minutes before the MCP server
-# started are "stale" — the dispatcher that requested them is gone, and
-# injecting them would flood the inbox at startup (issue #1355).
-# These sessions are silently marked as notified rather than queued.
-_STARTUP_SWEEP_STALE_MINUTES = 10
-
-
 async def _startup_sweep() -> None:
     """Send missed notifications for sessions that completed while server was down.
 
@@ -10171,18 +9669,7 @@ async def _startup_sweep() -> None:
 
     An additional idempotency guard checks whether an inbox file for the agent
     already exists (handles the crash-after-write-before-set_notified race).
-
-    Staleness filter (issue #1355): sessions that completed more than
-    _STARTUP_SWEEP_STALE_MINUTES minutes before the server started are silently
-    marked as notified without being injected into the inbox. This prevents the
-    inbox from being flooded with stale completion notices at startup — which
-    would block real user messages for several WFM cycles.
     """
-    from datetime import timedelta
-
-    # _SERVER_START_TIME is recorded at module import time (~line 899).
-    stale_cutoff = _SERVER_START_TIME - timedelta(minutes=_STARTUP_SWEEP_STALE_MINUTES)
-
     try:
         unnotified = _session_store.get_unnotified_completed(since_hours=24)
         if unnotified:
@@ -10190,30 +9677,8 @@ async def _startup_sweep() -> None:
                 f"[reconciler] Startup sweep: found {len(unnotified)} unnotified "
                 f"completed/dead session(s) — re-enqueuing notifications"
             )
-        stale_count = 0
         for session in unnotified:
             agent_id = session.get("id", "")
-
-            # Staleness check: sessions that finished long before the server
-            # started are stale artifacts — silently acknowledge them.
-            completed_at_str = session.get("completed_at") or session.get("stopped_at")
-            if completed_at_str:
-                try:
-                    completed_at = datetime.fromisoformat(
-                        completed_at_str.replace("Z", "+00:00")
-                    )
-                    if completed_at < stale_cutoff:
-                        _session_store.set_notified(agent_id)
-                        stale_count += 1
-                        log.debug(
-                            "[reconciler] Startup sweep: skipping stale session %r "
-                            "(completed_at=%s, stale_cutoff=%s)",
-                            agent_id, completed_at_str, stale_cutoff.isoformat(),
-                        )
-                        continue
-                except (ValueError, TypeError):
-                    pass  # Unparseable timestamp — fall through to normal handling
-
             if _inbox_already_has_agent(agent_id):
                 log.debug(
                     "[reconciler] Startup sweep: inbox file already exists for "
@@ -10223,12 +9688,6 @@ async def _startup_sweep() -> None:
                 continue
             outcome = session.get("status", "completed")
             _enqueue_reconciler_notification(session, outcome=outcome)
-
-        if stale_count:
-            log.info(
-                f"[reconciler] Startup sweep: silently acknowledged {stale_count} "
-                f"stale session(s) (completed >{_STARTUP_SWEEP_STALE_MINUTES}min before server start)"
-            )
     except Exception as exc:
         log.error(f"[reconciler] Startup sweep error: {exc}", exc_info=True)
 

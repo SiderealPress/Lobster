@@ -5,6 +5,9 @@ Tests check_inbox, send_reply, mark_processed, list_sources, get_stats
 """
 
 import json
+import os
+
+ADMIN_CHAT_ID_REDACTED: int = int(os.environ.get("LOBSTER_ADMIN_CHAT_ID", "1234567890"))
 import sys
 import pytest
 from pathlib import Path
@@ -840,7 +843,7 @@ class TestMarkProcessed:
         outbox = inbox_server_dirs["outbox"]
 
         # Use a real (large) chat_id that previously triggered the fallback
-        REAL_CHAT_ID = 8305714125
+        REAL_CHAT_ID = ADMIN_CHAT_ID_REDACTED
         msg = message_generator.generate_text_message(
             source="telegram", chat_id=REAL_CHAT_ID,
         )
@@ -882,7 +885,7 @@ class TestMarkProcessed:
         inbox, processed = setup_dirs
         outbox = inbox_server_dirs["outbox"]
 
-        REAL_CHAT_ID = 8305714125
+        REAL_CHAT_ID = ADMIN_CHAT_ID_REDACTED
         msg = message_generator.generate_text_message(
             source="telegram", chat_id=REAL_CHAT_ID,
         )
@@ -913,7 +916,7 @@ class TestMarkProcessed:
         inbox, processed = setup_dirs
         outbox = inbox_server_dirs["outbox"]
 
-        REAL_CHAT_ID = 8305714125
+        REAL_CHAT_ID = ADMIN_CHAT_ID_REDACTED
         msg = message_generator.generate_text_message(
             source="telegram", chat_id=REAL_CHAT_ID,
         )
