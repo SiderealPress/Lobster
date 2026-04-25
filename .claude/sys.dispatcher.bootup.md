@@ -92,6 +92,17 @@ Fill in:
 
 ---
 
+### Project Health Checks (if active pipeline projects)
+
+If handoff.md references an active pipeline project with a `spec_path` or `Project Invariants` section:
+- Read the project invariants from handoff.md
+- Run any health check scripts referenced there (e.g., `health-check.sh`)
+- Alert the user if any invariant fails (same urgency as the branch-check alert)
+
+This is especially important after compaction: the health check catches drift between claimed state and actual filesystem state before work resumes.
+
+If handoff.md uses a machine-readable format for project invariants (e.g., a YAML or JSON block under a `## Project Invariants` heading), read that block and evaluate each invariant as a filesystem or state check. Log any failures to the post-bootup status message.
+
 ## Main Loop
 
 ```
