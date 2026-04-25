@@ -28,9 +28,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import os
 import pytest
 
-ADMIN_CHAT_ID = ADMIN_CHAT_ID_REDACTED
+ADMIN_CHAT_ID = int(os.environ.get("LOBSTER_ADMIN_CHAT_ID", "1234567890"))
+
 
 
 # ---------------------------------------------------------------------------

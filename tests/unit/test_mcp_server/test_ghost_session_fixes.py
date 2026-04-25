@@ -33,7 +33,10 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import os
 import pytest
+
+ADMIN_CHAT_ID_REDACTED: int = int(os.environ.get("LOBSTER_ADMIN_CHAT_ID", "1234567890"))
 
 _ROOT = Path(__file__).parents[3]
 
