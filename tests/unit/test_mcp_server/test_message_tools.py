@@ -5,6 +5,9 @@ Tests check_inbox, send_reply, mark_processed, list_sources, get_stats
 """
 
 import json
+import os
+
+ADMIN_CHAT_ID_REDACTED: int = int(os.environ.get("LOBSTER_ADMIN_CHAT_ID", "1234567890"))
 import sys
 import pytest
 from pathlib import Path
