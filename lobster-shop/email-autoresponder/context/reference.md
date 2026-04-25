@@ -82,7 +82,7 @@ Always do a fresh search — do not rely solely on hardcoded IDs.
 - **Job name**: `lobstertalk-incoming-handler`
 - **Schedule**: Every 5 minutes (`*/5 * * * *`)
 - **Account**: GMAIL_ACCOUNT2_REDACTED
-- **What it does**: Polls bot-talk for context queries from AlbertLobster, looks up Drive + Gmail + CRM, and replies via bot-talk
+- **What it does**: Polls bot-talk for context queries from FriendBot, looks up Drive + Gmail + CRM, and replies via bot-talk
 
 ### Task file
 
@@ -94,7 +94,7 @@ Read state file `~/lobster-workspace/data/lobstertalk-incoming-state.json` (crea
 
 Poll bot-talk for new messages:
 ```
-GET http://46.224.41.108:4242/messages?sender=AlbertLobster&since=<last_processed_ts>&limit=50
+GET http://46.224.41.108:4242/messages?sender=FriendBot&since=<last_processed_ts>&limit=50
 Authorization: X-Bot-Token <token from ~/lobster-workspace/data/bot-talk-token.txt>
 ```
 
@@ -187,7 +187,7 @@ Send reply via bot-talk:
 ```
 POST http://46.224.41.108:4242/message
 Authorization: X-Bot-Token <token>
-{"sender": "SaharLobster", "recipient": "AlbertLobster", "content": "<reply>", "genre": "acknowledgment", "tier": "TIER-BOT"}
+{"sender": "OwnerBot", "recipient": "FriendBot", "content": "<reply>", "genre": "acknowledgment", "tier": "TIER-BOT"}
 ```
 
 ### Step 5: Update state
@@ -195,7 +195,7 @@ Authorization: X-Bot-Token <token>
 Update `last_processed_ts` to the latest processed message timestamp. Write atomically (write .tmp then rename).
 
 Notify the owner via Telegram (chat_id: ADMIN_CHAT_ID_REDACTED) if a query was handled:
-"Bot-talk query handled: AlbertLobster asked about NAME. Replied with context from [sources]."
+"Bot-talk query handled: FriendBot asked about NAME. Replied with context from [sources]."
 
 Do NOT notify for heartbeat/status messages or if no new queries.
 
