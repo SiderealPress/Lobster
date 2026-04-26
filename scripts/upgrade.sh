@@ -2816,6 +2816,50 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
         warn "Claude settings not found at $CLAUDE_SETTINGS or jq missing — skipping Migration 81"
     fi
 
+    # Migration 82: Update catchup-gate.py PreToolUse hook to direct Python invocation.
+    # The old entry used a flag-file guard: `test ! -f .../catchup-pending || python3 ...`
+    # Option B (issue #1751) queries agent_sessions.db directly — no flag file needed.
+    # This migration replaces the old flag-file-guarded command with a direct call so the
+    # hook runs on every tool invocation and performs the DB check itself (fast, fail-open).
+    if [ -f "$CLAUDE_SETTINGS" ] && command -v jq >/dev/null 2>&1; then
+        local _m82_hook_path="$LOBSTER_DIR/hooks/catchup-gate.py"
+        if [ -f "$_m82_hook_path" ]; then
+            chmod +x "$_m82_hook_path" 2>/dev/null || true
+            local _m82_new_cmd="python3 $LOBSTER_DIR/hooks/catchup-gate.py"
+            # Check whether the old flag-file-guarded entry is still present
+            local _m82_old_present
+            _m82_old_present=$(jq -r '
+                [.hooks.PreToolUse[]?.hooks[]?.command // empty]
+                | map(select(contains("catchup-pending")))
+                | length
+            ' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
+            if [ "${_m82_old_present:-0}" != "0" ] && [ "${_m82_old_present:-0}" != "" ]; then
+                TMP_SETTINGS=$(mktemp)
+                # Replace the flag-file-guarded command with direct Python invocation.
+                jq --arg old_pattern "catchup-pending" \
+                   --arg new_cmd "$_m82_new_cmd" \
+                   '.hooks.PreToolUse = [
+                       .hooks.PreToolUse[]
+                       | .hooks = [
+                           .hooks[]
+                           | if (.command // "") | contains($old_pattern)
+                             then .command = $new_cmd
+                             else .
+                             end
+                         ]
+                   ]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+                substep "Updated catchup-gate.py hook: removed flag-file guard, now calls Python directly"
+                migrated=$((migrated + 1))
+            else
+                substep "catchup-gate.py hook already uses direct invocation — skipping Migration 82"
+            fi
+        else
+            warn "catchup-gate.py not found at $_m82_hook_path — skipping Migration 82"
+        fi
+    else
+        warn "Claude settings not found at $CLAUDE_SETTINGS or jq missing — skipping Migration 82"
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
