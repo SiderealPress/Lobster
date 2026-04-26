@@ -247,9 +247,20 @@ class UpdateManager:
             self._git("pull", "origin", "main", "--ff-only")
             new_sha = self._git("rev-parse", "HEAD").strip()
 
-            if os.path.exists(self.repo_path / "requirements.txt"):
+            # Sync dependencies using uv (preferred) or fall back to pip.
+            # uv sync keeps the lockfile-pinned environment consistent; pip
+            # install is a best-effort fallback for non-uv installs.
+            pyproject = self.repo_path / "pyproject.toml"
+            requirements = self.repo_path / "requirements.txt"
+            if pyproject.exists():
                 subprocess.run(
-                    ["pip", "install", "-r", "requirements.txt", "--quiet"],
+                    ["uv", "sync", "--frozen", "--no-install-project"],
+                    cwd=self.repo_path,
+                    capture_output=True,
+                )
+            elif requirements.exists():
+                subprocess.run(
+                    ["pip", "install", "-r", str(requirements), "--quiet"],
                     cwd=self.repo_path,
                     capture_output=True,
                 )
