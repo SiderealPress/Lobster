@@ -2816,6 +2816,37 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
         warn "Claude settings not found at $CLAUDE_SETTINGS or jq missing — skipping Migration 81"
     fi
 
+    # Migration 82: Register prune-pr-worktrees MCP scheduled job (issue #1626).
+    # prune-pr-worktrees.py checks each git worktree under ~/lobster-workspace/projects/
+    # for a merged or closed PR and removes worktrees that are at least 7 days old.
+    # Runs daily at 03:00 UTC via a systemd timer managed by the MCP job infrastructure.
+    local _m82_script="$LOBSTER_DIR/scripts/prune-pr-worktrees.py"
+    local _m82_timer="lobster-prune-pr-worktrees.timer"
+    local _m82_cmd="$VENV_DIR/bin/python $LOBSTER_DIR/scripts/prune-pr-worktrees.py --age-days 7"
+    if [ -f "$_m82_script" ] && command -v uv &>/dev/null; then
+        if systemctl is-enabled "$_m82_timer" &>/dev/null; then
+            substep "prune-pr-worktrees systemd timer already enabled — skipping Migration 82"
+        else
+            uv run --project "$LOBSTER_DIR" python -c "
+import asyncio, sys
+sys.path.insert(0, '$LOBSTER_DIR/src')
+from mcp.systemd_jobs import create_job
+result = asyncio.run(create_job(
+    name='prune-pr-worktrees',
+    schedule='*-*-* 03:00:00',
+    command='$_m82_cmd',
+    description='Daily removal of stale PR git worktrees (merged/closed, age >= 7d)',
+))
+print(f'prune-pr-worktrees: {result.status}')
+" 2>/dev/null && {
+                substep "Registered prune-pr-worktrees systemd timer (daily at 03:00 UTC)"
+                migrated=$((migrated + 1))
+            } || warn "Could not register prune-pr-worktrees — try: uv run python -c \"import asyncio; from src.mcp.systemd_jobs import create_job; ...\""
+        fi
+    else
+        warn "prune-pr-worktrees.py not found at $_m82_script or uv unavailable — skipping Migration 82"
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
