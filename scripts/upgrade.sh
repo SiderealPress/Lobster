@@ -2816,16 +2816,60 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
         warn "Claude settings not found at $CLAUDE_SETTINGS or jq missing — skipping Migration 81"
     fi
 
-    # Migration 82: Register prune-pr-worktrees MCP scheduled job (issue #1626).
+    # Migration 82: Update catchup-gate.py PreToolUse hook to direct Python invocation.
+    # The old entry used a flag-file guard: `test ! -f .../catchup-pending || python3 ...`
+    # Option B (issue #1751) queries agent_sessions.db directly — no flag file needed.
+    # This migration replaces the old flag-file-guarded command with a direct call so the
+    # hook runs on every tool invocation and performs the DB check itself (fast, fail-open).
+    if [ -f "$CLAUDE_SETTINGS" ] && command -v jq >/dev/null 2>&1; then
+        local _m82_hook_path="$LOBSTER_DIR/hooks/catchup-gate.py"
+        if [ -f "$_m82_hook_path" ]; then
+            chmod +x "$_m82_hook_path" 2>/dev/null || true
+            local _m82_new_cmd="python3 $LOBSTER_DIR/hooks/catchup-gate.py"
+            # Check whether the old flag-file-guarded entry is still present
+            local _m82_old_present
+            _m82_old_present=$(jq -r '
+                [.hooks.PreToolUse[]?.hooks[]?.command // empty]
+                | map(select(contains("catchup-pending")))
+                | length
+            ' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
+            if [ "${_m82_old_present:-0}" != "0" ] && [ "${_m82_old_present:-0}" != "" ]; then
+                TMP_SETTINGS=$(mktemp)
+                # Replace the flag-file-guarded command with direct Python invocation.
+                jq --arg old_pattern "catchup-pending" \
+                   --arg new_cmd "$_m82_new_cmd" \
+                   '.hooks.PreToolUse = [
+                       .hooks.PreToolUse[]
+                       | .hooks = [
+                           .hooks[]
+                           | if (.command // "") | contains($old_pattern)
+                             then .command = $new_cmd
+                             else .
+                             end
+                         ]
+                   ]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+                substep "Updated catchup-gate.py hook: removed flag-file guard, now calls Python directly"
+                migrated=$((migrated + 1))
+            else
+                substep "catchup-gate.py hook already uses direct invocation — skipping Migration 82"
+            fi
+        else
+            warn "catchup-gate.py not found at $_m82_hook_path — skipping Migration 82"
+        fi
+    else
+        warn "Claude settings not found at $CLAUDE_SETTINGS or jq missing — skipping Migration 82"
+    fi
+
+    # Migration 83: Register prune-pr-worktrees MCP scheduled job (issue #1626).
     # prune-pr-worktrees.py checks each git worktree under ~/lobster-workspace/projects/
     # for a merged or closed PR and removes worktrees that are at least 7 days old.
     # Runs daily at 03:00 UTC via a systemd timer managed by the MCP job infrastructure.
-    local _m82_script="$LOBSTER_DIR/scripts/prune-pr-worktrees.py"
-    local _m82_timer="lobster-prune-pr-worktrees.timer"
-    local _m82_cmd="$VENV_DIR/bin/python $LOBSTER_DIR/scripts/prune-pr-worktrees.py --age-days 7"
-    if [ -f "$_m82_script" ] && command -v uv &>/dev/null; then
-        if systemctl is-enabled "$_m82_timer" &>/dev/null; then
-            substep "prune-pr-worktrees systemd timer already enabled — skipping Migration 82"
+    local _m83_script="$LOBSTER_DIR/scripts/prune-pr-worktrees.py"
+    local _m83_timer="lobster-prune-pr-worktrees.timer"
+    local _m83_cmd="$VENV_DIR/bin/python $LOBSTER_DIR/scripts/prune-pr-worktrees.py --age-days 7"
+    if [ -f "$_m83_script" ] && command -v uv &>/dev/null; then
+        if systemctl is-enabled "$_m83_timer" &>/dev/null; then
+            substep "prune-pr-worktrees systemd timer already enabled — skipping Migration 83"
         else
             uv run --project "$LOBSTER_DIR" python -c "
 import asyncio, sys
@@ -2834,7 +2878,7 @@ from mcp.systemd_jobs import create_job
 result = asyncio.run(create_job(
     name='prune-pr-worktrees',
     schedule='*-*-* 03:00:00',
-    command='$_m82_cmd',
+    command='$_m83_cmd',
     description='Daily removal of stale PR git worktrees (merged/closed, age >= 7d)',
 ))
 print(f'prune-pr-worktrees: {result.status}')
@@ -2844,7 +2888,7 @@ print(f'prune-pr-worktrees: {result.status}')
             } || warn "Could not register prune-pr-worktrees — try: uv run python -c \"import asyncio; from src.mcp.systemd_jobs import create_job; ...\""
         fi
     else
-        warn "prune-pr-worktrees.py not found at $_m82_script or uv unavailable — skipping Migration 82"
+        warn "prune-pr-worktrees.py not found at $_m83_script or uv unavailable — skipping Migration 83"
     fi
 
     if [ "$migrated" -eq 0 ]; then
