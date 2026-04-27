@@ -1404,6 +1404,38 @@ chmod +x "$INSTALL_DIR/scripts/cleanup-worktrees-audio.sh" || true
 
 success "Worktree + audio cleanup configured (runs daily at 04:00)"
 
+#===============================================================================
+# Prune PR Worktrees (MCP Scheduled Job)
+#===============================================================================
+
+step "Registering prune-pr-worktrees MCP scheduled job..."
+
+# prune-pr-worktrees runs daily at 03:00 UTC via a systemd timer managed by the
+# MCP create_scheduled_job infrastructure. It removes git worktrees for merged or
+# closed PRs that are at least 7 days old, logging results to prune-worktrees.log.
+_PRUNE_CMD="$VENV_DIR/bin/python $INSTALL_DIR/scripts/prune-pr-worktrees.py --age-days 7"
+if command -v uv &>/dev/null && [ -f "$INSTALL_DIR/scripts/prune-pr-worktrees.py" ]; then
+    if systemctl is-enabled "lobster-prune-pr-worktrees.timer" &>/dev/null; then
+        substep "prune-pr-worktrees systemd timer already enabled — skipping"
+    else
+        uv run --project "$INSTALL_DIR" python -c "
+import asyncio, sys
+sys.path.insert(0, '$INSTALL_DIR/src')
+from mcp.systemd_jobs import create_job
+result = asyncio.run(create_job(
+    name='prune-pr-worktrees',
+    schedule='*-*-* 03:00:00',
+    command='$_PRUNE_CMD',
+    description='Daily removal of stale PR git worktrees (merged/closed, age >= 7d)',
+))
+print(f'prune-pr-worktrees: {result.status}')
+" 2>/dev/null && success "prune-pr-worktrees scheduled job registered (daily at 03:00 UTC)" \
+          || warn "Could not register prune-pr-worktrees — run Migration 82 manually after install"
+    fi
+else
+    warn "prune-pr-worktrees.py not found or uv unavailable — skipping job registration"
+fi
+
 # Ensure any lingering self-check cron entry is removed on fresh installs
 { crontab -l 2>/dev/null | grep -v "# LOBSTER-SELF-CHECK" | grep -v "periodic-self-check" || true; } | crontab -
 

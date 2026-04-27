@@ -118,9 +118,22 @@ prune_audio() {
 # Main
 #-------------------------------------------------------------------------------
 
+prune_pr_worktrees() {
+    local script="$LOBSTER_DIR/scripts/prune-pr-worktrees.py"
+    if [ ! -f "$script" ]; then
+        info "prune-pr-worktrees.py not found — skipping"
+        return 0
+    fi
+    info "Pruning stale PR worktrees (merged/closed, ≥7 days old)"
+    uv run "$script" --age-days 7 2>&1 | while IFS= read -r line; do
+        log "  [prune-pr-worktrees] $line"
+    done || warn "prune-pr-worktrees.py exited non-zero"
+}
+
 main() {
     log "=== cleanup-worktrees-audio.sh starting ==="
     prune_worktrees
+    prune_pr_worktrees
     prune_audio
     log "=== cleanup-worktrees-audio.sh complete ==="
 }
