@@ -1775,6 +1775,29 @@ else
     info "Skipping post-compact-gate hook (settings.json not yet created)"
 fi
 
+# Set up Claude Code PreToolUse hook to gate tool calls while compact-catchup is in-flight.
+# Option B: queries agent_sessions.db directly — no flag file needed.
+chmod +x "$INSTALL_DIR/hooks/catchup-gate.py" || true
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '.hooks.PreToolUse[]? | select(.hooks[]?.command | test("catchup-gate"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq --arg cmd "python3 $INSTALL_DIR/hooks/catchup-gate.py" \
+           '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+            "matcher": "",
+            "hooks": [{
+                "type": "command",
+                "command": $cmd,
+                "timeout": 5
+            }]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "catchup-gate hook installed"
+    else
+        info "catchup-gate hook already configured in Claude Code settings"
+    fi
+else
+    info "Skipping catchup-gate hook (settings.json not yet created)"
+fi
+
 # Set up Claude Code PreToolUse hook to warn when outgoing messages contain secrets
 chmod +x "$INSTALL_DIR/hooks/secret-scanner.py" || true
 if [ -f "$CLAUDE_SETTINGS" ]; then
