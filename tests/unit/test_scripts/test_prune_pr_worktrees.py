@@ -135,6 +135,12 @@ class TestTimeoutDoesNotAbortScan:
         timeouts from true 'no PR found' cases.
         Spec: issue #1826 — a timeout log entry must appear in the log, not just
         a silent 'no PR' skip.
+
+        This test exercises the real run() implementation so that the [TIMEOUT]
+        log line emitted inside run() is genuinely produced, not asserted against
+        dead air from a fully-patched run().  subprocess.Popen is mocked at the
+        boundary: git commands succeed normally; the gh pr list call raises
+        TimeoutExpired to simulate a real subprocess timeout.
         """
         dir_a = _fake_worktree_dir(tmp_path, "timeout-dir")
 
@@ -142,31 +148,46 @@ class TestTimeoutDoesNotAbortScan:
         old_mtime = time.time() - (8 * 86400)
         os.utime(str(dir_a), (old_mtime, old_mtime))
 
-        def fake_run(cmd, cwd=None, timeout=30):
+        def make_popen_mock(cmd, **kwargs):
+            """Return a mock Popen object whose communicate() behaviour depends on cmd."""
+            mock_proc = MagicMock()
+            mock_proc.returncode = 0
             cmd_str = " ".join(str(c) for c in cmd)
             if "branch" in cmd_str and "--show-current" in cmd_str:
-                return 0, "feat/test-branch", ""
-            if "remote" in cmd_str and "get-url" in cmd_str:
-                return 0, "https://github.com/owner/repo.git", ""
-            if "gh" in cmd_str and "pr" in cmd_str:
-                return 1, "", "timeout"
-            return 0, "", ""
+                mock_proc.communicate.return_value = ("feat/test-branch\n", "")
+            elif "remote" in cmd_str and "get-url" in cmd_str:
+                mock_proc.communicate.return_value = ("https://github.com/owner/repo.git\n", "")
+            elif "gh" in cmd_str and "pr" in cmd_str:
+                # Simulate a real subprocess timeout on gh pr list
+                mock_proc.communicate.side_effect = subprocess.TimeoutExpired(
+                    cmd=cmd, timeout=30
+                )
+                # Second communicate() call (after kill) must succeed to reap the process
+                mock_proc.communicate.side_effect = [
+                    subprocess.TimeoutExpired(cmd=cmd, timeout=30),
+                    ("", ""),
+                ]
+            else:
+                mock_proc.communicate.return_value = ("", "")
+            return mock_proc
 
         log_messages = []
 
         def fake_log(msg: str) -> None:
             log_messages.append(msg)
 
-        with patch.object(mod, "run", side_effect=fake_run), \
+        with patch("subprocess.Popen", side_effect=make_popen_mock), \
              patch.object(mod, "log", side_effect=fake_log), \
              patch.object(mod, "DEFAULT_PROJECTS_DIR", tmp_path):
             with patch("sys.argv", ["prune-pr-worktrees.py", "--dry-run", "--projects-dir", str(tmp_path)]):
                 mod.main()
 
-        # Must see a timeout-related log entry for this directory
-        timeout_lines = [m for m in log_messages if "timeout" in m.lower() or "TIMEOUT" in m]
+        # The [TIMEOUT] line must have been emitted by the real run() implementation,
+        # confirming the timeout code path was genuinely exercised — not mocked away.
+        timeout_lines = [m for m in log_messages if "[TIMEOUT]" in m]
         assert len(timeout_lines) >= 1, (
-            "Expected at least one timeout log entry when gh pr list returns timeout sentinel"
+            "Expected at least one [TIMEOUT] log entry emitted by run() "
+            "when subprocess raises TimeoutExpired on gh pr list"
         )
 
 
