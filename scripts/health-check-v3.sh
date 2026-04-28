@@ -115,7 +115,7 @@ OUTBOX_YELLOW_THRESHOLD_SECONDS=300  # 5 min = YELLOW
 OUTBOX_HISTORICAL_CUTOFF=3600        # Skip files > 1 hour (dead-letter candidates)
 
 LOG_FILE="$WORKSPACE_DIR/logs/health-check.log"
-LOCK_FILE="${LOBSTER_HEALTH_LOCK:-/tmp/lobster-health-check-v3.lock}"
+LOCK_FILE="${LOBSTER_HEALTH_LOCK:-$WORKSPACE_DIR/logs/health-check-v3.lock}"
 
 MAX_RESTART_ATTEMPTS=3
 RESTART_COOLDOWN_SECONDS=600         # 10 min window for counting attempts
@@ -161,6 +161,7 @@ LOBSTER_ENV="${LOBSTER_ENV:-production}"
 mkdir -p "$(dirname "$LOG_FILE")"
 mkdir -p "$(dirname "$RESTART_STATE_FILE")"
 mkdir -p "$ALERT_DEDUP_DIR"
+mkdir -p "$(dirname "$LOCK_FILE")"
 
 # Dry-run gate: skip all real actions when LOBSTER_HEALTH_CHECK_DRY_RUN=1.
 # Used by tests to exercise parsing/reading logic without executing systemctl,
