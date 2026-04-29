@@ -180,13 +180,14 @@ def get_conversation_history(
     sender_type: str | None = None,
     limit: int = 20,
     offset: int = 0,
+    since_ts: str | None = None,
 ) -> list[Row]:
     """
     Fetch conversation history from the messages table.
 
     Applies optional filters for chat_id, source, full-text search,
-    direction (received/sent/all), and sender_type.  Results are ordered
-    newest-first.
+    direction (received/sent/all), sender_type, and since_ts.  Results are
+    ordered newest-first.
 
     Args:
         conn:        Open sqlite3.Connection.
@@ -201,6 +202,11 @@ def get_conversation_history(
                      None / omitted — all messages (current default behaviour)
         limit:       Maximum number of rows to return.
         offset:      Rows to skip for pagination.
+        since_ts:    ISO 8601 UTC timestamp string (e.g. '2026-01-01T12:00:00Z').
+                     When provided, only messages with timestamp >= since_ts are
+                     returned.  This prevents high-volume sessions from pushing
+                     earlier replies off the page when a fixed LIMIT is applied.
+                     Accepts the same formats as check_inbox since_ts.
 
     Returns:
         List of plain dicts with all message columns plus '_direction'.
@@ -232,6 +238,19 @@ def get_conversation_history(
     if source:
         conditions.append("LOWER(source) = LOWER(?)")
         params.append(source)
+
+    # since_ts filter — exclude messages older than the given UTC timestamp.
+    # Stored timestamps are ISO 8601 strings; SQLite lexicographic comparison
+    # works correctly for ISO 8601 when both sides use the same format.
+    # We normalise the caller's since_ts to the bare datetime prefix so that
+    # "2026-01-01T12:00:00Z" compares correctly against stored values like
+    # "2026-01-01T12:00:00.000000" or "2026-01-01T12:00:00+00:00".
+    if since_ts:
+        # Strip trailing Z or +00:00 offset so we compare just the datetime part,
+        # which is always stored as a naive ISO string in messages.db.
+        _since_normalised = since_ts.strip().rstrip("Z").split("+")[0]
+        conditions.append("timestamp >= ?")
+        params.append(_since_normalised)
 
     where_clause = ("WHERE " + " AND ".join(conditions)) if conditions else ""
 
@@ -298,6 +317,7 @@ def count_conversation_history(
     search: str | None = None,
     direction: str = "all",
     sender_type: str | None = None,
+    since_ts: str | None = None,
 ) -> int:
     """
     Return the total number of messages matching the given filters (for pagination).
@@ -306,6 +326,7 @@ def count_conversation_history(
     the row count, avoiding the overhead of fetching full rows.
 
     sender_type: see get_conversation_history for semantics.
+    since_ts: see get_conversation_history for semantics.
     """
     conditions: list[str] = []
     params: list[Any] = []
@@ -327,6 +348,12 @@ def count_conversation_history(
     if source:
         conditions.append("LOWER(source) = LOWER(?)")
         params.append(source)
+
+    # since_ts filter — mirror the same normalisation used in get_conversation_history.
+    if since_ts:
+        _since_normalised = since_ts.strip().rstrip("Z").split("+")[0]
+        conditions.append("timestamp >= ?")
+        params.append(_since_normalised)
 
     if search:
         use_fts = _table_exists(conn, "messages_fts")
