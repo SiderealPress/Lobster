@@ -2491,6 +2491,45 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
         migrated=$((migrated + _m84_patched))
     fi
 
+    # Migration 85: Fix lobster-lobstertalk-unified.service — two bugs left it silently broken
+    # even after Migration 84 added Environment=PATH=:
+    # 1. The shebang #!/usr/bin/env uv run python3 is missing the -S flag that env needs to
+    #    split multi-word interpreter strings. Without -S, env treats "uv run python3" as a
+    #    single binary name and exits 127.
+    # 2. The service file was missing EnvironmentFile directives, so BOT_TALK_URL and other
+    #    runtime secrets were never loaded, causing a RuntimeError on every execution.
+    # This migration patches the shebang in the script and adds EnvironmentFile lines to
+    # the service file, then runs daemon-reload.
+    local _m85_script="${LOBSTER_DIR}/scheduled-tasks/lobstertalk_unified.py"
+    local _m85_svc="/etc/systemd/system/lobster-lobstertalk-unified.service"
+    local _m85_patched=0
+
+    # Fix 1: shebang — replace #!/usr/bin/env uv run python3 with #!/usr/bin/env -S uv run python3
+    if [ -f "$_m85_script" ]; then
+        if head -1 "$_m85_script" | grep -q "^#!/usr/bin/env uv run python3$"; then
+            sed -i '1s|^#!/usr/bin/env uv run python3$|#!/usr/bin/env -S uv run python3|' "$_m85_script"
+            substep "Fixed shebang in lobstertalk_unified.py (added -S flag)"
+            _m85_patched=$((_m85_patched + 1))
+        fi
+    fi
+
+    # Fix 2: EnvironmentFile — add config file directives if missing
+    if [ -f "$_m85_svc" ]; then
+        if ! grep -q "^EnvironmentFile=" "$_m85_svc" 2>/dev/null; then
+            # Insert EnvironmentFile lines before ExecStart=
+            local _m85_env_files="EnvironmentFile=-${HOME}/lobster/config/config.env\nEnvironmentFile=${HOME}/lobster-config/config.env\nEnvironmentFile=-${HOME}/lobster-config/global.env"
+            sudo sed -i "s|^ExecStart=|${_m85_env_files}\nExecStart=|" "$_m85_svc"
+            substep "Added EnvironmentFile directives to lobster-lobstertalk-unified.service"
+            _m85_patched=$((_m85_patched + 1))
+        fi
+    fi
+
+    if [ "$_m85_patched" -gt 0 ]; then
+        sudo systemctl daemon-reload 2>/dev/null || warn "daemon-reload failed — run manually"
+        success "Migration 85: fixed lobstertalk-unified shebang and/or EnvironmentFile (daemon-reload done)"
+        migrated=$((_m85_patched + migrated))
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
