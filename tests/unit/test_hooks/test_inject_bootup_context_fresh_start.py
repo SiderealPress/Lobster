@@ -1,8 +1,7 @@
 """
 Unit tests for the fresh-dispatcher-start fallback in inject-bootup-context.py.
 
-Issue #1868 / regression from PR #1891 deploy (issue #1898):
-On a fresh restart (new process, MCP server restarted),
+Issue #1868: on a fresh restart (new process, MCP server restarted),
 inject-bootup-context.py injects the subagent bootup file instead of the
 dispatcher bootup file.
 
@@ -19,6 +18,8 @@ LOBSTER_MAIN_SESSION=1 → treat as dispatcher. This is safe because:
   which writes the primary file
 - compactions are handled by the existing _is_post_compact_dispatcher()
   sentinel fallback (on-compact.py writes the primary file proactively)
+
+FRESH_START_FILE_ABSENT constant: the primary file path used for override in tests.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -114,20 +115,8 @@ def _make_bootup_files(claude_dir: Path) -> tuple[Path, Path]:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skip(
-    reason=(
-        "Issue #1908 removed _is_fresh_start_dispatcher() from inject-bootup-context.py. "
-        "Dispatcher detection now uses the launcher-written startup flag (PID file). "
-        "These tests are retained for history but are no longer executable."
-    )
-)
 class TestIsFreshStartDispatcher:
-    """Unit tests for the _is_fresh_start_dispatcher() helper in inject-bootup-context.py.
-
-    SKIPPED: _is_fresh_start_dispatcher() was removed in issue #1908. Dispatcher
-    detection now uses the launcher-written startup flag file (PID-based). The
-    UUID/primary-file approach is no longer in use.
-    """
+    """Unit tests for the _is_fresh_start_dispatcher() helper in inject-bootup-context.py."""
 
     def test_returns_true_when_primary_file_absent_and_main_session(
         self, tmp_path, monkeypatch
@@ -140,9 +129,11 @@ class TestIsFreshStartDispatcher:
         # File does NOT exist
 
         mod = _load_inject_hook(home=tmp_path, workspace=tmp_path)
+        # Override to point at our absent path
         import session_role as sr
-
-        with patch.object(sr, "_get_mcp_claude_session_file", return_value=absent_primary):
+        mod.session_role = sr
+        from unittest.mock import patch as _patch
+        with _patch.object(sr, "_get_mcp_claude_session_file", return_value=absent_primary):
             result = mod._is_fresh_start_dispatcher()
 
         assert result is True
@@ -157,7 +148,6 @@ class TestIsFreshStartDispatcher:
 
         mod = _load_inject_hook(home=tmp_path, workspace=tmp_path)
         import session_role as sr
-
         with patch.object(sr, "_get_mcp_claude_session_file", return_value=primary_file):
             result = mod._is_fresh_start_dispatcher()
 
@@ -166,6 +156,9 @@ class TestIsFreshStartDispatcher:
     def test_returns_false_when_main_session_not_set(self, tmp_path, monkeypatch):
         """LOBSTER_MAIN_SESSION not set → not a Lobster-managed session, return False."""
         monkeypatch.delenv("LOBSTER_MAIN_SESSION", raising=False)
+        data_dir = tmp_path / "data"
+        data_dir.mkdir(parents=True)
+        # Primary file absent — but LOBSTER_MAIN_SESSION not set
 
         mod = _load_inject_hook(
             home=tmp_path, workspace=tmp_path, lobster_main_session=None
@@ -177,6 +170,8 @@ class TestIsFreshStartDispatcher:
     def test_returns_false_when_main_session_is_zero(self, tmp_path, monkeypatch):
         """LOBSTER_MAIN_SESSION=0 → return False."""
         monkeypatch.setenv("LOBSTER_MAIN_SESSION", "0")
+        data_dir = tmp_path / "data"
+        data_dir.mkdir(parents=True)
 
         mod = _load_inject_hook(
             home=tmp_path, workspace=tmp_path, lobster_main_session="0"
@@ -191,11 +186,11 @@ class TestIsFreshStartDispatcher:
 
         mod = _load_inject_hook(home=tmp_path, workspace=tmp_path)
 
+        from unittest.mock import MagicMock
         mock_path = MagicMock(spec=Path)
         mock_path.exists.side_effect = OSError("permission denied")
 
         import session_role as sr
-
         with patch.object(sr, "_get_mcp_claude_session_file", return_value=mock_path):
             result = mod._is_fresh_start_dispatcher()
 
@@ -210,13 +205,6 @@ class TestIsFreshStartDispatcher:
 class TestMainFreshStartFallback:
     """main() uses the fresh-start fallback to inject dispatcher bootup on fresh restarts."""
 
-    @pytest.mark.skip(
-        reason=(
-            "Issue #1908 removed _is_fresh_start_dispatcher() and UUID-based detection. "
-            "Dispatcher detection now uses the launcher-written startup flag (PID file). "
-            "This test scenario is no longer applicable."
-        )
-    )
     def test_fresh_start_fallback_injects_dispatcher_bootup(
         self, tmp_path, capsys, monkeypatch
     ):
@@ -386,13 +374,6 @@ class TestMainFreshStartFallback:
         )
         assert "DISPATCHER BOOTUP" not in captured.out
 
-    @pytest.mark.skip(
-        reason=(
-            "Issue #1908 removed UUID-based primary-file detection from inject-bootup-context.py. "
-            "Dispatcher detection now uses the launcher-written startup flag (PID file). "
-            "This test scenario is no longer applicable."
-        )
-    )
     def test_primary_file_match_still_injects_dispatcher_without_fallback(
         self, tmp_path, capsys, monkeypatch
     ):
