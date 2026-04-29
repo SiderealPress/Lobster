@@ -6,9 +6,10 @@
 # exit code 1 (no match) inside a pipeline caused the script to abort
 # silently. Any config.env that lacks LOBSTER_DEV_MODE triggers this.
 #
-# Also covers the same pattern in the other scripts that share the same
+# Also covers the same pattern in all other scripts that share the same
 # dev-mode check: inbox-staleness-warn.sh, daily-update-check.sh,
-# check-agent-outputs.sh, daily-health-check.sh.
+# check-agent-outputs.sh, daily-health-check.sh, periodic-self-check.sh,
+# and scheduled-tasks/dispatch-job.sh.
 #
 # Usage: bash tests/test-post-reminder-pipefail.sh
 #        (run from repo root or any directory)
@@ -27,7 +28,9 @@ PASS=0
 FAIL=0
 TOTAL=0
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Allow callers to override REPO_ROOT via env var so the test can be pointed
+# at an alternative checkout (e.g. main branch) without modifying this file.
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 
 TEST_TMPDIR=$(mktemp -d /tmp/lobster-test-pipefail-XXXXXX)
 cleanup() { rm -rf "$TEST_TMPDIR"; }
@@ -198,7 +201,153 @@ else
     fail "inbox-staleness-warn.sh exits 0 when config.env absent entirely" "exited non-zero"
 fi
 
-# --- Test 5: Verify post-reminder.sh actually writes the inbox file ----------
+# --- Test 5: daily-health-check.sh -------------------------------------------
+#
+# daily-health-check.sh uses `set -o pipefail`. Without the `|| true` fix,
+# the grep|cut pipeline exits 1 when LOBSTER_DEV_MODE is absent, aborting the
+# script immediately before any log file is written.
+#
+# We test two things:
+#   a) LOBSTER_DEV_MODE=true  → exits 0 (suppressed, never reaches checks)
+#   b) LOBSTER_DEV_MODE absent → script proceeds past the guard; we verify by
+#      checking that the log file was created (a sign the script ran)
+echo ""
+echo -e "${BOLD}Scenario: daily-health-check.sh with LOBSTER_DEV_MODE absent${NC}"
+FAKE_WORKSPACE="$TEST_TMPDIR/workspace"
+FAKE_LOG_DIR="$FAKE_WORKSPACE/logs"
+FAKE_MESSAGES_DIR="$FAKE_HOME/messages"
+mkdir -p "$FAKE_LOG_DIR" "$FAKE_MESSAGES_DIR/inbox"
+cat > "$FAKE_CONFIG_DIR/config.env" <<'EOF'
+# Minimal config — LOBSTER_DEV_MODE intentionally absent
+TELEGRAM_BOT_TOKEN=dummy
+EOF
+
+# With LOBSTER_DEV_MODE absent, the script proceeds past the guard and runs checks.
+# It will exit non-zero (many checks fail in this isolated env), but the log file
+# is created only after the guard — proving the pipefail bug did not fire.
+LOG_BEFORE=$(find "$FAKE_LOG_DIR" -name "daily-health-check.log" 2>/dev/null | wc -l)
+env HOME="$FAKE_HOME" LOBSTER_CONFIG_DIR="$FAKE_CONFIG_DIR" \
+    LOBSTER_INSTALL_DIR="$FAKE_HOME/lobster" \
+    LOBSTER_WORKSPACE="$FAKE_WORKSPACE" \
+    LOBSTER_MESSAGES="$FAKE_MESSAGES_DIR" \
+    bash "$REPO_ROOT/scripts/daily-health-check.sh" > /dev/null 2>&1 || true
+LOG_AFTER=$(find "$FAKE_LOG_DIR" -name "daily-health-check.log" 2>/dev/null | wc -l)
+if [ "$LOG_AFTER" -gt "$LOG_BEFORE" ]; then
+    pass "daily-health-check.sh proceeds past guard (log written) with LOBSTER_DEV_MODE absent"
+else
+    fail "daily-health-check.sh proceeds past guard with LOBSTER_DEV_MODE absent" \
+         "no log file created — script may have aborted early due to pipefail bug"
+fi
+
+echo ""
+echo -e "${BOLD}Scenario: daily-health-check.sh with LOBSTER_DEV_MODE=true${NC}"
+cat > "$FAKE_CONFIG_DIR/config.env" <<'EOF'
+LOBSTER_DEV_MODE=true
+EOF
+
+if env HOME="$FAKE_HOME" LOBSTER_CONFIG_DIR="$FAKE_CONFIG_DIR" \
+        LOBSTER_INSTALL_DIR="$FAKE_HOME/lobster" \
+        LOBSTER_WORKSPACE="$FAKE_WORKSPACE" \
+        LOBSTER_MESSAGES="$FAKE_MESSAGES_DIR" \
+        bash "$REPO_ROOT/scripts/daily-health-check.sh" > /dev/null 2>&1; then
+    pass "daily-health-check.sh exits 0 (suppressed) with LOBSTER_DEV_MODE=true"
+else
+    fail "daily-health-check.sh exits 0 (suppressed) with LOBSTER_DEV_MODE=true" "exited non-zero"
+fi
+
+# --- Test 6: periodic-self-check.sh ------------------------------------------
+#
+# periodic-self-check.sh uses `set -e`. It sources agent-status.sh from
+# LOBSTER_INSTALL_DIR/scripts/. We provide a minimal stub that satisfies the
+# source call so the script can run in isolation.
+#
+# Two scenarios:
+#   a) LOBSTER_DEV_MODE=true  → exits 0 immediately (dev suppression)
+#   b) LOBSTER_DEV_MODE absent → script passes the guard; exits 0 because
+#      Guard 2 (no self-check in inbox) and Guard 3 (no pending agents) fire.
+
+FAKE_LOBSTER_INSTALL="$TEST_TMPDIR/fake-lobster-install"
+mkdir -p "$FAKE_LOBSTER_INSTALL/scripts"
+# Minimal agent-status.sh stub: exports the two functions the script expects.
+cat > "$FAKE_LOBSTER_INSTALL/scripts/agent-status.sh" <<'STUB'
+scan_agent_status() { echo ""; }
+scan_completed_tasks() { echo ""; }
+STUB
+
+echo ""
+echo -e "${BOLD}Scenario: periodic-self-check.sh with LOBSTER_DEV_MODE absent${NC}"
+cat > "$FAKE_CONFIG_DIR/config.env" <<'EOF'
+# Minimal config — LOBSTER_DEV_MODE intentionally absent
+TELEGRAM_BOT_TOKEN=dummy
+EOF
+
+# The script exits 0 because Guard 2/3/4/5 all fire cleanly in the test env.
+if env HOME="$FAKE_HOME" LOBSTER_CONFIG_DIR="$FAKE_CONFIG_DIR" \
+        LOBSTER_MESSAGES="$FAKE_MESSAGES_DIR" \
+        LOBSTER_INSTALL_DIR="$FAKE_LOBSTER_INSTALL" \
+        bash "$REPO_ROOT/scripts/periodic-self-check.sh" > /dev/null 2>&1; then
+    pass "periodic-self-check.sh exits 0 with LOBSTER_DEV_MODE absent"
+else
+    fail "periodic-self-check.sh exits 0 with LOBSTER_DEV_MODE absent" "exited non-zero"
+fi
+
+echo ""
+echo -e "${BOLD}Scenario: periodic-self-check.sh with LOBSTER_DEV_MODE=true${NC}"
+cat > "$FAKE_CONFIG_DIR/config.env" <<'EOF'
+LOBSTER_DEV_MODE=true
+EOF
+
+if env HOME="$FAKE_HOME" LOBSTER_CONFIG_DIR="$FAKE_CONFIG_DIR" \
+        LOBSTER_MESSAGES="$FAKE_MESSAGES_DIR" \
+        LOBSTER_INSTALL_DIR="$FAKE_LOBSTER_INSTALL" \
+        bash "$REPO_ROOT/scripts/periodic-self-check.sh" > /dev/null 2>&1; then
+    pass "periodic-self-check.sh exits 0 (suppressed) with LOBSTER_DEV_MODE=true"
+else
+    fail "periodic-self-check.sh exits 0 (suppressed) with LOBSTER_DEV_MODE=true" "exited non-zero"
+fi
+
+# --- Test 7: dispatch-job.sh -------------------------------------------------
+#
+# dispatch-job.sh uses `set -e`. After the dev-mode guard, it checks whether the
+# corresponding systemd timer is enabled; when no such timer exists, it exits 0
+# silently. This gives us a clean exit-0 scenario in the test environment.
+echo ""
+echo -e "${BOLD}Scenario: dispatch-job.sh with LOBSTER_DEV_MODE absent${NC}"
+cat > "$FAKE_CONFIG_DIR/config.env" <<'EOF'
+# Minimal config — LOBSTER_DEV_MODE intentionally absent
+TELEGRAM_BOT_TOKEN=dummy
+EOF
+
+FAKE_JOB_WORKSPACE="$TEST_TMPDIR/workspace-dispatch"
+mkdir -p "$FAKE_JOB_WORKSPACE/scheduled-jobs/logs" "$FAKE_JOB_WORKSPACE/scheduled-jobs/tasks"
+# Pass a job name that has no matching systemd timer → script exits 0 (disabled)
+if env HOME="$FAKE_HOME" LOBSTER_CONFIG_DIR="$FAKE_CONFIG_DIR" \
+        LOBSTER_WORKSPACE="$FAKE_JOB_WORKSPACE" \
+        LOBSTER_MESSAGES="$FAKE_MESSAGES_DIR" \
+        LOBSTER_INSTALL_DIR="$FAKE_HOME/lobster" \
+        bash "$REPO_ROOT/scheduled-tasks/dispatch-job.sh" "lobster-test-nonexistent-job-$$" > /dev/null 2>&1; then
+    pass "dispatch-job.sh exits 0 with LOBSTER_DEV_MODE absent (timer not found)"
+else
+    fail "dispatch-job.sh exits 0 with LOBSTER_DEV_MODE absent (timer not found)" "exited non-zero"
+fi
+
+echo ""
+echo -e "${BOLD}Scenario: dispatch-job.sh with LOBSTER_DEV_MODE=true${NC}"
+cat > "$FAKE_CONFIG_DIR/config.env" <<'EOF'
+LOBSTER_DEV_MODE=true
+EOF
+
+if env HOME="$FAKE_HOME" LOBSTER_CONFIG_DIR="$FAKE_CONFIG_DIR" \
+        LOBSTER_WORKSPACE="$FAKE_JOB_WORKSPACE" \
+        LOBSTER_MESSAGES="$FAKE_MESSAGES_DIR" \
+        LOBSTER_INSTALL_DIR="$FAKE_HOME/lobster" \
+        bash "$REPO_ROOT/scheduled-tasks/dispatch-job.sh" "lobster-test-nonexistent-job-$$" > /dev/null 2>&1; then
+    pass "dispatch-job.sh exits 0 (suppressed) with LOBSTER_DEV_MODE=true"
+else
+    fail "dispatch-job.sh exits 0 (suppressed) with LOBSTER_DEV_MODE=true" "exited non-zero"
+fi
+
+# --- Test 8: Verify post-reminder.sh actually writes the inbox file ----------
 echo ""
 echo -e "${BOLD}Scenario: post-reminder.sh writes inbox file when not suppressed${NC}"
 cat > "$FAKE_CONFIG_DIR/config.env" <<'EOF'
