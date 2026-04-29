@@ -34,7 +34,8 @@ Edit `~/lobster-config/config.staging.env` and fill in:
 ```bash
 cd ~/lobster
 
-# Ensure GITHUB_TOKEN is set in your shell (see GitHub Auth section below)
+# Export GITHUB_TOKEN in your host shell to enable gh CLI inside the container.
+# The container init script automatically wires it into all 4 auth layers.
 export GITHUB_TOKEN=ghp_...
 
 sudo docker compose -f docker/staging/docker-compose.staging.yml up -d
@@ -66,72 +67,53 @@ sudo docker compose -f docker/staging/docker-compose.staging.yml down
 
 ---
 
-## GitHub Auth — IMPORTANT
+## GitHub Auth
 
-### Why `docker-compose` env passthrough is not enough
+### How it works
 
-`docker-compose` injects `GITHUB_TOKEN` into the environment of **PID 1** (the
-entrypoint script). That variable is available in the entrypoint shell but is
-**not propagated to Claude Code subprocesses** — subagents, scheduled tasks, and
-anything Claude Code forks internally will not see it.
+`lobster-container-init.sh` automatically wires `GITHUB_TOKEN` into all 4 auth
+layers at container boot, so `gh` CLI works in every subprocess context —
+systemd services, tmux sessions, and Claude Code subagents.
 
-This causes `gh` CLI commands to fail with authentication errors inside Claude
-Code sessions even though the token appears to be set at the container level.
+| Layer | Location | What it covers |
+|---|---|---|
+| 1 | `/etc/environment` | All processes, all shells, tmux sessions |
+| 2 | `gh auth login` → `~/.config/gh/hosts.yml` | `gh` CLI itself, regardless of env vars |
+| 3 | `~/.bashrc` / `~/.profile` | Interactive and login shell sessions |
+| 4 | `config.env` | Lobster-sourced config at startup |
 
-### The fix: all 4 layers
+All 4 layers are written on every boot and are idempotent — container restarts
+do not accumulate duplicate entries.
 
-Run these commands **inside the running container** after the first start:
+### Setup
 
+Set `GITHUB_TOKEN` in **either** of these places (not both required):
+
+**Option A — host shell (recommended):**
 ```bash
-sudo docker exec -it lobster-staging bash
+export GITHUB_TOKEN=ghp_...
+sudo docker compose -f docker/staging/docker-compose.staging.yml up -d
 ```
 
-Then, inside the container (replace `ghp_...` with your actual token):
-
+**Option B — config.staging.env:**
 ```bash
+# ~/lobster-config/config.staging.env
 GITHUB_TOKEN=ghp_...
-
-# Layer 1: /etc/environment — available system-wide across all shells and tmux sessions
-echo "GITHUB_TOKEN=${GITHUB_TOKEN}" | sudo tee -a /etc/environment
-echo "GH_TOKEN=${GITHUB_TOKEN}" | sudo tee -a /etc/environment
-
-# Layer 2: gh auth login — writes persistent credentials to ~/.config/gh/hosts.yml
-#           This is the most reliable fix; survives shell relaunches.
-echo "${GITHUB_TOKEN}" | gh auth login --with-token
-
-# Layer 3: shell profiles — picked up by interactive and login shells
-echo "export GITHUB_TOKEN=${GITHUB_TOKEN}" >> ~/.bashrc
-echo "export GH_TOKEN=${GITHUB_TOKEN}" >> ~/.bashrc
-echo "export GITHUB_TOKEN=${GITHUB_TOKEN}" >> ~/.profile
-echo "export GH_TOKEN=${GITHUB_TOKEN}" >> ~/.profile
-
-# Layer 4: Lobster config — sourced when Lobster reads its config
-echo "GITHUB_TOKEN=${GITHUB_TOKEN}" >> ~/lobster-config/config.env
-echo "GH_TOKEN=${GITHUB_TOKEN}" >> ~/lobster-config/config.env
 ```
 
-Verify auth is working:
+### Verifying auth
 
 ```bash
-gh auth status
+sudo docker exec -it lobster-staging bash -l -c "gh auth status"
 ```
 
-### Why all 4 layers?
+### Why docker-compose env passthrough alone is not enough
 
-| Layer | What it covers |
-|---|---|
-| `/etc/environment` | All processes, all shells, tmux sessions |
-| `gh auth login` | `gh` CLI itself, regardless of env vars |
-| `.bashrc` / `.profile` | Interactive and login shell sessions |
-| `config.env` | Lobster-sourced config at startup |
-
-Docker env passthrough alone only covers the entrypoint process. The `gh auth login`
-step (layer 2) is the most durable fix because it writes a persistent auth file
-(`~/.config/gh/hosts.yml`) that `gh` reads regardless of environment variables.
-
-### Tracking issue
-
-See GitHub issue #1798 for full context and planned automation of this setup step.
+Docker injects variables into PID 1 (systemd). Subprocesses launched later —
+tmux sessions, Claude Code forks, systemd service workers — do not inherit
+variables that aren't written to a persistent location. The 4-layer setup in
+`lobster-container-init.sh` propagates the token into all durable locations so
+every spawned process can authenticate.
 
 ---
 
@@ -139,8 +121,19 @@ See GitHub issue #1798 for full context and planned automation of this setup ste
 
 ### `gh` commands fail inside Claude Code / subagents
 
-Run `sudo docker exec -it lobster-staging bash` and follow the GitHub Auth
-setup above. Check `gh auth status` to confirm.
+Check that `GITHUB_TOKEN` was set when the container started:
+
+```bash
+sudo docker exec lobster-staging bash -l -c "gh auth status"
+```
+
+If not authenticated, restart the container with `GITHUB_TOKEN` exported:
+
+```bash
+sudo docker compose -f docker/staging/docker-compose.staging.yml down
+export GITHUB_TOKEN=ghp_...
+sudo docker compose -f docker/staging/docker-compose.staging.yml up -d
+```
 
 ### Router fails to start
 
