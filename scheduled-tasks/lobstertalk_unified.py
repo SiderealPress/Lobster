@@ -20,23 +20,33 @@ Pure functions handle data transformation; I/O is isolated to:
   - _load_token()
   - _poll_inbound()
   - _send_outbound()
-  - _write_inbox_message()
+  - _write_inbox_message() — includes deduplication via _is_duplicate()
   - _schedule_hot_retrigger()
   - _call_write_task_output() / _call_write_result()
+
+Deduplication
+-------------
+Re-delivered messages (e.g. due to a stat-vs-read race or network retries) are
+silently dropped before writing to the inbox. The dedup key is sha256 of
+(content + timestamp + sender). Recent inbox/ and processed/ files are scanned
+(within DEDUP_WINDOW_HOURS = 24h) for matching `dedup_key` fields. Legacy files
+without the field are skipped harmlessly.
 
 All state is stored in a single JSON file; all inbox writes are atomic.
 
 Hot mode
 --------
 When any messages are received, hot mode activates and a 5-minute systemd one-shot
-timer is scheduled via `systemd-run`. After 2 consecutive empty polls, hot mode
-reverts to hourly baseline. This is tracked in the state file.
+timer is scheduled via `systemd-run`. Hot mode exits when no activity has been seen
+for HOT_MODE_TIMEOUT_SECS (20 minutes). This is tracked via last_activity_ts in the
+state file.
 
 See lobstertalk/lobstertalk-api.md for the full protocol spec.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -78,6 +88,11 @@ LOG_ROTATE_BYTES = 50 * 1024 * 1024  # 50 MB
 
 # Exit hot mode after this many seconds of no new messages (20 minutes)
 HOT_MODE_TIMEOUT_SECS = 20 * 60
+
+# Deduplication: scan inbox and processed files this far back when checking for
+# re-delivered messages. 24 hours is generous — bot-talk retries typically occur
+# within minutes, not hours.
+DEDUP_WINDOW_HOURS = 24
 
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -285,36 +300,102 @@ def _send_outbound(token: str, outbox_path: Path) -> list[tuple[Path, bool]]:
 
 
 # ---------------------------------------------------------------------------
-# Inbox writing
+# Inbox writing with deduplication
 # ---------------------------------------------------------------------------
 
+def _compute_dedup_key(content: str, timestamp: str, from_field: str) -> str:
+    """Return a stable sha256 fingerprint for a bot-talk message. Pure.
+
+    The key is derived from content, timestamp, and sender so that
+    logically identical re-deliveries produce the same key regardless
+    of when the dedup check runs or which UUID was assigned to the message.
+    """
+    raw = f"{content}|{timestamp}|{from_field}"
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _is_duplicate(
+    dedup_key: str,
+    inbox_dir: Path,
+    processed_dir: Path,
+    window_hours: int = DEDUP_WINDOW_HOURS,
+) -> bool:
+    """Return True if a message with the same dedup_key was recently written.
+
+    Scans JSON files in inbox_dir and processed_dir that are younger than
+    window_hours. If any file contains a matching `dedup_key` field, the
+    message is a duplicate and should be dropped.
+
+    Pure I/O: no side effects other than reading files.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
+
+    for search_dir in (inbox_dir, processed_dir):
+        if not search_dir.exists():
+            continue
+        for f in search_dir.glob("*.json"):
+            try:
+                mtime = datetime.fromtimestamp(f.stat().st_mtime, tz=timezone.utc)
+                if mtime < cutoff:
+                    continue
+                data = json.loads(f.read_text())
+                if data.get("dedup_key") == dedup_key:
+                    return True
+            except (OSError, json.JSONDecodeError, ValueError):
+                continue
+    return False
+
+
 def _build_inbox_message(msg: dict[str, Any]) -> dict[str, Any]:
-    """Build an inbox message dict from a raw bot-talk message. Pure."""
+    """Build an inbox message dict from a raw bot-talk message. Pure.
+
+    Includes a `dedup_key` field (sha256 of content+timestamp+sender) so that
+    re-delivered messages can be detected and dropped by _is_duplicate().
+    """
     ts_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     uid = str(uuid.uuid4())[:8]
+    content = msg.get("content", "")
+    timestamp = msg.get("timestamp", datetime.now(timezone.utc).isoformat())
+    sender = msg.get("sender", "unknown")
     return {
         "id": f"{ts_ms}_bot_talk_{uid}",
         "type": "text",
         "source": "bot-talk",
         "chat_id": ADMIN_CHAT_ID,
-        "user_name": msg.get("sender", "unknown"),
-        "text": msg.get("content", ""),
-        "timestamp": msg.get("timestamp", datetime.now(timezone.utc).isoformat()),
+        "user_name": sender,
+        "text": content,
+        "timestamp": timestamp,
         "direction": "INBOUND",
-        "from": msg.get("sender", "unknown"),
+        "from": sender,
         "to": MY_LOBSTER_NAME,
+        "dedup_key": _compute_dedup_key(content, timestamp, sender),
     }
 
 
-def _write_inbox_message(msg: dict[str, Any]) -> None:
-    """Write an inbox message atomically to INBOX_DIR."""
+def _write_inbox_message(msg: dict[str, Any]) -> bool:
+    """Write an inbox message atomically to INBOX_DIR, skipping duplicates.
+
+    Returns True if the message was written, False if it was a duplicate.
+    Duplicates are detected by scanning recent inbox and processed files for
+    a matching `dedup_key` (content+timestamp+sender hash).
+    """
     INBOX_DIR.mkdir(parents=True, exist_ok=True)
     inbox_msg = _build_inbox_message(msg)
+    dedup_key = inbox_msg["dedup_key"]
+
+    if _is_duplicate(dedup_key, INBOX_DIR, PROCESSED_DIR):
+        log.info(
+            f"[dedup] Dropping duplicate message from {inbox_msg['from']!r}: "
+            f"key={dedup_key[:12]}... already seen in inbox or processed"
+        )
+        return False
+
     filename = f"{inbox_msg['id']}.json"
     target = INBOX_DIR / filename
     tmp = target.with_suffix(".tmp")
     tmp.write_text(json.dumps(inbox_msg, indent=2))
     tmp.rename(target)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -428,9 +509,13 @@ def run(task_id: str = "lobstertalk-unified") -> None:
     inbound = [m for m in all_messages if m.get("sender") != MY_LOBSTER_NAME]
 
     received_count = 0
+    dedup_dropped = 0
     for msg in inbound:
         try:
-            _write_inbox_message(msg)
+            written = _write_inbox_message(msg)
+            if not written:
+                dedup_dropped += 1
+                continue
             _append_log({
                 "ts": datetime.now(timezone.utc).isoformat(),
                 "direction": "INBOUND",
@@ -486,10 +571,12 @@ def run(task_id: str = "lobstertalk-unified") -> None:
         summary_parts.append(f"Received {received_count} INBOUND messages, routed to inbox.")
     else:
         summary_parts.append("No new messages.")
+    if dedup_dropped:
+        summary_parts.append(f"Dropped {dedup_dropped} duplicate(s).")
     if sent_count:
         summary_parts.append(f"Sent {sent_count} OUTBOUND messages.")
     summary_parts.append(
-        f"hot_mode={state['hot_mode']}, consecutive_empty={state['consecutive_empty_polls']}"
+        f"hot_mode={state['hot_mode']}, last_activity={state.get('last_activity_ts')}"
     )
     output = " ".join(summary_parts)
     log.info(output)
