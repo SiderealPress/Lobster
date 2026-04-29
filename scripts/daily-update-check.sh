@@ -31,7 +31,7 @@ if [ -d "$LOBSTER_DIR/.git" ]; then
         cat > "$INBOX/${TIMESTAMP}_update_available.json" << EOF
 {
   "id": "${TIMESTAMP}_update_available",
-  "source": "internal",
+  "source": "system",
   "chat_id": 0,
   "type": "update_notification",
   "text": "UPDATE AVAILABLE: Lobster is ${BEHIND} commits behind origin/main. Use check_updates for details.",
@@ -50,7 +50,7 @@ else
         cat > "$INBOX/${TIMESTAMP}_update_available.json" << EOF
 {
   "id": "${TIMESTAMP}_update_available",
-  "source": "internal",
+  "source": "system",
   "chat_id": 0,
   "type": "update_notification",
   "text": "UPDATE AVAILABLE: Lobster v${CURRENT_VERSION} -> v${LATEST_VERSION}. Use check_updates for details.",
