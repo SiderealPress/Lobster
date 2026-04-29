@@ -800,6 +800,13 @@ HEARTBEAT_FILE = _WORKSPACE / "logs" / "claude-heartbeat"
 # tests can verify it matches the health-check's WFM_ACTIVE_STALE_SECONDS.
 WAIT_HEARTBEAT_INTERVAL = 60
 
+# Idle timeout for the stateful StreamableHTTP session manager (issue #1823).
+# Sessions idle longer than this many seconds are reaped via anyio.CancelScope,
+# preventing task group accumulation that caused 4-minute event loop stalls.
+# The SDK recommends 1800s (30 min) — long enough to survive normal SSE polling
+# gaps without false reaps.  Requires MCP SDK >= 1.27.0.
+SESSION_IDLE_TIMEOUT_SECONDS = 1800
+
 # WFM-active signal file (issue #1713 / #949): written with a Unix epoch
 # timestamp when wait_for_messages begins blocking, refreshed every
 # WAIT_HEARTBEAT_INTERVAL seconds, and deleted when WFM returns.
@@ -9977,7 +9984,11 @@ async def main():
             except (ValueError, IndexError):
                 pass
 
-        session_manager = StreamableHTTPSessionManager(app=server, stateless=False)
+        session_manager = StreamableHTTPSessionManager(
+            app=server,
+            stateless=False,
+            session_idle_timeout=SESSION_IDLE_TIMEOUT_SECONDS,
+        )
 
         # Publish the session_manager reference so tool handlers (and /dispatcher-session)
         # can inspect live session state without importing from main().
