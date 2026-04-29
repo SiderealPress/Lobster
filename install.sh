@@ -1338,6 +1338,23 @@ chmod +x "$INSTALL_DIR/scripts/daily-health-check.sh" || true
 success "Daily dependency health check configured (runs at 06:00 daily)"
 
 #===============================================================================
+# Weekly Safe Upgrade Script
+#===============================================================================
+
+step "Setting up weekly safe upgrade script..."
+
+chmod +x "$INSTALL_DIR/scripts/run-upgrades.sh" || true
+
+# Add weekly upgrade to crontab (runs Sundays at 02:00).
+# run-upgrades.sh calls restart-mcp.sh first so the dispatcher gets an inbox
+# warning before any dpkg hook (needrestart) can fire SIGTERM at lobster
+# services.  See issue #1757.
+"$INSTALL_DIR/scripts/cron-manage.sh" add "# LOBSTER-WEEKLY-UPGRADE" \
+    "0 2 * * 0 $INSTALL_DIR/scripts/run-upgrades.sh # LOBSTER-WEEKLY-UPGRADE"
+
+success "Weekly safe upgrade configured (runs Sundays at 02:00)"
+
+#===============================================================================
 # Nightly Consolidation
 #===============================================================================
 
