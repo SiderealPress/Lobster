@@ -280,6 +280,10 @@ class TestScriptSourceValues:
         # parents[0]=test_mcp_server, [1]=unit, [2]=tests, [3]=repo_root
         return Path(__file__).resolve().parents[3] / "scripts"
 
+    def _get_docker_dir(self) -> Path:
+        """Locate the repository docker/ directory relative to this test file."""
+        return Path(__file__).resolve().parents[3] / "docker"
+
     def test_nightly_consolidation_source_is_recognized(self):
         """nightly-consolidation.sh must write a recognized source (regression: issue #1797)."""
         scripts_dir = self._get_scripts_dir()
@@ -332,5 +336,49 @@ class TestScriptSourceValues:
             "The following scripts write source values not in INBOX_MESSAGE_SOURCES.\n"
             "Either update INBOX_MESSAGE_SOURCES in message_types.py or change the\n"
             "source to 'system' (the standard value for cron/system-generated messages):\n"
+            + "\n".join(f"  {v}" for v in violations)
+        )
+
+    def test_worker_entrypoint_source_is_recognized(self):
+        """worker-entrypoint.sh must write a recognized source (regression: issue #1848).
+
+        PR #1845 added the scripts/ guardrail but missed docker/worker-entrypoint.sh,
+        which was writing source="worker" — not in INBOX_MESSAGE_SOURCES.
+        """
+        docker_dir = self._get_docker_dir()
+        script = docker_dir / "worker-entrypoint.sh"
+        assert script.exists(), f"Script not found: {script}"
+
+        found = self._extract_source_values(script)
+        assert found, (
+            f"No \"source\" values found in {script.name} — was the script refactored?"
+        )
+
+        bad = [(ln, v) for ln, v in found if v not in self._known_sources]
+        assert not bad, (
+            f"{script.name} writes unrecognized source value(s) — "
+            f"add to INBOX_MESSAGE_SOURCES or change to 'system':\n"
+            + "\n".join(f"  line {ln}: {v!r}" for ln, v in bad)
+        )
+
+    def test_all_docker_scripts_write_recognized_sources(self):
+        """Every *.sh script in docker/ that writes a JSON source field must use a known source.
+
+        Broad guardrail for the docker/ directory, mirroring test_all_scripts_write_recognized_sources
+        for scripts/. Ensures future docker entrypoints don't silently reintroduce this class of bug.
+        """
+        docker_dir = self._get_docker_dir()
+        assert docker_dir.exists(), f"docker/ directory not found at {docker_dir}"
+
+        violations: list[str] = []
+        for script in sorted(docker_dir.glob("*.sh")):
+            for lineno, value in self._extract_source_values(script):
+                if value not in self._known_sources:
+                    violations.append(f"{script.name}:{lineno}: {value!r}")
+
+        assert not violations, (
+            "The following docker scripts write source values not in INBOX_MESSAGE_SOURCES.\n"
+            "Either update INBOX_MESSAGE_SOURCES in message_types.py or change the\n"
+            "source to 'system' (the standard value for system-generated messages):\n"
             + "\n".join(f"  {v}" for v in violations)
         )
