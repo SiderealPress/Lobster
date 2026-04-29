@@ -4973,6 +4973,31 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
 
 
 
+# Maximum characters of task_id to include in the debug label — keeps labels
+# readable on mobile without truncating meaningful identifiers.
+_DEBUG_LABEL_TASK_ID_MAX_LEN = 20
+
+
+def _build_debug_source_label(task_id: str) -> str | None:
+    """Return a debug label string when LOBSTER_DEBUG=true, else None.
+
+    Pure function: reads env at call time so tests can patch os.environ freely.
+
+    When task_id is non-empty the caller is a subagent → label is
+    ``[agent:<task_id_truncated>]``.  When task_id is empty the caller is the
+    dispatcher → label is ``[dispatcher]``.
+
+    Returns None when LOBSTER_DEBUG is not 'true', so callers can skip the
+    string concatenation entirely in production.
+    """
+    if os.environ.get("LOBSTER_DEBUG", "").lower() != "true":
+        return None
+    if task_id:
+        short_id = task_id[:_DEBUG_LABEL_TASK_ID_MAX_LEN]
+        return f"[agent:{short_id}]"
+    return "[dispatcher]"
+
+
 async def handle_send_reply(args: dict) -> list[TextContent]:
     """Send a reply to a message with input validation."""
     # Validate inputs — return error TextContent instead of raising so callers
@@ -4986,6 +5011,14 @@ async def handle_send_reply(args: dict) -> list[TextContent]:
     source = args["source"]
     buttons = args.get("buttons")
     thread_ts = args.get("thread_ts")
+
+    # Debug source label: prepend [dispatcher] or [agent:<task_id>] when
+    # LOBSTER_DEBUG=true so the operator can see at a glance which component replied.
+    # No-op in production (label is None when debug mode is off).
+    task_id_for_label = (args.get("task_id") or "").strip()
+    debug_label = _build_debug_source_label(task_id_for_label)
+    if debug_label is not None:
+        text = f"{debug_label} {text}"
 
     # Create reply file in outbox
     reply_id = f"{int(time.time() * 1000)}_{source}"
