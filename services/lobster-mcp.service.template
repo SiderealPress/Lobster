@@ -15,6 +15,8 @@ Environment=LOBSTER_USER_CONFIG={{USER_CONFIG_DIR}}
 EnvironmentFile=-{{INSTALL_DIR}}/config/config.env
 EnvironmentFile={{CONFIG_DIR}}/config.env
 EnvironmentFile=-{{CONFIG_DIR}}/global.env
+Environment=PATH={{HOME}}/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HOME={{HOME}}
 ExecStart={{INSTALL_DIR}}/.venv/bin/python {{INSTALL_DIR}}/src/mcp/inbox_server_http.py
 Restart=always
 RestartSec=10
