@@ -105,6 +105,21 @@ def dir_age_days(path: Path) -> float:
     return age.total_seconds() / 86400
 
 
+def is_worktree_registered(main_repo: Path, worktree_path: Path) -> bool:
+    """Return True if worktree_path still appears in `git worktree list --porcelain`."""
+    rc, out, _ = run(["git", "worktree", "list", "--porcelain"], cwd=main_repo)
+    if rc != 0:
+        # If the command fails we conservatively assume it IS registered to
+        # avoid accidentally deleting a live worktree.
+        return True
+    resolved = str(worktree_path.resolve())
+    for line in out.splitlines():
+        # Lines look like: "worktree /absolute/path"
+        if line.startswith("worktree ") and line[len("worktree "):].strip() == resolved:
+            return True
+    return False
+
+
 def remove_worktree(main_repo: Path, worktree_path: Path, dry_run: bool) -> bool:
     """Remove a git worktree and its directory."""
     if dry_run:
@@ -118,11 +133,17 @@ def remove_worktree(main_repo: Path, worktree_path: Path, dry_run: bool) -> bool
         log(f"  [REMOVED] {worktree_path}")
         return True
 
-    # git worktree remove failed. Only fall back to shutil.rmtree if the
-    # directory still exists (meaning git failed before touching it, e.g.
-    # because the worktree isn't registered). If git already partially removed
-    # it (unlikely with --force), we skip to avoid double-removal.
-    log(f"  [WARN] git worktree remove failed ({err or 'unknown'}) — trying direct removal")
+    # git worktree remove failed.  Before falling back to direct filesystem
+    # removal, confirm the worktree is no longer registered in git's list.
+    # If it is still registered the failure was transient (permissions, locks,
+    # etc.) and a direct rm -rf would leave git's metadata in an inconsistent
+    # state.  Only proceed when git has already forgotten the worktree —
+    # i.e. the directory is a pure filesystem orphan.
+    log(f"  [WARN] git worktree remove failed ({err or 'unknown'}) — checking worktree list")
+    if is_worktree_registered(main_repo, worktree_path):
+        log(f"  [ERROR] refusing rm -rf: {worktree_path} is still registered in git worktree list")
+        return False
+
     if worktree_path.exists():
         # Safety check: only delete paths that live under the expected projects
         # dir to prevent accidental data loss if path resolution goes wrong.
