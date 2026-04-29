@@ -43,6 +43,7 @@ from integrations.granola.client import (
     GranolaAuthError,
     GranolaNote,
     GranolaAccountConfig,
+    GranolaUnknownAccountError,
     build_account_configs_from_env,
     iter_all_notes_for_account,
     get_note,
@@ -143,13 +144,19 @@ def _fetch_notes_with_detail(
     Notes: The list endpoint returns id, title, owner, created_at, updated_at
     but NOT summary_markdown or transcript. We need get_note() for those.
     """
-    # Build a lookup from account name → api_key so each note fetches with its own key.
+    # Build a strict lookup from account name → api_key.
+    # Using dict access (not .get()) ensures an unknown account name immediately
+    # raises GranolaUnknownAccountError rather than silently falling back to None,
+    # which previously caused get_note() to use the primary GRANOLA_API_KEY for
+    # any note whose account name was not in the config.
     api_key_by_account: dict[str, str] = {cfg.name: cfg.api_key for cfg in account_configs}
 
     full_notes: list[GranolaNote] = []
     for note in notes_summary:
+        if note.granola_account not in api_key_by_account:
+            raise GranolaUnknownAccountError(note.granola_account)
         try:
-            api_key = api_key_by_account.get(note.granola_account)
+            api_key = api_key_by_account[note.granola_account]
             full = get_note(
                 note.id,
                 include_transcript=True,

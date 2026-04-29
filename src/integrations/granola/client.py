@@ -160,6 +160,26 @@ class GranolaNotFoundError(GranolaAPIError):
         super().__init__(404, f"note {note_id!r} not found or not yet summarised")
 
 
+class GranolaUnknownAccountError(KeyError):
+    """
+    Raised when a note's granola_account name has no registered API key.
+
+    This replaces the previous silent fallback where an unknown account name
+    caused api_key_by_account.get() to return None, which then caused
+    get_note() to silently use the primary GRANOLA_API_KEY instead.
+
+    Catching this error explicitly signals a configuration gap — a new account
+    name appeared in notes but its key has not been added to the account registry.
+    """
+
+    def __init__(self, account_name: str) -> None:
+        self.account_name = account_name
+        super().__init__(
+            f"No API key registered for Granola account {account_name!r}. "
+            f"Add its key to the account config in ~/lobster-config/config.env."
+        )
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------

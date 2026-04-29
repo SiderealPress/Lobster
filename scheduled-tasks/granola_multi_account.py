@@ -3,6 +3,7 @@ Granola multi-account support — shared helpers for polling multiple API keys.
 
 Provides:
 - AccountConfig: typed descriptor for a Granola account
+- AccountRegistry: strict dict-like lookup from account name → AccountConfig
 - build_accounts_from_env: discover configured accounts from environment
 - annotate_note_with_account: pure function adding 'account' field to a raw note dict
 - merge_and_deduplicate: combine notes from multiple accounts, deduplicate by ID
@@ -20,7 +21,7 @@ Constants:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Iterator, Optional
 
 # ---------------------------------------------------------------------------
 # Account names (constants, not magic strings)
@@ -55,6 +56,54 @@ class AccountConfig:
 
     name: str
     api_key: str
+
+
+# ---------------------------------------------------------------------------
+# AccountRegistry — strict lookup, no silent fallback
+# ---------------------------------------------------------------------------
+
+
+class AccountRegistry:
+    """
+    Immutable registry mapping account names to AccountConfig objects.
+
+    Raises KeyError (with a descriptive message) when an account name is
+    looked up that has no registered key — preventing the silent primary-key
+    fallback that existed when callers used dict.get() directly.
+
+    Usage:
+        registry = AccountRegistry(build_accounts_from_env(os.environ))
+        cfg = registry.get("drew")   # → AccountConfig  # noname
+        cfg = registry.get("ghost")  # → KeyError: "No API key registered for 'ghost'"
+
+        "drew" in registry           # → True  # noname
+    """
+
+    def __init__(self, accounts: list[AccountConfig]) -> None:
+        self._by_name: dict[str, AccountConfig] = {a.name: a for a in accounts}
+
+    def get(self, account_name: str) -> AccountConfig:
+        """
+        Return the AccountConfig for account_name.
+
+        Raises:
+            KeyError: if account_name is not registered.
+        """
+        if account_name not in self._by_name:
+            raise KeyError(
+                f"No API key registered for Granola account {account_name!r}. "
+                f"Add its key to ~/lobster-config/config.env."
+            )
+        return self._by_name[account_name]
+
+    def __contains__(self, account_name: object) -> bool:
+        return account_name in self._by_name
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._by_name)
+
+    def __len__(self) -> int:
+        return len(self._by_name)
 
 
 # ---------------------------------------------------------------------------
