@@ -2065,6 +2065,16 @@ async def list_tools() -> list[Tool]:
                         ),
                         "enum": ["user", "lobster", "conversation"],
                     },
+                    "since_ts": {
+                        "type": "string",
+                        "description": (
+                            "ISO 8601 UTC timestamp (e.g. '2026-01-01T12:00:00Z'). "
+                            "When provided, only messages with a timestamp >= since_ts are returned. "
+                            "Useful for catch-up agents that need to verify replies without being subject to "
+                            "the fixed LIMIT truncation: pass the window start to retrieve all messages "
+                            "(both directions) within the window regardless of volume."
+                        ),
+                    },
                 },
             },
             _meta={"anthropic/alwaysLoad": True},
@@ -5672,13 +5682,18 @@ def _apply_filters_and_paginate(
     limit: int,
     offset: int,
     sender_type: str | None = None,
+    since_ts: str | None = None,
 ) -> tuple[list[dict], int]:
-    """Apply chat_id / source / search / sender_type filters, sort by timestamp, then paginate.
-
+    """Apply chat_id / source / search / sender_type / since_ts filters, sort by timestamp, then paginate.
 
     Returns (paginated_slice, total_count_before_pagination).
     All filtering and sorting is performed in-memory. This is the legacy
     fallback path used when messages.db is unavailable.
+
+    since_ts: ISO 8601 UTC timestamp string. When provided, messages with a
+    timestamp strictly before this value are excluded. Uses the same
+    timezone-aware parsing as _parse_ts so Z-suffixed and offset-suffixed
+    values compare correctly against stored naive ISO strings.
     """
     def _parse_ts(msg: dict) -> 'datetime':
         ts = msg.get("timestamp", "")
@@ -5690,6 +5705,16 @@ def _apply_filters_and_paginate(
             return datetime.min.replace(tzinfo=timezone.utc)
 
     filtered = messages
+
+    # since_ts filter — applied first to minimise work for subsequent filters.
+    if since_ts:
+        try:
+            since_dt = datetime.fromisoformat(since_ts.strip().replace("Z", "+00:00"))
+            if since_dt.tzinfo is None:
+                since_dt = since_dt.replace(tzinfo=timezone.utc)
+            filtered = [m for m in filtered if _parse_ts(m) >= since_dt]
+        except (ValueError, TypeError):
+            pass  # malformed since_ts — skip filter rather than crash
 
     if sender_type:
         filtered = _apply_sender_type_filter(filtered, sender_type)
@@ -5779,6 +5804,7 @@ async def handle_get_conversation_history(args: dict) -> list[TextContent]:
     direction = args.get("direction", "all").lower()
     source_filter = args.get("source", "").lower().strip()
     sender_type = args.get("sender_type") or None  # None when omitted or empty string
+    since_ts = args.get("since_ts") or None  # ISO 8601 UTC timestamp lower bound
 
     paginated: list[dict] = []
     total_count: int = 0
@@ -5800,6 +5826,7 @@ async def handle_get_conversation_history(args: dict) -> list[TextContent]:
                     sender_type=sender_type,
                     limit=limit,
                     offset=offset,
+                    since_ts=since_ts,
                 )
                 total_count = _db_count_conversation_history(
                     conn,
@@ -5808,6 +5835,7 @@ async def handle_get_conversation_history(args: dict) -> list[TextContent]:
                     search=search_text or None,
                     direction=direction,
                     sender_type=sender_type,
+                    since_ts=since_ts,
                 )
                 used_db = True
                 log.debug(
@@ -5839,6 +5867,7 @@ async def handle_get_conversation_history(args: dict) -> list[TextContent]:
             limit=limit,
             offset=offset,
             sender_type=sender_type,
+            since_ts=since_ts,
         )
 
     # ------------------------------------------------------------------
