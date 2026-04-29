@@ -2956,6 +2956,35 @@ print(f'prune-pr-worktrees: {result.status}')
         migrated=$((_m85_patched + migrated))
     fi
 
+    # Migration 86: Remove lobstertalk-ssh-watcher systemd timer/service (issue #1839).
+    # The SSH watcher was a LobsterTalk-specific artifact that should not live in the
+    # public Lobster repo. PR #1791 (which added it) was closed without merging;
+    # PR #1839 tracks the cleanup. Disable and remove the systemd timer and service
+    # from any existing installs where it was created via create_scheduled_job.
+    _m86_timer="lobster-lobstertalk-ssh-watcher.timer"
+    _m86_service="lobster-lobstertalk-ssh-watcher.service"
+    _m86_unit_dir="/etc/systemd/system"
+    _m86_done=false
+    if systemctl is-enabled "$_m86_timer" &>/dev/null || systemctl is-active "$_m86_timer" &>/dev/null; then
+        substep "Stopping and disabling ${_m86_timer}..."
+        sudo systemctl disable --now "$_m86_timer" 2>/dev/null && _m86_done=true || warn "Could not disable ${_m86_timer} — disable manually"
+    fi
+    for _m86_unit in "$_m86_timer" "$_m86_service"; do
+        _m86_unit_file="${_m86_unit_dir}/${_m86_unit}"
+        if [ -f "$_m86_unit_file" ]; then
+            sudo rm -f "$_m86_unit_file"
+            substep "Removed ${_m86_unit_file}"
+            _m86_done=true
+        fi
+    done
+    if $_m86_done; then
+        sudo systemctl daemon-reload 2>/dev/null || true
+        success "Migration 86: removed lobstertalk-ssh-watcher timer/service"
+        migrated=$((migrated + 1))
+    else
+        substep "lobstertalk-ssh-watcher timer/service not present — skipping Migration 86"
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
