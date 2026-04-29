@@ -78,6 +78,14 @@ services:
       # single-user install path. Override this env var before running compose if
       # your config lives elsewhere (e.g. export LOBSTER_CONFIG_DIR=/custom/path).
       - ${LOBSTER_CONFIG_DIR:-/home/lobster/lobster-config}/config.staging.env
+    # GitHub token passthrough — injects the host GITHUB_TOKEN into the container
+    # environment so lobster-container-init.sh can wire it into all 4 auth layers
+    # (see lobster-container-init.sh github auth section). Both GITHUB_TOKEN and
+    # GH_TOKEN are set so all gh CLI versions are covered. If neither is set on the
+    # host, gh CLI will be unauthenticated inside the container.
+    environment:
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - GH_TOKEN=${GITHUB_TOKEN:-}
     # systemd uses SIGRTMIN+3 for clean shutdown
     stop_signal: SIGRTMIN+3
     stop_grace_period: 30s
