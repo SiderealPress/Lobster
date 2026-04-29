@@ -1,4 +1,4 @@
-#!/usr/bin/env uv run python3
+#!/usr/bin/env -S uv run python3
 """
 LobsterTalk Unified Job — genericized production version.
 
