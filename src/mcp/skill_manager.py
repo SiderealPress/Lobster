@@ -448,16 +448,17 @@ def get_skill_context_for_message(
     config_dir: str | None = None,
     state_path: Path = _DEFAULT_STATE_PATH,
 ) -> str:
-    """Assemble per-message skill context: always skills + triggered skills that match.
+    """Assemble per-message skill context: only triggered skills that match the message.
 
     For each active skill:
-    - always mode: always included
+    - always mode: skipped (already injected once at session start via get_skill_context)
     - triggered mode: included only if a trigger keyword appears in message_text
-    - contextual mode: not included (handled separately via get_skill_context_for_message
-      with pattern matching — not yet implemented, see issue #1747)
+    - contextual mode: not included (not yet implemented, see issue #1747)
 
     This is the preferred call for per-message skill injection. Pair with
     get_skill_context(mode='always') at session start for inject-once always skills.
+    Always-mode skills are intentionally excluded here to avoid injecting them again
+    on every message turn.
 
     Args:
         message_text: The user's message text (used for trigger matching).
@@ -465,34 +466,38 @@ def get_skill_context_for_message(
         config_dir: Path to private config overlay.
         state_path: Path to skills-state.json.
 
-    Returns markdown string with context from matching skills.
+    Returns markdown string with context from matching triggered skills only.
+    Empty string if no triggered skills match.
     """
     repo_dir = repo_dir or _REPO_DIR
     config_dir = _CONFIG_DIR if config_dir is None else config_dir
 
+    # Single state read — used both to get active skills and to check activation_mode
     state = _read_store(state_path)
-    all_active = get_active_skills(state_path)
+    all_active = [
+        name for name, info in state.get("skills", {}).items()
+        if info.get("active", False)
+    ]
 
     if not all_active:
         return ""
 
     skill_dirs = _build_skill_dirs_map(repo_dir, config_dir)
 
-    # Determine which skills to include based on activation mode + trigger matching
+    # Determine which triggered skills to include based on trigger matching.
+    # Always-mode skills are excluded: they were already injected at session start.
     skills_to_include: list[str] = []
     for name in all_active:
         skill_state = state.get("skills", {}).get(name, {})
         skill_mode = skill_state.get("activation_mode", "always")
 
-        if skill_mode == "always":
-            # Always-mode skills are always included
-            skills_to_include.append(name)
-        elif skill_mode == "triggered":
+        if skill_mode == "triggered":
             # Triggered-mode skills: include only if message matches a trigger keyword
             if name in skill_dirs:
                 triggers = _read_triggers(skill_dirs[name])
                 if _skill_matches_trigger(triggers, message_text):
                     skills_to_include.append(name)
+        # always mode: skip — already covered by Phase 1 (get_skill_context(mode='always'))
         # contextual mode: not yet implemented (issue #1747) — skip for now
 
     if not skills_to_include:
