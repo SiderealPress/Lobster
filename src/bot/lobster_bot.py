@@ -1800,7 +1800,11 @@ def build_inline_keyboard(buttons: list) -> InlineKeyboardMarkup:
         keyboard_row = []
         for item in row:
             if isinstance(item, dict):
-                label = str(item.get("text", ""))
+                if not item.get("text"):
+                    raise ValueError(
+                        f"Dict button spec is missing a non-empty 'text' key: {item!r}"
+                    )
+                label = str(item["text"])
                 data = str(item.get("callback_data", label))
             elif isinstance(item, (list, tuple)) and len(item) == 2:
                 label, data = item
