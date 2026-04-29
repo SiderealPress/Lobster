@@ -91,8 +91,8 @@ DENY_REASON_NEEDS_TOKEN = (
 )
 
 DENY_REASON = (
-    "GATE BLOCKED: Context compaction was just detected. Your only permitted "
-    "action right now is to call `mcp__lobster-inbox__wait_for_messages` by its full name directly — "
+    "GATE BLOCKED: Context compaction was just detected. "
+    "Call `mcp__lobster-inbox__wait_for_messages(confirmation='LOBSTER_COMPACTED_REORIENTED')` directly — "
     "no ToolSearch needed, the schema is pre-registered. When it returns, you will "
     "receive a compact-reminder system message — read it to re-orient as the "
     "Lobster dispatcher, then resume your main loop normally. Do not retry this "
