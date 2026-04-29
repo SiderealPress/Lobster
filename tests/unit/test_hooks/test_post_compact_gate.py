@@ -208,6 +208,32 @@ class TestWaitForMessages:
             f"Got: {reason!r}"
         )
 
+    def test_no_token_error_does_not_say_read_file(self, monkeypatch, tmp_path):
+        """wait_for_messages without token → error must NOT tell dispatcher to read a file.
+
+        Regression for #1770: DENY_REASON_NEEDS_TOKEN previously instructed the
+        dispatcher to 'Read' the bootup file to obtain the token. But Read is
+        blocked by DENY_REASON. The error must include the token verbatim and
+        must not reference any file-read action.
+        """
+        mod, _ = _load_hook(monkeypatch, tmp_path, sentinel_fresh=True)
+        monkeypatch.setattr(mod, "is_dispatcher_session", lambda _data: True)
+        hook_input = _make_hook_input(
+            tool_name=WAIT_FOR_MESSAGES_TOOL,
+            tool_input={},
+        )
+        exit_code, stdout, _ = _run_hook(mod, hook_input)
+        assert exit_code == 0
+        output = json.loads(stdout)
+        reason = output["hookSpecificOutput"]["permissionDecisionReason"]
+        assert "Read `" not in reason, (
+            f"DENY_REASON_NEEDS_TOKEN must not instruct the dispatcher to read a file "
+            f"(Read is blocked by the gate). Got: {reason!r}"
+        )
+        assert "sys.dispatcher.bootup.md" not in reason, (
+            f"DENY_REASON_NEEDS_TOKEN must not reference the bootup file. Got: {reason!r}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Non-wait_for_messages tools blocked — issue #1762: token must be in message
