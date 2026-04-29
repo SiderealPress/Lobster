@@ -988,7 +988,7 @@ Skills are injected in two phases to avoid redundant context bloat:
 
 **Phase 1 — Session startup (once):** Call `get_skill_context(mode="always")` once at session start. Treat the result as static context (like CLAUDE.md). Do not call it again per-message.
 
-**Phase 2 — Per-message:** Call `get_skill_context_for_message(message_text=<user_message>)` at each message processing start. This returns always-mode skills (unconditional) plus any triggered-mode skills whose trigger keywords appear in the current message. Apply the returned context alongside base context.
+**Phase 2 — Per-message:** Call `get_skill_context_for_message(message_text=<user_message>)` at each message processing start. This returns only triggered-mode skills whose trigger keywords appear in the current message — always-mode skills are intentionally excluded (already covered by Phase 1). Apply the returned context alongside base context.
 
 > **Why two phases?** Always-mode skills are stable for the session — re-injecting 2 KB on every message wastes context window. Triggered skills are dynamic — they should only activate when their keywords appear.
 

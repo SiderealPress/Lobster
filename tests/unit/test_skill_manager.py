@@ -766,8 +766,13 @@ priority = 50
 
         assert "BROWSER_CONTENT" in result
 
-    def test_always_skills_always_included_regardless_of_message(self, tmp_path):
-        """Always skills appear in get_skill_context_for_message regardless of message text."""
+    def test_always_skills_excluded_from_per_message_context(self, tmp_path):
+        """Always skills are excluded from get_skill_context_for_message.
+
+        Phase 1 (get_skill_context(mode='always')) already injects them once at session
+        start. Phase 2 (get_skill_context_for_message) must not re-inject them on every
+        message to avoid redundant context bloat.
+        """
         state_path = tmp_path / "state.json"
         self._setup_always_skill(tmp_path, state_path, "ALWAYS_CONTENT")
         self._setup_triggered_skill(
@@ -779,7 +784,9 @@ priority = 50
             repo_dir=tmp_path, state_path=state_path,
         )
 
-        assert "ALWAYS_CONTENT" in result
+        # Always-mode skill must be excluded — it was injected by Phase 1, not Phase 2
+        assert "ALWAYS_CONTENT" not in result
+        # Triggered skill also excluded because no trigger keyword matched
         assert "BROWSER_CONTENT" not in result
 
     def test_multiple_triggered_skills_each_checked_independently(self, tmp_path):
