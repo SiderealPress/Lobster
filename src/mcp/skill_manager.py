@@ -584,61 +584,6 @@ def _get_contextual_skills_data(
     return result
 
 
-def get_skill_context_for_message(
-    message_text: str,
-    repo_dir: Path | None = None,
-    config_dir: str | None = None,
-    state_path: Path = _DEFAULT_STATE_PATH,
-) -> str:
-    """Assemble context from active skills, including contextual skills that match the message.
-
-    For skills with activation_mode='always' or 'triggered': included if active.
-    For skills with activation_mode='contextual': included only if a context_pattern
-    matches the message text.
-
-    Returns markdown string ready for injection into Claude's context.
-    Empty string if no skills are active/matched.
-    """
-    repo_dir = repo_dir or _REPO_DIR
-    config_dir = config_dir or _CONFIG_DIR
-
-    state = _read_store(state_path)
-
-    # Collect always-active and triggered skills (standard path)
-    standard_active = [
-        name for name, info in state.get("skills", {}).items()
-        if info.get("active", False) and info.get("activation_mode", "always") != "contextual"
-    ]
-
-    # Evaluate contextual skills against the message
-    contextual_matches: list[str] = []
-    for name, skill_dir, patterns, priority in _get_contextual_skills_data(
-        repo_dir, config_dir, state_path
-    ):
-        if any(_pattern_matches_message(p, message_text) for p in patterns):
-            contextual_matches.append(name)
-
-    all_active = standard_active + contextual_matches
-    if not all_active:
-        return ""
-
-    # Build name -> dir mapping
-    skill_dirs: dict[str, Path] = {}
-    for skill_dir in _resolve_skill_dirs(repo_dir, config_dir):
-        manifest = _parse_manifest(skill_dir)
-        if manifest:
-            name = _extract_skill_name(manifest, skill_dir.name)
-            skill_dirs[name] = skill_dir
-
-    result = _assemble_context(skill_dirs, all_active, state)
-
-    if contextual_matches:
-        note = "\n\n> **Contextual skills activated for this message:** " + ", ".join(contextual_matches)
-        result = result + note
-
-    return result
-
-
 def activate_skill(
     skill_name: str,
     mode: str = "always",
