@@ -2891,6 +2891,32 @@ print(f'prune-pr-worktrees: {result.status}')
         warn "prune-pr-worktrees.py not found at $_m83_script or uv unavailable — skipping Migration 83"
     fi
 
+    # Migration 84: Backfill Environment=PATH= and Environment=HOME= in existing Lobster-managed
+    # system service files. PR #1838 fixed the code that generates new service files, but existing
+    # on-disk files were already missing these directives and fail with exit-127 when uv is not
+    # found on systemd's minimal PATH. This migration patches all Lobster service files in
+    # /etc/systemd/system/ that are missing Environment=PATH= and runs daemon-reload.
+    local _m84_patched=0
+    local _m84_env_path="Environment=PATH=${HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin"
+    local _m84_env_home="Environment=HOME=${HOME}"
+    for _m84_svc in /etc/systemd/system/lobster-*.service; do
+        [ -f "$_m84_svc" ] || continue
+        if grep -q "Environment=PATH=" "$_m84_svc" 2>/dev/null; then
+            continue
+        fi
+        # Patch: insert PATH and HOME lines immediately before ExecStart=
+        if grep -q "^ExecStart=" "$_m84_svc" 2>/dev/null; then
+            sudo sed -i "s|^ExecStart=|${_m84_env_path}\n${_m84_env_home}\nExecStart=|" "$_m84_svc"
+            substep "Added PATH/HOME to $(basename "$_m84_svc")"
+            _m84_patched=$((_m84_patched + 1))
+        fi
+    done
+    if [ "$_m84_patched" -gt 0 ]; then
+        sudo systemctl daemon-reload 2>/dev/null || warn "daemon-reload failed — run manually"
+        success "Migration 84: patched $_m84_patched service file(s) with Environment=PATH= (daemon-reload done)"
+        migrated=$((migrated + _m84_patched))
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
