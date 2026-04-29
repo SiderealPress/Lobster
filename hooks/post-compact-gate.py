@@ -85,9 +85,9 @@ CONFIRMATION_TOKEN = "LOBSTER_COMPACTED_REORIENTED"  # noqa: S105 — not a secr
 
 DENY_REASON_NEEDS_TOKEN = (
     "GATE BLOCKED: Context compaction was just detected. "
-    "Read `~/lobster-workspace/.claude/sys.dispatcher.bootup.md` for the confirmation token, "
-    "then call `mcp__lobster-inbox__wait_for_messages(confirmation='LOBSTER_COMPACTED_REORIENTED')` directly. "
-    "No ToolSearch needed — the MCP schema is pre-registered."
+    "Call `mcp__lobster-inbox__wait_for_messages(confirmation='LOBSTER_COMPACTED_REORIENTED')` directly — "
+    "no ToolSearch needed, the schema is pre-registered. "
+    "No file read needed — the confirmation token is in this message: LOBSTER_COMPACTED_REORIENTED"
 )
 
 DENY_REASON = (
