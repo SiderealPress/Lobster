@@ -30,6 +30,12 @@ D4. The maintenance flag (written by `lobster stop`) must cause an immediate
     clean exit with no checks run and no restart attempted.  If this flag is
     ignored, manual maintenance windows trigger spurious health-check restarts
     that fight the operator.
+
+D6. The post-compaction grace period must suppress the dispatcher heartbeat check.
+    Lowering DISPATCHER_HEARTBEAT_STALE_SECONDS to 600s (issue #1786) means
+    a catchup run lasting longer than 10 min would trigger a false restart.
+    is_compact_grace_period() must return true (exit 0) when last-compact.ts is
+    within COMPACT_GRACE_SECONDS, and false otherwise.
 """
 
 from __future__ import annotations
@@ -356,7 +362,7 @@ def test_maintenance_flag_causes_clean_exit(tmp_path: Path) -> None:
 # against DISPATCHER_HEARTBEAT_STALE_SECONDS.
 
 # How long before a dispatcher is considered stale (must match script constant).
-DISPATCHER_HEARTBEAT_STALE_SECONDS = 1200
+DISPATCHER_HEARTBEAT_STALE_SECONDS = 600
 
 
 def _check_dispatcher_heartbeat_script(
@@ -481,5 +487,126 @@ def test_wfm_freshness_green_when_last_processed_absent_heartbeat_recent(
     assert result.returncode == 0, (
         "check_dispatcher_heartbeat() returned RED when the heartbeat file is "
         "absent. Fresh installs must be GREEN until the first heartbeat is written.\n"
+        f"stderr: {result.stderr!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# D6 — compact grace period (issue #1786)
+# ---------------------------------------------------------------------------
+#
+# With DISPATCHER_HEARTBEAT_STALE_SECONDS lowered to 600s, catchup runs that
+# last up to 12 min would trip the heartbeat check. is_compact_grace_period()
+# gates the check for COMPACT_GRACE_SECONDS (15 min) after last-compact.ts.
+
+# Must match COMPACT_GRACE_SECONDS in health-check-v3.sh (900).
+COMPACT_GRACE_SECONDS = 900
+
+
+def _is_compact_grace_period_script(ts_file: Path, tmp_path: Path) -> str:
+    """
+    Build a self-contained bash script fragment that:
+    - Sets WORKSPACE_DIR so is_compact_grace_period() can find last-compact.ts
+    - Injects stub log functions
+    - Calls is_compact_grace_period()
+    - Exits with the function's return code (0=grace active, 1=grace expired)
+    """
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "health-check.log"
+
+    fn_body = _extract_function("is_compact_grace_period")
+
+    # ts_file is ~/lobster-workspace/data/last-compact.ts; point WORKSPACE_DIR
+    # at tmp_path so the function resolves "$WORKSPACE_DIR/data/last-compact.ts".
+    workspace_dir = ts_file.parent.parent
+
+    return f"""
+#!/bin/bash
+WORKSPACE_DIR="{workspace_dir}"
+COMPACT_GRACE_SECONDS={COMPACT_GRACE_SECONDS}
+LOG_FILE="{log_file}"
+mkdir -p "$(dirname "$LOG_FILE")"
+log()      {{ echo "[$(date -Iseconds)] [$1] $2" >> "$LOG_FILE"; }}
+log_info() {{ log "INFO" "$1"; }}
+
+{fn_body}
+
+is_compact_grace_period
+exit $?
+"""
+
+
+def test_compact_grace_period_active_when_recent(tmp_path: Path) -> None:
+    """
+    D6a: is_compact_grace_period() must return true (exit 0) when last-compact.ts
+    was written within the last COMPACT_GRACE_SECONDS.
+
+    Failure mode: if this returns false for a recent compaction, the heartbeat
+    check fires immediately after compaction and restarts the dispatcher during
+    the catchup run — disrupting state and losing context.
+    """
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    ts_file = data_dir / "last-compact.ts"
+    ts_file.write_text(str(int(time.time()) - 60))  # 60s ago — well within grace
+
+    fragment = _is_compact_grace_period_script(ts_file, tmp_path)
+    result = _run_bash_fragment(fragment)
+
+    assert result.returncode == 0, (
+        "is_compact_grace_period() returned false for a 60s-old compaction, "
+        f"but COMPACT_GRACE_SECONDS is {COMPACT_GRACE_SECONDS}. "
+        "The heartbeat check must be suppressed during the grace window.\n"
+        f"stderr: {result.stderr!r}"
+    )
+
+
+def test_compact_grace_period_expired_when_stale(tmp_path: Path) -> None:
+    """
+    D6b: is_compact_grace_period() must return false (non-zero) when last-compact.ts
+    is older than COMPACT_GRACE_SECONDS.
+
+    Failure mode: if this returns true for a stale timestamp, the heartbeat check
+    is suppressed indefinitely after any past compaction — a genuine thinking-freeze
+    would never trigger a restart.
+    """
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    ts_file = data_dir / "last-compact.ts"
+    stale_ts = int(time.time()) - (COMPACT_GRACE_SECONDS + 120)
+    ts_file.write_text(str(stale_ts))
+
+    fragment = _is_compact_grace_period_script(ts_file, tmp_path)
+    result = _run_bash_fragment(fragment)
+
+    assert result.returncode != 0, (
+        f"is_compact_grace_period() returned true for a compaction that is "
+        f"{COMPACT_GRACE_SECONDS + 120}s old. The grace window is only "
+        f"{COMPACT_GRACE_SECONDS}s — stale timestamps must not suppress monitoring.\n"
+        f"stderr: {result.stderr!r}"
+    )
+
+
+def test_compact_grace_period_inactive_when_no_ts_file(tmp_path: Path) -> None:
+    """
+    D6c: is_compact_grace_period() must return false (non-zero) when last-compact.ts
+    does not exist.
+
+    Failure mode: if this returns true when the file is absent, the heartbeat check
+    is suppressed on systems that have never had a compaction — monitoring is broken
+    from first install.
+    """
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    ts_file = data_dir / "last-compact.ts"
+    # Do NOT create the file.
+
+    fragment = _is_compact_grace_period_script(ts_file, tmp_path)
+    result = _run_bash_fragment(fragment)
+
+    assert result.returncode != 0, (
+        "is_compact_grace_period() returned true when last-compact.ts does not exist. "
+        "The grace period must only activate after a real compaction event.\n"
         f"stderr: {result.stderr!r}"
     )
