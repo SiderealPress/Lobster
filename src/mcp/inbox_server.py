@@ -99,6 +99,7 @@ from claims import AtomicClaimDB as _AtomicClaimDB
 from skill_manager import (
     list_available_skills as _list_available_skills,
     get_skill_context as _get_skill_context,
+    get_skill_context_for_message as _get_skill_context_for_message,
     activate_skill as _activate_skill,
     deactivate_skill as _deactivate_skill,
     get_skill_preferences as _get_skill_preferences,
@@ -3404,10 +3405,42 @@ async def list_tools() -> list[Tool]:
         # Skill Management Tools
         Tool(
             name="get_skill_context",
-            description="Get assembled context from all active skills. Returns markdown with behavior instructions, domain context, and preferences for each active skill. Call this at message processing start when skills are enabled.",
+            description=(
+                "Get assembled context from active skills, optionally filtered by activation mode. "
+                "Use mode='always' at session startup to inject always-mode skills once as static context. "
+                "For per-message injection of triggered/contextual skills, prefer get_skill_context_for_message. "
+                "Omit mode to get all active skills (backward-compatible)."
+            ),
             inputSchema={
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "mode": {
+                        "type": "string",
+                        "description": (
+                            "Filter by activation mode: 'always', 'triggered', or 'contextual'. "
+                            "Omit to return all active skills."
+                        ),
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="get_skill_context_for_message",
+            description=(
+                "Get per-message skill context: always-mode skills (unconditional) plus triggered-mode "
+                "skills whose trigger keywords appear in the message text. "
+                "Call this at each message processing start instead of get_skill_context for correct "
+                "activation_mode enforcement. Triggered skills with no matching keyword are excluded."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "message_text": {
+                        "type": "string",
+                        "description": "The user's message text, used to match trigger keywords for triggered-mode skills.",
+                    },
+                },
+                "required": ["message_text"],
             },
         ),
         Tool(
@@ -3942,6 +3975,8 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
     # Skill Management Tools
     elif name == "get_skill_context":
         return await handle_get_skill_context(arguments)
+    elif name == "get_skill_context_for_message":
+        return await handle_get_skill_context_for_message(arguments)
     elif name == "list_skills":
         return await handle_list_skills(arguments)
     elif name == "activate_skill":
@@ -9094,14 +9129,29 @@ async def handle_generate_bisque_login_token(arguments: dict[str, Any]) -> list[
 # =============================================================================
 
 async def handle_get_skill_context(args: dict) -> list[TextContent]:
-    """Return assembled context from all active skills."""
+    """Return assembled context from active skills, optionally filtered by mode."""
     try:
-        context = _get_skill_context()
+        mode = args.get("mode") or None  # Treat empty string as None
+        context = _get_skill_context(mode=mode)
         if not context:
-            return [TextContent(type="text", text="No active skills.")]
+            mode_label = f" (mode={mode})" if mode else ""
+            return [TextContent(type="text", text=f"No active skills{mode_label}.")]
         return [TextContent(type="text", text=context)]
     except Exception as e:
         log.error(f"get_skill_context failed: {e}", exc_info=True)
+        return [TextContent(type="text", text=f"Error: {e}")]
+
+
+async def handle_get_skill_context_for_message(args: dict) -> list[TextContent]:
+    """Return per-message skill context: always skills + triggered skills matching message."""
+    try:
+        message_text = args.get("message_text", "")
+        context = _get_skill_context_for_message(message_text=message_text)
+        if not context:
+            return [TextContent(type="text", text="No skills active for this message.")]
+        return [TextContent(type="text", text=context)]
+    except Exception as e:
+        log.error(f"get_skill_context_for_message failed: {e}", exc_info=True)
         return [TextContent(type="text", text=f"Error: {e}")]
 
 
