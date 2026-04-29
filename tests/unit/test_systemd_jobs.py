@@ -149,6 +149,47 @@ class TestServiceUnit:
         content = sj._service_unit("myjob", "/bin/echo", "")
         assert f"User={sj.LOBSTER_USER}" in content
 
+    # --- Issue #1784: PATH= must be set so uv shebang scripts can be found ---
+
+    def test_service_unit_includes_path_env(self):
+        """Generated service file must set PATH so uv is found by the kernel."""
+        content = sj._service_unit("myjob", "/bin/echo", "")
+        assert f"Environment=PATH={sj.SERVICE_PATH}" in content
+
+    def test_service_path_includes_local_bin(self):
+        """SERVICE_PATH must include the lobster user's ~/.local/bin where uv lives."""
+        assert f"{sj.LOBSTER_HOME}/.local/bin" in sj.SERVICE_PATH
+
+    def test_service_unit_includes_home_env(self):
+        """Generated service file must set HOME so Python tools find their config."""
+        content = sj._service_unit("myjob", "/bin/echo", "")
+        assert f"Environment=HOME={sj.LOBSTER_HOME}" in content
+
+    def test_service_unit_includes_env_files(self):
+        """Generated service file must include EnvironmentFile entries for lobster config."""
+        content = sj._service_unit("myjob", "/bin/echo", "")
+        for env_file in sj.SERVICE_ENV_FILES:
+            assert f"EnvironmentFile={env_file}" in content, (
+                f"Expected 'EnvironmentFile={env_file}' in service unit content"
+            )
+
+    def test_env_files_are_optional(self):
+        """All EnvironmentFile entries must be optional (prefixed with '-') so jobs
+        work on installs that don't have the config files."""
+        for env_file in sj.SERVICE_ENV_FILES:
+            assert env_file.startswith("-"), (
+                f"EnvironmentFile entry must start with '-' to be optional: {env_file!r}"
+            )
+
+    def test_path_env_appears_before_exec_start(self):
+        """Environment= lines must precede ExecStart= in the [Service] section."""
+        content = sj._service_unit("myjob", "/bin/echo", "")
+        path_pos = content.index("Environment=PATH=")
+        exec_pos = content.index("ExecStart=")
+        assert path_pos < exec_pos, (
+            "Environment=PATH= must appear before ExecStart= in the service unit"
+        )
+
 
 class TestUnitPaths:
     def test_timer_path(self):
