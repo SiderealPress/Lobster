@@ -22,6 +22,7 @@ if str(_MCP_DIR) not in sys.path:
     sys.path.insert(0, str(_MCP_DIR))
 
 import src.mcp.inbox_server  # noqa: F401 — pre-load for patch.multiple resolution
+from src.mcp.inbox_server import _DEBUG_LABEL_TASK_ID_MAX_LEN
 
 
 # ---------------------------------------------------------------------------
@@ -129,11 +130,11 @@ class TestDebugSourceLabel:
 
         text = _read_outbox_text(outbox)
         # Label must not contain the full 40-char task_id — it should be cut off
-        assert long_task_id not in text.split("\n")[0], (
+        assert long_task_id not in text, (
             "Label line should not contain the full long task_id"
         )
-        # But the first 20 chars should be present
-        assert long_task_id[:20] in text
+        # But the first _DEBUG_LABEL_TASK_ID_MAX_LEN chars should be present
+        assert long_task_id[:_DEBUG_LABEL_TASK_ID_MAX_LEN] in text
 
 
 class TestDebugSourceLabelOff:
