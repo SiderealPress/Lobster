@@ -128,25 +128,32 @@ def _write_task_output(output: str, status: str = "success") -> None:
 # ---------------------------------------------------------------------------
 
 
-def _fetch_notes_with_detail(notes_summary: list[GranolaNote]) -> list[GranolaNote]:
+def _fetch_notes_with_detail(
+    notes_summary: list[GranolaNote],
+    account_configs: list[GranolaAccountConfig],
+) -> list[GranolaNote]:
     """
     For each note from list_notes() (which lacks transcript/summary),
-    fetch full detail via get_note().
+    fetch full detail via get_note() using the correct per-account API key.
 
-    The granola_account field from the summary note is passed through to the
-    detail call so attribution is preserved in the returned GranolaNote.
+    The granola_account field from the summary note is used to look up the
+    matching GranolaAccountConfig so the correct api_key is passed to get_note().
+    Account attribution is preserved in the returned GranolaNote.
 
     Notes: The list endpoint returns id, title, owner, created_at, updated_at
     but NOT summary_markdown or transcript. We need get_note() for those.
     """
+    # Build a lookup from account name → api_key so each note fetches with its own key.
+    api_key_by_account: dict[str, str] = {cfg.name: cfg.api_key for cfg in account_configs}
+
     full_notes: list[GranolaNote] = []
     for note in notes_summary:
         try:
-            # Pass the account's api_key (via granola_account context) and preserve
-            # account attribution so the serializer can write it to frontmatter.
+            api_key = api_key_by_account.get(note.granola_account)
             full = get_note(
                 note.id,
                 include_transcript=True,
+                api_key=api_key,
                 granola_account=note.granola_account,
             )
             full_notes.append(full)
@@ -285,9 +292,9 @@ def run_sync(dry_run: bool = False) -> dict[str, Any]:
         _write_task_output(json.dumps(result), status="success")
         return result
 
-    # Step 2: Fetch full details for each note, preserving granola_account
+    # Step 2: Fetch full details for each note, using per-account API keys
     log.info("Fetching full detail for %d notes...", n_fetched)
-    notes_full = _fetch_notes_with_detail(notes_summary)
+    notes_full = _fetch_notes_with_detail(notes_summary, accounts)
 
     if dry_run:
         log.info("DRY RUN — not writing to vault")

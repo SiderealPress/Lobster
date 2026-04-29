@@ -44,19 +44,17 @@ class AccountConfig:
     """
     Immutable descriptor for a single Granola account.
 
+    Structurally equivalent to GranolaAccountConfig in
+    src/integrations/granola/client.py (name + api_key). The two types exist
+    in separate subsystems that cannot share a cross-path import at this time.
+
     Attributes:
-        name:      Account identifier ("drew" or "kelly").  # noname
-        api_key:   Bearer token for this account.
-        state_key: Unique key used to namespace cursor state for this account.
+        name:    Account identifier ("drew" or "kelly").  # noname
+        api_key: Bearer token for this account.
     """
 
     name: str
     api_key: str
-
-    @property
-    def state_key(self) -> str:
-        """Namespaced key for this account's cursor/state in the state file."""
-        return f"account_{self.name}"
 
 
 # ---------------------------------------------------------------------------

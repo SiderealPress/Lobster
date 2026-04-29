@@ -32,7 +32,7 @@ from integrations.granola.client import (
     ACCOUNT_KELLY,  # noname
 )
 from integrations.granola.serializer import note_to_markdown
-from integrations.granola.sync import _merge_notes_deduplicated
+from integrations.granola.sync import _merge_notes_deduplicated, _fetch_notes_with_detail
 
 
 # ---------------------------------------------------------------------------
@@ -239,3 +239,76 @@ class TestMergeNotesDeduplicated:
         by_id = {n.id: n for n in result}
         assert by_id["d1"].granola_account == ACCOUNT_DREW  # noname
         assert by_id["k1"].granola_account == ACCOUNT_KELLY  # noname
+
+
+# ---------------------------------------------------------------------------
+# _fetch_notes_with_detail — per-account API key routing
+# ---------------------------------------------------------------------------
+
+PRIMARY_API_KEY = "grn_drew_primary_key"  # noname
+SECONDARY_API_KEY = "grn_kelly_secondary_key"  # noname
+
+
+class TestFetchNotesWithDetail:
+    """
+    Verify that _fetch_notes_with_detail passes the correct api_key to get_note()
+    for each note based on its granola_account field.
+
+    This is the regression test for the critical bug where Kelly's notes were
+    being fetched with the primary account's API key.  # noname
+    """
+
+    def _make_accounts(self) -> list[GranolaAccountConfig]:
+        return [
+            GranolaAccountConfig(name=ACCOUNT_DREW, api_key=PRIMARY_API_KEY),  # noname
+            GranolaAccountConfig(name=ACCOUNT_KELLY, api_key=SECONDARY_API_KEY),  # noname
+        ]
+
+    @patch("integrations.granola.sync.get_note")
+    def test_primary_account_note_uses_primary_api_key(self, mock_get_note):
+        """Notes from the primary account must be fetched with the primary API key."""
+        note = _make_note("d1", account=ACCOUNT_DREW)  # noname
+        mock_get_note.return_value = note
+
+        _fetch_notes_with_detail([note], self._make_accounts())
+
+        mock_get_note.assert_called_once()
+        call_kwargs = mock_get_note.call_args
+        assert call_kwargs.kwargs.get("api_key") == PRIMARY_API_KEY
+
+    @patch("integrations.granola.sync.get_note")
+    def test_secondary_account_note_uses_secondary_api_key(self, mock_get_note):
+        """Notes from the secondary account must be fetched with the secondary API key."""
+        note = _make_note("k1", account=ACCOUNT_KELLY)  # noname
+        mock_get_note.return_value = note
+
+        _fetch_notes_with_detail([note], self._make_accounts())
+
+        mock_get_note.assert_called_once()
+        call_kwargs = mock_get_note.call_args
+        assert call_kwargs.kwargs.get("api_key") == SECONDARY_API_KEY
+
+    @patch("integrations.granola.sync.get_note")
+    def test_mixed_accounts_use_correct_keys_for_each_note(self, mock_get_note):
+        """Each note in a mixed list is fetched with its own account's API key."""
+        primary_note = _make_note("d1", account=ACCOUNT_DREW)  # noname
+        secondary_note = _make_note("k1", account=ACCOUNT_KELLY)  # noname
+        mock_get_note.side_effect = [primary_note, secondary_note]
+
+        _fetch_notes_with_detail([primary_note, secondary_note], self._make_accounts())
+
+        assert mock_get_note.call_count == 2
+        calls = mock_get_note.call_args_list
+        assert calls[0].kwargs.get("api_key") == PRIMARY_API_KEY
+        assert calls[1].kwargs.get("api_key") == SECONDARY_API_KEY
+
+    @patch("integrations.granola.sync.get_note")
+    def test_account_attribution_preserved_in_returned_notes(self, mock_get_note):
+        """The granola_account field on the returned note must match the original note."""
+        note = _make_note("k1", account=ACCOUNT_KELLY)  # noname
+        mock_get_note.return_value = note
+
+        result = _fetch_notes_with_detail([note], self._make_accounts())
+
+        assert len(result) == 1
+        assert result[0].granola_account == ACCOUNT_KELLY  # noname

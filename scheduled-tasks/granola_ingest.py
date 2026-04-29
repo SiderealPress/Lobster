@@ -57,9 +57,6 @@ from granola_multi_account import (  # noqa: E402
 NOTES_ROOT = Path.home() / "lobster-workspace" / "granola-notes"
 LOG_PATH = NOTES_ROOT / "ingest.log"
 
-# State file path — shared file, per-account keys inside
-STATE_PATH = NOTES_ROOT / ".state.json"
-
 
 def _setup_logging() -> logging.Logger:
     NOTES_ROOT.mkdir(parents=True, exist_ok=True)

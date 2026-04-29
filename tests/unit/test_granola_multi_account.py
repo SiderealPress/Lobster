@@ -63,12 +63,6 @@ class TestAccountConfig:
         assert acc.name == ACCOUNT_KELLY  # noname
         assert acc.api_key == SECONDARY_KEY
 
-    def test_state_key_is_namespaced(self):
-        acc = AccountConfig(name=ACCOUNT_KELLY, api_key=SECONDARY_KEY)  # noname
-        # State key should be unique per account to avoid cursor collision
-        assert ACCOUNT_KELLY in acc.state_key  # noname
-        assert ACCOUNT_DREW not in acc.state_key  # noname
-
 
 # ---------------------------------------------------------------------------
 # build_accounts_from_env tests
