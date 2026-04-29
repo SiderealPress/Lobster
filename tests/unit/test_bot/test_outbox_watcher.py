@@ -904,6 +904,26 @@ class TestBuildInlineKeyboard:
         assert btn.text == "Only label"
         assert btn.callback_data == "Only label"
 
+    def test_dict_format_missing_text_raises_value_error(self, bot_module):
+        """A dict button without a 'text' key raises ValueError immediately.
+
+        Previously, item.get('text', '') silently produced an empty label and the
+        failure only surfaced later inside the Telegram outbox handler.  The guard
+        must fire at construction time with a clear message so the caller sees the
+        bad spec as soon as build_inline_keyboard is called.
+        """
+        with pytest.raises(ValueError, match="missing a non-empty 'text' key"):
+            bot_module.build_inline_keyboard([[{"callback_data": "some_action"}]])
+
+    def test_dict_format_empty_text_raises_value_error(self, bot_module):
+        """A dict button with an empty-string 'text' also raises ValueError.
+
+        An empty label is just as unusable as a missing one — the guard covers
+        both cases so the outbox handler is never handed a button with no label.
+        """
+        with pytest.raises(ValueError, match="missing a non-empty 'text' key"):
+            bot_module.build_inline_keyboard([[{"text": "", "callback_data": "some_action"}]])
+
     def test_multiple_rows(self, bot_module):
         """Multiple rows are each represented as separate inner lists."""
         markup = bot_module.build_inline_keyboard([
