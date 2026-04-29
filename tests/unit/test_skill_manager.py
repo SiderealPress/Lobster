@@ -27,6 +27,7 @@ from skill_manager import (
     list_available_skills,
     get_active_skills,
     get_skill_context,
+    get_skill_context_for_message,
     activate_skill,
     deactivate_skill,
     mark_installed,
@@ -516,3 +517,327 @@ class TestGracefulDegradation:
         )
         # Still returns empty since no content to assemble
         assert result == ""
+
+
+# =============================================================================
+# Activation Mode Filtering (#1745 — inject-once for always, #1746 — triggered)
+# =============================================================================
+
+# Named constants from the spec (issues #1745, #1746)
+ALWAYS_MODE = "always"
+TRIGGERED_MODE = "triggered"
+CONTEXTUAL_MODE = "contextual"
+
+
+def _activate_skill_with_mode(state_path, tmp_path, skill_name, mode):
+    """Activate a skill and then update its activation_mode in state."""
+    activate_skill(skill_name, mode=mode, state_path=state_path, repo_dir=tmp_path)
+
+
+class TestModeFilterInAssembleContext:
+    """_assemble_context with mode filter returns only matching-mode skills."""
+
+    def _make_skill(self, tmp_path, name, mode=ALWAYS_MODE, content="Test content."):
+        skill_dir = tmp_path / "lobster-shop" / name
+        _create_skill_toml(skill_dir, name, mode=mode)
+        _create_behavior(skill_dir, "system.md", content)
+        return skill_dir
+
+    def test_mode_filter_returns_only_always_skills(self, tmp_path):
+        """When mode='always', only always-mode skills are returned."""
+        always_dir = self._make_skill(tmp_path, "always-skill", ALWAYS_MODE, "ALWAYS_CONTENT")
+        triggered_dir = self._make_skill(tmp_path, "triggered-skill", TRIGGERED_MODE, "TRIGGERED_CONTENT")
+
+        state = {"skills": {
+            "always-skill": {"priority": 50, "activation_mode": ALWAYS_MODE},
+            "triggered-skill": {"priority": 50, "activation_mode": TRIGGERED_MODE},
+        }}
+        skill_dirs = {
+            "always-skill": always_dir,
+            "triggered-skill": triggered_dir,
+        }
+
+        result = _assemble_context(
+            skill_dirs=skill_dirs,
+            active_skills=["always-skill", "triggered-skill"],
+            state=state,
+            mode=ALWAYS_MODE,
+        )
+
+        assert "ALWAYS_CONTENT" in result
+        assert "TRIGGERED_CONTENT" not in result
+
+    def test_mode_filter_returns_only_triggered_skills(self, tmp_path):
+        """When mode='triggered', only triggered-mode skills are returned."""
+        always_dir = self._make_skill(tmp_path, "always-skill", ALWAYS_MODE, "ALWAYS_CONTENT")
+        triggered_dir = self._make_skill(tmp_path, "triggered-skill", TRIGGERED_MODE, "TRIGGERED_CONTENT")
+
+        state = {"skills": {
+            "always-skill": {"priority": 50, "activation_mode": ALWAYS_MODE},
+            "triggered-skill": {"priority": 50, "activation_mode": TRIGGERED_MODE},
+        }}
+        skill_dirs = {
+            "always-skill": always_dir,
+            "triggered-skill": triggered_dir,
+        }
+
+        result = _assemble_context(
+            skill_dirs=skill_dirs,
+            active_skills=["always-skill", "triggered-skill"],
+            state=state,
+            mode=TRIGGERED_MODE,
+        )
+
+        assert "ALWAYS_CONTENT" not in result
+        assert "TRIGGERED_CONTENT" in result
+
+    def test_no_mode_filter_returns_all_skills(self, tmp_path):
+        """When mode=None, all active skills are returned regardless of activation_mode."""
+        always_dir = self._make_skill(tmp_path, "always-skill", ALWAYS_MODE, "ALWAYS_CONTENT")
+        triggered_dir = self._make_skill(tmp_path, "triggered-skill", TRIGGERED_MODE, "TRIGGERED_CONTENT")
+
+        state = {"skills": {
+            "always-skill": {"priority": 50, "activation_mode": ALWAYS_MODE},
+            "triggered-skill": {"priority": 50, "activation_mode": TRIGGERED_MODE},
+        }}
+        skill_dirs = {
+            "always-skill": always_dir,
+            "triggered-skill": triggered_dir,
+        }
+
+        result = _assemble_context(
+            skill_dirs=skill_dirs,
+            active_skills=["always-skill", "triggered-skill"],
+            state=state,
+            mode=None,
+        )
+
+        assert "ALWAYS_CONTENT" in result
+        assert "TRIGGERED_CONTENT" in result
+
+    def test_mode_filter_with_no_matching_skills_returns_empty(self, tmp_path):
+        """Mode filter with no matching skills returns empty string, not header."""
+        always_dir = self._make_skill(tmp_path, "always-skill", ALWAYS_MODE, "ALWAYS_CONTENT")
+
+        state = {"skills": {
+            "always-skill": {"priority": 50, "activation_mode": ALWAYS_MODE},
+        }}
+        skill_dirs = {"always-skill": always_dir}
+
+        result = _assemble_context(
+            skill_dirs=skill_dirs,
+            active_skills=["always-skill"],
+            state=state,
+            mode=TRIGGERED_MODE,
+        )
+
+        assert result == ""
+
+
+class TestGetSkillContextModeFilter:
+    """get_skill_context(mode=...) filters assembled output by activation_mode."""
+
+    def _setup_two_mode_skills(self, tmp_path, state_path):
+        """Create one always and one triggered skill, both active."""
+        shop = tmp_path / "lobster-shop"
+
+        always_dir = shop / "always-skill"
+        _create_skill_toml(always_dir, "always-skill", mode=ALWAYS_MODE)
+        _create_behavior(always_dir, "system.md", "ALWAYS_BEHAVIOR")
+
+        triggered_dir = shop / "triggered-skill"
+        _create_skill_toml(triggered_dir, "triggered-skill", mode=TRIGGERED_MODE)
+        _create_behavior(triggered_dir, "system.md", "TRIGGERED_BEHAVIOR")
+
+        # Activate both skills
+        activate_skill("always-skill", mode=ALWAYS_MODE, state_path=state_path, repo_dir=tmp_path)
+        activate_skill("triggered-skill", mode=TRIGGERED_MODE, state_path=state_path, repo_dir=tmp_path)
+
+    def test_mode_always_returns_only_always_skills(self, tmp_path):
+        """get_skill_context(mode='always') returns only always-mode skills."""
+        state_path = tmp_path / "state.json"
+        self._setup_two_mode_skills(tmp_path, state_path)
+
+        result = get_skill_context(
+            repo_dir=tmp_path, state_path=state_path, mode=ALWAYS_MODE
+        )
+
+        assert "ALWAYS_BEHAVIOR" in result
+        assert "TRIGGERED_BEHAVIOR" not in result
+
+    def test_mode_triggered_returns_only_triggered_skills(self, tmp_path):
+        """get_skill_context(mode='triggered') returns only triggered-mode skills."""
+        state_path = tmp_path / "state.json"
+        self._setup_two_mode_skills(tmp_path, state_path)
+
+        result = get_skill_context(
+            repo_dir=tmp_path, state_path=state_path, mode=TRIGGERED_MODE
+        )
+
+        assert "ALWAYS_BEHAVIOR" not in result
+        assert "TRIGGERED_BEHAVIOR" in result
+
+    def test_no_mode_returns_all_active_skills(self, tmp_path):
+        """get_skill_context() with no mode returns all active skills (backward compatible)."""
+        state_path = tmp_path / "state.json"
+        self._setup_two_mode_skills(tmp_path, state_path)
+
+        result = get_skill_context(
+            repo_dir=tmp_path, state_path=state_path
+        )
+
+        assert "ALWAYS_BEHAVIOR" in result
+        assert "TRIGGERED_BEHAVIOR" in result
+
+
+class TestGetSkillContextForMessage:
+    """get_skill_context_for_message: triggered skills filtered by keyword match."""
+
+    def _setup_triggered_skill(self, tmp_path, state_path, skill_name, triggers, content):
+        """Create and activate a triggered skill with given trigger keywords."""
+        skill_dir = tmp_path / "lobster-shop" / skill_name
+        skill_dir.mkdir(parents=True, exist_ok=True)
+
+        # Write skill.toml with triggers
+        toml_content = f"""[skill]
+name = "{skill_name}"
+version = "1.0.0"
+description = "Test triggered skill"
+category = "tool"
+
+[activation]
+mode = "triggered"
+triggers = {json.dumps(triggers)}
+
+[layering]
+priority = 50
+"""
+        (skill_dir / "skill.toml").write_text(toml_content)
+        _create_behavior(skill_dir, "system.md", content)
+        activate_skill(skill_name, mode=TRIGGERED_MODE, state_path=state_path, repo_dir=tmp_path)
+        return skill_dir
+
+    def _setup_always_skill(self, tmp_path, state_path, content="ALWAYS_CONTENT"):
+        """Create and activate an always skill."""
+        skill_dir = tmp_path / "lobster-shop" / "always-skill"
+        _create_skill_toml(skill_dir, "always-skill", mode=ALWAYS_MODE)
+        _create_behavior(skill_dir, "system.md", content)
+        activate_skill("always-skill", mode=ALWAYS_MODE, state_path=state_path, repo_dir=tmp_path)
+
+    def test_triggered_skill_included_when_trigger_keyword_present(self, tmp_path):
+        """Triggered skill is included when message contains a trigger keyword."""
+        state_path = tmp_path / "state.json"
+        self._setup_triggered_skill(
+            tmp_path, state_path, "browser-skill", ["/browse", "/search"], "BROWSER_CONTENT"
+        )
+
+        result = get_skill_context_for_message(
+            message_text="/browse https://example.com",
+            repo_dir=tmp_path, state_path=state_path,
+        )
+
+        assert "BROWSER_CONTENT" in result
+
+    def test_triggered_skill_excluded_when_no_trigger_keyword(self, tmp_path):
+        """Triggered skill is excluded when message has no matching trigger keyword."""
+        state_path = tmp_path / "state.json"
+        self._setup_triggered_skill(
+            tmp_path, state_path, "browser-skill", ["/browse", "/search"], "BROWSER_CONTENT"
+        )
+
+        result = get_skill_context_for_message(
+            message_text="What's the weather like today?",
+            repo_dir=tmp_path, state_path=state_path,
+        )
+
+        assert "BROWSER_CONTENT" not in result
+
+    def test_trigger_matching_is_case_insensitive(self, tmp_path):
+        """Trigger keyword matching ignores case."""
+        state_path = tmp_path / "state.json"
+        self._setup_triggered_skill(
+            tmp_path, state_path, "browser-skill", ["/Browse"], "BROWSER_CONTENT"
+        )
+
+        result = get_skill_context_for_message(
+            message_text="/browse something",
+            repo_dir=tmp_path, state_path=state_path,
+        )
+
+        assert "BROWSER_CONTENT" in result
+
+    def test_always_skills_always_included_regardless_of_message(self, tmp_path):
+        """Always skills appear in get_skill_context_for_message regardless of message text."""
+        state_path = tmp_path / "state.json"
+        self._setup_always_skill(tmp_path, state_path, "ALWAYS_CONTENT")
+        self._setup_triggered_skill(
+            tmp_path, state_path, "browser-skill", ["/browse"], "BROWSER_CONTENT"
+        )
+
+        result = get_skill_context_for_message(
+            message_text="totally unrelated message",
+            repo_dir=tmp_path, state_path=state_path,
+        )
+
+        assert "ALWAYS_CONTENT" in result
+        assert "BROWSER_CONTENT" not in result
+
+    def test_multiple_triggered_skills_each_checked_independently(self, tmp_path):
+        """Each triggered skill is checked independently against the message."""
+        state_path = tmp_path / "state.json"
+        self._setup_triggered_skill(
+            tmp_path, state_path, "browser-skill", ["/browse"], "BROWSER_CONTENT"
+        )
+        self._setup_triggered_skill(
+            tmp_path, state_path, "email-skill", ["/email", "/mail"], "EMAIL_CONTENT"
+        )
+
+        result = get_skill_context_for_message(
+            message_text="/browse the web",
+            repo_dir=tmp_path, state_path=state_path,
+        )
+
+        assert "BROWSER_CONTENT" in result
+        assert "EMAIL_CONTENT" not in result
+
+    def test_empty_message_text_excludes_all_triggered_skills(self, tmp_path):
+        """Empty message text means no triggered skills match."""
+        state_path = tmp_path / "state.json"
+        self._setup_triggered_skill(
+            tmp_path, state_path, "browser-skill", ["/browse"], "BROWSER_CONTENT"
+        )
+
+        result = get_skill_context_for_message(
+            message_text="",
+            repo_dir=tmp_path, state_path=state_path,
+        )
+
+        assert "BROWSER_CONTENT" not in result
+
+    def test_triggered_skill_with_no_triggers_list_never_fires(self, tmp_path):
+        """A triggered skill with no triggers defined never activates."""
+        state_path = tmp_path / "state.json"
+        # Skill with triggered mode but no triggers field
+        skill_dir = tmp_path / "lobster-shop" / "notriggers-skill"
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        (skill_dir / "skill.toml").write_text("""[skill]
+name = "notriggers-skill"
+version = "1.0.0"
+description = "No triggers defined"
+category = "tool"
+
+[activation]
+mode = "triggered"
+
+[layering]
+priority = 50
+""")
+        _create_behavior(skill_dir, "system.md", "NOTRIGGERS_CONTENT")
+        activate_skill("notriggers-skill", mode=TRIGGERED_MODE, state_path=state_path, repo_dir=tmp_path)
+
+        result = get_skill_context_for_message(
+            message_text="/browse whatever",
+            repo_dir=tmp_path, state_path=state_path,
+        )
+
+        assert "NOTRIGGERS_CONTENT" not in result
