@@ -31,6 +31,20 @@ SYSTEMD_DIR = Path("/etc/systemd/system")
 UNIT_PREFIX = "lobster-"
 LOBSTER_MARKER = "# LOBSTER-MANAGED"
 LOBSTER_USER = "lobster"
+LOBSTER_HOME = f"/home/{LOBSTER_USER}"
+
+# PATH injected into every generated service unit so that tools installed in
+# the user's local bin (e.g. uv at ~/.local/bin/uv) are found by the kernel
+# when it resolves the script shebang (#!/usr/bin/env -S uv run python3).
+# Systemd's default service PATH omits ~/.local/bin entirely.
+SERVICE_PATH = f"{LOBSTER_HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin"
+
+# Optional env files loaded into every generated service unit.
+# The leading "-" means "ignore if missing" (systemd syntax).
+SERVICE_ENV_FILES = [
+    f"-{LOBSTER_HOME}/lobster-config/config.env",
+    f"-{LOBSTER_HOME}/lobster-config/global.env",
+]
 
 # Maximum name length (prefix + name must fit comfortably in a unit filename)
 MAX_NAME_LEN = 50
@@ -322,6 +336,7 @@ WantedBy=timers.target
 
 def _service_unit(name: str, command: str, description: str) -> str:
     desc = description or f"Lobster job: {name}"
+    env_file_lines = "\n".join(f"EnvironmentFile={f}" for f in SERVICE_ENV_FILES)
     return f"""[Unit]
 Description={desc}
 {LOBSTER_MARKER}
@@ -329,6 +344,9 @@ Description={desc}
 [Service]
 Type=oneshot
 User={LOBSTER_USER}
+Environment=PATH={SERVICE_PATH}
+Environment=HOME={LOBSTER_HOME}
+{env_file_lines}
 ExecStart={command}
 """
 
