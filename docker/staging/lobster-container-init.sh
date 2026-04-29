@@ -8,13 +8,19 @@
 #      LOBSTER_ENV, etc. — this script materialises them into the file that the
 #      lobster systemd services load via EnvironmentFile=.
 #
-#   2. Run install.sh --container-setup for runtime setup:
+#   2. GitHub auth — wire GITHUB_TOKEN into all 4 layers so gh CLI works in
+#      every subprocess context (systemd services, tmux, Claude Code subagents).
+#      docker-compose environment: passthrough reaches PID 1 only; this step
+#      propagates the token to /etc/environment, gh auth login, shell profiles,
+#      and config.env so all spawned processes can authenticate.
+#
+#   3. Run install.sh --container-setup for runtime setup:
 #      - Verifies sqlite-vec loads correctly
 #      - Creates CLAUDE.md and .claude/ symlinks in $WORKSPACE_DIR
 #      - Creates stub user-config agent files
 #      - Seeds canonical memory templates (idempotent)
 #
-#   3. Update ~/.claude/settings.json MCP registration to point at the inbox
+#   4. Update ~/.claude/settings.json MCP registration to point at the inbox
 #      server running in this container (the host settings.json path is correct,
 #      but this is idempotent and ensures it's always current).
 #
@@ -62,13 +68,80 @@ LOBSTER_ADMIN_CHAT_ID=${LOBSTER_ADMIN_CHAT_ID:-${TELEGRAM_ALLOWED_USERS:-}}
 LOBSTER_ENV=${LOBSTER_ENV:-production}
 LOBSTER_DEBUG=${LOBSTER_DEBUG:-false}
 GITHUB_TOKEN=${GITHUB_TOKEN:-}
-# ^ Set in config.staging.env to enable gh CLI inside the container.
-#   Not inherited from host environment (see docker-compose for details).
+# ^ Passed via docker-compose environment: (from host shell) or config.staging.env.
+#   Writing it here (layer 4) ensures Lobster services that source config.env
+#   also have access. Layers 1–3 are set up in the GitHub auth section below.
 CONFIG
 echo "[container-init] config.env written."
 
 #-------------------------------------------------------------------------------
-# 2. Run install.sh --container-setup
+# 2. GitHub auth — wire GITHUB_TOKEN into all 4 layers
+#
+# docker-compose environment: passthrough injects GITHUB_TOKEN into PID 1, but
+# subprocesses launched later (tmux sessions, Claude Code forks) do not inherit
+# it. We write it into 4 durable locations so it survives shell re-launches and
+# is available regardless of how the subprocess was spawned.
+#
+# Layer 1: /etc/environment — system-wide, read by PAM for all sessions
+# Layer 2: gh auth login   — persistent ~/.config/gh/hosts.yml; most reliable
+# Layer 3: ~/.bashrc / ~/.profile — interactive and login shells
+# Layer 4: config.env      — already written above; sourced by Lobster services
+#
+# All layers are idempotent: stale entries are removed before writing so
+# container restarts do not accumulate duplicate lines.
+#-------------------------------------------------------------------------------
+if [ -n "${GITHUB_TOKEN:-}" ]; then
+    echo "[container-init] GITHUB_TOKEN detected — configuring gh CLI auth (4 layers)..."
+
+    # Layer 1: /etc/environment (system-wide, all processes)
+    # Strip any stale entries first to keep the file clean across restarts.
+    # /etc/environment is root-owned; lobster has passwordless sudo in this container.
+    grep -v "^GITHUB_TOKEN=\|^GH_TOKEN=" /etc/environment > /tmp/etc-environment.tmp 2>/dev/null || true
+    printf 'GITHUB_TOKEN=%s\nGH_TOKEN=%s\n' "${GITHUB_TOKEN}" "${GITHUB_TOKEN}" >> /tmp/etc-environment.tmp
+    sudo cp /tmp/etc-environment.tmp /etc/environment
+    rm -f /tmp/etc-environment.tmp
+    echo "[container-init]   Layer 1 (/etc/environment) done."
+
+    # Layer 2: gh auth login — writes ~/.config/gh/hosts.yml
+    # Most durable: gh reads this file regardless of environment variables.
+    # Runs as root here; the lobster user's HOME is /home/lobster (lobster-
+    # container-init.service sets User=lobster, so HOME is already correct).
+    if command -v gh >/dev/null 2>&1; then
+        echo "${GITHUB_TOKEN}" | gh auth login --with-token 2>/dev/null && \
+            echo "[container-init]   Layer 2 (gh auth login) done." || \
+            echo "[container-init]   Layer 2 (gh auth login) failed — gh may not be installed yet."
+    else
+        echo "[container-init]   Layer 2 skipped — gh not found in PATH."
+    fi
+
+    # Layer 3: shell profiles (interactive + login shells)
+    # Strip stale exports first; append fresh ones.
+    HOME_DIR="/home/lobster"
+    for profile in "$HOME_DIR/.bashrc" "$HOME_DIR/.profile"; do
+        touch "$profile"
+        # Remove old export lines, then append updated ones.
+        grep -v "^export GITHUB_TOKEN=\|^export GH_TOKEN=" "$profile" > /tmp/profile.tmp 2>/dev/null || true
+        printf 'export GITHUB_TOKEN=%s\nexport GH_TOKEN=%s\n' \
+            "${GITHUB_TOKEN}" "${GITHUB_TOKEN}" >> /tmp/profile.tmp
+        cp /tmp/profile.tmp "$profile"
+        chown lobster:lobster "$profile"
+    done
+    rm -f /tmp/profile.tmp
+    echo "[container-init]   Layer 3 (.bashrc/.profile) done."
+
+    # Layer 4: already written to config.env above.
+    echo "[container-init]   Layer 4 (config.env) already done."
+
+    echo "[container-init] GitHub auth configured across all 4 layers."
+else
+    echo "[container-init] GITHUB_TOKEN not set — skipping gh CLI auth setup."
+    echo "[container-init]   To enable gh CLI in the container, set GITHUB_TOKEN in"
+    echo "[container-init]   config.staging.env or export it in your host shell before"
+    echo "[container-init]   running docker compose."
+fi
+
+#-------------------------------------------------------------------------------
+# 3. Run install.sh --container-setup (renumbered from 2 after adding gh auth)
 #
 # Idempotent — safe to run on every boot. Handles:
 #   - sqlite-vec load verification
@@ -86,7 +159,7 @@ LOBSTER_CONFIG_DIR="$CONFIG_DIR" \
 echo "[container-init] Container setup complete."
 
 #-------------------------------------------------------------------------------
-# 3. Update Claude settings.json MCP registration
+# 4. Update Claude settings.json MCP registration
 #
 # The ~/.claude dir is bind-mounted from the host. The host settings.json
 # already has the correct lobster-inbox HTTP registration (http://localhost:8766/mcp),
