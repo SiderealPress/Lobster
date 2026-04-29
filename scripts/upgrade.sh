@@ -2891,6 +2891,71 @@ print(f'prune-pr-worktrees: {result.status}')
         warn "prune-pr-worktrees.py not found at $_m83_script or uv unavailable — skipping Migration 83"
     fi
 
+    # Migration 84: Backfill Environment=PATH= and Environment=HOME= in existing Lobster-managed
+    # system service files. PR #1838 fixed the code that generates new service files, but existing
+    # on-disk files were already missing these directives and fail with exit-127 when uv is not
+    # found on systemd's minimal PATH. This migration patches all Lobster service files in
+    # /etc/systemd/system/ that are missing Environment=PATH= and runs daemon-reload.
+    local _m84_patched=0
+    local _m84_env_path="Environment=PATH=${HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin"
+    local _m84_env_home="Environment=HOME=${HOME}"
+    for _m84_svc in /etc/systemd/system/lobster-*.service; do
+        [ -f "$_m84_svc" ] || continue
+        if grep -q "Environment=PATH=" "$_m84_svc" 2>/dev/null; then
+            continue
+        fi
+        # Patch: insert PATH and HOME lines immediately before ExecStart=
+        if grep -q "^ExecStart=" "$_m84_svc" 2>/dev/null; then
+            sudo sed -i "s|^ExecStart=|${_m84_env_path}\n${_m84_env_home}\nExecStart=|" "$_m84_svc"
+            substep "Added PATH/HOME to $(basename "$_m84_svc")"
+            _m84_patched=$((_m84_patched + 1))
+        fi
+    done
+    if [ "$_m84_patched" -gt 0 ]; then
+        sudo systemctl daemon-reload 2>/dev/null || warn "daemon-reload failed — run manually"
+        success "Migration 84: patched $_m84_patched service file(s) with Environment=PATH= (daemon-reload done)"
+        migrated=$((migrated + _m84_patched))
+    fi
+
+    # Migration 85: Fix lobster-lobstertalk-unified.service — two bugs left it silently broken
+    # even after Migration 84 added Environment=PATH=:
+    # 1. The shebang #!/usr/bin/env uv run python3 is missing the -S flag that env needs to
+    #    split multi-word interpreter strings. Without -S, env treats "uv run python3" as a
+    #    single binary name and exits 127.
+    # 2. The service file was missing EnvironmentFile directives, so BOT_TALK_URL and other
+    #    runtime secrets were never loaded, causing a RuntimeError on every execution.
+    # This migration patches the shebang in the script and adds EnvironmentFile lines to
+    # the service file, then runs daemon-reload.
+    local _m85_script="${LOBSTER_DIR}/scheduled-tasks/lobstertalk_unified.py"
+    local _m85_svc="/etc/systemd/system/lobster-lobstertalk-unified.service"
+    local _m85_patched=0
+
+    # Fix 1: shebang — replace #!/usr/bin/env uv run python3 with #!/usr/bin/env -S uv run python3
+    if [ -f "$_m85_script" ]; then
+        if head -1 "$_m85_script" | grep -q "^#!/usr/bin/env uv run python3$"; then
+            sed -i '1s|^#!/usr/bin/env uv run python3$|#!/usr/bin/env -S uv run python3|' "$_m85_script"
+            substep "Fixed shebang in lobstertalk_unified.py (added -S flag)"
+            _m85_patched=$((_m85_patched + 1))
+        fi
+    fi
+
+    # Fix 2: EnvironmentFile — add config file directives if missing
+    if [ -f "$_m85_svc" ]; then
+        if ! grep -q "^EnvironmentFile=" "$_m85_svc" 2>/dev/null; then
+            # Insert EnvironmentFile lines before ExecStart=
+            local _m85_env_files="EnvironmentFile=-${HOME}/lobster/config/config.env\nEnvironmentFile=${HOME}/lobster-config/config.env\nEnvironmentFile=-${HOME}/lobster-config/global.env"
+            sudo sed -i "s|^ExecStart=|${_m85_env_files}\nExecStart=|" "$_m85_svc"
+            substep "Added EnvironmentFile directives to lobster-lobstertalk-unified.service"
+            _m85_patched=$((_m85_patched + 1))
+        fi
+    fi
+
+    if [ "$_m85_patched" -gt 0 ]; then
+        sudo systemctl daemon-reload 2>/dev/null || warn "daemon-reload failed — run manually"
+        success "Migration 85: fixed lobstertalk-unified shebang and/or EnvironmentFile (daemon-reload done)"
+        migrated=$((_m85_patched + migrated))
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
