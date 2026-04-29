@@ -2985,6 +2985,27 @@ print(f'prune-pr-worktrees: {result.status}')
         substep "lobstertalk-ssh-watcher timer/service not present — skipping Migration 86"
     fi
 
+    # Migration 87: Register LOBSTER-WEEKLY-UPGRADE cron entry (issue #1757).
+    # run-upgrades.sh calls restart-mcp.sh before running apt-get upgrade, so the
+    # dispatcher receives an inbox warning before needrestart can fire SIGTERM at
+    # the lobster Python services.  This replaces the apt-get upgrade that was
+    # previously run inside daily-health-check.sh.
+    local _m87_script="$LOBSTER_DIR/scripts/run-upgrades.sh"
+    if [ -f "$_m87_script" ]; then
+        chmod +x "$_m87_script" || true
+        local _m87_cron="0 2 * * 0 $_m87_script # LOBSTER-WEEKLY-UPGRADE"
+        if crontab -l 2>/dev/null | grep -qF "LOBSTER-WEEKLY-UPGRADE"; then
+            substep "LOBSTER-WEEKLY-UPGRADE cron entry already present — skipping Migration 87"
+        else
+            "$LOBSTER_DIR/scripts/cron-manage.sh" add "# LOBSTER-WEEKLY-UPGRADE" "$_m87_cron" && {
+                substep "Registered run-upgrades.sh as weekly cron job (Sundays at 02:00)"
+                migrated=$((migrated + 1))
+            } || warn "Could not register LOBSTER-WEEKLY-UPGRADE cron entry — add manually: $_m87_cron"
+        fi
+    else
+        warn "run-upgrades.sh not found at $_m87_script — skipping Migration 87"
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
