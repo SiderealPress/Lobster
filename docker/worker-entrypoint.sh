@@ -82,7 +82,7 @@ json_output=$(printf '%s' "$output" | jq -Rs .)
 cat > "$tmp_file" <<ENDJSON
 {
   "id": "${msg_id}",
-  "source": "worker",
+  "source": "system",
   "chat_id": ${WORKER_CHAT_ID},
   "user_id": 0,
   "username": "docker-worker",
