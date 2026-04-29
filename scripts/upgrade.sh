@@ -2559,6 +2559,27 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
         substep "lobstertalk-ssh-watcher timer/service not present — skipping Migration 86"
     fi
 
+    # Migration 84: Register LOBSTER-WEEKLY-UPGRADE cron entry (issue #1757).
+    # run-upgrades.sh calls restart-mcp.sh before running apt-get upgrade, so the
+    # dispatcher receives an inbox warning before needrestart can fire SIGTERM at
+    # the lobster Python services.  This replaces the apt-get upgrade that was
+    # previously run inside daily-health-check.sh.
+    local _m84_script="$LOBSTER_DIR/scripts/run-upgrades.sh"
+    if [ -f "$_m84_script" ]; then
+        chmod +x "$_m84_script" || true
+        local _m84_cron="0 2 * * 0 $_m84_script # LOBSTER-WEEKLY-UPGRADE"
+        if "$LOBSTER_DIR/scripts/cron-manage.sh" list 2>/dev/null | grep -q "LOBSTER-WEEKLY-UPGRADE"; then
+            substep "LOBSTER-WEEKLY-UPGRADE cron entry already present — skipping Migration 84"
+        else
+            "$LOBSTER_DIR/scripts/cron-manage.sh" add "# LOBSTER-WEEKLY-UPGRADE" "$_m84_cron" && {
+                substep "Registered run-upgrades.sh as weekly cron job (Sundays at 02:00)"
+                migrated=$((migrated + 1))
+            } || warn "Could not register LOBSTER-WEEKLY-UPGRADE cron entry — add manually: $_m84_cron"
+        fi
+    else
+        warn "run-upgrades.sh not found at $_m84_script — skipping Migration 84"
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
