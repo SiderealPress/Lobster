@@ -41,7 +41,6 @@ class TestCollectHealthHeartbeatFile:
 
     def test_reads_dispatcher_heartbeat_file(self, tmp_path):
         """Heartbeat age is measured from the dispatcher-heartbeat file."""
-        dispatcher_hb = _make_fresh_heartbeat_file(tmp_path, age_seconds=30)
         old_claude_hb = tmp_path / "claude-heartbeat"
         # claude-heartbeat is very stale (older than any threshold)
         old_claude_hb.write_text("0\n")
