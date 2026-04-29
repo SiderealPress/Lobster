@@ -24,6 +24,7 @@ sys.path.insert(0, str(_TASKS_DIR))
 # Import modules under test
 from granola_multi_account import (  # noqa: E402
     AccountConfig,
+    AccountRegistry,
     ACCOUNT_DREW,  # noname
     ACCOUNT_KELLY,  # noname
     build_accounts_from_env,
@@ -178,3 +179,46 @@ class TestMergeAndDeduplicate:
         result = merge_and_deduplicate(primary_notes, secondary_notes)
         primary_ids = [n["id"] for n in result if n.get("account") == ACCOUNT_DREW]  # noname
         assert primary_ids == ["d1", "d2"]
+
+
+# ---------------------------------------------------------------------------
+# AccountRegistry — strict lookup, no silent fallback
+# ---------------------------------------------------------------------------
+
+
+class TestAccountRegistry:
+    def _make_registry(self) -> AccountRegistry:
+        accounts = build_accounts_from_env({
+            "GRANOLA_API_KEY": PRIMARY_KEY,
+            "GRANOLA_API_KEY_KELLY": SECONDARY_KEY,  # noname
+        })
+        return AccountRegistry(accounts)
+
+    def test_lookup_known_primary_account(self):
+        registry = self._make_registry()
+        cfg = registry.get(ACCOUNT_DREW)  # noname
+        assert cfg.api_key == PRIMARY_KEY
+
+    def test_lookup_known_secondary_account(self):
+        registry = self._make_registry()
+        cfg = registry.get(ACCOUNT_KELLY)  # noname
+        assert cfg.api_key == SECONDARY_KEY
+
+    def test_unknown_account_raises_key_error(self):
+        """
+        An account name not in the registry must raise KeyError immediately.
+        No silent fallback to the primary key is acceptable.
+        """
+        registry = self._make_registry()
+        with pytest.raises(KeyError, match="phantom-account"):
+            registry.get("phantom-account")
+
+    def test_registry_contains_all_configured_accounts(self):
+        registry = self._make_registry()
+        assert ACCOUNT_DREW in registry  # noname
+        assert ACCOUNT_KELLY in registry  # noname
+
+    def test_registry_does_not_contain_unconfigured_account(self):
+        accounts = build_accounts_from_env({"GRANOLA_API_KEY": PRIMARY_KEY})
+        registry = AccountRegistry(accounts)
+        assert ACCOUNT_KELLY not in registry  # noname

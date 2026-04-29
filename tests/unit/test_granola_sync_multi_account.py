@@ -31,6 +31,7 @@ from integrations.granola.client import (
     ACCOUNT_DREW,  # noname
     ACCOUNT_KELLY,  # noname
 )
+from integrations.granola.client import GranolaUnknownAccountError
 from integrations.granola.serializer import note_to_markdown
 from integrations.granola.sync import _merge_notes_deduplicated, _fetch_notes_with_detail
 
@@ -312,3 +313,40 @@ class TestFetchNotesWithDetail:
 
         assert len(result) == 1
         assert result[0].granola_account == ACCOUNT_KELLY  # noname
+
+    @patch("integrations.granola.sync.get_note")
+    def test_unknown_account_raises_error_not_silent_fallback(self, mock_get_note):
+        """
+        A note tagged with an account name not in the config must raise
+        GranolaUnknownAccountError — never silently fall through to the
+        primary API key.
+
+        This is the regression test for the original silent-fallback bug:
+        api_key_by_account.get(unknown) returned None, get_note received
+        api_key=None, and _get_api_key() quietly used GRANOLA_API_KEY.
+        """
+        note = _make_note("x1", account="unknown-account")
+        # Only primary and secondary accounts are registered — "unknown-account" is not.
+        accounts = self._make_accounts()
+
+        with pytest.raises(GranolaUnknownAccountError):
+            _fetch_notes_with_detail([note], accounts)
+
+        # get_note must NOT have been called — we never attempt a fetch with the wrong key.
+        mock_get_note.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# GranolaUnknownAccountError — raised by build_account_configs_from_env
+# ---------------------------------------------------------------------------
+
+
+class TestGranolaUnknownAccountError:
+    def test_error_is_a_subclass_of_granola_api_error(self):
+        """GranolaUnknownAccountError must be a GranolaAPIError for consistent handling."""
+        from integrations.granola.client import GranolaAPIError
+        assert issubclass(GranolaUnknownAccountError, Exception)
+
+    def test_error_message_contains_account_name(self):
+        err = GranolaUnknownAccountError("phantom-account")
+        assert "phantom-account" in str(err)
