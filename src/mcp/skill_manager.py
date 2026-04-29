@@ -259,12 +259,44 @@ def _read_preferences_schema(skill_dir: Path) -> dict:
         return {}
 
 
+def _read_triggers(skill_dir: Path) -> list[str]:
+    """Read trigger keywords from a skill manifest's [activation] section.
+
+    Returns list of trigger strings (e.g. ['/browse', '/search']), or empty
+    list if no triggers are defined or the manifest is missing.
+    """
+    manifest = _parse_manifest(skill_dir)
+    if not manifest:
+        return []
+    activation = manifest.get("activation", {})
+    triggers = activation.get("triggers", [])
+    if not isinstance(triggers, list):
+        return []
+    return [str(t) for t in triggers]
+
+
+def _skill_matches_trigger(triggers: list[str], message_text: str) -> bool:
+    """Return True if any trigger keyword appears in message_text (case-insensitive)."""
+    if not triggers:
+        return False
+    lower_message = message_text.lower()
+    return any(trigger.lower() in lower_message for trigger in triggers)
+
+
 def _assemble_context(
     skill_dirs: dict[str, Path],
     active_skills: list[str],
     state: dict,
+    mode: str | None = None,
 ) -> str:
     """Assemble composite context from all active skills, ordered by priority.
+
+    Args:
+        skill_dirs: Mapping of skill name to directory path.
+        active_skills: List of active skill names.
+        state: Parsed skills-state dict.
+        mode: When set, only include skills whose activation_mode matches.
+              None means include all active skills (backward-compatible default).
 
     Returns markdown string with section headers per skill.
     """
@@ -277,6 +309,11 @@ def _assemble_context(
         if name not in skill_dirs:
             continue
         skill_state = state.get("skills", {}).get(name, {})
+        # Apply mode filter: skip skills whose activation_mode doesn't match
+        if mode is not None:
+            skill_mode = skill_state.get("activation_mode", "always")
+            if skill_mode != mode:
+                continue
         priority = skill_state.get("priority", 50)
         entries.append((priority, name, skill_dirs[name]))
 
@@ -357,15 +394,39 @@ def get_active_skills(state_path: Path = _DEFAULT_STATE_PATH) -> list[str]:
     ]
 
 
+def _build_skill_dirs_map(
+    repo_dir: Path,
+    config_dir: str,
+) -> dict[str, Path]:
+    """Build a name -> directory mapping for all discoverable skills."""
+    skill_dirs: dict[str, Path] = {}
+    for skill_dir in _resolve_skill_dirs(repo_dir, config_dir):
+        manifest = _parse_manifest(skill_dir)
+        if manifest:
+            name = _extract_skill_name(manifest, skill_dir.name)
+            skill_dirs[name] = skill_dir
+    return skill_dirs
+
+
 def get_skill_context(
     repo_dir: Path | None = None,
     config_dir: str | None = None,
     state_path: Path = _DEFAULT_STATE_PATH,
+    mode: str | None = None,
 ) -> str:
-    """THE KEY FUNCTION — assemble composite context from all active skills.
+    """Assemble composite context from active skills, optionally filtered by mode.
+
+    Args:
+        repo_dir: Path to lobster repo (default: LOBSTER_INSTALL_DIR env or ~/lobster).
+        config_dir: Path to private config overlay (default: LOBSTER_CONFIG_DIR env).
+        state_path: Path to skills-state.json.
+        mode: When set ('always', 'triggered', or 'contextual'), return only skills
+              with matching activation_mode. None returns all active skills.
+              Use mode='always' at session start for inject-once static context.
+              Use get_skill_context_for_message() for per-message triggered/contextual.
 
     Returns markdown string ready for injection into Claude's context.
-    Empty string if no skills are active.
+    Empty string if no active skills produce content.
     """
     repo_dir = repo_dir or _REPO_DIR
     config_dir = _CONFIG_DIR if config_dir is None else config_dir
@@ -376,15 +437,67 @@ def get_skill_context(
     if not active:
         return ""
 
-    # Build name -> dir mapping
-    skill_dirs: dict[str, Path] = {}
-    for skill_dir in _resolve_skill_dirs(repo_dir, config_dir):
-        manifest = _parse_manifest(skill_dir)
-        if manifest:
-            name = _extract_skill_name(manifest, skill_dir.name)
-            skill_dirs[name] = skill_dir
+    skill_dirs = _build_skill_dirs_map(repo_dir, config_dir)
+    return _assemble_context(skill_dirs, active, state, mode=mode)
 
-    return _assemble_context(skill_dirs, active, state)
+
+def get_skill_context_for_message(
+    message_text: str,
+    repo_dir: Path | None = None,
+    config_dir: str | None = None,
+    state_path: Path = _DEFAULT_STATE_PATH,
+) -> str:
+    """Assemble per-message skill context: always skills + triggered skills that match.
+
+    For each active skill:
+    - always mode: always included
+    - triggered mode: included only if a trigger keyword appears in message_text
+    - contextual mode: not included (handled separately via get_skill_context_for_message
+      with pattern matching — not yet implemented, see issue #1747)
+
+    This is the preferred call for per-message skill injection. Pair with
+    get_skill_context(mode='always') at session start for inject-once always skills.
+
+    Args:
+        message_text: The user's message text (used for trigger matching).
+        repo_dir: Path to lobster repo.
+        config_dir: Path to private config overlay.
+        state_path: Path to skills-state.json.
+
+    Returns markdown string with context from matching skills.
+    """
+    repo_dir = repo_dir or _REPO_DIR
+    config_dir = _CONFIG_DIR if config_dir is None else config_dir
+
+    state = _read_store(state_path)
+    all_active = get_active_skills(state_path)
+
+    if not all_active:
+        return ""
+
+    skill_dirs = _build_skill_dirs_map(repo_dir, config_dir)
+
+    # Determine which skills to include based on activation mode + trigger matching
+    skills_to_include: list[str] = []
+    for name in all_active:
+        skill_state = state.get("skills", {}).get(name, {})
+        skill_mode = skill_state.get("activation_mode", "always")
+
+        if skill_mode == "always":
+            # Always-mode skills are always included
+            skills_to_include.append(name)
+        elif skill_mode == "triggered":
+            # Triggered-mode skills: include only if message matches a trigger keyword
+            if name in skill_dirs:
+                triggers = _read_triggers(skill_dirs[name])
+                if _skill_matches_trigger(triggers, message_text):
+                    skills_to_include.append(name)
+        # contextual mode: not yet implemented (issue #1747) — skip for now
+
+    if not skills_to_include:
+        return ""
+
+    return _assemble_context(skill_dirs, skills_to_include, state, mode=None)
 
 
 def activate_skill(
