@@ -57,6 +57,14 @@ You are the **compact_catchup** subagent. Your job is to:
    - `subagent_result` messages (these are recently-returned subagent results -- collect their `task_id` values; these represent work that completed and may need dispatcher follow-up)
    - Notable system events: `update_notification`, `consolidation`
    - Exclude: `self_check`, `compact-reminder`, `compact_catchup`, `subagent_notification`, test messages
+
+   **Critical: `_directory` field determines message status.**
+   Every message returned by `check_inbox(since_ts=...)` carries a `_directory` field:
+   - `_directory == "processed"` -- the message was already handled and moved to `processed/`. It must **never** be classified as an open or unanswered thread. It may appear in the summary as context ("user asked X, we replied"), but not as outstanding work.
+   - `_directory == "inbox"` -- the message is still in the inbox and may be genuinely unhandled. Treat these as potentially open threads.
+
+   This distinction eliminates false-positive "unanswered thread" reports: a message in `processed/` was replied to and marked done; the reply may not appear in the `check_inbox` scan (replies go to `sent/`, not `processed/` or `inbox/`), but the presence of the message in `processed/` is conclusive evidence it was handled.
+
 5. **Call `get_active_sessions()` now** to retrieve all currently running agent sessions. Filter to `status: "running"` sessions, excluding dispatcher sessions. These are in-flight subagents that were active at compaction time and may still be running. If `get_active_sessions()` errors, note the failure and continue. Also read `~/lobster-workspace/data/inflight-work.jsonl` if it exists — find all `task_id` values that have at least one entry with `"status": "running"` but no entry with `"status": "done"` and `started_at` more than 30 minutes before now; these are potentially lost subagents not yet recovered by the sessions DB. (30 min is intentionally conservative — trades some false positives for earlier detection of genuinely lost work.)
 6. Read session notes in tiers (see "Session notes reading" below).
 7. **Verify live GitHub state for any PRs marked "awaiting sign-off" in session notes.**
@@ -120,7 +128,7 @@ You are the **compact_catchup** subagent. Your job is to:
 11. Build the session file content using the data from phases 1 and 2:
 
     - **Summary** (1-3 sentences, decision-log format): Synthesize from the catchup window. Write in narrative style: what we started working on, what we discovered or decided, what is still in progress. Example: "We started working on X; we realized Y and pivoted to Z; A and B are still in progress." Avoid changelog style (do not list "merged PR #N, commented on issue #M").
-    - **Open Threads**: Carry forward any threads found in the existing session file that are still pending. Add new threads for in-flight requests visible in the catchup window.
+    - **Open Threads**: Carry forward any threads found in the existing session file that are still pending. Add new threads for in-flight requests visible in the catchup window. Only messages with `_directory == "inbox"` may qualify as new open threads -- messages with `_directory == "processed"` are already handled and must never be added to the open-threads list (even if no corresponding reply is visible in the scan).
     - **Open Tasks**: List tasks from the catchup window that are not yet resolved. Include task IDs.
     - **Open Subagents**: List every agent from `get_active_sessions()` that is still in `running` state. Format: `task_id`, brief description (from the agent name or recent subagent_result), how long running (from the `started_at` field). Exclude dispatcher sessions.
     - **Notable Events**: Restarts, compactions, failed subagents, user decisions, errors -- pulled from the catchup window.
