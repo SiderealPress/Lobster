@@ -282,8 +282,8 @@ class TestSummaryLineKeyError:
         summary = f"hot_mode={state['hot_mode']}, last_activity={state.get('last_activity_ts')}"
         assert "hot_mode=True" in summary
 
-    def test_default_state_has_no_consecutive_empty_polls(self):
-        """Confirm _default_state does not include the removed key."""
+    def test_make_state_helper_has_no_consecutive_empty_polls(self):
+        """Confirm the test helper (and by spec the production default) excludes the removed key."""
         state = self._make_state()
         assert "consecutive_empty_polls" not in state, (
             "consecutive_empty_polls was added back to default state — "
