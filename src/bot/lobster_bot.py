@@ -1788,8 +1788,10 @@ def build_inline_keyboard(buttons: list) -> InlineKeyboardMarkup:
     """Build a Telegram InlineKeyboardMarkup from a nested list of button labels.
 
     Each inner list represents a row of buttons.  Each element in the row is
-    either a plain string label (callback_data == label) or a [label, data]
-    two-element list where data is the callback_data payload.
+    one of:
+    - a plain string label (callback_data == label)
+    - a [label, data] two-element list where data is the callback_data payload
+    - a {"text": label, "callback_data": data} dict (complex format)
 
     Pure function: no side effects.
     """
@@ -1797,7 +1799,10 @@ def build_inline_keyboard(buttons: list) -> InlineKeyboardMarkup:
     for row in buttons:
         keyboard_row = []
         for item in row:
-            if isinstance(item, (list, tuple)) and len(item) == 2:
+            if isinstance(item, dict):
+                label = str(item.get("text", ""))
+                data = str(item.get("callback_data", label))
+            elif isinstance(item, (list, tuple)) and len(item) == 2:
                 label, data = item
             else:
                 label = str(item)
