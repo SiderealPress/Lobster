@@ -57,6 +57,19 @@ SENT_DIR = _MESSAGES / "sent"
 TASK_OUTPUTS_DIR = _MESSAGES / "task-outputs"
 TASKS_FILE = _MESSAGES / "tasks.json"
 
+# Threshold (in seconds) above which the dispatcher heartbeat is considered stale.
+#
+# Aligned with DISPATCHER_HEARTBEAT_STALE_SECONDS in hooks/thinking-heartbeat.py
+# and DISPATCHER_HEARTBEAT_STALE_SECONDS in scripts/health-check-v3.sh (both 1200s).
+#
+# The previous value (300s / 5 min) caused false-positive STALE during context
+# compaction phases, which can last 10+ minutes without any PostToolUse events
+# firing — so the heartbeat inevitably goes stale even though the dispatcher is
+# healthy and actively running.  20 minutes aligns with the documented 20-minute
+# health-check window and absorbs the longest observed compaction phases.
+# See: issue #1822.
+HEARTBEAT_STALE_THRESHOLD = 1200  # 20 minutes — matches thinking-heartbeat.py
+
 
 def _count_files(directory: Path) -> int:
     """Count JSON files in a directory (non-recursive)."""
@@ -368,7 +381,16 @@ def collect_filesystem_overview() -> list[dict]:
 
 def collect_health() -> dict:
     """Check Lobster health indicators."""
-    heartbeat_file = _WORKSPACE / "logs" / "claude-heartbeat"
+    # Read dispatcher-heartbeat — the authoritative "dispatcher alive" signal,
+    # written by hooks/thinking-heartbeat.py on every PostToolUse event.
+    #
+    # Previously read claude-heartbeat (WFM-active signal, written only during
+    # wait_for_messages blocking calls).  That signal goes stale during compaction
+    # phases (no WFM calls fire) even when the dispatcher is healthy, causing
+    # false-positive STALE in status reports.  dispatcher-heartbeat is refreshed
+    # by any tool call at all, so it correctly reflects dispatcher liveness across
+    # all phases including compaction.  See issue #1822.
+    heartbeat_file = _WORKSPACE / "logs" / "dispatcher-heartbeat"
     heartbeat_age = None
     if heartbeat_file.is_file():
         heartbeat_age = int(time.time() - heartbeat_file.stat().st_mtime)
@@ -386,7 +408,7 @@ def collect_health() -> dict:
 
     return {
         "heartbeat_age_seconds": heartbeat_age,
-        "heartbeat_stale": heartbeat_age is not None and heartbeat_age > 300,
+        "heartbeat_stale": heartbeat_age is not None and heartbeat_age > HEARTBEAT_STALE_THRESHOLD,
         "telegram_bot_running": telegram_bot_running,
     }
 
