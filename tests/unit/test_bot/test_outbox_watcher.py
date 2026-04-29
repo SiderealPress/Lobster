@@ -835,3 +835,93 @@ class TestPrepareSendItems:
             # <pre><code> and </code></pre> tags must be balanced
             assert html.count("<pre>") == html.count("</pre>") or True  # HTML tags may differ
             assert len(html) <= bot_module.TELEGRAM_HARD_LIMIT
+
+
+class TestBuildInlineKeyboard:
+    """Tests for build_inline_keyboard — the helper that converts button specs to InlineKeyboardMarkup.
+
+    Covers all three supported button element formats:
+    - Simple string (text == callback_data)
+    - [label, data] two-element list
+    - {"text": label, "callback_data": data} dict (the complex format from issue #1777)
+    """
+
+    @pytest.fixture
+    def bot_module(self):
+        return get_bot_module()
+
+    def test_simple_string_buttons(self, bot_module):
+        """Plain string buttons use the string as both text and callback_data."""
+        markup = bot_module.build_inline_keyboard([["Yes", "No"]])
+        row = markup.inline_keyboard[0]
+        assert len(row) == 2
+        assert row[0].text == "Yes"
+        assert row[0].callback_data == "Yes"
+        assert row[1].text == "No"
+        assert row[1].callback_data == "No"
+
+    def test_list_format_buttons(self, bot_module):
+        """Two-element list buttons use first element as text, second as callback_data."""
+        markup = bot_module.build_inline_keyboard([[["Label A", "data_a"], ["Label B", "data_b"]]])
+        row = markup.inline_keyboard[0]
+        assert len(row) == 2
+        assert row[0].text == "Label A"
+        assert row[0].callback_data == "data_a"
+        assert row[1].text == "Label B"
+        assert row[1].callback_data == "data_b"
+
+    def test_dict_format_buttons_text_and_callback_data(self, bot_module):
+        """Dict buttons extract 'text' as the label and 'callback_data' as the payload.
+
+        This is the regression test for issue #1777: the dict must NOT be rendered
+        as a string — only the 'text' field should appear as the button label.
+        """
+        markup = bot_module.build_inline_keyboard([[
+            {"text": "👍 got it", "callback_data": "card1b_next"},
+            {"text": "😴 sleep", "callback_data": "card1b_sleep"},
+        ]])
+        row = markup.inline_keyboard[0]
+        assert len(row) == 2
+        assert row[0].text == "👍 got it"
+        assert row[0].callback_data == "card1b_next"
+        assert row[1].text == "😴 sleep"
+        assert row[1].callback_data == "card1b_sleep"
+
+    def test_dict_format_button_label_is_not_raw_json(self, bot_module):
+        """Dict button labels must never include dict-like syntax such as '{' or 'callback_data'."""
+        markup = bot_module.build_inline_keyboard([[
+            {"text": "Click me", "callback_data": "action_x"},
+        ]])
+        label = markup.inline_keyboard[0][0].text
+        assert "{" not in label, f"Button label looks like raw JSON: {label!r}"
+        assert "callback_data" not in label, f"Button label contains dict key: {label!r}"
+        assert label == "Click me"
+
+    def test_dict_format_missing_callback_data_falls_back_to_text(self, bot_module):
+        """A dict button without 'callback_data' falls back to the text value."""
+        markup = bot_module.build_inline_keyboard([[{"text": "Only label"}]])
+        btn = markup.inline_keyboard[0][0]
+        assert btn.text == "Only label"
+        assert btn.callback_data == "Only label"
+
+    def test_multiple_rows(self, bot_module):
+        """Multiple rows are each represented as separate inner lists."""
+        markup = bot_module.build_inline_keyboard([
+            ["Row1 Btn1", "Row1 Btn2"],
+            ["Row2 Btn1"],
+        ])
+        assert len(markup.inline_keyboard) == 2
+        assert len(markup.inline_keyboard[0]) == 2
+        assert len(markup.inline_keyboard[1]) == 1
+
+    def test_mixed_formats_in_same_row(self, bot_module):
+        """A row may mix simple strings and dict buttons."""
+        markup = bot_module.build_inline_keyboard([[
+            "Simple",
+            {"text": "Complex", "callback_data": "payload"},
+        ]])
+        row = markup.inline_keyboard[0]
+        assert row[0].text == "Simple"
+        assert row[0].callback_data == "Simple"
+        assert row[1].text == "Complex"
+        assert row[1].callback_data == "payload"
