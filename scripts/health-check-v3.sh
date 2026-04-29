@@ -47,7 +47,7 @@
 #   (after each health-check-initiated restart). Resource checks (memory, disk,
 #   auth, outbox) still run during the grace period.
 #   NOTE: Dispatcher heartbeat check is NOT suppressed during boot grace — the
-#   20-minute threshold absorbs the 90s boot window naturally.
+#   10-minute threshold absorbs the 90s boot window naturally.
 #
 # Escalation ladder:
 #   GREEN  - All checks pass (or in expected transient state)
@@ -530,14 +530,14 @@ is_compact_grace_period() {
     now=$(date +%s)
     local age=$((now - compact_ts))
     if [[ $age -le $COMPACT_GRACE_SECONDS ]]; then
-        log_info "Post-compaction grace period: compaction ${age}s ago (threshold: ${COMPACT_GRACE_SECONDS}s) — stale-inbox check suppressed"
+        log_info "Post-compaction grace period: compaction ${age}s ago (threshold: ${COMPACT_GRACE_SECONDS}s) — heartbeat and stale-inbox checks suppressed"
         return 0
     fi
     return 1
 }
 
 # is_catchup_active() removed (issue #1483).
-# The dispatcher heartbeat threshold (DISPATCHER_HEARTBEAT_STALE_SECONDS = 1200s)
+# The dispatcher heartbeat threshold (DISPATCHER_HEARTBEAT_STALE_SECONDS = 600s)
 # covers catchup duration naturally. No per-catchup suppression needed.
 # The dispatcher no longer needs to call record-catchup-state.sh.
 
