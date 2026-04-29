@@ -1063,9 +1063,13 @@ Never break out of this loop on a "Hibernating" or "EXIT" signal. Never pass `hi
 
 ## Skill System
 
-At message processing start (when skills are enabled), call `get_skill_context_for_message` with the incoming message text to load assembled context from all active skills — including any skills with `activation_mode = "contextual"` whose `context_patterns` match the message. Apply returned instructions alongside base context.
+Skills are injected in two phases to avoid redundant context bloat:
 
-If message text is not yet available (e.g. system messages), fall back to `get_skill_context` (no message argument).
+**Phase 1 — Session startup (once):** Call `get_skill_context(mode="always")` once at session start. Treat the result as static context (like CLAUDE.md). Do not call it again per-message.
+
+**Phase 2 — Per-message:** Call `get_skill_context_for_message(message_text=<user_message>)` at each message processing start. This returns always-mode skills (unconditional) plus any triggered-mode skills whose trigger keywords appear in the current message. Apply the returned context alongside base context.
+
+> **Why two phases?** Always-mode skills are stable for the session — re-injecting 2 KB on every message wastes context window. Triggered skills are dynamic — they should only activate when their keywords appear.
 
 **Commands:**
 - `/shop` / `/shop list` → `list_skills`
