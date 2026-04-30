@@ -26,7 +26,7 @@ Host machine
   ~/lobster-config/config.staging.env  <- env vars injected at compose up
 
 Container: lobster-staging (systemd as PID 1)
-  /home/lobster/lobster/              <- repo (baked into image at build time)
+  /home/lobster/lobster/              <- repo cloned from GitHub at build time (git clone)
   /home/lobster/messages/             <- Docker volume (lobster-staging-messages)
   /home/lobster/lobster-workspace/    <- Docker volume (lobster-staging-workspace)
   /home/lobster/lobster-config/       <- written by lobster-container-init.service
@@ -40,6 +40,21 @@ Systemd-managed services (start order):
 ```
 
 Credentials are **bind-mounted from the host** — they are never baked into the image.
+
+## Code freshness and updates
+
+The staging container clones the repo from GitHub (`git clone https://github.com/SiderealPress/lobster.git`) at Docker **build time**. The installed code is always current as of the image build — no stale tarball snapshots.
+
+**`execute_update` uses `git pull`**, not tarball download. `update_manager.py` detects the `.git` directory and calls `git pull origin main --ff-only`. This means updates are always safe and reproducible.
+
+To build a specific branch (e.g. for feature testing):
+
+```bash
+sudo docker compose -f docker/staging/docker-compose.staging.yml build \
+  --build-arg LOBSTER_BRANCH=feature/my-branch
+```
+
+The default branch is `main`.
 
 ---
 
@@ -120,6 +135,14 @@ All commands run from the repo root (`~/lobster/`).
 ```bash
 cd ~/lobster
 sudo docker compose -f docker/staging/docker-compose.staging.yml up -d --build
+```
+
+**After merging this PR** (switching from COPY to git clone): you must rebuild the image — the existing cached image still uses the old tarball-based approach. Run:
+
+```bash
+sudo docker compose -f docker/staging/docker-compose.staging.yml down
+sudo docker compose -f docker/staging/docker-compose.staging.yml build --no-cache
+sudo docker compose -f docker/staging/docker-compose.staging.yml up -d
 ```
 
 ### Subsequent runs (no Dockerfile changes)
@@ -256,3 +279,7 @@ sudo docker compose -f docker/staging/docker-compose.staging.yml up -d --build
 ### `claude: not found` inside the container
 
 The host claude binary is bind-mounted at `/home/lobster/.local/bin/claude`. Ensure `claude` is installed on the host at `~/.local/bin/claude`.
+
+### Container reverts to old/broken code after `execute_update`
+
+This was the root cause of [issue #1820](https://github.com/SiderealPress/lobster/issues/1820): the old tarball-based updater overwrote good code with a stale snapshot. After this PR, `execute_update` uses `git pull` and this cannot happen. If you are running an image built before this PR was merged, **rebuild the image** using the no-cache steps above.

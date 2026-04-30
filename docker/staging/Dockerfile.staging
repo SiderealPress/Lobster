@@ -4,6 +4,16 @@
 # Services are managed by systemd (lobster-router, lobster-claude, lobster-mcp-local),
 # and cron is managed by the cron daemon — no custom entrypoint workarounds.
 #
+# The repo is cloned from GitHub at build time (git clone), not copied from a
+# local tarball snapshot. This means the container always starts with current
+# code, and `execute_update` runs `git pull` (via update_manager.py) rather
+# than downloading a stale release tarball.
+#
+# REBUILD REQUIRED after merge: the existing lobster-staging image still uses
+# the old COPY-based approach. Run:
+#   sudo docker compose -f docker/staging/docker-compose.staging.yml build --no-cache
+#   sudo docker compose -f docker/staging/docker-compose.staging.yml up -d
+#
 # Usage:
 #   sudo docker compose -f docker/staging/docker-compose.staging.yml up -d
 #
@@ -101,8 +111,14 @@ WORKDIR /home/lobster
 RUN curl -fsSL https://astral.sh/uv/install.sh | sh
 ENV PATH="/home/lobster/.local/bin:${PATH}"
 
-# Copy repo (build context = repo root)
-COPY --chown=lobster:lobster . /home/lobster/lobster
+# Clone repo directly from GitHub — always current, git-managed.
+# This mirrors production installs and enables `git pull`-based updates
+# via execute_update (update_manager.py detects .git and uses the git path).
+# Build arg allows pinning a branch for testing (default: main).
+ARG LOBSTER_BRANCH=main
+RUN git clone --branch "${LOBSTER_BRANCH}" \
+    https://github.com/SiderealPress/lobster.git \
+    /home/lobster/lobster
 
 # Install Python dependencies
 WORKDIR /home/lobster/lobster
