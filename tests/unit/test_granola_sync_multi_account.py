@@ -342,10 +342,16 @@ class TestFetchNotesWithDetail:
 
 
 class TestGranolaUnknownAccountError:
-    def test_error_is_a_subclass_of_granola_api_error(self):
-        """GranolaUnknownAccountError must be a GranolaAPIError for consistent handling."""
+    def test_error_is_a_key_error(self):
+        """
+        GranolaUnknownAccountError extends KeyError, not GranolaAPIError.
+
+        It signals a configuration gap (unknown account name), not an API failure,
+        so callers can distinguish the two error classes and handle them separately.
+        """
         from integrations.granola.client import GranolaAPIError
-        assert issubclass(GranolaUnknownAccountError, Exception)
+        assert issubclass(GranolaUnknownAccountError, KeyError)
+        assert not issubclass(GranolaUnknownAccountError, GranolaAPIError)
 
     def test_error_message_contains_account_name(self):
         err = GranolaUnknownAccountError("phantom-account")

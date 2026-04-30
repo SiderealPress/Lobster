@@ -196,12 +196,12 @@ class TestAccountRegistry:
 
     def test_lookup_known_primary_account(self):
         registry = self._make_registry()
-        cfg = registry.get(ACCOUNT_DREW)  # noname
+        cfg = registry.lookup(ACCOUNT_DREW)  # noname
         assert cfg.api_key == PRIMARY_KEY
 
     def test_lookup_known_secondary_account(self):
         registry = self._make_registry()
-        cfg = registry.get(ACCOUNT_KELLY)  # noname
+        cfg = registry.lookup(ACCOUNT_KELLY)  # noname
         assert cfg.api_key == SECONDARY_KEY
 
     def test_unknown_account_raises_key_error(self):
@@ -211,7 +211,7 @@ class TestAccountRegistry:
         """
         registry = self._make_registry()
         with pytest.raises(KeyError, match="phantom-account"):
-            registry.get("phantom-account")
+            registry.lookup("phantom-account")
 
     def test_registry_contains_all_configured_accounts(self):
         registry = self._make_registry()

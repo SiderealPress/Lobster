@@ -73,8 +73,8 @@ class AccountRegistry:
 
     Usage:
         registry = AccountRegistry(build_accounts_from_env(os.environ))
-        cfg = registry.get("drew")   # → AccountConfig  # noname
-        cfg = registry.get("ghost")  # → KeyError: "No API key registered for 'ghost'"
+        cfg = registry.lookup("drew")   # → AccountConfig  # noname
+        cfg = registry.lookup("ghost")  # → KeyError: "No API key registered for 'ghost'"
 
         "drew" in registry           # → True  # noname
     """
@@ -82,9 +82,12 @@ class AccountRegistry:
     def __init__(self, accounts: list[AccountConfig]) -> None:
         self._by_name: dict[str, AccountConfig] = {a.name: a for a in accounts}
 
-    def get(self, account_name: str) -> AccountConfig:
+    def lookup(self, account_name: str) -> AccountConfig:
         """
         Return the AccountConfig for account_name.
+
+        Named ``lookup`` (not ``get``) to signal that this raises on missing keys,
+        unlike the standard Python dict.get() which returns None.
 
         Raises:
             KeyError: if account_name is not registered.
