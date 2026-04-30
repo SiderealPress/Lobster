@@ -10,6 +10,7 @@ Provides tools for Claude Code to interact with the message queue:
 - mark_processed: Mark a message as processed
 """
 
+import anyio
 import asyncio
 import json
 import logging
@@ -804,10 +805,11 @@ WAIT_HEARTBEAT_INTERVAL = 60
 # Idle timeout for the stateful StreamableHTTP session manager (issue #1823).
 # Sessions idle longer than this many seconds are reaped via anyio.CancelScope,
 # preventing task group accumulation that caused 4-minute event loop stalls.
-# Must be >= wait_for_messages timeout (72000s / 20h) so the MCP session is
-# never reaped while the dispatcher is idle in WFM — 1800s caused crash loops
-# overnight when the dispatcher sat idle between messages (issue #1873).
-SESSION_IDLE_TIMEOUT_SECONDS = 72000
+# Set to 1200s (20 min) to reap zombie subagent sessions within a reasonable
+# window after they crash. The dispatcher session is protected from this reap
+# because handle_wait_for_messages() explicitly extends its deadline to 72000s
+# (20h) on every WFM entry — see the deadline extension block there (issue #1876).
+SESSION_IDLE_TIMEOUT_SECONDS = 1200
 
 # WFM-active signal file (issue #1713 / #949): written with a Unix epoch
 # timestamp when wait_for_messages begins blocking, refreshed every
@@ -4166,6 +4168,13 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
         session_id = _get_current_http_session_id()
         if session_id is not None:
             _tag_dispatcher_session(session_id)
+            # Extend the dispatcher's idle-reap deadline to 20 hours on every
+            # WFM entry.  SESSION_IDLE_TIMEOUT_SECONDS is now 1200s to reap
+            # zombie subagent sessions quickly; without this extension the
+            # dispatcher would be reaped after 20 min of silence (issue #1876).
+            transport = _http_session_manager._server_instances.get(session_id)
+            if transport is not None and transport.idle_scope is not None:
+                transport.idle_scope.deadline = anyio.current_time() + 72000
 
     # Phase 2: SQLite dispatcher lock — enforce single-dispatcher structurally.
     # Take (or replace stale) dispatcher lock so a second concurrent loop cannot
