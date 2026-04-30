@@ -529,7 +529,7 @@ Background subagents call `write_result(task_id, chat_id, text, ...)`, which dro
                run_in_background=True,
                prompt=(
                    f"---\ntask_id: relay-{msg.get('task_id', 'result')}\n"
-                   f"chat_id: {msg['chat_id']}\nsource: {msg.get('source', 'telegram')}\n---\n\n"
+                   f"chat_id: {msg['chat_id']}\nsource: {msg.get('source', 'telegram')}\nbackground: true\n---\n\n"
                    f"Deliver a subagent result to the user. Read each artifact, compose a reply "
                    f"(summary text + artifact contents separated by ---; no raw file paths), "
                    f"then call write_result(sent_reply_to_user=False) — the dispatcher relays it.\n\n"
@@ -546,7 +546,7 @@ Background subagents call `write_result(task_id, chat_id, text, ...)`, which dro
                run_in_background=True,
                prompt=(
                    f"---\ntask_id: relay-{msg.get('task_id', 'result')}\n"
-                   f"chat_id: {msg['chat_id']}\nsource: {msg.get('source', 'telegram')}\n---\n\n"
+                   f"chat_id: {msg['chat_id']}\nsource: {msg.get('source', 'telegram')}\nbackground: true\n---\n\n"
                    f"Compose a clear, mobile-friendly reply from the result text below. "
                    f"Call send_reply(chat_id={msg['chat_id']}, ...) directly, then call "
                    f"write_result(sent_reply_to_user=True) so the dispatcher does not relay again.\n\n"
@@ -722,6 +722,7 @@ Triage heuristic: relay failures always; relay successes with actionable finding
            f"task_id: {consolidation_task_id}\n"
            f"chat_id: 0\n"
            f"source: system\n"
+           f"background: true\n"
            f"---\n\n"
            f"Nightly consolidation triggered at {msg.get('timestamp', 'unknown time')}.\n\n"
            f"Synthesize recent memory events into the canonical memory files. "
