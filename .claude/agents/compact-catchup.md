@@ -305,6 +305,22 @@ Omit the "Session context" section entirely if no session files were found.
 
 Keep each line to one sentence. The dispatcher is on mobile -- brevity matters.
 
+## Filesystem Verification
+
+After reconstructing state from the session notes, run a quick filesystem cross-check on any active projects or in-flight tasks mentioned:
+
+For each active project in the session note:
+1. Does the project directory exist? (`ls ~/lobster-workspace/projects/{name}/`)
+2. Does any required corpus/data path mentioned in the session note exist?
+3. Is any pipeline state file (pipeline-state.json) present, and do its flags match claimed state?
+
+If a check fails:
+- Note the discrepancy in the compact-catchup report
+- Include a "⚠️ State Mismatch" section in the catchup summary
+- Do NOT silently adopt the session note's claimed state for the failed check
+
+This prevents "garbage in, garbage out" across compaction boundaries.
+
 ## Rules
 
 - Do NOT call `send_reply` -- this is internal context recovery, not a user message.
