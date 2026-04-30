@@ -11,6 +11,14 @@ The index file lives at:
 This script is idempotent: re-running never creates duplicate files
 (deduplication is by Granola note ID recorded in index.json).
 
+Supports multiple Granola accounts:
+- GRANOLA_API_KEY       — primary account (required)
+- GRANOLA_API_KEY_KELLY — secondary personal account (optional)
+
+When both keys are present, notes from both accounts are fetched and merged.
+Shared meetings (same note ID in both accounts) are archived once; the primary
+account's copy wins.
+
 Usage:
     uv run python scheduled-tasks/granola_archive.py            # incremental (new only)
     uv run python scheduled-tasks/granola_archive.py --backfill # all meetings, ignore cursor
@@ -44,11 +52,14 @@ if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
 from integrations.granola.client import (  # noqa: E402
+    GranolaAccountConfig,
     GranolaNote,
     GranolaAPIError,
     GranolaAuthError,
     GranolaNotFoundError,
-    iter_all_notes,
+    GranolaUnknownAccountError,
+    build_account_configs_from_env,
+    iter_all_notes_for_account,
     get_note,
 )
 
@@ -348,13 +359,25 @@ def _archive_note(
 # ---------------------------------------------------------------------------
 
 
-def _fetch_full_note(note: GranolaNote, log: logging.Logger) -> Optional[GranolaNote]:
+def _fetch_full_note(
+    note: GranolaNote,
+    log: logging.Logger,
+    api_key: Optional[str] = None,
+) -> Optional[GranolaNote]:
     """
     Fetch note with transcript via get_note(). Falls back to summary-only
     on 404 (note not yet summarised). Returns None on hard API errors.
+
+    api_key: explicit key to use (required for secondary accounts so the
+             request authenticates with the correct account's token).
     """
     try:
-        return get_note(note.id, include_transcript=True)
+        return get_note(
+            note.id,
+            include_transcript=True,
+            api_key=api_key,
+            granola_account=note.granola_account,
+        )
     except GranolaNotFoundError:
         log.warning("Note %s not found / not yet summarised — skipping", note.id)
         return None
@@ -368,6 +391,25 @@ def _fetch_full_note(note: GranolaNote, log: logging.Logger) -> Optional[Granola
 # ---------------------------------------------------------------------------
 
 
+def _dedup_notes(notes: list[GranolaNote]) -> list[GranolaNote]:
+    """
+    Deduplicate a list of GranolaNote objects by note ID.
+
+    When two notes share the same ID (same meeting in two accounts), the first
+    occurrence is kept. Because the primary account is always fetched
+    first and prepended, this means primary wins on conflict.
+
+    Pure function — no I/O.
+    """
+    seen: set[str] = set()
+    result: list[GranolaNote] = []
+    for note in notes:
+        if note.id not in seen:
+            seen.add(note.id)
+            result.append(note)
+    return result
+
+
 def _run_archive(backfill: bool, log: logging.Logger) -> int:
     """
     Main archive loop. Returns exit code.
@@ -375,34 +417,57 @@ def _run_archive(backfill: bool, log: logging.Logger) -> int:
     backfill=True  — fetch all notes from the API (ignores index for filtering,
                      but still skips identical files on disk).
     backfill=False — only fetch notes not already in index.json.
+
+    Fetches from ALL configured accounts (GRANOLA_API_KEY + GRANOLA_API_KEY_KELLY
+    if set) and deduplicates by note ID so shared meetings are stored once.
     """
     MEETINGS_DIR.mkdir(parents=True, exist_ok=True)
 
-    api_key = os.environ.get("GRANOLA_API_KEY", "").strip()
-    if not api_key:
+    # Discover configured accounts (primary required, secondary optional)
+    accounts = build_account_configs_from_env()
+    if not accounts:
         log.error("GRANOLA_API_KEY not set. Set it in ~/lobster-config/config.env.")
         return 2
+
+    account_names = ", ".join(a.name for a in accounts)
 
     index = _load_index()
     known_ids = _indexed_ids(index)
 
     log.info(
-        "=== Granola archive started (mode=%s, indexed=%d) ===",
+        "=== Granola archive started (mode=%s, accounts=%s, indexed=%d) ===",
         "backfill" if backfill else "incremental",
+        account_names,
         len(known_ids),
     )
 
-    # Step 1: List all notes from API
-    try:
-        notes_summary = iter_all_notes()
-    except GranolaAuthError:
-        log.error("Granola authentication failed — check GRANOLA_API_KEY")
-        return 2
-    except GranolaAPIError as exc:
-        log.error("Granola API error during list: %s", exc)
-        return 1
+    # Step 1: List all notes from all accounts, then deduplicate
+    all_notes: list[GranolaNote] = []
+    for account in accounts:
+        try:
+            account_notes = iter_all_notes_for_account(account)
+            log.info("Account '%s': API returned %d notes", account.name, len(account_notes))
+            all_notes.extend(account_notes)
+        except GranolaAuthError:
+            log.error(
+                "Granola authentication failed for account '%s' — check API key",
+                account.name,
+            )
+            return 2
+        except GranolaAPIError as exc:
+            log.error("Granola API error for account '%s': %s", account.name, exc)
+            return 1
 
-    log.info("API returned %d notes total", len(notes_summary))
+    notes_summary = _dedup_notes(all_notes)
+    log.info(
+        "Combined: %d notes across %d account(s) → %d after dedup",
+        len(all_notes),
+        len(accounts),
+        len(notes_summary),
+    )
+
+    # Build api_key lookup by account name for get_note() calls below
+    api_key_by_account: dict[str, str] = {a.name: a.api_key for a in accounts}
 
     # Step 2: Filter to only new notes (unless backfill)
     if backfill:
@@ -422,7 +487,13 @@ def _run_archive(backfill: bool, log: logging.Logger) -> int:
     errors = 0
 
     for note_summary in to_process:
-        full_note = _fetch_full_note(note_summary, log)
+        # Use the account-specific API key so secondary-account notes authenticate correctly.
+        # Explicit lookup raises GranolaUnknownAccountError rather than silently falling back
+        # to None (which would cause get_note() to use the primary key for any unknown account).
+        if note_summary.granola_account not in api_key_by_account:
+            raise GranolaUnknownAccountError(note_summary.granola_account)
+        note_api_key = api_key_by_account[note_summary.granola_account]
+        full_note = _fetch_full_note(note_summary, log, api_key=note_api_key)
         if full_note is None:
             errors += 1
             continue
