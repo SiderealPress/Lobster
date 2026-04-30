@@ -14,8 +14,8 @@ Design principles:
 - Deterministic deduplication — primary account always wins on conflict
 
 Constants:
-    ACCOUNT_DREW  = "drew"   (primary, uses GRANOLA_API_KEY)  # noname
-    ACCOUNT_KELLY = "kelly"  (secondary, uses GRANOLA_API_KEY_KELLY)  # noname
+    ACCOUNT_PRIMARY   = "primary"   (primary, uses GRANOLA_API_KEY)
+    ACCOUNT_SECONDARY = "secondary" (secondary, uses GRANOLA_API_KEY_2)
 """
 
 from __future__ import annotations
@@ -27,12 +27,12 @@ from typing import Iterator, Optional
 # Account names (constants, not magic strings)
 # ---------------------------------------------------------------------------
 
-ACCOUNT_DREW: str = "drew"  # noname
-ACCOUNT_KELLY: str = "kelly"  # noname
+ACCOUNT_PRIMARY: str = "primary"
+ACCOUNT_SECONDARY: str = "secondary"
 
 # Environment variable names
-_ENV_KEY_DREW: str = "GRANOLA_API_KEY"  # noname
-_ENV_KEY_KELLY: str = "GRANOLA_API_KEY_KELLY"  # noname
+_ENV_KEY_PRIMARY: str = "GRANOLA_API_KEY"
+_ENV_KEY_SECONDARY: str = "GRANOLA_API_KEY_2"
 
 
 # ---------------------------------------------------------------------------
@@ -50,7 +50,7 @@ class AccountConfig:
     in separate subsystems that cannot share a cross-path import at this time.
 
     Attributes:
-        name:    Account identifier ("drew" or "kelly").  # noname
+        name:    Account identifier ("primary" or "secondary").
         api_key: Bearer token for this account.
     """
 
@@ -73,18 +73,21 @@ class AccountRegistry:
 
     Usage:
         registry = AccountRegistry(build_accounts_from_env(os.environ))
-        cfg = registry.get("drew")   # → AccountConfig  # noname
-        cfg = registry.get("ghost")  # → KeyError: "No API key registered for 'ghost'"
+        cfg = registry.lookup("primary")   # → AccountConfig
+        cfg = registry.lookup("ghost")     # → KeyError: "No API key registered for 'ghost'"
 
-        "drew" in registry           # → True  # noname
+        "primary" in registry        # → True
     """
 
     def __init__(self, accounts: list[AccountConfig]) -> None:
         self._by_name: dict[str, AccountConfig] = {a.name: a for a in accounts}
 
-    def get(self, account_name: str) -> AccountConfig:
+    def lookup(self, account_name: str) -> AccountConfig:
         """
         Return the AccountConfig for account_name.
+
+        Named ``lookup`` (not ``get``) to signal that this raises on missing keys,
+        unlike the standard Python dict.get() which returns None.
 
         Raises:
             KeyError: if account_name is not registered.
@@ -117,7 +120,7 @@ def build_accounts_from_env(env: dict[str, str]) -> list[AccountConfig]:
 
     Rules:
     - GRANOLA_API_KEY is required (primary account).
-    - GRANOLA_API_KEY_KELLY is optional (secondary personal account).  # noname
+    - GRANOLA_API_KEY_2 is optional (secondary account).
     - Primary account is always first in the returned list.
     - If GRANOLA_API_KEY is absent, an empty list is returned.
 
@@ -127,17 +130,17 @@ def build_accounts_from_env(env: dict[str, str]) -> list[AccountConfig]:
     Returns:
         List of AccountConfig, primary account first.
     """
-    primary_key = env.get(_ENV_KEY_DREW, "").strip()  # noname
+    primary_key = env.get(_ENV_KEY_PRIMARY, "").strip()
     if not primary_key:
         return []
 
     accounts: list[AccountConfig] = [
-        AccountConfig(name=ACCOUNT_DREW, api_key=primary_key),  # noname
+        AccountConfig(name=ACCOUNT_PRIMARY, api_key=primary_key),
     ]
 
-    secondary_key = env.get(_ENV_KEY_KELLY, "").strip()  # noname
+    secondary_key = env.get(_ENV_KEY_SECONDARY, "").strip()
     if secondary_key:
-        accounts.append(AccountConfig(name=ACCOUNT_KELLY, api_key=secondary_key))  # noname
+        accounts.append(AccountConfig(name=ACCOUNT_SECONDARY, api_key=secondary_key))
 
     return accounts
 
@@ -155,7 +158,7 @@ def annotate_note_with_account(note: dict, account_name: str) -> dict:
 
     Args:
         note:         Raw note dict from the Granola API.
-        account_name: Account identifier string (e.g. ACCOUNT_DREW).  # noname
+        account_name: Account identifier string (e.g. ACCOUNT_PRIMARY).
 
     Returns:
         New dict with all original fields plus 'account': account_name.

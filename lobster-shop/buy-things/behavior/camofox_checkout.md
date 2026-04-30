@@ -76,7 +76,7 @@ addr = card["billing_address"]
 
 # Fill in each address field
 # Find the input refs in the snapshot
-camofox_type(name_field_ref, "Drew Winget")  # Use owner name if available
+camofox_type(name_field_ref, owner_name)  # Use owner name from payment config
 camofox_type(street_field_ref, addr["street"])
 camofox_type(city_field_ref, addr["city"])
 # Select state from dropdown if needed

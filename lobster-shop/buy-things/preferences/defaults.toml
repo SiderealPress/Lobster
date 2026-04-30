@@ -30,4 +30,4 @@ save_receipts = true
 show_images = false
 
 # Default shipping name (used during checkout if owner name is unavailable)
-default_shipping_name = "Drew Winget"
+default_shipping_name = "Your Name"
