@@ -195,12 +195,16 @@ class TestFormatSystemdCalendar:
 
 class TestBuildCommand:
     def test_includes_reminder_type(self):
-        cmd = rm._build_command("interview-prep")
+        cmd = rm._build_command("interview-prep", "interview-prep-1000")
         assert "interview-prep" in cmd
         assert "post-reminder.sh" in cmd
 
+    def test_includes_reminder_id(self):
+        cmd = rm._build_command("test", "test-1234567890")
+        assert "test-1234567890" in cmd
+
     def test_absolute_path(self):
-        cmd = rm._build_command("test")
+        cmd = rm._build_command("test", "test-id")
         assert cmd.startswith("/")
 
 
@@ -363,6 +367,8 @@ class TestCreateReminder:
                    mock_create=fake_create)
         assert "post-reminder.sh" in captured["command"]
         assert "my-reminder" in captured["command"]
+        # reminder_id is also passed so post-reminder.sh can include it in the inbox message
+        assert "my-reminder-" in captured["command"]
 
     def test_reminder_written_to_registry(self, tmp_path: Path):
         from systemd_jobs import CreateResult
