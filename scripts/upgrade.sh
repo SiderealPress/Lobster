@@ -2607,6 +2607,7 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
                 | sed "s|cd $HOME && uv run \(.*\)oom-monitor\.py|cd $HOME \&\& $_m84_uv_abs run \1oom-monitor.py|g" \
                 | crontab - 2>/dev/null && {
                 substep "Migration 84: fixed oom-monitor cron to use absolute uv path"
+                migrated=$((migrated + 1))
             } || warn "Migration 84: could not update oom-monitor cron entry"
         fi
     fi
@@ -2616,6 +2617,7 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
                 | sed "s|cd \(.*\) && uv run \(.*\)export-logs\.py|cd \1 \&\& $_m84_uv_abs run \2export-logs.py|g" \
                 | crontab - 2>/dev/null && {
                 substep "Migration 84: fixed log-export cron to use absolute uv path"
+                migrated=$((migrated + 1))
             } || warn "Migration 84: could not update log-export cron entry"
         fi
     fi
