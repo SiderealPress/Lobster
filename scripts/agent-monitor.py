@@ -94,6 +94,7 @@ class AgentRow:
     spawned_at: str
     output_file: str | None
     last_seen_at: str | None
+    agent_type: str | None = None  # 'dispatcher' | 'subagent' | None
 
 
 @dataclass(frozen=True)
@@ -384,7 +385,7 @@ def load_running_agents(db_path: Path) -> list[AgentRow]:
         rows = conn.execute(
             """
             SELECT id, task_id, description, chat_id, status,
-                   spawned_at, output_file, last_seen_at
+                   spawned_at, output_file, last_seen_at, agent_type
             FROM agent_sessions
             WHERE status IN ('running', 'starting')
             ORDER BY spawned_at ASC
@@ -403,6 +404,7 @@ def load_running_agents(db_path: Path) -> list[AgentRow]:
             spawned_at=row["spawned_at"],
             output_file=row["output_file"],
             last_seen_at=row["last_seen_at"],
+            agent_type=row["agent_type"],
         )
         for row in rows
     ]
@@ -800,6 +802,44 @@ def mark_failed_unregistered(agent: UnregisteredAgent) -> None:
 #   session_start(agent_id="lobster-dispatcher", agent_type="dispatcher", ...)
 _DISPATCHER_AGENT_ID = "lobster-dispatcher"
 
+# WFM-active signal file — written by the MCP server every WAIT_HEARTBEAT_INTERVAL (60s)
+# while wait_for_messages is blocking. A fresh timestamp proves the dispatcher is alive
+# and actively waiting; an old or absent file means WFM has returned (or the process died).
+_WFM_ACTIVE_FILE = LOBSTER_HOME / "lobster-workspace" / "logs" / "dispatcher-wfm-active"
+
+# If the WFM-active file was written within this many seconds, the dispatcher is considered
+# to be alive and waiting for messages. 3× the 60s WAIT_HEARTBEAT_INTERVAL (mirrors
+# health-check-v3.sh WFM_ACTIVE_STALE_SECONDS=180).
+_WFM_ACTIVE_STALE_SECONDS = 180.0
+
+
+def _is_dispatcher_in_wfm() -> bool:
+    """Return True if the dispatcher is currently alive inside wait_for_messages.
+
+    Reads the WFM-active signal file written by the MCP server's heartbeat thread.
+    A fresh epoch timestamp (within _WFM_ACTIVE_STALE_SECONDS) means the dispatcher
+    is alive and blocking in WFM — NOT dead.  An absent or stale file means WFM has
+    returned (dispatcher is either processing a message or has died).
+
+    This check is used to avoid false-positive ghost classification: the hook-registered
+    dispatcher session (hex-UUID, agent_type='dispatcher') has no output_file, so it
+    falls into STALE_NO_FILE after 30 minutes.  Without this guard, mark_failed would
+    kill it even though the dispatcher is perfectly healthy.
+
+    Override path: LOBSTER_WFM_ACTIVE_OVERRIDE env var (used in tests).
+    """
+    wfm_file = Path(
+        os.environ.get("LOBSTER_WFM_ACTIVE_OVERRIDE", str(_WFM_ACTIVE_FILE))
+    )
+    try:
+        raw = wfm_file.read_text().strip()
+        if not raw.isdigit():
+            return False
+        age = time.time() - float(raw)
+        return age <= _WFM_ACTIVE_STALE_SECONDS
+    except (OSError, ValueError):
+        return False
+
 
 def mark_failed_all_ghosts(
     confirmed: list[ClassifiedAgent],
@@ -815,19 +855,22 @@ def mark_failed_all_ghosts(
     that never register an output file), which is why --mark-failed would previously
     leave stale dispatcher sessions in status=running indefinitely.
 
-    The live dispatcher session is always excluded from the STALE_NO_FILE sweep.
-    The dispatcher registers with the static agent_id "lobster-dispatcher", so any
-    entry with that agent_id is skipped unconditionally — it is the currently-running
-    dispatcher, not a dead subagent.
+    Two guards prevent killing the live dispatcher:
+
+    Guard 1 (agent_id): The dispatcher registers with the static agent_id
+    "lobster-dispatcher".  Any entry with that agent_id is skipped unconditionally.
+
+    Guard 2 (agent_type + WFM-active): The SessionStart hook also writes a separate
+    hex-UUID entry tagged agent_type='dispatcher' with no output_file.  This entry
+    always lands in STALE_NO_FILE after 30 minutes — and previously had no protection.
+    When the WFM-active signal is fresh (dispatcher alive in wait_for_messages), ALL
+    sessions with agent_type='dispatcher' are skipped.  This closes the false-positive
+    window that issue #1573 tracked: the hook-registered entry was being ghost-detected
+    whenever the JSONL transcript went idle while the dispatcher was healthy in WFM.
     """
     stale_no_file = stale_no_file or []
 
-    # Guard: exclude the live dispatcher session from the sweep.
-    # The dispatcher always registers with agent_id=_DISPATCHER_AGENT_ID (a static
-    # constant), so we filter on that directly.  There is no UUID file to read —
-    # the previous approach compared against the Claude UUID from
-    # dispatcher-claude-session-id, but that UUID is stored in a different field
-    # and was never equal to agent_id, making the guard a silent no-op.
+    # Guard 1: exclude the named dispatcher session (agent_id = "lobster-dispatcher").
     if stale_no_file:
         filtered_stale = [a for a in stale_no_file if a.row.agent_id != _DISPATCHER_AGENT_ID]
         skipped = len(stale_no_file) - len(filtered_stale)
@@ -837,6 +880,29 @@ def mark_failed_all_ghosts(
                 f"agent_id={_DISPATCHER_AGENT_ID!r} — live dispatcher, not a dead subagent."
             )
         stale_no_file = filtered_stale
+
+    # Guard 2: if the dispatcher is currently inside wait_for_messages (WFM-active signal
+    # is fresh), skip ALL sessions tagged agent_type='dispatcher'.  The hook-registered
+    # hex-UUID entry (no output_file, agent_type='dispatcher') is alive whenever WFM is
+    # active — its JSONL transcript goes idle because WFM blocks without writing, not
+    # because the dispatcher is dead.  Killing it would emit a spurious agent_failed
+    # notification and potentially inject an unnecessary compact-reminder (issue #1573).
+    in_wfm = _is_dispatcher_in_wfm()
+    if in_wfm:
+        def _is_dispatcher_type(a: ClassifiedAgent) -> bool:
+            return (a.row.agent_type or "") == "dispatcher"
+
+        pre_confirmed = len(confirmed)
+        pre_stale = len(stale_no_file)
+        confirmed = [a for a in confirmed if not _is_dispatcher_type(a)]
+        stale_no_file = [a for a in stale_no_file if not _is_dispatcher_type(a)]
+        skipped_wfm = (pre_confirmed - len(confirmed)) + (pre_stale - len(stale_no_file))
+        if skipped_wfm:
+            print(
+                f"\n  [mark-failed] WFM-active is fresh — skipping {skipped_wfm} "
+                "dispatcher-typed session(s) that appear alive in wait_for_messages. "
+                "(issue #1573)"
+            )
 
     to_fail = confirmed + stale_no_file
 
