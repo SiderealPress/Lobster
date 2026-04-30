@@ -1,5 +1,5 @@
 """
-Tests for HTTP session idle timeout configuration (issue #1823).
+Tests for HTTP session idle timeout configuration (issue #1823, fix #1873).
 
 The MCP server's stateful HTTP transport must be constructed with
 session_idle_timeout=SESSION_IDLE_TIMEOUT_SECONDS to prevent anyio task
@@ -7,7 +7,11 @@ group accumulation in the StreamableHTTPSessionManager — the root cause of
 the 4-minute asyncio stall observed on 2026-04-26.
 
 The constant SESSION_IDLE_TIMEOUT_SECONDS must be defined at module level so
-health checks and tests can reference it without hardcoding the literal 1800.
+health checks and tests can reference it without hardcoding the literal.
+
+The value must be >= the wait_for_messages timeout (72000s / 20h) to prevent
+the MCP session from being reaped while the dispatcher is idle in WFM.
+Setting this to 1800s caused dispatcher crash loops overnight (issue #1873).
 """
 
 import asyncio
@@ -15,21 +19,18 @@ import contextlib
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
-
-# Expected values — must match the spec in issue #1823 and the SDK recommendation.
-EXPECTED_SESSION_IDLE_TIMEOUT_SECONDS = 1800  # 30 minutes per SDK docs
+from src.mcp.inbox_server import SESSION_IDLE_TIMEOUT_SECONDS
 
 
 class TestSessionIdleTimeoutConstant:
     """SESSION_IDLE_TIMEOUT_SECONDS must be exported from inbox_server."""
 
     def test_constant_is_defined_and_correct(self):
-        """MODULE must export SESSION_IDLE_TIMEOUT_SECONDS = 1800."""
-        from src.mcp.inbox_server import SESSION_IDLE_TIMEOUT_SECONDS
-
-        assert SESSION_IDLE_TIMEOUT_SECONDS == EXPECTED_SESSION_IDLE_TIMEOUT_SECONDS, (
-            f"Expected SESSION_IDLE_TIMEOUT_SECONDS == {EXPECTED_SESSION_IDLE_TIMEOUT_SECONDS} "
-            f"(30 minutes per SDK recommendation); got {SESSION_IDLE_TIMEOUT_SECONDS}"
+        """MODULE must export SESSION_IDLE_TIMEOUT_SECONDS >= 72000 (20h, matching WFM timeout)."""
+        assert SESSION_IDLE_TIMEOUT_SECONDS >= 72000, (
+            f"Expected SESSION_IDLE_TIMEOUT_SECONDS >= 72000 "
+            f"(20 hours, matching WFM default; 1800s caused crash loops in #1873); "
+            f"got {SESSION_IDLE_TIMEOUT_SECONDS}"
         )
 
 
@@ -41,8 +42,9 @@ class TestHttpSessionManagerIdleTimeout:
 
         Without session_idle_timeout, anyio task groups accumulate for each
         long-lived dispatcher session and can stall the event loop for minutes
-        (issue #1823).  Providing idle_timeout=1800 ensures stale sessions are
-        reaped via anyio.CancelScope deadline rather than accumulating forever.
+        (issue #1823).  Providing idle_timeout=72000 (20h, matching WFM default)
+        ensures stale sessions are reaped via anyio.CancelScope deadline while
+        surviving dispatcher idle waits.  1800s was too short (#1873).
         """
         captured_calls = []
 
@@ -84,8 +86,9 @@ class TestHttpSessionManagerIdleTimeout:
             "StreamableHTTPSessionManager must receive session_idle_timeout; "
             "omitting it causes anyio task group accumulation (issue #1823)"
         )
-        assert kwargs["session_idle_timeout"] == EXPECTED_SESSION_IDLE_TIMEOUT_SECONDS, (
-            f"session_idle_timeout must be {EXPECTED_SESSION_IDLE_TIMEOUT_SECONDS}s; "
+        assert kwargs["session_idle_timeout"] == SESSION_IDLE_TIMEOUT_SECONDS, (
+            f"session_idle_timeout must be {SESSION_IDLE_TIMEOUT_SECONDS}s "
+            f"(from inbox_server.SESSION_IDLE_TIMEOUT_SECONDS); "
             f"got {kwargs['session_idle_timeout']}"
         )
         assert kwargs.get("stateless") is False, (
