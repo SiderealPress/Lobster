@@ -91,8 +91,8 @@ class GranolaTranscriptSegment:
 
 
 # Account name constants (canonical values shared across pipelines)
-ACCOUNT_DREW: str = "drew"  # noname
-ACCOUNT_KELLY: str = "kelly"  # noname
+ACCOUNT_PRIMARY: str = "primary"
+ACCOUNT_SECONDARY: str = "secondary"
 
 
 @dataclass(frozen=True)
@@ -104,7 +104,7 @@ class GranolaNote:
     with ?include=transcript.
 
     The ``granola_account`` field identifies which Granola account this note
-    came from ('drew' or 'kelly'). Defaults to 'drew' for backward compat.  # noname
+    came from ('primary' or 'secondary'). Defaults to 'primary'.
     """
 
     id: str
@@ -117,7 +117,7 @@ class GranolaNote:
     attendees: list[GranolaAttendee] = field(default_factory=list)
     calendar_event: Optional[GranolaCalendarEvent] = None
     transcript: list[GranolaTranscriptSegment] = field(default_factory=list)
-    granola_account: str = ACCOUNT_DREW  # noname
+    granola_account: str = ACCOUNT_PRIMARY
 
 
 @dataclass(frozen=True)
@@ -260,7 +260,7 @@ def _parse_transcript(raw_list: Optional[list[dict[str, Any]]]) -> list[GranolaT
     return segments
 
 
-def _parse_note(raw: dict[str, Any], granola_account: str = ACCOUNT_DREW) -> GranolaNote:  # noname
+def _parse_note(raw: dict[str, Any], granola_account: str = ACCOUNT_PRIMARY) -> GranolaNote:
     """Convert a raw API note dict → GranolaNote dataclass."""
     owner_raw = raw.get("owner") or {}
     owner = GranolaOwner(
@@ -362,7 +362,7 @@ def list_notes(
     cursor: Optional[str] = None,
     limit: int = 100,
     api_key: Optional[str] = None,
-    granola_account: str = ACCOUNT_DREW,  # noname
+    granola_account: str = ACCOUNT_PRIMARY,
 ) -> NoteListPage:
     """
     List meeting notes, newest-first.
@@ -404,7 +404,7 @@ def get_note(
     note_id: str,
     include_transcript: bool = True,
     api_key: Optional[str] = None,
-    granola_account: str = ACCOUNT_DREW,  # noname
+    granola_account: str = ACCOUNT_PRIMARY,
 ) -> GranolaNote:
     """
     Retrieve a single note by ID.
@@ -429,7 +429,7 @@ def get_note(
 def iter_all_notes(
     since: Optional[datetime] = None,
     api_key: Optional[str] = None,
-    granola_account: str = ACCOUNT_DREW,  # noname
+    granola_account: str = ACCOUNT_PRIMARY,
 ) -> list[GranolaNote]:
     """
     Fetch ALL notes (following pagination), optionally filtered by created_after.
@@ -466,7 +466,7 @@ class GranolaAccountConfig:
     Immutable descriptor for a single Granola account used in multi-account polling.
 
     Attributes:
-        name:    Account identifier ('drew' or 'kelly').  # noname
+        name:    Account identifier ('primary' or 'secondary').
         api_key: Bearer token for this account.
     """
 
@@ -480,7 +480,7 @@ def build_account_configs_from_env(env: Optional[dict[str, str]] = None) -> list
 
     Rules:
     - GRANOLA_API_KEY is required (primary enterprise account).
-    - GRANOLA_API_KEY_KELLY is optional (secondary personal account).  # noname
+    - GRANOLA_API_KEY_2 is optional (secondary account).
     - Primary account is always first in the returned list.
     - Returns empty list if GRANOLA_API_KEY is absent.
 
@@ -498,12 +498,12 @@ def build_account_configs_from_env(env: Optional[dict[str, str]] = None) -> list
         return []
 
     configs: list[GranolaAccountConfig] = [
-        GranolaAccountConfig(name=ACCOUNT_DREW, api_key=primary_key),  # noname
+        GranolaAccountConfig(name=ACCOUNT_PRIMARY, api_key=primary_key),
     ]
 
-    secondary_key = env.get("GRANOLA_API_KEY_KELLY", "").strip()  # noname
+    secondary_key = env.get("GRANOLA_API_KEY_2", "").strip()
     if secondary_key:
-        configs.append(GranolaAccountConfig(name=ACCOUNT_KELLY, api_key=secondary_key))  # noname
+        configs.append(GranolaAccountConfig(name=ACCOUNT_SECONDARY, api_key=secondary_key))
 
     return configs
 
