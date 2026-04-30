@@ -79,9 +79,11 @@ def _has_background_true_in_frontmatter(prompt: str) -> bool:
 
     # Find the closing --- of the frontmatter block.
     rest = prompt[3:]
-    end = rest.find("\n---")
-    if end == -1:
+    # Match closing delimiter: must be followed by newline or end-of-string
+    m = re.search(r"\n---(?:\n|$)", rest)
+    if m is None:
         return False
+    end = m.start()
 
     block = rest[:end]
     for line in block.splitlines():
