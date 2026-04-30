@@ -31,6 +31,19 @@ file.  If the sentinel exists AND LOBSTER_MAIN_SESSION=1, the session is
 treated as a post-compact dispatcher session regardless of the ID-match result.
 This bypasses the chicken-and-egg timing problem entirely for the post-compact
 case and ensures dispatcher bootup is always injected when it should be.
+
+Fresh-start fallback (issue #1868):
+On a genuine fresh restart (new process, MCP server restarted), the primary
+state file (dispatcher-claude-session-id) is cleared by the MCP server on
+startup and is absent until the dispatcher calls session_start().
+write-dispatcher-session-id.py may also skip updating the tertiary marker file
+if the previous session's JSONL has a recent mtime, leaving a stale UUID.
+Both state files then fail to identify the new dispatcher, causing is_dispatcher()
+to return False.  The sentinel fallback doesn't help (no compaction occurred).
+Fix: if the primary file is absent AND LOBSTER_MAIN_SESSION=1, treat the session
+as the dispatcher.  This is safe because subagents are only spawned after the
+dispatcher calls session_start() (which writes the primary file), and compaction
+events write the primary file proactively via on-compact.py.
 """
 
 import json
@@ -89,6 +102,40 @@ def _is_post_compact_dispatcher() -> bool:
     return COMPACT_PENDING_SENTINEL.exists()
 
 
+def _is_fresh_start_dispatcher() -> bool:
+    """Return True if this looks like a fresh-restart dispatcher session (issue #1868).
+
+    On a genuine fresh restart, the MCP server clears the primary state file
+    (dispatcher-claude-session-id) on startup.  That file is absent until the
+    dispatcher calls session_start().  write-dispatcher-session-id.py may also
+    skip updating the tertiary marker file if the previous session's JSONL has
+    a recent mtime, leaving a stale UUID in the tertiary file.
+
+    Consequence: is_dispatcher() finds no matching state file and returns False.
+    The compact-pending sentinel fallback (_is_post_compact_dispatcher) is also
+    inactive because no compaction occurred.  inject-bootup-context.py then
+    falls back to injecting subagent bootup — wrong for the dispatcher.
+
+    Fix: absent primary file + LOBSTER_MAIN_SESSION=1 → treat as dispatcher.
+
+    Why this is safe:
+    - Subagents are spawned only after the dispatcher calls session_start(),
+      which writes the primary file.  By the time any subagent SessionStart
+      fires, the primary file is present.
+    - Compaction events: on-compact.py proactively writes the primary file
+      with the new UUID before the post-compact SessionStart fires.  The
+      primary file is therefore present for compaction events, not absent.
+
+    Returns False on any OSError (cannot stat the primary file) — safe default.
+    """
+    if os.environ.get("LOBSTER_MAIN_SESSION", "") != "1":
+        return False
+    try:
+        return not session_role._get_mcp_claude_session_file().exists()
+    except OSError:
+        return False
+
+
 def _read_file_safe(path: Path, label: str) -> str | None:
     """Return file contents or None on any error or empty file, logging to stderr."""
     if not path.exists():
@@ -141,6 +188,21 @@ def main() -> None:
         print(
             f"[{HOOK_NAME}] sentinel fallback: compact-pending exists + "
             "LOBSTER_MAIN_SESSION=1; treating as post-compact dispatcher",
+            file=sys.stderr,
+        )
+        is_dispatcher = True
+
+    # Fresh-start fallback (issue #1868): if the primary state file is absent
+    # and LOBSTER_MAIN_SESSION=1, the MCP server has started but session_start()
+    # has not yet been called — this is the pre-session_start window that only
+    # exists during a genuine fresh restart.  Subagents cannot trigger this
+    # because they start only after the dispatcher has called session_start()
+    # (which writes the primary file).  Compaction events are also safe: on-compact.py
+    # writes the primary file proactively, so it is present for post-compact starts.
+    if not is_dispatcher and _is_fresh_start_dispatcher():
+        print(
+            f"[{HOOK_NAME}] fresh-start fallback: primary state file absent + "
+            "LOBSTER_MAIN_SESSION=1; treating as fresh-restart dispatcher",
             file=sys.stderr,
         )
         is_dispatcher = True
