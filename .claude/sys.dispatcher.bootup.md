@@ -461,6 +461,32 @@ Background subagents call `write_result(task_id, chat_id, text, ...)`, which dro
            mark_processed(message_id)
            continue
 
+       # --- PROMPT-PREP RESULT: spawn real subagent from spec ---
+       if msg.get("task_id", "").startswith("prompt-prep-"):
+           import re as _re, yaml as _yaml
+           spec_match = _re.search(r"## spawn-spec\n```yaml\n(.*?)```", msg["text"], _re.DOTALL)
+           prompt_match = _re.search(r"## prompt\n(.*)", msg["text"], _re.DOTALL)
+           if spec_match and prompt_match:
+               spec = _yaml.safe_load(spec_match.group(1))
+               real_task_id = spec.get("task_id", "prompt-prep-result")
+               real_subagent_type = spec.get("subagent_type", "lobster-generalist")
+               real_prompt = prompt_match.group(1).strip()
+               Task(
+                   subagent_type=real_subagent_type,
+                   run_in_background=True,
+                   prompt=real_prompt,
+               )
+               mark_processed(message_id)
+           else:
+               # Malformed spec: relay text to user with error notice
+               send_reply(
+                   chat_id=msg["chat_id"],
+                   text="Prompt prep returned a malformed spec -- here is what it produced:\n\n" + msg["text"][:400],
+                   source=msg.get("source", "telegram"),
+               )
+               mark_processed(message_id)
+           continue
+
        # --- ENGINEER → REVIEWER routing ---
        pr_url_match = re.search(r"https://github\.com/.*/pull/\d+", msg["text"])
        if pr_url_match:
@@ -1152,6 +1178,34 @@ pr_ref = parts[1].strip() if len(parts) > 1 else ""
 ```
 
 **Note:** `/re-review` posted as a GitHub PR comment is not yet wired (tracked in issue #885). Authors must relay the command via Telegram.
+
+---
+
+### prompt-prep flow
+
+Use prompt-prep when a request requires reading more than one file to compose a good prompt, the correct subagent type or skill is not obvious from the message alone, or the request references history or state that needs lookup.
+
+Skip prompt-prep for: simple inline answers, clearly-typed requests ("merge PR #N", "list tasks"), system messages (chat_id=0).
+
+Pattern:
+1. claim_and_ack(message_id, ack_text="On it -- figuring out the best approach.", chat_id=chat_id, source=source)
+2. task_id = f"prompt-prep-{slug}"
+3. Write inflight entry
+4. Task(
+       subagent_type="lobster-generalist",
+       run_in_background=True,
+       prompt=(
+           "Read ~/lobster/.claude/agents/prompt-prep.md first for full instructions.\n\n"
+           f"---\ntask_id: {task_id}\nchat_id: {chat_id}\nsource: {source}\nbackground: true\n---\n\n"
+           f"message_text: {msg['text']}\n"
+           f"rough_intent: {rough_intent}\n"
+           f"trigger_message_id: {message_id}\n"
+       )
+   )
+5. mark_processed(message_id)
+6. Return to wait_for_messages() IMMEDIATELY
+
+Note: Phase 1 uses subagent_type="lobster-generalist" with the agent definition file read as first step. Phase 2 will introduce a named "prompt-prep" agent type.
 
 ---
 
