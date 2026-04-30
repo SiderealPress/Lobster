@@ -57,6 +57,7 @@ from integrations.granola.client import (  # noqa: E402
     GranolaAPIError,
     GranolaAuthError,
     GranolaNotFoundError,
+    GranolaUnknownAccountError,
     build_account_configs_from_env,
     iter_all_notes_for_account,
     get_note,
@@ -486,8 +487,12 @@ def _run_archive(backfill: bool, log: logging.Logger) -> int:
     errors = 0
 
     for note_summary in to_process:
-        # Use the account-specific API key so secondary-account notes authenticate correctly
-        note_api_key = api_key_by_account.get(note_summary.granola_account)
+        # Use the account-specific API key so secondary-account notes authenticate correctly.
+        # Explicit lookup raises GranolaUnknownAccountError rather than silently falling back
+        # to None (which would cause get_note() to use the primary key for any unknown account).
+        if note_summary.granola_account not in api_key_by_account:
+            raise GranolaUnknownAccountError(note_summary.granola_account)
+        note_api_key = api_key_by_account[note_summary.granola_account]
         full_note = _fetch_full_note(note_summary, log, api_key=note_api_key)
         if full_note is None:
             errors += 1
