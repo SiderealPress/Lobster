@@ -1,5 +1,5 @@
 """
-Tests for HTTP session idle timeout configuration (issue #1823, fix #1873).
+Tests for HTTP session idle timeout configuration (issue #1823, fix #1876).
 
 The MCP server's stateful HTTP transport must be constructed with
 session_idle_timeout=SESSION_IDLE_TIMEOUT_SECONDS to prevent anyio task
@@ -9,9 +9,10 @@ the 4-minute asyncio stall observed on 2026-04-26.
 The constant SESSION_IDLE_TIMEOUT_SECONDS must be defined at module level so
 health checks and tests can reference it without hardcoding the literal.
 
-The value must be >= the wait_for_messages timeout (72000s / 20h) to prevent
-the MCP session from being reaped while the dispatcher is idle in WFM.
-Setting this to 1800s caused dispatcher crash loops overnight (issue #1873).
+As of issue #1876, the value is 1200s (20 min) to reap zombie subagent sessions
+quickly. The dispatcher session is NOT reaped at this timeout because
+handle_wait_for_messages() explicitly extends its idle_scope.deadline to 72000s
+on every WFM entry — making the dispatcher exempt from the global reap policy.
 """
 
 import asyncio
@@ -26,10 +27,15 @@ class TestSessionIdleTimeoutConstant:
     """SESSION_IDLE_TIMEOUT_SECONDS must be exported from inbox_server."""
 
     def test_constant_is_defined_and_correct(self):
-        """MODULE must export SESSION_IDLE_TIMEOUT_SECONDS >= 72000 (20h, matching WFM timeout)."""
-        assert SESSION_IDLE_TIMEOUT_SECONDS >= 72000, (
-            f"Expected SESSION_IDLE_TIMEOUT_SECONDS >= 72000 "
-            f"(20 hours, matching WFM default; 1800s caused crash loops in #1873); "
+        """MODULE must export SESSION_IDLE_TIMEOUT_SECONDS == 1200 (20 min zombie reap window).
+
+        The dispatcher is protected separately: handle_wait_for_messages() extends
+        its idle_scope.deadline to 72000s on every WFM entry (issue #1876).
+        """
+        assert SESSION_IDLE_TIMEOUT_SECONDS == 1200, (
+            f"Expected SESSION_IDLE_TIMEOUT_SECONDS == 1200 "
+            f"(20-min zombie-reap window; dispatcher deadline is extended separately "
+            f"to 72000s in handle_wait_for_messages — issue #1876); "
             f"got {SESSION_IDLE_TIMEOUT_SECONDS}"
         )
 
@@ -42,9 +48,8 @@ class TestHttpSessionManagerIdleTimeout:
 
         Without session_idle_timeout, anyio task groups accumulate for each
         long-lived dispatcher session and can stall the event loop for minutes
-        (issue #1823).  Providing idle_timeout=72000 (20h, matching WFM default)
-        ensures stale sessions are reaped via anyio.CancelScope deadline while
-        surviving dispatcher idle waits.  1800s was too short (#1873).
+        (issue #1823).  The value is 1200s (20 min) to reap zombie subagent sessions;
+        the dispatcher's own deadline is extended to 72000s on each WFM entry (issue #1876).
         """
         captured_calls = []
 
