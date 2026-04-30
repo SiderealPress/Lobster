@@ -2608,10 +2608,10 @@ async def list_tools() -> list[Tool]:
                         "type": "object",
                         "description": (
                             "Optional JSON object attached to the reminder. "
-                            "Use this to carry context that the dispatcher needs when routing "
+                            "Use this to carry context the dispatcher needs when routing "
                             "the reminder (e.g., task_id, description, chat_id). "
-                            "Passed through unchanged — the dispatcher reads it from the "
-                            "inbox message's 'metadata' field."
+                            "Stored in the reminders registry and retrievable via the "
+                            "reminder_id field included in the fired inbox message."
                         ),
                     },
                 },
