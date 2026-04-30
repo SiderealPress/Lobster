@@ -1852,7 +1852,7 @@ success "Nightly consolidation configured (runs at 03:00 nightly)"
 # summary to ~/messages/task-outputs/ (readable via check_task_outputs).
 chmod +x "$INSTALL_DIR/scheduled-tasks/export-logs.py" 2>/dev/null || true
 "$INSTALL_DIR/scripts/cron-manage.sh" add "# LOBSTER-LOG-EXPORT" \
-    "0 3 * * * cd $INSTALL_DIR && uv run scheduled-tasks/export-logs.py # LOBSTER-LOG-EXPORT"
+    "0 3 * * * cd $INSTALL_DIR && $HOME/.local/bin/uv run scheduled-tasks/export-logs.py # LOBSTER-LOG-EXPORT"
 
 success "Log export configured (runs at 03:00 UTC daily)"
 
@@ -1866,7 +1866,7 @@ step "Setting up ghost detector cron..."
 # sends a Telegram alert if GHOST_CONFIRMED or UNREGISTERED agents are found,
 # and marks ghost sessions as failed in agent_sessions.db. No LLM involved.
 "$INSTALL_DIR/scripts/cron-manage.sh" add "# LOBSTER-GHOST-DETECTOR" \
-    "*/5 * * * * cd $HOME && uv run $INSTALL_DIR/scripts/agent-monitor.py --alert --mark-failed >> $HOME/lobster-workspace/logs/agent-monitor.log 2>&1 # LOBSTER-GHOST-DETECTOR"
+    "*/5 * * * * cd $HOME && $HOME/.local/bin/uv run $INSTALL_DIR/scripts/agent-monitor.py --alert --mark-failed >> $HOME/lobster-workspace/logs/agent-monitor.log 2>&1 # LOBSTER-GHOST-DETECTOR"
 
 success "Ghost detector configured (runs every 5 minutes)"
 
@@ -1881,7 +1881,7 @@ step "Setting up OOM monitor cron..."
 # dispatcher when new OOM kill events are detected. No LLM involved.
 # Only active when LOBSTER_DEBUG=true (the script is a no-op otherwise).
 "$INSTALL_DIR/scripts/cron-manage.sh" add "# LOBSTER-OOM-CHECK" \
-    "*/10 * * * * cd $HOME && uv run $INSTALL_DIR/scripts/oom-monitor.py --since-minutes 10 >> $HOME/lobster-workspace/logs/oom-monitor.log 2>&1 # LOBSTER-OOM-CHECK"
+    "*/10 * * * * cd $HOME && $HOME/.local/bin/uv run $INSTALL_DIR/scripts/oom-monitor.py --since-minutes 10 >> $HOME/lobster-workspace/logs/oom-monitor.log 2>&1 # LOBSTER-OOM-CHECK"
 
 success "OOM monitor configured (runs every 10 minutes, active only when LOBSTER_DEBUG=true)"
 
