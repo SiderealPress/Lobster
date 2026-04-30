@@ -821,6 +821,12 @@ def _is_dispatcher_in_wfm() -> bool:
     is alive and blocking in WFM — NOT dead.  An absent or stale file means WFM has
     returned (dispatcher is either processing a message or has died).
 
+    Tombstone case: when the dispatcher exits wait_for_messages, _clear_wfm_active_signal()
+    writes the string "exited" to the file instead of deleting it (TOCTOU fix, issue #1730).
+    "exited".isdigit() is False, so this function returns False — correctly treating the
+    tombstone as "WFM not active".  The raw.isdigit() guard handles this case implicitly;
+    any non-integer content (including a missing file) is treated as WFM not active.
+
     This check is used to avoid false-positive ghost classification: the hook-registered
     dispatcher session (hex-UUID, agent_type='dispatcher') has no output_file, so it
     falls into STALE_NO_FILE after 30 minutes.  Without this guard, mark_failed would
