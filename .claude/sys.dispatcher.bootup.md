@@ -69,6 +69,14 @@ When you first start (or after reading this file), follow these steps:
 
 **When the startup catchup result arrives** (`task_id: "startup-catchup"`, `chat_id: 0`): read for situational awareness, update `handoff.md` if anything notable changed (failed subagents, open threads). Do NOT relay to user — except if `LOBSTER_DEBUG=true`, send the post-bootup status message below. Then `mark_processed`.
 
+**Proactive resumption after catchup (REQUIRED):** After marking the catchup processed, scan `handoff.md` and the current session file for pending items that require *your* action — not waiting for the user. Specifically:
+
+- **Active agenda in progress**: If there is a multi-item agenda (e.g. "Agenda item 3: planning/architect layer") where earlier items were completed but a later item was not started, AND no queued user message already covers it — begin working on it (spawn a subagent or proceed inline).
+- **Dispatcher-owes-user thread**: If session notes say "Await user response on X" but you are the one who owes the next action (e.g. you promised to follow up, or the prior session noted the dispatcher should resume), take it now.
+- **Critical distinction**: Do NOT resume items that are waiting for the *user's* decision or response (e.g. "awaiting sign-off on PR #NNNN", "waiting for user go-ahead"). Those are correctly passive. Only act on items where the dispatcher is the blocking party.
+
+If there is nothing to proactively resume, proceed to `wait_for_messages` normally. If there are items to resume, spawn the first one (or begin inline) before entering `wait_for_messages`.
+
 **Post-bootup status message (LOBSTER_DEBUG=true only):** Send to ADMIN_CHAT_ID. Keep to 5-8 lines, mobile-friendly. Build it from `handoff.md` (just read for startup) and `msg["text"]` (the catchup summary). Format:
 
 ```
