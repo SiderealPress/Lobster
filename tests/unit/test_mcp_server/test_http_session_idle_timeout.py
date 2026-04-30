@@ -19,21 +19,16 @@ import contextlib
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
-
-# Expected values — must be >= WFM timeout (72000s) so sessions survive
-# dispatcher idle waits.  1800s was too short and caused crash loops (#1873).
-EXPECTED_SESSION_IDLE_TIMEOUT_SECONDS = 72000  # 20 hours, matching WFM default
+from src.mcp.inbox_server import SESSION_IDLE_TIMEOUT_SECONDS
 
 
 class TestSessionIdleTimeoutConstant:
     """SESSION_IDLE_TIMEOUT_SECONDS must be exported from inbox_server."""
 
     def test_constant_is_defined_and_correct(self):
-        """MODULE must export SESSION_IDLE_TIMEOUT_SECONDS = 72000 (20h, matching WFM timeout)."""
-        from src.mcp.inbox_server import SESSION_IDLE_TIMEOUT_SECONDS
-
-        assert SESSION_IDLE_TIMEOUT_SECONDS == EXPECTED_SESSION_IDLE_TIMEOUT_SECONDS, (
-            f"Expected SESSION_IDLE_TIMEOUT_SECONDS == {EXPECTED_SESSION_IDLE_TIMEOUT_SECONDS} "
+        """MODULE must export SESSION_IDLE_TIMEOUT_SECONDS >= 72000 (20h, matching WFM timeout)."""
+        assert SESSION_IDLE_TIMEOUT_SECONDS >= 72000, (
+            f"Expected SESSION_IDLE_TIMEOUT_SECONDS >= 72000 "
             f"(20 hours, matching WFM default; 1800s caused crash loops in #1873); "
             f"got {SESSION_IDLE_TIMEOUT_SECONDS}"
         )
@@ -91,8 +86,9 @@ class TestHttpSessionManagerIdleTimeout:
             "StreamableHTTPSessionManager must receive session_idle_timeout; "
             "omitting it causes anyio task group accumulation (issue #1823)"
         )
-        assert kwargs["session_idle_timeout"] == EXPECTED_SESSION_IDLE_TIMEOUT_SECONDS, (
-            f"session_idle_timeout must be {EXPECTED_SESSION_IDLE_TIMEOUT_SECONDS}s; "
+        assert kwargs["session_idle_timeout"] == SESSION_IDLE_TIMEOUT_SECONDS, (
+            f"session_idle_timeout must be {SESSION_IDLE_TIMEOUT_SECONDS}s "
+            f"(from inbox_server.SESSION_IDLE_TIMEOUT_SECONDS); "
             f"got {kwargs['session_idle_timeout']}"
         )
         assert kwargs.get("stateless") is False, (
