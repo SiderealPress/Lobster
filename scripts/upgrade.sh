@@ -3035,6 +3035,8 @@ print(f'prune-pr-worktrees: {result.status}')
                 substep "Migration 88: fixed oom-monitor cron to use absolute uv path"
             } || warn "Migration 88: could not update oom-monitor cron entry"
         fi
+    else
+        substep "Migration 84: oom-monitor cron entry not found — skipping"
     fi
     if crontab -l 2>/dev/null | grep -q "LOBSTER-LOG-EXPORT"; then
         if crontab -l 2>/dev/null | grep "LOBSTER-LOG-EXPORT" | grep -q " uv run "; then
@@ -3044,6 +3046,8 @@ print(f'prune-pr-worktrees: {result.status}')
                 substep "Migration 88: fixed log-export cron to use absolute uv path"
             } || warn "Migration 88: could not update log-export cron entry"
         fi
+    else
+        substep "Migration 84: log-export cron entry not found — skipping"
     fi
 
     if [ "$migrated" -eq 0 ]; then

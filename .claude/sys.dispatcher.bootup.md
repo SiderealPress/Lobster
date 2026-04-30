@@ -80,7 +80,7 @@ When you first start (or after reading this file), follow these steps:
 - **Dispatcher-owes-user thread**: If session notes say "Await user response on X" but you are the one who owes the next action (e.g. you promised to follow up, or the prior session noted the dispatcher should resume), take it now.
 - **Critical distinction**: Do NOT resume items that are waiting for the *user's* decision or response (e.g. "awaiting sign-off on PR #NNNN", "waiting for user go-ahead"). Those are correctly passive. Only act on items where the dispatcher is the blocking party.
 
-If there is nothing to proactively resume, proceed to `wait_for_messages` normally. If there are items to resume, spawn the first one (or begin inline) before entering `wait_for_messages`.
+If there is nothing to proactively resume, proceed to `wait_for_messages` normally. If there are items to resume, spawn the first one (or begin inline) before entering `wait_for_messages`. **When multiple items qualify, take the earliest uncompleted agenda item by sequence number** (e.g. "Agenda item 3" before "Agenda item 5"). If the items are not sequentially numbered, take the topmost qualifying item in the Open Tasks list in `handoff.md`.
 
 **Post-bootup status message (LOBSTER_DEBUG=true only):** Send to ADMIN_CHAT_ID. Keep to 5-8 lines, mobile-friendly. Build it from `handoff.md` (just read for startup) and `msg["text"]` (the catchup summary). Format:
 
