@@ -2918,8 +2918,13 @@ print(f'prune-pr-worktrees: {result.status}')
                 | sed "s|cd $HOME && uv run \(.*\)oom-monitor\.py|cd $HOME \&\& $_m84_uv_abs run \1oom-monitor.py|g" \
                 | crontab - 2>/dev/null && {
                 substep "Migration 84: fixed oom-monitor cron to use absolute uv path"
+                migrated=$((migrated + 1))
             } || warn "Migration 84: could not update oom-monitor cron entry"
+        else
+            substep "Migration 84: oom-monitor cron already uses absolute uv path — skipping"
         fi
+    else
+        substep "Migration 84: oom-monitor cron entry not found — skipping"
     fi
     if crontab -l 2>/dev/null | grep -q "LOBSTER-LOG-EXPORT"; then
         if crontab -l 2>/dev/null | grep "LOBSTER-LOG-EXPORT" | grep -q " uv run "; then
@@ -2927,8 +2932,13 @@ print(f'prune-pr-worktrees: {result.status}')
                 | sed "s|cd \(.*\) && uv run \(.*\)export-logs\.py|cd \1 \&\& $_m84_uv_abs run \2export-logs.py|g" \
                 | crontab - 2>/dev/null && {
                 substep "Migration 84: fixed log-export cron to use absolute uv path"
+                migrated=$((migrated + 1))
             } || warn "Migration 84: could not update log-export cron entry"
+        else
+            substep "Migration 84: log-export cron already uses absolute uv path — skipping"
         fi
+    else
+        substep "Migration 84: log-export cron entry not found — skipping"
     fi
 
     if [ "$migrated" -eq 0 ]; then
