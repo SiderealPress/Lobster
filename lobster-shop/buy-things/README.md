@@ -137,7 +137,7 @@ Customize via MCP `set_skill_preference` or by editing `preferences/defaults.tom
 | `spend_warning_threshold_pct` | `80` | Warn at this % of cap |
 | `shipping_preference` | `"free"` | Preferred shipping speed |
 | `save_receipts` | `true` | Save confirmation screenshots |
-| `default_shipping_name` | `"Drew Winget"` | Name on shipping address |
+| `default_shipping_name` | `"Your Name"` | Name on shipping address |
 
 ---
 

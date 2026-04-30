@@ -30,8 +30,8 @@ from integrations.granola.client import (  # noqa: E402
     GranolaOwner,
     GranolaAccountConfig,
     GranolaUnknownAccountError,
-    ACCOUNT_DREW,  # noname
-    ACCOUNT_KELLY,  # noname
+    ACCOUNT_PRIMARY,
+    ACCOUNT_SECONDARY,
 )
 
 
@@ -50,7 +50,7 @@ SECONDARY_API_KEY = "grn_archive_secondary_key"
 def _make_note(
     note_id: str = "note-1",
     title: str = "Meeting",
-    account: str = ACCOUNT_DREW,  # noname
+    account: str = ACCOUNT_PRIMARY,
 ) -> GranolaNote:
     return GranolaNote(
         id=note_id,
@@ -72,25 +72,25 @@ class TestDedupNotes:
     def test_unique_notes_all_kept(self):
         """Notes with distinct IDs all survive deduplication."""
         notes = [
-            _make_note("n1", account=ACCOUNT_DREW),   # noname
-            _make_note("n2", account=ACCOUNT_KELLY),  # noname
-            _make_note("n3", account=ACCOUNT_DREW),   # noname
+            _make_note("n1", account=ACCOUNT_PRIMARY),
+            _make_note("n2", account=ACCOUNT_SECONDARY),
+            _make_note("n3", account=ACCOUNT_PRIMARY),
         ]
         result = _dedup_notes(notes)
         assert [n.id for n in result] == ["n1", "n2", "n3"]
 
     def test_same_id_in_both_accounts_yields_single_entry(self):
         """When primary and secondary share a note ID, only one entry is in the output."""
-        primary_note = _make_note("shared-id", title="primary version", account=ACCOUNT_DREW)   # noname
-        secondary_note = _make_note("shared-id", title="secondary version", account=ACCOUNT_KELLY)  # noname
+        primary_note = _make_note("shared-id", title="primary version", account=ACCOUNT_PRIMARY)
+        secondary_note = _make_note("shared-id", title="secondary version", account=ACCOUNT_SECONDARY)
         # Primary is prepended first (mirrors _run_archive ordering)
         result = _dedup_notes([primary_note, secondary_note])
         assert len(result) == 1
 
     def test_primary_wins_on_duplicate_id(self):
         """When same ID exists in both accounts, the first occurrence (primary) is kept."""
-        primary_note = _make_note("shared-id", title="primary version", account=ACCOUNT_DREW)   # noname
-        secondary_note = _make_note("shared-id", title="secondary version", account=ACCOUNT_KELLY)  # noname
+        primary_note = _make_note("shared-id", title="primary version", account=ACCOUNT_PRIMARY)
+        secondary_note = _make_note("shared-id", title="secondary version", account=ACCOUNT_SECONDARY)
         result = _dedup_notes([primary_note, secondary_note])
         assert result[0].title == "primary version"
 
@@ -133,8 +133,8 @@ class TestRunArchiveKeyRouting:
 
     def _make_accounts(self) -> list[GranolaAccountConfig]:
         return [
-            GranolaAccountConfig(name=ACCOUNT_DREW, api_key=PRIMARY_API_KEY),    # noname
-            GranolaAccountConfig(name=ACCOUNT_KELLY, api_key=SECONDARY_API_KEY), # noname
+            GranolaAccountConfig(name=ACCOUNT_PRIMARY, api_key=PRIMARY_API_KEY),
+            GranolaAccountConfig(name=ACCOUNT_SECONDARY, api_key=SECONDARY_API_KEY),
         ]
 
     @patch("granola_archive._save_index")
@@ -151,7 +151,7 @@ class TestRunArchiveKeyRouting:
         mock_save_index,
     ):
         """Notes from the primary account are fetched with the primary API key."""
-        note = _make_note("d1", account=ACCOUNT_DREW)  # noname
+        note = _make_note("d1", account=ACCOUNT_PRIMARY)
         mock_build_accounts.return_value = self._make_accounts()
         mock_iter_notes.return_value = [note]
         mock_fetch_full.return_value = note
@@ -178,7 +178,7 @@ class TestRunArchiveKeyRouting:
         mock_save_index,
     ):
         """Notes from the secondary account are fetched with the secondary API key."""
-        note = _make_note("k1", account=ACCOUNT_KELLY)  # noname
+        note = _make_note("k1", account=ACCOUNT_SECONDARY)
         mock_build_accounts.return_value = self._make_accounts()
         mock_iter_notes.return_value = [note]
         mock_fetch_full.return_value = note
@@ -205,8 +205,8 @@ class TestRunArchiveKeyRouting:
         mock_save_index,
     ):
         """In a mixed list, each note is fetched with its own account's key."""
-        primary_note = _make_note("d1", account=ACCOUNT_DREW)   # noname
-        secondary_note = _make_note("k1", account=ACCOUNT_KELLY)  # noname
+        primary_note = _make_note("d1", account=ACCOUNT_PRIMARY)
+        secondary_note = _make_note("k1", account=ACCOUNT_SECONDARY)
 
         mock_build_accounts.return_value = self._make_accounts()
         # iter_all_notes_for_account is called once per account; side_effect
@@ -241,7 +241,7 @@ class TestRunArchiveKeyRouting:
         """
         # Only primary account is registered; the note claims a phantom account
         mock_build_accounts.return_value = [
-            GranolaAccountConfig(name=ACCOUNT_DREW, api_key=PRIMARY_API_KEY),  # noname
+            GranolaAccountConfig(name=ACCOUNT_PRIMARY, api_key=PRIMARY_API_KEY),
         ]
         phantom_note = _make_note("x1", account="phantom-account")
         mock_iter_notes.return_value = [phantom_note]
