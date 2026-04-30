@@ -800,6 +800,17 @@ HEARTBEAT_FILE = _WORKSPACE / "logs" / "claude-heartbeat"
 # tests can verify it matches the health-check's WFM_ACTIVE_STALE_SECONDS.
 WAIT_HEARTBEAT_INTERVAL = 60
 
+# Idle timeout for the stateful StreamableHTTP session manager (issue #1876).
+# Sessions idle longer than this many seconds are reaped via anyio.CancelScope.
+# GracefulSessionManager writes a session-reap notification to the inbox before
+# terminating, giving the dispatcher advance notice to call wait_for_messages()
+# again cleanly.
+# Set to 20 hours (72000s) to match the WFM tool's own timeout so that under
+# normal conditions the dispatcher's WFM call always returns before the session
+# is reaped.  The notification is a safety net for edge cases (short timeouts,
+# brief reconnects) rather than the happy path.
+SESSION_IDLE_TIMEOUT_SECONDS = 72000
+
 # WFM-active signal file (issue #1713 / #949): written with a Unix epoch
 # timestamp when wait_for_messages begins blocking, refreshed every
 # WAIT_HEARTBEAT_INTERVAL seconds, and deleted when WFM returns.
@@ -1164,14 +1175,14 @@ def _drain_reconciler_ghosts() -> int:
 # either path updates the tag (CC restart recovery).
 #
 # _dispatcher_session_id: module-level str, set by Option A or B
-# _http_session_manager: reference to the StreamableHTTPSessionManager
+# _http_session_manager: reference to the GracefulSessionManager
 #   instance (set in main() when HTTP mode is active).  Non-None iff in HTTP
 #   mode.  Used by /dispatcher-session endpoint and by _dispatch_tool to
 #   select the correct guard path.
 # ---------------------------------------------------------------------------
 
 _dispatcher_session_id: str | None = None
-_http_session_manager = None  # Set to StreamableHTTPSessionManager in main() when HTTP mode is active
+_http_session_manager = None  # Set to GracefulSessionManager in main() when HTTP mode is active
 
 # State file: the dispatcher HTTP session ID persisted to disk so hooks can
 # read it without network calls or JSONL parsing.  Written atomically by
@@ -1309,6 +1320,54 @@ def _write_session_lost_reminder() -> None:
         log.info(f"[session-lost] Wrote session-lost-reminder to inbox: {reminder_id}")
     except Exception as exc:  # noqa: BLE001
         log.warning(f"[session-lost] Failed to write session-lost-reminder: {exc}")
+
+
+def _write_session_reap_notification() -> None:
+    """Write a session-reap message to the inbox before an idle session is reaped.
+
+    When session_idle_timeout fires in GracefulSessionManager, the anyio CancelScope
+    deadline cancels the active app.run() coroutine.  Without advance notice, the
+    dispatcher's in-flight WFM connection is severed and its next call returns a
+    "Session not found" 404.
+
+    This function writes a lightweight notification so the dispatcher can handle its
+    own reap cleanly: it sees the message via WFM (or on its next reconnect), calls
+    wait_for_messages() again, and resumes the main loop — no crash, no re-orient.
+
+    Motivation: session_idle_timeout applies equally to ALL sessions.  The dispatcher
+    idling in WFM and a crashed subagent look identical to the SDK.  The graceful
+    notification is the dispatcher's signal that the reap was intentional.
+
+    This is intentionally simpler than _write_session_lost_reminder():
+    - No PID guard — the dispatcher is alive and healthy, just being reaped
+    - Type is "session-reap" (NOT "compact-reminder") — the dispatcher does not
+      need to re-read bootup files, just call wait_for_messages() again
+    - Non-fatal: if the inbox write fails, log and proceed with reap anyway
+
+    Developer mode: when LOBSTER_DEV_MODE=true (or 1), the notification is suppressed.
+    """
+    if os.environ.get("LOBSTER_DEV_MODE", "").lower() in ("true", "1"):
+        log.info("[session-reap] LOBSTER_DEV_MODE active — skipping session-reap notification")
+        return
+    try:
+        now_utc = datetime.now(timezone.utc)
+        reap_id = f"session-reap-{int(now_utc.timestamp())}"
+        notification = {
+            "id": reap_id,
+            "source": "system",
+            "type": "session-reap",
+            "chat_id": 0,
+            "task_origin": "internal",
+            "text": (
+                "WFM connection closing. Reconnect when ready."
+            ),
+            "timestamp": now_utc.isoformat(),
+        }
+        inbox_file = INBOX_DIR / f"{reap_id}.json"
+        atomic_write_json(inbox_file, notification)
+        log.info(f"[session-reap] Wrote session-reap notification to inbox: {reap_id}")
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"[session-reap] Failed to write session-reap notification: {exc}")
 
 
 def _get_current_http_session_id() -> str | None:
@@ -9892,6 +9951,161 @@ async def reconcile_agent_sessions() -> None:
             log.error(f"[reconciler] Error in reconcile_agent_sessions: {exc}", exc_info=True)
 
 
+class GracefulSessionManager:
+    """StreamableHTTPSessionManager subclass that writes a session-reap notification
+    to the inbox before idle-reaped sessions are terminated.
+
+    The MCP SDK's session_idle_timeout fires when a session receives no HTTP requests
+    for N seconds.  The SDK applies this timeout equally to all sessions — the
+    dispatcher idling in wait_for_messages() and a crashed subagent look identical.
+    Without this subclass, an idle-reap severs the dispatcher's WFM connection with
+    no warning, causing an unexplained "Session not found" 404 on the next tool call.
+
+    This subclass overrides _handle_stateful_request so the run_server coroutine
+    calls _write_session_reap_notification() when idle_scope.cancelled_caught is True.
+    The notification lets the dispatcher handle its own reap cleanly: it receives the
+    message via WFM (or on reconnect), calls wait_for_messages() again, and resumes
+    the main loop — no crash, no re-orient, no bootup re-read needed.
+
+    The inbox write is non-fatal: if it fails (e.g. filesystem error), the exception
+    is caught and the reap proceeds normally — same as _write_session_lost_reminder().
+    """
+
+    # Import base class lazily so the top-level module doesn't hard-require uvicorn/starlette
+    # on non-HTTP transports.  The subclass is only instantiated in main() when use_http=True.
+    @staticmethod
+    def _get_base_class():
+        from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+        return StreamableHTTPSessionManager
+
+
+# Build the actual subclass at import time only if the SDK is available.
+# On environments without mcp[cli] this import may fail — catch and degrade gracefully.
+try:
+    from mcp.server.streamable_http_manager import StreamableHTTPSessionManager as _BaseSessionManager
+
+    class GracefulSessionManager(_BaseSessionManager):  # type: ignore[no-redef]
+        """StreamableHTTPSessionManager that writes a session-reap notification on idle timeout."""
+
+        async def _handle_stateful_request(self, scope, receive, send):  # type: ignore[override]
+            """Override to inject graceful reap notification before idle termination."""
+            import anyio
+            from uuid import uuid4
+            from mcp.server.streamable_http import MCP_SESSION_ID_HEADER
+            from starlette.requests import Request
+
+            request = Request(scope, receive)
+            request_mcp_session_id = request.headers.get(MCP_SESSION_ID_HEADER)
+
+            # Existing session: delegate directly to parent logic for deadline refresh
+            if (
+                request_mcp_session_id is not None
+                and request_mcp_session_id in self._server_instances
+            ):
+                transport = self._server_instances[request_mcp_session_id]
+                if transport.idle_scope is not None and self.session_idle_timeout is not None:
+                    transport.idle_scope.deadline = anyio.current_time() + self.session_idle_timeout
+                await transport.handle_request(scope, receive, send)
+                return
+
+            if request_mcp_session_id is None:
+                # New session: mirror the parent logic but inject the reap hook
+                from mcp.server.streamable_http import StreamableHTTPServerTransport
+                from anyio.abc import TaskStatus
+
+                async with self._session_creation_lock:
+                    new_session_id = uuid4().hex
+                    http_transport = StreamableHTTPServerTransport(
+                        mcp_session_id=new_session_id,
+                        is_json_response_enabled=self.json_response,
+                        event_store=self.event_store,
+                        security_settings=self.security_settings,
+                        retry_interval=self.retry_interval,
+                    )
+
+                    assert http_transport.mcp_session_id is not None
+                    self._server_instances[http_transport.mcp_session_id] = http_transport
+
+                    async def run_server(
+                        *, task_status: TaskStatus[None] = anyio.TASK_STATUS_IGNORED
+                    ) -> None:
+                        async with http_transport.connect() as streams:
+                            read_stream, write_stream = streams
+                            task_status.started()
+                            try:
+                                idle_scope = anyio.CancelScope()
+                                if self.session_idle_timeout is not None:
+                                    idle_scope.deadline = (
+                                        anyio.current_time() + self.session_idle_timeout
+                                    )
+                                    http_transport.idle_scope = idle_scope
+
+                                with idle_scope:
+                                    await self.app.run(
+                                        read_stream,
+                                        write_stream,
+                                        self.app.create_initialization_options(),
+                                        stateless=False,
+                                    )
+
+                                if idle_scope.cancelled_caught:
+                                    # Idle timeout fired — write graceful notification BEFORE
+                                    # cleaning up the session so the dispatcher is informed.
+                                    _write_session_reap_notification()
+                                    assert http_transport.mcp_session_id is not None
+                                    log.info(
+                                        f"[session-reap] Session {http_transport.mcp_session_id} "
+                                        "idle-reaped; dispatcher notified via inbox"
+                                    )
+                                    self._server_instances.pop(http_transport.mcp_session_id, None)
+                                    await http_transport.terminate()
+                            except Exception:
+                                log.exception(
+                                    f"Session {http_transport.mcp_session_id} crashed"
+                                )
+                            finally:
+                                if (
+                                    http_transport.mcp_session_id
+                                    and http_transport.mcp_session_id in self._server_instances
+                                    and not http_transport.is_terminated
+                                ):
+                                    log.info(
+                                        "Cleaning up crashed session "
+                                        f"{http_transport.mcp_session_id} from "
+                                        "active instances."
+                                    )
+                                    del self._server_instances[http_transport.mcp_session_id]
+
+                    assert self._task_group is not None
+                    await self._task_group.start(run_server)
+                    await http_transport.handle_request(scope, receive, send)
+            else:
+                # Unknown or expired session: return 404 per MCP spec (same as parent)
+                from http import HTTPStatus
+                from mcp.types import INVALID_REQUEST, ErrorData, JSONRPCError
+                from starlette.responses import Response
+
+                error_response = JSONRPCError(
+                    jsonrpc="2.0",
+                    id="server-error",
+                    error=ErrorData(
+                        code=INVALID_REQUEST,
+                        message="Session not found",
+                    ),
+                )
+                response = Response(
+                    content=error_response.model_dump_json(by_alias=True, exclude_none=True),
+                    status_code=HTTPStatus.NOT_FOUND,
+                    media_type="application/json",
+                )
+                await response(scope, receive, send)
+
+except ImportError:
+    # MCP SDK not installed (e.g. stdio-only environment).
+    # GracefulSessionManager falls back to a stub — main() uses it only in HTTP mode.
+    pass  # GracefulSessionManager remains the static-method stub defined above
+
+
 async def main():
     """Run the MCP server."""
     setup_logging()
@@ -9967,7 +10181,9 @@ async def main():
         from starlette.applications import Starlette
         from starlette.requests import Request
         from starlette.responses import Response
-        from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+        # GracefulSessionManager is defined at module level (above main()).
+        # It subclasses StreamableHTTPSessionManager and writes a session-reap
+        # notification to the inbox before idle sessions are terminated.
 
         # Determine port (--port N or MCP_HTTP_PORT env, default 8766)
         port = int(os.environ.get("MCP_HTTP_PORT", 8766))
@@ -9977,7 +10193,11 @@ async def main():
             except (ValueError, IndexError):
                 pass
 
-        session_manager = StreamableHTTPSessionManager(app=server, stateless=False)
+        session_manager = GracefulSessionManager(
+            app=server,
+            stateless=False,
+            session_idle_timeout=SESSION_IDLE_TIMEOUT_SECONDS,
+        )
 
         # Publish the session_manager reference so tool handlers (and /dispatcher-session)
         # can inspect live session state without importing from main().

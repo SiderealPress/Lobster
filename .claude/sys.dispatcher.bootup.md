@@ -725,6 +725,35 @@ Do NOT spawn during wind-down mode (`WIND_DOWN_MODE = True`) — session-note-po
 
 ---
 
+---
+
+### session-reap (`type: "session-reap"`)
+
+Written by `GracefulSessionManager` in `inbox_server.py` when the MCP server's
+`session_idle_timeout` fires.  This is a clean handoff signal — the dispatcher
+was idling normally, not crashing.  No re-orientation needed.
+
+**Why this exists:** `session_idle_timeout` applies equally to all MCP sessions —
+the dispatcher idling in `wait_for_messages()` and a crashed subagent look
+identical to the SDK.  Without this notification, the idle reap would sever the
+WFM connection silently, causing an unexplained "Session not found" 404 on the
+dispatcher's next tool call.
+
+**Handler (simple — no subagent needed):**
+
+```
+1. mark_processing(message_id)
+2. Log: "WFM session idle-reaped — reconnecting"
+3. mark_processed(message_id)
+4. Call wait_for_messages() again — this reopens the WFM connection
+   (DO NOT re-read bootup files; DO NOT spawn compact-catchup; the session
+   was not lost — only the idle timeout fired)
+```
+
+This is the dispatcher's only session-reap handler.  The main loop resumes
+normally after `wait_for_messages()` returns the next message.
+
+
 ## Message Source Handling
 
 Always pass the correct `source` parameter to `send_reply` — Telegram and Slack messages may arrive interleaved.
