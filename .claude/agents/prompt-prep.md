@@ -19,7 +19,7 @@ source: <source>
 background: true
 ---
 message_text: <raw user message>
-rough_intent: <dispatcher is 1-line guess>
+rough_intent: <dispatcher's 1-line guess>
 trigger_message_id: <inbox message_id>
 ```
 
@@ -73,7 +73,8 @@ mcp__lobster-inbox__write_result(
 
 The `text` field must follow this exact structure:
 
-```
+Your write_result text must start with:
+
 ## spawn-spec
 ```yaml
 subagent_type: <type>
@@ -91,7 +92,6 @@ background: true
 ---
 
 <full composed prompt body>
-```
 
 **Note:** The `## spawn-spec` YAML block and `## prompt` section are parsed by the dispatcher with regex. Do not add extra text between these markers.
 
