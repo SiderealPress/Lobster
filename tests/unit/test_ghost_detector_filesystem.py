@@ -471,17 +471,18 @@ class TestMarkFailedAllGhostsStaleNoFile:
         agent_id: str,
         classification: str,
         output_file: str | None = None,
-        agent_type: str = "dispatcher",
+        agent_type: str | None = "dispatcher",
     ) -> gd.ClassifiedAgent:
         row = gd.AgentRow(
             agent_id=agent_id,
             task_id=None,
-            description=f"test-{agent_type}-{agent_id[:8]}",
+            description=f"test-{agent_type or 'agent'}-{agent_id[:8]}",
             chat_id="12345",
             status="running",
             spawned_at="2026-03-15T09:00:00+00:00",
             output_file=output_file,
             last_seen_at=None,
+            agent_type=agent_type,
         )
         return gd.ClassifiedAgent(
             row=row,
@@ -499,6 +500,9 @@ class TestMarkFailedAllGhostsStaleNoFile:
 
         monkeypatch.setattr(gd, "mark_agent_failed", lambda db_path, agent_id: marked.append(agent_id))
         monkeypatch.setattr(gd, "drop_inbox_message", lambda payload: dropped.append(payload))
+        # Force WFM-inactive so Guard 2 does not fire and cause environmental flakiness
+        # when tests run while the live dispatcher is in wait_for_messages.
+        monkeypatch.setattr(gd, "_is_dispatcher_in_wfm", lambda: False)
 
         stale = self._make_classified("dispatcher001", "STALE_NO_FILE")
         fake_db = tmp_path / "agent_sessions.db"
@@ -516,6 +520,7 @@ class TestMarkFailedAllGhostsStaleNoFile:
         marked: list[str] = []
         monkeypatch.setattr(gd, "mark_agent_failed", lambda db_path, agent_id: marked.append(agent_id))
         monkeypatch.setattr(gd, "drop_inbox_message", lambda payload: None)
+        monkeypatch.setattr(gd, "_is_dispatcher_in_wfm", lambda: False)
 
         confirmed = self._make_classified("subagent001", "GHOST_CONFIRMED", output_file="/tmp/out.jsonl")
         stale = self._make_classified("dispatcher002", "STALE_NO_FILE")
@@ -533,6 +538,7 @@ class TestMarkFailedAllGhostsStaleNoFile:
         marked: list[str] = []
         monkeypatch.setattr(gd, "mark_agent_failed", lambda db_path, agent_id: marked.append(agent_id))
         monkeypatch.setattr(gd, "drop_inbox_message", lambda payload: None)
+        monkeypatch.setattr(gd, "_is_dispatcher_in_wfm", lambda: False)
 
         confirmed = self._make_classified("subagent003", "GHOST_CONFIRMED", output_file="/tmp/out.jsonl")
         fake_db = tmp_path / "agent_sessions.db"
@@ -548,6 +554,7 @@ class TestMarkFailedAllGhostsStaleNoFile:
         marked: list[str] = []
         monkeypatch.setattr(gd, "mark_agent_failed", lambda db_path, agent_id: marked.append(agent_id))
         monkeypatch.setattr(gd, "drop_inbox_message", lambda payload: None)
+        monkeypatch.setattr(gd, "_is_dispatcher_in_wfm", lambda: False)
 
         fake_db = tmp_path / "agent_sessions.db"
         gd.mark_failed_all_ghosts([], fake_db, stale_no_file=[])
@@ -597,6 +604,7 @@ class TestLiveDispatcherGuard:
         marked: list[str] = []
         monkeypatch.setattr(gd, "mark_agent_failed", lambda db_path, agent_id: marked.append(agent_id))
         monkeypatch.setattr(gd, "drop_inbox_message", lambda payload: None)
+        monkeypatch.setattr(gd, "_is_dispatcher_in_wfm", lambda: False)
 
         live_session = self._make_stale_classified(self.DISPATCHER_AGENT_ID)
         fake_db = tmp_path / "agent_sessions.db"
@@ -613,6 +621,7 @@ class TestLiveDispatcherGuard:
         marked: list[str] = []
         monkeypatch.setattr(gd, "mark_agent_failed", lambda db_path, agent_id: marked.append(agent_id))
         monkeypatch.setattr(gd, "drop_inbox_message", lambda payload: None)
+        monkeypatch.setattr(gd, "_is_dispatcher_in_wfm", lambda: False)
 
         dead_session = self._make_stale_classified("some-dead-subagent-task-id")
         fake_db = tmp_path / "agent_sessions.db"
@@ -628,6 +637,7 @@ class TestLiveDispatcherGuard:
         marked: list[str] = []
         monkeypatch.setattr(gd, "mark_agent_failed", lambda db_path, agent_id: marked.append(agent_id))
         monkeypatch.setattr(gd, "drop_inbox_message", lambda payload: None)
+        monkeypatch.setattr(gd, "_is_dispatcher_in_wfm", lambda: False)
 
         dispatcher_session = self._make_stale_classified(self.DISPATCHER_AGENT_ID)
         dead_session = self._make_stale_classified("dead-subagent-task-abc123")
@@ -644,6 +654,7 @@ class TestLiveDispatcherGuard:
         """A skip notice is printed when the dispatcher session is excluded."""
         monkeypatch.setattr(gd, "mark_agent_failed", lambda db_path, agent_id: None)
         monkeypatch.setattr(gd, "drop_inbox_message", lambda payload: None)
+        monkeypatch.setattr(gd, "_is_dispatcher_in_wfm", lambda: False)
 
         dispatcher_session = self._make_stale_classified(self.DISPATCHER_AGENT_ID)
         fake_db = tmp_path / "agent_sessions.db"
@@ -653,6 +664,158 @@ class TestLiveDispatcherGuard:
         out = capsys.readouterr().out
         assert "Skipping" in out
         assert "dispatcher" in out.lower()
+
+
+# ---------------------------------------------------------------------------
+# Guard 2: WFM-active + agent_type='dispatcher' skips hex-UUID dispatcher entry
+# ---------------------------------------------------------------------------
+
+# A hex-UUID agent_id that does NOT match the static "lobster-dispatcher" constant.
+# The SessionStart hook registers the dispatcher's Claude session under a UUID-style
+# id alongside the static "lobster-dispatcher" entry.  Guard 1 protects the static id;
+# Guard 2 protects this UUID entry when WFM is active.
+_HEX_UUID_DISPATCHER_ID = "a3f9e1b2c4d5e6f700112233445566aa"
+
+
+class TestGuard2WfmActiveDispatcherType:
+    """Guard 2: when WFM-active is fresh, sessions with agent_type='dispatcher'
+    and a non-static (hex-UUID) agent_id are skipped by mark_failed_all_ghosts.
+
+    This guard closes the false-positive window that Guard 1 misses: the
+    SessionStart hook registers a new dispatcher row with agent_type='dispatcher'
+    and a UUID-style id each restart.  Without Guard 2, that row would be
+    ghost-detected after 30 idle minutes even though the dispatcher is healthy.
+    """
+
+    def _make_dispatcher_typed(
+        self, agent_id: str = _HEX_UUID_DISPATCHER_ID
+    ) -> gd.ClassifiedAgent:
+        """Build a STALE_NO_FILE ClassifiedAgent with agent_type='dispatcher' and a hex UUID id."""
+        row = gd.AgentRow(
+            agent_id=agent_id,
+            task_id=None,
+            description="auto-registered by SessionStart hook (dispatcher)",
+            chat_id="0",
+            status="running",
+            spawned_at="2026-03-15T09:00:00+00:00",
+            output_file=None,
+            last_seen_at=None,
+            agent_type="dispatcher",
+        )
+        return gd.ClassifiedAgent(
+            row=row,
+            classification="STALE_NO_FILE",
+            age_minutes=120.0,
+            output_file_age_minutes=None,
+        )
+
+    def test_wfm_active_fresh_skips_dispatcher_typed_uuid_session(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When WFM-active is fresh, a hex-UUID session with agent_type='dispatcher'
+        must NOT be marked failed — the dispatcher is alive in wait_for_messages."""
+        marked: list[str] = []
+        monkeypatch.setattr(gd, "mark_agent_failed", lambda db_path, agent_id: marked.append(agent_id))
+        monkeypatch.setattr(gd, "drop_inbox_message", lambda payload: None)
+        monkeypatch.setattr(gd, "_is_dispatcher_in_wfm", lambda: True)  # WFM is fresh
+
+        session = self._make_dispatcher_typed(_HEX_UUID_DISPATCHER_ID)
+        fake_db = tmp_path / "agent_sessions.db"
+
+        gd.mark_failed_all_ghosts([], fake_db, stale_no_file=[session])
+
+        assert _HEX_UUID_DISPATCHER_ID not in marked, (
+            "Guard 2 must skip dispatcher-typed UUID sessions when WFM is active"
+        )
+
+    def test_wfm_not_active_marks_dispatcher_typed_uuid_session_failed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When WFM-active is stale/absent, a hex-UUID dispatcher-typed session IS
+        marked failed — the dispatcher has exited WFM and this row is a dead ghost."""
+        marked: list[str] = []
+        monkeypatch.setattr(gd, "mark_agent_failed", lambda db_path, agent_id: marked.append(agent_id))
+        monkeypatch.setattr(gd, "drop_inbox_message", lambda payload: None)
+        monkeypatch.setattr(gd, "_is_dispatcher_in_wfm", lambda: False)  # WFM stale/absent
+
+        session = self._make_dispatcher_typed(_HEX_UUID_DISPATCHER_ID)
+        fake_db = tmp_path / "agent_sessions.db"
+
+        gd.mark_failed_all_ghosts([], fake_db, stale_no_file=[session])
+
+        assert _HEX_UUID_DISPATCHER_ID in marked, (
+            "Guard 2 must NOT protect dispatcher-typed sessions when WFM is absent/stale"
+        )
+
+    def test_wfm_active_does_not_protect_non_dispatcher_typed_sessions(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Guard 2 only filters agent_type='dispatcher'. Subagent-typed sessions with
+        UUID ids are still marked failed even when WFM is active."""
+        marked: list[str] = []
+        monkeypatch.setattr(gd, "mark_agent_failed", lambda db_path, agent_id: marked.append(agent_id))
+        monkeypatch.setattr(gd, "drop_inbox_message", lambda payload: None)
+        monkeypatch.setattr(gd, "_is_dispatcher_in_wfm", lambda: True)  # WFM is fresh
+
+        row = gd.AgentRow(
+            agent_id="deadbeef1234567890abcdef",
+            task_id="some-task",
+            description="a regular subagent",
+            chat_id="12345",
+            status="running",
+            spawned_at="2026-03-15T09:00:00+00:00",
+            output_file=None,
+            last_seen_at=None,
+            agent_type="subagent",
+        )
+        session = gd.ClassifiedAgent(
+            row=row,
+            classification="STALE_NO_FILE",
+            age_minutes=120.0,
+            output_file_age_minutes=None,
+        )
+        fake_db = tmp_path / "agent_sessions.db"
+
+        gd.mark_failed_all_ghosts([], fake_db, stale_no_file=[session])
+
+        assert "deadbeef1234567890abcdef" in marked, (
+            "Guard 2 must not protect non-dispatcher-typed sessions regardless of WFM state"
+        )
+
+    def test_wfm_active_skips_dispatcher_typed_in_confirmed_list_too(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Guard 2 applies to the confirmed list as well as stale_no_file.
+        A GHOST_CONFIRMED session with agent_type='dispatcher' is skipped when WFM is fresh."""
+        marked: list[str] = []
+        monkeypatch.setattr(gd, "mark_agent_failed", lambda db_path, agent_id: marked.append(agent_id))
+        monkeypatch.setattr(gd, "drop_inbox_message", lambda payload: None)
+        monkeypatch.setattr(gd, "_is_dispatcher_in_wfm", lambda: True)  # WFM is fresh
+
+        row = gd.AgentRow(
+            agent_id=_HEX_UUID_DISPATCHER_ID,
+            task_id=None,
+            description="dispatcher-typed confirmed ghost",
+            chat_id="0",
+            status="running",
+            spawned_at="2026-03-15T09:00:00+00:00",
+            output_file="/tmp/fake-output.jsonl",
+            last_seen_at=None,
+            agent_type="dispatcher",
+        )
+        confirmed_session = gd.ClassifiedAgent(
+            row=row,
+            classification="GHOST_CONFIRMED",
+            age_minutes=120.0,
+            output_file_age_minutes=None,
+        )
+        fake_db = tmp_path / "agent_sessions.db"
+
+        gd.mark_failed_all_ghosts([confirmed_session], fake_db)
+
+        assert _HEX_UUID_DISPATCHER_ID not in marked, (
+            "Guard 2 must also protect dispatcher-typed GHOST_CONFIRMED sessions when WFM is active"
+        )
 
 
 # ---------------------------------------------------------------------------
