@@ -3006,6 +3006,46 @@ print(f'prune-pr-worktrees: {result.status}')
         warn "run-upgrades.sh not found at $_m87_script — skipping Migration 87"
     fi
 
+    # Migration 88: Fix cron PATH for uv-based scripts (ghost-detector, oom-monitor, log-export).
+    # Cron runs with a minimal PATH that does not include ~/.local/bin, so bare 'uv' fails
+    # with "uv: not found". Replace bare 'uv' with the absolute path $HOME/.local/bin/uv
+    # in the three affected cron entries.
+    local _m88_uv_abs="$HOME/.local/bin/uv"
+    if crontab -l 2>/dev/null | grep -q "LOBSTER-GHOST-DETECTOR"; then
+        if crontab -l 2>/dev/null | grep "LOBSTER-GHOST-DETECTOR" | grep -q " uv run "; then
+            crontab -l 2>/dev/null \
+                | sed "s|cd \$HOME && uv run \(.*\)agent-monitor\.py|cd \$HOME \&\& $_m88_uv_abs run \1agent-monitor.py|g" \
+                | sed "s|cd $HOME && uv run \(.*\)agent-monitor\.py|cd $HOME \&\& $_m88_uv_abs run \1agent-monitor.py|g" \
+                | crontab - 2>/dev/null && {
+                substep "Migration 88: fixed ghost-detector cron to use absolute uv path"
+                migrated=$((migrated + 1))
+            } || warn "Migration 88: could not update ghost-detector cron entry"
+        else
+            substep "Migration 88: ghost-detector cron already uses absolute uv path — skipping"
+        fi
+    else
+        substep "Migration 88: ghost-detector cron entry not found — skipping"
+    fi
+    if crontab -l 2>/dev/null | grep -q "LOBSTER-OOM-CHECK"; then
+        if crontab -l 2>/dev/null | grep "LOBSTER-OOM-CHECK" | grep -q " uv run "; then
+            crontab -l 2>/dev/null \
+                | sed "s|cd \$HOME && uv run \(.*\)oom-monitor\.py|cd \$HOME \&\& $_m88_uv_abs run \1oom-monitor.py|g" \
+                | sed "s|cd $HOME && uv run \(.*\)oom-monitor\.py|cd $HOME \&\& $_m88_uv_abs run \1oom-monitor.py|g" \
+                | crontab - 2>/dev/null && {
+                substep "Migration 88: fixed oom-monitor cron to use absolute uv path"
+            } || warn "Migration 88: could not update oom-monitor cron entry"
+        fi
+    fi
+    if crontab -l 2>/dev/null | grep -q "LOBSTER-LOG-EXPORT"; then
+        if crontab -l 2>/dev/null | grep "LOBSTER-LOG-EXPORT" | grep -q " uv run "; then
+            crontab -l 2>/dev/null \
+                | sed "s|cd \(.*\) && uv run \(.*\)export-logs\.py|cd \1 \&\& $_m88_uv_abs run \2export-logs.py|g" \
+                | crontab - 2>/dev/null && {
+                substep "Migration 88: fixed log-export cron to use absolute uv path"
+            } || warn "Migration 88: could not update log-export cron entry"
+        fi
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
