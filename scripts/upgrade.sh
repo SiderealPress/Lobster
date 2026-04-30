@@ -2609,7 +2609,11 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
                 substep "Migration 84: fixed oom-monitor cron to use absolute uv path"
                 migrated=$((migrated + 1))
             } || warn "Migration 84: could not update oom-monitor cron entry"
+        else
+            substep "Migration 84: oom-monitor cron already uses absolute uv path — skipping"
         fi
+    else
+        substep "Migration 84: oom-monitor cron entry not found — skipping"
     fi
     if crontab -l 2>/dev/null | grep -q "LOBSTER-LOG-EXPORT"; then
         if crontab -l 2>/dev/null | grep "LOBSTER-LOG-EXPORT" | grep -q " uv run "; then
@@ -2619,7 +2623,11 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
                 substep "Migration 84: fixed log-export cron to use absolute uv path"
                 migrated=$((migrated + 1))
             } || warn "Migration 84: could not update log-export cron entry"
+        else
+            substep "Migration 84: log-export cron already uses absolute uv path — skipping"
         fi
+    else
+        substep "Migration 84: log-export cron entry not found — skipping"
     fi
 
     if [ "$migrated" -eq 0 ]; then
