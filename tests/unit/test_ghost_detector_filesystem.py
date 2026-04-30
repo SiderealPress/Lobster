@@ -688,3 +688,198 @@ class TestLobsterHomePaths:
         assert home_slug in gd.AGENT_OUTPUT_GLOB, (
             f"Expected slug '{home_slug}' in AGENT_OUTPUT_GLOB={gd.AGENT_OUTPUT_GLOB!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Guard 2 (WFM-active): dispatcher-typed sessions skipped when WFM-active is fresh
+# ---------------------------------------------------------------------------
+
+# The number of seconds within which the WFM-active signal file is considered fresh.
+# Must match _WFM_ACTIVE_STALE_SECONDS in agent-monitor.py.
+WFM_ACTIVE_STALE_SECONDS = 180
+
+
+class TestGuard2WfmActiveDispatcherType:
+    """Guard 2 skips all sessions with agent_type='dispatcher' when the WFM-active
+    signal is fresh (written within WFM_ACTIVE_STALE_SECONDS seconds).
+
+    Guard 1 protects the named 'lobster-dispatcher' entry.  Guard 2 protects the
+    hook-registered hex-UUID entry (agent_type='dispatcher', no output_file) that
+    Guard 1 cannot reach because it has no predictable agent_id.
+
+    Test matrix:
+      (a) dispatcher-type + WFM-active fresh  → NOT killed
+      (b) dispatcher-type + WFM-active stale  → killed normally
+    """
+
+    def _make_dispatcher_type_stale(self, agent_id: str) -> gd.ClassifiedAgent:
+        """Build a STALE_NO_FILE ClassifiedAgent with agent_type='dispatcher'."""
+        row = gd.AgentRow(
+            agent_id=agent_id,
+            task_id=None,
+            description=f"hook-registered dispatcher session {agent_id[:8]}",
+            chat_id="0",
+            status="running",
+            spawned_at="2026-03-15T09:00:00+00:00",
+            output_file=None,
+            last_seen_at=None,
+            agent_type="dispatcher",
+        )
+        return gd.ClassifiedAgent(
+            row=row,
+            classification="STALE_NO_FILE",
+            age_minutes=60.0,
+            output_file_age_minutes=None,
+        )
+
+    def test_dispatcher_type_not_killed_when_wfm_active_fresh(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(a) agent_type='dispatcher' + fresh WFM-active signal → session NOT marked failed.
+
+        The hex-UUID dispatcher entry (registered by SessionStart hook) must be
+        protected when the dispatcher is alive inside wait_for_messages.
+        """
+        import time
+
+        # Write a fresh WFM-active signal (timestamp = now)
+        wfm_file = tmp_path / "dispatcher-wfm-active"
+        wfm_file.write_text(str(int(time.time())))
+        monkeypatch.setenv("LOBSTER_WFM_ACTIVE_OVERRIDE", str(wfm_file))
+
+        marked: list[str] = []
+        monkeypatch.setattr(gd, "mark_agent_failed", lambda db_path, agent_id: marked.append(agent_id))
+        monkeypatch.setattr(gd, "drop_inbox_message", lambda payload: None)
+
+        session = self._make_dispatcher_type_stale("hex-uuid-dispatcher-abc123")
+        fake_db = tmp_path / "agent_sessions.db"
+
+        gd.mark_failed_all_ghosts([], fake_db, stale_no_file=[session])
+
+        assert "hex-uuid-dispatcher-abc123" not in marked, (
+            "Dispatcher-typed session must NOT be killed when WFM-active signal is fresh"
+        )
+
+    def test_dispatcher_type_killed_when_wfm_active_stale(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(b) agent_type='dispatcher' + stale WFM-active signal → session IS marked failed.
+
+        When the WFM-active signal is older than WFM_ACTIVE_STALE_SECONDS, the dispatcher
+        is not alive in wait_for_messages — this is a legitimate dead session.
+        """
+        import time
+
+        # Write a stale WFM-active signal (timestamp well beyond the 180s threshold)
+        stale_ts = int(time.time()) - (WFM_ACTIVE_STALE_SECONDS + 60)
+        wfm_file = tmp_path / "dispatcher-wfm-active"
+        wfm_file.write_text(str(stale_ts))
+        monkeypatch.setenv("LOBSTER_WFM_ACTIVE_OVERRIDE", str(wfm_file))
+
+        marked: list[str] = []
+        monkeypatch.setattr(gd, "mark_agent_failed", lambda db_path, agent_id: marked.append(agent_id))
+        monkeypatch.setattr(gd, "drop_inbox_message", lambda payload: None)
+
+        session = self._make_dispatcher_type_stale("hex-uuid-dispatcher-dead456")
+        fake_db = tmp_path / "agent_sessions.db"
+
+        gd.mark_failed_all_ghosts([], fake_db, stale_no_file=[session])
+
+        assert "hex-uuid-dispatcher-dead456" in marked, (
+            "Dispatcher-typed session MUST be killed when WFM-active signal is stale"
+        )
+
+    def test_dispatcher_type_killed_when_wfm_active_absent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """agent_type='dispatcher' + absent WFM-active file → session IS marked failed.
+
+        An absent file means the dispatcher never entered wait_for_messages (or the
+        file was cleaned up).  The session should be treated as dead.
+        """
+        # Point override to a file that does not exist
+        monkeypatch.setenv("LOBSTER_WFM_ACTIVE_OVERRIDE", str(tmp_path / "no-such-file"))
+
+        marked: list[str] = []
+        monkeypatch.setattr(gd, "mark_agent_failed", lambda db_path, agent_id: marked.append(agent_id))
+        monkeypatch.setattr(gd, "drop_inbox_message", lambda payload: None)
+
+        session = self._make_dispatcher_type_stale("hex-uuid-dispatcher-absent789")
+        fake_db = tmp_path / "agent_sessions.db"
+
+        gd.mark_failed_all_ghosts([], fake_db, stale_no_file=[session])
+
+        assert "hex-uuid-dispatcher-absent789" in marked, (
+            "Dispatcher-typed session MUST be killed when WFM-active file is absent"
+        )
+
+    def test_dispatcher_type_killed_when_wfm_active_contains_tombstone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """agent_type='dispatcher' + tombstone in WFM-active file → session IS marked failed.
+
+        The tombstone value ("exited") is written by _clear_wfm_active_signal() when
+        the dispatcher leaves wait_for_messages.  It is a non-integer, so _is_dispatcher_in_wfm()
+        returns False — Guard 2 does not protect the session.
+        """
+        wfm_file = tmp_path / "dispatcher-wfm-active"
+        wfm_file.write_text("exited")
+        monkeypatch.setenv("LOBSTER_WFM_ACTIVE_OVERRIDE", str(wfm_file))
+
+        marked: list[str] = []
+        monkeypatch.setattr(gd, "mark_agent_failed", lambda db_path, agent_id: marked.append(agent_id))
+        monkeypatch.setattr(gd, "drop_inbox_message", lambda payload: None)
+
+        session = self._make_dispatcher_type_stale("hex-uuid-dispatcher-tombstone0")
+        fake_db = tmp_path / "agent_sessions.db"
+
+        gd.mark_failed_all_ghosts([], fake_db, stale_no_file=[session])
+
+        assert "hex-uuid-dispatcher-tombstone0" in marked, (
+            "Dispatcher-typed session MUST be killed when WFM-active file contains tombstone"
+        )
+
+    def test_non_dispatcher_type_killed_regardless_of_wfm_active(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Guard 2 must not protect sessions with agent_type != 'dispatcher'.
+
+        A regular subagent session (agent_type='functional-engineer') that lands in
+        STALE_NO_FILE must be killed even when WFM-active is fresh.
+        """
+        import time
+
+        # Write a fresh WFM-active signal
+        wfm_file = tmp_path / "dispatcher-wfm-active"
+        wfm_file.write_text(str(int(time.time())))
+        monkeypatch.setenv("LOBSTER_WFM_ACTIVE_OVERRIDE", str(wfm_file))
+
+        marked: list[str] = []
+        monkeypatch.setattr(gd, "mark_agent_failed", lambda db_path, agent_id: marked.append(agent_id))
+        monkeypatch.setattr(gd, "drop_inbox_message", lambda payload: None)
+
+        # Build a stale subagent session (not dispatcher-type)
+        row = gd.AgentRow(
+            agent_id="subagent-stale-no-file-xyz",
+            task_id=None,
+            description="functional-engineer subagent",
+            chat_id="12345",
+            status="running",
+            spawned_at="2026-03-15T09:00:00+00:00",
+            output_file=None,
+            last_seen_at=None,
+            agent_type="functional-engineer",
+        )
+        stale_subagent = gd.ClassifiedAgent(
+            row=row,
+            classification="STALE_NO_FILE",
+            age_minutes=60.0,
+            output_file_age_minutes=None,
+        )
+        fake_db = tmp_path / "agent_sessions.db"
+
+        gd.mark_failed_all_ghosts([], fake_db, stale_no_file=[stale_subagent])
+
+        assert "subagent-stale-no-file-xyz" in marked, (
+            "Non-dispatcher-typed sessions must be killed even when WFM-active is fresh"
+        )
