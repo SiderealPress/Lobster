@@ -13,7 +13,7 @@ This script is idempotent: re-running never creates duplicate files
 
 Supports multiple Granola accounts:
 - GRANOLA_API_KEY       — primary account (required)
-- GRANOLA_API_KEY_KELLY — secondary personal account (optional)
+- GRANOLA_API_KEY_2 — secondary account (optional)
 
 When both keys are present, notes from both accounts are fetched and merged.
 Shared meetings (same note ID in both accounts) are archived once; the primary
@@ -418,7 +418,7 @@ def _run_archive(backfill: bool, log: logging.Logger) -> int:
                      but still skips identical files on disk).
     backfill=False — only fetch notes not already in index.json.
 
-    Fetches from ALL configured accounts (GRANOLA_API_KEY + GRANOLA_API_KEY_KELLY
+    Fetches from ALL configured accounts (GRANOLA_API_KEY + GRANOLA_API_KEY_2
     if set) and deduplicates by note ID so shared meetings are stored once.
     """
     MEETINGS_DIR.mkdir(parents=True, exist_ok=True)

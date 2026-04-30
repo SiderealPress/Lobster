@@ -5,13 +5,13 @@ Incremental ingest of Granola meeting notes into the versioned folder
 hierarchy. Designed to run every 15 minutes from cron.
 
 Supports multiple Granola accounts:
-- GRANOLA_API_KEY       — primary account (required)  # noname
-- GRANOLA_API_KEY_KELLY — secondary personal account (optional)  # noname
+- GRANOLA_API_KEY   — primary account (required)
+- GRANOLA_API_KEY_2 — secondary account (optional)
 
 When both keys are present, notes from both accounts are fetched and merged.
 Each account's cursor state is tracked independently (keyed by account name).
-Notes from both accounts are deduplicated by note ID (primary account wins).  # noname
-Each note has an 'account' field added to its stored JSON ('drew' or 'kelly').  # noname
+Notes from both accounts are deduplicated by note ID (primary account wins).
+Each note has an 'account' field added to its stored JSON ('primary' or 'secondary').
 
 Exit codes:
   0 — success (including 0 new notes)
@@ -45,8 +45,8 @@ from granola_multi_account import (  # noqa: E402
     build_accounts_from_env,
     annotate_note_with_account,
     merge_and_deduplicate,
-    ACCOUNT_DREW,  # noname
-    ACCOUNT_KELLY,  # noname
+    ACCOUNT_PRIMARY,
+    ACCOUNT_SECONDARY,
 )
 
 
@@ -180,8 +180,8 @@ def main() -> int:
             all_notes_by_account[account.name] = []
 
     # Merge and deduplicate across accounts
-    primary_notes = all_notes_by_account.get(ACCOUNT_DREW, [])  # noname
-    secondary_notes = all_notes_by_account.get(ACCOUNT_KELLY, [])  # noname
+    primary_notes = all_notes_by_account.get(ACCOUNT_PRIMARY, [])
+    secondary_notes = all_notes_by_account.get(ACCOUNT_SECONDARY, [])
     merged_notes = merge_and_deduplicate(primary_notes, secondary_notes)
 
     log.info(
