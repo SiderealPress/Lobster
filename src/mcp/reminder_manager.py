@@ -19,8 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -28,9 +27,6 @@ from typing import Optional
 from systemd_jobs import (
     create_job,
     delete_job,
-    DeleteResult,
-    _is_lobster_unit,
-    _timer_path,
     LOBSTER_USER,
 )
 
@@ -145,10 +141,15 @@ def _format_systemd_calendar(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
-def _build_command(reminder_type: str) -> str:
-    """Build the ExecStart command for a reminder service unit."""
+def _build_command(reminder_type: str, reminder_id: str) -> str:
+    """Build the ExecStart command for a reminder service unit.
+
+    Passes reminder_id as the second argument so post-reminder.sh can include it
+    in the inbox message, allowing the dispatcher to look up metadata from the
+    registry when the reminder fires.
+    """
     script = str(POST_REMINDER_SCRIPT)
-    return f"{script} {reminder_type}"
+    return f"{script} {reminder_type} {reminder_id}"
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +245,7 @@ async def create_reminder(
     job_name = _make_job_name(reminder_id)
     dt = _parse_fire_time(fire_time_utc)
     schedule = _format_systemd_calendar(dt)
-    command = _build_command(reminder_type)
+    command = _build_command(reminder_type, reminder_id)
     description = f"Lobster reminder: {reminder_type}"
 
     await create_job(job_name, schedule, command, description)
