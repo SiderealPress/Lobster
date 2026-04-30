@@ -1,7 +1,11 @@
 #!/bin/bash
 # post-reminder.sh — Drop a scheduled_reminder message into the Lobster inbox.
 #
-# Usage: post-reminder.sh <reminder_type>
+# Usage: post-reminder.sh <reminder_type> [reminder_id]
+#
+# reminder_type  — required; dispatcher routing key
+# reminder_id    — optional; if provided, included in the inbox message so the
+#                  dispatcher can look up metadata from the reminders registry
 #
 # Checks inbox/ and processing/ for an existing unprocessed message of the same
 # reminder_type before inserting (dedup). If a duplicate is found, exits 0
@@ -23,9 +27,10 @@ fi
 unset _LOBSTER_CONFIG _DEV_MODE
 
 REMINDER_TYPE="${1:-}"
+REMINDER_ID="${2:-}"
 
 if [ -z "$REMINDER_TYPE" ]; then
-    echo "Usage: $0 <reminder_type>" >&2
+    echo "Usage: $0 <reminder_type> [reminder_id]" >&2
     exit 1
 fi
 
@@ -44,7 +49,22 @@ TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
 MILLIS="$(date +%s%3N)"
 FILENAME="${INBOX_DIR}/${MILLIS}_reminder_${REMINDER_TYPE}.json"
 
-cat > "$FILENAME" <<EOF
+# Build the JSON payload. Include reminder_id when provided so the dispatcher
+# can cross-reference the reminders registry to retrieve metadata.
+if [ -n "$REMINDER_ID" ]; then
+    cat > "$FILENAME" <<EOF
+{
+  "type": "scheduled_reminder",
+  "reminder_type": "${REMINDER_TYPE}",
+  "reminder_id": "${REMINDER_ID}",
+  "source": "system",
+  "chat_id": 0,
+  "text": "Scheduled reminder: ${REMINDER_TYPE}",
+  "timestamp": "${TIMESTAMP}"
+}
+EOF
+else
+    cat > "$FILENAME" <<EOF
 {
   "type": "scheduled_reminder",
   "reminder_type": "${REMINDER_TYPE}",
@@ -54,3 +74,4 @@ cat > "$FILENAME" <<EOF
   "timestamp": "${TIMESTAMP}"
 }
 EOF
+fi

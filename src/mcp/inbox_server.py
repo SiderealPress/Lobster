@@ -2479,6 +2479,85 @@ async def list_tools() -> list[Tool]:
                 "required": ["name"],
             },
         ),
+        # Reminder Primitives (one-shot inbox messages at a specific time)
+        Tool(
+            name="create_reminder",
+            description=(
+                "Create a one-shot reminder that fires at a specific UTC time. "
+                "When it fires, a 'scheduled_reminder' message is written to the inbox with "
+                "reminder_type as the routing key. Use this instead of create_scheduled_job "
+                "when you want to remind the dispatcher (or user) at a specific future time — "
+                "no knowledge of post-reminder.sh or systemd is required."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "reminder_type": {
+                        "type": "string",
+                        "description": (
+                            "Opaque string the dispatcher uses to route the reminder on receipt. "
+                            "Alphanumeric, hyphens, and underscores only. Max 30 characters. "
+                            "Examples: 'interview-prep', 'standup-nudge', 'follow-up-acme'."
+                        ),
+                    },
+                    "fire_time_utc": {
+                        "type": "string",
+                        "description": (
+                            "ISO 8601 UTC datetime when the reminder should fire. "
+                            "Must be in the future. Examples: '2026-05-01T09:00:00Z', "
+                            "'2026-05-01T09:00:00+00:00'."
+                        ),
+                    },
+                    "metadata": {
+                        "type": "object",
+                        "description": (
+                            "Optional JSON object attached to the reminder. "
+                            "Use this to carry context the dispatcher needs when routing "
+                            "the reminder (e.g., task_id, description, chat_id). "
+                            "Stored in the reminders registry and retrievable via the "
+                            "reminder_id field included in the fired inbox message."
+                        ),
+                    },
+                },
+                "required": ["reminder_type", "fire_time_utc"],
+            },
+        ),
+        Tool(
+            name="list_reminders",
+            description=(
+                "List reminders from the registry. By default returns only pending reminders "
+                "(future fire_time, not cancelled). Pass pending_only=false to see all reminders "
+                "including already-fired and cancelled ones."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "pending_only": {
+                        "type": "boolean",
+                        "description": "If true (default), only return reminders that are pending (future fire_time, not cancelled).",
+                        "default": True,
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="cancel_reminder",
+            description=(
+                "Cancel a pending reminder by stopping and removing its underlying systemd timer. "
+                "Returns cancelled=true if the reminder was found and cancelled, false if not found "
+                "or already cancelled."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "reminder_id": {
+                        "type": "string",
+                        "description": "The reminder_id returned by create_reminder.",
+                    },
+                },
+                "required": ["reminder_id"],
+            },
+        ),
         Tool(
             name="get_job_scaffold",
             description="Return a starter script template for writing a lobster scheduled job. Use this as a starting point before creating a new job.",
@@ -3933,6 +4012,12 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
         return await handle_update_scheduled_job(arguments)
     elif name == "delete_scheduled_job":
         return await handle_delete_scheduled_job(arguments)
+    elif name == "create_reminder":
+        return await handle_create_reminder(arguments)
+    elif name == "list_reminders":
+        return await handle_list_reminders(arguments)
+    elif name == "cancel_reminder":
+        return await handle_cancel_reminder(arguments)
     elif name == "get_job_scaffold":
         return await handle_get_job_scaffold(arguments)
     elif name == "check_task_outputs":
@@ -7207,6 +7292,11 @@ from systemd_jobs import (
     _read_unit_field as _sj_read_unit_field,
     _is_lobster_unit as _sj_is_lobster_unit,
 )
+from reminder_manager import (
+    create_reminder as _rm_create_reminder,
+    list_reminders as _rm_list_reminders,
+    cancel_reminder as _rm_cancel_reminder,
+)
 
 
 async def handle_create_scheduled_job(args: dict) -> list[TextContent]:
@@ -7374,6 +7464,81 @@ async def handle_get_job_scaffold(args: dict) -> list[TextContent]:
     kind = args.get("kind", "poller").strip() or "poller"
     content = _sj_get_scaffold(kind)
     return [TextContent(type="text", text=f"**Job scaffold ({kind}):**\n\n```python\n{content}\n```")]
+
+
+async def handle_create_reminder(args: dict) -> list[TextContent]:
+    """Create a one-shot inbox reminder that fires at a specific UTC time."""
+    reminder_type = args.get("reminder_type", "").strip()
+    fire_time_utc = args.get("fire_time_utc", "").strip()
+    metadata = args.get("metadata") or {}
+    if not isinstance(metadata, dict):
+        return [TextContent(type="text", text="Error: metadata must be a JSON object")]
+
+    try:
+        result = await _rm_create_reminder(reminder_type, fire_time_utc, metadata=metadata)
+    except ValueError as exc:
+        return [TextContent(type="text", text=f"Error: {exc}")]
+    except Exception as exc:
+        return [TextContent(type="text", text=f"Error creating reminder '{reminder_type}': {exc}")]
+
+    return [TextContent(type="text", text=(
+        f"Created reminder '{result.reminder_id}'\n"
+        f"Type: {reminder_type}\n"
+        f"Fires at: {result.fire_time_utc}\n"
+        f"Underlying job: {result.job_name}\n\n"
+        f"Use cancel_reminder(reminder_id='{result.reminder_id}') to cancel."
+    ))]
+
+
+async def handle_list_reminders(args: dict) -> list[TextContent]:
+    """List pending (or all) reminders from the registry."""
+    pending_only_raw = args.get("pending_only", True)
+    if isinstance(pending_only_raw, str):
+        pending_only = pending_only_raw.lower() not in ("false", "0", "no")
+    else:
+        pending_only = bool(pending_only_raw)
+
+    try:
+        reminders = _rm_list_reminders(pending_only=pending_only)
+    except Exception as exc:
+        return [TextContent(type="text", text=f"Error listing reminders: {exc}")]
+
+    if not reminders:
+        label = "pending" if pending_only else "registered"
+        return [TextContent(type="text", text=f"No {label} reminders found.")]
+
+    lines = [f"**Reminders ({'pending only' if pending_only else 'all'}):**\n"]
+    for r in reminders:
+        status = "cancelled" if r.cancelled else "pending"
+        lines.append(f"**{r.reminder_id}** ({status})")
+        lines.append(f"  Type: {r.reminder_type}")
+        lines.append(f"  Fires at: {r.fire_time_utc}")
+        if r.metadata:
+            lines.append(f"  Metadata: {r.metadata}")
+        lines.append("")
+
+    lines.append(f"---\nTotal: {len(reminders)} reminder(s)")
+    return [TextContent(type="text", text="\n".join(lines))]
+
+
+async def handle_cancel_reminder(args: dict) -> list[TextContent]:
+    """Cancel a pending reminder by stopping its systemd timer."""
+    reminder_id = args.get("reminder_id", "").strip()
+    if not reminder_id:
+        return [TextContent(type="text", text="Error: reminder_id is required")]
+
+    try:
+        result = await _rm_cancel_reminder(reminder_id)
+    except Exception as exc:
+        return [TextContent(type="text", text=f"Error cancelling reminder '{reminder_id}': {exc}")]
+
+    if result.cancelled:
+        return [TextContent(type="text", text=f"Cancelled reminder '{reminder_id}'.")]
+    else:
+        return [TextContent(type="text", text=(
+            f"Reminder '{reminder_id}' not found or already cancelled.\n"
+            "Use list_reminders() to see current reminders."
+        ))]
 
 
 async def handle_check_task_outputs(args: dict) -> list[TextContent]:
