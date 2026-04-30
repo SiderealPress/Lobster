@@ -25,8 +25,8 @@ sys.path.insert(0, str(_TASKS_DIR))
 from granola_multi_account import (  # noqa: E402
     AccountConfig,
     AccountRegistry,
-    ACCOUNT_DREW,  # noname
-    ACCOUNT_KELLY,  # noname
+    ACCOUNT_PRIMARY,
+    ACCOUNT_SECONDARY,
     build_accounts_from_env,
     merge_and_deduplicate,
     annotate_note_with_account,
@@ -37,8 +37,8 @@ from granola_multi_account import (  # noqa: E402
 # Constants that mirror the spec
 # ---------------------------------------------------------------------------
 
-PRIMARY_KEY = "grn_drew_test_key"  # noname
-SECONDARY_KEY = "grn_kelly_test_key"  # noname
+PRIMARY_KEY = "grn_primary_test_key"
+SECONDARY_KEY = "grn_secondary_test_key"
 
 
 # ---------------------------------------------------------------------------
@@ -55,13 +55,13 @@ def _raw_note(note_id: str, title: str = "Meeting", created_at: str = "2026-04-1
 
 class TestAccountConfig:
     def test_primary_account_uses_primary_key(self):
-        acc = AccountConfig(name=ACCOUNT_DREW, api_key=PRIMARY_KEY)  # noname
-        assert acc.name == ACCOUNT_DREW  # noname
+        acc = AccountConfig(name=ACCOUNT_PRIMARY, api_key=PRIMARY_KEY)
+        assert acc.name == ACCOUNT_PRIMARY
         assert acc.api_key == PRIMARY_KEY
 
     def test_secondary_account_uses_secondary_key(self):
-        acc = AccountConfig(name=ACCOUNT_KELLY, api_key=SECONDARY_KEY)  # noname
-        assert acc.name == ACCOUNT_KELLY  # noname
+        acc = AccountConfig(name=ACCOUNT_SECONDARY, api_key=SECONDARY_KEY)
+        assert acc.name == ACCOUNT_SECONDARY
         assert acc.api_key == SECONDARY_KEY
 
 
@@ -74,21 +74,21 @@ class TestBuildAccountsFromEnv:
         env = {"GRANOLA_API_KEY": PRIMARY_KEY}
         accounts = build_accounts_from_env(env)
         assert len(accounts) == 1
-        assert accounts[0].name == ACCOUNT_DREW  # noname
+        assert accounts[0].name == ACCOUNT_PRIMARY
 
     def test_two_accounts_when_both_keys_present(self):
-        env = {"GRANOLA_API_KEY": PRIMARY_KEY, "GRANOLA_API_KEY_KELLY": SECONDARY_KEY}  # noname
+        env = {"GRANOLA_API_KEY": PRIMARY_KEY, "GRANOLA_API_KEY_2": SECONDARY_KEY}
         accounts = build_accounts_from_env(env)
         assert len(accounts) == 2
         names = [a.name for a in accounts]
-        assert ACCOUNT_DREW in names  # noname
-        assert ACCOUNT_KELLY in names  # noname
+        assert ACCOUNT_PRIMARY in names
+        assert ACCOUNT_SECONDARY in names
 
     def test_primary_account_comes_first(self):
         """Primary account must come first so it wins deduplication."""
-        env = {"GRANOLA_API_KEY": PRIMARY_KEY, "GRANOLA_API_KEY_KELLY": SECONDARY_KEY}  # noname
+        env = {"GRANOLA_API_KEY": PRIMARY_KEY, "GRANOLA_API_KEY_2": SECONDARY_KEY}
         accounts = build_accounts_from_env(env)
-        assert accounts[0].name == ACCOUNT_DREW  # noname
+        assert accounts[0].name == ACCOUNT_PRIMARY
 
     def test_empty_env_returns_empty_list(self):
         accounts = build_accounts_from_env({})
@@ -96,7 +96,7 @@ class TestBuildAccountsFromEnv:
 
     def test_secondary_key_without_primary_key_is_excluded(self):
         """Secondary key alone is not usable — we need primary key."""
-        env = {"GRANOLA_API_KEY_KELLY": SECONDARY_KEY}  # noname
+        env = {"GRANOLA_API_KEY_2": SECONDARY_KEY}
         accounts = build_accounts_from_env(env)
         assert len(accounts) == 0
 
@@ -108,27 +108,27 @@ class TestBuildAccountsFromEnv:
 class TestAnnotateNoteWithAccount:
     def test_adds_account_field(self):
         note = _raw_note("n1")
-        result = annotate_note_with_account(note, ACCOUNT_DREW)  # noname
-        assert result["account"] == ACCOUNT_DREW  # noname
+        result = annotate_note_with_account(note, ACCOUNT_PRIMARY)
+        assert result["account"] == ACCOUNT_PRIMARY
 
     def test_does_not_mutate_original(self):
         note = _raw_note("n1")
         original_keys = set(note.keys())
-        annotate_note_with_account(note, ACCOUNT_DREW)  # noname
+        annotate_note_with_account(note, ACCOUNT_PRIMARY)
         assert set(note.keys()) == original_keys
 
     def test_secondary_account_annotation(self):
         note = _raw_note("n1")
-        result = annotate_note_with_account(note, ACCOUNT_KELLY)  # noname
-        assert result["account"] == ACCOUNT_KELLY  # noname
+        result = annotate_note_with_account(note, ACCOUNT_SECONDARY)
+        assert result["account"] == ACCOUNT_SECONDARY
 
 
 # ---------------------------------------------------------------------------
 # merge_and_deduplicate tests
 # ---------------------------------------------------------------------------
 
-SECONDARY_NOTE = ACCOUNT_KELLY  # noname  # alias for readability in dedup tests
-PRIMARY_NOTE = ACCOUNT_DREW  # noname
+SECONDARY_NOTE = ACCOUNT_SECONDARY  # alias for readability in dedup tests
+PRIMARY_NOTE = ACCOUNT_PRIMARY
 
 
 class TestMergeAndDeduplicate:
@@ -163,21 +163,21 @@ class TestMergeAndDeduplicate:
         assert result == []
 
     def test_account_annotation_preserved(self):
-        primary_note = annotate_note_with_account(_raw_note("d1"), ACCOUNT_DREW)  # noname
-        secondary_note = annotate_note_with_account(_raw_note("k1"), ACCOUNT_KELLY)  # noname
+        primary_note = annotate_note_with_account(_raw_note("d1"), ACCOUNT_PRIMARY)
+        secondary_note = annotate_note_with_account(_raw_note("k1"), ACCOUNT_SECONDARY)
         result = merge_and_deduplicate([primary_note], [secondary_note])
         by_id = {n["id"]: n for n in result}
-        assert by_id["d1"]["account"] == ACCOUNT_DREW  # noname
-        assert by_id["k1"]["account"] == ACCOUNT_KELLY  # noname
+        assert by_id["d1"]["account"] == ACCOUNT_PRIMARY
+        assert by_id["k1"]["account"] == ACCOUNT_SECONDARY
 
     def test_order_preserved_primary_first(self):
         primary_notes = [
-            annotate_note_with_account(_raw_note("d1"), ACCOUNT_DREW),  # noname
-            annotate_note_with_account(_raw_note("d2"), ACCOUNT_DREW),  # noname
+            annotate_note_with_account(_raw_note("d1"), ACCOUNT_PRIMARY),
+            annotate_note_with_account(_raw_note("d2"), ACCOUNT_PRIMARY),
         ]
-        secondary_notes = [annotate_note_with_account(_raw_note("k1"), ACCOUNT_KELLY)]  # noname
+        secondary_notes = [annotate_note_with_account(_raw_note("k1"), ACCOUNT_SECONDARY)]
         result = merge_and_deduplicate(primary_notes, secondary_notes)
-        primary_ids = [n["id"] for n in result if n.get("account") == ACCOUNT_DREW]  # noname
+        primary_ids = [n["id"] for n in result if n.get("account") == ACCOUNT_PRIMARY]
         assert primary_ids == ["d1", "d2"]
 
 
@@ -190,18 +190,18 @@ class TestAccountRegistry:
     def _make_registry(self) -> AccountRegistry:
         accounts = build_accounts_from_env({
             "GRANOLA_API_KEY": PRIMARY_KEY,
-            "GRANOLA_API_KEY_KELLY": SECONDARY_KEY,  # noname
+            "GRANOLA_API_KEY_2": SECONDARY_KEY,
         })
         return AccountRegistry(accounts)
 
     def test_lookup_known_primary_account(self):
         registry = self._make_registry()
-        cfg = registry.get(ACCOUNT_DREW)  # noname
+        cfg = registry.lookup(ACCOUNT_PRIMARY)
         assert cfg.api_key == PRIMARY_KEY
 
     def test_lookup_known_secondary_account(self):
         registry = self._make_registry()
-        cfg = registry.get(ACCOUNT_KELLY)  # noname
+        cfg = registry.lookup(ACCOUNT_SECONDARY)
         assert cfg.api_key == SECONDARY_KEY
 
     def test_unknown_account_raises_key_error(self):
@@ -211,14 +211,14 @@ class TestAccountRegistry:
         """
         registry = self._make_registry()
         with pytest.raises(KeyError, match="phantom-account"):
-            registry.get("phantom-account")
+            registry.lookup("phantom-account")
 
     def test_registry_contains_all_configured_accounts(self):
         registry = self._make_registry()
-        assert ACCOUNT_DREW in registry  # noname
-        assert ACCOUNT_KELLY in registry  # noname
+        assert ACCOUNT_PRIMARY in registry
+        assert ACCOUNT_SECONDARY in registry
 
     def test_registry_does_not_contain_unconfigured_account(self):
         accounts = build_accounts_from_env({"GRANOLA_API_KEY": PRIMARY_KEY})
         registry = AccountRegistry(accounts)
-        assert ACCOUNT_KELLY not in registry  # noname
+        assert ACCOUNT_SECONDARY not in registry

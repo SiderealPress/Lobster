@@ -28,8 +28,8 @@ from integrations.granola.client import (
     GranolaAccountConfig,
     build_account_configs_from_env,
     iter_all_notes_for_account,
-    ACCOUNT_DREW,  # noname
-    ACCOUNT_KELLY,  # noname
+    ACCOUNT_PRIMARY,
+    ACCOUNT_SECONDARY,
 )
 from integrations.granola.client import GranolaUnknownAccountError
 from integrations.granola.serializer import note_to_markdown
@@ -50,7 +50,7 @@ GRANOLA_ACCOUNT_FRONTMATTER_KEY = "granola_account"
 def _make_note(
     note_id: str = "note-1",
     title: str = "Meeting",
-    account: str = ACCOUNT_DREW,  # noname
+    account: str = ACCOUNT_PRIMARY,
 ) -> GranolaNote:
     return GranolaNote(
         id=note_id,
@@ -76,15 +76,15 @@ class TestGranolaAccountField:
             created_at=datetime(2026, 4, 10, tzinfo=timezone.utc),
             updated_at=datetime(2026, 4, 10, tzinfo=timezone.utc),
         )
-        assert note.granola_account == ACCOUNT_DREW  # noname
+        assert note.granola_account == ACCOUNT_PRIMARY
 
     def test_explicit_secondary_account(self):
-        note = _make_note(account=ACCOUNT_KELLY)  # noname
-        assert note.granola_account == ACCOUNT_KELLY  # noname
+        note = _make_note(account=ACCOUNT_SECONDARY)
+        assert note.granola_account == ACCOUNT_SECONDARY
 
     def test_explicit_primary_account(self):
-        note = _make_note(account=ACCOUNT_DREW)  # noname
-        assert note.granola_account == ACCOUNT_DREW  # noname
+        note = _make_note(account=ACCOUNT_PRIMARY)
+        assert note.granola_account == ACCOUNT_PRIMARY
 
 
 # ---------------------------------------------------------------------------
@@ -93,18 +93,18 @@ class TestGranolaAccountField:
 
 class TestNoteToMarkdownAccountAnnotation:
     def test_primary_account_in_frontmatter(self):
-        note = _make_note(account=ACCOUNT_DREW)  # noname
+        note = _make_note(account=ACCOUNT_PRIMARY)
         md = note_to_markdown(note)
-        assert f"{GRANOLA_ACCOUNT_FRONTMATTER_KEY}: {ACCOUNT_DREW}" in md  # noname
+        assert f"{GRANOLA_ACCOUNT_FRONTMATTER_KEY}: {ACCOUNT_PRIMARY}" in md
 
     def test_secondary_account_in_frontmatter(self):
-        note = _make_note(account=ACCOUNT_KELLY)  # noname
+        note = _make_note(account=ACCOUNT_SECONDARY)
         md = note_to_markdown(note)
-        assert f"{GRANOLA_ACCOUNT_FRONTMATTER_KEY}: {ACCOUNT_KELLY}" in md  # noname
+        assert f"{GRANOLA_ACCOUNT_FRONTMATTER_KEY}: {ACCOUNT_SECONDARY}" in md
 
     def test_account_field_is_in_frontmatter_block(self):
         """Ensure the field is inside the --- block, not in the body."""
-        note = _make_note(account=ACCOUNT_KELLY)  # noname
+        note = _make_note(account=ACCOUNT_SECONDARY)
         md = note_to_markdown(note)
         # Find the frontmatter block
         parts = md.split("---")
@@ -122,7 +122,7 @@ class TestNoteToMarkdownAccountAnnotation:
             updated_at=datetime(2026, 4, 10, 10, tzinfo=timezone.utc),
         )
         md = note_to_markdown(note)
-        assert f"{GRANOLA_ACCOUNT_FRONTMATTER_KEY}: {ACCOUNT_DREW}" in md  # noname
+        assert f"{GRANOLA_ACCOUNT_FRONTMATTER_KEY}: {ACCOUNT_PRIMARY}" in md
 
 
 # ---------------------------------------------------------------------------
@@ -134,23 +134,23 @@ class TestBuildAccountConfigsFromEnv:
         env = {"GRANOLA_API_KEY": "grn_primary"}
         configs = build_account_configs_from_env(env)
         assert len(configs) == 1
-        assert configs[0].name == ACCOUNT_DREW  # noname
+        assert configs[0].name == ACCOUNT_PRIMARY
 
     def test_two_accounts_when_both_keys_present(self):
-        env = {"GRANOLA_API_KEY": "grn_primary", "GRANOLA_API_KEY_KELLY": "grn_secondary"}  # noname
+        env = {"GRANOLA_API_KEY": "grn_primary", "GRANOLA_API_KEY_2": "grn_secondary"}
         configs = build_account_configs_from_env(env)
         assert len(configs) == 2
         names = [c.name for c in configs]
-        assert ACCOUNT_DREW in names  # noname
-        assert ACCOUNT_KELLY in names  # noname
+        assert ACCOUNT_PRIMARY in names
+        assert ACCOUNT_SECONDARY in names
 
     def test_primary_account_is_first(self):
-        env = {"GRANOLA_API_KEY": "grn_primary", "GRANOLA_API_KEY_KELLY": "grn_secondary"}  # noname
+        env = {"GRANOLA_API_KEY": "grn_primary", "GRANOLA_API_KEY_2": "grn_secondary"}
         configs = build_account_configs_from_env(env)
-        assert configs[0].name == ACCOUNT_DREW  # noname
+        assert configs[0].name == ACCOUNT_PRIMARY
 
     def test_missing_primary_key_returns_empty(self):
-        env = {"GRANOLA_API_KEY_KELLY": "grn_secondary"}  # noname
+        env = {"GRANOLA_API_KEY_2": "grn_secondary"}
         configs = build_account_configs_from_env(env)
         assert configs == []
 
@@ -159,11 +159,11 @@ class TestBuildAccountConfigsFromEnv:
         assert configs == []
 
     def test_api_key_stored_in_config(self):
-        env = {"GRANOLA_API_KEY": "grn_primary_key", "GRANOLA_API_KEY_KELLY": "grn_secondary_key"}  # noname
+        env = {"GRANOLA_API_KEY": "grn_primary_key", "GRANOLA_API_KEY_2": "grn_secondary_key"}
         configs = build_account_configs_from_env(env)
         config_by_name = {c.name: c for c in configs}
-        assert config_by_name[ACCOUNT_DREW].api_key == "grn_primary_key"  # noname
-        assert config_by_name[ACCOUNT_KELLY].api_key == "grn_secondary_key"  # noname
+        assert config_by_name[ACCOUNT_PRIMARY].api_key == "grn_primary_key"
+        assert config_by_name[ACCOUNT_SECONDARY].api_key == "grn_secondary_key"
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +176,7 @@ class TestIterAllNotesForAccount:
         from integrations.granola.client import NoteListPage
         mock_list_notes.return_value = NoteListPage(notes=[], has_more=False, cursor=None)
 
-        account = GranolaAccountConfig(name=ACCOUNT_KELLY, api_key="grn_secondary_test")  # noname
+        account = GranolaAccountConfig(name=ACCOUNT_SECONDARY, api_key="grn_secondary_test")
         iter_all_notes_for_account(account)
 
         call_kwargs = mock_list_notes.call_args
@@ -188,11 +188,11 @@ class TestIterAllNotesForAccount:
         from integrations.granola.client import NoteListPage
         mock_list_notes.return_value = NoteListPage(notes=[], has_more=False, cursor=None)
 
-        account = GranolaAccountConfig(name=ACCOUNT_KELLY, api_key="grn_secondary_test")  # noname
+        account = GranolaAccountConfig(name=ACCOUNT_SECONDARY, api_key="grn_secondary_test")
         iter_all_notes_for_account(account)
 
         call_kwargs = mock_list_notes.call_args
-        assert call_kwargs.kwargs.get("granola_account") == ACCOUNT_KELLY  # noname
+        assert call_kwargs.kwargs.get("granola_account") == ACCOUNT_SECONDARY
 
 
 # ---------------------------------------------------------------------------
@@ -202,28 +202,28 @@ class TestIterAllNotesForAccount:
 class TestMergeNotesDeduplicated:
     def test_non_overlapping_notes_all_kept(self):
         primary_notes = [_make_note("d1"), _make_note("d2")]
-        secondary_notes = [_make_note("k1", account=ACCOUNT_KELLY)]  # noname
+        secondary_notes = [_make_note("k1", account=ACCOUNT_SECONDARY)]
         result = _merge_notes_deduplicated({
-            ACCOUNT_DREW: primary_notes,  # noname
-            ACCOUNT_KELLY: secondary_notes,  # noname
+            ACCOUNT_PRIMARY: primary_notes,
+            ACCOUNT_SECONDARY: secondary_notes,
         })
         ids = {n.id for n in result}
         assert ids == {"d1", "d2", "k1"}
 
     def test_primary_wins_on_duplicate_id(self):
         shared_id = "shared-meeting"
-        primary_note = _make_note(shared_id, title="primary version", account=ACCOUNT_DREW)  # noname
-        secondary_note = _make_note(shared_id, title="secondary version", account=ACCOUNT_KELLY)  # noname
+        primary_note = _make_note(shared_id, title="primary version", account=ACCOUNT_PRIMARY)
+        secondary_note = _make_note(shared_id, title="secondary version", account=ACCOUNT_SECONDARY)
         result = _merge_notes_deduplicated({
-            ACCOUNT_DREW: [primary_note],  # noname
-            ACCOUNT_KELLY: [secondary_note],  # noname
+            ACCOUNT_PRIMARY: [primary_note],
+            ACCOUNT_SECONDARY: [secondary_note],
         })
         assert len(result) == 1
         assert result[0].title == "primary version"
 
     def test_missing_secondary_account_returns_primary_only(self):
         primary_notes = [_make_note("d1")]
-        result = _merge_notes_deduplicated({ACCOUNT_DREW: primary_notes})  # noname
+        result = _merge_notes_deduplicated({ACCOUNT_PRIMARY: primary_notes})
         assert [n.id for n in result] == ["d1"]
 
     def test_empty_accounts_returns_empty(self):
@@ -231,23 +231,23 @@ class TestMergeNotesDeduplicated:
         assert result == []
 
     def test_account_field_preserved_after_merge(self):
-        primary_note = _make_note("d1", account=ACCOUNT_DREW)  # noname
-        secondary_note = _make_note("k1", account=ACCOUNT_KELLY)  # noname
+        primary_note = _make_note("d1", account=ACCOUNT_PRIMARY)
+        secondary_note = _make_note("k1", account=ACCOUNT_SECONDARY)
         result = _merge_notes_deduplicated({
-            ACCOUNT_DREW: [primary_note],  # noname
-            ACCOUNT_KELLY: [secondary_note],  # noname
+            ACCOUNT_PRIMARY: [primary_note],
+            ACCOUNT_SECONDARY: [secondary_note],
         })
         by_id = {n.id: n for n in result}
-        assert by_id["d1"].granola_account == ACCOUNT_DREW  # noname
-        assert by_id["k1"].granola_account == ACCOUNT_KELLY  # noname
+        assert by_id["d1"].granola_account == ACCOUNT_PRIMARY
+        assert by_id["k1"].granola_account == ACCOUNT_SECONDARY
 
 
 # ---------------------------------------------------------------------------
 # _fetch_notes_with_detail — per-account API key routing
 # ---------------------------------------------------------------------------
 
-PRIMARY_API_KEY = "grn_drew_primary_key"  # noname
-SECONDARY_API_KEY = "grn_kelly_secondary_key"  # noname
+PRIMARY_API_KEY = "grn_primary_key"
+SECONDARY_API_KEY = "grn_secondary_key"
 
 
 class TestFetchNotesWithDetail:
@@ -255,20 +255,20 @@ class TestFetchNotesWithDetail:
     Verify that _fetch_notes_with_detail passes the correct api_key to get_note()
     for each note based on its granola_account field.
 
-    This is the regression test for the critical bug where Kelly's notes were
-    being fetched with the primary account's API key.  # noname
+    This is the regression test for the critical bug where the secondary account's
+    notes were being fetched with the primary account's API key.
     """
 
     def _make_accounts(self) -> list[GranolaAccountConfig]:
         return [
-            GranolaAccountConfig(name=ACCOUNT_DREW, api_key=PRIMARY_API_KEY),  # noname
-            GranolaAccountConfig(name=ACCOUNT_KELLY, api_key=SECONDARY_API_KEY),  # noname
+            GranolaAccountConfig(name=ACCOUNT_PRIMARY, api_key=PRIMARY_API_KEY),
+            GranolaAccountConfig(name=ACCOUNT_SECONDARY, api_key=SECONDARY_API_KEY),
         ]
 
     @patch("integrations.granola.sync.get_note")
     def test_primary_account_note_uses_primary_api_key(self, mock_get_note):
         """Notes from the primary account must be fetched with the primary API key."""
-        note = _make_note("d1", account=ACCOUNT_DREW)  # noname
+        note = _make_note("d1", account=ACCOUNT_PRIMARY)
         mock_get_note.return_value = note
 
         _fetch_notes_with_detail([note], self._make_accounts())
@@ -280,7 +280,7 @@ class TestFetchNotesWithDetail:
     @patch("integrations.granola.sync.get_note")
     def test_secondary_account_note_uses_secondary_api_key(self, mock_get_note):
         """Notes from the secondary account must be fetched with the secondary API key."""
-        note = _make_note("k1", account=ACCOUNT_KELLY)  # noname
+        note = _make_note("k1", account=ACCOUNT_SECONDARY)
         mock_get_note.return_value = note
 
         _fetch_notes_with_detail([note], self._make_accounts())
@@ -292,8 +292,8 @@ class TestFetchNotesWithDetail:
     @patch("integrations.granola.sync.get_note")
     def test_mixed_accounts_use_correct_keys_for_each_note(self, mock_get_note):
         """Each note in a mixed list is fetched with its own account's API key."""
-        primary_note = _make_note("d1", account=ACCOUNT_DREW)  # noname
-        secondary_note = _make_note("k1", account=ACCOUNT_KELLY)  # noname
+        primary_note = _make_note("d1", account=ACCOUNT_PRIMARY)
+        secondary_note = _make_note("k1", account=ACCOUNT_SECONDARY)
         mock_get_note.side_effect = [primary_note, secondary_note]
 
         _fetch_notes_with_detail([primary_note, secondary_note], self._make_accounts())
@@ -306,13 +306,13 @@ class TestFetchNotesWithDetail:
     @patch("integrations.granola.sync.get_note")
     def test_account_attribution_preserved_in_returned_notes(self, mock_get_note):
         """The granola_account field on the returned note must match the original note."""
-        note = _make_note("k1", account=ACCOUNT_KELLY)  # noname
+        note = _make_note("k1", account=ACCOUNT_SECONDARY)
         mock_get_note.return_value = note
 
         result = _fetch_notes_with_detail([note], self._make_accounts())
 
         assert len(result) == 1
-        assert result[0].granola_account == ACCOUNT_KELLY  # noname
+        assert result[0].granola_account == ACCOUNT_SECONDARY
 
     @patch("integrations.granola.sync.get_note")
     def test_unknown_account_raises_error_not_silent_fallback(self, mock_get_note):
@@ -342,10 +342,16 @@ class TestFetchNotesWithDetail:
 
 
 class TestGranolaUnknownAccountError:
-    def test_error_is_a_subclass_of_granola_api_error(self):
-        """GranolaUnknownAccountError must be a GranolaAPIError for consistent handling."""
+    def test_error_is_a_key_error(self):
+        """
+        GranolaUnknownAccountError extends KeyError, not GranolaAPIError.
+
+        It signals a configuration gap (unknown account name), not an API failure,
+        so callers can distinguish the two error classes and handle them separately.
+        """
         from integrations.granola.client import GranolaAPIError
-        assert issubclass(GranolaUnknownAccountError, Exception)
+        assert issubclass(GranolaUnknownAccountError, KeyError)
+        assert not issubclass(GranolaUnknownAccountError, GranolaAPIError)
 
     def test_error_message_contains_account_name(self):
         err = GranolaUnknownAccountError("phantom-account")

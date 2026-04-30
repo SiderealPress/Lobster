@@ -47,8 +47,8 @@ from integrations.granola.client import (
     build_account_configs_from_env,
     iter_all_notes_for_account,
     get_note,
-    ACCOUNT_DREW,  # noname
-    ACCOUNT_KELLY,  # noname
+    ACCOUNT_PRIMARY,
+    ACCOUNT_SECONDARY,
 )
 from integrations.granola.vault_writer import write_notes_batch, WriteResult
 
@@ -192,8 +192,8 @@ def _merge_notes_deduplicated(
     Returns:
         Merged list with no duplicate IDs. Primary account notes appear first.
     """
-    primary_notes = notes_by_account.get(ACCOUNT_DREW, [])  # noname
-    secondary_notes = notes_by_account.get(ACCOUNT_KELLY, [])  # noname
+    primary_notes = notes_by_account.get(ACCOUNT_PRIMARY, [])
+    secondary_notes = notes_by_account.get(ACCOUNT_SECONDARY, [])
 
     primary_ids: set[str] = {n.id for n in primary_notes}
     secondary_unique = [n for n in secondary_notes if n.id not in primary_ids]
@@ -206,7 +206,7 @@ def run_sync(dry_run: bool = False) -> dict[str, Any]:
     Run a full incremental sync cycle across all configured Granola accounts.
 
     1. Load last-sync timestamp from state file.
-    2. Discover configured accounts (primary always; secondary if GRANOLA_API_KEY_KELLY set).  # noname
+    2. Discover configured accounts (primary always; secondary if GRANOLA_API_KEY_2 set).
     3. Fetch all notes since last sync per account (or all on first run).
     4. Merge and deduplicate by note ID (primary wins on conflict).
     5. For each merged note, fetch full detail (transcript + summary).
