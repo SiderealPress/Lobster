@@ -183,13 +183,19 @@ Never say "Noted." alone — it doesn't tell the user whether work is happening.
 2. Generate a short task_id (e.g. "fix-pr-475", "upstream-check")
 3. Write in-flight entry (see "In-flight work tracking" below)
 4. Task(
-       prompt="---\ntask_id: <task_id>\nchat_id: <chat_id>\nsource: <source>\n---\n\n...",
+       prompt="---\ntask_id: <task_id>\nchat_id: <chat_id>\nsource: <source>\nbackground: true\n---\n\n...",
        subagent_type="...",
        run_in_background=true
    )
 5. mark_processed(message_id)
 6. Return to wait_for_messages() IMMEDIATELY
 ```
+
+> **Background intent — two signals required:** Always include BOTH `run_in_background=true` as a
+> tool parameter AND `background: true` in the prompt frontmatter. The `require-background-agent.py`
+> hook accepts either, but some Claude Code versions (2.1.123+) strip `run_in_background` before
+> the hook sees it when the Agent schema has `additionalProperties: false` (issue #1872). The
+> frontmatter key is the schema-safe fallback and must be in every spawned-agent prompt.
 
 Agent registration is fully automatic — a PostToolUse hook fires after each Task call. You do not need to call `register_agent`.
 
@@ -346,10 +352,10 @@ Scheduled reminders arrive from `scheduled-tasks/dispatch-job.sh` (user-created 
            continue  # ← explicit early exit — prompt construction never reached
 
        # Generic dispatch: user-created job (non-destructive name)
-       prompt = f"---\ntask_id: scheduled-job-{reminder_type}\nchat_id: 0\nsource: system\n---\n\n{task_content}"
+       prompt = f"---\ntask_id: scheduled-job-{reminder_type}\nchat_id: 0\nsource: system\nbackground: true\n---\n\n{task_content}"
    else:
        # Unknown reminder with no task content
-       prompt = f"---\ntask_id: unknown-reminder\nchat_id: 0\nsource: system\n---\n\nUnknown reminder_type: '{reminder_type}'. Call write_result and return."
+       prompt = f"---\ntask_id: unknown-reminder\nchat_id: 0\nsource: system\nbackground: true\n---\n\nUnknown reminder_type: '{reminder_type}'. Call write_result and return."
    Spawn subagent: subagent_type: "lobster-generalist", prompt: prompt
 5. mark_processed(message_id)
 ```
@@ -469,7 +475,7 @@ Background subagents call `write_result(task_id, chat_id, text, ...)`, which dro
                    run_in_background=True,
                    prompt=(
                        f"---\ntask_id: {reviewer_task_id}\nchat_id: {msg['chat_id']}\n"
-                       f"source: {msg.get('source', 'telegram')}\n---\n\n"
+                       f"source: {msg.get('source', 'telegram')}\nbackground: true\n---\n\n"
                        f"Review PR {pr_url} and post findings as a GitHub comment.\n\n"
                        f"REVIEWER PROCESS (follow this order exactly):\n"
                        f"1. Run: gh pr diff {pr_number} --repo {pr_repo}\n"
@@ -772,7 +778,7 @@ If `reacted_to_text` is empty: use `get_conversation_history` to get context.
                    subagent_type="review",
                    run_in_background=True,
                    prompt=(
-                       f"---\ntask_id: {reviewer_task_id}\nchat_id: {chat_id}\nsource: {source}\n---\n\n"
+                       f"---\ntask_id: {reviewer_task_id}\nchat_id: {chat_id}\nsource: {source}\nbackground: true\n---\n\n"
                        f"Review PR {pr_url} and post findings as a GitHub comment.\n\n"
                        f"REVIEWER PROCESS (follow this order exactly):\n"
                        f"1. Run: gh pr diff {pr_number} --repo {pr_repo}\n"
@@ -813,7 +819,7 @@ If `reacted_to_text` is empty: use `get_conversation_history` to get context.
        parked   = next((r for r in results if r.get("metadata", {}).get("job_name") == job_name), None)
        if parked:
            task_content = parked["content"]
-           prompt = f"---\ntask_id: scheduled-job-{job_name}\nchat_id: 0\nsource: system\n---\n\n{task_content}"
+           prompt = f"---\ntask_id: scheduled-job-{job_name}\nchat_id: 0\nsource: system\nbackground: true\n---\n\n{task_content}"
            Task(subagent_type="lobster-generalist", run_in_background=True, prompt=prompt)
            send_reply(chat_id=chat_id, text=f"Job \'{job_name}\' dispatched.", source=source)
        else:
@@ -1020,7 +1026,7 @@ Task(
     subagent_type="review",
     run_in_background=True,
     prompt=(
-        f"---\ntask_id: {task_id}\nchat_id: {chat_id}\nsource: {source}\n---\n\n"
+        f"---\ntask_id: {task_id}\nchat_id: {chat_id}\nsource: {source}\nbackground: true\n---\n\n"
         f"Design review requested.\n\n"
         f"Design description:\n{design_text}\n\n"
         # Only include if actual value available — NEVER include as "None"
@@ -1060,7 +1066,7 @@ Indicators: multiple unrelated topics, stream-of-consciousness style, phrases li
 
 ```python
 Task(
-    prompt=f"---\ntask_id: brain-dump-{id}\nchat_id: {chat_id}\nsource: {source}\nreply_to_message_id: {id}\n---\n\nProcess this brain dump:\nTranscription: {text}",
+    prompt=f"---\ntask_id: brain-dump-{id}\nchat_id: {chat_id}\nsource: {source}\nreply_to_message_id: {id}\nbackground: true\n---\n\nProcess this brain dump:\nTranscription: {text}",
     subagent_type="brain-dumps"
 )
 ```
