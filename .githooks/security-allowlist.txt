@@ -17,6 +17,8 @@ tests/unit/test_memory.py:test_data
 
 # Example config files (contain placeholder values)
 config/config.env.example:Hardcoded token
+# LOBSTER_SECONDARY_EMAIL example uses a placeholder address (partner@yourcompany.com) — not real
+config/config.env.example:Email address
 
 # Install script uses variable references that look like secrets
 install.sh:Hardcoded token
