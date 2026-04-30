@@ -461,8 +461,10 @@ Background subagents call `write_result(task_id, chat_id, text, ...)`, which dro
                real_task_id = spec.get("task_id", "prompt-prep-result")
                real_subagent_type = spec.get("subagent_type", "lobster-generalist")
                real_prompt = prompt_match.group(1).strip()
+               Bash(f'echo \'{"task_id": "{real_task_id}", "type": "prompt-prep-spawned", "description": "spawned by prompt-prep", "started_at": "{datetime.utcnow().isoformat()}Z", "chat_id": {spec.get("chat_id", 0)}, "status": "running"}\' >> ~/lobster-workspace/data/inflight-work.jsonl')
                Task(
                    subagent_type=real_subagent_type,
+                   task_id=real_task_id,
                    run_in_background=True,
                    prompt=real_prompt,
                )
