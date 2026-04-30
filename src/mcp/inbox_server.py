@@ -4777,9 +4777,38 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
         for _key, f, msg in sorted(_scored, key=lambda x: x[0]):
             try:
                 if not msg:
-                    # Re-read files that failed the first pass (e.g. transient lock)
-                    with open(f) as fp:  # type: ignore[arg-type]
-                        msg = json.load(fp)
+                    # Re-read files that failed the first pass (e.g. transient lock).
+                    # If the file is genuinely unparseable (JSONDecodeError), quarantine
+                    # it to failed/ immediately so it cannot cause a WFM tight-loop
+                    # (issue #1813): wait_for_messages sees the file on every call and
+                    # returns immediately, triggering rapid MCP restarts all day.
+                    try:
+                        with open(f) as fp:  # type: ignore[arg-type]
+                            msg = json.load(fp)
+                    except json.JSONDecodeError as _jde:
+                        error_msg = (
+                            f"Unparseable JSON in inbox file — quarantined to failed/ "
+                            f"to prevent WFM tight-loop. Parse error: {_jde}"
+                        )
+                        log.error(f"check_inbox: quarantining {f.name}: {error_msg}")  # type: ignore[union-attr]
+                        try:
+                            quarantine_payload = {
+                                "_permanently_failed": True,
+                                "_last_error": error_msg,
+                                "_last_failed_at": datetime.now(timezone.utc).isoformat(),
+                                "_original_filename": f.name,  # type: ignore[union-attr]
+                            }
+                            dest = FAILED_DIR / f.name  # type: ignore[union-attr]
+                            atomic_write_json(dest, quarantine_payload)
+                            f.unlink(missing_ok=True)  # type: ignore[union-attr]
+                            _emit_mcp_event(
+                                "inbox.failed",
+                                {"message_id": f.stem, "error": error_msg, "permanent": True},  # type: ignore[union-attr]
+                                severity="warn",
+                            )
+                        except Exception as _q_exc:
+                            log.error(f"check_inbox: quarantine of malformed JSON failed for {f}: {_q_exc}")  # type: ignore[union-attr]
+                        continue  # skip — quarantined
                 # Quarantine files with unrecognized sources (issue #1735).
                 # This check runs before source_filter so that a bad-source file
                 # is always quarantined regardless of whether the caller passed a
