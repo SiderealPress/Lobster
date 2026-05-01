@@ -291,12 +291,17 @@ def test_wfm_heartbeat_thread_fn_swallows_exceptions(tmp_path):
         t.start()
         # Give it time to fire (and raise) at least once
         time.sleep(0.3)
+        # Verify the thread survived the repeated exceptions — if it is NOT alive
+        # here, the exception propagated and crashed the thread before stop_event
+        # was set, which is the failure mode we are testing against.
+        assert t.is_alive(), (
+            "Thread died due to an unswallowed exception from touch_heartbeat "
+            "(crashed before stop_event was set)"
+        )
         stop_event.set()
         t.join(timeout=1)
 
-    # If the thread is dead without us killing it via stop_event first,
-    # it means an unhandled exception propagated — which is a test failure.
-    # After stop_event.set() + join, it should be cleanly stopped (not crashed).
+    # After stop_event.set() + join, the thread should be cleanly stopped.
     assert not t.is_alive(), (
-        "Thread crashed due to an unswallowed exception from touch_heartbeat"
+        "Thread should have exited cleanly after stop_event.set() and join()"
     )

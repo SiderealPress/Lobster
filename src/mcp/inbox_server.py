@@ -4212,12 +4212,13 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
     # survive a crash.  The stop_event lets the finally block terminate the
     # thread cleanly on normal exit.
     _hb_stop = threading.Event()
-    threading.Thread(
+    _hb_thread = threading.Thread(
         target=_wfm_heartbeat_thread_fn,
         args=(_hb_stop, WAIT_HEARTBEAT_INTERVAL),
         daemon=True,
         name="wfm-heartbeat",
-    ).start()
+    )
+    _hb_thread.start()
 
     try:
         # Now that the observer is running, check for messages that already
@@ -4292,7 +4293,10 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
         # Stop the heartbeat daemon thread before writing the tombstone.
         # Setting the event wakes the thread's stop_event.wait() immediately
         # so it exits without waiting for the next interval tick.
+        # join() ensures the thread has fully exited before we write the tombstone,
+        # so no stale heartbeat can overwrite the tombstone after _clear_wfm_active_signal().
         _hb_stop.set()
+        _hb_thread.join(timeout=1)
         observer.stop()
         observer.join(timeout=1)
         # Write tombstone to WFM_ACTIVE_FILE instead of deleting it (issue #1730).
