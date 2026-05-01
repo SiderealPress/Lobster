@@ -94,6 +94,51 @@ log() {
 }
 
 #===============================================================================
+# Session Lifecycle Log
+#
+# Writes one JSONL event per line to session-lifecycle.log so crash
+# investigations can determine:
+#   - When the CC process started and which attempt it was (CC_START)
+#   - When it exited and with what exit code (CC_EXIT)
+#   - When wait_for_messages was entered/exited (written by wfm-lifecycle-logger.py hook)
+#
+# Format (one JSON object per line, no pretty-printing):
+#   {"ts":"...","event":"CC_START","pid":12345,"attempt":1,"session_id":""}
+#   {"ts":"...","event":"CC_EXIT","pid":12345,"exit_code":1,"attempt":1,"signal":"unknown"}
+#
+# All writes are plain appends — atomic enough for single-process use (only
+# this script writes CC_START/CC_EXIT; the hook writes WFM_* events from a
+# separate process but those are also single-writer).
+#===============================================================================
+LIFECYCLE_LOG="$LOG_DIR/session-lifecycle.log"
+
+_lifecycle_ts() {
+    date -u +"%Y-%m-%dT%H:%M:%SZ"
+}
+
+write_lifecycle_event() {
+    # write_lifecycle_event <json-object-string>
+    # Appends one JSONL line to session-lifecycle.log. Silent on failure.
+    local json="$1"
+    mkdir -p "$LOG_DIR" 2>/dev/null || true
+    printf '%s\n' "$json" >> "$LIFECYCLE_LOG" 2>/dev/null || true
+}
+
+write_cc_start() {
+    local pid="$1" attempt="$2"
+    local ts
+    ts=$(_lifecycle_ts)
+    write_lifecycle_event "{\"ts\":\"$ts\",\"event\":\"CC_START\",\"pid\":$pid,\"attempt\":$attempt}"
+}
+
+write_cc_exit() {
+    local pid="$1" exit_code="$2" attempt="$3"
+    local ts
+    ts=$(_lifecycle_ts)
+    write_lifecycle_event "{\"ts\":\"$ts\",\"event\":\"CC_EXIT\",\"pid\":$pid,\"exit_code\":$exit_code,\"attempt\":$attempt}"
+}
+
+#===============================================================================
 # Telegram Alerting (direct curl, bypasses outbox)
 #===============================================================================
 send_telegram_alert() {
@@ -556,11 +601,25 @@ launch_claude() {
 
     (
         echo "$BASHPID" > "$dispatcher_pid_file"
+        # Write CC_START lifecycle event from inside the subshell so we capture
+        # $BASHPID (the actual claude PID after exec). We write before exec so the
+        # event is always recorded even if claude exits immediately.
+        write_cc_start "$BASHPID" "$attempt"
         exec claude --dangerously-skip-permissions \
             --model sonnet \
             --max-turns 150 \
             -p "$init_prompt"
     ) 2>&1 | tee -a "$LOG_DIR/claude-session.log" || claude_exit_code=$?
+
+    # Read the PID that was written before exec so we can log CC_EXIT with it.
+    # If the file was already cleaned up (e.g. very fast exit), fall back to 0.
+    local claude_pid=0
+    if [[ -f "$dispatcher_pid_file" ]]; then
+        claude_pid=$(cat "$dispatcher_pid_file" 2>/dev/null || echo 0)
+    fi
+
+    # Write CC_EXIT lifecycle event before removing the PID file.
+    write_cc_exit "${claude_pid:-0}" "$claude_exit_code" "$attempt"
 
     # Clean up PID file on exit — the process is gone, the file is stale.
     # Note: if claude-persistent.sh's parent is SIGKILLed, this cleanup won't run,
