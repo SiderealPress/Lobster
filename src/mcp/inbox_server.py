@@ -5027,7 +5027,7 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
     """
     source_filter = args.get("source", "").lower()
     limit = args.get("limit", 10)
-    offset = max(0, args.get("offset", 0))
+    offset = args.get("offset", 0)
     since_ts_str = args.get("since_ts", "")
     since_epoch = _parse_iso_timestamp(since_ts_str) if since_ts_str else None
 
@@ -5046,6 +5046,7 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
         all_files = sorted(
             list(PROCESSED_DIR.glob("*.json")) + list(INBOX_DIR.glob("*.json"))
         )
+        all_matching: list[dict] = []
         for f in all_files:
             try:
                 with open(f) as fp:
@@ -5060,11 +5061,14 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
                     continue
                 msg["_filename"] = f.name
                 msg["_directory"] = f.parent.name  # "inbox" or "processed"
-                all_messages.append(msg)
+                all_matching.append(msg)
             except Exception:
                 continue
 
-        if not all_messages:
+        total_count = len(all_matching)
+        messages = all_matching[offset: offset + limit]
+
+        if not messages:
             return [TextContent(type="text", text=f"📭 No messages found since {since_ts_str}.")]
 
         total = len(all_messages)
@@ -5200,7 +5204,12 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
             except Exception:
                 continue
 
-        if not all_messages:
+        # Apply offset+limit pagination. total_count is set here for the regular
+        # inbox mode; for since_ts mode it was set above during collection.
+        total_count = len(messages)
+        messages = messages[offset: offset + limit]
+
+        if not messages:
             return [TextContent(type="text", text="📭 No new messages in inbox.")]
 
         total = len(all_messages)
@@ -5219,8 +5228,13 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
     else:
         pagination_info = ""
 
-    # Format messages nicely
-    output = f"📬 **{len(messages)} new message(s){pagination_info}:**\n\n"
+    # Format messages nicely — include pagination info when results are truncated.
+    showing_start = offset + 1
+    showing_end = offset + len(messages)
+    if total_count > len(messages) or offset > 0:
+        output = f"📬 **{len(messages)} new message(s):** ({showing_start}–{showing_end} of {total_count})\n\n"
+    else:
+        output = f"📬 **{len(messages)} new message(s):**\n\n"
     for msg in messages:
         source = msg.get("source", "unknown").upper()
         user = msg.get("user_name", msg.get("username", "Unknown"))
@@ -5282,18 +5296,17 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
         if msg_type == "subagent_notification":
             output += "dispatcher_hint: SUBAGENT_NOTIFICATION — user already received the subagent's reply. Don't summarize it. If you respond, add new value only — a question, a correction, missing context. Call mark_processed when done.\n"
         if msg_type == "subagent_recovered":
-            _recovered_chat_id = msg.get("chat_id", 0)
-            if _recovered_chat_id and _recovered_chat_id != 0:
+            if chat_id and int(chat_id) != 0:
                 output += (
-                    "dispatcher_hint: SUBAGENT_RECOVERED — agent exited without calling write_result. "
-                    f"The originating user (chat_id={_recovered_chat_id}) has NOT been notified. "
-                    "Send them a brief, gentle message: "
-                    '"A background task ran into trouble and could not complete. Here\'s what it found: [brief summary from text]. '
-                    'Let me know if you\'d like me to retry." '
-                    "Do NOT relay the raw salvaged dump. call mark_processed when done.\n"
+                    f"dispatcher_hint: SUBAGENT_RECOVERED — agent exited without calling write_result; "
+                    f"content was salvaged from transcript. The user at chat_id={chat_id} has NOT been notified. "
+                    f"Send a gentle message to chat_id={chat_id} summarising the outcome and call mark_processed when done.\n"
                 )
             else:
-                output += "dispatcher_hint: SUBAGENT_RECOVERED — agent exited without calling write_result; content was salvaged from transcript. chat_id=0 means no known user — drop silently. Call mark_processed when done.\n"
+                output += (
+                    "dispatcher_hint: SUBAGENT_RECOVERED — agent exited without calling write_result; "
+                    f"content was salvaged from transcript. chat_id=0 means no user to notify — drop silently and call mark_processed.\n"
+                )
         _has_file = msg_type in ("voice", "photo", "document") or bool(
             msg.get("image_file") or msg.get("image_files") or
             msg.get("file_path") or msg.get("audio_file")
@@ -5347,6 +5360,15 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
     output += "Use `send_reply` to respond, `mark_processed` when done."
     if page_end < total:
         output += f"\n\n⚠️ **{total - page_end} more message(s) not shown.** Call `check_inbox(offset={page_end})` to fetch the next page."
+
+    # Pagination footer: hint for next page when more messages remain.
+    remaining = total_count - (offset + len(messages))
+    if remaining > 0:
+        next_offset = offset + len(messages)
+        output += (
+            f"\n\n📄 {remaining} more message(s) available. "
+            f"Use `check_inbox(offset={next_offset})` to see the next page."
+        )
 
     return [TextContent(type="text", text=output)]
 
@@ -9072,6 +9094,190 @@ async def handle_memory_search(arguments: dict[str, Any]) -> list[TextContent]:
         content_preview = event.content[:200] + "..." if len(event.content) > 200 else event.content
         lines.append(f"\n{i}. {eid} ({event.type}/{event.source}{proj}) {ts}")
         lines.append(f"   {content_preview}")
+
+    return [TextContent(type="text", text="\n".join(lines))]
+
+
+# ---------------------------------------------------------------------------
+# Decision tools — write_decision and list_decisions
+# ---------------------------------------------------------------------------
+
+def _build_decision_content(
+    key: str,
+    title: str,
+    decision: str,
+    rationale: str,
+    date: str,
+    affected_areas: list,
+    supersedes: "str | None",
+) -> str:
+    """Build the canonical content string for a decision memory event.
+
+    The content is designed for keyword searchability — all structured fields
+    are encoded as labelled lines so free-text search can surface the decision
+    by any of its key terms.
+    """
+    lines = [
+        f"[DECISION] key={key}",
+        f"Title: {title}",
+        f"Decision: {decision}",
+        f"Rationale: {rationale}",
+        f"Date: {date}",
+    ]
+    if affected_areas:
+        lines.append(f"Affected areas: {', '.join(affected_areas)}")
+    if supersedes:
+        lines.append(f"Supersedes: {supersedes}")
+    return "\n".join(lines)
+
+
+async def handle_write_decision(args: dict) -> list[TextContent]:
+    """Store a structured decision in memory with type='decision'.
+
+    Required fields: key, title, decision, rationale, date.
+    Optional fields: affected_areas (list of strings), supersedes (key string).
+
+    Validates required fields, builds canonical content, stores as a MemoryEvent
+    with type='decision' and structured metadata for programmatic access.
+    """
+    # Validate required fields
+    required = ["key", "title", "decision", "rationale", "date"]
+    for field_name in required:
+        if field_name not in args:
+            return [TextContent(
+                type="text",
+                text=f"Error: missing required field '{field_name}'.",
+            )]
+
+    key = args.get("key", "").strip()
+    if not key:
+        return [TextContent(type="text", text="Error: 'key' must be a non-empty string.")]
+
+    title = args.get("title", "").strip()
+    decision_text = args.get("decision", "").strip()
+    rationale = args.get("rationale", "").strip()
+    date = args.get("date", "").strip()
+    affected_areas = args.get("affected_areas", [])
+    supersedes = args.get("supersedes", None)
+
+    if _memory_provider is None:
+        return [TextContent(type="text", text="Memory system is not available.")]
+
+    content = _build_decision_content(
+        key=key,
+        title=title,
+        decision=decision_text,
+        rationale=rationale,
+        date=date,
+        affected_areas=affected_areas,
+        supersedes=supersedes,
+    )
+
+    metadata: dict = {
+        "tags": ["architecture", "decision"],
+        "decision_key": key,
+        "decision_title": title,
+        "decision_date": date,
+        "decision_affected_areas": affected_areas,
+    }
+    if supersedes:
+        # Record the supersedes key in the new decision's metadata.
+        # list_decisions uses this to build a superseded-keys set and exclude
+        # those decisions when active_only=True (no mutation of old events needed).
+        metadata["supersedes"] = supersedes
+
+    event = MemoryEvent(
+        id=None,
+        timestamp=datetime.now(timezone.utc),
+        type="decision",
+        source="internal",
+        project=None,
+        content=content,
+        metadata=metadata,
+    )
+
+    try:
+        event_id = _memory_provider.store(event)
+        result_text = f"Decision stored (key={key!r}, event_id={event_id})."
+    except Exception as e:
+        log.error(f"handle_write_decision failed: {e}", exc_info=True)
+        return [TextContent(type="text", text=f"Error storing decision: {e}")]
+
+    return [TextContent(type="text", text=result_text)]
+
+
+async def handle_list_decisions(args: dict) -> list[TextContent]:
+    """List stored decisions from memory.
+
+    Args:
+        active_only: If True (default), hide decisions that have been superseded.
+        area: If provided, filter to decisions affecting the given area.
+    """
+    if _memory_provider is None:
+        return [TextContent(type="text", text="Memory system is not available.")]
+
+    active_only: bool = args.get("active_only", True)
+    area: "str | None" = args.get("area", None)
+
+    # Retrieve all decision-type events.
+    # Use a large recent window to capture all decisions regardless of age.
+    try:
+        all_events = _memory_provider.recent(hours=24 * 365 * 10)
+    except Exception as e:
+        log.error(f"handle_list_decisions failed: {e}", exc_info=True)
+        return [TextContent(type="text", text=f"Error retrieving decisions: {e}")]
+
+    decision_events = [ev for ev in all_events if ev.type == "decision"]
+
+    # Apply active_only filter.
+    # Build the set of decision keys that have been superseded by a newer decision.
+    # A key is superseded if any other decision event has "supersedes": <that key>.
+    if active_only:
+        superseded_keys = {
+            ev.metadata["supersedes"]
+            for ev in decision_events
+            if ev.metadata.get("supersedes")
+        }
+        decision_events = [
+            ev for ev in decision_events
+            if ev.metadata.get("decision_key") not in superseded_keys
+        ]
+
+    # Apply area filter.
+    if area:
+        decision_events = [
+            ev for ev in decision_events
+            if area in ev.metadata.get("decision_affected_areas", [])
+        ]
+
+    if not decision_events:
+        return [TextContent(type="text", text="No decisions found.")]
+
+    active_label = f"({len(decision_events)} active)" if active_only else f"({len(decision_events)} total)"
+    lines = [f"**Decisions** {active_label}:\n"]
+    for ev in decision_events:
+        key = ev.metadata.get("decision_key", "unknown")
+        title = ev.metadata.get("decision_title", "")
+        date = ev.metadata.get("decision_date", "")
+        affected = ev.metadata.get("decision_affected_areas", [])
+        superseded_by = ev.metadata.get("decision_superseded_by", "")
+
+        lines.append(f"### {key}")
+        if title:
+            lines.append(f"**Title:** {title}")
+        if date:
+            lines.append(f"**Date:** {date}")
+        if affected:
+            lines.append(f"**Affected areas:** {', '.join(affected)}")
+        if superseded_by:
+            lines.append(f"**Superseded by:** {superseded_by}")
+        # Include rationale from content
+        for line in ev.content.splitlines():
+            if line.startswith("Rationale: "):
+                rationale_text = line[len("Rationale: "):]
+                lines.append(f"**Rationale:** {rationale_text}")
+                break
+        lines.append("")
 
     return [TextContent(type="text", text="\n".join(lines))]
 
