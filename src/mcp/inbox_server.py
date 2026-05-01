@@ -1482,6 +1482,25 @@ def _write_wfm_active_signal() -> None:
         pass  # Never block wait_for_messages on a heartbeat write failure
 
 
+def _wfm_heartbeat_thread_fn(stop_event: threading.Event, interval: int) -> None:
+    """Daemon thread that refreshes the WFM-active heartbeat on wall-clock time.
+
+    Runs independently of the asyncio event loop so that heartbeat writes
+    continue even when the loop is stalled (e.g. during Claude API streaming).
+    Fires every `interval` seconds until stop_event is set.
+
+    Exceptions are swallowed so the thread never crashes the process.
+    daemon=True on the spawning site guarantees this thread dies with the
+    process — no fake heartbeats survive a crash or unexpected exit.
+    """
+    while not stop_event.wait(timeout=interval):
+        try:
+            touch_heartbeat()
+            _write_wfm_active_signal()
+        except Exception:
+            pass  # Never crash the heartbeat thread
+
+
 # Tombstone value written to WFM_ACTIVE_FILE when WFM exits (Fix 2, issue #1730).
 # Using a non-integer string means:
 #   - The file is NEVER absent between the health check's -f gate and its cat read
@@ -4185,6 +4204,22 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
     observer.schedule(InboxHandler(), str(INBOX_DIR), recursive=False)
     observer.start()
 
+    # Start a daemon thread to refresh the WFM-active heartbeat on wall-clock
+    # time, independent of the asyncio event loop (issue #1823).  The event
+    # loop can stall for minutes during Claude API streaming; the daemon thread
+    # keeps writing so the health check never sees a false-stale signal.
+    # daemon=True means the thread dies with the process — no heartbeats
+    # survive a crash.  The stop_event lets the finally block terminate the
+    # thread cleanly on normal exit.
+    _hb_stop = threading.Event()
+    _hb_thread = threading.Thread(
+        target=_wfm_heartbeat_thread_fn,
+        args=(_hb_stop, WAIT_HEARTBEAT_INTERVAL),
+        daemon=True,
+        name="wfm-heartbeat",
+    )
+    _hb_thread.start()
+
     try:
         # Now that the observer is running, check for messages that already
         # existed before we started watching.  Any message that arrives from
@@ -4196,9 +4231,9 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
             touch_heartbeat()
             inbox_results = await handle_check_inbox({"limit": 10})
             return _prepend_sessions_prefix(sessions_prefix, inbox_results)
-        # Wait with periodic heartbeats (every WAIT_HEARTBEAT_INTERVAL seconds).
-        # Refresh WFM-active on every iteration so the health check sees a
-        # fresh signal even during long quiet periods (issue #1713 / #949).
+        # Wait loop: block until a message arrives or timeout expires.
+        # Heartbeat and WFM-active refresh are handled by the daemon thread
+        # started above — they no longer depend on this event-loop coroutine.
         heartbeat_interval = WAIT_HEARTBEAT_INTERVAL
         elapsed = 0
 
@@ -4213,9 +4248,6 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
             if arrived:
                 break
 
-            # Touch heartbeat and refresh WFM-active to show we're still alive.
-            touch_heartbeat()
-            _write_wfm_active_signal()
             elapsed += wait_time
 
         if message_arrived.is_set():
@@ -4258,6 +4290,13 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
                 timeout_text = sessions_prefix + "\n\n" + timeout_text
             return [TextContent(type="text", text=timeout_text)]
     finally:
+        # Stop the heartbeat daemon thread before writing the tombstone.
+        # Setting the event wakes the thread's stop_event.wait() immediately
+        # so it exits without waiting for the next interval tick.
+        # join() ensures the thread has fully exited before we write the tombstone,
+        # so no stale heartbeat can overwrite the tombstone after _clear_wfm_active_signal().
+        _hb_stop.set()
+        _hb_thread.join(timeout=1)
         observer.stop()
         observer.join(timeout=1)
         # Write tombstone to WFM_ACTIVE_FILE instead of deleting it (issue #1730).
