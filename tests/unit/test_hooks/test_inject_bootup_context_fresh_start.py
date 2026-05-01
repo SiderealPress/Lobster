@@ -1,7 +1,8 @@
 """
 Unit tests for the fresh-dispatcher-start fallback in inject-bootup-context.py.
 
-Issue #1868: on a fresh restart (new process, MCP server restarted),
+Issue #1868 / regression from PR #1891 deploy (issue #1898):
+On a fresh restart (new process, MCP server restarted),
 inject-bootup-context.py injects the subagent bootup file instead of the
 dispatcher bootup file.
 
@@ -18,8 +19,6 @@ LOBSTER_MAIN_SESSION=1 → treat as dispatcher. This is safe because:
   which writes the primary file
 - compactions are handled by the existing _is_post_compact_dispatcher()
   sentinel fallback (on-compact.py writes the primary file proactively)
-
-FRESH_START_FILE_ABSENT constant: the primary file path used for override in tests.
 """
 
 from __future__ import annotations
@@ -30,7 +29,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -129,11 +128,9 @@ class TestIsFreshStartDispatcher:
         # File does NOT exist
 
         mod = _load_inject_hook(home=tmp_path, workspace=tmp_path)
-        # Override to point at our absent path
         import session_role as sr
-        mod.session_role = sr
-        from unittest.mock import patch as _patch
-        with _patch.object(sr, "_get_mcp_claude_session_file", return_value=absent_primary):
+
+        with patch.object(sr, "_get_mcp_claude_session_file", return_value=absent_primary):
             result = mod._is_fresh_start_dispatcher()
 
         assert result is True
@@ -148,6 +145,7 @@ class TestIsFreshStartDispatcher:
 
         mod = _load_inject_hook(home=tmp_path, workspace=tmp_path)
         import session_role as sr
+
         with patch.object(sr, "_get_mcp_claude_session_file", return_value=primary_file):
             result = mod._is_fresh_start_dispatcher()
 
@@ -156,9 +154,6 @@ class TestIsFreshStartDispatcher:
     def test_returns_false_when_main_session_not_set(self, tmp_path, monkeypatch):
         """LOBSTER_MAIN_SESSION not set → not a Lobster-managed session, return False."""
         monkeypatch.delenv("LOBSTER_MAIN_SESSION", raising=False)
-        data_dir = tmp_path / "data"
-        data_dir.mkdir(parents=True)
-        # Primary file absent — but LOBSTER_MAIN_SESSION not set
 
         mod = _load_inject_hook(
             home=tmp_path, workspace=tmp_path, lobster_main_session=None
@@ -170,8 +165,6 @@ class TestIsFreshStartDispatcher:
     def test_returns_false_when_main_session_is_zero(self, tmp_path, monkeypatch):
         """LOBSTER_MAIN_SESSION=0 → return False."""
         monkeypatch.setenv("LOBSTER_MAIN_SESSION", "0")
-        data_dir = tmp_path / "data"
-        data_dir.mkdir(parents=True)
 
         mod = _load_inject_hook(
             home=tmp_path, workspace=tmp_path, lobster_main_session="0"
@@ -186,11 +179,11 @@ class TestIsFreshStartDispatcher:
 
         mod = _load_inject_hook(home=tmp_path, workspace=tmp_path)
 
-        from unittest.mock import MagicMock
         mock_path = MagicMock(spec=Path)
         mock_path.exists.side_effect = OSError("permission denied")
 
         import session_role as sr
+
         with patch.object(sr, "_get_mcp_claude_session_file", return_value=mock_path):
             result = mod._is_fresh_start_dispatcher()
 
