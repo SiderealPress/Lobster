@@ -1905,30 +1905,8 @@ else
     info "Skipping secret-scanner hook (settings.json not yet created)"
 fi
 
-# Set up Claude Code SessionStart hook to write the dispatcher session ID
-# This enables hooks to reliably distinguish dispatcher from subagent sessions.
-chmod +x "$INSTALL_DIR/hooks/write-dispatcher-session-id.py" || true
-if [ -f "$CLAUDE_SETTINGS" ]; then
-    if ! jq -e '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("write-dispatcher-session-id"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
-        TMP_SETTINGS=$(mktemp)
-        jq '.hooks.SessionStart = (.hooks.SessionStart // []) + [{
-            "matcher": "",
-            "hooks": [{
-                "type": "command",
-                "command": "python3 '"$INSTALL_DIR"'/hooks/write-dispatcher-session-id.py",
-                "timeout": 5
-            }]
-        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
-        success "write-dispatcher-session-id hook installed"
-    else
-        info "write-dispatcher-session-id hook already configured in Claude Code settings"
-    fi
-else
-    info "Skipping write-dispatcher-session-id hook (settings.json not yet created)"
-fi
-
 # Set up Claude Code SessionStart hook to inject system and user bootup files into context.
-# Runs after write-dispatcher-session-id so role detection (is_dispatcher) works correctly.
+# inject-bootup-context.py performs dispatcher detection via the launcher-written startup flag.
 # Adds two entries: one empty-matcher entry for all fresh sessions, and one compact-matcher
 # entry so bootup content is re-injected after context compaction.
 chmod +x "$INSTALL_DIR/hooks/inject-bootup-context.py" || true

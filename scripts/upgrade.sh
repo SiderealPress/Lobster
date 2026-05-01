@@ -3232,6 +3232,24 @@ print(f'prune-pr-worktrees: {result.status}')
         substep "Migration 91: settings.json, jq, or pretooluse-heartbeat.py not found — skipping"
     fi
 
+    # Migration 92: Remove write-dispatcher-session-id SessionStart hook from settings.json
+    # (issue #1908). Dispatcher detection now uses the launcher-written startup flag file
+    # instead of a UUID written by this hook. The hook file is deleted; the settings.json
+    # entry must be removed from existing installs.
+    if [ -f "$CLAUDE_SETTINGS" ] && command -v jq &>/dev/null; then
+        if jq -e '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("write-dispatcher-session-id"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+            TMP_SETTINGS=$(mktemp)
+            jq 'del(.hooks.SessionStart[] | select(.hooks[]?.command | contains("write-dispatcher-session-id")))' \
+                "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+            substep "Removed write-dispatcher-session-id hook from settings.json (Migration 92)"
+            migrated=$((migrated + 1))
+        else
+            substep "write-dispatcher-session-id hook not found in settings.json — skipping Migration 92"
+        fi
+    else
+        substep "settings.json not found or jq unavailable — skipping Migration 92"
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
