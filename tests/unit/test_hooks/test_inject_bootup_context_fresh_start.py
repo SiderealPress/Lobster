@@ -198,6 +198,13 @@ class TestIsFreshStartDispatcher:
 class TestMainFreshStartFallback:
     """main() uses the fresh-start fallback to inject dispatcher bootup on fresh restarts."""
 
+    @pytest.mark.skip(
+        reason=(
+            "Issue #1908 removed _is_fresh_start_dispatcher() and UUID-based detection. "
+            "Dispatcher detection now uses the launcher-written startup flag (PID file). "
+            "This test scenario is no longer applicable."
+        )
+    )
     def test_fresh_start_fallback_injects_dispatcher_bootup(
         self, tmp_path, capsys, monkeypatch
     ):
@@ -367,6 +374,13 @@ class TestMainFreshStartFallback:
         )
         assert "DISPATCHER BOOTUP" not in captured.out
 
+    @pytest.mark.skip(
+        reason=(
+            "Issue #1908 removed UUID-based primary-file detection from inject-bootup-context.py. "
+            "Dispatcher detection now uses the launcher-written startup flag (PID file). "
+            "This test scenario is no longer applicable."
+        )
+    )
     def test_primary_file_match_still_injects_dispatcher_without_fallback(
         self, tmp_path, capsys, monkeypatch
     ):
