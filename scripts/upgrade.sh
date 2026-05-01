@@ -2630,6 +2630,62 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
         substep "Migration 84: log-export cron entry not found — skipping"
     fi
 
+    # Migration 89: Switch on-compact.py SessionStart hook from matcher="compact"
+    # to matcher="" for reliability.  Claude Code intermittently fails to fire
+    # hooks registered with matcher="compact", causing the ♻️ compaction
+    # notification to be silently dropped.  The fix registers on-compact.py with
+    # matcher="" (always fires) and adds a self-gate inside the script using the
+    # hook_name field from the CC payload.
+    #
+    # Steps:
+    #   1. Remove the old compact-matcher entry for on-compact.py (if present).
+    #   2. Remove any duplicate entries (matcher="" entries already added during
+    #      a previous partial migration or manual edit).
+    #   3. Add exactly one matcher="" entry for on-compact.py, placed BEFORE the
+    #      write-dispatcher-session-id entry so it fires early in the chain.
+    if [ -f "$CLAUDE_SETTINGS" ]; then
+        local _m89_has_compact_matcher _m89_has_empty_matcher
+        _m89_has_compact_matcher=$(jq -r '
+            [.hooks.SessionStart[]? |
+             select(.matcher == "compact") |
+             select(.hooks[]?.command | contains("on-compact"))]
+            | length' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
+        _m89_has_empty_matcher=$(jq -r '
+            [.hooks.SessionStart[]? |
+             select(.matcher == "") |
+             select(.hooks[]?.command | contains("on-compact"))]
+            | length' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
+
+        if [[ "$_m89_has_compact_matcher" -gt 0 || "$_m89_has_empty_matcher" -eq 0 ]]; then
+            local _m89_tmp
+            _m89_tmp=$(mktemp)
+            # Remove ALL existing on-compact.py entries (both matchers), then add
+            # exactly one with matcher="" at the front of the SessionStart list.
+            jq --arg cmd "python3 $LOBSTER_DIR/hooks/on-compact.py" '
+              .hooks.SessionStart =
+                [{
+                  "matcher": "",
+                  "hooks": [{
+                    "type": "command",
+                    "command": $cmd,
+                    "timeout": 30
+                  }]
+                }] +
+                [.hooks.SessionStart[]? |
+                 select(.hooks[]?.command | contains("on-compact") | not)]
+            ' "$CLAUDE_SETTINGS" > "$_m89_tmp" \
+                && mv "$_m89_tmp" "$CLAUDE_SETTINGS" 2>/dev/null \
+                && {
+                substep "Migration 89: on-compact hook re-registered with matcher='' (was 'compact')"
+                migrated=$((migrated + 1))
+            } || warn "Migration 89: could not update on-compact hook matcher"
+        else
+            substep "Migration 89: on-compact hook already uses matcher='' — skipping"
+        fi
+    else
+        substep "Migration 89: settings.json not found — skipping"
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else

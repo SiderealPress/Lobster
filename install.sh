@@ -2386,20 +2386,23 @@ else
     info "Skipping inject-bootup-context hook (settings.json not yet created)"
 fi
 
-# Set up Claude Code SessionStart hook to set compact flag on context compaction
+# Set up Claude Code SessionStart hook to handle context compaction.
+# Uses matcher="" (fires on every SessionStart) because the "compact" matcher
+# in Claude Code intermittently fails to fire.  on-compact.py self-gates using
+# the hook_name field in the CC payload so it only acts on compact events.
 chmod +x "$INSTALL_DIR/hooks/on-compact.py" || true
 if [ -f "$CLAUDE_SETTINGS" ]; then
-    if ! jq -e '.hooks.SessionStart[]? | select(.matcher == "compact")' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+    if ! jq -e '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("on-compact"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
         TMP_SETTINGS=$(mktemp)
         jq '.hooks.SessionStart = (.hooks.SessionStart // []) + [{
-            "matcher": "compact",
+            "matcher": "",
             "hooks": [{
                 "type": "command",
                 "command": "python3 '"$INSTALL_DIR"'/hooks/on-compact.py",
                 "timeout": 30
             }]
         }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
-        success "on-compact hook installed"
+        success "on-compact hook installed (matcher='' for reliability)"
     else
         info "on-compact hook already configured in Claude Code settings"
     fi
