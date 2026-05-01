@@ -218,14 +218,29 @@ class TestMainSentinelFallback:
         )
         assert "SUBAGENT BOOTUP" not in captured.out
 
-    def test_no_sentinel_normal_subagent_gets_subagent_bootup(self, tmp_path, capsys):
-        """Without sentinel, an unrecognised session gets subagent bootup (normal path)."""
+    def test_no_sentinel_subagent_with_primary_file_present_gets_subagent_bootup(
+        self, tmp_path, capsys
+    ):
+        """Without sentinel, a non-matching session gets subagent bootup when primary file is present.
+
+        A real subagent session starts only after the dispatcher has already called
+        session_start(), which writes the primary state file (dispatcher-claude-session-id).
+        The subagent's UUID does not match the stored dispatcher UUID, so it correctly
+        receives subagent bootup.
+
+        Note: if the primary file were absent, the fresh-start fallback (#1868) would
+        treat the session as a fresh-restart dispatcher.  That scenario is tested in
+        test_inject_bootup_context_fresh_start.py.
+        """
         claude_dir = tmp_path / "lobster" / ".claude"
         claude_dir.mkdir(parents=True)
         _, subagent_bootup = self._make_bootup_files(claude_dir)
 
-        # No sentinel, no dispatcher session files.
-        (tmp_path / "data").mkdir(parents=True, exist_ok=True)
+        # Primary file present (dispatcher wrote it before spawning subagents).
+        # The subagent's UUID differs from the stored dispatcher UUID.
+        data_dir = tmp_path / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        (data_dir / "dispatcher-claude-session-id").write_text("dispatcher-uuid-abc")
 
         hook_input = json.dumps({"session_id": "random-subagent-uuid"})
 
@@ -255,7 +270,8 @@ class TestMainSentinelFallback:
 
         captured = capsys.readouterr()
         assert "SUBAGENT BOOTUP" in captured.out, (
-            "Subagent bootup should be injected for unrecognised session without sentinel"
+            "Subagent bootup should be injected when primary file is present "
+            "and the session UUID does not match the stored dispatcher UUID"
         )
         assert "DISPATCHER BOOTUP" not in captured.out
 
