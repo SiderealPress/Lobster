@@ -3369,6 +3369,73 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="write_decision",
+            description=(
+                "Record an architectural or process decision in Lobster's memory with structured metadata. "
+                "Decisions differ from notes in that they require explicit rationale (why the decision was made) "
+                "and can supersede earlier decisions. Use this to capture choices that will need to be looked up later, "
+                "e.g. which library to use, which protocol was chosen, or how a workflow was settled."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "key": {
+                        "type": "string",
+                        "description": "Short, stable slug identifying this decision (e.g. 'relay-pattern-deprecated'). Used for supersession lookups.",
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Human-readable title for the decision.",
+                    },
+                    "decision": {
+                        "type": "string",
+                        "description": "What was decided — the actual choice made.",
+                    },
+                    "rationale": {
+                        "type": "string",
+                        "description": "Why this decision was made. Required — decisions without rationale are just rules.",
+                    },
+                    "date": {
+                        "type": "string",
+                        "description": "When the decision was made, in YYYY-MM or YYYY-MM-DD format.",
+                    },
+                    "affected_areas": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional list of system areas this decision affects.",
+                        "default": [],
+                    },
+                    "supersedes": {
+                        "type": "string",
+                        "description": "Optional key of an earlier decision this one supersedes.",
+                    },
+                },
+                "required": ["key", "title", "decision", "rationale", "date"],
+            },
+        ),
+        Tool(
+            name="list_decisions",
+            description=(
+                "List architectural and process decisions recorded in Lobster's memory. "
+                "By default returns only active (non-superseded) decisions. "
+                "Use active_only=False to include superseded decisions as well."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "active_only": {
+                        "type": "boolean",
+                        "description": "If true (default), only return decisions that have not been superseded.",
+                        "default": True,
+                    },
+                    "area": {
+                        "type": "string",
+                        "description": "Optional filter: only return decisions affecting this area.",
+                    },
+                },
+            },
+        ),
+        Tool(
             name="get_handoff",
             description="Read the current handoff document - a complete briefing for a new Lobster session. Contains identity, architecture, current state, and pending items.",
             inputSchema={
@@ -4064,6 +4131,10 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
         return await handle_memory_search(arguments)
     elif name == "memory_recent":
         return await handle_memory_recent(arguments)
+    elif name == "write_decision":
+        return await handle_write_decision(arguments)
+    elif name == "list_decisions":
+        return await handle_list_decisions(arguments)
     elif name == "get_handoff":
         return await handle_get_handoff(arguments)
     elif name == "mark_consolidated":
@@ -5044,7 +5115,18 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
         if msg_type == "subagent_notification":
             output += "dispatcher_hint: SUBAGENT_NOTIFICATION — user already received the subagent's reply. Don't summarize it. If you respond, add new value only — a question, a correction, missing context. Call mark_processed when done.\n"
         if msg_type == "subagent_recovered":
-            output += "dispatcher_hint: SUBAGENT_RECOVERED — agent exited without calling write_result; content was salvaged from transcript. The owner has been notified via inbox. Do NOT relay the raw dump to the user. Call mark_processed when done.\n"
+            _recovered_chat_id = msg.get("chat_id", 0)
+            if _recovered_chat_id and _recovered_chat_id != 0:
+                output += (
+                    f"dispatcher_hint: SUBAGENT_RECOVERED — agent exited without calling write_result; "
+                    f"content was salvaged from transcript. The user (chat_id={_recovered_chat_id}) has NOT been notified. "
+                    f"Send a gentle summary to the user, then call mark_processed.\n"
+                )
+            else:
+                output += (
+                    f"dispatcher_hint: SUBAGENT_RECOVERED — agent exited without calling write_result; "
+                    f"content was salvaged from transcript. chat_id=0 — drop silently, call mark_processed.\n"
+                )
         _has_file = msg_type in ("voice", "photo", "document") or bool(
             msg.get("image_file") or msg.get("image_files") or
             msg.get("file_path") or msg.get("audio_file")
@@ -8841,6 +8923,185 @@ async def handle_memory_recent(arguments: dict[str, Any]) -> list[TextContent]:
     except Exception as e:
         log.error(f"memory_recent failed: {e}", exc_info=True)
         return [TextContent(type="text", text=f"Error getting recent events: {e}")]
+
+
+def _build_decision_content(
+    key: str,
+    title: str,
+    decision: str,
+    rationale: str,
+    date: str,
+    affected_areas: list[str],
+    supersedes: str | None,
+) -> str:
+    """Build the canonical content string for a decision memory event.
+
+    All structured fields are encoded in the content so they are discoverable
+    via full-text or vector search without requiring metadata queries.
+    """
+    lines = [
+        f"[DECISION] key={key}",
+        f"Title: {title}",
+        f"Decision: {decision}",
+        f"Rationale: {rationale}",
+        f"Date: {date}",
+    ]
+    if affected_areas:
+        lines.append(f"Affected areas: {', '.join(affected_areas)}")
+    if supersedes:
+        lines.append(f"Supersedes: {supersedes}")
+    return "\n".join(lines)
+
+
+async def handle_write_decision(args: dict) -> list[TextContent]:
+    """Record an architectural or process decision in memory.
+
+    Required fields: key, title, decision, rationale, date.
+    Optional: affected_areas (list), supersedes (key of earlier decision).
+    """
+    REQUIRED = {"key", "title", "decision", "rationale", "date"}
+    missing = [f for f in sorted(REQUIRED) if not args.get(f)]
+    if missing:
+        return [TextContent(
+            type="text",
+            text=f"Error: missing required field(s): {', '.join(missing)}"
+        )]
+
+    key = args["key"].strip()
+    if not key:
+        return [TextContent(type="text", text="Error: key cannot be empty")]
+
+    if _memory_provider is None:
+        return [TextContent(type="text", text="Memory system is not available.")]
+
+    title = args["title"]
+    decision = args["decision"]
+    rationale = args["rationale"]
+    date = args["date"]
+    affected_areas: list[str] = args.get("affected_areas") or []
+    supersedes: str | None = args.get("supersedes")
+
+    content = _build_decision_content(
+        key=key,
+        title=title,
+        decision=decision,
+        rationale=rationale,
+        date=date,
+        affected_areas=affected_areas,
+        supersedes=supersedes,
+    )
+
+    metadata: dict = {
+        "tags": ["decision", "architecture"],
+        "decision_key": key,
+        "decision_title": title,
+        "decision_date": date,
+        "decision_affected_areas": affected_areas,
+    }
+    if supersedes:
+        metadata["supersedes"] = supersedes
+
+    event = MemoryEvent(
+        id=None,
+        timestamp=datetime.now(timezone.utc),
+        type="decision",
+        source="internal",
+        project=None,
+        content=content,
+        metadata=metadata,
+    )
+
+    try:
+        event_id = _memory_provider.store(event)
+        return [TextContent(
+            type="text",
+            text=f"Decision stored (id=#{event_id}): key={key!r}\nTitle: {title}"
+        )]
+    except Exception as exc:
+        log.error(f"write_decision failed: {exc}", exc_info=True)
+        return [TextContent(type="text", text=f"Error storing decision: {exc}")]
+
+
+async def handle_list_decisions(args: dict) -> list[TextContent]:
+    """List architectural/process decisions from memory.
+
+    By default returns only active (non-superseded) decisions.
+    Supports filtering by affected area.
+    """
+    if _memory_provider is None:
+        return [TextContent(type="text", text="Memory system is not available.")]
+
+    active_only: bool = args.get("active_only", True)
+    area_filter: str | None = args.get("area")
+
+    try:
+        all_events = _memory_provider.search("decision", limit=200)
+    except Exception as exc:
+        log.error(f"list_decisions search failed: {exc}", exc_info=True)
+        return [TextContent(type="text", text=f"Error listing decisions: {exc}")]
+
+    # Filter to only 'decision' type events
+    decision_events = [e for e in all_events if e.type == "decision"]
+
+    if not decision_events:
+        return [TextContent(type="text", text="No decisions found.")]
+
+    # Collect the set of superseded keys so we can filter them out when active_only=True
+    superseded_keys: set[str] = {
+        e.metadata["supersedes"]
+        for e in decision_events
+        if e.metadata.get("supersedes")
+    }
+
+    # Apply active_only filter
+    if active_only:
+        decision_events = [
+            e for e in decision_events
+            if e.metadata.get("decision_key") not in superseded_keys
+        ]
+
+    # Apply area filter
+    if area_filter:
+        decision_events = [
+            e for e in decision_events
+            if area_filter in (e.metadata.get("decision_affected_areas") or [])
+        ]
+
+    if not decision_events:
+        qualifier = f" for area={area_filter!r}" if area_filter else ""
+        return [TextContent(type="text", text=f"No decisions found{qualifier}.")]
+
+    # Sort by date field in metadata, then by timestamp
+    decision_events = sorted(
+        decision_events,
+        key=lambda e: (e.metadata.get("decision_date", ""), e.timestamp or ""),
+        reverse=True,
+    )
+
+    count_label = f"({len(decision_events)} active)" if active_only else f"({len(decision_events)} total)"
+    lines = [f"## Decisions {count_label}"]
+    for event in decision_events:
+        dec_key = event.metadata.get("decision_key", "?")
+        dec_title = event.metadata.get("decision_title", "")
+        dec_date = event.metadata.get("decision_date", "")
+        dec_areas = event.metadata.get("decision_affected_areas", [])
+        # Extract rationale from content — it follows the "Rationale: " prefix
+        rationale_line = next(
+            (line[len("Rationale: "):] for line in event.content.splitlines()
+             if line.startswith("Rationale: ")),
+            None,
+        )
+        lines.append(f"\n### {dec_key}")
+        if dec_title:
+            lines.append(f"**{dec_title}**")
+        if dec_date:
+            lines.append(f"Date: {dec_date}")
+        if dec_areas:
+            lines.append(f"Areas: {', '.join(dec_areas)}")
+        if rationale_line:
+            lines.append(f"Rationale: {rationale_line}")
+
+    return [TextContent(type="text", text="\n".join(lines))]
 
 
 async def handle_get_handoff(arguments: dict[str, Any]) -> list[TextContent]:
