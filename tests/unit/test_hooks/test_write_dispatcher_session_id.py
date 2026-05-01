@@ -51,39 +51,16 @@ if str(_HOOKS_DIR) not in sys.path:
 # ---------------------------------------------------------------------------
 
 
-class _PatchEnv:
-    """Context manager to temporarily set / restore environment variables."""
-
-    def __init__(self, env: dict):
-        self._env = env
-        self._saved: dict = {}
-
-    def __enter__(self):
-        for k, v in self._env.items():
-            self._saved[k] = os.environ.get(k)
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
-        return self
-
-    def __exit__(self, *_):
-        for k, saved_v in self._saved.items():
-            if saved_v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = saved_v
-
-
 def _load_hook(*, workspace: Path, home: Path) -> object:
     """Load write-dispatcher-session-id.py with test-controlled paths.
 
     Returns the loaded module. Uses a unique name to avoid sys.modules
     pollution between test calls.
 
-    NOTE: callers must wrap the mod.main() call inside a _PatchEnv context
-    that sets LOBSTER_WORKSPACE and HOME, because write_dispatcher_claude_session_id
-    resolves the primary file path at call time from LOBSTER_WORKSPACE.
+    LOBSTER_WORKSPACE and HOME are set via patch.dict(os.environ) during module
+    load, and callers set them via monkeypatch.setenv before calling mod.main(),
+    so write_dispatcher_claude_session_id resolves the primary file path at call
+    time using the test-controlled env values.
     """
     import uuid
 
@@ -93,7 +70,7 @@ def _load_hook(*, workspace: Path, home: Path) -> object:
         "LOBSTER_MAIN_SESSION": "1",
     }
     unique_name = f"write_dispatcher_session_id_{uuid.uuid4().hex}"
-    with _PatchEnv(env):
+    with patch.dict(os.environ, env):
         spec = importlib.util.spec_from_file_location(unique_name, _HOOK_PATH)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
@@ -344,11 +321,10 @@ class TestPrimaryFileNotWrittenForSubagent:
 
         mod = _load_hook(workspace=tmp_path, home=tmp_path)
 
-        env_override = {"LOBSTER_MAIN_SESSION": None}
-        with _PatchEnv(env_override):
-            with patch("sys.stdin", __import__("io").StringIO(hook_input)):
-                with pytest.raises(SystemExit):
-                    mod.main()
+        monkeypatch.delenv("LOBSTER_MAIN_SESSION", raising=False)
+        with patch("sys.stdin", __import__("io").StringIO(hook_input)):
+            with pytest.raises(SystemExit):
+                mod.main()
 
         primary_file = tmp_path / "data" / "dispatcher-claude-session-id"
         assert not primary_file.exists(), (
