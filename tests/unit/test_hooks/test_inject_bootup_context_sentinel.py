@@ -207,6 +207,12 @@ class TestMainSentinelFallback:
             mod.USER_BASE_BOOTUP = tmp_path / "no-user-base"
             mod.USER_DISPATCHER_BOOTUP = tmp_path / "no-user-dispatcher"
             mod.USER_SUBAGENT_BOOTUP = tmp_path / "no-user-subagent"
+            # Redirect DISPATCHER_SESSION_FILE to tmp_path so the sentinel-triggered
+            # write_dispatcher_session_id() call does not corrupt the production state
+            # file at ~/messages/config/dispatcher-session-id.
+            mod.session_role.DISPATCHER_SESSION_FILE = (
+                tmp_path / "messages" / "config" / "dispatcher-session-id"
+            )
 
             with patch("sys.stdin", io.StringIO(hook_input)):
                 with pytest.raises(SystemExit):
@@ -263,6 +269,11 @@ class TestMainSentinelFallback:
             mod.USER_BASE_BOOTUP = tmp_path / "no-user-base"
             mod.USER_DISPATCHER_BOOTUP = tmp_path / "no-user-dispatcher"
             mod.USER_SUBAGENT_BOOTUP = tmp_path / "no-user-subagent"
+            # Redirect DISPATCHER_SESSION_FILE defensively even though is_dispatcher()
+            # returns False here (no write occurs), so future changes can't regress.
+            mod.session_role.DISPATCHER_SESSION_FILE = (
+                tmp_path / "messages" / "config" / "dispatcher-session-id"
+            )
 
             with patch("sys.stdin", io.StringIO(hook_input)):
                 with pytest.raises(SystemExit):
@@ -309,6 +320,11 @@ class TestMainSentinelFallback:
             mod.USER_BASE_BOOTUP = tmp_path / "no-user-base"
             mod.USER_DISPATCHER_BOOTUP = tmp_path / "no-user-dispatcher"
             mod.USER_SUBAGENT_BOOTUP = tmp_path / "no-user-subagent"
+            # Redirect DISPATCHER_SESSION_FILE defensively even though is_dispatcher()
+            # returns False here (no write occurs), so future changes can't regress.
+            mod.session_role.DISPATCHER_SESSION_FILE = (
+                tmp_path / "messages" / "config" / "dispatcher-session-id"
+            )
 
             with patch("sys.stdin", io.StringIO(hook_input)):
                 with pytest.raises(SystemExit):
@@ -353,6 +369,15 @@ class TestMainSentinelFallback:
             mod.USER_BASE_BOOTUP = tmp_path / "no-user-base"
             mod.USER_DISPATCHER_BOOTUP = tmp_path / "no-user-dispatcher"
             mod.USER_SUBAGENT_BOOTUP = tmp_path / "no-user-subagent"
+            # Redirect DISPATCHER_SESSION_FILE to tmp_path so the dispatcher write
+            # that happens when is_dispatcher() returns True does not corrupt the
+            # production state file at ~/messages/config/dispatcher-session-id.
+            # This is the test that caused the 2026-05-01 incident: the primary
+            # file matched "known-dispatcher-uuid-abc", triggering write_dispatcher_
+            # session_id() which overwrote the live dispatcher's session ID.
+            mod.session_role.DISPATCHER_SESSION_FILE = (
+                tmp_path / "messages" / "config" / "dispatcher-session-id"
+            )
 
             with patch("sys.stdin", io.StringIO(hook_input)):
                 with pytest.raises(SystemExit):
