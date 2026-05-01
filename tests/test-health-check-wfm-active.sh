@@ -59,7 +59,7 @@ assert_exit() {
 # Source check_dispatcher_heartbeat() from the health check script.
 LOG_FILE="$TEST_LOG_DIR/health-check.log"
 DISPATCHER_HEARTBEAT_STALE_SECONDS=1200
-WFM_ACTIVE_STALE_SECONDS=180
+WFM_ACTIVE_STALE_SECONDS=600
 
 log()       { echo "[$1] $2" >> "$LOG_FILE" 2>/dev/null; }
 log_info()  { log INFO "$1"; }
@@ -102,9 +102,9 @@ assert_exit "$rc" 0
 # -------------------------------------------------------------------
 # Test 3: Stale heartbeat + stale WFM-active → RED (both stale = frozen)
 # -------------------------------------------------------------------
-begin_test "Stale heartbeat + stale WFM-active (600s old) → RED"
+begin_test "Stale heartbeat + stale WFM-active ($(( WFM_ACTIVE_STALE_SECONDS + 120 ))s old) → RED"
 write_stale_heartbeat
-echo "$(( $(date +%s) - 600 ))" > "$DISPATCHER_WFM_ACTIVE_FILE"
+echo "$(( $(date +%s) - (WFM_ACTIVE_STALE_SECONDS + 120) ))" > "$DISPATCHER_WFM_ACTIVE_FILE"
 check_dispatcher_heartbeat && rc=$? || rc=$?
 assert_exit "$rc" 2
 
@@ -131,7 +131,7 @@ assert_exit "$rc" 0
 # -------------------------------------------------------------------
 begin_test "Fresh heartbeat → GREEN regardless of WFM-active"
 write_fresh_heartbeat
-echo "$(( $(date +%s) - 600 ))" > "$DISPATCHER_WFM_ACTIVE_FILE"  # stale WFM-active
+echo "$(( $(date +%s) - (WFM_ACTIVE_STALE_SECONDS + 120) ))" > "$DISPATCHER_WFM_ACTIVE_FILE"  # stale WFM-active
 check_dispatcher_heartbeat && rc=$? || rc=$?
 assert_exit "$rc" 0
 
