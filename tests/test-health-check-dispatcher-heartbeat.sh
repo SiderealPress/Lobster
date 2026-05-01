@@ -59,7 +59,7 @@ DISPATCHER_HEARTBEAT_STALE_SECONDS=1200
 # WFM-active variables (issue #1713): must match the values in health-check-v3.sh.
 # Default to an absent file so existing heartbeat tests are unaffected.
 DISPATCHER_WFM_ACTIVE_FILE="$TEST_LOG_DIR/dispatcher-wfm-active-ABSENT"
-WFM_ACTIVE_STALE_SECONDS=180
+WFM_ACTIVE_STALE_SECONDS=600
 
 log()       { echo "[$1] $2" >> "$LOG_FILE" 2>/dev/null; }
 log_info()  { log INFO "$1"; }
