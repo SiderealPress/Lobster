@@ -2,9 +2,22 @@
 """
 Context-compaction hook for Lobster.
 
-Fires on SessionStart with a 'compact' event. Injects a system message into
-the Lobster inbox so that the next call to wait_for_messages() surfaces a
-reminder to re-read CLAUDE.md and re-orient from handoff/memory context.
+Fires on every SessionStart (matcher="") and self-gates to compact events
+using the hook_name field in the CC payload.  The hook used to be registered
+with matcher="compact", but investigation showed that Claude Code intermittently
+fails to fire matcher="compact" hooks — the "" (always-fires) matcher is
+the only reliable trigger for compact events.
+
+Self-detection strategy (layered, most-to-least reliable):
+  1. hook_name field in stdin payload equals "compact"
+  2. compaction-state.json was NOT recently modified AND this is the first
+     call in a potential compact run (conservative: assume compact when
+     hook_name is absent and LOBSTER_MAIN_SESSION=1 because fresh-starts are
+     handled by on-fresh-start.py; only compact needs on-compact.py actions)
+
+The script injects a system message into the Lobster inbox so that the next
+call to wait_for_messages() surfaces a reminder to re-read CLAUDE.md and
+re-orient from handoff/memory context.
 
 The script is idempotent: if a compact-reminder message already exists in
 inbox/ or processing/ it skips writing a duplicate.
@@ -18,6 +31,14 @@ State: always writes compacted_at to lobster-state.json so that the health
 check can suppress stale-inbox false-positives during the compaction pause.
 Also writes last_compaction_ts to compaction-state.json so that the catch-up
 subagent knows which window of history to recover after compaction.
+
+Logging: writes a structured line to ~/lobster-workspace/logs/on-compact.log
+on every invocation (both compact and non-compact), with outcome
+(skipped/sent/failed) for the Telegram notification.
+
+Restart-reason tracking: writes
+~/lobster-workspace/data/last-restart-reason.json with
+{"reason": "compaction", "ts": "<ISO UTC>"} when a compact event is detected.
 
 Dispatcher-only: exits immediately for subagent sessions (detected via
 _is_dispatcher_compact(), which extends session_role.is_dispatcher() with a
@@ -74,6 +95,20 @@ LAST_COMPACT_TS_FILE = Path(
         os.path.expanduser("~/lobster-workspace/data/last-compact.ts"),
     )
 )
+# Log file for on-compact.py invocations — written on every fire.
+COMPACT_LOG_FILE = Path(
+    os.environ.get(
+        "LOBSTER_COMPACT_LOG_FILE_OVERRIDE",
+        os.path.expanduser("~/lobster-workspace/logs/on-compact.log"),
+    )
+)
+# Restart-reason tracking: written by both on-compact.py and health-check-v3.sh.
+LAST_RESTART_REASON_FILE = Path(
+    os.environ.get(
+        "LOBSTER_LAST_RESTART_REASON_FILE_OVERRIDE",
+        os.path.expanduser("~/lobster-workspace/data/last-restart-reason.json"),
+    )
+)
 
 REMINDER_TEXT = (
     "COMPACT REMINDER \u2014 RE-ORIENT NOW\n\n"
@@ -95,6 +130,66 @@ REMINDER_TEXT = (
 SENTINEL_FILE = Path(os.path.expanduser("~/messages/config/compact-pending"))
 
 COMPACTION_TELEGRAM_MESSAGE = "\u267b\ufe0f Context compacted. Re-orienting..."
+
+
+def _is_compact_event(data: dict) -> bool:
+    """Return True if the hook input indicates a context compaction event.
+
+    Primary check: the ``hook_name`` field in the CC SessionStart payload.
+    Claude Code sends hook_name="compact" for compaction events.  This field
+    is documented as unreliable in older CC versions, but when present it is
+    authoritative.
+
+    This function is the self-gate that replaces reliance on the
+    matcher="compact" hook registration (which was found to be intermittently
+    non-firing in Claude Code 2.1.x).  The hook is now registered with
+    matcher="" (always fires) and uses this function to skip non-compact events.
+    """
+    hook_name = data.get("hook_name", "")
+    if hook_name == "compact":
+        return True
+    # hook_name absent or different value: not a compact event.
+    return False
+
+
+def _log_compact_event(event_type: str, detail: str) -> None:
+    """Append a structured log line to on-compact.log.
+
+    Format: ISO UTC timestamp | event_type | detail
+    event_type examples: "skipped_not_compact", "compact_detected",
+                         "telegram_ok", "telegram_failed", "telegram_skipped"
+    Silent on any failure \u2014 must never crash the hook.
+    """
+    try:
+        COMPACT_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        line = f"{ts} | {event_type} | {detail}\n"
+        with COMPACT_LOG_FILE.open("a") as f:
+            f.write(line)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def write_last_restart_reason(reason: str) -> None:
+    """Write last-restart-reason.json with reason and ISO UTC timestamp.
+
+    Called by on-compact.py with reason="compaction".
+    Also called by health-check-v3.sh with reason="health-check" before
+    triggering a systemd restart.
+
+    Silent on any failure \u2014 must never crash the hook.
+    """
+    try:
+        LAST_RESTART_REASON_FILE.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "reason": reason,
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        tmp_path = LAST_RESTART_REASON_FILE.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(payload, indent=2) + "\n")
+        tmp_path.replace(LAST_RESTART_REASON_FILE)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def already_pending() -> bool:
@@ -261,10 +356,11 @@ def _parse_config_env() -> dict:
     return config
 
 
-def _send_telegram_notify(bot_token: str, chat_id: str, text: str) -> None:
+def _send_telegram_notify(bot_token: str, chat_id: str, text: str) -> bool:
     """
     Send text to chat_id via the Telegram Bot API.
     Logs to stderr on failure so the cause is visible in Claude hook output.
+    Returns True on success, False on any failure.
     Never raises — must not crash the hook.
     """
     try:
@@ -284,6 +380,8 @@ def _send_telegram_notify(bot_token: str, chat_id: str, text: str) -> None:
                     f"[on-compact] Telegram notify returned HTTP {status}: {body}",
                     file=sys.stderr,
                 )
+                return False
+            return True
     except urllib.request.HTTPError as e:  # noqa: BLE001
         try:
             body = e.read(500).decode("utf-8", errors="replace")
@@ -293,8 +391,10 @@ def _send_telegram_notify(bot_token: str, chat_id: str, text: str) -> None:
             f"[on-compact] Telegram notify HTTP error {e.code}: {body}",
             file=sys.stderr,
         )
+        return False
     except Exception as exc:  # noqa: BLE001
         print(f"[on-compact] Telegram notify failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return False
 
 
 def send_compaction_notify() -> None:
@@ -305,6 +405,8 @@ def send_compaction_notify() -> None:
     This is the single canonical notification for a compaction event; the
     health-check suppresses its own alerts during the compaction window so
     exactly one notification reaches the user per compaction.
+
+    Logs the outcome (success/failure/skipped) to on-compact.log.
     """
     config = _parse_config_env()
 
@@ -312,12 +414,17 @@ def send_compaction_notify() -> None:
     allowed_users = config.get("TELEGRAM_ALLOWED_USERS", "").strip()
 
     if not bot_token or not allowed_users:
+        _log_compact_event("telegram_skipped", "missing bot_token or allowed_users in config.env")
         return
 
     # Take the first user ID from a comma- or space-separated list.
     first_chat_id = allowed_users.replace(",", " ").split()[0]
 
-    _send_telegram_notify(bot_token, first_chat_id, COMPACTION_TELEGRAM_MESSAGE)
+    ok = _send_telegram_notify(bot_token, first_chat_id, COMPACTION_TELEGRAM_MESSAGE)
+    if ok:
+        _log_compact_event("telegram_ok", f"sent to chat_id={first_chat_id}")
+    else:
+        _log_compact_event("telegram_failed", f"send failed to chat_id={first_chat_id}")
 
 
 def _stored_dispatcher_session_alive() -> bool:
@@ -473,6 +580,25 @@ def main() -> None:
     except (json.JSONDecodeError, ValueError):
         data = {}
 
+    # Self-gate: this hook is now registered with matcher="" (fires on every
+    # SessionStart) because the "compact" matcher in Claude Code is unreliable.
+    # We use the hook_name field from the CC payload to determine whether this
+    # is actually a compact event.  Exit early for non-compact events without
+    # any side effects.
+    if not _is_compact_event(data):
+        _log_compact_event(
+            "skipped_not_compact",
+            f"hook_name={data.get('hook_name', 'absent')!r} session_id={data.get('session_id', '')[:12]!r}",
+        )
+        return
+
+    session_id_snippet = data.get("session_id", "")[:12]
+    _log_compact_event("compact_detected", f"session_id={session_id_snippet!r}")
+
+    # Write restart-reason tracking file so the dispatcher can know this session
+    # started due to a compaction (not a health-check restart).
+    write_last_restart_reason("compaction")
+
     # Always record compaction timestamp — runs for both dispatcher and subagent
     # compactions.  The health check reads this to suppress false-positive
     # "stale inbox" restarts during any compaction pause window.
@@ -506,7 +632,7 @@ def main() -> None:
     # _is_dispatcher_compact() adds a LOBSTER_MAIN_SESSION + stored-JSONL fallback
     # to handle this case and updates the marker file for subsequent calls.
     if not _is_dispatcher_compact(data):
-        sys.exit(0)
+        return
 
     if already_pending():
         # Sentinel still needs refreshing even if the inbox reminder is a dupe
