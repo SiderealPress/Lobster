@@ -55,7 +55,7 @@ _HOOKS_DIR = Path(__file__).parent
 if str(_HOOKS_DIR) not in sys.path:
     sys.path.insert(0, str(_HOOKS_DIR))
 
-from session_role import is_dispatcher, is_dispatcher_session  # noqa: E402
+from session_role import is_dispatcher_session  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -147,7 +147,7 @@ def handle_pre_tool_use(hook_input: dict) -> None:
 
 def handle_post_tool_use(hook_input: dict) -> None:
     """Write WFM_EXIT event with duration and message count."""
-    if not is_dispatcher(hook_input):
+    if not is_dispatcher_session(hook_input):
         return
 
     now_epoch = time.time()
