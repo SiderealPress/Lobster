@@ -12,9 +12,16 @@ silently ignored.
 When the marker file is absent (fresh dispatcher start), the current
 session_id matches the stored dispatcher ID, or the stored dispatcher session
 has ended (its .jsonl file is gone from ~/.claude/projects/), writes
-session_id to ~/messages/config/dispatcher-session-id. This file is the
-primary signal that other hooks use to distinguish the dispatcher from
-subagents.
+session_id to two files:
+- ~/messages/config/dispatcher-session-id (tertiary hook marker file)
+- $LOBSTER_WORKSPACE/data/dispatcher-claude-session-id (primary Claude UUID state file)
+
+The primary file write (issue #1903) ensures that inject-bootup-context.py
+(Hook 2, which runs after this hook) finds the correct UUID in the primary
+file even when the MCP server kept running across a CC restart, leaving a
+stale UUID in the primary file. Without this write, the fresh-start fallback
+in inject-bootup-context.py cannot help (the file exists with a wrong UUID,
+not absent), causing dispatcher sessions to receive subagent bootup.
 
 ## Subagent sessions
 
@@ -85,6 +92,14 @@ sys.path.insert(0, str(_SRC_DIR))
 
 import session_role  # noqa: E402 — path insert must precede this
 from agents import session_store  # noqa: E402
+
+# Import the primary-file writer used by on-compact.py for the same purpose.
+# write_dispatcher_claude_session_id writes the Claude UUID to the primary state
+# file (dispatcher-claude-session-id), which is the file checked first by
+# inject-bootup-context.py (Hook 2) when deciding whether to inject dispatcher
+# or subagent bootup. Writing it here (Hook 1) ensures the primary file is
+# up-to-date before Hook 2 runs, fixing the stale-UUID bug described in #1903.
+from session_role import write_dispatcher_claude_session_id  # noqa: E402
 
 # A JSONL file not modified for longer than this is treated as belonging to an
 # idle or dead session.  Active dispatcher sessions append to their JSONL on
@@ -195,6 +210,16 @@ def main() -> None:
 
     if _is_dispatcher_session(session_id):
         session_role.write_dispatcher_session_id(session_id)
+        # Issue #1903: also write the primary Claude UUID state file
+        # (dispatcher-claude-session-id) so that inject-bootup-context.py
+        # (Hook 2, which runs after this hook) finds the correct UUID in the
+        # primary file.  Without this, when CC restarts while MCP keeps running,
+        # the primary file retains the old dispatcher UUID (stale, not absent),
+        # causing both the primary check and the fresh-start fallback to fail —
+        # and subagent bootup to be injected instead of dispatcher bootup.
+        # This mirrors the same write that on-compact.py performs for the
+        # post-compaction case (Option 1, issue #1375).
+        write_dispatcher_claude_session_id(session_id)
         # Issue #781 Fix 2: also tag this session in agent_sessions.db as
         # 'dispatcher' so the reconciler never emits agent_failed for it.
         _register_dispatcher_session(session_id)
