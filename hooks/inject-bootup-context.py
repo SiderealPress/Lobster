@@ -36,6 +36,7 @@ case and ensures dispatcher bootup is always injected when it should be.
 import json
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Allow imports from the hooks directory (session_role).
@@ -54,6 +55,13 @@ USER_DISPATCHER_BOOTUP = USER_CONFIG_DIR / "user.dispatcher.bootup.md"
 USER_SUBAGENT_BOOTUP = USER_CONFIG_DIR / "user.subagent.bootup.md"
 
 HOOK_NAME = "inject-bootup-context"
+
+# Append-only log of context injections — one line per hook run.
+# Populated at import time so tests can override by setting mod.CONTEXT_INJECTION_LOG.
+_LOBSTER_WORKSPACE = Path(
+    os.environ.get("LOBSTER_WORKSPACE", Path.home() / "lobster-workspace")
+)
+CONTEXT_INJECTION_LOG = _LOBSTER_WORKSPACE / "logs" / "context-injection.log"
 
 # Compact-pending sentinel written by on-compact.py for dispatcher compactions only.
 # Used as the Option 3 fallback: sentinel present + LOBSTER_MAIN_SESSION=1 → dispatcher.
@@ -108,19 +116,51 @@ def _read_file_safe(path: Path, label: str) -> str | None:
         return None
 
 
-def _inject_if_exists(path: Path, label: str) -> None:
-    """Read and print file contents if the file exists and is non-empty. Silent skip otherwise."""
+def _inject_if_exists(path: Path, label: str) -> bool:
+    """Read and print file contents if the file exists and is non-empty.
+
+    Returns True if the file was successfully injected, False otherwise.
+    Silent skip when the file is absent.
+    """
     if not path.exists():
-        return
+        return False
     try:
         content = path.read_text()
         if content.strip():
             print(content)
+            return True
+        return False
     except OSError as exc:
         print(
             f"[{HOOK_NAME}] WARNING: could not read {path} ({label}): {exc}",
             file=sys.stderr,
         )
+        return False
+
+
+def _append_injection_log(
+    session_id: str,
+    role: str,
+    injected_files: list[str],
+) -> None:
+    """Append one line to the context injection log.
+
+    Format:
+      <ISO UTC timestamp> | session=<id> | role=<role> | injected=[file1, file2, ...]
+
+    Creates the log file and any missing parent directories if needed.
+    Errors are swallowed — logging must never break the hook.
+    """
+    try:
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        files_repr = "[" + ", ".join(injected_files) + "]"
+        line = f"{timestamp} | session={session_id} | role={role} | injected={files_repr}\n"
+        log_path = CONTEXT_INJECTION_LOG
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a") as fh:
+            fh.write(line)
+    except Exception:  # noqa: BLE001
+        pass  # logging must not break injection
 
 
 def main() -> None:
@@ -129,6 +169,8 @@ def main() -> None:
         hook_input = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError):
         hook_input = {}
+
+    session_id = hook_input.get("session_id", "unknown")
 
     is_dispatcher = session_role.is_dispatcher(hook_input)
 
@@ -149,30 +191,41 @@ def main() -> None:
     # This makes the hook self-sufficient regardless of whether
     # write-dispatcher-session-id.py ran first. The write is idempotent.
     if is_dispatcher:
-        session_id = session_role.get_session_id(hook_input)
-        if session_id:
-            session_role.write_dispatcher_session_id(session_id)
+        sid = session_role.get_session_id(hook_input)
+        if sid:
+            session_role.write_dispatcher_session_id(sid)
+
+    role = "dispatcher" if is_dispatcher else "subagent"
+    injected: list[str] = []
 
     # 1. Inject system bootup file based on role.
     if is_dispatcher:
         content = _read_file_safe(DISPATCHER_BOOTUP, "sys.dispatcher.bootup.md")
+        system_file = DISPATCHER_BOOTUP
     else:
         content = _read_file_safe(SUBAGENT_BOOTUP, "sys.subagent.bootup.md")
+        system_file = SUBAGENT_BOOTUP
 
     if content is None:
+        _append_injection_log(session_id, role, injected)
         sys.exit(0)
 
     print(content)
+    injected.append(system_file.name)
 
     # 2. Inject user base bootup (both roles).
-    _inject_if_exists(USER_BASE_BOOTUP, "user.base.bootup.md")
+    if _inject_if_exists(USER_BASE_BOOTUP, "user.base.bootup.md"):
+        injected.append(USER_BASE_BOOTUP.name)
 
     # 3. Inject role-specific user bootup.
     if is_dispatcher:
-        _inject_if_exists(USER_DISPATCHER_BOOTUP, "user.dispatcher.bootup.md")
+        if _inject_if_exists(USER_DISPATCHER_BOOTUP, "user.dispatcher.bootup.md"):
+            injected.append(USER_DISPATCHER_BOOTUP.name)
     else:
-        _inject_if_exists(USER_SUBAGENT_BOOTUP, "user.subagent.bootup.md")
+        if _inject_if_exists(USER_SUBAGENT_BOOTUP, "user.subagent.bootup.md"):
+            injected.append(USER_SUBAGENT_BOOTUP.name)
 
+    _append_injection_log(session_id, role, injected)
     sys.exit(0)
 
 
