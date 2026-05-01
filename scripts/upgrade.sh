@@ -2767,6 +2767,51 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
         substep "Migration 90: settings.json, jq, or wfm-lifecycle-logger.py not found — skipping"
     fi
 
+    # Migration 91: Register pretooluse-heartbeat.py PreToolUse hook (issue #1439).
+    # This hook was added to install.sh in PR #1896 but was missing from upgrade.sh,
+    # so existing installs never had it registered in settings.json.
+    # Writes last_pretooluse_at to lobster-state.json before every tool call, enabling
+    # narrower detection of MCP-disconnect freezes where PostToolUse never fires.
+    local _m91_hook="$LOBSTER_DIR/hooks/pretooluse-heartbeat.py"
+    if [ -f "$CLAUDE_SETTINGS" ] && command -v jq &>/dev/null && [ -f "$_m91_hook" ]; then
+        local _m91_present
+        _m91_present=$(jq -r '
+            [.hooks.PreToolUse[]?.hooks[]? |
+             select((.command // "") | contains("pretooluse-heartbeat"))]
+            | length' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
+
+        if [[ "${_m91_present:-0}" -gt 0 ]]; then
+            substep "Migration 91: pretooluse-heartbeat hook already registered — skipping"
+        else
+            local _m91_tmp
+            _m91_tmp=$(mktemp)
+            local _m91_cmd="python3 $_m91_hook"
+
+            if jq --arg cmd "$_m91_cmd" '
+                .hooks.PreToolUse = (
+                    (.hooks.PreToolUse // []) +
+                    [{
+                        "matcher": "",
+                        "hooks": [{
+                            "type": "command",
+                            "command": $cmd,
+                            "timeout": 5
+                        }]
+                    }]
+                )
+            ' "$CLAUDE_SETTINGS" > "$_m91_tmp" \
+                && mv "$_m91_tmp" "$CLAUDE_SETTINGS" 2>/dev/null; then
+                substep "Migration 91: pretooluse-heartbeat hook registered in settings.json"
+                migrated=$((migrated + 1))
+            else
+                rm -f "$_m91_tmp" 2>/dev/null || true
+                warn "Migration 91: could not update settings.json — jq transform failed"
+            fi
+        fi
+    else
+        substep "Migration 91: settings.json, jq, or pretooluse-heartbeat.py not found — skipping"
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
