@@ -241,7 +241,12 @@ class TestFullTelegramRoundtrip:
 
         reply = json.loads(outbox_files[0].read_text())
         assert reply["chat_id"] == 123456
-        assert reply["text"] == "It's 12:00 PM!"
+        # Strip optional debug prefix ([dispatcher] or [agent:...]) that is
+        # added when LOBSTER_DEBUG=true, so the assertion is env-agnostic.
+        reply_text = reply["text"]
+        if reply_text.startswith("[") and "] " in reply_text:
+            reply_text = reply_text.split("] ", 1)[1]
+        assert reply_text == "It's 12:00 PM!"
 
         # Step 4: Verify inbox is empty, processed has message
         assert len(list(inbox.glob("*.json"))) == 0
