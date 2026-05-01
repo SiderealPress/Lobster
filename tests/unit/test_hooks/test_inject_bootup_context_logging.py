@@ -104,12 +104,11 @@ def _run_hook(
     lobster_workspace.mkdir(parents=True, exist_ok=True)
     (lobster_workspace / "logs").mkdir(parents=True, exist_ok=True)
 
-    # Startup flag and data dir must live under LOBSTER_WORKSPACE/data/
-    # (inject-bootup-context.py resolves STARTUP_FLAG_FILE relative to LOBSTER_WORKSPACE)
+    # Primary state file must live under LOBSTER_WORKSPACE/data/
+    # (session_role reads LOBSTER_WORKSPACE from env at call time)
     ws_data_dir = lobster_workspace / "data"
     ws_data_dir.mkdir(parents=True, exist_ok=True)
     if dispatcher_uuid:
-        # Legacy: write UUID file for compatibility with tests that don't use startup flag.
         (ws_data_dir / "dispatcher-claude-session-id").write_text(dispatcher_uuid)
 
     config_dir = tmp_path / "messages" / "config"
@@ -133,18 +132,12 @@ def _run_hook(
 
         mod.DISPATCHER_BOOTUP = dispatcher_bootup
         mod.SUBAGENT_BOOTUP = subagent_bootup
+        mod.COMPACT_PENDING_SENTINEL = tmp_path / "no-sentinel"
         mod.USER_CONFIG_DIR = tmp_path / "no-user-config"
         mod.USER_BASE_BOOTUP = tmp_path / "no-user-base"
         mod.USER_DISPATCHER_BOOTUP = tmp_path / "no-user-dispatcher"
         mod.USER_SUBAGENT_BOOTUP = tmp_path / "no-user-subagent"
         mod.CONTEXT_INJECTION_LOG = log_path
-
-        # Issue #1908: startup flag is now the sole dispatcher detection mechanism.
-        # Override STARTUP_FLAG_FILE and write current PID to simulate dispatcher.
-        if is_dispatcher_session:
-            startup_flag = ws_data_dir / "dispatcher-startup-flag"
-            startup_flag.write_text(str(os.getpid()))
-            mod.STARTUP_FLAG_FILE = startup_flag
 
         stdin_data = json.dumps(hook_input)
         with patch("sys.stdin", io.StringIO(stdin_data)):
@@ -321,27 +314,24 @@ class TestRoleField:
         )
 
     def test_role_is_subagent_for_non_dispatcher_session(self, tmp_path, capsys):
-        """role=subagent when no startup flag is present (session is a subagent).
-
-        Issue #1908: dispatcher detection uses PID-based startup flag only.
-        Subagents are sessions that were NOT launched via claude-persistent.sh,
-        so no startup flag is present.
-        """
+        """role=subagent when session UUID does not match dispatcher UUID."""
         log_dir = tmp_path / "lobster-workspace" / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / "context-injection.log"
 
-        # No startup flag written — this session is a subagent.
+        # Write dispatcher UUID to primary file — subagent has a different UUID
+        dispatcher_uuid = "real-dispatcher-uuid-abc"
         _run_hook(
             tmp_path,
             hook_input={"session_id": "subagent-uuid-different"},
-            is_dispatcher_session=False,
+            dispatcher_uuid=dispatcher_uuid,
+            is_dispatcher_session=True,
             log_path=log_path,
         )
 
         line = log_path.read_text().strip()
         assert "role=subagent" in line, (
-            f"Expected 'role=subagent' for subagent session (no startup flag), got: {line!r}"
+            f"Expected 'role=subagent' for non-dispatcher session, got: {line!r}"
         )
 
 
@@ -359,11 +349,13 @@ class TestInjectedFilesList:
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / "context-injection.log"
 
-        # Subagent session — no startup flag written (issue #1908: flag is sole detection)
+        # Subagent session — primary file present with different UUID
+        dispatcher_uuid = "disp-uuid-xyz"
         _run_hook(
             tmp_path,
             hook_input={"session_id": "subagent-session-id"},
-            is_dispatcher_session=False,
+            dispatcher_uuid=dispatcher_uuid,
+            is_dispatcher_session=True,
             log_path=log_path,
         )
 
@@ -554,11 +546,12 @@ class TestStdoutUnchanged:
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / "context-injection.log"
 
-        # Subagent session — no startup flag (issue #1908: flag is sole detection)
+        dispatcher_uuid = "stdout-test-disp-for-subagent"
         _run_hook(
             tmp_path,
             hook_input={"session_id": "subagent-stdout-test"},
-            is_dispatcher_session=False,
+            dispatcher_uuid=dispatcher_uuid,
+            is_dispatcher_session=True,
             log_path=log_path,
         )
 
