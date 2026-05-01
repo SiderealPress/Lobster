@@ -145,7 +145,12 @@ class TestMCPToolFlow:
             assert len(outbox_files) == 1
 
             reply_content = json.loads(outbox_files[0].read_text())
-            assert reply_content["text"] == "It's sunny today!"
+            # Strip optional debug prefix ([dispatcher] or [agent:...]) that is
+            # added when LOBSTER_DEBUG=true, so the assertion is env-agnostic.
+            reply_text = reply_content["text"]
+            if reply_text.startswith("[") and "] " in reply_text:
+                reply_text = reply_text.split("] ", 1)[1]
+            assert reply_text == "It's sunny today!"
             assert reply_content["chat_id"] == 123456
 
     @pytest.mark.asyncio

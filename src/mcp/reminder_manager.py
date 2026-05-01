@@ -92,15 +92,21 @@ def _validate_reminder_type(reminder_type: str) -> Optional[str]:
     return None
 
 
-def _validate_fire_time(fire_time_utc: str) -> Optional[str]:
-    """Return error string or None if the fire_time_utc is a valid future UTC ISO 8601 string."""
+def _validate_fire_time(fire_time_utc: str, now_utc: Optional[datetime] = None) -> Optional[str]:
+    """Return error string or None if the fire_time_utc is a valid future UTC ISO 8601 string.
+
+    Args:
+        fire_time_utc: ISO 8601 UTC string to validate.
+        now_utc: Reference "now" for the future check. Defaults to datetime.now(timezone.utc).
+            Pass an explicit value in tests to make the check deterministic.
+    """
     if not fire_time_utc:
         return "fire_time_utc cannot be empty"
     try:
         dt = _parse_fire_time(fire_time_utc)
     except ValueError as exc:
         return f"fire_time_utc is not a valid ISO 8601 UTC datetime: {exc}"
-    now = datetime.now(tz=timezone.utc)
+    now = now_utc if now_utc is not None else datetime.now(tz=timezone.utc)
     if dt <= now:
         return f"fire_time_utc must be in the future (got {fire_time_utc!r})"
     return None
@@ -234,12 +240,13 @@ async def create_reminder(
     err = _validate_reminder_type(reminder_type)
     if err:
         raise ValueError(err)
-    err = _validate_fire_time(fire_time_utc)
-    if err:
-        raise ValueError(err)
 
     if now_utc is None:
         now_utc = datetime.now(tz=timezone.utc)
+
+    err = _validate_fire_time(fire_time_utc, now_utc=now_utc)
+    if err:
+        raise ValueError(err)
 
     reminder_id = _make_reminder_id(reminder_type, now_utc)
     job_name = _make_job_name(reminder_id)
