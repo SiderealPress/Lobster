@@ -10,17 +10,20 @@
 # "dispatcher idle in WFM" from "dispatcher frozen/dead".
 #
 # Tests:
-#   1. Stale heartbeat + absent WFM-active → RED (baseline, no change)
-#   2. Stale heartbeat + fresh WFM-active → GREEN (dispatcher is alive in WFM)
-#   3. Stale heartbeat + stale WFM-active → RED (WFM itself looks frozen)
-#   4. Stale heartbeat + non-integer WFM-active → RED (graceful: treat as stale)
-#   5. Stale heartbeat + empty WFM-active → RED (graceful: treat as stale)
-#   6. Fresh heartbeat + fresh WFM-active → GREEN (both fresh, no regression)
-#   7. DISPATCHER_WFM_ACTIVE_FILE can be set to a custom path
-#   8. WFM-active staleness threshold boundary: 1s before → GREEN
-#   9. WFM-active staleness threshold boundary: 1s after → RED
+#   1. Stale heartbeat + absent WFM-active → RED (original behavior preserved)
+#   2. Stale heartbeat + fresh WFM-active → GREEN (WFM suppression works)
+#   3. Stale heartbeat + stale WFM-active → RED (both stale = frozen)
+#   4. Stale heartbeat + WFM-active 1s past threshold → RED (boundary)
+#   5. Stale heartbeat + WFM-active 1s before threshold → GREEN (boundary)
+#   6. Fresh heartbeat ignores WFM-active (heartbeat alone = GREEN)
+#   7. LOBSTER_WFM_ACTIVE_OVERRIDE env var is respected
+#   8. WFM-active file with non-integer content → RED (treat as absent)
+#   9. WFM-active tombstone ('exited') with FRESH mtime → GREEN (issue #1884 midnight race fix)
+#  10. WFM-active tombstone ('exited') with OLD mtime → RED (grace period expired, treat as absent)
+#  11. TOCTOU race: file deleted mid-read → RED, not crash (Fix 1 regression test)
 #
 # Usage: bash tests/test-health-check-wfm-active.sh
+# Total tests: 11
 #===============================================================================
 
 set -u
@@ -56,7 +59,8 @@ assert_exit() {
 # Source check_dispatcher_heartbeat() from the health check script.
 LOG_FILE="$TEST_LOG_DIR/health-check.log"
 DISPATCHER_HEARTBEAT_STALE_SECONDS=1200
-WFM_ACTIVE_STALE_SECONDS=600
+WFM_ACTIVE_STALE_SECONDS=180
+WFM_TOMBSTONE_GRACE_SECONDS=30
 
 log()       { echo "[$1] $2" >> "$LOG_FILE" 2>/dev/null; }
 log_info()  { log INFO "$1"; }
@@ -217,19 +221,44 @@ check_dispatcher_heartbeat && rc=$? || rc=$?
 assert_exit "$rc" 2
 
 # -------------------------------------------------------------------
-# Test 9: TOCTOU fix — tombstone value ("exited") → treated as absent → RED
-# The finally block in inbox_server.py writes "exited" instead of deleting
-# the file, so the health check never sees a missing file mid-read.
-# The non-integer tombstone must be treated as absent (= WFM not active).
+# Test 9: Midnight race fix (issue #1884) — tombstone ('exited') with FRESH
+# file mtime → GREEN.
+#
+# At 00:00Z, scheduled jobs fire and wake wait_for_messages(). WFM writes
+# "exited" to dispatcher-wfm-active as it transitions to active processing.
+# The health-check cron also fires at 00:00Z. Previously, seeing "exited"
+# caused an unconditional RED (false-positive kill). With the fix, a fresh
+# tombstone mtime means the dispatcher just left WFM — grant a grace period.
+#
+# We create the file, set its mtime to "now" (default), and verify GREEN.
 # -------------------------------------------------------------------
-begin_test "WFM-active tombstone value 'exited' → treated as absent → RED"
+begin_test "WFM-active tombstone 'exited' with fresh mtime → GREEN (midnight race fix)"
 write_stale_heartbeat
 echo "exited" > "$DISPATCHER_WFM_ACTIVE_FILE"
+# mtime is "now" by default — within WFM_TOMBSTONE_GRACE_SECONDS
+check_dispatcher_heartbeat && rc=$? || rc=$?
+assert_exit "$rc" 0
+
+# -------------------------------------------------------------------
+# Test 10: Tombstone ('exited') with OLD file mtime → RED (grace expired).
+#
+# If the tombstone was written longer ago than WFM_TOMBSTONE_GRACE_SECONDS,
+# the dispatcher has been in the processing phase for a while — heartbeat
+# staleness is genuinely suspicious, not a WFM→processing transition artifact.
+# Treat as absent → RED.
+#
+# We backdate the file mtime by 120s (well past the 30s grace window).
+# -------------------------------------------------------------------
+begin_test "WFM-active tombstone 'exited' with old mtime → RED (grace period expired)"
+write_stale_heartbeat
+echo "exited" > "$DISPATCHER_WFM_ACTIVE_FILE"
+# Backdate mtime by 120s — well past WFM_TOMBSTONE_GRACE_SECONDS=30
+touch -d "$(date -d '120 seconds ago' '+%Y-%m-%d %H:%M:%S')" "$DISPATCHER_WFM_ACTIVE_FILE"
 check_dispatcher_heartbeat && rc=$? || rc=$?
 assert_exit "$rc" 2
 
 # -------------------------------------------------------------------
-# Test 10: TOCTOU race scenario — file present at check start, absent at read
+# Test 11: TOCTOU race scenario — file present at check start, absent at read
 #
 # Simulates the race window that caused the 2026-04-22 false-positive restart:
 # the WFM-active file exists when the health check starts, but is deleted
@@ -274,8 +303,5 @@ assert_exit "$rc" 2
 # Summary
 # -------------------------------------------------------------------
 echo ""
-echo "Results: $PASS/$TOTAL passed, $FAIL failed"
-if [[ $FAIL -gt 0 ]]; then
-    exit 1
-fi
-exit 0
+echo "Results: $PASS/$TOTAL passed, $FAIL failed  (expected 11)"
+[[ $FAIL -eq 0 ]] && exit 0 || exit 1
