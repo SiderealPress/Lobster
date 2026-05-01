@@ -101,15 +101,16 @@ HEARTBEAT_FILE="$WORKSPACE_DIR/logs/claude-heartbeat"   # legacy WFM-touch signa
 DISPATCHER_HEARTBEAT_FILE="${LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE:-$WORKSPACE_DIR/logs/dispatcher-heartbeat}"
 DISPATCHER_HEARTBEAT_STALE_SECONDS=600    # 10 min — covers compaction (~5m) + catchup margin; grace period handles the rest
 
-# WFM-active signal (issue #949): inbox_server.py writes this file with a Unix
-# epoch timestamp when wait_for_messages begins blocking and refreshes it every
-# 60s (WAIT_HEARTBEAT_INTERVAL). When this file is fresh, the dispatcher is alive
-# and waiting for messages — heartbeat staleness does NOT indicate a problem.
-# Threshold: 3x WAIT_HEARTBEAT_INTERVAL (180s) to absorb one missed refresh.
+# WFM-active signal (issue #1713 / #949): inbox_server.py writes this file with
+# a Unix epoch timestamp when wait_for_messages begins blocking and refreshes it
+# every WAIT_HEARTBEAT_INTERVAL (60s). When this file is fresh, the dispatcher is
+# alive and waiting for messages — heartbeat staleness is expected, not a problem.
+# Threshold: 10x WAIT_HEARTBEAT_INTERVAL — gives the dispatcher a 10-minute window
+# to be outside WFM (e.g. processing a message, startup compact-catchup) before
+# the health check fires.  3x was too tight and produced false-positive kills.
 # File is deleted by the MCP server when WFM returns (message arrived or timeout).
 DISPATCHER_WFM_ACTIVE_FILE="${LOBSTER_WFM_ACTIVE_OVERRIDE:-$WORKSPACE_DIR/logs/dispatcher-wfm-active}"
-# 3x WAIT_HEARTBEAT_INTERVAL (60s) — absorbs one missed tick
-WFM_ACTIVE_STALE_SECONDS=180
+WFM_ACTIVE_STALE_SECONDS=600   # 10x WAIT_HEARTBEAT_INTERVAL (60s) — 10-minute window
 
 OUTBOX_DIR="$MESSAGES_DIR/outbox"
 OUTBOX_STALE_THRESHOLD_SECONDS=900   # 15 min = RED
