@@ -18,7 +18,7 @@ Design:
 - Atomic write: write to .tmp, then os.rename() to avoid partial reads
 - Single integer timestamp — no JSON parsing, no merging, no state file locking
 - Silent on failure: health check degrades gracefully when file is absent
-- Threshold-based: the health check uses a 20-minute window that naturally
+- Threshold-based: the health check uses a 15-minute window that naturally
   covers compaction, catchup, and boot transitions without any suppression logic
 
 Dispatcher-only guard (issue #1897):
@@ -62,8 +62,8 @@ HEARTBEAT_FILE = Path(
 )
 
 # Sentinel threshold used in tests — not read here, but documents the expected value.
-# The health check uses DISPATCHER_HEARTBEAT_STALE_SECONDS = 1200 (20 minutes).
-DISPATCHER_HEARTBEAT_STALE_SECONDS = 1200
+# The health check uses DISPATCHER_HEARTBEAT_STALE_SECONDS = 900 (15 minutes).
+DISPATCHER_HEARTBEAT_STALE_SECONDS = 900
 
 
 def write_heartbeat(heartbeat_file: Path) -> None:

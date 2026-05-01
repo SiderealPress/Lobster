@@ -797,9 +797,9 @@ def normalize_message_type(msg: dict) -> dict:
 # Heartbeat file for health monitoring
 HEARTBEAT_FILE = _WORKSPACE / "logs" / "claude-heartbeat"
 
-# How often (in seconds) wait_for_messages touches heartbeats and refreshes
-# WFM-active during the blocking wait.  Exposed as a module-level constant so
-# tests can verify it matches the health-check's WFM_ACTIVE_STALE_SECONDS.
+# How often (in seconds) the daemon thread refreshes the dispatcher heartbeat
+# during the blocking wait.  Exposed as a module-level constant so tests can
+# verify it matches the health-check's DISPATCHER_HEARTBEAT_STALE_SECONDS.
 WAIT_HEARTBEAT_INTERVAL = 60
 
 # Idle timeout for the stateful StreamableHTTP session manager (issue #1823).
@@ -811,22 +811,22 @@ WAIT_HEARTBEAT_INTERVAL = 60
 # (20h) on every WFM entry — see the deadline extension block there (issue #1876).
 SESSION_IDLE_TIMEOUT_SECONDS = 1200
 
-# WFM-active signal file (issue #1713 / #949): written with a Unix epoch
-# timestamp when wait_for_messages begins blocking, refreshed every
-# WAIT_HEARTBEAT_INTERVAL seconds, and deleted when WFM returns.
+# Dispatcher heartbeat file (issue #1908 simplification):
+# The daemon thread in handle_wait_for_messages refreshes this file every
+# WAIT_HEARTBEAT_INTERVAL seconds while WFM is blocking, so the health check
+# sees a continuous liveness signal even when PostToolUse hooks don't fire
+# (they don't fire during a blocking MCP call).
 #
-# The health check reads this file to distinguish "dispatcher alive, waiting
-# for messages" from "dispatcher frozen/dead" — suppressing the
-# heartbeat-stale RED that would otherwise fire after 20 minutes of quiet.
+# Path: ~/lobster-workspace/logs/dispatcher-heartbeat
+# Content: single Unix epoch integer (e.g. "1713456789\n")
+# Override: LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE env var (used in tests).
 #
-# Path: ~/lobster-workspace/logs/dispatcher-wfm-active
-# Content: single Unix epoch integer (e.g. "1713456789\n"), same format as
-#          dispatcher-heartbeat so health-check-v3.sh can parse it identically.
-# Override: LOBSTER_WFM_ACTIVE_OVERRIDE env var (used in tests).
-WFM_ACTIVE_FILE = Path(
+# This replaces the previous WFM-active file (dispatcher-wfm-active) and
+# consolidates into the single heartbeat signal already read by health-check-v3.sh.
+DISPATCHER_HEARTBEAT_FILE = Path(
     os.environ.get(
-        "LOBSTER_WFM_ACTIVE_OVERRIDE",
-        _WORKSPACE / "logs" / "dispatcher-wfm-active",
+        "LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE",
+        str(_WORKSPACE / "logs" / "dispatcher-heartbeat"),
     )
 )
 
@@ -1537,34 +1537,42 @@ def touch_heartbeat():
         pass  # Don't fail on heartbeat errors
 
 
-def _write_wfm_active_signal() -> None:
-    """Write the WFM-active heartbeat signal atomically (issue #949).
+def _write_dispatcher_heartbeat_from_wfm() -> None:
+    """Write a fresh dispatcher heartbeat from within wait_for_messages (issue #1908).
 
-    Called at the start of the wait_for_messages blocking loop and refreshed
-    on every WAIT_HEARTBEAT_INTERVAL tick so the health check sees a fresh
-    signal throughout the entire WFM blocking period.
+    Called at WFM entry and by the daemon thread every WAIT_HEARTBEAT_INTERVAL
+    seconds so the health check sees a continuous liveness signal while the
+    dispatcher is blocked waiting for messages.
 
-    Content: single Unix epoch integer — same format as dispatcher-heartbeat —
-    so health-check-v3.sh can parse it with the same integer comparison logic.
+    PostToolUse hooks (thinking-heartbeat.py) also write this file on every tool
+    call, so it stays fresh during active processing. The daemon thread bridges
+    the gap during WFM blocking where no tool calls occur.
 
-    Atomic write (tmp → rename) prevents partial reads by the health check.
+    Content: single Unix epoch integer (e.g. "1713456789\n").
+    Atomic write (tmp -> rename) prevents partial reads by the health check.
     Silently swallowed on failure: health check degrades gracefully when absent.
     """
     try:
-        WFM_ACTIVE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = WFM_ACTIVE_FILE.with_name(f".wfm-active-{os.getpid()}.tmp")
+        DISPATCHER_HEARTBEAT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = DISPATCHER_HEARTBEAT_FILE.with_name(
+            f".dispatcher-heartbeat-{os.getpid()}.tmp"
+        )
         tmp.write_text(str(int(time.time())) + "\n")
-        os.rename(str(tmp), str(WFM_ACTIVE_FILE))
+        os.rename(str(tmp), str(DISPATCHER_HEARTBEAT_FILE))
     except Exception:
         pass  # Never block wait_for_messages on a heartbeat write failure
 
 
 def _wfm_heartbeat_thread_fn(stop_event: threading.Event, interval: int) -> None:
-    """Daemon thread that refreshes the WFM-active heartbeat on wall-clock time.
+    """Daemon thread that refreshes the dispatcher heartbeat on wall-clock time.
 
     Runs independently of the asyncio event loop so that heartbeat writes
     continue even when the loop is stalled (e.g. during Claude API streaming).
     Fires every `interval` seconds until stop_event is set.
+
+    Writes to DISPATCHER_HEARTBEAT_FILE (the same file that thinking-heartbeat.py
+    writes on PostToolUse events) — a single consolidated signal for the health
+    check. Replaces the previous WFM-active file approach (issue #1908).
 
     Exceptions are swallowed so the thread never crashes the process.
     daemon=True on the spawning site guarantees this thread dies with the
@@ -1573,42 +1581,9 @@ def _wfm_heartbeat_thread_fn(stop_event: threading.Event, interval: int) -> None
     while not stop_event.wait(timeout=interval):
         try:
             touch_heartbeat()
-            _write_wfm_active_signal()
+            _write_dispatcher_heartbeat_from_wfm()
         except Exception:
             pass  # Never crash the heartbeat thread
-
-
-# Tombstone value written to WFM_ACTIVE_FILE when WFM exits (Fix 2, issue #1730).
-# Using a non-integer string means:
-#   - The file is NEVER absent between the health check's -f gate and its cat read
-#     (closing the TOCTOU race that caused the 2026-04-22 00:00Z false restart).
-#   - The health check's existing integer guard ([[ "$ts" =~ ^[0-9]+$ ]]) rejects
-#     this value and treats it as "WFM not active" — the correct semantic.
-WFM_ACTIVE_TOMBSTONE = "exited"
-
-
-def _clear_wfm_active_signal() -> None:
-    """Write a tombstone to WFM_ACTIVE_FILE instead of deleting it (issue #1730).
-
-    Replaces the previous WFM_ACTIVE_FILE.unlink() in the WFM finally block.
-    Writing a non-integer tombstone ("exited") instead of deleting ensures the
-    file is never transiently absent — closing the TOCTOU race between:
-      1. The health check's existence test  (if [[ -f ... ]])
-      2. The health check's content read    (cat ...)
-    If the file disappears between those two operations, cat returns empty and
-    the health check falls through to RED, triggering a false-positive restart.
-
-    The tombstone is parsed by the health check's integer regex guard and treated
-    as absent (WFM not active), which is the correct semantic.
-
-    Silently swallowed on failure: this runs in a finally block and must never
-    mask the original exception that caused WFM to exit.
-    """
-    try:
-        WFM_ACTIVE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        WFM_ACTIVE_FILE.write_text(WFM_ACTIVE_TOMBSTONE + "\n")
-    except Exception:
-        pass  # Never propagate errors from a finally-block cleanup
 
 
 # ---------------------------------------------------------------------------
@@ -4498,24 +4473,12 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
     # transient mode, calling wait_for_messages means Claude is up and running.
     _write_lobster_state(LOBSTER_STATE_FILE, "active")
 
-    # Write WFM active timestamp so the external watchdog can detect freezes.
-    # The watchdog (scripts/wfm-watchdog.sh) runs every 10 minutes via cron and
-    # injects a synthetic wfm_watchdog message if WFM has been running for longer
-    # than 35 minutes (2100s — 5 min past the default 1800s WFM timeout).
-    # We clear this file in the finally block so the watchdog only fires when
-    # WFM is genuinely blocked and has not returned normally.
-    _wfm_active_file = CONFIG_DIR / "wfm-active.json"
-    try:
-        _wfm_start_ts = datetime.now(timezone.utc)
-        _wfm_active_payload = {
-            "started_at": _wfm_start_ts.isoformat(),
-            "pid": os.getpid(),
-        }
-        _wfm_tmp = _wfm_active_file.parent / f".wfm-active-{os.getpid()}.tmp"
-        _wfm_tmp.write_text(json.dumps(_wfm_active_payload))
-        _wfm_tmp.rename(_wfm_active_file)
-    except Exception as _wfm_exc:
-        log.warning(f"[wfm-watchdog] Failed to write wfm-active.json: {_wfm_exc}")
+    # Write an initial dispatcher heartbeat at WFM entry (issue #1908).
+    # The daemon thread started below will refresh this on wall-clock time
+    # throughout the blocking period.  PostToolUse hooks also write this file;
+    # this call ensures the heartbeat is fresh at WFM entry even if the previous
+    # PostToolUse was long ago.
+    _write_dispatcher_heartbeat_from_wfm()
 
     # Recover stale processing and retryable failed messages
     _recover_stale_processing()
@@ -4558,10 +4521,13 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
     observer.schedule(InboxHandler(), str(INBOX_DIR), recursive=False)
     observer.start()
 
-    # Start a daemon thread to refresh the WFM-active heartbeat on wall-clock
-    # time, independent of the asyncio event loop (issue #1823).  The event
-    # loop can stall for minutes during Claude API streaming; the daemon thread
-    # keeps writing so the health check never sees a false-stale signal.
+    # Start a daemon thread to refresh the dispatcher heartbeat on wall-clock
+    # time, independent of the asyncio event loop (issue #1823, #1908).
+    # The event loop can stall for minutes during Claude API streaming; the
+    # daemon thread keeps writing so the health check never sees a false-stale
+    # signal while the dispatcher is blocked in WFM.
+    # Writes to DISPATCHER_HEARTBEAT_FILE (same as thinking-heartbeat.py),
+    # consolidating into a single liveness signal (issue #1908 simplification).
     # daemon=True means the thread dies with the process — no heartbeats
     # survive a crash.  The stop_event lets the finally block terminate the
     # thread cleanly on normal exit.
@@ -4570,8 +4536,9 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
         target=_wfm_heartbeat_thread_fn,
         args=(_hb_stop, WAIT_HEARTBEAT_INTERVAL),
         daemon=True,
-        name="wfm-heartbeat",
-    ).start()
+        name="dispatcher-heartbeat",
+    )
+    _hb_thread.start()
 
     try:
         # Now that the observer is running, check for messages that already
@@ -4653,26 +4620,13 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
                 timeout_text = sessions_prefix + "\n\n" + timeout_text
             return [TextContent(type="text", text=timeout_text)]
     finally:
-        # Stop the heartbeat daemon thread before writing the tombstone.
+        # Stop the heartbeat daemon thread cleanly.
         # Setting the event wakes the thread's stop_event.wait() immediately
         # so it exits without waiting for the next interval tick.
+        # join() ensures no stale heartbeat write can occur after WFM exits.
         _hb_stop.set()
         observer.stop()
         observer.join(timeout=1)
-        # Clear WFM active file so the watchdog knows WFM returned normally.
-        try:
-            _wfm_active_file = CONFIG_DIR / "wfm-active.json"
-            if _wfm_active_file.exists():
-                _wfm_active_file.unlink()
-        except Exception as _wfm_clear_exc:
-            log.warning(f"[wfm-watchdog] Failed to clear wfm-active.json: {_wfm_clear_exc}")
-        # Write tombstone to WFM_ACTIVE_FILE instead of deleting it (issue #1730).
-        # Deleting the file creates a TOCTOU race: the health check's -f gate can
-        # pass just before unlink(), then cat returns empty and declares RED.
-        # Writing the non-integer tombstone WFM_ACTIVE_TOMBSTONE means the file is
-        # never transiently absent — the health check treats non-integer content as
-        # "WFM not active" (same as absent), with no race window.
-        _clear_wfm_active_signal()
 
 
 def _is_report_command(text: str) -> bool:

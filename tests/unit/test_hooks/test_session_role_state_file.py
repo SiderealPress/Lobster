@@ -1,7 +1,15 @@
 """
 Unit tests for hooks/session_role.py — state-file-based dispatcher detection.
 
-Covers the three-layer detection strategy:
+Issue #1908 split dispatcher detection into two APIs:
+
+- is_dispatcher(hook_input): for SessionStart hooks — uses startup flag file only.
+  State-file tests for is_dispatcher() are in test_startup_flag_dispatcher_detection.py.
+
+- is_dispatcher_session(hook_input): for PreToolUse hooks — uses state files + process tree.
+  This file tests the state-file paths for is_dispatcher_session().
+
+Covers the three-layer detection strategy used by is_dispatcher_session():
 
 1. Claude UUID state file (primary):  $LOBSTER_WORKSPACE/data/dispatcher-claude-session-id
    Written by MCP server when session_start(agent_type='dispatcher',
@@ -13,7 +21,7 @@ Covers the three-layer detection strategy:
    (mismatch), absent file falls through.
 
 3. Hook marker file (tertiary): ~/messages/config/dispatcher-session-id
-   Written by write-dispatcher-session-id.py SessionStart hook.
+   Written by on-compact.py (formerly write-dispatcher-session-id.py).
 
 4. Default: False (conservative/subagent)
 
@@ -147,7 +155,11 @@ class TestCheckStateFile:
 
 
 # ---------------------------------------------------------------------------
-# is_dispatcher — Claude UUID state file (PRIMARY, the bug fix)
+# is_dispatcher_session — Claude UUID state file (PRIMARY, the bug fix)
+#
+# NOTE: is_dispatcher() was simplified in issue #1908 to use startup flag only.
+# The state-file-based detection below is tested via is_dispatcher_session(),
+# which is the API used by PreToolUse hooks during active processing.
 # ---------------------------------------------------------------------------
 
 
@@ -158,20 +170,33 @@ class TestIsDispatcherClaudeUUIDFile:
     The hook receives a Claude UUID (hook_input["session_id"]) but the old
     primary check compared against the HTTP session ID — they never matched.
     The new primary file stores the Claude UUID and comparison works correctly.
+
+    These tests use is_dispatcher_session() (PreToolUse context) rather than
+    is_dispatcher() (SessionStart context).  After issue #1908, is_dispatcher()
+    uses startup flag only; state-file logic lives in is_dispatcher_session().
     """
 
     def test_claude_uuid_match_returns_true(self, monkeypatch, tmp_path):
-        """Primary: Claude UUID file matches → dispatcher detected."""
+        """Primary: Claude UUID file matches → dispatcher detected (PreToolUse context)."""
         sr = _reload_session_role(monkeypatch, tmp_path)
         data_dir = tmp_path / "data"
         data_dir.mkdir()
         claude_uuid = "756633a5-4802-4327-ab98-684243d5fc2a"
         (data_dir / "dispatcher-claude-session-id").write_text(claude_uuid)
 
-        assert sr.is_dispatcher(_hook_input(claude_uuid)) is True
+        assert sr.is_dispatcher_session(_hook_input(claude_uuid)) is True
 
-    def test_claude_uuid_mismatch_returns_false(self, monkeypatch, tmp_path):
-        """Primary: Claude UUID file present, different session → subagent."""
+    def test_claude_uuid_mismatch_falls_through_to_process_tree(
+        self, monkeypatch, tmp_path
+    ):
+        """Primary file mismatch does NOT short-circuit — falls through to process-tree.
+
+        A mismatch means "this session is not the one stored in the file," but it
+        does not mean "this session is definitively a subagent."  The file may be
+        stale (previous session's ID).  The process-tree check is the authoritative
+        discriminator.  This test patches process-tree to return False (non-dispatcher
+        process context) to isolate state-file layer behavior.
+        """
         sr = _reload_session_role(monkeypatch, tmp_path)
         data_dir = tmp_path / "data"
         data_dir.mkdir()
@@ -179,7 +204,44 @@ class TestIsDispatcherClaudeUUIDFile:
         subagent_uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
         (data_dir / "dispatcher-claude-session-id").write_text(dispatcher_uuid)
 
-        assert sr.is_dispatcher(_hook_input(subagent_uuid)) is False
+        # Process-tree returns False → subagent confirmed.
+        with patch.object(sr, "_is_dispatcher_by_process_tree", return_value=False):
+            assert sr.is_dispatcher_session(_hook_input(subagent_uuid)) is False
+
+    def test_stale_state_file_falls_through_to_process_tree_dispatcher(
+        self, monkeypatch, tmp_path
+    ):
+        """Stale state file (previous session's ID) does not block new dispatcher.
+
+        Root cause of the fallthrough bug (issue #1908): after a normal restart,
+        DISPATCHER_SESSION_FILE holds the PREVIOUS session's ID.  The new dispatcher
+        session gets _check_state_file() → False (ID mismatch), which previously
+        caused is_dispatcher_session() to return False immediately, bypassing the
+        process-tree fallback.  The new dispatcher was incorrectly treated as a
+        subagent.
+
+        Fix: False from state file is not authoritative — only True short-circuits.
+        The process-tree check correctly identifies the new dispatcher session.
+        """
+        sr = _reload_session_role(monkeypatch, tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        sr = importlib.reload(sr)
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+
+        # State file holds the PREVIOUS (stale) dispatcher session ID.
+        stale_uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        (data_dir / "dispatcher-claude-session-id").write_text(stale_uuid)
+
+        # The NEW dispatcher session has a different UUID.
+        new_dispatcher_uuid = "756633a5-4802-4327-ab98-684243d5fc2a"
+
+        # Process-tree returns True — confirms this IS the dispatcher process.
+        with patch.object(sr, "_is_dispatcher_by_process_tree", return_value=True):
+            # Before the fix: _check_state_file() returns False (stale mismatch)
+            # → is_dispatcher_session() returned False immediately.
+            # After the fix: False falls through to process-tree → correctly True.
+            assert sr.is_dispatcher_session(_hook_input(new_dispatcher_uuid)) is True
 
     def test_bug_1253_http_session_id_does_not_match_claude_uuid(
         self, monkeypatch, tmp_path
@@ -214,12 +276,17 @@ class TestIsDispatcherClaudeUUIDFile:
         (data_dir / "dispatcher-claude-session-id").write_text(claude_uuid)
 
         # With the fix: primary Claude UUID file matches → dispatcher correctly identified.
-        assert sr.is_dispatcher(_hook_input(claude_uuid)) is True
+        assert sr.is_dispatcher_session(_hook_input(claude_uuid)) is True
 
     def test_claude_uuid_file_absent_with_only_http_file_returns_false(
         self, monkeypatch, tmp_path
     ):
-        """Primary absent, only HTTP session file present → False (secondary skipped, tertiary absent)."""
+        """Primary absent, only HTTP session file present → secondary skipped, tertiary absent.
+
+        State-file layers return no definitive answer; the result depends on
+        the process-tree fallback.  This test patches the fallback to return
+        False (non-dispatcher process context) to isolate state-file behavior.
+        """
         sr = _reload_session_role(monkeypatch, tmp_path)
         monkeypatch.setenv("HOME", str(tmp_path))
         sr = importlib.reload(sr)
@@ -228,13 +295,14 @@ class TestIsDispatcherClaudeUUIDFile:
 
         # Only the HTTP session file is present (older MCP version or race window).
         # The secondary check is intentionally skipped (format mismatch — see
-        # session_role.py), and the tertiary hook marker file is also absent,
-        # so is_dispatcher() falls through to the default → False.
+        # session_role.py), and the tertiary hook marker file is also absent.
         http_session_id = "43e178fa975741eb9f6c1cb9f328d52b"
         claude_uuid = "756633a5-4802-4327-ab98-684243d5fc2a"
         (data_dir / "dispatcher-session-id").write_text(http_session_id)
 
-        assert sr.is_dispatcher(_hook_input(claude_uuid)) is False
+        # Patch process-tree fallback to return False (isolates state-file layer).
+        with patch.object(sr, "_is_dispatcher_by_process_tree", return_value=False):
+            assert sr.is_dispatcher_session(_hook_input(claude_uuid)) is False
 
     def test_claude_uuid_file_absent_falls_through_to_hook_marker(
         self, monkeypatch, tmp_path
@@ -250,16 +318,16 @@ class TestIsDispatcherClaudeUUIDFile:
         claude_uuid = "756633a5-4802-4327-ab98-684243d5fc2a"
         (config_dir / "dispatcher-session-id").write_text(claude_uuid)
 
-        assert sr.is_dispatcher(_hook_input(claude_uuid)) is True
+        assert sr.is_dispatcher_session(_hook_input(claude_uuid)) is True
 
 
 # ---------------------------------------------------------------------------
-# is_dispatcher — MCP HTTP session state file (secondary, skipped)
+# is_dispatcher_session — MCP HTTP session state file (secondary, skipped)
 #
 # The secondary file (dispatcher-session-id) stores the HTTP transport session
 # ID (32-char hex), NOT the Claude UUID. The secondary check is intentionally
-# skipped in is_dispatcher() because it would always return False for both
-# dispatcher and subagents (format mismatch), blocking the tertiary check.
+# skipped in is_dispatcher_session() because it would always return False for
+# both dispatcher and subagents (format mismatch), blocking the tertiary check.
 # These tests verify that the secondary file alone never causes a True return,
 # and that the function falls through correctly to the tertiary check.
 # ---------------------------------------------------------------------------
@@ -267,18 +335,22 @@ class TestIsDispatcherClaudeUUIDFile:
 
 class TestIsDispatcherMCPStateFile:
     def test_mcp_file_alone_never_returns_true(self, monkeypatch, tmp_path):
-        """Secondary-only: MCP HTTP session file is skipped; returns False (no tertiary)."""
+        """Secondary-only: MCP HTTP session file is skipped; tertiary absent.
+
+        Under the old code this would return True; under the fix, the secondary
+        file is skipped and the tertiary (hook marker) file is absent, so the
+        result depends on the process-tree fallback.  Patch it to return False
+        to isolate state-file layer behavior.
+        """
         sr = _reload_session_role(monkeypatch, tmp_path)
         monkeypatch.setenv("HOME", str(tmp_path))
         sr = importlib.reload(sr)
         mcp_dir = tmp_path / "data"
         mcp_dir.mkdir()
-        # Write the secondary file with a value that matches the hook input.
-        # Under the old code this would return True; under the fix it is skipped
-        # and the tertiary (hook marker) file is absent → False.
         (mcp_dir / "dispatcher-session-id").write_text("sess-mcp-001")
 
-        assert sr.is_dispatcher(_hook_input("sess-mcp-001")) is False
+        with patch.object(sr, "_is_dispatcher_by_process_tree", return_value=False):
+            assert sr.is_dispatcher_session(_hook_input("sess-mcp-001")) is False
 
     def test_mcp_file_present_falls_through_to_tertiary(self, monkeypatch, tmp_path):
         """Secondary file present but skipped → tertiary hook marker file decides."""
@@ -298,7 +370,7 @@ class TestIsDispatcherMCPStateFile:
         (config_dir / "dispatcher-session-id").write_text(claude_uuid)
 
         # Secondary is skipped; tertiary matches → dispatcher.
-        assert sr.is_dispatcher(_hook_input(claude_uuid)) is True
+        assert sr.is_dispatcher_session(_hook_input(claude_uuid)) is True
 
     def test_mcp_file_absent_falls_through_to_tertiary(self, monkeypatch, tmp_path):
         """Both MCP files absent → falls through to hook marker file."""
@@ -313,19 +385,23 @@ class TestIsDispatcherMCPStateFile:
         config_dir.mkdir(parents=True, exist_ok=True)
         (config_dir / "dispatcher-session-id").write_text("sess-hook-001")
 
-        assert sr.is_dispatcher(_hook_input("sess-hook-001")) is True
+        assert sr.is_dispatcher_session(_hook_input("sess-hook-001")) is True
 
     def test_mcp_file_absent_no_secondary_returns_false(self, monkeypatch, tmp_path):
-        """All files absent → default False."""
+        """All files absent → falls through to process-tree fallback.
+
+        Patch process-tree to return False to isolate state-file layer behavior.
+        """
         sr = _reload_session_role(monkeypatch, tmp_path)
         monkeypatch.setenv("HOME", str(tmp_path))
         sr = importlib.reload(sr)
 
-        assert sr.is_dispatcher(_hook_input("any-session")) is False
+        with patch.object(sr, "_is_dispatcher_by_process_tree", return_value=False):
+            assert sr.is_dispatcher_session(_hook_input("any-session")) is False
 
 
 # ---------------------------------------------------------------------------
-# is_dispatcher — hook marker file (tertiary)
+# is_dispatcher_session — hook marker file (tertiary)
 # ---------------------------------------------------------------------------
 
 
@@ -340,10 +416,17 @@ class TestIsDispatcherHookMarkerFile:
         config_dir.mkdir(parents=True, exist_ok=True)
         (config_dir / "dispatcher-session-id").write_text("hook-dispatcher-sess")
 
-        assert sr.is_dispatcher(_hook_input("hook-dispatcher-sess")) is True
+        assert sr.is_dispatcher_session(_hook_input("hook-dispatcher-sess")) is True
 
-    def test_hook_file_mismatch_when_mcp_absent(self, monkeypatch, tmp_path):
-        """Hook file present but non-matching → subagent."""
+    def test_hook_file_mismatch_falls_through_to_process_tree(
+        self, monkeypatch, tmp_path
+    ):
+        """Hook file present but non-matching → falls through to process-tree.
+
+        A mismatch is not authoritative — the file may be stale.  The process-tree
+        check is the final discriminator.  This test patches process-tree to return
+        False (non-dispatcher process context) to isolate state-file layer behavior.
+        """
         sr = _reload_session_role(monkeypatch, tmp_path)
         monkeypatch.setenv("HOME", str(tmp_path))
         sr = importlib.reload(sr)
@@ -352,7 +435,8 @@ class TestIsDispatcherHookMarkerFile:
         config_dir.mkdir(parents=True, exist_ok=True)
         (config_dir / "dispatcher-session-id").write_text("dispatcher-session")
 
-        assert sr.is_dispatcher(_hook_input("subagent-session")) is False
+        with patch.object(sr, "_is_dispatcher_by_process_tree", return_value=False):
+            assert sr.is_dispatcher_session(_hook_input("subagent-session")) is False
 
 
 # ---------------------------------------------------------------------------
@@ -411,7 +495,7 @@ class TestIsDispatcherSecondaryCheckSkipped:
         hook marker file has the correct Claude UUID.
 
         Before the fix: secondary returned False (mismatch) → early exit →
-        is_dispatcher() returned False for the dispatcher.
+        is_dispatcher_session() returned False for the dispatcher.
 
         After the fix: secondary is skipped → tertiary check runs → True.
         """
@@ -435,12 +519,17 @@ class TestIsDispatcherSecondaryCheckSkipped:
 
         # Must return True — the dispatcher is correctly identified via the
         # tertiary check, which is now reached because the secondary is skipped.
-        assert sr.is_dispatcher(_hook_input(claude_uuid)) is True
+        assert sr.is_dispatcher_session(_hook_input(claude_uuid)) is True
 
-    def test_secondary_hex_does_not_block_tertiary_uuid_mismatch(
+    def test_secondary_skipped_tertiary_mismatch_falls_through_to_process_tree(
         self, monkeypatch, tmp_path
     ):
-        """Secondary skipped, tertiary has a different UUID → False (subagent)."""
+        """Secondary skipped, tertiary mismatch → falls through to process-tree.
+
+        A tertiary mismatch does NOT short-circuit (may be a stale entry).  The
+        process-tree check is patched to return False to isolate state-file layer
+        behavior and confirm that a subagent is correctly identified.
+        """
         sr = _reload_session_role(monkeypatch, tmp_path)
         monkeypatch.setenv("HOME", str(tmp_path))
         sr = importlib.reload(sr)
@@ -457,8 +546,9 @@ class TestIsDispatcherSecondaryCheckSkipped:
         config_dir.mkdir(parents=True, exist_ok=True)
         (config_dir / "dispatcher-session-id").write_text(dispatcher_uuid)
 
-        # Subagent session ID does not match tertiary → False.
-        assert sr.is_dispatcher(_hook_input(subagent_uuid)) is False
+        # State files cannot confirm dispatcher (no match) → process-tree decides.
+        with patch.object(sr, "_is_dispatcher_by_process_tree", return_value=False):
+            assert sr.is_dispatcher_session(_hook_input(subagent_uuid)) is False
 
 
 # ---------------------------------------------------------------------------

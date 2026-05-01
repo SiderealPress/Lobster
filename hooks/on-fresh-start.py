@@ -76,9 +76,9 @@ Add this to ~/.claude/settings.json under "hooks" → "SessionStart":
       ]
     }
 
-Place this entry AFTER write-dispatcher-session-id.py so the marker file is
-already written when this hook runs. (Both have empty matchers and will fire
-on every SessionStart; ordering matters only for the marker file dependency.)
+Place this entry AFTER inject-bootup-context.py so the startup flag is
+already consumed when this hook runs. (Both have empty matchers and will fire
+on every SessionStart; ordering matters only for the startup flag dependency.)
 """
 
 import json

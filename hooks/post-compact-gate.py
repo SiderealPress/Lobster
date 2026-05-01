@@ -9,7 +9,10 @@ on-compact.py when a compaction occurs. This hook passes when:
   1. No sentinel file exists (normal operation), OR
   2. Not the dispatcher session (see session_role.is_dispatcher()), OR
   3. The sentinel is older than SENTINEL_TTL_SECONDS (stale / post-hibernation), OR
-  4. The tool being called IS wait_for_messages (let it through, delete sentinel).
+  4. The tool being called IS wait_for_messages (let it through, delete sentinel), OR
+  5. The tool being called IS ToolSearch (read-only schema fetch, needed to load
+     deferred MCP tool schemas — the dispatcher must be able to call ToolSearch to
+     fetch the wait_for_messages schema before it can call wait_for_messages).
 
 The TTL (10 minutes) eliminates the stuck-sentinel failure mode: if the
 dispatcher hibernates or crashes while the sentinel is active, the next boot
@@ -34,10 +37,10 @@ Detection is performed by is_dispatcher_session(), which uses a layered strategy
    here — it stores an MCP HTTP transport ID (32-char hex) which never matches
    the CC UUID in hook_input["session_id"] (see issue #1151).
 
-2. Hook marker file (secondary): At dispatcher startup, write-dispatcher-session-id.py
-   (a SessionStart hook) writes the session ID to
-   ~/messages/config/dispatcher-session-id.  This is a CC UUID fallback for
-   the window before session_start is called.  Match → dispatcher.
+2. Hook marker file (secondary): At dispatcher startup, on-compact.py writes the
+   session ID to ~/messages/config/dispatcher-session-id.  This is used by
+   is_dispatcher_session() for PreToolUse hooks during active processing
+   (after the startup flag has been consumed by inject-bootup-context.py).
 
 3. Process-tree fallback: If neither state file is present or gives a definitive
    answer, walk the process tree upward.  Two consecutive claude-like ancestors
@@ -96,18 +99,18 @@ CONFIRMATION_TOKEN = "LOBSTER_COMPACTED_REORIENTED"  # noqa: S105 — not a secr
 
 DENY_REASON_NEEDS_TOKEN = (
     "GATE BLOCKED: Context compaction was just detected. "
-    "Call `mcp__lobster-inbox__wait_for_messages(confirmation='LOBSTER_COMPACTED_REORIENTED')` directly — "
-    "no ToolSearch needed, the schema is pre-registered. "
-    "No file read needed — the confirmation token is in this message: LOBSTER_COMPACTED_REORIENTED"
+    "If you need the wait_for_messages schema, call ToolSearch first (it is allowed). "
+    "Then call `mcp__lobster-inbox__wait_for_messages(confirmation='LOBSTER_COMPACTED_REORIENTED')` directly. "
+    "Confirmation token: LOBSTER_COMPACTED_REORIENTED"
 )
 
 DENY_REASON = (
-    "GATE BLOCKED: Context compaction was just detected. "
-    "Call `mcp__lobster-inbox__wait_for_messages(confirmation='LOBSTER_COMPACTED_REORIENTED')` directly — "
-    "no ToolSearch needed, the schema is pre-registered. When it returns, you will "
-    "receive a compact-reminder system message — read it to re-orient as the "
-    "Lobster dispatcher, then resume your main loop normally. Do not retry this "
-    "tool call."
+    "GATE BLOCKED: Context compaction was just detected. Your only permitted "
+    "actions right now are: (1) ToolSearch to load the wait_for_messages schema if needed, "
+    "then (2) call `mcp__lobster-inbox__wait_for_messages(confirmation='LOBSTER_COMPACTED_REORIENTED')` directly. "
+    "When it returns, you will receive a compact-reminder system message — read it to re-orient "
+    "as the Lobster dispatcher, then resume your main loop normally. "
+    "Do not retry this tool call."
 )
 
 LOBSTER_TMUX_SESSION = os.environ.get("LOBSTER_TMUX_SESSION", "lobster")

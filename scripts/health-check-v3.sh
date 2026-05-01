@@ -30,13 +30,13 @@
 #   during the post-compaction grace period (is_compact_grace_period) to prevent
 #   false restarts during the up-to-12-minute catchup run that follows compaction.
 #
-# Dispatcher liveness (replaces WFM freshness + catchup suppression):
+# Dispatcher liveness (simplified, issue #1908):
 #   hooks/thinking-heartbeat.py writes a Unix epoch timestamp to
 #   ~/lobster-workspace/logs/dispatcher-heartbeat on every PostToolUse event.
-#   check_dispatcher_heartbeat() reads this single file and checks its age.
-#   The 600s threshold (10 min) reduces MTTR for thinking-freeze from 20 min to
-#   10 min. The post-compaction grace period suppression covers catchup runs that
-#   can last up to 12 min. See issue #1483, #1786.
+#   The daemon thread in inbox_server.py also writes this file every 60s while
+#   wait_for_messages is blocking, bridging the gap when no tool calls occur.
+#   check_dispatcher_heartbeat() reads this single file with a 900s threshold.
+#   No WFM-active fallback needed — the daemon thread keeps the heartbeat fresh.
 #
 # Boot grace period:
 #   After any restart (health-check-initiated or manual), the new Claude session
@@ -94,32 +94,14 @@ HIBERNATE_FRESH_SECONDS=30           # DEPRECATED — kept for reference; hibern
 WFM_STALE_SECONDS=1200               # 20 minutes - kept for backward-compat references; superseded by DISPATCHER_HEARTBEAT_STALE_SECONDS
 HEARTBEAT_FILE="$WORKSPACE_DIR/logs/claude-heartbeat"   # legacy WFM-touch signal; superseded by dispatcher-heartbeat
 
-# Dispatcher heartbeat sentinel (issue #1483 simplification)
-# Written by hooks/thinking-heartbeat.py on every PostToolUse event.
+# Dispatcher heartbeat (issue #1908 simplification).
+# Written by hooks/thinking-heartbeat.py on every PostToolUse event AND by
+# the daemon thread in inbox_server.py while wait_for_messages is blocking.
 # Single file, single integer (Unix epoch seconds). No JSON parsing required.
-# Threshold is generous enough to cover compaction + catchup without suppression.
+# 900s threshold: covers compaction (~5m) + catchup (~12m) + margin, without
+# needing a separate WFM-active signal.
 DISPATCHER_HEARTBEAT_FILE="${LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE:-$WORKSPACE_DIR/logs/dispatcher-heartbeat}"
-DISPATCHER_HEARTBEAT_STALE_SECONDS=600    # 10 min — covers compaction (~5m) + catchup margin; grace period handles the rest
-
-# WFM-active signal (issue #1713 / #949): inbox_server.py writes this file with
-# a Unix epoch timestamp when wait_for_messages begins blocking and refreshes it
-# every WAIT_HEARTBEAT_INTERVAL (60s). When this file is fresh, the dispatcher is
-# alive and waiting for messages — heartbeat staleness is expected, not a problem.
-# Threshold: 10x WAIT_HEARTBEAT_INTERVAL — gives the dispatcher a 10-minute window
-# to be outside WFM (e.g. processing a message, startup compact-catchup) before
-# the health check fires.  3x was too tight and produced false-positive kills.
-# File is deleted by the MCP server when WFM returns (message arrived or timeout).
-DISPATCHER_WFM_ACTIVE_FILE="${LOBSTER_WFM_ACTIVE_OVERRIDE:-$WORKSPACE_DIR/logs/dispatcher-wfm-active}"
-WFM_ACTIVE_STALE_SECONDS=180   # 3x WAIT_HEARTBEAT_INTERVAL (60s) — absorbs one missed tick
-# Grace window for WFM tombstone ("exited"): if the WFM-active file contains the
-# tombstone but was written within this many seconds, the dispatcher just left WFM
-# and is actively transitioning to message processing — grant the same exemption as
-# a live timestamp. This closes the midnight race (issue #1884): scheduled jobs fire
-# at 00:00Z, wake WFM, which writes "exited" to this file; the health-check cron
-# also fires at 00:00Z and previously declared RED when it saw "exited" instead of
-# a live integer.  A 30s window is well above the sub-second WFM→processing
-# transition but narrow enough to never mask a genuinely frozen dispatcher.
-WFM_TOMBSTONE_GRACE_SECONDS=30
+DISPATCHER_HEARTBEAT_STALE_SECONDS=900    # 15 min — covers compaction + catchup + margin
 
 OUTBOX_DIR="$MESSAGES_DIR/outbox"
 OUTBOX_STALE_THRESHOLD_SECONDS=900   # 15 min = RED
@@ -985,6 +967,11 @@ check_outbox_drain() {
 #
 # Returns: 0=GREEN (fresh or skipped), 2=RED (stale)
 check_dispatcher_heartbeat() {
+    # Simplified heartbeat check (issue #1908):
+    # Single file check — no WFM-active fallback needed. The daemon thread in
+    # inbox_server.py now writes to DISPATCHER_HEARTBEAT_FILE directly during
+    # WFM blocking, so this file stays fresh whether the dispatcher is processing
+    # a message or idle in wait_for_messages.
     if [[ ! -f "$DISPATCHER_HEARTBEAT_FILE" ]]; then
         log_info "Dispatcher heartbeat: file not found — skipping check (fresh install?)"
         return 0
@@ -1064,57 +1051,11 @@ except Exception:
     age=$(( now - raw_ts ))
 
     if [[ $age -gt $DISPATCHER_HEARTBEAT_STALE_SECONDS ]]; then
-        # Heartbeat is stale — check the WFM-active signal before declaring RED.
-        # When the dispatcher is blocked in wait_for_messages, PostToolUse hooks
-        # do not fire so the heartbeat goes stale. inbox_server.py writes
-        # DISPATCHER_WFM_ACTIVE_FILE with a fresh epoch timestamp every 60s while
-        # WFM is blocking. A fresh WFM-active file means the dispatcher is alive
-        # and simply idle — not frozen or dead. (issue #1713 / #949)
-        #
-        # Fix 1 (issue #1730 TOCTOU): Use cat-only read, no -f existence gate.
-        # A two-step -f / cat sequence has a race window: the MCP server's
-        # finally block can write the tombstone between the -f check and the cat,
-        # making cat return empty and this function fall through to RED.
-        # cat 2>/dev/null is a single atomic read: empty result = absent or
-        # unreadable; non-empty integer = WFM active; non-integer = tombstone
-        # (WFM exited cleanly). The integer guard below handles all three cases
-        # without any race window.
-        local wfm_active_ts=""
-        wfm_active_ts=$(cat "$DISPATCHER_WFM_ACTIVE_FILE" 2>/dev/null | tr -d '[:space:]')
-        if [[ -n "$wfm_active_ts" ]] && [[ "$wfm_active_ts" =~ ^[0-9]+$ ]]; then
-            local wfm_age=$(( now - wfm_active_ts ))
-            if [[ $wfm_age -le $WFM_ACTIVE_STALE_SECONDS ]]; then
-                log_info "Dispatcher heartbeat stale (${age}s) but WFM-active is fresh (${wfm_age}s) — dispatcher alive in wait_for_messages, skipping RED"
-                return 0
-            else
-                log_error "RED: dispatcher heartbeat stale (${age}s) and WFM-active also stale (${wfm_age}s, threshold: ${WFM_ACTIVE_STALE_SECONDS}s) — dispatcher appears frozen"
-                return 2
-            fi
-        fi
-        # Tombstone check (issue #1884 midnight race): inbox_server.py writes
-        # "exited" to WFM_ACTIVE_FILE when WFM returns (instead of deleting the
-        # file, to avoid the TOCTOU race fixed in issue #1730).  If the tombstone
-        # was written within WFM_TOMBSTONE_GRACE_SECONDS, the dispatcher just left
-        # WFM and is actively transitioning to message processing — this is healthy,
-        # not a freeze.  Only grant the exemption when the file mtime is fresh;
-        # an old tombstone (dispatcher has been processing for longer than the grace
-        # window) means the heartbeat staleness is genuinely suspicious.
-        if [[ "$wfm_active_ts" == "exited" ]]; then
-            local file_mtime
-            file_mtime=$(stat -c %Y "$DISPATCHER_WFM_ACTIVE_FILE" 2>/dev/null || echo 0)
-            local tombstone_age=$(( now - file_mtime ))
-            if [[ $tombstone_age -le $WFM_TOMBSTONE_GRACE_SECONDS ]]; then
-                log_info "Dispatcher heartbeat stale (${age}s) but WFM-active tombstone is fresh (written ${tombstone_age}s ago, grace: ${WFM_TOMBSTONE_GRACE_SECONDS}s) — dispatcher just left WFM, skipping RED"
-                return 0
-            else
-                log_info "Dispatcher heartbeat stale (${age}s) and WFM-active tombstone is old (${tombstone_age}s, grace: ${WFM_TOMBSTONE_GRACE_SECONDS}s) — treating as absent"
-            fi
-        fi
-        log_error "RED: dispatcher heartbeat stale — last tool use ${age}s ago (threshold: ${DISPATCHER_HEARTBEAT_STALE_SECONDS}s)"
+        log_error "RED: dispatcher heartbeat stale — last heartbeat ${age}s ago (threshold: ${DISPATCHER_HEARTBEAT_STALE_SECONDS}s)"
         return 2
     fi
 
-    log_info "Dispatcher heartbeat OK: last tool use ${age}s ago (threshold: ${DISPATCHER_HEARTBEAT_STALE_SECONDS}s)"
+    log_info "Dispatcher heartbeat OK: last heartbeat ${age}s ago (threshold: ${DISPATCHER_HEARTBEAT_STALE_SECONDS}s)"
     return 0
 }
 
