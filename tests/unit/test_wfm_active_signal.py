@@ -5,7 +5,7 @@ Verifies that:
 - _write_wfm_active_signal() writes a single Unix epoch integer
 - WFM_ACTIVE_FILE path is ~/lobster-workspace/logs/dispatcher-wfm-active
 - LOBSTER_WFM_ACTIVE_OVERRIDE env var overrides the path (test isolation)
-- WAIT_HEARTBEAT_INTERVAL is 60s (matches health-check's WFM_ACTIVE_STALE_SECONDS/3)
+- WAIT_HEARTBEAT_INTERVAL is 60s (health-check WFM_ACTIVE_STALE_SECONDS is 10x this value)
 - The written timestamp is within 2 seconds of now
 - Atomic write: a .tmp file is never left behind
 - The file is writable before the wait loop starts
@@ -58,13 +58,13 @@ def test_wfm_active_file_path_is_workspace_logs(tmp_path):
 
 
 def test_wait_heartbeat_interval_is_60():
-    """WAIT_HEARTBEAT_INTERVAL must be 60s to match health-check's 3x WFM_ACTIVE_STALE_SECONDS expectation."""
+    """WAIT_HEARTBEAT_INTERVAL must be 60s (health-check WFM_ACTIVE_STALE_SECONDS=600 is 10x this value)."""
     mcp_dir = str(Path(__file__).resolve().parent.parent.parent / "src" / "mcp")
     if mcp_dir not in sys.path:
         sys.path.insert(0, mcp_dir)
     import inbox_server
     assert inbox_server.WAIT_HEARTBEAT_INTERVAL == 60, (
-        "WAIT_HEARTBEAT_INTERVAL must be 60s — health-check WFM_ACTIVE_STALE_SECONDS=180 is 3x this value"
+        "WAIT_HEARTBEAT_INTERVAL must be 60s — health-check WFM_ACTIVE_STALE_SECONDS=600 is 10x this value"
     )
 
 
