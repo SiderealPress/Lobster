@@ -601,6 +601,14 @@ launch_claude() {
 
     (
         echo "$BASHPID" > "$dispatcher_pid_file"
+        # Write the dispatcher startup flag so inject-bootup-context.py can
+        # identify the next CC session as the dispatcher without UUID matching.
+        # The flag contains $BASHPID — the same PID that becomes the claude
+        # process after exec.  The hook confirms the PID is still alive with
+        # kill -0 before accepting the flag as valid.  The hook deletes the
+        # flag after consuming it so subagents never see it.
+        mkdir -p "$WORKSPACE_DIR/data" 2>/dev/null || true
+        echo "$BASHPID" > "$WORKSPACE_DIR/data/dispatcher-startup-flag"
         # Write CC_START lifecycle event from inside the subshell so we capture
         # $BASHPID (the actual claude PID after exec). We write before exec so the
         # event is always recorded even if claude exits immediately.

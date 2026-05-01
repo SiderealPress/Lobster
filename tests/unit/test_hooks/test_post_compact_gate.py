@@ -249,7 +249,6 @@ class TestBlockedToolsIncludeToken:
     """
 
     @pytest.mark.parametrize("tool_name", [
-        "ToolSearch",
         "Read",
         "Bash",
         "mcp__lobster-inbox__write_result",
@@ -270,6 +269,22 @@ class TestBlockedToolsIncludeToken:
         assert CONFIRMATION_TOKEN in reason, (
             f"Blocked {tool_name!r} call must include the confirmation token "
             f"'{CONFIRMATION_TOKEN}' in the error message. Got: {reason!r}"
+        )
+
+    def test_toolsearch_allowed_through_gate(self, monkeypatch, tmp_path):
+        """ToolSearch is always allowed through the gate even when the sentinel is active.
+
+        Issue #1914: ToolSearch is a read-only schema fetch needed to load deferred
+        MCP tools (including wait_for_messages). Blocking it creates a deadlock where
+        the gate says "call WFM" but WFM schema is unresolvable without ToolSearch first.
+        """
+        mod, _ = _load_hook(monkeypatch, tmp_path, sentinel_fresh=True)
+        monkeypatch.setattr(mod, "is_dispatcher_session", lambda _data: True)
+        hook_input = _make_hook_input(tool_name="ToolSearch")
+        exit_code, stdout, _ = _run_hook(mod, hook_input)
+        assert exit_code == 0, f"ToolSearch must exit 0 (allowed), got {exit_code}"
+        assert stdout.strip() == "", (
+            f"ToolSearch must produce no output (allowed through), got: {stdout!r}"
         )
 
     def test_deny_decision_is_deny(self, monkeypatch, tmp_path):

@@ -43,7 +43,7 @@ HOOK_PATH = _HOOKS_DIR / "thinking-heartbeat.py"
 TIMESTAMP_TOLERANCE_SECONDS = 5
 
 # The threshold documented in the hook (checked here to prevent silent drift).
-EXPECTED_STALE_THRESHOLD = 1200  # 20 minutes
+EXPECTED_STALE_THRESHOLD = 900  # 15 minutes
 
 # Fake session IDs used in tests.
 DISPATCHER_SESSION_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
@@ -132,7 +132,7 @@ class TestWriteHeartbeat:
 class TestStaleThresholdConstant:
     """Verify the documented threshold matches the expected value (prevents silent drift)."""
 
-    def test_stale_threshold_is_1200_seconds(self):
+    def test_stale_threshold_is_900_seconds(self):
         spec = importlib.util.spec_from_file_location("th", HOOK_PATH)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)

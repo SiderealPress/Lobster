@@ -50,8 +50,18 @@ def _run_hook(
     tool_input: dict,
     session_id: str = "sess-sub-001",
     dispatcher_session_id: str | None = None,
+    simulate_dispatcher: bool = False,
 ) -> subprocess.CompletedProcess:
-    """Run the hook with the given inputs, optionally setting the dispatcher marker file."""
+    """Run the hook with the given inputs.
+
+    When simulate_dispatcher=True, writes the current process PID to the
+    dispatcher startup flag file so is_dispatcher() returns True inside the
+    hook subprocess. This replaces the old dispatcher_session_id marker file
+    approach (issue #1908: simplified startup-flag detection).
+
+    dispatcher_session_id is accepted for API compatibility but is no longer
+    used by is_dispatcher() — pass simulate_dispatcher=True instead.
+    """
     payload = json.dumps(
         {
             "hook_event_name": "PreToolUse",
@@ -64,12 +74,21 @@ def _run_hook(
     env = os.environ.copy()
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        if dispatcher_session_id is not None:
-            marker_dir = Path(tmpdir) / "messages" / "config"
-            marker_dir.mkdir(parents=True)
-            (marker_dir / "dispatcher-session-id").write_text(dispatcher_session_id)
-        # Override HOME so session_role reads from our temp dir.
+        # Override HOME and LOBSTER_WORKSPACE so session_role reads from our
+        # temp dir. LOBSTER_WORKSPACE may be set in the parent environment
+        # (pointing at the real workspace), so it must be explicitly overridden
+        # here to prevent the hook from looking at real workspace files.
         env["HOME"] = tmpdir
+        workspace_dir = Path(tmpdir) / "lobster-workspace"
+        env["LOBSTER_WORKSPACE"] = str(workspace_dir)
+
+        if simulate_dispatcher:
+            # Write the current process PID as the "dispatcher launcher PID".
+            # The hook subprocess checks os.kill(pid, 0) — the test process
+            # is alive throughout the subprocess run, so this always succeeds.
+            flag_dir = workspace_dir / "data"
+            flag_dir.mkdir(parents=True, exist_ok=True)
+            (flag_dir / "dispatcher-startup-flag").write_text(str(os.getpid()))
 
         return subprocess.run(
             [sys.executable, str(HOOK)],
@@ -95,7 +114,7 @@ def test_dispatcher_background_agent_exits_zero():
         "Agent",
         {"run_in_background": True, "prompt": "do stuff"},
         session_id="dispatcher-sess",
-        dispatcher_session_id="dispatcher-sess",
+        simulate_dispatcher=True,
     )
 
     assert result.returncode == 0, (
@@ -122,7 +141,7 @@ def test_dispatcher_foreground_agent_explicit_false_blocked():
         "Agent",
         {"run_in_background": False, "prompt": "do stuff"},
         session_id="dispatcher-sess",
-        dispatcher_session_id="dispatcher-sess",
+        simulate_dispatcher=True,
     )
 
     assert result.returncode == 2, (
@@ -153,7 +172,7 @@ def test_dispatcher_foreground_agent_field_absent_blocked():
         "Agent",
         {"prompt": "do stuff"},
         session_id="dispatcher-sess",
-        dispatcher_session_id="dispatcher-sess",
+        simulate_dispatcher=True,
     )
 
     assert result.returncode == 2, (
@@ -183,7 +202,7 @@ def test_non_agent_tool_exits_zero():
             tool_name,
             {"some_param": "value"},
             session_id="dispatcher-sess",
-            dispatcher_session_id="dispatcher-sess",
+            simulate_dispatcher=True,
         )
 
         assert result.returncode == 0, (
@@ -210,9 +229,8 @@ def test_subagent_sync_agent_exits_zero():
     result = _run_hook(
         "Agent",
         {"prompt": "do nested work"},
-        # subagent session does NOT match dispatcher marker
+        # No simulate_dispatcher — startup flag absent → is_dispatcher() → False
         session_id="subagent-sess-999",
-        dispatcher_session_id="dispatcher-sess-001",
     )
 
     assert result.returncode == 0, (
@@ -236,7 +254,7 @@ def test_dispatcher_task_tool_sync_blocked():
         "Task",
         {"prompt": "do stuff"},
         session_id="dispatcher-sess",
-        dispatcher_session_id="dispatcher-sess",
+        simulate_dispatcher=True,
     )
 
     assert result.returncode == 2, (
@@ -327,8 +345,7 @@ def test_dispatcher_frontmatter_background_false_exits_two():
     result = _run_hook(
         "Agent",
         {"prompt": _FRONTMATTER_BACKGROUND_FALSE},
-        session_id="dispatcher-sess",
-        dispatcher_session_id="dispatcher-sess",
+        simulate_dispatcher=True,
     )
 
     assert result.returncode == 2, (
