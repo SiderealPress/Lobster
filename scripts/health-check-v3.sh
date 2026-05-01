@@ -108,6 +108,15 @@ DISPATCHER_HEARTBEAT_STALE_SECONDS=1200   # 20 min — covers compaction (~5m) +
 # File is deleted by the MCP server when WFM returns (message arrived or timeout).
 DISPATCHER_WFM_ACTIVE_FILE="${LOBSTER_WFM_ACTIVE_OVERRIDE:-$WORKSPACE_DIR/logs/dispatcher-wfm-active}"
 WFM_ACTIVE_STALE_SECONDS=180   # 3x WAIT_HEARTBEAT_INTERVAL (60s) — absorbs one missed tick
+# Grace window for WFM tombstone ("exited"): if the WFM-active file contains the
+# tombstone but was written within this many seconds, the dispatcher just left WFM
+# and is actively transitioning to message processing — grant the same exemption as
+# a live timestamp. This closes the midnight race (issue #1884): scheduled jobs fire
+# at 00:00Z, wake WFM, which writes "exited" to this file; the health-check cron
+# also fires at 00:00Z and previously declared RED when it saw "exited" instead of
+# a live integer.  A 30s window is well above the sub-second WFM→processing
+# transition but narrow enough to never mask a genuinely frozen dispatcher.
+WFM_TOMBSTONE_GRACE_SECONDS=30
 
 OUTBOX_DIR="$MESSAGES_DIR/outbox"
 OUTBOX_STALE_THRESHOLD_SECONDS=900   # 15 min = RED
@@ -1008,6 +1017,25 @@ check_dispatcher_heartbeat() {
             else
                 log_error "RED: dispatcher heartbeat stale (${age}s) and WFM-active also stale (${wfm_age}s, threshold: ${WFM_ACTIVE_STALE_SECONDS}s) — dispatcher appears frozen"
                 return 2
+            fi
+        fi
+        # Tombstone check (issue #1884 midnight race): inbox_server.py writes
+        # "exited" to WFM_ACTIVE_FILE when WFM returns (instead of deleting the
+        # file, to avoid the TOCTOU race fixed in issue #1730).  If the tombstone
+        # was written within WFM_TOMBSTONE_GRACE_SECONDS, the dispatcher just left
+        # WFM and is actively transitioning to message processing — this is healthy,
+        # not a freeze.  Only grant the exemption when the file mtime is fresh;
+        # an old tombstone (dispatcher has been processing for longer than the grace
+        # window) means the heartbeat staleness is genuinely suspicious.
+        if [[ "$wfm_active_ts" == "exited" ]]; then
+            local file_mtime
+            file_mtime=$(stat -c %Y "$DISPATCHER_WFM_ACTIVE_FILE" 2>/dev/null || echo 0)
+            local tombstone_age=$(( now - file_mtime ))
+            if [[ $tombstone_age -le $WFM_TOMBSTONE_GRACE_SECONDS ]]; then
+                log_info "Dispatcher heartbeat stale (${age}s) but WFM-active tombstone is fresh (written ${tombstone_age}s ago, grace: ${WFM_TOMBSTONE_GRACE_SECONDS}s) — dispatcher just left WFM, skipping RED"
+                return 0
+            else
+                log_info "Dispatcher heartbeat stale (${age}s) and WFM-active tombstone is old (${tombstone_age}s, grace: ${WFM_TOMBSTONE_GRACE_SECONDS}s) — treating as absent"
             fi
         fi
         log_error "RED: dispatcher heartbeat stale — last tool use ${age}s ago (threshold: ${DISPATCHER_HEARTBEAT_STALE_SECONDS}s)"
