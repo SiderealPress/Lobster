@@ -1362,6 +1362,17 @@ Manual intervention required:
     # recovered from processing/ back to inbox/ during the restart.
     write_last_restart_at
 
+    # Write last-restart-reason.json so the dispatcher and tools can distinguish
+    # health-check-initiated restarts from compaction-triggered session starts.
+    # on-compact.py writes this file with reason="compaction"; health-check writes
+    # reason="health-check".  A shell script get-restart-reason.sh provides easy
+    # inspection from the dispatcher or debugging tools.
+    local restart_reason_file="$WORKSPACE_DIR/data/last-restart-reason.json"
+    local restart_ts
+    restart_ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    printf '{"reason": "health-check", "ts": "%s"}\n' "$restart_ts" > "${restart_reason_file}.tmp" \
+        && mv "${restart_reason_file}.tmp" "$restart_reason_file" 2>/dev/null || true
+
     record_restart
 
     # Capture the Claude PID before stopping, so we can verify a new process
