@@ -101,7 +101,7 @@ HEARTBEAT_FILE="$WORKSPACE_DIR/logs/claude-heartbeat"   # legacy WFM-touch signa
 # 900s threshold: covers compaction (~5m) + catchup (~12m) + margin, without
 # needing a separate WFM-active signal.
 DISPATCHER_HEARTBEAT_FILE="${LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE:-$WORKSPACE_DIR/logs/dispatcher-heartbeat}"
-DISPATCHER_HEARTBEAT_STALE_SECONDS=900    # 15 min — covers compaction + catchup + margin
+DISPATCHER_HEARTBEAT_STALE_SECONDS=3600   # 1 hour — temporary patch to prevent rogue health check restarts during docker state machine work
 
 OUTBOX_DIR="$MESSAGES_DIR/outbox"
 OUTBOX_STALE_THRESHOLD_SECONDS=900   # 15 min = RED
