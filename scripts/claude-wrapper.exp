@@ -68,6 +68,30 @@ if {[file readable $config_file]} {
 # Start Claude with bypass permissions
 spawn claude --dangerously-skip-permissions
 
+# Write the dispatcher startup flag so inject-bootup-context.py can identify
+# this session as the dispatcher. Mirrors what claude-persistent.sh does before
+# exec-ing claude: writes the launcher PID to
+# ~/lobster-workspace/data/dispatcher-startup-flag.
+#
+# In debug mode, $spawn_pid is the PID of the spawned claude process. We write
+# it immediately after spawn so the flag is present before Claude's SessionStart
+# hook fires (the hook fires during Claude's startup sequence, well after spawn
+# returns). inject-bootup-context.py checks kill -0 on this PID to confirm
+# liveness, then deletes the flag — exactly the same contract as persistent mode.
+#
+# Without this write, is_dispatcher() returns False for every debug-mode session
+# because the flag never exists, causing thinking-heartbeat.py to skip the
+# heartbeat write, which triggers the health-check cascade restart loop.
+set workspace [expr {[info exists ::env(LOBSTER_WORKSPACE)] ? $::env(LOBSTER_WORKSPACE) : "$::env(HOME)/lobster-workspace"}]
+set flag_dir [file join $workspace "data"]
+set flag_file [file join $flag_dir "dispatcher-startup-flag"]
+catch { file mkdir $flag_dir }
+catch {
+    set fh [open $flag_file w]
+    puts $fh $spawn_pid
+    close $fh
+}
+
 # Wait for either the permissions dialog OR the ready prompt.
 #
 # The ❯ (U+276F) character appears in the prompt area surrounded by ANSI escape
