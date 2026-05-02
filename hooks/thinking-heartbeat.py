@@ -14,7 +14,7 @@ a single file containing a single integer (epoch seconds).
 Design:
 - Fires on every PostToolUse (no tool-name filtering needed)
 - Guards on dispatcher session: reads hook input from stdin, checks session_id
-  against the stored dispatcher session ID. Subagent calls exit 0 immediately.
+  via is_dispatcher_session(). Subagent calls exit 0 immediately.
 - Atomic write: write to .tmp, then os.rename() to avoid partial reads
 - Single integer timestamp — no JSON parsing, no merging, no state file locking
 - Silent on failure: health check degrades gracefully when file is absent
@@ -25,10 +25,23 @@ Dispatcher-only guard (issue #1897):
 - PostToolUse fires for ALL sessions sharing the same Claude Code process,
   including background subagents. Without this guard, a subagent doing heavy
   tool work can keep the heartbeat fresh even if the dispatcher is dead.
-- The guard reads hook_input["session_id"] and compares it against the
-  dispatcher-session-id file written by write-dispatcher-session-id.py at
-  dispatcher startup (SessionStart hook). If the session IDs do not match,
-  the current caller is a subagent and the heartbeat write is skipped.
+- The guard reads hook_input["session_id"] and calls is_dispatcher_session()
+  which uses: (0) agent_id fast path — CC injects agent_id into subagent
+  payloads, absent for the dispatcher; (1) MCP Claude UUID state file written by
+  write-dispatcher-session-id.py at startup; (2) hook marker file
+  (dispatcher-session-id); (3) process-tree walk as a last resort. If the session
+  is not the dispatcher, the heartbeat write is skipped.
+
+Why is_dispatcher_session() and NOT is_dispatcher():
+- is_dispatcher() checks the dispatcher-startup-flag file, which is DELETED by
+  inject-bootup-context.py after the dispatcher's SessionStart hook runs. Since
+  the flag is deleted at startup, is_dispatcher() always returns False at runtime
+  (during PostToolUse), so the heartbeat would never be written.
+- is_dispatcher_session() uses agent_id fast path + state files + process tree,
+  all of which remain valid throughout the entire dispatcher session lifetime.
+- Rule: is_dispatcher() for SessionStart/SubagentStop/Stop hooks (uses startup
+  flag). is_dispatcher_session() for PreToolUse/PostToolUse hooks (uses agent_id
+  + state files + process tree). See session_role.py for full documentation.
 - Launcher-agnostic: works whether Lobster is started via claude-interactive.exp
   or claude-persistent.sh, because both launchers trigger the same SessionStart
   hook that writes the dispatcher session ID file.
@@ -85,10 +98,17 @@ def main() -> None:
         sys.exit(0)
 
     # Guard: only write the heartbeat for the dispatcher session.
-    # is_dispatcher() compares hook_input["session_id"] against the stored
-    # dispatcher session ID file. Returns False for subagents and when the
-    # session ID is unavailable. Fails open (returns True) on I/O errors.
-    if not session_role.is_dispatcher(hook_input):
+    # is_dispatcher_session() uses: agent_id fast path (subagents have agent_id in
+    # their payloads) → MCP Claude UUID state file → hook marker file → process-tree
+    # walk. Returns False for subagents; True for the dispatcher. Fails open
+    # (returns True) on I/O errors to avoid blocking the heartbeat on state-file
+    # read failures.
+    #
+    # NOTE: is_dispatcher() MUST NOT be used here. That function checks the
+    # dispatcher-startup-flag which is deleted by inject-bootup-context.py at
+    # dispatcher startup — it always returns False during PostToolUse, causing the
+    # heartbeat to never be written.
+    if not session_role.is_dispatcher_session(hook_input):
         sys.exit(0)
 
     try:
