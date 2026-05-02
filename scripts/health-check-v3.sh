@@ -101,27 +101,7 @@ HEARTBEAT_FILE="$WORKSPACE_DIR/logs/claude-heartbeat"   # legacy WFM-touch signa
 # 900s threshold: covers compaction (~5m) + catchup (~12m) + margin, without
 # needing a separate WFM-active signal.
 DISPATCHER_HEARTBEAT_FILE="${LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE:-$WORKSPACE_DIR/logs/dispatcher-heartbeat}"
-DISPATCHER_HEARTBEAT_STALE_SECONDS=1800   # stop-gap: raised from 600s to 30min while state machine PR lands; long startup sequences were triggering false-positive restarts
-
-# WFM-active signal (issue #1713 / #949): inbox_server.py writes this file with
-# a Unix epoch timestamp when wait_for_messages begins blocking and refreshes it
-# every WAIT_HEARTBEAT_INTERVAL (60s). When this file is fresh, the dispatcher is
-# alive and waiting for messages — heartbeat staleness is expected, not a problem.
-# Threshold: 30x WAIT_HEARTBEAT_INTERVAL — gives the dispatcher a 1800s (30 min) window
-# to be outside WFM (e.g. processing a message, startup compact-catchup) before
-# the health check fires.  3x was too tight and produced false-positive kills.
-# File is deleted by the MCP server when WFM returns (message arrived or timeout).
-DISPATCHER_WFM_ACTIVE_FILE="${LOBSTER_WFM_ACTIVE_OVERRIDE:-$WORKSPACE_DIR/logs/dispatcher-wfm-active}"
-WFM_ACTIVE_STALE_SECONDS=1800  # stop-gap: raised from 600s to 30min while state machine PR lands; long startup sequences were triggering false-positive restarts
-# Grace window for WFM tombstone ("exited"): if the WFM-active file contains the
-# tombstone but was written within this many seconds, the dispatcher just left WFM
-# and is actively transitioning to message processing — grant the same exemption as
-# a live timestamp. This closes the midnight race (issue #1884): scheduled jobs fire
-# at 00:00Z, wake WFM, which writes "exited" to this file; the health-check cron
-# also fires at 00:00Z and previously declared RED when it saw "exited" instead of
-# a live integer.  A 30s window is well above the sub-second WFM→processing
-# transition but narrow enough to never mask a genuinely frozen dispatcher.
-WFM_TOMBSTONE_GRACE_SECONDS=30
+DISPATCHER_HEARTBEAT_STALE_SECONDS=3600   # 1 hour — temporary patch to prevent rogue health check restarts during docker state machine work
 
 OUTBOX_DIR="$MESSAGES_DIR/outbox"
 OUTBOX_STALE_THRESHOLD_SECONDS=900   # 15 min = RED
