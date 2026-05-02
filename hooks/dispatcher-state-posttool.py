@@ -12,6 +12,7 @@ Silent on all errors — must never block tool execution.
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 

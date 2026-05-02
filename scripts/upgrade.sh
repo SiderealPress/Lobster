@@ -2830,6 +2830,77 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
         substep "settings.json not found or jq unavailable — skipping Migration 92"
     fi
 
+    # Migration 93: Register dispatcher state machine hooks (issue #1918).
+    # Three hooks implement the 5-state liveness machine:
+    #   - dispatcher-state-pretool.py  (PreToolUse):  WAITING on wait_for_messages,
+    #                                                  PROCESSING on mark_processing
+    #   - dispatcher-state-posttool.py (PostToolUse): WAITING on mark_processed
+    #   - dispatcher-state-stop.py     (Stop):        DEAD on session exit
+    # The STARTING state is written by inject-bootup-context.py (SessionStart),
+    # which already imports state_machine and does not need a separate hook entry.
+    if [ -f "$CLAUDE_SETTINGS" ] && command -v jq >/dev/null 2>&1; then
+        local has_state_pretool has_state_posttool has_state_stop
+        has_state_pretool=$(jq -r '
+            [.hooks.PreToolUse[]?.hooks[]?.command // empty]
+            | map(select(contains("dispatcher-state-pretool")))
+            | length
+        ' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
+        has_state_posttool=$(jq -r '
+            [.hooks.PostToolUse[]?.hooks[]?.command // empty]
+            | map(select(contains("dispatcher-state-posttool")))
+            | length
+        ' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
+        has_state_stop=$(jq -r '
+            [.hooks.Stop[]?.hooks[]?.command // empty]
+            | map(select(contains("dispatcher-state-stop")))
+            | length
+        ' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
+
+        if [ "${has_state_pretool:-0}" = "0" ] || [ "${has_state_pretool:-0}" = "" ]; then
+            chmod +x "$LOBSTER_DIR/hooks/dispatcher-state-pretool.py" 2>/dev/null || true
+            TMP_SETTINGS=$(mktemp)
+            jq --arg cmd "python3 $LOBSTER_DIR/hooks/dispatcher-state-pretool.py" \
+               '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+                "matcher": "mcp__lobster-inbox__wait_for_messages|mcp__lobster-inbox__mark_processing",
+                "hooks": [{"type": "command", "command": $cmd, "timeout": 5}]
+            }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+            substep "Migration 93: Registered dispatcher-state-pretool PreToolUse hook"
+            migrated=$((migrated + 1))
+        else
+            substep "Migration 93: dispatcher-state-pretool PreToolUse hook already registered — skipping"
+        fi
+
+        if [ "${has_state_posttool:-0}" = "0" ] || [ "${has_state_posttool:-0}" = "" ]; then
+            chmod +x "$LOBSTER_DIR/hooks/dispatcher-state-posttool.py" 2>/dev/null || true
+            TMP_SETTINGS=$(mktemp)
+            jq --arg cmd "python3 $LOBSTER_DIR/hooks/dispatcher-state-posttool.py" \
+               '.hooks.PostToolUse = (.hooks.PostToolUse // []) + [{
+                "matcher": "mcp__lobster-inbox__mark_processed",
+                "hooks": [{"type": "command", "command": $cmd, "timeout": 5}]
+            }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+            substep "Migration 93: Registered dispatcher-state-posttool PostToolUse hook"
+            migrated=$((migrated + 1))
+        else
+            substep "Migration 93: dispatcher-state-posttool PostToolUse hook already registered — skipping"
+        fi
+
+        if [ "${has_state_stop:-0}" = "0" ] || [ "${has_state_stop:-0}" = "" ]; then
+            chmod +x "$LOBSTER_DIR/hooks/dispatcher-state-stop.py" 2>/dev/null || true
+            TMP_SETTINGS=$(mktemp)
+            jq --arg cmd "python3 $LOBSTER_DIR/hooks/dispatcher-state-stop.py" \
+               '.hooks.Stop = (.hooks.Stop // []) + [{
+                "matcher": "",
+                "hooks": [{"type": "command", "command": $cmd, "timeout": 5}]
+            }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+            substep "Migration 93: Registered dispatcher-state-stop Stop hook"
+            migrated=$((migrated + 1))
+        else
+            substep "Migration 93: dispatcher-state-stop Stop hook already registered — skipping"
+        fi
+    else
+        substep "Migration 93: settings.json or jq not found — skipping state machine hook registration"
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
