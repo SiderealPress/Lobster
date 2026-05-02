@@ -33,10 +33,10 @@
 # Dispatcher liveness (simplified, issue #1908):
 #   hooks/thinking-heartbeat.py writes a Unix epoch timestamp to
 #   ~/lobster-workspace/logs/dispatcher-heartbeat on every PostToolUse event.
-#   The daemon thread in inbox_server.py also writes this file every 60s while
-#   wait_for_messages is blocking, bridging the gap when no tool calls occur.
-#   check_dispatcher_heartbeat() reads this single file with a 900s threshold.
-#   No WFM-active fallback needed — the daemon thread keeps the heartbeat fresh.
+#   check_dispatcher_heartbeat() reads this single file and checks its age.
+#   The 1800s threshold (30 min) reduces MTTR for thinking-freeze. The
+#   post-compaction grace period suppression covers catchup runs that
+#   can last up to 12 min. See issue #1483, #1786.
 #
 # Boot grace period:
 #   After any restart (health-check-initiated or manual), the new Claude session
@@ -47,7 +47,7 @@
 #   (after each health-check-initiated restart). Resource checks (memory, disk,
 #   auth, outbox) still run during the grace period.
 #   NOTE: Dispatcher heartbeat check is NOT suppressed during boot grace — the
-#   10-minute threshold absorbs the 90s boot window naturally.
+#   1800s (30 min) threshold absorbs the 90s boot window naturally.
 #
 # Escalation ladder:
 #   GREEN  - All checks pass (or in expected transient state)
@@ -107,7 +107,7 @@ DISPATCHER_HEARTBEAT_STALE_SECONDS=1800   # stop-gap: raised from 600s to 30min 
 # a Unix epoch timestamp when wait_for_messages begins blocking and refreshes it
 # every WAIT_HEARTBEAT_INTERVAL (60s). When this file is fresh, the dispatcher is
 # alive and waiting for messages — heartbeat staleness is expected, not a problem.
-# Threshold: 10x WAIT_HEARTBEAT_INTERVAL — gives the dispatcher a 10-minute window
+# Threshold: 30x WAIT_HEARTBEAT_INTERVAL — gives the dispatcher a 1800s (30 min) window
 # to be outside WFM (e.g. processing a message, startup compact-catchup) before
 # the health check fires.  3x was too tight and produced false-positive kills.
 # File is deleted by the MCP server when WFM returns (message arrived or timeout).
@@ -558,7 +558,7 @@ is_compact_grace_period() {
 }
 
 # is_catchup_active() removed (issue #1483).
-# The dispatcher heartbeat threshold (DISPATCHER_HEARTBEAT_STALE_SECONDS = 600s)
+# The dispatcher heartbeat threshold (DISPATCHER_HEARTBEAT_STALE_SECONDS = 1800s)
 # covers catchup duration naturally. No per-catchup suppression needed.
 # The dispatcher no longer needs to call record-catchup-state.sh.
 
@@ -977,10 +977,10 @@ check_outbox_drain() {
 #
 # This single-file check replaces the previous multi-signal approach
 # (claude-heartbeat file + last_processed_at + last_thinking_at in
-# lobster-state.json). Threshold is 600s (10 min) — reduced from 1200s to lower
-# MTTR for thinking-freeze. The post-compaction grace suppression in main() covers
-# catchup runs that can exceed 10 min. Boot grace period (90s) is well within
-# the 600s threshold.
+# lobster-state.json). Threshold is 1800s (30 min) — raised from 600s as a
+# stop-gap while the state machine PR lands; long startup sequences were
+# triggering false-positive restarts. Boot grace period (90s) is well within
+# the 1800s threshold.
 #
 # Gracefully skips the check if the heartbeat file does not exist (fresh install
 # or first run before the hook has fired).
@@ -1920,17 +1920,17 @@ main() {
     # --- Dispatcher heartbeat check (issue #1483 simplification, #1786 tuning) ---
     # Single-file liveness check: hooks/thinking-heartbeat.py writes a Unix
     # epoch timestamp to DISPATCHER_HEARTBEAT_FILE on every PostToolUse event.
-    # Threshold is 600s (10 min) — reduces MTTR for thinking-freeze from 20 min
-    # to 10 min.
+    # Threshold is 1800s (30 min) — stop-gap raised from 600s while state machine
+    # PR lands; long startup sequences were triggering false-positive restarts.
     #
     # Suppressed during:
     #   - Hibernation (dispatcher process is not running)
     #   - Transient lifecycle states (starting/restarting/waking/backoff/stopped —
     #     the wrapper hasn't even launched Claude yet)
     #   - Post-compaction grace period (is_compact_grace_period): catchup runs
-    #     after compaction can last up to 12 min, exceeding the 10-min threshold.
+    #     after compaction can last up to 12 min, well within the 1800s threshold.
     #     Grace period is COMPACT_GRACE_SECONDS (15 min) from last-compact.ts.
-    # Boot grace is not needed: 600s is still well above the 90s boot window.
+    # Boot grace is not needed: 1800s is still well above the 90s boot window.
 
     if is_hibernating; then
         log_info "Dispatcher heartbeat suppressed (hibernating)"
