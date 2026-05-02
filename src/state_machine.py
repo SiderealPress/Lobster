@@ -64,16 +64,31 @@ def write_state(
         pid: Dispatcher PID. Defaults to os.getpid().
         session_id: Claude session ID string (optional, for debugging).
 
+    The `since` field records when the current state was *entered* and is
+    preserved across updates unless the state value changes.  This lets the
+    health check compute how long the dispatcher has been in a given state
+    without confusion from frequent `updated_at` refreshes.
+
     Silent on all exceptions — must never interrupt hooks or dispatcher code.
     """
     try:
         now_iso = datetime.now(timezone.utc).isoformat()
+
+        # Preserve `since` if the state has not changed since the last write.
+        since_iso = now_iso
+        try:
+            existing = json.loads(STATE_FILE.read_text())
+            if existing.get("state") == state and existing.get("since"):
+                since_iso = existing["since"]
+        except Exception:
+            pass  # File absent or unreadable — use now_iso
+
         data = {
             "state": state,
             "pid": pid if pid is not None else os.getpid(),
             "session_id": session_id or "",
             "updated_at": now_iso,
-            "since": now_iso,
+            "since": since_iso,
         }
         STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         tmp = STATE_FILE.with_suffix(".json.tmp")
