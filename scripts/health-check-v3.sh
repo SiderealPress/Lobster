@@ -157,6 +157,16 @@ mkdir -p "$(dirname "$RESTART_STATE_FILE")"
 mkdir -p "$ALERT_DEDUP_DIR"
 mkdir -p "$(dirname "$LOCK_FILE")"
 
+# Source dispatcher state machine check (issue #1918).
+# Defines check_dispatcher_state() and DISPATCHER_STATE_FILE.
+# The patch file uses WORKSPACE_DIR which is already set above.
+_INSTALL_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
+_STATE_MACHINE_PATCH="$_INSTALL_DIR/scripts/health-check-state-machine-patch.sh"
+if [[ -f "$_STATE_MACHINE_PATCH" ]]; then
+    # shellcheck source=health-check-state-machine-patch.sh
+    source "$_STATE_MACHINE_PATCH"
+fi
+
 # Dry-run gate: skip all real actions when LOBSTER_HEALTH_CHECK_DRY_RUN=1.
 # Used by tests to exercise parsing/reading logic without executing systemctl,
 # curl, or other external commands.
@@ -1851,11 +1861,35 @@ main() {
     elif is_compact_grace_period; then
         log_info "Dispatcher heartbeat suppressed (post-compaction grace period — catchup may still be running)"
     else
-        check_dispatcher_heartbeat
-        local hb_rc=$?
-        if [[ $hb_rc -eq 2 ]]; then
+        # --- Dispatcher state machine check (issue #1918) ---
+        # check_dispatcher_state() is defined in health-check-state-machine-patch.sh
+        # (sourced at startup). If the function is not defined (old install without the
+        # patch), fall through immediately to the heartbeat check.
+        #
+        # Return codes:
+        #   0 = GREEN (STARTING/PROCESSING/WINDING_DOWN within threshold) — skip heartbeat
+        #   2 = RED (DEAD or stale STARTING) — skip heartbeat, trigger restart
+        #   3 = SKIP (WAITING, missing file, unknown state) — fall through to heartbeat
+        local sm_rc=3
+        if declare -f check_dispatcher_state > /dev/null 2>&1; then
+            check_dispatcher_state
+            sm_rc=$?
+        fi
+
+        if [[ $sm_rc -eq 0 ]]; then
+            log_info "Dispatcher state machine: GREEN — skipping legacy heartbeat check"
+        elif [[ $sm_rc -eq 2 ]]; then
+            log_error "Dispatcher state machine: RED — skipping legacy heartbeat check"
             level="RED"
-            restart_reason="${restart_reason:+$restart_reason + }dispatcher heartbeat stale (>${DISPATCHER_HEARTBEAT_STALE_SECONDS}s)"
+            restart_reason="${restart_reason:+$restart_reason + }dispatcher state machine RED"
+        else
+            # sm_rc=3 (SKIP) or function not available — fall through to heartbeat
+            check_dispatcher_heartbeat
+            local hb_rc=$?
+            if [[ $hb_rc -eq 2 ]]; then
+                level="RED"
+                restart_reason="${restart_reason:+$restart_reason + }dispatcher heartbeat stale (>${DISPATCHER_HEARTBEAT_STALE_SECONDS}s)"
+            fi
         fi
     fi
 
