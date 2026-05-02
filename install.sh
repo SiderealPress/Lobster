@@ -2501,6 +2501,64 @@ else
     info "Skipping on-fresh-start hook (settings.json not yet created)"
 fi
 
+# Set up Claude Code PreToolUse + PostToolUse + Stop hooks for dispatcher state machine
+# (issue #1918). Three hooks implement the 5-state liveness machine:
+#   - dispatcher-state-pretool.py  (PreToolUse):  WAITING on wait_for_messages,
+#                                                 PROCESSING on mark_processing
+#   - dispatcher-state-posttool.py (PostToolUse): WAITING on mark_processed
+#   - dispatcher-state-stop.py     (Stop):        DEAD on session exit
+# STARTING is written by inject-bootup-context.py (SessionStart hook).
+chmod +x "$INSTALL_DIR/hooks/dispatcher-state-pretool.py" || true
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '[.hooks.PreToolUse[]?.hooks[]?.command // empty] | any(contains("dispatcher-state-pretool"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq --arg cmd "python3 $INSTALL_DIR/hooks/dispatcher-state-pretool.py" \
+           '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+            "matcher": "mcp__lobster-inbox__wait_for_messages|mcp__lobster-inbox__mark_processing",
+            "hooks": [{"type": "command", "command": $cmd, "timeout": 5}]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "dispatcher-state-pretool PreToolUse hook registered"
+    else
+        info "dispatcher-state-pretool PreToolUse hook already configured"
+    fi
+else
+    info "Skipping dispatcher-state-pretool hook (settings.json not yet created)"
+fi
+
+chmod +x "$INSTALL_DIR/hooks/dispatcher-state-posttool.py" || true
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '[.hooks.PostToolUse[]?.hooks[]?.command // empty] | any(contains("dispatcher-state-posttool"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq --arg cmd "python3 $INSTALL_DIR/hooks/dispatcher-state-posttool.py" \
+           '.hooks.PostToolUse = (.hooks.PostToolUse // []) + [{
+            "matcher": "mcp__lobster-inbox__mark_processed",
+            "hooks": [{"type": "command", "command": $cmd, "timeout": 5}]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "dispatcher-state-posttool PostToolUse hook registered"
+    else
+        info "dispatcher-state-posttool PostToolUse hook already configured"
+    fi
+else
+    info "Skipping dispatcher-state-posttool hook (settings.json not yet created)"
+fi
+
+chmod +x "$INSTALL_DIR/hooks/dispatcher-state-stop.py" || true
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '[.hooks.Stop[]?.hooks[]?.command // empty] | any(contains("dispatcher-state-stop"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq --arg cmd "python3 $INSTALL_DIR/hooks/dispatcher-state-stop.py" \
+           '.hooks.Stop = (.hooks.Stop // []) + [{
+            "matcher": "",
+            "hooks": [{"type": "command", "command": $cmd, "timeout": 5}]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "dispatcher-state-stop Stop hook registered"
+    else
+        info "dispatcher-state-stop Stop hook already configured"
+    fi
+else
+    info "Skipping dispatcher-state-stop hook (settings.json not yet created)"
+fi
+
 # Set up Claude Code Stop hook to enforce wait_for_messages in dispatcher sessions.
 # Stop fires when the dispatcher's main Claude Code session considers stopping.
 # The hook detects the dispatcher via session_role.is_dispatcher() and injects a
