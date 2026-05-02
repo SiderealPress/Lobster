@@ -20,15 +20,18 @@ Design change from the original (lobster-state.json merge):
 - Single file — no other state touched
 
 Dispatcher-only guard (issue #1897):
-- Hooks now read stdin and call session_role.is_dispatcher() before writing.
+- Hooks now read stdin and call session_role.is_dispatcher_session() before writing.
 - Tests exercise: dispatcher writes, subagent skips, unknown-session skips.
+
+Key difference from pre-PR-1897 behaviour: the hook now uses is_dispatcher_session()
+(not is_dispatcher()) so it works correctly at PostToolUse time when the startup
+flag has already been deleted by inject-bootup-context.py.
 """
 
 import importlib.util
 import json
 import os
 import sys
-import tempfile
 import time
 from io import StringIO
 from pathlib import Path
@@ -147,12 +150,12 @@ def _run_hook_with_input(
     monkeypatch,
     heartbeat_file: Path,
     hook_input: dict,
-    is_dispatcher_return: bool = True,
+    is_dispatcher_session_return: bool = True,
 ) -> tuple[int, str, str]:
-    """Execute the hook's main() with a given hook input dict and mocked is_dispatcher.
+    """Execute the hook's main() with a given hook input dict and mocked is_dispatcher_session.
 
-    Mocks session_role.is_dispatcher to return is_dispatcher_return so tests
-    don't depend on filesystem state (dispatcher-session-id files).
+    Mocks session_role.is_dispatcher_session to return is_dispatcher_session_return so
+    tests don't depend on filesystem state (dispatcher-session-id files).
     """
     monkeypatch.setenv("LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE", str(heartbeat_file))
 
@@ -172,8 +175,8 @@ def _run_hook_with_input(
     ):
         try:
             spec.loader.exec_module(mod)
-            # Patch is_dispatcher on the loaded module's session_role reference.
-            mod.session_role.is_dispatcher = lambda _: is_dispatcher_return
+            # Patch is_dispatcher_session on the loaded module's session_role reference.
+            mod.session_role.is_dispatcher_session = lambda _: is_dispatcher_session_return
             mod.main()
         except SystemExit as e:
             exit_code = e.code
@@ -182,12 +185,12 @@ def _run_hook_with_input(
 
 
 def _run_hook(monkeypatch, heartbeat_file: Path) -> tuple[int, str, str]:
-    """Run hook as the dispatcher (is_dispatcher returns True)."""
+    """Run hook as the dispatcher (is_dispatcher_session returns True)."""
     return _run_hook_with_input(
         monkeypatch,
         heartbeat_file,
         hook_input={"session_id": DISPATCHER_SESSION_ID},
-        is_dispatcher_return=True,
+        is_dispatcher_session_return=True,
     )
 
 
@@ -231,7 +234,7 @@ class TestHookMain:
 # ---------------------------------------------------------------------------
 
 # Named constant from the spec (issue #1897): subagent activity masks dispatcher death.
-# The fix: heartbeat is only written when is_dispatcher() returns True.
+# The fix: heartbeat is only written when is_dispatcher_session() returns True.
 SUBAGENT_MUST_NOT_WRITE_HEARTBEAT = True
 
 
@@ -239,13 +242,13 @@ class TestDispatcherOnlyGuard:
     """Issue #1897: subagent tool calls must NOT update the dispatcher heartbeat."""
 
     def test_subagent_session_does_not_write_heartbeat(self, monkeypatch, tmp_path):
-        """When is_dispatcher returns False, heartbeat file is not created."""
+        """When is_dispatcher_session returns False, heartbeat file is not created."""
         hb = tmp_path / "dispatcher-heartbeat"
         code, _, _ = _run_hook_with_input(
             monkeypatch,
             hb,
             hook_input={"session_id": SUBAGENT_SESSION_ID},
-            is_dispatcher_return=False,
+            is_dispatcher_session_return=False,
         )
         assert code == 0
         assert not hb.exists(), (
@@ -262,7 +265,7 @@ class TestDispatcherOnlyGuard:
             monkeypatch,
             hb,
             hook_input={"session_id": SUBAGENT_SESSION_ID},
-            is_dispatcher_return=False,
+            is_dispatcher_session_return=False,
         )
         assert code == 0
         # File content must be unchanged.
@@ -271,14 +274,14 @@ class TestDispatcherOnlyGuard:
         )
 
     def test_dispatcher_session_writes_heartbeat(self, monkeypatch, tmp_path):
-        """When is_dispatcher returns True, the heartbeat IS written."""
+        """When is_dispatcher_session returns True, the heartbeat IS written."""
         hb = tmp_path / "dispatcher-heartbeat"
         before = int(time.time())
         _run_hook_with_input(
             monkeypatch,
             hb,
             hook_input={"session_id": DISPATCHER_SESSION_ID},
-            is_dispatcher_return=True,
+            is_dispatcher_session_return=True,
         )
         after = int(time.time())
         assert hb.exists()
@@ -327,17 +330,42 @@ class TestDispatcherOnlyGuard:
 
     def test_exits_zero_regardless_of_session_type(self, monkeypatch, tmp_path):
         """Hook always exits 0, whether dispatcher or subagent (never blocks tool execution)."""
-        hb = tmp_path / "dispatcher-heartbeat"
-
-        for is_dispatcher in (True, False):
-            hb_i = tmp_path / f"heartbeat-{is_dispatcher}"
+        for is_dispatcher_session in (True, False):
+            hb_i = tmp_path / f"heartbeat-{is_dispatcher_session}"
             code, _, _ = _run_hook_with_input(
                 monkeypatch,
                 hb_i,
                 hook_input={"session_id": DISPATCHER_SESSION_ID},
-                is_dispatcher_return=is_dispatcher,
+                is_dispatcher_session_return=is_dispatcher_session,
             )
-            assert code == 0, f"Hook must exit 0 for is_dispatcher={is_dispatcher}"
+            assert code == 0, f"Hook must exit 0 for is_dispatcher_session={is_dispatcher_session}"
+
+    def test_uses_is_dispatcher_session_not_is_dispatcher(self, tmp_path):
+        """Guard must call is_dispatcher_session(), NOT is_dispatcher() which uses the
+        deleted startup flag and always returns False at PostToolUse time."""
+        import ast
+        source = HOOK_PATH.read_text()
+        tree = ast.parse(source)
+
+        # Check that is_dispatcher_session is called somewhere in the source.
+        assert "is_dispatcher_session" in source, (
+            "thinking-heartbeat.py must call is_dispatcher_session() for PostToolUse "
+            "hooks, not is_dispatcher() which reads the deleted startup flag"
+        )
+
+        # Check that is_dispatcher() is NOT called (only is_dispatcher_session).
+        # We look for the call pattern specifically: session_role.is_dispatcher(
+        # but NOT session_role.is_dispatcher_session(
+        import re
+        bare_is_dispatcher_calls = re.findall(
+            r'session_role\.is_dispatcher\s*\((?!_session)',
+            source,
+        )
+        assert not bare_is_dispatcher_calls, (
+            "thinking-heartbeat.py must NOT call session_role.is_dispatcher() — "
+            "that function reads the deleted startup flag and always returns False "
+            "at PostToolUse time. Use is_dispatcher_session() instead."
+        )
 
 
 # ---------------------------------------------------------------------------
