@@ -202,6 +202,45 @@ class TestWriteState:
             data = json.loads(Path(state_file).read_text())
             assert data["state"] == state
 
+    def test_since_preserved_on_same_state_write(self, tmp_path):
+        """since must not change when write_state is called with the same state."""
+        state_file = str(tmp_path / "dispatcher-state.json")
+        mod = _load_state_machine(state_file)
+        mod.write_state(mod.WAITING)
+        first = json.loads(Path(state_file).read_text())
+        original_since = first["since"]
+        # Write the same state again
+        mod.write_state(mod.WAITING)
+        second = json.loads(Path(state_file).read_text())
+        assert second["since"] == original_since, (
+            "since must be preserved when state does not change"
+        )
+
+    def test_since_resets_on_state_change(self, tmp_path):
+        """since must update when the state value changes."""
+        import time
+        state_file = str(tmp_path / "dispatcher-state.json")
+        mod = _load_state_machine(state_file)
+        mod.write_state(mod.WAITING)
+        first = json.loads(Path(state_file).read_text())
+        original_since = first["since"]
+        # A tiny sleep to ensure the new timestamp is strictly later
+        time.sleep(0.01)
+        mod.write_state(mod.PROCESSING)
+        second = json.loads(Path(state_file).read_text())
+        assert second["since"] != original_since, (
+            "since must reset when state changes"
+        )
+
+    def test_since_field_present(self, tmp_path):
+        """since must be present in every write."""
+        state_file = str(tmp_path / "dispatcher-state.json")
+        mod = _load_state_machine(state_file)
+        mod.write_state(mod.STARTING)
+        data = json.loads(Path(state_file).read_text())
+        assert "since" in data
+        assert "T" in data["since"]  # ISO 8601
+
 
 class TestReadState:
     """state_machine.read_state() — reads and parses the state file."""
@@ -450,11 +489,8 @@ class TestInjectBootupStartingState:
         hook_input = json.dumps({"session_id": "dispatcher-abc"})
 
         # Patch the dispatcher-detection chain to say "yes, dispatcher"
-        with patch.object(mod.session_role, "is_dispatcher", return_value=True), \
-             patch.object(mod, "_is_post_compact_dispatcher", return_value=False), \
-             patch.object(mod, "_is_fresh_start_dispatcher", return_value=False), \
-             patch.object(mod.session_role, "get_session_id", return_value="dispatcher-abc"), \
-             patch.object(mod.session_role, "write_dispatcher_session_id"), \
+        with patch.object(mod, "_is_startup_flag_dispatcher", return_value=True), \
+             patch.object(mod, "_consume_startup_flag"), \
              patch.object(mod, "_read_file_safe", return_value="# bootup content"), \
              patch.object(mod, "_inject_if_exists", return_value=False), \
              patch.object(mod, "_append_injection_log"), \
@@ -474,9 +510,7 @@ class TestInjectBootupStartingState:
 
         hook_input = json.dumps({"session_id": "subagent-xyz"})
 
-        with patch.object(mod.session_role, "is_dispatcher", return_value=False), \
-             patch.object(mod, "_is_post_compact_dispatcher", return_value=False), \
-             patch.object(mod, "_is_fresh_start_dispatcher", return_value=False), \
+        with patch.object(mod, "_is_startup_flag_dispatcher", return_value=False), \
              patch.object(mod, "_read_file_safe", return_value="# subagent bootup"), \
              patch.object(mod, "_inject_if_exists", return_value=False), \
              patch.object(mod, "_append_injection_log"), \
