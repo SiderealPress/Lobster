@@ -29,47 +29,38 @@ check_dispatcher_state() {
         return 3  # SKIP: fall through to existing heartbeat check
     fi
 
-    local state updated_at
-    state=$(uv run python3 -c "
+    # Read all needed fields in a single Python process invocation.
+    local parsed
+    parsed=$(uv run python3 -c "
 import json, sys
+from datetime import datetime, timezone, timedelta
+import time
 try:
     d = json.load(open('$DISPATCHER_STATE_FILE'))
-    print(d.get('state', 'unknown'))
+    state = d.get('state', 'unknown')
+    # Use 'since' (state-entry time) if present, else fall back to 'updated_at'.
+    ts = d.get('since') or d.get('updated_at', '')
+    age = 0
+    if ts:
+        try:
+            dt = datetime.fromisoformat(ts)
+            age = int(time.time() - dt.timestamp())
+        except Exception:
+            age = 0
+    print(state)
+    print(age)
 except Exception as e:
     print('unknown')
-" 2>/dev/null)
-
-    updated_at=$(uv run python3 -c "
-import json, sys
-try:
-    d = json.load(open('$DISPATCHER_STATE_FILE'))
-    print(d.get('updated_at', ''))
-except Exception:
-    print('')
-" 2>/dev/null)
-
-    if [[ -z "$state" ]]; then
-        log_info "Dispatcher state: unreadable — skipping state-machine check"
-        return 3  # SKIP
-    fi
-
-    # Calculate age of the state in seconds
-    local age=0
-    if [[ -n "$updated_at" ]]; then
-        local updated_epoch
-        updated_epoch=$(uv run python3 -c "
-from datetime import datetime, timezone
-try:
-    dt = datetime.fromisoformat('$updated_at')
-    print(int(dt.timestamp()))
-except Exception:
     print(0)
 " 2>/dev/null)
-        if [[ -n "$updated_epoch" && "$updated_epoch" != "0" ]]; then
-            local now
-            now=$(date +%s)
-            age=$(( now - updated_epoch ))
-        fi
+
+    local state age
+    state=$(echo "$parsed" | head -1)
+    age=$(echo "$parsed" | tail -1)
+
+    if [[ -z "$state" || "$state" == "unknown" ]]; then
+        log_info "Dispatcher state: unreadable — skipping state-machine check"
+        return 3  # SKIP
     fi
 
     case "$state" in
