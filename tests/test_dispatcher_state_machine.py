@@ -450,11 +450,8 @@ class TestInjectBootupStartingState:
         hook_input = json.dumps({"session_id": "dispatcher-abc"})
 
         # Patch the dispatcher-detection chain to say "yes, dispatcher"
-        with patch.object(mod.session_role, "is_dispatcher", return_value=True), \
-             patch.object(mod, "_is_post_compact_dispatcher", return_value=False), \
-             patch.object(mod, "_is_fresh_start_dispatcher", return_value=False), \
-             patch.object(mod.session_role, "get_session_id", return_value="dispatcher-abc"), \
-             patch.object(mod.session_role, "write_dispatcher_session_id"), \
+        with patch.object(mod, "_is_startup_flag_dispatcher", return_value=True), \
+             patch.object(mod, "_consume_startup_flag"), \
              patch.object(mod, "_read_file_safe", return_value="# bootup content"), \
              patch.object(mod, "_inject_if_exists", return_value=False), \
              patch.object(mod, "_append_injection_log"), \
@@ -474,9 +471,7 @@ class TestInjectBootupStartingState:
 
         hook_input = json.dumps({"session_id": "subagent-xyz"})
 
-        with patch.object(mod.session_role, "is_dispatcher", return_value=False), \
-             patch.object(mod, "_is_post_compact_dispatcher", return_value=False), \
-             patch.object(mod, "_is_fresh_start_dispatcher", return_value=False), \
+        with patch.object(mod, "_is_startup_flag_dispatcher", return_value=False), \
              patch.object(mod, "_read_file_safe", return_value="# subagent bootup"), \
              patch.object(mod, "_inject_if_exists", return_value=False), \
              patch.object(mod, "_append_injection_log"), \
