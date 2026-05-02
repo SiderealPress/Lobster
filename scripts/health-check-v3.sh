@@ -99,7 +99,7 @@ HEARTBEAT_FILE="$WORKSPACE_DIR/logs/claude-heartbeat"   # legacy WFM-touch signa
 # Single file, single integer (Unix epoch seconds). No JSON parsing required.
 # Threshold is generous enough to cover compaction + catchup without suppression.
 DISPATCHER_HEARTBEAT_FILE="${LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE:-$WORKSPACE_DIR/logs/dispatcher-heartbeat}"
-DISPATCHER_HEARTBEAT_STALE_SECONDS=600    # 10 min — covers compaction (~5m) + catchup margin; grace period handles the rest
+DISPATCHER_HEARTBEAT_STALE_SECONDS=1800   # stop-gap: raised from 600s to 30min while state machine PR lands; long startup sequences were triggering false-positive restarts
 
 # WFM-active signal (issue #1713 / #949): inbox_server.py writes this file with
 # a Unix epoch timestamp when wait_for_messages begins blocking and refreshes it
@@ -110,7 +110,7 @@ DISPATCHER_HEARTBEAT_STALE_SECONDS=600    # 10 min — covers compaction (~5m) +
 # the health check fires.  3x was too tight and produced false-positive kills.
 # File is deleted by the MCP server when WFM returns (message arrived or timeout).
 DISPATCHER_WFM_ACTIVE_FILE="${LOBSTER_WFM_ACTIVE_OVERRIDE:-$WORKSPACE_DIR/logs/dispatcher-wfm-active}"
-WFM_ACTIVE_STALE_SECONDS=600   # 10x WAIT_HEARTBEAT_INTERVAL (60s) — 10-minute window
+WFM_ACTIVE_STALE_SECONDS=1800  # stop-gap: raised from 600s to 30min while state machine PR lands; long startup sequences were triggering false-positive restarts
 # Grace window for WFM tombstone ("exited"): if the WFM-active file contains the
 # tombstone but was written within this many seconds, the dispatcher just left WFM
 # and is actively transitioning to message processing — grant the same exemption as
