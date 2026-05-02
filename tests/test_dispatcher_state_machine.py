@@ -202,6 +202,45 @@ class TestWriteState:
             data = json.loads(Path(state_file).read_text())
             assert data["state"] == state
 
+    def test_since_preserved_on_same_state_write(self, tmp_path):
+        """since must not change when write_state is called with the same state."""
+        state_file = str(tmp_path / "dispatcher-state.json")
+        mod = _load_state_machine(state_file)
+        mod.write_state(mod.WAITING)
+        first = json.loads(Path(state_file).read_text())
+        original_since = first["since"]
+        # Write the same state again
+        mod.write_state(mod.WAITING)
+        second = json.loads(Path(state_file).read_text())
+        assert second["since"] == original_since, (
+            "since must be preserved when state does not change"
+        )
+
+    def test_since_resets_on_state_change(self, tmp_path):
+        """since must update when the state value changes."""
+        import time
+        state_file = str(tmp_path / "dispatcher-state.json")
+        mod = _load_state_machine(state_file)
+        mod.write_state(mod.WAITING)
+        first = json.loads(Path(state_file).read_text())
+        original_since = first["since"]
+        # A tiny sleep to ensure the new timestamp is strictly later
+        time.sleep(0.01)
+        mod.write_state(mod.PROCESSING)
+        second = json.loads(Path(state_file).read_text())
+        assert second["since"] != original_since, (
+            "since must reset when state changes"
+        )
+
+    def test_since_field_present(self, tmp_path):
+        """since must be present in every write."""
+        state_file = str(tmp_path / "dispatcher-state.json")
+        mod = _load_state_machine(state_file)
+        mod.write_state(mod.STARTING)
+        data = json.loads(Path(state_file).read_text())
+        assert "since" in data
+        assert "T" in data["since"]  # ISO 8601
+
 
 class TestReadState:
     """state_machine.read_state() — reads and parses the state file."""
