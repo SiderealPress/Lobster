@@ -30,6 +30,34 @@ import uuid
 from pathlib import Path
 from datetime import datetime, timezone
 
+# Import state machine for WINDING_DOWN transition (issue #1918).
+# Imported lazily in _write_winding_down() so a missing/broken import never
+# blocks context monitoring. Silent on all errors.
+_STATE_MACHINE_LOADED = False
+_state_machine = None
+
+def _write_winding_down(session_id: str = "") -> None:
+    """Write WINDING_DOWN state to dispatcher-state.json (issue #1918).
+
+    Called once when the context_warning threshold is crossed. Silent on all
+    errors — must never interrupt context monitoring.
+    """
+    global _STATE_MACHINE_LOADED, _state_machine
+    try:
+        if not _STATE_MACHINE_LOADED:
+            import importlib.util
+            _hooks_dir = Path(__file__).parent
+            _src_dir = _hooks_dir.parent / "src"
+            if str(_src_dir) not in sys.path:
+                sys.path.insert(0, str(_src_dir))
+            import state_machine as _sm
+            _state_machine = _sm
+            _STATE_MACHINE_LOADED = True
+        if _state_machine is not None:
+            _state_machine.write_state(_state_machine.WINDING_DOWN, session_id=session_id)
+    except Exception:
+        pass
+
 WARNING_THRESHOLD = 70.0
 DEDUP_FLAG = Path("/tmp/lobster-context-warning-sent")
 
@@ -206,6 +234,7 @@ def _handle_payload(
 
     tool_name = data.get("tool_name", "unknown")
     transcript_path = data.get("transcript_path")
+    session_id = data.get("session_id", "")
 
     result = _read_transcript_usage(transcript_path)
 
@@ -237,6 +266,10 @@ def _handle_payload(
     message = _build_warning_message(used_pct)
     _write_warning_to_inbox(inbox_dir, message)
     DEDUP_FLAG.touch()
+    # Transition dispatcher state to WINDING_DOWN (issue #1918).
+    # Written after the inbox message so the dispatcher sees the context_warning
+    # before the health check reads WINDING_DOWN and suppresses restarts.
+    _write_winding_down(session_id=session_id)
 
 
 def main() -> None:
