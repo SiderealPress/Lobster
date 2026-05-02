@@ -30,7 +30,7 @@ check_dispatcher_state() {
     fi
 
     local state updated_at
-    state=$(python3 -c "
+    state=$(uv run python3 -c "
 import json, sys
 try:
     d = json.load(open('$DISPATCHER_STATE_FILE'))
@@ -39,7 +39,7 @@ except Exception as e:
     print('unknown')
 " 2>/dev/null)
 
-    updated_at=$(python3 -c "
+    updated_at=$(uv run python3 -c "
 import json, sys
 try:
     d = json.load(open('$DISPATCHER_STATE_FILE'))
@@ -57,7 +57,7 @@ except Exception:
     local age=0
     if [[ -n "$updated_at" ]]; then
         local updated_epoch
-        updated_epoch=$(python3 -c "
+        updated_epoch=$(uv run python3 -c "
 from datetime import datetime, timezone
 try:
     dt = datetime.fromisoformat('$updated_at')
