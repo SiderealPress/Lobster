@@ -33,9 +33,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 # Allow imports from the hooks directory (session_role).
-sys.path.insert(0, str(Path(__file__).parent))
+_HOOKS_DIR = Path(__file__).parent
+sys.path.insert(0, str(_HOOKS_DIR))
 
 import session_role  # noqa: E402 — path insert must precede this
+
+# Import state_machine for writing STARTING state on dispatcher sessions.
+_LOBSTER_SRC_DIR = _HOOKS_DIR.parent / "src"
+sys.path.insert(0, str(_LOBSTER_SRC_DIR))
+import state_machine  # noqa: E402
 
 CLAUDE_DIR = Path(os.path.expanduser("~/lobster/.claude"))
 USER_CONFIG_DIR = Path(os.path.expanduser("~/lobster-user-config/agents"))
@@ -224,6 +230,13 @@ def main() -> None:
         print(
             f"[{HOOK_NAME}] startup-flag detected live PID — injecting dispatcher bootup",
             file=sys.stderr,
+        )
+        # Write STARTING state so the health check knows the dispatcher is
+        # initializing. State transitions to WAITING when wait_for_messages
+        # fires (handled by dispatcher-state-pretool.py).
+        state_machine.write_state(
+            state_machine.STARTING,
+            session_id=hook_input.get("session_id", ""),
         )
 
     role = "dispatcher" if is_dispatcher else "subagent"
