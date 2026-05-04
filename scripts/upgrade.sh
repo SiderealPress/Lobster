@@ -2891,6 +2891,46 @@ print(f'prune-pr-worktrees: {result.status}')
         warn "prune-pr-worktrees.py not found at $_m83_script or uv unavailable — skipping Migration 83"
     fi
 
+    # Migration 84: Fix User=lobster in AWP email service files (issue #1925).
+    # Applied live on the running system; this migration ensures fresh installs
+    # also get the corrected unit files.
+    # NOTE: Migration 84 was applied live by PR #1925. The actual unit-file
+    # corrections are already in place on the running host. This placeholder
+    # ensures the migration number is reserved in the sequence.
+    # (No-op: the file edits were done directly via systemctl/sed on the host.)
+
+    # Migration 85: Remove defunct Pub/Sub and AWP-pipeline systemd units.
+    # The Pub/Sub pipeline (gmail-watch-renewal, awp-gmail-token-refresh) was
+    # superseded by the deterministic gmail-poll.py poller in Migration 80.
+    # The awp-gmail-pipeline service ran awp_gmail_pipeline.py (a workspace
+    # script), doing inline classification now handled by the awp-email skill +
+    # dispatcher. All three timers are disabled; this migration stops and removes
+    # their unit files so they don't clutter the system on upgrades.
+    local _m85_units=(
+        "lobster-awp-gmail-pipeline"
+        "lobster-gmail-watch-renewal"
+        "lobster-awp-gmail-token-refresh"
+    )
+    local _m85_applied=0
+    for _m85_unit in "${_m85_units[@]}"; do
+        local _m85_service="/etc/systemd/system/${_m85_unit}.service"
+        local _m85_timer="/etc/systemd/system/${_m85_unit}.timer"
+        if [ -f "$_m85_service" ] || [ -f "$_m85_timer" ]; then
+            substep "Removing defunct unit ${_m85_unit} (Migration 85)..."
+            sudo systemctl stop "${_m85_unit}.timer" 2>/dev/null || true
+            sudo systemctl stop "${_m85_unit}.service" 2>/dev/null || true
+            sudo systemctl disable "${_m85_unit}.timer" 2>/dev/null || true
+            sudo systemctl disable "${_m85_unit}.service" 2>/dev/null || true
+            sudo rm -f "$_m85_service" "$_m85_timer" 2>/dev/null || true
+            _m85_applied=1
+        fi
+    done
+    if [ "$_m85_applied" -eq 1 ]; then
+        sudo systemctl daemon-reload 2>/dev/null || true
+        substep "Removed defunct AWP email pipeline and Pub/Sub units"
+        migrated=$((migrated + 1))
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
