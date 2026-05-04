@@ -258,14 +258,16 @@ class VectorMemory:
         vec_blob = _serialize_vector(query_embedding)
 
         # Get top candidates from vector search (fetch more than limit for merging)
+        # sqlite-vec v0.1.7-alpha+ requires `k = ?` in the WHERE clause for KNN
+        # queries with a bound parameter; `LIMIT ?` is not recognised.
         fetch_limit = limit * 3
         vec_results = self._conn.execute(
             """
             SELECT rowid, distance
             FROM events_vec
             WHERE embedding MATCH ?
+            AND k = ?
             ORDER BY distance
-            LIMIT ?
             """,
             (vec_blob, fetch_limit),
         ).fetchall()
