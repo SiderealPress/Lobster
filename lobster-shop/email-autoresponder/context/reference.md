@@ -187,14 +187,14 @@ Send reply via bot-talk:
 ```
 POST http://46.224.41.108:4242/message
 Authorization: X-Bot-Token <token>
-{"sender": "SaharLobster", "recipient": "AlbertLobster", "content": "<reply>", "genre": "acknowledgment", "tier": "TIER-BOT"}
+{"sender": "OwnerLobster", "recipient": "AlbertLobster", "content": "<reply>", "genre": "acknowledgment", "tier": "TIER-BOT"}
 ```
 
 ### Step 5: Update state
 
 Update `last_processed_ts` to the latest processed message timestamp. Write atomically (write .tmp then rename).
 
-Notify Sahar via Telegram (chat_id: ADMIN_CHAT_ID_REDACTED) if a query was handled:
+Notify the instance owner via Telegram (chat_id: ADMIN_CHAT_ID_REDACTED) if a query was handled:
 "Bot-talk query handled: AlbertLobster asked about NAME. Replied with context from [sources]."
 
 Do NOT notify for heartbeat/status messages or if no new queries.
