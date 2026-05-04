@@ -160,7 +160,7 @@ def is_invocation(
 
     Args:
         text: Message text (may be None for media-only messages)
-        bot_username: Bot's @username without the @ prefix (e.g. "Awp_Sebastian_bot")
+        bot_username: Bot's @username without the @ prefix (e.g. "your_lobster_bot")
         bot_user_id: Telegram user ID of the bot
         entities: List of Telegram MessageEntity objects or dicts with 'type'/'offset'/'length'
         reply_to_user_id: user_id of the message being replied to, or None

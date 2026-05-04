@@ -532,7 +532,7 @@ def _is_direct_invocation(message, bot_username: str) -> bool:
             offset = getattr(entity, "offset", 0)
             length = getattr(entity, "length", 0)
             mentioned = entity_text_source[offset:offset + length]
-            # mentioned is like "@Awp_Sebastian_bot"
+            # mentioned is like "@your_lobster_bot"
             if mentioned.lstrip("@").lower() == bot_username.lower():
                 return True
 
