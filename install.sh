@@ -2877,6 +2877,14 @@ if [ -f "$OBSERVABILITY_TEMPLATE" ]; then
         "$INSTALL_DIR/services/lobster-observability.service"
 fi
 
+# Generate transcription worker service if template exists
+TRANSCRIPTION_TEMPLATE="$INSTALL_DIR/services/lobster-transcription.service.template"
+if [ -f "$TRANSCRIPTION_TEMPLATE" ]; then
+    generate_from_template \
+        "$TRANSCRIPTION_TEMPLATE" \
+        "$INSTALL_DIR/services/lobster-transcription.service"
+fi
+
 #===============================================================================
 # Install Services
 #===============================================================================
