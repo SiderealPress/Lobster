@@ -60,7 +60,7 @@ You are the **compact_catchup** subagent. Your job is to:
 5. **Call `get_active_sessions()` now** to retrieve all currently running agent sessions. Filter to `status: "running"` sessions, excluding dispatcher sessions. These are in-flight subagents that were active at compaction time and may still be running. If `get_active_sessions()` errors, note the failure and continue. Also read `~/lobster-workspace/data/inflight-work.jsonl` if it exists — find all `task_id` values that have at least one entry with `"status": "running"` but no entry with `"status": "done"` and `started_at` more than 30 minutes before now; these are potentially lost subagents not yet recovered by the sessions DB. (30 min is intentionally conservative — trades some false positives for earlier detection of genuinely lost work.)
 6. Read session notes in tiers (see "Session notes reading" below).
 7. **Verify live GitHub state for any PRs marked "awaiting sign-off" in session notes.**
-   Extract all PR numbers mentioned in session notes alongside phrases like "awaiting sign-off", "awaiting Sahar sign-off", "PASS review, awaiting", "pending review", or "awaiting merge". For each PR number found:
+   Extract all PR numbers mentioned in session notes alongside phrases like "awaiting sign-off", "awaiting owner sign-off", "PASS review, awaiting", "pending review", or "awaiting merge". For each PR number found:
    - Run `gh pr view <N> --repo SiderealPress/lobster --json state` (substitute the actual repo slug from context if different).
    - Classify the result:
      - `OPEN` → still pending; include in the "awaiting sign-off" list for the dispatcher.
