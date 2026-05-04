@@ -37,23 +37,23 @@ import bot_talk_mirror as btm
 
 class TestBuildHttpPayload:
     def test_required_fields_present(self):
-        payload = btm._build_http_payload("hello", "status-update", "OUTBOUND", "SaharLobster", "AlbertLobster")
+        payload = btm._build_http_payload("hello", "status-update", "OUTBOUND", "OwnerLobster", "AlbertLobster")
         assert payload["sender"] == btm.LOBSTER_NAME
         assert payload["tier"] == btm.BOT_TALK_TIER
         assert payload["genre"] == "status-update"
         assert payload["content"] == "hello"
 
     def test_direction_from_to_fields_present(self):
-        payload = btm._build_http_payload("msg", "status-update", "OUTBOUND", "SaharLobster", "AlbertLobster")
+        payload = btm._build_http_payload("msg", "status-update", "OUTBOUND", "OwnerLobster", "AlbertLobster")
         assert payload["direction"] == "OUTBOUND"
-        assert payload["from"] == "SaharLobster"
+        assert payload["from"] == "OwnerLobster"
         assert payload["to"] == "AlbertLobster"
 
     def test_inbound_direction(self):
-        payload = btm._build_http_payload("msg", "status-update", "INBOUND", "AlbertLobster", "SaharLobster")
+        payload = btm._build_http_payload("msg", "status-update", "INBOUND", "AlbertLobster", "OwnerLobster")
         assert payload["direction"] == "INBOUND"
         assert payload["from"] == "AlbertLobster"
-        assert payload["to"] == "SaharLobster"
+        assert payload["to"] == "OwnerLobster"
 
     def test_content_is_passed_through(self):
         payload = btm._build_http_payload("some content here", "query", "OUTBOUND", "A", "B")
@@ -127,7 +127,7 @@ class TestTryHttp:
             mock_client.post.return_value = mock_response
             mock_client_cls.return_value = mock_client
 
-            result = btm._try_http({"sender": "SaharLobster", "content": "x", "tier": "TIER-BOT", "genre": "status-update"})
+            result = btm._try_http({"sender": "OwnerLobster", "content": "x", "tier": "TIER-BOT", "genre": "status-update"})
 
         assert result is True
 
@@ -318,7 +318,7 @@ class TestEmitEventBus:
                 LobsterEvent=mock_event_class,
             )
         }):
-            btm._emit_event_bus("OUTBOUND", "SaharLobster", "AlbertLobster", "hello world")
+            btm._emit_event_bus("OUTBOUND", "OwnerLobster", "AlbertLobster", "hello world")
 
         assert len(captured_events) == 1
         event_kwargs = captured_events[0]
@@ -326,7 +326,7 @@ class TestEmitEventBus:
         assert event_kwargs["severity"] == "debug"
         payload = event_kwargs["payload"]
         assert payload["direction"] == "OUTBOUND"
-        assert payload["from"] == "SaharLobster"
+        assert payload["from"] == "OwnerLobster"
         assert payload["to"] == "AlbertLobster"
         assert "hello world" in payload["content"]
 
@@ -334,7 +334,7 @@ class TestEmitEventBus:
         """_emit_event_bus must not raise when event_bus module is missing."""
         with patch.dict("sys.modules", {"event_bus": None}):
             # Should not raise
-            btm._emit_event_bus("INBOUND", "AlbertLobster", "SaharLobster", "test")
+            btm._emit_event_bus("INBOUND", "AlbertLobster", "OwnerLobster", "test")
 
     def test_content_truncated_to_500(self):
         """_emit_event_bus truncates content to 500 chars in the payload."""
@@ -377,11 +377,11 @@ class TestRouteToInbox:
     def test_message_has_correct_to_field(self, tmp_path):
         inbox_dir = tmp_path / "inbox"
         with patch.object(btm, "_INBOX_DIR", inbox_dir), \
-             patch.object(btm, "LOBSTER_NAME", "SaharLobster"):
+             patch.object(btm, "LOBSTER_NAME", "OwnerLobster"):
             btm._route_to_inbox("AlbertLobster", "content")
 
         msg = json.loads(list(inbox_dir.glob("*.json"))[0].read_text())
-        assert msg["to"] == "SaharLobster"
+        assert msg["to"] == "OwnerLobster"
 
     def test_message_user_name_is_sender(self, tmp_path):
         inbox_dir = tmp_path / "inbox"
@@ -427,7 +427,7 @@ class TestDoMirror:
              patch.object(btm, "_try_ssh") as mock_ssh, \
              patch.object(btm, "_write_local_log") as mock_local, \
              patch.object(btm, "_emit_event_bus") as mock_bus:
-            btm._do_mirror("content", "status-update", "OUTBOUND", "SaharLobster", "AlbertLobster")
+            btm._do_mirror("content", "status-update", "OUTBOUND", "OwnerLobster", "AlbertLobster")
 
         mock_http.assert_called_once()
         mock_ssh.assert_not_called()
@@ -439,7 +439,7 @@ class TestDoMirror:
              patch.object(btm, "_try_ssh", return_value=True) as mock_ssh, \
              patch.object(btm, "_write_local_log") as mock_local, \
              patch.object(btm, "_emit_event_bus") as mock_bus:
-            btm._do_mirror("content", "status-update", "INBOUND", "AlbertLobster", "SaharLobster")
+            btm._do_mirror("content", "status-update", "INBOUND", "AlbertLobster", "OwnerLobster")
 
         mock_ssh.assert_called_once()
         mock_local.assert_not_called()
@@ -458,9 +458,9 @@ class TestDoMirror:
     def test_event_bus_called_with_correct_direction_fields(self):
         with patch.object(btm, "_try_http", return_value=True), \
              patch.object(btm, "_emit_event_bus") as mock_bus:
-            btm._do_mirror("the content", "status-update", "INBOUND", "AlbertLobster", "SaharLobster")
+            btm._do_mirror("the content", "status-update", "INBOUND", "AlbertLobster", "OwnerLobster")
 
-        mock_bus.assert_called_once_with("INBOUND", "AlbertLobster", "SaharLobster", "the content")
+        mock_bus.assert_called_once_with("INBOUND", "AlbertLobster", "OwnerLobster", "the content")
 
 
 # ---------------------------------------------------------------------------
@@ -600,7 +600,7 @@ class TestEventSeverity:
                 LobsterEvent=mock_event_class,
             )
         }):
-            btm._emit_event_bus("OUTBOUND", "SaharLobster", "AlbertLobster", "test")
+            btm._emit_event_bus("OUTBOUND", "OwnerLobster", "AlbertLobster", "test")
 
         assert len(captured_events) == 1
         assert captured_events[0]["severity"] == "debug", (
@@ -622,7 +622,7 @@ class TestEventSeverity:
                 LobsterEvent=mock_event_class,
             )
         }):
-            btm._emit_event_bus("INBOUND", "AlbertLobster", "SaharLobster", "test")
+            btm._emit_event_bus("INBOUND", "AlbertLobster", "OwnerLobster", "test")
 
         assert captured_events[0]["severity"] != "info", (
             "Severity must not be 'info' — TelegramOutboxListener drops info events."

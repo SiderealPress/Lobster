@@ -39,7 +39,7 @@ For full architecture documentation, see issue #1059.
 |---|---|---|
 | `dispatch-job.sh` | Non-polling dispatcher | Writes a `scheduled_reminder` to the inbox; called by all Layer 1 scripts and directly by cron for reminder jobs |
 | `bot-talk-check-dispatch.sh` | Poll with state | Polls bot-talk API; skips dispatch if no new messages since last cursor |
-| `lobstertalk-incoming-check.sh` | API poll | Polls bot-talk API for messages addressed to SaharLobster; skips dispatch if none |
+| `lobstertalk-incoming-check.sh` | API poll | Polls bot-talk API for messages addressed to this Lobster instance; skips dispatch if none |
 | `sync-crontab.sh` | Local code | Syncs the crontab from a config file; no LLM |
 | `export-logs.py` | Local code | Exports log data; no LLM |
 

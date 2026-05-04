@@ -3,7 +3,7 @@
 Bot-talk mirroring module — cross-Lobster channel only.
 
 Bot-talk is strictly inter-Lobster communication: messages exchanged between
-Lobster instances (e.g. SaharLobster <-> AlbertLobster). Owner messages sent
+Lobster instances (e.g. LobsterA <-> LobsterB). Owner messages sent
 from Telegram to their own Lobster are NOT bot-talk and are never logged here.
 
 Public API

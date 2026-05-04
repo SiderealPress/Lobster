@@ -218,9 +218,9 @@ _TOKEN_FILE_MODE: int = stat.S_IRUSR | stat.S_IWUSR
 
 _INTERNAL_SECRET: str = os.environ.get("LOBSTER_INTERNAL_SECRET", "").strip()
 
-# AWP_IMPORT_TOKEN is used by the AWP webhook endpoint.
+# LOBSTER_IMPORT_TOKEN is used by the intake webhook endpoint.
 # In the Google Apps Script that sends intake data, this is stored as LOBSTER_SECRET.
-_AWP_IMPORT_TOKEN: str = os.environ.get("AWP_IMPORT_TOKEN", "").strip()
+_IMPORT_TOKEN: str = os.environ.get("LOBSTER_IMPORT_TOKEN", os.environ.get("AWP_IMPORT_TOKEN", "")).strip()
 
 _INBOX_DIR: Path = _MESSAGES_DIR / "inbox"
 
@@ -236,19 +236,19 @@ def _is_authorized_internal(request: Request) -> bool:
     return auth_header[7:].strip() == _INTERNAL_SECRET
 
 
-def _is_authorized_awp(request: Request) -> bool:
-    """Return True if the request carries a valid AWP_IMPORT_TOKEN.
+def _is_authorized_intake(request: Request) -> bool:
+    """Return True if the request carries a valid LOBSTER_IMPORT_TOKEN.
 
-    The Apps Script on the AWP side stores this token as LOBSTER_SECRET and
-    sends it as ``Authorization: Bearer <AWP_IMPORT_TOKEN>``.
+    The Apps Script on the intake side stores this token as LOBSTER_SECRET and
+    sends it as ``Authorization: Bearer <LOBSTER_IMPORT_TOKEN>``.
     """
-    if not _AWP_IMPORT_TOKEN:
-        logger.error("AWP_IMPORT_TOKEN not configured — awp-intake endpoint disabled")
+    if not _IMPORT_TOKEN:
+        logger.error("LOBSTER_IMPORT_TOKEN not configured — intake endpoint disabled")
         return False
     auth_header = request.headers.get("authorization", "")
     if not auth_header.startswith("Bearer "):
         return False
-    return auth_header[7:].strip() == _AWP_IMPORT_TOKEN
+    return auth_header[7:].strip() == _IMPORT_TOKEN
 
 
 async def push_calendar_token_endpoint(scope, receive, send):
@@ -620,16 +620,16 @@ async def enrichment_status_endpoint(scope, receive, send):
     response = JSONResponse(manifest)
 
 async def awp_intake_endpoint(scope, receive, send):
-    """POST /api/webhooks/awp-intake — receive an AWP investor intake submission.
+    """POST /api/webhooks/intake — receive an intake form submission.
 
-    Sent by the Google Apps Script attached to the AWP Typeform. The Apps Script
-    stores the auth token as ``LOBSTER_SECRET``; on this side it is ``AWP_IMPORT_TOKEN``.
+    Sent by a Google Apps Script attached to a form or data source. The Apps Script
+    stores the auth token as ``LOBSTER_SECRET``; on this side it is ``LOBSTER_IMPORT_TOKEN``.
 
-    Authentication: ``Authorization: Bearer <AWP_IMPORT_TOKEN>``
+    Authentication: ``Authorization: Bearer <LOBSTER_IMPORT_TOKEN>``
     """
     request = Request(scope, receive)
 
-    if not _is_authorized_awp(request):
+    if not _is_authorized_intake(request):
         response = JSONResponse({"error": "Unauthorized"}, status_code=401)
         await response(scope, receive, send)
         return
@@ -650,10 +650,10 @@ async def awp_intake_endpoint(scope, receive, send):
 
     now = datetime.now(timezone.utc)
     timestamp_ms = int(now.timestamp() * 1000)
-    message_id = f"{timestamp_ms}_awp-intake"
+    message_id = f"{timestamp_ms}_intake"
 
     summary_text = (
-        f"New AWP intake: {full_name} ({email})\n"
+        f"New intake: {full_name} ({email})\n"
         f"Capital: {investable_capital}\n"
         f"Accreditation: {accreditation_status}\n"
         f"Entity: {entity_type}"
@@ -661,8 +661,8 @@ async def awp_intake_endpoint(scope, receive, send):
 
     message = {
         "id": message_id,
-        "type": "awp_intake",
-        "source": "awp",
+        "type": "intake",
+        "source": "intake",
         "chat_id": 0,
         "text": summary_text,
         "payload": body,
@@ -678,7 +678,7 @@ async def awp_intake_endpoint(scope, receive, send):
         with os.fdopen(fd, "w") as f:
             f.write(payload_str)
         os.rename(str(tmp_path), str(inbox_path))
-        logger.info("AWP intake message written: %s (from=%r)", message_id, email)
+        logger.info("Intake message written: %s (from=%r)", message_id, email)
     except Exception as exc:
         logger.error("Failed to write AWP intake message: %s", exc)
         response = JSONResponse({"error": "Failed to write message"}, status_code=500)
@@ -847,8 +847,8 @@ async def mcp_endpoint(scope, receive, send):
         await enrichment_status_endpoint(scope, receive, send)
         return
 
-    # AWP investor intake — authenticated by AWP_IMPORT_TOKEN (Apps Script: LOBSTER_SECRET)
-    if path == "/api/webhooks/awp-intake":
+    # Intake webhook — authenticated by LOBSTER_IMPORT_TOKEN (Apps Script: LOBSTER_SECRET)
+    if path in ("/api/webhooks/intake", "/api/webhooks/awp-intake"):
         await awp_intake_endpoint(scope, receive, send)
         return
 
