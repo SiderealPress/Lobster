@@ -2891,6 +2891,45 @@ print(f'prune-pr-worktrees: {result.status}')
         warn "prune-pr-worktrees.py not found at $_m83_script or uv unavailable — skipping Migration 83"
     fi
 
+    # Migration 84: Fix User=lobster in AWP email service files (issue: non-existent user).
+    # Three services were written with User=lobster instead of User=admin, causing
+    # status=217/USER failures since the user does not exist. Also adds PATH and
+    # EnvironmentFile to lobster-gmail-watch-renewal so uv and config vars are available.
+    for _m84_svc in \
+        "lobster-awp-gmail-pipeline" \
+        "lobster-email-audit-check" \
+        "lobster-gmail-watch-renewal"; do
+        local _m84_file="/etc/systemd/system/${_m84_svc}.service"
+        if [ -f "$_m84_file" ] && grep -q "^User=lobster" "$_m84_file"; then
+            sudo sed -i 's/^User=lobster$/User=admin/g; s|/home/lobster|/home/admin|g' "$_m84_file"
+            substep "Fixed User=lobster -> User=admin in ${_m84_svc}.service"
+            migrated=$((migrated + 1))
+        fi
+    done
+    # Also ensure lobster-email-audit-check has PATH so uv is found
+    local _m84_audit="/etc/systemd/system/lobster-email-audit-check.service"
+    if [ -f "$_m84_audit" ] && ! grep -q "^Environment=PATH=" "$_m84_audit"; then
+        sudo sed -i '/^User=admin$/a Environment=PATH=/home/admin/.local/bin:/usr/local/bin:/usr/bin:/bin' "$_m84_audit"
+        substep "Added PATH environment to lobster-email-audit-check.service"
+        migrated=$((migrated + 1))
+    fi
+    # Also ensure lobster-gmail-watch-renewal loads config.env and has PATH
+    local _m84_renewal="/etc/systemd/system/lobster-gmail-watch-renewal.service"
+    if [ -f "$_m84_renewal" ] && ! grep -q "^EnvironmentFile=" "$_m84_renewal"; then
+        sudo sed -i '/^User=admin$/a EnvironmentFile=/home/admin/lobster-config/config.env\nEnvironment=PATH=/home/admin/.local/bin:/usr/local/bin:/usr/bin:/bin' "$_m84_renewal"
+        substep "Added EnvironmentFile + PATH to lobster-gmail-watch-renewal.service"
+        migrated=$((migrated + 1))
+    fi
+    # Point gmail-watch-renewal to deprecated/ script path if still pointing to old location
+    if [ -f "$_m84_renewal" ] && grep -q "scheduled-tasks/gmail-watch-renewal.py" "$_m84_renewal"; then
+        sudo sed -i 's|scheduled-tasks/gmail-watch-renewal.py|scheduled-tasks/deprecated/gmail-watch-renewal.py|' "$_m84_renewal"
+        substep "Updated gmail-watch-renewal.service ExecStart to deprecated/ path"
+        migrated=$((migrated + 1))
+    fi
+    if [ "$migrated" -gt 0 ]; then
+        sudo systemctl daemon-reload 2>/dev/null || true
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
