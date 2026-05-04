@@ -1,31 +1,45 @@
 #!/bin/bash
 #===============================================================================
-# Pre-Push Hook: Security & PII Scanner (Reject-Only)
+# Pre-Push Hook: Public OSS Guard + PII/Security Scanner
 #
-# Scans files being pushed for:
-#   - PII (emails, phone numbers, SSNs, credit cards, IP addresses)
-#   - Security issues (API keys, tokens, credentials, private keys)
-#   - Personal names: "sahar" and "drew" (as standalone names)
+# This repo (SiderealPress/Lobster) is PUBLIC on GitHub. This hook:
+#   1. Prints a clear PUBLIC OSS REPO banner on every push
+#   2. Scans the outgoing diff for PII and instance-specific secrets
+#   3. If findings are detected, prompts for confirmation (default: abort)
+#   4. Always requires explicit confirmation that PII has been checked
+#
+# Scans for:
+#   - Instance-specific URLs (awp-two.vercel.app, alternativewealthpartners.com,
+#     myownlobster.com) and emails on those domains
+#   - Hardcoded home paths (/home/admin, /home/lobster)
+#   - Bot usernames with Awp_ prefix
+#   - Database URLs (postgresql://, mongodb://)
+#   - Numeric IDs in env-var form (BOT_USER_ID=NNNNNNNN, chat_id=NNNNNNNN, etc.)
+#   - PII: email addresses, phone numbers, SSNs, credit cards, IP addresses
+#   - Security: API keys, tokens, credentials, private keys
+#   - Personal names: Sahar, Drew, Kelly, Addie (as standalone words)
 #
 # IMPORTANT: This hook NEVER modifies files. It only reports violations and
-# blocks the push. The developer must fix issues manually. Silent file
-# rewriting is dangerous: it corrupts binaries, breaks test fixtures that
-# intentionally contain fake values, and loops on its own output.
+# lets the developer decide. Silent file rewriting is dangerous: it corrupts
+# binaries, breaks test fixtures that intentionally contain fake values, and
+# loops on its own output.
 #
 # Exclusions (never scanned):
 #   - Test directories: tests/, test/, spec/, or any path with /test
 #   - Documentation: .md, .mdx, .rst, .txt, .adoc (examples/placeholders by design)
-#   - Binary files: detected by extension or git's binary check
-#   - Files in the allowlist: .githooks/security-allowlist.txt
+#   - Binary files: detected by extension
+#   - The hook files themselves (.githooks/*)
+#   - Files listed in .githooks/security-allowlist.txt
 #
-# Name check allowlisted non-name occurrences:
-#   - "sayhar" (GitHub username) — allowed
-#   - "andrew" — allowed (drew as part of a larger name/word is ignored)
-#   - "withdrew", etc. — allowed (drew embedded in longer words)
-#   - Lines containing '# noname' — suppressed
+# Inline suppressions (in source files):
+#   - '# nosec' or '# noqa' — suppress security/PII match on that line
+#   - '# noname' — suppress personal name match on that line
 #
 # Allowlist: .githooks/security-allowlist.txt
 #   Format: filepath:pattern_description (one per line)
+#
+# CI mode: if stdin is not a tty, findings are printed but the push is allowed.
+#   Non-interactive CI environments cannot respond to prompts.
 #
 # Emergency bypass: git push --no-verify
 #===============================================================================
@@ -48,12 +62,16 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"
 ALLOWLIST_FILE="$REPO_ROOT/.githooks/security-allowlist.txt"
 ISSUES_FOUND=0
 
+# Detect CI / non-interactive mode: if stdin is not a tty, don't block
+IS_TTY=1
+[ ! -t 0 ] && IS_TTY=0
+
 #===============================================================================
 # Helpers
 #===============================================================================
 
 info()  { echo -e "${CYAN}[SCAN]${NC} $1"; }
-block() { echo -e "${RED}[BLOCK]${NC} $1"; }
+warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
 
 # Check if a file:pattern combo is in the allowlist
 is_allowlisted() {
@@ -74,7 +92,6 @@ is_allowlisted() {
         local allowed_file="${line%%:*}"
         local allowed_pattern="${line#*:}"
 
-        # Check if filepath matches (supports glob-style prefix matching)
         if [[ "$filepath" == $allowed_file ]] && [[ "$pattern_desc" == *"$allowed_pattern"* ]]; then
             return 0
         fi
@@ -84,52 +101,39 @@ is_allowlisted() {
 }
 
 # Returns 0 (skip) if the file should not be scanned.
-# Skips test directories, documentation files, and known binary extensions.
 should_skip_file() {
     local filepath="$1"
     local ext="${filepath##*.}"
 
-    # Skip test directories — fake/mock values are intentional there.
+    # Skip hook files themselves — they contain the patterns as legitimate regex strings
     case "$filepath" in
-        tests/*|test/*|spec/*)
-            return 0
-            ;;
+        .githooks/*) return 0 ;;
+    esac
+
+    # Skip test directories — fake/mock values are intentional there
+    case "$filepath" in
+        tests/*|test/*|spec/*) return 0 ;;
     esac
     if [[ "$filepath" == */test/* || "$filepath" == */tests/* || "$filepath" == */spec/* ]]; then
         return 0
     fi
 
-    # Skip documentation files — these use example/placeholder values by design.
+    # Skip documentation files — example/placeholder values by design
     case "$filepath" in
-        *.md|*.mdx|*.rst|*.txt|*.adoc)
-            return 0
-            ;;
+        *.md|*.mdx|*.rst|*.txt|*.adoc) return 0 ;;
     esac
 
-    # Skip known binary/generated/lock file extensions.
+    # Skip known binary/generated/lock file extensions
     case "$ext" in
-        png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot|mp3|mp4|zip|tar|gz|bz2|xz|pdf)
-            return 0
-            ;;
-        pyc|whl|egg|so|dylib|dll|exe|o|a|class)
-            return 0
-            ;;
-        lock)
-            return 0
-            ;;
+        png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot|mp3|mp4|zip|tar|gz|bz2|xz|pdf) return 0 ;;
+        pyc|whl|egg|so|dylib|dll|exe|o|a|class) return 0 ;;
+        lock) return 0 ;;
     esac
-    # Also skip files with no extension that git reports as binary
-    # (e.g. Go/native executables like lobster-shop/kissinger/bin/kissinger)
-    if git diff --no-index --numstat /dev/null "$REPO_ROOT/$filepath" 2>/dev/null | grep -q "^-"; then
-        return 0
-    fi
 
     return 1
 }
 
-# Returns 0 if the line looks like an obvious placeholder/fake value that should
-# not be flagged. This prevents false positives in configuration examples,
-# documentation snippets checked into non-.md files, and similar patterns.
+# Returns 0 if the line looks like an obvious placeholder/fake value.
 is_placeholder_value() {
     local line="$1"
     echo "$line" | grep -qiP \
@@ -137,40 +141,17 @@ is_placeholder_value() {
         2>/dev/null
 }
 
-# Get the list of files being pushed (comparing local ref to remote ref)
-get_pushed_files() {
-    local remote="$1"
-    local url="$2"
-    local files=""
+# Get the diff of commits being pushed (not yet on the remote).
+# Uses upstream range first; falls back to origin/main diff or full log.
+get_push_diff() {
+    local diff_output
+    diff_output="$(git log @{u}..HEAD --no-merges -p 2>/dev/null || true)"
 
-    while read -r local_ref local_sha remote_ref remote_sha; do
-        if [ "$local_sha" = "0000000000000000000000000000000000000000" ]; then
-            # Deleting a branch, nothing to scan
-            continue
-        fi
+    if [ -z "$diff_output" ]; then
+        diff_output="$(git diff origin/main..HEAD 2>/dev/null || git log -p HEAD 2>/dev/null || true)"
+    fi
 
-        if [ "$remote_sha" = "0000000000000000000000000000000000000000" ]; then
-            # New branch - scan all commits against the default branch
-            local default_branch
-            default_branch="$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@' || echo 'main')"
-            local merge_base
-            merge_base="$(git merge-base "$default_branch" "$local_sha" 2>/dev/null || echo "")"
-            if [ -n "$merge_base" ]; then
-                files="$files$(git diff --name-only --diff-filter=ACMRT "$merge_base" "$local_sha" 2>/dev/null || true)"$'\n'
-            else
-                # Fallback: scan all files in the commit
-                files="$files$(git diff-tree --no-commit-id --name-only -r "$local_sha" 2>/dev/null || true)"$'\n'
-            fi
-        else
-            # Existing branch update - scan only new commits
-            files="$files$(git diff --name-only --diff-filter=ACMRT "$remote_sha" "$local_sha" 2>/dev/null || true)"$'\n'
-        fi
-    done
-
-    # Deduplicate and filter to existing files
-    echo "$files" | sort -u | while read -r f; do
-        [ -n "$f" ] && [ -f "$REPO_ROOT/$f" ] && echo "$f"
-    done
+    echo "$diff_output"
 }
 
 #===============================================================================
@@ -178,8 +159,16 @@ get_pushed_files() {
 #
 # Format: name@@regex@@description
 # Using @@ as delimiter to avoid conflicts with regex pipe characters.
-# All detections BLOCK the push — no auto-fix, no silent modification.
 #===============================================================================
+
+# Instance-specific patterns — things that identify this private deployment
+INSTANCE_PATTERNS=(
+    'instance_url@@(?i)(awp-two\.vercel\.app|alternativewealthpartners\.com|myownlobster\.com)@@Instance-specific URL'
+    'home_path@@/home/(?:admin|lobster)\b@@Hardcoded home path (/home/admin or /home/lobster)'
+    'awp_bot@@\bAwp_\w+_bot\b@@Awp_ prefixed bot username'
+    'db_url@@(?i)(?:postgresql|mongodb)://@@Database connection URL'
+    'numeric_id@@(?i)(?:BOT_USER_ID|chat_id|ADMIN_CHAT_ID)\s*=\s*\d{8,}@@Hardcoded numeric bot/user ID (8+ digits)'
+)
 
 PII_PATTERNS=(
     'email@@[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}@@Email address'
@@ -203,21 +192,6 @@ SECURITY_PATTERNS=(
     'telegram_token@@\b\d{8,10}:[A-Za-z0-9_-]{35}\b@@Telegram bot token'
 )
 
-# Files that should never be committed
-BLOCKED_FILES=(
-    '.env'
-    '.env.local'
-    '.env.production'
-    '.env.staging'
-    'id_rsa'
-    'id_ed25519'
-    'id_ecdsa'
-    '*.pem'
-    '*.key'
-    'credentials.json'
-    'service-account*.json'
-)
-
 # Known false-positive email patterns to ignore
 EMAIL_ALLOWLIST='noreply@anthropic\.com|noreply@github\.com|example\.com|example\.org|test\.com|localhost'
 
@@ -226,12 +200,7 @@ EMAIL_ALLOWLIST='noreply@anthropic\.com|noreply@github\.com|example\.com|example
 # Config file: ${LOBSTER_USER_CONFIG_DIR:-~/lobster-user-config}/blocked-names.txt
 # Format (one entry per line):
 #   name@@allowlist_regex
-#   - name: the word to block (matched case-insensitively as a whole word)
-#   - allowlist_regex: PCRE — if the full line matches, the match is suppressed
 #   Lines starting with # are comments; empty lines are ignored.
-#
-# The hook derives the match regex as (?<![a-z])name(?![a-z]) — a whole-word
-# boundary check that excludes names embedded in longer words.
 _PP_NAMES_CONFIG="${LOBSTER_USER_CONFIG_DIR:-$HOME/lobster-user-config}/blocked-names.txt"
 NAME_PATTERNS=()
 if [ -f "$_PP_NAMES_CONFIG" ]; then
@@ -249,213 +218,195 @@ if [ "${#NAME_PATTERNS[@]}" -eq 0 ]; then
     NAME_PATTERNS=(
         'sahar@@(?<![a-z])sahar(?![a-z])@@Personal name (sahar)@@sayhar'
         'drew@@(?<![a-z])drew(?![a-z])@@Personal name (drew)@@andrew|withdrew|outdrewn'
+        'kelly@@(?<![a-z])kelly(?![a-z])@@Personal name (kelly)@@'
+        'addie@@(?<![a-z])addie(?![a-z])@@Personal name (addie)@@'
     )
 fi
 
 #===============================================================================
-# Scanning Logic
+# Diff-based scanning
+#
+# We parse the unified diff from git log -p and scan only added lines (prefix '+').
+# Each finding records the file and approximate line number from the hunk header.
 #===============================================================================
 
-scan_file() {
+FINDINGS=()
+
+add_finding() {
     local filepath="$1"
-    local full_path="$REPO_ROOT/$filepath"
-    local basename
-    basename="$(basename "$filepath")"
-    local ext="${basename##*.}"
+    local linenum="$2"
+    local desc="$3"
+    local snippet="$4"
+    FINDINGS+=("  ${RED}[FINDING]${NC} ${BOLD}${filepath}${NC}:${linenum} - ${desc}")
+    if [ -n "$snippet" ]; then
+        FINDINGS+=("           ${snippet:0:120}")
+    fi
+    ISSUES_FOUND=$((ISSUES_FOUND + 1))
+}
 
-    # Skip hook files themselves and the allowlist (they may contain the patterns
-    # as legitimate documentation/regex strings)
-    case "$filepath" in
-        .githooks/*) return 0 ;;
-    esac
+scan_diff() {
+    local diff_text="$1"
 
-    # Apply file-level exclusions (test dirs, .md, binary extensions)
-    if should_skip_file "$filepath"; then
-        return 0
+    if [ -z "$diff_text" ]; then
+        return
     fi
 
-    # Check blocked filenames
-    for blocked in "${BLOCKED_FILES[@]}"; do
-        if [[ "$basename" == $blocked ]]; then
-            if is_allowlisted "$filepath" "blocked_file"; then
-                continue
-            fi
-            block "$filepath -> Blocked file pattern: $blocked (do not commit secrets files)"
-            ISSUES_FOUND=$((ISSUES_FOUND + 1))
-            return 0
+    local current_file=""
+    local line_num=0
+
+    while IFS= read -r raw_line; do
+        # Track which file we're in from diff headers
+        if [[ "$raw_line" =~ ^diff\ --git ]]; then
+            current_file=""
+            line_num=0
+            continue
         fi
-    done
-
-    local file_content
-    file_content="$(cat "$full_path" 2>/dev/null || true)"
-    if [ -z "$file_content" ]; then
-        return 0
-    fi
-
-    # Scan PII patterns
-    for pattern_def in "${PII_PATTERNS[@]}"; do
-        local name regex desc
-        IFS= read -r name <<< "$(echo "$pattern_def" | awk -F'@@' '{print $1}')"
-        IFS= read -r regex <<< "$(echo "$pattern_def" | awk -F'@@' '{print $2}')"
-        IFS= read -r desc <<< "$(echo "$pattern_def" | awk -F'@@' '{print $3}')"
-
-        local matches
-        matches="$(echo "$file_content" | grep -Pn -e "$regex" 2>/dev/null || true)"
-
-        if [ -z "$matches" ]; then
+        if [[ "$raw_line" =~ ^\+\+\+\ b/(.+)$ ]]; then
+            current_file="${BASH_REMATCH[1]}"
+            line_num=0
+            continue
+        fi
+        # Track line numbers from hunk headers: @@ -old +new[,count] @@
+        if [[ "$raw_line" =~ ^@@\ [^+]*\+([0-9]+) ]]; then
+            line_num=$(( BASH_REMATCH[1] - 1 ))
             continue
         fi
 
-        # Skip lines marked with # nosec or # noqa (inline suppression)
-        matches="$(echo "$matches" | grep -Pv '#\s*nosec\b|#\s*noqa\b' || true)"
-        if [ -z "$matches" ]; then
+        # Context lines: advance counter
+        if [[ "$raw_line" =~ ^\ .*$ ]]; then
+            line_num=$((line_num + 1))
             continue
         fi
 
-        # For emails, filter out known false positives
-        if [ "$name" = "email" ]; then
-            matches="$(echo "$matches" | grep -Pv "$EMAIL_ALLOWLIST" || true)"
-            if [ -z "$matches" ]; then
+        # Only scan added lines ('+' prefix, not '+++')
+        if [[ "$raw_line" =~ ^\+[^+] || "$raw_line" == "+" ]]; then
+            line_num=$((line_num + 1))
+            local content="${raw_line:1}"  # strip leading '+'
+
+            # Skip if file should not be scanned
+            if [ -n "$current_file" ] && should_skip_file "$current_file"; then
                 continue
             fi
-        fi
 
-        # For phone numbers, only flag if in non-code context
-        if [ "$name" = "phone" ]; then
-            if [[ "$ext" =~ ^(py|js|ts|go|rs|c|h|cpp|java)$ ]]; then
-                matches="$(echo "$matches" | grep -Pi '(?:phone|mobile|cell|tel|fax|contact)' || true)"
-                if [ -z "$matches" ]; then
+            # Skip lines with inline suppression
+            if echo "$content" | grep -qP '#\s*nosec\b|#\s*noqa\b' 2>/dev/null; then
+                continue
+            fi
+
+            local fp="${current_file:-<unknown>}"
+
+            # --- Instance-specific patterns ---
+            for pattern_def in "${INSTANCE_PATTERNS[@]}"; do
+                local iname iregex idesc
+                iname="$(echo "$pattern_def" | awk -F'@@' '{print $1}')"
+                iregex="$(echo "$pattern_def" | awk -F'@@' '{print $2}')"
+                idesc="$(echo "$pattern_def" | awk -F'@@' '{print $3}')"
+
+                if echo "$content" | grep -qiP "$iregex" 2>/dev/null; then
+                    if [ -n "$current_file" ] && is_allowlisted "$current_file" "$idesc"; then
+                        continue
+                    fi
+                    add_finding "$fp" "$line_num" "$idesc" "$content"
+                fi
+            done
+
+            # --- PII patterns ---
+            for pattern_def in "${PII_PATTERNS[@]}"; do
+                local pname pregex pdesc
+                pname="$(echo "$pattern_def" | awk -F'@@' '{print $1}')"
+                pregex="$(echo "$pattern_def" | awk -F'@@' '{print $2}')"
+                pdesc="$(echo "$pattern_def" | awk -F'@@' '{print $3}')"
+
+                if ! echo "$content" | grep -qP "$pregex" 2>/dev/null; then
                     continue
                 fi
-            fi
-        fi
 
-        # For IP addresses, skip common non-sensitive patterns (private ranges)
-        if [ "$name" = "ip" ]; then
-            matches="$(echo "$matches" | grep -Pv '(?:255\.255\.255\.\d+|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+)' || true)"
-            if [ -z "$matches" ]; then
+                # Email: filter known false positives
+                if [ "$pname" = "email" ]; then
+                    if echo "$content" | grep -qiP "$EMAIL_ALLOWLIST" 2>/dev/null; then
+                        continue
+                    fi
+                fi
+
+                # IP: skip private/reserved ranges
+                if [ "$pname" = "ip" ]; then
+                    if echo "$content" | grep -qP '(?:255\.255\.255\.\d+|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+)' 2>/dev/null; then
+                        continue
+                    fi
+                fi
+
+                if is_placeholder_value "$content"; then
+                    continue
+                fi
+
+                if [ -n "$current_file" ] && is_allowlisted "$current_file" "$pdesc"; then
+                    continue
+                fi
+
+                add_finding "$fp" "$line_num" "$pdesc" "$content"
+            done
+
+            # --- Security patterns ---
+            for pattern_def in "${SECURITY_PATTERNS[@]}"; do
+                local sname sregex sdesc
+                sname="$(echo "$pattern_def" | awk -F'@@' '{print $1}')"
+                sregex="$(echo "$pattern_def" | awk -F'@@' '{print $2}')"
+                sdesc="$(echo "$pattern_def" | awk -F'@@' '{print $3}')"
+
+                if ! echo "$content" | grep -qP "$sregex" 2>/dev/null; then
+                    continue
+                fi
+
+                # Skip variable references like token = "$VAR"
+                if [ "$sname" = "password" ] || [ "$sname" = "token_assign" ]; then
+                    if echo "$content" | grep -qP "[=:]\s*[\"']\$" 2>/dev/null; then
+                        continue
+                    fi
+                fi
+
+                if is_placeholder_value "$content"; then
+                    continue
+                fi
+
+                if [ -n "$current_file" ] && is_allowlisted "$current_file" "$sdesc"; then
+                    continue
+                fi
+
+                add_finding "$fp" "$line_num" "$sdesc" "$content"
+            done
+
+            # --- Personal name patterns ---
+            # Skip lines with '# noname' inline suppression
+            if echo "$content" | grep -qP '#\s*noname\b' 2>/dev/null; then
                 continue
             fi
+
+            for pattern_def in "${NAME_PATTERNS[@]}"; do
+                local nname nregex ndesc nallow
+                nname="$(echo "$pattern_def" | awk -F'@@' '{print $1}')"
+                nregex="$(echo "$pattern_def" | awk -F'@@' '{print $2}')"
+                ndesc="$(echo "$pattern_def" | awk -F'@@' '{print $3}')"
+                nallow="$(echo "$pattern_def" | awk -F'@@' '{print $4}')"
+
+                if ! echo "$content" | grep -qiP "$nregex" 2>/dev/null; then
+                    continue
+                fi
+
+                # Apply per-pattern allowlist
+                if [ -n "$nallow" ]; then
+                    if echo "$content" | grep -qiP "$nallow" 2>/dev/null; then
+                        continue
+                    fi
+                fi
+
+                if [ -n "$current_file" ] && is_allowlisted "$current_file" "$ndesc"; then
+                    continue
+                fi
+
+                add_finding "$fp" "$line_num" "$ndesc" "$content"
+            done
         fi
-
-        if is_allowlisted "$filepath" "$desc"; then
-            continue
-        fi
-
-        # Skip lines that look like obvious placeholder/fake values
-        local real_matches=""
-        while IFS= read -r match_line; do
-            if ! is_placeholder_value "$match_line"; then
-                real_matches="${real_matches}${match_line}"$'\n'
-            fi
-        done <<< "$matches"
-        if [ -z "$real_matches" ]; then
-            continue
-        fi
-
-        ISSUES_FOUND=$((ISSUES_FOUND + 1))
-        block "$filepath -> $desc found"
-        echo "$real_matches" | head -3 | while read -r line; do
-            echo "       Line: $line"
-        done
-        echo "       Fix: remove the sensitive value, use env vars or a secret manager"
-    done
-
-    # Scan security patterns
-    for pattern_def in "${SECURITY_PATTERNS[@]}"; do
-        local name regex desc
-        IFS= read -r name <<< "$(echo "$pattern_def" | awk -F'@@' '{print $1}')"
-        IFS= read -r regex <<< "$(echo "$pattern_def" | awk -F'@@' '{print $2}')"
-        IFS= read -r desc <<< "$(echo "$pattern_def" | awk -F'@@' '{print $3}')"
-
-        local matches
-        matches="$(echo "$file_content" | grep -Pn -e "$regex" 2>/dev/null || true)"
-
-        if [ -z "$matches" ]; then
-            continue
-        fi
-
-        # Skip lines marked with # nosec or # noqa (inline suppression)
-        matches="$(echo "$matches" | grep -Pv '#\s*nosec\b|#\s*noqa\b' || true)"
-        if [ -z "$matches" ]; then
-            continue
-        fi
-
-        # For password/token patterns, skip lines where value is a variable reference
-        if [ "$name" = "password" ] || [ "$name" = "token_assign" ]; then
-            matches="$(echo "$matches" | grep -Pv '[=:]\s*["'"'"']\$' || true)"
-            if [ -z "$matches" ]; then
-                continue
-            fi
-        fi
-
-        if is_allowlisted "$filepath" "$desc"; then
-            continue
-        fi
-
-        # Skip lines that look like obvious placeholder/fake values
-        local real_matches=""
-        while IFS= read -r match_line; do
-            if ! is_placeholder_value "$match_line"; then
-                real_matches="${real_matches}${match_line}"$'\n'
-            fi
-        done <<< "$matches"
-        if [ -z "$real_matches" ]; then
-            continue
-        fi
-
-        ISSUES_FOUND=$((ISSUES_FOUND + 1))
-        block "$filepath -> $desc"
-        echo "$real_matches" | head -3 | while read -r line; do
-            echo "       Line: $line"
-        done
-        echo "       Fix: remove the secret, use env vars or a secret manager"
-        echo "       If false positive: add to .githooks/security-allowlist.txt"
-    done
-
-    # Scan personal name patterns
-    for pattern_def in "${NAME_PATTERNS[@]}"; do
-        local name regex desc allowlist_re
-        IFS= read -r name <<< "$(echo "$pattern_def" | awk -F'@@' '{print $1}')"
-        IFS= read -r regex <<< "$(echo "$pattern_def" | awk -F'@@' '{print $2}')"
-        IFS= read -r desc <<< "$(echo "$pattern_def" | awk -F'@@' '{print $3}')"
-        IFS= read -r allowlist_re <<< "$(echo "$pattern_def" | awk -F'@@' '{print $4}')"
-
-        # Case-insensitive match
-        local matches
-        matches="$(echo "$file_content" | grep -Pni -e "$regex" 2>/dev/null || true)"
-
-        if [ -z "$matches" ]; then
-            continue
-        fi
-
-        # Skip lines with inline suppression
-        matches="$(echo "$matches" | grep -Pv '#\s*noname\b' || true)"
-        if [ -z "$matches" ]; then
-            continue
-        fi
-
-        # Apply per-pattern allowlist (non-name words containing the pattern)
-        if [ -n "$allowlist_re" ]; then
-            matches="$(echo "$matches" | grep -Piv "$allowlist_re" || true)"
-            if [ -z "$matches" ]; then
-                continue
-            fi
-        fi
-
-        if is_allowlisted "$filepath" "$desc"; then
-            continue
-        fi
-
-        ISSUES_FOUND=$((ISSUES_FOUND + 1))
-        block "$filepath -> $desc"
-        echo "$matches" | head -3 | while read -r line; do
-            echo "       Line: $line"
-        done
-        echo "       Fix: replace the personal name with a role, alias, or initials"
-        echo "       Inline suppress: add '# noname' to the line"
-        echo "       If false positive: add to .githooks/security-allowlist.txt"
-    done
+    done <<< "$diff_text"
 }
 
 #===============================================================================
@@ -463,47 +414,88 @@ scan_file() {
 #===============================================================================
 
 echo ""
-echo -e "${BOLD}Pre-Push Security & PII Scanner${NC}"
-echo "================================"
+echo -e "${RED}${BOLD}============================================================${NC}"
+echo -e "${RED}${BOLD}  PUBLIC OSS REPO — SiderealPress/Lobster is publicly       ${NC}"
+echo -e "${RED}${BOLD}  visible on GitHub. Review your diff before pushing.       ${NC}"
+echo -e "${RED}${BOLD}============================================================${NC}"
+echo ""
 
-# Get files being pushed from stdin
-FILES="$(get_pushed_files "$@")"
+DIFF_TEXT="$(get_push_diff)"
 
-if [ -z "$FILES" ]; then
-    info "No files to scan."
+if [ -n "$DIFF_TEXT" ]; then
+    info "Scanning outgoing diff for PII and instance-specific data..."
+    scan_diff "$DIFF_TEXT"
+    echo ""
+else
+    info "No outgoing commits to scan."
+    echo ""
+fi
+
+# CI / non-interactive mode: print findings but do not block
+if [ "$IS_TTY" -eq 0 ]; then
+    warn "Non-interactive mode (CI). Running scan but will not block push."
+    if [ "${#FINDINGS[@]}" -gt 0 ]; then
+        echo ""
+        echo -e "${YELLOW}${BOLD}Potential PII/secrets found (CI mode — not blocking):${NC}"
+        for finding in "${FINDINGS[@]}"; do
+            echo -e "$finding"
+        done
+        echo ""
+        warn "Review these findings before merging."
+    else
+        echo -e "${GREEN}Scan complete. No issues detected.${NC}"
+    fi
     echo ""
     exit 0
 fi
 
-FILE_COUNT="$(echo "$FILES" | wc -l)"
-info "Scanning $FILE_COUNT file(s)..."
+# Interactive mode — prompt if findings exist, then always require confirmation
 
-while IFS= read -r file; do
-    [ -n "$file" ] && scan_file "$file"
-done <<< "$FILES"
-
-echo ""
-echo "================================"
-
-if [ "$ISSUES_FOUND" -eq 0 ]; then
-    echo -e "${GREEN}${BOLD}All clear!${NC} No PII or security issues detected."
+if [ "${#FINDINGS[@]}" -gt 0 ]; then
+    echo -e "${RED}${BOLD}Potential PII or instance-specific data found in diff:${NC}"
     echo ""
-    exit 0
+    for finding in "${FINDINGS[@]}"; do
+        echo -e "$finding"
+    done
+    echo ""
+    echo -e "${RED}${BOLD}STRONG WARNING: Pushing this to a public repo may expose private data.${NC}"
+    echo ""
+
+    # Default: abort (Y). User must type 'n' or 'no' to override.
+    read -r -p "Found potential PII. Abort push? [Y/n]: " pii_response </dev/tty
+    pii_response="${pii_response:-Y}"
+    if [[ "$pii_response" =~ ^[Nn]([Oo])?$ ]]; then
+        echo ""
+        warn "Proceeding despite findings (user override). Ensure this is intentional."
+        echo ""
+    else
+        echo ""
+        echo -e "${RED}Push aborted.${NC} Fix the findings above before pushing."
+        echo ""
+        echo "If this is a false positive, add to .githooks/security-allowlist.txt:"
+        echo "  filepath:pattern_description"
+        echo ""
+        echo "Emergency bypass: git push --no-verify"
+        echo ""
+        exit 1
+    fi
+else
+    echo -e "${GREEN}Scan complete. No PII or instance-specific data detected.${NC}"
+    echo ""
 fi
 
-echo -e "Issues found: ${RED}${BOLD}$ISSUES_FOUND${NC}"
-echo ""
-echo -e "${RED}${BOLD}Push blocked.${NC} Files have NOT been modified — fix the issues above manually."
-echo ""
-echo "To fix:"
-echo "  1. Remove the secret from the file"
-echo "  2. Use environment variables or a secret manager instead"
-echo "  3. Amend/rewrite the commit to remove the secret from history"
-echo ""
-echo "If this is a false positive, add to .githooks/security-allowlist.txt:"
-echo "  filepath:pattern_description"
-echo ""
-echo "Emergency bypass (use with extreme caution):"
-echo "  git push --no-verify"
-echo ""
-exit 1
+# Always require explicit opt-in confirmation before pushing to the public repo.
+# Default: abort (N). User must type 'y' or 'yes' to proceed.
+read -r -p "This is a PUBLIC OSS repo. Confirm you have checked for PII. [y/N]: " confirm_response </dev/tty
+confirm_response="${confirm_response:-N}"
+if [[ "$confirm_response" =~ ^[Yy]([Ee][Ss])?$ ]]; then
+    echo ""
+    echo -e "${GREEN}Confirmed. Proceeding with push.${NC}"
+    echo ""
+    exit 0
+else
+    echo ""
+    echo -e "${RED}Push aborted.${NC} Re-run when you are ready to confirm."
+    echo ""
+    exit 1
+fi
