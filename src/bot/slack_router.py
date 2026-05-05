@@ -78,6 +78,18 @@ if not SLACK_APP_TOKEN:
 ALLOWED_CHANNELS = [x.strip() for x in os.environ.get("LOBSTER_SLACK_ALLOWED_CHANNELS", "").split(",") if x.strip()]
 ALLOWED_USERS = [x.strip() for x in os.environ.get("LOBSTER_SLACK_ALLOWED_USERS", "").split(",") if x.strip()]
 
+# Typing indicator (post-then-update pattern).
+# When enabled, outbound replies are first posted as a "..." placeholder and
+# then immediately updated with the real text — so the user sees the message
+# appear at once rather than waiting in silence until the full reply is ready.
+# Disable with LOBSTER_SLACK_TYPING_INDICATOR=false (or 0) if the Slack plan
+# does not permit chat.update (e.g. free-tier restrictions).
+_TYPING_INDICATOR_RAW = os.environ.get("LOBSTER_SLACK_TYPING_INDICATOR", "true").strip().lower()
+SLACK_TYPING_INDICATOR: bool = _TYPING_INDICATOR_RAW not in ("false", "0", "no", "off")
+
+# The placeholder text posted before the real reply is ready.
+SLACK_TYPING_PLACEHOLDER = "..."
+
 
 def parse_channel_remap(raw: str) -> dict:
     """Parse ``LOBSTER_SLACK_CHANNEL_REMAP`` into a channel-ID mapping dict.
@@ -492,6 +504,20 @@ def _send_slack_reply(reply: dict) -> bool:
     the app bot.  If the reply targets a channel that LOBSTER_SLACK_CHANNEL_REMAP
     maps to a different channel (e.g. the bot-DM channel that xoxp- cannot
     access), it is remapped before posting.
+
+    When ``SLACK_TYPING_INDICATOR`` is enabled (the default), this function
+    uses the post-then-update pattern:
+
+    1. Post a ``SLACK_TYPING_PLACEHOLDER`` ("...") immediately — the user sees
+       the message appear at once rather than waiting in silence.
+    2. Call ``chat.update`` with the real reply text to fill in the placeholder.
+
+    If the placeholder post fails (e.g. API error or plan restriction), the
+    function falls back to a direct ``chat_postMessage`` with the real text so
+    the reply is never silently dropped.  If the ``chat.update`` call fails
+    after a successful placeholder, we log the error but still return True —
+    the placeholder is visible in Slack and re-queuing the outbox file would
+    result in a duplicate reply.
     """
     channel_id = reply.get("chat_id", "")
     text = reply.get("text", "")
@@ -503,16 +529,80 @@ def _send_slack_reply(reply: dict) -> bool:
         log.info("Outbound: remapping channel %s → %s", channel_id, remapped)
         channel_id = remapped
 
+    if SLACK_TYPING_INDICATOR:
+        return _send_with_typing_indicator(channel_id, text, thread_ts)
+    return _send_direct(channel_id, text, thread_ts)
+
+
+def _build_post_kwargs(channel_id: str, text: str, thread_ts: str | None) -> dict:
+    """Return the kwargs dict for chat.postMessage or chat.update (pure helper)."""
+    kwargs: dict = {"channel": channel_id, "text": text}
+    if thread_ts:
+        kwargs["thread_ts"] = thread_ts
+    return kwargs
+
+
+def _send_direct(channel_id: str, text: str, thread_ts: str | None) -> bool:
+    """Post *text* to *channel_id* directly via chat.postMessage.
+
+    Returns True on success, False on SlackApiError.
+    """
     try:
-        kwargs: dict = {"channel": channel_id, "text": text}
-        if thread_ts:
-            kwargs["thread_ts"] = thread_ts
-        user_client.chat_postMessage(**kwargs)
+        user_client.chat_postMessage(**_build_post_kwargs(channel_id, text, thread_ts))
         log.info("Sent Slack reply to %s: %s...", channel_id, text[:50])
         return True
     except SlackApiError as exc:
         log.error("Error sending Slack message: %s", exc)
         return False
+
+
+def _send_with_typing_indicator(channel_id: str, text: str, thread_ts: str | None) -> bool:
+    """Deliver *text* to *channel_id* using the post-then-update typing pattern.
+
+    Posts ``SLACK_TYPING_PLACEHOLDER`` ("...") first so the user sees the
+    message appear immediately, then calls ``chat.update`` with the real text.
+
+    Fallback: if the placeholder post fails, posts the real text directly.
+    If the ``chat.update`` call fails after a successful placeholder, logs
+    a warning and returns True (the placeholder is already in Slack; re-queuing
+    would cause a duplicate).
+
+    Returns True when the real text has been delivered (either via update or
+    direct fallback), False only when all delivery attempts fail.
+    """
+    placeholder_kwargs = _build_post_kwargs(channel_id, SLACK_TYPING_PLACEHOLDER, thread_ts)
+    try:
+        post_response = user_client.chat_postMessage(**placeholder_kwargs)
+        placeholder_ts = post_response.get("ts")
+        log.info(
+            "Posted typing placeholder to %s (ts=%s)",
+            channel_id, placeholder_ts,
+        )
+    except SlackApiError as exc:
+        log.warning(
+            "Typing indicator placeholder failed (%s) — falling back to direct post",
+            exc,
+        )
+        return _send_direct(channel_id, text, thread_ts)
+
+    # Replace the placeholder with the real reply text.
+    try:
+        update_kwargs: dict = {"channel": channel_id, "ts": placeholder_ts, "text": text}
+        if thread_ts:
+            update_kwargs["thread_ts"] = thread_ts
+        user_client.chat_update(**update_kwargs)
+        log.info("Updated placeholder → real reply in %s: %s...", channel_id, text[:50])
+        return True
+    except SlackApiError as exc:
+        # The placeholder "..." is already visible in Slack.  Returning False
+        # would leave the outbox file in place and trigger a duplicate send.
+        # Log the failure and return True to consume the outbox file.
+        log.warning(
+            "chat.update failed for placeholder ts=%s in %s: %s — "
+            "placeholder remains visible; not re-queuing to avoid duplicate",
+            placeholder_ts, channel_id, exc,
+        )
+        return True
 
 
 # Backward-compatible alias -- code that imports OutboxHandler directly still works.
