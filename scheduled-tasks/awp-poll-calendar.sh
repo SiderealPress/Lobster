@@ -2,8 +2,13 @@
 # awp-poll-calendar.sh — Poll AWP calendar every 15 minutes (BIS-133)
 #
 # Calls the AWP /api/cron/poll-calendar endpoint to detect new investor meetings.
-# This is the Lobster-side fallback for the Vercel Cron trigger, ensuring the
-# pipeline runs even if Vercel silently fails.
+#
+# DEPLOYMENT NOTE — primary trigger, not a fallback:
+# This Lobster job IS the primary cron trigger for the poll-calendar pipeline.
+# The Vercel Cron trigger on the AWP project MUST be disabled (or set to a
+# safe low-frequency schedule such as every 6 hours) before deploying this job.
+# Running both at 15-minute intervals causes double-firing and potential race
+# conditions in the meeting-brief pipeline.
 #
 # Required config (in ~/lobster-config/config.env):
 #   AWP_BASE_URL=<your AWP Vercel URL>
