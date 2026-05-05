@@ -388,3 +388,85 @@ class TestOutboundChannelRemap:
 
         posted_channel = m.user_client.chat_postMessage.call_args[1]["channel"]
         assert posted_channel == "DUNKNOWN001"
+
+
+# ---------------------------------------------------------------------------
+# 6. _remap_channel helper (PR 2)
+# ---------------------------------------------------------------------------
+
+class TestRemapChannelHelper:
+    """_remap_channel is the single shared lookup for both inbound and outbound paths."""
+
+    def test_remap_channel_maps_src_to_dst(self):
+        """Source channel is mapped to its destination."""
+        m = _load_module(_minimal_env())
+        assert m._remap_channel(FAKE_BOT_CHANNEL) == FAKE_USER_CHANNEL
+
+    def test_remap_channel_returns_unchanged_when_not_in_map(self):
+        """An unknown channel is returned unchanged."""
+        m = _load_module(_minimal_env())
+        assert m._remap_channel("DUNKNOWN999") == "DUNKNOWN999"
+
+    def test_remap_channel_returns_unchanged_when_map_empty(self):
+        """When CHANNEL_REMAP is empty, all channels are returned unchanged."""
+        env = _minimal_env()
+        del env["LOBSTER_SLACK_CHANNEL_REMAP"]
+        m = _load_module(env)
+        assert m._remap_channel(FAKE_BOT_CHANNEL) == FAKE_BOT_CHANNEL
+
+    def test_inbound_and_outbound_use_same_remap_table(self):
+        """Both inbound handler and outbound send function call _remap_channel.
+
+        Verified by monkey-patching _remap_channel and confirming both paths
+        reach it.  This is the key invariant: the single helper eliminates
+        any risk of the two call sites drifting out of sync.
+        """
+        m = _load_module(_minimal_env())
+
+        calls = []
+
+        def tracking_remap(channel_id):
+            calls.append(("remap_called", channel_id))
+            return m.CHANNEL_REMAP.get(channel_id, channel_id)
+
+        # Patch the helper on the module
+        import types
+        m._remap_channel = tracking_remap
+
+        # Trigger inbound path
+        written = {}
+
+        def fake_write(msg_data):
+            written.update(msg_data)
+
+        m.write_message_to_inbox = fake_write
+        m.get_user_info = lambda uid: {"name": "u", "profile": {}, "real_name": "U"}
+        m.get_channel_info = lambda cid: {"name": "dm", "is_im": True}
+        m._channel_config = None
+        m._CHANNEL_CONFIG_ENABLED = False
+        m._INGRESS_LOGGING_ENABLED = False
+        m.ALLOWED_CHANNELS = []
+        m.ALLOWED_USERS = []
+
+        body = {
+            "event": {
+                "user": "USENDER001",
+                "channel": FAKE_BOT_CHANNEL,
+                "text": "hello",
+                "ts": "1234567890.000200",
+                "thread_ts": None,
+            }
+        }
+        m.handle_message_events(body=body, say=MagicMock(), logger=MagicMock())
+
+        # Trigger outbound path
+        m.user_client.chat_postMessage.reset_mock()
+        reply = {"chat_id": FAKE_BOT_CHANNEL, "text": "reply", "source": "slack"}
+        m._send_slack_reply(reply)
+
+        # Both paths must have called our tracking remap
+        call_channels = [c for _, c in calls]
+        assert FAKE_BOT_CHANNEL in call_channels, (
+            f"_remap_channel not called with {FAKE_BOT_CHANNEL!r}; calls={calls}"
+        )
+        assert len(calls) >= 2, f"Expected at least 2 remap calls, got {len(calls)}"
