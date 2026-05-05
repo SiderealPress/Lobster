@@ -1,0 +1,37 @@
+[skill]
+name = "skill-builder"
+version = "1.0.0"
+description = "Guides Lobster users through creating custom skills — scaffolds the correct file layout, explains the two-location model (repo vs instance), and wires MCP tool registration."
+author = "Lobster"
+category = "workflow"
+
+[activation]
+mode = "triggered"
+triggers = ["/skill-builder", "create skill", "new skill", "build a skill", "add skill", "make a skill", "write a skill", "create a skill"]
+context_patterns = [
+    "when user wants to create a custom skill",
+    "when user asks how to add a skill to Lobster",
+    "when user asks where skills live",
+    "when user asks how to register a skill",
+]
+
+[layering]
+priority = 50
+merge_strategy = "append"
+
+[provides]
+mcp_tools = []
+bot_commands = ["/skill-builder"]
+
+[compatibility]
+enhances = ["lobster-dev"]
+conflicts = []
+
+[dependencies]
+pip = []
+npm = []
+system = []
+api_keys = []
+
+[dependencies.runtime]
+python = ">=3.11"
