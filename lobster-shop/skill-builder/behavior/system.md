@@ -14,12 +14,12 @@ Skills live in exactly one of two places — never both, never somewhere else.
 - Must be generic: no user-specific data, no instance-specific config, no private API keys
 
 **For instance-specific skills** (private to this Lobster install):
-- Location: `~/lobster-user-config/skills/<skill-name>/`
+- Location: `$LOBSTER_CONFIG_DIR/skills/<skill-name>/` (typically `~/lobster-config/skills/<skill-name>/`)
 - Never committed to any public repo — this path is private and gitignored
 - Activated via MCP tool: `activate_skill(name="<skill-name>")`
 - Lobster discovers skills from this path automatically at runtime
 
-**The critical rule:** NEVER put instance-specific skills in `~/lobster/`. If the skill contains anything personal, private, or instance-specific, it belongs in `~/lobster-user-config/skills/`.
+**The critical rule:** NEVER put instance-specific skills in `~/lobster/`. If the skill contains anything personal, private, or instance-specific, it belongs in `$LOBSTER_CONFIG_DIR/skills/` (typically `~/lobster-config/skills/`).
 
 ---
 
@@ -114,17 +114,17 @@ get_skill_preferences(name="skill-name")  # read per-skill settings
 set_skill_preference(name, key, value)    # write a per-skill setting
 ```
 
-After placing files in `~/lobster-user-config/skills/<skill-name>/`, call `activate_skill` — no restart needed.
+After placing files in `$LOBSTER_CONFIG_DIR/skills/<skill-name>/`, call `activate_skill` — no restart needed.
 
 ---
 
 ### Common mistakes
 
-- **Wrong location**: putting a private skill in `~/lobster/lobster-shop/`. Private skills must go in `~/lobster-user-config/skills/`.
+- **Wrong location**: putting a private skill in `~/lobster/lobster-shop/`. Private skills must go in `$LOBSTER_CONFIG_DIR/skills/` (typically `~/lobster-config/skills/`).
 - **Committing secrets**: API keys, personal tokens, and user-specific config must never appear in skill files. Skills in the lobster repo are public.
 - **Overly broad activation**: using `mode = "always"` for a skill that only applies in one context. Use `triggered` or `contextual` instead.
 - **One giant behavior file**: if `system.md` exceeds ~200 lines, the skill is likely covering too many concerns. Split it.
-- **Skipping `activate_skill`**: files in `~/lobster-user-config/skills/` are discovered but not automatically active. Call `activate_skill` after creating the files.
+- **Skipping `activate_skill`**: files in `$LOBSTER_CONFIG_DIR/skills/` are discovered but not automatically active. Call `activate_skill` after creating the files.
 
 ---
 
@@ -132,7 +132,7 @@ After placing files in `~/lobster-user-config/skills/<skill-name>/`, call `activ
 
 1. Create the directory:
    ```bash
-   mkdir -p ~/lobster-user-config/skills/<skill-name>/behavior
+   mkdir -p ~/lobster-config/skills/<skill-name>/behavior
    ```
 
 2. Write `skill.toml` with at minimum: `name`, `version`, `description`, `[activation]`, `[layering]`, `[provides]`.
