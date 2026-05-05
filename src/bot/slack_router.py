@@ -306,6 +306,19 @@ def handle_message_events(body, say, logger):
     if not user_id or not channel_id:
         return
 
+    # --- Inbound channel remap (BEFORE authorization check) ---
+    # Remap must run first so that ALLOWED_CHANNELS is checked against the
+    # canonical (post-remap) channel ID.  If the remap ran after the allowlist
+    # check, a pre-remap channel ID that is absent from ALLOWED_CHANNELS would
+    # be silently dropped before remapping could occur.
+    if channel_id in CHANNEL_REMAP:
+        remapped_id = CHANNEL_REMAP[channel_id]
+        log.info(
+            "Inbound: remapping channel %s → %s",
+            channel_id, remapped_id,
+        )
+        channel_id = remapped_id
+
     # --- Ingress logging (BEFORE authorization / LLM routing) ---
     if _INGRESS_LOGGING_ENABLED and _ingress_logger is not None:
         try:
@@ -368,19 +381,6 @@ def handle_message_events(body, say, logger):
 
     # Clean the text
     cleaned_text = clean_slack_text(text, BOT_USER_ID)
-
-    # Remap the inbound channel if LOBSTER_SLACK_CHANNEL_REMAP maps it to a
-    # different channel.  The typical case is that a Socket Mode event arrives
-    # on the bot-DM channel while the canonical user-facing channel is the
-    # user-DM channel — the xoxp- token cannot reply to the bot-DM channel, so
-    # all inbox entries should reference the user-DM channel ID instead.
-    if channel_id in CHANNEL_REMAP:
-        remapped_id = CHANNEL_REMAP[channel_id]
-        log.info(
-            "Inbound: remapping channel %s → %s",
-            channel_id, remapped_id,
-        )
-        channel_id = remapped_id
 
     # Generate message ID
     msg_id = f"{int(time.time() * 1000)}_{ts.replace('.', '')}"
@@ -538,8 +538,24 @@ if SLACK_USER_TOKEN and not _POLL_CHANNELS:
 # State file to persist the last-seen timestamp across restarts
 _POLL_STATE_FILE = _WORKSPACE / "data" / "slack-poll-state.json"
 
-# In-memory seen-ts set to deduplicate within a run (fallback)
+# In-memory seen-ts set to deduplicate within a run (fallback).
+# Capped at _SEEN_TS_MAX_SIZE entries to prevent unbounded growth over long sessions.
+_SEEN_TS_MAX_SIZE = 1000
 _seen_ts: set = set()
+
+
+def _trim_seen_ts() -> None:
+    """Evict the oldest half of _seen_ts when the set exceeds _SEEN_TS_MAX_SIZE.
+
+    Timestamps are Slack's float-string format (e.g. "1234567890.000100").
+    Sorting them lexicographically is safe because they share the same integer
+    prefix length and the decimal portion is zero-padded by Slack.
+    """
+    if len(_seen_ts) > _SEEN_TS_MAX_SIZE:
+        # Keep the most-recent half; discard the oldest half.
+        keep = sorted(_seen_ts)[len(_seen_ts) // 2:]
+        _seen_ts.clear()
+        _seen_ts.update(keep)
 
 
 def _load_poll_state() -> dict:
@@ -594,7 +610,9 @@ def _poll_user_dm_channels(stop_event: Event) -> None:
             try:
                 kwargs: dict = {"channel": channel_id, "limit": 20}
                 if oldest:
-                    kwargs["oldest"] = oldest
+                    # Use exclusive lower bound: oldest + epsilon so the
+                    # already-processed message is not re-delivered on restart.
+                    kwargs["oldest"] = str(float(oldest) + 0.000001)
 
                 resp = poll_client.conversations_history(**kwargs)
                 messages = resp.get("messages", [])
@@ -616,11 +634,13 @@ def _poll_user_dm_channels(stop_event: Event) -> None:
                     # it is workspace-specific and is never hardcoded.
                     if POLL_SELF_USER_ID and msg_user == POLL_SELF_USER_ID:
                         _seen_ts.add(ts)
+                        _trim_seen_ts()
                         if not oldest or float(ts) > float(oldest):
                             state[channel_id] = ts
                         continue
 
                     _seen_ts.add(ts)
+                    _trim_seen_ts()
 
                     # Resolve display name
                     user_info = get_user_info(msg_user) if msg_user else {}

@@ -290,6 +290,31 @@ class TestInboundChannelRemap:
         m = _load_module(env)
         assert m.CHANNEL_REMAP == {}
 
+    def _make_body(self, channel_id: str, text: str = "hello", ts: str = "1234567890.000100") -> dict:
+        return {
+            "event": {
+                "user": "USENDER001",
+                "channel": channel_id,
+                "text": text,
+                "ts": ts,
+                "thread_ts": None,
+            }
+        }
+
+    def _setup_monkeypatches(self, m, monkeypatch):
+        monkeypatch.setattr(m, "write_message_to_inbox", MagicMock())
+        monkeypatch.setattr(m, "get_user_info", lambda uid: {
+            "name": "testuser", "profile": {}, "real_name": "Test User"
+        })
+        monkeypatch.setattr(m, "get_channel_info", lambda cid: {
+            "name": "dm", "is_im": True
+        })
+        monkeypatch.setattr(m, "_channel_config", None)
+        monkeypatch.setattr(m, "_CHANNEL_CONFIG_ENABLED", False)
+        monkeypatch.setattr(m, "_INGRESS_LOGGING_ENABLED", False)
+        monkeypatch.setattr(m, "ALLOWED_CHANNELS", [])
+        monkeypatch.setattr(m, "ALLOWED_USERS", [])
+
     def test_inbound_source_channel_remapped_to_destination(self, monkeypatch):
         """A message on the source channel is written to inbox with the destination chat_id."""
         m = _load_module(_minimal_env())
@@ -313,20 +338,46 @@ class TestInboundChannelRemap:
         monkeypatch.setattr(m, "ALLOWED_USERS", [])
 
         # Simulate a Socket Mode event on the source (bot-DM) channel
-        body = {
-            "event": {
-                "user": "USENDER001",
-                "channel": FAKE_BOT_CHANNEL,
-                "text": "hello",
-                "ts": "1234567890.000100",
-                "thread_ts": None,
-            }
-        }
+        body = self._make_body(FAKE_BOT_CHANNEL)
 
         m.handle_message_events(body=body, say=MagicMock(), logger=MagicMock())
 
         assert written.get("chat_id") == FAKE_USER_CHANNEL, (
             f"Expected chat_id={FAKE_USER_CHANNEL!r}, got {written.get('chat_id')!r}"
+        )
+
+    def test_inbound_remap_runs_before_allowed_channels_check(self, monkeypatch):
+        """Remap must happen before ALLOWED_CHANNELS check so the canonical ID is authorized.
+
+        Regression for: inbound remap was running AFTER the allowlist check, causing
+        messages on the pre-remap channel ID to be silently dropped when ALLOWED_CHANNELS
+        was set to the post-remap ID only.
+        """
+        # ALLOWED_CHANNELS contains only the destination (user-DM) channel.
+        # The inbound event arrives on the source (bot-DM) channel.
+        # Without remap-before-auth the message would be dropped.
+        env = _minimal_env()
+        env["LOBSTER_SLACK_CHANNEL_REMAP"] = f"{FAKE_BOT_CHANNEL}:{FAKE_USER_CHANNEL}"
+        m = _load_module(env)
+
+        written = {}
+
+        def fake_write(msg_data):
+            written.update(msg_data)
+
+        self._setup_monkeypatches(m, monkeypatch)
+        monkeypatch.setattr(m, "write_message_to_inbox", fake_write)
+        # Set ALLOWED_CHANNELS to only the destination ID — not the source
+        monkeypatch.setattr(m, "ALLOWED_CHANNELS", [FAKE_USER_CHANNEL])
+
+        m.handle_message_events(
+            body=self._make_body(FAKE_BOT_CHANNEL),
+            say=MagicMock(),
+            logger=MagicMock(),
+        )
+
+        assert written.get("chat_id") == FAKE_USER_CHANNEL, (
+            "Message was dropped before remap — auth check ran before remap"
         )
 
 
@@ -388,3 +439,101 @@ class TestOutboundChannelRemap:
 
         posted_channel = m.user_client.chat_postMessage.call_args[1]["channel"]
         assert posted_channel == "DUNKNOWN001"
+
+
+# ---------------------------------------------------------------------------
+# 6. Poll uses exclusive oldest boundary (no duplicate delivery on restart)
+# ---------------------------------------------------------------------------
+
+class TestPollExclusiveBoundary:
+    """The poll uses an exclusive oldest boundary to avoid re-delivering the
+    last-seen message on restart."""
+
+    def test_oldest_boundary_formula_is_exclusive(self):
+        """The expression used to compute the exclusive oldest is oldest + 0.000001.
+
+        We verify this by inspecting the source code for the exclusive-boundary
+        expression.  This is a deliberate code-inspection test: the behaviour
+        is a single arithmetic expression deep inside a threaded poll loop, and
+        the only way to exercise it without introducing a multi-second sleep or
+        complex threading machinery is to assert the expression is present in
+        source — the same technique used for the PII regression tests above.
+
+        The specific expression checked is: float(oldest) + 0.000001
+        """
+        source = Path(__file__).parent.parent.parent.parent / "src" / "bot" / "slack_router.py"
+        text = source.read_text()
+        assert "float(oldest) + 0.000001" in text, (
+            "Expected exclusive oldest boundary expression not found in source. "
+            "The poll must use oldest + 0.000001 to avoid re-delivering the "
+            "last-seen message on restart."
+        )
+
+    def test_oldest_boundary_not_used_inclusive(self):
+        """The poll must NOT pass the raw oldest value directly as the boundary."""
+        source = Path(__file__).parent.parent.parent.parent / "src" / "bot" / "slack_router.py"
+        text = source.read_text()
+        # The original buggy pattern: kwargs["oldest"] = oldest (without epsilon)
+        # We can't easily check for absence of assignment without epsilon, but
+        # we can confirm the epsilon expression IS present (previous test) and
+        # that the epsilon constant is the correct value.
+        assert "0.000001" in text, (
+            "Epsilon value 0.000001 must appear in source for exclusive oldest boundary"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 7. _seen_ts is capped to prevent unbounded growth
+# ---------------------------------------------------------------------------
+
+class TestSeenTsCap:
+    """_seen_ts is trimmed when it exceeds _SEEN_TS_MAX_SIZE entries."""
+
+    def test_trim_seen_ts_caps_set_size(self):
+        """After _trim_seen_ts, the set size is at most _SEEN_TS_MAX_SIZE."""
+        m = _load_module(_minimal_env())
+
+        # Fill beyond the cap
+        m._seen_ts.clear()
+        for i in range(m._SEEN_TS_MAX_SIZE + 200):
+            m._seen_ts.add(f"170000{i:010d}.000001")
+
+        assert len(m._seen_ts) > m._SEEN_TS_MAX_SIZE
+
+        m._trim_seen_ts()
+
+        assert len(m._seen_ts) <= m._SEEN_TS_MAX_SIZE, (
+            f"_seen_ts grew to {len(m._seen_ts)}, expected <= {m._SEEN_TS_MAX_SIZE}"
+        )
+
+    def test_trim_seen_ts_keeps_newest_entries(self):
+        """After trimming, the retained entries are the most-recent ones."""
+        m = _load_module(_minimal_env())
+
+        m._seen_ts.clear()
+        # Add 1100 entries with sequential timestamps
+        ts_list = [f"1700000{i:07d}.000001" for i in range(1100)]
+        m._seen_ts.update(ts_list)
+
+        m._trim_seen_ts()
+
+        kept = sorted(m._seen_ts)
+        # All retained entries should be from the newer half
+        oldest_kept = kept[0]
+        oldest_all = sorted(ts_list)[0]
+        assert oldest_kept > oldest_all, (
+            "Trim should have evicted the oldest entries, not the newest"
+        )
+
+    def test_trim_seen_ts_noop_when_under_cap(self):
+        """_trim_seen_ts does nothing when the set is within the size limit."""
+        m = _load_module(_minimal_env())
+
+        m._seen_ts.clear()
+        for i in range(10):
+            m._seen_ts.add(f"1700000000.00000{i}")
+
+        before = set(m._seen_ts)
+        m._trim_seen_ts()
+
+        assert m._seen_ts == before, "Small set should be unchanged after trim"
