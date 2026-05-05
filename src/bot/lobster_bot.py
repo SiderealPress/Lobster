@@ -1866,6 +1866,14 @@ class OutboxHandler(FileSystemEventHandler):
                     pass
                 return
 
+            # Skip outbox files destined for other channels (Slack, SMS, WhatsApp, etc.)
+            # Those routers watch the same shared outbox directory and handle their own files.
+            source = reply.get('source', 'telegram')
+            if source not in ('telegram', 'lobster-group', ''):
+                log.debug(f"process_reply: skipping non-Telegram file {filepath} (source={source!r})")
+                _processing_files.discard(filepath)
+                return
+
             chat_id = reply.get('chat_id')
             text = reply.get('text', '')
             buttons = reply.get('buttons')
