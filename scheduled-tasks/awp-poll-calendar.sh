@@ -6,7 +6,7 @@
 # pipeline runs even if Vercel silently fails.
 #
 # Required config (in ~/lobster-config/config.env):
-#   AWP_BASE_URL=https://awp-two.vercel.app
+#   AWP_BASE_URL=<your AWP Vercel URL>
 #   AWP_CRON_SECRET=<value of CRON_SECRET from Vercel environment>
 #
 # Optional: AWP_CRON_SECRET may be omitted if the Vercel endpoint allows
