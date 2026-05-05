@@ -2,7 +2,17 @@
 Trigify Daily Sync — Phases 1 & 2.
 
 Pulls LinkedIn post signals from Trigify, matches them against Kissinger,
-writes contact events, discovers new prospects, and surfaces warm intro paths.
+writes contact events (signal enrichment), and surfaces warm intro paths.
+
+Trigify is a **signal enrichment source only**.  It writes ``last_signal_*``
+meta and the ``signal:post-engagement`` tag onto existing Tier 1 / Tier 2
+contacts.  It does NOT create new prospect entities and does NOT manage the
+outreach queue.
+
+Queue management is handled separately by the reload-tasks API endpoint
+(/api/outreach/reload-tasks) which selects contacts by provenance tier:
+  Tier 1 — source:human or source:csv (highest trust, surfaces first)
+  Tier 2 — pipeline-contact (Apollo / org-chart enrichment)
 
 Usage (from ~/lobster):
     uv run python src/integrations/trigify/daily_sync.py
@@ -65,31 +75,6 @@ DEFAULT_SEARCHES: list[dict[str, str]] = [
     {"name": "rail car manufacturing", "query": "rail car manufacturing", "platform": "linkedin-posts"},
 ]
 
-# ---------------------------------------------------------------------------
-# Title exclusion — COO / Chief Operating Officer must never become a prospect
-# ---------------------------------------------------------------------------
-import re as _re
-
-_EXCLUDED_TITLE_PATTERNS = [
-    _re.compile(r'\bCOO\b', _re.IGNORECASE),
-    _re.compile(r'Chief Operating Officer', _re.IGNORECASE),
-    _re.compile(r'Chief Operations Officer', _re.IGNORECASE),
-]
-
-
-def is_excluded_title(title: str) -> bool:
-    """Return True if the title matches a permanently-excluded role (e.g. COO)."""
-    if not title:
-        return False
-    return any(p.search(title) for p in _EXCLUDED_TITLE_PATTERNS)
-
-
-# Sectors that qualify an unmatched result as a prospect worth creating
-TARGET_SECTOR_KEYWORDS: frozenset[str] = frozenset([
-    "manufacturing", "supply chain", "defense", "aerospace", "industrial",
-    "rail", "heavy equipment", "logistics", "operations", "procurement",
-    "s&op", "demand planning", "materials",
-])
 
 # Admin Telegram chat ID for the digest (read from env)
 ADMIN_CHAT_ID: str = os.environ.get(
@@ -670,45 +655,6 @@ def update_entity_tags_and_meta(
     return bool(data and data.get("updateEntity"))
 
 
-def create_prospect_entity(result: dict[str, Any]) -> Optional[str]:
-    """Create a new Kissinger person entity from a Trigify result.
-
-    Args:
-        result: A Trigify search result dict with author data.
-
-    Returns:
-        The new entity ID, or None on failure.
-    """
-    # Trigify API nests author data under an "author" sub-dict
-    author = result.get("author") or {}
-    name = (author.get("name") or result.get("name") or result.get("author_name") or "Unknown").strip()
-    title = author.get("title") or result.get("title") or result.get("author_title") or ""
-    company = author.get("company") or result.get("company") or result.get("author_company") or ""
-    linkedin_url = author.get("profile_url") or result.get("linkedin_url") or result.get("profile_url") or ""
-
-    meta: list[dict[str, str]] = []
-    if title:
-        meta.append({"key": "title", "value": title})
-    if company:
-        meta.append({"key": "company", "value": company})
-    if linkedin_url:
-        meta.append({"key": "linkedin_url", "value": linkedin_url})
-
-    data = _kissinger_gql(
-        _CREATE_ENTITY_MUTATION,
-        {
-            "input": {
-                "kind": "person",
-                "name": name,
-                "tags": ["trigify-discovered", "prospect"],
-                "meta": meta,
-            }
-        },
-    )
-    if data and data.get("createEntity"):
-        return data["createEntity"]["id"]
-    return None
-
 
 # ===========================================================================
 # Phase 2: Warm intro path surfacing
@@ -827,250 +773,10 @@ def fetch_intro_paths(
     return paths
 
 
-# ===========================================================================
-# Queue replenishment
-# ===========================================================================
-
-_FETCH_ALL_PEOPLE_WITH_TAGS_QUERY = """
-query FetchAllPeople($kind: String, $first: Int, $after: String) {
-  entities(kind: $kind, first: $first, after: $after) {
-    pageInfo { hasNextPage endCursor }
-    edges {
-      node {
-        id
-        name
-        tags
-        updatedAt
-      }
-    }
-  }
-}
-"""
-
-
-def _count_active_queue() -> int:
-    """Count prospect-contact entities that are not skipped and not yet sent.
-
-    Returns:
-        Count of truly active queue entries.
-    """
-    # Fetch all prospect-contact tagged entities (summary level, no meta)
-    candidates: list[dict[str, Any]] = []
-    after: Optional[str] = None
-    while True:
-        variables: dict[str, Any] = {"kind": "person", "first": 500}
-        if after:
-            variables["after"] = after
-        data = _kissinger_gql(_FETCH_ALL_PEOPLE_WITH_TAGS_QUERY, variables)
-        if not data:
-            break
-        conn = data.get("entities", {})
-        for edge in conn.get("edges", []):
-            node = edge["node"]
-            if "prospect-contact" in node.get("tags", []):
-                candidates.append(node)
-        page_info = conn.get("pageInfo", {})
-        if not page_info.get("hasNextPage"):
-            break
-        after = page_info.get("endCursor")
-
-    # For each, fetch full entity to check skipped/sent meta
-    active = 0
-    for entity in candidates:
-        full = _fetch_full_entity(entity["id"])
-        if not full:
-            continue
-        meta = {m["key"]: m["value"] for m in full.get("meta", [])}
-        if meta.get("outreach_skipped") == "true":
-            continue
-        if meta.get("outreach_sent_at"):
-            continue
-        active += 1
-    return active
-
-
-def _fetch_replenishment_candidates(limit: int) -> list[dict[str, Any]]:
-    """Fetch trigify-discovered prospects eligible for queue promotion.
-
-    Eligibility:
-    - Tagged ``trigify-discovered`` and ``prospect``
-    - NOT tagged ``prospect-contact``
-    - NOT meta ``outreach_skipped = true``
-    - NOT excluded title (COO etc.)
-
-    Sorted by: entities with ``last_signal_date`` first (warm signals),
-    then by recency of ``last_signal_date`` descending.
-
-    Args:
-        limit: Maximum number of candidates to return.
-
-    Returns:
-        List of full entity dicts, ready to promote.
-    """
-    # Collect summary-level candidates
-    summary_pool: list[dict[str, Any]] = []
-    after: Optional[str] = None
-    while True:
-        variables: dict[str, Any] = {"kind": "person", "first": 500}
-        if after:
-            variables["after"] = after
-        data = _kissinger_gql(_FETCH_ALL_PEOPLE_WITH_TAGS_QUERY, variables)
-        if not data:
-            break
-        conn = data.get("entities", {})
-        for edge in conn.get("edges", []):
-            node = edge["node"]
-            tags = node.get("tags", [])
-            if "trigify-discovered" in tags and "prospect" in tags and "prospect-contact" not in tags:
-                summary_pool.append(node)
-        page_info = conn.get("pageInfo", {})
-        if not page_info.get("hasNextPage"):
-            break
-        after = page_info.get("endCursor")
-
-    log.info("Replenishment: %d summary-level candidates found", len(summary_pool))
-
-    # Fetch full entities to filter and score
-    eligible: list[tuple[str, dict[str, Any]]] = []  # (last_signal_date_iso_or_empty, entity)
-    for summary in summary_pool:
-        full = _fetch_full_entity(summary["id"])
-        if not full:
-            continue
-        meta = {m["key"]: m["value"] for m in full.get("meta", [])}
-
-        # Skip if already skipped
-        if meta.get("outreach_skipped") == "true":
-            continue
-        if meta.get("signal_dismissed") == "true":
-            continue
-
-        # Skip excluded titles
-        title = meta.get("title", "")
-        if is_excluded_title(title):
-            log.debug("Replenishment: skipping excluded title '%s' (%s)", full.get("name"), title)
-            continue
-
-        last_signal = meta.get("last_signal_date", "")
-        eligible.append((last_signal, full))
-
-    log.info("Replenishment: %d eligible candidates after filtering", len(eligible))
-
-    # Sort: entities with a last_signal_date come first (warm), then by recency desc
-    def _sort_key(item: tuple[str, dict[str, Any]]) -> tuple[int, str]:
-        date_str = item[0]
-        has_signal = 1 if date_str else 0
-        return (-has_signal, "" if not date_str else ("" if date_str > "z" else date_str))
-
-    eligible.sort(key=lambda item: (-int(bool(item[0])), "" if not item[0] else item[0]), reverse=False)
-    # Better sort: warm signals first, then by date descending
-    eligible.sort(key=lambda item: (0 if item[0] else 1, "" if not item[0] else item[0]), reverse=False)
-    # Final deterministic sort: (no_signal_flag ASC, date DESC)
-    eligible.sort(key=lambda item: (0 if item[0] else 1, item[0] or ""), reverse=False)
-    # Stable: put entries with a date first, sorted newest-first
-    with_date = sorted(
-        [(d, e) for d, e in eligible if d],
-        key=lambda x: x[0],
-        reverse=True,
-    )
-    without_date = [(d, e) for d, e in eligible if not d]
-    sorted_eligible = with_date + without_date
-
-    return [entity for _, entity in sorted_eligible[:limit]]
-
-
-def replenish_outreach_queue(target_size: int = 100) -> dict[str, Any]:
-    """Ensure the active outreach queue has at least ``target_size`` contacts.
-
-    Promotes ``trigify-discovered`` prospects to ``prospect-contact`` status
-    until the active queue reaches the target.  Applies title exclusion filters
-    before promoting.
-
-    Args:
-        target_size: Minimum number of active (not skipped, not sent) queue
-                     entries to maintain. Defaults to 100.
-
-    Returns:
-        dict with keys:
-            ``current``       — active queue size before promotion
-            ``promoted``      — number of entities promoted this run
-            ``available_pool``— remaining eligible candidates not promoted
-    """
-    log.info("=== Queue replenishment (target=%d) ===", target_size)
-
-    current = _count_active_queue()
-    log.info("Active queue size: %d", current)
-
-    deficit = max(0, target_size - current)
-    if deficit == 0:
-        log.info("Queue already at or above target (%d >= %d)", current, target_size)
-        return {"current": current, "promoted": 0, "available_pool": 0}
-
-    log.info("Deficit: %d — fetching candidates to promote", deficit)
-
-    # Fetch a slightly larger pool than needed to account for any race conditions
-    fetch_limit = deficit + 20
-    candidates = _fetch_replenishment_candidates(fetch_limit)
-    available_pool = max(0, len(candidates) - deficit)
-
-    promoted_count = 0
-    to_promote = candidates[:deficit]
-
-    for entity in to_promote:
-        entity_id = entity["id"]
-        current_tags = entity.get("tags", [])
-        ok = update_entity_tags_and_meta(
-            entity_id=entity_id,
-            current_tags=current_tags,
-            add_tags=["prospect-contact"],
-            meta_updates=[
-                {"key": "queue_added_at", "value": datetime.now(tz=timezone.utc).isoformat()},
-                {"key": "queue_added_by", "value": "auto-replenishment"},
-            ],
-        )
-        if ok:
-            promoted_count += 1
-            log.info(
-                "Promoted %s (%s) -> prospect-contact",
-                entity.get("name", entity_id),
-                entity_id,
-            )
-        else:
-            log.warning("Failed to promote entity %s", entity_id)
-
-    log.info(
-        "Queue replenishment complete: promoted %d, pool has ~%d remaining",
-        promoted_count,
-        available_pool,
-    )
-    return {
-        "current": current,
-        "promoted": promoted_count,
-        "available_pool": available_pool,
-    }
-
 
 # ===========================================================================
 # Main sync logic
 # ===========================================================================
-
-def _is_target_sector(result: dict[str, Any]) -> bool:
-    """Return True if a Trigify result appears to be from a target sector."""
-    author = result.get("author") or {}
-    content = result.get("content") or {}
-    content_text = content.get("text", "") if isinstance(content, dict) else (content or "")
-    haystack = " ".join([
-        author.get("title", ""),
-        author.get("company", ""),
-        result.get("title", ""),
-        result.get("author_title", ""),
-        result.get("company", ""),
-        result.get("author_company", ""),
-        content_text,
-        result.get("post_text", ""),
-        result.get("text", ""),
-        result.get("snippet", ""),
-    ]).lower()
-    return any(kw in haystack for kw in TARGET_SECTOR_KEYWORDS)
 
 
 def _result_post_text(result: dict[str, Any]) -> str:
@@ -1216,7 +922,6 @@ def run_sync() -> dict[str, Any]:
     # Step 5 & 6: Match results and write signals
     # ------------------------------------------------------------------
     warm_signals: list[dict[str, Any]] = []        # matched + written
-    new_prospects_created: list[dict[str, Any]] = []  # newly created entities
     signal_entity_ids: list[str] = []
 
     now_iso = datetime.now(tz=timezone.utc).isoformat()
@@ -1280,42 +985,13 @@ def run_sync() -> dict[str, Any]:
                     "in_graph": True,
                 })
         else:
-            # Phase 1 Step 7: create new prospect for target-sector unmatched results
-            if _is_target_sector(result):
-                # Permanently skip COO / Chief Operating Officer titles
-                if is_excluded_title(title):
-                    log.info("Skipping COO/excluded title prospect: '%s' (%s)", person_name, title)
-                    continue
-                log.info("Creating new prospect for unmatched result: '%s'", person_name)
-                new_id = create_prospect_entity(result)
-                if new_id:
-                    # Log the signal event on the new entity too
-                    log_trigify_signal(new_id, keyword, post_text, occurred_at)
-                    new_meta_updates = [
-                        {"key": "last_signal_date", "value": now_iso},
-                        {"key": "last_signal_keyword", "value": keyword},
-                    ]
-                    if post_url:
-                        new_meta_updates.append({"key": "last_signal_url", "value": post_url})
-                    update_entity_tags_and_meta(
-                        new_id,
-                        current_tags=["trigify-discovered", "prospect"],
-                        add_tags=["signal:post-engagement"],
-                        meta_updates=new_meta_updates,
-                    )
-                    new_prospects_created.append({
-                        "name": person_name,
-                        "title": title,
-                        "company": company,
-                        "keyword": keyword,
-                        "entity_id": new_id,
-                    })
+            log.debug(
+                "No Kissinger match for Trigify result '%s' at '%s' — skipping (not a lead source)",
+                person_name,
+                company,
+            )
 
-    log.info(
-        "Signals written: %d warm matches, %d new prospects",
-        len(warm_signals),
-        len(new_prospects_created),
-    )
+    log.info("Signals written: %d warm matches", len(warm_signals))
 
     # ------------------------------------------------------------------
     # Phase 2: Warm intro paths for recently-signalled entities
@@ -1384,41 +1060,10 @@ def run_sync() -> dict[str, Any]:
 
     digest_lines.append("")
 
-    if new_prospects_created:
-        digest_lines.append(f"{len(new_prospects_created)} new prospect{'s' if len(new_prospects_created) != 1 else ''} discovered:")
-        for p in new_prospects_created:
-            company_str = f" @ {p['company']}" if p.get("company") else ""
-            digest_lines.append(f"- {p['name']}{company_str} (via \"{p['keyword']}\")")
-        digest_lines.append("")
-
     if intro_path_lines:
         digest_lines.append("Warm intro paths:")
         digest_lines.extend(intro_path_lines)
         digest_lines.append("")
-
-    # ------------------------------------------------------------------
-    # Step 9: Queue replenishment — ensure >= 100 active contacts
-    # ------------------------------------------------------------------
-    replenish_result = replenish_outreach_queue(target_size=100)
-    log.info(
-        "Queue replenishment: %d active, promoted %d, pool has %d remaining",
-        replenish_result["current"],
-        replenish_result["promoted"],
-        replenish_result["available_pool"],
-    )
-
-    # Add replenishment line to digest
-    digest_lines.append("")
-    if replenish_result["promoted"] > 0:
-        digest_lines.append(
-            f"Queue: {replenish_result['current']} active before sync, "
-            f"promoted {replenish_result['promoted']} new contacts "
-            f"({replenish_result['available_pool']} remaining in pool)."
-        )
-    else:
-        digest_lines.append(
-            f"Queue: {replenish_result['current']} active contacts — at or above target (no promotion needed)."
-        )
 
     digest = "\n".join(digest_lines).strip()
 
@@ -1426,11 +1071,7 @@ def run_sync() -> dict[str, Any]:
         "date": today_str,
         "total_results": len(all_results),
         "warm_signals": len(warm_signals),
-        "new_prospects": len(new_prospects_created),
         "intro_paths_found": len(intro_path_lines),
-        "queue_before": replenish_result["current"],
-        "queue_promoted": replenish_result["promoted"],
-        "queue_pool_remaining": replenish_result["available_pool"],
         "digest": digest,
     }
 
@@ -1473,8 +1114,7 @@ def main() -> None:
     print()
     print(summary["digest"])
     print()
-    print(f"Stats: {summary['warm_signals']} signals, {summary['new_prospects']} new prospects, "
-          f"{summary['intro_paths_found']} intro paths")
+    print(f"Stats: {summary['warm_signals']} signals, {summary['intro_paths_found']} intro paths")
 
     if args.output:
         Path(args.output).write_text(json.dumps(summary, indent=2), encoding="utf-8")
