@@ -119,6 +119,20 @@ CHANNEL_REMAP: dict = parse_channel_remap(
     os.environ.get("LOBSTER_SLACK_CHANNEL_REMAP", "")
 )
 
+
+def _remap_channel(channel_id: str) -> str:
+    """Return the remapped channel ID, or *channel_id* unchanged if no mapping exists.
+
+    Both the inbound (Socket Mode) and outbound (chat_postMessage) paths share
+    this helper so the remap logic lives in exactly one place.
+
+    The mapping is workspace-specific and comes entirely from the
+    ``LOBSTER_SLACK_CHANNEL_REMAP`` config variable — see ``parse_channel_remap``
+    for the format.  A typical deployment maps the bot-DM channel (which the
+    xoxp- user token cannot post to) to the user-DM channel.
+    """
+    return CHANNEL_REMAP.get(channel_id, channel_id)
+
 # Directories
 _MESSAGES = Path(os.environ.get("LOBSTER_MESSAGES", Path.home() / "messages"))
 _WORKSPACE = Path(os.environ.get("LOBSTER_WORKSPACE", Path.home() / "lobster-workspace"))
@@ -311,12 +325,9 @@ def handle_message_events(body, say, logger):
     # canonical (post-remap) channel ID.  If the remap ran after the allowlist
     # check, a pre-remap channel ID that is absent from ALLOWED_CHANNELS would
     # be silently dropped before remapping could occur.
-    if channel_id in CHANNEL_REMAP:
-        remapped_id = CHANNEL_REMAP[channel_id]
-        log.info(
-            "Inbound: remapping channel %s → %s",
-            channel_id, remapped_id,
-        )
+    remapped_id = _remap_channel(channel_id)
+    if remapped_id != channel_id:
+        log.info("Inbound: remapping channel %s → %s", channel_id, remapped_id)
         channel_id = remapped_id
 
     # --- Ingress logging (BEFORE authorization / LLM routing) ---
@@ -487,12 +498,9 @@ def _send_slack_reply(reply: dict) -> bool:
     thread_ts = reply.get("thread_ts")
 
     # Apply outbound channel remap from config — no hardcoded channel IDs.
-    if channel_id in CHANNEL_REMAP:
-        remapped = CHANNEL_REMAP[channel_id]
-        log.info(
-            "Outbound: remapping channel %s → %s",
-            channel_id, remapped,
-        )
+    remapped = _remap_channel(channel_id)
+    if remapped != channel_id:
+        log.info("Outbound: remapping channel %s → %s", channel_id, remapped)
         channel_id = remapped
 
     try:
