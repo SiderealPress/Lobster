@@ -4,16 +4,28 @@
 # dedicated test bot token. Isolated from production via a separate
 # messages volume and workspace.
 #
-# Credential setup (one-time):
-#   cp ~/lobster/config/config.staging.env.example ~/lobster-config/config.staging.env
-#   # Fill in TELEGRAM_BOT_TOKEN (test bot), TELEGRAM_ALLOWED_USERS, etc.
-#   # Set LOBSTER_ENV=production — the dispatcher exits immediately otherwise.
-#   # NEVER put the production TELEGRAM_BOT_TOKEN in config.staging.env.
+# ── Required secrets / env vars ─────────────────────────────────────────────
+# All values go in config.staging.env (copy from config.staging.env.example).
 #
-# Usage:
-#   cd ~/lobster
+#   TELEGRAM_BOT_TOKEN       Staging bot token (from @BotFather). NEVER use the
+#                            production token here — this is the credential boundary.
+#   TELEGRAM_ALLOWED_USERS   Comma-separated Telegram user IDs allowed to message
+#                            the bot (e.g. your own chat_id).
+#   LOBSTER_ADMIN_CHAT_ID    Chat ID for admin notifications (defaults to the first
+#                            value in TELEGRAM_ALLOWED_USERS if not set).
+#   LOBSTER_ENV              Must be "production" — the dispatcher exits immediately
+#                            if it is anything else (safety check).
+#   LOBSTER_DEBUG            Set to "true" to enable debug mode (optional).
+#   GITHUB_TOKEN             Personal access token with repo scope. Required for
+#                            gh CLI and GitHub subagent operations inside the
+#                            container. Not inherited from the host environment.
+#
+# ── Credential setup (one-time) ─────────────────────────────────────────────
+#   cp ~/lobster/config/config.staging.env.example ~/lobster-config/config.staging.env
+#   # Fill in the values above, then:
 #   sudo docker compose -f docker/staging/docker-compose.staging.yml up -d
 #
+# ── Usage ────────────────────────────────────────────────────────────────────
 # Attach to Claude session:
 #   sudo docker exec -it lobster-staging tmux -L lobster attach -t lobster
 #
@@ -49,9 +61,10 @@ services:
       # Must be rw: Ubuntu 22.04 with cgroup v2 requires write access so systemd
       # can manage service lifecycle and resource accounting.
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
-      # Mount host Claude credentials (read-only auth, but settings.json needs write)
-      - /home/lobster/.claude:/home/lobster/.claude
-      # Mount host claude binary (avoid reinstalling)
+      # Mount host claude binary (avoid reinstalling on every rebuild).
+      # The .claude/ settings directory is NOT bind-mounted — the image generates
+      # settings.json with all hooks at boot via install.sh --container-setup,
+      # making the container fully self-contained.
       - /home/lobster/.local/bin/claude:/home/lobster/.local/bin/claude:ro
       - /home/lobster/.local/share/claude:/home/lobster/.local/share/claude:ro
       # Persistent staging volumes (isolated from production)
