@@ -73,6 +73,15 @@ LAST_COMPACT_TS_FILE = Path(
         os.path.expanduser("~/lobster-workspace/data/last-compact.ts"),
     )
 )
+# Single source of truth for startup cause detection.
+# Written here (cause=compaction) before process exit.
+# inject-bootup-context.py reads and resets it (cause=restart) on every startup.
+STARTUP_CAUSE_FILE = Path(
+    os.environ.get(
+        "LOBSTER_STARTUP_CAUSE_FILE_OVERRIDE",
+        os.path.expanduser("~/lobster-workspace/data/last-startup-cause.json"),
+    )
+)
 
 REMINDER_TEXT = (
     "COMPACT REMINDER \u2014 RE-ORIENT NOW\n\n"
@@ -209,6 +218,33 @@ def write_last_compact_ts() -> None:
         tmp_path = LAST_COMPACT_TS_FILE.with_suffix(".ts.tmp")
         tmp_path.write_text(str(int(time.time())) + "\n")
         tmp_path.replace(LAST_COMPACT_TS_FILE)  # atomic on Linux (same filesystem)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def write_startup_cause() -> None:
+    """
+    Write {"cause": "compaction", "ts": "<iso_utc>"} to last-startup-cause.json.
+
+    Called just before the process exits after a compaction.  inject-bootup-context.py
+    reads this file on the next startup:
+      - If cause == "compaction" and ts is within 5 minutes: startup was a compaction.
+      - Otherwise: startup was a plain restart.
+    After reading, inject-bootup-context.py resets the file to cause="restart" so
+    subsequent startups default to restart unless this hook fires again.
+
+    Uses an atomic rename so the file is never half-written.
+    Silent on any failure — must never crash the hook.
+    """
+    try:
+        STARTUP_CAUSE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "cause": "compaction",
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        tmp_path = STARTUP_CAUSE_FILE.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(payload, indent=2) + "\n")
+        tmp_path.replace(STARTUP_CAUSE_FILE)  # atomic on Linux (same filesystem)
     except Exception:  # noqa: BLE001
         pass
 
@@ -466,6 +502,15 @@ def main() -> None:
         data = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError):
         data = {}
+
+    # Write cause=compaction BEFORE anything else.  inject-bootup-context.py reads
+    # this file on the next startup: if cause==compaction and ts is within 5 minutes,
+    # the startup is classified as a compaction-triggered restart rather than a plain
+    # restart.  After reading, inject-bootup-context.py resets the file to
+    # cause=restart, so subsequent startups default to restart unless this hook fires.
+    # Runs for both dispatcher and subagent compactions (the classification only matters
+    # for the dispatcher, but writing it early for all compactions is harmless).
+    write_startup_cause()
 
     # Always record compaction timestamp — runs for both dispatcher and subagent
     # compactions.  The health check reads this to suppress false-positive
