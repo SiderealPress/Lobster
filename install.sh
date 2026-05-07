@@ -222,7 +222,7 @@ apply_private_overlay() {
     step "Applying private configuration overlay from: $config_dir"
 
     # Copy config.env if exists
-    if [ -f "$config_dir/config.env" ]; then
+    if [ -f "$config_dir/config.env" ] && [ "$(realpath "$config_dir/config.env")" != "$(realpath "$CONFIG_DIR/config.env" 2>/dev/null)" ]; then
         cp "$config_dir/config.env" "$CONFIG_DIR/config.env"
         success "Applied: config.env"
     fi
