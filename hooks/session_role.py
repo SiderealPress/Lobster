@@ -4,15 +4,14 @@ Shared utility: dispatcher vs subagent session discrimination.
 
 ## Session-context API — `is_dispatcher(hook_input)`
 
-For use in **SessionStart hooks only**.
+For use in **SessionStart / SubagentStop / Stop hooks**.
 
 Simplified detection (issue #1908): checks the launcher-written startup flag
 file at ~/lobster-workspace/data/dispatcher-startup-flag. The launcher
 (claude-persistent.sh) writes its subshell PID to this file before exec-ing
 claude. If the file exists and the PID is still alive (kill -0), the session
-is the dispatcher. The flag is deleted by inject-bootup-context.py at
-SessionStart — it is absent for all subsequent hook events (Stop,
-SubagentStop, PreToolUse, PostToolUse).
+is the dispatcher. The flag is deleted by inject-bootup-context.py after
+detection so subagents never see it.
 
 ## Hook-process-context API — `is_dispatcher_session(hook_input)`
 
@@ -99,13 +98,6 @@ def is_dispatcher(hook_input: dict) -> bool:  # noqa: ARG001
 
     hook_input is accepted for API compatibility but is not used — the startup
     flag is the sole detection signal for SessionStart hooks.
-
-    USE IN: SessionStart only — the flag is consumed (deleted) at SessionStart
-    and is absent for all subsequent hooks.  For Stop / PreToolUse hooks, use
-    is_dispatcher_session() which falls back to the session-ID state files and
-    the process-tree walk.  The UUID cannot be used here instead because CC
-    generates it internally after exec; the launcher has no way to predict it
-    before writing the flag.
     """
     try:
         if not STARTUP_FLAG_FILE.exists():
@@ -295,6 +287,9 @@ def is_dispatcher_session(hook_input: dict) -> bool:
       2. Process-tree walk: count consecutive claude ancestors before a tmux pane
          PID.  ≤1 ancestor → dispatcher; ≥2 → subagent.
       3. Env-var-only fallback: LOBSTER_MAIN_SESSION=1 without tmux confirmation.
+
+    For SessionStart / SubagentStop / Stop hooks, use the simpler `is_dispatcher()`
+    which checks the startup flag file.
 
     NOTE: Intentionally unchanged by issue #1908 — PreToolUse hooks depend on this
     function's process-tree + state-file logic during active processing (after the

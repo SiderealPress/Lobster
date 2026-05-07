@@ -1,19 +1,24 @@
 """
-Regression guard: fresh-dispatcher-start detection in inject-bootup-context.py.
+Unit tests for the fresh-dispatcher-start fallback in inject-bootup-context.py.
 
 Issue #1868 / regression from PR #1891 deploy (issue #1898):
 On a fresh restart (new process, MCP server restarted),
 inject-bootup-context.py injects the subagent bootup file instead of the
 dispatcher bootup file.
 
-The UUID-based _is_fresh_start_dispatcher() fallback introduced for this issue
-was superseded by PR #1908, which replaced all UUID-based detection with a
-launcher-written startup flag (PID file). Dispatcher detection is now entirely
-handled by _is_startup_flag_dispatcher() — the function is no longer needed.
+Root cause (same as #1768, but not applied to this hook):
+- MCP server clears the primary state file (dispatcher-claude-session-id) on startup
+- write-dispatcher-session-id.py may skip writing the tertiary file when the
+  previous JSONL has a recent mtime
+- is_dispatcher() finds no matching file and returns False
+- inject-bootup-context.py injects subagent bootup instead of dispatcher bootup
 
-This file is kept as a regression guard. The main() integration test below
-documents the failure scenario and asserts it is no longer applicable with the
-startup-flag approach.
+Fix: add _is_fresh_start_dispatcher() as a fallback. Absent primary file +
+LOBSTER_MAIN_SESSION=1 → treat as dispatcher. This is safe because:
+- subagents are spawned only after the dispatcher has called session_start(),
+  which writes the primary file
+- compactions are handled by the existing _is_post_compact_dispatcher()
+  sentinel fallback (on-compact.py writes the primary file proactively)
 """
 
 from __future__ import annotations
@@ -24,7 +29,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -102,6 +107,99 @@ def _make_bootup_files(claude_dir: Path) -> tuple[Path, Path]:
     dispatcher_bootup.write_text("# DISPATCHER BOOTUP\n")
     subagent_bootup.write_text("# SUBAGENT BOOTUP\n")
     return dispatcher_bootup, subagent_bootup
+
+
+# ---------------------------------------------------------------------------
+# Unit tests for _is_fresh_start_dispatcher()
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skip(
+    reason=(
+        "Issue #1908 removed _is_fresh_start_dispatcher() from inject-bootup-context.py. "
+        "Dispatcher detection now uses the launcher-written startup flag (PID file). "
+        "These tests are retained for history but are no longer executable."
+    )
+)
+class TestIsFreshStartDispatcher:
+    """Unit tests for the _is_fresh_start_dispatcher() helper in inject-bootup-context.py.
+
+    SKIPPED: _is_fresh_start_dispatcher() was removed in issue #1908. Dispatcher
+    detection now uses the launcher-written startup flag file (PID-based). The
+    UUID/primary-file approach is no longer in use.
+    """
+
+    def test_returns_true_when_primary_file_absent_and_main_session(
+        self, tmp_path, monkeypatch
+    ):
+        """Primary file absent + LOBSTER_MAIN_SESSION=1 → fresh dispatcher start."""
+        monkeypatch.setenv("LOBSTER_MAIN_SESSION", "1")
+        data_dir = tmp_path / "data"
+        data_dir.mkdir(parents=True)
+        absent_primary = data_dir / "dispatcher-claude-session-id"
+        # File does NOT exist
+
+        mod = _load_inject_hook(home=tmp_path, workspace=tmp_path)
+        import session_role as sr
+
+        with patch.object(sr, "_get_mcp_claude_session_file", return_value=absent_primary):
+            result = mod._is_fresh_start_dispatcher()
+
+        assert result is True
+
+    def test_returns_false_when_primary_file_present(self, tmp_path, monkeypatch):
+        """Primary file present → dispatcher already called session_start, not a fresh boot."""
+        monkeypatch.setenv("LOBSTER_MAIN_SESSION", "1")
+        data_dir = tmp_path / "data"
+        data_dir.mkdir(parents=True)
+        primary_file = data_dir / "dispatcher-claude-session-id"
+        primary_file.write_text("some-session-uuid-1234")
+
+        mod = _load_inject_hook(home=tmp_path, workspace=tmp_path)
+        import session_role as sr
+
+        with patch.object(sr, "_get_mcp_claude_session_file", return_value=primary_file):
+            result = mod._is_fresh_start_dispatcher()
+
+        assert result is False
+
+    def test_returns_false_when_main_session_not_set(self, tmp_path, monkeypatch):
+        """LOBSTER_MAIN_SESSION not set → not a Lobster-managed session, return False."""
+        monkeypatch.delenv("LOBSTER_MAIN_SESSION", raising=False)
+
+        mod = _load_inject_hook(
+            home=tmp_path, workspace=tmp_path, lobster_main_session=None
+        )
+        result = mod._is_fresh_start_dispatcher()
+
+        assert result is False
+
+    def test_returns_false_when_main_session_is_zero(self, tmp_path, monkeypatch):
+        """LOBSTER_MAIN_SESSION=0 → return False."""
+        monkeypatch.setenv("LOBSTER_MAIN_SESSION", "0")
+
+        mod = _load_inject_hook(
+            home=tmp_path, workspace=tmp_path, lobster_main_session="0"
+        )
+        result = mod._is_fresh_start_dispatcher()
+
+        assert result is False
+
+    def test_returns_false_on_oserror_stat(self, tmp_path, monkeypatch):
+        """OSError when checking primary file existence → return False (safe default)."""
+        monkeypatch.setenv("LOBSTER_MAIN_SESSION", "1")
+
+        mod = _load_inject_hook(home=tmp_path, workspace=tmp_path)
+
+        mock_path = MagicMock(spec=Path)
+        mock_path.exists.side_effect = OSError("permission denied")
+
+        import session_role as sr
+
+        with patch.object(sr, "_get_mcp_claude_session_file", return_value=mock_path):
+            result = mod._is_fresh_start_dispatcher()
+
+        assert result is False
 
 
 # ---------------------------------------------------------------------------

@@ -2072,7 +2072,7 @@ PYEOF
 
     # Migration 60: Register inject-bootup-context.py SessionStart hooks in settings.json
     # Adds two SessionStart entries: one empty-matcher entry for all fresh sessions
-    # (must run after write-dispatcher-session-id so role detection works), and one
+    # (must run after the launcher writes the startup flag — see issue #1908), and one
     # compact-matcher entry so bootup content is re-injected after context compaction.
     if [ -f "$CLAUDE_SETTINGS" ]; then
         chmod +x "$LOBSTER_DIR/hooks/inject-bootup-context.py" 2>/dev/null || true
@@ -2891,348 +2891,47 @@ print(f'prune-pr-worktrees: {result.status}')
         warn "prune-pr-worktrees.py not found at $_m83_script or uv unavailable — skipping Migration 83"
     fi
 
-    # Migration 84: Backfill Environment=PATH= and Environment=HOME= in existing Lobster-managed
-    # system service files. PR #1838 fixed the code that generates new service files, but existing
-    # on-disk files were already missing these directives and fail with exit-127 when uv is not
-    # found on systemd's minimal PATH. This migration patches all Lobster service files in
-    # /etc/systemd/system/ that are missing Environment=PATH= and runs daemon-reload.
-    local _m84_patched=0
-    local _m84_env_path="Environment=PATH=${HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin"
-    local _m84_env_home="Environment=HOME=${HOME}"
-    for _m84_svc in /etc/systemd/system/lobster-*.service; do
-        [ -f "$_m84_svc" ] || continue
-        if grep -q "Environment=PATH=" "$_m84_svc" 2>/dev/null; then
-            continue
-        fi
-        # Patch: insert PATH and HOME lines immediately before ExecStart=
-        if grep -q "^ExecStart=" "$_m84_svc" 2>/dev/null; then
-            sudo sed -i "s|^ExecStart=|${_m84_env_path}\n${_m84_env_home}\nExecStart=|" "$_m84_svc"
-            substep "Added PATH/HOME to $(basename "$_m84_svc")"
-            _m84_patched=$((_m84_patched + 1))
-        fi
-    done
-    if [ "$_m84_patched" -gt 0 ]; then
-        sudo systemctl daemon-reload 2>/dev/null || warn "daemon-reload failed — run manually"
-        success "Migration 84: patched $_m84_patched service file(s) with Environment=PATH= (daemon-reload done)"
-        migrated=$((migrated + _m84_patched))
-    fi
+    # Migration 84: Fix User=lobster in AWP email service files (issue #1925).
+    # Applied live on the running system; this migration ensures fresh installs
+    # also get the corrected unit files.
+    # NOTE: Migration 84 was applied live by PR #1925. The actual unit-file
+    # corrections are already in place on the running host. This placeholder
+    # ensures the migration number is reserved in the sequence.
+    # (No-op: the file edits were done directly via systemctl/sed on the host.)
 
-    # Migration 85: Fix lobster-lobstertalk-unified.service — two bugs left it silently broken
-    # even after Migration 84 added Environment=PATH=:
-    # 1. The shebang #!/usr/bin/env uv run python3 is missing the -S flag that env needs to
-    #    split multi-word interpreter strings. Without -S, env treats "uv run python3" as a
-    #    single binary name and exits 127.
-    # 2. The service file was missing EnvironmentFile directives, so BOT_TALK_URL and other
-    #    runtime secrets were never loaded, causing a RuntimeError on every execution.
-    # This migration patches the shebang in the script and adds EnvironmentFile lines to
-    # the service file, then runs daemon-reload.
-    local _m85_script="${LOBSTER_DIR}/scheduled-tasks/lobstertalk_unified.py"
-    local _m85_svc="/etc/systemd/system/lobster-lobstertalk-unified.service"
-    local _m85_patched=0
-
-    # Fix 1: shebang — replace #!/usr/bin/env uv run python3 with #!/usr/bin/env -S uv run python3
-    if [ -f "$_m85_script" ]; then
-        if head -1 "$_m85_script" | grep -q "^#!/usr/bin/env uv run python3$"; then
-            sed -i '1s|^#!/usr/bin/env uv run python3$|#!/usr/bin/env -S uv run python3|' "$_m85_script"
-            substep "Fixed shebang in lobstertalk_unified.py (added -S flag)"
-            _m85_patched=$((_m85_patched + 1))
-        fi
-    fi
-
-    # Fix 2: EnvironmentFile — add config file directives if missing
-    if [ -f "$_m85_svc" ]; then
-        if ! grep -q "^EnvironmentFile=" "$_m85_svc" 2>/dev/null; then
-            # Insert EnvironmentFile lines before ExecStart=
-            local _m85_env_files="EnvironmentFile=-${HOME}/lobster/config/config.env\nEnvironmentFile=${HOME}/lobster-config/config.env\nEnvironmentFile=-${HOME}/lobster-config/global.env"
-            sudo sed -i "s|^ExecStart=|${_m85_env_files}\nExecStart=|" "$_m85_svc"
-            substep "Added EnvironmentFile directives to lobster-lobstertalk-unified.service"
-            _m85_patched=$((_m85_patched + 1))
-        fi
-    fi
-
-    if [ "$_m85_patched" -gt 0 ]; then
-        sudo systemctl daemon-reload 2>/dev/null || warn "daemon-reload failed — run manually"
-        success "Migration 85: fixed lobstertalk-unified shebang and/or EnvironmentFile (daemon-reload done)"
-        migrated=$((_m85_patched + migrated))
-    fi
-
-    # Migration 86: Remove lobstertalk-ssh-watcher systemd timer/service (issue #1839).
-    # The SSH watcher was a LobsterTalk-specific artifact that should not live in the
-    # public Lobster repo. PR #1791 (which added it) was closed without merging;
-    # PR #1839 tracks the cleanup. Disable and remove the systemd timer and service
-    # from any existing installs where it was created via create_scheduled_job.
-    _m86_timer="lobster-lobstertalk-ssh-watcher.timer"
-    _m86_service="lobster-lobstertalk-ssh-watcher.service"
-    _m86_unit_dir="/etc/systemd/system"
-    _m86_done=false
-    if systemctl is-enabled "$_m86_timer" &>/dev/null || systemctl is-active "$_m86_timer" &>/dev/null; then
-        substep "Stopping and disabling ${_m86_timer}..."
-        sudo systemctl disable --now "$_m86_timer" 2>/dev/null && _m86_done=true || warn "Could not disable ${_m86_timer} — disable manually"
-    fi
-    for _m86_unit in "$_m86_timer" "$_m86_service"; do
-        _m86_unit_file="${_m86_unit_dir}/${_m86_unit}"
-        if [ -f "$_m86_unit_file" ]; then
-            sudo rm -f "$_m86_unit_file"
-            substep "Removed ${_m86_unit_file}"
-            _m86_done=true
+    # Migration 85: Remove defunct Pub/Sub and AWP-pipeline systemd units.
+    # The Pub/Sub pipeline (gmail-watch-renewal, awp-gmail-token-refresh) was
+    # superseded by the deterministic gmail-poll.py poller in Migration 80.
+    # The awp-gmail-pipeline service ran awp_gmail_pipeline.py (a workspace
+    # script), doing inline classification now handled by the awp-email skill +
+    # dispatcher. All three timers are disabled; this migration stops and removes
+    # their unit files so they don't clutter the system on upgrades.
+    local _m85_units=(
+        "lobster-awp-gmail-pipeline"
+        "lobster-gmail-watch-renewal"
+        "lobster-awp-gmail-token-refresh"
+    )
+    local _m85_applied=0
+    for _m85_unit in "${_m85_units[@]}"; do
+        local _m85_service="/etc/systemd/system/${_m85_unit}.service"
+        local _m85_timer="/etc/systemd/system/${_m85_unit}.timer"
+        if [ -f "$_m85_service" ] || [ -f "$_m85_timer" ]; then
+            substep "Removing defunct unit ${_m85_unit} (Migration 85)..."
+            sudo systemctl stop "${_m85_unit}.timer" 2>/dev/null || true
+            sudo systemctl stop "${_m85_unit}.service" 2>/dev/null || true
+            sudo systemctl disable "${_m85_unit}.timer" 2>/dev/null || true
+            sudo systemctl disable "${_m85_unit}.service" 2>/dev/null || true
+            sudo rm -f "$_m85_service" "$_m85_timer" 2>/dev/null || true
+            _m85_applied=1
         fi
     done
-    if $_m86_done; then
+    if [ "$_m85_applied" -eq 1 ]; then
         sudo systemctl daemon-reload 2>/dev/null || true
-        success "Migration 86: removed lobstertalk-ssh-watcher timer/service"
+        substep "Removed defunct AWP email pipeline and Pub/Sub units"
         migrated=$((migrated + 1))
-    else
-        substep "lobstertalk-ssh-watcher timer/service not present — skipping Migration 86"
     fi
 
-    # Migration 87: Register LOBSTER-WEEKLY-UPGRADE cron entry (issue #1757).
-    # run-upgrades.sh calls restart-mcp.sh before running apt-get upgrade, so the
-    # dispatcher receives an inbox warning before needrestart can fire SIGTERM at
-    # the lobster Python services.  This replaces the apt-get upgrade that was
-    # previously run inside daily-health-check.sh.
-    local _m87_script="$LOBSTER_DIR/scripts/run-upgrades.sh"
-    if [ -f "$_m87_script" ]; then
-        chmod +x "$_m87_script" || true
-        local _m87_cron="0 2 * * 0 $_m87_script # LOBSTER-WEEKLY-UPGRADE"
-        if crontab -l 2>/dev/null | grep -qF "LOBSTER-WEEKLY-UPGRADE"; then
-            substep "LOBSTER-WEEKLY-UPGRADE cron entry already present — skipping Migration 87"
-        else
-            "$LOBSTER_DIR/scripts/cron-manage.sh" add "# LOBSTER-WEEKLY-UPGRADE" "$_m87_cron" && {
-                substep "Registered run-upgrades.sh as weekly cron job (Sundays at 02:00)"
-                migrated=$((migrated + 1))
-            } || warn "Could not register LOBSTER-WEEKLY-UPGRADE cron entry — add manually: $_m87_cron"
-        fi
-    else
-        warn "run-upgrades.sh not found at $_m87_script — skipping Migration 87"
-    fi
-
-    # Migration 88: Fix cron PATH for uv-based scripts (ghost-detector, oom-monitor, log-export).
-    # Cron runs with a minimal PATH that does not include ~/.local/bin, so bare 'uv' fails
-    # with "uv: not found". Replace bare 'uv' with the absolute path $HOME/.local/bin/uv
-    # in the three affected cron entries.
-    local _m88_uv_abs="$HOME/.local/bin/uv"
-    if crontab -l 2>/dev/null | grep -q "LOBSTER-GHOST-DETECTOR"; then
-        if crontab -l 2>/dev/null | grep "LOBSTER-GHOST-DETECTOR" | grep -q " uv run "; then
-            crontab -l 2>/dev/null \
-                | sed "s|cd \$HOME && uv run \(.*\)agent-monitor\.py|cd \$HOME \&\& $_m88_uv_abs run \1agent-monitor.py|g" \
-                | sed "s|cd $HOME && uv run \(.*\)agent-monitor\.py|cd $HOME \&\& $_m88_uv_abs run \1agent-monitor.py|g" \
-                | crontab - 2>/dev/null && {
-                substep "Migration 88: fixed ghost-detector cron to use absolute uv path"
-                migrated=$((migrated + 1))
-            } || warn "Migration 88: could not update ghost-detector cron entry"
-        else
-            substep "Migration 88: ghost-detector cron already uses absolute uv path — skipping"
-        fi
-    else
-        substep "Migration 88: ghost-detector cron entry not found — skipping"
-    fi
-    if crontab -l 2>/dev/null | grep -q "LOBSTER-OOM-CHECK"; then
-        if crontab -l 2>/dev/null | grep "LOBSTER-OOM-CHECK" | grep -q " uv run "; then
-            crontab -l 2>/dev/null \
-                | sed "s|cd \$HOME && uv run \(.*\)oom-monitor\.py|cd \$HOME \&\& $_m88_uv_abs run \1oom-monitor.py|g" \
-                | sed "s|cd $HOME && uv run \(.*\)oom-monitor\.py|cd $HOME \&\& $_m88_uv_abs run \1oom-monitor.py|g" \
-                | crontab - 2>/dev/null && {
-                substep "Migration 88: fixed oom-monitor cron to use absolute uv path"
-            } || warn "Migration 88: could not update oom-monitor cron entry"
-        fi
-    else
-        substep "Migration 84: oom-monitor cron entry not found — skipping"
-    fi
-    if crontab -l 2>/dev/null | grep -q "LOBSTER-LOG-EXPORT"; then
-        if crontab -l 2>/dev/null | grep "LOBSTER-LOG-EXPORT" | grep -q " uv run "; then
-            crontab -l 2>/dev/null \
-                | sed "s|cd \(.*\) && uv run \(.*\)export-logs\.py|cd \1 \&\& $_m88_uv_abs run \2export-logs.py|g" \
-                | crontab - 2>/dev/null && {
-                substep "Migration 88: fixed log-export cron to use absolute uv path"
-            } || warn "Migration 88: could not update log-export cron entry"
-        fi
-    else
-        substep "Migration 84: log-export cron entry not found — skipping"
-    fi
-
-    # Migration 89: Switch on-compact.py SessionStart hook from matcher="compact"
-    # to matcher="" for reliability.  Claude Code intermittently fails to fire
-    # hooks registered with matcher="compact", causing the ♻️ compaction
-    # notification to be silently dropped.  The fix registers on-compact.py with
-    # matcher="" (always fires) and adds a self-gate inside the script using the
-    # hook_name field from the CC payload.
-    #
-    # Steps:
-    #   1. Remove the old compact-matcher entry for on-compact.py (if present).
-    #   2. Remove any duplicate entries (matcher="" entries already added during
-    #      a previous partial migration or manual edit).
-    #   3. Add exactly one matcher="" entry for on-compact.py, placed BEFORE the
-    #      write-dispatcher-session-id entry so it fires early in the chain.
-    if [ -f "$CLAUDE_SETTINGS" ]; then
-        local _m89_has_compact_matcher _m89_has_empty_matcher
-        _m89_has_compact_matcher=$(jq -r '
-            [.hooks.SessionStart[]? |
-             select(.matcher == "compact") |
-             select(.hooks[]?.command | contains("on-compact"))]
-            | length' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
-        _m89_has_empty_matcher=$(jq -r '
-            [.hooks.SessionStart[]? |
-             select(.matcher == "") |
-             select(.hooks[]?.command | contains("on-compact"))]
-            | length' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
-
-        if [[ "$_m89_has_compact_matcher" -gt 0 || "$_m89_has_empty_matcher" -eq 0 ]]; then
-            local _m89_tmp
-            _m89_tmp=$(mktemp)
-            # Remove ALL existing on-compact.py entries (both matchers), then add
-            # exactly one with matcher="" at the front of the SessionStart list.
-            jq --arg cmd "python3 $LOBSTER_DIR/hooks/on-compact.py" '
-              .hooks.SessionStart =
-                [{
-                  "matcher": "",
-                  "hooks": [{
-                    "type": "command",
-                    "command": $cmd,
-                    "timeout": 30
-                  }]
-                }] +
-                [.hooks.SessionStart[]? |
-                 select(.hooks[]?.command | contains("on-compact") | not)]
-            ' "$CLAUDE_SETTINGS" > "$_m89_tmp" \
-                && mv "$_m89_tmp" "$CLAUDE_SETTINGS" 2>/dev/null \
-                && {
-                substep "Migration 89: on-compact hook re-registered with matcher='' (was 'compact')"
-                migrated=$((migrated + 1))
-            } || warn "Migration 89: could not update on-compact hook matcher"
-        else
-            substep "Migration 89: on-compact hook already uses matcher='' — skipping"
-        fi
-    else
-        substep "Migration 89: settings.json not found — skipping"
-    fi
-
-    # Migration 90: Register WFM lifecycle logger hooks (PreToolUse + PostToolUse)
-    # in ~/.claude/settings.json (issue #1895).
-    #
-    # Adds two hook entries that write WFM_ENTER / WFM_EXIT events to
-    # ~/lobster-workspace/logs/session-lifecycle.log, enabling crash investigation
-    # by recording how long each wait_for_messages call blocked and whether the
-    # dispatcher was mid-WFM when it died.
-    #
-    # The hook reads WFM_HOOK_TYPE ("pre" or "post") from the environment to
-    # distinguish the two invocation modes from a single script file.
-    #
-    # Idempotent: skips if both entries already registered.
-    local _m90_hook="$LOBSTER_DIR/hooks/wfm-lifecycle-logger.py"
-    if [ -f "$CLAUDE_SETTINGS" ] && command -v jq &>/dev/null && [ -f "$_m90_hook" ]; then
-        local _m90_pre_present _m90_post_present
-        _m90_pre_present=$(jq -r '
-            [.hooks.PreToolUse[]?.hooks[]? |
-             select((.command // "") | contains("wfm-lifecycle-logger"))]
-            | length' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
-        _m90_post_present=$(jq -r '
-            [.hooks.PostToolUse[]?.hooks[]? |
-             select((.command // "") | contains("wfm-lifecycle-logger"))]
-            | length' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
-
-        if [[ "${_m90_pre_present:-0}" -gt 0 && "${_m90_post_present:-0}" -gt 0 ]]; then
-            substep "Migration 90: WFM lifecycle logger hooks already registered — skipping"
-        else
-            local _m90_tmp
-            _m90_tmp=$(mktemp)
-            local _m90_pre_cmd="WFM_HOOK_TYPE=pre python3 $_m90_hook"
-            local _m90_post_cmd="WFM_HOOK_TYPE=post python3 $_m90_hook"
-
-            if jq --arg pre_cmd "$_m90_pre_cmd" \
-                  --arg post_cmd "$_m90_post_cmd" '
-                # Add PreToolUse entry if not already present
-                .hooks.PreToolUse = (
-                    (.hooks.PreToolUse // []) +
-                    if ([(.hooks.PreToolUse // [])[]?.hooks[]? |
-                         select((.command // "") | contains("wfm-lifecycle-logger"))]
-                        | length) == 0
-                    then [{
-                        "matcher": "mcp__lobster-inbox__wait_for_messages",
-                        "hooks": [{
-                            "type": "command",
-                            "command": $pre_cmd,
-                            "timeout": 5
-                        }]
-                    }]
-                    else []
-                    end
-                ) |
-                # Add PostToolUse entry if not already present
-                .hooks.PostToolUse = (
-                    (.hooks.PostToolUse // []) +
-                    if ([(.hooks.PostToolUse // [])[]?.hooks[]? |
-                         select((.command // "") | contains("wfm-lifecycle-logger"))]
-                        | length) == 0
-                    then [{
-                        "matcher": "mcp__lobster-inbox__wait_for_messages",
-                        "hooks": [{
-                            "type": "command",
-                            "command": $post_cmd,
-                            "timeout": 5
-                        }]
-                    }]
-                    else []
-                    end
-                )
-            ' "$CLAUDE_SETTINGS" > "$_m90_tmp" \
-                && mv "$_m90_tmp" "$CLAUDE_SETTINGS" 2>/dev/null; then
-                substep "Migration 90: WFM lifecycle logger hooks registered in settings.json"
-                migrated=$((migrated + 1))
-            else
-                rm -f "$_m90_tmp" 2>/dev/null || true
-                warn "Migration 90: could not update settings.json — jq transform failed"
-            fi
-        fi
-    else
-        substep "Migration 90: settings.json, jq, or wfm-lifecycle-logger.py not found — skipping"
-    fi
-
-    # Migration 91: Register pretooluse-heartbeat.py PreToolUse hook (issue #1439).
-    # This hook was added to install.sh in PR #1896 but was missing from upgrade.sh,
-    # so existing installs never had it registered in settings.json.
-    # Writes last_pretooluse_at to lobster-state.json before every tool call, enabling
-    # narrower detection of MCP-disconnect freezes where PostToolUse never fires.
-    local _m91_hook="$LOBSTER_DIR/hooks/pretooluse-heartbeat.py"
-    if [ -f "$CLAUDE_SETTINGS" ] && command -v jq &>/dev/null && [ -f "$_m91_hook" ]; then
-        local _m91_present
-        _m91_present=$(jq -r '
-            [.hooks.PreToolUse[]?.hooks[]? |
-             select((.command // "") | contains("pretooluse-heartbeat"))]
-            | length' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
-
-        if [[ "${_m91_present:-0}" -gt 0 ]]; then
-            substep "Migration 91: pretooluse-heartbeat hook already registered — skipping"
-        else
-            local _m91_tmp
-            _m91_tmp=$(mktemp)
-            local _m91_cmd="python3 $_m91_hook"
-
-            if jq --arg cmd "$_m91_cmd" '
-                .hooks.PreToolUse = (
-                    (.hooks.PreToolUse // []) +
-                    [{
-                        "matcher": "",
-                        "hooks": [{
-                            "type": "command",
-                            "command": $cmd,
-                            "timeout": 5
-                        }]
-                    }]
-                )
-            ' "$CLAUDE_SETTINGS" > "$_m91_tmp" \
-                && mv "$_m91_tmp" "$CLAUDE_SETTINGS" 2>/dev/null; then
-                substep "Migration 91: pretooluse-heartbeat hook registered in settings.json"
-                migrated=$((migrated + 1))
-            else
-                rm -f "$_m91_tmp" 2>/dev/null || true
-                warn "Migration 91: could not update settings.json — jq transform failed"
-            fi
-        fi
-    else
-        substep "Migration 91: settings.json, jq, or pretooluse-heartbeat.py not found — skipping"
-    fi
-
-    # Migration 92: Remove write-dispatcher-session-id SessionStart hook from settings.json
+    # Migration 86: Remove write-dispatcher-session-id SessionStart hook from settings.json
     # (issue #1908). Dispatcher detection now uses the launcher-written startup flag file
     # instead of a UUID written by this hook. The hook file is deleted; the settings.json
     # entry must be removed from existing installs.
@@ -3241,84 +2940,33 @@ print(f'prune-pr-worktrees: {result.status}')
             TMP_SETTINGS=$(mktemp)
             jq 'del(.hooks.SessionStart[] | select(.hooks[]?.command | contains("write-dispatcher-session-id")))' \
                 "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
-            substep "Removed write-dispatcher-session-id hook from settings.json (Migration 92)"
+            substep "Removed write-dispatcher-session-id hook from settings.json (Migration 86)"
             migrated=$((migrated + 1))
         else
-            substep "write-dispatcher-session-id hook not found in settings.json — skipping Migration 92"
+            substep "write-dispatcher-session-id hook not found in settings.json — skipping Migration 86"
         fi
     else
-        substep "settings.json not found or jq unavailable — skipping Migration 92"
+        substep "settings.json not found or jq unavailable — skipping Migration 86"
     fi
 
-    # Migration 93: Register dispatcher state machine hooks (issue #1918).
-    # Three hooks implement the 5-state liveness machine:
-    #   - dispatcher-state-pretool.py  (PreToolUse):  WAITING on wait_for_messages,
-    #                                                  PROCESSING on mark_processing
-    #   - dispatcher-state-posttool.py (PostToolUse): WAITING on mark_processed
-    #   - dispatcher-state-stop.py     (Stop):        DEAD on session exit
-    # The STARTING state is written by inject-bootup-context.py (SessionStart),
-    # which already imports state_machine and does not need a separate hook entry.
-    if [ -f "$CLAUDE_SETTINGS" ] && command -v jq >/dev/null 2>&1; then
-        local has_state_pretool has_state_posttool has_state_stop
-        has_state_pretool=$(jq -r '
-            [.hooks.PreToolUse[]?.hooks[]?.command // empty]
-            | map(select(contains("dispatcher-state-pretool")))
-            | length
-        ' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
-        has_state_posttool=$(jq -r '
-            [.hooks.PostToolUse[]?.hooks[]?.command // empty]
-            | map(select(contains("dispatcher-state-posttool")))
-            | length
-        ' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
-        has_state_stop=$(jq -r '
-            [.hooks.Stop[]?.hooks[]?.command // empty]
-            | map(select(contains("dispatcher-state-stop")))
-            | length
-        ' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
 
-        if [ "${has_state_pretool:-0}" = "0" ] || [ "${has_state_pretool:-0}" = "" ]; then
-            chmod +x "$LOBSTER_DIR/hooks/dispatcher-state-pretool.py" 2>/dev/null || true
-            TMP_SETTINGS=$(mktemp)
-            jq --arg cmd "python3 $LOBSTER_DIR/hooks/dispatcher-state-pretool.py" \
-               '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
-                "matcher": "mcp__lobster-inbox__wait_for_messages|mcp__lobster-inbox__mark_processing",
-                "hooks": [{"type": "command", "command": $cmd, "timeout": 5}]
-            }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
-            substep "Migration 93: Registered dispatcher-state-pretool PreToolUse hook"
-            migrated=$((migrated + 1))
-        else
-            substep "Migration 93: dispatcher-state-pretool PreToolUse hook already registered — skipping"
-        fi
-
-        if [ "${has_state_posttool:-0}" = "0" ] || [ "${has_state_posttool:-0}" = "" ]; then
-            chmod +x "$LOBSTER_DIR/hooks/dispatcher-state-posttool.py" 2>/dev/null || true
-            TMP_SETTINGS=$(mktemp)
-            jq --arg cmd "python3 $LOBSTER_DIR/hooks/dispatcher-state-posttool.py" \
-               '.hooks.PostToolUse = (.hooks.PostToolUse // []) + [{
-                "matcher": "mcp__lobster-inbox__mark_processed",
-                "hooks": [{"type": "command", "command": $cmd, "timeout": 5}]
-            }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
-            substep "Migration 93: Registered dispatcher-state-posttool PostToolUse hook"
-            migrated=$((migrated + 1))
-        else
-            substep "Migration 93: dispatcher-state-posttool PostToolUse hook already registered — skipping"
-        fi
-
-        if [ "${has_state_stop:-0}" = "0" ] || [ "${has_state_stop:-0}" = "" ]; then
-            chmod +x "$LOBSTER_DIR/hooks/dispatcher-state-stop.py" 2>/dev/null || true
-            TMP_SETTINGS=$(mktemp)
-            jq --arg cmd "python3 $LOBSTER_DIR/hooks/dispatcher-state-stop.py" \
-               '.hooks.Stop = (.hooks.Stop // []) + [{
-                "matcher": "",
-                "hooks": [{"type": "command", "command": $cmd, "timeout": 5}]
-            }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
-            substep "Migration 93: Registered dispatcher-state-stop Stop hook"
-            migrated=$((migrated + 1))
-        else
-            substep "Migration 93: dispatcher-state-stop Stop hook already registered — skipping"
+    # Migration 87: Install LOBSTER-INFLIGHT-REMINDERS cron entry (issue #1686).
+    # check-inflight-reminders.py runs every 3 minutes to detect stale subagent work
+    # and drop reminder messages into the dispatcher inbox.
+    local INFLIGHT_MARKER="# LOBSTER-INFLIGHT-REMINDERS"
+    local INFLIGHT_SCRIPT="$LOBSTER_DIR/scripts/check-inflight-reminders.py"
+    if [ -f "$INFLIGHT_SCRIPT" ]; then
+        chmod +x "$INFLIGHT_SCRIPT" 2>/dev/null || true
+        if ! crontab -l 2>/dev/null | grep -qF "$INFLIGHT_MARKER"; then
+            "$LOBSTER_DIR/scripts/cron-manage.sh" add "$INFLIGHT_MARKER" \
+                "*/3 * * * * uv run $INFLIGHT_SCRIPT >> $HOME/lobster-workspace/logs/inflight-reminders.log 2>&1 $INFLIGHT_MARKER" 2>/dev/null && {
+                substep "Added LOBSTER-INFLIGHT-REMINDERS cron entry (check-inflight-reminders.py, every 3 min)"
+                migrated=$((migrated + 1))
+            } || warn "Could not add LOBSTER-INFLIGHT-REMINDERS cron entry — check cron-manage.sh"
         fi
     else
-        substep "Migration 93: settings.json or jq not found — skipping state machine hook registration"    fi
+        warn "check-inflight-reminders.py not found at $INFLIGHT_SCRIPT — skipping Migration 87"
+    fi
 
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
