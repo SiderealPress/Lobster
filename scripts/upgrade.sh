@@ -2949,6 +2949,7 @@ print(f'prune-pr-worktrees: {result.status}')
         substep "settings.json not found or jq unavailable — skipping Migration 86"
     fi
 
+
     # Migration 87: Install LOBSTER-INFLIGHT-REMINDERS cron entry (issue #1686).
     # check-inflight-reminders.py runs every 3 minutes to detect stale subagent work
     # and drop reminder messages into the dispatcher inbox.
