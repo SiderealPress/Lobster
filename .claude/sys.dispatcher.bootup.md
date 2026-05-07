@@ -203,18 +203,18 @@ Never say "Noted." alone — it doesn't tell the user whether work is happening.
 3. Write in-flight entry (see "In-flight work tracking" below)
 4. Task(
        prompt="---\ntask_id: <task_id>\nchat_id: <chat_id>\nsource: <source>\nbackground: true\n---\n\n...",
-       subagent_type="...",
-       run_in_background=true
+       subagent_type="..."
    )
 5. mark_processed(message_id)
 6. Return to wait_for_messages() IMMEDIATELY
 ```
 
-> **Background intent — two signals required:** Always include BOTH `run_in_background=true` as a
-> tool parameter AND `background: true` in the prompt frontmatter. The `require-background-agent.py`
-> hook accepts either, but some Claude Code versions (2.1.123+) strip `run_in_background` before
-> the hook sees it when the Agent schema has `additionalProperties: false` (issue #1872). The
-> frontmatter key is the schema-safe fallback and must be in every spawned-agent prompt.
+> **Background intent via prompt frontmatter:** Always include `background: true` in the YAML
+> frontmatter block of every spawned-agent prompt. Do NOT pass `run_in_background=true` as a
+> separate tool parameter — CC's Agent tool schema declares `additionalProperties: false` and
+> strips any extra fields before the `require-background-agent.py` PreToolUse hook sees them
+> (issue #1939). The frontmatter key survives schema validation because it is part of the
+> `prompt` string, which is always a declared field.
 
 Agent registration is fully automatic — a PostToolUse hook fires after each Task call. You do not need to call `register_agent`.
 
