@@ -2891,6 +2891,58 @@ print(f'prune-pr-worktrees: {result.status}')
         warn "prune-pr-worktrees.py not found at $_m83_script or uv unavailable — skipping Migration 83"
     fi
 
+    # Migration 88: Register session-exit-logger hook for Stop and SubagentStop events.
+    # Passively logs every session exit to observations.log with category "session_exit".
+    # Always exits 0 — never blocks the session. Safe to add without restart.
+    if [ -f "$CLAUDE_SETTINGS" ] && command -v jq &>/dev/null; then
+        local _m88_script="$LOBSTER_DIR/hooks/session-exit-logger.py"
+        if [ -f "$_m88_script" ]; then
+            chmod +x "$_m88_script" || true
+            local _m88_has_stop
+            _m88_has_stop=$(jq -r '
+                [.hooks.Stop[]?.hooks[]?.command // empty]
+                | map(select(contains("session-exit-logger")))
+                | length
+            ' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
+            if [ "${_m88_has_stop:-0}" = "0" ] || [ "${_m88_has_stop:-0}" = "" ]; then
+                TMP_SETTINGS=$(mktemp)
+                jq --arg cmd "python3 $_m88_script" \
+                   '.hooks.Stop = (.hooks.Stop // []) + [{
+                    "matcher": "",
+                    "hooks": [{
+                        "type": "command",
+                        "command": $cmd,
+                        "timeout": 10
+                    }]
+                }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+                substep "Registered session-exit-logger Stop hook"
+                migrated=$((migrated + 1))
+            fi
+            local _m88_has_subagent
+            _m88_has_subagent=$(jq -r '
+                [.hooks.SubagentStop[]?.hooks[]?.command // empty]
+                | map(select(contains("session-exit-logger")))
+                | length
+            ' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
+            if [ "${_m88_has_subagent:-0}" = "0" ] || [ "${_m88_has_subagent:-0}" = "" ]; then
+                TMP_SETTINGS=$(mktemp)
+                jq --arg cmd "python3 $_m88_script" \
+                   '.hooks.SubagentStop = (.hooks.SubagentStop // []) + [{
+                    "matcher": "",
+                    "hooks": [{
+                        "type": "command",
+                        "command": $cmd,
+                        "timeout": 10
+                    }]
+                }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+                substep "Registered session-exit-logger SubagentStop hook"
+                migrated=$((migrated + 1))
+            fi
+        else
+            warn "session-exit-logger.py not found at $_m88_script — skipping Migration 88"
+        fi
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
