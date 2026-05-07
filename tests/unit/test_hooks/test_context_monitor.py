@@ -36,6 +36,8 @@ WARNING_THRESHOLD = 70.0
 # claude-sonnet-4-6 supports up to 1M tokens but CC's default window is 200k.
 # Update when we can detect which mode is active.
 SONNET_4_6_MAX_CONTEXT = 200_000
+# claude-opus-4-6 also uses CC's default 200k window.
+OPUS_4_6_MAX_CONTEXT = 200_000
 HAIKU_4_5_MAX_CONTEXT = 200_000
 DEFAULT_MAX_CONTEXT = 200_000
 
@@ -187,7 +189,7 @@ class TestModelContextLookup:
     def test_opus_4_6_returns_200k(self):
         """claude-opus-4-6 → 200_000 (CC default window)."""
         mod = _load_hook()
-        assert mod._model_max_context("claude-opus-4-6") == SONNET_4_6_MAX_CONTEXT
+        assert mod._model_max_context("claude-opus-4-6") == OPUS_4_6_MAX_CONTEXT
 
     def test_haiku_4_5_bare_returns_200k(self):
         """claude-haiku-4-5 → 200_000."""
