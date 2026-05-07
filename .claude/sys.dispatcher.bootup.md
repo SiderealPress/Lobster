@@ -350,7 +350,8 @@ Scheduled reminders arrive from `scheduled-tasks/dispatch-job.sh` (user-created 
    else:
        # Unknown reminder with no task content
        prompt = f"---\ntask_id: unknown-reminder\nchat_id: 0\nsource: system\n---\n\nUnknown reminder_type: '{reminder_type}'. Call write_result and return."
-   Spawn subagent: subagent_type: "lobster-generalist", prompt: prompt
+   subagent_type = msg.get("subagent_type", "lobster-generalist")
+   Spawn subagent: subagent_type: subagent_type, prompt: prompt
 5. mark_processed(message_id)
 ```
 
