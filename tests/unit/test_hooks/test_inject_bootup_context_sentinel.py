@@ -207,8 +207,7 @@ class TestConsumeStartupFlag:
 
 class TestMainStartupFlagRouting:
     """main() in inject-bootup-context.py uses the startup flag (live PID) to
-    detect the dispatcher session and inject dispatcher bootup context.
-    """
+    detect the dispatcher session and inject dispatcher bootup context.    """
 
     def _make_bootup_files(self, claude_dir: Path) -> tuple[Path, Path]:
         """Write minimal dispatcher and subagent bootup stubs."""
@@ -227,12 +226,15 @@ class TestMainStartupFlagRouting:
         # Write live PID to startup flag.
         flag = workspace / "data" / STARTUP_FLAG_FILENAME
         flag.write_text(str(os.getpid()))
-
         claude_dir = tmp_path / "lobster" / ".claude"
         claude_dir.mkdir(parents=True)
         dispatcher_bootup, _ = self._make_bootup_files(claude_dir)
 
         hook_input = json.dumps({"session_id": "any-session-uuid"})
+
+        # Redirect the tertiary session file to a temp path so write_dispatcher_session_id()
+        # never touches ~/messages/config/dispatcher-session-id.
+        tmp_session_file = tmp_path / "messages" / "config" / "dispatcher-session-id"
 
         with _PatchEnv(
             {
@@ -252,7 +254,6 @@ class TestMainStartupFlagRouting:
             mod.USER_DISPATCHER_BOOTUP = tmp_path / "no-user-dispatcher"
             mod.USER_SUBAGENT_BOOTUP = tmp_path / "no-user-subagent"
             mod.CONTEXT_INJECTION_LOG = workspace / "logs" / "context-injection.log"
-
             with patch("sys.stdin", io.StringIO(hook_input)):
                 with pytest.raises(SystemExit):
                     mod.main()
@@ -271,7 +272,6 @@ class TestMainStartupFlagRouting:
 
         flag = workspace / "data" / STARTUP_FLAG_FILENAME
         flag.write_text(str(os.getpid()))
-
         claude_dir = tmp_path / "lobster" / ".claude"
         claude_dir.mkdir(parents=True)
         dispatcher_bootup, _ = self._make_bootup_files(claude_dir)
@@ -554,7 +554,6 @@ class TestMainSentinelFallback:
         # UUID files are NOT used by inject-bootup-context.py after issue #1908.
         # (Writing them here to verify they don't interfere.)
         (workspace / "data" / "dispatcher-claude-session-id").write_text("some-old-uuid")
-
         claude_dir = tmp_path / "lobster" / ".claude"
         claude_dir.mkdir(parents=True)
         dispatcher_bootup, _ = self._make_bootup_files(claude_dir)
@@ -562,8 +561,7 @@ class TestMainSentinelFallback:
         hook_input = json.dumps({"session_id": "any-session-uuid"})
 
         with _PatchEnv({"HOME": str(tmp_path), "LOBSTER_WORKSPACE": str(workspace)}):
-            spec = importlib.util.spec_from_file_location("inject_primary_compat", _HOOK_PATH)
-            mod = importlib.util.module_from_spec(spec)
+            spec = importlib.util.spec_from_file_location("inject_primary_compat", _HOOK_PATH)            mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
 
             mod.STARTUP_FLAG_FILE = flag
@@ -573,7 +571,6 @@ class TestMainSentinelFallback:
             mod.USER_DISPATCHER_BOOTUP = tmp_path / "no-user-dispatcher"
             mod.USER_SUBAGENT_BOOTUP = tmp_path / "no-user-subagent"
             mod.CONTEXT_INJECTION_LOG = workspace / "logs" / "context-injection.log"
-
             with patch("sys.stdin", io.StringIO(hook_input)):
                 with pytest.raises(SystemExit):
                     mod.main()
@@ -581,3 +578,10 @@ class TestMainSentinelFallback:
         captured = capsys.readouterr()
         assert "DISPATCHER BOOTUP" in captured.out
         assert "SUBAGENT BOOTUP" not in captured.out
+
+        # Teardown assertion: production file must be unchanged.
+        prod_after = prod_file.read_text() if prod_file.exists() else None
+        assert prod_before == prod_after, (
+            f"Test wrote to production dispatcher-session-id file! "
+            f"before={prod_before!r} after={prod_after!r}"
+        )

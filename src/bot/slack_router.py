@@ -19,7 +19,7 @@ import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from threading import Thread
+from threading import Thread, Event
 
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
@@ -65,6 +65,9 @@ except ImportError:
 # Configuration from environment
 SLACK_BOT_TOKEN = os.environ.get("LOBSTER_SLACK_BOT_TOKEN", "")
 SLACK_APP_TOKEN = os.environ.get("LOBSTER_SLACK_APP_TOKEN", "")
+# Optional user token (xoxp-) for outbound messages — makes replies appear as
+# the user rather than the app bot.  Falls back to the bot token if not set.
+SLACK_USER_TOKEN = os.environ.get("LOBSTER_SLACK_USER_TOKEN", "")
 
 if not SLACK_BOT_TOKEN:
     raise ValueError("LOBSTER_SLACK_BOT_TOKEN environment variable is required")
@@ -74,6 +77,73 @@ if not SLACK_APP_TOKEN:
 # Optional: Restrict to specific channel IDs or user IDs
 ALLOWED_CHANNELS = [x.strip() for x in os.environ.get("LOBSTER_SLACK_ALLOWED_CHANNELS", "").split(",") if x.strip()]
 ALLOWED_USERS = [x.strip() for x in os.environ.get("LOBSTER_SLACK_ALLOWED_USERS", "").split(",") if x.strip()]
+
+# Typing indicator (post-then-update pattern).
+# When enabled, outbound replies are first posted as a "..." placeholder and
+# then immediately updated with the real text — so the user sees the message
+# appear at once rather than waiting in silence until the full reply is ready.
+# Disable with LOBSTER_SLACK_TYPING_INDICATOR=false (or 0) if the Slack plan
+# does not permit chat.update (e.g. free-tier restrictions).
+_TYPING_INDICATOR_RAW = os.environ.get("LOBSTER_SLACK_TYPING_INDICATOR", "true").strip().lower()
+SLACK_TYPING_INDICATOR: bool = _TYPING_INDICATOR_RAW not in ("false", "0", "no", "off")
+
+# The placeholder text posted before the real reply is ready.
+SLACK_TYPING_PLACEHOLDER = "..."
+
+
+def parse_channel_remap(raw: str) -> dict:
+    """Parse ``LOBSTER_SLACK_CHANNEL_REMAP`` into a channel-ID mapping dict.
+
+    Format: ``SRC1:DST1,SRC2:DST2``
+
+    This mapping covers both inbound and outbound channel remapping.  The
+    canonical use-case is redirecting the bot-DM channel (which the xoxp-
+    user token cannot post to) to the equivalent user-DM channel.  Both the
+    source and destination values are workspace-specific and must come from
+    config — they must never be hardcoded.
+
+    Entries that do not contain a colon separator are silently skipped.
+    Leading/trailing whitespace is stripped from each token.
+
+    Returns an empty dict when *raw* is empty or blank.
+    """
+    result: dict = {}
+    if not raw or not raw.strip():
+        return result
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if ":" not in entry:
+            continue
+        src, dst = entry.split(":", 1)
+        src, dst = src.strip(), dst.strip()
+        if src and dst:
+            result[src] = dst
+    return result
+
+
+# Channel remap: maps source channel IDs to destination channel IDs for both
+# inbound and outbound message paths.  Populated from LOBSTER_SLACK_CHANNEL_REMAP
+# at startup — no channel IDs are hardcoded in the source.
+#
+# Example config.env entry:
+#   LOBSTER_SLACK_CHANNEL_REMAP=<bot-dm-channel-id>:<user-dm-channel-id>
+CHANNEL_REMAP: dict = parse_channel_remap(
+    os.environ.get("LOBSTER_SLACK_CHANNEL_REMAP", "")
+)
+
+
+def _remap_channel(channel_id: str) -> str:
+    """Return the remapped channel ID, or *channel_id* unchanged if no mapping exists.
+
+    Both the inbound (Socket Mode) and outbound (chat_postMessage) paths share
+    this helper so the remap logic lives in exactly one place.
+
+    The mapping is workspace-specific and comes entirely from the
+    ``LOBSTER_SLACK_CHANNEL_REMAP`` config variable — see ``parse_channel_remap``
+    for the format.  A typical deployment maps the bot-DM channel (which the
+    xoxp- user token cannot post to) to the user-DM channel.
+    """
+    return CHANNEL_REMAP.get(channel_id, channel_id)
 
 # Directories
 _MESSAGES = Path(os.environ.get("LOBSTER_MESSAGES", Path.home() / "messages"))
@@ -108,6 +178,15 @@ log.addHandler(logging.StreamHandler())
 # Initialize Slack app
 app = App(token=SLACK_BOT_TOKEN)
 client = WebClient(token=SLACK_BOT_TOKEN)
+# Separate client for outbound postMessage — uses user token if available so
+# replies appear as the user rather than the app bot.  Falls back to the bot
+# token if not set.
+_outbound_token = SLACK_USER_TOKEN or SLACK_BOT_TOKEN
+user_client = WebClient(token=_outbound_token)
+if SLACK_USER_TOKEN:
+    log.info("Outbound messages will use user token (xoxp-) — replies appear as user")
+else:
+    log.info("No LOBSTER_SLACK_USER_TOKEN set — outbound messages use bot token")
 
 # Cache for user info and channel info
 user_cache = {}
@@ -217,6 +296,18 @@ except SlackApiError as e:
     BOT_USER_ID = None
     BOT_NAME = None
 
+# Resolve the xoxp- user identity at startup so the poll loop can filter out
+# Lobster's own outbound messages.  This must come from auth.test on the user
+# token — the value is workspace-specific and must never be hardcoded.
+POLL_SELF_USER_ID: str | None = None
+if SLACK_USER_TOKEN:
+    try:
+        _user_auth = user_client.auth_test()
+        POLL_SELF_USER_ID = _user_auth.get("user_id")
+        log.info("User token identity resolved: %s", POLL_SELF_USER_ID)
+    except SlackApiError as e:
+        log.error("Failed to resolve user token identity: %s", e)
+
 
 @app.event("message")
 def handle_message_events(body, say, logger):
@@ -240,6 +331,16 @@ def handle_message_events(body, say, logger):
 
     if not user_id or not channel_id:
         return
+
+    # --- Inbound channel remap (BEFORE authorization check) ---
+    # Remap must run first so that ALLOWED_CHANNELS is checked against the
+    # canonical (post-remap) channel ID.  If the remap ran after the allowlist
+    # check, a pre-remap channel ID that is absent from ALLOWED_CHANNELS would
+    # be silently dropped before remapping could occur.
+    remapped_id = _remap_channel(channel_id)
+    if remapped_id != channel_id:
+        log.info("Inbound: remapping channel %s → %s", channel_id, remapped_id)
+        channel_id = remapped_id
 
     # --- Ingress logging (BEFORE authorization / LLM routing) ---
     if _INGRESS_LOGGING_ENABLED and _ingress_logger is not None:
@@ -397,16 +498,57 @@ def _send_slack_reply(reply: dict) -> bool:
 
     Handles optional thread replies by passing ``thread_ts`` from the reply
     dict to ``chat_postMessage``.
+
+    All outbound messages use ``user_client`` (xoxp-) when a user token is
+    configured — this makes replies appear as the user identity rather than
+    the app bot.  If the reply targets a channel that LOBSTER_SLACK_CHANNEL_REMAP
+    maps to a different channel (e.g. the bot-DM channel that xoxp- cannot
+    access), it is remapped before posting.
+
+    When ``SLACK_TYPING_INDICATOR`` is enabled (the default), this function
+    uses the post-then-update pattern:
+
+    1. Post a ``SLACK_TYPING_PLACEHOLDER`` ("...") immediately — the user sees
+       the message appear at once rather than waiting in silence.
+    2. Call ``chat.update`` with the real reply text to fill in the placeholder.
+
+    If the placeholder post fails (e.g. API error or plan restriction), the
+    function falls back to a direct ``chat_postMessage`` with the real text so
+    the reply is never silently dropped.  If the ``chat.update`` call fails
+    after a successful placeholder, we log the error but still return True —
+    the placeholder is visible in Slack and re-queuing the outbox file would
+    result in a duplicate reply.
     """
     channel_id = reply.get("chat_id", "")
     text = reply.get("text", "")
     thread_ts = reply.get("thread_ts")
 
+    # Apply outbound channel remap from config — no hardcoded channel IDs.
+    remapped = _remap_channel(channel_id)
+    if remapped != channel_id:
+        log.info("Outbound: remapping channel %s → %s", channel_id, remapped)
+        channel_id = remapped
+
+    if SLACK_TYPING_INDICATOR:
+        return _send_with_typing_indicator(channel_id, text, thread_ts)
+    return _send_direct(channel_id, text, thread_ts)
+
+
+def _build_post_kwargs(channel_id: str, text: str, thread_ts: str | None) -> dict:
+    """Return the kwargs dict for chat.postMessage or chat.update (pure helper)."""
+    kwargs: dict = {"channel": channel_id, "text": text}
+    if thread_ts:
+        kwargs["thread_ts"] = thread_ts
+    return kwargs
+
+
+def _send_direct(channel_id: str, text: str, thread_ts: str | None) -> bool:
+    """Post *text* to *channel_id* directly via chat.postMessage.
+
+    Returns True on success, False on SlackApiError.
+    """
     try:
-        kwargs: dict = {"channel": channel_id, "text": text}
-        if thread_ts:
-            kwargs["thread_ts"] = thread_ts
-        client.chat_postMessage(**kwargs)
+        user_client.chat_postMessage(**_build_post_kwargs(channel_id, text, thread_ts))
         log.info("Sent Slack reply to %s: %s...", channel_id, text[:50])
         return True
     except SlackApiError as exc:
@@ -414,8 +556,242 @@ def _send_slack_reply(reply: dict) -> bool:
         return False
 
 
+def _send_with_typing_indicator(channel_id: str, text: str, thread_ts: str | None) -> bool:
+    """Deliver *text* to *channel_id* using the post-then-update typing pattern.
+
+    Posts ``SLACK_TYPING_PLACEHOLDER`` ("...") first so the user sees the
+    message appear immediately, then calls ``chat.update`` with the real text.
+
+    Fallback: if the placeholder post fails, posts the real text directly.
+    If the ``chat.update`` call fails after a successful placeholder, logs
+    a warning and returns True (the placeholder is already in Slack; re-queuing
+    would cause a duplicate).
+
+    Returns True when the real text has been delivered (either via update or
+    direct fallback), False only when all delivery attempts fail.
+    """
+    placeholder_kwargs = _build_post_kwargs(channel_id, SLACK_TYPING_PLACEHOLDER, thread_ts)
+    try:
+        post_response = user_client.chat_postMessage(**placeholder_kwargs)
+        placeholder_ts = post_response.get("ts")
+        log.info(
+            "Posted typing placeholder to %s (ts=%s)",
+            channel_id, placeholder_ts,
+        )
+    except SlackApiError as exc:
+        log.warning(
+            "Typing indicator placeholder failed (%s) — falling back to direct post",
+            exc,
+        )
+        return _send_direct(channel_id, text, thread_ts)
+
+    # Replace the placeholder with the real reply text.
+    try:
+        update_kwargs: dict = {"channel": channel_id, "ts": placeholder_ts, "text": text}
+        if thread_ts:
+            update_kwargs["thread_ts"] = thread_ts
+        user_client.chat_update(**update_kwargs)
+        log.info("Updated placeholder → real reply in %s: %s...", channel_id, text[:50])
+        return True
+    except SlackApiError as exc:
+        # The placeholder "..." is already visible in Slack.  Returning False
+        # would leave the outbox file in place and trigger a duplicate send.
+        # Log the failure and return True to consume the outbox file.
+        log.warning(
+            "chat.update failed for placeholder ts=%s in %s: %s — "
+            "placeholder remains visible; not re-queuing to avoid duplicate",
+            placeholder_ts, channel_id, exc,
+        )
+        return True
+
+
 # Backward-compatible alias -- code that imports OutboxHandler directly still works.
 OutboxHandler = OutboxFileHandler
+
+
+# ---------------------------------------------------------------------------
+# User-DM poller: monitors channels that Socket Mode cannot see (e.g. the
+# user-token DM channel where messages are sent to the user identity).
+# ---------------------------------------------------------------------------
+
+# Comma-separated list of channel IDs to poll with the user token.
+# Set LOBSTER_SLACK_POLL_CHANNELS in config.env to the user-DM channel ID(s).
+# No default is provided — the correct channel ID is workspace-specific.
+_POLL_CHANNELS = [
+    c.strip()
+    for c in os.environ.get("LOBSTER_SLACK_POLL_CHANNELS", "").split(",")
+    if c.strip()
+]
+_POLL_INTERVAL = int(os.environ.get("LOBSTER_SLACK_POLL_INTERVAL", "10"))  # seconds
+
+# Warn at startup if the user token is configured but no poll channels are set.
+# Without poll channels, DMs sent to the user identity will not be received.
+if SLACK_USER_TOKEN and not _POLL_CHANNELS:
+    log.warning(
+        "LOBSTER_SLACK_USER_TOKEN is set but LOBSTER_SLACK_POLL_CHANNELS is empty — "
+        "user DM polling disabled. Set LOBSTER_SLACK_POLL_CHANNELS to the channel "
+        "ID(s) you want to poll so that DMs to the user identity are received."
+    )
+
+# State file to persist the last-seen timestamp across restarts
+_POLL_STATE_FILE = _WORKSPACE / "data" / "slack-poll-state.json"
+
+# In-memory seen-ts set to deduplicate within a run (fallback).
+# Capped at _SEEN_TS_MAX_SIZE entries to prevent unbounded growth over long sessions.
+_SEEN_TS_MAX_SIZE = 1000
+_seen_ts: set = set()
+
+
+def _trim_seen_ts() -> None:
+    """Evict the oldest half of _seen_ts when the set exceeds _SEEN_TS_MAX_SIZE.
+
+    Timestamps are Slack's float-string format (e.g. "1234567890.000100").
+    Sorting them lexicographically is safe because they share the same integer
+    prefix length and the decimal portion is zero-padded by Slack.
+    """
+    if len(_seen_ts) > _SEEN_TS_MAX_SIZE:
+        # Keep the most-recent half; discard the oldest half.
+        keep = sorted(_seen_ts)[len(_seen_ts) // 2:]
+        _seen_ts.clear()
+        _seen_ts.update(keep)
+
+
+def _load_poll_state() -> dict:
+    """Load last-seen timestamps from disk."""
+    if _POLL_STATE_FILE.exists():
+        try:
+            return json.loads(_POLL_STATE_FILE.read_text())
+        except Exception:
+            pass
+    return {}
+
+
+def _save_poll_state(state: dict) -> None:
+    """Persist last-seen timestamps to disk."""
+    try:
+        _POLL_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _POLL_STATE_FILE.write_text(json.dumps(state))
+    except Exception as exc:
+        log.warning("Could not save poll state: %s", exc)
+
+
+def _poll_user_dm_channels(stop_event: Event) -> None:
+    """Poll user-token DM channels for new messages and write them to inbox.
+
+    This is the inbound path for DMs sent to the user identity (xoxp-).
+    Socket Mode only receives events for the bot identity, so DMs sent to
+    the user account are invisible to it.  We compensate by polling
+    conversations.history at regular intervals.
+
+    The self-user filter uses POLL_SELF_USER_ID, resolved from auth.test on
+    the user token at startup — never a hardcoded user ID.
+    """
+    if not SLACK_USER_TOKEN:
+        log.info("No LOBSTER_SLACK_USER_TOKEN — user DM polling disabled")
+        return
+
+    if not _POLL_CHANNELS:
+        log.info("No LOBSTER_SLACK_POLL_CHANNELS — user DM polling disabled")
+        return
+
+    poll_client = WebClient(token=SLACK_USER_TOKEN)
+    state = _load_poll_state()
+
+    log.info(
+        "User DM poller started: channels=%s interval=%ds",
+        _POLL_CHANNELS, _POLL_INTERVAL,
+    )
+
+    while not stop_event.is_set():
+        for channel_id in _POLL_CHANNELS:
+            oldest = state.get(channel_id)
+            try:
+                kwargs: dict = {"channel": channel_id, "limit": 20}
+                if oldest:
+                    # Use exclusive lower bound: oldest + epsilon so the
+                    # already-processed message is not re-delivered on restart.
+                    kwargs["oldest"] = str(float(oldest) + 0.000001)
+
+                resp = poll_client.conversations_history(**kwargs)
+                messages = resp.get("messages", [])
+
+                # API returns newest-first; reverse to process chronologically
+                for msg in reversed(messages):
+                    ts = msg.get("ts", "")
+                    msg_user = msg.get("user", "")
+
+                    if not ts:
+                        continue
+
+                    # Skip messages we've already seen
+                    if ts in _seen_ts:
+                        continue
+
+                    # Skip messages sent by this Lobster instance's user identity.
+                    # POLL_SELF_USER_ID is resolved from auth.test at startup —
+                    # it is workspace-specific and is never hardcoded.
+                    if POLL_SELF_USER_ID and msg_user == POLL_SELF_USER_ID:
+                        _seen_ts.add(ts)
+                        _trim_seen_ts()
+                        if not oldest or float(ts) > float(oldest):
+                            state[channel_id] = ts
+                        continue
+
+                    _seen_ts.add(ts)
+                    _trim_seen_ts()
+
+                    # Resolve display name
+                    user_info = get_user_info(msg_user) if msg_user else {}
+                    username = user_info.get("name", msg_user)
+                    display_name = (
+                        user_info.get("profile", {}).get("display_name")
+                        or user_info.get("real_name", username)
+                    )
+
+                    text = clean_slack_text(msg.get("text", ""), BOT_USER_ID)
+                    msg_id = f"{int(time.time() * 1000)}_{ts.replace('.', '')}"
+
+                    msg_data = {
+                        "id": msg_id,
+                        "source": "slack",
+                        "type": "text",
+                        "chat_id": channel_id,
+                        "user_id": msg_user,
+                        "username": username,
+                        "user_name": display_name,
+                        "text": text,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "slack_ts": ts,
+                        "channel_name": channel_id,
+                        "is_dm": True,
+                        "via_poll": True,
+                    }
+
+                    thread_ts = msg.get("thread_ts")
+                    if thread_ts:
+                        msg_data["thread_ts"] = thread_ts
+
+                    write_message_to_inbox(msg_data)
+                    log.info(
+                        "Polled new message from %s in %s: %s",
+                        username, channel_id, repr(text[:60]),
+                    )
+
+                    # Advance the oldest pointer past this message
+                    if not oldest or float(ts) > float(oldest):
+                        state[channel_id] = ts
+
+                if messages:
+                    _save_poll_state(state)
+
+            except SlackApiError as exc:
+                log.warning("Poll error for channel %s: %s", channel_id, exc)
+            except Exception as exc:
+                log.exception("Unexpected poll error for channel %s: %s", channel_id, exc)
+
+        stop_event.wait(timeout=_POLL_INTERVAL)
+
+    log.info("User DM poller stopped")
 
 
 def process_existing_outbox() -> None:
@@ -435,6 +811,8 @@ def main():
         log.info(f"Allowed users: {ALLOWED_USERS}")
     if not ALLOWED_CHANNELS and not ALLOWED_USERS:
         log.info("No restrictions configured - all channels and users allowed")
+    if CHANNEL_REMAP:
+        log.info("Channel remap active: %s", CHANNEL_REMAP)
 
     # Set up outbox watcher
     observer = Observer()
@@ -449,6 +827,16 @@ def main():
     # Process any existing outbox files
     drain_outbox(OUTBOX_DIR, source="slack", send_fn=_send_slack_reply, log=log)
 
+    # Start user-DM poller thread
+    _poll_stop = Event()
+    _poll_thread = Thread(
+        target=_poll_user_dm_channels,
+        args=(_poll_stop,),
+        daemon=True,
+        name="user-dm-poller",
+    )
+    _poll_thread.start()
+
     # Start Socket Mode handler
     handler = SocketModeHandler(app, SLACK_APP_TOKEN)
 
@@ -458,6 +846,8 @@ def main():
     except KeyboardInterrupt:
         log.info("Shutting down...")
     finally:
+        _poll_stop.set()
+        _poll_thread.join(timeout=5)
         observer.stop()
         observer.join()
 

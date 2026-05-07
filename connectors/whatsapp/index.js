@@ -208,7 +208,7 @@ function touchHeartbeat() {
  * Render a QR code string to a PNG file and emit a qr_ready system event.
  *
  * The qr_ready event is picked up by whatsapp_bridge_adapter.py, which writes
- * a Telegram outbox message containing the PNG so Drew can scan it on his phone
+ * a Telegram outbox message containing the PNG so the user can scan it on their phone
  * without any terminal or SSH access.
  *
  * Falls back to a text-only qr_ready event (no image_path) if PNG generation fails,
@@ -313,7 +313,7 @@ function startBridge() {
     // ---------------------------------------------------------------------------
     // QR code — first-run authentication
     //
-    // Renders the QR as a PNG and delivers it to Drew's Telegram chat via the
+    // Renders the QR as a PNG and delivers it to the user's Telegram chat via the
     // whatsapp_bridge_adapter.py qr_ready event handler — no terminal needed.
     // ---------------------------------------------------------------------------
 
@@ -400,7 +400,7 @@ function startBridge() {
                 console.error('[SESSION] Could not delete session:', e.message);
             }
 
-            // Notify Drew via the event bus
+            // Notify the user via the event bus
             emitSystemEvent(
                 'session_expired',
                 'Session expired — QR scan required. Restart the service: sudo systemctl restart lobster-whatsapp-bridge'

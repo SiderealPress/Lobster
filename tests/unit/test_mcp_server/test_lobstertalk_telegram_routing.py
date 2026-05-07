@@ -83,7 +83,7 @@ class TestInboxMessageChatId:
 
     def test_chat_id_is_admin_chat_id(self):
         """The core bug: chat_id was set to sender name string. Must be ADMIN_CHAT_ID_REDACTED."""
-        msg = build_inbox_message("AlbertLobster", "hello", "SaharLobster")
+        msg = build_inbox_message("AlbertLobster", "hello", "OwnerLobster")
         assert msg["chat_id"] == ADMIN_CHAT_ID, (
             f"Expected chat_id={ADMIN_CHAT_ID}, got {msg['chat_id']!r}. "
             "chat_id must be the owner's Telegram ID, not the sender name."
@@ -91,14 +91,14 @@ class TestInboxMessageChatId:
 
     def test_chat_id_is_integer_not_string(self):
         """chat_id must be an integer. A string would not route to any Telegram chat."""
-        msg = build_inbox_message("AlbertLobster", "hello", "SaharLobster")
+        msg = build_inbox_message("AlbertLobster", "hello", "OwnerLobster")
         assert isinstance(msg["chat_id"], int), (
             f"chat_id must be int, got {type(msg['chat_id']).__name__}"
         )
 
     def test_sender_identity_preserved_in_from_field(self):
         """Sender name is NOT lost — it's in the 'from' field for display purposes."""
-        msg = build_inbox_message("AlbertLobster", "hello", "SaharLobster")
+        msg = build_inbox_message("AlbertLobster", "hello", "OwnerLobster")
         assert msg["from"] == "AlbertLobster"
         assert msg["chat_id"] == ADMIN_CHAT_ID
         # Both are present: routing destination and sender identity
@@ -106,8 +106,8 @@ class TestInboxMessageChatId:
 
     def test_different_senders_same_chat_id(self):
         """All bot-talk messages route to the same owner chat, regardless of sender."""
-        msg_albert = build_inbox_message("AlbertLobster", "hi", "SaharLobster")
-        msg_carol = build_inbox_message("CarolLobster", "hi", "SaharLobster")
+        msg_albert = build_inbox_message("AlbertLobster", "hi", "OwnerLobster")
+        msg_carol = build_inbox_message("CarolLobster", "hi", "OwnerLobster")
         assert msg_albert["chat_id"] == ADMIN_CHAT_ID
         assert msg_carol["chat_id"] == ADMIN_CHAT_ID
         # Different senders, same delivery destination
@@ -115,11 +115,11 @@ class TestInboxMessageChatId:
         assert msg_carol["from"] == "CarolLobster"
 
     def test_source_is_bot_talk(self):
-        msg = build_inbox_message("AlbertLobster", "hello", "SaharLobster")
+        msg = build_inbox_message("AlbertLobster", "hello", "OwnerLobster")
         assert msg["source"] == "bot-talk"
 
     def test_required_fields_present(self):
-        msg = build_inbox_message("AlbertLobster", "hello", "SaharLobster")
+        msg = build_inbox_message("AlbertLobster", "hello", "OwnerLobster")
         for field in ("id", "type", "source", "chat_id", "user_name", "text",
                       "timestamp", "direction", "from", "to"):
             assert field in msg, f"Missing field: {field!r}"
@@ -129,23 +129,23 @@ class TestDispatcherRoutingFormat:
     """The dispatcher formats bot-talk messages correctly before sending to Telegram."""
 
     def test_notification_includes_sender_name(self):
-        msg = build_inbox_message("AlbertLobster", "Let's sync on the project.", "SaharLobster")
+        msg = build_inbox_message("AlbertLobster", "Let's sync on the project.", "OwnerLobster")
         text = format_bot_talk_notification(msg)
         assert "AlbertLobster" in text
 
     def test_notification_includes_message_text(self):
-        msg = build_inbox_message("AlbertLobster", "Let's sync on the project.", "SaharLobster")
+        msg = build_inbox_message("AlbertLobster", "Let's sync on the project.", "OwnerLobster")
         text = format_bot_talk_notification(msg)
         assert "Let's sync on the project." in text
 
     def test_notification_format(self):
-        msg = build_inbox_message("AlbertLobster", "Hello there.", "SaharLobster")
+        msg = build_inbox_message("AlbertLobster", "Hello there.", "OwnerLobster")
         text = format_bot_talk_notification(msg)
         assert text == "📨 From AlbertLobster via LobsterTalk:\n\nHello there."
 
     def test_dispatcher_uses_admin_chat_id_for_send_reply(self):
         """Confirm the dispatcher would call send_reply with the correct chat_id."""
-        msg = build_inbox_message("AlbertLobster", "hello", "SaharLobster")
+        msg = build_inbox_message("AlbertLobster", "hello", "OwnerLobster")
         # The dispatcher routing rule: send_reply(chat_id=msg['chat_id'], ...)
         # Since chat_id is ADMIN_CHAT_ID, this delivers to the owner's Telegram
         assert msg["chat_id"] == ADMIN_CHAT_ID
@@ -156,7 +156,7 @@ class TestInboxFileAtomicWrite:
 
     def test_inbox_file_is_valid_json(self, tmp_path):
         import uuid
-        msg = build_inbox_message("AlbertLobster", "hi there", "SaharLobster")
+        msg = build_inbox_message("AlbertLobster", "hi there", "OwnerLobster")
         inbox_file = tmp_path / f"{msg['id']}.json"
         tmp_file = inbox_file.with_suffix(".tmp")
         tmp_file.write_text(json.dumps(msg), encoding="utf-8")
@@ -170,7 +170,7 @@ class TestInboxFileAtomicWrite:
 
     def test_dispatcher_can_parse_inbox_file(self, tmp_path):
         """Simulate the dispatcher reading and routing a bot-talk inbox file."""
-        msg = build_inbox_message("AlbertLobster", "hello from Albert", "SaharLobster")
+        msg = build_inbox_message("AlbertLobster", "hello from Albert", "OwnerLobster")
         inbox_file = tmp_path / f"{msg['id']}.json"
         inbox_file.write_text(json.dumps(msg), encoding="utf-8")
 
