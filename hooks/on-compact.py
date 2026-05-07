@@ -9,10 +9,11 @@ reminder to re-read CLAUDE.md and re-orient from handoff/memory context.
 The script is idempotent: if a compact-reminder message already exists in
 inbox/ or processing/ it skips writing a duplicate.
 
-Notification: always sends a Telegram message directly to the owner's chat ID
-so the user is immediately notified that a compaction occurred.  The health
-check suppresses its own alerts during the compaction window so exactly one
-notification reaches the user per compaction event.
+Notification: always writes a compaction notification to ~/messages/outbox/
+(the Lobster outbox pipeline) so the user is notified via Telegram.  The
+outbox watcher picks up the file and delivers it to the correct transport.
+This matches the architectural pattern used by all other Lobster notifications
+and avoids direct Telegram API calls from the hook.
 
 State: always writes compacted_at to lobster-state.json so that the health
 check can suppress stale-inbox false-positives during the compaction pause.
@@ -36,7 +37,6 @@ import json
 import os
 import sys
 import time
-import urllib.request
 from pathlib import Path
 
 # Import shared session role utility.
@@ -51,6 +51,12 @@ from session_role import (
 
 INBOX_DIR = Path(os.path.expanduser("~/messages/inbox"))
 PROCESSING_DIR = Path(os.path.expanduser("~/messages/processing"))
+OUTBOX_DIR = Path(
+    os.environ.get(
+        "LOBSTER_OUTBOX_DIR_OVERRIDE",
+        os.path.expanduser("~/messages/outbox"),
+    )
+)
 CONFIG_ENV = Path(os.path.expanduser("~/lobster-config/config.env"))
 STATE_FILE = Path(
     os.environ.get(
@@ -296,63 +302,62 @@ def _parse_config_env() -> dict:
     return config
 
 
-def _send_telegram_notify(bot_token: str, chat_id: str, text: str) -> None:
+def send_compaction_notify() -> None:
     """
-    Send text to chat_id via the Telegram Bot API.
-    Logs to stderr on failure so the cause is visible in Claude hook output.
-    Never raises — must not crash the hook.
+    Notify the owner that a context compaction occurred by writing to the outbox.
+
+    Writes a JSON file to ~/messages/outbox/ using the standard Lobster outbox
+    format.  The outbox watcher (lobster_bot.py / outbox.py) picks up the file
+    and delivers it via Telegram — identical to how all other Lobster system
+    notifications are sent.
+
+    This avoids calling the Telegram Bot API directly from the hook, keeping all
+    outbound messages routed through the shared pipeline.
+
+    Always fires when TELEGRAM_ALLOWED_USERS is configured — not gated on
+    LOBSTER_DEBUG.  The health-check suppresses its own alerts during the
+    compaction window so exactly one notification reaches the user per compaction.
+
+    Silent on any failure — must never crash the hook.
     """
     try:
-        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-        payload = json.dumps({"chat_id": chat_id, "text": text}).encode()
-        req = urllib.request.Request(
-            url,
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=25) as resp:
-            status = resp.status
-            if status != 200:
-                body = resp.read(500).decode("utf-8", errors="replace")
-                print(
-                    f"[on-compact] Telegram notify returned HTTP {status}: {body}",
-                    file=sys.stderr,
-                )
-    except urllib.request.HTTPError as e:  # noqa: BLE001
-        try:
-            body = e.read(500).decode("utf-8", errors="replace")
-        except Exception:
-            body = "(could not read body)"
+        config = _parse_config_env()
+        allowed_users = config.get("TELEGRAM_ALLOWED_USERS", "").strip()
+        if not allowed_users:
+            return
+
+        # Take the first user ID from a comma- or space-separated list.
+        first_chat_id = allowed_users.replace(",", " ").split()[0]
+
+        ts_ms = int(time.time() * 1000)
+        reply_id = f"{ts_ms}_compact_notify_telegram"
+        timestamp = time.strftime("%Y-%m-%dT%H:%M:%S.%f", time.localtime()) + "+00:00"
+
+        reply = {
+            "id": reply_id,
+            "source": "telegram",
+            "chat_id": first_chat_id,
+            "text": COMPACTION_TELEGRAM_MESSAGE,
+            "timestamp": timestamp,
+        }
+
+        OUTBOX_DIR.mkdir(parents=True, exist_ok=True)
+        dest = OUTBOX_DIR / f"{reply_id}.json"
+        # Atomic write: write to .tmp then rename so the watcher never sees a
+        # partial file (mirrors the pattern in src/utils/fs.py:atomic_write_json).
+        tmp_dest = dest.with_suffix(".tmp")
+        tmp_dest.write_text(json.dumps(reply, indent=2) + "\n")
+        tmp_dest.replace(dest)
+
         print(
-            f"[on-compact] Telegram notify HTTP error {e.code}: {body}",
+            f"[on-compact] compaction notify queued to outbox: {dest}",
             file=sys.stderr,
         )
     except Exception as exc:  # noqa: BLE001
-        print(f"[on-compact] Telegram notify failed: {type(exc).__name__}: {exc}", file=sys.stderr)
-
-
-def send_compaction_notify() -> None:
-    """
-    Send a Telegram notification to the owner that a context compaction occurred.
-
-    Always fires when credentials are available — not gated on LOBSTER_DEBUG.
-    This is the single canonical notification for a compaction event; the
-    health-check suppresses its own alerts during the compaction window so
-    exactly one notification reaches the user per compaction.
-    """
-    config = _parse_config_env()
-
-    bot_token = config.get("TELEGRAM_BOT_TOKEN", "").strip()
-    allowed_users = config.get("TELEGRAM_ALLOWED_USERS", "").strip()
-
-    if not bot_token or not allowed_users:
-        return
-
-    # Take the first user ID from a comma- or space-separated list.
-    first_chat_id = allowed_users.replace(",", " ").split()[0]
-
-    _send_telegram_notify(bot_token, first_chat_id, COMPACTION_TELEGRAM_MESSAGE)
+        print(
+            f"[on-compact] compaction notify failed: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
 
 
 def _stored_dispatcher_session_alive() -> bool:
