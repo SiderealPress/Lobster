@@ -1857,6 +1857,19 @@ else
     warn "prune-pr-worktrees.py not found or uv unavailable — skipping job registration"
 fi
 
+#===============================================================================
+# Inflight Reminders
+#===============================================================================
+
+step "Setting up inflight reminders cron..."
+
+# check-inflight-reminders.py runs every 3 minutes to detect stale subagent work
+# and drop reminder messages into the dispatcher inbox. No LLM involved.
+"$INSTALL_DIR/scripts/cron-manage.sh" add "# LOBSTER-INFLIGHT-REMINDERS" \
+    "*/3 * * * * uv run $INSTALL_DIR/scripts/check-inflight-reminders.py >> $HOME/lobster-workspace/logs/inflight-reminders.log 2>&1 # LOBSTER-INFLIGHT-REMINDERS"
+
+success "Inflight reminders configured (runs every 3 minutes)"
+
 # Ensure any lingering self-check cron entry is removed on fresh installs
 { crontab -l 2>/dev/null | grep -v "# LOBSTER-SELF-CHECK" | grep -v "periodic-self-check" || true; } | crontab -
 
