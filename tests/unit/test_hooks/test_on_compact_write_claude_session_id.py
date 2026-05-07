@@ -20,8 +20,6 @@ import json
 import os
 import sys
 from pathlib import Path
-from unittest.mock import patch
-
 import pytest
 
 _HOOKS_DIR = Path(__file__).parents[3] / "hooks"
@@ -275,12 +273,11 @@ class TestOnCompactWritesPrimarySessionFile:
         }
 
         with _PatchEnv(env_overrides):
-            with patch("urllib.request.urlopen"):  # suppress Telegram call
-                spec = importlib.util.spec_from_file_location("on_compact_t", _HOOK_PATH)
-                mod = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(mod)
-                # Call compaction fallback directly.
-                result = mod._is_dispatcher_compact({"session_id": new_uuid})
+            spec = importlib.util.spec_from_file_location("on_compact_t", _HOOK_PATH)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            # Call _is_dispatcher_compact + write path directly.
+            result = mod._is_dispatcher_compact({"session_id": new_uuid})
 
         assert result is True, "_is_dispatcher_compact should return True for dispatcher compaction"
 
