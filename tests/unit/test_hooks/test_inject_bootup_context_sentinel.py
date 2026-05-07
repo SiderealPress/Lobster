@@ -346,9 +346,9 @@ class TestMainSentinelFallback:
         # Write dispatcher UUID to primary file.
         data_dir = tmp_path / "data"
         data_dir.mkdir()
-        # Use a realistic UUID4 format instead of a recognisable stub so that
+        # Use a UUID4-format test value instead of a recognisable stub so that
         # any accidental write to the real path is still obviously wrong.
-        dispatcher_uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        dispatcher_uuid = "a0b1c2d3-e4f5-4a6b-8c7d-9e0f1a2b3c4d"
         (data_dir / "dispatcher-claude-session-id").write_text(dispatcher_uuid)
 
         # No sentinel.
