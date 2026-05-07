@@ -223,7 +223,7 @@ def read_and_reset_startup_cause() -> str:
                         cause = "compaction"
                 except (ValueError, AttributeError):
                     pass  # unparseable ts → keep cause = "restart"
-    except (OSError, json.JSONDecodeError, Exception):  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         pass  # any read failure → keep cause = "restart"
 
     # Always reset to "restart" so subsequent startups default correctly.

@@ -44,8 +44,20 @@ _HOOKS_DIR = Path(__file__).parents[3] / "hooks"
 _ON_COMPACT_PATH = _HOOKS_DIR / "on-compact.py"
 _INJECT_HOOK_PATH = _HOOKS_DIR / "inject-bootup-context.py"
 
-# The window constant used by inject-bootup-context.py for trusting "compaction" entries.
-COMPACTION_CAUSE_WINDOW_SECONDS = 300
+
+def _load_inject_hook_module() -> object:
+    """Load inject-bootup-context.py once at module level to extract constants."""
+    spec = importlib.util.spec_from_file_location("_inject_hook_constants", _INJECT_HOOK_PATH)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_INJECT_HOOK_MODULE = _load_inject_hook_module()
+
+# Import the window constant directly from the hook — avoids duplication so
+# test coverage is not silently invalidated if the constant changes.
+COMPACTION_CAUSE_WINDOW_SECONDS = _INJECT_HOOK_MODULE.COMPACTION_CAUSE_WINDOW_SECONDS
 
 
 # ---------------------------------------------------------------------------
@@ -268,6 +280,24 @@ class TestReadAndResetStartupCause:
         result = mod.read_and_reset_startup_cause()
 
         assert result == "restart"
+
+    def test_returns_restart_when_cause_key_absent(self, tmp_path):
+        """Returns 'restart' when the JSON is valid but has no 'cause' key.
+
+        data.get("cause", "restart") must default to 'restart' — lock in this
+        behavior explicitly so a future refactor cannot silently break it.
+        """
+        cause_file = tmp_path / "last-startup-cause.json"
+        cause_file.write_text(json.dumps({"ts": _fresh_ts()}))
+
+        workspace = tmp_path
+        mod = _load_inject_hook(workspace=workspace, startup_cause_override=str(cause_file))
+
+        result = mod.read_and_reset_startup_cause()
+
+        assert result == "restart", (
+            f"Absent 'cause' key must default to 'restart', got {result!r}"
+        )
 
     def test_resets_to_restart_after_compaction_read(self, tmp_path):
         """After reading cause=compaction, file is overwritten with cause=restart."""
