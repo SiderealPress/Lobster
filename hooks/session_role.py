@@ -100,6 +100,12 @@ def is_dispatcher(hook_input: dict) -> bool:  # noqa: ARG001
 
     hook_input is accepted for API compatibility but is not used — the startup
     flag is the sole detection signal for SessionStart hooks.
+
+    USE IN: SessionStart / SubagentStop / Stop hooks (early hook lifecycle, flag
+    still present).  NOT for PreToolUse — the flag is consumed at SessionStart
+    and is absent for all subsequent hooks.  The UUID cannot be used here instead
+    because CC generates it internally after exec; the launcher has no way to
+    predict it before writing the flag.
     """
     try:
         if not STARTUP_FLAG_FILE.exists():
@@ -275,9 +281,10 @@ def _is_dispatcher_by_process_tree() -> bool:
 def is_dispatcher_session(hook_input: dict) -> bool:
     """Return True when this hook is running inside the dispatcher Claude.
 
-    **For use in PreToolUse hooks** (hook-process context).  Adds a process-tree
-    walk fallback on top of the state-file checks in `is_dispatcher()`, for the
-    early-boot window before `session_start` has been called.
+    **For use in PreToolUse / Stop hooks** — i.e., any hook that fires AFTER
+    SessionStart has already consumed and deleted the startup flag.  Cannot use
+    is_dispatcher() here because the flag no longer exists by the time these
+    hooks run.  Falls back to session-ID state files and the process-tree walk.
 
     Detection strategy (in order):
       0. agent_id fast path: CC injects agent_id only into subagent PreToolUse
@@ -288,9 +295,6 @@ def is_dispatcher_session(hook_input: dict) -> bool:
       2. Process-tree walk: count consecutive claude ancestors before a tmux pane
          PID.  ≤1 ancestor → dispatcher; ≥2 → subagent.
       3. Env-var-only fallback: LOBSTER_MAIN_SESSION=1 without tmux confirmation.
-
-    For SessionStart / SubagentStop / Stop hooks, use the simpler `is_dispatcher()`
-    which checks the startup flag file.
 
     NOTE: Intentionally unchanged by issue #1908 — PreToolUse hooks depend on this
     function's process-tree + state-file logic during active processing (after the
