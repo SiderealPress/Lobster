@@ -31,7 +31,6 @@ Silent on all errors — must never interrupt a hook or dispatcher operation.
 
 import json
 import os
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 

@@ -3318,8 +3318,7 @@ print(f'prune-pr-worktrees: {result.status}')
             substep "Migration 93: dispatcher-state-stop Stop hook already registered — skipping"
         fi
     else
-        substep "Migration 93: settings.json or jq not found — skipping state machine hook registration"
-    fi
+        substep "Migration 93: settings.json or jq not found — skipping state machine hook registration"    fi
 
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"

@@ -179,11 +179,11 @@ POST http://46.224.41.108:4242/message
 Update `last_processed_ts` to the timestamp of the latest processed message.
 Write to state file atomically (write .tmp then rename).
 
-Also notify Sahar via Telegram if a context query was received and answered:
+Also notify the instance owner via Telegram if a context query was received and answered:
 - chat_id: ADMIN_CHAT_ID_REDACTED
 - Message: "Bot-talk query handled: AlbertLobster asked about NAME. Replied with context from [sources]."
 
-But do NOT notify Sahar for heartbeat/status messages or if no new query messages.
+But do NOT notify the instance owner for heartbeat/status messages or if no new query messages.
 
 ## Output
 
