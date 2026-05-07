@@ -13,7 +13,7 @@ Behaviors verified:
 1. Transcript present with usage → correct percentage computed from token counts.
 2. transcript_path absent → WARN logged, no crash.
 3. Last assistant turn is selected when multiple turns exist.
-4. Model lookup table: Sonnet 4.6 = 1M, Haiku 4.5 = 200k, unknown = 200k.
+4. Model lookup table: Sonnet 4.6 = 200k (CC default), Haiku 4.5 = 200k, unknown = 200k.
 5. At or above WARNING_THRESHOLD → context_warning written to inbox (once per session).
 6. Dedup flag suppresses second warning.
 7. _handle_payload() accepts injectable log_dir and inbox_dir.
@@ -33,7 +33,11 @@ _HOOK_PATH = _HOOKS_DIR / "context-monitor.py"
 # Named constants matching the spec — these are protocol-level values.
 WARN_PREFIX_ABSENT_CONTEXT = "[WARN] transcript usage unavailable"
 WARNING_THRESHOLD = 70.0
-SONNET_4_6_MAX_CONTEXT = 1_000_000
+# claude-sonnet-4-6 supports up to 1M tokens but CC's default window is 200k.
+# Update when we can detect which mode is active.
+SONNET_4_6_MAX_CONTEXT = 200_000
+# claude-opus-4-6 also uses CC's default 200k window.
+OPUS_4_6_MAX_CONTEXT = 200_000
 HAIKU_4_5_MAX_CONTEXT = 200_000
 DEFAULT_MAX_CONTEXT = 200_000
 
@@ -81,14 +85,14 @@ class TestTranscriptUsageReading:
     def test_returns_correct_percentage_from_transcript(self, tmp_path):
         """Transcript with usage block → percentage computed from token sum / model max."""
         mod = _load_hook()
-        # 500_000 tokens on a 1M-context Sonnet model → 50%
+        # 100_000 tokens on a 200k-context Sonnet model (CC default) → 50%
         transcript = _make_transcript(tmp_path, [
             {
                 "model": "claude-sonnet-4-6",
                 "usage": {
-                    "input_tokens": 100_000,
-                    "cache_creation_input_tokens": 200_000,
-                    "cache_read_input_tokens": 200_000,
+                    "input_tokens": 20_000,
+                    "cache_creation_input_tokens": 40_000,
+                    "cache_read_input_tokens": 40_000,
                     "output_tokens": 5_000,
                 },
             }
@@ -107,7 +111,7 @@ class TestTranscriptUsageReading:
             {
                 "model": "claude-sonnet-4-6",
                 "usage": {
-                    "input_tokens": 100_000,
+                    "input_tokens": 20_000,
                     "cache_creation_input_tokens": 0,
                     "cache_read_input_tokens": 0,
                 },
@@ -115,7 +119,7 @@ class TestTranscriptUsageReading:
             {
                 "model": "claude-sonnet-4-6",
                 "usage": {
-                    "input_tokens": 800_000,  # 80% — this is the last turn
+                    "input_tokens": 160_000,  # 80% of 200k CC window — this is the last turn
                     "cache_creation_input_tokens": 0,
                     "cache_read_input_tokens": 0,
                 },
@@ -177,15 +181,15 @@ class TestTranscriptUsageReading:
 class TestModelContextLookup:
     """_model_max_context() returns correct sizes for known and unknown models."""
 
-    def test_sonnet_4_6_returns_1m(self):
-        """claude-sonnet-4-6 → 1_000_000."""
+    def test_sonnet_4_6_returns_200k(self):
+        """claude-sonnet-4-6 → 200_000 (CC default window)."""
         mod = _load_hook()
         assert mod._model_max_context("claude-sonnet-4-6") == SONNET_4_6_MAX_CONTEXT
 
-    def test_opus_4_6_returns_1m(self):
-        """claude-opus-4-6 → 1_000_000."""
+    def test_opus_4_6_returns_200k(self):
+        """claude-opus-4-6 → 200_000 (CC default window)."""
         mod = _load_hook()
-        assert mod._model_max_context("claude-opus-4-6") == SONNET_4_6_MAX_CONTEXT
+        assert mod._model_max_context("claude-opus-4-6") == OPUS_4_6_MAX_CONTEXT
 
     def test_haiku_4_5_bare_returns_200k(self):
         """claude-haiku-4-5 → 200_000."""
@@ -217,14 +221,14 @@ class TestHandlePayloadTranscriptPath:
         log_dir = tmp_path / "lobster-workspace" / "logs"
         log_dir.mkdir(parents=True)
 
-        # 300k / 1M = 30%
+        # 60k / 200k (CC default) = 30%
         transcript = _make_transcript(tmp_path, [
             {
                 "model": "claude-sonnet-4-6",
                 "usage": {
-                    "input_tokens": 150_000,
-                    "cache_creation_input_tokens": 100_000,
-                    "cache_read_input_tokens": 50_000,
+                    "input_tokens": 30_000,
+                    "cache_creation_input_tokens": 20_000,
+                    "cache_read_input_tokens": 10_000,
                 },
             }
         ])
@@ -253,12 +257,12 @@ class TestHandlePayloadTranscriptPath:
         original_dedup = mod.DEDUP_FLAG
         mod.DEDUP_FLAG = dedup_flag
         try:
-            # 800k / 1M = 80% → above 70% threshold
+            # 160k / 200k (CC default) = 80% → above 70% threshold
             transcript = _make_transcript(tmp_path, [
                 {
                     "model": "claude-sonnet-4-6",
                     "usage": {
-                        "input_tokens": 800_000,
+                        "input_tokens": 160_000,
                         "cache_creation_input_tokens": 0,
                         "cache_read_input_tokens": 0,
                     },
@@ -291,11 +295,12 @@ class TestHandlePayloadTranscriptPath:
         original_dedup = mod.DEDUP_FLAG
         mod.DEDUP_FLAG = dedup_flag
         try:
+            # 180k / 200k (CC default) = 90% → above 70% threshold
             transcript = _make_transcript(tmp_path, [
                 {
                     "model": "claude-sonnet-4-6",
                     "usage": {
-                        "input_tokens": 900_000,
+                        "input_tokens": 180_000,
                         "cache_creation_input_tokens": 0,
                         "cache_read_input_tokens": 0,
                     },
