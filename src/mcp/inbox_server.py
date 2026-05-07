@@ -4537,8 +4537,7 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
         args=(_hb_stop, WAIT_HEARTBEAT_INTERVAL),
         daemon=True,
         name="dispatcher-heartbeat",
-    )
-    _hb_thread.start()
+    ).start()
 
     try:
         # Now that the observer is running, check for messages that already
@@ -4556,7 +4555,7 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
         # started above — they no longer depend on this event-loop coroutine.
         heartbeat_interval = WAIT_HEARTBEAT_INTERVAL
         elapsed = 0
-        _write_wfm_active_signal()
+        _write_dispatcher_heartbeat_from_wfm()
 
         while elapsed < timeout:
             wait_time = min(heartbeat_interval, timeout - elapsed)
@@ -5160,14 +5159,13 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
 
         # Apply offset+limit pagination. total_count is set here for the regular
         # inbox mode; for since_ts mode it was set above during collection.
-        total_count = len(messages)
-        messages = messages[offset: offset + limit]
+        total_count = len(all_messages)
+        messages = all_messages[offset: offset + limit]
 
         if not messages:
             return [TextContent(type="text", text="📭 No new messages in inbox.")]
 
         total = len(all_messages)
-        messages = all_messages[offset: offset + limit]
         log.info(f"check_inbox returning {len(messages)}/{total} message(s) (offset={offset})")
 
     # Build pagination info for the header
