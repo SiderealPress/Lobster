@@ -24,6 +24,12 @@ claude. This hook reads that flag:
 This eliminates the chicken-and-egg problem of UUID-based detection: the flag
 is written *before* CC starts, not after session_start() is called. Stale
 flags (dead PID) are safe because the check is purely process-existence-based.
+
+After detection, this hook writes the session ID to the marker file
+(~/messages/config/dispatcher-session-id) via session_role.write_dispatcher_session_id().
+This ensures is_dispatcher_session() (used by Stop and PostToolUse hooks) has a
+reliable state file to read for the rest of the session, without falling back to
+the slower process-tree walk on every hook invocation.
 """
 
 import json
@@ -231,12 +237,19 @@ def main() -> None:
             f"[{HOOK_NAME}] startup-flag detected live PID — injecting dispatcher bootup",
             file=sys.stderr,
         )
+        # Write session ID to the marker file so is_dispatcher_session() has a
+        # reliable state file to read during Stop and PostToolUse hooks.
+        # The startup flag is deleted above; without this write, is_dispatcher_session()
+        # would fall back to the process-tree walk for the entire session lifetime.
+        real_session_id = hook_input.get("session_id", "")
+        if real_session_id:
+            session_role.write_dispatcher_session_id(real_session_id)
         # Write STARTING state so the health check knows the dispatcher is
         # initializing. State transitions to WAITING when wait_for_messages
         # fires (handled by dispatcher-state-pretool.py).
         state_machine.write_state(
             state_machine.STARTING,
-            session_id=hook_input.get("session_id", ""),
+            session_id=real_session_id,
         )
 
     role = "dispatcher" if is_dispatcher else "subagent"
