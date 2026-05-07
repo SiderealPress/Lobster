@@ -45,7 +45,6 @@ time. Common placeholders:
 |---|---|---|
 | `bot-talk-poller.md.template` | `bot-talk-poller` | Hourly baseline poller for bot-talk messages |
 | `bot-talk-poller-fast.md.template` | `bot-talk-poller-fast` | 2-minute fast poller (hot-mode only) |
-| `gmail-email-pipeline.md.template` | `gmail-email-pipeline` | Gmail polling with CRM enrichment |
 
 ## How to instantiate a template
 

@@ -532,7 +532,7 @@ def _is_direct_invocation(message, bot_username: str) -> bool:
             offset = getattr(entity, "offset", 0)
             length = getattr(entity, "length", 0)
             mentioned = entity_text_source[offset:offset + length]
-            # mentioned is like "@Awp_Sebastian_bot"
+            # mentioned is like "@your_lobster_bot"
             if mentioned.lstrip("@").lower() == bot_username.lower():
                 return True
 
@@ -1873,6 +1873,14 @@ class OutboxHandler(FileSystemEventHandler):
                     os.remove(filepath)
                 except OSError:
                     pass
+                return
+
+            # Skip outbox files destined for other channels (Slack, SMS, WhatsApp, etc.)
+            # Those routers watch the same shared outbox directory and handle their own files.
+            source = reply.get('source', 'telegram')
+            if source not in ('telegram', 'lobster-group', ''):
+                log.debug(f"process_reply: skipping non-Telegram file {filepath} (source={source!r})")
+                _processing_files.discard(filepath)
                 return
 
             chat_id = reply.get('chat_id')

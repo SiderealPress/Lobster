@@ -5,14 +5,14 @@ group chat support is working end-to-end.
 
 ## Manual prerequisites (do once, before testing)
 
-1. **Disable BotFather privacy mode** for @Awp_Sebastian_bot:
+1. **Disable BotFather privacy mode** for your bot (e.g. @your_lobster_bot):
    - Open BotFather in Telegram
-   - Select @Awp_Sebastian_bot → Bot Settings → Group Privacy → Turn off
+   - Select your bot → Bot Settings → Group Privacy → Turn off
    - Without this step, the bot cannot see messages in groups where it is not
      mentioned by name.
 
 2. **Re-add the bot to the group** (required after privacy mode change):
-   - Remove @Awp_Sebastian_bot from group `-5033634362`
+   - Remove your bot from the test group
    - Re-add it — this triggers the `my_chat_member` join event that registers
      the group
 
@@ -27,8 +27,8 @@ ls ~/messages/config/group-whitelist.json
 cat ~/messages/config/group-whitelist.json
 ```
 
-Expected: file exists and contains at least `{"groups": {...}}`. The group
-`-5033634362` should already be present if previously whitelisted.
+Expected: file exists and contains at least `{"groups": {...}}`. Your test group
+should already be present if previously whitelisted.
 
 ### 2. Service restart
 
@@ -41,11 +41,11 @@ Expected: no import errors, bot starts and connects to Telegram.
 
 ### 3. Message from whitelisted user in whitelisted group
 
-Send a plain text message in group `-5033634362` from a whitelisted user.
+Send a plain text message in your test group from a whitelisted user.
 
 Expected:
 - Message appears in `~/messages/inbox/` within a few seconds
-- File has `"source": "lobster-group"` and `"group_chat_id": -5033634362`
+- File has `"source": "lobster-group"` and the correct `"group_chat_id"`
 - **No "Message received. Processing..." ack appears in the group** (suppressed for groups)
 - Lobster eventually replies in the group thread
 
@@ -86,8 +86,8 @@ These commands work in DMs with the bot (from an allowed user):
 | Command | Effect |
 |---|---|
 | `/enable_group_bot` | Enable group bot feature flag |
-| `/whitelist -5033634362` | Add a group to the whitelist |
-| `/unwhitelist -5033634362` | Remove a group from the whitelist |
+| `/whitelist <group_id>` | Add a group to the whitelist |
+| `/unwhitelist <group_id>` | Remove a group from the whitelist |
 | `/list_groups` | Show all whitelisted groups |
 
 ## Troubleshooting
