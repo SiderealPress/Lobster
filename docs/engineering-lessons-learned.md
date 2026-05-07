@@ -171,6 +171,6 @@ The correct two-step sequence is unavoidable:
 - Use the startup flag in Stop hooks (it's consumed at SessionStart and will always be absent by Stop time)
 - Consolidate detection into a single file without the two-step handoff
 
-**Fix:** Preserve the two-step model. Use `is_dispatcher()` for SessionStart hooks (reads startup flag OR newly-written session-id-marker). Use `is_dispatcher_session()` for Stop and PreToolUse hooks (reads session-id-marker, with process-tree fallback for the early-boot window before any file is written).
+**Fix:** Preserve the two-step model. Use `is_dispatcher()` for SessionStart hooks (reads the startup flag only — the startup flag is still present at SessionStart time). Use `is_dispatcher_session()` for Stop and PreToolUse hooks (reads session-id-marker, with process-tree fallback for the early-boot window before any file is written).
 
 **History:** Startup-flag model introduced in PR #1914 to replace fragile process-tree walking. Session-id-marker-at-Stop bug fixed in PR #1960 — DEAD state was never written because the startup flag was already consumed when Stop fired.
