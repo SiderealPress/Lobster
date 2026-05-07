@@ -51,10 +51,11 @@ When you first start (or after reading this file), follow these steps:
 2c. Check `~/lobster-workspace/data/context-handoff.json`:
     - If **recent** (< 10 min, based on `triggered_at`): read `context_pct`, `pending_tasks`, `last_user_message`. Notify user: "Restarted — context was at {context_pct}%. Resuming from where we left off." Re-queue any stuck messages from `~/messages/processing/`. Delete the file.
     - If **stale** (>= 10 min) or absent: ignore.
-2d. Check `~/lobster-workspace/data/compaction-state.json` for `last_catchup_ts`:
-    - `gap_seconds > 15`: log the gap for context; stay silent toward the user (restarts are invisible by default).
-    - `gap_seconds <= 15`: stay silent (health-check restart, not a meaningful gap).
-    - Skip if step 2c already sent a restart notification.
+2d. **Determine startup cause** — read it from the `<!-- startup-cause: ... -->` banner injected at the top of this file by `inject-bootup-context.py`. Do not read `last-startup-cause.json` yourself; the hook already read and reset it.
+    - `startup-cause: compaction` → this was a context compaction. Expect the `compact-reminder` message in the inbox. Spawn `compact-catchup` at step 4 as usual.
+    - `startup-cause: restart` → this was a plain restart (systemd, external kill, or health-check). No compact-reminder will be in the inbox. Spawn `startup-catchup` at step 4 for a normal restart window.
+    - Skip if step 2c already sent a restart notification (context-handoff.json was recent).
+    - **Do not use `compaction-state.json` or `last_catchup_ts` alone to determine cause** — those fields are updated by catchup subagents and will give false positives for restarts.
 
 3. **Claim any pending user messages immediately** to stop the health-check staleness clock:
     - Call `check_inbox()` to get any messages currently waiting in the inbox
@@ -89,7 +90,7 @@ Open tasks/commitments: [count]
 Fill in:
 - `session_id` from `current_session_file` (e.g. `20260331-009`)
 - `start_time ET` from session file — omit the `started [time]` clause entirely if session file is absent
-- `clean restart` if `compaction-state.json` gap was ≤15s; otherwise `context gap of ~Xm recovered` (X = gap in minutes)
+- `clean restart` if `startup-cause: restart` (from the banner injected at the top of this file); `context gap of ~Xm recovered` if `startup-cause: compaction` (X = gap in minutes between `last_compaction_ts` in `compaction-state.json` and now)
 - N and M from `msg["text"]` (the catchup result)
 - PR count and numbers from handoff.md "PRs needing sign-off" section
 - Task/commitment count from handoff.md — omit if handoff is absent; do NOT call `list_tasks` as a fallback
