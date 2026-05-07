@@ -16,10 +16,13 @@ Covers:
 - dispatcher-state-posttool.py: exits 0 silently for non-dispatcher sessions
 - dispatcher-state-posttool.py: exits 0 for unrelated tool names (no write)
 - dispatcher-state-posttool.py: exits 0 silently on malformed JSON input
-- dispatcher-state-stop.py: writes DEAD on stop for dispatcher sessions
+- dispatcher-state-stop.py: writes DEAD on stop for dispatcher sessions (via is_dispatcher_session)
 - dispatcher-state-stop.py: exits 0 silently for non-dispatcher sessions
+- dispatcher-state-stop.py: does NOT call is_dispatcher() (always False at Stop time)
 - inject-bootup-context.py: writes STARTING state when dispatcher is detected
+- inject-bootup-context.py: writes session ID to marker file (for is_dispatcher_session fallback)
 - inject-bootup-context.py: does NOT write state for subagent sessions
+- inject-bootup-context.py: does NOT write session ID for subagent sessions
 """
 
 import importlib.util
@@ -398,11 +401,13 @@ class TestStopHook:
     """dispatcher-state-stop.py — writes DEAD on dispatcher session exit."""
 
     def test_writes_dead_on_dispatcher_stop(self, tmp_path):
+        """Stop hook writes DEAD state when is_dispatcher_session() returns True."""
         state_file = str(tmp_path / "dispatcher-state.json")
         mod = _load_hook("dispatcher-state-stop.py", state_file)
         hook_input = _make_stop_hook_input()
-        with patch.object(mod.session_role, "is_dispatcher", return_value=True), \
-             patch.object(mod.session_role, "is_dispatcher_session", return_value=True), \
+        # Stop hook uses only is_dispatcher_session() — NOT is_dispatcher().
+        # is_dispatcher() reads the startup flag which is always absent at Stop time.
+        with patch.object(mod.session_role, "is_dispatcher_session", return_value=True), \
              patch("sys.stdin", StringIO(hook_input)), \
              patch("sys.exit", side_effect=_raise_system_exit):
             with pytest.raises(SystemExit):
@@ -411,11 +416,11 @@ class TestStopHook:
         assert data["state"] == "DEAD"
 
     def test_no_write_for_non_dispatcher_session(self, tmp_path):
+        """Stop hook does not write state when is_dispatcher_session() returns False."""
         state_file = str(tmp_path / "dispatcher-state.json")
         mod = _load_hook("dispatcher-state-stop.py", state_file)
         hook_input = _make_stop_hook_input()
-        with patch.object(mod.session_role, "is_dispatcher", return_value=False), \
-             patch.object(mod.session_role, "is_dispatcher_session", return_value=False), \
+        with patch.object(mod.session_role, "is_dispatcher_session", return_value=False), \
              patch("sys.stdin", StringIO(hook_input)), \
              patch("sys.exit", side_effect=_raise_system_exit):
             with pytest.raises(SystemExit):
@@ -423,11 +428,10 @@ class TestStopHook:
         assert not Path(state_file).exists()
 
     def test_writes_dead_even_with_bad_json(self, tmp_path):
-        """On bad JSON, hook_input defaults to {} but still calls is_dispatcher()."""
+        """On bad JSON, hook_input defaults to {} but is_dispatcher_session() is still called."""
         state_file = str(tmp_path / "dispatcher-state.json")
         mod = _load_hook("dispatcher-state-stop.py", state_file)
-        with patch.object(mod.session_role, "is_dispatcher", return_value=True), \
-             patch.object(mod.session_role, "is_dispatcher_session", return_value=True), \
+        with patch.object(mod.session_role, "is_dispatcher_session", return_value=True), \
              patch("sys.stdin", StringIO("{{invalid")), \
              patch("sys.exit", side_effect=_raise_system_exit):
             with pytest.raises(SystemExit):
@@ -439,13 +443,40 @@ class TestStopHook:
         """On bad JSON + non-dispatcher session, no state file is written."""
         state_file = str(tmp_path / "dispatcher-state.json")
         mod = _load_hook("dispatcher-state-stop.py", state_file)
-        with patch.object(mod.session_role, "is_dispatcher", return_value=False), \
-             patch.object(mod.session_role, "is_dispatcher_session", return_value=False), \
+        with patch.object(mod.session_role, "is_dispatcher_session", return_value=False), \
              patch("sys.stdin", StringIO("{{invalid")), \
              patch("sys.exit", side_effect=_raise_system_exit):
             with pytest.raises(SystemExit):
                 mod.main()
         assert not Path(state_file).exists()
+
+    def test_stop_hook_does_not_use_is_dispatcher(self, tmp_path):
+        """Verify is_dispatcher() is NOT called by the Stop hook (it always returns False).
+
+        The startup flag is consumed at SessionStart — is_dispatcher() always
+        returns False for Stop hooks. The hook must use is_dispatcher_session() only.
+        """
+        state_file = str(tmp_path / "dispatcher-state.json")
+        mod = _load_hook("dispatcher-state-stop.py", state_file)
+        hook_input = _make_stop_hook_input()
+
+        is_dispatcher_calls = []
+
+        def record_is_dispatcher(*args, **kwargs):
+            is_dispatcher_calls.append(True)
+            return False  # always False — startup flag is gone
+
+        with patch.object(mod.session_role, "is_dispatcher", side_effect=record_is_dispatcher), \
+             patch.object(mod.session_role, "is_dispatcher_session", return_value=True), \
+             patch("sys.stdin", StringIO(hook_input)), \
+             patch("sys.exit", side_effect=_raise_system_exit):
+            with pytest.raises(SystemExit):
+                mod.main()
+
+        assert not is_dispatcher_calls, (
+            "is_dispatcher() was called by the Stop hook but should NOT be — "
+            "it always returns False because the startup flag is consumed at SessionStart."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -521,3 +552,62 @@ class TestInjectBootupStartingState:
                 mod.main()
 
         assert not Path(state_file).exists()
+
+    def test_writes_session_id_to_marker_file_for_dispatcher(self, tmp_path):
+        """When dispatcher is detected, session ID is written to the marker file.
+
+        This ensures is_dispatcher_session() has a reliable state file to read
+        during Stop and PostToolUse hooks — without falling back to the process tree.
+        """
+        state_file = str(tmp_path / "dispatcher-state.json")
+        mod = self._load_inject_bootup(state_file)
+
+        hook_input = json.dumps({"session_id": "dispatcher-session-abc123"})
+
+        written_ids = []
+
+        def record_write(session_id):
+            written_ids.append(session_id)
+
+        with patch.object(mod, "_is_startup_flag_dispatcher", return_value=True), \
+             patch.object(mod, "_consume_startup_flag"), \
+             patch.object(mod.session_role, "write_dispatcher_session_id", side_effect=record_write), \
+             patch.object(mod, "_read_file_safe", return_value="# bootup content"), \
+             patch.object(mod, "_inject_if_exists", return_value=False), \
+             patch.object(mod, "_append_injection_log"), \
+             patch("sys.stdin", StringIO(hook_input)), \
+             patch("sys.exit", side_effect=_raise_system_exit), \
+             patch("sys.stdout", StringIO()):
+            with pytest.raises(SystemExit):
+                mod.main()
+
+        assert written_ids == ["dispatcher-session-abc123"], (
+            f"Expected session ID written to marker file, got: {written_ids}"
+        )
+
+    def test_does_not_write_session_id_for_subagent(self, tmp_path):
+        """Subagent sessions must not write to the dispatcher marker file."""
+        state_file = str(tmp_path / "dispatcher-state.json")
+        mod = self._load_inject_bootup(state_file)
+
+        hook_input = json.dumps({"session_id": "subagent-xyz"})
+
+        written_ids = []
+
+        def record_write(session_id):
+            written_ids.append(session_id)
+
+        with patch.object(mod, "_is_startup_flag_dispatcher", return_value=False), \
+             patch.object(mod.session_role, "write_dispatcher_session_id", side_effect=record_write), \
+             patch.object(mod, "_read_file_safe", return_value="# subagent bootup"), \
+             patch.object(mod, "_inject_if_exists", return_value=False), \
+             patch.object(mod, "_append_injection_log"), \
+             patch("sys.stdin", StringIO(hook_input)), \
+             patch("sys.exit", side_effect=_raise_system_exit), \
+             patch("sys.stdout", StringIO()):
+            with pytest.raises(SystemExit):
+                mod.main()
+
+        assert not written_ids, (
+            f"Expected no session ID write for subagent, but got: {written_ids}"
+        )
