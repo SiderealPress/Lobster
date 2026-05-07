@@ -13,8 +13,8 @@ Approach:
      contains a `message.usage` block.
   3. Compute total tokens = input_tokens + cache_creation_input_tokens
      + cache_read_input_tokens.
-  4. Look up the model's max context window from a known table (1M for Sonnet/Opus
-     4.x, 200k for Haiku or unknown models).
+  4. Look up the model's max context window from a known table (200k for all
+     current CC models; see MODEL_CONTEXT_SIZES for details).
   5. Compute used_pct and trigger wind-down mode if at or above WARNING_THRESHOLD.
 
 Below the warning threshold (default 70%): logs usage to context-monitor.log.
@@ -65,8 +65,12 @@ DEDUP_FLAG = Path("/tmp/lobster-context-warning-sent")
 # 'claude-haiku-4-5-20251001' resolve correctly.
 # Default fallback: 200_000 (conservative — avoids false negatives on unknown models).
 MODEL_CONTEXT_SIZES: list[tuple[str, int]] = [
-    ("claude-sonnet-4-6", 1_000_000),
-    ("claude-opus-4-6", 1_000_000),
+    # claude-sonnet-4-6 supports up to 1M tokens but CC's default window is 200k.
+    # Update when we can detect which mode is active.
+    ("claude-sonnet-4-6", 200_000),
+    # claude-opus-4-6 supports up to 1M tokens but CC's default window is 200k.
+    # Update when we can detect which mode is active.
+    ("claude-opus-4-6", 200_000),
     ("claude-haiku-4-5", 200_000),
 ]
 DEFAULT_CONTEXT_SIZE = 200_000
