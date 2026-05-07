@@ -21,8 +21,8 @@ File
     "state": "WAITING",
     "pid": 12345,
     "session_id": "...",
-    "updated_at": "2026-05-02T12:58:00Z",
-    "since": "2026-05-02T12:57:55Z"   # when this state was entered
+    "updated_at": "2026-05-02T12:58:00.000000+00:00",
+    "since": "2026-05-02T12:57:55.000000+00:00"   # when this state was entered
 }
 
 Written atomically (write .tmp, os.replace) — safe to read concurrently.
