@@ -2949,6 +2949,25 @@ print(f'prune-pr-worktrees: {result.status}')
         substep "settings.json not found or jq unavailable — skipping Migration 86"
     fi
 
+
+    # Migration 87: Install LOBSTER-INFLIGHT-REMINDERS cron entry (issue #1686).
+    # check-inflight-reminders.py runs every 3 minutes to detect stale subagent work
+    # and drop reminder messages into the dispatcher inbox.
+    local INFLIGHT_MARKER="# LOBSTER-INFLIGHT-REMINDERS"
+    local INFLIGHT_SCRIPT="$LOBSTER_DIR/scripts/check-inflight-reminders.py"
+    if [ -f "$INFLIGHT_SCRIPT" ]; then
+        chmod +x "$INFLIGHT_SCRIPT" 2>/dev/null || true
+        if ! crontab -l 2>/dev/null | grep -qF "$INFLIGHT_MARKER"; then
+            "$LOBSTER_DIR/scripts/cron-manage.sh" add "$INFLIGHT_MARKER" \
+                "*/3 * * * * uv run $INFLIGHT_SCRIPT >> $HOME/lobster-workspace/logs/inflight-reminders.log 2>&1 $INFLIGHT_MARKER" 2>/dev/null && {
+                substep "Added LOBSTER-INFLIGHT-REMINDERS cron entry (check-inflight-reminders.py, every 3 min)"
+                migrated=$((migrated + 1))
+            } || warn "Could not add LOBSTER-INFLIGHT-REMINDERS cron entry — check cron-manage.sh"
+        fi
+    else
+        warn "check-inflight-reminders.py not found at $INFLIGHT_SCRIPT — skipping Migration 87"
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
