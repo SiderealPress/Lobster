@@ -373,3 +373,131 @@ class TestHandlePayloadSignature:
         assert "inbox_dir" in sig.parameters, (
             "_handle_payload() must accept inbox_dir= for testability"
         )
+
+
+class TestWindingDownStateTransition:
+    """_write_winding_down() writes WINDING_DOWN to dispatcher-state.json (issue #1918)."""
+
+    def test_winding_down_calls_write_state_on_threshold(self, tmp_path):
+        """When context_warning is triggered, write_state(WINDING_DOWN) is called.
+
+        Uses a mock state machine so the test doesn't depend on the real
+        state_machine module being on sys.path (it may not be on older branches).
+        """
+        mod = _load_hook()
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        inbox_dir = tmp_path / "inbox"
+        inbox_dir.mkdir(parents=True, exist_ok=True)
+        dedup_flag = tmp_path / "context-warning-sent"
+
+        # Record calls to write_state via a mock state machine object
+        write_state_calls: list[dict] = []
+
+        class MockStateMachine:
+            WINDING_DOWN = "WINDING_DOWN"
+
+            @staticmethod
+            def write_state(state: str, session_id: str = "") -> None:
+                write_state_calls.append({"state": state, "session_id": session_id})
+
+        original_dedup = mod.DEDUP_FLAG
+        mod.DEDUP_FLAG = dedup_flag
+
+        # Inject mock directly — bypass the lazy import path
+        mod._STATE_MACHINE_LOADED = True
+        mod._state_machine = MockStateMachine
+
+        try:
+            # 160k / 200k (CC default) = 80% → triggers threshold
+            transcript = _make_transcript(tmp_path, [
+                {
+                    "model": "claude-sonnet-4-6",
+                    "usage": {
+                        "input_tokens": 160_000,
+                        "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": 0,
+                    },
+                }
+            ])
+            payload = {
+                "tool_name": "Bash",
+                "transcript_path": str(transcript),
+                "session_id": "test-session-001",
+            }
+            mod._handle_payload(payload, log_dir=log_dir, inbox_dir=inbox_dir)
+        finally:
+            mod.DEDUP_FLAG = original_dedup
+            mod._STATE_MACHINE_LOADED = False
+            mod._state_machine = None
+
+        assert len(write_state_calls) == 1, (
+            f"Expected exactly one write_state call, got: {write_state_calls}"
+        )
+        assert write_state_calls[0]["state"] == "WINDING_DOWN", (
+            f"Expected WINDING_DOWN, got: {write_state_calls[0]['state']}"
+        )
+        assert write_state_calls[0]["session_id"] == "test-session-001"
+
+    def test_winding_down_not_called_below_threshold(self, tmp_path):
+        """write_state(WINDING_DOWN) must NOT be called when below threshold."""
+        mod = _load_hook()
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        inbox_dir = tmp_path / "inbox"
+        inbox_dir.mkdir(parents=True, exist_ok=True)
+
+        write_state_calls: list[dict] = []
+
+        class MockStateMachine:
+            WINDING_DOWN = "WINDING_DOWN"
+
+            @staticmethod
+            def write_state(state: str, session_id: str = "") -> None:
+                write_state_calls.append({"state": state, "session_id": session_id})
+
+        mod._STATE_MACHINE_LOADED = True
+        mod._state_machine = MockStateMachine
+
+        try:
+            # 60k / 200k (CC default) = 30% → below 70% threshold
+            transcript = _make_transcript(tmp_path, [
+                {
+                    "model": "claude-sonnet-4-6",
+                    "usage": {
+                        "input_tokens": 60_000,
+                        "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": 0,
+                    },
+                }
+            ])
+            payload = {"tool_name": "Bash", "transcript_path": str(transcript)}
+            mod._handle_payload(payload, log_dir=log_dir, inbox_dir=inbox_dir)
+        finally:
+            mod._STATE_MACHINE_LOADED = False
+            mod._state_machine = None
+
+        assert len(write_state_calls) == 0, (
+            f"write_state must not be called below threshold, got: {write_state_calls}"
+        )
+
+    def test_winding_down_silent_on_import_error(self, tmp_path):
+        """_write_winding_down() must never raise — it is a best-effort write."""
+        mod = _load_hook()
+        # Ensure lazy-load state is reset so the import path is exercised
+        mod._STATE_MACHINE_LOADED = False
+        mod._state_machine = None
+
+        # Restrict sys.path to a location with no state_machine module
+        import sys
+        original_path = sys.path[:]
+        sys.path = [str(tmp_path)]  # empty dir, no state_machine
+        try:
+            # Must not raise
+            mod._write_winding_down(session_id="test")
+        except Exception as exc:
+            pytest.fail(f"_write_winding_down() must be silent on error, but raised: {exc}")
+        finally:
+            sys.path = original_path
+            mod._STATE_MACHINE_LOADED = False
+            mod._state_machine = None

@@ -743,3 +743,4 @@ class TestHasBackgroundTrueInFrontmatter:
         fn = self._fn()
         prompt = "---\ntask_id: my-task\nchat_id: 99\nsource: telegram\nbackground: true\n---\n\nbody"
         assert fn(prompt) is True
+

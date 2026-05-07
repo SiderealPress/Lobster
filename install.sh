@@ -557,18 +557,8 @@ HOOKEOF
 
     # ── SessionStart ────────────────────────────────────────────────────────────
 
-    # Write dispatcher session ID so hooks can distinguish dispatcher from subagent
-    chmod +x "$INSTALL_DIR/hooks/write-dispatcher-session-id.py" 2>/dev/null || true
-    if ! jq -e '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("write-dispatcher-session-id"))' "$_settings" > /dev/null 2>&1; then
-        _tmp=$(mktemp)
-        jq '.hooks.SessionStart = (.hooks.SessionStart // []) + [{
-            "matcher": "",
-            "hooks": [{"type": "command", "command": "python3 '"$INSTALL_DIR"'/hooks/write-dispatcher-session-id.py", "timeout": 5}]
-        }]' "$_settings" > "$_tmp" && mv "$_tmp" "$_settings"
-        success "write-dispatcher-session-id hook installed"
-    else
-        info "write-dispatcher-session-id hook already configured"
-    fi
+    # Dispatcher detection uses the startup flag written by claude-persistent.sh (issue #1908);
+    # write-dispatcher-session-id.py hook is no longer needed and has been removed.
 
     # Inject bootup context on all fresh sessions
     chmod +x "$INSTALL_DIR/hooks/inject-bootup-context.py" 2>/dev/null || true
@@ -1883,6 +1873,19 @@ print(f'prune-pr-worktrees: {result.status}')
 else
     warn "prune-pr-worktrees.py not found or uv unavailable — skipping job registration"
 fi
+
+#===============================================================================
+# Inflight Reminders
+#===============================================================================
+
+step "Setting up inflight reminders cron..."
+
+# check-inflight-reminders.py runs every 3 minutes to detect stale subagent work
+# and drop reminder messages into the dispatcher inbox. No LLM involved.
+"$INSTALL_DIR/scripts/cron-manage.sh" add "# LOBSTER-INFLIGHT-REMINDERS" \
+    "*/3 * * * * uv run $INSTALL_DIR/scripts/check-inflight-reminders.py >> $HOME/lobster-workspace/logs/inflight-reminders.log 2>&1 # LOBSTER-INFLIGHT-REMINDERS"
+
+success "Inflight reminders configured (runs every 3 minutes)"
 
 # Ensure any lingering self-check cron entry is removed on fresh installs
 { crontab -l 2>/dev/null | grep -v "# LOBSTER-SELF-CHECK" | grep -v "periodic-self-check" || true; } | crontab -

@@ -24,12 +24,6 @@ claude. This hook reads that flag:
 This eliminates the chicken-and-egg problem of UUID-based detection: the flag
 is written *before* CC starts, not after session_start() is called. Stale
 flags (dead PID) are safe because the check is purely process-existence-based.
-
-After detection, this hook writes the session ID to the marker file
-(~/messages/config/dispatcher-session-id) via session_role.write_dispatcher_session_id().
-This ensures is_dispatcher_session() (used by Stop and PostToolUse hooks) has a
-reliable state file to read for the rest of the session, without falling back to
-the slower process-tree walk on every hook invocation.
 """
 
 import json
@@ -39,15 +33,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 # Allow imports from the hooks directory (session_role).
-_HOOKS_DIR = Path(__file__).parent
-sys.path.insert(0, str(_HOOKS_DIR))
+sys.path.insert(0, str(Path(__file__).parent))
 
 import session_role  # noqa: E402 — path insert must precede this
-
-# Import state_machine for writing STARTING state on dispatcher sessions.
-_LOBSTER_SRC_DIR = _HOOKS_DIR.parent / "src"
-sys.path.insert(0, str(_LOBSTER_SRC_DIR))
-import state_machine  # noqa: E402
 
 CLAUDE_DIR = Path(os.path.expanduser("~/lobster/.claude"))
 USER_CONFIG_DIR = Path(os.path.expanduser("~/lobster-user-config/agents"))
@@ -197,30 +185,11 @@ def main() -> None:
     is_dispatcher = _is_startup_flag_dispatcher()
 
     if is_dispatcher:
-        # Two-step handoff: the launcher wrote the startup flag (with its PID)
-        # BEFORE exec-ing claude, because the UUID is only known to CC after
-        # startup.  Now that CC has started and given us the UUID via hook_input,
-        # we delete the flag (so subagents never see it) and write the session-id
-        # marker file (so is_dispatcher_session() in later hooks can use the UUID
-        # directly without falling back to the slower process-tree walk).
+        # Consume the flag so subsequent sessions (subagents) do not see it.
         _consume_startup_flag()
         print(
             f"[{HOOK_NAME}] startup-flag detected live PID — injecting dispatcher bootup",
             file=sys.stderr,
-        )
-        # Write session ID to the marker file so is_dispatcher_session() has a
-        # reliable state file to read during Stop and PostToolUse hooks.
-        # The startup flag is deleted above; without this write, is_dispatcher_session()
-        # would fall back to the process-tree walk for the entire session lifetime.
-        real_session_id = hook_input.get("session_id", "")
-        if real_session_id:
-            session_role.write_dispatcher_session_id(real_session_id)
-        # Write STARTING state so the health check knows the dispatcher is
-        # initializing. State transitions to WAITING when wait_for_messages
-        # fires (handled by dispatcher-state-pretool.py).
-        state_machine.write_state(
-            state_machine.STARTING,
-            session_id=real_session_id,
         )
 
     role = "dispatcher" if is_dispatcher else "subagent"
