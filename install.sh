@@ -1413,7 +1413,7 @@ step "Registering prune-pr-worktrees MCP scheduled job..."
 # prune-pr-worktrees runs daily at 03:00 UTC via a systemd timer managed by the
 # MCP create_scheduled_job infrastructure. It removes git worktrees for merged or
 # closed PRs that are at least 7 days old, logging results to prune-worktrees.log.
-_PRUNE_CMD="$VENV_DIR/bin/python $INSTALL_DIR/scripts/prune-pr-worktrees.py --age-days 7"
+_PRUNE_CMD="uv run $INSTALL_DIR/scripts/prune-pr-worktrees.py --age-days 7"
 if command -v uv &>/dev/null && [ -f "$INSTALL_DIR/scripts/prune-pr-worktrees.py" ]; then
     if systemctl is-enabled "lobster-prune-pr-worktrees.timer" &>/dev/null; then
         substep "prune-pr-worktrees systemd timer already enabled — skipping"
