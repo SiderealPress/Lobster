@@ -2072,7 +2072,7 @@ PYEOF
 
     # Migration 60: Register inject-bootup-context.py SessionStart hooks in settings.json
     # Adds two SessionStart entries: one empty-matcher entry for all fresh sessions
-    # (must run after write-dispatcher-session-id so role detection works), and one
+    # (must run after the launcher writes the startup flag — see issue #1908), and one
     # compact-matcher entry so bootup content is re-injected after context compaction.
     if [ -f "$CLAUDE_SETTINGS" ]; then
         chmod +x "$LOBSTER_DIR/hooks/inject-bootup-context.py" 2>/dev/null || true
@@ -2929,6 +2929,24 @@ print(f'prune-pr-worktrees: {result.status}')
         sudo systemctl daemon-reload 2>/dev/null || true
         substep "Removed defunct AWP email pipeline and Pub/Sub units"
         migrated=$((migrated + 1))
+    fi
+
+    # Migration 86: Remove write-dispatcher-session-id SessionStart hook from settings.json
+    # (issue #1908). Dispatcher detection now uses the launcher-written startup flag file
+    # instead of a UUID written by this hook. The hook file is deleted; the settings.json
+    # entry must be removed from existing installs.
+    if [ -f "$CLAUDE_SETTINGS" ] && command -v jq &>/dev/null; then
+        if jq -e '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("write-dispatcher-session-id"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+            TMP_SETTINGS=$(mktemp)
+            jq 'del(.hooks.SessionStart[] | select(.hooks[]?.command | contains("write-dispatcher-session-id")))' \
+                "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+            substep "Removed write-dispatcher-session-id hook from settings.json (Migration 86)"
+            migrated=$((migrated + 1))
+        else
+            substep "write-dispatcher-session-id hook not found in settings.json — skipping Migration 86"
+        fi
+    else
+        substep "settings.json not found or jq unavailable — skipping Migration 86"
     fi
 
     if [ "$migrated" -eq 0 ]; then

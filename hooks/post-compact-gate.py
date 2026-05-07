@@ -31,10 +31,10 @@ Detection is performed by is_dispatcher_session(), which uses a layered strategy
    field in practice (namespace mismatch — see issue #1151).  Retained for
    belt-and-suspenders; effectively a no-op in hook context.
 
-2. Hook marker file (secondary): At dispatcher startup, write-dispatcher-session-id.py
-   (a SessionStart hook) writes the session ID to
-   ~/messages/config/dispatcher-session-id.  This is the real primary
-   state-file signal for hooks (CC UUID on both sides).  Match → dispatcher.
+2. Hook marker file (secondary): At dispatcher startup, on-compact.py writes the
+   session ID to ~/messages/config/dispatcher-session-id.  This is used by
+   is_dispatcher_session() for PreToolUse hooks during active processing
+   (after the startup flag has been consumed by inject-bootup-context.py).
 
 3. Process-tree fallback: If neither state file is present or gives a definitive
    answer, walk the process tree upward.  Two consecutive claude-like ancestors
@@ -81,22 +81,31 @@ LOG_FILE = Path(os.path.expanduser("~/lobster-workspace/logs/compact-gate.log"))
 
 WAIT_FOR_MESSAGES_TOOL = "mcp__lobster-inbox__wait_for_messages"
 
+# ToolSearch is a read-only schema fetch.  It is always allowed through the gate
+# even when compact-pending is active, because the dispatcher needs it to load the
+# deferred wait_for_messages schema before it can call wait_for_messages.
+# HTTP MCP servers in Claude Code register all tools as deferred by default, so
+# ToolSearch is the only path to make wait_for_messages callable.  Blocking it
+# causes a deadlock: the gate says "call WFM", but WFM is unresolvable without
+# ToolSearch first.  See issue #1914 staging infinite-compaction-loop bug.
+TOOL_SEARCH_TOOL = "ToolSearch"
+
 CONFIRMATION_TOKEN = "LOBSTER_COMPACTED_REORIENTED"  # noqa: S105 — not a secret, intentional safe word
 
 DENY_REASON_NEEDS_TOKEN = (
     "GATE BLOCKED: Context compaction was just detected. "
-    "Read `~/lobster-workspace/.claude/sys.dispatcher.bootup.md` for the confirmation token, "
-    "then call `mcp__lobster-inbox__wait_for_messages(confirmation='LOBSTER_COMPACTED_REORIENTED')` directly. "
-    "No ToolSearch needed — the MCP schema is pre-registered."
+    "If you need the wait_for_messages schema, call ToolSearch first (it is allowed). "
+    "Then call `mcp__lobster-inbox__wait_for_messages(confirmation='LOBSTER_COMPACTED_REORIENTED')` directly. "
+    "Confirmation token: LOBSTER_COMPACTED_REORIENTED"
 )
 
 DENY_REASON = (
     "GATE BLOCKED: Context compaction was just detected. Your only permitted "
-    "action right now is to call `mcp__lobster-inbox__wait_for_messages` by its full name directly — "
-    "no ToolSearch needed, the schema is pre-registered. When it returns, you will "
-    "receive a compact-reminder system message — read it to re-orient as the "
-    "Lobster dispatcher, then resume your main loop normally. Do not retry this "
-    "tool call."
+    "actions right now are: (1) ToolSearch to load the wait_for_messages schema if needed, "
+    "then (2) call `mcp__lobster-inbox__wait_for_messages(confirmation='LOBSTER_COMPACTED_REORIENTED')` directly. "
+    "When it returns, you will receive a compact-reminder system message — read it to re-orient "
+    "as the Lobster dispatcher, then resume your main loop normally. "
+    "Do not retry this tool call."
 )
 
 def log_gate_event(tool_name: str, action: str) -> None:
@@ -141,6 +150,16 @@ def main() -> None:
 
     tool_name = data.get("tool_name", "")
     tool_input = data.get("tool_input", {})
+
+    # ToolSearch is always allowed through even when the sentinel is active.
+    # HTTP MCP servers register all tools as deferred; ToolSearch is the only way
+    # to fetch the wait_for_messages schema so the dispatcher can call it.
+    # Blocking ToolSearch creates a deadlock: gate says "call WFM", but WFM is
+    # unresolvable without schema pre-load.  ToolSearch is read-only — no side
+    # effects and no risk of bypassing the intent of the gate.
+    if tool_name == TOOL_SEARCH_TOOL:
+        log_gate_event(tool_name, "allowed-schema-fetch")
+        sys.exit(0)
 
     # If the tool IS wait_for_messages, handle based on sentinel state.
     if tool_name == WAIT_FOR_MESSAGES_TOOL:
