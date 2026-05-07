@@ -156,6 +156,13 @@ class TestIsPostCompactDispatcher:
 # ---------------------------------------------------------------------------
 
 
+# Real production path for the hook marker file — used in teardown assertions
+# to guarantee tests never write to it.
+_PRODUCTION_DISPATCHER_SESSION_FILE = Path(
+    os.path.expanduser("~/messages/config/dispatcher-session-id")
+)
+
+
 class TestMainSentinelFallback:
     """main() in inject-bootup-context.py uses the sentinel as a fallback
     when is_dispatcher() returns False but the post-compact sentinel is present.
@@ -173,6 +180,11 @@ class TestMainSentinelFallback:
         """When is_dispatcher()=False but sentinel+LOBSTER_MAIN_SESSION=1,
         dispatcher bootup must be injected (not subagent bootup).
         """
+        # Record the production file's state before the test so we can assert
+        # it was not modified (teardown guard).
+        prod_file = _PRODUCTION_DISPATCHER_SESSION_FILE
+        prod_before = prod_file.read_text() if prod_file.exists() else None
+
         # Set up file structure.
         claude_dir = tmp_path / "lobster" / ".claude"
         claude_dir.mkdir(parents=True)
@@ -187,6 +199,10 @@ class TestMainSentinelFallback:
         (tmp_path / "data").mkdir(parents=True, exist_ok=True)
 
         hook_input = json.dumps({"session_id": "unknown-post-compact-uuid"})
+
+        # Redirect the tertiary session file to a temp path so write_dispatcher_session_id()
+        # never touches ~/messages/config/dispatcher-session-id.
+        tmp_session_file = tmp_path / "messages" / "config" / "dispatcher-session-id"
 
         with _PatchEnv(
             {
@@ -207,6 +223,8 @@ class TestMainSentinelFallback:
             mod.USER_BASE_BOOTUP = tmp_path / "no-user-base"
             mod.USER_DISPATCHER_BOOTUP = tmp_path / "no-user-dispatcher"
             mod.USER_SUBAGENT_BOOTUP = tmp_path / "no-user-subagent"
+            # Redirect the hook-marker write away from the production path.
+            mod.session_role.DISPATCHER_SESSION_FILE = tmp_session_file
 
             with patch("sys.stdin", io.StringIO(hook_input)):
                 with pytest.raises(SystemExit):
@@ -217,6 +235,13 @@ class TestMainSentinelFallback:
             "Dispatcher bootup should have been injected via sentinel fallback"
         )
         assert "SUBAGENT BOOTUP" not in captured.out
+
+        # Teardown assertion: production file must be unchanged.
+        prod_after = prod_file.read_text() if prod_file.exists() else None
+        assert prod_before == prod_after, (
+            f"Test wrote to production dispatcher-session-id file! "
+            f"before={prod_before!r} after={prod_after!r}"
+        )
 
     def test_no_sentinel_normal_subagent_gets_subagent_bootup(self, tmp_path, capsys):
         """Without sentinel, an unrecognised session gets subagent bootup (normal path)."""
@@ -303,7 +328,17 @@ class TestMainSentinelFallback:
         assert "DISPATCHER BOOTUP" not in captured.out
 
     def test_primary_file_match_still_works_without_sentinel(self, tmp_path, capsys):
-        """When is_dispatcher() returns True via primary file, no sentinel needed."""
+        """When is_dispatcher() returns True via primary file, no sentinel needed.
+
+        Previously this test corrupted ~/messages/config/dispatcher-session-id
+        because session_role.DISPATCHER_SESSION_FILE is resolved at import time
+        and was never redirected to a temp path.  The fix patches it explicitly.
+        """
+        # Record the production file's state before the test so we can assert
+        # it was not modified (teardown guard).
+        prod_file = _PRODUCTION_DISPATCHER_SESSION_FILE
+        prod_before = prod_file.read_text() if prod_file.exists() else None
+
         claude_dir = tmp_path / "lobster" / ".claude"
         claude_dir.mkdir(parents=True)
         dispatcher_bootup, _ = self._make_bootup_files(claude_dir)
@@ -311,13 +346,20 @@ class TestMainSentinelFallback:
         # Write dispatcher UUID to primary file.
         data_dir = tmp_path / "data"
         data_dir.mkdir()
-        dispatcher_uuid = "known-dispatcher-uuid-abc"
+        # Use a UUID4-format test value instead of a recognisable stub so that
+        # any accidental write to the real path is still obviously wrong.
+        dispatcher_uuid = "a0b1c2d3-e4f5-4a6b-8c7d-9e0f1a2b3c4d"
         (data_dir / "dispatcher-claude-session-id").write_text(dispatcher_uuid)
 
         # No sentinel.
-        (tmp_path / "messages" / "config").mkdir(parents=True, exist_ok=True)
+        config_dir = tmp_path / "messages" / "config"
+        config_dir.mkdir(parents=True, exist_ok=True)
 
         hook_input = json.dumps({"session_id": dispatcher_uuid})
+
+        # Redirect the tertiary session file to a temp path so write_dispatcher_session_id()
+        # never touches ~/messages/config/dispatcher-session-id.
+        tmp_session_file = config_dir / "dispatcher-session-id"
 
         with _PatchEnv(
             {
@@ -331,12 +373,14 @@ class TestMainSentinelFallback:
             spec.loader.exec_module(mod)
 
             mod.DISPATCHER_BOOTUP = dispatcher_bootup
-            sentinel_path = tmp_path / "messages" / "config" / "compact-pending"
+            sentinel_path = config_dir / "compact-pending"
             mod.COMPACT_PENDING_SENTINEL = sentinel_path  # does not exist
             mod.USER_CONFIG_DIR = tmp_path / "no-user-config"
             mod.USER_BASE_BOOTUP = tmp_path / "no-user-base"
             mod.USER_DISPATCHER_BOOTUP = tmp_path / "no-user-dispatcher"
             mod.USER_SUBAGENT_BOOTUP = tmp_path / "no-user-subagent"
+            # Redirect the hook-marker write away from the production path.
+            mod.session_role.DISPATCHER_SESSION_FILE = tmp_session_file
 
             with patch("sys.stdin", io.StringIO(hook_input)):
                 with pytest.raises(SystemExit):
@@ -345,3 +389,10 @@ class TestMainSentinelFallback:
         captured = capsys.readouterr()
         assert "DISPATCHER BOOTUP" in captured.out
         assert "SUBAGENT BOOTUP" not in captured.out
+
+        # Teardown assertion: production file must be unchanged.
+        prod_after = prod_file.read_text() if prod_file.exists() else None
+        assert prod_before == prod_after, (
+            f"Test wrote to production dispatcher-session-id file! "
+            f"before={prod_before!r} after={prod_after!r}"
+        )
