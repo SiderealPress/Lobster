@@ -80,12 +80,19 @@ class _PatchEnv:
                 os.environ[k] = saved_v
 
 
-def _load_inject_hook(*, workspace: Path) -> object:
-    """Load inject-bootup-context.py with a controlled LOBSTER_WORKSPACE."""
+def _load_inject_hook(*, workspace: Path, home: "Path | None" = None) -> object:
+    """Load inject-bootup-context.py with a controlled LOBSTER_WORKSPACE (and HOME).
+
+    Pass home= to prevent HOME-derived paths (e.g. session_role.DISPATCHER_SESSION_FILE)
+    from resolving to production paths when the hook calls write_dispatcher_session_id().
+    """
     import uuid
 
     unique_name = f"inject_bootup_{uuid.uuid4().hex}"
-    with _PatchEnv({"LOBSTER_WORKSPACE": str(workspace)}):
+    env: dict = {"LOBSTER_WORKSPACE": str(workspace)}
+    if home is not None:
+        env["HOME"] = str(home)
+    with _PatchEnv(env):
         spec = importlib.util.spec_from_file_location(unique_name, _INJECT_HOOK_PATH)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
@@ -243,7 +250,15 @@ class TestStartupFlagDeletion:
 
         hook_input = json.dumps({"session_id": "dispatcher-uuid-abc"})
 
-        with _PatchEnv({"LOBSTER_WORKSPACE": str(tmp_path)}):
+        # HOME must be patched so write_dispatcher_session_id() and
+        # state_machine.write_state() resolve their paths under tmp_path,
+        # not under the real HOME — preventing production file corruption.
+        with _PatchEnv(
+            {
+                "HOME": str(tmp_path),
+                "LOBSTER_WORKSPACE": str(tmp_path),
+            }
+        ):
             spec = importlib.util.spec_from_file_location(
                 "inject_flag_delete_test", _INJECT_HOOK_PATH
             )
@@ -256,6 +271,14 @@ class TestStartupFlagDeletion:
             mod.USER_BASE_BOOTUP = tmp_path / "no-user-base"
             mod.USER_DISPATCHER_BOOTUP = tmp_path / "no-user-dispatcher"
             mod.USER_SUBAGENT_BOOTUP = tmp_path / "no-user-subagent"
+            mod.CONTEXT_INJECTION_LOG = tmp_path / "logs" / "context-injection.log"
+            # Redirect the dispatcher session-id file so write_dispatcher_session_id()
+            # never touches ~/messages/config/dispatcher-session-id.
+            mod.session_role.DISPATCHER_SESSION_FILE = (
+                tmp_path / "messages" / "config" / "dispatcher-session-id"
+            )
+            # Redirect state machine write so it doesn't touch production state file.
+            mod.state_machine.STATE_FILE = tmp_path / "data" / "dispatcher-state.json"
 
             with patch("sys.stdin", io.StringIO(hook_input)):
                 with pytest.raises(SystemExit):
@@ -286,7 +309,7 @@ class TestStartupFlagDeletion:
 
         hook_input = json.dumps({"session_id": "some-subagent-uuid"})
 
-        with _PatchEnv({"LOBSTER_WORKSPACE": str(tmp_path)}):
+        with _PatchEnv({"HOME": str(tmp_path), "LOBSTER_WORKSPACE": str(tmp_path)}):
             spec = importlib.util.spec_from_file_location(
                 "inject_no_delete_test", _INJECT_HOOK_PATH
             )
@@ -299,6 +322,7 @@ class TestStartupFlagDeletion:
             mod.USER_BASE_BOOTUP = tmp_path / "no-user-base"
             mod.USER_DISPATCHER_BOOTUP = tmp_path / "no-user-dispatcher"
             mod.USER_SUBAGENT_BOOTUP = tmp_path / "no-user-subagent"
+            mod.CONTEXT_INJECTION_LOG = tmp_path / "logs" / "context-injection.log"
 
             with patch("sys.stdin", io.StringIO(hook_input)):
                 with pytest.raises(SystemExit):
@@ -329,7 +353,10 @@ class TestMainRoutingViaStartupFlag:
         dispatcher_bootup, subagent_bootup = self._setup_bootup_files(tmp_path)
         hook_input = json.dumps({"session_id": session_id})
 
-        with _PatchEnv({"LOBSTER_WORKSPACE": str(tmp_path)}):
+        # HOME must be patched alongside LOBSTER_WORKSPACE so that any
+        # HOME-derived module-level constants (e.g. session_role.DISPATCHER_SESSION_FILE)
+        # resolved during exec_module do not point at production paths.
+        with _PatchEnv({"HOME": str(tmp_path), "LOBSTER_WORKSPACE": str(tmp_path)}):
             spec = importlib.util.spec_from_file_location(
                 f"inject_routing_{session_id[:8]}", _INJECT_HOOK_PATH
             )
@@ -342,6 +369,14 @@ class TestMainRoutingViaStartupFlag:
             mod.USER_BASE_BOOTUP = tmp_path / "no-user-base"
             mod.USER_DISPATCHER_BOOTUP = tmp_path / "no-user-dispatcher"
             mod.USER_SUBAGENT_BOOTUP = tmp_path / "no-user-subagent"
+            mod.CONTEXT_INJECTION_LOG = tmp_path / "logs" / "context-injection.log"
+            # Redirect writes to production state files so tests never corrupt
+            # ~/messages/config/dispatcher-session-id or
+            # ~/lobster-workspace/data/dispatcher-state.json.
+            mod.session_role.DISPATCHER_SESSION_FILE = (
+                tmp_path / "messages" / "config" / "dispatcher-session-id"
+            )
+            mod.state_machine.STATE_FILE = tmp_path / "data" / "dispatcher-state.json"
 
             import io as _io
             from contextlib import redirect_stdout
@@ -361,7 +396,12 @@ class TestMainRoutingViaStartupFlag:
         self._setup_bootup_files(tmp_path)
         hook_input = json.dumps({"session_id": "any-session-uuid"})
 
-        with _PatchEnv({"LOBSTER_WORKSPACE": str(tmp_path)}):
+        # HOME must be patched so that write_dispatcher_session_id() and
+        # state_machine.write_state() write to tmp paths, not production files.
+        # Without HOME patching, session_role.DISPATCHER_SESSION_FILE resolves to
+        # ~/messages/config/dispatcher-session-id (production), corrupting session
+        # role detection for the running dispatcher.
+        with _PatchEnv({"HOME": str(tmp_path), "LOBSTER_WORKSPACE": str(tmp_path)}):
             spec = importlib.util.spec_from_file_location(
                 "inject_live_flag_test", _INJECT_HOOK_PATH
             )
@@ -374,6 +414,14 @@ class TestMainRoutingViaStartupFlag:
             mod.USER_BASE_BOOTUP = tmp_path / "no-user-base"
             mod.USER_DISPATCHER_BOOTUP = tmp_path / "no-user-dispatcher"
             mod.USER_SUBAGENT_BOOTUP = tmp_path / "no-user-subagent"
+            mod.CONTEXT_INJECTION_LOG = tmp_path / "logs" / "context-injection.log"
+            # Redirect writes to production state files so tests never corrupt
+            # ~/messages/config/dispatcher-session-id or
+            # ~/lobster-workspace/data/dispatcher-state.json.
+            mod.session_role.DISPATCHER_SESSION_FILE = (
+                tmp_path / "messages" / "config" / "dispatcher-session-id"
+            )
+            mod.state_machine.STATE_FILE = tmp_path / "data" / "dispatcher-state.json"
 
             with patch("sys.stdin", io.StringIO(hook_input)):
                 with pytest.raises(SystemExit):
@@ -392,7 +440,7 @@ class TestMainRoutingViaStartupFlag:
         self._setup_bootup_files(tmp_path)
         hook_input = json.dumps({"session_id": "subagent-uuid-1234"})
 
-        with _PatchEnv({"LOBSTER_WORKSPACE": str(tmp_path)}):
+        with _PatchEnv({"HOME": str(tmp_path), "LOBSTER_WORKSPACE": str(tmp_path)}):
             spec = importlib.util.spec_from_file_location(
                 "inject_no_flag_test", _INJECT_HOOK_PATH
             )
@@ -405,6 +453,7 @@ class TestMainRoutingViaStartupFlag:
             mod.USER_BASE_BOOTUP = tmp_path / "no-user-base"
             mod.USER_DISPATCHER_BOOTUP = tmp_path / "no-user-dispatcher"
             mod.USER_SUBAGENT_BOOTUP = tmp_path / "no-user-subagent"
+            mod.CONTEXT_INJECTION_LOG = tmp_path / "logs" / "context-injection.log"
 
             with patch("sys.stdin", io.StringIO(hook_input)):
                 with pytest.raises(SystemExit):
@@ -423,7 +472,7 @@ class TestMainRoutingViaStartupFlag:
         self._setup_bootup_files(tmp_path)
         hook_input = json.dumps({"session_id": "stale-flag-session-uuid"})
 
-        with _PatchEnv({"LOBSTER_WORKSPACE": str(tmp_path)}):
+        with _PatchEnv({"HOME": str(tmp_path), "LOBSTER_WORKSPACE": str(tmp_path)}):
             spec = importlib.util.spec_from_file_location(
                 "inject_stale_flag_test", _INJECT_HOOK_PATH
             )
@@ -436,6 +485,7 @@ class TestMainRoutingViaStartupFlag:
             mod.USER_BASE_BOOTUP = tmp_path / "no-user-base"
             mod.USER_DISPATCHER_BOOTUP = tmp_path / "no-user-dispatcher"
             mod.USER_SUBAGENT_BOOTUP = tmp_path / "no-user-subagent"
+            mod.CONTEXT_INJECTION_LOG = tmp_path / "logs" / "context-injection.log"
 
             with patch("sys.stdin", io.StringIO(hook_input)):
                 with pytest.raises(SystemExit):
