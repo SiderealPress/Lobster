@@ -9,8 +9,9 @@ the 4-minute asyncio stall observed on 2026-04-26.
 The constant SESSION_IDLE_TIMEOUT_SECONDS must be defined at module level so
 health checks and tests can reference it without hardcoding the literal.
 
-As of issue #1876, the value is 1200s (20 min) to reap zombie subagent sessions
-quickly. The dispatcher session is NOT reaped at this timeout because
+As of the 45-min bump (2700s), zombie subagent sessions are reaped within 45
+minutes of crashing, giving active subagents with slow tool calls more headroom.
+The dispatcher session is NOT reaped at this timeout because
 handle_wait_for_messages() explicitly extends its idle_scope.deadline to 72000s
 on every WFM entry — making the dispatcher exempt from the global reap policy.
 """
@@ -27,14 +28,14 @@ class TestSessionIdleTimeoutConstant:
     """SESSION_IDLE_TIMEOUT_SECONDS must be exported from inbox_server."""
 
     def test_constant_is_defined_and_correct(self):
-        """MODULE must export SESSION_IDLE_TIMEOUT_SECONDS == 1200 (20 min zombie reap window).
+        """MODULE must export SESSION_IDLE_TIMEOUT_SECONDS == 2700 (45 min zombie reap window).
 
         The dispatcher is protected separately: handle_wait_for_messages() extends
         its idle_scope.deadline to 72000s on every WFM entry (issue #1876).
         """
-        assert SESSION_IDLE_TIMEOUT_SECONDS == 1200, (
-            f"Expected SESSION_IDLE_TIMEOUT_SECONDS == 1200 "
-            f"(20-min zombie-reap window; dispatcher deadline is extended separately "
+        assert SESSION_IDLE_TIMEOUT_SECONDS == 2700, (
+            f"Expected SESSION_IDLE_TIMEOUT_SECONDS == 2700 "
+            f"(45-min zombie-reap window; dispatcher deadline is extended separately "
             f"to 72000s in handle_wait_for_messages — issue #1876); "
             f"got {SESSION_IDLE_TIMEOUT_SECONDS}"
         )
@@ -48,7 +49,7 @@ class TestHttpSessionManagerIdleTimeout:
 
         Without session_idle_timeout, anyio task groups accumulate for each
         long-lived dispatcher session and can stall the event loop for minutes
-        (issue #1823).  The value is 1200s (20 min) to reap zombie subagent sessions;
+        (issue #1823).  The value is 2700s (45 min) to reap zombie subagent sessions;
         the dispatcher's own deadline is extended to 72000s on each WFM entry (issue #1876).
         """
         captured_calls = []
@@ -92,8 +93,8 @@ class TestHttpSessionManagerIdleTimeout:
             "omitting it causes anyio task group accumulation (issue #1823)"
         )
         assert kwargs["session_idle_timeout"] == SESSION_IDLE_TIMEOUT_SECONDS, (
-            f"session_idle_timeout must be {SESSION_IDLE_TIMEOUT_SECONDS}s "
-            f"(from inbox_server.SESSION_IDLE_TIMEOUT_SECONDS); "
+            f"session_idle_timeout must be SESSION_IDLE_TIMEOUT_SECONDS "
+            f"(currently {SESSION_IDLE_TIMEOUT_SECONDS}s = 45 min, from inbox_server.SESSION_IDLE_TIMEOUT_SECONDS); "
             f"got {kwargs['session_idle_timeout']}"
         )
         assert kwargs.get("stateless") is False, (

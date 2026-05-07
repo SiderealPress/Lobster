@@ -804,11 +804,13 @@ WAIT_HEARTBEAT_INTERVAL = 60
 # Idle timeout for the stateful StreamableHTTP session manager (issue #1823).
 # Sessions idle longer than this many seconds are reaped via anyio.CancelScope,
 # preventing task group accumulation that caused 4-minute event loop stalls.
-# Set to 1200s (20 min) to reap zombie subagent sessions within a reasonable
-# window after they crash. The dispatcher session is protected from this reap
-# because handle_wait_for_messages() explicitly extends its deadline to 72000s
-# (20h) on every WFM entry — see the deadline extension block there (issue #1876).
-SESSION_IDLE_TIMEOUT_SECONDS = 1200
+# Set to 2700s (45 min) to reap zombie subagent sessions within a reasonable
+# window after they crash, while giving active subagents with slow tool calls
+# more headroom before being reaped. The dispatcher session is protected from
+# this reap because handle_wait_for_messages() explicitly extends its deadline
+# to 72000s (20h) on every WFM entry — see the deadline extension block there
+# (issue #1876).
+SESSION_IDLE_TIMEOUT_SECONDS = 2700
 
 # WFM-active signal file (issue #1713 / #949): written with a Unix epoch
 # timestamp when wait_for_messages begins blocking, refreshed every
@@ -1182,6 +1184,14 @@ def _drain_reconciler_ghosts() -> int:
 
 _dispatcher_session_id: str | None = None
 _http_session_manager = None  # Set to StreamableHTTPSessionManager in main() when HTTP mode is active
+
+# Session registry: maps HTTP session_id -> Unix timestamp of first observation.
+# Populated by the session monitor loop; used to compute idle_duration_seconds
+# when a session disappears (is reaped by idle timeout).
+_session_first_seen: dict[str, float] = {}
+
+# Interval (seconds) between session usage snapshots written to session-usage.jsonl.
+SESSION_USAGE_SNAPSHOT_INTERVAL = 600  # 10 minutes
 
 # State file: the dispatcher HTTP session ID persisted to disk so hooks can
 # read it without network calls or JSONL parsing.  Written atomically by
@@ -9909,6 +9919,105 @@ async def reconcile_agent_sessions() -> None:
             log.error(f"[reconciler] Error in reconcile_agent_sessions: {exc}", exc_info=True)
 
 
+def _write_session_usage_snapshot(instances: dict, now_ts: float) -> None:
+    """Append a session usage snapshot record to session-usage.jsonl.
+
+    Writes one JSONL record per call containing:
+      - timestamp (ISO 8601)
+      - active_session_count
+      - per-session: session_id, age_seconds (time since first seen), dispatcher flag
+
+    Pure data write — no side effects beyond the append. Best-effort: silently
+    swallows any I/O error so the caller (the monitor loop) is never disrupted.
+    """
+    try:
+        session_usage_log = LOG_DIR / "session-usage.jsonl"
+        sessions_snapshot = []
+        for sid, transport in instances.items():
+            first_seen = _session_first_seen.get(sid, now_ts)
+            age_seconds = now_ts - first_seen
+            # Compute remaining idle deadline if the transport has an idle scope
+            idle_deadline = None
+            if transport.idle_scope is not None:
+                try:
+                    import anyio as _anyio
+                    remaining = transport.idle_scope.deadline - _anyio.current_time()
+                    idle_deadline = round(remaining, 1)
+                except Exception:
+                    pass
+            sessions_snapshot.append({
+                "session_id": sid,
+                "age_seconds": round(age_seconds, 1),
+                "is_dispatcher": sid == _dispatcher_session_id,
+                "idle_deadline_remaining_seconds": idle_deadline,
+            })
+        record = {
+            "ts": datetime.fromtimestamp(now_ts, tz=timezone.utc).isoformat(),
+            "active_session_count": len(instances),
+            "sessions": sessions_snapshot,
+        }
+        with session_usage_log.open("a") as f:
+            f.write(json.dumps(record) + "\n")
+    except Exception as exc:
+        log.warning(f"[session-monitor] Failed to write session usage snapshot: {exc}")
+
+
+async def _session_monitor_loop() -> None:
+    """Background task: snapshot session usage every SESSION_USAGE_SNAPSHOT_INTERVAL seconds.
+
+    Two responsibilities:
+      1. Periodically write active session count + per-session metadata to
+         ~/lobster-workspace/logs/session-usage.jsonl for data collection before
+         potential context overflow crashes.
+      2. Detect reaped sessions (sessions that disappear from _server_instances
+         after being known to us) and emit a structured INFO log with session_id,
+         reason, idle_duration_seconds, and timestamp.
+
+    Runs as a background anyio task inside the HTTP lifespan. A no-op when
+    _http_session_manager is None (stdio mode).
+    """
+    log.info("[session-monitor] Session usage monitor started "
+             f"(interval={SESSION_USAGE_SNAPSHOT_INTERVAL}s, "
+             f"log={LOG_DIR / 'session-usage.jsonl'})")
+    while True:
+        await anyio.sleep(SESSION_USAGE_SNAPSHOT_INTERVAL)
+
+        if _http_session_manager is None:
+            continue
+
+        try:
+            now_ts = time.time()
+            instances: dict = dict(getattr(_http_session_manager, "_server_instances", {}))
+
+            # Update first-seen registry for any new sessions.
+            for sid in instances:
+                if sid not in _session_first_seen:
+                    _session_first_seen[sid] = now_ts
+
+            # Detect reaped sessions: present in first-seen registry but absent
+            # from live instances. These were reaped by idle timeout between
+            # the last snapshot and this one.
+            known_sids = set(_session_first_seen.keys())
+            live_sids = set(instances.keys())
+            reaped = known_sids - live_sids
+            for sid in reaped:
+                first_seen = _session_first_seen.pop(sid)
+                idle_duration = round(now_ts - first_seen, 1)
+                log.info(
+                    "[session-reap] session_id=%s reason=idle_timeout "
+                    "idle_duration_seconds=%s timestamp=%s",
+                    sid,
+                    idle_duration,
+                    datetime.fromtimestamp(now_ts, tz=timezone.utc).isoformat(),
+                )
+
+            # Write snapshot after updating registry and detecting reaps.
+            _write_session_usage_snapshot(instances, now_ts)
+
+        except Exception as exc:
+            log.warning(f"[session-monitor] Error in monitor loop: {exc}", exc_info=True)
+
+
 async def main():
     """Run the MCP server."""
     setup_logging()
@@ -10009,6 +10118,10 @@ async def main():
         async def _lifespan(app: Starlette):
             async with session_manager.run():
                 log.info(f"[http-transport] Lobster MCP server listening on http://localhost:{port}/mcp")
+                # Launch the session usage monitor as a fire-and-forget background task.
+                # It snapshots active sessions every SESSION_USAGE_SNAPSHOT_INTERVAL seconds
+                # and logs structured INFO when sessions are reaped by idle timeout.
+                asyncio.create_task(_session_monitor_loop())
                 yield
 
         async def _mcp_handler(scope, receive, send):
