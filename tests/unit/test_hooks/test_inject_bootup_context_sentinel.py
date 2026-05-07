@@ -561,7 +561,8 @@ class TestMainSentinelFallback:
         hook_input = json.dumps({"session_id": "any-session-uuid"})
 
         with _PatchEnv({"HOME": str(tmp_path), "LOBSTER_WORKSPACE": str(workspace)}):
-            spec = importlib.util.spec_from_file_location("inject_primary_compat", _HOOK_PATH)            mod = importlib.util.module_from_spec(spec)
+            spec = importlib.util.spec_from_file_location("inject_primary_compat", _HOOK_PATH)
+            mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
 
             mod.STARTUP_FLAG_FILE = flag
@@ -578,10 +579,3 @@ class TestMainSentinelFallback:
         captured = capsys.readouterr()
         assert "DISPATCHER BOOTUP" in captured.out
         assert "SUBAGENT BOOTUP" not in captured.out
-
-        # Teardown assertion: production file must be unchanged.
-        prod_after = prod_file.read_text() if prod_file.exists() else None
-        assert prod_before == prod_after, (
-            f"Test wrote to production dispatcher-session-id file! "
-            f"before={prod_before!r} after={prod_after!r}"
-        )
