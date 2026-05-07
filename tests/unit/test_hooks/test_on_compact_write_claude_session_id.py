@@ -155,8 +155,13 @@ class TestWriteDispatcherClaudeSessionId:
         # Must not raise.
         sr.write_dispatcher_claude_session_id("any-uuid")
 
-    def test_is_dispatcher_passes_after_write(self, monkeypatch, tmp_path):
-        """After write_dispatcher_claude_session_id, is_dispatcher() returns True."""
+    def test_is_dispatcher_session_passes_after_write(self, monkeypatch, tmp_path):
+        """After write_dispatcher_claude_session_id, is_dispatcher_session() returns True.
+
+        NOTE: is_dispatcher() was simplified in issue #1908 to use startup flag only
+        and no longer checks state files.  is_dispatcher_session() is the function
+        that checks state files (for PreToolUse hook context).
+        """
         import importlib
         import session_role as _sr
 
@@ -169,12 +174,20 @@ class TestWriteDispatcherClaudeSessionId:
         new_uuid = "post-compact-uuid-1111-2222-3333"
         sr.write_dispatcher_claude_session_id(new_uuid)
 
-        assert sr.is_dispatcher({"session_id": new_uuid}) is True
+        assert sr.is_dispatcher_session({"session_id": new_uuid}) is True
 
     def test_old_uuid_no_longer_matches_after_write(self, monkeypatch, tmp_path):
-        """After updating the primary file, the old UUID is rejected."""
+        """After updating the primary file, the old UUID falls through to process-tree.
+
+        The old UUID does not match the updated primary file → state-file check
+        returns False (mismatch), which is not authoritative.  The process-tree check
+        is patched to return False (non-dispatcher process context) to isolate the
+        state-file layer.  The new UUID does match the primary file → returns True
+        immediately (no process-tree needed).
+        """
         import importlib
         import session_role as _sr
+        from unittest.mock import patch
 
         monkeypatch.setenv("LOBSTER_WORKSPACE", str(tmp_path))
         monkeypatch.setenv("HOME", str(tmp_path))
@@ -187,10 +200,11 @@ class TestWriteDispatcherClaudeSessionId:
 
         sr.write_dispatcher_claude_session_id(new_uuid)
 
-        # Old UUID should now fail the primary check.
-        assert sr.is_dispatcher({"session_id": old_uuid}) is False
-        # New UUID should pass.
-        assert sr.is_dispatcher({"session_id": new_uuid}) is True
+        # Old UUID: primary mismatch → falls through to process-tree → False (patched).
+        with patch.object(sr, "_is_dispatcher_by_process_tree", return_value=False):
+            assert sr.is_dispatcher_session({"session_id": old_uuid}) is False
+        # New UUID should pass primary check immediately (no process-tree needed).
+        assert sr.is_dispatcher_session({"session_id": new_uuid}) is True
 
 
 # ---------------------------------------------------------------------------
@@ -199,9 +213,16 @@ class TestWriteDispatcherClaudeSessionId:
 
 
 class TestOnCompactWritesPrimarySessionFile:
-    """on-compact.py must write the new UUID to the primary Claude session file
-    when the compaction fallback fires (_is_dispatcher_compact returns True via
-    LOBSTER_MAIN_SESSION + stored JSONL alive path).
+    """on-compact.py compaction fallback behavior tests (issue #1908 simplified).
+
+    After issue #1908, on-compact.py no longer writes the primary Claude UUID
+    file (dispatcher-claude-session-id) — inject-bootup-context.py now uses the
+    startup flag for SessionStart detection, so the primary file is no longer
+    needed at compaction time.
+
+    on-compact.py still writes the tertiary hook marker file
+    (~/messages/config/dispatcher-session-id) for is_dispatcher_session()
+    (PreToolUse hooks) to use during active processing.
     """
 
     def _setup_stored_session_jsonl(self, home_dir: Path, stored_uuid: str) -> None:
@@ -210,8 +231,13 @@ class TestOnCompactWritesPrimarySessionFile:
         projects_dir.mkdir(parents=True, exist_ok=True)
         (projects_dir / f"{stored_uuid}.jsonl").write_text('{"type":"text"}\n')
 
-    def test_primary_file_written_on_dispatcher_compaction(self, monkeypatch, tmp_path):
-        """When the dispatcher compact fallback fires, primary Claude session file is updated."""
+    def test_tertiary_file_written_primary_file_not_written(self, monkeypatch, tmp_path):
+        """Compaction fallback: tertiary marker file updated, primary Claude UUID file NOT written.
+
+        Issue #1908: inject-bootup-context.py uses startup flag (not UUID files),
+        so on-compact.py no longer needs to update the primary Claude UUID file.
+        It still writes the tertiary marker file for is_dispatcher_session() (PreToolUse hooks).
+        """
         import importlib
         import session_role as _sr
 
@@ -237,7 +263,7 @@ class TestOnCompactWritesPrimarySessionFile:
         last_compact_ts = tmp_path / "last-compact.ts"
 
         # Reload session_role so path resolution picks up new HOME/WORKSPACE.
-        sr = importlib.reload(_sr)
+        importlib.reload(_sr)
 
         env_overrides = {
             "LOBSTER_WORKSPACE": str(tmp_path),
@@ -248,22 +274,29 @@ class TestOnCompactWritesPrimarySessionFile:
             "LOBSTER_LAST_COMPACT_TS_FILE_OVERRIDE": str(last_compact_ts),
         }
 
-        hook_input = json.dumps({"session_id": new_uuid, "hook_event_name": "PostCompact"})
-
         with _PatchEnv(env_overrides):
             with patch("urllib.request.urlopen"):  # suppress Telegram call
                 spec = importlib.util.spec_from_file_location("on_compact_t", _HOOK_PATH)
                 mod = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(mod)
-                # Call _is_dispatcher_compact + write path directly.
-                mod._is_dispatcher_compact({"session_id": new_uuid})
+                # Call compaction fallback directly.
+                result = mod._is_dispatcher_compact({"session_id": new_uuid})
 
-        # After the call, the primary file should contain the new UUID.
-        primary_file = tmp_path / "data" / "dispatcher-claude-session-id"
-        assert primary_file.exists(), (
-            "Primary Claude session file should have been written by on-compact.py"
+        assert result is True, "_is_dispatcher_compact should return True for dispatcher compaction"
+
+        # Tertiary marker file should be updated with the new UUID.
+        tertiary_file = config_dir / "dispatcher-session-id"
+        assert tertiary_file.read_text().strip() == new_uuid, (
+            "Tertiary hook marker file must be updated to the new session UUID "
+            "so is_dispatcher_session() works in PreToolUse hooks after compaction"
         )
-        assert primary_file.read_text().strip() == new_uuid
+
+        # Primary Claude UUID file must NOT be written (issue #1908: startup flag handles this).
+        primary_file = tmp_path / "data" / "dispatcher-claude-session-id"
+        assert not primary_file.exists(), (
+            "Primary Claude session file must NOT be written by on-compact.py "
+            "(issue #1908: inject-bootup-context.py uses startup flag, not UUID files)"
+        )
 
     def test_primary_file_not_written_for_subagent_compaction(self, monkeypatch, tmp_path):
         """Subagent compactions must not write the primary dispatcher session file."""

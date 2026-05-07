@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-SessionStart / compact hook: inject dispatcher or subagent bootup files.
+SessionStart hook: inject dispatcher or subagent bootup files.
 
-Fires on every SessionStart event (and on compact sessions via the "compact"
-matcher entry in settings.json). Reads the appropriate system bootup file
+Fires on every SessionStart event. Reads the appropriate system bootup file
 and user-specific bootup files, printing their contents to stdout.
 
 Claude Code SessionStart hooks inject stdout as a system message at the start
@@ -15,27 +14,22 @@ File injection order:
 3. ~/lobster-user-config/agents/user.dispatcher.bootup.md (dispatcher only, if exists)
    OR ~/lobster-user-config/agents/user.subagent.bootup.md (subagent only, if exists)
 
-Hook ordering note:
-This hook calls session_role.write_dispatcher_session_id() when it detects a
-dispatcher session, making it self-sufficient regardless of whether
-write-dispatcher-session-id.py ran first. The write is idempotent: if
-write-dispatcher-session-id.py already ran (position 0 in settings.json),
-the file already has the correct ID and this is a no-op; if this hook runs
-first for any reason, the ID is written here and downstream hooks benefit.
+Dispatcher detection (simplified, issue #1908):
+The launcher (claude-persistent.sh) writes the subshell PID to
+~/lobster-workspace/data/dispatcher-startup-flag immediately before exec-ing
+claude. This hook reads that flag:
+  - Flag present AND PID alive (kill -0) → dispatcher session. Delete the flag.
+  - Flag absent OR PID dead → subagent session.
 
-Post-compaction sentinel fallback (Option 3, issue #1375):
-After context compaction, CC assigns a NEW session_id to the post-compact
-session.  on-compact.py writes the new UUID to both state files (Option 1),
-but as defense-in-depth this hook also checks for the compact-pending sentinel
-file.  If the sentinel exists AND LOBSTER_MAIN_SESSION=1, the session is
-treated as a post-compact dispatcher session regardless of the ID-match result.
-This bypasses the chicken-and-egg timing problem entirely for the post-compact
-case and ensures dispatcher bootup is always injected when it should be.
+This eliminates the chicken-and-egg problem of UUID-based detection: the flag
+is written *before* CC starts, not after session_start() is called. Stale
+flags (dead PID) are safe because the check is purely process-existence-based.
 """
 
 import json
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Allow imports from the hooks directory (session_role).
@@ -55,38 +49,60 @@ USER_SUBAGENT_BOOTUP = USER_CONFIG_DIR / "user.subagent.bootup.md"
 
 HOOK_NAME = "inject-bootup-context"
 
-# Compact-pending sentinel written by on-compact.py for dispatcher compactions only.
-# Used as the Option 3 fallback: sentinel present + LOBSTER_MAIN_SESSION=1 → dispatcher.
-COMPACT_PENDING_SENTINEL = Path(os.path.expanduser("~/messages/config/compact-pending"))
+# Append-only log of context injections — one line per hook run.
+# Populated at import time so tests can override by setting mod.CONTEXT_INJECTION_LOG.
+_LOBSTER_WORKSPACE = Path(
+    os.environ.get("LOBSTER_WORKSPACE", Path.home() / "lobster-workspace")
+)
+CONTEXT_INJECTION_LOG = _LOBSTER_WORKSPACE / "logs" / "context-injection.log"
+
+# Startup flag written by claude-persistent.sh before exec-ing claude.
+# Contains the launcher subshell PID. Deleted after the dispatcher is detected.
+STARTUP_FLAG_FILE = _LOBSTER_WORKSPACE / "data" / "dispatcher-startup-flag"
 
 
-def _is_post_compact_dispatcher() -> bool:
-    """Return True if this looks like a post-compaction dispatcher session.
+def _is_startup_flag_dispatcher() -> bool:
+    """Return True if a live startup flag marks this as the dispatcher session.
 
-    This is the Option 3 sentinel-based fallback for issue #1375.  It
-    bypasses the session-ID matching checks entirely for the post-compact case.
+    The launcher writes its PID to STARTUP_FLAG_FILE before exec-ing claude.
+    If the file exists and the PID is still alive (kill -0), this is the
+    dispatcher. Stale flags (dead PID) are treated as absent — safe fallback.
 
-    Conditions (both required):
-    - LOBSTER_MAIN_SESSION=1 is set in the environment (marks sessions started
-      by claude-persistent.sh as the dispatcher or its subagents).
-    - The compact-pending sentinel file exists.  on-compact.py writes this
-      file only for dispatcher compactions, so its presence is a reliable
-      dispatcher-scoped signal.
-
-    Why this is safe for subagents:
-    Subagent sessions that compact (rare) also have LOBSTER_MAIN_SESSION=1
-    and the sentinel will be present from the dispatcher's last compaction.
-    However, the sentinel is removed when the dispatcher calls
-    wait_for_messages() via post-compact-gate.py, so by the time a subagent
-    is spawned after a compaction the sentinel is normally gone.  In the
-    narrow window where a subagent starts while the sentinel is still present,
-    injecting dispatcher bootup is low-cost: the subagent will receive extra
-    context that does not conflict with its own bootup.  This is the same
-    acceptable trade-off documented in _is_dispatcher_compact().
+    Returns False on any error (OSError, ValueError, etc.) — conservative default.
     """
-    if os.environ.get("LOBSTER_MAIN_SESSION", "") != "1":
+    try:
+        if not STARTUP_FLAG_FILE.exists():
+            return False
+        raw = STARTUP_FLAG_FILE.read_text().strip()
+        if not raw:
+            return False
+        pid = int(raw)
+        # os.kill(pid, 0) checks process existence without sending a signal.
+        # Raises ProcessLookupError if the PID doesn't exist.
+        # Raises PermissionError if the PID exists but we can't signal it —
+        # that means the process IS alive (just belongs to another user), treat alive.
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            # PID is dead — stale flag.
+            return False
+        except PermissionError:
+            # PID exists, we just can't signal it — alive.
+            pass
+        return True
+    except (OSError, ValueError):
         return False
-    return COMPACT_PENDING_SENTINEL.exists()
+
+
+def _consume_startup_flag() -> None:
+    """Delete the startup flag file after the dispatcher is detected.
+
+    Silent on any error — must never crash the hook.
+    """
+    try:
+        STARTUP_FLAG_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _read_file_safe(path: Path, label: str) -> str | None:
@@ -108,71 +124,105 @@ def _read_file_safe(path: Path, label: str) -> str | None:
         return None
 
 
-def _inject_if_exists(path: Path, label: str) -> None:
-    """Read and print file contents if the file exists and is non-empty. Silent skip otherwise."""
+def _inject_if_exists(path: Path, label: str) -> bool:
+    """Read and print file contents if the file exists and is non-empty.
+
+    Returns True if the file was successfully injected, False otherwise.
+    Silent skip when the file is absent.
+    """
     if not path.exists():
-        return
+        return False
     try:
         content = path.read_text()
         if content.strip():
             print(content)
+            return True
+        return False
     except OSError as exc:
         print(
             f"[{HOOK_NAME}] WARNING: could not read {path} ({label}): {exc}",
             file=sys.stderr,
         )
+        return False
+
+
+def _append_injection_log(
+    session_id: str,
+    role: str,
+    injected_files: list[str],
+) -> None:
+    """Append one line to the context injection log.
+
+    Format:
+      <ISO UTC timestamp> | session=<id> | role=<role> | injected=[file1, file2, ...]
+
+    Creates the log file and any missing parent directories if needed.
+    Errors are swallowed — logging must never break the hook.
+    """
+    try:
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        files_repr = "[" + ", ".join(injected_files) + "]"
+        line = f"{timestamp} | session={session_id} | role={role} | injected={files_repr}\n"
+        log_path = CONTEXT_INJECTION_LOG
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a") as fh:
+            fh.write(line)
+    except Exception:  # noqa: BLE001
+        pass  # logging must not break injection
 
 
 def main() -> None:
-    # Read hook input from stdin to detect dispatcher vs subagent role.
+    # Read hook input from stdin (provides session_id for logging).
     try:
         hook_input = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError):
         hook_input = {}
 
-    is_dispatcher = session_role.is_dispatcher(hook_input)
+    session_id = hook_input.get("session_id", "unknown")
 
-    # Option 3 fallback (issue #1375): if the compact-pending sentinel exists
-    # and LOBSTER_MAIN_SESSION=1, treat this as a post-compact dispatcher session
-    # regardless of what is_dispatcher() returned.  This covers the case where
-    # Option 1 (writing the new UUID in on-compact.py) hasn't propagated yet or
-    # fails silently, and provides defense-in-depth for the post-compact window.
-    if not is_dispatcher and _is_post_compact_dispatcher():
+    # Simplified dispatcher detection (issue #1908):
+    # Check the launcher-written startup flag file. Live PID = dispatcher.
+    is_dispatcher = _is_startup_flag_dispatcher()
+
+    if is_dispatcher:
+        # Consume the flag so subsequent sessions (subagents) do not see it.
+        _consume_startup_flag()
         print(
-            f"[{HOOK_NAME}] sentinel fallback: compact-pending exists + "
-            "LOBSTER_MAIN_SESSION=1; treating as post-compact dispatcher",
+            f"[{HOOK_NAME}] startup-flag detected live PID — injecting dispatcher bootup",
             file=sys.stderr,
         )
-        is_dispatcher = True
 
-    # If this is the dispatcher session, write the session ID to the marker file.
-    # This makes the hook self-sufficient regardless of whether
-    # write-dispatcher-session-id.py ran first. The write is idempotent.
-    if is_dispatcher:
-        session_id = session_role.get_session_id(hook_input)
-        if session_id:
-            session_role.write_dispatcher_session_id(session_id)
+    role = "dispatcher" if is_dispatcher else "subagent"
+    injected: list[str] = []
 
     # 1. Inject system bootup file based on role.
     if is_dispatcher:
         content = _read_file_safe(DISPATCHER_BOOTUP, "sys.dispatcher.bootup.md")
+        system_file = DISPATCHER_BOOTUP
     else:
         content = _read_file_safe(SUBAGENT_BOOTUP, "sys.subagent.bootup.md")
+        system_file = SUBAGENT_BOOTUP
 
     if content is None:
+        _append_injection_log(session_id, role, injected)
         sys.exit(0)
 
     print(content)
+    injected.append(system_file.name)
 
     # 2. Inject user base bootup (both roles).
-    _inject_if_exists(USER_BASE_BOOTUP, "user.base.bootup.md")
+    if _inject_if_exists(USER_BASE_BOOTUP, "user.base.bootup.md"):
+        injected.append(USER_BASE_BOOTUP.name)
 
     # 3. Inject role-specific user bootup.
     if is_dispatcher:
-        _inject_if_exists(USER_DISPATCHER_BOOTUP, "user.dispatcher.bootup.md")
+        if _inject_if_exists(USER_DISPATCHER_BOOTUP, "user.dispatcher.bootup.md"):
+            injected.append(USER_DISPATCHER_BOOTUP.name)
     else:
-        _inject_if_exists(USER_SUBAGENT_BOOTUP, "user.subagent.bootup.md")
+        if _inject_if_exists(USER_SUBAGENT_BOOTUP, "user.subagent.bootup.md"):
+            injected.append(USER_SUBAGENT_BOOTUP.name)
 
+    _append_injection_log(session_id, role, injected)
     sys.exit(0)
 
 
