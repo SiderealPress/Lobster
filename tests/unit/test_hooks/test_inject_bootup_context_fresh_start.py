@@ -114,8 +114,20 @@ def _make_bootup_files(claude_dir: Path) -> tuple[Path, Path]:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skip(
+    reason=(
+        "Issue #1908 removed _is_fresh_start_dispatcher() from inject-bootup-context.py. "
+        "Dispatcher detection now uses the launcher-written startup flag (PID file). "
+        "These tests are retained for history but are no longer executable."
+    )
+)
 class TestIsFreshStartDispatcher:
-    """Unit tests for the _is_fresh_start_dispatcher() helper in inject-bootup-context.py."""
+    """Unit tests for the _is_fresh_start_dispatcher() helper in inject-bootup-context.py.
+
+    SKIPPED: _is_fresh_start_dispatcher() was removed in issue #1908. Dispatcher
+    detection now uses the launcher-written startup flag file (PID-based). The
+    UUID/primary-file approach is no longer in use.
+    """
 
     def test_returns_true_when_primary_file_absent_and_main_session(
         self, tmp_path, monkeypatch

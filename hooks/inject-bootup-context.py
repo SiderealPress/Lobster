@@ -105,40 +105,6 @@ def _consume_startup_flag() -> None:
         pass
 
 
-def _is_fresh_start_dispatcher() -> bool:
-    """Return True if this looks like a fresh-restart dispatcher session (issue #1868).
-
-    On a genuine fresh restart, the MCP server clears the primary state file
-    (dispatcher-claude-session-id) on startup.  That file is absent until the
-    dispatcher calls session_start().  write-dispatcher-session-id.py may also
-    skip updating the tertiary marker file if the previous session's JSONL has
-    a recent mtime, leaving a stale UUID in the tertiary file.
-
-    Consequence: is_dispatcher() finds no matching state file and returns False.
-    The compact-pending sentinel fallback (_is_post_compact_dispatcher) is also
-    inactive because no compaction occurred.  inject-bootup-context.py then
-    falls back to injecting subagent bootup — wrong for the dispatcher.
-
-    Fix: absent primary file + LOBSTER_MAIN_SESSION=1 → treat as dispatcher.
-
-    Why this is safe:
-    - Subagents are spawned only after the dispatcher calls session_start(),
-      which writes the primary file.  By the time any subagent SessionStart
-      fires, the primary file is present.
-    - Compaction events: on-compact.py proactively writes the primary file
-      with the new UUID before the post-compact SessionStart fires.  The
-      primary file is therefore present for compaction events, not absent.
-
-    Returns False on any OSError (cannot stat the primary file) — safe default.
-    """
-    if os.environ.get("LOBSTER_MAIN_SESSION", "") != "1":
-        return False
-    try:
-        return not session_role._get_mcp_claude_session_file().exists()
-    except OSError:
-        return False
-
-
 def _read_file_safe(path: Path, label: str) -> str | None:
     """Return file contents or None on any error or empty file, logging to stderr."""
     if not path.exists():
