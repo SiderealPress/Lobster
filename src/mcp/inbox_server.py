@@ -4115,7 +4115,7 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
         if session_id is not None:
             _tag_dispatcher_session(session_id)
             # Extend the dispatcher's idle-reap deadline to 20 hours on every
-            # WFM entry.  SESSION_IDLE_TIMEOUT_SECONDS is now 1200s to reap
+            # WFM entry.  SESSION_IDLE_TIMEOUT_SECONDS is now 2700s to reap
             # zombie subagent sessions quickly; without this extension the
             # dispatcher would be reaped after 20 min of silence (issue #1876).
             transport = _http_session_manager._server_instances.get(session_id)
@@ -10004,7 +10004,7 @@ async def _session_monitor_loop() -> None:
                 first_seen = _session_first_seen.pop(sid)
                 idle_duration = round(now_ts - first_seen, 1)
                 log.info(
-                    "[session-reap] session_id=%s reason=idle_timeout "
+                    "[session-reap] session_id=%s reason=session_ended "
                     "idle_duration_seconds=%s timestamp=%s",
                     sid,
                     idle_duration,

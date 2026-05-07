@@ -2891,22 +2891,22 @@ print(f'prune-pr-worktrees: {result.status}')
         warn "prune-pr-worktrees.py not found at $_m83_script or uv unavailable — skipping Migration 83"
     fi
 
-    # Migration 84: Register session-exit-logger hook for Stop and SubagentStop events.
+    # Migration 88: Register session-exit-logger hook for Stop and SubagentStop events.
     # Passively logs every session exit to observations.log with category "session_exit".
     # Always exits 0 — never blocks the session. Safe to add without restart.
     if [ -f "$CLAUDE_SETTINGS" ] && command -v jq &>/dev/null; then
-        local _m84_script="$LOBSTER_DIR/hooks/session-exit-logger.py"
-        if [ -f "$_m84_script" ]; then
-            chmod +x "$_m84_script" || true
-            local _m84_has_stop
-            _m84_has_stop=$(jq -r '
+        local _m88_script="$LOBSTER_DIR/hooks/session-exit-logger.py"
+        if [ -f "$_m88_script" ]; then
+            chmod +x "$_m88_script" || true
+            local _m88_has_stop
+            _m88_has_stop=$(jq -r '
                 [.hooks.Stop[]?.hooks[]?.command // empty]
                 | map(select(contains("session-exit-logger")))
                 | length
             ' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
-            if [ "${_m84_has_stop:-0}" = "0" ] || [ "${_m84_has_stop:-0}" = "" ]; then
+            if [ "${_m88_has_stop:-0}" = "0" ] || [ "${_m88_has_stop:-0}" = "" ]; then
                 TMP_SETTINGS=$(mktemp)
-                jq --arg cmd "python3 $_m84_script" \
+                jq --arg cmd "python3 $_m88_script" \
                    '.hooks.Stop = (.hooks.Stop // []) + [{
                     "matcher": "",
                     "hooks": [{
@@ -2918,15 +2918,15 @@ print(f'prune-pr-worktrees: {result.status}')
                 substep "Registered session-exit-logger Stop hook"
                 migrated=$((migrated + 1))
             fi
-            local _m84_has_subagent
-            _m84_has_subagent=$(jq -r '
+            local _m88_has_subagent
+            _m88_has_subagent=$(jq -r '
                 [.hooks.SubagentStop[]?.hooks[]?.command // empty]
                 | map(select(contains("session-exit-logger")))
                 | length
             ' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
-            if [ "${_m84_has_subagent:-0}" = "0" ] || [ "${_m84_has_subagent:-0}" = "" ]; then
+            if [ "${_m88_has_subagent:-0}" = "0" ] || [ "${_m88_has_subagent:-0}" = "" ]; then
                 TMP_SETTINGS=$(mktemp)
-                jq --arg cmd "python3 $_m84_script" \
+                jq --arg cmd "python3 $_m88_script" \
                    '.hooks.SubagentStop = (.hooks.SubagentStop // []) + [{
                     "matcher": "",
                     "hooks": [{
@@ -2939,7 +2939,7 @@ print(f'prune-pr-worktrees: {result.status}')
                 migrated=$((migrated + 1))
             fi
         else
-            warn "session-exit-logger.py not found at $_m84_script — skipping Migration 84"
+            warn "session-exit-logger.py not found at $_m88_script — skipping Migration 88"
         fi
     fi
 
