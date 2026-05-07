@@ -197,7 +197,12 @@ def main() -> None:
     is_dispatcher = _is_startup_flag_dispatcher()
 
     if is_dispatcher:
-        # Consume the flag so subsequent sessions (subagents) do not see it.
+        # Two-step handoff: the launcher wrote the startup flag (with its PID)
+        # BEFORE exec-ing claude, because the UUID is only known to CC after
+        # startup.  Now that CC has started and given us the UUID via hook_input,
+        # we delete the flag (so subagents never see it) and write the session-id
+        # marker file (so is_dispatcher_session() in later hooks can use the UUID
+        # directly without falling back to the slower process-tree walk).
         _consume_startup_flag()
         print(
             f"[{HOOK_NAME}] startup-flag detected live PID — injecting dispatcher bootup",
