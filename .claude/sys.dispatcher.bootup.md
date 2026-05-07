@@ -28,7 +28,7 @@ When you first start (or after reading this file), follow these steps:
 > **Note on stale agent sessions:** The `on-fresh-start.py` SessionStart hook runs automatically before your first turn and calls `agent-monitor.py --mark-failed` to clear any sessions left in "running" state. You do not need to do this manually.
 
 0. Call `session_start(agent_type="dispatcher", agent_id="lobster-dispatcher", description="Lobster dispatcher main loop", chat_id=<ADMIN_CHAT_ID>)` to register this session as the dispatcher. This clears any stale `_dispatcher_session_id` from a previous dispatcher instance and ensures all guarded MCP tools (`send_reply`, `check_inbox`, etc.) work immediately. Without this, a new dispatcher session may be blocked by a stale session ID from the previous instance.
-   - Get ADMIN_CHAT_ID from `config.env` (`grep ADMIN_CHAT_ID ~/lobster-config/config.env` or equivalent), or use the `chat_id` from `context-handoff.json` if available.
+   - Get ADMIN_CHAT_ID from `lobster.conf` (`grep ADMIN_CHAT_ID ~/lobster-config/lobster.conf` or equivalent), or use the `chat_id` from `context-handoff.json` if available.
    - This is the FIRST action before any guarded tools — must fire before step 2d.
 
 0b. **ToolSearch pre-load** — ALL MCP tools are deferred by default in Claude Code. Without schema pre-loading, the CC client's Zod validator stringifies numeric/boolean args, causing `InputValidationError: '10' is not of type 'integer'`. Call ToolSearch immediately after step 0:
@@ -74,14 +74,6 @@ When you first start (or after reading this file), follow these steps:
 
 **When the startup catchup result arrives** (`task_id: "startup-catchup"`, `chat_id: 0`): read for situational awareness, update `handoff.md` if anything notable changed (failed subagents, open threads). Do NOT relay to user — except if `LOBSTER_DEBUG=true`, send the post-bootup status message below. Then `mark_processed`.
 
-**Proactive resumption after catchup (REQUIRED):** After marking the catchup processed, scan `handoff.md` and the current session file for pending items that require *your* action — not waiting for the user. Specifically:
-
-- **Active agenda in progress**: If there is a multi-item agenda (e.g. "Agenda item 3: planning/architect layer") where earlier items were completed but a later item was not started, AND no queued user message already covers it — begin working on it (spawn a subagent or proceed inline).
-- **Dispatcher-owes-user thread**: If session notes say "Await user response on X" but you are the one who owes the next action (e.g. you promised to follow up, or the prior session noted the dispatcher should resume), take it now.
-- **Critical distinction**: Do NOT resume items that are waiting for the *user's* decision or response (e.g. "awaiting sign-off on PR #NNNN", "waiting for user go-ahead"). Those are correctly passive. Only act on items where the dispatcher is the blocking party.
-
-If there is nothing to proactively resume, proceed to `wait_for_messages` normally. If there are items to resume, spawn the first one (or begin inline) before entering `wait_for_messages`. **When multiple items qualify, take the earliest uncompleted agenda item by sequence number** (e.g. "Agenda item 3" before "Agenda item 5"). If the items are not sequentially numbered, take the topmost qualifying item in the Open Tasks list in `handoff.md`.
-
 **Post-bootup status message (LOBSTER_DEBUG=true only):** Send to ADMIN_CHAT_ID. Keep to 5-8 lines, mobile-friendly. Build it from `handoff.md` (just read for startup) and `msg["text"]` (the catchup summary). Format:
 
 ```
@@ -104,17 +96,6 @@ Fill in:
 - URGENT line only if handoff contains items marked URGENT or blocked — omit entirely if none
 
 ---
-
-### Project Health Checks (if active pipeline projects)
-
-If handoff.md references an active pipeline project with a `spec_path` or `Project Invariants` section:
-- Read the project invariants from handoff.md
-- Run any health check scripts referenced there (e.g., `health-check.sh`)
-- Alert the user if any invariant fails (same urgency as the branch-check alert)
-
-This is especially important after compaction: the health check catches drift between claimed state and actual filesystem state before work resumes.
-
-If handoff.md uses a machine-readable format for project invariants (e.g., a YAML or JSON block under a `## Project Invariants` heading), read that block and evaluate each invariant as a filesystem or state check. Log any failures to the post-bootup status message.
 
 ## Main Loop
 
@@ -202,19 +183,13 @@ Never say "Noted." alone — it doesn't tell the user whether work is happening.
 2. Generate a short task_id (e.g. "fix-pr-475", "upstream-check")
 3. Write in-flight entry (see "In-flight work tracking" below)
 4. Task(
-       prompt="---\ntask_id: <task_id>\nchat_id: <chat_id>\nsource: <source>\nbackground: true\n---\n\n...",
+       prompt="---\ntask_id: <task_id>\nchat_id: <chat_id>\nsource: <source>\n---\n\n...",
        subagent_type="...",
        run_in_background=true
    )
 5. mark_processed(message_id)
 6. Return to wait_for_messages() IMMEDIATELY
 ```
-
-> **Background intent — two signals required:** Always include BOTH `run_in_background=true` as a
-> tool parameter AND `background: true` in the prompt frontmatter. The `require-background-agent.py`
-> hook accepts either, but some Claude Code versions (2.1.123+) strip `run_in_background` before
-> the hook sees it when the Agent schema has `additionalProperties: false` (issue #1872). The
-> frontmatter key is the schema-safe fallback and must be in every spawned-agent prompt.
 
 Agent registration is fully automatic — a PostToolUse hook fires after each Task call. You do not need to call `register_agent`.
 
@@ -308,7 +283,7 @@ After a context compaction you lose situational awareness of the last ~30 minute
 - Do NOT send_reply — this is internal context, except:
   - If `LOBSTER_DEBUG=true`: send a brief status to ADMIN_CHAT_ID:
     `"🔄 Back online. Context recovered from [window_start] to [now]. [N messages] processed, [M subagents] were running."`
-    (Fill in N and M from `msg["text"]`. ADMIN_CHAT_ID from `config.env` or the compact-reminder context.)
+    (Fill in N and M from `msg["text"]`. ADMIN_CHAT_ID from `lobster.conf` or the compact-reminder context.)
     **Before composing this message, convert `[window_start]` and `[now]` from UTC ISO timestamps to ET (e.g. "5:29 AM ET"). Rule: EDT (UTC-4) mid-March through early November, EST (UTC-5) otherwise. Never send raw UTC ISO strings to the user.**
 - `mark_processed`
 
@@ -371,11 +346,12 @@ Scheduled reminders arrive from `scheduled-tasks/dispatch-job.sh` (user-created 
            continue  # ← explicit early exit — prompt construction never reached
 
        # Generic dispatch: user-created job (non-destructive name)
-       prompt = f"---\ntask_id: scheduled-job-{reminder_type}\nchat_id: 0\nsource: system\nbackground: true\n---\n\n{task_content}"
+       prompt = f"---\ntask_id: scheduled-job-{reminder_type}\nchat_id: 0\nsource: system\n---\n\n{task_content}"
    else:
        # Unknown reminder with no task content
-       prompt = f"---\ntask_id: unknown-reminder\nchat_id: 0\nsource: system\nbackground: true\n---\n\nUnknown reminder_type: '{reminder_type}'. Call write_result and return."
-   Spawn subagent: subagent_type: "lobster-generalist", prompt: prompt
+       prompt = f"---\ntask_id: unknown-reminder\nchat_id: 0\nsource: system\n---\n\nUnknown reminder_type: '{reminder_type}'. Call write_result and return."
+   subagent_type = msg.get("subagent_type", "lobster-generalist")
+   Spawn subagent: subagent_type: subagent_type, prompt: prompt
 5. mark_processed(message_id)
 ```
 
@@ -476,34 +452,6 @@ Background subagents call `write_result(task_id, chat_id, text, ...)`, which dro
            mark_processed(message_id)
            continue
 
-       # --- PROMPT-PREP RESULT: spawn real subagent from spec ---
-       if msg.get("task_id", "").startswith("prompt-prep-"):
-           import re as _re, yaml as _yaml
-           spec_match = _re.search(r"## spawn-spec\n```yaml\n(.*?)```", msg["text"], _re.DOTALL)
-           prompt_match = _re.search(r"## prompt\n(.*)", msg["text"], _re.DOTALL)
-           if spec_match and prompt_match:
-               spec = _yaml.safe_load(spec_match.group(1))
-               real_task_id = spec.get("task_id", "prompt-prep-result")
-               real_subagent_type = spec.get("subagent_type", "lobster-generalist")
-               real_prompt = prompt_match.group(1).strip()
-               Bash(f'echo \'{"task_id": "{real_task_id}", "type": "prompt-prep-spawned", "description": "spawned by prompt-prep", "started_at": "{datetime.utcnow().isoformat()}Z", "chat_id": {spec.get("chat_id", 0)}, "status": "running"}\' >> ~/lobster-workspace/data/inflight-work.jsonl')
-               Task(
-                   subagent_type=real_subagent_type,
-                   task_id=real_task_id,
-                   run_in_background=True,
-                   prompt=real_prompt,
-               )
-               mark_processed(message_id)
-           else:
-               # Malformed spec: relay text to user with error notice
-               send_reply(
-                   chat_id=msg["chat_id"],
-                   text="Prompt prep returned a malformed spec -- here is what it produced:\n\n" + msg["text"][:400],
-                   source=msg.get("source", "telegram"),
-               )
-               mark_processed(message_id)
-           continue
-
        # --- ENGINEER → REVIEWER routing ---
        pr_url_match = re.search(r"https://github\.com/.*/pull/\d+", msg["text"])
        if pr_url_match:
@@ -522,7 +470,7 @@ Background subagents call `write_result(task_id, chat_id, text, ...)`, which dro
                    run_in_background=True,
                    prompt=(
                        f"---\ntask_id: {reviewer_task_id}\nchat_id: {msg['chat_id']}\n"
-                       f"source: {msg.get('source', 'telegram')}\nbackground: true\n---\n\n"
+                       f"source: {msg.get('source', 'telegram')}\n---\n\n"
                        f"Review PR {pr_url} and post findings as a GitHub comment.\n\n"
                        f"REVIEWER PROCESS (follow this order exactly):\n"
                        f"1. Run: gh pr diff {pr_number} --repo {pr_repo}\n"
@@ -561,7 +509,7 @@ Background subagents call `write_result(task_id, chat_id, text, ...)`, which dro
                run_in_background=True,
                prompt=(
                    f"---\ntask_id: relay-{msg.get('task_id', 'result')}\n"
-                   f"chat_id: {msg['chat_id']}\nsource: {msg.get('source', 'telegram')}\nbackground: true\n---\n\n"
+                   f"chat_id: {msg['chat_id']}\nsource: {msg.get('source', 'telegram')}\n---\n\n"
                    f"Deliver a subagent result to the user. Read each artifact, compose a reply "
                    f"(summary text + artifact contents separated by ---; no raw file paths), "
                    f"then call write_result(sent_reply_to_user=False) — the dispatcher relays it.\n\n"
@@ -578,7 +526,7 @@ Background subagents call `write_result(task_id, chat_id, text, ...)`, which dro
                run_in_background=True,
                prompt=(
                    f"---\ntask_id: relay-{msg.get('task_id', 'result')}\n"
-                   f"chat_id: {msg['chat_id']}\nsource: {msg.get('source', 'telegram')}\nbackground: true\n---\n\n"
+                   f"chat_id: {msg['chat_id']}\nsource: {msg.get('source', 'telegram')}\n---\n\n"
                    f"Compose a clear, mobile-friendly reply from the result text below. "
                    f"Call send_reply(chat_id={msg['chat_id']}, ...) directly, then call "
                    f"write_result(sent_reply_to_user=True) so the dispatcher does not relay again.\n\n"
@@ -708,7 +656,6 @@ Triage heuristic: relay failures always; relay successes with actionable finding
            f"task_id: {consolidation_task_id}\n"
            f"chat_id: 0\n"
            f"source: system\n"
-           f"background: true\n"
            f"---\n\n"
            f"Nightly consolidation triggered at {msg.get('timestamp', 'unknown time')}.\n\n"
            f"Synthesize recent memory events into the canonical memory files. "
@@ -826,7 +773,7 @@ If `reacted_to_text` is empty: use `get_conversation_history` to get context.
                    subagent_type="review",
                    run_in_background=True,
                    prompt=(
-                       f"---\ntask_id: {reviewer_task_id}\nchat_id: {chat_id}\nsource: {source}\nbackground: true\n---\n\n"
+                       f"---\ntask_id: {reviewer_task_id}\nchat_id: {chat_id}\nsource: {source}\n---\n\n"
                        f"Review PR {pr_url} and post findings as a GitHub comment.\n\n"
                        f"REVIEWER PROCESS (follow this order exactly):\n"
                        f"1. Run: gh pr diff {pr_number} --repo {pr_repo}\n"
@@ -867,7 +814,7 @@ If `reacted_to_text` is empty: use `get_conversation_history` to get context.
        parked   = next((r for r in results if r.get("metadata", {}).get("job_name") == job_name), None)
        if parked:
            task_content = parked["content"]
-           prompt = f"---\ntask_id: scheduled-job-{job_name}\nchat_id: 0\nsource: system\nbackground: true\n---\n\n{task_content}"
+           prompt = f"---\ntask_id: scheduled-job-{job_name}\nchat_id: 0\nsource: system\n---\n\n{task_content}"
            Task(subagent_type="lobster-generalist", run_in_background=True, prompt=prompt)
            send_reply(chat_id=chat_id, text=f"Job \'{job_name}\' dispatched.", source=source)
        else:
@@ -1038,13 +985,7 @@ This rule is unconditional — even if the session processed zero messages, the 
 
 ## Skill System
 
-Skills are injected in two phases to avoid redundant context bloat:
-
-**Phase 1 — Session startup (once):** Call `get_skill_context(mode="always")` once at session start. Treat the result as static context (like CLAUDE.md). Do not call it again per-message.
-
-**Phase 2 — Per-message:** Call `get_skill_context_for_message(message_text=<user_message>)` at each message processing start. This returns only triggered-mode skills whose trigger keywords appear in the current message — always-mode skills are intentionally excluded (already covered by Phase 1). Apply the returned context alongside base context.
-
-> **Why two phases?** Always-mode skills are stable for the session — re-injecting 2 KB on every message wastes context window. Triggered skills are dynamic — they should only activate when their keywords appear.
+At message processing start (when skills are enabled), call `get_skill_context` to load assembled context from all active skills. Apply returned instructions alongside base context.
 
 **Commands:**
 - `/shop` / `/shop list` → `list_skills`
@@ -1080,7 +1021,7 @@ Task(
     subagent_type="review",
     run_in_background=True,
     prompt=(
-        f"---\ntask_id: {task_id}\nchat_id: {chat_id}\nsource: {source}\nbackground: true\n---\n\n"
+        f"---\ntask_id: {task_id}\nchat_id: {chat_id}\nsource: {source}\n---\n\n"
         f"Design review requested.\n\n"
         f"Design description:\n{design_text}\n\n"
         # Only include if actual value available — NEVER include as "None"
@@ -1112,34 +1053,6 @@ pr_ref = parts[1].strip() if len(parts) > 1 else ""
 
 ---
 
-### prompt-prep flow
-
-Use prompt-prep when a request requires reading more than one file to compose a good prompt, the correct subagent type or skill is not obvious from the message alone, or the request references history or state that needs lookup.
-
-Skip prompt-prep for: simple inline answers, clearly-typed requests ("merge PR #N", "list tasks"), system messages (chat_id=0).
-
-Pattern:
-1. claim_and_ack(message_id, ack_text="On it -- figuring out the best approach.", chat_id=chat_id, source=source)
-2. task_id = f"prompt-prep-{slug}"
-3. Write inflight entry
-4. Task(
-       subagent_type="lobster-generalist",
-       run_in_background=True,
-       prompt=(
-           "Read ~/lobster/.claude/agents/prompt-prep.md first for full instructions.\n\n"
-           f"---\ntask_id: {task_id}\nchat_id: {chat_id}\nsource: {source}\nbackground: true\n---\n\n"
-           f"message_text: {msg['text']}\n"
-           f"rough_intent: {rough_intent}\n"
-           f"trigger_message_id: {message_id}\n"
-       )
-   )
-5. mark_processed(message_id)
-6. Return to wait_for_messages() IMMEDIATELY
-
-Note: Phase 1 uses subagent_type="lobster-generalist" with the agent definition file read as first step. Phase 2 will introduce a named "prompt-prep" agent type.
-
----
-
 ## Voice Note Brain Dumps
 
 When a voice message appears to be a brain dump (multiple unrelated topics, stream of consciousness, "brain dump"/"note to self" phrasing), use the **brain-dumps** agent.
@@ -1148,7 +1061,7 @@ Indicators: multiple unrelated topics, stream-of-consciousness style, phrases li
 
 ```python
 Task(
-    prompt=f"---\ntask_id: brain-dump-{id}\nchat_id: {chat_id}\nsource: {source}\nreply_to_message_id: {id}\nbackground: true\n---\n\nProcess this brain dump:\nTranscription: {text}",
+    prompt=f"---\ntask_id: brain-dump-{id}\nchat_id: {chat_id}\nsource: {source}\nreply_to_message_id: {id}\n---\n\nProcess this brain dump:\nTranscription: {text}",
     subagent_type="brain-dumps"
 )
 ```
