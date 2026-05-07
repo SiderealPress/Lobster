@@ -29,6 +29,7 @@ flags (dead PID) are safe because the check is purely process-existence-based.
 import json
 import os
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -59,6 +60,21 @@ CONTEXT_INJECTION_LOG = _LOBSTER_WORKSPACE / "logs" / "context-injection.log"
 # Startup flag written by claude-persistent.sh before exec-ing claude.
 # Contains the launcher subshell PID. Deleted after the dispatcher is detected.
 STARTUP_FLAG_FILE = _LOBSTER_WORKSPACE / "data" / "dispatcher-startup-flag"
+
+# Single source of truth for startup cause classification (issue #1972).
+# on-compact.py writes {"cause": "compaction", "ts": "<iso_utc>"} before exiting.
+# This hook reads + resets it on every startup. Override via env var for tests.
+STARTUP_CAUSE_FILE = Path(
+    os.environ.get(
+        "LOBSTER_STARTUP_CAUSE_FILE_OVERRIDE",
+        str(_LOBSTER_WORKSPACE / "data" / "last-startup-cause.json"),
+    )
+)
+
+# Maximum age in seconds for a "compaction" cause entry to be trusted.
+# Beyond this window we fall back to "restart" to avoid misclassifying a
+# compaction that was followed by an unrelated external restart.
+COMPACTION_CAUSE_WINDOW_SECONDS = 300  # 5 minutes
 
 
 def _is_startup_flag_dispatcher() -> bool:
@@ -171,6 +187,73 @@ def _append_injection_log(
         pass  # logging must not break injection
 
 
+def read_and_reset_startup_cause() -> str:
+    """Read last-startup-cause.json and return the startup cause as a string.
+
+    Returns "compaction" if:
+      - The file exists AND cause == "compaction" AND ts is within the last
+        COMPACTION_CAUSE_WINDOW_SECONDS seconds.
+
+    Returns "restart" for all other cases:
+      - File absent
+      - File corrupt / unparseable JSON
+      - cause == "restart"
+      - cause == "compaction" but ts is stale (>= COMPACTION_CAUSE_WINDOW_SECONDS)
+
+    After reading, always overwrites the file with {"cause": "restart", "ts": "<now>"}
+    so the next startup defaults to "restart" unless on-compact.py fires first.
+    The overwrite is silent on failure — the return value is still correct.
+
+    This function is the ONLY place the dispatcher reads startup cause.  Do not
+    read last-startup-cause.json anywhere else.
+    """
+    cause: str = "restart"
+
+    try:
+        if STARTUP_CAUSE_FILE.exists():
+            raw = STARTUP_CAUSE_FILE.read_text()
+            data = json.loads(raw)
+            file_cause = data.get("cause", "restart")
+            if file_cause == "compaction":
+                ts_str = data.get("ts", "")
+                try:
+                    ts_dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                    age_seconds = (datetime.now(timezone.utc) - ts_dt).total_seconds()
+                    if age_seconds < COMPACTION_CAUSE_WINDOW_SECONDS:
+                        cause = "compaction"
+                except (ValueError, AttributeError):
+                    pass  # unparseable ts → keep cause = "restart"
+    except Exception:  # noqa: BLE001
+        pass  # any read failure → keep cause = "restart"
+
+    # Always reset to "restart" so subsequent startups default correctly.
+    _reset_startup_cause_to_restart()
+
+    return cause
+
+
+def _reset_startup_cause_to_restart() -> None:
+    """Overwrite last-startup-cause.json with cause=restart and the current timestamp.
+
+    Called unconditionally after read_and_reset_startup_cause() reads the file,
+    ensuring that the next startup defaults to "restart" unless on-compact.py
+    fires first and writes cause=compaction.
+
+    Silent on any failure — must never crash the hook.
+    """
+    try:
+        STARTUP_CAUSE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "cause": "restart",
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        tmp_path = STARTUP_CAUSE_FILE.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(payload, indent=2) + "\n")
+        tmp_path.replace(STARTUP_CAUSE_FILE)  # atomic on Linux (same filesystem)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def main() -> None:
     # Read hook input from stdin (provides session_id for logging).
     try:
@@ -192,6 +275,17 @@ def main() -> None:
             file=sys.stderr,
         )
 
+    # Read and reset last-startup-cause.json (issue #1972).
+    # Always runs (both dispatcher and subagent) so the file is reset on every
+    # startup and never accumulates a stale "compaction" entry.
+    # Only the dispatcher acts on the cause — subagents ignore it.
+    startup_cause = read_and_reset_startup_cause()
+    if is_dispatcher:
+        print(
+            f"[{HOOK_NAME}] startup cause: {startup_cause}",
+            file=sys.stderr,
+        )
+
     role = "dispatcher" if is_dispatcher else "subagent"
     injected: list[str] = []
 
@@ -206,6 +300,18 @@ def main() -> None:
     if content is None:
         _append_injection_log(session_id, role, injected)
         sys.exit(0)
+
+    # For the dispatcher: prepend a single line announcing the startup cause
+    # so step 2d of the startup sequence can use it without reading any files.
+    # This is the ONLY place startup_cause is surfaced to the model context.
+    if is_dispatcher:
+        now_utc = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        cause_banner = (
+            f"<!-- startup-cause: {startup_cause} | ts: {now_utc} -->\n"
+            f"**Startup cause: {startup_cause}**\n"
+            f"(Written by inject-bootup-context.py from last-startup-cause.json)\n\n"
+        )
+        print(cause_banner, end="")
 
     print(content)
     injected.append(system_file.name)
