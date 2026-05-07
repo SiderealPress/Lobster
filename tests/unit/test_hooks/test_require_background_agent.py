@@ -6,13 +6,19 @@ Tests cover:
 - Agent with run_in_background=True passes through (exit 0)
 - Agent without run_in_background called by dispatcher: hard block (exit 2)
 - Agent without run_in_background called by subagent: allowed (exit 0)
-- Dispatcher detection via marker file
+- Dispatcher detection via startup flag file
 - Missing run_in_background key (falsy) from dispatcher: blocked (exit 2)
 - Block message goes to stderr
+- Frontmatter sentinel: background: true in YAML frontmatter allows call (exit 0)
+  even when run_in_background is stripped by schema validation
+- Frontmatter sentinel: absent or false means hard block for dispatcher (exit 2)
+- Sentinel is case-insensitive (background: True, background: true both accepted)
+- Subagent with no sentinel is still allowed (no enforcement for subagents)
 """
 
 import importlib.util
 import json
+import os
 import sys
 from io import StringIO
 from pathlib import Path
@@ -84,10 +90,46 @@ def _make_hook_input(
 
 
 def _setup_dispatcher_marker(tmp_path: Path, session_id: str) -> None:
-    """Write the dispatcher session marker file under tmp_path/messages/config/."""
+    """Write the dispatcher session marker file under tmp_path/messages/config/.
+
+    Kept for tests that still set up the legacy DISPATCHER_SESSION_FILE.
+    This file is no longer used by is_dispatcher() — use _setup_startup_flag()
+    and _patch_startup_flag() to simulate the dispatcher via the startup flag.
+    """
     config_dir = tmp_path / "messages" / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "dispatcher-session-id").write_text(session_id)
+
+
+def _setup_startup_flag(tmp_path: Path) -> Path:
+    """Write the dispatcher startup flag file with the current process PID.
+
+    is_dispatcher() reads this file and checks that the PID is alive via
+    kill(pid, 0). Writing os.getpid() makes the check succeed in the test
+    process, simulating an active dispatcher launcher.
+
+    Returns the Path of the flag file.
+    """
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    flag_file = data_dir / "dispatcher-startup-flag"
+    flag_file.write_text(str(os.getpid()))
+    return flag_file
+
+
+def _patch_startup_flag(monkeypatch, tmp_path: Path) -> Path:
+    """Patch session_role.STARTUP_FLAG_FILE to a temp file with the live PID.
+
+    This is the correct way to simulate the dispatcher in tests under the
+    simplified detection scheme (issue #1908). The startup flag replaces the
+    legacy DISPATCHER_SESSION_FILE as the primary dispatcher signal.
+
+    Returns the Path of the patched flag file.
+    """
+    import session_role
+    flag_file = _setup_startup_flag(tmp_path)
+    monkeypatch.setattr(session_role, "STARTUP_FLAG_FILE", flag_file)
+    return flag_file
 
 
 # ---------------------------------------------------------------------------
@@ -98,22 +140,14 @@ def _setup_dispatcher_marker(tmp_path: Path, session_id: str) -> None:
 class TestNonAgentTool:
     def test_non_agent_tool_exits_0(self, monkeypatch, tmp_path):
         """Any tool that is not Agent passes through immediately."""
-        import session_role
-        monkeypatch.setattr(
-            session_role, "DISPATCHER_SESSION_FILE",
-            tmp_path / "messages" / "config" / "dispatcher-session-id",
-        )
+        _patch_startup_flag(monkeypatch, tmp_path)
         hook_input = _make_hook_input("Bash", {"command": "ls"})
         exit_code, stdout, stderr = _run_hook(hook_input)
         assert exit_code == 0
 
     def test_mcp_tool_exits_0(self, monkeypatch, tmp_path):
         """MCP tools are not the Agent tool and must pass through."""
-        import session_role
-        monkeypatch.setattr(
-            session_role, "DISPATCHER_SESSION_FILE",
-            tmp_path / "messages" / "config" / "dispatcher-session-id",
-        )
+        _patch_startup_flag(monkeypatch, tmp_path)
         hook_input = _make_hook_input(
             "mcp__lobster-inbox__check_inbox", {}, session_id="dispatcher-sess"
         )
@@ -129,16 +163,10 @@ class TestNonAgentTool:
 class TestAgentWithBackground:
     def test_agent_with_background_true_exits_0_dispatcher(self, monkeypatch, tmp_path):
         """Dispatcher calling Agent with run_in_background=True is always OK."""
-        _setup_dispatcher_marker(tmp_path, "dispatcher-sess-001")
-        import session_role
-        monkeypatch.setattr(
-            session_role, "DISPATCHER_SESSION_FILE",
-            tmp_path / "messages" / "config" / "dispatcher-session-id",
-        )
+        _patch_startup_flag(monkeypatch, tmp_path)
         hook_input = _make_hook_input(
             "Agent",
             {"prompt": "do work", "run_in_background": True},
-            session_id="dispatcher-sess-001",
         )
         exit_code, _, _ = _run_hook(hook_input)
         assert exit_code == 0
@@ -167,48 +195,30 @@ class TestAgentWithBackground:
 class TestDispatcherSynchronousAgent:
     def test_dispatcher_agent_no_background_key_exits_2(self, monkeypatch, tmp_path):
         """Dispatcher omitting run_in_background is hard-blocked (exit 2)."""
-        _setup_dispatcher_marker(tmp_path, "dispatcher-sess-001")
-        import session_role
-        monkeypatch.setattr(
-            session_role, "DISPATCHER_SESSION_FILE",
-            tmp_path / "messages" / "config" / "dispatcher-session-id",
-        )
+        _patch_startup_flag(monkeypatch, tmp_path)
         hook_input = _make_hook_input(
             "Agent",
             {"prompt": "do work"},
-            session_id="dispatcher-sess-001",
         )
         exit_code, stdout, stderr = _run_hook(hook_input)
         assert exit_code == 2, f"Expected hard block (exit 2), got {exit_code}"
 
     def test_dispatcher_agent_background_false_exits_2(self, monkeypatch, tmp_path):
         """Dispatcher passing run_in_background=False explicitly is hard-blocked."""
-        _setup_dispatcher_marker(tmp_path, "dispatcher-sess-001")
-        import session_role
-        monkeypatch.setattr(
-            session_role, "DISPATCHER_SESSION_FILE",
-            tmp_path / "messages" / "config" / "dispatcher-session-id",
-        )
+        _patch_startup_flag(monkeypatch, tmp_path)
         hook_input = _make_hook_input(
             "Agent",
             {"prompt": "do work", "run_in_background": False},
-            session_id="dispatcher-sess-001",
         )
         exit_code, stdout, stderr = _run_hook(hook_input)
         assert exit_code == 2, f"Expected hard block (exit 2), got {exit_code}"
 
     def test_block_message_goes_to_stderr(self, monkeypatch, tmp_path):
         """Block message must appear on stderr so Claude Code injects it as feedback."""
-        _setup_dispatcher_marker(tmp_path, "dispatcher-sess-001")
-        import session_role
-        monkeypatch.setattr(
-            session_role, "DISPATCHER_SESSION_FILE",
-            tmp_path / "messages" / "config" / "dispatcher-session-id",
-        )
+        _patch_startup_flag(monkeypatch, tmp_path)
         hook_input = _make_hook_input(
             "Agent",
             {"prompt": "do work"},
-            session_id="dispatcher-sess-001",
         )
         exit_code, stdout, stderr = _run_hook(hook_input)
         assert exit_code == 2
@@ -217,16 +227,10 @@ class TestDispatcherSynchronousAgent:
 
     def test_block_message_not_in_stdout(self, monkeypatch, tmp_path):
         """Block message must not appear on stdout (stdout is for JSON responses)."""
-        _setup_dispatcher_marker(tmp_path, "dispatcher-sess-001")
-        import session_role
-        monkeypatch.setattr(
-            session_role, "DISPATCHER_SESSION_FILE",
-            tmp_path / "messages" / "config" / "dispatcher-session-id",
-        )
+        _patch_startup_flag(monkeypatch, tmp_path)
         hook_input = _make_hook_input(
             "Agent",
             {"prompt": "do work"},
-            session_id="dispatcher-sess-001",
         )
         exit_code, stdout, stderr = _run_hook(hook_input)
         assert exit_code == 2
@@ -292,16 +296,10 @@ class TestTaskToolName:
 
     def test_task_tool_dispatcher_sync_exits_2(self, monkeypatch, tmp_path):
         """Dispatcher calling Task (old CC) without run_in_background is hard-blocked."""
-        _setup_dispatcher_marker(tmp_path, "dispatcher-sess-001")
-        import session_role
-        monkeypatch.setattr(
-            session_role, "DISPATCHER_SESSION_FILE",
-            tmp_path / "messages" / "config" / "dispatcher-session-id",
-        )
+        _patch_startup_flag(monkeypatch, tmp_path)
         hook_input = _make_hook_input(
             "Task",
             {"prompt": "do work"},
-            session_id="dispatcher-sess-001",
         )
         exit_code, stdout, stderr = _run_hook(hook_input)
         assert exit_code == 2, (
@@ -343,3 +341,195 @@ class TestTaskToolName:
             f"Subagent should be allowed to call Task synchronously, got exit {exit_code}. "
             f"stderr={stderr!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Frontmatter sentinel: background: true in prompt YAML frontmatter
+# ---------------------------------------------------------------------------
+#
+# When the Agent tool schema strips run_in_background (additionalProperties: false),
+# the dispatcher can still signal background intent by including `background: true`
+# in the prompt's YAML frontmatter block. This is the canonical workaround until
+# the schema is fixed upstream.
+#
+# Related issue: #1872
+# ---------------------------------------------------------------------------
+
+FRONTMATTER_PROMPT_BACKGROUND_TRUE = """\
+---
+task_id: test-task
+chat_id: 12345
+source: telegram
+background: true
+---
+
+Do some background work."""
+
+FRONTMATTER_PROMPT_BACKGROUND_FALSE = """\
+---
+task_id: test-task
+chat_id: 12345
+source: telegram
+background: false
+---
+
+Do some foreground work."""
+
+FRONTMATTER_PROMPT_NO_BACKGROUND = """\
+---
+task_id: test-task
+chat_id: 12345
+source: telegram
+---
+
+Do some work without background key."""
+
+FRONTMATTER_PROMPT_BACKGROUND_TRUE_UPPERCASE = """\
+---
+task_id: test-task
+chat_id: 12345
+source: telegram
+background: True
+---
+
+Do some background work (Python-style True)."""
+
+
+class TestFrontmatterSentinel:
+    """Tests for the background: true YAML frontmatter sentinel.
+
+    These tests verify the workaround for the Agent schema stripping run_in_background
+    (issue #1872). The dispatcher includes `background: true` in the prompt frontmatter;
+    the hook checks this as a secondary signal when run_in_background is absent.
+    """
+
+    def test_dispatcher_frontmatter_background_true_exits_0(self, monkeypatch, tmp_path):
+        """Dispatcher prompt with background: true in frontmatter → allowed (exit 0).
+
+        This is the primary fix for #1872: when the schema strips run_in_background,
+        the dispatcher signals background intent via the prompt frontmatter instead.
+        """
+        _setup_dispatcher_marker(tmp_path, "dispatcher-sess-001")
+        import session_role
+        monkeypatch.setattr(
+            session_role, "DISPATCHER_SESSION_FILE",
+            tmp_path / "messages" / "config" / "dispatcher-session-id",
+        )
+        hook_input = _make_hook_input(
+            "Agent",
+            {"prompt": FRONTMATTER_PROMPT_BACKGROUND_TRUE},
+            session_id="dispatcher-sess-001",
+        )
+        exit_code, stdout, stderr = _run_hook(hook_input)
+        assert exit_code == 0, (
+            f"Dispatcher with background: true in frontmatter should be allowed, "
+            f"got exit {exit_code}. stderr={stderr!r}"
+        )
+
+    def test_dispatcher_frontmatter_background_false_exits_2(self, monkeypatch, tmp_path):
+        """Dispatcher prompt with background: false in frontmatter → hard block (exit 2).
+
+        background: false explicitly opts out of background mode — must be blocked.
+        """
+        _patch_startup_flag(monkeypatch, tmp_path)
+        hook_input = _make_hook_input(
+            "Agent",
+            {"prompt": FRONTMATTER_PROMPT_BACKGROUND_FALSE},
+        )
+        exit_code, stdout, stderr = _run_hook(hook_input)
+        assert exit_code == 2, (
+            f"Dispatcher with background: false should be hard-blocked, "
+            f"got exit {exit_code}. stderr={stderr!r}"
+        )
+
+    def test_dispatcher_frontmatter_no_background_key_exits_2(self, monkeypatch, tmp_path):
+        """Dispatcher prompt with no background key in frontmatter → hard block (exit 2).
+
+        Missing background key means no background intent declared — must be blocked.
+        """
+        _patch_startup_flag(monkeypatch, tmp_path)
+        hook_input = _make_hook_input(
+            "Agent",
+            {"prompt": FRONTMATTER_PROMPT_NO_BACKGROUND},
+        )
+        exit_code, stdout, stderr = _run_hook(hook_input)
+        assert exit_code == 2, (
+            f"Dispatcher without background key should be hard-blocked, "
+            f"got exit {exit_code}. stderr={stderr!r}"
+        )
+
+    def test_dispatcher_frontmatter_background_uppercase_True_exits_0(
+        self, monkeypatch, tmp_path
+    ):
+        """background: True (Python-style) in frontmatter → allowed (exit 0).
+
+        Claude often writes True/False (Python style) in YAML-like blocks.
+        The hook must accept both `true` and `True`.
+        """
+        _setup_dispatcher_marker(tmp_path, "dispatcher-sess-001")
+        import session_role
+        monkeypatch.setattr(
+            session_role, "DISPATCHER_SESSION_FILE",
+            tmp_path / "messages" / "config" / "dispatcher-session-id",
+        )
+        hook_input = _make_hook_input(
+            "Agent",
+            {"prompt": FRONTMATTER_PROMPT_BACKGROUND_TRUE_UPPERCASE},
+            session_id="dispatcher-sess-001",
+        )
+        exit_code, stdout, stderr = _run_hook(hook_input)
+        assert exit_code == 0, (
+            f"background: True (Python-style) should be accepted, "
+            f"got exit {exit_code}. stderr={stderr!r}"
+        )
+
+    def test_subagent_no_background_sentinel_exits_0(self, monkeypatch, tmp_path):
+        """Subagent without background sentinel is still allowed — enforcement is dispatcher-only."""
+        _setup_dispatcher_marker(tmp_path, "dispatcher-sess-001")
+        import session_role
+        monkeypatch.setattr(
+            session_role, "DISPATCHER_SESSION_FILE",
+            tmp_path / "messages" / "config" / "dispatcher-session-id",
+        )
+        hook_input = _make_hook_input(
+            "Agent",
+            {"prompt": FRONTMATTER_PROMPT_NO_BACKGROUND},
+            session_id="subagent-sess-999",  # Not the dispatcher
+        )
+        exit_code, stdout, stderr = _run_hook(hook_input)
+        assert exit_code == 0, (
+            f"Subagent without background sentinel should be allowed, "
+            f"got exit {exit_code}. stderr={stderr!r}"
+        )
+
+    def test_block_message_mentions_frontmatter_sentinel(self, monkeypatch, tmp_path):
+        """Block message must mention the frontmatter sentinel as the fix."""
+        _patch_startup_flag(monkeypatch, tmp_path)
+        hook_input = _make_hook_input(
+            "Agent",
+            {"prompt": "do work"},
+        )
+        exit_code, stdout, stderr = _run_hook(hook_input)
+        assert exit_code == 2
+        assert "background: true" in stderr.lower(), (
+            f"Block message should mention 'background: true' sentinel. stderr={stderr!r}"
+        )
+
+    def test_both_signals_present_exits_0(self, monkeypatch, tmp_path):
+        """Both run_in_background=True in tool_input AND sentinel in frontmatter → allowed."""
+        _setup_dispatcher_marker(tmp_path, "dispatcher-sess-001")
+        import session_role
+        monkeypatch.setattr(
+            session_role, "DISPATCHER_SESSION_FILE",
+            tmp_path / "messages" / "config" / "dispatcher-session-id",
+        )
+        hook_input = _make_hook_input(
+            "Agent",
+            {
+                "prompt": FRONTMATTER_PROMPT_BACKGROUND_TRUE,
+                "run_in_background": True,
+            },
+            session_id="dispatcher-sess-001",
+        )
+        exit_code, _, _ = _run_hook(hook_input)
+        assert exit_code == 0

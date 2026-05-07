@@ -235,11 +235,13 @@ class TestCompactReminderAlreadyQueued:
         inbox.mkdir()
         mod = _load_on_fresh_start()
         mod.INBOX_DIR = inbox
+        mod.PROCESSING_DIR = tmp_path / "processing"  # absent — no compact reminder here
         assert mod._compact_reminder_already_queued() is False
 
     def test_returns_false_when_inbox_absent(self, tmp_path):
         mod = _load_on_fresh_start()
         mod.INBOX_DIR = tmp_path / "nonexistent_inbox"
+        mod.PROCESSING_DIR = tmp_path / "nonexistent_processing"  # absent
         assert mod._compact_reminder_already_queued() is False
 
     def test_returns_true_when_compact_reminder_exists(self, tmp_path):
@@ -260,6 +262,7 @@ class TestCompactReminderAlreadyQueued:
 
         mod = _load_on_fresh_start()
         mod.INBOX_DIR = inbox
+        mod.PROCESSING_DIR = tmp_path / "processing"  # absent — no compact reminder here
         assert mod._compact_reminder_already_queued() is False
 
     def test_ignores_malformed_json(self, tmp_path):
@@ -269,6 +272,7 @@ class TestCompactReminderAlreadyQueued:
 
         mod = _load_on_fresh_start()
         mod.INBOX_DIR = inbox
+        mod.PROCESSING_DIR = tmp_path / "processing"  # absent — no compact reminder here
         # Should not raise, and should return False (no valid compact-reminder found)
         assert mod._compact_reminder_already_queued() is False
 
@@ -309,6 +313,7 @@ class TestInjectCompactReminder:
         inbox.mkdir()
         mod = _load_on_fresh_start()
         mod.INBOX_DIR = inbox
+        mod.PROCESSING_DIR = tmp_path / "processing"  # absent — no stale reminder
 
         mod._inject_compact_reminder()
 
@@ -324,6 +329,7 @@ class TestInjectCompactReminder:
         inbox.mkdir()
         mod = _load_on_fresh_start()
         mod.INBOX_DIR = inbox
+        mod.PROCESSING_DIR = tmp_path / "processing"  # absent — no stale reminder
 
         mod._inject_compact_reminder()
 
@@ -360,6 +366,7 @@ class TestInjectCompactReminder:
         inbox = tmp_path / "inbox_not_yet_created"
         mod = _load_on_fresh_start()
         mod.INBOX_DIR = inbox
+        mod.PROCESSING_DIR = tmp_path / "processing"  # absent — no stale reminder
 
         mod._inject_compact_reminder()
 
@@ -380,6 +387,7 @@ class TestInjectCompactReminder:
         inbox.mkdir()
         mod = _load_on_fresh_start()
         mod.INBOX_DIR = inbox
+        mod.PROCESSING_DIR = tmp_path / "processing"  # absent — no stale reminder
 
         mod._inject_compact_reminder()
 
@@ -507,6 +515,7 @@ class TestClearStaleClaim:
 
         mod = _load_on_fresh_start()
         mod.INBOX_DIR = inbox
+        mod.PROCESSING_DIR = tmp_path / "processing"  # absent — no stale reminder file
         mod.AGENT_SESSIONS_DB = db
 
         mod._inject_compact_reminder()

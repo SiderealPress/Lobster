@@ -557,18 +557,8 @@ HOOKEOF
 
     # ── SessionStart ────────────────────────────────────────────────────────────
 
-    # Write dispatcher session ID so hooks can distinguish dispatcher from subagent
-    chmod +x "$INSTALL_DIR/hooks/write-dispatcher-session-id.py" 2>/dev/null || true
-    if ! jq -e '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("write-dispatcher-session-id"))' "$_settings" > /dev/null 2>&1; then
-        _tmp=$(mktemp)
-        jq '.hooks.SessionStart = (.hooks.SessionStart // []) + [{
-            "matcher": "",
-            "hooks": [{"type": "command", "command": "python3 '"$INSTALL_DIR"'/hooks/write-dispatcher-session-id.py", "timeout": 5}]
-        }]' "$_settings" > "$_tmp" && mv "$_tmp" "$_settings"
-        success "write-dispatcher-session-id hook installed"
-    else
-        info "write-dispatcher-session-id hook already configured"
-    fi
+    # Dispatcher detection uses the startup flag written by claude-persistent.sh (issue #1908);
+    # write-dispatcher-session-id.py hook is no longer needed and has been removed.
 
     # Inject bootup context on all fresh sessions
     chmod +x "$INSTALL_DIR/hooks/inject-bootup-context.py" 2>/dev/null || true

@@ -28,6 +28,11 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
+# Add hooks directory to path so session_role can be imported by test helpers.
+_HOOKS_DIR = Path(__file__).parents[3] / "hooks"
+if str(_HOOKS_DIR) not in sys.path:
+    sys.path.insert(0, str(_HOOKS_DIR))
+
 import pytest
 
 
@@ -359,22 +364,19 @@ class TestDispatcherExemption:
         """Dispatcher sessions must always be allowed to stop."""
         mod = _load_hook(monkeypatch, tmp_path)
 
-        # Write the dispatcher session marker file.
-        config_dir = tmp_path / "messages" / "config"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "dispatcher-session-id").write_text("dispatcher-sess-001")
+        # Simulate the dispatcher launcher by writing the current PID to the
+        # startup flag file. is_dispatcher() reads this file and checks that
+        # the PID is alive via kill(pid, 0).
+        import session_role
+        data_dir = tmp_path / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        startup_flag = data_dir / "dispatcher-startup-flag"
+        startup_flag.write_text(str(os.getpid()))
+        monkeypatch.setattr(session_role, "STARTUP_FLAG_FILE", startup_flag)
 
         # Write a transcript file with no write_result (dispatcher never calls it).
         transcript_file = tmp_path / "dispatcher.jsonl"
         _write_jsonl_transcript(transcript_file, _make_transcript_no_write_result())
-
-        # Patch the DISPATCHER_SESSION_FILE in session_role module.
-        import session_role
-        original = session_role.DISPATCHER_SESSION_FILE
-        monkeypatch.setattr(
-            session_role, "DISPATCHER_SESSION_FILE",
-            config_dir / "dispatcher-session-id"
-        )
 
         hook_input = _make_stop_hook_input_with_path(
             str(transcript_file),
@@ -382,7 +384,6 @@ class TestDispatcherExemption:
         )
         exit_code, stdout, stderr = _run_hook(mod, hook_input)
 
-        monkeypatch.setattr(session_role, "DISPATCHER_SESSION_FILE", original)
         assert exit_code == 0, f"Dispatcher should always exit 0, got {exit_code}"
 
 

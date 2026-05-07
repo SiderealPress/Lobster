@@ -19,7 +19,7 @@ subagent session. The agent_sessions.db can have two rows for the same subagent:
      the dispatcher via register_agent() after spawning the Task.
 
   2. An "auto-register stub": id = session UUID (e.g. "29e27af2-..."), created by
-     the SessionStart hook (write-dispatcher-session-id.py) when the subagent's
+     the SessionStart hook (inject-bootup-context.py) when the subagent's
      session starts.
 
 To close both rows we call session_end() with up to three identifiers:
