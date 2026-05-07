@@ -2410,9 +2410,10 @@ else
 fi
 
 # Set up Claude Code SessionStart hook to handle context compaction.
-# Uses matcher="" (fires on every SessionStart) because the "compact" matcher
-# in Claude Code intermittently fails to fire.  on-compact.py self-gates using
-# the hook_name field in the CC payload so it only acts on compact events.
+# Uses matcher="" (fires on all SessionStart events) with a self-gate inside the script
+# that exits early unless the event is a compact. matcher="compact" is unreliable in
+# CC 2.1.119 (fires in ~37% of compaction events); matcher="" + self-gate is the
+# correct pattern. See issue #1947.
 chmod +x "$INSTALL_DIR/hooks/on-compact.py" || true
 if [ -f "$CLAUDE_SETTINGS" ]; then
     if ! jq -e '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("on-compact"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
@@ -2432,28 +2433,10 @@ if [ -f "$CLAUDE_SETTINGS" ]; then
 else
     info "Skipping on-compact hook (settings.json not yet created)"
 fi
-
-# Set up Claude Code SessionStart hook to re-inject bootup context after compaction.
-# The compact-matcher entry ensures bootup files are injected into the fresh context
-# that follows a compaction event, just as they are on a fresh session start.
-if [ -f "$CLAUDE_SETTINGS" ]; then
-    if ! jq -e '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("inject-bootup-context")) | select(.matcher == "compact")' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
-        TMP_SETTINGS=$(mktemp)
-        jq '.hooks.SessionStart = (.hooks.SessionStart // []) + [{
-            "matcher": "compact",
-            "hooks": [{
-                "type": "command",
-                "command": "python3 '"$INSTALL_DIR"'/hooks/inject-bootup-context.py",
-                "timeout": 10
-            }]
-        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
-        success "inject-bootup-context hook installed (compact sessions)"
-    else
-        info "inject-bootup-context hook already configured in Claude Code settings (compact sessions)"
-    fi
-else
-    info "Skipping inject-bootup-context compact hook (settings.json not yet created)"
-fi
+# Note: a separate compact-matcher inject-bootup-context entry is NOT added here.
+# The empty-matcher inject-bootup-context entry above already fires on all
+# SessionStart events including compact, so a second compact-specific entry would
+# cause double-injection on every session type.
 
 # Set up Claude Code SessionStart hook to inject sys.debug.bootup.md when LOBSTER_DEBUG=true
 chmod +x "$INSTALL_DIR/hooks/inject-debug-bootup.py" || true
