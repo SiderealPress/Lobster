@@ -2024,6 +2024,44 @@ else
     info "Skipping require-auditor-context-update SubagentStop hook (settings.json not yet created)"
 fi
 
+# Set up session-exit-logger hook for both Stop (dispatcher) and SubagentStop (subagents).
+# Passively logs every session exit to observations.log with category "session_exit",
+# including exit_cause (write_result / potential_overflow / unknown) and message_count.
+# This hook always exits 0 and never blocks the session from exiting.
+chmod +x "$INSTALL_DIR/hooks/session-exit-logger.py" || true
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '.hooks.Stop[]? | select(.hooks[]?.command | contains("session-exit-logger"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq '.hooks.Stop = (.hooks.Stop // []) + [{
+            "matcher": "",
+            "hooks": [{
+                "type": "command",
+                "command": "python3 '"$INSTALL_DIR"'/hooks/session-exit-logger.py",
+                "timeout": 10
+            }]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "session-exit-logger Stop hook installed"
+    else
+        info "session-exit-logger Stop hook already configured in Claude Code settings"
+    fi
+    if ! jq -e '.hooks.SubagentStop[]? | select(.hooks[]?.command | contains("session-exit-logger"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq '.hooks.SubagentStop = (.hooks.SubagentStop // []) + [{
+            "matcher": "",
+            "hooks": [{
+                "type": "command",
+                "command": "python3 '"$INSTALL_DIR"'/hooks/session-exit-logger.py",
+                "timeout": 10
+            }]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "session-exit-logger SubagentStop hook installed"
+    else
+        info "session-exit-logger SubagentStop hook already configured in Claude Code settings"
+    fi
+else
+    info "Skipping session-exit-logger hooks (settings.json not yet created)"
+fi
+
 #===============================================================================
 # Python Environment
 #===============================================================================
