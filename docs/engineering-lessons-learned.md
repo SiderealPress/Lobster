@@ -152,3 +152,25 @@ docker exec -it <container> node -e "
 - Is the inner SQL string single-quoted? That helps but does not fully protect if the variable was expanded before substitution.
 
 **Historical note:** This exact bug corrupted the Twenty CRM admin password hash during initial setup on 2026-03-23. The psql UPDATE succeeded silently; the corruption was discovered on first login attempt. Recovery required running `bcrypt.hash()` inside the Twenty Docker container and re-running the UPDATE.
+
+---
+
+## Dispatcher Detection: Why Two Files (startup-flag + session-id-marker)
+
+**Pattern:** Dispatcher detection uses two separate files: a startup-flag written by the launcher, and a session-id-marker written by the SessionStart hook. Code may attempt to consolidate these into one file.
+
+**Why it matters:** The dispatcher's Claude session ID (UUID) is not known at launch time — Claude generates it internally after startup. The launcher can only write a plain flag ("the next session is the dispatcher") but cannot predict what UUID Claude will assign. This makes a single pre-launch file with the session ID impossible.
+
+The correct two-step sequence is unavoidable:
+1. Launcher writes `startup-flag` (just a marker, no UUID) before exec
+2. SessionStart hook reads the flag (detects it's the dispatcher), deletes it, then writes `session-id-marker` with the now-known session UUID
+3. All subsequent hooks (PreToolUse, Stop) read `session-id-marker` — NOT the startup flag (which is already gone)
+
+**What to look for:** Any attempt to:
+- Write the session UUID before Claude starts (impossible — it doesn't exist yet)
+- Use the startup flag in Stop hooks (it's consumed at SessionStart and will always be absent by Stop time)
+- Consolidate detection into a single file without the two-step handoff
+
+**Fix:** Preserve the two-step model. Use `is_dispatcher()` for SessionStart hooks (reads startup flag OR newly-written session-id-marker). Use `is_dispatcher_session()` for Stop and PreToolUse hooks (reads session-id-marker, with process-tree fallback for the early-boot window before any file is written).
+
+**History:** Startup-flag model introduced in PR #1914 to replace fragile process-tree walking. Session-id-marker-at-Stop bug fixed in PR #1960 — DEAD state was never written because the startup flag was already consumed when Stop fired.
