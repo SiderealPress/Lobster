@@ -2968,6 +2968,70 @@ print(f'prune-pr-worktrees: {result.status}')
         warn "check-inflight-reminders.py not found at $INFLIGHT_SCRIPT — skipping Migration 87"
     fi
 
+    # Migration 88: Fix on-compact.py hook matcher (issue #1947).
+    # matcher="compact" is unreliable in CC 2.1.119 (~37% fire rate since April 17).
+    # The correct pattern is matcher="" + self-gate inside the script.
+    # on-compact.py already has the self-gate (reads hook_event_name, exits early
+    # unless it's a compact event) since commit 26e7e060 (May 1).
+    # This migration:
+    #   1. Changes the on-compact.py SessionStart entry from matcher="compact" to matcher=""
+    #   2. Removes the redundant inject-bootup-context.py compact-matcher entry
+    #      (already covered by the empty-matcher entry that fires on all session types)
+    if [ -f "$CLAUDE_SETTINGS" ] && command -v python3 &>/dev/null; then
+        local _m88_needs_fix=0
+        if python3 -c "
+import json, sys
+with open('$CLAUDE_SETTINGS') as f:
+    d = json.load(f)
+hooks = d.get('hooks', {}).get('SessionStart', [])
+for h in hooks:
+    cmd = h.get('hooks', [{}])[0].get('command', '')
+    if 'on-compact' in cmd and h.get('matcher') == 'compact':
+        sys.exit(0)  # needs fix
+sys.exit(1)  # already correct
+" 2>/dev/null; then
+            _m88_needs_fix=1
+        fi
+        if [ "$_m88_needs_fix" -eq 1 ]; then
+            substep "Fixing on-compact.py hook matcher (Migration 88)..."
+            TMP_SETTINGS=$(mktemp)
+            python3 - "$CLAUDE_SETTINGS" "$TMP_SETTINGS" << 'M88_PYEOF'
+import json, sys
+src, dst = sys.argv[1], sys.argv[2]
+with open(src) as f:
+    data = json.load(f)
+session_start = data.get('hooks', {}).get('SessionStart', [])
+updated = []
+for entry in session_start:
+    cmd = entry.get('hooks', [{}])[0].get('command', '')
+    # Change on-compact.py from matcher="compact" to matcher=""
+    if 'on-compact' in cmd and entry.get('matcher') == 'compact':
+        entry = dict(entry, matcher='')
+    # Remove the redundant inject-bootup-context.py compact-matcher entry
+    # (the empty-matcher entry already fires on all session types including compact)
+    elif 'inject-bootup-context' in cmd and entry.get('matcher') == 'compact':
+        continue
+    updated.append(entry)
+data['hooks']['SessionStart'] = updated
+with open(dst, 'w') as f:
+    json.dump(data, f, indent=2)
+    f.write('\n')
+M88_PYEOF
+            if [ $? -eq 0 ] && [ -s "$TMP_SETTINGS" ]; then
+                mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+                success "Fixed on-compact.py hook matcher (matcher='' + removed redundant compact inject-bootup-context entry)"
+                migrated=$((migrated + 1))
+            else
+                rm -f "$TMP_SETTINGS"
+                warn "Migration 88: failed to update $CLAUDE_SETTINGS"
+            fi
+        else
+            info "Migration 88: on-compact.py hook already uses matcher='' — no change needed"
+        fi
+    else
+        info "Migration 88: settings.json not found or python3 unavailable — skipping"
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
