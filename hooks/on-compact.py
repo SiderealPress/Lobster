@@ -3,17 +3,15 @@
 Context-compaction hook for Lobster.
 
 Fires on every SessionStart (matcher="") and self-gates to compact events
-using the hook_name field in the CC payload.  The hook used to be registered
-with matcher="compact", but investigation showed that Claude Code intermittently
+using _is_compact_event().  The hook used to be registered with
+matcher="compact", but investigation showed that Claude Code intermittently
 fails to fire matcher="compact" hooks — the "" (always-fires) matcher is
 the only reliable trigger for compact events.
 
 Self-detection strategy (layered, most-to-least reliable):
-  1. hook_name field in stdin payload equals "compact"
-  2. compaction-state.json was NOT recently modified AND this is the first
-     call in a potential compact run (conservative: assume compact when
-     hook_name is absent and LOBSTER_MAIN_SESSION=1 because fresh-starts are
-     handled by on-fresh-start.py; only compact needs on-compact.py actions)
+  1. source field in stdin payload equals "compact" (CC-documented primary field)
+  2. hook_name field equals "compact" (fallback for older CC versions; only
+     checked when source is absent from the payload)
 
 The script injects a system message into the Lobster inbox so that the next
 call to wait_for_messages() surfaces a reminder to re-read CLAUDE.md and
@@ -134,21 +132,25 @@ COMPACTION_TELEGRAM_MESSAGE = "\u267b\ufe0f Context compacted. Re-orienting..."
 def _is_compact_event(data: dict) -> bool:
     """Return True if the hook input indicates a context compaction event.
 
-    Primary check: the ``hook_name`` field in the CC SessionStart payload.
-    Claude Code sends hook_name="compact" for compaction events.  This field
-    is documented as unreliable in older CC versions, but when present it is
-    authoritative.
+    Primary check: the ``source`` field in the CC SessionStart payload.
+    Claude Code sets source="compact" for compaction-triggered sessions
+    (other values: "startup", "resume", "clear").
+
+    Fallback: hook_name == "compact" is undocumented but observed in some
+    CC versions.  The fallback is only used when ``source`` is absent from
+    the payload — if ``source`` is present but non-compact, the event is
+    not a compaction regardless of hook_name.
 
     This function is the self-gate that replaces reliance on the
     matcher="compact" hook registration (which was found to be intermittently
     non-firing in Claude Code 2.1.x).  The hook is now registered with
     matcher="" (always fires) and uses this function to skip non-compact events.
     """
-    hook_name = data.get("hook_name", "")
-    if hook_name == "compact":
-        return True
-    # hook_name absent or different value: not a compact event.
-    return False
+    source = data.get("source")
+    if source is not None:
+        return source == "compact"
+    # source field absent — fall back to hook_name
+    return data.get("hook_name") == "compact"
 
 
 def _log_compact_event(event_type: str, detail: str) -> None:
