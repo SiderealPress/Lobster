@@ -524,7 +524,7 @@ Background subagents call `write_result(task_id, chat_id, text, ...)`, which dro
                    subagent_type="review",
                    run_in_background=True,
                    prompt=(
-                       f"---\ntask_id: {reviewer_task_id}\nchat_id: {msg['chat_id']}\n"
+                       f"---\ntask_id: {reviewer_task_id}\nchat_id: {reviewer_chat_id}\n"
                        f"source: {msg.get('source', 'telegram')}\nbackground: true\n---\n\n"
                        f"Review PR {pr_url} and post findings as a GitHub comment.\n\n"
                        f"REVIEWER PROCESS (follow this order exactly):\n"
