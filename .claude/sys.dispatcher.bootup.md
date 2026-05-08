@@ -39,13 +39,16 @@ When you first start (or after reading this file), follow these steps:
 2. Read `~/lobster-workspace/user-model/_context.md` if it exists — pre-computed summary of user values, preferences, and active projects. Skip if absent.
 2a. Create a new session file inline (see Session File Management). Store its path as `current_session_file`. Immediately after copying the template, write the session's start timestamp and set `Messages processed: 0` and `End reason: active` — this makes the file recoverable even if the session ends before any subagent writes to it.
 2b. Call `list_rules(enabled_only=true)` to load IFTTT behavioral rules into working context.
-2c. Check `~/lobster-workspace/data/context-handoff.json`:
-    - If **recent** (< 10 min, based on `triggered_at`): read `context_pct`, `pending_tasks`, `last_user_message`. Notify user: "Restarted — context was at {context_pct}%. Resuming from where we left off." Re-queue any stuck messages from `~/messages/processing/`. Delete the file.
-    - If **stale** (>= 10 min) or absent: ignore.
-2d. Check `~/lobster-workspace/data/compaction-state.json` for `last_catchup_ts`:
-    - `gap_seconds > 15`: log the gap for context; stay silent toward the user (restarts are invisible by default).
-    - `gap_seconds <= 15`: stay silent (health-check restart, not a meaningful gap).
-    - Skip if step 2c already sent a restart notification.
+2c. Check `~/lobster-workspace/logs/events.jsonl` for the last `session.end` event:
+    - Read the file from the end (tail backwards) and find the last line where `event_type == "session.end"`. If no such line exists or the file is absent, treat as "no prior context".
+    - Extract `payload.context_pct`, `payload.in_flight_agents`, and `timestamp` from the matching event.
+    - If **recent** (< 10 min, based on `timestamp`): read `payload.context_pct`. Notify user: "Restarted — context was at {context_pct}%. Resuming from where we left off." Re-queue any stuck messages from `~/messages/processing/`.
+    - If **stale** (>= 10 min) or absent/empty: ignore.
+2d. **Determine startup cause** — read it from the `<!-- startup-cause: ... -->` banner injected at the top of this file by `inject-bootup-context.py`. Do not read `last-startup-cause.json` yourself; the hook already read and reset it.
+    - `startup-cause: compaction` → this was a context compaction. Expect the `compact-reminder` message in the inbox. Spawn `compact-catchup` at step 4 as usual.
+    - `startup-cause: restart` → this was a plain restart (systemd, external kill, or health-check). No compact-reminder will be in the inbox. Spawn `startup-catchup` at step 4 for a normal restart window.
+    - Skip if step 2c already sent a restart notification (events.jsonl had a recent session.end event).
+    - **Do not use `compaction-state.json` or `last_catchup_ts` alone to determine cause** — those fields are updated by catchup subagents and will give false positives for restarts.
 
 3. **Claim any pending user messages immediately** to stop the health-check staleness clock:
     - Call `check_inbox()` to get any messages currently waiting in the inbox
@@ -794,8 +797,8 @@ Written by `hooks/context-monitor.py` when context window >= 70%.
    - Do NOT spawn new non-trivial subagents
    - For new user messages: ack, create_task to record, tell user "Compacting context shortly — will pick this up after."
 4. Drain in-flight agents: poll get_active_sessions() every 10s. Process arriving subagent results normally.
-5. Write ~/lobster-workspace/data/context-handoff.json:
-   {"triggered_at": "<iso8601>", "context_pct": <pct>, "pending_tasks": <list>, "last_user_message": "<text>", "note": "Graceful wind-down"}
+5. Emit a `session.end` event to the EventBus (call `emit_event` MCP tool):
+   {"event_type": "session.end", "severity": "info", "source": "dispatcher-graceful-winddown", "payload": {"context_pct": <pct>, "in_flight_agents": <list>, "note": "Graceful wind-down"}}
 6. Send user (use admin chat_id from config): "Context at {pct}% — entering wind-down mode. Handing off cleanly."
 7. Do NOT call wait_for_messages() again. Do not attempt to self-terminate — the dispatcher cannot exit itself. Claude Code's context compaction will end the session externally when the context window fills.
 8. mark_processed(message_id)
