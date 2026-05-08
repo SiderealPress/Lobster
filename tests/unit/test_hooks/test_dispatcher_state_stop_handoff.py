@@ -17,6 +17,7 @@ Behaviors verified:
 6. Required fields present: triggered_at, context_pct, note="Stop hook wind-down".
 7. Hook is silent on all errors (never crashes the stop sequence).
 8. Write is atomic (tmp file + replace, not direct write).
+9. Retried agents (same task_id: done then running again) appear in in_flight_agents.
 
 Named constants (spec-derived, not reverse-engineered from implementation):
   EXPECTED_NOTE = "Stop hook wind-down"   # as specified in issue #1977
@@ -572,6 +573,128 @@ class TestInFlightAgents:
         data = json.loads(handoff_path.read_text())
         assert data["in_flight_agents"] == [], (
             "in_flight_agents must be empty when all tasks are done"
+        )
+
+    def test_retried_agent_appears_in_flight_after_done_then_running(self, monkeypatch, tmp_path):
+        """A task that completed and was retried with the same task_id is tracked as in-flight.
+
+        Log sequence: running -> done -> running (retry). The retry is still running when
+        the session ends, so it must appear in in_flight_agents. The first done entry must
+        not permanently suppress the subsequent running entry.
+        """
+        handoff_dir = tmp_path / "data"
+        handoff_dir.mkdir()
+        handoff_path = handoff_dir / HANDOFF_FILENAME
+
+        # task-retry: first run completes, then retried with same task_id and still running.
+        inflight_path = _make_inflight_jsonl(handoff_dir, [
+            {"task_id": "task-retry", "type": "engineering", "status": "running",
+             "description": "First attempt", "started_at": "2026-05-07T20:00:00Z"},
+            {"task_id": "task-retry", "completed_at": "2026-05-07T20:30:00Z", "status": "done"},
+            {"task_id": "task-retry", "type": "engineering", "status": "running",
+             "description": "Retry attempt", "started_at": "2026-05-07T21:00:00Z"},
+        ])
+        assert inflight_path.exists()
+
+        mod = _load_hook()
+
+        import session_role
+        monkeypatch.setattr(session_role, "is_dispatcher", lambda _data: True)
+        monkeypatch.setattr(session_role, "is_dispatcher_session", lambda _data: True)
+
+        import state_machine as sm
+        monkeypatch.setattr(sm, "write_state", lambda *a, **kw: None)
+
+        hook_input = _make_hook_input()
+        _run_main(mod, monkeypatch, hook_input, handoff_dir)
+
+        data = json.loads(handoff_path.read_text())
+        task_ids = [a["task_id"] for a in data["in_flight_agents"]]
+        assert "task-retry" in task_ids, (
+            "task-retry must appear in in_flight_agents: its retry is still running"
+        )
+
+    def test_retried_agent_excluded_when_retry_also_completes(self, monkeypatch, tmp_path):
+        """A retried task that also completes is excluded from in_flight_agents.
+
+        Log sequence: running -> done -> running (retry) -> done. Both runs completed,
+        so the task must not appear in in_flight_agents.
+        """
+        handoff_dir = tmp_path / "data"
+        handoff_dir.mkdir()
+        handoff_path = handoff_dir / HANDOFF_FILENAME
+
+        inflight_path = _make_inflight_jsonl(handoff_dir, [
+            {"task_id": "task-retry-done", "type": "engineering", "status": "running",
+             "description": "First attempt", "started_at": "2026-05-07T20:00:00Z"},
+            {"task_id": "task-retry-done", "completed_at": "2026-05-07T20:30:00Z", "status": "done"},
+            {"task_id": "task-retry-done", "type": "engineering", "status": "running",
+             "description": "Retry attempt", "started_at": "2026-05-07T21:00:00Z"},
+            {"task_id": "task-retry-done", "completed_at": "2026-05-07T21:30:00Z", "status": "done"},
+        ])
+        assert inflight_path.exists()
+
+        mod = _load_hook()
+
+        import session_role
+        monkeypatch.setattr(session_role, "is_dispatcher", lambda _data: True)
+        monkeypatch.setattr(session_role, "is_dispatcher_session", lambda _data: True)
+
+        import state_machine as sm
+        monkeypatch.setattr(sm, "write_state", lambda *a, **kw: None)
+
+        hook_input = _make_hook_input()
+        _run_main(mod, monkeypatch, hook_input, handoff_dir)
+
+        data = json.loads(handoff_path.read_text())
+        task_ids = [a["task_id"] for a in data["in_flight_agents"]]
+        assert "task-retry-done" not in task_ids, (
+            "task-retry-done must NOT appear in in_flight_agents: retry also completed"
+        )
+
+
+class TestAtomicWrite:
+    """context-handoff.json must be written atomically using tmp file + os.replace."""
+
+    def test_write_uses_tmp_file_then_replace(self, monkeypatch, tmp_path):
+        """Handoff file is written via a .json.tmp intermediate, then atomically replaced.
+
+        Verifies that os.replace() is called (not a direct open/write), confirming
+        the atomic write path is used.
+        """
+        handoff_dir = tmp_path / "data"
+        handoff_dir.mkdir()
+
+        mod = _load_hook()
+
+        import session_role
+        monkeypatch.setattr(session_role, "is_dispatcher", lambda _data: True)
+        monkeypatch.setattr(session_role, "is_dispatcher_session", lambda _data: True)
+
+        import state_machine as sm
+        monkeypatch.setattr(sm, "write_state", lambda *a, **kw: None)
+
+        replace_calls = []
+        original_replace = os.replace
+
+        def tracking_replace(src, dst):
+            replace_calls.append((src, dst))
+            return original_replace(src, dst)
+
+        monkeypatch.setattr(os, "replace", tracking_replace)
+
+        hook_input = _make_hook_input()
+        _run_main(mod, monkeypatch, hook_input, handoff_dir)
+
+        assert len(replace_calls) == 1, (
+            "os.replace() must be called exactly once for the atomic write"
+        )
+        src, dst = replace_calls[0]
+        assert src.endswith(".json.tmp"), (
+            f"Source of os.replace() must be a .json.tmp file, got: {src}"
+        )
+        assert dst.endswith(HANDOFF_FILENAME), (
+            f"Destination of os.replace() must be {HANDOFF_FILENAME}, got: {dst}"
         )
 
 
