@@ -26,21 +26,28 @@ If context-handoff.json already exists (written by the graceful LLM wind-down), 
 NOT overwrite it — the graceful version has richer data. This hook is strictly a
 fallback.
 
-## Dispatcher detection
+## Dispatcher detection (agent_id guard)
 
-Uses both is_dispatcher() and is_dispatcher_session() from session_role.py, combined
-with `or`. This is necessary because:
+Uses the agent_id fast path from hook_input: Claude Code injects agent_id only into
+subagent SessionStop payloads. The dispatcher session never carries agent_id.
 
-1. is_dispatcher() checks the startup flag file written by the launcher. That flag is
-   consumed (deleted) by inject-bootup-context.py during SessionStart — so by the time
-   SessionStop fires, the flag is gone and is_dispatcher() returns False for the actual
-   dispatcher session.
-2. is_dispatcher_session() provides the fallback: it uses state files and a process-tree
-   walk, which remain valid throughout the session lifetime.
+  - agent_id present and non-empty → subagent → exit 0 immediately (no I/O).
+  - agent_id absent or empty → dispatcher → proceed.
 
-The combination `is_dispatcher() or is_dispatcher_session()` is therefore correct for
-SessionStop hooks: is_dispatcher() handles the rare case where the flag was not yet
-consumed (e.g., very short sessions), and is_dispatcher_session() covers the normal case.
+This is the same approach used by thinking-heartbeat.py (PR #2007 / issue #1897).
+It eliminates the previous is_dispatcher_session() call, which added ~10ms of
+subprocess calls (process-tree walk) on every session stop.
+
+Why NOT is_dispatcher() or is_dispatcher_session:
+- is_dispatcher() reads the startup-flag file, which is deleted at SessionStart by
+  inject-bootup-context.py — so it always returns False during SessionStop (issue #1958).
+- is_dispatcher_session() falls back to a process-tree walk (tmux + /proc reads), adding
+  latency and external-process dependencies that are unnecessary when agent_id is available.
+
+Fail-open behavior: if stdin is unparseable, hook_input defaults to {} — agent_id is
+absent, so the hook proceeds as if it were the dispatcher. The dispatcher cannot set
+agent_id, so an unparseable payload cannot be a subagent. This preserves the liveness
+signal during edge cases (very short sessions, abnormal stdin).
 
 Silent on all errors — must never block session stop.
 """
@@ -52,13 +59,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 _HOOKS_DIR = Path(__file__).parent
-sys.path.insert(0, str(_HOOKS_DIR))
-
-import session_role  # noqa: E402
-
 _LOBSTER_DIR = _HOOKS_DIR.parent
 sys.path.insert(0, str(_LOBSTER_DIR / "src"))
 import state_machine  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# Named constant (spec-derived, not magic literal)
+# ---------------------------------------------------------------------------
+
+# The hook_input field injected by Claude Code into subagent payloads only.
+# Absent in dispatcher payloads — used as a fast O(1) guard with no file I/O.
+AGENT_ID_FIELD = "agent_id"
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -79,6 +90,17 @@ _DEFAULT_CONTEXT_SIZE = 200_000
 # ---------------------------------------------------------------------------
 # Pure helpers
 # ---------------------------------------------------------------------------
+
+
+def is_subagent(hook_input: dict) -> bool:
+    """Return True if hook_input belongs to a subagent session.
+
+    Claude Code injects agent_id only into subagent SessionStop payloads.
+    The dispatcher session never carries this field.
+
+    Pure function — no file I/O, no subprocess calls, no imports.
+    """
+    return bool(hook_input.get(AGENT_ID_FIELD))
 
 
 def _model_max_context(model: str) -> int:
@@ -255,11 +277,11 @@ def main() -> None:
     except (json.JSONDecodeError, ValueError, EOFError):
         hook_input = {}
 
-    # Use is_dispatcher_session() — not is_dispatcher().
-    # is_dispatcher() checks the startup-flag file which is deleted at SessionStart;
-    # it always returns False during SessionStop. is_dispatcher_session() uses
-    # state files and process-tree walk which remain valid throughout the session.
-    if not session_role.is_dispatcher_session(hook_input):
+    # Guard: agent_id is present only in subagent SessionStop payloads.
+    # The dispatcher session never has agent_id — exit immediately for subagents.
+    # Fail-open: if stdin is unparseable, hook_input is {} — agent_id is absent,
+    # so we proceed as dispatcher. An unparseable payload cannot be a subagent.
+    if is_subagent(hook_input):
         sys.exit(0)
 
     session_id = hook_input.get("session_id", "")
