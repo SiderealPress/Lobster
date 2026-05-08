@@ -1,31 +1,32 @@
 """
 Unit tests for hooks/thinking-heartbeat.py
 
-Tests cover the simplified sentinel design (issue #1483) and the
-dispatcher-only guard (issue #1897):
-- write_heartbeat() writes a Unix epoch integer to the heartbeat file
-- Atomic write: uses .tmp then rename, no .tmp left behind
-- Creates parent directory if absent
-- Overwrites existing content on each call
-- Timestamp is within a small window of time.time()
-- main() exits 0 on success (dispatcher session)
-- main() exits 0 without writing when called from a subagent session
-- main() exits 0 even when write fails (silent failure — never block tool use)
-- LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE env var is respected
-- Subagent tool calls do NOT update the heartbeat (issue #1897)
+Tests cover two concerns:
 
-Design change from the original (lobster-state.json merge):
-- No JSON parsing or merging
-- Single integer epoch value, not ISO timestamp
-- Single file — no other state touched
+1. The sentinel design (issue #1483):
+   - write_heartbeat() writes a Unix epoch integer to the heartbeat file
+   - Atomic write: uses .tmp then rename, no .tmp left behind
+   - Creates parent directory if absent
+   - Overwrites existing content on each call
+   - Timestamp is within a small window of time.time()
+   - main() exits 0 on success
+   - main() exits 0 even when write fails (silent failure — never block tool use)
+   - LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE env var is respected
 
-Dispatcher-only guard (issue #1897):
-- Hooks now read stdin and call session_role.is_dispatcher_session() before writing.
-- Tests exercise: dispatcher writes, subagent skips, unknown-session skips.
+2. The dispatcher-only guard (issue #1897):
+   - Subagent payloads carry an agent_id field; dispatcher payloads do not
+   - When agent_id is present (non-empty), the heartbeat is NOT written
+   - When agent_id is absent, the heartbeat IS written
+   - When stdin is empty or invalid JSON, the heartbeat IS written (fail-open:
+     preserves liveness signal; the dispatcher cannot set agent_id, so absence
+     of parseable input is the same as absence of agent_id)
 
-Key difference from pre-PR-1897 behaviour: the hook now uses is_dispatcher_session()
-(not is_dispatcher()) so it works correctly at PostToolUse time when the startup
-flag has already been deleted by inject-bootup-context.py.
+Guard design:
+- The agent_id field is injected by Claude Code only into subagent hook payloads.
+  The dispatcher session never has agent_id.
+- This is the simplest possible guard: a single field check, no state file I/O,
+  no process tree walk, no imported helpers.
+- Named constant AGENT_ID_SUBAGENT_FIELD documents the field name.
 """
 
 import importlib.util
@@ -46,15 +47,21 @@ HOOK_PATH = _HOOKS_DIR / "thinking-heartbeat.py"
 TIMESTAMP_TOLERANCE_SECONDS = 5
 
 # The threshold documented in the hook (checked here to prevent silent drift).
-EXPECTED_STALE_THRESHOLD = 900  # 15 minutes
+# Named constant from spec — see issue #1897 and health-check-v3.sh.
+EXPECTED_STALE_THRESHOLD = 1200  # 20 minutes — matches health-check-v3.sh
 
-# Fake session IDs used in tests.
-DISPATCHER_SESSION_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
-SUBAGENT_SESSION_ID = "11111111-2222-3333-4444-555555555555"
+# Field name injected by Claude Code into subagent payloads (absent for dispatcher).
+# Named constant from spec (issue #1897): this is the guard field.
+AGENT_ID_SUBAGENT_FIELD = "agent_id"
+
+# Representative values used in tests.
+SAMPLE_SUBAGENT_AGENT_ID = "lobster-dispatcher"  # any non-empty string = subagent
+SAMPLE_SUBAGENT_SESSION_ID = "subagent-session-aabbcc"
+SAMPLE_DISPATCHER_SESSION_ID = "dispatcher-session-ddeeff"
 
 
 # ---------------------------------------------------------------------------
-# Module loader
+# Module loader helpers
 # ---------------------------------------------------------------------------
 
 def _load_module(monkeypatch, heartbeat_file: Path):
@@ -66,8 +73,62 @@ def _load_module(monkeypatch, heartbeat_file: Path):
     return mod
 
 
+def _run_hook(monkeypatch, heartbeat_file: Path) -> tuple[int, str, str]:
+    """Execute the hook's main() with no stdin input (empty = no agent_id = dispatcher)."""
+    monkeypatch.setenv("LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE", str(heartbeat_file))
+
+    spec = importlib.util.spec_from_file_location("thinking_heartbeat", HOOK_PATH)
+    mod = importlib.util.module_from_spec(spec)
+
+    stdout_cap = StringIO()
+    stderr_cap = StringIO()
+    exit_code = None
+
+    with (
+        patch("sys.stdout", stdout_cap),
+        patch("sys.stderr", stderr_cap),
+        patch("sys.stdin", StringIO("")),
+    ):
+        try:
+            spec.loader.exec_module(mod)
+            mod.main()
+        except SystemExit as e:
+            exit_code = e.code
+
+    return exit_code, stdout_cap.getvalue(), stderr_cap.getvalue()
+
+
+def _run_hook_with_input(
+    monkeypatch,
+    heartbeat_file: Path,
+    hook_input: dict,
+) -> tuple[int, str, str]:
+    """Execute the hook's main() with the given JSON payload on stdin."""
+    monkeypatch.setenv("LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE", str(heartbeat_file))
+
+    spec = importlib.util.spec_from_file_location("thinking_heartbeat", HOOK_PATH)
+    mod = importlib.util.module_from_spec(spec)
+
+    stdout_cap = StringIO()
+    stderr_cap = StringIO()
+    exit_code = None
+
+    with (
+        patch("sys.stdout", stdout_cap),
+        patch("sys.stderr", stderr_cap),
+        patch("sys.stdin", StringIO(json.dumps(hook_input))),
+    ):
+        try:
+            spec.loader.exec_module(mod)
+            mod.main()
+        except SystemExit as e:
+            exit_code = e.code
+
+    return exit_code, stdout_cap.getvalue(), stderr_cap.getvalue()
+
+
 # ---------------------------------------------------------------------------
-# Pure function tests
+# Pure function tests: write_heartbeat()
 # ---------------------------------------------------------------------------
 
 class TestWriteHeartbeat:
@@ -132,10 +193,14 @@ class TestWriteHeartbeat:
         assert before - TIMESTAMP_TOLERANCE_SECONDS <= ts <= after + TIMESTAMP_TOLERANCE_SECONDS
 
 
+# ---------------------------------------------------------------------------
+# Threshold constant guard (prevents silent drift)
+# ---------------------------------------------------------------------------
+
 class TestStaleThresholdConstant:
     """Verify the documented threshold matches the expected value (prevents silent drift)."""
 
-    def test_stale_threshold_is_900_seconds(self):
+    def test_stale_threshold_is_1200_seconds(self):
         spec = importlib.util.spec_from_file_location("th", HOOK_PATH)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
@@ -143,56 +208,191 @@ class TestStaleThresholdConstant:
 
 
 # ---------------------------------------------------------------------------
-# Hook main() integration tests with dispatcher-only guard
+# Dispatcher-only guard: agent_id field check (issue #1897)
 # ---------------------------------------------------------------------------
 
-def _run_hook_with_input(
-    monkeypatch,
-    heartbeat_file: Path,
-    hook_input: dict,
-    is_dispatcher_session_return: bool = True,
-) -> tuple[int, str, str]:
-    """Execute the hook's main() with a given hook input dict and mocked is_dispatcher_session.
+# Named constant from spec: subagent tool calls must NOT update the heartbeat.
+# The fix: check agent_id field — present = subagent, absent = dispatcher.
+SUBAGENT_MUST_NOT_WRITE_HEARTBEAT = True
 
-    Mocks session_role.is_dispatcher_session to return is_dispatcher_session_return so
-    tests don't depend on filesystem state (dispatcher-session-id files).
+
+class TestAgentIdGuard:
+    """Issue #1897: subagent tool calls must NOT update the dispatcher heartbeat.
+
+    Agent_id guard: CC injects agent_id only into subagent hook payloads.
+    The dispatcher session never carries agent_id. A single field check is
+    sufficient — no state file I/O, no process tree walk.
     """
-    monkeypatch.setenv("LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE", str(heartbeat_file))
 
-    stdin_content = json.dumps(hook_input)
+    def test_subagent_payload_does_not_write_heartbeat(self, monkeypatch, tmp_path):
+        """When agent_id is present in the payload, heartbeat is NOT written."""
+        hb = tmp_path / "dispatcher-heartbeat"
+        code, _, _ = _run_hook_with_input(
+            monkeypatch,
+            hb,
+            hook_input={
+                AGENT_ID_SUBAGENT_FIELD: SAMPLE_SUBAGENT_AGENT_ID,
+                "session_id": SAMPLE_SUBAGENT_SESSION_ID,
+            },
+        )
+        assert code == 0
+        assert not hb.exists(), (
+            "Subagent tool calls (agent_id present) must not update the dispatcher "
+            "heartbeat (issue #1897)"
+        )
 
-    spec = importlib.util.spec_from_file_location("thinking_heartbeat", HOOK_PATH)
-    mod = importlib.util.module_from_spec(spec)
+    def test_subagent_does_not_overwrite_existing_heartbeat(self, monkeypatch, tmp_path):
+        """An existing heartbeat written by the dispatcher is not touched by subagent calls."""
+        hb = tmp_path / "dispatcher-heartbeat"
+        old_ts = 1700000000
+        hb.write_text(str(old_ts) + "\n")
 
-    stdout_cap = StringIO()
-    stderr_cap = StringIO()
-    exit_code = None
+        code, _, _ = _run_hook_with_input(
+            monkeypatch,
+            hb,
+            hook_input={
+                AGENT_ID_SUBAGENT_FIELD: SAMPLE_SUBAGENT_AGENT_ID,
+                "session_id": SAMPLE_SUBAGENT_SESSION_ID,
+            },
+        )
+        assert code == 0
+        assert int(hb.read_text().strip()) == old_ts, (
+            "Subagent call must not overwrite existing dispatcher heartbeat (issue #1897)"
+        )
 
-    with (
-        patch("sys.stdout", stdout_cap),
-        patch("sys.stderr", stderr_cap),
-        patch("sys.stdin", StringIO(stdin_content)),
-    ):
-        try:
-            spec.loader.exec_module(mod)
-            # Patch is_dispatcher_session on the loaded module's session_role reference.
-            mod.session_role.is_dispatcher_session = lambda _: is_dispatcher_session_return
-            mod.main()
-        except SystemExit as e:
-            exit_code = e.code
+    def test_dispatcher_payload_no_agent_id_writes_heartbeat(self, monkeypatch, tmp_path):
+        """When agent_id is absent (dispatcher payload), the heartbeat IS written."""
+        hb = tmp_path / "dispatcher-heartbeat"
+        before = int(time.time())
+        _run_hook_with_input(
+            monkeypatch,
+            hb,
+            hook_input={"session_id": SAMPLE_DISPATCHER_SESSION_ID},
+        )
+        after = int(time.time())
+        assert hb.exists()
+        ts = int(hb.read_text().strip())
+        assert before <= ts <= after + 1
 
-    return exit_code, stdout_cap.getvalue(), stderr_cap.getvalue()
+    def test_empty_agent_id_string_writes_heartbeat(self, monkeypatch, tmp_path):
+        """An empty string for agent_id is treated as absent (write heartbeat)."""
+        hb = tmp_path / "dispatcher-heartbeat"
+        _run_hook_with_input(
+            monkeypatch,
+            hb,
+            hook_input={AGENT_ID_SUBAGENT_FIELD: "", "session_id": SAMPLE_DISPATCHER_SESSION_ID},
+        )
+        assert hb.exists(), (
+            "Empty agent_id string must be treated as absent (dispatcher path)"
+        )
+
+    def test_null_agent_id_writes_heartbeat(self, monkeypatch, tmp_path):
+        """A null/None value for agent_id is treated as absent (write heartbeat)."""
+        hb = tmp_path / "dispatcher-heartbeat"
+        _run_hook_with_input(
+            monkeypatch,
+            hb,
+            hook_input={AGENT_ID_SUBAGENT_FIELD: None, "session_id": SAMPLE_DISPATCHER_SESSION_ID},
+        )
+        assert hb.exists(), (
+            "Null agent_id must be treated as absent (dispatcher path)"
+        )
+
+    def test_empty_stdin_writes_heartbeat(self, monkeypatch, tmp_path):
+        """When stdin is empty (no JSON), heartbeat IS written (fail-open).
+
+        The dispatcher never sends agent_id, so absence of parseable stdin is
+        equivalent to absence of agent_id. Fail open to preserve liveness signal.
+        """
+        hb = tmp_path / "dispatcher-heartbeat"
+        code, _, _ = _run_hook(monkeypatch, hb)  # _run_hook uses empty stdin
+        assert code == 0
+        assert hb.exists(), (
+            "Empty stdin must write the heartbeat (fail-open: dispatcher cannot set agent_id)"
+        )
+
+    def test_invalid_json_stdin_writes_heartbeat(self, monkeypatch, tmp_path):
+        """When stdin contains invalid JSON, heartbeat IS written (fail-open)."""
+        hb = tmp_path / "dispatcher-heartbeat"
+        monkeypatch.setenv("LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE", str(hb))
+
+        spec = importlib.util.spec_from_file_location("thinking_heartbeat", HOOK_PATH)
+        mod = importlib.util.module_from_spec(spec)
+        exit_code = None
+
+        with patch("sys.stdin", StringIO("not valid json {")):
+            try:
+                spec.loader.exec_module(mod)
+                mod.main()
+            except SystemExit as e:
+                exit_code = e.code
+
+        assert exit_code == 0
+        assert hb.exists(), (
+            "Invalid JSON stdin must write the heartbeat (fail-open: cannot confirm subagent)"
+        )
+
+    def test_exits_zero_for_both_dispatcher_and_subagent(self, monkeypatch, tmp_path):
+        """Hook always exits 0, whether dispatcher or subagent (never blocks tool execution)."""
+        for payload in [
+            {"session_id": SAMPLE_DISPATCHER_SESSION_ID},  # dispatcher
+            {AGENT_ID_SUBAGENT_FIELD: SAMPLE_SUBAGENT_AGENT_ID, "session_id": SAMPLE_SUBAGENT_SESSION_ID},  # subagent
+        ]:
+            hb = tmp_path / f"heartbeat-{payload.get(AGENT_ID_SUBAGENT_FIELD, 'dispatcher')}"
+            code, _, _ = _run_hook_with_input(monkeypatch, hb, hook_input=payload)
+            assert code == 0, f"Hook must exit 0 for payload={payload!r}"
+
+    def test_guard_uses_agent_id_not_session_role_import(self):
+        """Guard must use agent_id field check, not session_role.is_dispatcher_session().
+
+        The agent_id guard is self-contained: no state file I/O, no process tree,
+        no is_dispatcher_session() which requires importing session_role and may
+        fall through to process-tree walks with tmux timeouts.
+        """
+        source = HOOK_PATH.read_text()
+
+        # The guard reads hook_input["agent_id"] (or .get("agent_id")).
+        assert "agent_id" in source, (
+            "thinking-heartbeat.py must reference 'agent_id' to implement the guard"
+        )
+
+        # Must NOT call is_dispatcher_session() in executable code — that would
+        # re-introduce state file I/O and process-tree walks. Parse the AST to
+        # check only actual function calls, not docstring references.
+        import ast
+        tree = ast.parse(source)
+        dispatcher_session_calls = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and (
+                (isinstance(node.func, ast.Attribute) and node.func.attr == "is_dispatcher_session")
+                or (isinstance(node.func, ast.Name) and node.func.id == "is_dispatcher_session")
+            )
+        ]
+        assert not dispatcher_session_calls, (
+            "thinking-heartbeat.py must NOT call is_dispatcher_session() — "
+            "use the direct agent_id field check instead (simpler, no I/O, no process tree)"
+        )
+
+        # Must NOT import session_role — the guard is self-contained.
+        session_role_imports = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Import)
+            and any(alias.name == "session_role" for alias in node.names)
+        ] + [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+            and node.module == "session_role"
+        ]
+        assert not session_role_imports, (
+            "thinking-heartbeat.py must NOT import session_role — "
+            "the agent_id guard requires no external helpers"
+        )
 
 
-def _run_hook(monkeypatch, heartbeat_file: Path) -> tuple[int, str, str]:
-    """Run hook as the dispatcher (is_dispatcher_session returns True)."""
-    return _run_hook_with_input(
-        monkeypatch,
-        heartbeat_file,
-        hook_input={"session_id": DISPATCHER_SESSION_ID},
-        is_dispatcher_session_return=True,
-    )
-
+# ---------------------------------------------------------------------------
+# Hook main() integration tests
+# ---------------------------------------------------------------------------
 
 class TestHookMain:
     def test_exits_zero_on_success(self, monkeypatch, tmp_path):
@@ -200,8 +400,7 @@ class TestHookMain:
         code, _, _ = _run_hook(monkeypatch, hb)
         assert code == 0
 
-    def test_writes_heartbeat_when_dispatcher(self, monkeypatch, tmp_path):
-        """Heartbeat is written when the session is the dispatcher."""
+    def test_writes_heartbeat_on_success(self, monkeypatch, tmp_path):
         hb = tmp_path / "dispatcher-heartbeat"
         _run_hook(monkeypatch, hb)
         assert hb.exists()
@@ -227,145 +426,6 @@ class TestHookMain:
         code, _, _ = _run_hook(monkeypatch, custom)
         assert code == 0
         assert custom.exists()
-
-
-# ---------------------------------------------------------------------------
-# Dispatcher-only guard: subagent calls must NOT update the heartbeat
-# ---------------------------------------------------------------------------
-
-# Named constant from the spec (issue #1897): subagent activity masks dispatcher death.
-# The fix: heartbeat is only written when is_dispatcher_session() returns True.
-SUBAGENT_MUST_NOT_WRITE_HEARTBEAT = True
-
-
-class TestDispatcherOnlyGuard:
-    """Issue #1897: subagent tool calls must NOT update the dispatcher heartbeat."""
-
-    def test_subagent_session_does_not_write_heartbeat(self, monkeypatch, tmp_path):
-        """When is_dispatcher_session returns False, heartbeat file is not created."""
-        hb = tmp_path / "dispatcher-heartbeat"
-        code, _, _ = _run_hook_with_input(
-            monkeypatch,
-            hb,
-            hook_input={"session_id": SUBAGENT_SESSION_ID},
-            is_dispatcher_session_return=False,
-        )
-        assert code == 0
-        assert not hb.exists(), (
-            "Subagent tool calls must not update the dispatcher heartbeat (issue #1897)"
-        )
-
-    def test_subagent_does_not_overwrite_existing_heartbeat(self, monkeypatch, tmp_path):
-        """An existing heartbeat written by the dispatcher is not touched by subagent calls."""
-        hb = tmp_path / "dispatcher-heartbeat"
-        old_ts = 1700000000
-        hb.write_text(str(old_ts) + "\n")
-
-        code, _, _ = _run_hook_with_input(
-            monkeypatch,
-            hb,
-            hook_input={"session_id": SUBAGENT_SESSION_ID},
-            is_dispatcher_session_return=False,
-        )
-        assert code == 0
-        # File content must be unchanged.
-        assert int(hb.read_text().strip()) == old_ts, (
-            "Subagent call must not overwrite existing dispatcher heartbeat"
-        )
-
-    def test_dispatcher_session_writes_heartbeat(self, monkeypatch, tmp_path):
-        """When is_dispatcher_session returns True, the heartbeat IS written."""
-        hb = tmp_path / "dispatcher-heartbeat"
-        before = int(time.time())
-        _run_hook_with_input(
-            monkeypatch,
-            hb,
-            hook_input={"session_id": DISPATCHER_SESSION_ID},
-            is_dispatcher_session_return=True,
-        )
-        after = int(time.time())
-        assert hb.exists()
-        ts = int(hb.read_text().strip())
-        assert before <= ts <= after + 1
-
-    def test_empty_stdin_does_not_write_heartbeat(self, monkeypatch, tmp_path):
-        """When stdin is empty (unparseable JSON), no heartbeat is written (conservative)."""
-        hb = tmp_path / "dispatcher-heartbeat"
-        monkeypatch.setenv("LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE", str(hb))
-
-        spec = importlib.util.spec_from_file_location("thinking_heartbeat", HOOK_PATH)
-        mod = importlib.util.module_from_spec(spec)
-        exit_code = None
-
-        with patch("sys.stdin", StringIO("")):
-            try:
-                spec.loader.exec_module(mod)
-                mod.main()
-            except SystemExit as e:
-                exit_code = e.code
-
-        assert exit_code == 0
-        assert not hb.exists(), (
-            "Empty stdin must not write the heartbeat (conservative: unknown session = skip)"
-        )
-
-    def test_invalid_json_stdin_does_not_write_heartbeat(self, monkeypatch, tmp_path):
-        """When stdin contains invalid JSON, no heartbeat is written."""
-        hb = tmp_path / "dispatcher-heartbeat"
-        monkeypatch.setenv("LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE", str(hb))
-
-        spec = importlib.util.spec_from_file_location("thinking_heartbeat", HOOK_PATH)
-        mod = importlib.util.module_from_spec(spec)
-        exit_code = None
-
-        with patch("sys.stdin", StringIO("not valid json {")):
-            try:
-                spec.loader.exec_module(mod)
-                mod.main()
-            except SystemExit as e:
-                exit_code = e.code
-
-        assert exit_code == 0
-        assert not hb.exists()
-
-    def test_exits_zero_regardless_of_session_type(self, monkeypatch, tmp_path):
-        """Hook always exits 0, whether dispatcher or subagent (never blocks tool execution)."""
-        for is_dispatcher_session in (True, False):
-            hb_i = tmp_path / f"heartbeat-{is_dispatcher_session}"
-            code, _, _ = _run_hook_with_input(
-                monkeypatch,
-                hb_i,
-                hook_input={"session_id": DISPATCHER_SESSION_ID},
-                is_dispatcher_session_return=is_dispatcher_session,
-            )
-            assert code == 0, f"Hook must exit 0 for is_dispatcher_session={is_dispatcher_session}"
-
-    def test_uses_is_dispatcher_session_not_is_dispatcher(self, tmp_path):
-        """Guard must call is_dispatcher_session(), NOT is_dispatcher() which uses the
-        deleted startup flag and always returns False at PostToolUse time."""
-        import ast
-        source = HOOK_PATH.read_text()
-        tree = ast.parse(source)
-
-        # Check that is_dispatcher_session is called somewhere in the source.
-        assert "is_dispatcher_session" in source, (
-            "thinking-heartbeat.py must call is_dispatcher_session() for PostToolUse "
-            "hooks, not is_dispatcher() which reads the deleted startup flag"
-        )
-
-        # Check that is_dispatcher() is NOT called (only is_dispatcher_session).
-        # We look for the call pattern specifically: session_role.is_dispatcher(
-        # but NOT session_role.is_dispatcher_session(
-        import re
-        bare_is_dispatcher_calls = re.findall(
-            r'session_role\.is_dispatcher\s*\((?!_session)',
-            source,
-        )
-        assert not bare_is_dispatcher_calls, (
-            "thinking-heartbeat.py must NOT call session_role.is_dispatcher() — "
-            "that function reads the deleted startup flag and always returns False "
-            "at PostToolUse time. Use is_dispatcher_session() instead."
-        )
 
 
 # ---------------------------------------------------------------------------
