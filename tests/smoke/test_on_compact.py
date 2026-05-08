@@ -63,6 +63,7 @@ def _load_hook(
     sentinel_file: Path,
     session_id: str = "test-dispatcher-session",
     processing_dir: Path | None = None,
+    outbox_dir: Path | None = None,
 ) -> types.ModuleType:
     """
     Load hooks/on-compact.py as a fresh module with patched path constants.
@@ -72,6 +73,9 @@ def _load_hook(
 
     processing_dir: optional override for PROCESSING_DIR; defaults to a
     non-existent tmp subdirectory so existing tests are unaffected.
+    outbox_dir: optional override for OUTBOX_DIR so tests can inspect outbox
+    writes without touching ~/messages/outbox.  Defaults to a non-existent tmp
+    subdirectory (safe — send_compaction_notify is stubbed out in most tests).
     """
     spec = importlib.util.spec_from_file_location("on_compact", HOOK_PATH)
     assert spec is not None, f"Could not load spec from {HOOK_PATH}"
@@ -88,9 +92,13 @@ def _load_hook(
     mod.SENTINEL_FILE = sentinel_file
     # Default: a directory that doesn't exist so it's safely skipped.
     mod.PROCESSING_DIR = processing_dir if processing_dir is not None else (inbox_dir.parent / "processing")
+    # Default: a non-existent tmp subdir so no real outbox writes occur when
+    # send_compaction_notify is stubbed out (which it is in all tests except A7).
+    mod.OUTBOX_DIR = outbox_dir if outbox_dir is not None else (inbox_dir.parent / "outbox")
 
-    # Suppress the Telegram notify side-effect — we never want real network
-    # calls in smoke tests and we don't want to depend on config.env being present.
+    # Suppress the outbox notify side-effect in all tests except A7 (which
+    # explicitly provides an outbox_dir and tests the write directly).
+    # Using lambda: None keeps the tests independent of config.env.
     mod.send_compaction_notify = lambda: None  # type: ignore[attr-defined]
 
     # Stub is_dispatcher to return True so tests exercise the dispatcher path.
@@ -390,3 +398,67 @@ def test_on_compact_idempotent_when_reminder_in_processing(tmp_path: Path) -> No
         f"but found {len(inbox_reminders)}. Double-compaction regression — "
         "already_pending() must check processing/ as well as inbox/."
     )
+
+
+# ---------------------------------------------------------------------------
+# A7 – send_compaction_notify() writes to the outbox, not the Telegram API
+# ---------------------------------------------------------------------------
+
+
+def test_send_compaction_notify_writes_to_outbox(tmp_path: Path) -> None:
+    """
+    A7: send_compaction_notify() must write a JSON file to OUTBOX_DIR rather
+    than calling the Telegram Bot API directly.
+
+    This verifies the architectural fix in issue #1949: all outbound Lobster
+    notifications must go through the outbox pipeline so the shared bot runner
+    handles delivery.  Directly calling the Telegram API bypasses error handling,
+    retry logic, and the send queue.
+
+    The test calls send_compaction_notify() directly (not via main()) with a
+    real OUTBOX_DIR pointing to a tmp directory so we can inspect the output.
+    A minimal config.env is written with TELEGRAM_ALLOWED_USERS so the function
+    has a chat_id to write into the outbox file.
+    """
+    outbox_dir = tmp_path / "outbox"
+    config_dir = tmp_path / "lobster-config"
+    config_dir.mkdir(parents=True)
+    (config_dir / "config.env").write_text("TELEGRAM_ALLOWED_USERS=12345678\n")
+
+    # Load the module with test-controlled OUTBOX_DIR and CONFIG_ENV so we
+    # inspect outbox output without touching production paths.
+    spec = importlib.util.spec_from_file_location("on_compact_a7", HOOK_PATH)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)  # type: ignore[attr-defined]
+    mod.OUTBOX_DIR = outbox_dir
+    mod.CONFIG_ENV = config_dir / "config.env"
+
+    # Call the notify function directly — no main() or dispatcher stub needed.
+    mod.send_compaction_notify()
+
+    # A JSON file must have been written to the outbox.
+    outbox_files = list(outbox_dir.glob("*.json"))
+    assert len(outbox_files) == 1, (
+        f"Expected exactly 1 outbox file after send_compaction_notify(), "
+        f"found {len(outbox_files)}: {[str(f) for f in outbox_files]}"
+    )
+
+    reply = json.loads(outbox_files[0].read_text())
+
+    # Must target Telegram transport.
+    assert reply.get("source") == "telegram", (
+        f"outbox file source must be 'telegram', got {reply.get('source')!r}"
+    )
+
+    # Must be sent to the configured chat_id.
+    assert str(reply.get("chat_id")) == "12345678", (
+        f"outbox file chat_id must be '12345678', got {reply.get('chat_id')!r}"
+    )
+
+    # Must carry the compaction notification text.
+    assert reply.get("text") == "♻️ Context compacted. Re-orienting...", (
+        f"outbox file text mismatch: {reply.get('text')!r}"
+    )
+
+    # Must have a non-empty id field (used as the filename key).
+    assert reply.get("id"), "outbox file must have a non-empty 'id' field"
