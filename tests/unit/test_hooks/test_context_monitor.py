@@ -99,10 +99,11 @@ class TestTranscriptUsageReading:
         ])
         result = mod._read_transcript_usage(str(transcript))
         assert result is not None, "Expected usage data from transcript"
-        used_pct, remaining_pct, model = result
+        used_pct, remaining_pct, model, total_tokens = result
         assert abs(used_pct - 50.0) < 0.01, f"Expected 50% used, got {used_pct}"
         assert abs(remaining_pct - 50.0) < 0.01
         assert model == "claude-sonnet-4-6"
+        assert total_tokens == 100_000, f"Expected 100_000 raw tokens, got {total_tokens}"
 
     def test_last_turn_wins_when_multiple_turns_exist(self, tmp_path):
         """When multiple assistant turns exist, the last one's usage is returned."""
@@ -127,10 +128,11 @@ class TestTranscriptUsageReading:
         ])
         result = mod._read_transcript_usage(str(transcript))
         assert result is not None
-        used_pct, _, _ = result
+        used_pct, _, _, total_tokens = result
         assert abs(used_pct - 80.0) < 0.01, (
             f"Expected 80% from last turn, got {used_pct}"
         )
+        assert total_tokens == 160_000, f"Expected 160_000 raw tokens from last turn, got {total_tokens}"
 
     def test_returns_none_when_transcript_path_is_none(self, tmp_path):
         """No transcript_path → returns None (caller logs WARN)."""
@@ -173,9 +175,10 @@ class TestTranscriptUsageReading:
         ])
         result = mod._read_transcript_usage(str(transcript))
         assert result is not None
-        used_pct, _, model = result
+        used_pct, _, model, total_tokens = result
         assert abs(used_pct - 100.0) < 0.01, f"Expected 100%, got {used_pct}"
         assert model == "claude-haiku-4-5"
+        assert total_tokens == 200_000, f"Expected 200_000 raw tokens, got {total_tokens}"
 
 
 class TestModelContextLookup:
@@ -373,3 +376,75 @@ class TestHandlePayloadSignature:
         assert "inbox_dir" in sig.parameters, (
             "_handle_payload() must accept inbox_dir= for testability"
         )
+
+
+class TestTokenCountDisplay:
+    """Warning message leads with raw token count, not percentage (issue #1956).
+
+    Percentage is fragile: it depends on the assumed max window, which varies.
+    Raw token count is always accurate.
+    """
+
+    def test_warning_message_leads_with_token_count(self):
+        """_build_warning_message() text starts with token count, not percentage."""
+        mod = _load_hook()
+        # 168_000 tokens → "Context at 168,000 tokens (...)"
+        msg = mod._build_warning_message(84.0, total_tokens=168_000)
+        assert msg["text"].startswith("Context at 168,000 tokens"), (
+            f"Expected text to lead with token count, got: {msg['text']!r}"
+        )
+
+    def test_warning_message_includes_percentage_as_secondary(self):
+        """_build_warning_message() includes percentage in parentheses after the count."""
+        mod = _load_hook()
+        msg = mod._build_warning_message(84.0, total_tokens=168_000)
+        assert "84.0%" in msg["text"], (
+            f"Expected percentage as secondary context in: {msg['text']!r}"
+        )
+
+    def test_warning_message_stores_total_tokens_field(self):
+        """_build_warning_message() stores total_tokens as a top-level field for consumers."""
+        mod = _load_hook()
+        msg = mod._build_warning_message(80.0, total_tokens=160_000)
+        assert msg.get("total_tokens") == 160_000, (
+            f"Expected total_tokens=160_000, got: {msg.get('total_tokens')}"
+        )
+
+    def test_inbox_warning_contains_token_count_in_text(self, tmp_path):
+        """End-to-end: inbox warning message text leads with raw token count."""
+        mod = _load_hook()
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        inbox_dir = tmp_path / "inbox"
+        inbox_dir.mkdir(parents=True, exist_ok=True)
+        dedup_flag = tmp_path / "context-warning-sent"
+
+        original_dedup = mod.DEDUP_FLAG
+        mod.DEDUP_FLAG = dedup_flag
+        try:
+            # 160k / 200k = 80% — above threshold, 160,000 raw tokens
+            transcript = _make_transcript(tmp_path, [
+                {
+                    "model": "claude-sonnet-4-6",
+                    "usage": {
+                        "input_tokens": 160_000,
+                        "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": 0,
+                    },
+                }
+            ])
+            payload = {
+                "tool_name": "Bash",
+                "transcript_path": str(transcript),
+            }
+            mod._handle_payload(payload, log_dir=log_dir, inbox_dir=inbox_dir)
+        finally:
+            mod.DEDUP_FLAG = original_dedup
+
+        inbox_files = list(inbox_dir.glob("context-warning-*.json"))
+        assert len(inbox_files) == 1
+        msg = json.loads(inbox_files[0].read_text())
+        assert "160,000 tokens" in msg["text"], (
+            f"Expected '160,000 tokens' in warning text, got: {msg['text']!r}"
+        )
+        assert msg.get("total_tokens") == 160_000

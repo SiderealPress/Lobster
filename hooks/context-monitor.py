@@ -90,10 +90,12 @@ def _model_max_context(model: str) -> int:
 
 def _read_transcript_usage(
     transcript_path: str | None,
-) -> "tuple[float, float, str] | None":
+) -> "tuple[float, float, str, int] | None":
     """Read the last assistant usage entry from the transcript JSONL.
 
-    Returns (used_pct, remaining_pct, model) or None if data is unavailable.
+    Returns (used_pct, remaining_pct, model, total_tokens) or None if data
+    is unavailable. total_tokens is the raw token count (input + cache), which
+    is always accurate regardless of the assumed max context window.
 
     Reads the file line-by-line, keeping only the last assistant entry with a
     usage block. This is O(n) in lines but O(1) in memory — suitable for large
@@ -157,7 +159,7 @@ def _read_transcript_usage(
     used_pct = (total_used / model_max) * 100.0
     remaining_pct = 100.0 - used_pct
 
-    return (used_pct, remaining_pct, last_model)
+    return (used_pct, remaining_pct, last_model, total_used)
 
 
 def _log_usage(log_dir: Path, entry: dict) -> None:
@@ -200,15 +202,26 @@ def _build_absent_context_entry(tool_name: str, reason: str = "") -> dict:
     }
 
 
-def _build_warning_message(used_pct: float) -> dict:
-    """Return the context_warning inbox message payload."""
+def _build_warning_message(used_pct: float, total_tokens: int = 0) -> dict:
+    """Return the context_warning inbox message payload.
+
+    The message text leads with the raw token count (always accurate) and
+    includes the percentage as secondary context (only meaningful if the assumed
+    max window is correct). See issue #1956.
+    """
+    token_str = f"{total_tokens:,}"
+    text = (
+        f"Context at {token_str} tokens ({used_pct:.1f}% of 200k default window)"
+        " — entering wind-down mode"
+    )
     return {
         "id": str(uuid.uuid4()),
         "type": "context_warning",
         "source": "system",
         "chat_id": 0,
-        "text": f"Context window at {used_pct:.1f}% — entering wind-down mode",
+        "text": text,
         "used_percentage": used_pct,
+        "total_tokens": total_tokens,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -255,7 +268,7 @@ def _handle_payload(
         _log_usage(log_dir, entry)
         return
 
-    used_pct, remaining_pct, model = result
+    used_pct, remaining_pct, model, total_tokens = result
 
     entry = _build_log_entry(tool_name, used_pct, remaining_pct, model)
     _log_usage(log_dir, entry)
@@ -267,7 +280,7 @@ def _handle_payload(
     if DEDUP_FLAG.exists():
         return
 
-    message = _build_warning_message(used_pct)
+    message = _build_warning_message(used_pct, total_tokens)
     _write_warning_to_inbox(inbox_dir, message)
     DEDUP_FLAG.touch()
     # Transition dispatcher state to WINDING_DOWN (issue #1918).
