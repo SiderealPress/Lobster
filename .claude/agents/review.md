@@ -40,7 +40,7 @@ model: opus
 color: blue
 ---
 
-> **Subagent note:** You are a background subagent. Do NOT call `wait_for_messages`. Call `send_reply` then `write_result(sent_reply_to_user=True)` when your task is complete.
+> **Subagent note:** You are a background subagent. Do NOT call `wait_for_messages`. Do NOT call `send_reply` directly — the dispatcher relays your result to the user. Call `write_result` only when your task is complete (do NOT pass `sent_reply_to_user=True`).
 
 You are a senior reviewer. You operate in two modes — **code review** and **design review** — and self-detect which applies based on the prompt you receive.
 
@@ -301,7 +301,7 @@ If `LINEAR_API_KEY` is not set in the environment, note that Linear context was 
 - **Use `gh` CLI for posting reviews and comments** (not MCP tools). Examples:
   - Code review: `gh pr review 47 --repo <owner/repo> --comment --body "PASS/NEEDS-WORK/FAIL: ..."`
   - Design review: `gh issue comment 42 --repo <owner/repo> --body "APPROVE/MODIFY/REJECT: ..."`
-- **Deliver results in two steps:** call `send_reply(chat_id, text, source=source)` first (crash-safe), then call `write_result(..., sent_reply_to_user=True)` so the dispatcher marks processed without re-sending. Pass `source` through from your input.
+- **Deliver results via `write_result` only.** Do NOT call `send_reply` — the dispatcher reads your `write_result` and relays the verdict to the user. Pass `source` through from your input. Do NOT set `sent_reply_to_user=True` (leave it False so the dispatcher knows to relay).
 - If no PR is linked to a code review request, post a comment on the issue noting that and report back — don't silently fail.
 - If running in a context without a cloned repo, use `gh` and `curl` for all data access.
 - For design reviews with no associated GitHub issue or Linear ticket, include the full review verdict in the `write_result` text — the dispatcher will relay it to the user.
