@@ -103,6 +103,14 @@ HEARTBEAT_FILE="$WORKSPACE_DIR/logs/claude-heartbeat"   # legacy WFM-touch signa
 DISPATCHER_HEARTBEAT_FILE="${LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE:-$WORKSPACE_DIR/logs/dispatcher-heartbeat}"
 DISPATCHER_HEARTBEAT_STALE_SECONDS=3600   # 1 hour — temporary patch to prevent rogue health check restarts during docker state machine work
 
+# Pre-tool heartbeat (issue #1999).
+# Written by hooks/pre-tool-heartbeat.py BEFORE each tool call.
+# Supplementary to DISPATCHER_HEARTBEAT_FILE: if pre-tool is more recent, use it
+# as the freshness signal. This catches MCP-disconnect freezes where PostToolUse
+# never fires (and DISPATCHER_HEARTBEAT_FILE goes stale) but the dispatcher was
+# alive and trying to call a tool moments before.
+PRE_TOOL_HEARTBEAT_FILE="${LOBSTER_PRE_TOOL_HEARTBEAT_OVERRIDE:-$WORKSPACE_DIR/logs/dispatcher-pre-tool-heartbeat}"
+
 OUTBOX_DIR="$MESSAGES_DIR/outbox"
 OUTBOX_STALE_THRESHOLD_SECONDS=900   # 15 min = RED
 OUTBOX_YELLOW_THRESHOLD_SECONDS=300  # 5 min = YELLOW
@@ -977,11 +985,8 @@ check_outbox_drain() {
 #
 # Returns: 0=GREEN (fresh or skipped), 2=RED (stale)
 check_dispatcher_heartbeat() {
-    # Simplified heartbeat check (issue #1908):
-    # Single file check — no WFM-active fallback needed. The daemon thread in
-    # inbox_server.py now writes to DISPATCHER_HEARTBEAT_FILE directly during
-    # WFM blocking, so this file stays fresh whether the dispatcher is processing
-    # a message or idle in wait_for_messages.
+    # Primary signal: dispatcher-heartbeat (written by thinking-heartbeat.py on
+    # every PostToolUse event, and by the WFM daemon thread while blocking).
     if [[ ! -f "$DISPATCHER_HEARTBEAT_FILE" ]]; then
         log_info "Dispatcher heartbeat: file not found — skipping check (fresh install?)"
         return 0
@@ -994,78 +999,35 @@ check_dispatcher_heartbeat() {
         return 0
     fi
 
-    # Read per-message heartbeat (mark_processed, issue #694), PostToolUse
-    # thinking heartbeat (issue #1401), and PreToolUse heartbeat (issue #1439)
-    # from lobster-state.json.
-    local last_processed_epoch=0
-    local last_thinking_epoch=0
-    local last_pretooluse_epoch=0
-    if [[ -f "$LOBSTER_STATE_FILE" ]]; then
-        local last_processed_at last_thinking_at last_pretooluse_at
-        last_processed_at=$(python3 -c "
-import json, sys
-try:
-    d = json.load(open('$LOBSTER_STATE_FILE'))
-    print(d.get('last_processed_at', ''))
-except Exception:
-    print('')
-" 2>/dev/null)
-        last_thinking_at=$(python3 -c "
-import json, sys
-try:
-    d = json.load(open('$LOBSTER_STATE_FILE'))
-    print(d.get('last_thinking_at', ''))
-except Exception:
-    print('')
-" 2>/dev/null)
-        last_pretooluse_at=$(python3 -c "
-import json, sys
-try:
-    d = json.load(open('$LOBSTER_STATE_FILE'))
-    print(d.get('last_pretooluse_at', ''))
-except Exception:
-    print('')
-" 2>/dev/null)
-        if [[ -n "$last_processed_at" ]]; then
-            last_processed_epoch=$(date -d "$last_processed_at" +%s 2>/dev/null) || last_processed_epoch=0
-        fi
-        if [[ -n "$last_thinking_at" ]]; then
-            last_thinking_epoch=$(date -d "$last_thinking_at" +%s 2>/dev/null) || last_thinking_epoch=0
-        fi
-        if [[ -n "$last_pretooluse_at" ]]; then
-            last_pretooluse_epoch=$(date -d "$last_pretooluse_at" +%s 2>/dev/null) || last_pretooluse_epoch=0
+    # Supplementary signal: pre-tool heartbeat (issue #1999).
+    # Written by hooks/pre-tool-heartbeat.py BEFORE each tool call — fires even
+    # when PostToolUse never fires (e.g. MCP-disconnect freeze). If this file is
+    # more recent than the primary signal, use it as the effective timestamp.
+    local effective_ts="$raw_ts"
+    local effective_source="post-tool heartbeat"
+    if [[ -f "$PRE_TOOL_HEARTBEAT_FILE" ]]; then
+        local pre_tool_ts
+        pre_tool_ts=$(cat "$PRE_TOOL_HEARTBEAT_FILE" 2>/dev/null | tr -d '[:space:]')
+        if [[ -n "$pre_tool_ts" ]] && [[ "$pre_tool_ts" =~ ^[0-9]+$ ]] && \
+           [[ "$pre_tool_ts" -gt "$effective_ts" ]]; then
+            effective_ts="$pre_tool_ts"
+            effective_source="pre-tool heartbeat"
         fi
     fi
-
-    # Effective freshness = most recent of all four signals
-    local effective_last="$last_heartbeat"
-    local effective_source="WFM heartbeat"
-    if [[ "$last_processed_epoch" -gt "$effective_last" ]]; then
-        effective_last="$last_processed_epoch"
-        effective_source="last_processed_at"
-    fi
-    if [[ "$last_thinking_epoch" -gt "$effective_last" ]]; then
-        effective_last="$last_thinking_epoch"
-        effective_source="last_thinking_at"
-    fi
-    if [[ "$last_pretooluse_epoch" -gt "$effective_last" ]]; then
-        effective_last="$last_pretooluse_epoch"
-        effective_source="last_pretooluse_at"
-    fi
-    if [[ "$effective_source" != "WFM heartbeat" ]]; then
-        log_info "WFM freshness: using $effective_source signal (more recent than WFM heartbeat)"
+    if [[ "$effective_source" != "post-tool heartbeat" ]]; then
+        log_info "Dispatcher heartbeat: using $effective_source (more recent than post-tool)"
     fi
 
     local now age
     now=$(date +%s)
-    age=$(( now - raw_ts ))
+    age=$(( now - effective_ts ))
 
     if [[ $age -gt $DISPATCHER_HEARTBEAT_STALE_SECONDS ]]; then
-        log_error "RED: dispatcher heartbeat stale — last heartbeat ${age}s ago (threshold: ${DISPATCHER_HEARTBEAT_STALE_SECONDS}s)"
+        log_error "RED: dispatcher heartbeat stale — last $effective_source ${age}s ago (threshold: ${DISPATCHER_HEARTBEAT_STALE_SECONDS}s)"
         return 2
     fi
 
-    log_info "Dispatcher heartbeat OK: last heartbeat ${age}s ago (threshold: ${DISPATCHER_HEARTBEAT_STALE_SECONDS}s)"
+    log_info "Dispatcher heartbeat OK: last $effective_source ${age}s ago (threshold: ${DISPATCHER_HEARTBEAT_STALE_SECONDS}s)"
     return 0
 }
 
