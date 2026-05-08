@@ -1,23 +1,22 @@
 """
-Unit tests for hooks/pretooluse-heartbeat.py
+Unit tests for hooks/pretooluse-heartbeat.deprecated.py
+
+This hook is deprecated (superseded by hooks/pre-tool-heartbeat.py, issue #1786).
+The deprecated file is retained for audit purposes only — it should never be
+registered in settings.json. If it fires, it writes a warning to a JSONL log.
 
 Tests cover:
-- Normal write: last_pretooluse_at written and ISO UTC formatted
-- Merge semantics: existing fields in lobster-state.json are preserved
-- Creates state file if absent (state dir exists)
-- Atomic write: uses .tmp then rename
-- Env override: LOBSTER_STATE_FILE_OVERRIDE is respected
-- Malformed existing JSON is treated as empty (overwritten cleanly)
-- Exceptions during write do not propagate (hook exits 0 silently)
-- Hook exits 0 in all cases
-- Key distinction: last_pretooluse_at is a separate field from last_thinking_at
+- Hook exits 0 even though it is deprecated (must not block tool execution)
+- Firing writes a warning entry to deprecated-hook-fired.jsonl
+- Log entry contains expected fields (timestamp, event, hook name, message)
+- Log entry timestamp is parseable ISO UTC
+- Failure to write to log does not propagate — still exits 0
 """
 
 import importlib.util
 import json
 import os
 import sys
-import tempfile
 from datetime import datetime, timezone
 from io import StringIO
 from pathlib import Path
@@ -26,168 +25,32 @@ from unittest.mock import patch
 import pytest
 
 _HOOKS_DIR = Path(__file__).parents[3] / "hooks"
-HOOK_PATH = _HOOKS_DIR / "pretooluse-heartbeat.py"
+HOOK_PATH = _HOOKS_DIR / "pretooluse-heartbeat.deprecated.py"
 
-# Named constant matching the spec (issue #1439)
-PRETOOLUSE_HEARTBEAT_FIELD = "last_pretooluse_at"
+# Named constants matching the spec (issue #2001)
+DEPRECATED_HOOK_NAME = "pretooluse-heartbeat.deprecated.py"
+DEPRECATED_LOG_FILENAME = "deprecated-hook-fired.jsonl"
+DEPRECATED_EVENT_TYPE = "deprecated_hook_fired"
 
 
 # ---------------------------------------------------------------------------
-# Module loader (fresh import each call to avoid state pollution)
+# Module loader
 # ---------------------------------------------------------------------------
 
-def _load_module(state_file: Path):
-    """Load pretooluse-heartbeat as a fresh module with state file override."""
-    os.environ["LOBSTER_STATE_FILE_OVERRIDE"] = str(state_file)
-    spec = importlib.util.spec_from_file_location("pretooluse_heartbeat", HOOK_PATH)
+def _load_module(messages_dir: Path):
+    """Load the deprecated hook as a fresh module with LOBSTER_MESSAGES override."""
+    os.environ["LOBSTER_MESSAGES"] = str(messages_dir)
+    spec = importlib.util.spec_from_file_location("pretooluse_heartbeat_deprecated", HOOK_PATH)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
 
 
-# ---------------------------------------------------------------------------
-# Pure function tests
-# ---------------------------------------------------------------------------
-
-class TestReadState:
-    def _load(self):
-        mod = importlib.util.module_from_spec(
-            importlib.util.spec_from_file_location("pth", HOOK_PATH)
-        )
-        importlib.util.spec_from_file_location("pth", HOOK_PATH).loader.exec_module(mod)
-        return mod
-
-    def test_returns_empty_dict_when_file_absent(self, tmp_path):
-        mod = self._load()
-        result = mod._read_state(tmp_path / "nonexistent.json")
-        assert result == {}
-
-    def test_returns_parsed_dict(self, tmp_path):
-        mod = self._load()
-        f = tmp_path / "state.json"
-        f.write_text('{"mode": "active", "booted_at": "2024-01-01T00:00:00Z"}')
-        result = mod._read_state(f)
-        assert result == {"mode": "active", "booted_at": "2024-01-01T00:00:00Z"}
-
-    def test_returns_empty_dict_on_malformed_json(self, tmp_path):
-        mod = self._load()
-        f = tmp_path / "state.json"
-        f.write_text("not valid json {{{")
-        result = mod._read_state(f)
-        assert result == {}
-
-
-class TestWriteStateAtomic:
-    def _load(self):
-        mod = importlib.util.module_from_spec(
-            importlib.util.spec_from_file_location("pth", HOOK_PATH)
-        )
-        importlib.util.spec_from_file_location("pth", HOOK_PATH).loader.exec_module(mod)
-        return mod
-
-    def test_writes_json_to_path(self, tmp_path):
-        mod = self._load()
-        target = tmp_path / "state.json"
-        mod._write_state_atomic(target, {"foo": "bar"})
-        assert target.exists()
-        data = json.loads(target.read_text())
-        assert data == {"foo": "bar"}
-
-    def test_no_tmp_file_left_behind(self, tmp_path):
-        mod = self._load()
-        target = tmp_path / "state.json"
-        mod._write_state_atomic(target, {"x": 1})
-        tmp = Path(str(target) + ".tmp")
-        assert not tmp.exists()
-
-
-class TestWritePreToolUseHeartbeat:
-    def _load(self):
-        mod = importlib.util.module_from_spec(
-            importlib.util.spec_from_file_location("pth", HOOK_PATH)
-        )
-        importlib.util.spec_from_file_location("pth", HOOK_PATH).loader.exec_module(mod)
-        return mod
-
-    def test_writes_last_pretooluse_at(self, tmp_path):
-        """Heartbeat fires before any tool call and records the timestamp."""
-        mod = self._load()
-        state_file = tmp_path / "lobster-state.json"
-        mod.write_pretooluse_heartbeat(state_file)
-        data = json.loads(state_file.read_text())
-        assert PRETOOLUSE_HEARTBEAT_FIELD in data
-        # Parseable ISO timestamp
-        ts = datetime.fromisoformat(data[PRETOOLUSE_HEARTBEAT_FIELD])
-        assert ts.tzinfo is not None
-
-    def test_preserves_existing_fields(self, tmp_path):
-        """Other state fields (last_thinking_at, last_processed_at) survive the write."""
-        mod = self._load()
-        state_file = tmp_path / "lobster-state.json"
-        state_file.write_text(json.dumps({
-            "mode": "active",
-            "booted_at": "2024-01-01T00:00:00Z",
-            "last_thinking_at": "2024-01-01T01:00:00Z",
-            "last_processed_at": "2024-01-01T01:00:00Z",
-        }))
-        mod.write_pretooluse_heartbeat(state_file)
-        data = json.loads(state_file.read_text())
-        assert data["mode"] == "active"
-        assert data["booted_at"] == "2024-01-01T00:00:00Z"
-        assert data["last_thinking_at"] == "2024-01-01T01:00:00Z"
-        assert data["last_processed_at"] == "2024-01-01T01:00:00Z"
-        assert PRETOOLUSE_HEARTBEAT_FIELD in data
-
-    def test_creates_file_when_absent(self, tmp_path):
-        mod = self._load()
-        state_file = tmp_path / "subdir" / "lobster-state.json"
-        state_file.parent.mkdir(parents=True)
-        mod.write_pretooluse_heartbeat(state_file)
-        assert state_file.exists()
-        data = json.loads(state_file.read_text())
-        assert PRETOOLUSE_HEARTBEAT_FIELD in data
-
-    def test_overwrites_malformed_json_cleanly(self, tmp_path):
-        mod = self._load()
-        state_file = tmp_path / "lobster-state.json"
-        state_file.write_text("not json at all")
-        mod.write_pretooluse_heartbeat(state_file)
-        data = json.loads(state_file.read_text())
-        assert PRETOOLUSE_HEARTBEAT_FIELD in data
-
-    def test_timestamp_is_utc(self, tmp_path):
-        mod = self._load()
-        state_file = tmp_path / "lobster-state.json"
-        mod.write_pretooluse_heartbeat(state_file)
-        data = json.loads(state_file.read_text())
-        ts = datetime.fromisoformat(data[PRETOOLUSE_HEARTBEAT_FIELD])
-        # UTC offset should be +00:00
-        assert ts.utcoffset().total_seconds() == 0
-
-    def test_pretooluse_field_distinct_from_thinking_at(self, tmp_path):
-        """The PreToolUse field is separate from PostToolUse — health check can see both."""
-        mod = self._load()
-        state_file = tmp_path / "lobster-state.json"
-        state_file.write_text(json.dumps({
-            "last_thinking_at": "2024-01-01T01:00:00Z",
-        }))
-        mod.write_pretooluse_heartbeat(state_file)
-        data = json.loads(state_file.read_text())
-        # Both fields present independently
-        assert "last_thinking_at" in data  # unchanged
-        assert PRETOOLUSE_HEARTBEAT_FIELD in data
-        assert data["last_thinking_at"] == "2024-01-01T01:00:00Z"
-
-
-# ---------------------------------------------------------------------------
-# Hook main() integration tests
-# ---------------------------------------------------------------------------
-
-def _run_hook(monkeypatch, state_file: Path) -> tuple[int, str, str]:
+def _run_hook(monkeypatch, messages_dir: Path) -> tuple[int, str, str]:
     """Execute the hook's main() capturing exit code and stdio."""
-    monkeypatch.setenv("LOBSTER_STATE_FILE_OVERRIDE", str(state_file))
+    monkeypatch.setenv("LOBSTER_MESSAGES", str(messages_dir))
 
-    spec = importlib.util.spec_from_file_location("pretooluse_heartbeat", HOOK_PATH)
+    spec = importlib.util.spec_from_file_location("pretooluse_heartbeat_deprecated", HOOK_PATH)
     mod = importlib.util.module_from_spec(spec)
 
     stdout_cap = StringIO()
@@ -207,29 +70,110 @@ def _run_hook(monkeypatch, state_file: Path) -> tuple[int, str, str]:
     return exit_code, stdout_cap.getvalue(), stderr_cap.getvalue()
 
 
-class TestHookMain:
-    def test_exits_zero_on_success(self, monkeypatch, tmp_path):
-        """Hook must exit 0 — never block tool execution."""
-        state_file = tmp_path / "lobster-state.json"
-        code, _, _ = _run_hook(monkeypatch, state_file)
+# ---------------------------------------------------------------------------
+# Behavior tests: deprecated hook must log and exit 0
+# ---------------------------------------------------------------------------
+
+class TestDeprecatedHookExitsZero:
+    def test_exits_zero_on_successful_log(self, monkeypatch, tmp_path):
+        """Deprecated hook must exit 0 — never block tool execution."""
+        messages_dir = tmp_path / "messages"
+        messages_dir.mkdir(exist_ok=True)
+        code, _, _ = _run_hook(monkeypatch, messages_dir)
         assert code == 0
 
-    def test_writes_heartbeat_on_success(self, monkeypatch, tmp_path):
-        state_file = tmp_path / "lobster-state.json"
-        _run_hook(monkeypatch, state_file)
-        assert state_file.exists()
-        data = json.loads(state_file.read_text())
-        assert PRETOOLUSE_HEARTBEAT_FIELD in data
-
-    def test_exits_zero_even_when_write_fails(self, monkeypatch, tmp_path):
-        """Write failure must not block the tool call — health check degrades gracefully."""
-        state_file = tmp_path / "readonly_dir" / "lobster-state.json"
-        readonly_dir = tmp_path / "readonly_dir"
-        readonly_dir.mkdir()
-        readonly_dir.chmod(0o444)  # read-only directory
+    def test_exits_zero_even_when_log_write_fails(self, monkeypatch, tmp_path):
+        """Write failure must not block the tool call — degrades gracefully."""
+        messages_dir = tmp_path / "messages"
+        messages_dir.mkdir(exist_ok=True)
+        # Make logs dir read-only so write fails
+        logs_dir = messages_dir / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        logs_dir.chmod(0o444)
 
         try:
-            code, _, _ = _run_hook(monkeypatch, state_file)
+            code, _, _ = _run_hook(monkeypatch, messages_dir)
             assert code == 0
         finally:
-            readonly_dir.chmod(0o755)  # restore for cleanup
+            logs_dir.chmod(0o755)
+
+
+class TestDeprecatedHookLogsWarning:
+    def test_writes_jsonl_entry_when_fired(self, monkeypatch, tmp_path):
+        """Firing writes a structured warning entry to deprecated-hook-fired.jsonl."""
+        messages_dir = tmp_path / "messages"
+        messages_dir.mkdir(exist_ok=True)
+        _run_hook(monkeypatch, messages_dir)
+
+        log_file = messages_dir / "logs" / DEPRECATED_LOG_FILENAME
+        assert log_file.exists(), "deprecated-hook-fired.jsonl must be created when hook fires"
+
+        lines = log_file.read_text().strip().splitlines()
+        assert len(lines) == 1, "Exactly one JSONL entry per firing"
+
+    def test_log_entry_has_required_fields(self, monkeypatch, tmp_path):
+        """Log entry must contain timestamp, event, hook name, and message."""
+        messages_dir = tmp_path / "messages"
+        messages_dir.mkdir(exist_ok=True)
+        _run_hook(monkeypatch, messages_dir)
+
+        log_file = messages_dir / "logs" / DEPRECATED_LOG_FILENAME
+        entry = json.loads(log_file.read_text().strip().splitlines()[0])
+
+        assert "timestamp" in entry
+        assert "event" in entry
+        assert "hook" in entry
+        assert "message" in entry
+
+    def test_log_entry_event_type_is_deprecated_hook_fired(self, monkeypatch, tmp_path):
+        """Event type must be 'deprecated_hook_fired' for observability filters."""
+        messages_dir = tmp_path / "messages"
+        messages_dir.mkdir(exist_ok=True)
+        _run_hook(monkeypatch, messages_dir)
+
+        log_file = messages_dir / "logs" / DEPRECATED_LOG_FILENAME
+        entry = json.loads(log_file.read_text().strip().splitlines()[0])
+        assert entry["event"] == DEPRECATED_EVENT_TYPE
+
+    def test_log_entry_hook_name_matches_filename(self, monkeypatch, tmp_path):
+        """Hook name in log entry identifies which file fired."""
+        messages_dir = tmp_path / "messages"
+        messages_dir.mkdir(exist_ok=True)
+        _run_hook(monkeypatch, messages_dir)
+
+        log_file = messages_dir / "logs" / DEPRECATED_LOG_FILENAME
+        entry = json.loads(log_file.read_text().strip().splitlines()[0])
+        assert entry["hook"] == DEPRECATED_HOOK_NAME
+
+    def test_log_entry_timestamp_is_utc_iso(self, monkeypatch, tmp_path):
+        """Timestamp must be parseable ISO UTC so log scanners can sort by time."""
+        messages_dir = tmp_path / "messages"
+        messages_dir.mkdir(exist_ok=True)
+        _run_hook(monkeypatch, messages_dir)
+
+        log_file = messages_dir / "logs" / DEPRECATED_LOG_FILENAME
+        entry = json.loads(log_file.read_text().strip().splitlines()[0])
+        ts = datetime.fromisoformat(entry["timestamp"])
+        assert ts.tzinfo is not None
+        assert ts.utcoffset().total_seconds() == 0
+
+    def test_log_appends_on_repeated_firings(self, monkeypatch, tmp_path):
+        """Each firing appends a new line — log accumulates for audit."""
+        messages_dir = tmp_path / "messages"
+        messages_dir.mkdir(exist_ok=True)
+        _run_hook(monkeypatch, messages_dir)
+        _run_hook(monkeypatch, messages_dir)
+
+        log_file = messages_dir / "logs" / DEPRECATED_LOG_FILENAME
+        lines = log_file.read_text().strip().splitlines()
+        assert len(lines) == 2, "Two firings must produce two log entries"
+
+    def test_creates_logs_dir_if_absent(self, monkeypatch, tmp_path):
+        """Hook must create ~/messages/logs/ if it doesn't exist yet."""
+        messages_dir = tmp_path / "messages"
+        messages_dir.mkdir(exist_ok=True)
+        # logs/ does not exist yet
+        _run_hook(monkeypatch, messages_dir)
+
+        log_file = messages_dir / "logs" / DEPRECATED_LOG_FILENAME
+        assert log_file.exists()
