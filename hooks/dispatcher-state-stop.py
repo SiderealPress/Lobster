@@ -1,30 +1,32 @@
 #!/usr/bin/env python3
 """
-SessionStop hook: write DEAD state for dispatcher and fallback context-handoff.json.
+SessionStop hook: write DEAD state for dispatcher and append context-handoff.jsonl.
 
 Responsibilities:
 1. Write DEAD state to dispatcher-state.json (issue #1918 — 5-state liveness machine)
    so the health check can immediately restart.
-2. Write a lightweight context-handoff.json when the dispatcher session ends without
-   a graceful wind-down (issue #1977).
+2. Append a minimal record to context-handoff.jsonl when the dispatcher session ends
+   (issue #1977, redesigned in issue #2002).
 
-## context-handoff.json fallback (issue #1977)
+## context-handoff.jsonl append (issues #1977, #2002)
 
 The graceful wind-down path (context_warning handler in sys.dispatcher.bootup.md,
 step 5) writes context-handoff.json with rich data: pending_tasks, last_user_message,
 etc. But sessions that hit the hard context limit before reaching 70%, or that crash,
 bypass this entirely — the LLM never gets to act.
 
-This hook is the safety net: if context-handoff.json does not already exist when the
-Stop hook fires, we write a minimal version so the next session always has at least:
+This hook is the safety net: every dispatcher session end appends one JSON line to
+context-handoff.jsonl. The next session reads the last line (most recent record).
+
+Each appended record contains:
   - triggered_at: current UTC ISO timestamp
   - context_pct: last known context % from the session transcript (None if unavailable)
   - in_flight_agents: list of running tasks from inflight-work.jsonl without completion
   - note: "Stop hook wind-down"
 
-If context-handoff.json already exists (written by the graceful LLM wind-down), we do
-NOT overwrite it — the graceful version has richer data. This hook is strictly a
-fallback.
+Unlike the old write-if-absent singleton approach, this always appends — giving a
+historical record and removing the need for an existence check. The graceful wind-down
+path also writes to this log; both entries accumulate.
 
 ## Dispatcher detection
 
@@ -207,7 +209,7 @@ def _resolve_inflight_path() -> Path:
 
 
 def _build_handoff_payload(context_pct: float | None, in_flight_agents: list[dict]) -> dict:
-    """Return the minimal context-handoff.json payload for a Stop hook wind-down."""
+    """Return the minimal context-handoff.jsonl entry payload for a Stop hook wind-down."""
     return {
         "triggered_at": datetime.now(timezone.utc).isoformat(),
         "context_pct": context_pct,
@@ -216,32 +218,29 @@ def _build_handoff_payload(context_pct: float | None, in_flight_agents: list[dic
     }
 
 
-def _write_handoff_if_absent(handoff_path: Path, payload: dict) -> None:
-    """Write context-handoff.json atomically if it does not already exist.
+def _append_handoff_entry(handoff_path: Path, payload: dict) -> None:
+    """Append a JSON line to context-handoff.jsonl.
 
-    Uses a tmp-file + os.replace() for atomic write. Does not overwrite an
-    existing file — the graceful wind-down version has richer data.
+    Always appends — no existence check needed. Every session end writes one
+    record, building a log. The startup reader reads the last line.
 
     Silent on all errors.
     """
-    if handoff_path.exists():
-        return  # Graceful wind-down already wrote this — preserve it.
-
     try:
         handoff_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = handoff_path.with_suffix(".json.tmp")
-        tmp_path.write_text(json.dumps(payload, indent=2) + "\n")
-        os.replace(str(tmp_path), str(handoff_path))
+        line = json.dumps(payload) + "\n"
+        with open(handoff_path, "a", encoding="utf-8") as f:
+            f.write(line)
     except Exception:  # noqa: BLE001
         pass  # Never interrupt session stop
 
 
 def _resolve_handoff_path() -> Path:
-    """Return the context-handoff.json path, resolved from LOBSTER_WORKSPACE."""
+    """Return the context-handoff.jsonl path, resolved from LOBSTER_WORKSPACE."""
     workspace = Path(
         os.environ.get("LOBSTER_WORKSPACE", Path.home() / "lobster-workspace")
     )
-    return workspace / "data" / "context-handoff.json"
+    return workspace / "data" / "context-handoff.jsonl"
 
 
 # ---------------------------------------------------------------------------
@@ -270,14 +269,14 @@ def main() -> None:
     except Exception:
         pass
 
-    # --- 2. Write fallback context-handoff.json (issue #1977) ---
+    # --- 2. Append context-handoff.jsonl entry (issues #1977, #2002) ---
     try:
         transcript_path = hook_input.get("transcript_path")
         context_pct = _read_context_pct_from_transcript(transcript_path)
         in_flight_agents = _read_in_flight_agents(_resolve_inflight_path())
         payload = _build_handoff_payload(context_pct, in_flight_agents)
         handoff_path = _resolve_handoff_path()
-        _write_handoff_if_absent(handoff_path, payload)
+        _append_handoff_entry(handoff_path, payload)
     except Exception:
         pass
 
