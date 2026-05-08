@@ -65,8 +65,8 @@ HEARTBEAT_FILE = Path(
 )
 
 # Sentinel threshold used in tests — not read here, but documents the expected value.
-# The health check uses DISPATCHER_HEARTBEAT_STALE_SECONDS = 900 (15 minutes).
-DISPATCHER_HEARTBEAT_STALE_SECONDS = 900
+# The health check uses DISPATCHER_HEARTBEAT_STALE_SECONDS = 1200 (20 minutes).
+DISPATCHER_HEARTBEAT_STALE_SECONDS = 1200
 
 # Field injected by Claude Code into subagent hook payloads (absent for dispatcher).
 # Named constant for test clarity — see issue #1897.

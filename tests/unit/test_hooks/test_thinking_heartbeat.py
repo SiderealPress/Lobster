@@ -48,7 +48,7 @@ TIMESTAMP_TOLERANCE_SECONDS = 5
 
 # The threshold documented in the hook (checked here to prevent silent drift).
 # Named constant from spec — see issue #1897 and health-check-v3.sh.
-EXPECTED_STALE_THRESHOLD = 900  # 15 minutes
+EXPECTED_STALE_THRESHOLD = 1200  # 20 minutes — matches health-check-v3.sh
 
 # Field name injected by Claude Code into subagent payloads (absent for dispatcher).
 # Named constant from spec (issue #1897): this is the guard field.
@@ -200,7 +200,7 @@ class TestWriteHeartbeat:
 class TestStaleThresholdConstant:
     """Verify the documented threshold matches the expected value (prevents silent drift)."""
 
-    def test_stale_threshold_is_900_seconds(self):
+    def test_stale_threshold_is_1200_seconds(self):
         spec = importlib.util.spec_from_file_location("th", HOOK_PATH)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
