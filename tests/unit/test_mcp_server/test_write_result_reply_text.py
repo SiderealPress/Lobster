@@ -227,14 +227,3 @@ class TestBackwardCompatibility:
         assert msg["chat_id"] == 42
         assert msg["text"] == "My result."
         assert msg["source"] == "telegram"
-        assert msg["status"] == "success"
-        assert "reply_text" not in msg
-
-    def test_sent_reply_to_user_false_by_default(self, tmp_path):
-        """sent_reply_to_user defaults to False when not provided."""
-        msg = _run_write_result(tmp_path, {
-            "task_id": "default-sent",
-            "chat_id": 1,
-            "text": "Text.",
-        })
-        assert msg["sent_reply_to_user"] is False

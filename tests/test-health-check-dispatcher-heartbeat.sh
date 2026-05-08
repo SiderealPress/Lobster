@@ -17,7 +17,7 @@
 # Key behavioral assertion: the check uses a single dispatcher-heartbeat file with
 # a single epoch timestamp. No lobster-state.json reads. The WFM-active file is
 # also consulted by check_dispatcher_heartbeat() but is bypassed safely here via
-# DISPATCHER_WFM_ACTIVE_FILE pointing to an absent file (defaulting to GREEN).
+# the DISPATCHER_WFM_ACTIVE_FILE default (absent file → treated as not active).
 #
 # Usage: bash tests/test-health-check-dispatcher-heartbeat.sh
 #===============================================================================

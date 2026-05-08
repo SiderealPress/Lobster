@@ -4,15 +4,6 @@ Granola Ingest — Main Entry Point (Slices 1-4)
 Incremental ingest of Granola meeting notes into the versioned folder
 hierarchy. Designed to run every 15 minutes from cron.
 
-Supports multiple Granola accounts:
-- GRANOLA_API_KEY   — primary account (required)
-- GRANOLA_API_KEY_2 — secondary account (optional)
-
-When both keys are present, notes from both accounts are fetched and merged.
-Each account's cursor state is tracked independently (keyed by account name).
-Notes from both accounts are deduplicated by note ID (primary account wins).
-Each note has an 'account' field added to its stored JSON ('primary' or 'secondary').
-
 Exit codes:
   0 — success (including 0 new notes)
   1 — partial failure (API error, some notes may not have been written)
@@ -27,7 +18,6 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Iterator
 
 
 # ---------------------------------------------------------------------------
@@ -40,14 +30,6 @@ if str(_THIS_DIR) not in sys.path:
 from granola_client import GranolaClient, GranolaAPIError  # noqa: E402
 from granola_state import IncrementalFetcher, StateManager  # noqa: E402
 from granola_storage import NoteStorage  # noqa: E402
-from granola_multi_account import (  # noqa: E402
-    AccountConfig,
-    build_accounts_from_env,
-    annotate_note_with_account,
-    merge_and_deduplicate,
-    ACCOUNT_PRIMARY,
-    ACCOUNT_SECONDARY,
-)
 
 
 # ---------------------------------------------------------------------------
@@ -103,43 +85,6 @@ def _load_config_env() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Per-account fetch with per-account cursor state
-# ---------------------------------------------------------------------------
-
-def _fetch_notes_for_account(
-    account: AccountConfig,
-    log: logging.Logger,
-) -> list[dict]:
-    """
-    Fetch all new notes for a single Granola account.
-
-    Uses an account-namespaced state key inside the shared .state.json file
-    so each account's cursor is tracked independently.
-
-    Returns a list of annotated raw note dicts (with 'account' field added).
-    """
-    # Each account gets its own StateManager pointing to the same file but
-    # using a namespaced state_path suffix to isolate cursors.
-    account_state_path = NOTES_ROOT / f".state-{account.name}.json"
-    state_manager = StateManager(state_path=account_state_path)
-
-    client = GranolaClient(api_key=account.api_key)
-    fetcher = IncrementalFetcher(client=client, state_manager=state_manager)
-
-    notes: list[dict] = []
-    for note in fetcher.fetch_new():
-        annotated = annotate_note_with_account(note.raw, account.name)
-        notes.append(annotated)
-
-    log.info(
-        "Account '%s': fetched %d new notes",
-        account.name,
-        len(notes),
-    )
-    return notes
-
-
-# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -149,67 +94,58 @@ def main() -> int:
 
     _load_config_env()
 
-    # Discover configured accounts
-    accounts = build_accounts_from_env(dict(os.environ))
-    if not accounts:
+    # Validate API key
+    api_key = os.environ.get("GRANOLA_API_KEY")
+    if not api_key:
         log.error(
             "GRANOLA_API_KEY not set. Set it in ~/lobster-config/config.env "
             "or export it before running."
         )
         return 2
 
-    account_names = ", ".join(a.name for a in accounts)
-    log.info("Polling %d account(s): %s", len(accounts), account_names)
+    try:
+        client = GranolaClient(api_key=api_key)
+        state_manager = StateManager(state_path=NOTES_ROOT / ".state.json")
+        storage = NoteStorage(root=NOTES_ROOT)
+        fetcher = IncrementalFetcher(client=client, state_manager=state_manager)
+    except ValueError as exc:
+        log.error("Configuration error: %s", exc)
+        return 2
 
-    storage = NoteStorage(root=NOTES_ROOT)
-
-    # Fetch notes per account
-    all_notes_by_account: dict[str, list[dict]] = {}
-    for account in accounts:
-        try:
-            all_notes_by_account[account.name] = _fetch_notes_for_account(account, log)
-        except GranolaAPIError as exc:
-            log.error("Granola API error for account '%s': %s", account.name, exc)
-            # Treat a single account failure as partial — continue with others
-            all_notes_by_account[account.name] = []
-        except Exception as exc:  # noqa: BLE001
-            log.error(
-                "Unexpected error fetching account '%s': %s",
-                account.name, exc, exc_info=True,
-            )
-            all_notes_by_account[account.name] = []
-
-    # Merge and deduplicate across accounts
-    primary_notes = all_notes_by_account.get(ACCOUNT_PRIMARY, [])
-    secondary_notes = all_notes_by_account.get(ACCOUNT_SECONDARY, [])
-    merged_notes = merge_and_deduplicate(primary_notes, secondary_notes)
-
-    log.info(
-        "Merged: %d from primary, %d from secondary → %d after dedup",
-        len(primary_notes), len(secondary_notes), len(merged_notes),
-    )
-
-    # Write merged notes to storage
     written = 0
     skipped = 0
     errors = 0
 
-    for raw_note in merged_notes:
-        try:
-            path, was_new = storage.write_note(raw_note)
-            if was_new:
-                written += 1
-                log.debug("Wrote note %s → %s", raw_note.get("id"), path)
-            else:
-                skipped += 1
-                log.debug("Skipped (identical) note %s", raw_note.get("id"))
-        except Exception as exc:  # noqa: BLE001
-            errors += 1
-            log.warning("Failed to write note %s: %s", raw_note.get("id"), exc)
+    try:
+        for note in fetcher.fetch_new():
+            try:
+                path, was_new = storage.write_note(note.raw)
+                if was_new:
+                    written += 1
+                    log.debug("Wrote note %s → %s", note.id, path)
+                else:
+                    skipped += 1
+                    log.debug("Skipped (identical) note %s", note.id)
+            except Exception as exc:  # noqa: BLE001
+                errors += 1
+                log.warning("Failed to write note %s: %s", note.id, exc)
 
+    except GranolaAPIError as exc:
+        log.error("Granola API error: %s", exc)
+        log.info(
+            "Partial run — wrote %d, skipped %d, errors %d",
+            written, skipped, errors,
+        )
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        log.error("Unexpected error during fetch: %s", exc, exc_info=True)
+        return 1
+
+    state = state_manager.load()
+    cursor = state.get("cursor", "null")
     log.info(
-        "Ingest complete — wrote %d new, skipped %d identical, errors %d",
-        written, skipped, errors,
+        "Ingest complete — wrote %d new, skipped %d identical, errors %d; cursor=%s",
+        written, skipped, errors, cursor,
     )
     return 0 if errors == 0 else 1
 

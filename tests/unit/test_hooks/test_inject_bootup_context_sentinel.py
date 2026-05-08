@@ -207,7 +207,8 @@ class TestConsumeStartupFlag:
 
 class TestMainStartupFlagRouting:
     """main() in inject-bootup-context.py uses the startup flag (live PID) to
-    detect the dispatcher session and inject dispatcher bootup context.    """
+    detect the dispatcher session and inject dispatcher bootup context.
+    """
 
     def _make_bootup_files(self, claude_dir: Path) -> tuple[Path, Path]:
         """Write minimal dispatcher and subagent bootup stubs."""
@@ -226,15 +227,12 @@ class TestMainStartupFlagRouting:
         # Write live PID to startup flag.
         flag = workspace / "data" / STARTUP_FLAG_FILENAME
         flag.write_text(str(os.getpid()))
+
         claude_dir = tmp_path / "lobster" / ".claude"
         claude_dir.mkdir(parents=True)
         dispatcher_bootup, _ = self._make_bootup_files(claude_dir)
 
         hook_input = json.dumps({"session_id": "any-session-uuid"})
-
-        # Redirect the tertiary session file to a temp path so write_dispatcher_session_id()
-        # never touches ~/messages/config/dispatcher-session-id.
-        tmp_session_file = tmp_path / "messages" / "config" / "dispatcher-session-id"
 
         with _PatchEnv(
             {
@@ -254,6 +252,7 @@ class TestMainStartupFlagRouting:
             mod.USER_DISPATCHER_BOOTUP = tmp_path / "no-user-dispatcher"
             mod.USER_SUBAGENT_BOOTUP = tmp_path / "no-user-subagent"
             mod.CONTEXT_INJECTION_LOG = workspace / "logs" / "context-injection.log"
+
             with patch("sys.stdin", io.StringIO(hook_input)):
                 with pytest.raises(SystemExit):
                     mod.main()
@@ -272,6 +271,7 @@ class TestMainStartupFlagRouting:
 
         flag = workspace / "data" / STARTUP_FLAG_FILENAME
         flag.write_text(str(os.getpid()))
+
         claude_dir = tmp_path / "lobster" / ".claude"
         claude_dir.mkdir(parents=True)
         dispatcher_bootup, _ = self._make_bootup_files(claude_dir)
@@ -554,6 +554,7 @@ class TestMainSentinelFallback:
         # UUID files are NOT used by inject-bootup-context.py after issue #1908.
         # (Writing them here to verify they don't interfere.)
         (workspace / "data" / "dispatcher-claude-session-id").write_text("some-old-uuid")
+
         claude_dir = tmp_path / "lobster" / ".claude"
         claude_dir.mkdir(parents=True)
         dispatcher_bootup, _ = self._make_bootup_files(claude_dir)
@@ -572,6 +573,7 @@ class TestMainSentinelFallback:
             mod.USER_DISPATCHER_BOOTUP = tmp_path / "no-user-dispatcher"
             mod.USER_SUBAGENT_BOOTUP = tmp_path / "no-user-subagent"
             mod.CONTEXT_INJECTION_LOG = workspace / "logs" / "context-injection.log"
+
             with patch("sys.stdin", io.StringIO(hook_input)):
                 with pytest.raises(SystemExit):
                     mod.main()

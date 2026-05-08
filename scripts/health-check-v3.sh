@@ -33,10 +33,10 @@
 # Dispatcher liveness (simplified, issue #1908):
 #   hooks/thinking-heartbeat.py writes a Unix epoch timestamp to
 #   ~/lobster-workspace/logs/dispatcher-heartbeat on every PostToolUse event.
-#   The daemon thread in inbox_server.py also writes this file every 60s while
-#   wait_for_messages is blocking, bridging the gap when no tool calls occur.
-#   check_dispatcher_heartbeat() reads this single file with a 900s threshold.
-#   No WFM-active fallback needed — the daemon thread keeps the heartbeat fresh.
+#   check_dispatcher_heartbeat() reads this single file and checks its age.
+#   The 1800s threshold (30 min) reduces MTTR for thinking-freeze. The
+#   post-compaction grace period suppression covers catchup runs that
+#   can last up to 12 min. See issue #1483, #1786.
 #
 # Boot grace period:
 #   After any restart (health-check-initiated or manual), the new Claude session
@@ -47,7 +47,7 @@
 #   (after each health-check-initiated restart). Resource checks (memory, disk,
 #   auth, outbox) still run during the grace period.
 #   NOTE: Dispatcher heartbeat check is NOT suppressed during boot grace — the
-#   900s (15 min) threshold absorbs the 90s boot window naturally.
+#   1800s (30 min) threshold absorbs the 90s boot window naturally.
 #
 # Escalation ladder:
 #   GREEN  - All checks pass (or in expected transient state)
@@ -83,7 +83,7 @@ RESTART_WINDOW_BUFFER_SECONDS=120    # Pre-mark messages within this window of t
 MAINTENANCE_EXPIRY_SECONDS=3600      # 1 hour - stale maintenance flag is auto-cleared and checks resume
 
 COMPACTION_SUPPRESS_SECONDS=300      # 5 minutes - skip stale-inbox check after a compaction event
-COMPACT_GRACE_SECONDS=900            # 15 minutes - skip stale-inbox check after a compaction (last-compact.ts)
+COMPACT_GRACE_SECONDS=600            # 10 minutes - skip stale-inbox check after a compaction (last-compact.ts)
 # CATCHUP_SUPPRESS_SECONDS removed (issue #1483): dispatcher heartbeat threshold covers catchup naturally
 RESTART_COOLDOWN_SUPPRESS_SECONDS=240 # 4 minutes - suppress stale-inbox RED after a recent restart
 
@@ -155,7 +155,6 @@ LOBSTER_ENV="${LOBSTER_ENV:-production}"
 mkdir -p "$(dirname "$LOG_FILE")"
 mkdir -p "$(dirname "$RESTART_STATE_FILE")"
 mkdir -p "$ALERT_DEDUP_DIR"
-mkdir -p "$(dirname "$LOCK_FILE")"
 
 # Source dispatcher state machine check (issue #1918).
 # Defines check_dispatcher_state() and DISPATCHER_STATE_FILE.
@@ -326,15 +325,16 @@ get_black_set_ts() {
 }
 
 # If system has been in BLACK state longer than BLACK_RENOTIFY_SECONDS,
-# silently attempt a single restart (no Telegram alert). If the restart
-# succeeds the system will return to GREEN on the next health check and
-# clear_manual_intervention() will remove the BLACK flag automatically.
-# If the restart fails, re-set the BLACK flag and reset the 2-hour timer
-# so another attempt fires BLACK_RENOTIFY_SECONDS from now.
+# attempt a single restart. If the restart succeeds the system will return
+# to GREEN on the next health check and clear_manual_intervention() will
+# remove the BLACK flag automatically.
+# If the restart fails, re-set the BLACK flag, reset the 2-hour timer so
+# another attempt fires BLACK_RENOTIFY_SECONDS from now, and send a
+# Telegram re-alert so the user knows the system is still down (issue #989).
 #
 # The one-time alert sent when BLACK is first set (in do_restart) is
-# intentionally preserved. Only the periodic re-notifications are replaced
-# by these silent retry attempts.
+# intentionally preserved. The re-alert fires only when a periodic retry
+# fails, so it cannot spam — at most one alert per BLACK_RENOTIFY_SECONDS.
 check_and_renotify_black() {
     local reason="${1:-periodic BLACK retry}"
     local black_set_ts
@@ -358,7 +358,7 @@ check_and_renotify_black() {
 
     if [[ $elapsed -gt $BLACK_RENOTIFY_SECONDS ]]; then
         local hours=$(( elapsed / 3600 ))
-        log_warn "BLACK: System in manual intervention state for ${hours}h — attempting silent restart (no alert)"
+        log_warn "BLACK: System in manual intervention state for ${hours}h — attempting silent restart"
         # Temporarily clear the MANUAL_INTERVENTION flag so do_restart's
         # can_restart() check passes, then attempt a single restart.
         clear_manual_intervention
@@ -373,6 +373,14 @@ check_and_renotify_black() {
             log_error "BLACK: Silent restart attempt failed — re-entering BLACK state"
             set_manual_intervention
             log_info "BLACK: Reset retry timer (next attempt in ${BLACK_RENOTIFY_SECONDS}s)"
+            # Re-alert: send a Telegram notification so the user knows the system
+            # is still down after ${hours}h. Issue #989: without this, the initial
+            # BLACK alert is the only notification — users have no way to know the
+            # system hasn't recovered during a long outage.
+            send_telegram_alert "System still unrecoverable after ${hours}h in BLACK state.
+
+Restart attempt failed. Manual intervention still required:
+\`lobster restart\`"
         fi
     else
         local remaining=$(( BLACK_RENOTIFY_SECONDS - elapsed ))
@@ -516,9 +524,9 @@ except Exception:
 # Check if a context compaction occurred within the last COMPACT_GRACE_SECONDS.
 # Returns 0 (true) if inbox staleness checks should be suppressed, 1 otherwise.
 # Reads the Unix timestamp from last-compact.ts (written by hooks/on-compact.py).
-# This provides a 15-minute grace period for post-compaction re-orientation,
+# This provides a 10-minute grace period for post-compaction re-orientation,
 # extending the existing COMPACTION_SUPPRESS_SECONDS (5 min) window by an additional
-# 10 minutes to cover cases where re-orientation takes longer than expected.
+# 5 minutes to cover cases where re-orientation takes longer than expected.
 is_compact_grace_period() {
     local ts_file="$WORKSPACE_DIR/data/last-compact.ts"
     if [[ ! -f "$ts_file" ]]; then
@@ -540,7 +548,7 @@ is_compact_grace_period() {
 }
 
 # is_catchup_active() removed (issue #1483).
-# The dispatcher heartbeat threshold (DISPATCHER_HEARTBEAT_STALE_SECONDS = 900s)
+# The dispatcher heartbeat threshold (DISPATCHER_HEARTBEAT_STALE_SECONDS = 1800s)
 # covers catchup duration naturally. No per-catchup suppression needed.
 # The dispatcher no longer needs to call record-catchup-state.sh.
 
@@ -952,16 +960,17 @@ check_outbox_drain() {
 
 # Check 6: Dispatcher heartbeat sentinel (issue #1483 simplification, #1786 tuning)
 #
-# The dispatcher is considered alive if hooks/thinking-heartbeat.py has written
-# to DISPATCHER_HEARTBEAT_FILE within the last DISPATCHER_HEARTBEAT_STALE_SECONDS.
-# The hook fires on every PostToolUse event — any tool call resets the clock.
+# Signal (d) is distinct from (c): it fires BEFORE each tool call, so it captures
+# activity even when tool calls fail or hang (e.g. MCP server restart). When the
+# MCP server crashes mid-session, wait_for_messages fails silently and no PostToolUse
+# fires — but the PreToolUse heartbeat still recorded that the dispatcher was trying.
 #
 # This single-file check replaces the previous multi-signal approach
 # (claude-heartbeat file + last_processed_at + last_thinking_at in
-# lobster-state.json). Threshold is 900s (15 min) — covers compaction (~5m) +
-# catchup (~12m) + margin. The daemon thread in inbox_server.py keeps the
-# heartbeat fresh during WFM blocking. Boot grace period (90s) is well within
-# the 900s threshold.
+# lobster-state.json). Threshold is 1800s (30 min) — raised from 600s as a
+# stop-gap while the state machine PR lands; long startup sequences were
+# triggering false-positive restarts. Boot grace period (90s) is well within
+# the 1800s threshold.
 #
 # Gracefully skips the check if the heartbeat file does not exist (fresh install
 # or first run before the hook has fired).
@@ -983,6 +992,68 @@ check_dispatcher_heartbeat() {
     if [[ -z "$raw_ts" ]] || ! [[ "$raw_ts" =~ ^[0-9]+$ ]]; then
         log_info "Dispatcher heartbeat: unreadable or non-integer content — skipping check"
         return 0
+    fi
+
+    # Read per-message heartbeat (mark_processed, issue #694), PostToolUse
+    # thinking heartbeat (issue #1401), and PreToolUse heartbeat (issue #1439)
+    # from lobster-state.json.
+    local last_processed_epoch=0
+    local last_thinking_epoch=0
+    local last_pretooluse_epoch=0
+    if [[ -f "$LOBSTER_STATE_FILE" ]]; then
+        local last_processed_at last_thinking_at last_pretooluse_at
+        last_processed_at=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('$LOBSTER_STATE_FILE'))
+    print(d.get('last_processed_at', ''))
+except Exception:
+    print('')
+" 2>/dev/null)
+        last_thinking_at=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('$LOBSTER_STATE_FILE'))
+    print(d.get('last_thinking_at', ''))
+except Exception:
+    print('')
+" 2>/dev/null)
+        last_pretooluse_at=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('$LOBSTER_STATE_FILE'))
+    print(d.get('last_pretooluse_at', ''))
+except Exception:
+    print('')
+" 2>/dev/null)
+        if [[ -n "$last_processed_at" ]]; then
+            last_processed_epoch=$(date -d "$last_processed_at" +%s 2>/dev/null) || last_processed_epoch=0
+        fi
+        if [[ -n "$last_thinking_at" ]]; then
+            last_thinking_epoch=$(date -d "$last_thinking_at" +%s 2>/dev/null) || last_thinking_epoch=0
+        fi
+        if [[ -n "$last_pretooluse_at" ]]; then
+            last_pretooluse_epoch=$(date -d "$last_pretooluse_at" +%s 2>/dev/null) || last_pretooluse_epoch=0
+        fi
+    fi
+
+    # Effective freshness = most recent of all four signals
+    local effective_last="$last_heartbeat"
+    local effective_source="WFM heartbeat"
+    if [[ "$last_processed_epoch" -gt "$effective_last" ]]; then
+        effective_last="$last_processed_epoch"
+        effective_source="last_processed_at"
+    fi
+    if [[ "$last_thinking_epoch" -gt "$effective_last" ]]; then
+        effective_last="$last_thinking_epoch"
+        effective_source="last_thinking_at"
+    fi
+    if [[ "$last_pretooluse_epoch" -gt "$effective_last" ]]; then
+        effective_last="$last_pretooluse_epoch"
+        effective_source="last_pretooluse_at"
+    fi
+    if [[ "$effective_source" != "WFM heartbeat" ]]; then
+        log_info "WFM freshness: using $effective_source signal (more recent than WFM heartbeat)"
     fi
 
     local now age
@@ -1283,8 +1354,8 @@ The restart has been skipped to avoid killing running subagents. If the problem 
         if is_manual_intervention_required; then
             # Already in BLACK/manual-intervention state — check whether it's time to re-alert.
             # check_and_renotify_black silently retries a restart if BLACK_RENOTIFY_SECONDS
-            # (2h) have elapsed. No Telegram alert is sent — the initial BLACK alert already
-            # fired. If the retry succeeds the system returns to GREEN naturally.
+            # (2h) have elapsed. If the retry fails, a Telegram re-alert is sent so the user
+            # knows the system is still down. If the retry succeeds, the system returns to GREEN naturally.
             check_and_renotify_black "$reason"
         else
             # First time hitting BLACK — set flag and send a single alert.
@@ -1591,7 +1662,7 @@ main() {
     # Claude Code pauses tool calls during context compaction for 1-3+ minutes.
     # If on-compact.py recorded a compacted_at within the last
     # COMPACTION_SUPPRESS_SECONDS, skip all stale-inbox checks this run.
-    # Additionally, check last-compact.ts for a 15-minute grace period that
+    # Additionally, check last-compact.ts for a 10-minute grace period that
     # covers the post-compaction re-orientation window (reading bootup files,
     # processing inbox backlog, waiting for compact-catchup to complete).
     local compaction_recent=false
@@ -1839,18 +1910,17 @@ main() {
     # --- Dispatcher heartbeat check (issue #1483 simplification, #1786 tuning) ---
     # Single-file liveness check: hooks/thinking-heartbeat.py writes a Unix
     # epoch timestamp to DISPATCHER_HEARTBEAT_FILE on every PostToolUse event.
-    # Threshold is 900s (15 min) — covers compaction (~5m) + catchup (~12m) +
-    # margin. The daemon thread in inbox_server.py refreshes the heartbeat during
-    # WFM blocking, so no WFM-active fallback is needed.
+    # Threshold is 1800s (30 min) — stop-gap raised from 600s while state machine
+    # PR lands; long startup sequences were triggering false-positive restarts.
     #
     # Suppressed during:
     #   - Hibernation (dispatcher process is not running)
     #   - Transient lifecycle states (starting/restarting/waking/backoff/stopped —
     #     the wrapper hasn't even launched Claude yet)
     #   - Post-compaction grace period (is_compact_grace_period): catchup runs
-    #     after compaction can last up to 12 min, within the 900s threshold.
+    #     after compaction can last up to 12 min, well within the 1800s threshold.
     #     Grace period is COMPACT_GRACE_SECONDS (15 min) from last-compact.ts.
-    # Boot grace is not needed: 900s is still well above the 90s boot window.
+    # Boot grace is not needed: 1800s is still well above the 90s boot window.
 
     if is_hibernating; then
         log_info "Dispatcher heartbeat suppressed (hibernating)"
