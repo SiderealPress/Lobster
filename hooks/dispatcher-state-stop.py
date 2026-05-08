@@ -28,9 +28,19 @@ fallback.
 
 ## Dispatcher detection
 
-Uses is_dispatcher() from session_role.py (not is_dispatcher_session()) — correct for
-SessionStop hooks per the existing convention (see thinking-heartbeat.py docstring for
-the is_dispatcher vs is_dispatcher_session distinction).
+Uses both is_dispatcher() and is_dispatcher_session() from session_role.py, combined
+with `or`. This is necessary because:
+
+1. is_dispatcher() checks the startup flag file written by the launcher. That flag is
+   consumed (deleted) by inject-bootup-context.py during SessionStart — so by the time
+   SessionStop fires, the flag is gone and is_dispatcher() returns False for the actual
+   dispatcher session.
+2. is_dispatcher_session() provides the fallback: it uses state files and a process-tree
+   walk, which remain valid throughout the session lifetime.
+
+The combination `is_dispatcher() or is_dispatcher_session()` is therefore correct for
+SessionStop hooks: is_dispatcher() handles the rare case where the flag was not yet
+consumed (e.g., very short sessions), and is_dispatcher_session() covers the normal case.
 
 Silent on all errors — must never block session stop.
 """
@@ -137,12 +147,15 @@ def _read_context_pct_from_transcript(transcript_path: str | None) -> float | No
 def _read_in_flight_agents(inflight_path: Path) -> list[dict]:
     """Return a list of in-flight agents from inflight-work.jsonl.
 
-    An agent is in-flight if it has at least one entry with status="running"
-    and no subsequent entry with the same task_id and status="done".
+    An agent is in-flight if its last status entry is "running" (not "done").
+    The log is append-only, so entries are processed in order:
+    - "running" entry: marks the task as in-flight (removes from done_ids to
+      handle retries — a new "running" after a "done" means the task was retried
+      with the same task_id and the retry is in-flight).
+    - "done" entry: marks the task as completed (removes from running dict).
 
-    The log is append-only. A task is "done" if any entry with the same task_id
-    has status="done". Entries with status="running" and no corresponding "done"
-    are in-flight.
+    The final state is determined by whichever of "running" or "done" appeared
+    last for each task_id.
 
     Returns an empty list if the file is absent, unreadable, or has no in-flight
     entries. Silent on all errors.
@@ -172,7 +185,11 @@ def _read_in_flight_agents(inflight_path: Path) -> list[dict]:
                 if status == "done":
                     done_ids.add(task_id)
                     running.pop(task_id, None)
-                elif status == "running" and task_id not in done_ids:
+                elif status == "running":
+                    # Remove from done_ids: a new "running" entry after a "done"
+                    # means the task was retried with the same task_id. The retry
+                    # is in-flight until its own "done" entry appears.
+                    done_ids.discard(task_id)
                     running[task_id] = entry
 
         # Return only tasks still in running state (not completed).
