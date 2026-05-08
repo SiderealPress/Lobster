@@ -875,7 +875,7 @@ def format_active_sessions_block(sessions: list[dict]) -> str:
 
     Produces output like:
         [1 agent running, 1 system]
-        - functional-engineer: "Implement GSD phase plan" (chat: ADMIN_CHAT_ID_REDACTED, 12m ago)
+        - functional-engineer: "Implement GSD phase plan" (chat: 8305714125, 12m ago)
         - subagent: "startup-catchup" (system, 3m ago)
 
     Returns an empty string if sessions is empty.

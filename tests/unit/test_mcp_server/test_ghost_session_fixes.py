@@ -33,10 +33,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-import os
 import pytest
-
-ADMIN_CHAT_ID_REDACTED: int = int(os.environ.get("LOBSTER_ADMIN_CHAT_ID", "1234567890"))
 
 _ROOT = Path(__file__).parents[3]
 
@@ -70,7 +67,7 @@ _REAL_SUBAGENT_SESSION: dict = {
     "id": "real-subagent-xyz",
     "task_id": "fix-something-123",
     "description": "Fix something for user",
-    "chat_id": "ADMIN_CHAT_ID_REDACTED",
+    "chat_id": "8305714125",
     "source": "telegram",
     "status": "running",
     "output_file": None,
@@ -281,8 +278,8 @@ class TestGhostChatIdNoInboxNotification:
         ("", True),
         (None, True),
         ("None", True),
-        ("ADMIN_CHAT_ID_REDACTED", False),
-        (ADMIN_CHAT_ID_REDACTED, False),
+        ("8305714125", False),
+        (8305714125, False),
         ("123", False),
     ])
     def test_dead_outcome_parametrized(self, chat_id, should_skip):
@@ -306,7 +303,7 @@ class TestGhostChatIdNoInboxNotification:
 
     def test_dead_real_user_not_skipped(self):
         """Dead sessions with a real user ID are NOT skipped."""
-        session = dict(_REAL_SUBAGENT_SESSION, chat_id="ADMIN_CHAT_ID_REDACTED")
+        session = dict(_REAL_SUBAGENT_SESSION, chat_id="8305714125")
         assert _should_skip_dead_no_user(session, "dead") is False
 
     def test_dead_ghost_session_is_skipped(self):
@@ -559,7 +556,7 @@ class TestStartupSweepIdempotencyGuard:
             "id": agent_id,
             "task_id": None,
             "description": "test session",
-            "chat_id": "ADMIN_CHAT_ID_REDACTED",
+            "chat_id": "8305714125",
             "source": "telegram",
             "status": status,
             "output_file": None,

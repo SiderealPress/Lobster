@@ -21,11 +21,12 @@ and should have restricted file permissions (`600`).
 > **Directory layout note:** Lobster uses two separate directories with distinct purposes:
 >
 > - `~/lobster-config/` (`$LOBSTER_CONFIG_DIR`) — Private credentials and config overlay.
->   Contains `config.env` (Lobster service config and all API tokens) and private
->   overrides applied during install. Also contains `owner.toml` (identity, preferences,
->   consolidation schedule) and `sync-repos.json` (repos to monitor).
+>   Contains `global.env` (API tokens), `config.env` (Lobster service config), and any
+>   private overrides applied during install.
 > - `~/lobster-user-config/` (`$LOBSTER_USER_CONFIG`) — User-visible behavioral config.
 >   Contains agent bootup files, memory, and context files that shape how Lobster behaves.
+>
+> `global.env` belongs in `~/lobster-config/`, not `~/lobster-user-config/`.
 
 ## Format
 

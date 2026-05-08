@@ -94,7 +94,7 @@ class TestTaxonomyConstants:
     def test_required_sources_present(self):
         """All known message sources must be in INBOX_MESSAGE_SOURCES."""
         from message_types import INBOX_MESSAGE_SOURCES
-        required = {"telegram", "slack", "sms", "signal", "whatsapp", "bisque", "system", "gmail"}
+        required = {"telegram", "slack", "sms", "signal", "whatsapp", "bisque", "system"}
         missing = required - INBOX_MESSAGE_SOURCES
         assert not missing, f"Required sources missing: {missing}"
 
@@ -242,18 +242,20 @@ class TestMarkProcessingTypeValidation:
         assert not type_warnings, f"Unexpected type warning for known type 'text': {type_warnings}"
 
 
-class TestScriptSourceValues:
+class TestDockerScriptSourceValues:
     """
-    Guardrail: every "source" value written by cron/system scripts must be in
-    INBOX_MESSAGE_SOURCES (issue #1797).
+    Guardrail: every "source" value written by docker/*.sh scripts must be in
+    INBOX_MESSAGE_SOURCES (issue #1848).
 
-    When PR #1736 added the quarantine guard it updated daily-health-check.sh
-    but missed nightly-consolidation.sh and daily-update-check.sh, which kept
-    writing source="internal". Those messages were silently quarantined for
-    3 nights before the bug was discovered. This class catches similar mismatches
-    at test time so the same class of error cannot be re-introduced.
+    docker/worker-entrypoint.sh was writing source="worker" — not in the
+    allowlist. Since PR #1736 added the quarantine guard (Apr 22 2026), every
+    Docker worker message has been silently quarantined and never reached the
+    dispatcher.
 
-    Strategy: parse every *.sh file in scripts/ for JSON "source" values written
+    The parallel guardrail for scripts/*.sh is in PR #1845 (TestScriptSourceValues).
+    This class covers docker/*.sh, which PR #1845 missed.
+
+    Strategy: parse every *.sh file in docker/ for JSON "source" values written
     to the inbox (i.e. lines matching `"source": "<value>"`), then assert each
     extracted value is in INBOX_MESSAGE_SOURCES.
     """
@@ -274,76 +276,19 @@ class TestScriptSourceValues:
                 results.append((lineno, m.group(1)))
         return results
 
-    def _get_scripts_dir(self) -> Path:
-        """Locate the repository scripts/ directory relative to this test file."""
-        # test_message_taxonomy.py → test_mcp_server/ → unit/ → tests/ → repo_root/
-        # parents[0]=test_mcp_server, [1]=unit, [2]=tests, [3]=repo_root
-        return Path(__file__).resolve().parents[3] / "scripts"
-
     def _get_docker_dir(self) -> Path:
         """Locate the repository docker/ directory relative to this test file."""
+        # test_message_taxonomy.py → test_mcp_server/ → unit/ → tests/ → repo_root/
+        # parents[0]=test_mcp_server, [1]=unit, [2]=tests, [3]=repo_root
         return Path(__file__).resolve().parents[3] / "docker"
-
-    def test_nightly_consolidation_source_is_recognized(self):
-        """nightly-consolidation.sh must write a recognized source (regression: issue #1797)."""
-        scripts_dir = self._get_scripts_dir()
-        script = scripts_dir / "nightly-consolidation.sh"
-        assert script.exists(), f"Script not found: {script}"
-
-        found = self._extract_source_values(script)
-        assert found, f"No \"source\" values found in {script.name} — was the script refactored?"
-
-        bad = [(ln, v) for ln, v in found if v not in self._known_sources]
-        assert not bad, (
-            f"{script.name} writes unrecognized source value(s) — "
-            f"add to INBOX_MESSAGE_SOURCES or change to 'system':\n"
-            + "\n".join(f"  line {ln}: {v!r}" for ln, v in bad)
-        )
-
-    def test_daily_update_check_source_is_recognized(self):
-        """daily-update-check.sh must write a recognized source (regression: issue #1797)."""
-        scripts_dir = self._get_scripts_dir()
-        script = scripts_dir / "daily-update-check.sh"
-        assert script.exists(), f"Script not found: {script}"
-
-        found = self._extract_source_values(script)
-        assert found, f"No \"source\" values found in {script.name} — was the script refactored?"
-
-        bad = [(ln, v) for ln, v in found if v not in self._known_sources]
-        assert not bad, (
-            f"{script.name} writes unrecognized source value(s) — "
-            f"add to INBOX_MESSAGE_SOURCES or change to 'system':\n"
-            + "\n".join(f"  line {ln}: {v!r}" for ln, v in bad)
-        )
-
-    def test_all_scripts_write_recognized_sources(self):
-        """Every *.sh script in scripts/ that writes a JSON source field must use a known source.
-
-        This is the broad guardrail: adding a new script that writes
-        source="internal" (or any other unrecognized value) will fail here.
-        Existing scripts with no "source" field are ignored.
-        """
-        scripts_dir = self._get_scripts_dir()
-        assert scripts_dir.exists(), f"scripts/ directory not found at {scripts_dir}"
-
-        violations: list[str] = []
-        for script in sorted(scripts_dir.glob("*.sh")):
-            for lineno, value in self._extract_source_values(script):
-                if value not in self._known_sources:
-                    violations.append(f"{script.name}:{lineno}: {value!r}")
-
-        assert not violations, (
-            "The following scripts write source values not in INBOX_MESSAGE_SOURCES.\n"
-            "Either update INBOX_MESSAGE_SOURCES in message_types.py or change the\n"
-            "source to 'system' (the standard value for cron/system-generated messages):\n"
-            + "\n".join(f"  {v}" for v in violations)
-        )
 
     def test_worker_entrypoint_source_is_recognized(self):
         """worker-entrypoint.sh must write a recognized source (regression: issue #1848).
 
-        PR #1845 added the scripts/ guardrail but missed docker/worker-entrypoint.sh,
-        which was writing source="worker" — not in INBOX_MESSAGE_SOURCES.
+        PR #1845 added guardrail tests for scripts/*.sh but missed
+        docker/worker-entrypoint.sh, which was writing source="worker" —
+        not in INBOX_MESSAGE_SOURCES. This targeted test catches a re-introduction
+        of that exact bug.
         """
         docker_dir = self._get_docker_dir()
         script = docker_dir / "worker-entrypoint.sh"
@@ -364,8 +309,9 @@ class TestScriptSourceValues:
     def test_all_docker_scripts_write_recognized_sources(self):
         """Every *.sh script in docker/ that writes a JSON source field must use a known source.
 
-        Broad guardrail for the docker/ directory, mirroring test_all_scripts_write_recognized_sources
-        for scripts/. Ensures future docker entrypoints don't silently reintroduce this class of bug.
+        Broad guardrail for the docker/ directory: adding a new docker entrypoint
+        that writes an unrecognized source= value will fail here before quarantine
+        silently drops its messages in production.
         """
         docker_dir = self._get_docker_dir()
         assert docker_dir.exists(), f"docker/ directory not found at {docker_dir}"

@@ -619,75 +619,6 @@ async def enrichment_status_endpoint(scope, receive, send):
         return
 
     response = JSONResponse(manifest)
-
-async def awp_intake_endpoint(scope, receive, send):
-    """POST /api/webhooks/intake — receive an intake form submission.
-
-    Sent by a Google Apps Script attached to a form or data source. The Apps Script
-    stores the auth token as ``LOBSTER_SECRET``; on this side it is ``LOBSTER_IMPORT_TOKEN``.
-
-    Authentication: ``Authorization: Bearer <LOBSTER_IMPORT_TOKEN>``
-    """
-    request = Request(scope, receive)
-
-    if not _is_authorized_intake(request):
-        response = JSONResponse({"error": "Unauthorized"}, status_code=401)
-        await response(scope, receive, send)
-        return
-
-    try:
-        body = await request.json()
-    except Exception:
-        response = JSONResponse({"error": "Invalid JSON body"}, status_code=400)
-        await response(scope, receive, send)
-        return
-
-    # Extract fields — all are optional so the message is written even if partial
-    full_name = str(body.get("full_name", "")).strip()
-    email = str(body.get("email", "")).strip()
-    investable_capital = str(body.get("investable_capital", "")).strip()
-    accreditation_status = str(body.get("accreditation_status", "")).strip()
-    entity_type = str(body.get("entity_type", "")).strip()
-
-    now = datetime.now(timezone.utc)
-    timestamp_ms = int(now.timestamp() * 1000)
-    message_id = f"{timestamp_ms}_intake"
-
-    summary_text = (
-        f"New intake: {full_name} ({email})\n"
-        f"Capital: {investable_capital}\n"
-        f"Accreditation: {accreditation_status}\n"
-        f"Entity: {entity_type}"
-    )
-
-    message = {
-        "id": message_id,
-        "type": "intake",
-        "source": "intake",
-        "chat_id": 0,
-        "text": summary_text,
-        "payload": body,
-        "timestamp": now.isoformat(),
-    }
-
-    try:
-        _INBOX_DIR.mkdir(parents=True, exist_ok=True)
-        inbox_path = _INBOX_DIR / f"{message_id}.json"
-        tmp_path = inbox_path.with_suffix(".json.tmp")
-        payload_str = json.dumps(message, indent=2)
-        fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _TOKEN_FILE_MODE)
-        with os.fdopen(fd, "w") as f:
-            f.write(payload_str)
-        os.rename(str(tmp_path), str(inbox_path))
-        logger.info("Intake message written: %s (from=%r)", message_id, email)
-    except Exception as exc:
-        logger.error("Failed to write AWP intake message: %s", exc)
-        response = JSONResponse({"error": "Failed to write message"}, status_code=500)
-        await response(scope, receive, send)
-        return
-
-    response = JSONResponse({"status": "ok", "message_id": message_id})
-    await response(scope, receive, send)
     await response(scope, receive, send)
 
 
@@ -846,11 +777,6 @@ async def mcp_endpoint(scope, receive, send):
 
     if path == "/enrichment_status":
         await enrichment_status_endpoint(scope, receive, send)
-        return
-
-    # Intake webhook — authenticated by LOBSTER_IMPORT_TOKEN (Apps Script: LOBSTER_SECRET)
-    if path in ("/api/webhooks/intake", "/api/webhooks/awp-intake"):
-        await awp_intake_endpoint(scope, receive, send)
         return
 
     # Workspace token push — authenticated by LOBSTER_INTERNAL_SECRET

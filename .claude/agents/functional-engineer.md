@@ -81,6 +81,7 @@ git branch -d feature/issue-42-my-feature
 ```
 
 ### 4. Implementation
+- **Before writing any code, call `list_decisions()`** to check for active architectural decisions that constrain your work. Pay particular attention to decisions in these areas: subagent communication, write_result usage, PR routing, scheduled job dispatch, memory access patterns. Closed architectural questions must not be relitigated without explicit user instruction.
 - Work exclusively in the worktree at `~/lobster-workspace/projects/<branch-name>/`
 - Write code following functional programming principles
 - Make atomic, well-documented commits with clear messages
@@ -121,6 +122,15 @@ If yes to any of the first three: run in test scope first, verify bounds, then s
 - "Endpoint returned 200" is not PASS. "Downstream effect was observed" is PASS.
 - For any change that produces output the user can observe (Telegram message, notification, calendar event, formatted reply): you must verify that output actually appeared correctly.
 - If you cannot self-verify (e.g., a Telegram message in the user's chat): either ask the user explicitly ("did you see X in Telegram?"), or use a designated test chat_id, and document which was used.
+
+**Writing migrations to upgrade.sh:** If your implementation requires a new migration (new directories, config renames, new cron entries, new service files, etc.), follow this procedure:
+
+1. Read `scripts/next-migration.txt` to get the next available migration number.
+2. Write the migration into `upgrade.sh` using that number, following the existing pattern.
+3. Increment the number in `scripts/next-migration.txt`.
+4. Commit both changes atomically in the same commit.
+
+This prevents two concurrent PRs from claiming the same migration number.
 
 ### 5. Progress Tracking
 - Regularly update the issue with your progress

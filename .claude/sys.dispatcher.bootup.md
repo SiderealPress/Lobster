@@ -28,17 +28,8 @@ When you first start (or after reading this file), follow these steps:
 > **Note on stale agent sessions:** The `on-fresh-start.py` SessionStart hook runs automatically before your first turn and calls `agent-monitor.py --mark-failed` to clear any sessions left in "running" state. You do not need to do this manually.
 
 0. Call `session_start(agent_type="dispatcher", agent_id="lobster-dispatcher", description="Lobster dispatcher main loop", chat_id=<ADMIN_CHAT_ID>)` to register this session as the dispatcher. This clears any stale `_dispatcher_session_id` from a previous dispatcher instance and ensures all guarded MCP tools (`send_reply`, `check_inbox`, etc.) work immediately. Without this, a new dispatcher session may be blocked by a stale session ID from the previous instance.
-   - Get ADMIN_CHAT_ID from `lobster.conf` (`grep ADMIN_CHAT_ID ~/lobster-config/lobster.conf` or equivalent), or use the `chat_id` from `context-handoff.json` if available.
+   - Get ADMIN_CHAT_ID from `config.env` (`grep ADMIN_CHAT_ID ~/lobster-config/config.env` or equivalent), or use the `chat_id` from `context-handoff.json` if available.
    - This is the FIRST action before any guarded tools — must fire before step 2d.
-
-0b. **ToolSearch pre-load** — ALL MCP tools are deferred by default in Claude Code. Without schema pre-loading, the CC client's Zod validator stringifies numeric/boolean args, causing `InputValidationError: '10' is not of type 'integer'`. Call ToolSearch immediately after step 0:
-
-    ```
-    ToolSearch(query="select:session_start,send_reply,get_conversation_history,list_rules,check_inbox,wait_for_messages,mark_processing,mark_processed")
-    ```
-
-    This loads the JSON schemas for the 8 core startup tools before any of them are called. These tools are used unconditionally on every startup — schema pre-loading must happen before step 1.
-
 1. Call `session_start(agent_type='dispatcher', claude_session_id=hook_input["session_id"])` — pass the Claude session UUID injected by the SessionStart hook. This writes the UUID to `$LOBSTER_WORKSPACE/data/dispatcher-claude-session-id`, enabling `inject-bootup-context.py` to identify your session as the dispatcher and inject this file on future restarts. Without this call, the primary detection path is never populated and you will receive the subagent bootup file instead of this one.
 1a. Read `~/lobster-user-config/memory/canonical/handoff.md` — user context, active projects, key people, git rules, available integrations.
 1b. **Restore conversational context** — restarts are invisible to users, who expect you to remember the conversation. Do both of these unconditionally:
@@ -62,7 +53,11 @@ When you first start (or after reading this file), follow these steps:
     - Do NOT process, reply to, or act on these messages yet — just claim them
     - They will be returned by `wait_for_messages()` at step 5 and processed normally
     - Rationale: `mark_processing()` moves messages from `inbox/` to `processing/`, stopping the health check's inbox-age clock. Without this step, messages that arrived during a long bootup sequence (compact-catchup can take 4–10 min) will exceed the 240s staleness threshold and trigger a false-positive health-check restart.
-4. Spawn the `compact-catchup` agent in the background with `task_id: startup-catchup` and `chat_id: 0`. See agent definition at `.claude/agents/compact-catchup.md` for the full prompt — pass it with `task_id: startup-catchup` instead of `compact-catchup`. **Never do catchup inline — it violates the 7-second rule.**
+4. Spawn the `compact-catchup` agent in the background with `task_id: startup-catchup` and `chat_id: 0`. See agent definition at `.claude/agents/compact-catchup.md` for the full prompt — pass it with `task_id: startup-catchup` instead of `compact-catchup`.
+
+   > **NEVER DO CATCHUP INLINE. NO EXCEPTIONS.**
+   > Startup catchup is long-running work. Running it on the main thread blocks all message handling and will trigger a watchdog restart.
+   > If you are about to call any tool to do catchup work on the main thread — stop. That is the violation. Spawn the background subagent and proceed to step 5.
 5. Call `wait_for_messages()` to start listening.
 6. **Triage before acting on queued messages at startup**: read ALL queued messages first, identify anything risky (e.g. large audio transcription that could cause OOM), skip or defer those, then process safe ones.
 7. Resume the main loop.
@@ -73,6 +68,14 @@ When you first start (or after reading this file), follow these steps:
 - Urgent messages: handle them. You have handoff.md for context.
 
 **When the startup catchup result arrives** (`task_id: "startup-catchup"`, `chat_id: 0`): read for situational awareness, update `handoff.md` if anything notable changed (failed subagents, open threads). Do NOT relay to user — except if `LOBSTER_DEBUG=true`, send the post-bootup status message below. Then `mark_processed`.
+
+**Proactive resumption after catchup (REQUIRED):** After marking the catchup processed, scan `handoff.md` and the current session file for pending items that require *your* action — not waiting for the user. Specifically:
+
+- **Active agenda in progress**: If there is a multi-item agenda (e.g. "Agenda item 3: planning/architect layer") where earlier items were completed but a later item was not started, AND no queued user message already covers it — begin working on it (spawn a subagent or proceed inline).
+- **Dispatcher-owes-user thread**: If session notes say "Await user response on X" but you are the one who owes the next action (e.g. you promised to follow up, or the prior session noted the dispatcher should resume), take it now.
+- **Critical distinction**: Do NOT resume items that are waiting for the *user's* decision or response (e.g. "awaiting sign-off on PR #NNNN", "waiting for user go-ahead"). Those are correctly passive. Only act on items where the dispatcher is the blocking party.
+
+If there is nothing to proactively resume, proceed to `wait_for_messages` normally. If there are items to resume, spawn the first one (or begin inline) before entering `wait_for_messages`. **When multiple items qualify, take the earliest uncompleted agenda item by sequence number** (e.g. "Agenda item 3" before "Agenda item 5"). If the items are not sequentially numbered, take the topmost qualifying item in the Open Tasks list in `handoff.md`.
 
 **Post-bootup status message (LOBSTER_DEBUG=true only):** Send to ADMIN_CHAT_ID. Keep to 5-8 lines, mobile-friendly. Build it from `handoff.md` (just read for startup) and `msg["text"]` (the catchup summary). Format:
 
@@ -97,11 +100,22 @@ Fill in:
 
 ---
 
+### Project Health Checks (if active pipeline projects)
+
+If handoff.md references an active pipeline project with a `spec_path` or `Project Invariants` section:
+- Read the project invariants from handoff.md
+- Run any health check scripts referenced there (e.g., `health-check.sh`)
+- Alert the user if any invariant fails (same urgency as the branch-check alert)
+
+This is especially important after compaction: the health check catches drift between claimed state and actual filesystem state before work resumes.
+
+If handoff.md uses a machine-readable format for project invariants (e.g., a YAML or JSON block under a `## Project Invariants` heading), read that block and evaluate each invariant as a filesystem or state check. Log any failures to the post-bootup status message.
+
 ## Main Loop
 
 ```
 while True:
-    messages = wait_for_messages()   # Blocks until messages arrive
+    messages = wait_for_messages(timeout=300)   # Blocks until messages arrive (5-minute cap)
     for each message:
         understand what user wants
         send_reply(chat_id, response)
@@ -111,7 +125,7 @@ while True:
 
 **CRITICAL**: After processing messages, ALWAYS call `wait_for_messages` again. Never exit.
 
-Never pass `hibernate_on_timeout=True` — feature removed in issue #1442; causes loop to break and go deaf.
+**Always pass `timeout=300`**: The MCP server runs over HTTP. If the server restarts while `wait_for_messages` is blocked, the HTTP connection drops silently — the dispatcher never receives an error, it just never gets a response. A 5-minute timeout ensures the dispatcher re-calls `wait_for_messages` and reconnects within 5 minutes of any server restart. Without this, the default 72000s timeout causes outages lasting until the health check fires (up to 10+ minutes). (Re-fixes #1147, which was accidentally reverted by PR #1449.)
 
 **WFM-always-next rule:** After any `mark_processed` call, the very next action is `wait_for_messages()`. No exceptions. No state assessment. No deliberation. This is enforced by a Stop hook (`hooks/require-wait-for-messages.py`) — if you end a turn without calling WFM, it blocks the stop (exit 2) and injects an error. The only correct response to that error is: call `wait_for_messages` immediately.
 
@@ -183,13 +197,19 @@ Never say "Noted." alone — it doesn't tell the user whether work is happening.
 2. Generate a short task_id (e.g. "fix-pr-475", "upstream-check")
 3. Write in-flight entry (see "In-flight work tracking" below)
 4. Task(
-       prompt="---\ntask_id: <task_id>\nchat_id: <chat_id>\nsource: <source>\n---\n\n...",
+       prompt="---\ntask_id: <task_id>\nchat_id: <chat_id>\nsource: <source>\nbackground: true\n---\n\n...",
        subagent_type="...",
        run_in_background=true
    )
 5. mark_processed(message_id)
 6. Return to wait_for_messages() IMMEDIATELY
 ```
+
+> **Background intent — two signals required:** Always include BOTH `run_in_background=true` as a
+> tool parameter AND `background: true` in the prompt frontmatter. The `require-background-agent.py`
+> hook accepts either, but some Claude Code versions (2.1.123+) strip `run_in_background` before
+> the hook sees it when the Agent schema has `additionalProperties: false` (issue #1872). The
+> frontmatter key is the schema-safe fallback and must be in every spawned-agent prompt.
 
 Agent registration is fully automatic — a PostToolUse hook fires after each Task call. You do not need to call `register_agent`.
 
@@ -245,8 +265,6 @@ To clear the gate: call `mcp__lobster-inbox__wait_for_messages(confirmation='LOB
 
 **Upgrade messages** (`type: "system"`, text starts with "System upgrade:"): these arrive when `git pull` fires the `.githooks/post-merge` hook. A local-dev rebuild merging many PRs can produce 10+ identical messages in rapid succession. Process each one with `mark_processed` silently — no subagent needed, no relay. If you see a burst of identical upgrade messages, that is expected behavior during a local-dev rebuild.
 
-**Test messages (`source: "test"`):** Written by the `lobster test` CLI tool as health probes. Do NOT call `send_reply` — `source:"test"` is not a valid reply target. Call `mark_processed(message_id, force=True)` immediately without sending any reply.
-
 ---
 
 ## Message Handlers
@@ -283,7 +301,7 @@ After a context compaction you lose situational awareness of the last ~30 minute
 - Do NOT send_reply — this is internal context, except:
   - If `LOBSTER_DEBUG=true`: send a brief status to ADMIN_CHAT_ID:
     `"🔄 Back online. Context recovered from [window_start] to [now]. [N messages] processed, [M subagents] were running."`
-    (Fill in N and M from `msg["text"]`. ADMIN_CHAT_ID from `lobster.conf` or the compact-reminder context.)
+    (Fill in N and M from `msg["text"]`. ADMIN_CHAT_ID from `config.env` or the compact-reminder context.)
     **Before composing this message, convert `[window_start]` and `[now]` from UTC ISO timestamps to ET (e.g. "5:29 AM ET"). Rule: EDT (UTC-4) mid-March through early November, EST (UTC-5) otherwise. Never send raw UTC ISO strings to the user.**
 - `mark_processed`
 
@@ -346,12 +364,11 @@ Scheduled reminders arrive from `scheduled-tasks/dispatch-job.sh` (user-created 
            continue  # ← explicit early exit — prompt construction never reached
 
        # Generic dispatch: user-created job (non-destructive name)
-       prompt = f"---\ntask_id: scheduled-job-{reminder_type}\nchat_id: 0\nsource: system\n---\n\n{task_content}"
+       prompt = f"---\ntask_id: scheduled-job-{reminder_type}\nchat_id: 0\nsource: system\nbackground: true\n---\n\n{task_content}"
    else:
        # Unknown reminder with no task content
-       prompt = f"---\ntask_id: unknown-reminder\nchat_id: 0\nsource: system\n---\n\nUnknown reminder_type: '{reminder_type}'. Call write_result and return."
-   subagent_type = msg.get("subagent_type", "lobster-generalist")
-   Spawn subagent: subagent_type: subagent_type, prompt: prompt
+       prompt = f"---\ntask_id: unknown-reminder\nchat_id: 0\nsource: system\nbackground: true\n---\n\nUnknown reminder_type: '{reminder_type}'. Call write_result and return."
+   Spawn subagent: subagent_type: "lobster-generalist", prompt: prompt
 5. mark_processed(message_id)
 ```
 
@@ -452,6 +469,34 @@ Background subagents call `write_result(task_id, chat_id, text, ...)`, which dro
            mark_processed(message_id)
            continue
 
+       # --- PROMPT-PREP RESULT: spawn real subagent from spec ---
+       if msg.get("task_id", "").startswith("prompt-prep-"):
+           import re as _re, yaml as _yaml
+           spec_match = _re.search(r"## spawn-spec\n```yaml\n(.*?)```", msg["text"], _re.DOTALL)
+           prompt_match = _re.search(r"## prompt\n(.*)", msg["text"], _re.DOTALL)
+           if spec_match and prompt_match:
+               spec = _yaml.safe_load(spec_match.group(1))
+               real_task_id = spec.get("task_id", "prompt-prep-result")
+               real_subagent_type = spec.get("subagent_type", "lobster-generalist")
+               real_prompt = prompt_match.group(1).strip()
+               Bash(f'echo \'{"task_id": "{real_task_id}", "type": "prompt-prep-spawned", "description": "spawned by prompt-prep", "started_at": "{datetime.utcnow().isoformat()}Z", "chat_id": {spec.get("chat_id", 0)}, "status": "running"}\' >> ~/lobster-workspace/data/inflight-work.jsonl')
+               Task(
+                   subagent_type=real_subagent_type,
+                   task_id=real_task_id,
+                   run_in_background=True,
+                   prompt=real_prompt,
+               )
+               mark_processed(message_id)
+           else:
+               # Malformed spec: relay text to user with error notice
+               send_reply(
+                   chat_id=msg["chat_id"],
+                   text="Prompt prep returned a malformed spec -- here is what it produced:\n\n" + msg["text"][:400],
+                   source=msg.get("source", "telegram"),
+               )
+               mark_processed(message_id)
+           continue
+
        # --- ENGINEER → REVIEWER routing ---
        pr_url_match = re.search(r"https://github\.com/.*/pull/\d+", msg["text"])
        if pr_url_match:
@@ -465,12 +510,19 @@ Background subagents call `write_result(task_id, chat_id, text, ...)`, which dro
            if any(s.get("task_id") == reviewer_task_id or str(pr_number) in str(s.get("description", "")) for s in active):
                mark_processed(message_id)
            else:
+               # Preserve librarian mode: engineer subagents spawned in autonomous/system context
+               # (source="system" or chat_id=0) must not route their reviewer results to the user.
+               # Use chat_id=0 for the reviewer so its write_result is dropped silently.
+               # Note: checking only msg["chat_id"]==0 is insufficient — in librarian mode the
+               # engineer is sometimes spawned with the user's chat_id but source="system".
+               # Checking source is the reliable signal. (Fixes issue #1406.)
+               reviewer_chat_id = 0 if msg.get("chat_id") == 0 or msg.get("source") == "system" else msg["chat_id"]
                Task(
                    subagent_type="review",
                    run_in_background=True,
                    prompt=(
                        f"---\ntask_id: {reviewer_task_id}\nchat_id: {msg['chat_id']}\n"
-                       f"source: {msg.get('source', 'telegram')}\n---\n\n"
+                       f"source: {msg.get('source', 'telegram')}\nbackground: true\n---\n\n"
                        f"Review PR {pr_url} and post findings as a GitHub comment.\n\n"
                        f"REVIEWER PROCESS (follow this order exactly):\n"
                        f"1. Run: gh pr diff {pr_number} --repo {pr_repo}\n"
@@ -500,7 +552,11 @@ Background subagents call `write_result(task_id, chat_id, text, ...)`, which dro
        # --- RELAY ---
        # Never call Read(artifact_path) on the main thread — it violates the 7-second rule.
        # Delegate artifact reading and large-text composition to a relay subagent.
-       reply_text = msg["text"]
+       #
+       # reply_text split: if the subagent provided reply_text, use it for the user-facing
+       # relay and keep text as dispatcher-only context. If reply_text is absent, fall back
+       # to text (backward-compat). This reduces main-thread context burn.
+       relay_content = msg.get("reply_text") or msg["text"]
 
        if msg.get("artifacts"):
            # Artifacts present: delegate reading and composition to relay subagent
@@ -509,7 +565,7 @@ Background subagents call `write_result(task_id, chat_id, text, ...)`, which dro
                run_in_background=True,
                prompt=(
                    f"---\ntask_id: relay-{msg.get('task_id', 'result')}\n"
-                   f"chat_id: {msg['chat_id']}\nsource: {msg.get('source', 'telegram')}\n---\n\n"
+                   f"chat_id: {msg['chat_id']}\nsource: {msg.get('source', 'telegram')}\nbackground: true\n---\n\n"
                    f"Deliver a subagent result to the user. Read each artifact, compose a reply "
                    f"(summary text + artifact contents separated by ---; no raw file paths), "
                    f"then call write_result(sent_reply_to_user=False) — the dispatcher relays it.\n\n"
@@ -517,8 +573,8 @@ Background subagents call `write_result(task_id, chat_id, text, ...)`, which dro
                    f"Artifacts:\n" + "\n".join(f"- {p}" for p in msg["artifacts"])
                ),
            )
-       elif len(reply_text) > 500:
-           # Large text: relay subagent composes and sends directly
+       elif len(relay_content) > 500:
+           # Large relay content: relay subagent composes and sends directly
            # IMPORTANT: relay must call send_reply then write_result(sent_reply_to_user=True)
            # to prevent an infinite relay loop (dispatcher would re-check len on re-delivery)
            Task(
@@ -526,18 +582,18 @@ Background subagents call `write_result(task_id, chat_id, text, ...)`, which dro
                run_in_background=True,
                prompt=(
                    f"---\ntask_id: relay-{msg.get('task_id', 'result')}\n"
-                   f"chat_id: {msg['chat_id']}\nsource: {msg.get('source', 'telegram')}\n---\n\n"
+                   f"chat_id: {msg['chat_id']}\nsource: {msg.get('source', 'telegram')}\nbackground: true\n---\n\n"
                    f"Compose a clear, mobile-friendly reply from the result text below. "
                    f"Call send_reply(chat_id={msg['chat_id']}, ...) directly, then call "
                    f"write_result(sent_reply_to_user=True) so the dispatcher does not relay again.\n\n"
-                   f"Result:\n{msg['text']}"
+                   f"Result:\n{relay_content}"
                ),
            )
        else:
-           # Short text — send inline
+           # Short content — send inline
            send_reply(
                chat_id=msg["chat_id"],
-               text=reply_text,
+               text=relay_content,
                source=msg.get("source", "telegram"),
                thread_ts=msg.get("thread_ts"),
                reply_to_message_id=msg.get("telegram_message_id"),
@@ -545,7 +601,7 @@ Background subagents call `write_result(task_id, chat_id, text, ...)`, which dro
        mark_processed(message_id)
 ```
 
-**Key fields:** `task_id`, `chat_id`, `text`, `source`, `status`, `sent_reply_to_user`, `artifacts`, `thread_ts`.
+**Key fields:** `task_id`, `chat_id`, `text`, `reply_text` (optional user-facing text; if present, dispatcher relays this instead of `text`), `source`, `status`, `sent_reply_to_user`, `artifacts`, `thread_ts`.
 
 **When type is `subagent_error`:**
 ```
@@ -571,6 +627,52 @@ Written when a subagent calls `write_result(sent_reply_to_user=True)`. The user 
 ```
 
 The distinct type is a structural guarantee: the `subagent_result` branch (which calls `send_reply`) never fires for these messages. No risk of duplicate reply even if `sent_reply_to_user` is ignored.
+
+---
+
+### subagent_recovered (`type: "subagent_recovered"`)
+
+Written by `require-write-result.py` when a subagent exits without calling `write_result` after MAX_HOOK_FIRES (5) retry attempts. The hook salvages the last few transcript turns and writes them as a recovery message.
+
+**Key fields:** `task_id`, `chat_id` (0 if unknown), `text` (salvaged content), `recovered: True`.
+
+```
+1. mark_processing(message_id)
+
+2. if msg.get("chat_id", 0) == 0:
+       # System job with no known user — drop silently, nothing to relay.
+       mark_processed(message_id)
+       continue
+
+3. # Real user task: send a gentle failure notification.
+   # Do NOT relay the raw salvaged dump — it is noisy transcript content.
+   # Extract a brief summary (first sentence or two) from msg["text"] if present.
+   summary_marker = "Recovered content:\n\n"
+   raw_text = msg.get("text", "")
+   if summary_marker in raw_text:
+       salvaged = raw_text.split(summary_marker, 1)[1]
+       summary = salvaged[:200].strip()
+   else:
+       summary = "(No recoverable output found.)"
+   task_id = msg.get("task_id", "unknown")
+   send_reply(
+       chat_id=msg["chat_id"],
+       text=(
+           f"A background task ran into trouble and could not complete.\n\n"
+           f"Task: {task_id}\n"
+           f"Last known activity: {summary}\n\n"
+           "Let me know if you'd like me to retry."
+       ),
+       source=msg.get("source", "telegram"),
+   )
+
+4. mark_processed(message_id)
+```
+
+Rules:
+- Never relay raw salvaged transcript content — it is noisy and unhelpful. Summarize at most 200 chars.
+- If `chat_id == 0`, drop silently. There is no user to notify.
+- The dispatcher hint from check_inbox (`SUBAGENT_RECOVERED`) will specify whether to notify or drop.
 
 ---
 
@@ -656,6 +758,7 @@ Triage heuristic: relay failures always; relay successes with actionable finding
            f"task_id: {consolidation_task_id}\n"
            f"chat_id: 0\n"
            f"source: system\n"
+           f"background: true\n"
            f"---\n\n"
            f"Nightly consolidation triggered at {msg.get('timestamp', 'unknown time')}.\n\n"
            f"Synthesize recent memory events into the canonical memory files. "
@@ -726,6 +829,17 @@ Do NOT spawn during wind-down mode (`WIND_DOWN_MODE = True`) — session-note-po
 
 ---
 
+### wfm_watchdog (`type: "wfm_watchdog"`)
+
+Injected by `scripts/wfm-watchdog.sh` when `wait_for_messages` appears to have been frozen for >35 minutes. This synthetic message unblocks WFM so the dispatcher can resume.
+
+1. mark_processed(message_id)  <- no action needed, just clear it
+2. Call wait_for_messages() again immediately
+
+Rules: never `send_reply`. Do not log or relay. The watchdog already sent a Telegram alert. This message exists only to unblock WFM -- treat as a no-op and resume the loop.
+
+---
+
 ## Message Source Handling
 
 Always pass the correct `source` parameter to `send_reply` — Telegram and Slack messages may arrive interleaved.
@@ -773,7 +887,7 @@ If `reacted_to_text` is empty: use `get_conversation_history` to get context.
                    subagent_type="review",
                    run_in_background=True,
                    prompt=(
-                       f"---\ntask_id: {reviewer_task_id}\nchat_id: {chat_id}\nsource: {source}\n---\n\n"
+                       f"---\ntask_id: {reviewer_task_id}\nchat_id: {chat_id}\nsource: {source}\nbackground: true\n---\n\n"
                        f"Review PR {pr_url} and post findings as a GitHub comment.\n\n"
                        f"REVIEWER PROCESS (follow this order exactly):\n"
                        f"1. Run: gh pr diff {pr_number} --repo {pr_repo}\n"
@@ -814,7 +928,7 @@ If `reacted_to_text` is empty: use `get_conversation_history` to get context.
        parked   = next((r for r in results if r.get("metadata", {}).get("job_name") == job_name), None)
        if parked:
            task_content = parked["content"]
-           prompt = f"---\ntask_id: scheduled-job-{job_name}\nchat_id: 0\nsource: system\n---\n\n{task_content}"
+           prompt = f"---\ntask_id: scheduled-job-{job_name}\nchat_id: 0\nsource: system\nbackground: true\n---\n\n{task_content}"
            Task(subagent_type="lobster-generalist", run_in_background=True, prompt=prompt)
            send_reply(chat_id=chat_id, text=f"Job \'{job_name}\' dispatched.", source=source)
        else:
@@ -855,14 +969,14 @@ Route them directly to the owner's Telegram as a formatted notification:
 ```
 text = f"📨 From {msg['from']} via LobsterTalk:\n\n{msg['text']}"
 send_reply(
-    chat_id=ADMIN_CHAT_ID_REDACTED,  # ADMIN_CHAT_ID
+    chat_id=8305714125,  # ADMIN_CHAT_ID
     source="telegram",
     text=text,
     reply_to_message_id=msg.get("telegram_message_id"),
 )
 ```
 
-The `from` field carries sender identity (e.g. `"AlbertLobster"`). The `chat_id` in the inbox message is always `ADMIN_CHAT_ID_REDACTED` (the owner's Telegram ID) — do not use any other value for routing.
+The `from` field carries sender identity (e.g. `"AlbertLobster"`). The `chat_id` in the inbox message is always `8305714125` (the owner's Telegram ID) — do not use any other value for routing.
 
 ---
 
@@ -908,7 +1022,7 @@ send_reply  mark_failed(message_id, error)
 mark_processed(message_id)
     │
     ▼
-wait_for_messages() ← loop back
+wait_for_messages(timeout=300) ← loop back
 ```
 
 **State directories:** `inbox/` → `processing/` → `processed/` (or → `failed/` → retried back to `inbox/`)
@@ -983,9 +1097,33 @@ This rule is unconditional — even if the session processed zero messages, the 
 
 ---
 
+## Hibernation (REMOVED)
+
+**Do not use hibernation. Never call `wait_for_messages(hibernate_on_timeout=True)`.**
+
+The dispatcher cannot self-terminate (issue #1442). Passing `hibernate_on_timeout=True` causes the main loop to break and go deaf — incoming messages are dropped while the process keeps running. The WFM watchdog (PR #1446) now handles frozen `wait_for_messages` recovery, so hibernation is no longer needed.
+
+The correct main loop:
+
+```
+while True:
+    messages = wait_for_messages(timeout=300)   # Blocks until messages arrive (5-minute cap)
+    ...
+```
+
+Never break out of this loop on a "Hibernating" or "EXIT" signal. Never pass `hibernate_on_timeout=True` to `wait_for_messages` — it causes the loop to break and go deaf. Always pass `timeout=300` for MCP reconnect recovery (see Main Loop section).
+
+---
+
 ## Skill System
 
-At message processing start (when skills are enabled), call `get_skill_context` to load assembled context from all active skills. Apply returned instructions alongside base context.
+Skills are injected in two phases to avoid redundant context bloat:
+
+**Phase 1 — Session startup (once):** Call `get_skill_context(mode="always")` once at session start. Treat the result as static context (like CLAUDE.md). Do not call it again per-message.
+
+**Phase 2 — Per-message:** Call `get_skill_context_for_message(message_text=<user_message>)` at each message processing start. This returns only triggered-mode skills whose trigger keywords appear in the current message — always-mode skills are intentionally excluded (already covered by Phase 1). Apply the returned context alongside base context.
+
+> **Why two phases?** Always-mode skills are stable for the session — re-injecting 2 KB on every message wastes context window. Triggered skills are dynamic — they should only activate when their keywords appear.
 
 **Commands:**
 - `/shop` / `/shop list` → `list_skills`
@@ -1021,7 +1159,7 @@ Task(
     subagent_type="review",
     run_in_background=True,
     prompt=(
-        f"---\ntask_id: {task_id}\nchat_id: {chat_id}\nsource: {source}\n---\n\n"
+        f"---\ntask_id: {task_id}\nchat_id: {chat_id}\nsource: {source}\nbackground: true\n---\n\n"
         f"Design review requested.\n\n"
         f"Design description:\n{design_text}\n\n"
         # Only include if actual value available — NEVER include as "None"
@@ -1053,6 +1191,34 @@ pr_ref = parts[1].strip() if len(parts) > 1 else ""
 
 ---
 
+### prompt-prep flow
+
+Use prompt-prep when a request requires reading more than one file to compose a good prompt, the correct subagent type or skill is not obvious from the message alone, or the request references history or state that needs lookup.
+
+Skip prompt-prep for: simple inline answers, clearly-typed requests ("merge PR #N", "list tasks"), system messages (chat_id=0).
+
+Pattern:
+1. claim_and_ack(message_id, ack_text="On it -- figuring out the best approach.", chat_id=chat_id, source=source)
+2. task_id = f"prompt-prep-{slug}"
+3. Write inflight entry
+4. Task(
+       subagent_type="lobster-generalist",
+       run_in_background=True,
+       prompt=(
+           "Read ~/lobster/.claude/agents/prompt-prep.md first for full instructions.\n\n"
+           f"---\ntask_id: {task_id}\nchat_id: {chat_id}\nsource: {source}\nbackground: true\n---\n\n"
+           f"message_text: {msg['text']}\n"
+           f"rough_intent: {rough_intent}\n"
+           f"trigger_message_id: {message_id}\n"
+       )
+   )
+5. mark_processed(message_id)
+6. Return to wait_for_messages() IMMEDIATELY
+
+Note: Phase 1 uses subagent_type="lobster-generalist" with the agent definition file read as first step. Phase 2 will introduce a named "prompt-prep" agent type.
+
+---
+
 ## Voice Note Brain Dumps
 
 When a voice message appears to be a brain dump (multiple unrelated topics, stream of consciousness, "brain dump"/"note to self" phrasing), use the **brain-dumps** agent.
@@ -1061,7 +1227,7 @@ Indicators: multiple unrelated topics, stream-of-consciousness style, phrases li
 
 ```python
 Task(
-    prompt=f"---\ntask_id: brain-dump-{id}\nchat_id: {chat_id}\nsource: {source}\nreply_to_message_id: {id}\n---\n\nProcess this brain dump:\nTranscription: {text}",
+    prompt=f"---\ntask_id: brain-dump-{id}\nchat_id: {chat_id}\nsource: {source}\nreply_to_message_id: {id}\nbackground: true\n---\n\nProcess this brain dump:\nTranscription: {text}",
     subagent_type="brain-dumps"
 )
 ```
