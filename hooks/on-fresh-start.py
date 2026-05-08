@@ -104,6 +104,20 @@ COMPACTION_STATE_FILE = Path(
     )
 )
 
+# Primary dispatcher state file — written by the MCP server when the dispatcher
+# calls session_start(agent_type='dispatcher', claude_session_id=...).
+# The MCP server CLEARS this file on every startup, so it is absent during the
+# window between MCP restart and the dispatcher's first session_start() call.
+# On compaction, on-compact.py proactively writes the file with the new UUID
+# so the new session is identifiable before session_start() is called.
+# Override path for tests.
+_MCP_CLAUDE_SESSION_FILE = Path(
+    os.environ.get(
+        "LOBSTER_MCP_CLAUDE_SESSION_FILE_OVERRIDE",
+        os.path.expanduser("~/lobster-workspace/data/dispatcher-claude-session-id"),
+    )
+)
+
 INBOX_DIR = Path(os.path.expanduser("~/messages/inbox"))
 PROCESSING_DIR = Path(os.path.expanduser("~/messages/processing"))
 
@@ -470,6 +484,63 @@ def _mark_all_running_failed() -> None:
         )
 
 
+def _is_fresh_dispatcher_start(hook_input: dict) -> bool:  # noqa: ARG001 — hook_input unused; kept for API compat
+    """Return True if this SessionStart looks like a fresh (post-restart) dispatcher boot.
+
+    Belt-and-suspenders fallback for when session_role.is_dispatcher() returns False
+    despite the session being the real dispatcher.
+
+    ## Why is_dispatcher() can return False for the dispatcher
+
+    session_role.is_dispatcher() detects the dispatcher via the startup flag file
+    written by claude-persistent.sh. inject-bootup-context.py is the first
+    SessionStart hook to run — it reads the flag, determines the role, then
+    DELETES the flag. By the time on-fresh-start.py runs (later in the hook chain),
+    the flag is already gone and is_dispatcher() returns False.
+
+    ## Why absent primary file + LOBSTER_MAIN_SESSION=1 implies fresh dispatcher start
+
+    The primary state file (dispatcher-claude-session-id) lifecycle:
+
+    - MCP server startup: file is **deleted** (_clear_dispatcher_state_file)
+    - After dispatcher calls session_start(..., claude_session_id=uuid): file is written
+    - Compaction: on-compact.py proactively writes the file with the new UUID
+      so the new session is identifiable before session_start() is called
+
+    Consequence:
+
+    - At a fresh restart (new process, MCP server restarted): the file is absent
+      from MCP startup until the dispatcher calls session_start().
+    - At a subagent SessionStart: the file is present (the dispatcher already
+      called session_start() before spawning any subagents via Task()).
+    - At a compaction SessionStart: the file is present (on-compact.py wrote it).
+
+    Therefore: absent primary file at a non-compaction SessionStart, combined
+    with LOBSTER_MAIN_SESSION=1, is a reliable signal that this is the dispatcher
+    booting for the first time in this session — not a subagent.
+
+    This check intentionally runs ONLY when is_dispatcher() has already returned
+    False.  When is_dispatcher() returns True (the common case), this function is
+    never called.
+    """
+    # LOBSTER_MAIN_SESSION=1 is required — must be a Lobster-managed session.
+    if os.environ.get("LOBSTER_MAIN_SESSION", "") != "1":
+        return False
+
+    # Not a compaction event (callers should already gate on this, but double-check).
+    if _is_compact_event(hook_input):
+        return False
+
+    # Primary file absent ↔ MCP server has started but session_start() has not
+    # yet been called by the dispatcher.  This is the pre-session_start window
+    # that exists only on genuine fresh restarts.
+    try:
+        return not _MCP_CLAUDE_SESSION_FILE.exists()
+    except OSError:
+        # If we cannot stat the file, do not assume dispatcher — return False.
+        return False
+
+
 def main() -> None:
     # Only fire for Lobster-managed sessions.
     if os.environ.get("LOBSTER_MAIN_SESSION", "") != "1":
@@ -485,7 +556,20 @@ def main() -> None:
         sys.exit(0)
 
     # Skip subagent sessions — only the dispatcher should run this.
-    if not session_role.is_dispatcher(data):
+    #
+    # is_dispatcher() uses the startup flag written by claude-persistent.sh.
+    # inject-bootup-context.py runs first in the SessionStart hook chain and
+    # consumes (deletes) that flag before on-fresh-start.py runs, so
+    # is_dispatcher() returns False here even for a real dispatcher session.
+    #
+    # Fallback (issue #1768): if is_dispatcher() returns False but the primary
+    # MCP state file (dispatcher-claude-session-id) is absent AND we are in a
+    # LOBSTER_MAIN_SESSION=1 environment, treat this as a fresh dispatcher start.
+    # The MCP server clears this file on every startup and it remains absent until
+    # the dispatcher calls session_start(); subagents only start after that call,
+    # so absent primary file + non-compaction + LOBSTER_MAIN_SESSION=1 reliably
+    # identifies the dispatcher in the pre-session_start window.
+    if not session_role.is_dispatcher(data) and not _is_fresh_dispatcher_start(data):
         sys.exit(0)
 
     if not AGENT_MONITOR.exists():
