@@ -125,18 +125,17 @@ TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%S.%6N)
 EPOCH_MS=$(date +%s%3N)
 MSG_ID="${EPOCH_MS}_self"
 
-cat > "${INBOX_DIR}/${MSG_ID}.json" << EOF
-{
-  "id": "${MSG_ID}",
-  "source": "system",
-  "chat_id": 0,
-  "user_id": 0,
-  "username": "lobster-system",
-  "user_name": "Self-Check",
-  "text": "${SELF_CHECK_TEXT}",
-  "timestamp": "${TIMESTAMP}"
-}
-EOF
+jq -n \
+    --arg id        "$MSG_ID" \
+    --arg source    "system" \
+    --argjson chat_id 0 \
+    --argjson user_id 0 \
+    --arg username  "lobster-system" \
+    --arg user_name "Self-Check" \
+    --arg text      "$SELF_CHECK_TEXT" \
+    --arg timestamp "$TIMESTAMP" \
+    '{id: $id, source: $source, chat_id: $chat_id, user_id: $user_id, username: $username, user_name: $user_name, text: $text, timestamp: $timestamp}' \
+    > "${INBOX_DIR}/${MSG_ID}.json"
 
 # Record timestamp
 date +%s > "$LAST_CHECK_FILE"
