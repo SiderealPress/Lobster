@@ -28,7 +28,7 @@ When you first start (or after reading this file), follow these steps:
 > **Note on stale agent sessions:** The `on-fresh-start.py` SessionStart hook runs automatically before your first turn and calls `agent-monitor.py --mark-failed` to clear any sessions left in "running" state. You do not need to do this manually.
 
 0. Call `session_start(agent_type="dispatcher", agent_id="lobster-dispatcher", description="Lobster dispatcher main loop", chat_id=<ADMIN_CHAT_ID>)` to register this session as the dispatcher. This clears any stale `_dispatcher_session_id` from a previous dispatcher instance and ensures all guarded MCP tools (`send_reply`, `check_inbox`, etc.) work immediately. Without this, a new dispatcher session may be blocked by a stale session ID from the previous instance.
-   - Get ADMIN_CHAT_ID from `lobster.conf` (`grep ADMIN_CHAT_ID ~/lobster-config/lobster.conf` or equivalent), or use the `chat_id` from `context-handoff.json` if available.
+   - Get ADMIN_CHAT_ID from `lobster.conf` (`grep ADMIN_CHAT_ID ~/lobster-config/lobster.conf` or equivalent), or use the `chat_id` from the last line of `context-handoff.jsonl` if available.
    - This is the FIRST action before any guarded tools — must fire before step 2d.
 
 0b. **ToolSearch pre-load** — ALL MCP tools are deferred by default in Claude Code. Without schema pre-loading, the CC client's Zod validator stringifies numeric/boolean args, causing `InputValidationError: '10' is not of type 'integer'`. Call ToolSearch immediately after step 0:
@@ -48,13 +48,14 @@ When you first start (or after reading this file), follow these steps:
 2. Read `~/lobster-workspace/user-model/_context.md` if it exists — pre-computed summary of user values, preferences, and active projects. Skip if absent.
 2a. Create a new session file inline (see Session File Management). Store its path as `current_session_file`. Immediately after copying the template, write the session's start timestamp and set `Messages processed: 0` and `End reason: active` — this makes the file recoverable even if the session ends before any subagent writes to it.
 2b. Call `list_rules(enabled_only=true)` to load IFTTT behavioral rules into working context.
-2c. Check `~/lobster-workspace/data/context-handoff.json`:
-    - If **recent** (< 10 min, based on `triggered_at`): read `context_pct`, `pending_tasks`, `last_user_message`. Notify user: "Restarted — context was at {context_pct}%. Resuming from where we left off." Re-queue any stuck messages from `~/messages/processing/`. Delete the file.
-    - If **stale** (>= 10 min) or absent: ignore.
+2c. Check `~/lobster-workspace/data/context-handoff.jsonl`:
+    - Read the **last line** of the file (most recent session-end record). If the file is absent or empty, treat as "no prior context".
+    - If **recent** (< 10 min, based on `triggered_at` of the last line): read `context_pct`, `pending_tasks`, `last_user_message`. Notify user: "Restarted — context was at {context_pct}%. Resuming from where we left off." Re-queue any stuck messages from `~/messages/processing/`.
+    - If **stale** (>= 10 min) or absent/empty: ignore.
 2d. **Determine startup cause** — read it from the `<!-- startup-cause: ... -->` banner injected at the top of this file by `inject-bootup-context.py`. Do not read `last-startup-cause.json` yourself; the hook already read and reset it.
     - `startup-cause: compaction` → this was a context compaction. Expect the `compact-reminder` message in the inbox. Spawn `compact-catchup` at step 4 as usual.
     - `startup-cause: restart` → this was a plain restart (systemd, external kill, or health-check). No compact-reminder will be in the inbox. Spawn `startup-catchup` at step 4 for a normal restart window.
-    - Skip if step 2c already sent a restart notification (context-handoff.json was recent).
+    - Skip if step 2c already sent a restart notification (context-handoff.jsonl had a recent last line).
     - **Do not use `compaction-state.json` or `last_catchup_ts` alone to determine cause** — those fields are updated by catchup subagents and will give false positives for restarts.
 
 3. **Claim any pending user messages immediately** to stop the health-check staleness clock:
@@ -698,7 +699,7 @@ Written by `hooks/context-monitor.py` when context window >= 70%.
    - Do NOT spawn new non-trivial subagents
    - For new user messages: ack, create_task to record, tell user "Compacting context shortly — will pick this up after."
 4. Drain in-flight agents: poll get_active_sessions() every 10s. Process arriving subagent results normally.
-5. Write ~/lobster-workspace/data/context-handoff.json:
+5. Append to ~/lobster-workspace/data/context-handoff.jsonl (one JSON line):
    {"triggered_at": "<iso8601>", "context_pct": <pct>, "pending_tasks": <list>, "last_user_message": "<text>", "note": "Graceful wind-down"}
 6. Send user (use admin chat_id from config): "Context at {pct}% — entering wind-down mode. Handing off cleanly."
 7. Do NOT call wait_for_messages() again. Do not attempt to self-terminate — the dispatcher cannot exit itself. Claude Code's context compaction will end the session externally when the context window fills.
