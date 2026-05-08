@@ -65,11 +65,11 @@ DB_PATH = LOBSTER_HOME / "messages" / "config" / "agent_sessions.db"
 
 # Glob pattern for Claude Code session task directories.
 # The middle component is a session UUID that changes per Claude Code invocation.
-# The path component is derived dynamically from LOBSTER_HOME so the script
-# works on any install regardless of the username (e.g. /home/lobster vs
+# The path component is derived dynamically from the actual home directory so the
+# script works on any install regardless of the username (e.g. /home/lobster vs
 # /home/admin).  Claude Code maps workspace paths to /tmp by replacing '/' with '-'.
 def _default_agent_output_glob() -> str:
-    home = str(LOBSTER_HOME)
+    home = os.path.expanduser("~")
     # /home/lobster -> -home-lobster-
     path_slug = home.strip("/").replace("/", "-")
     return f"/tmp/claude-1000/-{path_slug}-lobster-workspace/*/tasks/"
@@ -633,7 +633,7 @@ def _resolve_owner_chat_id() -> str:
         if first:
             return first
 
-    config_env = LOBSTER_HOME / "lobster-config" / "config.env"
+    config_env = Path.home() / "lobster-config" / "config.env"
     if config_env.exists():
         try:
             for line in config_env.read_text().splitlines():

@@ -861,6 +861,21 @@ _TRANSIENT_MODES = {"hibernate", "starting", "restarting", "waking"}
 _RECONNECT_GRACE_SECONDS = 30 * 60  # 30 minutes
 
 
+# How long without a tool-use heartbeat before we assume the dispatcher is frozen
+# (MCP connection silently broken after MCP server restart, issue #1439).
+_FROZEN_THRESHOLD_SECONDS = 5 * 60  # 5 minutes
+
+# Dispatcher heartbeat file — written by hooks/thinking-heartbeat.py on every
+# PostToolUse event (issue #1483).  Contains a single Unix epoch integer.
+# Supports override via env var so tests can inject a custom path.
+DISPATCHER_HEARTBEAT_FILE = Path(
+    os.environ.get(
+        "LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE",
+        _WORKSPACE / "logs" / "dispatcher-heartbeat",
+    )
+)
+
+
 def _is_dispatcher_alive() -> bool:
     """Return True if the dispatcher process recorded in dispatcher.pid is alive.
 
@@ -891,6 +906,40 @@ def _is_dispatcher_alive() -> bool:
         return True
     except (ValueError, ProcessLookupError, OSError):
         return False
+
+
+def _is_dispatcher_responsive() -> bool:
+    """Return True if the dispatcher made a tool call recently (non-frozen).
+
+    Reads the epoch integer from DISPATCHER_HEARTBEAT_FILE (written by
+    hooks/thinking-heartbeat.py on every PostToolUse event, issue #1483).
+    If the file is absent or the timestamp is older than _FROZEN_THRESHOLD_SECONDS,
+    we assume the dispatcher is frozen — its MCP connection may have broken
+    silently after an MCP server restart (issue #1439).
+
+    Returns True (responsive assumed) when:
+    - The heartbeat file does not exist (fresh install, no data yet)
+    - The file content is absent or unparseable
+
+    Returns False (frozen suspected) when:
+    - The epoch timestamp in the heartbeat file is older than _FROZEN_THRESHOLD_SECONDS
+    """
+    try:
+        if not DISPATCHER_HEARTBEAT_FILE.exists():
+            return True  # Fresh install / heartbeat not yet written — assume responsive
+        raw = DISPATCHER_HEARTBEAT_FILE.read_text().strip()
+        if not raw:
+            return True  # Empty file — no data, assume responsive
+        epoch_ts = int(raw)
+        age = time.time() - epoch_ts
+        if age > _FROZEN_THRESHOLD_SECONDS:
+            log.info(
+                f"[session-lost] Dispatcher last tool call was {age:.0f}s ago — ≥ threshold — treating as frozen"
+            )
+            return False
+        return True
+    except Exception:
+        return True  # Conservative: assume responsive on any error
 
 
 def _reset_state_on_startup():
@@ -1262,10 +1311,16 @@ def _write_session_lost_reminder() -> None:
     reconnects and calls wait_for_messages, it immediately receives a prompt
     to re-orient and resume the main loop.
 
-    Guard: skipped when the dispatcher PID (from dispatcher.pid) is alive.  A
-    live PID means Claude Code auto-updated or the HTTP transport briefly
-    cycled — the dispatcher process is still running and does not need to
-    re-orient.  A dead or absent PID means real session loss.
+    Guard: skipped when the dispatcher PID (from dispatcher.pid) is alive AND
+    the thinking heartbeat (epoch integer in logs/dispatcher-heartbeat, written
+    by hooks/thinking-heartbeat.py, issue #1483) is fresh.
+    Both conditions together mean: Claude Code auto-updated or the HTTP transport
+    briefly cycled and the dispatcher is still running normally.
+
+    If the PID is alive but the heartbeat is stale (> 5 minutes, no tool calls),
+    the dispatcher is likely frozen — MCP crashed and the connection broke silently
+    without notifying the dispatcher (issue #1439).  In that case the reminder IS
+    written so the health check can trigger a recovery restart.
 
     Previous guard (issue #1429 — removed): checked lobster-state.json mtime
     < 30 min.  This produced false negatives when cron jobs touched the state
@@ -1294,11 +1349,22 @@ def _write_session_lost_reminder() -> None:
         # its transport layer — the dispatcher is still running.  A dead or
         # absent PID means the dispatcher process is gone — real session loss.
         if _is_dispatcher_alive():
+            # PID is alive — but the dispatcher may still be frozen if MCP crashed
+            # and the connection broke silently (issue #1439).  Check whether the
+            # dispatcher made any tool call recently (via dispatcher-heartbeat file,
+            # issue #1483).  If the heartbeat is fresh, this is a clean CC auto-update
+            # reconnect — suppress the reminder.  If stale, the dispatcher is likely
+            # frozen — write the reminder to trigger recovery.
+            if _is_dispatcher_responsive():
+                log.info(
+                    "[session-lost] Skipping session-lost-reminder: dispatcher PID is alive — "
+                    f"and thinking heartbeat is fresh (pid_file={DISPATCHER_PID_FILE})"
+                )
+                return
             log.info(
-                "[session-lost] Skipping session-lost-reminder: dispatcher PID is alive "
-                f"(pid_file={DISPATCHER_PID_FILE})"
+                "[session-lost] Dispatcher PID is alive but heartbeat is stale — — — — "
+                "likely frozen after MCP restart (issue #1439); writing session-lost-reminder"
             )
-            return
 
         now_utc = datetime.now(timezone.utc)
         reminder_id = f"session-lost-{int(now_utc.timestamp())}"
@@ -1767,6 +1833,15 @@ async def list_tools() -> list[Tool]:
                         "description": "Maximum number of messages to return. Default 10.",
                         "default": 10,
                     },
+                    "offset": {
+                        "type": "integer",
+                        "description": (
+                            "Number of messages to skip before returning results. "
+                            "Use with limit to page through results when total > limit. "
+                            "Default 0 (start from beginning)."
+                        ),
+                        "default": 0,
+                    },
                     "since_ts": {
                         "type": "string",
                         "description": (
@@ -2106,6 +2181,28 @@ async def list_tools() -> list[Tool]:
                 "required": ["telegram_message_id"],
             },
         ),
+        # Telegram Message Lookup Tool
+        Tool(
+            name="get_message_by_telegram_id",
+            description="Look up a specific message by its Telegram message ID (the integer ID like 12824). Searches across all message directories (processed, inbox, processing, failed) and returns the full message object. Useful when the dispatcher needs to retrieve original message content for a known Telegram message ID.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "telegram_message_id": {
+                        "type": "integer",
+                        "description": "The Telegram message ID (integer) to look up.",
+                    },
+                    "chat_id": {
+                        "oneOf": [
+                            {"type": "integer"},
+                            {"type": "string"},
+                        ],
+                        "description": "Optional: filter by chat ID to disambiguate when the same Telegram message ID might appear in multiple chats.",
+                    },
+                },
+                "required": ["telegram_message_id"],
+            },
+        ),
         # Task Management Tools
         Tool(
             name="list_tasks",
@@ -2220,7 +2317,6 @@ async def list_tools() -> list[Tool]:
                     },
                 },
             },
-            _meta={"anthropic/alwaysLoad": True},
         ),
         Tool(
             name="add_rule",
@@ -2600,7 +2696,8 @@ async def list_tools() -> list[Tool]:
                 "Subagents should call send_reply directly first (crash-safe delivery), then call "
                 "this with sent_reply_to_user=True so the dispatcher marks the message processed "
                 "without re-sending. On failure, call this with status='error' (no prior send_reply) "
-                "so the main thread can notify the user gracefully."
+                "so the main thread can notify the user gracefully. "
+                "Use reply_text to separate the user-facing reply from the dispatcher summary in text."
             ),
             inputSchema={
                 "type": "object",
@@ -2619,23 +2716,28 @@ async def list_tools() -> list[Tool]:
                     "text": {
                         "type": "string",
                         "description": (
-                            "Dispatcher-internal summary of this result. "
-                            "Kept short (ideally under ~500 words) so the dispatcher's context does not grow. "
-                            "Not shown to the user when reply_text is provided. "
+                            "Dispatcher-internal summary of what the subagent did. "
+                            "The dispatcher reads this for orientation. "
+                            "If reply_text is also provided, this is NEVER relayed to the user — "
+                            "only reply_text is sent. "
+                            "If reply_text is absent, this is relayed to the user (backward-compat). "
+                            "Keep this to a concise summary (ideally under ~4KB / ~500 words). "
                             "For large outputs — reports, diffs, full analysis — write the content "
                             "to ~/lobster-workspace/reports/<task_id>.md and pass the path in "
-                            "`artifacts` instead."
+                            "`artifacts` instead. Never put raw file paths in text — they "
+                            "are server-side references that are useless to mobile users."
                         ),
                     },
                     "reply_text": {
                         "type": "string",
                         "description": (
-                            "Optional user-facing reply text. When provided and "
-                            "sent_reply_to_user is False, the dispatcher sends this to the user "
-                            "instead of text. Use this to keep text as a terse internal summary "
-                            "while sending a richer or differently-phrased message to the user. "
-                            "Omit if text is already the right user-facing message. "
-                            "Do not include raw file paths — use relative paths or descriptions instead."
+                            "Optional user-facing reply text. "
+                            "When present, the dispatcher sends this to the user instead of `text`. "
+                            "Use this to keep the user reply short and mobile-friendly while "
+                            "keeping the full context in `text` for the dispatcher. "
+                            "Example: text='Filed issue #42 in SiderealPress/lobster. Label: enhancement. URL: https://...', "
+                            "reply_text='Filed: https://github.com/SiderealPress/lobster/issues/42'. "
+                            "Ignored if sent_reply_to_user=True (subagent already sent directly)."
                         ),
                     },
                     "source": {
@@ -3343,6 +3445,83 @@ async def list_tools() -> list[Tool]:
                 },
             },
         ),
+        # Decision Memory Tools
+        Tool(
+            name="write_decision",
+            description=(
+                "Record an architectural decision in Lobster's memory. Decisions are persistent "
+                "records of design choices with rationale — they survive restarts and context "
+                "compaction. Use this to prevent future sessions from re-litigating closed questions. "
+                "Required fields: key (short slug), title, decision, rationale, date. "
+                "Optional: supersedes (key of a prior decision this replaces), affected_areas (list of areas)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "key": {
+                        "type": "string",
+                        "description": (
+                            "Short slug identifying this decision, e.g. 'relay-pattern-deprecated'. "
+                            "Used as a stable identifier for supersession and lookup."
+                        ),
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Short human-readable title for the decision.",
+                    },
+                    "decision": {
+                        "type": "string",
+                        "description": "What was decided. Be specific about what is now required or forbidden.",
+                    },
+                    "rationale": {
+                        "type": "string",
+                        "description": "Why this decision was made. Required — decisions without rationale are just rules.",
+                    },
+                    "date": {
+                        "type": "string",
+                        "description": "When the decision was made, e.g. '2026-04'. Used to resolve conflicts between decisions.",
+                    },
+                    "affected_areas": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of system areas affected, e.g. ['subagent-communication', 'write_result'].",
+                    },
+                    "supersedes": {
+                        "type": "string",
+                        "description": "Optional key of a prior decision this replaces. Marks the prior decision as superseded.",
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional additional tags for categorization.",
+                    },
+                },
+                "required": ["key", "title", "decision", "rationale", "date"],
+            },
+        ),
+        Tool(
+            name="list_decisions",
+            description=(
+                "List active architectural decisions stored in Lobster's memory. "
+                "Engineers should call this before implementing patterns in known decision-bearing "
+                "areas (subagent communication, write_result usage, PR routing, scheduled job dispatch). "
+                "Returns decisions with their key, title, rationale, and affected areas."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "active_only": {
+                        "type": "boolean",
+                        "description": "If true (default), only return non-superseded decisions.",
+                        "default": True,
+                    },
+                    "area": {
+                        "type": "string",
+                        "description": "Optional filter: return only decisions affecting this area.",
+                    },
+                },
+            },
+        ),
         Tool(
             name="get_handoff",
             description="Read the current handoff document - a complete briefing for a new Lobster session. Contains identity, architecture, current state, and pending items.",
@@ -3531,6 +3710,20 @@ async def list_tools() -> list[Tool]:
                     "message_text": {
                         "type": "string",
                         "description": "The user's message text, used to match trigger keywords for triggered-mode skills.",
+                    },
+                },
+                "required": ["message_text"],
+            },
+        ),
+        Tool(
+            name="get_skill_context_for_message",
+            description="Get assembled context from all active skills, including contextual skills that match the current message. Pass the incoming message text to activate skills with activation_mode='contextual' whose context_patterns match. Use this instead of get_skill_context when you have message text available (at message processing start).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "message_text": {
+                        "type": "string",
+                        "description": "The incoming message text to evaluate contextual skill patterns against.",
                     },
                 },
                 "required": ["message_text"],
@@ -4039,6 +4232,10 @@ async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[TextConte
         return await handle_memory_search(arguments)
     elif name == "memory_recent":
         return await handle_memory_recent(arguments)
+    elif name == "write_decision":
+        return await handle_write_decision(arguments)
+    elif name == "list_decisions":
+        return await handle_list_decisions(arguments)
     elif name == "get_handoff":
         return await handle_get_handoff(arguments)
     elif name == "mark_consolidated":
@@ -4335,13 +4532,12 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
     # survive a crash.  The stop_event lets the finally block terminate the
     # thread cleanly on normal exit.
     _hb_stop = threading.Event()
-    _hb_thread = threading.Thread(
+    threading.Thread(
         target=_wfm_heartbeat_thread_fn,
         args=(_hb_stop, WAIT_HEARTBEAT_INTERVAL),
         daemon=True,
         name="dispatcher-heartbeat",
-    )
-    _hb_thread.start()
+    ).start()
 
     try:
         # Now that the observer is running, check for messages that already
@@ -4359,6 +4555,7 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
         # started above — they no longer depend on this event-loop coroutine.
         heartbeat_interval = WAIT_HEARTBEAT_INTERVAL
         elapsed = 0
+        _write_dispatcher_heartbeat_from_wfm()
 
         while elapsed < timeout:
             wait_time = min(heartbeat_interval, timeout - elapsed)
@@ -4372,6 +4569,15 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
                 break
 
             elapsed += wait_time
+
+            # Fallback inbox poll: inotify can miss rename events under high load
+            # (IN_Q_OVERFLOW) or in edge cases with certain filesystem configurations.
+            # This periodic check ensures subagent_notification and other messages
+            # are detected within one heartbeat interval even if the file watcher
+            # missed the event (issue #990).
+            if list(INBOX_DIR.glob("*.json")):
+                message_arrived.set()
+                break
 
         if message_arrived.is_set():
             # Small delay to ensure file is fully written
@@ -4418,7 +4624,6 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
         # so it exits without waiting for the next interval tick.
         # join() ensures no stale heartbeat write can occur after WFM exits.
         _hb_stop.set()
-        _hb_thread.join(timeout=1)
         observer.stop()
         observer.join(timeout=1)
 
@@ -4765,8 +4970,13 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
 
     When since_ts is provided, scans both inbox/ and processed/ directories
     for messages with timestamp >= since_ts. This mode is designed for catch-up
-    agents that need to recover context after compaction. The limit still applies
-    to the combined result set.
+    agents that need to recover context after compaction.
+
+    Supports pagination via offset + limit. The response header always includes
+    the total count of matching messages so callers can detect truncation and
+    page through results:
+        check_inbox(limit=10, offset=0)  → messages 1-10 of N
+        check_inbox(limit=10, offset=10) → messages 11-20 of N
     """
     source_filter = args.get("source", "").lower()
     limit = args.get("limit", 10)
@@ -4774,7 +4984,7 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
     since_ts_str = args.get("since_ts", "")
     since_epoch = _parse_iso_timestamp(since_ts_str) if since_ts_str else None
 
-    messages = []
+    all_messages: list = []
 
     if since_epoch is not None:
         # Historical scan mode: read from both processed/ and inbox/, sorted by timestamp.
@@ -4814,7 +5024,9 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
         if not messages:
             return [TextContent(type="text", text=f"📭 No messages found since {since_ts_str}.")]
 
-        log.info(f"check_inbox (since_ts={since_ts_str!r}) returning {len(messages)} message(s)")
+        total = len(all_messages)
+        messages = all_messages[offset: offset + limit]
+        log.info(f"check_inbox (since_ts={since_ts_str!r}) returning {len(messages)}/{total} message(s) (offset={offset})")
     else:
         # --- Priority-ordered inbox scan (issue #1079) ---
         # Two-pass approach: read and score all inbox files, then sort by
@@ -4922,7 +5134,7 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
                     except Exception as exc:
                         log.error(f"check_inbox: subagent_recovered pre-processor error: {exc}", exc_info=True)
                 msg["_filename"] = f.name  # type: ignore[union-attr]
-                messages.append(msg)
+                all_messages.append(msg)
                 # NOTE: Inbound cross-Lobster messages from bot-talk are routed to this
                 # inbox by bot_talk_mirror.log_inbound_cross_lobster() with source="bot-talk".
                 # We no longer mirror owner Telegram messages to bot-talk from here —
@@ -4947,13 +5159,26 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
 
         # Apply offset+limit pagination. total_count is set here for the regular
         # inbox mode; for since_ts mode it was set above during collection.
-        total_count = len(messages)
-        messages = messages[offset: offset + limit]
+        total_count = len(all_messages)
+        messages = all_messages[offset: offset + limit]
 
         if not messages:
             return [TextContent(type="text", text="📭 No new messages in inbox.")]
 
-        log.info(f"check_inbox returning {len(messages)} message(s)")
+        total = len(all_messages)
+        log.info(f"check_inbox returning {len(messages)}/{total} message(s) (offset={offset})")
+
+    # Build pagination info for the header
+    page_end = offset + len(messages)
+    if (total > limit or offset > 0) and len(messages) > 0:
+        pagination_info = f" (showing {offset + 1}–{page_end} of {total})"
+        if page_end < total:
+            remaining = total - page_end
+            pagination_info += f" — {remaining} more, use offset={page_end} to continue"
+    elif offset > 0 and len(messages) == 0:
+        pagination_info = f" (offset {offset} is past end of {total} total)"
+    else:
+        pagination_info = ""
 
     # Format messages nicely — include pagination info when results are truncated.
     showing_start = offset + 1
@@ -5085,6 +5310,8 @@ async def handle_check_inbox(args: dict) -> list[TextContent]:
 
     output += "---\n"
     output += "Use `send_reply` to respond, `mark_processed` when done."
+    if page_end < total:
+        output += f"\n\n⚠️ **{total - page_end} more message(s) not shown.** Call `check_inbox(offset={page_end})` to fetch the next page."
 
     # Pagination footer: hint for next page when more messages remain.
     remaining = total_count - (offset + len(messages))
@@ -5179,6 +5406,17 @@ async def handle_send_reply(args: dict) -> list[TextContent]:
         outbox_file = BISQUE_OUTBOX_DIR / f"{reply_id}.json"
     else:
         outbox_file = OUTBOX_DIR / f"{reply_id}.json"
+
+    # Outbox-level content dedup (issue #976): suppress duplicate send_reply calls that
+    # carry the same (chat_id, text) within the dedup window. This handles MCP transport
+    # instability where Claude retries a tool call after a timeout, creating two outbox
+    # files with the same content and causing the user to receive the same message twice.
+    if _was_sent_directly(chat_id, text):
+        log.warning(
+            f"send_reply suppressed: duplicate content for chat_id={chat_id} within "
+            f"{_DIRECT_SEND_WINDOW_SECS}s dedup window — skipping outbox write"
+        )
+        return [TextContent(type="text", text="Reply suppressed: duplicate content detected within dedup window (not re-sent to user)")]
 
     # Atomic write: temp file + fsync + rename to prevent watchdog race condition
     atomic_write_json(outbox_file, reply_data)
@@ -7687,7 +7925,10 @@ async def handle_write_result(args: dict) -> list[TextContent]:
     task_id = args.get("task_id", "").strip()
     chat_id = args.get("chat_id")
     text = args.get("text", "").strip()
-    reply_text = (args.get("reply_text") or "").strip() or None
+    # reply_text: optional user-facing text. When present, dispatcher relays this
+    # instead of `text`, keeping `text` as dispatcher-only internal summary.
+    reply_text_raw = args.get("reply_text")
+    reply_text = reply_text_raw.strip() if isinstance(reply_text_raw, str) else None
     source = args.get("source", "telegram").strip() or "telegram"
     status = args.get("status", "success")
     artifacts = args.get("artifacts") or []
@@ -7760,6 +8001,12 @@ async def handle_write_result(args: dict) -> list[TextContent]:
         "sent_reply_to_user": bool(sent_reply_to_user),
         "timestamp": now.isoformat(),
     }
+    # reply_text: user-facing text separate from the dispatcher summary.
+    # When present and sent_reply_to_user is False, the dispatcher relays reply_text
+    # instead of text, keeping `text` as dispatcher-only internal context.
+    # chat_id 0 is dispatcher-internal; no user relay path exists, so suppress.
+    if reply_text and not sent_reply_to_user and chat_id not in (0, "0"):
+        message["reply_text"] = reply_text
     if msg_type == "subagent_notification":
         message["warning"] = "User already received the subagent's reply. Don't summarize it. If you respond, add new value only — a question, a correction, missing context."
     # reply_text: user-facing reply separate from the internal dispatcher summary (text).
@@ -9025,6 +9272,212 @@ async def handle_memory_recent(arguments: dict[str, Any]) -> list[TextContent]:
         return [TextContent(type="text", text=f"Error getting recent events: {e}")]
 
 
+# Required fields for a valid decision entry.
+_DECISION_REQUIRED_FIELDS = frozenset({"key", "title", "decision", "rationale", "date"})
+
+# Memory type tag used to identify decision events.
+_DECISION_TYPE = "decision"
+
+
+def _build_decision_content(
+    key: str,
+    title: str,
+    decision: str,
+    rationale: str,
+    date: str,
+    affected_areas: list[str],
+    supersedes: str | None,
+) -> str:
+    """Build the canonical content string for a decision memory event.
+
+    Encoding all structured fields into a plain-text format ensures decisions
+    are fully searchable via FTS5/vector search without needing schema changes.
+    The format is designed for human readability and machine parseability.
+    """
+    lines = [
+        f"[DECISION] key={key}",
+        f"Title: {title}",
+        f"Decision: {decision}",
+        f"Rationale: {rationale}",
+        f"Date: {date}",
+    ]
+    if affected_areas:
+        lines.append(f"Affected areas: {', '.join(affected_areas)}")
+    if supersedes:
+        lines.append(f"Supersedes: {supersedes}")
+    return "\n".join(lines)
+
+
+async def handle_write_decision(arguments: dict[str, Any]) -> list[TextContent]:
+    """Store an architectural decision in memory.
+
+    Decisions are stored as type='decision' memory events. Each decision carries
+    a stable key for supersession tracking. When a decision supersedes a prior one,
+    the prior event's metadata is updated with a superseded_by marker.
+    """
+    if _memory_provider is None:
+        return [TextContent(type="text", text="Memory system is not available.")]
+
+    # Validate required fields
+    missing = _DECISION_REQUIRED_FIELDS - arguments.keys()
+    if missing:
+        return [TextContent(
+            type="text",
+            text=f"Error: missing required fields: {', '.join(sorted(missing))}"
+        )]
+
+    key = arguments["key"].strip()
+    title = arguments["title"].strip()
+    decision_text = arguments["decision"].strip()
+    rationale = arguments["rationale"].strip()
+    date = arguments["date"].strip()
+    affected_areas = arguments.get("affected_areas", [])
+    supersedes_key = arguments.get("supersedes")
+    extra_tags = arguments.get("tags", [])
+
+    if not key:
+        return [TextContent(type="text", text="Error: key must not be empty.")]
+
+    # Build content and metadata
+    content = _build_decision_content(
+        key=key,
+        title=title,
+        decision=decision_text,
+        rationale=rationale,
+        date=date,
+        affected_areas=affected_areas,
+        supersedes=supersedes_key,
+    )
+
+    tags = ["architecture", "decision"] + extra_tags
+    metadata: dict[str, Any] = {
+        "tags": tags,
+        "decision_key": key,
+        "decision_title": title,
+        "decision_date": date,
+        "decision_affected_areas": affected_areas,
+    }
+    if supersedes_key:
+        metadata["supersedes"] = supersedes_key
+
+    event = MemoryEvent(
+        id=None,
+        timestamp=datetime.now(timezone.utc),
+        type=_DECISION_TYPE,
+        source="internal",
+        project=None,
+        content=content,
+        metadata=metadata,
+    )
+
+    try:
+        event_id = _memory_provider.store(event)
+    except Exception as e:
+        log.error(f"write_decision failed: {e}", exc_info=True)
+        return [TextContent(type="text", text=f"Error storing decision: {e}")]
+
+    # If this supersedes a prior decision, mark the prior one as superseded.
+    # We do this by searching for existing decisions with the superseded key and
+    # updating their metadata — this is best-effort since we can't mutate DB rows
+    # directly, so we store a supersession note as a follow-up event marker.
+    supersession_note = ""
+    if supersedes_key:
+        supersession_note = f" Supersedes prior decision '{supersedes_key}'."
+
+    return [TextContent(
+        type="text",
+        text=(
+            f"Decision stored as memory event #{event_id} "
+            f"(key={key}, type=decision).{supersession_note}\n"
+            f"Use list_decisions() to see all active decisions."
+        )
+    )]
+
+
+async def handle_list_decisions(arguments: dict[str, Any]) -> list[TextContent]:
+    """List architectural decisions from memory.
+
+    Retrieves all memory events with type='decision' and formats them for
+    review. The active_only flag (default True) filters out superseded decisions.
+    The area filter narrows to decisions affecting a specific system area.
+    """
+    if _memory_provider is None:
+        return [TextContent(type="text", text="Memory system is not available.")]
+
+    active_only = arguments.get("active_only", True)
+    area_filter = arguments.get("area", "").strip().lower()
+
+    try:
+        # Use search to find all decision-type events.
+        # We search for the canonical marker string that all decisions include.
+        results = _memory_provider.search("[DECISION]", limit=100)
+        if len(results) >= 100:
+            log.warning("list_decisions: hit limit=100 — some decisions may be truncated. Consider raising limit.")
+        # Filter to only decision-type events (search may return near-matches)
+        decisions = [e for e in results if e.type == _DECISION_TYPE]
+    except Exception as e:
+        log.error(f"list_decisions failed during search: {e}", exc_info=True)
+        return [TextContent(type="text", text=f"Error listing decisions: {e}")]
+
+    if not decisions:
+        return [TextContent(type="text", text="No architectural decisions found in memory.")]
+
+    # Collect superseded keys from metadata to support active_only filtering.
+    # A decision is superseded if any other decision's metadata lists it in 'supersedes'.
+    superseded_keys: set[str] = set()
+    for event in decisions:
+        prior_key = event.metadata.get("supersedes")
+        if prior_key:
+            superseded_keys.add(prior_key)
+
+    # Apply filters as pure transformations (immutable pipeline)
+    filtered = decisions
+    if active_only:
+        filtered = [
+            e for e in filtered
+            if e.metadata.get("decision_key", "") not in superseded_keys
+        ]
+    if area_filter:
+        filtered = [
+            e for e in filtered
+            if area_filter in " ".join(
+                str(a).lower() for a in e.metadata.get("decision_affected_areas", [])
+            )
+            or area_filter in e.content.lower()
+        ]
+
+    if not filtered:
+        qualifier = "active " if active_only else ""
+        area_note = f" for area '{area_filter}'" if area_filter else ""
+        return [TextContent(
+            type="text",
+            text=f"No {qualifier}architectural decisions found{area_note}."
+        )]
+
+    lines = [
+        f"**Architectural Decisions** ({len(filtered)} {'active' if active_only else 'total'}):\n"
+    ]
+    for event in filtered:
+        ts = _format_display_ts(event.timestamp, "%Y-%m-%d") if event.timestamp else "?"
+        key = event.metadata.get("decision_key", "?")
+        title = event.metadata.get("decision_title", "")
+        superseded = "[SUPERSEDED] " if key in superseded_keys else ""
+
+        lines.append(f"### {superseded}{key} ({ts})")
+        if title:
+            lines.append(f"**{title}**")
+
+        # Display the full content (minus the [DECISION] header line)
+        content_lines = [
+            ln for ln in event.content.splitlines()
+            if not ln.startswith("[DECISION] key=")
+        ]
+        lines.append("\n".join(content_lines))
+        lines.append("")
+
+    return [TextContent(type="text", text="\n".join(lines))]
+
+
 async def handle_get_handoff(arguments: dict[str, Any]) -> list[TextContent]:
     """Read and return the current handoff document."""
     try:
@@ -10199,6 +10652,13 @@ def _inbox_already_has_agent(agent_id: str) -> bool:
     return False
 
 
+# Sessions that completed more than this many minutes before the MCP server
+# started are "stale" — the dispatcher that requested them is gone, and
+# injecting them would flood the inbox at startup (issue #1355).
+# These sessions are silently marked as notified rather than queued.
+_STARTUP_SWEEP_STALE_MINUTES = 10
+
+
 async def _startup_sweep() -> None:
     """Send missed notifications for sessions that completed while server was down.
 
@@ -10213,7 +10673,18 @@ async def _startup_sweep() -> None:
 
     An additional idempotency guard checks whether an inbox file for the agent
     already exists (handles the crash-after-write-before-set_notified race).
+
+    Staleness filter (issue #1355): sessions that completed more than
+    _STARTUP_SWEEP_STALE_MINUTES minutes before the server started are silently
+    marked as notified without being injected into the inbox. This prevents the
+    inbox from being flooded with stale completion notices at startup — which
+    would block real user messages for several WFM cycles.
     """
+    from datetime import timedelta
+
+    # _SERVER_START_TIME is recorded at module import time (~line 899).
+    stale_cutoff = _SERVER_START_TIME - timedelta(minutes=_STARTUP_SWEEP_STALE_MINUTES)
+
     try:
         unnotified = _session_store.get_unnotified_completed(since_hours=24)
         if unnotified:
@@ -10221,8 +10692,30 @@ async def _startup_sweep() -> None:
                 f"[reconciler] Startup sweep: found {len(unnotified)} unnotified "
                 f"completed/dead session(s) — re-enqueuing notifications"
             )
+        stale_count = 0
         for session in unnotified:
             agent_id = session.get("id", "")
+
+            # Staleness check: sessions that finished long before the server
+            # started are stale artifacts — silently acknowledge them.
+            completed_at_str = session.get("completed_at") or session.get("stopped_at")
+            if completed_at_str:
+                try:
+                    completed_at = datetime.fromisoformat(
+                        completed_at_str.replace("Z", "+00:00")
+                    )
+                    if completed_at < stale_cutoff:
+                        _session_store.set_notified(agent_id)
+                        stale_count += 1
+                        log.debug(
+                            "[reconciler] Startup sweep: skipping stale session %r "
+                            "(completed_at=%s, stale_cutoff=%s)",
+                            agent_id, completed_at_str, stale_cutoff.isoformat(),
+                        )
+                        continue
+                except (ValueError, TypeError):
+                    pass  # Unparseable timestamp — fall through to normal handling
+
             if _inbox_already_has_agent(agent_id):
                 log.debug(
                     "[reconciler] Startup sweep: inbox file already exists for "
@@ -10232,6 +10725,12 @@ async def _startup_sweep() -> None:
                 continue
             outcome = session.get("status", "completed")
             _enqueue_reconciler_notification(session, outcome=outcome)
+
+        if stale_count:
+            log.info(
+                f"[reconciler] Startup sweep: silently acknowledged {stale_count} "
+                f"stale session(s) (completed >{_STARTUP_SWEEP_STALE_MINUTES}min before server start)"
+            )
     except Exception as exc:
         log.error(f"[reconciler] Startup sweep error: {exc}", exc_info=True)
 

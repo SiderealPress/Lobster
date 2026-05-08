@@ -532,7 +532,7 @@ def _is_direct_invocation(message, bot_username: str) -> bool:
             offset = getattr(entity, "offset", 0)
             length = getattr(entity, "length", 0)
             mentioned = entity_text_source[offset:offset + length]
-            # mentioned is like "@your_lobster_bot"
+            # mentioned is like "@Awp_Sebastian_bot"
             if mentioned.lstrip("@").lower() == bot_username.lower():
                 return True
 
@@ -1788,10 +1788,17 @@ def build_inline_keyboard(buttons: list) -> InlineKeyboardMarkup:
     """Build a Telegram InlineKeyboardMarkup from a nested list of button labels.
 
     Each inner list represents a row of buttons.  Each element in the row is
-    one of:
-    - a plain string label (callback_data == label)
-    - a [label, data] two-element list where data is the callback_data payload
-    - a {"text": label, "callback_data": data} dict (complex format)
+    one of three supported formats:
+
+    1. Plain string — text == callback_data
+       e.g. ``"Yes"``
+
+    2. Two-element list/tuple — separate text and callback_data
+       e.g. ``["Vote Yes", "yes_cb"]``
+
+    3. Dict with a ``"text"`` key — complex format with optional separate callback_data
+       e.g. ``{"text": "Got it", "callback_data": "card1b_next"}``
+       If ``"callback_data"`` is absent, ``"text"`` is used as the callback value.
 
     Pure function: no side effects.
     """
@@ -1800,12 +1807,8 @@ def build_inline_keyboard(buttons: list) -> InlineKeyboardMarkup:
         keyboard_row = []
         for item in row:
             if isinstance(item, dict):
-                if not item.get("text"):
-                    raise ValueError(
-                        f"Dict button spec is missing a non-empty 'text' key: {item!r}"
-                    )
-                label = str(item["text"])
-                data = str(item.get("callback_data", label))
+                label = item["text"]
+                data = item.get("callback_data", label)
             elif isinstance(item, (list, tuple)) and len(item) == 2:
                 label, data = item
             else:
@@ -1873,14 +1876,6 @@ class OutboxHandler(FileSystemEventHandler):
                     os.remove(filepath)
                 except OSError:
                     pass
-                return
-
-            # Skip outbox files destined for other channels (Slack, SMS, WhatsApp, etc.)
-            # Those routers watch the same shared outbox directory and handle their own files.
-            source = reply.get('source', 'telegram')
-            if source not in ('telegram', 'lobster-group', ''):
-                log.debug(f"process_reply: skipping non-Telegram file {filepath} (source={source!r})")
-                _processing_files.discard(filepath)
                 return
 
             chat_id = reply.get('chat_id')

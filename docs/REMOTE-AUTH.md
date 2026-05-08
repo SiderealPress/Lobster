@@ -60,6 +60,12 @@ When `CLAUDE_CODE_OAUTH_TOKEN` expires, obtain a new token and update config.env
    claude auth status --output-format json
    ```
 
+4. **Verify**:
+
+   ```bash
+   claude auth status --output-format json
+   ```
+
 ---
 
 ## Transfer credentials from another machine

@@ -4,7 +4,7 @@
 
 - **Job name**: `gmail-auto-draft`
 - **Schedule**: Every 5 minutes (`*/5 * * * *`)
-- **Account**: GMAIL_ACCOUNT_REDACTED
+- **Account**: albobsterbot@gmail.com
 - **What it does**: Finds inbox emails without existing drafts, drafts context-aware HTML replies with named read-only Drive links
 
 ### Draft deduplication (critical)

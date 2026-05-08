@@ -41,14 +41,8 @@ if str(_SRC_DIR) not in sys.path:
 from integrations.granola.client import (
     GranolaAPIError,
     GranolaAuthError,
-    GranolaNote,
-    GranolaAccountConfig,
-    GranolaUnknownAccountError,
-    build_account_configs_from_env,
-    iter_all_notes_for_account,
+    iter_all_notes,
     get_note,
-    ACCOUNT_PRIMARY,
-    ACCOUNT_SECONDARY,
 )
 from integrations.granola.vault_writer import write_notes_batch, WriteResult
 
@@ -129,45 +123,23 @@ def _write_task_output(output: str, status: str = "success") -> None:
 # ---------------------------------------------------------------------------
 
 
-def _fetch_notes_with_detail(
-    notes_summary: list[GranolaNote],
-    account_configs: list[GranolaAccountConfig],
-) -> list[GranolaNote]:
+def _fetch_notes_with_detail(notes_summary: list) -> list:
     """
     For each note from list_notes() (which lacks transcript/summary),
-    fetch full detail via get_note() using the correct per-account API key.
-
-    The granola_account field from the summary note is used to look up the
-    matching GranolaAccountConfig so the correct api_key is passed to get_note().
-    Account attribution is preserved in the returned GranolaNote.
+    fetch full detail via get_note().
 
     Notes: The list endpoint returns id, title, owner, created_at, updated_at
     but NOT summary_markdown or transcript. We need get_note() for those.
     """
-    # Build a strict lookup from account name → api_key.
-    # Using dict access (not .get()) ensures an unknown account name immediately
-    # raises GranolaUnknownAccountError rather than silently falling back to None,
-    # which previously caused get_note() to use the primary GRANOLA_API_KEY for
-    # any note whose account name was not in the config.
-    api_key_by_account: dict[str, str] = {cfg.name: cfg.api_key for cfg in account_configs}
-
-    full_notes: list[GranolaNote] = []
+    full_notes = []
     for note in notes_summary:
-        if note.granola_account not in api_key_by_account:
-            raise GranolaUnknownAccountError(note.granola_account)
         try:
-            api_key = api_key_by_account[note.granola_account]
-            full = get_note(
-                note.id,
-                include_transcript=True,
-                api_key=api_key,
-                granola_account=note.granola_account,
-            )
+            full = get_note(note.id, include_transcript=True)
             full_notes.append(full)
-            log.debug("Fetched detail for note %s (account=%s)", note.id, note.granola_account)
+            log.debug("Fetched detail for note %s", note.id)
         except GranolaAPIError as exc:
             log.warning("Could not fetch detail for note %s: %s", note.id, exc)
-            # Fall back to the summary-only version (account attribution preserved)
+            # Fall back to the summary-only version (no transcript/summary)
             full_notes.append(note)
     return full_notes
 
@@ -177,43 +149,17 @@ def _fetch_notes_with_detail(
 # ---------------------------------------------------------------------------
 
 
-def _merge_notes_deduplicated(
-    notes_by_account: dict[str, list[GranolaNote]],
-) -> list[GranolaNote]:
-    """
-    Merge notes from multiple accounts, deduplicating by note ID.
-
-    Primary account is the authoritative source: when the same note ID appears
-    in both accounts, the primary version is kept. This is a pure function.
-
-    Args:
-        notes_by_account: Mapping of account name → list of GranolaNote.
-
-    Returns:
-        Merged list with no duplicate IDs. Primary account notes appear first.
-    """
-    primary_notes = notes_by_account.get(ACCOUNT_PRIMARY, [])
-    secondary_notes = notes_by_account.get(ACCOUNT_SECONDARY, [])
-
-    primary_ids: set[str] = {n.id for n in primary_notes}
-    secondary_unique = [n for n in secondary_notes if n.id not in primary_ids]
-
-    return list(primary_notes) + secondary_unique
-
-
 def run_sync(dry_run: bool = False) -> dict[str, Any]:
     """
-    Run a full incremental sync cycle across all configured Granola accounts.
+    Run a full incremental sync cycle.
 
     1. Load last-sync timestamp from state file.
-    2. Discover configured accounts (primary always; secondary if GRANOLA_API_KEY_2 set).
-    3. Fetch all notes since last sync per account (or all on first run).
-    4. Merge and deduplicate by note ID (primary wins on conflict).
-    5. For each merged note, fetch full detail (transcript + summary).
-    6. Write to Obsidian vault (idempotent, annotated with granola_account).
-    7. Git-commit the vault.
-    8. Update state file with new timestamp.
-    9. Return result summary dict.
+    2. Fetch all notes created since last sync (or all on first run).
+    3. For each note, fetch full detail (transcript + summary).
+    4. Write to Obsidian vault (idempotent).
+    5. Git-commit the vault.
+    6. Update state file with new timestamp.
+    7. Return result summary dict.
 
     Args:
         dry_run: If True, fetch and serialise but do not write to disk
@@ -221,8 +167,7 @@ def run_sync(dry_run: bool = False) -> dict[str, Any]:
 
     Returns:
         dict with keys: status, notes_fetched, notes_written, notes_skipped,
-        notes_errored, committed, last_sync_at, vault_path, message,
-        accounts_polled.
+        notes_errored, committed, last_sync_at, vault_path, message.
     """
     run_start = datetime.now(timezone.utc)
     state = _load_sync_state()
@@ -238,41 +183,19 @@ def run_sync(dry_run: bool = False) -> dict[str, Any]:
     else:
         log.info("No prior sync state — running full sync (all notes)")
 
-    # Discover configured accounts
-    accounts = build_account_configs_from_env()
-    if not accounts:
-        msg = "GRANOLA_API_KEY not set — check config.env"
+    # Step 1: List notes
+    try:
+        notes_summary = iter_all_notes(since=since)
+    except GranolaAuthError:
+        msg = "Granola authentication failed — check GRANOLA_API_KEY in config.env"
         log.error(msg)
         _write_task_output(msg, status="failed")
         return {"status": "failed", "message": msg}
-
-    account_names = [a.name for a in accounts]
-    log.info("Polling %d account(s): %s", len(accounts), ", ".join(account_names))
-
-    # Step 1: Fetch notes per account and merge
-    notes_by_account: dict[str, list[GranolaNote]] = {}
-    for account in accounts:
-        try:
-            account_notes = iter_all_notes_for_account(account, since=since)
-            notes_by_account[account.name] = account_notes
-            log.info("Account '%s': %d notes fetched", account.name, len(account_notes))
-        except GranolaAuthError:
-            msg = f"Granola authentication failed for account '{account.name}' — check API key in config.env"
-            log.error(msg)
-            _write_task_output(msg, status="failed")
-            return {"status": "failed", "message": msg}
-        except GranolaAPIError as exc:
-            msg = f"Granola API error for account '{account.name}': {exc}"
-            log.error(msg)
-            _write_task_output(msg, status="failed")
-            return {"status": "failed", "message": msg}
-
-    notes_summary = _merge_notes_deduplicated(notes_by_account)
-    log.info(
-        "Merged: %s → %d total after dedup",
-        ", ".join(f"{acc}={len(notes_by_account.get(acc, []))}" for acc in account_names),
-        len(notes_summary),
-    )
+    except GranolaAPIError as exc:
+        msg = f"Granola API error during list: {exc}"
+        log.error(msg)
+        _write_task_output(msg, status="failed")
+        return {"status": "failed", "message": msg}
 
     n_fetched = len(notes_summary)
     log.info("Fetched %d notes from Granola API", n_fetched)
@@ -293,15 +216,14 @@ def run_sync(dry_run: bool = False) -> dict[str, Any]:
             "committed": False,
             "last_sync_at": last_sync_str,
             "vault_path": str(_VAULT_PATH),
-            "accounts_polled": account_names,
             "message": msg,
         }
         _write_task_output(json.dumps(result), status="success")
         return result
 
-    # Step 2: Fetch full details for each note, using per-account API keys
+    # Step 2: Fetch full details for each note
     log.info("Fetching full detail for %d notes...", n_fetched)
-    notes_full = _fetch_notes_with_detail(notes_summary, accounts)
+    notes_full = _fetch_notes_with_detail(notes_summary)
 
     if dry_run:
         log.info("DRY RUN — not writing to vault")
@@ -313,7 +235,6 @@ def run_sync(dry_run: bool = False) -> dict[str, Any]:
             "notes_errored": 0,
             "committed": False,
             "vault_path": str(_VAULT_PATH),
-            "accounts_polled": account_names,
             "message": f"Dry run: would write {n_fetched} notes",
         }
         return result
@@ -326,6 +247,8 @@ def run_sync(dry_run: bool = False) -> dict[str, Any]:
     )
 
     # Step 4: Update state
+    # Advance the cursor to the earliest created_at in this batch
+    # so next run only fetches truly new notes.
     # We use the LATEST updated_at among written notes as the new cursor.
     if notes_full:
         latest_dt = max(n.updated_at for n in notes_full)
@@ -353,7 +276,6 @@ def run_sync(dry_run: bool = False) -> dict[str, Any]:
         "committed": write_result.committed,
         "last_sync_at": state["last_sync_at"],
         "vault_path": str(_VAULT_PATH),
-        "accounts_polled": account_names,
         "message": message,
     }
 

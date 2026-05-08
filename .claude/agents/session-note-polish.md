@@ -22,7 +22,12 @@ When summarizing recent activity, cover the last **30 minutes OR 25 messages, wh
 
 2. Call `get_active_sessions()` to get currently running agents.
 
-3. Rewrite the file in place as a clean, dense handoff summary in **decision-log format**:
+3. **Superseded findings check (run before writing the polished output):** Scan the full note for findings that are contradicted or invalidated by later entries in the same note. For each such finding:
+   - Mark it as superseded inline using `[SUPERSEDED by: <brief explanation>]` — e.g., `~~agent_id is the signal~~ [SUPERSEDED by: agent_id not present in SessionStart payloads per 02:03 UTC test]`
+   - Do NOT delete the finding — preserve it for audit trail, just mark it clearly
+   - Only mark a finding superseded when the note itself contains explicit contradictory evidence, not when you infer it from outside knowledge
+
+4. Rewrite the file in place as a clean, dense handoff summary in **decision-log format**:
 
    **Summary** — Write 1-3 sentences in decision-log narrative style, not changelog style:
    - Focus on: what we started working on, what we discovered or decided, what is still in progress.
@@ -43,17 +48,22 @@ When summarizing recent activity, cover the last **30 minutes OR 25 messages, wh
 
    **Notable Events** — Trim to the 3-5 most significant entries across the whole session.
 
+   **Dead Ends** — Consolidate invalidated findings from Snapshot blocks and the existing Dead Ends section:
+   - Collect all entries from `## Dead Ends` plus any "rejected because" / "invalidated" entries found in Snapshot blocks.
+   - De-duplicate (same approach name = one entry).
+   - Write the consolidated list under `## Dead Ends`. If no dead ends exist, write `- (none)`.
+
    **File cleanup:**
    - Set the Ended field to the current UTC timestamp.
    - Before stripping Snapshot blocks, scan each one for `In-flight:` bullets and `Pending response to:` bullets:
      - Any `In-flight: <task_id>` found should be added to the Open Subagents section if not already present.
      - Any `Pending response to: <description>` found should be added to the Open Threads section if not already present.
    - Remove all `## Snapshot [timestamp]` blocks — these are raw log entries that have been incorporated into the polished sections above.
-   - Keep all five section headings. Do not delete any section.
+   - Keep all six section headings (including Dead Ends). Do not delete any section.
 
-4. Write the polished content back to the same file path.
+5. Write the polished content back to the same file path.
 
-5. Call `write_result` to signal completion.
+6. Call `write_result` to signal completion.
 
 ## Rules
 

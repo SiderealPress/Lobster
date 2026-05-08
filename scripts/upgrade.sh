@@ -1750,29 +1750,14 @@ EOF
         local mcp_local_service="$LOBSTER_DIR/services/lobster-mcp-local.service"
 
         if [ -f "$mcp_local_template" ]; then
-            # Use the shared template library when available (it is, since we
-            # run from an existing install with the repo already cloned).
-            # Falls back to inline sed only if the lib file is somehow missing.
-            local _lib="${LOBSTER_DIR}/scripts/lib/template.sh"
-            if [ -f "$_lib" ]; then
-                # Set canonical LOBSTER_* vars the library expects
-                LOBSTER_USER="${LOBSTER_USER:-$(whoami)}"
-                LOBSTER_GROUP="${LOBSTER_GROUP:-$(id -gn)}"
-                LOBSTER_HOME="${LOBSTER_HOME:-$HOME}"
-                LOBSTER_INSTALL_DIR="$LOBSTER_DIR"
-                LOBSTER_WORKSPACE="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
-                LOBSTER_MESSAGES="${LOBSTER_MESSAGES:-$HOME/messages}"
-                LOBSTER_CONFIG_DIR="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}"
-                LOBSTER_USER_CONFIG="${LOBSTER_USER_CONFIG:-$HOME/lobster-user-config}"
-                # shellcheck source=lib/template.sh
-                source "$_lib"
-                _tmpl_generate_from_template "$mcp_local_template" "$mcp_local_service"
+            # Render template (reuse generate_from_template if available, else sed directly)
+            if declare -f generate_from_template >/dev/null 2>&1; then
+                generate_from_template "$mcp_local_template" "$mcp_local_service"
             else
-                # Fallback: inline rendering (all 8 placeholders — keep in sync with lib)
-                local _user _group _home _config_dir _messages_dir _workspace_dir _user_config_dir
+                # Minimal inline rendering matching install.sh variable names
+                local _user _group _config_dir _messages_dir _workspace_dir _user_config_dir
                 _user=$(whoami)
                 _group=$(id -gn)
-                _home="$HOME"
                 _config_dir="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}"
                 _messages_dir="${LOBSTER_MESSAGES:-$HOME/messages}"
                 _workspace_dir="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
@@ -1780,7 +1765,6 @@ EOF
                 sed \
                     -e "s|{{USER}}|$_user|g" \
                     -e "s|{{GROUP}}|$_group|g" \
-                    -e "s|{{HOME}}|$_home|g" \
                     -e "s|{{INSTALL_DIR}}|$LOBSTER_DIR|g" \
                     -e "s|{{CONFIG_DIR}}|$_config_dir|g" \
                     -e "s|{{MESSAGES_DIR}}|$_messages_dir|g" \
@@ -2458,437 +2442,27 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
         substep "wfm-watchdog.sh cron entry already present — skipping"
     fi
 
-    # Migration 70: Install piper TTS and lessac-medium voice model for send_voice_note.
-    # Soft requirement: failure warns but does not abort upgrade.
-    local PIPER_BIN_PATH="/usr/local/bin/piper"
-    local PIPER_MODELS_TARGET="${WORKSPACE_DIR}/piper-models"
-    local PIPER_MODEL_FILE="${PIPER_MODELS_TARGET}/en_US-lessac-medium.onnx"
-    mkdir -p "$PIPER_MODELS_TARGET"
-
-    if [ ! -x "$PIPER_BIN_PATH" ] && ! command -v piper &>/dev/null; then
-        substep "Installing piper TTS binary for send_voice_note..."
-        local _arch
-        _arch="$(uname -m)"
-        local _piper_arch=""
-        case "$_arch" in
-            x86_64)   _piper_arch="amd64" ;;
-            aarch64)  _piper_arch="aarch64" ;;
-            armv7l)   _piper_arch="armv7" ;;
-        esac
-        if [ -n "$_piper_arch" ]; then
-            local _piper_url
-            _piper_url="$(curl -fsSL https://api.github.com/repos/rhasspy/piper/releases/latest 2>/dev/null | \
-                python3 -c "import sys,json; \
-                data=json.load(sys.stdin); \
-                urls=[a['browser_download_url'] for a in data.get('assets',[]) \
-                      if 'linux_${_piper_arch}' in a['name'] and a['name'].endswith('.tar.gz')]; \
-                print(urls[0] if urls else '')" 2>/dev/null || true)"
-            if [ -n "$_piper_url" ]; then
-                local _ptmp
-                _ptmp="$(mktemp -d)"
-                if curl -fsSL -o "${_ptmp}/piper.tar.gz" "$_piper_url" && \
-                   tar -xzf "${_ptmp}/piper.tar.gz" -C "$_ptmp"; then
-                    local _bin
-                    _bin="$(find "$_ptmp" -type f -name "piper" | head -1)"
-                    if [ -n "$_bin" ]; then
-                        local _bin_dir
-                        _bin_dir="$(dirname "$_bin")"
-                        sudo cp "$_bin" "$PIPER_BIN_PATH"
-                        sudo chmod +x "$PIPER_BIN_PATH"
-                        # Copy shared libraries
-                        for _lib in libonnxruntime.so.* libpiper_phonemize.so.* libespeak-ng.so.*; do
-                            _lib_path="$(find "$_bin_dir" -name "$_lib" -type f | head -1)"
-                            [ -n "$_lib_path" ] && sudo cp "$_lib_path" /usr/local/lib/ 2>/dev/null || true
-                        done
-                        sudo ldconfig 2>/dev/null || true
-                        # Install bundled espeak-ng-data
-                        if [ -d "${_bin_dir}/espeak-ng-data" ]; then
-                            sudo cp -r "${_bin_dir}/espeak-ng-data" /usr/share/ 2>/dev/null || true
-                        fi
-                        substep "piper TTS installed to $PIPER_BIN_PATH"
-                        migrated=$((migrated + 1))
-                    fi
-                fi
-                rm -rf "$_ptmp"
-            fi
-        fi
-    fi
-
-    if [ ! -f "$PIPER_MODEL_FILE" ]; then
-        substep "Downloading piper lessac-medium voice model (~30MB)..."
-        local _model_url="https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/en_US-lessac-medium.onnx"
-        local _model_json_url="https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json"
-        if curl -fsSL -o "$PIPER_MODEL_FILE" "$_model_url" && \
-           curl -fsSL -o "${PIPER_MODEL_FILE}.json" "$_model_json_url"; then
-            substep "piper voice model downloaded"
-            migrated=$((migrated + 1))
-        else
-            warn "piper voice model download failed — send_voice_note will fall back to text"
-            rm -f "$PIPER_MODEL_FILE" "${PIPER_MODEL_FILE}.json"
-        fi
-    fi
-
-    # Migration 71: Remove stale LOBSTER-SCHEDULED crontab entries (issue #1083 Phase 1).
-    # The cron + jobs.json + dispatch-job.sh scheduling layer has been superseded by
-    # systemd timers (PR #1105). Any remaining "# LOBSTER-SCHEDULED" crontab entries
-    # are now duplicates of systemd timers or orphaned jobs that no longer fire on
-    # systemd. Remove them so the crontab is clean.
-    #
-    # SAFETY: Only remove a LOBSTER-SCHEDULED cron entry for a job if a corresponding
-    # lobster-managed systemd timer already exists for that job. Entries for jobs that
-    # have no systemd timer are left in place and a warning is printed. This prevents
-    # silent loss of the only trigger for a job.
-    #
-    # NOTE: System-level cron entries (LOBSTER-HEALTH, LOBSTER-SELF-CHECK, etc.) are
-    # intentionally preserved — only LOBSTER-SCHEDULED user-space job entries are removed.
-    if crontab -l 2>/dev/null | grep -q '# LOBSTER-SCHEDULED'; then
-        _m71_safe_to_remove=""
-        _m71_skipped=""
-        while IFS= read -r _m71_line; do
-            # Extract the job name from lines like:
-            #   0 */6 * * * /path/dispatch-job.sh lobstertalk-ssh-watcher # LOBSTER-SCHEDULED
-            _m71_job=$(echo "$_m71_line" | grep -oP '(?<=dispatch-job\.sh )\S+' || true)
-            if [ -z "$_m71_job" ]; then
-                # Not a dispatch-job.sh line — skip it (don't remove)
-                _m71_skipped="${_m71_skipped}${_m71_line}\n"
-                continue
-            fi
-            _m71_timer="/etc/systemd/system/lobster-${_m71_job}.timer"
-            if [ -f "$_m71_timer" ] && grep -q '# LOBSTER-MANAGED' "$_m71_timer" 2>/dev/null; then
-                # Systemd timer exists and is lobster-managed — safe to remove cron entry
-                _m71_safe_to_remove="${_m71_safe_to_remove}${_m71_job} "
-            else
-                # No systemd timer — leave cron entry in place, warn operator
-                substep "WARNING: LOBSTER-SCHEDULED cron entry for '${_m71_job}' has no systemd timer — leaving in place"
-                substep "  To fix: create a systemd timer for '${_m71_job}' via create_scheduled_job MCP tool, then re-run upgrade.sh"
-                _m71_skipped="${_m71_skipped}${_m71_line}\n"
-            fi
-        done < <(crontab -l 2>/dev/null | grep '# LOBSTER-SCHEDULED')
-
-        if [ -n "$_m71_safe_to_remove" ]; then
-            # Build a pattern that matches only the job names we confirmed are timer-backed
-            _m71_pattern=$(echo "$_m71_safe_to_remove" | tr ' ' '\n' | grep -v '^$' | sed 's/.*/dispatch-job\\.sh &/' | paste -sd '|')
-            { crontab -l 2>/dev/null | grep -Ev "$_m71_pattern" || true; } | crontab -
-            substep "Removed LOBSTER-SCHEDULED cron entries for timer-backed jobs: ${_m71_safe_to_remove% }"
-            migrated=$((migrated + 1))
-        else
-            substep "No timer-backed LOBSTER-SCHEDULED cron entries to remove"
-        fi
-    else
-        substep "No LOBSTER-SCHEDULED crontab entries found — skipping"
-    fi
-
-    # Migration 72: Enable lobster-claude and lobster-router for autostart on existing installs.
-    # Non-interactive installs (NON_INTERACTIVE=true) prior to this fix skipped the
-    # `systemctl enable` call entirely, leaving the services installed but not enabled.
-    # After any reboot the services would not start automatically, causing ~4 min downtime
-    # until the health check detected and restarted the missing session. Fix: enable
-    # unconditionally if the service unit is present but not enabled. (issue #1603)
-    for _m72_svc in lobster-router lobster-claude; do
-        if systemctl list-unit-files --quiet "${_m72_svc}.service" 2>/dev/null | grep -q "^${_m72_svc}"; then
-            if ! systemctl is-enabled --quiet "${_m72_svc}" 2>/dev/null; then
-                sudo systemctl enable "${_m72_svc}" 2>/dev/null || true
-                substep "Enabled ${_m72_svc} for autostart"
-                migrated=$((migrated + 1))
-            else
-                substep "${_m72_svc} already enabled — skipping"
-            fi
-        else
-            substep "${_m72_svc}.service not found — skipping"
-        fi
-    done
-
-    # Migration 73: Remove stale system-audit.context.md from memory/canonical/
-    # install.sh's generic canonical-template loop previously copied system-audit.context.md
-    # to both memory/canonical/ and agents/ (the latter via a dedicated block).
-    # The agents/ copy is the canonical write target — the memory/canonical/ copy was
-    # never updated by the lobster-auditor and drifted stale. Fix: delete the stale copy
-    # and exclude it from the generic loop going forward (issue #1196).
-    local stale_audit_context="$USER_CONFIG_DIR/memory/canonical/system-audit.context.md"
-    if [ -f "$stale_audit_context" ]; then
-        rm -f "$stale_audit_context"
-        substep "Removed stale system-audit.context.md from memory/canonical/ (canonical copy is agents/system-audit.context.md)"
-        migrated=$((migrated + 1))
-    fi
-
-    # Migration 74: Enable and start lobster-transcription.service on existing installs.
-    # Prior to this fix, install.sh installed the service file but never called
-    # systemctl enable, so voice messages accumulated in pending-transcription/ forever.
-    if systemctl is-system-running >/dev/null 2>&1 || pidof systemd >/dev/null 2>&1; then
-        local transcription_svc="$LOBSTER_DIR/services/lobster-transcription.service"
-        if [ -f "$transcription_svc" ]; then
-            sudo cp "$transcription_svc" /etc/systemd/system/lobster-transcription.service
-            sudo systemctl daemon-reload 2>/dev/null || true
-            if ! systemctl is-enabled --quiet lobster-transcription 2>/dev/null; then
-                sudo systemctl enable lobster-transcription 2>/dev/null || true
-                substep "Enabled lobster-transcription.service"
-                migrated=$((migrated + 1))
-            fi
-            if ! systemctl is-active --quiet lobster-transcription 2>/dev/null; then
-                sudo systemctl start lobster-transcription 2>/dev/null || true
-                substep "Started lobster-transcription.service"
-                migrated=$((migrated + 1))
-            fi
-        else
-            substep "WARN: lobster-transcription.service not found at $transcription_svc — skipping"
-        fi
-    else
-        substep "systemd not running — skipping lobster-transcription.service enable (container?)"
-    fi
-
-    # Migration 75: Install LOBSTER-CLEANUP cron entry (worktree + audio cleanup, issue #1609).
-    # cleanup-worktrees-audio.sh prunes finished git worktrees and removes audio files
-    # older than 7 days. Runs daily at 04:00 to avoid overlap with nightly consolidation (03:00).
-    local CLEANUP_MARKER="# LOBSTER-CLEANUP"
-    local CLEANUP_SCRIPT="$LOBSTER_DIR/scripts/cleanup-worktrees-audio.sh"
-    if [ -f "$CLEANUP_SCRIPT" ]; then
-        chmod +x "$CLEANUP_SCRIPT" 2>/dev/null || true
-        if ! crontab -l 2>/dev/null | grep -qF "$CLEANUP_MARKER"; then
-            "$LOBSTER_DIR/scripts/cron-manage.sh" add "$CLEANUP_MARKER" \
-                "0 4 * * * $CLEANUP_SCRIPT >> $HOME/lobster-workspace/logs/cleanup.log 2>&1 $CLEANUP_MARKER" 2>/dev/null && {
-                substep "Added LOBSTER-CLEANUP cron entry (cleanup-worktrees-audio.sh, 04:00 daily)"
-                migrated=$((migrated + 1))
-            } || warn "Could not add LOBSTER-CLEANUP cron entry — check cron-manage.sh"
-        fi
-    else
-        warn "cleanup-worktrees-audio.sh not found at $CLEANUP_SCRIPT — skipping Migration 75"
-    fi
-
-    # Migration 76: Remove wfm-watchdog.sh cron entry (superseded by PR #1646).
-    # PR #1646 fixed the actual root cause: the health check now treats a fresh
-    # wfm-active signal as GREEN, so the false-positive kills the watchdog was
-    # designed to work around no longer occur. The watchdog now only generates
-    # noise during normal idle operation.
-    local WFM_WATCHDOG_REMOVE_MARKER="# LOBSTER-WFM-WATCHDOG"
-    if crontab -l 2>/dev/null | grep -qF "$WFM_WATCHDOG_REMOVE_MARKER"; then
-        "$LOBSTER_DIR/scripts/cron-manage.sh" remove "$WFM_WATCHDOG_REMOVE_MARKER" 2>/dev/null && {
-            substep "Removed wfm-watchdog.sh cron entry (superseded by PR #1646)"
-            migrated=$((migrated + 1))
-        } || warn "Could not remove LOBSTER-WFM-WATCHDOG cron entry — remove manually"
-    else
-        substep "wfm-watchdog.sh cron entry not present — nothing to remove"
-    fi
-
-    # Migration 77: Add permissions.defaultMode bypassPermissions to settings.json (issue #1706).
-    # Claude Code has a known regression where --dangerously-skip-permissions (CLI flag) stops
-    # working after auto-updates. Setting permissions.defaultMode in settings.json is the
-    # permanent fix that survives updates.
+    # Migration 73: Install PreToolUse pretooluse-heartbeat hook (issue #1439).
+    # This hook writes last_pretooluse_at to lobster-state.json BEFORE each tool call.
+    # Unlike the PostToolUse thinking-heartbeat (migration 66), this fires even when
+    # tool calls fail — providing an additional liveness signal when MCP is disconnected.
     if [ -f "$CLAUDE_SETTINGS" ]; then
-        if jq -e '.permissions.defaultMode != "bypassPermissions"' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
-            substep "Adding permissions.defaultMode: bypassPermissions to settings.json..."
-            jq '. + {"skipDangerousModePermissionPrompt": true, "permissions": {"defaultMode": "bypassPermissions"}}' "$CLAUDE_SETTINGS" > "$CLAUDE_SETTINGS.tmp" && mv "$CLAUDE_SETTINGS.tmp" "$CLAUDE_SETTINGS"
-            success "Permissions bypass settings added"
+        chmod +x "$LOBSTER_DIR/hooks/pretooluse-heartbeat.py" 2>/dev/null || true
+        if ! jq -e '.hooks.PreToolUse[]? | select(.hooks[]?.command | contains("pretooluse-heartbeat"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+            TMP_SETTINGS=$(mktemp)
+            jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+                "matcher": "",
+                "hooks": [{
+                    "type": "command",
+                    "command": "python3 '"$LOBSTER_DIR"'/hooks/pretooluse-heartbeat.py",
+                    "timeout": 5
+                }]
+            }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+            substep "Installed pretooluse-heartbeat PreToolUse hook"
             migrated=$((migrated + 1))
-        fi
-    else
-        warn "Claude settings not found at $CLAUDE_SETTINGS — skipping Migration 77"
-    fi
-
-    # Migration 78: Remove stale dispatch-job.sh LOBSTER-SCHEDULED cron entries.
-    # These three entries were already superseded by systemd timers but Migration 71
-    # left them in place on installs where the timer check was inconclusive.
-    # Two entries use invalid systemd-style cron syntax (*-*-* ...) that standard
-    # cron ignores entirely; the third (lobstertalk-ssh-watcher) fires every 6h
-    # and causes duplicate invocations alongside the timer. Remove all three
-    # unconditionally — the systemd timers are the canonical trigger.
-    _m78_jobs="lobstertalk-unified lobstertalk-ssh-watcher lobstertalk-kanban-watcher"
-    _m78_removed=""
-    for _m78_job in $_m78_jobs; do
-        if crontab -l 2>/dev/null | grep -q "dispatch-job\.sh ${_m78_job}"; then
-            { crontab -l 2>/dev/null | grep -v "dispatch-job\.sh ${_m78_job}" || true; } | crontab -
-            _m78_removed="${_m78_removed}${_m78_job} "
-            substep "Removed stale LOBSTER-SCHEDULED cron entry for ${_m78_job}"
-        fi
-    done
-    if [ -n "$_m78_removed" ]; then
-        success "Migration 78: removed cron entries for: ${_m78_removed% }"
-        migrated=$((migrated + 1))
-    fi
-
-    # Migration 79: Config consolidation (issue #1785, Option A).
-    # Two steps:
-    #   a) Merge non-comment, non-duplicate keys from global.env into config.env,
-    #      then archive global.env as global.env.bak (safe rollback).
-    #   b) Remove stale duplicate lobster/config/consolidation.conf and
-    #      lobster/config/sync-repos.json left by the original migration 0.
-    local _m79_config_env="$LOBSTER_CONFIG_DIR/config.env"
-    local _m79_global_env="$LOBSTER_CONFIG_DIR/global.env"
-
-    # Step a: merge global.env → config.env
-    if [ -f "$_m79_global_env" ] && [ ! -f "${_m79_global_env}.bak" ]; then
-        local _m79_merged=0
-        while IFS= read -r _m79_line; do
-            # Skip comments and blank lines
-            [[ "$_m79_line" =~ ^[[:space:]]*# ]] && continue
-            [[ -z "${_m79_line// }" ]] && continue
-
-            # Extract key (everything before first '=')
-            local _m79_key
-            _m79_key="${_m79_line%%=*}"
-            [ -z "$_m79_key" ] && continue
-
-            # Skip if key already exists in config.env
-            if grep -qE "^${_m79_key}=" "$_m79_config_env" 2>/dev/null; then
-                substep "  global.env: ${_m79_key} already in config.env — skipping"
-                continue
-            fi
-
-            # Append to config.env
-            echo "$_m79_line" >> "$_m79_config_env"
-            substep "  global.env: merged ${_m79_key} into config.env"
-            _m79_merged=$((_m79_merged + 1))
-        done < "$_m79_global_env"
-
-        # Archive global.env (keep as .bak for safety — delete after next stable release)
-        mv "$_m79_global_env" "${_m79_global_env}.bak"
-        substep "Archived global.env to global.env.bak ($_m79_merged keys merged into config.env)"
-        migrated=$((migrated + 1))
-    else
-        substep "global.env already migrated or absent — skipping step a"
-    fi
-
-    # Step b: remove stale duplicate files in the repo's config/ directory
-    local _m79_repo_conf="$LOBSTER_DIR/config/consolidation.conf"
-    local _m79_repo_repos="$LOBSTER_DIR/config/sync-repos.json"
-    if [ -f "$_m79_repo_conf" ]; then
-        rm -f "$_m79_repo_conf"
-        substep "Removed stale $LOBSTER_DIR/config/consolidation.conf"
-        migrated=$((migrated + 1))
-    fi
-    if [ -f "$_m79_repo_repos" ]; then
-        rm -f "$_m79_repo_repos"
-        substep "Removed stale $LOBSTER_DIR/config/sync-repos.json"
-        migrated=$((migrated + 1))
-    fi
-
-
-    # Migration 80: Disable Gmail Pub/Sub systemd timers (issue #1807).
-    # The Pub/Sub-based email pipeline (gmail-watch-renewal + awp-gmail-token-refresh)
-    # is replaced by the deterministic gmail-poll.py History API poller, which runs
-    # every 10 seconds with zero token spend on empty polls. No GCP setup required.
-    for _m80_unit in lobster-gmail-watch-renewal lobster-awp-gmail-token-refresh; do
-        if systemctl is-enabled "${_m80_unit}.timer" &>/dev/null; then
-            substep "Disabling ${_m80_unit}.timer (Pub/Sub pipeline, superseded by gmail-poll.py)..."
-            sudo systemctl disable --now "${_m80_unit}.timer" 2>/dev/null && {
-                substep "Disabled ${_m80_unit}.timer"
-                migrated=$((migrated + 1))
-            } || warn "Could not disable ${_m80_unit}.timer -- disable manually"
         else
-            substep "${_m80_unit}.timer already disabled -- nothing to do"
+            substep "pretooluse-heartbeat PreToolUse hook already installed — skipping"
         fi
-    done
-
-    # Migration 81: Install PreToolUse heartbeat hook (issue #1786).
-    # pre-tool-heartbeat.py writes a timestamp before each tool call, complementing
-    # thinking-heartbeat.py (PostToolUse). Together they allow the health check to
-    # distinguish "tool is running (long)" from "dispatcher is frozen" without
-    # false positives, enabling the PostToolUse threshold to be lowered safely.
-    if [ -f "$CLAUDE_SETTINGS" ] && command -v jq >/dev/null 2>&1; then
-        local _m81_hook_path="$LOBSTER_DIR/hooks/pre-tool-heartbeat.py"
-        if [ -f "$_m81_hook_path" ]; then
-            chmod +x "$_m81_hook_path" 2>/dev/null || true
-            local _m81_present
-            _m81_present=$(jq -r '
-                [.hooks.PreToolUse[]?.hooks[]?.command // empty]
-                | map(select(contains("pre-tool-heartbeat")))
-                | length
-            ' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
-            if [ "${_m81_present:-0}" = "0" ] || [ "${_m81_present:-0}" = "" ]; then
-                TMP_SETTINGS=$(mktemp)
-                jq --arg cmd "python3 $LOBSTER_DIR/hooks/pre-tool-heartbeat.py" \
-                   '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
-                    "matcher": "",
-                    "hooks": [{
-                        "type": "command",
-                        "command": $cmd,
-                        "timeout": 5
-                    }]
-                }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
-                substep "Registered pre-tool-heartbeat hook in Claude Code settings"
-                migrated=$((migrated + 1))
-            else
-                substep "pre-tool-heartbeat hook already present — skipping Migration 81"
-            fi
-        else
-            warn "pre-tool-heartbeat.py not found at $_m81_hook_path — skipping Migration 81"
-        fi
-    else
-        warn "Claude settings not found at $CLAUDE_SETTINGS or jq missing — skipping Migration 81"
-    fi
-
-    # Migration 82: Update catchup-gate.py PreToolUse hook to direct Python invocation.
-    # The old entry used a flag-file guard: `test ! -f .../catchup-pending || python3 ...`
-    # Option B (issue #1751) queries agent_sessions.db directly — no flag file needed.
-    # This migration replaces the old flag-file-guarded command with a direct call so the
-    # hook runs on every tool invocation and performs the DB check itself (fast, fail-open).
-    if [ -f "$CLAUDE_SETTINGS" ] && command -v jq >/dev/null 2>&1; then
-        local _m82_hook_path="$LOBSTER_DIR/hooks/catchup-gate.py"
-        if [ -f "$_m82_hook_path" ]; then
-            chmod +x "$_m82_hook_path" 2>/dev/null || true
-            local _m82_new_cmd="python3 $LOBSTER_DIR/hooks/catchup-gate.py"
-            # Check whether the old flag-file-guarded entry is still present
-            local _m82_old_present
-            _m82_old_present=$(jq -r '
-                [.hooks.PreToolUse[]?.hooks[]?.command // empty]
-                | map(select(contains("catchup-pending")))
-                | length
-            ' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
-            if [ "${_m82_old_present:-0}" != "0" ] && [ "${_m82_old_present:-0}" != "" ]; then
-                TMP_SETTINGS=$(mktemp)
-                # Replace the flag-file-guarded command with direct Python invocation.
-                jq --arg old_pattern "catchup-pending" \
-                   --arg new_cmd "$_m82_new_cmd" \
-                   '.hooks.PreToolUse = [
-                       .hooks.PreToolUse[]
-                       | .hooks = [
-                           .hooks[]
-                           | if (.command // "") | contains($old_pattern)
-                             then .command = $new_cmd
-                             else .
-                             end
-                         ]
-                   ]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
-                substep "Updated catchup-gate.py hook: removed flag-file guard, now calls Python directly"
-                migrated=$((migrated + 1))
-            else
-                substep "catchup-gate.py hook already uses direct invocation — skipping Migration 82"
-            fi
-        else
-            warn "catchup-gate.py not found at $_m82_hook_path — skipping Migration 82"
-        fi
-    else
-        warn "Claude settings not found at $CLAUDE_SETTINGS or jq missing — skipping Migration 82"
-    fi
-
-    # Migration 83: Register prune-pr-worktrees MCP scheduled job (issue #1626).
-    # prune-pr-worktrees.py checks each git worktree under ~/lobster-workspace/projects/
-    # for a merged or closed PR and removes worktrees that are at least 7 days old.
-    # Runs daily at 03:00 UTC via a systemd timer managed by the MCP job infrastructure.
-    local _m83_script="$LOBSTER_DIR/scripts/prune-pr-worktrees.py"
-    local _m83_timer="lobster-prune-pr-worktrees.timer"
-    local _m83_cmd="$VENV_DIR/bin/python $LOBSTER_DIR/scripts/prune-pr-worktrees.py --age-days 7"
-    if [ -f "$_m83_script" ] && command -v uv &>/dev/null; then
-        if systemctl is-enabled "$_m83_timer" &>/dev/null; then
-            substep "prune-pr-worktrees systemd timer already enabled — skipping Migration 83"
-        else
-            uv run --project "$LOBSTER_DIR" python -c "
-import asyncio, sys
-sys.path.insert(0, '$LOBSTER_DIR/src')
-from mcp.systemd_jobs import create_job
-result = asyncio.run(create_job(
-    name='prune-pr-worktrees',
-    schedule='*-*-* 03:00:00',
-    command='$_m83_cmd',
-    description='Daily removal of stale PR git worktrees (merged/closed, age >= 7d)',
-))
-print(f'prune-pr-worktrees: {result.status}')
-" 2>/dev/null && {
-                substep "Registered prune-pr-worktrees systemd timer (daily at 03:00 UTC)"
-                migrated=$((migrated + 1))
-            } || warn "Could not register prune-pr-worktrees — try: uv run python -c \"import asyncio; from src.mcp.systemd_jobs import create_job; ...\""
-        fi
-    else
-        warn "prune-pr-worktrees.py not found at $_m83_script or uv unavailable — skipping Migration 83"
     fi
 
     # Migration 84: Backfill Environment=PATH= and Environment=HOME= in existing Lobster-managed
@@ -3006,34 +2580,37 @@ print(f'prune-pr-worktrees: {result.status}')
         warn "run-upgrades.sh not found at $_m87_script — skipping Migration 87"
     fi
 
-    # Migration 88: Fix cron PATH for uv-based scripts (ghost-detector, oom-monitor, log-export).
+    # Migration 84: Fix cron PATH for uv-based scripts (ghost-detector, oom-monitor, log-export).
     # Cron runs with a minimal PATH that does not include ~/.local/bin, so bare 'uv' fails
     # with "uv: not found". Replace bare 'uv' with the absolute path $HOME/.local/bin/uv
     # in the three affected cron entries.
-    local _m88_uv_abs="$HOME/.local/bin/uv"
+    local _m84_uv_abs="$HOME/.local/bin/uv"
     if crontab -l 2>/dev/null | grep -q "LOBSTER-GHOST-DETECTOR"; then
         if crontab -l 2>/dev/null | grep "LOBSTER-GHOST-DETECTOR" | grep -q " uv run "; then
             crontab -l 2>/dev/null \
-                | sed "s|cd \$HOME && uv run \(.*\)agent-monitor\.py|cd \$HOME \&\& $_m88_uv_abs run \1agent-monitor.py|g" \
-                | sed "s|cd $HOME && uv run \(.*\)agent-monitor\.py|cd $HOME \&\& $_m88_uv_abs run \1agent-monitor.py|g" \
+                | sed "s|cd \$HOME && uv run \(.*\)agent-monitor\.py|cd \$HOME \&\& $_m84_uv_abs run \1agent-monitor.py|g" \
+                | sed "s|cd $HOME && uv run \(.*\)agent-monitor\.py|cd $HOME \&\& $_m84_uv_abs run \1agent-monitor.py|g" \
                 | crontab - 2>/dev/null && {
-                substep "Migration 88: fixed ghost-detector cron to use absolute uv path"
+                substep "Migration 84: fixed ghost-detector cron to use absolute uv path"
                 migrated=$((migrated + 1))
-            } || warn "Migration 88: could not update ghost-detector cron entry"
+            } || warn "Migration 84: could not update ghost-detector cron entry"
         else
-            substep "Migration 88: ghost-detector cron already uses absolute uv path — skipping"
+            substep "Migration 84: ghost-detector cron already uses absolute uv path — skipping"
         fi
     else
-        substep "Migration 88: ghost-detector cron entry not found — skipping"
+        substep "Migration 84: ghost-detector cron entry not found — skipping"
     fi
     if crontab -l 2>/dev/null | grep -q "LOBSTER-OOM-CHECK"; then
         if crontab -l 2>/dev/null | grep "LOBSTER-OOM-CHECK" | grep -q " uv run "; then
             crontab -l 2>/dev/null \
-                | sed "s|cd \$HOME && uv run \(.*\)oom-monitor\.py|cd \$HOME \&\& $_m88_uv_abs run \1oom-monitor.py|g" \
-                | sed "s|cd $HOME && uv run \(.*\)oom-monitor\.py|cd $HOME \&\& $_m88_uv_abs run \1oom-monitor.py|g" \
+                | sed "s|cd \$HOME && uv run \(.*\)oom-monitor\.py|cd \$HOME \&\& $_m84_uv_abs run \1oom-monitor.py|g" \
+                | sed "s|cd $HOME && uv run \(.*\)oom-monitor\.py|cd $HOME \&\& $_m84_uv_abs run \1oom-monitor.py|g" \
                 | crontab - 2>/dev/null && {
-                substep "Migration 88: fixed oom-monitor cron to use absolute uv path"
-            } || warn "Migration 88: could not update oom-monitor cron entry"
+                substep "Migration 84: fixed oom-monitor cron to use absolute uv path"
+                migrated=$((migrated + 1))
+            } || warn "Migration 84: could not update oom-monitor cron entry"
+        else
+            substep "Migration 84: oom-monitor cron already uses absolute uv path — skipping"
         fi
     else
         substep "Migration 84: oom-monitor cron entry not found — skipping"
@@ -3041,10 +2618,13 @@ print(f'prune-pr-worktrees: {result.status}')
     if crontab -l 2>/dev/null | grep -q "LOBSTER-LOG-EXPORT"; then
         if crontab -l 2>/dev/null | grep "LOBSTER-LOG-EXPORT" | grep -q " uv run "; then
             crontab -l 2>/dev/null \
-                | sed "s|cd \(.*\) && uv run \(.*\)export-logs\.py|cd \1 \&\& $_m88_uv_abs run \2export-logs.py|g" \
+                | sed "s|cd \(.*\) && uv run \(.*\)export-logs\.py|cd \1 \&\& $_m84_uv_abs run \2export-logs.py|g" \
                 | crontab - 2>/dev/null && {
-                substep "Migration 88: fixed log-export cron to use absolute uv path"
-            } || warn "Migration 88: could not update log-export cron entry"
+                substep "Migration 84: fixed log-export cron to use absolute uv path"
+                migrated=$((migrated + 1))
+            } || warn "Migration 84: could not update log-export cron entry"
+        else
+            substep "Migration 84: log-export cron already uses absolute uv path — skipping"
         fi
     else
         substep "Migration 84: log-export cron entry not found — skipping"
@@ -3318,7 +2898,72 @@ print(f'prune-pr-worktrees: {result.status}')
             substep "Migration 93: dispatcher-state-stop Stop hook already registered — skipping"
         fi
     else
-        substep "Migration 93: settings.json or jq not found — skipping state machine hook registration"    fi
+        substep "Migration 93: settings.json or jq not found — skipping state machine hook registration"
+    fi
+
+    # Migration 86: Fix on-compact.py hook matcher (issue #1947).
+    # matcher="compact" is unreliable in CC 2.1.119 (~37% fire rate since April 17).
+    # The correct pattern is matcher="" + self-gate inside the script.
+    # on-compact.py already has the self-gate (reads hook_event_name, exits early
+    # unless it's a compact event) since commit 26e7e060 (May 1).
+    # This migration:
+    #   1. Changes the on-compact.py SessionStart entry from matcher="compact" to matcher=""
+    #   2. Removes the redundant inject-bootup-context.py compact-matcher entry
+    #      (already covered by the empty-matcher entry that fires on all session types)
+    if [ -f "$CLAUDE_SETTINGS" ] && command -v python3 &>/dev/null; then
+        local _m86_needs_fix=0
+        if python3 -c "
+import json, sys
+with open('$CLAUDE_SETTINGS') as f:
+    d = json.load(f)
+hooks = d.get('hooks', {}).get('SessionStart', [])
+for h in hooks:
+    cmd = h.get('hooks', [{}])[0].get('command', '')
+    if 'on-compact' in cmd and h.get('matcher') == 'compact':
+        sys.exit(0)  # needs fix
+sys.exit(1)  # already correct
+" 2>/dev/null; then
+            _m86_needs_fix=1
+        fi
+        if [ "$_m86_needs_fix" -eq 1 ]; then
+            substep "Fixing on-compact.py hook matcher (Migration 86)..."
+            TMP_SETTINGS=$(mktemp)
+            python3 - "$CLAUDE_SETTINGS" "$TMP_SETTINGS" << 'M86_PYEOF'
+import json, sys
+src, dst = sys.argv[1], sys.argv[2]
+with open(src) as f:
+    data = json.load(f)
+session_start = data.get('hooks', {}).get('SessionStart', [])
+updated = []
+for entry in session_start:
+    cmd = entry.get('hooks', [{}])[0].get('command', '')
+    # Change on-compact.py from matcher="compact" to matcher=""
+    if 'on-compact' in cmd and entry.get('matcher') == 'compact':
+        entry = dict(entry, matcher='')
+    # Remove the redundant inject-bootup-context.py compact-matcher entry
+    # (the empty-matcher entry already fires on all session types including compact)
+    elif 'inject-bootup-context' in cmd and entry.get('matcher') == 'compact':
+        continue
+    updated.append(entry)
+data['hooks']['SessionStart'] = updated
+with open(dst, 'w') as f:
+    json.dump(data, f, indent=2)
+    f.write('\n')
+M86_PYEOF
+            if [ $? -eq 0 ] && [ -s "$TMP_SETTINGS" ]; then
+                mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+                success "Fixed on-compact.py hook matcher (matcher='' + removed redundant compact inject-bootup-context entry)"
+                migrated=$((migrated + 1))
+            else
+                rm -f "$TMP_SETTINGS"
+                warn "Migration 86: failed to update $CLAUDE_SETTINGS"
+            fi
+        else
+            info "Migration 86: on-compact.py hook already uses matcher='' — no change needed"
+        fi
+    else
+        info "Migration 86: settings.json not found or python3 unavailable — skipping"
+    fi
 
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"

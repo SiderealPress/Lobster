@@ -1,6 +1,6 @@
 #!/bin/bash
 #===============================================================================
-# Test Suite: Health Check v3 - WFM-Active Signal (issue #1713 / #949)
+# Test Suite: Health Check v3 - WFM-Active Signal (issue #949)
 #
 # Tests for the WFM-active bypass in check_dispatcher_heartbeat():
 # When the dispatcher is blocked inside wait_for_messages, PostToolUse hooks
@@ -41,8 +41,6 @@ HEALTH_SCRIPT="$SCRIPT_DIR/health-check-v3.sh"
 
 TEST_TMPDIR=$(mktemp -d /tmp/lobster-wfm-active-test-XXXXXX)
 TEST_LOG_DIR="$TEST_TMPDIR/logs"
-DISPATCHER_HEARTBEAT_FILE="$TEST_LOG_DIR/dispatcher-heartbeat"
-DISPATCHER_WFM_ACTIVE_FILE="$TEST_LOG_DIR/dispatcher-wfm-active"
 
 cleanup() { rm -rf "$TEST_TMPDIR"; }
 trap cleanup EXIT
@@ -61,7 +59,7 @@ assert_exit() {
 # Source check_dispatcher_heartbeat() from the health check script.
 LOG_FILE="$TEST_LOG_DIR/health-check.log"
 DISPATCHER_HEARTBEAT_STALE_SECONDS=1200
-WFM_ACTIVE_STALE_SECONDS=600
+WFM_ACTIVE_STALE_SECONDS=180
 WFM_TOMBSTONE_GRACE_SECONDS=30
 
 log()       { echo "[$1] $2" >> "$LOG_FILE" 2>/dev/null; }
@@ -69,41 +67,103 @@ log_info()  { log INFO "$1"; }
 log_warn()  { log WARN "$1"; }
 log_error() { log ERROR "$1"; }
 
+# Load the function definition from the health check script.
 eval "$(sed -n '/^check_dispatcher_heartbeat()/,/^}/p' "$HEALTH_SCRIPT")" 2>/dev/null
 
-# Helper: write a stale heartbeat (20 minutes ago).
-write_stale_heartbeat() {
-    echo "$(( $(date +%s) - 1500 ))" > "$DISPATCHER_HEARTBEAT_FILE"
-}
-
-# Helper: write a fresh heartbeat (5 seconds ago).
-write_fresh_heartbeat() {
-    echo "$(( $(date +%s) - 5 ))" > "$DISPATCHER_HEARTBEAT_FILE"
-}
+# Also load the WFM_ACTIVE_STALE_SECONDS constant.
+WFM_ACTIVE_STALE_SECONDS=$(grep '^WFM_ACTIVE_STALE_SECONDS=' "$HEALTH_SCRIPT" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]')
+if [[ -z "$WFM_ACTIVE_STALE_SECONDS" ]]; then
+    echo "ERROR: WFM_ACTIVE_STALE_SECONDS not found in $HEALTH_SCRIPT"
+    exit 1
+fi
 
 echo "=== WFM-Active Signal Health Check Tests ==="
+echo "DISPATCHER_HEARTBEAT_STALE_SECONDS=$DISPATCHER_HEARTBEAT_STALE_SECONDS"
+echo "WFM_ACTIVE_STALE_SECONDS=$WFM_ACTIVE_STALE_SECONDS"
 echo ""
 
+DISPATCHER_HB_FILE="$TEST_LOG_DIR/dispatcher-heartbeat"
+WFM_ACTIVE_FILE="$TEST_LOG_DIR/dispatcher-wfm-active"
+STALE_HEARTBEAT=$(( $(date +%s) - 1500 ))   # 1500s ago — past 1200s threshold
+RECENT_HEARTBEAT=$(( $(date +%s) - 5 ))      # 5s ago — well within threshold
+
+run_check() {
+    local hb_file="$1"
+    local wfm_file="$2"
+    DISPATCHER_HEARTBEAT_FILE="$hb_file"
+    DISPATCHER_WFM_ACTIVE_FILE="$wfm_file"
+    check_dispatcher_heartbeat
+    return $?
+}
+
 # -------------------------------------------------------------------
-# Test 1: Stale heartbeat + absent WFM-active → RED
+# Test 1: Stale heartbeat + absent WFM-active → RED (baseline)
 # -------------------------------------------------------------------
 begin_test "Stale heartbeat + absent WFM-active → RED"
-write_stale_heartbeat
-rm -f "$DISPATCHER_WFM_ACTIVE_FILE"
-check_dispatcher_heartbeat && rc=$? || rc=$?
+echo "$STALE_HEARTBEAT" > "$DISPATCHER_HB_FILE"
+rm -f "$WFM_ACTIVE_FILE"
+run_check "$DISPATCHER_HB_FILE" "$WFM_ACTIVE_FILE" && rc=$? || rc=$?
 assert_exit "$rc" 2
 
 # -------------------------------------------------------------------
-# Test 2: Stale heartbeat + fresh WFM-active → GREEN (WFM suppression)
+# Test 2: Stale heartbeat + fresh WFM-active → GREEN (alive in WFM)
 # -------------------------------------------------------------------
 begin_test "Stale heartbeat + fresh WFM-active → GREEN"
-write_stale_heartbeat
-echo "$(( $(date +%s) - 30 ))" > "$DISPATCHER_WFM_ACTIVE_FILE"
+echo "$STALE_HEARTBEAT" > "$DISPATCHER_HB_FILE"
+echo "$(( $(date +%s) - 30 ))" > "$WFM_ACTIVE_FILE"
+run_check "$DISPATCHER_HB_FILE" "$WFM_ACTIVE_FILE" && rc=$? || rc=$?
+assert_exit "$rc" 0
+
+# -------------------------------------------------------------------
+# Test 3: Stale heartbeat + stale WFM-active → RED (WFM frozen)
+# -------------------------------------------------------------------
+begin_test "Stale heartbeat + stale WFM-active → RED"
+echo "$STALE_HEARTBEAT" > "$DISPATCHER_HB_FILE"
+echo "$(( $(date +%s) - WFM_ACTIVE_STALE_SECONDS - 60 ))" > "$WFM_ACTIVE_FILE"
+run_check "$DISPATCHER_HB_FILE" "$WFM_ACTIVE_FILE" && rc=$? || rc=$?
+assert_exit "$rc" 2
+
+# -------------------------------------------------------------------
+# Test 4: Stale heartbeat + non-integer WFM-active → RED (graceful)
+# -------------------------------------------------------------------
+begin_test "Stale heartbeat + non-integer WFM-active → RED"
+echo "$STALE_HEARTBEAT" > "$DISPATCHER_HB_FILE"
+echo "not-a-number" > "$WFM_ACTIVE_FILE"
+run_check "$DISPATCHER_HB_FILE" "$WFM_ACTIVE_FILE" && rc=$? || rc=$?
+assert_exit "$rc" 2
+
+# -------------------------------------------------------------------
+# Test 5: Stale heartbeat + empty WFM-active → RED (graceful)
+# -------------------------------------------------------------------
+begin_test "Stale heartbeat + empty WFM-active → RED"
+echo "$STALE_HEARTBEAT" > "$DISPATCHER_HB_FILE"
+echo "" > "$WFM_ACTIVE_FILE"
+run_check "$DISPATCHER_HB_FILE" "$WFM_ACTIVE_FILE" && rc=$? || rc=$?
+assert_exit "$rc" 2
+
+# -------------------------------------------------------------------
+# Test 6: Fresh heartbeat + fresh WFM-active → GREEN (no regression)
+# -------------------------------------------------------------------
+begin_test "Fresh heartbeat + fresh WFM-active → GREEN"
+echo "$RECENT_HEARTBEAT" > "$DISPATCHER_HB_FILE"
+echo "$(( $(date +%s) - 30 ))" > "$WFM_ACTIVE_FILE"
+run_check "$DISPATCHER_HB_FILE" "$WFM_ACTIVE_FILE" && rc=$? || rc=$?
+assert_exit "$rc" 0
+
+# -------------------------------------------------------------------
+# Test 7: DISPATCHER_WFM_ACTIVE_FILE can be set to a custom path
+# -------------------------------------------------------------------
+begin_test "Custom DISPATCHER_WFM_ACTIVE_FILE path is used"
+custom_wfm="$TEST_TMPDIR/custom-wfm-active"
+echo "$STALE_HEARTBEAT" > "$DISPATCHER_HB_FILE"
+echo "$(( $(date +%s) - 30 ))" > "$custom_wfm"
+DISPATCHER_WFM_ACTIVE_FILE="$custom_wfm"
+DISPATCHER_HEARTBEAT_FILE="$DISPATCHER_HB_FILE"
 check_dispatcher_heartbeat && rc=$? || rc=$?
 assert_exit "$rc" 0
 
 # -------------------------------------------------------------------
-# Test 3: Stale heartbeat + stale WFM-active → RED (both stale = frozen)
+# Test 8: WFM-active 1s before threshold → GREEN (boundary)
 # -------------------------------------------------------------------
 begin_test "Stale heartbeat + stale WFM-active ($(( WFM_ACTIVE_STALE_SECONDS + 120 ))s old) → RED"
 write_stale_heartbeat
@@ -130,7 +190,7 @@ check_dispatcher_heartbeat && rc=$? || rc=$?
 assert_exit "$rc" 0
 
 # -------------------------------------------------------------------
-# Test 6: Fresh heartbeat → GREEN (WFM-active is irrelevant)
+# Test 9: WFM-active 1s past threshold → RED (boundary)
 # -------------------------------------------------------------------
 begin_test "Fresh heartbeat → GREEN regardless of WFM-active"
 write_fresh_heartbeat

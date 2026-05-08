@@ -17,14 +17,20 @@ Verifies that:
 - The file is writable before the wait loop starts
 - _wfm_heartbeat_thread_fn fires at least once and stops cleanly
 """
-import importlib
+
+import importlib.util
+import json
 import os
 import sys
 import threading
 import time
+import asyncio
+import threading
+import tempfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock, AsyncMock
 
+import pytest
 
 def _load_inbox_server(tmp_heartbeat_file: Path):
     """Import inbox_server with LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE set to a test path."""
@@ -217,7 +223,9 @@ def test_wfm_heartbeat_thread_fn_swallows_exceptions(tmp_path):
         stop_event.set()
         t.join(timeout=1)
 
-    # After stop_event.set() + join, the thread should be cleanly stopped.
+    # If the thread is dead without us killing it via stop_event first,
+    # it means an unhandled exception propagated — which is a test failure.
+    # After stop_event.set() + join, it should be cleanly stopped (not crashed).
     assert not t.is_alive(), (
-        "Thread should have exited cleanly after stop_event.set() and join()"
+        "Thread crashed due to an unswallowed exception from touch_heartbeat"
     )
