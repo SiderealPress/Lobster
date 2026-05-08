@@ -20,10 +20,10 @@ cd "$LOBSTER_DIR"
 
 # Support both git and tarball installs
 if [ -d "$LOBSTER_DIR/.git" ]; then
-    git fetch origin main --quiet
+    git fetch origin local-dev --quiet
 
     LOCAL=$(git rev-parse HEAD)
-    REMOTE=$(git rev-parse origin/main)
+    REMOTE=$(git rev-parse origin/local-dev)
 
     if [ "$LOCAL" != "$REMOTE" ]; then
         BEHIND=$(git rev-list --count "$LOCAL..$REMOTE")
@@ -34,7 +34,7 @@ if [ -d "$LOBSTER_DIR/.git" ]; then
   "source": "system",
   "chat_id": 0,
   "type": "update_notification",
-  "text": "UPDATE AVAILABLE: Lobster is ${BEHIND} commits behind origin/main. Use check_updates for details.",
+  "text": "UPDATE AVAILABLE: Lobster is ${BEHIND} commits behind origin/local-dev. Use check_updates for details.",
   "timestamp": "$(date -Iseconds)"
 }
 EOF
