@@ -108,8 +108,8 @@ COMPACTION_STATE_FILE = Path(
 # calls session_start(agent_type='dispatcher', claude_session_id=...).
 # The MCP server CLEARS this file on every startup, so it is absent during the
 # window between MCP restart and the dispatcher's first session_start() call.
-# On compaction, on-compact.py proactively writes the file with the new UUID
-# so the new session is identifiable before session_start() is called.
+# Compaction events are excluded via _is_compact_event() (mtime check on
+# compaction-state.json), not via this file.
 # Override path for tests.
 _MCP_CLAUDE_SESSION_FILE = Path(
     os.environ.get(
@@ -172,7 +172,7 @@ STARTUP_COMPACT_REMINDER_TEXT = (
 )
 
 
-def _is_compact_event(data: dict) -> bool:  # noqa: ARG001 — data unused; kept for API compat
+def _is_compact_event(data: dict) -> bool:
     """Return True if the hook input indicates a context compaction event.
 
     Rather than relying on a ``hook_name`` field in the SessionStart payload
@@ -484,7 +484,7 @@ def _mark_all_running_failed() -> None:
         )
 
 
-def _is_fresh_dispatcher_start(hook_input: dict) -> bool:  # noqa: ARG001 — hook_input unused; kept for API compat
+def _is_fresh_dispatcher_start(hook_input: dict) -> bool:
     """Return True if this SessionStart looks like a fresh (post-restart) dispatcher boot.
 
     Belt-and-suspenders fallback for when session_role.is_dispatcher() returns False
@@ -504,8 +504,6 @@ def _is_fresh_dispatcher_start(hook_input: dict) -> bool:  # noqa: ARG001 — ho
 
     - MCP server startup: file is **deleted** (_clear_dispatcher_state_file)
     - After dispatcher calls session_start(..., claude_session_id=uuid): file is written
-    - Compaction: on-compact.py proactively writes the file with the new UUID
-      so the new session is identifiable before session_start() is called
 
     Consequence:
 
@@ -513,7 +511,11 @@ def _is_fresh_dispatcher_start(hook_input: dict) -> bool:  # noqa: ARG001 — ho
       from MCP startup until the dispatcher calls session_start().
     - At a subagent SessionStart: the file is present (the dispatcher already
       called session_start() before spawning any subagents via Task()).
-    - At a compaction SessionStart: the file is present (on-compact.py wrote it).
+
+    Compaction events are excluded by the ``_is_compact_event(hook_input)`` guard,
+    which checks whether ``on-compact.py`` updated compaction-state.json within the
+    last 60 seconds (COMPACTION_RECENCY_SECONDS).  That mtime check is the
+    authoritative signal — it does not rely on any field in the SessionStart payload.
 
     Therefore: absent primary file at a non-compaction SessionStart, combined
     with LOBSTER_MAIN_SESSION=1, is a reliable signal that this is the dispatcher
