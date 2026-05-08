@@ -9,11 +9,16 @@ fails to fire matcher="compact" hooks — the "" (always-fires) matcher is
 the only reliable trigger for compact events.
 
 Self-detection strategy (layered, most-to-least reliable):
-  1. hook_name field in stdin payload equals "compact"
-  2. compaction-state.json was NOT recently modified AND this is the first
-     call in a potential compact run (conservative: assume compact when
-     hook_name is absent and LOBSTER_MAIN_SESSION=1 because fresh-starts are
-     handled by on-fresh-start.py; only compact needs on-compact.py actions)
+  1. source field in stdin payload equals "compact" (CC-documented primary field)
+  2. hook_name field equals "compact" (fallback for older CC versions; only
+     checked when source is absent from the payload)
+  3. Filesystem fallback: when both source and hook_name are absent, check
+     ~/lobster-workspace/logs/dispatcher-wfm-active.  A digit-only value
+     (Unix timestamp) means the dispatcher was actively blocking in
+     wait_for_messages before this session started — a strong signal that
+     the compaction interrupted an active WFM wait.  The string "exited"
+     means WFM had already returned cleanly; treat as non-compact.
+     Override via LOBSTER_WFM_ACTIVE_OVERRIDE env var (test isolation).
 
 The script injects a system message into the Lobster inbox so that the next
 call to wait_for_messages() surfaces a reminder to re-read CLAUDE.md and
@@ -109,6 +114,29 @@ LAST_RESTART_REASON_FILE = Path(
     )
 )
 
+# WFM-active signal file — written by the MCP server's heartbeat thread every
+# 60s while wait_for_messages is blocking.  Content is a digit-only Unix
+# timestamp when WFM is active; the string "exited" when WFM exits cleanly.
+# Used as a fallback compaction signal when both source and hook_name are absent.
+# Override: LOBSTER_WFM_ACTIVE_OVERRIDE env var (test isolation).
+WFM_ACTIVE_FILE = Path(
+    os.environ.get(
+        "LOBSTER_WFM_ACTIVE_OVERRIDE",
+        os.path.expanduser("~/lobster-workspace/logs/dispatcher-wfm-active"),
+    )
+)
+
+# Startup-cause tracking: written by on-compact.py when a compaction is detected.
+# read by inject-bootup-context.py at the start of the next session to
+# determine whether the session is post-compact or a fresh start.
+# Override: LOBSTER_STARTUP_CAUSE_FILE_OVERRIDE env var (test isolation).
+STARTUP_CAUSE_FILE = Path(
+    os.environ.get(
+        "LOBSTER_STARTUP_CAUSE_FILE_OVERRIDE",
+        os.path.expanduser("~/lobster-workspace/data/last-startup-cause.json"),
+    )
+)
+
 REMINDER_TEXT = (
     "COMPACT REMINDER \u2014 RE-ORIENT NOW\n\n"
     "You are Lobster, the always-on dispatcher. Your role has not changed.\n\n"
@@ -131,24 +159,60 @@ SENTINEL_FILE = Path(os.path.expanduser("~/messages/config/compact-pending"))
 COMPACTION_TELEGRAM_MESSAGE = "\u267b\ufe0f Context compacted. Re-orienting..."
 
 
+def _wfm_was_active() -> bool:
+    """Return True if the dispatcher was actively blocking in wait_for_messages.
+
+    Reads WFM_ACTIVE_FILE (dispatcher-wfm-active).  A digit-only value means
+    the MCP server's heartbeat thread last wrote an epoch timestamp while WFM
+    was blocking — the dispatcher was alive and waiting.  The string "exited"
+    means WFM exited cleanly; any non-digit content (including a missing file)
+    returns False.
+
+    Used as the third-tier fallback in _is_compact_event() when CC omits both
+    source and hook_name from the SessionStart payload.
+    """
+    try:
+        raw = WFM_ACTIVE_FILE.read_text().strip()
+        return raw.isdigit()
+    except OSError:
+        return False
+
+
 def _is_compact_event(data: dict) -> bool:
     """Return True if the hook input indicates a context compaction event.
 
-    Primary check: the ``hook_name`` field in the CC SessionStart payload.
-    Claude Code sends hook_name="compact" for compaction events.  This field
-    is documented as unreliable in older CC versions, but when present it is
-    authoritative.
+    Layered detection (most-to-least reliable):
+
+    1. ``source`` field equals "compact" (CC-documented primary field; present
+       in most CC versions).  If source is present but non-compact, returns
+       False immediately — hook_name and filesystem fallbacks are not used.
+
+    2. ``hook_name`` field equals "compact" (observed in older CC versions).
+       Only checked when source is absent from the payload.
+
+    3. Filesystem fallback: when both source and hook_name are absent, check
+       whether the dispatcher was actively blocking in wait_for_messages
+       (WFM_ACTIVE_FILE contains a digit-only Unix timestamp).  A live WFM
+       signal with no payload fields strongly implies CC fired a compaction
+       SessionStart without populating the usual identification fields.
 
     This function is the self-gate that replaces reliance on the
     matcher="compact" hook registration (which was found to be intermittently
     non-firing in Claude Code 2.1.x).  The hook is now registered with
     matcher="" (always fires) and uses this function to skip non-compact events.
     """
-    hook_name = data.get("hook_name", "")
-    if hook_name == "compact":
-        return True
-    # hook_name absent or different value: not a compact event.
-    return False
+    source = data.get("source")
+    if source is not None:
+        # source field present — authoritative; do not fall through to hook_name.
+        return source == "compact"
+
+    hook_name = data.get("hook_name")
+    if hook_name is not None:
+        # source absent but hook_name present — use it.
+        return hook_name == "compact"
+
+    # Both source and hook_name absent — filesystem fallback.
+    return _wfm_was_active()
 
 
 def _log_compact_event(event_type: str, detail: str) -> None:
@@ -187,6 +251,36 @@ def write_last_restart_reason(reason: str) -> None:
         tmp_path = LAST_RESTART_REASON_FILE.with_suffix(".tmp")
         tmp_path.write_text(json.dumps(payload, indent=2) + "\n")
         tmp_path.replace(LAST_RESTART_REASON_FILE)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def write_startup_cause() -> None:
+    """Write last-startup-cause.json with cause="compaction" and ISO UTC timestamp.
+
+    Called when _is_compact_event() returns True, immediately before the hook
+    exits.  The next session's inject-bootup-context.py reads this file at
+    startup and uses it to classify the session as post-compact vs fresh-start.
+
+    inject-bootup-context.py resets the file to cause="restart" after reading
+    it, so the file self-clears after one session.  This function only needs to
+    write cause="compaction" — the "fresh/restart" default is handled by the
+    reader.
+
+    Uses an atomic tmp-rename to prevent a partial-write from corrupting the
+    file between on-compact.py writing and inject-bootup-context.py reading.
+
+    Silent on any failure — must never crash the hook.
+    """
+    try:
+        STARTUP_CAUSE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "cause": "compaction",
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        tmp_path = STARTUP_CAUSE_FILE.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(payload, indent=2) + "\n")
+        tmp_path.replace(STARTUP_CAUSE_FILE)  # atomic on Linux (same filesystem)
     except Exception:  # noqa: BLE001
         pass
 
@@ -588,6 +682,10 @@ def main() -> None:
 
     session_id_snippet = data.get("session_id", "")[:12]
     _log_compact_event("compact_detected", f"session_id={session_id_snippet!r}")
+
+    # Write startup-cause file so inject-bootup-context.py knows the NEXT
+    # session started due to a compaction (issue #2010).
+    write_startup_cause()
 
     # Write restart-reason tracking file so the dispatcher can know this session
     # started due to a compaction (not a health-check restart).
