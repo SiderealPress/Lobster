@@ -3032,6 +3032,24 @@ M88_PYEOF
         info "Migration 88: settings.json not found or python3 unavailable — skipping"
     fi
 
+    # Migration 89: Fix context-monitor PostToolUse matcher (issue #1985).
+    # The matcher "Bash|mcp__lobster-inbox__|Agent" treats the middle segment as
+    # an exact tool name — no tool is named exactly "mcp__lobster-inbox__", so the
+    # hook never fired on any MCP call. The fix adds .* to match all mcp__lobster-inbox__*
+    # tools: "Bash|mcp__lobster-inbox__.*|Agent".
+    if [ -f "$CLAUDE_SETTINGS" ] && command -v jq &>/dev/null; then
+        if jq -e '.hooks.PostToolUse[]? | select(.matcher == "Bash|mcp__lobster-inbox__|Agent")' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+            TMP_SETTINGS=$(mktemp)
+            jq '(.hooks.PostToolUse[]? | select(.matcher == "Bash|mcp__lobster-inbox__|Agent") | .matcher) = "Bash|mcp__lobster-inbox__.*|Agent"' \
+                "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+            substep "Fixed context-monitor matcher: mcp__lobster-inbox__ → mcp__lobster-inbox__.* (Migration 89)"
+            migrated=$((migrated + 1))
+        else
+            substep "context-monitor matcher already correct or hook absent — skipping Migration 89"
+        fi
+    else
+        substep "settings.json not found or jq unavailable — skipping Migration 89"
+    fi
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else

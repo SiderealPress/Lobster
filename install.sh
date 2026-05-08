@@ -521,10 +521,10 @@ HOOKEOF
     if ! jq -e '.hooks.PostToolUse[]? | select(.hooks[]?.command | contains("context-monitor"))' "$_settings" > /dev/null 2>&1; then
         _tmp=$(mktemp)
         jq '.hooks.PostToolUse = (.hooks.PostToolUse // []) + [{
-            "matcher": "Bash|mcp__lobster-inbox__|Agent",
+            "matcher": "Bash|mcp__lobster-inbox__.*|Agent",
             "hooks": [{"type": "command", "command": "python3 '"$INSTALL_DIR"'/hooks/context-monitor.py", "timeout": 5}]
         }]' "$_settings" > "$_tmp" && mv "$_tmp" "$_settings"
-        success "context-monitor hook installed (Bash|mcp__lobster-inbox__|Agent)"
+        success "context-monitor hook installed (Bash|mcp__lobster-inbox__.*|Agent)"
     else
         info "context-monitor hook already configured"
     fi

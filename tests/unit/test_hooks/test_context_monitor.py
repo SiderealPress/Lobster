@@ -501,3 +501,114 @@ class TestWindingDownStateTransition:
             sys.path = original_path
             mod._STATE_MACHINE_LOADED = False
             mod._state_machine = None
+
+
+# Named constants for the matcher pattern (issue #1985).
+# The Claude Code hook matcher treats each |-separated segment as an exact tool
+# name match. Adding .* to the MCP segment makes it a prefix match covering all
+# mcp__lobster-inbox__* tools.
+CONTEXT_MONITOR_MATCHER = "Bash|mcp__lobster-inbox__.*|Agent"
+# The broken matcher that shipped before the fix — kept here so the regression
+# test is self-documenting about what we are protecting against.
+_BROKEN_MATCHER = "Bash|mcp__lobster-inbox__|Agent"
+
+
+class TestSettingsMatcherPattern:
+    """Verify the context-monitor matcher in settings.json covers MCP tool calls.
+
+    The Claude Code hook runner matches each |-separated segment as a literal
+    prefix/exact pattern. The segment 'mcp__lobster-inbox__' (without .*) is
+    treated as an exact tool name — no real tool is named exactly that, so the
+    hook silently never fires on any MCP call (issue #1985).
+
+    These tests verify:
+    1. The pattern "mcp__lobster-inbox__.*" matches every mcp__lobster-inbox__* tool.
+    2. The broken pattern "mcp__lobster-inbox__" does NOT match any real tool name.
+    3. The full CONTEXT_MONITOR_MATCHER covers Bash, Agent, and all MCP tools.
+    4. settings.json contains the correct (fixed) matcher.
+    """
+
+    # Representative sample of real MCP tool names from the lobster-inbox server.
+    REAL_MCP_TOOLS = [
+        "mcp__lobster-inbox__wait_for_messages",
+        "mcp__lobster-inbox__send_reply",
+        "mcp__lobster-inbox__mark_processed",
+        "mcp__lobster-inbox__mark_processing",
+        "mcp__lobster-inbox__write_result",
+        "mcp__lobster-inbox__check_inbox",
+    ]
+
+    def _segment_matches(self, pattern_segment: str, tool_name: str) -> bool:
+        """Return True if the tool_name matches the pattern_segment as a regex."""
+        import re
+        return bool(re.fullmatch(pattern_segment, tool_name))
+
+    def test_fixed_mcp_segment_matches_all_real_mcp_tools(self):
+        """The fixed segment 'mcp__lobster-inbox__.*' matches every real MCP tool."""
+        mcp_segment = "mcp__lobster-inbox__.*"
+        for tool in self.REAL_MCP_TOOLS:
+            assert self._segment_matches(mcp_segment, tool), (
+                f"Fixed segment '{mcp_segment}' must match tool '{tool}' but did not"
+            )
+
+    def test_broken_mcp_segment_matches_no_real_mcp_tools(self):
+        """The broken segment 'mcp__lobster-inbox__' (no .*) matches NO real MCP tool.
+
+        This is the regression — the broken matcher silently skipped all MCP calls.
+        """
+        broken_segment = "mcp__lobster-inbox__"
+        for tool in self.REAL_MCP_TOOLS:
+            assert not self._segment_matches(broken_segment, tool), (
+                f"Broken segment '{broken_segment}' unexpectedly matched '{tool}' — "
+                "this confirms the pre-fix hook was broken"
+            )
+
+    def test_full_matcher_covers_bash_and_agent(self):
+        """The full CONTEXT_MONITOR_MATCHER also matches Bash and Agent tools."""
+        import re
+        matcher_segments = CONTEXT_MONITOR_MATCHER.split("|")
+        bash_matches = any(re.fullmatch(seg, "Bash") for seg in matcher_segments)
+        agent_matches = any(re.fullmatch(seg, "Agent") for seg in matcher_segments)
+        assert bash_matches, f"Matcher '{CONTEXT_MONITOR_MATCHER}' must match 'Bash'"
+        assert agent_matches, f"Matcher '{CONTEXT_MONITOR_MATCHER}' must match 'Agent'"
+
+    def test_full_matcher_covers_all_real_mcp_tools(self):
+        """The full CONTEXT_MONITOR_MATCHER matches every real MCP tool via prefix."""
+        import re
+        matcher_segments = CONTEXT_MONITOR_MATCHER.split("|")
+        for tool in self.REAL_MCP_TOOLS:
+            matched = any(re.fullmatch(seg, tool) for seg in matcher_segments)
+            assert matched, (
+                f"CONTEXT_MONITOR_MATCHER '{CONTEXT_MONITOR_MATCHER}' "
+                f"must match tool '{tool}' but did not"
+            )
+
+    def test_settings_json_uses_fixed_matcher(self):
+        """settings.json contains the fixed matcher (mcp__lobster-inbox__.*).
+
+        Reads ~/.claude/settings.json and confirms the context-monitor PostToolUse
+        entry uses the corrected pattern, not the broken exact-match pattern.
+        """
+        settings_path = Path.home() / ".claude" / "settings.json"
+        if not settings_path.exists():
+            pytest.skip("~/.claude/settings.json not present in this environment")
+
+        settings = json.loads(settings_path.read_text())
+        posttool_hooks = settings.get("hooks", {}).get("PostToolUse", [])
+
+        # Find the context-monitor entry
+        context_monitor_entry = None
+        for entry in posttool_hooks:
+            hooks = entry.get("hooks", [])
+            if any("context-monitor" in h.get("command", "") for h in hooks):
+                context_monitor_entry = entry
+                break
+
+        if context_monitor_entry is None:
+            pytest.skip("context-monitor hook not installed in this environment")
+
+        matcher = context_monitor_entry.get("matcher", "")
+        assert "mcp__lobster-inbox__.*" in matcher, (
+            f"context-monitor matcher '{matcher}' must contain 'mcp__lobster-inbox__.*' "
+            f"(not the broken 'mcp__lobster-inbox__' exact match)"
+        )
