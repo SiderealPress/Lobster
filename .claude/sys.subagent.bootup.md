@@ -123,24 +123,31 @@ mcp__lobster-inbox__write_result(
 
 The dispatcher will read your result and decide what (if anything) to relay to the user.
 
-**reply_text — separate user reply from dispatcher summary:**
+**user_summary and dispatcher_detail — structured result fields:**
 
-When the dispatcher should relay a short user-facing message while you provide a longer internal summary, use `reply_text`:
+Use these fields to separate user-facing content from dispatcher-internal content and extended context:
+
+- **`text`** — Brief dispatcher summary. Always auto-loaded. Keep short (under ~4KB). This is what the dispatcher reads for orientation.
+- **`user_summary`** — User-facing reply the dispatcher forwards WITHOUT reading. Zero dispatcher token cost. Use this for the message the user should see. Takes relay priority over `reply_text`.
+- **`dispatcher_detail`** — Extended on-demand context. NOT auto-loaded by dispatcher. Use for full analysis, diffs, verbose logs. Dispatcher fetches this only when explicitly needed.
+- **`reply_text`** — Legacy user-facing text. Prefer `user_summary` for new callers. Relay priority: `user_summary` > `reply_text` > `text`.
 
 ```python
 mcp__lobster-inbox__write_result(
     task_id="<task-id>",
     chat_id=<chat_id>,
-    # text = full context for dispatcher (decisions made, URLs, details)
-    text="Filed issue #42 in SiderealPress/lobster. Label: enhancement. URL: https://github.com/.../issues/42",
-    # reply_text = trimmed mobile-friendly message shown to user
-    reply_text="Filed: https://github.com/SiderealPress/lobster/issues/42",
+    # text = brief dispatcher summary (always loaded — keep short)
+    text="PR #42 opened in SiderealPress/lobster. Branch: feat/issue-42-my-feature.",
+    # user_summary = mobile-friendly message for the user (dispatcher forwards without reading)
+    user_summary="PR opened: https://github.com/SiderealPress/lobster/pull/42",
+    # dispatcher_detail = full analysis (dispatcher fetches on demand only)
+    dispatcher_detail="Full diff: 12 files changed. Tests: 8 new. Known gaps: Docker test skipped.",
     source="telegram",
     sent_reply_to_user=False,
 )
 ```
 
-When `reply_text` is present: dispatcher relays `reply_text` to the user; `text` stays in dispatcher context only. When absent: dispatcher relays `text` (backward-compatible). Ignored if `sent_reply_to_user=True`.
+When `user_summary` is present: dispatcher forwards it to the user without reading it; `text` stays as dispatcher-only summary. When absent, `reply_text` is used if present; otherwise `text` is relayed (backward-compatible). Both `user_summary` and `reply_text` are suppressed when `sent_reply_to_user=True` or `chat_id==0`. `dispatcher_detail` is stored regardless.
 
 **Signal convention note:** This only works if the dispatcher (or whoever spawns you) actually includes the signal phrase ("do NOT call send_reply" or "Use write_result only") in your task prompt. The dispatcher is responsible for adding this signal when spawning internal subagents. If you receive a task prompt without this signal, treat it as user-facing.
 

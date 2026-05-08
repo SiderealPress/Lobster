@@ -556,10 +556,17 @@ Background subagents call `write_result(task_id, chat_id, text, ...)`, which dro
        # Never call Read(artifact_path) on the main thread — it violates the 7-second rule.
        # Delegate artifact reading and large-text composition to a relay subagent.
        #
-       # reply_text split: if the subagent provided reply_text, use it for the user-facing
-       # relay and keep text as dispatcher-only context. If reply_text is absent, fall back
-       # to text (backward-compat). This reduces main-thread context burn.
-       relay_content = msg.get("reply_text") or msg["text"]
+       # Relay priority for user-facing content:
+       #   user_summary > reply_text > text (backward-compat fallback)
+       #
+       # user_summary: forwarded to the user WITHOUT being loaded into dispatcher context.
+       #   The dispatcher must forward this field blindly — do NOT read its content.
+       #   Zero dispatcher token cost. Used for mobile-friendly user messages.
+       # reply_text: legacy user-facing text (loaded into context; prefer user_summary).
+       # text: always loaded into dispatcher context; only relayed when above are absent.
+       # dispatcher_detail: on-demand extended context; NOT auto-loaded. Fetch explicitly
+       #   only when you need depth (e.g. follow-up questions, chained tasks).
+       relay_content = msg.get("user_summary") or msg.get("reply_text") or msg["text"]
 
        if msg.get("artifacts"):
            # Artifacts present: delegate reading and composition to relay subagent
@@ -604,7 +611,9 @@ Background subagents call `write_result(task_id, chat_id, text, ...)`, which dro
        mark_processed(message_id)
 ```
 
-**Key fields:** `task_id`, `chat_id`, `text`, `reply_text` (optional user-facing text; if present, dispatcher relays this instead of `text`), `source`, `status`, `sent_reply_to_user`, `artifacts`, `thread_ts`.
+**Key fields:** `task_id`, `chat_id`, `text` (brief dispatcher summary — always loaded), `user_summary` (user-facing relay — forward blindly, do NOT read into context), `dispatcher_detail` (on-demand extended context — fetch only when needed), `reply_text` (legacy user-facing text), `source`, `status`, `sent_reply_to_user`, `artifacts`, `thread_ts`.
+
+**Relay priority:** `user_summary` > `reply_text` > `text`. When `user_summary` is present, forward it to the user without reading its content — this is the zero-token-cost relay path.
 
 **When type is `subagent_error`:**
 ```
