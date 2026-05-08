@@ -2697,7 +2697,9 @@ async def list_tools() -> list[Tool]:
                 "this with sent_reply_to_user=True so the dispatcher marks the message processed "
                 "without re-sending. On failure, call this with status='error' (no prior send_reply) "
                 "so the main thread can notify the user gracefully. "
-                "Use reply_text to separate the user-facing reply from the dispatcher summary in text."
+                "Use user_summary to provide a user-facing reply the dispatcher forwards without reading. "
+                "Use dispatcher_detail for extended context the dispatcher fetches on demand. "
+                "Use reply_text (legacy) for a user-facing reply when user_summary is not needed."
             ),
             inputSchema={
                 "type": "object",
@@ -2716,27 +2718,47 @@ async def list_tools() -> list[Tool]:
                     "text": {
                         "type": "string",
                         "description": (
-                            "Dispatcher-internal summary of what the subagent did. "
-                            "The dispatcher reads this for orientation. "
-                            "If reply_text is also provided, this is NEVER relayed to the user — "
-                            "only reply_text is sent. "
-                            "If reply_text is absent, this is relayed to the user (backward-compat). "
-                            "Keep this to a concise summary (ideally under ~4KB / ~500 words). "
-                            "For large outputs — reports, diffs, full analysis — write the content "
-                            "to ~/lobster-workspace/reports/<task_id>.md and pass the path in "
-                            "`artifacts` instead. Never put raw file paths in text — they "
-                            "are server-side references that are useless to mobile users."
+                            "Brief dispatcher-internal summary of what the subagent did. "
+                            "The dispatcher ALWAYS reads this for orientation — keep it short "
+                            "(ideally under ~4KB / ~500 words). "
+                            "If user_summary is present, text is NEVER relayed to the user. "
+                            "If user_summary is absent and reply_text is present, text is not relayed. "
+                            "If both are absent, text is relayed to the user (backward-compat). "
+                            "For large outputs, write to ~/lobster-workspace/reports/<task_id>.md "
+                            "and pass the path in `artifacts`. Use dispatcher_detail for extended "
+                            "context the dispatcher needs but should not auto-load."
+                        ),
+                    },
+                    "user_summary": {
+                        "type": "string",
+                        "description": (
+                            "Optional user-facing reply that the dispatcher forwards DIRECTLY to the user "
+                            "WITHOUT loading into its own context — zero dispatcher token cost. "
+                            "Use this for the message you want the user to see. "
+                            "Relay priority: user_summary > reply_text > text. "
+                            "Example: text='Filed issue #42, set label enhancement, linked to project.', "
+                            "user_summary='Filed: https://github.com/SiderealPress/lobster/issues/42'. "
+                            "Suppressed when sent_reply_to_user=True or chat_id==0."
+                        ),
+                    },
+                    "dispatcher_detail": {
+                        "type": "string",
+                        "description": (
+                            "Optional extended context for the dispatcher, available on demand but "
+                            "NOT auto-loaded. Use this for full analysis, diffs, verbose logs, or "
+                            "any content too large to put in text. The dispatcher fetches this only "
+                            "when it explicitly needs depth (e.g. follow-up questions, chained tasks). "
+                            "Storing large content here avoids burning dispatcher context on every result. "
+                            "Available regardless of sent_reply_to_user or chat_id."
                         ),
                     },
                     "reply_text": {
                         "type": "string",
                         "description": (
-                            "Optional user-facing reply text. "
-                            "When present, the dispatcher sends this to the user instead of `text`. "
-                            "Use this to keep the user reply short and mobile-friendly while "
-                            "keeping the full context in `text` for the dispatcher. "
-                            "Example: text='Filed issue #42 in SiderealPress/lobster. Label: enhancement. URL: https://...', "
-                            "reply_text='Filed: https://github.com/SiderealPress/lobster/issues/42'. "
+                            "Legacy optional user-facing reply text. "
+                            "Prefer user_summary for new callers — it has higher relay priority and "
+                            "clearer semantics. When present and user_summary is absent, the dispatcher "
+                            "sends this to the user instead of `text`. "
                             "Ignored if sent_reply_to_user=True (subagent already sent directly)."
                         ),
                     },
@@ -7925,10 +7947,20 @@ async def handle_write_result(args: dict) -> list[TextContent]:
     task_id = args.get("task_id", "").strip()
     chat_id = args.get("chat_id")
     text = args.get("text", "").strip()
-    # reply_text: optional user-facing text. When present, dispatcher relays this
+    # reply_text: optional user-facing text (legacy). When present, dispatcher relays this
     # instead of `text`, keeping `text` as dispatcher-only internal summary.
     reply_text_raw = args.get("reply_text")
     reply_text = reply_text_raw.strip() if isinstance(reply_text_raw, str) else None
+    # user_summary: user-facing reply the dispatcher relays without loading into its own
+    # context. Takes relay priority over reply_text. When present, dispatcher forwards
+    # this field directly with zero token cost — it does not read the content.
+    user_summary_raw = args.get("user_summary")
+    user_summary = user_summary_raw.strip() if isinstance(user_summary_raw, str) else None
+    # dispatcher_detail: extended on-demand context. NOT auto-loaded by dispatcher —
+    # only fetched when the dispatcher explicitly needs depth. Stored separately so
+    # token cost is deferred until actually needed.
+    dispatcher_detail_raw = args.get("dispatcher_detail")
+    dispatcher_detail = dispatcher_detail_raw.strip() if isinstance(dispatcher_detail_raw, str) else None
     source = args.get("source", "telegram").strip() or "telegram"
     status = args.get("status", "success")
     artifacts = args.get("artifacts") or []
@@ -8001,19 +8033,24 @@ async def handle_write_result(args: dict) -> list[TextContent]:
         "sent_reply_to_user": bool(sent_reply_to_user),
         "timestamp": now.isoformat(),
     }
-    # reply_text: user-facing text separate from the dispatcher summary.
-    # When present and sent_reply_to_user is False, the dispatcher relays reply_text
-    # instead of text, keeping `text` as dispatcher-only internal context.
-    # chat_id 0 is dispatcher-internal; no user relay path exists, so suppress.
-    if reply_text and not sent_reply_to_user and chat_id not in (0, "0"):
-        message["reply_text"] = reply_text
     if msg_type == "subagent_notification":
         message["warning"] = "User already received the subagent's reply. Don't summarize it. If you respond, add new value only — a question, a correction, missing context."
-    # reply_text: user-facing reply separate from the internal dispatcher summary (text).
-    # Only stored when there is an active user relay path: sent_reply_to_user=False and
-    # chat_id not in (0, "0") (chat_id 0 is dispatcher-internal; no user reply is ever sent).
-    if reply_text and not sent_reply_to_user and chat_id not in (0, "0"):
+    # User-relay fields: only stored when there is an active user relay path.
+    # Conditions: sent_reply_to_user=False AND chat_id not in (0, "0").
+    # chat_id 0 is dispatcher-internal — no user reply is ever sent.
+    has_user_relay = not sent_reply_to_user and chat_id not in (0, "0")
+    # user_summary: user-facing reply the dispatcher forwards without reading.
+    # Relay priority: user_summary > reply_text > text (backward-compat fallback).
+    if user_summary and has_user_relay:
+        message["user_summary"] = user_summary
+    # reply_text: legacy user-facing text. Kept for backward compatibility.
+    # Dispatcher relays this when user_summary is absent.
+    if reply_text and has_user_relay:
         message["reply_text"] = reply_text
+    # dispatcher_detail: on-demand extended context. NOT auto-loaded.
+    # Stored unconditionally (useful even for internal tasks / sent-reply paths).
+    if dispatcher_detail:
+        message["dispatcher_detail"] = dispatcher_detail
     if artifacts:
         message["artifacts"] = artifacts
     if thread_ts:
