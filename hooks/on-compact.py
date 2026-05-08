@@ -211,9 +211,10 @@ def _is_compact_event(data: dict) -> bool:
 
     3. Filesystem fallback: when both source and hook_name are absent, check
        whether the dispatcher was actively blocking in wait_for_messages
-       (WFM_ACTIVE_FILE contains a digit-only Unix timestamp).  A live WFM
-       signal with no payload fields strongly implies CC fired a compaction
-       SessionStart without populating the usual identification fields.
+       (DISPATCHER_HEARTBEAT_FILE contains a recent digit-only Unix timestamp).
+       A live heartbeat signal with no payload fields strongly implies CC fired
+       a compaction SessionStart without populating the usual identification
+       fields.
 
     This function is the self-gate that replaces reliance on the
     matcher="compact" hook registration (which was found to be intermittently
