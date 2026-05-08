@@ -13,12 +13,12 @@ Self-detection strategy (layered, most-to-least reliable):
   2. hook_name field equals "compact" (fallback for older CC versions; only
      checked when source is absent from the payload)
   3. Filesystem fallback: when both source and hook_name are absent, check
-     ~/lobster-workspace/logs/dispatcher-wfm-active.  A digit-only value
-     (Unix timestamp) means the dispatcher was actively blocking in
-     wait_for_messages before this session started — a strong signal that
-     the compaction interrupted an active WFM wait.  The string "exited"
-     means WFM had already returned cleanly; treat as non-compact.
-     Override via LOBSTER_WFM_ACTIVE_OVERRIDE env var (test isolation).
+     ~/lobster-workspace/logs/dispatcher-heartbeat.  A Unix epoch integer
+     written within the last 15 minutes means the dispatcher was actively
+     running immediately before this session — a strong signal that the
+     compaction interrupted an active session.  A missing file, non-integer
+     content, or a stale timestamp (>15 min) → False (fresh start).
+     Override via LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE env var (test isolation).
 
 The script injects a system message into the Lobster inbox so that the next
 call to wait_for_messages() surfaces a reminder to re-read CLAUDE.md and
@@ -114,17 +114,28 @@ LAST_RESTART_REASON_FILE = Path(
     )
 )
 
-# WFM-active signal file — written by the MCP server's heartbeat thread every
-# 60s while wait_for_messages is blocking.  Content is a digit-only Unix
-# timestamp when WFM is active; the string "exited" when WFM exits cleanly.
-# Used as a fallback compaction signal when both source and hook_name are absent.
-# Override: LOBSTER_WFM_ACTIVE_OVERRIDE env var (test isolation).
-WFM_ACTIVE_FILE = Path(
+# Dispatcher heartbeat file — written by thinking-heartbeat.py (PostToolUse)
+# and the WFM heartbeat thread in inbox_server.py every 60s.  Content is a
+# Unix epoch integer (e.g. "1713456789\n").  Used as a fallback compaction
+# signal when both source and hook_name are absent from the CC payload: if the
+# heartbeat was written within DISPATCHER_WFM_RECENCY_SECONDS, the dispatcher
+# was actively running immediately before this session — a strong signal that
+# this is a compaction rather than a fresh start.
+# Override: LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE env var (test isolation,
+# matching the existing override used by thinking-heartbeat.py and health-check).
+DISPATCHER_HEARTBEAT_FILE = Path(
     os.environ.get(
-        "LOBSTER_WFM_ACTIVE_OVERRIDE",
-        os.path.expanduser("~/lobster-workspace/logs/dispatcher-wfm-active"),
+        "LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE",
+        os.path.expanduser("~/lobster-workspace/logs/dispatcher-heartbeat"),
     )
 )
+
+# Maximum age (seconds) for the dispatcher heartbeat to be treated as "recently
+# active" in the tier-3 compaction fallback.  15 minutes is conservative: it
+# covers the longest normal idle period (WFM blocking with no messages), while
+# being short enough to avoid false-positives after a genuine long-idle restart
+# (e.g. Lobster was stopped for an hour and then restarted cleanly).
+DISPATCHER_WFM_RECENCY_SECONDS = 900  # 15 minutes
 
 # Startup-cause tracking: written by on-compact.py when a compaction is detected.
 # read by inject-bootup-context.py at the start of the next session to
@@ -160,20 +171,28 @@ COMPACTION_TELEGRAM_MESSAGE = "\u267b\ufe0f Context compacted. Re-orienting..."
 
 
 def _wfm_was_active() -> bool:
-    """Return True if the dispatcher was actively blocking in wait_for_messages.
+    """Return True if the dispatcher was recently active before this session started.
 
-    Reads WFM_ACTIVE_FILE (dispatcher-wfm-active).  A digit-only value means
-    the MCP server's heartbeat thread last wrote an epoch timestamp while WFM
-    was blocking — the dispatcher was alive and waiting.  The string "exited"
-    means WFM exited cleanly; any non-digit content (including a missing file)
-    returns False.
+    Reads DISPATCHER_HEARTBEAT_FILE (dispatcher-heartbeat).  The file contains
+    a single Unix epoch integer written by thinking-heartbeat.py (PostToolUse)
+    and the WFM heartbeat thread in inbox_server.py.  If the file exists and
+    the recorded timestamp is within DISPATCHER_WFM_RECENCY_SECONDS (15 min),
+    the dispatcher was actively running immediately before this session — a
+    strong signal that this is a compaction rather than a fresh start.
+
+    A missing file, non-integer content, or a stale timestamp all return False
+    (conservative: prefer false-negatives over false-positives for tier-3).
 
     Used as the third-tier fallback in _is_compact_event() when CC omits both
     source and hook_name from the SessionStart payload.
     """
     try:
-        raw = WFM_ACTIVE_FILE.read_text().strip()
-        return raw.isdigit()
+        raw = DISPATCHER_HEARTBEAT_FILE.read_text().strip()
+        if not raw.isdigit():
+            return False
+        last_ts = int(raw)
+        age_seconds = int(time.time()) - last_ts
+        return 0 <= age_seconds < DISPATCHER_WFM_RECENCY_SECONDS
     except OSError:
         return False
 
