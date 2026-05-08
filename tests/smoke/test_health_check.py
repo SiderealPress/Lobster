@@ -610,3 +610,138 @@ def test_compact_grace_period_inactive_when_no_ts_file(tmp_path: Path) -> None:
         "The grace period must only activate after a real compaction event.\n"
         f"stderr: {result.stderr!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# D7 — pre-tool heartbeat as supplementary signal (issue #1999)
+# ---------------------------------------------------------------------------
+#
+# pre-tool-heartbeat.py writes dispatcher-pre-tool-heartbeat (Unix epoch)
+# BEFORE each tool call. This fires even when PostToolUse never fires (e.g.
+# MCP disconnect). check_dispatcher_heartbeat() must treat the pre-tool
+# heartbeat as a supplementary freshness signal: if it is more recent than
+# dispatcher-heartbeat, the dispatcher is considered fresh.
+#
+# Naming: the file is PRE_TOOL_HEARTBEAT_FILE in the script.
+
+
+def _check_dispatcher_heartbeat_with_pretool_script(
+    heartbeat_file: Path,
+    pre_tool_heartbeat_file: Path,
+    tmp_path: Path,
+) -> str:
+    """
+    Build a self-contained bash script fragment that exercises
+    check_dispatcher_heartbeat() with both the primary and pre-tool heartbeat
+    files injected via environment overrides.
+    """
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "health-check.log"
+
+    fn_body = _extract_function("check_dispatcher_heartbeat")
+
+    return f"""
+#!/bin/bash
+DISPATCHER_HEARTBEAT_FILE="{heartbeat_file}"
+PRE_TOOL_HEARTBEAT_FILE="{pre_tool_heartbeat_file}"
+DISPATCHER_HEARTBEAT_STALE_SECONDS={DISPATCHER_HEARTBEAT_STALE_SECONDS}
+LOG_FILE="{log_file}"
+mkdir -p "$(dirname "$LOG_FILE")"
+log()       {{ echo "[$(date -Iseconds)] [$1] $2" >> "$LOG_FILE"; }}
+log_info()  {{ log "INFO"  "$1"; }}
+log_warn()  {{ log "WARN"  "$1"; }}
+log_error() {{ log "ERROR" "$1"; }}
+
+{fn_body}
+
+check_dispatcher_heartbeat
+exit $?
+"""
+
+
+def test_pretool_heartbeat_rescues_stale_post_tool(tmp_path: Path) -> None:
+    """
+    D7a: When dispatcher-heartbeat is stale but dispatcher-pre-tool-heartbeat
+    is fresh, check_dispatcher_heartbeat() must return GREEN (0).
+
+    This covers the MCP-disconnect scenario: the dispatcher called a tool
+    (pre-tool fired) but the tool never returned (post-tool never fired),
+    leaving dispatcher-heartbeat stale. The dispatcher is still alive and
+    trying — the pre-tool signal proves it.
+
+    Failure mode: if this returns RED, a dispatcher whose MCP call hangs is
+    restarted while it is still alive and will retry on its own.
+    """
+    stale_ts = int(time.time()) - (DISPATCHER_HEARTBEAT_STALE_SECONDS + 120)
+    primary_heartbeat = tmp_path / "dispatcher-heartbeat"
+    primary_heartbeat.write_text(str(stale_ts))  # stale
+
+    pre_tool_heartbeat = tmp_path / "dispatcher-pre-tool-heartbeat"
+    pre_tool_heartbeat.write_text(str(int(time.time())))  # fresh
+
+    fragment = _check_dispatcher_heartbeat_with_pretool_script(
+        primary_heartbeat, pre_tool_heartbeat, tmp_path
+    )
+    result = _run_bash_fragment(fragment)
+
+    assert result.returncode == 0, (
+        "check_dispatcher_heartbeat() returned RED when dispatcher-heartbeat is "
+        "stale but dispatcher-pre-tool-heartbeat is fresh. A dispatcher that fired "
+        "pre-tool recently is alive and must stay GREEN.\n"
+        f"stderr: {result.stderr!r}"
+    )
+
+
+def test_pretool_heartbeat_does_not_rescue_if_also_stale(tmp_path: Path) -> None:
+    """
+    D7b: When both dispatcher-heartbeat and dispatcher-pre-tool-heartbeat are
+    stale, check_dispatcher_heartbeat() must return RED (2).
+
+    Failure mode: if this returns GREEN when both signals are stale, a genuinely
+    frozen dispatcher goes undetected regardless of whether pre-tool fires.
+    """
+    stale_ts = int(time.time()) - (DISPATCHER_HEARTBEAT_STALE_SECONDS + 120)
+    primary_heartbeat = tmp_path / "dispatcher-heartbeat"
+    primary_heartbeat.write_text(str(stale_ts))  # stale
+
+    pre_tool_heartbeat = tmp_path / "dispatcher-pre-tool-heartbeat"
+    pre_tool_heartbeat.write_text(str(stale_ts))  # also stale
+
+    fragment = _check_dispatcher_heartbeat_with_pretool_script(
+        primary_heartbeat, pre_tool_heartbeat, tmp_path
+    )
+    result = _run_bash_fragment(fragment)
+
+    assert result.returncode == 2, (
+        "check_dispatcher_heartbeat() returned GREEN when both heartbeat signals "
+        "are stale. A frozen dispatcher must trigger RED.\n"
+        f"stderr: {result.stderr!r}"
+    )
+
+
+def test_pretool_heartbeat_absent_falls_back_to_primary(tmp_path: Path) -> None:
+    """
+    D7c: When dispatcher-pre-tool-heartbeat is absent, check_dispatcher_heartbeat()
+    must still use dispatcher-heartbeat as the primary signal.
+
+    This ensures the fix is backward-compatible: systems where the pre-tool hook
+    hasn't fired yet (e.g. fresh install, first boot) still get a valid health check.
+    """
+    fresh_ts = int(time.time())
+    primary_heartbeat = tmp_path / "dispatcher-heartbeat"
+    primary_heartbeat.write_text(str(fresh_ts))  # fresh
+
+    pre_tool_heartbeat = tmp_path / "dispatcher-pre-tool-heartbeat"
+    # Do NOT create pre-tool file — simulate pre-hook not yet registered.
+
+    fragment = _check_dispatcher_heartbeat_with_pretool_script(
+        primary_heartbeat, pre_tool_heartbeat, tmp_path
+    )
+    result = _run_bash_fragment(fragment)
+
+    assert result.returncode == 0, (
+        "check_dispatcher_heartbeat() returned RED when pre-tool heartbeat is absent "
+        "but primary heartbeat is fresh. Must fall back to primary signal.\n"
+        f"stderr: {result.stderr!r}"
+    )
