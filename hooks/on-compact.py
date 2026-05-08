@@ -12,6 +12,13 @@ Self-detection strategy (layered, most-to-least reliable):
   1. source field in stdin payload equals "compact" (CC-documented primary field)
   2. hook_name field equals "compact" (fallback for older CC versions; only
      checked when source is absent from the payload)
+  3. Filesystem fallback: when both source and hook_name are absent, check
+     ~/lobster-workspace/logs/dispatcher-heartbeat.  A Unix epoch integer
+     written within the last 15 minutes means the dispatcher was actively
+     running immediately before this session — a strong signal that the
+     compaction interrupted an active session.  A missing file, non-integer
+     content, or a stale timestamp (>15 min) → False (fresh start).
+     Override via LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE env var (test isolation).
 
 The script injects a system message into the Lobster inbox so that the next
 call to wait_for_messages() surfaces a reminder to re-read CLAUDE.md and
@@ -107,6 +114,40 @@ LAST_RESTART_REASON_FILE = Path(
     )
 )
 
+# Dispatcher heartbeat file — written by thinking-heartbeat.py (PostToolUse)
+# and the WFM heartbeat thread in inbox_server.py every 60s.  Content is a
+# Unix epoch integer (e.g. "1713456789\n").  Used as a fallback compaction
+# signal when both source and hook_name are absent from the CC payload: if the
+# heartbeat was written within DISPATCHER_WFM_RECENCY_SECONDS, the dispatcher
+# was actively running immediately before this session — a strong signal that
+# this is a compaction rather than a fresh start.
+# Override: LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE env var (test isolation,
+# matching the existing override used by thinking-heartbeat.py and health-check).
+DISPATCHER_HEARTBEAT_FILE = Path(
+    os.environ.get(
+        "LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE",
+        os.path.expanduser("~/lobster-workspace/logs/dispatcher-heartbeat"),
+    )
+)
+
+# Maximum age (seconds) for the dispatcher heartbeat to be treated as "recently
+# active" in the tier-3 compaction fallback.  15 minutes is conservative: it
+# covers the longest normal idle period (WFM blocking with no messages), while
+# being short enough to avoid false-positives after a genuine long-idle restart
+# (e.g. Lobster was stopped for an hour and then restarted cleanly).
+DISPATCHER_WFM_RECENCY_SECONDS = 900  # 15 minutes
+
+# Startup-cause tracking: written by on-compact.py when a compaction is detected.
+# read by inject-bootup-context.py at the start of the next session to
+# determine whether the session is post-compact or a fresh start.
+# Override: LOBSTER_STARTUP_CAUSE_FILE_OVERRIDE env var (test isolation).
+STARTUP_CAUSE_FILE = Path(
+    os.environ.get(
+        "LOBSTER_STARTUP_CAUSE_FILE_OVERRIDE",
+        os.path.expanduser("~/lobster-workspace/data/last-startup-cause.json"),
+    )
+)
+
 REMINDER_TEXT = (
     "COMPACT REMINDER \u2014 RE-ORIENT NOW\n\n"
     "You are Lobster, the always-on dispatcher. Your role has not changed.\n\n"
@@ -129,17 +170,51 @@ SENTINEL_FILE = Path(os.path.expanduser("~/messages/config/compact-pending"))
 COMPACTION_TELEGRAM_MESSAGE = "\u267b\ufe0f Context compacted. Re-orienting..."
 
 
+def _wfm_was_active() -> bool:
+    """Return True if the dispatcher was recently active before this session started.
+
+    Reads DISPATCHER_HEARTBEAT_FILE (dispatcher-heartbeat).  The file contains
+    a single Unix epoch integer written by thinking-heartbeat.py (PostToolUse)
+    and the WFM heartbeat thread in inbox_server.py.  If the file exists and
+    the recorded timestamp is within DISPATCHER_WFM_RECENCY_SECONDS (15 min),
+    the dispatcher was actively running immediately before this session — a
+    strong signal that this is a compaction rather than a fresh start.
+
+    A missing file, non-integer content, or a stale timestamp all return False
+    (conservative: prefer false-negatives over false-positives for tier-3).
+
+    Used as the third-tier fallback in _is_compact_event() when CC omits both
+    source and hook_name from the SessionStart payload.
+    """
+    try:
+        raw = DISPATCHER_HEARTBEAT_FILE.read_text().strip()
+        if not raw.isdigit():
+            return False
+        last_ts = int(raw)
+        age_seconds = int(time.time()) - last_ts
+        return 0 <= age_seconds < DISPATCHER_WFM_RECENCY_SECONDS
+    except OSError:
+        return False
+
+
 def _is_compact_event(data: dict) -> bool:
     """Return True if the hook input indicates a context compaction event.
 
-    Primary check: the ``source`` field in the CC SessionStart payload.
-    Claude Code sets source="compact" for compaction-triggered sessions
-    (other values: "startup", "resume", "clear").
+    Layered detection (most-to-least reliable):
 
-    Fallback: hook_name == "compact" is undocumented but observed in some
-    CC versions.  The fallback is only used when ``source`` is absent from
-    the payload — if ``source`` is present but non-compact, the event is
-    not a compaction regardless of hook_name.
+    1. ``source`` field equals "compact" (CC-documented primary field; present
+       in most CC versions).  If source is present but non-compact, returns
+       False immediately — hook_name and filesystem fallbacks are not used.
+
+    2. ``hook_name`` field equals "compact" (observed in older CC versions).
+       Only checked when source is absent from the payload.
+
+    3. Filesystem fallback: when both source and hook_name are absent, check
+       whether the dispatcher was actively blocking in wait_for_messages
+       (DISPATCHER_HEARTBEAT_FILE contains a recent digit-only Unix timestamp).
+       A live heartbeat signal with no payload fields strongly implies CC fired
+       a compaction SessionStart without populating the usual identification
+       fields.
 
     This function is the self-gate that replaces reliance on the
     matcher="compact" hook registration (which was found to be intermittently
@@ -148,9 +223,16 @@ def _is_compact_event(data: dict) -> bool:
     """
     source = data.get("source")
     if source is not None:
+        # source field present — authoritative; do not fall through to hook_name.
         return source == "compact"
-    # source field absent — fall back to hook_name
-    return data.get("hook_name") == "compact"
+
+    hook_name = data.get("hook_name")
+    if hook_name is not None:
+        # source absent but hook_name present — use it.
+        return hook_name == "compact"
+
+    # Both source and hook_name absent — filesystem fallback.
+    return _wfm_was_active()
 
 
 def _log_compact_event(event_type: str, detail: str) -> None:
@@ -189,6 +271,36 @@ def write_last_restart_reason(reason: str) -> None:
         tmp_path = LAST_RESTART_REASON_FILE.with_suffix(".tmp")
         tmp_path.write_text(json.dumps(payload, indent=2) + "\n")
         tmp_path.replace(LAST_RESTART_REASON_FILE)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def write_startup_cause() -> None:
+    """Write last-startup-cause.json with cause="compaction" and ISO UTC timestamp.
+
+    Called when _is_compact_event() returns True, immediately before the hook
+    exits.  The next session's inject-bootup-context.py reads this file at
+    startup and uses it to classify the session as post-compact vs fresh-start.
+
+    inject-bootup-context.py resets the file to cause="restart" after reading
+    it, so the file self-clears after one session.  This function only needs to
+    write cause="compaction" — the "fresh/restart" default is handled by the
+    reader.
+
+    Uses an atomic tmp-rename to prevent a partial-write from corrupting the
+    file between on-compact.py writing and inject-bootup-context.py reading.
+
+    Silent on any failure — must never crash the hook.
+    """
+    try:
+        STARTUP_CAUSE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "cause": "compaction",
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        tmp_path = STARTUP_CAUSE_FILE.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(payload, indent=2) + "\n")
+        tmp_path.replace(STARTUP_CAUSE_FILE)  # atomic on Linux (same filesystem)
     except Exception:  # noqa: BLE001
         pass
 
@@ -590,6 +702,10 @@ def main() -> None:
 
     session_id_snippet = data.get("session_id", "")[:12]
     _log_compact_event("compact_detected", f"session_id={session_id_snippet!r}")
+
+    # Write startup-cause file so inject-bootup-context.py knows the NEXT
+    # session started due to a compaction (issue #2010).
+    write_startup_cause()
 
     # Write restart-reason tracking file so the dispatcher can know this session
     # started due to a compaction (not a health-check restart).
