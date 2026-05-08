@@ -58,7 +58,7 @@ AGENT_TOOL_NAMES = {"Agent", "Task"}
 # Values accepted as truthy for `background:` in the YAML frontmatter.
 # Covers both YAML true/false and Python-style True/False that Claude often writes.
 _BACKGROUND_TRUE_VALUES = frozenset({"true", "yes", "1"})
-_BACKGROUND_FALSE_OR_MISSING = frozenset({"false", "no", "0", ""})
+
 
 
 def _has_background_true_in_frontmatter(prompt: str) -> bool:
