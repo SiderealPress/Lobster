@@ -2968,11 +2968,11 @@ print(f'prune-pr-worktrees: {result.status}')
         warn "check-inflight-reminders.py not found at $INFLIGHT_SCRIPT — skipping Migration 87"
     fi
 
-    # Migration 88: Fix on-compact.py hook matcher (issue #1947).
+    # Migration 88: Fix on-compact.py hook matcher + add source-field self-gate (issue #1947/#1984).
     # matcher="compact" is unreliable in CC 2.1.119 (~37% fire rate since April 17).
     # The correct pattern is matcher="" + self-gate inside the script.
-    # on-compact.py already has the self-gate (reads hook_event_name, exits early
-    # unless it's a compact event) since commit 26e7e060 (May 1).
+    # The self-gate now checks data["source"] == "compact" (CC-documented primary field)
+    # with data["hook_name"] == "compact" as a fallback for older CC versions.
     # This migration:
     #   1. Changes the on-compact.py SessionStart entry from matcher="compact" to matcher=""
     #   2. Removes the redundant inject-bootup-context.py compact-matcher entry

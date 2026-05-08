@@ -2,12 +2,22 @@
 """
 Context-compaction hook for Lobster.
 
-Fires on SessionStart with a 'compact' event. Injects a system message into
-the Lobster inbox so that the next call to wait_for_messages() surfaces a
-reminder to re-read CLAUDE.md and re-orient from handoff/memory context.
+Fires on SessionStart — registered with matcher="" so it fires on every
+session start.  The script self-gates using _is_compact_event(): it checks the
+``source`` field in the CC SessionStart payload (primary) and ``hook_name`` as
+a fallback, then exits immediately for non-compact events.
+
+Injects a system message into the Lobster inbox so that the next call to
+wait_for_messages() surfaces a reminder to re-read CLAUDE.md and re-orient
+from handoff/memory context.
 
 The script is idempotent: if a compact-reminder message already exists in
 inbox/ or processing/ it skips writing a duplicate.
+
+Compaction detection (self-gate):
+  Primary:  data["source"] == "compact"  (CC-documented field)
+  Fallback: data["hook_name"] == "compact"  (observed in some CC versions)
+  If neither matches, the script exits immediately (sys.exit(0)).
 
 Notification: always writes a compaction notification to ~/messages/outbox/
 (the Lobster outbox pipeline) so the user is notified via Telegram.  The
@@ -360,6 +370,25 @@ def send_compaction_notify() -> None:
         )
 
 
+def _is_compact_event(data: dict) -> bool:
+    """Return True if the hook input indicates a context compaction event.
+
+    Primary check: the ``source`` field in the CC SessionStart payload.
+    Claude Code sets source="compact" for compaction-triggered sessions
+    (other values: "startup", "resume", "clear").
+
+    Fallback: hook_name == "compact" is undocumented but observed in some
+    CC versions.  The fallback is only used when ``source`` is absent from
+    the payload — if ``source`` is present but non-compact, the event is
+    not a compaction regardless of hook_name.
+    """
+    source = data.get("source")
+    if source is not None:
+        return source == "compact"
+    # source field absent — fall back to hook_name
+    return data.get("hook_name") == "compact"
+
+
 def _stored_dispatcher_session_alive() -> bool:
     """Return True if the stored dispatcher session's JSONL file still exists on disk.
 
@@ -507,6 +536,13 @@ def main() -> None:
         data = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError):
         data = {}
+
+    # Self-gate: this hook is registered with matcher="" so it fires on every
+    # SessionStart event.  Exit immediately for non-compact sessions.
+    # Primary check: source="compact" (CC-documented).
+    # Fallback: hook_name="compact" (observed in some CC versions).
+    if not _is_compact_event(data):
+        sys.exit(0)
 
     # Write cause=compaction BEFORE anything else.  inject-bootup-context.py reads
     # this file on the next startup: if cause==compaction and ts is within 5 minutes,
