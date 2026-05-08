@@ -2965,6 +2965,51 @@ M86_PYEOF
         info "Migration 86: settings.json not found or python3 unavailable — skipping"
     fi
 
+    # Migration 94: Register require-reply-to-message-id.py PreToolUse hook (issue #1999).
+    # This hook blocks Telegram send_reply calls that omit reply_to_message_id, preventing
+    # standalone (unthreaded) replies. It was added to install.sh (PR #1168) but had no
+    # upgrade.sh migration, so existing installs never had it registered.
+    # Idempotent: skips if entry already registered.
+    local _m94_hook="$LOBSTER_DIR/hooks/require-reply-to-message-id.py"
+    if [ -f "$CLAUDE_SETTINGS" ] && command -v jq &>/dev/null && [ -f "$_m94_hook" ]; then
+        local _m94_present
+        _m94_present=$(jq -r '
+            [.hooks.PreToolUse[]?.hooks[]? |
+             select((.command // "") | contains("require-reply-to-message-id"))]
+            | length' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
+
+        if [[ "${_m94_present:-0}" -gt 0 ]]; then
+            substep "Migration 94: require-reply-to-message-id hook already registered — skipping"
+        else
+            local _m94_tmp
+            _m94_tmp=$(mktemp)
+            local _m94_cmd="python3 $_m94_hook"
+
+            if jq --arg cmd "$_m94_cmd" '
+                .hooks.PreToolUse = (
+                    (.hooks.PreToolUse // []) +
+                    [{
+                        "matcher": "mcp__lobster-inbox__send_reply",
+                        "hooks": [{
+                            "type": "command",
+                            "command": $cmd,
+                            "timeout": 5
+                        }]
+                    }]
+                )
+            ' "$CLAUDE_SETTINGS" > "$_m94_tmp" \
+                && mv "$_m94_tmp" "$CLAUDE_SETTINGS" 2>/dev/null; then
+                substep "Migration 94: require-reply-to-message-id hook registered in settings.json"
+                migrated=$((migrated + 1))
+            else
+                rm -f "$_m94_tmp" 2>/dev/null || true
+                warn "Migration 94: could not update settings.json — jq transform failed"
+            fi
+        fi
+    else
+        substep "Migration 94: settings.json, jq, or require-reply-to-message-id.py not found — skipping"
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
