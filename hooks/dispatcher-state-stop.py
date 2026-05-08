@@ -1,32 +1,57 @@
 #!/usr/bin/env python3
 """
-SessionStop hook: write DEAD state for dispatcher and append context-handoff.jsonl.
+SessionStop hook: write DEAD state for dispatcher and emit session.end to events.jsonl.
 
 Responsibilities:
 1. Write DEAD state to dispatcher-state.json (issue #1918 — 5-state liveness machine)
    so the health check can immediately restart.
-2. Append a minimal record to context-handoff.jsonl when the dispatcher session ends
-   (issue #1977, redesigned in issue #2002).
+2. Emit a session.end LobsterEvent to ~/lobster-workspace/logs/events.jsonl when the
+   dispatcher session ends (issue #1977, redesigned in issues #2002 and v2 design).
 
-## context-handoff.jsonl append (issues #1977, #2002)
+## session.end event emit (issues #1977, #2002, v2 redesign)
+
+All events in the Lobster system go through the central EventBus, which writes to
+~/lobster-workspace/logs/events.jsonl. This hook emits a session.end LobsterEvent
+directly to that file rather than maintaining a separate context-handoff.jsonl.
 
 The graceful wind-down path (context_warning handler in sys.dispatcher.bootup.md,
-step 5) writes context-handoff.json with rich data: pending_tasks, last_user_message,
-etc. But sessions that hit the hard context limit before reaching 70%, or that crash,
-bypass this entirely — the LLM never gets to act.
+step 5) also writes to events.jsonl. The startup reader finds the last session.end
+event by scanning backwards through events.jsonl.
 
-This hook is the safety net: every dispatcher session end appends one JSON line to
-context-handoff.jsonl. The next session reads the last line (most recent record).
-
-Each appended record contains:
-  - triggered_at: current UTC ISO timestamp
+Each session.end event payload contains:
   - context_pct: last known context % from the session transcript (None if unavailable)
   - in_flight_agents: list of running tasks from inflight-work.jsonl without completion
-  - note: "Stop hook wind-down"
+  - note: "Stop hook session end"
 
-Unlike the old write-if-absent singleton approach, this always appends — giving a
-historical record and removing the need for an existence check. The graceful wind-down
-path also writes to this log; both entries accumulate.
+## LobsterEvent format (matched to event_bus.LobsterEvent.to_dict())
+
+The emitted JSON line matches the exact format produced by LobsterEvent.to_dict():
+
+  {
+    "event_type": "session.end",
+    "severity": "info",
+    "source": "dispatcher-state-stop",
+    "payload": { ... },
+    "timestamp": "<ISO 8601 UTC with timezone offset>",
+    "task_id": null,
+    "chat_id": null
+  }
+
+## Locking concern
+
+GzipRotatingFileHandler (in src/mcp/log_utils.py) uses handler.acquire() /
+handler.release() — the standard logging.Handler threading.RLock — around the stream
+write in JsonlFileListener.deliver(). This hook does NOT use the handler; it writes
+directly to the file with open(path, "a").
+
+Linux O_APPEND writes are atomic for payloads smaller than PIPE_BUF (4096 bytes on
+Linux). A single session.end JSON line is well under that limit (~200–400 bytes
+typically), so the direct append is safe and consistent with the atomicity guarantee
+Linux provides for O_APPEND writes below PIPE_BUF.
+
+There is no shared in-process handler to acquire. Each MCP server process that uses
+the handler holds its own lock, which is irrelevant to this out-of-process hook. The
+append atomicity guarantee is sufficient.
 
 ## Dispatcher detection
 
@@ -66,7 +91,10 @@ import state_machine  # noqa: E402
 # Constants
 # ---------------------------------------------------------------------------
 
-_HANDOFF_NOTE = "Stop hook wind-down"
+_SESSION_END_NOTE = "Stop hook session end"
+_EVENT_TYPE = "session.end"
+_EVENT_SEVERITY = "info"
+_EVENT_SOURCE = "dispatcher-state-stop"
 
 # Known model context window sizes (same table as context-monitor.py).
 # Matched by prefix so versioned IDs resolve correctly.
@@ -208,39 +236,55 @@ def _resolve_inflight_path() -> Path:
     return workspace / "data" / "inflight-work.jsonl"
 
 
-def _build_handoff_payload(context_pct: float | None, in_flight_agents: list[dict]) -> dict:
-    """Return the minimal context-handoff.jsonl entry payload for a Stop hook wind-down."""
+def _resolve_events_path() -> Path:
+    """Return the events.jsonl path, resolved from LOBSTER_WORKSPACE."""
+    workspace = Path(
+        os.environ.get("LOBSTER_WORKSPACE", Path.home() / "lobster-workspace")
+    )
+    return workspace / "logs" / "events.jsonl"
+
+
+def _build_session_end_event(context_pct: float | None, in_flight_agents: list[dict]) -> dict:
+    """Return a LobsterEvent dict for session.end, matching LobsterEvent.to_dict() format.
+
+    The format matches the exact field names and structure produced by
+    LobsterEvent.to_dict() in src/mcp/event_bus.py, so the startup reader can
+    parse it with the same keys.
+    """
     return {
-        "triggered_at": datetime.now(timezone.utc).isoformat(),
-        "context_pct": context_pct,
-        "in_flight_agents": in_flight_agents,
-        "note": _HANDOFF_NOTE,
+        "event_type": _EVENT_TYPE,
+        "severity": _EVENT_SEVERITY,
+        "source": _EVENT_SOURCE,
+        "payload": {
+            "context_pct": context_pct,
+            "in_flight_agents": in_flight_agents,
+            "note": _SESSION_END_NOTE,
+        },
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "task_id": None,
+        "chat_id": None,
     }
 
 
-def _append_handoff_entry(handoff_path: Path, payload: dict) -> None:
-    """Append a JSON line to context-handoff.jsonl.
+def _emit_session_end_event(events_path: Path, event: dict) -> None:
+    """Append a session.end JSON line to events.jsonl.
 
-    Always appends — no existence check needed. Every session end writes one
-    record, building a log. The startup reader reads the last line.
+    Always appends — every dispatcher session end writes one record. The startup
+    reader scans backwards to find the last session.end event.
+
+    Write safety: Linux O_APPEND writes are atomic for payloads smaller than
+    PIPE_BUF (4096 bytes). A single JSON line for session.end is ~200–400 bytes,
+    well within that limit. No additional locking is needed.
 
     Silent on all errors.
     """
     try:
-        handoff_path.parent.mkdir(parents=True, exist_ok=True)
-        line = json.dumps(payload) + "\n"
-        with open(handoff_path, "a", encoding="utf-8") as f:
+        events_path.parent.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(event) + "\n"
+        with open(events_path, "a", encoding="utf-8") as f:
             f.write(line)
     except Exception:  # noqa: BLE001
         pass  # Never interrupt session stop
-
-
-def _resolve_handoff_path() -> Path:
-    """Return the context-handoff.jsonl path, resolved from LOBSTER_WORKSPACE."""
-    workspace = Path(
-        os.environ.get("LOBSTER_WORKSPACE", Path.home() / "lobster-workspace")
-    )
-    return workspace / "data" / "context-handoff.jsonl"
 
 
 # ---------------------------------------------------------------------------
@@ -269,14 +313,13 @@ def main() -> None:
     except Exception:
         pass
 
-    # --- 2. Append context-handoff.jsonl entry (issues #1977, #2002) ---
+    # --- 2. Emit session.end event to events.jsonl (issues #1977, #2002, v2 redesign) ---
     try:
         transcript_path = hook_input.get("transcript_path")
         context_pct = _read_context_pct_from_transcript(transcript_path)
         in_flight_agents = _read_in_flight_agents(_resolve_inflight_path())
-        payload = _build_handoff_payload(context_pct, in_flight_agents)
-        handoff_path = _resolve_handoff_path()
-        _append_handoff_entry(handoff_path, payload)
+        event = _build_session_end_event(context_pct, in_flight_agents)
+        _emit_session_end_event(_resolve_events_path(), event)
     except Exception:
         pass
 
