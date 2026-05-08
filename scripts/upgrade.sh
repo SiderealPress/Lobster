@@ -2768,50 +2768,13 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
         substep "Migration 90: settings.json, jq, or wfm-lifecycle-logger.py not found — skipping"
     fi
 
-    # Migration 91: Register pretooluse-heartbeat.py PreToolUse hook (issue #1439).
-    # This hook was added to install.sh in PR #1896 but was missing from upgrade.sh,
-    # so existing installs never had it registered in settings.json.
-    # Writes last_pretooluse_at to lobster-state.json before every tool call, enabling
-    # narrower detection of MCP-disconnect freezes where PostToolUse never fires.
-    local _m91_hook="$LOBSTER_DIR/hooks/pretooluse-heartbeat.py"
-    if [ -f "$CLAUDE_SETTINGS" ] && command -v jq &>/dev/null && [ -f "$_m91_hook" ]; then
-        local _m91_present
-        _m91_present=$(jq -r '
-            [.hooks.PreToolUse[]?.hooks[]? |
-             select((.command // "") | contains("pretooluse-heartbeat"))]
-            | length' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
-
-        if [[ "${_m91_present:-0}" -gt 0 ]]; then
-            substep "Migration 91: pretooluse-heartbeat hook already registered — skipping"
-        else
-            local _m91_tmp
-            _m91_tmp=$(mktemp)
-            local _m91_cmd="python3 $_m91_hook"
-
-            if jq --arg cmd "$_m91_cmd" '
-                .hooks.PreToolUse = (
-                    (.hooks.PreToolUse // []) +
-                    [{
-                        "matcher": "",
-                        "hooks": [{
-                            "type": "command",
-                            "command": $cmd,
-                            "timeout": 5
-                        }]
-                    }]
-                )
-            ' "$CLAUDE_SETTINGS" > "$_m91_tmp" \
-                && mv "$_m91_tmp" "$CLAUDE_SETTINGS" 2>/dev/null; then
-                substep "Migration 91: pretooluse-heartbeat hook registered in settings.json"
-                migrated=$((migrated + 1))
-            else
-                rm -f "$_m91_tmp" 2>/dev/null || true
-                warn "Migration 91: could not update settings.json — jq transform failed"
-            fi
-        fi
-    else
-        substep "Migration 91: settings.json, jq, or pretooluse-heartbeat.py not found — skipping"
-    fi
+    # Migration 91: NO-OP (superseded by migrations 90 and 95).
+    # Originally intended to register hooks/pretooluse-heartbeat.py (issue #1439, PR #1896),
+    # but that hook was deprecated in PR #1817 (replaced by pre-tool-heartbeat.py which adds
+    # a dispatcher-only guard). Migration 90 removes it from settings.json; migration 95
+    # removes any re-registered entry. Registering the deprecated hook here would conflict
+    # with the deregistration intent of migrations 90 and 95 (issue #2001).
+    substep "Migration 91: no-op — pretooluse-heartbeat.py is deprecated; see migrations 90 and 95"
 
     # Migration 92: Remove write-dispatcher-session-id SessionStart hook from settings.json
     # (issue #1908). Dispatcher detection now uses the launcher-written startup flag file
@@ -3132,6 +3095,47 @@ M88_PYEOF
         fi
     else
         substep "Migration 94: settings.json, jq, or require-reply-to-message-id.py not found — skipping"
+    fi
+
+    # Migration 95: Remove any pretooluse-heartbeat entry from settings.json (issue #2001).
+    # Migration 91 incorrectly re-registered hooks/pretooluse-heartbeat.py on fresh installs
+    # that ran upgrade.sh before this fix. Migration 90 also removes it, but migration 91
+    # ran BEFORE migration 90 in the original file ordering, so on some installs migration 91
+    # added the entry and then migration 90 removed it. On fresh installs after this PR,
+    # migration 91 is a no-op and migration 90 is also a no-op (nothing to remove). This
+    # migration is a belt-and-suspenders cleanup: remove any remaining pretooluse-heartbeat
+    # entries (original .py or renamed .deprecated.py) that should not be in settings.json.
+    if [ -f "$CLAUDE_SETTINGS" ] && command -v jq &>/dev/null; then
+        local _m95_present
+        _m95_present=$(jq -r '
+            [.hooks.PreToolUse[]?.hooks[]? |
+             select((.command // "") | test("pretooluse-heartbeat"))]
+            | length' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
+
+        if [[ "${_m95_present:-0}" -gt 0 ]]; then
+            local _m95_tmp
+            _m95_tmp=$(mktemp)
+            if jq '
+                .hooks.PreToolUse = (
+                    .hooks.PreToolUse // [] |
+                    map(select(
+                        (.hooks // [] | any(.command // "" | test("pretooluse-heartbeat")))
+                        | not
+                    ))
+                )
+            ' "$CLAUDE_SETTINGS" > "$_m95_tmp" \
+                && mv "$_m95_tmp" "$CLAUDE_SETTINGS" 2>/dev/null; then
+                substep "Migration 95: removed pretooluse-heartbeat hook from settings.json"
+                migrated=$((migrated + 1))
+            else
+                rm -f "$_m95_tmp" 2>/dev/null || true
+                warn "Migration 95: could not update settings.json — jq transform failed"
+            fi
+        else
+            substep "Migration 95: pretooluse-heartbeat hook not present in settings.json — skipping"
+        fi
+    else
+        substep "Migration 95: settings.json or jq not found — skipping"
     fi
 
     if [ "$migrated" -eq 0 ]; then
