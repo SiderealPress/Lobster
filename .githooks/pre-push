@@ -241,6 +241,10 @@ add_finding() {
     ISSUES_FOUND=$((ISSUES_FOUND + 1))
 }
 
+scan_diff() {
+    local diff_text="$1"
+    local filepath=""
+
     # Skip hook files themselves and the allowlist (they may contain the patterns
     # as legitimate documentation/regex strings)
     case "$filepath" in
@@ -403,124 +407,7 @@ add_finding() {
             done
         fi
 
-        if is_allowlisted "$filepath" "$desc"; then
-            continue
-        fi
-
-        # Skip lines that look like obvious placeholder/fake values
-        local real_matches=""
-        while IFS= read -r match_line; do
-            if ! is_placeholder_value "$match_line"; then
-                real_matches="${real_matches}${match_line}"$'\n'
-            fi
-        done <<< "$matches"
-        if [ -z "$real_matches" ]; then
-            continue
-        fi
-
-        ISSUES_FOUND=$((ISSUES_FOUND + 1))
-        block "$filepath -> $desc found"
-        echo "$real_matches" | head -3 | while read -r line; do
-            echo "       Line: $line"
-        done
-        echo "       Fix: remove the sensitive value, use env vars or a secret manager"
-    done
-
-    # Scan security patterns
-    for pattern_def in "${SECURITY_PATTERNS[@]}"; do
-        local name regex desc
-        IFS= read -r name <<< "$(echo "$pattern_def" | awk -F'@@' '{print $1}')"
-        IFS= read -r regex <<< "$(echo "$pattern_def" | awk -F'@@' '{print $2}')"
-        IFS= read -r desc <<< "$(echo "$pattern_def" | awk -F'@@' '{print $3}')"
-
-        local matches
-        matches="$(echo "$file_content" | grep -Pn -e "$regex" 2>/dev/null || true)"
-
-        if [ -z "$matches" ]; then
-            continue
-        fi
-
-        # Skip lines marked with # nosec or # noqa (inline suppression)
-        matches="$(echo "$matches" | grep -Pv '#\s*nosec\b|#\s*noqa\b' || true)"
-        if [ -z "$matches" ]; then
-            continue
-        fi
-
-        # For password/token patterns, skip lines where value is a variable reference
-        if [ "$name" = "password" ] || [ "$name" = "token_assign" ]; then
-            matches="$(echo "$matches" | grep -Pv '[=:]\s*["'"'"']\$' || true)"
-            if [ -z "$matches" ]; then
-                continue
-            fi
-        fi
-
-        if is_allowlisted "$filepath" "$desc"; then
-            continue
-        fi
-
-        # Skip lines that look like obvious placeholder/fake values
-        local real_matches=""
-        while IFS= read -r match_line; do
-            if ! is_placeholder_value "$match_line"; then
-                real_matches="${real_matches}${match_line}"$'\n'
-            fi
-        done <<< "$matches"
-        if [ -z "$real_matches" ]; then
-            continue
-        fi
-
-        ISSUES_FOUND=$((ISSUES_FOUND + 1))
-        block "$filepath -> $desc"
-        echo "$real_matches" | head -3 | while read -r line; do
-            echo "       Line: $line"
-        done
-        echo "       Fix: remove the secret, use env vars or a secret manager"
-        echo "       If false positive: add to .githooks/security-allowlist.txt"
-    done
-
-    # Scan personal name patterns
-    for pattern_def in "${NAME_PATTERNS[@]}"; do
-        local name regex desc allowlist_re
-        IFS= read -r name <<< "$(echo "$pattern_def" | awk -F'@@' '{print $1}')"
-        IFS= read -r regex <<< "$(echo "$pattern_def" | awk -F'@@' '{print $2}')"
-        IFS= read -r desc <<< "$(echo "$pattern_def" | awk -F'@@' '{print $3}')"
-        IFS= read -r allowlist_re <<< "$(echo "$pattern_def" | awk -F'@@' '{print $4}')"
-
-        # Case-insensitive match
-        local matches
-        matches="$(echo "$file_content" | grep -Pni -e "$regex" 2>/dev/null || true)"
-
-        if [ -z "$matches" ]; then
-            continue
-        fi
-
-        # Skip lines with inline suppression
-        matches="$(echo "$matches" | grep -Pv '#\s*noname\b' || true)"
-        if [ -z "$matches" ]; then
-            continue
-        fi
-
-        # Apply per-pattern allowlist (non-name words containing the pattern)
-        if [ -n "$allowlist_re" ]; then
-            matches="$(echo "$matches" | grep -Piv "$allowlist_re" || true)"
-            if [ -z "$matches" ]; then
-                continue
-            fi
-        fi
-
-        if is_allowlisted "$filepath" "$desc"; then
-            continue
-        fi
-
-        ISSUES_FOUND=$((ISSUES_FOUND + 1))
-        block "$filepath -> $desc"
-        echo "$matches" | head -3 | while read -r line; do
-            echo "       Line: $line"
-        done
-        echo "       Fix: replace the personal name with a role, alias, or initials"
-        echo "       Inline suppress: add '# noname' to the line"
-        echo "       If false positive: add to .githooks/security-allowlist.txt"
-    done
+    done <<< "$diff_text"
 }
 
 #===============================================================================
