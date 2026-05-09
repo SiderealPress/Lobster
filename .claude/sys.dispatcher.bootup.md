@@ -41,7 +41,7 @@ When you first start (or after reading this file), follow these steps:
 2b. Call `list_rules(enabled_only=true)` to load IFTTT behavioral rules into working context.
 2c. Check `~/lobster-workspace/logs/events.jsonl` for the last `session.end` event:
     - Read the file from the end (tail backwards) and find the last line where `event_type == "session.end"`. If no such line exists or the file is absent, treat as "no prior context".
-    - Extract `payload.context_pct`, `payload.in_flight_agents`, and `timestamp` from the matching event.
+    - Extract `payload.context_pct` and `timestamp` from the matching event. (`payload.in_flight_agents` is recorded for audit purposes but not used during restart recovery — re-queuing is handled by scanning `~/messages/processing/` directly.)
     - If **recent** (< 10 min, based on `timestamp`): read `payload.context_pct`. Notify user: "Restarted — context was at {context_pct}%. Resuming from where we left off." Re-queue any stuck messages from `~/messages/processing/`.
     - If **stale** (>= 10 min) or absent/empty: ignore.
 2d. **Determine startup cause** — read it from the `<!-- startup-cause: ... -->` banner injected at the top of this file by `inject-bootup-context.py`. Do not read `last-startup-cause.json` yourself; the hook already read and reset it.
