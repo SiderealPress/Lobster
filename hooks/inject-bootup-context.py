@@ -8,11 +8,14 @@ and user-specific bootup files, printing their contents to stdout.
 Claude Code SessionStart hooks inject stdout as a system message at the start
 of the session, making this content available before the first turn.
 
-File injection order (dispatcher):
+File injection order (dispatcher) — issue #1994:
 0. ADMIN_CHAT_ID preamble line (from ~/lobster-config/config.env, if present)
-1. sys.dispatcher.bootup.md
-2. ~/lobster-user-config/agents/user.base.bootup.md (if exists)
-3. ~/lobster-user-config/agents/user.dispatcher.bootup.md (if exists)
+0b. startup-cause banner (from last-startup-cause.json, always present)
+   NOTE: sys.dispatcher.bootup.md is NOT injected. It is 84KB and the rendering
+   layer truncates the preview to ~2KB, making injection useless. The dispatcher
+   re-reads it explicitly via Read('.claude/sys.dispatcher.bootup.md') at startup.
+1. ~/lobster-user-config/agents/user.base.bootup.md (if exists)
+2. ~/lobster-user-config/agents/user.dispatcher.bootup.md (if exists)
 
 File injection order (subagent):
 1. sys.subagent.bootup.md
@@ -371,22 +374,19 @@ def main() -> None:
     role = "dispatcher" if is_dispatcher else "subagent"
     injected: list[str] = []
 
-    # 1. Inject system bootup file based on role.
     if is_dispatcher:
-        content = _read_file_safe(DISPATCHER_BOOTUP, "sys.dispatcher.bootup.md")
-        system_file = DISPATCHER_BOOTUP
-    else:
-        content = _read_file_safe(SUBAGENT_BOOTUP, "sys.subagent.bootup.md")
-        system_file = SUBAGENT_BOOTUP
+        # Issue #1994: sys.dispatcher.bootup.md is 84KB. The rendering layer
+        # truncates the injected preview to ~2KB, so injecting the full file
+        # wastes ~21K tokens with zero benefit. The dispatcher re-reads the file
+        # explicitly at startup via Read('.claude/sys.dispatcher.bootup.md').
+        #
+        # We still inject the small, genuinely useful dispatcher preambles:
+        #   - ADMIN_CHAT_ID (from config.env) — fits in 2KB preview, avoids grep
+        #   - startup_cause banner — fits in 2KB preview, avoids reading a file
+        #   - user.base.bootup.md and user.dispatcher.bootup.md (small user config)
 
-    if content is None:
-        _append_injection_log(session_id, role, injected)
-        sys.exit(0)
-
-    # For the dispatcher: inject ADMIN_CHAT_ID preamble from config.env so the
-    # dispatcher has the value available in context without any grep at startup.
-    # Silent when config.env is absent or the key is missing (graceful degradation).
-    if is_dispatcher:
+        # ADMIN_CHAT_ID preamble: inject from config.env so the dispatcher has it
+        # available in context without any grep at startup. Silent when absent.
         admin_chat_id = _parse_admin_chat_id(CONFIG_ENV_PATH)
         if admin_chat_id is not None:
             print(f"ADMIN_CHAT_ID={admin_chat_id}")
@@ -395,10 +395,8 @@ def main() -> None:
                 " — no grep needed at startup)\n"
             )
 
-    # For the dispatcher: prepend a single line announcing the startup cause
-    # so step 2d of the startup sequence can use it without reading any files.
-    # This is the ONLY place startup_cause is surfaced to the model context.
-    if is_dispatcher:
+        # startup_cause banner: the ONLY place startup_cause is surfaced to context.
+        # Step 2d of the startup sequence reads it from here — no file read needed.
         now_utc = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         cause_banner = (
             f"<!-- startup-cause: {startup_cause} | ts: {now_utc} -->\n"
@@ -407,19 +405,24 @@ def main() -> None:
         )
         print(cause_banner, end="")
 
-
-    print(content)
-    injected.append(system_file.name)
-
-    # 2. Inject user base bootup (both roles).
-    if _inject_if_exists(USER_BASE_BOOTUP, "user.base.bootup.md"):
-        injected.append(USER_BASE_BOOTUP.name)
-
-    # 3. Inject role-specific user bootup.
-    if is_dispatcher:
+        # User bootup files: inject if they exist (these are small and genuinely useful).
+        if _inject_if_exists(USER_BASE_BOOTUP, "user.base.bootup.md"):
+            injected.append(USER_BASE_BOOTUP.name)
         if _inject_if_exists(USER_DISPATCHER_BOOTUP, "user.dispatcher.bootup.md"):
             injected.append(USER_DISPATCHER_BOOTUP.name)
+
     else:
+        # Subagent path: inject sys.subagent.bootup.md (28KB, feasible to inject).
+        content = _read_file_safe(SUBAGENT_BOOTUP, "sys.subagent.bootup.md")
+        if content is None:
+            _append_injection_log(session_id, role, injected)
+            sys.exit(0)
+
+        print(content)
+        injected.append(SUBAGENT_BOOTUP.name)
+
+        if _inject_if_exists(USER_BASE_BOOTUP, "user.base.bootup.md"):
+            injected.append(USER_BASE_BOOTUP.name)
         if _inject_if_exists(USER_SUBAGENT_BOOTUP, "user.subagent.bootup.md"):
             injected.append(USER_SUBAGENT_BOOTUP.name)
 

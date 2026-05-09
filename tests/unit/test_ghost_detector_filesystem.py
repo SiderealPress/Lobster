@@ -677,7 +677,7 @@ class TestLiveDispatcherGuard:
 _HEX_UUID_DISPATCHER_ID = "a3f9e1b2c4d5e6f700112233445566aa"
 
 
-class TestGuard2WfmActiveDispatcherType:
+class TestGuard2WfmActiveDispatcherType_IsDispatcherInWfm:
     """Guard 2: when WFM-active is fresh, sessions with agent_type='dispatcher'
     and a non-static (hex-UUID) agent_id are skipped by mark_failed_all_ghosts.
 
@@ -685,6 +685,9 @@ class TestGuard2WfmActiveDispatcherType:
     SessionStart hook registers a new dispatcher row with agent_type='dispatcher'
     and a UUID-style id each restart.  Without Guard 2, that row would be
     ghost-detected after 30 idle minutes even though the dispatcher is healthy.
+
+    This class tests Guard 2 via monkeypatching _is_dispatcher_in_wfm directly.
+    See TestGuard2WfmActiveDispatcherType for tests using the WFM-active signal file.
     """
 
     def _make_dispatcher_typed(

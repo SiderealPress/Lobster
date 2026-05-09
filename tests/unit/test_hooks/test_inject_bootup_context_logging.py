@@ -372,10 +372,15 @@ class TestInjectedFilesList:
             f"Expected 'sys.subagent.bootup.md' in injected list, got: {line!r}"
         )
 
-    def test_injected_contains_dispatcher_bootup_for_dispatcher_session(
+    def test_injected_does_not_contain_dispatcher_bootup_for_dispatcher_session(
         self, tmp_path, capsys
     ):
-        """injected= includes sys.dispatcher.bootup.md for dispatcher sessions."""
+        """injected= does NOT include sys.dispatcher.bootup.md for dispatcher sessions.
+
+        After issue #1994 (Fix C), sys.dispatcher.bootup.md is no longer injected
+        into the context window. The dispatcher reads it explicitly via Read() at startup.
+        The log must accurately reflect what was actually injected.
+        """
         log_dir = tmp_path / "lobster-workspace" / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / "context-injection.log"
@@ -390,8 +395,12 @@ class TestInjectedFilesList:
         )
 
         line = log_path.read_text().strip()
-        assert "sys.dispatcher.bootup.md" in line, (
-            f"Expected 'sys.dispatcher.bootup.md' in injected list, got: {line!r}"
+        assert "sys.dispatcher.bootup.md" not in line, (
+            f"sys.dispatcher.bootup.md must NOT appear in injected list after Fix C (#1994), got: {line!r}"
+        )
+        # Log must still record role=dispatcher and a valid injected list.
+        assert "role=dispatcher" in line, (
+            f"Expected 'role=dispatcher' in log line, got: {line!r}"
         )
 
     def test_injected_is_empty_list_when_no_files_injected(self, tmp_path, capsys):
@@ -528,7 +537,12 @@ class TestStdoutUnchanged:
     """Adding a log line must not alter stdout output (bootup content unchanged)."""
 
     def test_dispatcher_stdout_unchanged_by_logging(self, tmp_path, capsys):
-        """Adding log does not change what the dispatcher session sees in stdout."""
+        """Adding a log line must not pollute dispatcher stdout with log metadata.
+
+        After issue #1994 (Fix C), sys.dispatcher.bootup.md is NOT injected.
+        The dispatcher still receives the startup-cause banner. Log metadata
+        (injected=, session=) must never appear in stdout.
+        """
         log_dir = tmp_path / "lobster-workspace" / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / "context-injection.log"
@@ -543,7 +557,15 @@ class TestStdoutUnchanged:
         )
 
         captured = capsys.readouterr()
-        assert "DISPATCHER BOOTUP" in captured.out
+        # Dispatcher bootup body is NOT injected after Fix C (#1994).
+        assert "DISPATCHER BOOTUP" not in captured.out, (
+            "sys.dispatcher.bootup.md body must NOT appear in dispatcher stdout after Fix C"
+        )
+        # startup-cause banner IS still injected (it fits in the 2KB preview).
+        assert "startup-cause:" in captured.out, (
+            "startup-cause banner must still appear in dispatcher stdout"
+        )
+        # Log metadata must never leak into stdout.
         assert "context-injection.log" not in captured.out
         assert "injected=" not in captured.out
         assert "session=" not in captured.out
