@@ -573,29 +573,25 @@ HOOKEOF
         info "inject-bootup-context hook already configured (all sessions)"
     fi
 
-    # Set compact flag on context compaction (on-compact)
+    # Set up on-compact.py hook with matcher="" (fires on all SessionStart events).
+    # Uses matcher="" instead of matcher="compact" because matcher="compact" is unreliable
+    # in CC 2.1.119 (~37% fire rate observed since April 17 — see issue #1947).
+    # The script has an internal self-gate (_is_compact_event()) that skips non-compact
+    # events, so matcher="" is safe.
+    # Note: a compact-matcher inject-bootup-context entry is NOT added here.
+    # The empty-matcher inject-bootup-context entry above already fires on all
+    # SessionStart events including compact, so a second compact-specific entry would
+    # cause double-injection on every session type.
     chmod +x "$INSTALL_DIR/hooks/on-compact.py" 2>/dev/null || true
-    if ! jq -e '.hooks.SessionStart[]? | select(.matcher == "compact")' "$_settings" > /dev/null 2>&1; then
+    if ! jq -e '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("on-compact")) | select(.matcher == "")' "$_settings" > /dev/null 2>&1; then
         _tmp=$(mktemp)
         jq '.hooks.SessionStart = (.hooks.SessionStart // []) + [{
-            "matcher": "compact",
+            "matcher": "",
             "hooks": [{"type": "command", "command": "python3 '"$INSTALL_DIR"'/hooks/on-compact.py", "timeout": 30}]
         }]' "$_settings" > "$_tmp" && mv "$_tmp" "$_settings"
-        success "on-compact hook installed"
+        success "on-compact hook installed (matcher='' for reliability)"
     else
-        info "on-compact hook already configured"
-    fi
-
-    # Re-inject bootup context after compaction
-    if ! jq -e '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("inject-bootup-context")) | select(.matcher == "compact")' "$_settings" > /dev/null 2>&1; then
-        _tmp=$(mktemp)
-        jq '.hooks.SessionStart = (.hooks.SessionStart // []) + [{
-            "matcher": "compact",
-            "hooks": [{"type": "command", "command": "python3 '"$INSTALL_DIR"'/hooks/inject-bootup-context.py", "timeout": 10}]
-        }]' "$_settings" > "$_tmp" && mv "$_tmp" "$_settings"
-        success "inject-bootup-context hook installed (compact sessions)"
-    else
-        info "inject-bootup-context hook already configured (compact sessions)"
+        info "on-compact hook already configured (all sessions, self-gating)"
     fi
 
     # Inject sys.debug.bootup.md when LOBSTER_DEBUG=true
