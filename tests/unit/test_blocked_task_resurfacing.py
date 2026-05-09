@@ -296,3 +296,82 @@ class TestGetTaskBlockedStatus:
         text = _text(result)
         assert "blocked" in text.lower()
         assert BLOCKED_TASK_SUBJECT in text
+
+
+# ---------------------------------------------------------------------------
+# list_tasks fallback "Other" group for unrecognized statuses
+# ---------------------------------------------------------------------------
+
+class TestListTasksOtherGroup:
+    """Tasks with unrecognized statuses must appear in an 'Other' section,
+    not be silently dropped from the list_tasks display.
+
+    This covers legacy 'done' status and any future unknown values that may
+    exist in production task stores from old data.
+    """
+
+    def _call(self, args, tasks_file):
+        with patch("inbox_server.TASKS_FILE", tasks_file):
+            from inbox_server import handle_list_tasks
+            return _run(handle_list_tasks(args))
+
+    def _seed_with_legacy_status(self, tasks_file: Path) -> None:
+        """Write a task file containing a task with legacy 'done' status."""
+        tasks = {
+            "tasks": [
+                {
+                    "id": 1,
+                    "subject": "Normal pending task",
+                    "description": "",
+                    "status": "pending",
+                    "created_at": "2026-05-09T10:00:00Z",
+                    "updated_at": "2026-05-09T10:00:00Z",
+                },
+                {
+                    "id": 2,
+                    "subject": "Old legacy done task",
+                    "description": "",
+                    "status": "done",
+                    "created_at": "2026-05-09T09:00:00Z",
+                    "updated_at": "2026-05-09T09:00:00Z",
+                },
+            ],
+            "next_id": 3,
+        }
+        tasks_file.write_text(json.dumps(tasks))
+
+    def test_legacy_done_task_appears_in_other_section(self, tmp_path):
+        """A task with status='done' (not in VALID_TASK_STATUSES) must appear in
+        the 'Other' section of list_tasks output rather than being silently dropped."""
+        tasks_file = tmp_path / "tasks.json"
+        self._seed_with_legacy_status(tasks_file)
+        result = self._call({}, tasks_file)
+        text = _text(result)
+        assert "Old legacy done task" in text, (
+            "Task with unrecognized status 'done' was silently dropped from list_tasks output"
+        )
+        assert "Other" in text, (
+            "Expected an 'Other' fallback section for unrecognized statuses, but none was found"
+        )
+        assert "[done]" in text, (
+            "The unrecognized status label should appear next to the task subject"
+        )
+
+    def test_legacy_task_does_not_affect_total_count(self, tmp_path):
+        """The total task count must include legacy-status tasks."""
+        tasks_file = tmp_path / "tasks.json"
+        self._seed_with_legacy_status(tasks_file)
+        result = self._call({}, tasks_file)
+        text = _text(result)
+        assert "2 task(s)" in text, (
+            "Total count must include tasks with unrecognized statuses"
+        )
+
+    def test_known_statuses_still_appear_normally(self, tmp_path):
+        """Adding an 'Other' section must not interfere with normal status groups."""
+        tasks_file = tmp_path / "tasks.json"
+        self._seed_with_legacy_status(tasks_file)
+        result = self._call({}, tasks_file)
+        text = _text(result)
+        assert "Normal pending task" in text
+        assert "Pending" in text
