@@ -141,6 +141,8 @@ def write_prompt_file(prompts_dir: Path, task_id: str, prompt: str) -> Path:
 
     Raises OSError on write failure.
     """
+    if "/" in task_id or task_id.startswith("."):
+        raise ValueError(f"task_id contains path traversal characters: {task_id!r}")
     prompts_dir.mkdir(parents=True, exist_ok=True)
     prompt_file = prompts_dir / f"{task_id}.txt"
 
@@ -214,9 +216,16 @@ def main() -> int:
     prompt: str = payload.get("prompt", "")
 
     # 3. Write the prompt to a dedicated file (best-effort — JSONL still appended on failure).
+    #    ValueError (e.g. path traversal) is fatal and causes immediate exit.
     prompt_file_path = INFLIGHT_PROMPTS_DIR / f"{task_id}.txt"
     try:
         prompt_file_path = write_prompt_file(INFLIGHT_PROMPTS_DIR, task_id, prompt)
+    except ValueError as exc:
+        print(
+            f"[save-inflight-prompt] fatal: {exc}",
+            file=sys.stderr,
+        )
+        return 1
     except Exception as exc:  # noqa: BLE001
         print(
             f"[save-inflight-prompt] warning: failed to write prompt file for {task_id!r}: {exc}",
