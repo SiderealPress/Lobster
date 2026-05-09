@@ -404,26 +404,20 @@ def _is_dispatcher_compact(data: dict) -> bool:
     2. Exact session ID match: compare hook_input['session_id'] against the stored
        dispatcher session ID in DISPATCHER_SESSION_FILE
        (~/messages/config/dispatcher-session-id).  This file is written by
-       inject-bootup-context.py at dispatcher startup (startup flag detected), and
-       updated by this function when a post-compact dispatcher is confirmed.
+       on-compact.py on the first confirmed dispatcher compaction (tier 3 path) and
+       updated on each subsequent compaction.
        Exact match → this IS the dispatcher session.
 
-    3. Post-compact fallback (session ID mismatch + explicit compact signal):
-       CC assigns a NEW session_id after compaction, so the post-compact dispatcher's
-       session ID differs from the stored pre-compact ID.  When the stored session ID
-       file exists but the IDs don't match, we only fall through to LOBSTER_MAIN_SESSION=1
-       if the hook payload contains an explicit compact signal (source='compact' or
-       hook_name='compact').  This distinguishes a real dispatcher compaction (which
-       always has the explicit compact signal) from a catchup subagent (which is NOT a
-       compact event itself — it reaches this code only via the heartbeat fallback in
-       _is_compact_event(), which fires without any source/hook_name field).
-
-       After confirming via this path, update the stored session ID to the new post-
-       compact session ID so that catchup subagents spawned later won't match.
-
-    4. Backward compat (no stored session ID file): if the file doesn't exist yet
-       (fresh install or pre-fix system), fall back to LOBSTER_MAIN_SESSION=1 alone.
-       This preserves the prior behavior for the first run.
+    3. LOBSTER_MAIN_SESSION fallback: handles two sub-cases that share the same
+       LOBSTER_MAIN_SESSION=1 check.  When the stored session ID file exists but the
+       IDs don't match, we only reach this tier if the hook payload contains an
+       explicit compact signal (source='compact' or hook_name='compact') — this
+       distinguishes a real post-compact dispatcher (which always carries the signal)
+       from a catchup subagent (a plain SessionStart with no source/hook_name field).
+       If the stored file is absent (fresh install or pre-fix system), we fall through
+       directly and use LOBSTER_MAIN_SESSION=1 as a backward-compatible guard.
+       On confirmation, update the stored session ID to the new post-compact ID so
+       that catchup subagents spawned later won't match.
 
     Fix for issue #2046: the previous logic used LOBSTER_MAIN_SESSION=1 as an
     unconditional fallback. Catchup subagents inherit LOBSTER_MAIN_SESSION=1 from the
@@ -460,10 +454,11 @@ def _is_dispatcher_compact(data: dict) -> bool:
             return False
 
         # Tier 3: explicit compact signal but new session ID (post-compact dispatcher).
-        # Fall through to LOBSTER_MAIN_SESSION check below.
+        # Fall through to LOBSTER_MAIN_SESSION check below (tier 3 path).
 
-    # Tier 4 (backward compat): no stored session ID file, or post-compact path.
-    # Use LOBSTER_MAIN_SESSION=1 as the discriminator.
+    # Tier 3 (LOBSTER_MAIN_SESSION fallback): post-compact path OR no stored session
+    # ID file (backward compat for fresh install / pre-fix system).
+    # Use LOBSTER_MAIN_SESSION=1 as the final backward-compatible guard.
     if os.environ.get("LOBSTER_MAIN_SESSION", "") != "1":
         return False
 
