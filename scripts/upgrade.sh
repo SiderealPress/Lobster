@@ -107,7 +107,7 @@ Options:
 
 What it does:
   1. Backs up config, env files, tasks, and scheduled jobs
-  2. Pulls latest code from main branch
+  2. Pulls latest code from local-dev branch
   3. Updates Python dependencies in the venv
   4. Creates any new directories the updated code expects
   5. Optionally installs Syncthing for LobsterDrop file sharing
@@ -307,7 +307,7 @@ git_pull() {
         return $?
     fi
 
-    step "Pulling latest code from main"
+    step "Pulling latest code from local-dev"
 
     cd "$LOBSTER_DIR"
 
