@@ -96,6 +96,18 @@ import session_role  # noqa: E402 — path insert must precede this
 
 AGENT_MONITOR = Path(os.path.expanduser("~/lobster/scripts/agent-monitor.py"))
 
+# context-handoff.json is a single-use artifact written by the Stop hook and
+# the graceful wind-down path. The dispatcher reads it during startup step 2c
+# and is instructed to delete it — but LLM deletion is unreliable. This hook
+# enforces the single-use guarantee by clearing the file on every fresh
+# dispatcher start, before the dispatcher's first turn. Issue #1995.
+CONTEXT_HANDOFF_FILE = Path(
+    os.environ.get(
+        "LOBSTER_CONTEXT_HANDOFF_FILE_OVERRIDE",
+        os.path.expanduser("~/lobster-workspace/data/context-handoff.json"),
+    )
+)
+
 # on-compact.py writes last_compaction_ts to this file on every compaction.
 COMPACTION_STATE_FILE = Path(
     os.environ.get(
@@ -425,6 +437,49 @@ def _schedule_reflection_prompt(trigger: str) -> None:
         )
 
 
+def _clear_context_handoff() -> None:
+    """Overwrite context-handoff.json with {} immediately after a fresh dispatcher start.
+
+    context-handoff.json is a single-use artifact: it carries state across
+    exactly one restart and is then obsolete. The dispatcher startup protocol
+    (step 2c) instructs the LLM to delete the file after reading it, but
+    LLM-side deletion is unreliable — the LLM may skip the step or the
+    session may end before the instruction is reached.
+
+    This function enforces the single-use guarantee at the code level by
+    overwriting the file with {} on every fresh dispatcher start, unconditionally.
+    Because this hook fires before the dispatcher's first turn, the dispatcher
+    can still read the file during step 2c; after the file is overwritten on the
+    NEXT restart, the stale data is gone.
+
+    Why overwrite with {} rather than delete:
+    - {} is a valid JSON object, so readers that parse the file won't crash.
+    - Presence of the file with {} signals "consumed" rather than "missing",
+      which is more informative for debugging than a missing file.
+    - If the dispatcher reads the file between hook runs, {} parses cleanly and
+      the triggered_at field will be absent → treated as "no prior context".
+
+    Silent on all errors — must never crash the hook or block dispatcher start.
+    """
+    if not CONTEXT_HANDOFF_FILE.exists():
+        # Nothing to clear — no prior context file was written.
+        return
+
+    try:
+        tmp_path = CONTEXT_HANDOFF_FILE.with_suffix(".json.tmp")
+        tmp_path.write_text("{}\n")
+        tmp_path.replace(CONTEXT_HANDOFF_FILE)
+        print(
+            f"[on-fresh-start] cleared stale context-handoff.json: {CONTEXT_HANDOFF_FILE}",
+            file=sys.stderr,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"[on-fresh-start] failed to clear context-handoff.json: {exc}",
+            file=sys.stderr,
+        )
+
+
 def _mark_all_running_failed() -> None:
     """Run agent-monitor.py --mark-failed via uv.
 
@@ -487,6 +542,13 @@ def main() -> None:
     # Skip subagent sessions — only the dispatcher should run this.
     if not session_role.is_dispatcher(data):
         sys.exit(0)
+
+    # Clear context-handoff.json so stale entries from prior sessions do not
+    # surface on subsequent restarts. The dispatcher reads this file during
+    # startup step 2c; clearing it here (before the dispatcher's first turn)
+    # ensures the NEXT restart sees an empty file rather than stale data.
+    # Issue #1995.
+    _clear_context_handoff()
 
     if not AGENT_MONITOR.exists():
         print(
