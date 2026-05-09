@@ -17,7 +17,7 @@ import sys
 import time
 from pathlib import Path
 from threading import Event
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
