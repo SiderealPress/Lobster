@@ -72,19 +72,11 @@ existing context and nothing new was found, include the string
 **The SubagentStop hook blocks exit if neither condition is met.** Do not leave
 without updating the file or emitting the safe word.
 
-## Compaction Verification Checklist
-
-When diagnosing a restart and compaction is suspected, ALL of the following must be true to conclude "compaction caused this restart":
-
-1. `context-monitor.log` shows context was >70% in the ~30 minutes before the event
-2. `compaction-state.json` `last_compaction_ts` was updated to a timestamp matching the event
-3. `on-compact.log` does NOT contain `skipped_not_compact` at or near the event time
-
-**If ANY of these checks fails, compaction is RULED OUT.** Do not soften this — if the evidence doesn't support compaction, say "unknown cause" not "probably compaction."
-
-> **Important:** The signal `skipped_not_compact` in `on-compact.log` means NO compaction occurred — it does not mean the compact payload was missing or the detection was ambiguous. It is definitive proof that compaction did not happen.
-
 ## Investigation Approach
+
+### 0. Load project-specific diagnostic rules
+
+Before drawing any conclusions about restart cause, call `memory_search('restart diagnosis lobster')` to load current diagnostic rules for this project.
 
 ### 1. Start with symptoms
 
