@@ -1,10 +1,6 @@
 #!/usr/bin/env python3
 # DEPRECATED: This hook was deregistered by migration 90 (PR #1988).
 # If this fires, it means settings.json was corrupted or a migration re-registered it.
-import datetime as _dt, pathlib as _pl
-_pl.Path("/tmp/pretooluse-heartbeat-deprecated-fired.log").write_text(
-    f"FIRED at {_dt.datetime.utcnow().isoformat()}Z\n", encoding="utf-8"
-)
 
 """
 DEPRECATED — do not register or use this hook.
@@ -51,6 +47,16 @@ def log_unexpected_firing() -> None:
     }
     with open(LOG_FILE, "a") as f:
         f.write(json.dumps(entry) + "\n")
+    # Secondary /tmp marker for quick observability.  Wrapped in its own
+    # try/except so a read-only or missing /tmp cannot propagate an exception
+    # out of this function — tool execution must never be blocked.
+    try:
+        Path("/tmp/pretooluse-heartbeat-deprecated-fired.log").write_text(
+            f"FIRED at {datetime.now(timezone.utc).isoformat()}Z\n",
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
 
 
 def main() -> None:
