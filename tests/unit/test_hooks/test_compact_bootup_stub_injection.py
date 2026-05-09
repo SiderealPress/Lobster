@@ -19,7 +19,6 @@ Behaviors tested:
   - On restart start: full dispatcher bootup is injected, compact stub is not
   - On restart start: user config files are injected as usual
   - When compact stub file is absent: falls back to full bootup (graceful degradation)
-  - Log entry records "compact-stub" or "compact" mode for compaction starts
 """
 
 from __future__ import annotations
@@ -76,12 +75,6 @@ class _PatchEnv:
                 os.environ[k] = saved_v
 
 
-def _fresh_compaction_ts() -> str:
-    """Return a UTC ISO timestamp 1 second old — well within the compaction window."""
-    ts = datetime.now(timezone.utc) - timedelta(seconds=1)
-    return ts.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
 def _make_bootup_files(claude_dir: Path) -> tuple[Path, Path, Path]:
     """Write dispatcher, subagent, and compact stub bootup files."""
     claude_dir.mkdir(parents=True, exist_ok=True)
@@ -110,6 +103,7 @@ def _load_and_run_hook(
     dispatcher_bootup: Path,
     compact_stub: Path | None,
     cause_file: Path,
+    subagent_bootup: Path | None = None,
     user_base_bootup: Path | None = None,
     user_dispatcher_bootup: Path | None = None,
     session_id: str = "test-session-uuid",
@@ -139,7 +133,7 @@ def _load_and_run_hook(
     # Override module-level paths.
     mod.STARTUP_FLAG_FILE = flag_path
     mod.DISPATCHER_BOOTUP = dispatcher_bootup
-    mod.SUBAGENT_BOOTUP = tmp_path / "no-subagent"  # not relevant for dispatcher tests
+    mod.SUBAGENT_BOOTUP = subagent_bootup if subagent_bootup is not None else tmp_path / "no-subagent"
     mod.STARTUP_CAUSE_FILE = cause_file
 
     if compact_stub is not None:
@@ -496,47 +490,17 @@ class TestSubagentPathUnchanged:
         cause_file = workspace / "data" / "last-startup-cause.json"
         _write_startup_cause(cause_file, "compaction", age_seconds=1)
 
-        import uuid as _uuid
-        env = {
-            "HOME": str(tmp_path),
-            "LOBSTER_WORKSPACE": str(workspace),
-            "LOBSTER_STARTUP_CAUSE_FILE_OVERRIDE": str(cause_file),
-        }
-        unique_name = f"inject_compact_sub_{_uuid.uuid4().hex}"
-        with _PatchEnv(env):
-            spec = importlib.util.spec_from_file_location(unique_name, _HOOK_PATH)
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
+        stdout, _ = _load_and_run_hook(
+            tmp_path=tmp_path,
+            workspace=workspace,
+            startup_flag_pid=None,  # No startup flag → subagent session.
+            dispatcher_bootup=dispatcher_bootup,
+            compact_stub=compact_stub,
+            cause_file=cause_file,
+            subagent_bootup=subagent_bootup,
+            session_id="subagent-uuid",
+        )
 
-        # No startup flag (subagent session).
-        flag_path = workspace / "data" / "dispatcher-startup-flag"
-        flag_path.unlink(missing_ok=True)
-
-        mod.STARTUP_FLAG_FILE = flag_path
-        mod.DISPATCHER_BOOTUP = dispatcher_bootup
-        mod.SUBAGENT_BOOTUP = subagent_bootup
-        mod.COMPACT_DISPATCHER_BOOTUP = compact_stub
-        mod.STARTUP_CAUSE_FILE = cause_file
-        mod.USER_BASE_BOOTUP = tmp_path / "no-user-base"
-        mod.USER_DISPATCHER_BOOTUP = tmp_path / "no-user-dispatcher"
-        mod.USER_SUBAGENT_BOOTUP = tmp_path / "no-user-subagent"
-        mod.CONTEXT_INJECTION_LOG = workspace / "logs" / "context-injection.log"
-
-        hook_input = json.dumps({"session_id": "subagent-uuid"})
-        import io as _io
-        stdout_buf = _io.StringIO()
-        stderr_buf = _io.StringIO()
-
-        from unittest.mock import patch as _patch
-        with _patch("sys.stdin", _io.StringIO(hook_input)):
-            with _patch("sys.stdout", stdout_buf):
-                with _patch("sys.stderr", stderr_buf):
-                    try:
-                        mod.main()
-                    except SystemExit:
-                        pass
-
-        stdout = stdout_buf.getvalue()
         assert "SUBAGENT BOOTUP" in stdout, (
             "Subagent bootup must be injected for non-dispatcher sessions regardless of cause"
         )
