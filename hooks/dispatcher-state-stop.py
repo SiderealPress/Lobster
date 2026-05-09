@@ -61,8 +61,7 @@ subagent SessionStop payloads. The dispatcher session never carries agent_id.
   - agent_id present and non-empty → subagent → exit 0 immediately (no I/O).
   - agent_id absent or empty → dispatcher → proceed.
 
-This is the same approach used by thinking-heartbeat.py (PR #2007 / issue #1897).
-It eliminates the previous is_dispatcher_session() call, which added ~10ms of
+This eliminates the previous is_dispatcher_session() call, which added ~10ms of
 subprocess calls (process-tree walk) on every session stop.
 
 Why NOT is_dispatcher() or is_dispatcher_session:
