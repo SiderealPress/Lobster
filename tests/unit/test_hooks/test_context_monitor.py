@@ -1,29 +1,26 @@
 """
-Unit tests for hooks/context-monitor.py (issue #1790).
+Unit tests for hooks/context-monitor.py (issue #2056: remove wind-down mode).
 
-Root cause: The hook called data.get('context_window') on the PostToolUse payload,
-which Claude Code never populates for PostToolUse events. The hook was a no-op in
-every session.
-
-Fix: Read actual token usage from the transcript JSONL file (at transcript_path in
-the payload). The last assistant turn's usage block gives input + cache counts, which
-are divided by the model's known max context to produce used_pct.
+The context monitor reports token counts to a log. It does NOT trigger wind-down
+mode, does NOT write context_warning inbox messages, and does NOT call any state
+machine transitions. CC handles compaction on its own; no Lobster-side preparation
+is needed.
 
 Behaviors verified:
 1. Transcript present with usage → correct percentage computed from token counts.
 2. transcript_path absent → WARN logged, no crash.
 3. Last assistant turn is selected when multiple turns exist.
 4. Model lookup table: Sonnet 4.6 = 200k (CC default), Haiku 4.5 = 200k, unknown = 200k.
-5. At or above WARNING_THRESHOLD → context_warning written to inbox (once per session).
-6. Dedup flag suppresses second warning.
+5. Token usage is always logged (no threshold suppression).
+6. At ANY usage level, no context_warning is written to inbox.
 7. _handle_payload() accepts injectable log_dir and inbox_dir.
+8. Wind-down artifacts (WARNING_THRESHOLD, DEDUP_FLAG, _write_winding_down, etc.) are absent.
 """
 
 import importlib.util
 import json
 import sys
 from pathlib import Path
-from datetime import datetime, timezone
 
 import pytest
 
@@ -32,7 +29,6 @@ _HOOK_PATH = _HOOKS_DIR / "context-monitor.py"
 
 # Named constants matching the spec — these are protocol-level values.
 WARN_PREFIX_ABSENT_CONTEXT = "[WARN] transcript usage unavailable"
-WARNING_THRESHOLD = 70.0
 # claude-sonnet-4-6 supports up to 1M tokens but CC's default window is 200k.
 # Update when we can detect which mode is active.
 SONNET_4_6_MAX_CONTEXT = 200_000
@@ -99,10 +95,11 @@ class TestTranscriptUsageReading:
         ])
         result = mod._read_transcript_usage(str(transcript))
         assert result is not None, "Expected usage data from transcript"
-        used_pct, remaining_pct, model = result
+        used_pct, remaining_pct, model, total_tokens = result
         assert abs(used_pct - 50.0) < 0.01, f"Expected 50% used, got {used_pct}"
         assert abs(remaining_pct - 50.0) < 0.01
         assert model == "claude-sonnet-4-6"
+        assert total_tokens == 100_000, f"Expected 100_000 raw tokens, got {total_tokens}"
 
     def test_last_turn_wins_when_multiple_turns_exist(self, tmp_path):
         """When multiple assistant turns exist, the last one's usage is returned."""
@@ -127,10 +124,11 @@ class TestTranscriptUsageReading:
         ])
         result = mod._read_transcript_usage(str(transcript))
         assert result is not None
-        used_pct, _, _ = result
+        used_pct, _, _, total_tokens = result
         assert abs(used_pct - 80.0) < 0.01, (
             f"Expected 80% from last turn, got {used_pct}"
         )
+        assert total_tokens == 160_000, f"Expected 160_000 raw tokens from last turn, got {total_tokens}"
 
     def test_returns_none_when_transcript_path_is_none(self, tmp_path):
         """No transcript_path → returns None (caller logs WARN)."""
@@ -173,9 +171,10 @@ class TestTranscriptUsageReading:
         ])
         result = mod._read_transcript_usage(str(transcript))
         assert result is not None
-        used_pct, _, model = result
+        used_pct, _, model, total_tokens = result
         assert abs(used_pct - 100.0) < 0.01, f"Expected 100%, got {used_pct}"
         assert model == "claude-haiku-4-5"
+        assert total_tokens == 200_000, f"Expected 200_000 raw tokens, got {total_tokens}"
 
 
 class TestModelContextLookup:
@@ -212,11 +211,11 @@ class TestModelContextLookup:
         assert mod._model_max_context("") == DEFAULT_MAX_CONTEXT
 
 
-class TestHandlePayloadTranscriptPath:
-    """_handle_payload() uses transcript_path to read usage from the JSONL."""
+class TestHandlePayloadLogging:
+    """_handle_payload() logs token usage but never writes context_warning inbox messages."""
 
-    def test_logs_usage_from_transcript_below_threshold(self, tmp_path):
-        """Transcript present, below 70% → usage entry logged with source=transcript_jsonl."""
+    def test_logs_usage_from_transcript_at_any_level(self, tmp_path):
+        """Transcript present at 30% → usage entry logged with source=transcript_jsonl."""
         mod = _load_hook()
         log_dir = tmp_path / "lobster-workspace" / "logs"
         log_dir.mkdir(parents=True)
@@ -245,77 +244,72 @@ class TestHandlePayloadTranscriptPath:
         assert entry.get("source") == "transcript_jsonl"
         assert not entry.get("transcript_unavailable", False)
 
-    def test_writes_inbox_warning_at_threshold(self, tmp_path):
-        """Transcript usage at or above WARNING_THRESHOLD → inbox warning written."""
+    def test_logs_usage_above_former_threshold(self, tmp_path):
+        """Transcript usage above 70% (old threshold) → usage logged, NO inbox message."""
         mod = _load_hook()
         log_dir = tmp_path / "lobster-workspace" / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         inbox_dir = tmp_path / "messages" / "inbox"
         inbox_dir.mkdir(parents=True, exist_ok=True)
-        dedup_flag = tmp_path / "lobster-context-warning-sent"
 
-        original_dedup = mod.DEDUP_FLAG
-        mod.DEDUP_FLAG = dedup_flag
-        try:
-            # 160k / 200k (CC default) = 80% → above 70% threshold
-            transcript = _make_transcript(tmp_path, [
-                {
-                    "model": "claude-sonnet-4-6",
-                    "usage": {
-                        "input_tokens": 160_000,
-                        "cache_creation_input_tokens": 0,
-                        "cache_read_input_tokens": 0,
-                    },
-                }
-            ])
-            payload = {
-                "tool_name": "mcp__lobster-inbox__wait_for_messages",
-                "transcript_path": str(transcript),
+        # 160k / 200k = 80% — formerly above the wind-down threshold
+        transcript = _make_transcript(tmp_path, [
+            {
+                "model": "claude-sonnet-4-6",
+                "usage": {
+                    "input_tokens": 160_000,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                },
             }
-            mod._handle_payload(payload, log_dir=log_dir, inbox_dir=inbox_dir)
-        finally:
-            mod.DEDUP_FLAG = original_dedup
+        ])
+        payload = {
+            "tool_name": "mcp__lobster-inbox__wait_for_messages",
+            "transcript_path": str(transcript),
+        }
+        mod._handle_payload(payload, log_dir=log_dir, inbox_dir=inbox_dir)
 
-        inbox_files = list(inbox_dir.glob("context-warning-*.json"))
-        assert len(inbox_files) == 1
-        msg = json.loads(inbox_files[0].read_text())
-        assert msg["type"] == "context_warning"
-        assert msg["used_percentage"] > WARNING_THRESHOLD
+        # Token usage must still be logged
+        entries = _read_log(log_dir)
+        assert len(entries) == 1, f"Expected 1 log entry, got {len(entries)}"
+        assert abs(entries[0]["used_percentage"] - 80.0) < 0.01
 
-    def test_dedup_suppresses_second_warning(self, tmp_path):
-        """Dedup flag present → second warning is not written."""
+        # Inbox must be completely empty — no context_warning ever
+        inbox_files = list(inbox_dir.glob("*.json"))
+        assert len(inbox_files) == 0, (
+            f"context_warning must never be written to inbox (wind-down mode removed), "
+            f"but found: {inbox_files}"
+        )
+
+    def test_no_inbox_message_at_full_context(self, tmp_path):
+        """Even at 100% context usage, no context_warning is written to inbox."""
         mod = _load_hook()
         log_dir = tmp_path / "lobster-workspace" / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         inbox_dir = tmp_path / "messages" / "inbox"
         inbox_dir.mkdir(parents=True, exist_ok=True)
-        dedup_flag = tmp_path / "lobster-context-warning-sent"
-        dedup_flag.touch()  # Already flagged
 
-        original_dedup = mod.DEDUP_FLAG
-        mod.DEDUP_FLAG = dedup_flag
-        try:
-            # 180k / 200k (CC default) = 90% → above 70% threshold
-            transcript = _make_transcript(tmp_path, [
-                {
-                    "model": "claude-sonnet-4-6",
-                    "usage": {
-                        "input_tokens": 180_000,
-                        "cache_creation_input_tokens": 0,
-                        "cache_read_input_tokens": 0,
-                    },
-                }
-            ])
-            payload = {
-                "tool_name": "Bash",
-                "transcript_path": str(transcript),
+        # 200k / 200k = 100% — maximum possible context usage
+        transcript = _make_transcript(tmp_path, [
+            {
+                "model": "claude-sonnet-4-6",
+                "usage": {
+                    "input_tokens": 200_000,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                },
             }
-            mod._handle_payload(payload, log_dir=log_dir, inbox_dir=inbox_dir)
-        finally:
-            mod.DEDUP_FLAG = original_dedup
+        ])
+        payload = {
+            "tool_name": "Bash",
+            "transcript_path": str(transcript),
+        }
+        mod._handle_payload(payload, log_dir=log_dir, inbox_dir=inbox_dir)
 
-        inbox_files = list(inbox_dir.glob("context-warning-*.json"))
-        assert len(inbox_files) == 0, "Dedup flag should suppress second warning"
+        inbox_files = list(inbox_dir.glob("*.json"))
+        assert len(inbox_files) == 0, (
+            f"Inbox must remain empty regardless of context level, but found: {inbox_files}"
+        )
 
     def test_logs_warn_when_transcript_path_absent(self, tmp_path):
         """Payload with no transcript_path → WARN written to log, no crash."""
@@ -336,7 +330,7 @@ class TestHandlePayloadTranscriptPath:
         assert entry.get("tool") == "mcp__lobster-inbox__wait_for_messages"
 
     def test_no_inbox_message_when_transcript_absent(self, tmp_path):
-        """Missing transcript_path must never trigger a context_warning inbox message."""
+        """Missing transcript_path must never trigger any inbox message."""
         mod = _load_hook()
         inbox_dir = tmp_path / "messages" / "inbox"
         inbox_dir.mkdir(parents=True, exist_ok=True)
@@ -348,8 +342,51 @@ class TestHandlePayloadTranscriptPath:
 
         inbox_files = list(inbox_dir.glob("*.json"))
         assert len(inbox_files) == 0, (
-            f"No inbox message should be written when transcript absent, "
-            f"but found: {inbox_files}"
+            f"No inbox message should ever be written, but found: {inbox_files}"
+        )
+
+
+class TestWindDownRemoved:
+    """Wind-down mode artifacts are completely absent from the hook (issue #2056).
+
+    These tests verify that the hook no longer contains the wind-down triggering
+    mechanism: no WARNING_THRESHOLD, no DEDUP_FLAG, no _write_winding_down(),
+    no state machine imports.
+    """
+
+    def test_no_warning_threshold_constant(self):
+        """Hook must not export WARNING_THRESHOLD (removed with wind-down mode)."""
+        mod = _load_hook()
+        assert not hasattr(mod, "WARNING_THRESHOLD"), (
+            "WARNING_THRESHOLD constant must be removed — wind-down mode is gone"
+        )
+
+    def test_no_dedup_flag_constant(self):
+        """Hook must not export DEDUP_FLAG (removed with wind-down mode)."""
+        mod = _load_hook()
+        assert not hasattr(mod, "DEDUP_FLAG"), (
+            "DEDUP_FLAG must be removed — wind-down dedup logic is gone"
+        )
+
+    def test_no_write_winding_down_function(self):
+        """Hook must not export _write_winding_down() (removed with wind-down mode)."""
+        mod = _load_hook()
+        assert not hasattr(mod, "_write_winding_down"), (
+            "_write_winding_down() must be removed — state machine transition is gone"
+        )
+
+    def test_no_build_warning_message_function(self):
+        """Hook must not export _build_warning_message() (removed with wind-down mode)."""
+        mod = _load_hook()
+        assert not hasattr(mod, "_build_warning_message"), (
+            "_build_warning_message() must be removed — inbox warning is gone"
+        )
+
+    def test_no_write_warning_to_inbox_function(self):
+        """Hook must not export _write_warning_to_inbox() (removed with wind-down mode)."""
+        mod = _load_hook()
+        assert not hasattr(mod, "_write_warning_to_inbox"), (
+            "_write_warning_to_inbox() must be removed — inbox warning is gone"
         )
 
 
@@ -373,134 +410,6 @@ class TestHandlePayloadSignature:
         assert "inbox_dir" in sig.parameters, (
             "_handle_payload() must accept inbox_dir= for testability"
         )
-
-
-class TestWindingDownStateTransition:
-    """_write_winding_down() writes WINDING_DOWN to dispatcher-state.json (issue #1918)."""
-
-    def test_winding_down_calls_write_state_on_threshold(self, tmp_path):
-        """When context_warning is triggered, write_state(WINDING_DOWN) is called.
-
-        Uses a mock state machine so the test doesn't depend on the real
-        state_machine module being on sys.path (it may not be on older branches).
-        """
-        mod = _load_hook()
-        log_dir = tmp_path / "logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        inbox_dir = tmp_path / "inbox"
-        inbox_dir.mkdir(parents=True, exist_ok=True)
-        dedup_flag = tmp_path / "context-warning-sent"
-
-        # Record calls to write_state via a mock state machine object
-        write_state_calls: list[dict] = []
-
-        class MockStateMachine:
-            WINDING_DOWN = "WINDING_DOWN"
-
-            @staticmethod
-            def write_state(state: str, session_id: str = "") -> None:
-                write_state_calls.append({"state": state, "session_id": session_id})
-
-        original_dedup = mod.DEDUP_FLAG
-        mod.DEDUP_FLAG = dedup_flag
-
-        # Inject mock directly — bypass the lazy import path
-        mod._STATE_MACHINE_LOADED = True
-        mod._state_machine = MockStateMachine
-
-        try:
-            # 160k / 200k (CC default) = 80% → triggers threshold
-            transcript = _make_transcript(tmp_path, [
-                {
-                    "model": "claude-sonnet-4-6",
-                    "usage": {
-                        "input_tokens": 160_000,
-                        "cache_creation_input_tokens": 0,
-                        "cache_read_input_tokens": 0,
-                    },
-                }
-            ])
-            payload = {
-                "tool_name": "Bash",
-                "transcript_path": str(transcript),
-                "session_id": "test-session-001",
-            }
-            mod._handle_payload(payload, log_dir=log_dir, inbox_dir=inbox_dir)
-        finally:
-            mod.DEDUP_FLAG = original_dedup
-            mod._STATE_MACHINE_LOADED = False
-            mod._state_machine = None
-
-        assert len(write_state_calls) == 1, (
-            f"Expected exactly one write_state call, got: {write_state_calls}"
-        )
-        assert write_state_calls[0]["state"] == "WINDING_DOWN", (
-            f"Expected WINDING_DOWN, got: {write_state_calls[0]['state']}"
-        )
-        assert write_state_calls[0]["session_id"] == "test-session-001"
-
-    def test_winding_down_not_called_below_threshold(self, tmp_path):
-        """write_state(WINDING_DOWN) must NOT be called when below threshold."""
-        mod = _load_hook()
-        log_dir = tmp_path / "logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        inbox_dir = tmp_path / "inbox"
-        inbox_dir.mkdir(parents=True, exist_ok=True)
-
-        write_state_calls: list[dict] = []
-
-        class MockStateMachine:
-            WINDING_DOWN = "WINDING_DOWN"
-
-            @staticmethod
-            def write_state(state: str, session_id: str = "") -> None:
-                write_state_calls.append({"state": state, "session_id": session_id})
-
-        mod._STATE_MACHINE_LOADED = True
-        mod._state_machine = MockStateMachine
-
-        try:
-            # 60k / 200k (CC default) = 30% → below 70% threshold
-            transcript = _make_transcript(tmp_path, [
-                {
-                    "model": "claude-sonnet-4-6",
-                    "usage": {
-                        "input_tokens": 60_000,
-                        "cache_creation_input_tokens": 0,
-                        "cache_read_input_tokens": 0,
-                    },
-                }
-            ])
-            payload = {"tool_name": "Bash", "transcript_path": str(transcript)}
-            mod._handle_payload(payload, log_dir=log_dir, inbox_dir=inbox_dir)
-        finally:
-            mod._STATE_MACHINE_LOADED = False
-            mod._state_machine = None
-
-        assert len(write_state_calls) == 0, (
-            f"write_state must not be called below threshold, got: {write_state_calls}"
-        )
-
-    def test_winding_down_silent_on_import_error(self, tmp_path):
-        """_write_winding_down() must never raise — it is a best-effort write."""
-        mod = _load_hook()
-        # Ensure lazy-load state is reset so the import path is exercised
-        mod._STATE_MACHINE_LOADED = False
-        mod._state_machine = None
-
-        # Restrict sys.path to a location with no state_machine module
-        import sys
-        original_path = sys.path[:]
-        sys.path = [str(tmp_path)]  # empty dir, no state_machine
-        try:
-            # Must not raise
-            mod._write_winding_down(session_id="test")
-        except Exception as exc:
-            pytest.fail(f"_write_winding_down() must be silent on error, but raised: {exc}")
-        finally:
-            sys.path = original_path
-            mod._STATE_MACHINE_LOADED = False
-            mod._state_machine = None
 
 
 # Named constants for the matcher pattern (issue #1985).
