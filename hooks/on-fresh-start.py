@@ -230,7 +230,8 @@ def _compact_inflight_entries(
             continue
 
         # Running entry with no matching done: check age.
-        ts_str = entry.get("ts")
+        # Prefer "ts" (legacy field) but fall back to "started_at" (current field).
+        ts_str = entry.get("ts") or entry.get("started_at")
         if not ts_str:
             # No timestamp → cannot determine age → treat as stale, drop.
             print(
@@ -306,6 +307,11 @@ def _compact_inflight_work() -> None:
         if dropped == 0 and malformed_count == 0:
             # Nothing to do — avoid touching the file unnecessarily.
             return
+
+        # Rewrite the file when there are dropped entries or malformed lines.
+        # Malformed lines are intentionally excluded from the rewrite: they cannot
+        # be parsed, so they carry no meaningful state — keeping them would
+        # silently corrupt the JSONL and trigger spurious errors on future reads.
 
         # Atomic rewrite: write to a temp file in the same directory, then rename.
         dir_ = str(INFLIGHT_WORK_FILE.parent)
