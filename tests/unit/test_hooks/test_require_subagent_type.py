@@ -9,7 +9,7 @@ Tests cover:
 - Agent with subagent_type='general-purpose' is hard-blocked (exit 2)
 - Block messages go to stderr, not stdout
 - Error messages enumerate all known agent types including 'review'
-- KNOWN_AGENT_TYPES constant matches the agent files in .claude/agents/
+- KNOWN_AGENT_TYPES spot-checks key types and aligns with .claude/agents/ files
 """
 
 import json
@@ -22,6 +22,7 @@ import pytest
 
 HOOKS_DIR = Path(__file__).parents[3] / "hooks"
 HOOK_PATH = HOOKS_DIR / "require-subagent-type.py"
+AGENTS_DIR = Path(__file__).parents[3] / ".claude" / "agents"
 
 
 # ---------------------------------------------------------------------------
@@ -59,6 +60,29 @@ def _make_hook_input(tool_name: str, tool_input: dict) -> dict:
     }
 
 
+def _load_known_agent_types() -> tuple:
+    """Load KNOWN_AGENT_TYPES from the hook module at import time."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("_require_subagent_type_loader", HOOK_PATH)
+    mod = importlib.util.module_from_spec(spec)
+    fake_stdin = json.dumps({"tool_name": "Bash", "tool_input": {}})
+    with (
+        patch("sys.stdin", StringIO(fake_stdin)),
+        patch("sys.stdout", StringIO()),
+        patch("sys.stderr", StringIO()),
+    ):
+        try:
+            spec.loader.exec_module(mod)
+        except SystemExit:
+            pass
+    return mod.KNOWN_AGENT_TYPES
+
+
+# Single source of truth: import from the hook rather than duplicating the list.
+KNOWN_AGENT_TYPES = _load_known_agent_types()
+
+
 # ---------------------------------------------------------------------------
 # Non-Agent tool passthrough
 # ---------------------------------------------------------------------------
@@ -92,22 +116,8 @@ class TestNonAgentTool:
 # ---------------------------------------------------------------------------
 
 
-VALID_AGENT_TYPES = [
-    "lobster-generalist",
-    "functional-engineer",
-    "review",
-    "lobster-ops",
-    "lobster-auditor",
-    "brain-dumps",
-    "compact-catchup",
-    "nightly-consolidation",
-    "session-note-appender",
-    "session-note-polish",
-]
-
-
 class TestValidSubagentTypes:
-    @pytest.mark.parametrize("agent_type", VALID_AGENT_TYPES)
+    @pytest.mark.parametrize("agent_type", KNOWN_AGENT_TYPES)
     def test_known_agent_type_exits_0(self, agent_type):
         """Every known agent type must be allowed through (exit 0 or natural return)."""
         hook_input = _make_hook_input(
@@ -247,42 +257,28 @@ class TestGeneralPurposeBlocked:
 class TestKnownAgentTypesConstant:
     def test_review_is_in_known_types(self):
         """KNOWN_AGENT_TYPES must include 'review' since dispatcher uses subagent_type='review'."""
-        # Load the hook module to inspect KNOWN_AGENT_TYPES
-        import importlib.util
-
-        spec = importlib.util.spec_from_file_location("require_subagent_type", HOOK_PATH)
-        mod = importlib.util.module_from_spec(spec)
-        fake_stdin = json.dumps({"tool_name": "Bash", "tool_input": {}})
-        with (
-            patch("sys.stdin", StringIO(fake_stdin)),
-            patch("sys.stdout", StringIO()),
-            patch("sys.stderr", StringIO()),
-        ):
-            try:
-                spec.loader.exec_module(mod)
-            except SystemExit:
-                pass
-
-        assert "review" in mod.KNOWN_AGENT_TYPES, (
+        assert "review" in KNOWN_AGENT_TYPES, (
             "KNOWN_AGENT_TYPES must include 'review' — dispatcher uses subagent_type='review' "
             "for engineer→reviewer routing."
         )
 
     def test_functional_engineer_is_in_known_types(self):
         """KNOWN_AGENT_TYPES must include 'functional-engineer'."""
-        import importlib.util
+        assert "functional-engineer" in KNOWN_AGENT_TYPES
 
-        spec = importlib.util.spec_from_file_location("require_subagent_type_fe", HOOK_PATH)
-        mod = importlib.util.module_from_spec(spec)
-        fake_stdin = json.dumps({"tool_name": "Bash", "tool_input": {}})
-        with (
-            patch("sys.stdin", StringIO(fake_stdin)),
-            patch("sys.stdout", StringIO()),
-            patch("sys.stderr", StringIO()),
-        ):
-            try:
-                spec.loader.exec_module(mod)
-            except SystemExit:
-                pass
+    def test_known_types_matches_agents_directory(self):
+        """KNOWN_AGENT_TYPES must contain exactly the agent types defined in .claude/agents/.
 
-        assert "functional-engineer" in mod.KNOWN_AGENT_TYPES
+        Each .md file in .claude/agents/ defines one agent type (filename without extension).
+        This test catches a new agent file being added without updating KNOWN_AGENT_TYPES,
+        or a stale entry left after an agent file is removed.
+        """
+        files_on_disk = {p.stem for p in AGENTS_DIR.glob("*.md")}
+        constant_set = set(KNOWN_AGENT_TYPES)
+        missing_from_constant = files_on_disk - constant_set
+        extra_in_constant = constant_set - files_on_disk
+        assert not missing_from_constant and not extra_in_constant, (
+            f"KNOWN_AGENT_TYPES is out of sync with .claude/agents/. "
+            f"Missing from constant: {sorted(missing_from_constant)}. "
+            f"Extra in constant (no matching file): {sorted(extra_in_constant)}."
+        )
