@@ -64,6 +64,11 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"
 ALLOWLIST_FILE="$REPO_ROOT/.githooks/security-allowlist.txt"
 ISSUES_FOUND=0
 
+# Temp file used to communicate SCAN_TIMED_OUT across the subshell boundary
+# created by DIFF_TEXT="$(get_push_diff)".
+TIMEOUT_FLAG_FILE=$(mktemp)
+trap 'rm -f "$TIMEOUT_FLAG_FILE"' EXIT
+
 # Wall-clock timeout for the scan_diff loop (seconds).
 # The loop is O(lines × patterns) with a subprocess per grep/awk call; on a
 # large diff (500+ added lines × 20+ patterns) this can run for several minutes
