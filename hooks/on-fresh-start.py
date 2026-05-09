@@ -107,6 +107,16 @@ COMPACTION_STATE_FILE = Path(
 INBOX_DIR = Path(os.path.expanduser("~/messages/inbox"))
 PROCESSING_DIR = Path(os.path.expanduser("~/messages/processing"))
 
+# Sidecar file for debug reflection prompts (Fix B, issue #1998).
+# Written here instead of the inbox to avoid mark_processing/mark_processed overhead.
+# The dispatcher reads this file at startup when LOBSTER_DEBUG=true.
+BOOTUP_PROMPT_FILE = Path(
+    os.environ.get(
+        "LOBSTER_BOOTUP_PROMPT_FILE_OVERRIDE",
+        os.path.expanduser("~/messages/bootup-prompt.md"),
+    )
+)
+
 # Pointer to the current session file (written by compact-catchup / session management).
 # If this file exists and was modified recently, there is a prior session worth catching up.
 CURRENT_SESSION_FILE_POINTER = Path(
@@ -367,55 +377,39 @@ def _inject_compact_reminder() -> None:
 
 
 def _schedule_reflection_prompt(trigger: str) -> None:
-    """In debug mode, write a reflection-prompt message to the inbox.
+    """In debug mode, write a reflection prompt to the bootup-prompt sidecar file.
 
-    When LOBSTER_DEBUG=true, drops a message asking the dispatcher to reflect
-    on the bootup/compaction experience and file GitHub issues with observations.
-    Written immediately — the dispatcher processes inbox messages in order so it
-    will reach this after the compact-reminder and catchup handling.
+    When LOBSTER_DEBUG=true, writes a prompt asking the dispatcher to reflect on
+    the bootup/compaction experience and file GitHub issues with observations.
 
-    Silent on any failure — must never crash the hook.
+    Writes to BOOTUP_PROMPT_FILE (~/messages/bootup-prompt.md) instead of the
+    inbox (Fix B, issue #1998).  The dispatcher reads this file at startup
+    when LOBSTER_DEBUG=true -- one Read call, no mark_processing/mark_processed
+    round-trips.  The file is overwritten on the next restart, so it never
+    accumulates stale entries.
+
+    Silent on any failure -- must never crash the hook.
     """
     if os.environ.get("LOBSTER_DEBUG", "false").lower() != "true":
         return
 
     try:
-        INBOX_DIR.mkdir(parents=True, exist_ok=True)
-
-        ts = time.time()
-        msg_id = f"reflection_{trigger}_{int(ts)}"
-        timestamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + ".000000"
+        BOOTUP_PROMPT_FILE.parent.mkdir(parents=True, exist_ok=True)
 
         content = (
             f"[Debug] {trigger.capitalize()} reflection prompt:\n\n"
             "How was the experience? Were there friction points, gaps, or improvements "
             "worth capturing?\n\n"
             "If you have observations: file or update GitHub issues in SiderealPress/lobster, "
-            "or open PRs for straightforward fixes. Capture it while it's fresh."
+            "or open PRs for straightforward fixes. Capture it while it's fresh.\n\n"
+            f"trigger: {trigger}\n"
         )
 
-        msg = {
-            "id": msg_id,
-            "source": "system",
-            "chat_id": 0,
-            "user_id": 0,
-            "username": "lobster-system",
-            "user_name": "System",
-            "type": "reflection_prompt",
-            "trigger": trigger,
-            "text": content,
-            "timestamp": timestamp,
-        }
-
-        # Use current epoch_ms so this sorts after the startup compact-reminder
-        # (ts_ms=0/1) and after any queued user messages.
-        ts_ms = int(ts * 1000)
-        msg_path = INBOX_DIR / f"{ts_ms}_reflection_{trigger}.json"
-        tmp_path = msg_path.with_suffix(".tmp")
-        tmp_path.write_text(json.dumps(msg, indent=2) + "\n")
-        tmp_path.rename(msg_path)
+        tmp_path = BOOTUP_PROMPT_FILE.with_suffix(".tmp")
+        tmp_path.write_text(content)
+        tmp_path.rename(BOOTUP_PROMPT_FILE)
         print(
-            f"[on-fresh-start] debug: wrote reflection prompt to {msg_path}",
+            f"[on-fresh-start] debug: wrote reflection prompt to {BOOTUP_PROMPT_FILE}",
             file=sys.stderr,
         )
     except Exception as exc:  # noqa: BLE001
@@ -423,7 +417,6 @@ def _schedule_reflection_prompt(trigger: str) -> None:
             f"[on-fresh-start] debug: failed to write reflection prompt: {exc}",
             file=sys.stderr,
         )
-
 
 def _mark_all_running_failed() -> None:
     """Run agent-monitor.py --mark-failed via uv.
