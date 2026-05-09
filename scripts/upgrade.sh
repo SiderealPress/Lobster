@@ -3138,6 +3138,74 @@ M88_PYEOF
         substep "Migration 95: settings.json or jq not found — skipping"
     fi
 
+    # Migration 96: Fix on-compact.py hook matcher in settings.json (issue #1947).
+    # setup_claude_hooks() in install.sh previously registered on-compact.py with
+    # matcher="compact", which is unreliable in CC 2.1.119 (~37% fire rate since
+    # April 17). The correct pattern is matcher="" + internal self-gate inside the
+    # script (_is_compact_event()). This migration:
+    #   1. Changes on-compact.py SessionStart entries from matcher="compact" to matcher=""
+    #   2. Removes the redundant inject-bootup-context.py compact-matcher entry
+    #      (the empty-matcher entry already fires on all session types including compact,
+    #       so a second compact-specific entry causes double-injection)
+    # Idempotent: no-op when settings.json is already correct.
+    if [ -f "$CLAUDE_SETTINGS" ] && command -v python3 &>/dev/null; then
+        local _m96_needs_fix=0
+        if python3 -c "
+import json, sys
+with open('$CLAUDE_SETTINGS') as f:
+    d = json.load(f)
+hooks = d.get('hooks', {}).get('SessionStart', [])
+for h in hooks:
+    cmd = h.get('hooks', [{}])[0].get('command', '')
+    if 'on-compact' in cmd and h.get('matcher') == 'compact':
+        sys.exit(0)  # needs fix: compact matcher present
+    if 'inject-bootup-context' in cmd and h.get('matcher') == 'compact':
+        sys.exit(0)  # needs fix: redundant compact inject-bootup entry present
+sys.exit(1)  # already correct
+" 2>/dev/null; then
+            _m96_needs_fix=1
+        fi
+        if [ "$_m96_needs_fix" -eq 1 ]; then
+            substep "Fixing on-compact.py hook matcher (Migration 96)..."
+            local _m96_tmp
+            _m96_tmp=$(mktemp)
+            python3 - "$CLAUDE_SETTINGS" "$_m96_tmp" << 'M96_PYEOF'
+import json, sys
+src, dst = sys.argv[1], sys.argv[2]
+with open(src) as f:
+    data = json.load(f)
+session_start = data.get('hooks', {}).get('SessionStart', [])
+updated = []
+for entry in session_start:
+    cmd = entry.get('hooks', [{}])[0].get('command', '')
+    # Change on-compact.py from matcher="compact" to matcher=""
+    if 'on-compact' in cmd and entry.get('matcher') == 'compact':
+        entry = dict(entry, matcher='')
+    # Remove the redundant inject-bootup-context.py compact-matcher entry
+    # (the empty-matcher entry already fires on all session types including compact)
+    elif 'inject-bootup-context' in cmd and entry.get('matcher') == 'compact':
+        continue
+    updated.append(entry)
+data['hooks']['SessionStart'] = updated
+with open(dst, 'w') as f:
+    json.dump(data, f, indent=2)
+    f.write('\n')
+M96_PYEOF
+            if [ $? -eq 0 ] && [ -s "$_m96_tmp" ]; then
+                mv "$_m96_tmp" "$CLAUDE_SETTINGS"
+                success "Migration 96: fixed on-compact.py hook matcher (matcher='' + removed redundant compact inject-bootup-context entry)"
+                migrated=$((migrated + 1))
+            else
+                rm -f "$_m96_tmp" 2>/dev/null || true
+                warn "Migration 96: failed to update $CLAUDE_SETTINGS"
+            fi
+        else
+            substep "Migration 96: on-compact.py hook already uses matcher='' — skipping"
+        fi
+    else
+        substep "Migration 96: settings.json or python3 not found — skipping"
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
