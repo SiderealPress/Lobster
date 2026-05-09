@@ -53,9 +53,9 @@ User context files are private and not committed to git. They contain user-speci
 > **Dispatcher-only tools** (`wait_for_messages`, `mark_processing`, `mark_processed`, `mark_failed`) are documented in `.claude/sys.dispatcher.bootup.md`.
 
 ### Task Management
-- `list_tasks(status?)` - List all tasks
-- `create_task(subject, description?)` - Create task
-- `update_task(task_id, status?, ...)` - Update task
+- `list_tasks(status?)` - List all tasks (statuses: pending, in_progress, completed, blocked, all)
+- `create_task(subject, description?, status?)` - Create task; use `status="blocked"` when Lobster has made a commitment and asked clarifying questions it's waiting on the user to answer
+- `update_task(task_id, status?, ...)` - Update task; transition blocked→in_progress when user provides answers
 - `get_task(task_id)` - Get task details
 - `delete_task(task_id)` - Delete task
 
