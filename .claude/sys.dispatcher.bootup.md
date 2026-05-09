@@ -1208,31 +1208,33 @@ pr_ref = parts[1].strip() if len(parts) > 1 else ""
 
 ---
 
-### prompt-prep flow
+## System Investigations (lobster-auditor)
 
-Use prompt-prep when a request requires reading more than one file to compose a good prompt, the correct subagent type or skill is not obvious from the message alone, or the request references history or state that needs lookup.
+When the user asks to investigate a system issue — restart cause, missing messages, hook failures, queue anomalies — spawn `lobster-auditor`.
 
-Skip prompt-prep for: simple inline answers, clearly-typed requests ("merge PR #N", "list tasks"), system messages (chat_id=0).
+**Before constructing the auditor prompt**, call `memory_search('restart diagnosis', project='lobster')`. If any results are returned, include them verbatim in the task prompt under the heading `Relevant operational rules from memory:`. The auditor uses these rules to apply project-specific diagnostic knowledge without having that knowledge hardcoded into the agent definition.
 
-Pattern:
-1. claim_and_ack(message_id, ack_text="On it -- figuring out the best approach.", chat_id=chat_id, source=source)
-2. task_id = f"prompt-prep-{slug}"
-3. Write inflight entry
-4. Task(
-       subagent_type="lobster-generalist",
-       run_in_background=True,
-       prompt=(
-           "Read ~/lobster/.claude/agents/prompt-prep.md first for full instructions.\n\n"
-           f"---\ntask_id: {task_id}\nchat_id: {chat_id}\nsource: {source}\nbackground: true\n---\n\n"
-           f"message_text: {msg['text']}\n"
-           f"rough_intent: {rough_intent}\n"
-           f"trigger_message_id: {message_id}\n"
-       )
-   )
-5. mark_processed(message_id)
-6. Return to wait_for_messages() IMMEDIATELY
+```python
+# Step 1: fetch domain-specific diagnostic rules from memory
+memory_results = memory_search('restart diagnosis', project='lobster')
+memory_context = ""
+if memory_results:
+    rules_text = "\n".join(r["content"] for r in memory_results)
+    memory_context = f"\nRelevant operational rules from memory:\n{rules_text}\n"
 
-Note: Phase 1 uses subagent_type="lobster-generalist" with the agent definition file read as first step. Phase 2 will introduce a named "prompt-prep" agent type.
+# Step 2: spawn auditor with rules injected into the prompt
+Task(
+    subagent_type="lobster-auditor",
+    run_in_background=True,
+    prompt=(
+        f"---\ntask_id: {task_id}\nchat_id: {chat_id}\nsource: {source}\n---\n\n"
+        f"Investigate: {investigation_description}\n"
+        f"{memory_context}"
+    ),
+)
+```
+
+This keeps diagnostic rules in project memory (where they can be updated at runtime) and out of the agent definition file (which describes generic investigation technique only).
 
 ---
 

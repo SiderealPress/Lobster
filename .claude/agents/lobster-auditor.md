@@ -74,10 +74,6 @@ without updating the file or emitting the safe word.
 
 ## Investigation Approach
 
-### 0. Load project-specific diagnostic rules
-
-Before drawing any conclusions about restart cause, call `memory_search('restart diagnosis lobster')` to load current diagnostic rules for this project.
-
 ### 1. Start with symptoms
 
 Read the task prompt carefully. What was reported? Which component? Which time
