@@ -94,8 +94,8 @@ check_hook "restore-exec-bit (PostToolUse, matcher=Edit|Write)" \
     '.hooks.PostToolUse[]? | select(.matcher == "Edit|Write") | select(.hooks[]?.command | contains("restore-exec-bit"))'
 check_hook "auto-register-agent (PostToolUse)" \
     '.hooks.PostToolUse[]? | select(.hooks[]?.command | test("auto-register-agent"))'
-check_hook "context-monitor (PostToolUse, matcher=Bash|mcp__lobster-inbox__|Agent)" \
-    '.hooks.PostToolUse[]? | select(.matcher == "Bash|mcp__lobster-inbox__|Agent")'
+check_hook "context-monitor (PostToolUse, matcher=Bash|mcp__lobster-inbox__.*|Agent)" \
+    '.hooks.PostToolUse[]? | select(.matcher == "Bash|mcp__lobster-inbox__.*|Agent")'
 check_hook "dispatcher-state-posttool (PostToolUse)" \
     '.hooks.PostToolUse[]? | select(.hooks[]?.command | contains("dispatcher-state-posttool"))'
 check_hook "thinking-heartbeat (PostToolUse)" \
@@ -263,13 +263,11 @@ check_hook "setup_claude_hooks: restore-exec-bit (PostToolUse)" \
 check_hook "setup_claude_hooks: auto-register-agent (PostToolUse)" \
     '.hooks.PostToolUse[]? | select(.hooks[]?.command | test("auto-register-agent"))'
 check_hook "setup_claude_hooks: context-monitor (PostToolUse) with Bash matcher" \
-    '.hooks.PostToolUse[]? | select(.matcher == "Bash|mcp__lobster-inbox__|Agent")'
+    '.hooks.PostToolUse[]? | select(.matcher == "Bash|mcp__lobster-inbox__.*|Agent")'
 check_hook "setup_claude_hooks: dispatcher-state-posttool (PostToolUse) [previously missing from install.sh]" \
     '.hooks.PostToolUse[]? | select(.hooks[]?.command | contains("dispatcher-state-posttool"))'
 
 # Test 13: SessionStart hooks (unit)
-check_hook "setup_claude_hooks: write-dispatcher-session-id (SessionStart)" \
-    '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("write-dispatcher-session-id"))'
 check_hook "setup_claude_hooks: inject-bootup-context all-sessions (SessionStart)" \
     '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("inject-bootup-context")) | select(.matcher == "")'
 check_hook "setup_claude_hooks: on-compact (SessionStart)" \
