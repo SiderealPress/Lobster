@@ -3091,6 +3091,88 @@ M88_PYEOF
         substep "Migration 90: settings.json or jq not found — skipping"
     fi
 
+    # Migration 92: Register WFM lifecycle logger hooks (PreToolUse + PostToolUse)
+    # in ~/.claude/settings.json (issue #1895).
+    #
+    # Adds two hook entries that write WFM_ENTER / WFM_EXIT events to
+    # ~/lobster-workspace/logs/session-lifecycle.log, enabling crash investigation
+    # by recording how long each wait_for_messages call blocked and whether the
+    # dispatcher was mid-WFM when it died.
+    #
+    # The hook reads WFM_HOOK_TYPE ("pre" or "post") from the environment to
+    # distinguish the two invocation modes from a single script file.
+    #
+    # Idempotent: skips if both entries already registered.
+    # Note: Migration 91 is reserved for PR #2027 (on-compact.py fix).
+    local _m92_hook="$LOBSTER_DIR/hooks/wfm-lifecycle-logger.py"
+    if [ -f "$CLAUDE_SETTINGS" ] && command -v jq &>/dev/null && [ -f "$_m92_hook" ]; then
+        local _m92_pre_present _m92_post_present
+        _m92_pre_present=$(jq -r '
+            [.hooks.PreToolUse[]?.hooks[]? |
+             select((.command // "") | contains("wfm-lifecycle-logger"))]
+            | length' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
+        _m92_post_present=$(jq -r '
+            [.hooks.PostToolUse[]?.hooks[]? |
+             select((.command // "") | contains("wfm-lifecycle-logger"))]
+            | length' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
+
+        if [[ "${_m92_pre_present:-0}" -gt 0 && "${_m92_post_present:-0}" -gt 0 ]]; then
+            substep "Migration 92: WFM lifecycle logger hooks already registered — skipping"
+        else
+            local _m92_tmp
+            _m92_tmp=$(mktemp)
+            local _m92_pre_cmd="WFM_HOOK_TYPE=pre python3 $_m92_hook"
+            local _m92_post_cmd="WFM_HOOK_TYPE=post python3 $_m92_hook"
+
+            if jq --arg pre_cmd "$_m92_pre_cmd" \
+                  --arg post_cmd "$_m92_post_cmd" '
+                # Add PreToolUse entry if not already present
+                .hooks.PreToolUse = (
+                    (.hooks.PreToolUse // []) +
+                    if ([(.hooks.PreToolUse // [])[]?.hooks[]? |
+                         select((.command // "") | contains("wfm-lifecycle-logger"))]
+                        | length) == 0
+                    then [{
+                        "matcher": "mcp__lobster-inbox__wait_for_messages",
+                        "hooks": [{
+                            "type": "command",
+                            "command": $pre_cmd,
+                            "timeout": 5
+                        }]
+                    }]
+                    else []
+                    end
+                ) |
+                # Add PostToolUse entry if not already present
+                .hooks.PostToolUse = (
+                    (.hooks.PostToolUse // []) +
+                    if ([(.hooks.PostToolUse // [])[]?.hooks[]? |
+                         select((.command // "") | contains("wfm-lifecycle-logger"))]
+                        | length) == 0
+                    then [{
+                        "matcher": "mcp__lobster-inbox__wait_for_messages",
+                        "hooks": [{
+                            "type": "command",
+                            "command": $post_cmd,
+                            "timeout": 5
+                        }]
+                    }]
+                    else []
+                    end
+                )
+            ' "$CLAUDE_SETTINGS" > "$_m92_tmp" \
+                && mv "$_m92_tmp" "$CLAUDE_SETTINGS" 2>/dev/null; then
+                substep "Migration 92: WFM lifecycle logger hooks registered in settings.json"
+                migrated=$((migrated + 1))
+            else
+                rm -f "$_m92_tmp" 2>/dev/null || true
+                warn "Migration 92: could not update settings.json — jq transform failed"
+            fi
+        fi
+    else
+        substep "Migration 92: settings.json, jq, or wfm-lifecycle-logger.py not found — skipping"
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else

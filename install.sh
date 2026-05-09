@@ -2118,6 +2118,51 @@ else
     info "Skipping pre-tool-heartbeat hook (settings.json not yet created)"
 fi
 
+# Set up Claude Code PreToolUse + PostToolUse hooks for WFM lifecycle logging (issue #1895).
+# Writes WFM_ENTER (PreToolUse) and WFM_EXIT (PostToolUse) events to
+# ~/lobster-workspace/logs/session-lifecycle.log, enabling post-crash investigation of
+# how long the dispatcher was blocked in wait_for_messages.
+# A single script handles both hooks; WFM_HOOK_TYPE env var ("pre"/"post") selects behavior.
+chmod +x "$INSTALL_DIR/hooks/wfm-lifecycle-logger.py" || true
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '.hooks.PreToolUse[]?.hooks[]? | select((.command // "") | contains("wfm-lifecycle-logger"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1 || \
+       ! jq -e '.hooks.PostToolUse[]?.hooks[]? | select((.command // "") | contains("wfm-lifecycle-logger"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq --arg pre_cmd "WFM_HOOK_TYPE=pre python3 $INSTALL_DIR/hooks/wfm-lifecycle-logger.py" \
+           --arg post_cmd "WFM_HOOK_TYPE=post python3 $INSTALL_DIR/hooks/wfm-lifecycle-logger.py" '
+            .hooks.PreToolUse = (
+                (.hooks.PreToolUse // []) +
+                if ([(.hooks.PreToolUse // [])[]?.hooks[]? |
+                     select((.command // "") | contains("wfm-lifecycle-logger"))]
+                    | length) == 0
+                then [{
+                    "matcher": "mcp__lobster-inbox__wait_for_messages",
+                    "hooks": [{"type": "command", "command": $pre_cmd, "timeout": 5}]
+                }]
+                else []
+                end
+            ) |
+            .hooks.PostToolUse = (
+                (.hooks.PostToolUse // []) +
+                if ([(.hooks.PostToolUse // [])[]?.hooks[]? |
+                     select((.command // "") | contains("wfm-lifecycle-logger"))]
+                    | length) == 0
+                then [{
+                    "matcher": "mcp__lobster-inbox__wait_for_messages",
+                    "hooks": [{"type": "command", "command": $post_cmd, "timeout": 5}]
+                }]
+                else []
+                end
+            )
+        ' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "wfm-lifecycle-logger PreToolUse + PostToolUse hooks installed"
+    else
+        info "wfm-lifecycle-logger hooks already configured in Claude Code settings"
+    fi
+else
+    info "Skipping wfm-lifecycle-logger hooks (settings.json not yet created)"
+fi
+
 # Set up Claude Code PreToolUse hook to block tool use after compaction without context reload.
 # Uses a shell wrapper so Python is only spawned when the sentinel file exists (~1% of calls).
 # On the 99%+ of calls where the sentinel is absent, `test ! -f ...` exits in ~1ms with no
