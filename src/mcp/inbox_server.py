@@ -4015,6 +4015,46 @@ def _find_message_file(directory: Path, message_id: str) -> Path | None:
     return None
 
 
+def _find_all_message_files(directories: list[Path], message_id: str) -> list[Path]:
+    """Find ALL message files across directories whose 'id' field matches message_id.
+
+    Unlike _find_message_file (which returns the first match), this function
+    returns every file whose JSON 'id' field equals message_id, across all
+    provided directories.  Used by handle_mark_processed to archive duplicate
+    files that share the same logical ID — a condition that arises when
+    concurrent hook invocations write multiple files with identical IDs but
+    different millisecond-precision filenames (issue #2039).
+
+    Files that match by filename substring (message_id in f.name) are also
+    included to catch the common case where the filename embeds the message ID.
+    """
+    matches: list[Path] = []
+    seen: set[Path] = set()  # deduplicate if matched by both name and content
+
+    for directory in directories:
+        if not directory.exists():
+            continue
+        for f in directory.glob("*.json"):
+            if f in seen:
+                continue
+            # Fast path: filename contains the message_id
+            if message_id in f.name:
+                matches.append(f)
+                seen.add(f)
+                continue
+            # Slow path: read JSON and check the 'id' field
+            try:
+                with open(f) as fp:
+                    msg = json.load(fp)
+                if msg.get("id") == message_id:
+                    matches.append(f)
+                    seen.add(f)
+            except Exception:
+                continue
+
+    return matches
+
+
 def _stale_timeout_for_message(msg: dict) -> int:
     """Return the stale processing timeout in seconds based on message type.
 
@@ -5197,7 +5237,7 @@ async def handle_mark_processed(args: dict) -> list[TextContent]:
         except (json.JSONDecodeError, OSError):
             pass  # If we can't read the message, skip the guard
 
-    # Move to processed
+    # Move the primary file to processed.
     dest = PROCESSED_DIR / found.name
     found.rename(dest)
 
@@ -5211,6 +5251,28 @@ async def handle_mark_processed(args: dict) -> list[TextContent]:
             _db_persist_inbound(json.loads(dest.read_text()))
         except Exception as _db_exc:
             log.warning(f"[DB] inbound persist failed for {message_id}: {_db_exc}")
+
+    # Fix #2039: archive any duplicate files sharing the same message ID.
+    #
+    # Concurrent hook invocations (e.g. multiple subagent SessionStart events
+    # within the same second) can write multiple files with identical 'id'
+    # fields but different millisecond-precision filenames.  _find_message_file
+    # returns only the first match, so the remaining N-1 files would stay in
+    # inbox/ and re-surface on the next wait_for_messages call — causing the
+    # dispatcher to see the same message 4–6 times even after marking it
+    # processed.
+    #
+    # Scan inbox/ and processing/ for additional files with the same ID and
+    # archive them silently.  The primary file has already been moved above,
+    # so it will no longer appear in these directories.
+    duplicates = _find_all_message_files([INBOX_DIR, PROCESSING_DIR], message_id)
+    for dup in duplicates:
+        try:
+            dup_dest = PROCESSED_DIR / dup.name
+            dup.rename(dup_dest)
+            log.info(f"Archived duplicate message file {dup.name} for id={message_id!r}")
+        except Exception as dup_exc:
+            log.warning(f"Failed to archive duplicate {dup.name} for id={message_id!r}: {dup_exc}")
 
     # Write a per-message heartbeat so the health check can distinguish a
     # dispatcher that is actively draining a long message batch from one that
