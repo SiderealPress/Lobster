@@ -507,7 +507,7 @@ def send_compaction_notify() -> None:
 
         ts_ms = int(time.time() * 1000)
         reply_id = f"{ts_ms}_compact_notify_telegram"
-        timestamp = time.strftime("%Y-%m-%dT%H:%M:%S.%f", time.localtime()) + "+00:00"
+        timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
         reply = {
             "id": reply_id,
