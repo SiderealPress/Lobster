@@ -235,6 +235,9 @@ class TestOnCompactWritesPrimarySessionFile:
         Issue #1908: inject-bootup-context.py uses startup flag (not UUID files),
         so on-compact.py no longer needs to update the primary Claude UUID file.
         It still writes the tertiary marker file for is_dispatcher_session() (PreToolUse hooks).
+
+        Issue #2046 update: the fallback path now requires source='compact' to confirm an
+        authoritative compaction event and avoid false positives from catchup subagents.
         """
         import importlib
         import session_role as _sr
@@ -247,9 +250,6 @@ class TestOnCompactWritesPrimarySessionFile:
         config_dir = tmp_path / "messages" / "config"
         config_dir.mkdir(parents=True, exist_ok=True)
         (config_dir / "dispatcher-session-id").write_text(stored_uuid)
-
-        # Create the JSONL so _stored_dispatcher_session_alive() returns True.
-        self._setup_stored_session_jsonl(tmp_path, stored_uuid)
 
         # New post-compact session ID.
         new_uuid = "new-post-compact-uuid-9999"
@@ -270,14 +270,26 @@ class TestOnCompactWritesPrimarySessionFile:
             "LOBSTER_STATE_FILE_OVERRIDE": str(state_file),
             "LOBSTER_COMPACTION_STATE_FILE_OVERRIDE": str(compaction_state),
             "LOBSTER_LAST_COMPACT_TS_FILE_OVERRIDE": str(last_compact_ts),
+            # Redirect DISPATCHER_SESSION_FILE so it reads from tmp_path, not real HOME.
+            "LOBSTER_DISPATCHER_SESSION_ID_FILE_OVERRIDE": str(config_dir / "dispatcher-session-id"),
         }
 
         with _PatchEnv(env_overrides):
-            spec = importlib.util.spec_from_file_location("on_compact_t", _HOOK_PATH)
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
-            # Call _is_dispatcher_compact + write path directly.
-            result = mod._is_dispatcher_compact({"session_id": new_uuid})
+            # Evict session_role so DISPATCHER_SESSION_FILE is recomputed from the
+            # patched LOBSTER_DISPATCHER_SESSION_ID_FILE_OVERRIDE env var (issue #2046).
+            _cached_sr = sys.modules.pop("session_role", None)
+            try:
+                spec = importlib.util.spec_from_file_location("on_compact_t", _HOOK_PATH)
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+            finally:
+                if _cached_sr is not None:
+                    sys.modules["session_role"] = _cached_sr
+                else:
+                    sys.modules.pop("session_role", None)
+            # Call _is_dispatcher_compact with source='compact' to signal an authoritative
+            # post-compact event (issue #2046: required to distinguish from catchup subagents).
+            result = mod._is_dispatcher_compact({"session_id": new_uuid, "source": "compact"})
 
         assert result is True, "_is_dispatcher_compact should return True for dispatcher compaction"
 
