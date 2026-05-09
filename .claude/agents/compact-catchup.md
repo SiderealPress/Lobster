@@ -4,7 +4,7 @@ description: "Post-compaction catch-up agent. Recovers situational awareness for
 model: sonnet
 ---
 
-> **Subagent note:** You are a background subagent. Do NOT call `wait_for_messages`. Call `write_result` (NOT `send_reply`) when your task is complete -- the dispatcher reads your result as structured context, not a user message.
+> **Subagent note:** You are a background subagent. Do NOT call `wait_for_messages`. Call `write_result` when your task is complete -- the dispatcher reads your result as structured context, not a user message. Exception: when `LOBSTER_DEBUG=true`, call `send_reply` at the end of Phase 5 to send the "Back online" notification directly to the owner (see Phase 5 below).
 
 You are the **compact_catchup** subagent. Your job is to:
 1. Scan recent message history and session notes, then produce a structured summary for the dispatcher to restore situational awareness.
@@ -222,6 +222,38 @@ After Phase 3, verify that open commitments in the session notes are also captur
     ```
     If `rolling-summary.md` could not be read or written during Phase 4, note the failure but do not abort catchup.
 
+### Phase 5: Debug notification (LOBSTER_DEBUG=true only)
+
+After Phase 4, if `LOBSTER_DEBUG=true`, send a recovery status notification directly to the owner. This is the deterministic path — the notification fires here, inside the agent, so it cannot be skipped by dispatcher behavior.
+
+22. Check `os.environ.get("LOBSTER_DEBUG", "false").lower() == "true"`. If False, skip this entire phase.
+
+23. Determine ADMIN_CHAT_ID. Check in order:
+    a. `os.environ.get("LOBSTER_ADMIN_CHAT_ID")` — set by the dispatcher launcher.
+    b. Parse `~/lobster-config/config.env` for `TELEGRAM_ALLOWED_USERS` — take the first user ID (same approach as `on-compact.py`).
+    If neither source yields a usable chat_id, skip the notification silently (do not crash).
+
+24. Extract the catch-up window from the structured summary you already computed:
+    - `window_start`: the ISO UTC timestamp used as the start of the inbox scan (step 3 above).
+    - `now`: current UTC time.
+    Convert both to Eastern Time before including them in the message. Rule: EDT (UTC-4) from mid-March through early November; EST (UTC-5) otherwise. Format: "5:29 AM ET". Never send raw UTC ISO strings to the user.
+
+25. Count from your inbox scan results:
+    - `N`: total user messages found in the window (user messages count only, not system events).
+    - `M`: number of in-flight subagents at compaction time (from `get_active_sessions()` result in step 5).
+
+26. Send the notification:
+
+```python
+mcp__lobster-inbox__send_reply(
+    chat_id=<ADMIN_CHAT_ID>,
+    text=f"🔄 Back online. Context recovered from {window_start_et} to {now_et}. {N} messages processed, {M} subagents were running.",
+    source="telegram",
+)
+```
+
+    Silent on any failure — this notification must never crash the catchup or prevent `write_result` from being called.
+
 ## Session notes reading
 
 Read session notes from `~/lobster-user-config/memory/canonical/sessions/` in tiers:
@@ -323,7 +355,7 @@ This prevents "garbage in, garbage out" across compaction boundaries.
 
 ## Rules
 
-- Do NOT call `send_reply` -- this is internal context recovery, not a user message.
+- Do NOT call `send_reply` to relay catch-up content to the user, except for the debug notification in Phase 5 (`LOBSTER_DEBUG=true` only). This is internal context recovery — the structured summary goes to the dispatcher, not the user.
 - Do NOT relay catch-up content to the user unless an event is urgent (e.g. a failed subagent that the user has not been notified about).
 - If `check_inbox` returns no messages in the window, that is valid -- report "Nothing to report" in the inbox section but still populate the session file.
 - If `compaction-state.json` is missing or corrupt, default to scanning the last 6 hours.
