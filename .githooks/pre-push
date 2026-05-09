@@ -460,7 +460,8 @@ echo -e "${RED}${BOLD}==========================================================
 echo ""
 
 DIFF_TEXT="$(get_push_diff)"
-SCAN_TIMED_OUT=$(cat "$TIMEOUT_FLAG_FILE" 2>/dev/null || echo 0)
+SCAN_TIMED_OUT=$(cat "$TIMEOUT_FLAG_FILE" 2>/dev/null)
+SCAN_TIMED_OUT="${SCAN_TIMED_OUT:-0}"
 rm -f "$TIMEOUT_FLAG_FILE"
 
 if [ "$SCAN_TIMED_OUT" -eq 1 ]; then

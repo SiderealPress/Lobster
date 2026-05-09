@@ -133,7 +133,8 @@ get_push_diff() {
 # Call via command substitution — same as the real hook — so the subshell
 # cannot propagate variable assignments back to the outer scope.
 DIFF_TEXT="$(get_push_diff)"
-SCAN_TIMED_OUT=$(cat "$TIMEOUT_FLAG_FILE" 2>/dev/null || echo 0)
+SCAN_TIMED_OUT=$(cat "$TIMEOUT_FLAG_FILE" 2>/dev/null)
+SCAN_TIMED_OUT="${SCAN_TIMED_OUT:-0}"
 rm -f "$TIMEOUT_FLAG_FILE"
 
 if [ "$SCAN_TIMED_OUT" -eq 1 ]; then
