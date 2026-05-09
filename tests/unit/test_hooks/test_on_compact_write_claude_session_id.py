@@ -1,16 +1,12 @@
 """
-Unit tests for Option 1 of issue #1375: on-compact.py writes the new
-post-compact session UUID to the primary MCP Claude UUID state file
-(dispatcher-claude-session-id) when _is_dispatcher_compact() confirms a
-dispatcher compaction.
+Unit tests for session_role.write_dispatcher_claude_session_id and the
+on-compact.py dispatcher-detection behavior (issue #1375, updated for #2046).
 
-Previously, on-compact.py only updated the tertiary hook marker file
-(~/messages/config/dispatcher-session-id) when the compaction fallback fired.
-The primary file remained stale, causing inject-bootup-context.py to inject
-subagent bootup context instead of dispatcher bootup after every compaction.
-
-The fix adds a call to write_dispatcher_claude_session_id(new_session_id) so
-the primary file is up-to-date before any subsequent hooks run.
+After issue #2046 simplification: _is_dispatcher_compact() uses source='compact'
+as the sole post-compact signal.  It no longer writes the tertiary marker file
+(dispatcher-session-id) — that file is not needed by the simplified detection logic.
+The primary Claude UUID file (dispatcher-claude-session-id) was already not written
+by on-compact.py after issue #1908.
 """
 
 from __future__ import annotations
@@ -83,10 +79,6 @@ def _load_on_compact(
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
     return mod
-
-
-def _dispatcher_hook_input(session_id: str) -> dict:
-    return {"session_id": session_id}
 
 
 # ---------------------------------------------------------------------------
@@ -206,38 +198,24 @@ class TestWriteDispatcherClaudeSessionId:
 
 
 # ---------------------------------------------------------------------------
-# Tests verifying on-compact.py calls write_dispatcher_claude_session_id
+# Tests verifying on-compact.py does NOT write session files
 # ---------------------------------------------------------------------------
 
 
-class TestOnCompactWritesPrimarySessionFile:
-    """on-compact.py compaction fallback behavior tests (issue #1908 simplified).
+class TestOnCompactSessionFileWrites:
+    """on-compact.py must not write dispatcher session files.
 
-    After issue #1908, on-compact.py no longer writes the primary Claude UUID
-    file (dispatcher-claude-session-id) — inject-bootup-context.py now uses the
-    startup flag for SessionStart detection, so the primary file is no longer
-    needed at compaction time.
-
-    on-compact.py still writes the tertiary hook marker file
-    (~/messages/config/dispatcher-session-id) for is_dispatcher_session()
-    (PreToolUse hooks) to use during active processing.
+    After issue #2046 simplification: _is_dispatcher_compact() uses source='compact'
+    only.  There is no session ID file read/write in the simplified implementation.
+    Both the primary (dispatcher-claude-session-id) and tertiary (dispatcher-session-id)
+    files must remain unwritten by on-compact.py.
     """
 
-    def _setup_stored_session_jsonl(self, home_dir: Path, stored_uuid: str) -> None:
-        """Create a fake stored-session JSONL so _stored_dispatcher_session_alive returns True."""
-        projects_dir = home_dir / ".claude" / "projects" / "fake-project"
-        projects_dir.mkdir(parents=True, exist_ok=True)
-        (projects_dir / f"{stored_uuid}.jsonl").write_text('{"type":"text"}\n')
+    def test_no_session_files_written_for_dispatcher_compaction(self, monkeypatch, tmp_path):
+        """Dispatcher compaction (source='compact'): no session files are written.
 
-    def test_tertiary_file_written_primary_file_not_written(self, monkeypatch, tmp_path):
-        """Compaction fallback: tertiary marker file updated, primary Claude UUID file NOT written.
-
-        Issue #1908: inject-bootup-context.py uses startup flag (not UUID files),
-        so on-compact.py no longer needs to update the primary Claude UUID file.
-        It still writes the tertiary marker file for is_dispatcher_session() (PreToolUse hooks).
-
-        Issue #2046 update: the fallback path now requires source='compact' to confirm an
-        authoritative compaction event and avoid false positives from catchup subagents.
+        After #2046 simplification, on-compact.py no longer needs to track session
+        IDs — source='compact' alone is sufficient.
         """
         import importlib
         import session_role as _sr
@@ -245,22 +223,13 @@ class TestOnCompactWritesPrimarySessionFile:
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("LOBSTER_WORKSPACE", str(tmp_path))
 
-        # Write stored (old) session UUID to the tertiary marker file.
-        stored_uuid = "old-session-uuid-stored"
-        config_dir = tmp_path / "messages" / "config"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "dispatcher-session-id").write_text(stored_uuid)
-
-        # New post-compact session ID.
         new_uuid = "new-post-compact-uuid-9999"
 
-        # Minimal support files.
         state_file = tmp_path / "lobster-state.json"
         state_file.write_text('{"mode":"active"}')
         compaction_state = tmp_path / "compaction-state.json"
         last_compact_ts = tmp_path / "last-compact.ts"
 
-        # Reload session_role so path resolution picks up new HOME/WORKSPACE.
         importlib.reload(_sr)
 
         env_overrides = {
@@ -270,13 +239,9 @@ class TestOnCompactWritesPrimarySessionFile:
             "LOBSTER_STATE_FILE_OVERRIDE": str(state_file),
             "LOBSTER_COMPACTION_STATE_FILE_OVERRIDE": str(compaction_state),
             "LOBSTER_LAST_COMPACT_TS_FILE_OVERRIDE": str(last_compact_ts),
-            # Redirect DISPATCHER_SESSION_FILE so it reads from tmp_path, not real HOME.
-            "LOBSTER_DISPATCHER_SESSION_ID_FILE_OVERRIDE": str(config_dir / "dispatcher-session-id"),
         }
 
         with _PatchEnv(env_overrides):
-            # Evict session_role so DISPATCHER_SESSION_FILE is recomputed from the
-            # patched LOBSTER_DISPATCHER_SESSION_ID_FILE_OVERRIDE env var (issue #2046).
             _cached_sr = sys.modules.pop("session_role", None)
             try:
                 spec = importlib.util.spec_from_file_location("on_compact_t", _HOOK_PATH)
@@ -287,46 +252,36 @@ class TestOnCompactWritesPrimarySessionFile:
                     sys.modules["session_role"] = _cached_sr
                 else:
                     sys.modules.pop("session_role", None)
-            # Call _is_dispatcher_compact with source='compact' to signal an authoritative
-            # post-compact event (issue #2046: required to distinguish from catchup subagents).
             result = mod._is_dispatcher_compact({"session_id": new_uuid, "source": "compact"})
 
-        assert result is True, "_is_dispatcher_compact should return True for dispatcher compaction"
+        assert result is True, "_is_dispatcher_compact should return True for source='compact'"
 
-        # Tertiary marker file should be updated with the new UUID.
-        tertiary_file = config_dir / "dispatcher-session-id"
-        assert tertiary_file.read_text().strip() == new_uuid, (
-            "Tertiary hook marker file must be updated to the new session UUID "
-            "so is_dispatcher_session() works in PreToolUse hooks after compaction"
-        )
-
-        # Primary Claude UUID file must NOT be written (issue #1908: startup flag handles this).
+        # Neither session file should be written by the simplified implementation.
         primary_file = tmp_path / "data" / "dispatcher-claude-session-id"
         assert not primary_file.exists(), (
-            "Primary Claude session file must NOT be written by on-compact.py "
-            "(issue #1908: inject-bootup-context.py uses startup flag, not UUID files)"
+            "Primary Claude session file must NOT be written by on-compact.py"
+        )
+        tertiary_file = tmp_path / "messages" / "config" / "dispatcher-session-id"
+        assert not tertiary_file.exists(), (
+            "Tertiary dispatcher session file must NOT be written by on-compact.py "
+            "(source='compact' check is stateless)"
         )
 
-    def test_primary_file_not_written_for_subagent_compaction(self, monkeypatch, tmp_path):
-        """Subagent compactions must not write the primary dispatcher session file."""
+    def test_no_session_files_written_for_subagent(self, monkeypatch, tmp_path):
+        """Subagent compactions (no source='compact') must not write any session files."""
         import importlib
         import session_role as _sr
 
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("LOBSTER_WORKSPACE", str(tmp_path))
 
-        # No stored dispatcher session — _stored_dispatcher_session_alive() returns False.
-        # LOBSTER_MAIN_SESSION is set to something other than '1' to simulate subagent.
-        config_dir = tmp_path / "messages" / "config"
-        config_dir.mkdir(parents=True, exist_ok=True)
-
         subagent_uuid = "subagent-uuid-no-write"
 
-        sr = importlib.reload(_sr)
+        importlib.reload(_sr)
 
         env_overrides = {
             "LOBSTER_WORKSPACE": str(tmp_path),
-            "LOBSTER_MAIN_SESSION": "0",  # not the main session
+            "LOBSTER_MAIN_SESSION": "0",
             "HOME": str(tmp_path),
         }
 
