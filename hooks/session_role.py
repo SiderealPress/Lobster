@@ -39,10 +39,26 @@ from pathlib import Path
 # Tmux session name for the process-tree fallback used by is_dispatcher_session().
 _LOBSTER_TMUX_SESSION = os.environ.get("LOBSTER_TMUX_SESSION", "lobster")
 
-# Tertiary: hook marker file (kept for on-compact.py compatibility).
-DISPATCHER_SESSION_FILE = Path(
-    os.path.expanduser("~/messages/config/dispatcher-session-id")
-)
+# Tertiary: hook marker file written by inject-bootup-context.py at fresh
+# dispatcher starts and read by on-compact.py to confirm the dispatcher's
+# session ID on compact events.
+# Override via LOBSTER_DISPATCHER_SESSION_ID_FILE_OVERRIDE for test isolation.
+def _get_dispatcher_session_file() -> Path:
+    """Return the dispatcher session ID file path, resolved at call time.
+
+    Reads LOBSTER_DISPATCHER_SESSION_ID_FILE_OVERRIDE on every call so tests
+    can override the path without module reload.
+    """
+    override = os.environ.get("LOBSTER_DISPATCHER_SESSION_ID_FILE_OVERRIDE")
+    if override:
+        return Path(override)
+    return Path(os.path.expanduser("~/messages/config/dispatcher-session-id"))
+
+
+# Module-level alias for callers that import DISPATCHER_SESSION_FILE directly.
+# Use _get_dispatcher_session_file() in on-compact.py and inject-bootup-context.py
+# so that test env var overrides are respected at call time.
+DISPATCHER_SESSION_FILE = _get_dispatcher_session_file()
 
 # Tools that only the dispatcher calls — kept for reference / external callers.
 DISPATCHER_ONLY_TOOLS = {
@@ -122,14 +138,17 @@ def is_dispatcher(hook_input: dict) -> bool:  # noqa: ARG001
 def write_dispatcher_session_id(session_id: str) -> None:
     """Write session_id to the hook dispatcher marker file.
 
-    Kept for on-compact.py compatibility. No longer used by is_dispatcher().
+    Called by inject-bootup-context.py at fresh dispatcher starts to record
+    the dispatcher's CC session UUID.  read by on-compact.py to confirm
+    session identity on compact events.
     Atomic write via a .tmp rename. Silent on any failure.
     """
     try:
-        DISPATCHER_SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = DISPATCHER_SESSION_FILE.with_suffix(".tmp")
+        path = _get_dispatcher_session_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_suffix(".tmp")
         tmp_path.write_text(session_id.strip())
-        tmp_path.replace(DISPATCHER_SESSION_FILE)  # atomic on Linux
+        tmp_path.replace(path)  # atomic on Linux
     except Exception:  # noqa: BLE001
         pass
 
@@ -184,7 +203,7 @@ def _check_state_file(path: Path, session_id: "str | None") -> "bool | None":
 
 def _read_dispatcher_session_id() -> "str | None":
     """Return the stored dispatcher session ID from the hook marker file, or None."""
-    result = _read_session_id_from_file(DISPATCHER_SESSION_FILE)
+    result = _read_session_id_from_file(_get_dispatcher_session_file())
     if isinstance(result, OSError):
         return None
     return result
@@ -315,7 +334,7 @@ def is_dispatcher_session(hook_input: dict) -> bool:
         return True
 
     # Tertiary: hook marker file.
-    tertiary_result = _check_state_file(DISPATCHER_SESSION_FILE, session_id)
+    tertiary_result = _check_state_file(_get_dispatcher_session_file(), session_id)
     if tertiary_result is True:
         return True
 

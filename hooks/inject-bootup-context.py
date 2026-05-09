@@ -37,6 +37,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 import session_role  # noqa: E402 — path insert must precede this
+from session_role import write_dispatcher_session_id  # noqa: E402
 
 CLAUDE_DIR = Path(os.path.expanduser("~/lobster/.claude"))
 USER_CONFIG_DIR = Path(os.path.expanduser("~/lobster-user-config/agents"))
@@ -274,6 +275,17 @@ def main() -> None:
             f"[{HOOK_NAME}] startup-flag detected live PID — injecting dispatcher bootup",
             file=sys.stderr,
         )
+        # Write the dispatcher's CC session UUID so on-compact.py can confirm
+        # session identity on compact events.  CC preserves the session UUID
+        # across compactions, so this stored value remains valid for all
+        # subsequent compact events in this dispatcher run.
+        # Silent on failure — must never crash the hook.
+        if session_id and session_id != "unknown":
+            write_dispatcher_session_id(session_id)
+            print(
+                f"[{HOOK_NAME}] wrote dispatcher session ID: {session_id[:8]}...",
+                file=sys.stderr,
+            )
 
     # Read and reset last-startup-cause.json (issue #1972).
     # Always runs (both dispatcher and subagent) so the file is reset on every
