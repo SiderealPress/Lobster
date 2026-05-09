@@ -139,13 +139,27 @@ def _write_dispatcher_session_id(workspace: Path, session_id: str) -> None:
 
 
 class TestIsDispatcherCompact:
-    """_is_dispatcher_compact() basic source='compact' gating (no stored session ID)."""
+    """_is_dispatcher_compact() basic source='compact' gating (no stored session ID).
+
+    All tests in this class exercise the no-stored-session-ID path: the tmp_path
+    workspace has no dispatcher-session-id file, and LOBSTER_DISPATCHER_SESSION_ID_FILE_OVERRIDE
+    is kept active during the function call via _PatchEnv so that _read_dispatcher_session_id()
+    resolves to the temp-isolated (absent) file rather than the live production file.
+    """
 
     def test_source_compact_no_stored_id_returns_true(self, tmp_path):
-        """source='compact' with no stored session ID → True (fail-open backward compat)."""
+        """source='compact' with no stored session ID → True (fail-open backward compat).
+
+        The env override must be active during the call so _read_dispatcher_session_id()
+        reads from the temp-isolated path (which has no file) rather than the production
+        ~/messages/config/dispatcher-session-id, ensuring the "no stored ID" branch is
+        actually exercised.
+        """
         mod = _load_on_compact(workspace=tmp_path)
 
-        result = mod._is_dispatcher_compact({"source": "compact"})
+        # No dispatcher-session-id file written in tmp_path — "no stored ID" condition.
+        with _PatchEnv(_make_env(tmp_path)):
+            result = mod._is_dispatcher_compact({"source": "compact"})
 
         assert result is True, "source='compact' with no stored ID must return True (fail-open)"
 
@@ -153,7 +167,8 @@ class TestIsDispatcherCompact:
         """source='start' → False (plain session start, not a compaction)."""
         mod = _load_on_compact(workspace=tmp_path)
 
-        result = mod._is_dispatcher_compact({"source": "start"})
+        with _PatchEnv(_make_env(tmp_path)):
+            result = mod._is_dispatcher_compact({"source": "start"})
 
         assert result is False, "source='start' must return False"
 
@@ -161,7 +176,8 @@ class TestIsDispatcherCompact:
         """No source field → False (plain SessionStart, e.g. catchup subagent)."""
         mod = _load_on_compact(workspace=tmp_path)
 
-        result = mod._is_dispatcher_compact({"session_id": "any-subagent-id"})
+        with _PatchEnv(_make_env(tmp_path)):
+            result = mod._is_dispatcher_compact({"session_id": "any-subagent-id"})
 
         assert result is False, "Missing source field must return False"
 
@@ -169,7 +185,8 @@ class TestIsDispatcherCompact:
         """source='' → False (empty source is not a compact signal)."""
         mod = _load_on_compact(workspace=tmp_path)
 
-        result = mod._is_dispatcher_compact({"source": ""})
+        with _PatchEnv(_make_env(tmp_path)):
+            result = mod._is_dispatcher_compact({"source": ""})
 
         assert result is False, "Empty source must return False"
 
@@ -182,15 +199,9 @@ class TestIsDispatcherCompact:
         """
         mod = _load_on_compact(workspace=tmp_path)
 
-        saved = os.environ.get("LOBSTER_MAIN_SESSION")
-        os.environ["LOBSTER_MAIN_SESSION"] = "1"
-        try:
+        env = {**_make_env(tmp_path), "LOBSTER_MAIN_SESSION": "1"}
+        with _PatchEnv(env):
             result = mod._is_dispatcher_compact({"session_id": "catchup-subagent-0001"})
-        finally:
-            if saved is None:
-                os.environ.pop("LOBSTER_MAIN_SESSION", None)
-            else:
-                os.environ["LOBSTER_MAIN_SESSION"] = saved
 
         assert result is False, (
             "Catchup subagent with inherited LOBSTER_MAIN_SESSION=1 and no "

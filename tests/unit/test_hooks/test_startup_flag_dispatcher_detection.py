@@ -512,3 +512,128 @@ class TestSessionRoleIsDispatcher:
             "is_dispatcher_session() with agent_id present should return False "
             "(subagent fast path must remain intact)"
         )
+
+
+# ---------------------------------------------------------------------------
+# Tests: inject-bootup-context.py writes dispatcher session ID on startup
+# ---------------------------------------------------------------------------
+
+
+class TestInjectBootupWritesSessionId:
+    """inject-bootup-context.py must write the dispatcher session ID when it detects
+    the dispatcher via the startup flag.
+
+    This verifies the session ID write added by this PR:
+    https://github.com/SiderealPress/lobster/pull/2051
+
+    When the dispatcher starts fresh, inject-bootup-context.py:
+    1. Detects the dispatcher via the startup flag (live PID)
+    2. Calls write_dispatcher_session_id(session_id) to record the CC session UUID
+    3. on-compact.py later reads this file to confirm session identity on compact events
+    """
+
+    def test_dispatcher_session_id_file_written_on_dispatcher_start(self, tmp_path, capsys):
+        """main() writes the dispatcher session ID file when startup flag is live.
+
+        Runs main() with a live startup flag and a known session_id, then asserts
+        that the dispatcher session ID file contains the expected UUID.  Uses
+        LOBSTER_DISPATCHER_SESSION_ID_FILE_OVERRIDE so the write goes to a
+        temp-isolated path instead of the production file.
+        """
+        # Set up startup flag with the live test process PID.
+        data_dir = tmp_path / "data"
+        flag = _write_flag(data_dir, os.getpid())
+
+        # Set up bootup stubs.
+        claude_dir = tmp_path / "lobster" / ".claude"
+        claude_dir.mkdir(parents=True, exist_ok=True)
+        dispatcher_bootup = claude_dir / "sys.dispatcher.bootup.md"
+        dispatcher_bootup.write_text("# DISPATCHER BOOTUP\n")
+        subagent_bootup = claude_dir / "sys.subagent.bootup.md"
+        subagent_bootup.write_text("# SUBAGENT BOOTUP\n")
+
+        # Point dispatcher session ID file to an isolated path.
+        session_id_file = tmp_path / "messages" / "config" / "dispatcher-session-id"
+        dispatcher_uuid = "3cf478f7-fbeb-4a84-8a6c-d5fd90da7a3f"
+        hook_input = json.dumps({"session_id": dispatcher_uuid})
+
+        env = {
+            "LOBSTER_WORKSPACE": str(tmp_path),
+            "LOBSTER_DISPATCHER_SESSION_ID_FILE_OVERRIDE": str(session_id_file),
+        }
+
+        with _PatchEnv(env):
+            spec = importlib.util.spec_from_file_location(
+                "inject_session_id_write_test", _INJECT_HOOK_PATH
+            )
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+
+            mod.STARTUP_FLAG_FILE = flag
+            mod.DISPATCHER_BOOTUP = dispatcher_bootup
+            mod.SUBAGENT_BOOTUP = subagent_bootup
+            mod.USER_BASE_BOOTUP = tmp_path / "no-user-base"
+            mod.USER_DISPATCHER_BOOTUP = tmp_path / "no-user-dispatcher"
+            mod.USER_SUBAGENT_BOOTUP = tmp_path / "no-user-subagent"
+
+            with patch("sys.stdin", io.StringIO(hook_input)):
+                with pytest.raises(SystemExit):
+                    mod.main()
+
+        assert session_id_file.exists(), (
+            "inject-bootup-context.py must write the dispatcher session ID file "
+            "when the startup flag detects the dispatcher"
+        )
+        written_id = session_id_file.read_text().strip()
+        assert written_id == dispatcher_uuid, (
+            f"Dispatcher session ID file must contain the UUID from hook_input "
+            f"(expected {dispatcher_uuid!r}, got {written_id!r})"
+        )
+
+    def test_session_id_not_written_for_subagent(self, tmp_path, capsys):
+        """main() must NOT write the dispatcher session ID file for subagent sessions.
+
+        When the startup flag is absent (or has a dead PID), the session is a
+        subagent and write_dispatcher_session_id() must not be called.
+        """
+        # No startup flag written → subagent session.
+        data_dir = tmp_path / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        flag = data_dir / STARTUP_FLAG_FILENAME  # does NOT exist
+
+        claude_dir = tmp_path / "lobster" / ".claude"
+        claude_dir.mkdir(parents=True, exist_ok=True)
+        dispatcher_bootup = claude_dir / "sys.dispatcher.bootup.md"
+        dispatcher_bootup.write_text("# DISPATCHER BOOTUP\n")
+        subagent_bootup = claude_dir / "sys.subagent.bootup.md"
+        subagent_bootup.write_text("# SUBAGENT BOOTUP\n")
+
+        session_id_file = tmp_path / "messages" / "config" / "dispatcher-session-id"
+        hook_input = json.dumps({"session_id": "subagent-uuid-1234"})
+
+        env = {
+            "LOBSTER_WORKSPACE": str(tmp_path),
+            "LOBSTER_DISPATCHER_SESSION_ID_FILE_OVERRIDE": str(session_id_file),
+        }
+
+        with _PatchEnv(env):
+            spec = importlib.util.spec_from_file_location(
+                "inject_no_write_subagent_test", _INJECT_HOOK_PATH
+            )
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+
+            mod.STARTUP_FLAG_FILE = flag
+            mod.DISPATCHER_BOOTUP = dispatcher_bootup
+            mod.SUBAGENT_BOOTUP = subagent_bootup
+            mod.USER_BASE_BOOTUP = tmp_path / "no-user-base"
+            mod.USER_DISPATCHER_BOOTUP = tmp_path / "no-user-dispatcher"
+            mod.USER_SUBAGENT_BOOTUP = tmp_path / "no-user-subagent"
+
+            with patch("sys.stdin", io.StringIO(hook_input)):
+                with pytest.raises(SystemExit):
+                    mod.main()
+
+        assert not session_id_file.exists(), (
+            "Dispatcher session ID file must NOT be written when the session is a subagent"
+        )
