@@ -681,39 +681,9 @@ Rules:
 
 ---
 
-### context_warning (`type: "context_warning"`)
-
-Written by `hooks/context-monitor.py` when context window >= 70%.
-
-```
-1. mark_processing(message_id)
-2. Write a tombstone to the current session file (inline, no subagent needed — this is fast):
-   - Set Ended to current UTC ISO timestamp
-   - Set Messages processed to the count of messages handled this session (tracked in working context as MESSAGE_COUNT)
-   - Set End reason to "context_warning"
-   - Set Summary to "Graceful wind-down triggered at {context_pct}% context. [Brief list of what was in progress, if anything.]"
-   This ensures the session file is recoverable even if nothing else was written during this session.
-3. Enter wind-down mode:
-   - Set WIND_DOWN_MODE = True
-   - Do NOT spawn new non-trivial subagents
-   - For new user messages: ack, create_task to record, tell user "Compacting context shortly — will pick this up after."
-4. Drain in-flight agents: poll get_active_sessions() every 10s. Process arriving subagent results normally.
-5. Write ~/lobster-workspace/data/context-handoff.json:
-   {"triggered_at": "<iso8601>", "context_pct": <pct>, "pending_tasks": <list>, "last_user_message": "<text>", "note": "Graceful wind-down"}
-6. Send user (use admin chat_id from config): "Context at {pct}% — entering wind-down mode. Handing off cleanly."
-7. Do NOT call wait_for_messages() again. Do not attempt to self-terminate — the dispatcher cannot exit itself. Claude Code's context compaction will end the session externally when the context window fills.
-8. mark_processed(message_id)
-```
-
-Rules: `chat_id` is 0 — use admin chat_id for step 5. Never re-enter wind-down for a second warning. Do NOT call `lobster restart` — compaction is the recovery mechanism.
-
----
-
 ### session_note_reminder (`type: "session_note_reminder"`)
 
 Injected by the MCP server after every 20 real user messages. Spawn session-note-appender in the background; mark_processed silently (no reply).
-
-Do NOT spawn during wind-down mode (`WIND_DOWN_MODE = True`) — session-note-polish handles the final consolidation.
 
 ```
 1. mark_processing(message_id)
@@ -972,7 +942,7 @@ Do not modify Summary or Started/Ended. 3. Write back. 4. Call write_result.
 **Tombstone on session end (unconditional):** Whenever the session ends for any reason, write a tombstone update to the session file before stopping. This is done inline (not via subagent) and takes <1 second. Minimum content:
 - `Ended`: current UTC ISO timestamp
 - `Messages processed`: MESSAGE_COUNT (tracked in working context; increment on each `mark_processed` call)
-- `End reason`: one of `graceful wind-down`, `context_warning`, `short session`, `crash` (use `short session` if session ran < 5 minutes and no reason is known)
+- `End reason`: one of `compaction`, `short session`, `crash` (use `short session` if session ran < 5 minutes and no reason is known)
 - `Summary`: at minimum, "Session ended [reason]. [N] messages processed." — fill in more if context permits.
 
 This rule is unconditional — even if the session processed zero messages, the tombstone must be written. A stub file with only a start timestamp is nearly as bad as no file at all.
@@ -985,8 +955,6 @@ This rule is unconditional — even if the session processed zero messages, the 
 - All currently in-flight subagents (task_id, subagent type, brief description, and elapsed time since started_at) — these are the entries most at risk of being lost across compaction
 - Any pending user responses (messages that were mark_processing-d but not yet replied to)
 - The current MESSAGE_COUNT at time of compaction
-
-**On context_warning:** Write a tombstone inline as step 2 (see context_warning handler above) — this is faster and more reliable than spawning a subagent, and ensures the record survives even if wind-down is interrupted.
 
 ---
 

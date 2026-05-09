@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PostToolUse hook: context window guard.
+PostToolUse hook: context window monitor.
 
 Reads actual token usage from the session's transcript JSONL file rather than
 relying on the `context_window` field in the PostToolUse payload — which Claude
@@ -15,51 +15,16 @@ Approach:
      + cache_read_input_tokens.
   4. Look up the model's max context window from a known table (200k for all
      current CC models; see MODEL_CONTEXT_SIZES for details).
-  5. Compute used_pct and trigger wind-down mode if at or above WARNING_THRESHOLD.
+  5. Log used_pct to context-monitor.log.
 
-Below the warning threshold (default 70%): logs usage to context-monitor.log.
-At or above the threshold: writes a context_warning message to ~/messages/inbox/
-so the dispatcher can enter wind-down mode and trigger a graceful restart.
-
-Dedup: once a warning is written, /tmp/lobster-context-warning-sent is touched
-so subsequent hook firings skip the write until the flag is cleared on restart.
+No threshold triggering, no wind-down mode, no inbox messages. CC compacts on
+its own terms; the on-compact.py hook handles recovery after each compaction.
+(issue #2056: wind-down mode removed)
 """
 import json
 import sys
-import uuid
 from pathlib import Path
 from datetime import datetime, timezone
-
-# Import state machine for WINDING_DOWN transition (issue #1918).
-# Imported lazily in _write_winding_down() so a missing/broken import never
-# blocks context monitoring. Silent on all errors.
-_STATE_MACHINE_LOADED = False
-_state_machine = None
-
-def _write_winding_down(session_id: str = "") -> None:
-    """Write WINDING_DOWN state to dispatcher-state.json (issue #1918).
-
-    Called once when the context_warning threshold is crossed. Silent on all
-    errors — must never interrupt context monitoring.
-    """
-    global _STATE_MACHINE_LOADED, _state_machine
-    try:
-        if not _STATE_MACHINE_LOADED:
-            import importlib.util
-            _hooks_dir = Path(__file__).parent
-            _src_dir = _hooks_dir.parent / "src"
-            if str(_src_dir) not in sys.path:
-                sys.path.insert(0, str(_src_dir))
-            import state_machine as _sm
-            _state_machine = _sm
-            _STATE_MACHINE_LOADED = True
-        if _state_machine is not None:
-            _state_machine.write_state(_state_machine.WINDING_DOWN, session_id=session_id)
-    except Exception:
-        pass
-
-WARNING_THRESHOLD = 70.0
-DEDUP_FLAG = Path("/tmp/lobster-context-warning-sent")
 
 # Known model context sizes. Matched by prefix so versioned IDs like
 # 'claude-haiku-4-5-20251001' resolve correctly.
@@ -90,10 +55,12 @@ def _model_max_context(model: str) -> int:
 
 def _read_transcript_usage(
     transcript_path: str | None,
-) -> "tuple[float, float, str] | None":
+) -> "tuple[float, float, str, int] | None":
     """Read the last assistant usage entry from the transcript JSONL.
 
-    Returns (used_pct, remaining_pct, model) or None if data is unavailable.
+    Returns (used_pct, remaining_pct, model, total_tokens) or None if data
+    is unavailable. total_tokens is the raw token count (input + cache), which
+    is always accurate regardless of the assumed max context window.
 
     Reads the file line-by-line, keeping only the last assistant entry with a
     usage block. This is O(n) in lines but O(1) in memory — suitable for large
@@ -157,7 +124,7 @@ def _read_transcript_usage(
     used_pct = (total_used / model_max) * 100.0
     remaining_pct = 100.0 - used_pct
 
-    return (used_pct, remaining_pct, last_model)
+    return (used_pct, remaining_pct, last_model, total_used)
 
 
 def _log_usage(log_dir: Path, entry: dict) -> None:
@@ -200,26 +167,6 @@ def _build_absent_context_entry(tool_name: str, reason: str = "") -> dict:
     }
 
 
-def _build_warning_message(used_pct: float) -> dict:
-    """Return the context_warning inbox message payload."""
-    return {
-        "id": str(uuid.uuid4()),
-        "type": "context_warning",
-        "source": "system",
-        "chat_id": 0,
-        "text": f"Context window at {used_pct:.1f}% — entering wind-down mode",
-        "used_percentage": used_pct,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    }
-
-
-def _write_warning_to_inbox(inbox_dir: Path, message: dict) -> None:
-    """Write the warning message JSON to the inbox directory."""
-    inbox_dir.mkdir(parents=True, exist_ok=True)
-    filename = f"context-warning-{message['id']}.json"
-    (inbox_dir / filename).write_text(json.dumps(message, indent=2))
-
-
 def _handle_payload(
     data: dict,
     log_dir: Path | None = None,
@@ -229,16 +176,14 @@ def _handle_payload(
 
     Accepts log_dir and inbox_dir as injectable parameters so tests can verify
     behavior without touching the real filesystem. When not provided, defaults
-    to the standard runtime paths.
+    to the standard runtime paths. inbox_dir is accepted but unused — retained
+    for test compatibility (issue #2056: inbox warning removed with wind-down mode).
     """
     if log_dir is None:
         log_dir = Path.home() / "lobster-workspace" / "logs"
-    if inbox_dir is None:
-        inbox_dir = Path.home() / "messages" / "inbox"
 
     tool_name = data.get("tool_name", "unknown")
     transcript_path = data.get("transcript_path")
-    session_id = data.get("session_id", "")
 
     result = _read_transcript_usage(transcript_path)
 
@@ -255,25 +200,13 @@ def _handle_payload(
         _log_usage(log_dir, entry)
         return
 
-    used_pct, remaining_pct, model = result
+    used_pct, remaining_pct, model, _total_tokens = result
 
     entry = _build_log_entry(tool_name, used_pct, remaining_pct, model)
     _log_usage(log_dir, entry)
 
-    if used_pct < WARNING_THRESHOLD:
-        return
-
-    # At or above threshold — write a context_warning to inbox (once per session)
-    if DEDUP_FLAG.exists():
-        return
-
-    message = _build_warning_message(used_pct)
-    _write_warning_to_inbox(inbox_dir, message)
-    DEDUP_FLAG.touch()
-    # Transition dispatcher state to WINDING_DOWN (issue #1918).
-    # Written after the inbox message so the dispatcher sees the context_warning
-    # before the health check reads WINDING_DOWN and suppresses restarts.
-    _write_winding_down(session_id=session_id)
+    # No threshold check, no inbox message, no wind-down triggering.
+    # CC compacts on its own terms; on-compact.py handles post-compaction recovery.
 
 
 def main() -> None:
