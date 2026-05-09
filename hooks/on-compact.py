@@ -53,11 +53,22 @@ Dispatcher-only: exits immediately for subagent sessions (detected via
 _is_dispatcher_compact()).  Subagent compactions must not write compact-reminders
 or the sentinel — those signals are only meaningful to the dispatcher.
 
-Dispatcher detection: CC sets source='compact' on post-compact SessionStart
-hooks.  Catchup subagents are plain SessionStart events without this signal —
-they never carry source='compact'.  So source='compact' (combined with the
-startup flag check for fresh starts) is sufficient to gate all dispatcher-only
-writes.
+Dispatcher detection (two tiers):
+  Tier 1: source='compact' AND session_id matches the stored dispatcher session ID
+           written by inject-bootup-context.py at fresh dispatcher starts.
+           CC preserves the CC session UUID across compactions (same UUID before
+           and after compact), so the stored ID matches the post-compact session.
+           Subagents have their own unique session IDs that do NOT match the
+           stored dispatcher ID, so they are rejected here.
+  Tier 2: source='compact' AND no stored session ID (fail-open backward compat).
+           Also handles the startup flag case (is_dispatcher) as a fast path
+           for any non-compact events that reach this function.
+
+Session ID written by: inject-bootup-context.py when it detects the dispatcher
+  via the startup flag.  The write uses write_dispatcher_session_id() from
+  session_role.py and stores the CC session UUID in
+  ~/messages/config/dispatcher-session-id.  Because CC preserves the session
+  UUID across compactions, this stored value remains valid until a full restart.
 """
 
 import json
@@ -68,7 +79,7 @@ from pathlib import Path
 
 # Import shared session role utility.
 sys.path.insert(0, str(Path(__file__).parent))
-from session_role import is_dispatcher
+from session_role import is_dispatcher, _read_dispatcher_session_id
 
 
 INBOX_DIR = Path(os.path.expanduser("~/messages/inbox"))
@@ -543,20 +554,51 @@ def send_compaction_notify() -> None:
 def _is_dispatcher_compact(data: dict) -> bool:
     """Return True only if this SessionStart is a real dispatcher compaction.
 
-    CC sets source='compact' on post-compact SessionStart hooks.
-    Catchup subagents and other subagents have plain SessionStart events
-    without this signal, so they are correctly rejected.
+    Detection strategy (two tiers):
 
-    The startup flag check (is_dispatcher) handles fresh non-compact dispatcher
-    starts where source='compact' would not be present.
+    Tier 1 (startup flag): is_dispatcher() checks the launcher-written startup
+      flag.  This handles fresh non-compact starts where source='compact' is not
+      present.  The startup flag is consumed by inject-bootup-context.py, so it
+      will not be present when called from within a compact event — but is kept
+      as a fast-path for any edge case where this function is called outside the
+      normal compact flow.
+
+    Tier 2 (session ID + source='compact'): CC preserves the CC session UUID
+      across compactions — the post-compact session has the SAME session_id as
+      the pre-compact session.  inject-bootup-context.py writes the dispatcher's
+      session UUID to DISPATCHER_SESSION_FILE at fresh starts.  This tier checks:
+        a. source='compact' AND stored ID matches current session_id
+           → confirmed dispatcher compact (session ID proves dispatcher identity).
+        b. source='compact' AND stored ID exists but doesn't match current session_id
+           → subagent compact (subagents have their own unique session IDs).
+        c. source='compact' AND no stored ID (or absent current session_id)
+           → fail-open: treat as dispatcher compact (backward compat for systems
+             where inject-bootup-context.py has not yet written the session ID).
     """
-    # Fresh dispatcher start (non-compact): startup flag is still present.
+    # Tier 1: startup flag (fresh dispatcher start, not post-compact).
     if is_dispatcher(data):
         return True
 
-    # Post-compact dispatcher: CC sets source='compact' on the new session.
-    # Catchup subagents do NOT carry this field — they are plain SessionStart events.
-    return data.get("source") == "compact"
+    # Only process source='compact' events from here on.
+    if data.get("source") != "compact":
+        return False
+
+    # Tier 2: session ID check.
+    # CC preserves the session UUID across compactions, so the stored dispatcher
+    # session ID (written at fresh start) matches the post-compact session ID.
+    # Subagents have their own unique session IDs and are rejected here.
+    stored_session_id = _read_dispatcher_session_id()
+    if stored_session_id is not None:
+        current_session_id = (data.get("session_id") or "").strip()
+        if current_session_id:
+            if current_session_id == stored_session_id:
+                return True  # confirmed dispatcher: session ID matches
+            # Session ID mismatch: this is a subagent compact, not the dispatcher.
+            return False
+
+    # No stored session ID (or no current session_id): fail-open.
+    # source='compact' is the authoritative signal when the session ID file is absent.
+    return True
 
 
 def _reflection_already_exists(msg_id: str) -> bool:

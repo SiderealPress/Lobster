@@ -576,19 +576,33 @@ class TestWriteDispatcherSessionId:
         assert written == "sess-with-spaces"
 
     def test_silent_on_write_failure(self, monkeypatch, tmp_path):
-        """Errors during write are silently swallowed."""
+        """Errors during write are silently swallowed.
+
+        write_dispatcher_session_id() calls _get_dispatcher_session_file() which
+        resolves the path dynamically from LOBSTER_DISPATCHER_SESSION_ID_FILE_OVERRIDE.
+        Patching the module-level DISPATCHER_SESSION_FILE alias is not sufficient —
+        we must set the env var so that the dynamic resolver returns the desired path.
+        """
         monkeypatch.setenv("HOME", str(tmp_path))
         sr = importlib.reload(_sr_module)
 
-        # Point to an unwritable directory.
+        # Point to a file inside an unwritable directory via the env var that
+        # _get_dispatcher_session_file() reads at call time.
         unwritable = tmp_path / "readonly"
         unwritable.mkdir()
         unwritable.chmod(0o555)
         try:
-            monkeypatch.setattr(sr, "DISPATCHER_SESSION_FILE",
-                                unwritable / "dispatcher-session-id")
-            # Should not raise.
+            monkeypatch.setenv(
+                "LOBSTER_DISPATCHER_SESSION_ID_FILE_OVERRIDE",
+                str(unwritable / "dispatcher-session-id"),
+            )
+            # Should not raise — write failure must be silenced.
             sr.write_dispatcher_session_id("sess-x")
+            # Confirm the file was NOT written (the write was blocked, not silently
+            # ignored after a successful write).
+            assert not (unwritable / "dispatcher-session-id").exists(), (
+                "File must not exist in unwritable directory — write should have failed silently"
+            )
         finally:
             unwritable.chmod(0o755)
 
