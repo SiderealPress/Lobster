@@ -3738,20 +3738,6 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
-            name="get_skill_context_for_message",
-            description="Get assembled context from all active skills, including contextual skills that match the current message. Pass the incoming message text to activate skills with activation_mode='contextual' whose context_patterns match. Use this instead of get_skill_context when you have message text available (at message processing start).",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "message_text": {
-                        "type": "string",
-                        "description": "The incoming message text to evaluate contextual skill patterns against.",
-                    },
-                },
-                "required": ["message_text"],
-            },
-        ),
-        Tool(
             name="list_skills",
             description="List available skills in the Lobster Shop. Shows install/active status for each skill.",
             inputSchema={
