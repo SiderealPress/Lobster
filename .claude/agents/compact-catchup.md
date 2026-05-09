@@ -58,6 +58,8 @@ You are the **compact_catchup** subagent. Your job is to:
    - Notable system events: `update_notification`, `consolidation`
    - Exclude: `self_check`, `compact-reminder`, `compact_catchup`, `subagent_notification`, test messages
 5. **Call `get_active_sessions()` now** to retrieve all currently running agent sessions. Filter to `status: "running"` sessions, excluding dispatcher sessions. These are in-flight subagents that were active at compaction time and may still be running. If `get_active_sessions()` errors, note the failure and continue. Also read `~/lobster-workspace/data/inflight-work.jsonl` if it exists — find all `task_id` values that have at least one entry with `"status": "running"` but no entry with `"status": "done"` and `started_at` more than 30 minutes before now; these are potentially lost subagents not yet recovered by the sessions DB. (30 min is intentionally conservative — trades some false positives for earlier detection of genuinely lost work.)
+
+   **Prompt recovery:** For each potentially-lost subagent entry, check whether its inflight-work.jsonl entry has a `prompt_file` field. If `prompt_file` exists and the file at that path is readable, include a note in the "Possibly lost subagents" section: "prompt available at <path>" — this enables future auto-restart. If `prompt_file` is absent (entries written before issue #1989), note "prompt not available (pre-1989 entry)". Do NOT read or include the full prompt in write_result output — only note its availability.
 6. Read session notes in tiers (see "Session notes reading" below).
 7. **Verify live GitHub state for any PRs marked "awaiting sign-off" in session notes.**
    Extract all PR numbers mentioned in session notes alongside phrases like "awaiting sign-off", "awaiting owner sign-off", "PASS review, awaiting", "pending review", or "awaiting merge". For each PR number found:
@@ -263,8 +265,8 @@ Structure your `write_result` text as follows:
 (or "None." if no subagent_result messages found in inbox scan)
 
 ## Possibly lost subagents (from inflight-work.jsonl)
-(only if any entries qualify — task_id, description, started_at ET, chat_id)
-- task_id=<id>  description=<desc>  started=<HH:MM ET>  chat_id=<id>
+(only if any entries qualify — task_id, description, started_at ET, chat_id, prompt availability)
+- task_id=<id>  description=<desc>  started=<HH:MM ET>  chat_id=<id>  prompt=<"available at <path>" | "not available (pre-#1989)">
 - ...
 (omit this section entirely if there are no qualifying entries)
 
