@@ -30,7 +30,6 @@ import importlib.util
 import io
 import json
 import os
-import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -252,6 +251,22 @@ class TestParseAdminChatId:
         result = mod._parse_admin_chat_id(config_file)
         assert result == SAMPLE_CHAT_ID
 
+    def test_does_not_match_key_with_longer_prefix(self, tmp_path):
+        """Does not falsely match a key that starts with LOBSTER_ADMIN_CHAT_ID but has a suffix.
+
+        e.g. LOBSTER_ADMIN_CHAT_ID_BACKUP=999 must not be returned when
+        LOBSTER_ADMIN_CHAT_ID itself is absent.
+        """
+        config_file = _write_config_env(
+            tmp_path / "lobster-config",
+            f"{LOBSTER_ADMIN_CHAT_ID_VAR}_BACKUP=999\n",  # similar but different key
+        )
+        mod = _load_hook(workspace=tmp_path)
+        result = mod._parse_admin_chat_id(config_file)
+        assert result is None, (
+            "Should not match LOBSTER_ADMIN_CHAT_ID_BACKUP when LOBSTER_ADMIN_CHAT_ID is absent"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Integration tests: preamble injection in main()
@@ -350,4 +365,27 @@ class TestAdminChatIdInjectionInMain:
         expected_line = f"{PREAMBLE_PREFIX}{SAMPLE_CHAT_ID}"
         assert expected_line in output, (
             f"Expected preamble '{expected_line}' in output"
+        )
+
+    def test_preamble_annotation_appears_in_dispatcher_output(self, tmp_path):
+        """Dispatcher output includes the annotation comment explaining the injection source.
+
+        The annotation tells the dispatcher that ADMIN_CHAT_ID was injected from
+        config.env so it knows not to grep for it at startup.
+        """
+        config_file = _write_config_env(
+            tmp_path / "lobster-config",
+            f"{LOBSTER_ADMIN_CHAT_ID_VAR}={SAMPLE_CHAT_ID}\n",
+        )
+        output = _run_hook(
+            tmp_path=tmp_path,
+            config_env_path=config_file,
+            is_dispatcher=True,
+        )
+
+        assert "config.env" in output, (
+            "Annotation must mention config.env as the injection source"
+        )
+        assert "no grep needed" in output.lower(), (
+            "Annotation must confirm no grep is needed at startup"
         )
