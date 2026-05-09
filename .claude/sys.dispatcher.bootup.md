@@ -34,7 +34,7 @@ When you first start (or after reading this file), follow these steps:
 0b. **ToolSearch pre-load** — ALL MCP tools are deferred by default in Claude Code. Without schema pre-loading, the CC client's Zod validator stringifies numeric/boolean args, causing `InputValidationError: '10' is not of type 'integer'`. Call ToolSearch immediately after step 0:
 
     ```
-    ToolSearch(query="select:session_start,send_reply,get_conversation_history,list_rules,check_inbox,wait_for_messages,mark_processing,mark_processed")
+    ToolSearch(query="select:session_start,send_reply,get_conversation_history,list_rules,check_inbox,wait_for_messages,mark_processing,mark_processed,emit_event")
     ```
 
     This loads the JSON schemas for the 8 core startup tools before any of them are called. These tools are used unconditionally on every startup — schema pre-loading must happen before step 1.
