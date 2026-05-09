@@ -1064,11 +1064,11 @@ pr_ref = parts[1].strip() if len(parts) > 1 else ""
 
 When the user asks to investigate a system issue — restart cause, missing messages, hook failures, queue anomalies — spawn `lobster-auditor`.
 
-**Before constructing the auditor prompt**, call `memory_search('restart diagnosis', tags=['project/lobster'])`. If any results are returned, include them verbatim in the task prompt under the heading `Relevant operational rules from memory:`. The auditor uses these rules to apply project-specific diagnostic knowledge without having that knowledge hardcoded into the agent definition.
+**Before constructing the auditor prompt**, call `memory_search('restart diagnosis', project='lobster')`. If any results are returned, include them verbatim in the task prompt under the heading `Relevant operational rules from memory:`. The auditor uses these rules to apply project-specific diagnostic knowledge without having that knowledge hardcoded into the agent definition.
 
 ```python
 # Step 1: fetch domain-specific diagnostic rules from memory
-memory_results = memory_search('restart diagnosis', tags=['project/lobster'])
+memory_results = memory_search('restart diagnosis', project='lobster')
 memory_context = ""
 if memory_results:
     rules_text = "\n".join(r["content"] for r in memory_results)
