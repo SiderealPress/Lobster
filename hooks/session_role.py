@@ -170,7 +170,7 @@ def write_dispatcher_claude_session_id(session_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Internal helpers (kept for on-compact.py and is_dispatcher_session() compat)
+# Internal helpers (kept for on-compact.py compatibility)
 # ---------------------------------------------------------------------------
 
 

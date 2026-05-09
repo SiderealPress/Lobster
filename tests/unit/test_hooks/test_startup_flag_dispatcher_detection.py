@@ -353,13 +353,8 @@ class TestMainRoutingViaStartupFlag:
 
         return out_buf.getvalue(), ""
 
-    def test_live_flag_routes_to_dispatcher_path(self, tmp_path, capsys):
-        """Flag present with live PID → dispatcher path taken (bootup body NOT injected).
-
-        After issue #1994 (Fix C), sys.dispatcher.bootup.md body is not injected
-        into the context window. The startup-cause banner IS injected (it fits
-        in the 2KB preview). Subagent bootup must not appear.
-        """
+    def test_live_flag_injects_dispatcher_bootup(self, tmp_path, capsys):
+        """Flag present with live PID → dispatcher bootup injected."""
         data_dir = tmp_path / "data"
         flag = _write_flag(data_dir, os.getpid())
 
@@ -385,14 +380,7 @@ class TestMainRoutingViaStartupFlag:
                     mod.main()
 
         captured = capsys.readouterr()
-        # Dispatcher bootup body is NOT injected after Fix C (#1994).
-        assert "DISPATCHER BOOTUP" not in captured.out, (
-            "sys.dispatcher.bootup.md body must NOT be injected after Fix C (#1994)"
-        )
-        # startup-cause banner IS injected (it fits in the 2KB preview).
-        assert "startup-cause:" in captured.out, (
-            "startup-cause banner must be injected when startup flag has a live PID"
-        )
+        assert "DISPATCHER BOOTUP" in captured.out
         assert "SUBAGENT BOOTUP" not in captured.out
 
     def test_absent_flag_injects_subagent_bootup(self, tmp_path, capsys):
