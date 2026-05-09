@@ -120,17 +120,26 @@ REMINDER_TEXT = (
 
 SENTINEL_FILE = Path(os.path.expanduser("~/messages/config/compact-pending"))
 
-# WFM-active signal file: written with a Unix timestamp while the dispatcher is
-# blocking in wait_for_messages(), refreshed every 60 s, and deleted (or set to
-# "exited") when WFM returns.  A digit-only, non-"exited" value in this file
-# means the dispatcher was actively waiting when the current session started --
-# a strong indicator that this SessionStart was triggered by a compaction.
-WFM_ACTIVE_FILE = Path(
+# Dispatcher heartbeat file: written with a Unix epoch timestamp by the WFM
+# heartbeat thread in inbox_server.py while wait_for_messages() is blocking,
+# refreshed every 60 s.  A recent digit-only value means the dispatcher was
+# actively running immediately before this session started — a strong signal
+# that this SessionStart was triggered by a compaction rather than a fresh start.
+# Override: LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE env var (test isolation,
+# matching the existing override used by thinking-heartbeat.py and health-check).
+DISPATCHER_HEARTBEAT_FILE = Path(
     os.environ.get(
-        "LOBSTER_WFM_ACTIVE_OVERRIDE",
-        os.path.expanduser("~/lobster-workspace/logs/dispatcher-wfm-active"),
+        "LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE",
+        os.path.expanduser("~/lobster-workspace/logs/dispatcher-heartbeat"),
     )
 )
+
+# Maximum age (seconds) for the dispatcher heartbeat to be treated as "recently
+# active" in the tier-3 compaction fallback.  15 minutes is conservative: it
+# covers the longest normal idle period (WFM blocking with no messages), while
+# being short enough to avoid false-positives after a genuine long-idle restart
+# (e.g. Lobster was stopped for an hour and then restarted cleanly).
+DISPATCHER_WFM_RECENCY_SECONDS = 900  # 15 minutes
 
 COMPACTION_TELEGRAM_MESSAGE = "\u267b\ufe0f Context compacted. Re-orienting..."
 
@@ -384,36 +393,37 @@ def send_compaction_notify() -> None:
         )
 
 
-def _wfm_active_indicates_compaction() -> bool:
-    """Return True if the WFM-active signal file suggests a compaction occurred.
+def _wfm_was_active() -> bool:
+    """Return True if the dispatcher was recently active before this session started.
 
-    Reads ``dispatcher-wfm-active`` (``~/lobster-workspace/logs/``).  The MCP
-    server writes a Unix epoch timestamp into this file while
-    wait_for_messages() is blocking and sets it to "exited" (or deletes it)
-    when WFM returns.
+    Reads DISPATCHER_HEARTBEAT_FILE (dispatcher-heartbeat).  The file contains
+    a single Unix epoch integer written by thinking-heartbeat.py (PostToolUse)
+    and the WFM heartbeat thread in inbox_server.py.  If the file exists and
+    the recorded timestamp is within DISPATCHER_WFM_RECENCY_SECONDS (15 min),
+    the dispatcher was actively running immediately before this session — a
+    strong signal that this is a compaction rather than a fresh start.
 
-    Returns True when:
-    - the file exists, AND
-    - the stripped content is all digits (a Unix timestamp), AND
-    - the content is NOT the literal string "exited"
+    A missing file, non-integer content, or a stale timestamp all return False
+    (conservative: prefer false-negatives over false-positives for tier-3).
 
-    Returns False in all other cases, including any read error.
+    Used as the third-tier fallback in _is_compact_event() when CC omits both
+    source and hook_name from the SessionStart payload.
     """
     try:
-        if not WFM_ACTIVE_FILE.exists():
+        raw = DISPATCHER_HEARTBEAT_FILE.read_text().strip()
+        if not raw.isdigit():
             return False
-        file_content = WFM_ACTIVE_FILE.read_text().strip()
-        if file_content == "exited":
-            return False
-        return file_content.isdigit()
-    except Exception:  # noqa: BLE001
+        last_ts = int(raw)
+        age_seconds = int(time.time()) - last_ts
+        return 0 <= age_seconds < DISPATCHER_WFM_RECENCY_SECONDS
+    except OSError:
         return False
 
 
 def _is_compact_event(data: dict) -> bool:
     """Return True if the hook input indicates a context compaction event.
 
-    Tier 1 (primary: the ``source`` field in the CC SessionStart payload.
+    Tier 1 (primary): the ``source`` field in the CC SessionStart payload.
     Claude Code sets source="compact" for compaction-triggered sessions
     (other values: "startup", "resume", "clear").
 
@@ -423,12 +433,10 @@ def _is_compact_event(data: dict) -> bool:
     hook_name.
 
     Tier 3 (filesystem fallback): when BOTH ``source`` and ``hook_name`` are
-    absent from the payload, check the dispatcher-wfm-active file.  If that
-    file exists and its content is an all-digit string (a Unix timestamp) that
-    is not the literal string "exited", the dispatcher was actively waiting for
-    messages before this session started — a strong indicator that this
-    SessionStart was triggered by a compaction.  Claude Code sometimes omits
-    both fields entirely; this tier catches those cases.
+    absent from the payload, check whether the dispatcher was recently active
+    (DISPATCHER_HEARTBEAT_FILE contains a recent digit-only Unix timestamp).
+    A live heartbeat signal with no payload fields strongly implies CC fired
+    a compaction SessionStart without populating the usual identification fields.
 
     Returns False conservatively when neither field is present and the
     filesystem fallback is unavailable or inconclusive.
@@ -441,7 +449,7 @@ def _is_compact_event(data: dict) -> bool:
     if hook_name is not None:
         return hook_name == "compact"
     # Tier 3: both source and hook_name absent — use filesystem fallback
-    return _wfm_active_indicates_compaction()
+    return _wfm_was_active()
 
 
 def _stored_dispatcher_session_alive() -> bool:
