@@ -9954,6 +9954,17 @@ async def main():
     from event_bus import init_event_bus
     init_event_bus()
 
+    # Start the IPC bridge (issue #2003): Unix domain socket server that accepts
+    # LobsterEvent JSON from hooks (subprocesses) and emits them into the in-process
+    # EventBus.  Hooks use emit_to_bus() from hooks/emit_to_bus.py as the client side.
+    # Idempotent — safe to call multiple times; the socket path is
+    # $LOBSTER_WORKSPACE/run/event-bus.sock.
+    try:
+        from event_bus_ipc import start_ipc_server
+        await start_ipc_server()
+    except Exception as _ipc_err:
+        log.warning("[event-bus-ipc] Failed to start IPC server (non-fatal): %s", _ipc_err)
+
     # Startup cleanup: mark stale 'running' rows as 'dead' before reconciler loop begins.
     # After a force-restart, agents killed mid-run leave their output files with
     # stop_reason=tool_use, which the reconciler treats as still-running. We fix this

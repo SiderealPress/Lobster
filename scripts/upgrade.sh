@@ -635,6 +635,7 @@ create_new_directories() {
         "$WORKSPACE_DIR/data"
         "$WORKSPACE_DIR/scheduled-jobs/logs"
         "$WORKSPACE_DIR/reports"
+        "$WORKSPACE_DIR/run"
         "$USER_CONFIG_DIR/memory/canonical/people"
         "$USER_CONFIG_DIR/memory/canonical/projects"
         "$USER_CONFIG_DIR/memory/archive/digests"
@@ -3089,6 +3090,24 @@ M88_PYEOF
         fi
     else
         substep "Migration 90: settings.json or jq not found — skipping"
+    fi
+
+    # Migration 91: Create $LOBSTER_WORKSPACE/run/ directory (issue #2003).
+    # The EventBus IPC bridge (event_bus_ipc.py) binds its Unix domain socket at
+    # $LOBSTER_WORKSPACE/run/event-bus.sock. This directory must exist before the
+    # MCP server starts. The server creates it lazily, but the migration ensures
+    # it is present on existing installs that upgrade from older versions.
+    local _m91_run_dir="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}/run"
+    if [ ! -d "$_m91_run_dir" ]; then
+        if ! $DRY_RUN; then
+            mkdir -p "$_m91_run_dir"
+            substep "Migration 91: created $_m91_run_dir for EventBus IPC socket"
+        else
+            substep "Migration 91 (dry-run): would create $_m91_run_dir"
+        fi
+        ((migrated++)) || true
+    else
+        substep "Migration 91: run/ directory already exists — skipping"
     fi
 
     if [ "$migrated" -eq 0 ]; then
