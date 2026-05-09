@@ -462,3 +462,19 @@ def test_send_compaction_notify_writes_to_outbox(tmp_path: Path) -> None:
 
     # Must have a non-empty id field (used as the filename key).
     assert reply.get("id"), "outbox file must have a non-empty 'id' field"
+
+    # Timestamp must be ISO 8601 UTC format (e.g. "2024-01-15T12:34:56Z"),
+    # not a local-time offset (+00:00) and not contain a literal "%f".
+    ts = reply.get("timestamp", "")
+    assert isinstance(ts, str) and ts, f"outbox file must have a non-empty 'timestamp' field, got {ts!r}"
+    assert "%f" not in ts, (
+        f"timestamp contains literal '%f' — time.strftime does not support %%f: {ts!r}"
+    )
+    assert ts.endswith("Z"), (
+        f"timestamp must end with 'Z' (UTC), not a local-time offset: {ts!r}"
+    )
+    # Must parse as a valid ISO 8601 UTC datetime.
+    try:
+        datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError as exc:
+        pytest.fail(f"outbox file timestamp {ts!r} is not valid ISO 8601: {exc}")
