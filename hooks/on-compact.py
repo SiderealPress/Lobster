@@ -15,9 +15,11 @@ The script is idempotent: if a compact-reminder message already exists in
 inbox/ or processing/ it skips writing a duplicate.
 
 Compaction detection (self-gate):
-  Primary:  data["source"] == "compact"  (CC-documented field)
-  Fallback: data["hook_name"] == "compact"  (observed in some CC versions)
-  If neither matches, the script exits immediately (sys.exit(0)).
+  Tier 1:  data["source"] == "compact"  (CC-documented field)
+  Tier 2:  data["hook_name"] == "compact"  (observed in some CC versions)
+  Tier 3:  dispatcher-wfm-active file contains a digit-only timestamp
+           (filesystem fallback for CC versions that omit both fields)
+  If none of the tiers match, the script exits immediately (sys.exit(0)).
 
 Notification: always writes a compaction notification to ~/messages/outbox/
 (the Lobster outbox pipeline) so the user is notified via Telegram.  The
@@ -117,6 +119,18 @@ REMINDER_TEXT = (
 )
 
 SENTINEL_FILE = Path(os.path.expanduser("~/messages/config/compact-pending"))
+
+# WFM-active signal file: written with a Unix timestamp while the dispatcher is
+# blocking in wait_for_messages(), refreshed every 60 s, and deleted (or set to
+# "exited") when WFM returns.  A digit-only, non-"exited" value in this file
+# means the dispatcher was actively waiting when the current session started --
+# a strong indicator that this SessionStart was triggered by a compaction.
+WFM_ACTIVE_FILE = Path(
+    os.environ.get(
+        "LOBSTER_WFM_ACTIVE_OVERRIDE",
+        os.path.expanduser("~/lobster-workspace/logs/dispatcher-wfm-active"),
+    )
+)
 
 COMPACTION_TELEGRAM_MESSAGE = "\u267b\ufe0f Context compacted. Re-orienting..."
 
@@ -370,23 +384,64 @@ def send_compaction_notify() -> None:
         )
 
 
+def _wfm_active_indicates_compaction() -> bool:
+    """Return True if the WFM-active signal file suggests a compaction occurred.
+
+    Reads ``dispatcher-wfm-active`` (``~/lobster-workspace/logs/``).  The MCP
+    server writes a Unix epoch timestamp into this file while
+    wait_for_messages() is blocking and sets it to "exited" (or deletes it)
+    when WFM returns.
+
+    Returns True when:
+    - the file exists, AND
+    - the stripped content is all digits (a Unix timestamp), AND
+    - the content is NOT the literal string "exited"
+
+    Returns False in all other cases, including any read error.
+    """
+    try:
+        if not WFM_ACTIVE_FILE.exists():
+            return False
+        file_content = WFM_ACTIVE_FILE.read_text().strip()
+        if file_content == "exited":
+            return False
+        return file_content.isdigit()
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _is_compact_event(data: dict) -> bool:
     """Return True if the hook input indicates a context compaction event.
 
-    Primary check: the ``source`` field in the CC SessionStart payload.
+    Tier 1 (primary: the ``source`` field in the CC SessionStart payload.
     Claude Code sets source="compact" for compaction-triggered sessions
     (other values: "startup", "resume", "clear").
 
-    Fallback: hook_name == "compact" is undocumented but observed in some
-    CC versions.  The fallback is only used when ``source`` is absent from
-    the payload — if ``source`` is present but non-compact, the event is
-    not a compaction regardless of hook_name.
+    Tier 2 (fallback): hook_name == "compact" is undocumented but observed
+    in some CC versions.  Only used when ``source`` is absent — if ``source``
+    is present but non-compact, the event is not a compaction regardless of
+    hook_name.
+
+    Tier 3 (filesystem fallback): when BOTH ``source`` and ``hook_name`` are
+    absent from the payload, check the dispatcher-wfm-active file.  If that
+    file exists and its content is an all-digit string (a Unix timestamp) that
+    is not the literal string "exited", the dispatcher was actively waiting for
+    messages before this session started — a strong indicator that this
+    SessionStart was triggered by a compaction.  Claude Code sometimes omits
+    both fields entirely; this tier catches those cases.
+
+    Returns False conservatively when neither field is present and the
+    filesystem fallback is unavailable or inconclusive.
     """
     source = data.get("source")
     if source is not None:
         return source == "compact"
-    # source field absent — fall back to hook_name
-    return data.get("hook_name") == "compact"
+    # Tier 2: source field absent — fall back to hook_name
+    hook_name = data.get("hook_name")
+    if hook_name is not None:
+        return hook_name == "compact"
+    # Tier 3: both source and hook_name absent — use filesystem fallback
+    return _wfm_active_indicates_compaction()
 
 
 def _stored_dispatcher_session_alive() -> bool:
@@ -539,8 +594,10 @@ def main() -> None:
 
     # Self-gate: this hook is registered with matcher="" so it fires on every
     # SessionStart event.  Exit immediately for non-compact sessions.
-    # Primary check: source="compact" (CC-documented).
-    # Fallback: hook_name="compact" (observed in some CC versions).
+    # Tier 1: source="compact" (CC-documented).
+    # Tier 2: hook_name="compact" (observed in some CC versions).
+    # Tier 3: dispatcher-wfm-active contains a digit-only timestamp (both
+    #         fields absent -- CC sometimes omits them entirely).
     if not _is_compact_event(data):
         sys.exit(0)
 
