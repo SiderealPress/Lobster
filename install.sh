@@ -573,25 +573,29 @@ HOOKEOF
         info "inject-bootup-context hook already configured (all sessions)"
     fi
 
-    # Set up on-compact.py hook with matcher="" (fires on all SessionStart events).
-    # Uses matcher="" instead of matcher="compact" because matcher="compact" is unreliable
-    # in CC 2.1.119 (~37% fire rate observed since April 17 — see issue #1947).
-    # The script has an internal self-gate (_is_compact_event()) that skips non-compact
-    # events, so matcher="" is safe.
-    # Note: a compact-matcher inject-bootup-context entry is NOT added here.
-    # The empty-matcher inject-bootup-context entry above already fires on all
-    # SessionStart events including compact, so a second compact-specific entry would
-    # cause double-injection on every session type.
+    # Set compact flag on context compaction (on-compact)
     chmod +x "$INSTALL_DIR/hooks/on-compact.py" 2>/dev/null || true
-    if ! jq -e '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("on-compact")) | select(.matcher == "")' "$_settings" > /dev/null 2>&1; then
+    if ! jq -e '.hooks.SessionStart[]? | select(.matcher == "compact")' "$_settings" > /dev/null 2>&1; then
         _tmp=$(mktemp)
         jq '.hooks.SessionStart = (.hooks.SessionStart // []) + [{
-            "matcher": "",
+            "matcher": "compact",
             "hooks": [{"type": "command", "command": "python3 '"$INSTALL_DIR"'/hooks/on-compact.py", "timeout": 30}]
         }]' "$_settings" > "$_tmp" && mv "$_tmp" "$_settings"
-        success "on-compact hook installed (matcher='' for reliability)"
+        success "on-compact hook installed"
     else
-        info "on-compact hook already configured (all sessions, self-gating)"
+        info "on-compact hook already configured"
+    fi
+
+    # Re-inject bootup context after compaction
+    if ! jq -e '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("inject-bootup-context")) | select(.matcher == "compact")' "$_settings" > /dev/null 2>&1; then
+        _tmp=$(mktemp)
+        jq '.hooks.SessionStart = (.hooks.SessionStart // []) + [{
+            "matcher": "compact",
+            "hooks": [{"type": "command", "command": "python3 '"$INSTALL_DIR"'/hooks/inject-bootup-context.py", "timeout": 10}]
+        }]' "$_settings" > "$_tmp" && mv "$_tmp" "$_settings"
+        success "inject-bootup-context hook installed (compact sessions)"
+    else
+        info "inject-bootup-context hook already configured (compact sessions)"
     fi
 
     # Inject sys.debug.bootup.md when LOBSTER_DEBUG=true
@@ -1873,25 +1877,6 @@ step "Configuring Claude Code settings and hooks..."
 setup_claude_hooks
 success "Self-check cron configured (every 3min)"
 
-# Set up Claude Code PreToolUse hook to block writes to .claude/memory/
-if [ -f "$CLAUDE_SETTINGS" ]; then
-    if ! jq -e '.hooks.PreToolUse[]? | select(.matcher == "Write|Edit")' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
-        TMP_SETTINGS=$(mktemp)
-        jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
-            "matcher": "Write|Edit",
-            "hooks": [{
-                "type": "command",
-                "command": "python3 '"$INSTALL_DIR"'/hooks/no-auto-memory.py",
-                "timeout": 5
-            }]
-        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
-        success "No-auto-memory hook added to Claude Code settings"
-    else
-        info "No-auto-memory hook already configured in Claude Code settings"
-    fi
-else
-    info "Skipping no-auto-memory hook (settings.json not yet created)"
-fi
 
 # Set up Claude Code PreToolUse hook to enforce clickable links for completed work
 chmod +x "$INSTALL_DIR/hooks/link-checker.py" || true
@@ -1912,27 +1897,6 @@ if [ -f "$CLAUDE_SETTINGS" ]; then
     fi
 else
     info "Skipping link enforcement hook (settings.json not yet created)"
-fi
-
-# Set up Claude Code PreToolUse hook to enforce reply_to_message_id on Telegram send_reply (#1168)
-chmod +x "$INSTALL_DIR/hooks/require-reply-to-message-id.py" || true
-if [ -f "$CLAUDE_SETTINGS" ]; then
-    if ! jq -e '.hooks.PreToolUse[]? | select(.hooks[]?.command | test("require-reply-to-message-id"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
-        TMP_SETTINGS=$(mktemp)
-        jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
-            "matcher": "mcp__lobster-inbox__send_reply",
-            "hooks": [{
-                "type": "command",
-                "command": "python3 '"$INSTALL_DIR"'/hooks/require-reply-to-message-id.py",
-                "timeout": 5
-            }]
-        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
-        success "Telegram reply_to_message_id enforcement hook installed"
-    else
-        info "reply_to_message_id enforcement hook already configured in Claude Code settings"
-    fi
-else
-    info "Skipping reply_to_message_id enforcement hook (settings.json not yet created)"
 fi
 
 # Set up Claude Code PreToolUse hook to block generic Agent calls without subagent_type
@@ -2130,30 +2094,6 @@ if [ -f "$CLAUDE_SETTINGS" ]; then
 else
     info "Skipping thinking-heartbeat hook (settings.json not yet created)"
 fi
-# Set up Claude Code PreToolUse hook to write a pre-tool heartbeat to lobster-state.json.
-# Fires BEFORE every tool call — captures liveness even when tool calls fail (e.g. MCP
-# disconnect). Unlike the PostToolUse thinking-heartbeat (which only fires after success),
-# this fires first, so the health check can detect a frozen dispatcher stuck retrying a
-# failed MCP call (issue #1439).
-chmod +x "$INSTALL_DIR/hooks/pretooluse-heartbeat.py" || true
-if [ -f "$CLAUDE_SETTINGS" ]; then
-    if ! jq -e '.hooks.PreToolUse[]? | select(.hooks[]?.command | contains("pretooluse-heartbeat"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
-        TMP_SETTINGS=$(mktemp)
-        jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
-            "matcher": "",
-            "hooks": [{
-                "type": "command",
-                "command": "python3 '"$INSTALL_DIR"'/hooks/pretooluse-heartbeat.py",
-                "timeout": 5
-            }]
-        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
-        success "pretooluse-heartbeat hook installed"
-    else
-        info "pretooluse-heartbeat hook already configured in Claude Code settings"
-    fi
-else
-    info "Skipping pretooluse-heartbeat hook (settings.json not yet created)"
-fi
 
 # Set up Claude Code PreToolUse hook to write a pre-tool heartbeat timestamp (issue #1786).
 # Complements thinking-heartbeat.py (PostToolUse) and narrows the inference-gap detection
@@ -2178,7 +2118,7 @@ else
     info "Skipping pre-tool-heartbeat hook (settings.json not yet created)"
 fi
 
-# Set up Claude Code PreToolUse + PostToolUse hooks to log WFM lifecycle events (issue #1895).
+# Set up Claude Code PreToolUse + PostToolUse hooks for WFM lifecycle logging (issue #1895).
 # Writes WFM_ENTER (PreToolUse) and WFM_EXIT (PostToolUse) events to
 # ~/lobster-workspace/logs/session-lifecycle.log, enabling post-crash investigation of
 # how long the dispatcher was blocked in wait_for_messages.
@@ -2354,7 +2294,7 @@ if [ -f "$CLAUDE_SETTINGS" ]; then
                 "timeout": 30
             }]
         }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
-        success "on-compact hook installed (matcher='' for reliability)"
+        success "on-compact hook installed"
     else
         info "on-compact hook already configured in Claude Code settings"
     fi
@@ -2410,64 +2350,6 @@ if [ -f "$CLAUDE_SETTINGS" ]; then
     fi
 else
     info "Skipping on-fresh-start hook (settings.json not yet created)"
-fi
-
-# Set up Claude Code PreToolUse + PostToolUse + Stop hooks for dispatcher state machine
-# (issue #1918). Three hooks implement the 5-state liveness machine:
-#   - dispatcher-state-pretool.py  (PreToolUse):  WAITING on wait_for_messages,
-#                                                 PROCESSING on mark_processing
-#   - dispatcher-state-posttool.py (PostToolUse): WAITING on mark_processed
-#   - dispatcher-state-stop.py     (Stop):        DEAD on session exit
-# STARTING is written by inject-bootup-context.py (SessionStart hook).
-chmod +x "$INSTALL_DIR/hooks/dispatcher-state-pretool.py" || true
-if [ -f "$CLAUDE_SETTINGS" ]; then
-    if ! jq -e '[.hooks.PreToolUse[]?.hooks[]?.command // empty] | any(contains("dispatcher-state-pretool"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
-        TMP_SETTINGS=$(mktemp)
-        jq --arg cmd "python3 $INSTALL_DIR/hooks/dispatcher-state-pretool.py" \
-           '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
-            "matcher": "mcp__lobster-inbox__wait_for_messages|mcp__lobster-inbox__mark_processing",
-            "hooks": [{"type": "command", "command": $cmd, "timeout": 5}]
-        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
-        success "dispatcher-state-pretool PreToolUse hook registered"
-    else
-        info "dispatcher-state-pretool PreToolUse hook already configured"
-    fi
-else
-    info "Skipping dispatcher-state-pretool hook (settings.json not yet created)"
-fi
-
-chmod +x "$INSTALL_DIR/hooks/dispatcher-state-posttool.py" || true
-if [ -f "$CLAUDE_SETTINGS" ]; then
-    if ! jq -e '[.hooks.PostToolUse[]?.hooks[]?.command // empty] | any(contains("dispatcher-state-posttool"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
-        TMP_SETTINGS=$(mktemp)
-        jq --arg cmd "python3 $INSTALL_DIR/hooks/dispatcher-state-posttool.py" \
-           '.hooks.PostToolUse = (.hooks.PostToolUse // []) + [{
-            "matcher": "mcp__lobster-inbox__mark_processed",
-            "hooks": [{"type": "command", "command": $cmd, "timeout": 5}]
-        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
-        success "dispatcher-state-posttool PostToolUse hook registered"
-    else
-        info "dispatcher-state-posttool PostToolUse hook already configured"
-    fi
-else
-    info "Skipping dispatcher-state-posttool hook (settings.json not yet created)"
-fi
-
-chmod +x "$INSTALL_DIR/hooks/dispatcher-state-stop.py" || true
-if [ -f "$CLAUDE_SETTINGS" ]; then
-    if ! jq -e '[.hooks.Stop[]?.hooks[]?.command // empty] | any(contains("dispatcher-state-stop"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
-        TMP_SETTINGS=$(mktemp)
-        jq --arg cmd "python3 $INSTALL_DIR/hooks/dispatcher-state-stop.py" \
-           '.hooks.Stop = (.hooks.Stop // []) + [{
-            "matcher": "",
-            "hooks": [{"type": "command", "command": $cmd, "timeout": 5}]
-        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
-        success "dispatcher-state-stop Stop hook registered"
-    else
-        info "dispatcher-state-stop Stop hook already configured"
-    fi
-else
-    info "Skipping dispatcher-state-stop hook (settings.json not yet created)"
 fi
 
 # Set up Claude Code Stop hook to enforce wait_for_messages in dispatcher sessions.
