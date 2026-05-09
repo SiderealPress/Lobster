@@ -6119,6 +6119,15 @@ async def handle_list_tasks(args: dict) -> list[TextContent]:
             output += f"  #{t['id']} {t['subject']}{desc_preview}\n"
         output += "\n"
 
+    # Show tasks with unrecognized statuses (e.g. legacy "done") in a fallback group
+    # rather than silently dropping them from the display.
+    other_tasks = [t for s, lst in groups.items() if s not in _TASK_STATUS_META for t in lst]
+    if other_tasks:
+        output += "**❓ Other (unrecognized status):**\n"
+        for t in other_tasks:
+            output += f"  #{t['id']} {t['subject']} [{t.get('status', 'unknown')}]\n"
+        output += "\n"
+
     output += f"---\nTotal: {len(tasks)} task(s)"
 
     return [TextContent(type="text", text=output)]

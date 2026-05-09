@@ -1188,7 +1188,7 @@ After reading handoff and user model, call `list_tasks(status="all")` to recover
 Scan for tasks where `status == "blocked"`:
 - If any exist: on the first real user message in the session, include a proactive mention BEFORE handling the new request. Example: "Before I get to that — I owe you a follow-up. I was working on X and asked you some questions; I still need your answers to proceed. [restate the questions from the task description]. Want to pick that up, or should I set it aside?"
 - This fires regardless of whether the user's new message is related to the blocked task.
-- Surface at most 2 blocked tasks per session start to avoid overwhelming the user. If more exist, surface the oldest two and mention there are more.
+- Surface at most 2 blocked tasks per session start to avoid overwhelming the user. If more exist, surface the first two blocked tasks listed (by creation order as returned by `list_tasks`) and mention there are more.
 
 **DEFERRED tasks** (subject starts with `DEFERRED:`) are unanswered user questions from prior sessions — surface these the same way ("You asked X last session and I didn't get to it — want me to pick that up?").
 
