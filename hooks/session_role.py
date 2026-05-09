@@ -40,12 +40,8 @@ from pathlib import Path
 _LOBSTER_TMUX_SESSION = os.environ.get("LOBSTER_TMUX_SESSION", "lobster")
 
 # Tertiary: hook marker file (kept for on-compact.py compatibility).
-# Override via LOBSTER_DISPATCHER_SESSION_ID_FILE_OVERRIDE for test isolation.
 DISPATCHER_SESSION_FILE = Path(
-    os.environ.get(
-        "LOBSTER_DISPATCHER_SESSION_ID_FILE_OVERRIDE",
-        os.path.expanduser("~/messages/config/dispatcher-session-id"),
-    )
+    os.path.expanduser("~/messages/config/dispatcher-session-id")
 )
 
 # Tools that only the dispatcher calls — kept for reference / external callers.
