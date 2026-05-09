@@ -31,16 +31,20 @@ Also writes last_compaction_ts to compaction-state.json so that the catch-up
 subagent knows which window of history to recover after compaction.
 
 Dispatcher-only: exits immediately for subagent sessions (detected via
-_is_dispatcher_compact(), which extends session_role.is_dispatcher() with a
-LOBSTER_MAIN_SESSION + stored-JSONL fallback).  Subagent compactions must not
-write compact-reminders or the sentinel — those signals are only meaningful to
+_is_dispatcher_compact(), which uses a layered strategy: startup flag, then
+exact session ID match, then LOBSTER_MAIN_SESSION + explicit compact signal
+as a post-compact fallback).  Subagent compactions must not write
+compact-reminders or the sentinel — those signals are only meaningful to
 the dispatcher.
 
 Compaction session_id change: CC assigns a NEW session_id to the post-compact
 session, so the hook input's session_id won't match the stored
 dispatcher-session-id marker even for the dispatcher's own compaction.
-_is_dispatcher_compact() handles this by checking LOBSTER_MAIN_SESSION=1 +
-whether the previous dispatcher session JSONL still exists on disk.
+_is_dispatcher_compact() handles this via an explicit compact signal check:
+if source='compact' or hook_name='compact' is present (authoritative signal)
+AND LOBSTER_MAIN_SESSION=1, it is a real dispatcher compaction.  Catchup
+subagents do NOT have this signal — they are plain SessionStart events
+detected only via the heartbeat fallback — so they are correctly rejected.
 """
 
 import json
@@ -389,83 +393,87 @@ def _is_compact_event(data: dict) -> bool:
     return data.get("hook_name") == "compact"
 
 
-def _stored_dispatcher_session_alive() -> bool:
-    """Return True if the stored dispatcher session's JSONL file still exists on disk.
-
-    Used as a compaction fallback: if the stored session JSONL is present, the
-    session hasn't ended cleanly.  For a compaction event this means the dispatcher's
-    context was just compacted — the old JSONL is retained by CC on disk.
-
-    Returns False if the marker file is absent, or the JSONL glob finds nothing.
-    Fails open (returns True) on unexpected errors so we don't skip a real
-    dispatcher compaction due to filesystem issues.
-    """
-    stored = _read_dispatcher_session_id()
-    if not stored:
-        return False
-    try:
-        projects_dir = Path(os.path.expanduser("~/.claude/projects"))
-        if not projects_dir.is_dir():
-            return True  # can't determine — assume alive (conservative)
-        for _ in projects_dir.glob(f"*/{stored}.jsonl"):
-            return True
-        return False
-    except Exception:  # noqa: BLE001
-        return True  # conservative fallback
-
-
 def _is_dispatcher_compact(data: dict) -> bool:
     """Return True if this compaction event belongs to the dispatcher session.
 
-    Layered strategy:
+    Layered strategy (most-to-least reliable):
 
-    1. Primary: session_role.is_dispatcher() — works when the session_id in the
-       hook input matches the stored marker file (fresh compaction of a session
-       whose ID hasn't changed yet, or when the MCP state file is current).
+    1. Startup flag: session_role.is_dispatcher() — works for fresh (non-compact)
+       dispatcher starts where the launcher-written flag is still present.
 
-    2. Fallback: LOBSTER_MAIN_SESSION=1 + stored session JSONL alive.
-       Context compaction assigns a NEW session_id to the post-compact session,
-       so the hook input's session_id won't match the stored dispatcher ID even
-       though this is the dispatcher's own compaction.  In that case:
-       - If LOBSTER_MAIN_SESSION=1 (set by claude-persistent.sh for the
-         dispatcher and inherited by its subagents), AND
-       - The stored dispatcher session's JSONL still exists on disk (meaning the
-         previous session hasn't ended — it was just compacted),
-       then this is very likely the dispatcher's compaction.
+    2. Exact session ID match: compare hook_input['session_id'] against the stored
+       dispatcher session ID in DISPATCHER_SESSION_FILE
+       (~/messages/config/dispatcher-session-id).  This file is written by
+       inject-bootup-context.py at dispatcher startup (startup flag detected), and
+       updated by this function when a post-compact dispatcher is confirmed.
+       Exact match → this IS the dispatcher session.
 
-       Edge case: a subagent that compacts will also have LOBSTER_MAIN_SESSION=1
-       and the dispatcher's JSONL will also still be alive.  In that rare case a
-       false-positive compact-reminder would be written.  This is low-cost: the
-       dispatcher will receive an extra compact-reminder in its inbox, which is
-       harmless (it will re-orient and spawn catchup, then resume normally).
-       Subagent compactions are rare enough that this trade-off is acceptable.
+    3. Post-compact fallback (session ID mismatch + explicit compact signal):
+       CC assigns a NEW session_id after compaction, so the post-compact dispatcher's
+       session ID differs from the stored pre-compact ID.  When the stored session ID
+       file exists but the IDs don't match, we only fall through to LOBSTER_MAIN_SESSION=1
+       if the hook payload contains an explicit compact signal (source='compact' or
+       hook_name='compact').  This distinguishes a real dispatcher compaction (which
+       always has the explicit compact signal) from a catchup subagent (which is NOT a
+       compact event itself — it reaches this code only via the heartbeat fallback in
+       _is_compact_event(), which fires without any source/hook_name field).
 
-    When the fallback fires, this function also updates the dispatcher marker
-    file (~/messages/config/dispatcher-session-id) to the new session_id so
-    that subsequent is_dispatcher() calls within the same session return True.
+       After confirming via this path, update the stored session ID to the new post-
+       compact session ID so that catchup subagents spawned later won't match.
+
+    4. Backward compat (no stored session ID file): if the file doesn't exist yet
+       (fresh install or pre-fix system), fall back to LOBSTER_MAIN_SESSION=1 alone.
+       This preserves the prior behavior for the first run.
+
+    Fix for issue #2046: the previous logic used LOBSTER_MAIN_SESSION=1 as an
+    unconditional fallback. Catchup subagents inherit LOBSTER_MAIN_SESSION=1 from the
+    dispatcher process.  When _is_compact_event() returned True via the heartbeat
+    fallback (dispatcher was recently active), _is_dispatcher_compact() also returned
+    True — causing a cascade of false compact-reminders.  The exact session ID match
+    (tier 2) and explicit-signal gating (tier 3) prevent this.
     """
+    # Tier 1: startup flag (fresh dispatcher start, not post-compact).
     if is_dispatcher(data):
         return True
 
-    # Fallback: LOBSTER_MAIN_SESSION + stored session alive
+    new_session_id = data.get("session_id", "").strip()
+
+    # Tier 2: exact session ID match against stored dispatcher session ID.
+    stored_session_id = _read_dispatcher_session_id()
+    if stored_session_id is not None:
+        if new_session_id and new_session_id == stored_session_id:
+            # Exact match: this is the known dispatcher session.
+            return True
+
+        # Session ID mismatch: check for an explicit compact signal in the payload.
+        # Only fall through to LOBSTER_MAIN_SESSION=1 if the compact event is
+        # authoritative (source/hook_name field present, not just heartbeat fallback).
+        # Catchup subagents started by the post-compact dispatcher will NOT have
+        # source='compact' or hook_name='compact' — they are plain SessionStart events.
+        source = data.get("source")
+        hook_name = data.get("hook_name")
+        has_explicit_compact_signal = (source == "compact") or (
+            source is None and hook_name == "compact"
+        )
+        if not has_explicit_compact_signal:
+            # No explicit compact source: this is a subagent, not the dispatcher.
+            return False
+
+        # Tier 3: explicit compact signal but new session ID (post-compact dispatcher).
+        # Fall through to LOBSTER_MAIN_SESSION check below.
+
+    # Tier 4 (backward compat): no stored session ID file, or post-compact path.
+    # Use LOBSTER_MAIN_SESSION=1 as the discriminator.
     if os.environ.get("LOBSTER_MAIN_SESSION", "") != "1":
         return False
 
-    if not _stored_dispatcher_session_alive():
-        return False
-
-    # This looks like a dispatcher compaction.  Update both the hook marker
-    # file (tertiary) and the primary MCP Claude UUID state file so all
-    # subsequent hook calls in this session recognise the new session_id.
-    # Note: inject-bootup-context.py now uses the startup flag (not UUID),
-    # so writing the primary Claude UUID file (dispatcher-claude-session-id)
-    # is no longer needed here (issue #1908).
-    new_session_id = data.get("session_id", "").strip()
+    # Confirmed as dispatcher compaction.  Update the stored session ID to the new
+    # post-compact session ID so that catchup subagents spawned later won't match.
     if new_session_id:
         write_dispatcher_session_id(new_session_id)
         print(
-            f"[on-compact] compaction fallback: updated dispatcher-session-id "
-            f"to {new_session_id}",
+            f"[on-compact] compaction confirmed: updated dispatcher-session-id "
+            f"to post-compact session {new_session_id!r}",
             file=sys.stderr,
         )
 
