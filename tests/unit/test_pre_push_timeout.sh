@@ -113,6 +113,7 @@ cat > "$TMP_SCRIPT" << 'INNER_EOF'
 set -uo pipefail
 SCAN_TIMEOUT_SECONDS=1
 SCAN_TIMED_OUT=0
+TIMEOUT_FLAG_FILE=$(mktemp)
 
 get_push_diff() {
     local diff_output
@@ -122,14 +123,19 @@ get_push_diff() {
     diff_output="$(timeout "${SCAN_TIMEOUT_SECONDS}s" sleep 5 2>/dev/null)"
     exit_status=$?
     if [ $exit_status -eq 124 ]; then
-        SCAN_TIMED_OUT=1
+        echo 1 > "$TIMEOUT_FLAG_FILE"
         echo ""
         return 0
     fi
     echo "$diff_output"
 }
 
-get_push_diff
+# Call via command substitution — same as the real hook — so the subshell
+# cannot propagate variable assignments back to the outer scope.
+DIFF_TEXT="$(get_push_diff)"
+SCAN_TIMED_OUT=$(cat "$TIMEOUT_FLAG_FILE" 2>/dev/null || echo 0)
+rm -f "$TIMEOUT_FLAG_FILE"
+
 if [ "$SCAN_TIMED_OUT" -eq 1 ]; then
     echo "TIMED_OUT_FLAG_SET"
     exit 0
@@ -144,7 +150,7 @@ OUTPUT=$(bash "$TMP_SCRIPT" 2>&1)
 EXIT_CODE=$?
 
 if [ $EXIT_CODE -eq 0 ] && echo "$OUTPUT" | grep -q "TIMED_OUT_FLAG_SET"; then
-    ok "SCAN_TIMED_OUT=1 set when git call exceeds timeout; exit 0"
+    ok "SCAN_TIMED_OUT=1 communicated via tmpfile across subshell boundary; exit 0"
 else
     fail "Expected SCAN_TIMED_OUT=1 and exit 0; got exit=$EXIT_CODE output='$OUTPUT'"
 fi
