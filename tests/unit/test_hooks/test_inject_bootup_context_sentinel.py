@@ -218,8 +218,13 @@ class TestMainStartupFlagRouting:
         subagent_bootup.write_text("# SUBAGENT BOOTUP\n")
         return dispatcher_bootup, subagent_bootup
 
-    def test_live_pid_flag_injects_dispatcher_bootup(self, tmp_path, capsys):
-        """When startup flag contains a live PID, dispatcher bootup is injected."""
+    def test_live_pid_flag_routes_to_dispatcher_path(self, tmp_path, capsys):
+        """When startup flag contains a live PID, dispatcher path is taken.
+
+        After issue #1994 (Fix C), sys.dispatcher.bootup.md body is NOT injected.
+        The startup-cause banner IS injected (it fits in 2KB preview). Subagent
+        bootup must NOT appear.
+        """
         workspace = tmp_path / "workspace"
         (workspace / "data").mkdir(parents=True, exist_ok=True)
         (workspace / "logs").mkdir(parents=True, exist_ok=True)
@@ -258,8 +263,13 @@ class TestMainStartupFlagRouting:
                     mod.main()
 
         captured = capsys.readouterr()
-        assert "DISPATCHER BOOTUP" in captured.out, (
-            "Dispatcher bootup should be injected when startup flag has a live PID"
+        # Dispatcher bootup body is NOT injected after Fix C (#1994).
+        assert "DISPATCHER BOOTUP" not in captured.out, (
+            "sys.dispatcher.bootup.md body must NOT be injected after Fix C (#1994)"
+        )
+        # startup-cause banner IS injected (it's small and fits in 2KB preview).
+        assert "startup-cause:" in captured.out, (
+            "startup-cause banner must be injected when startup flag has a live PID"
         )
         assert "SUBAGENT BOOTUP" not in captured.out
 
@@ -423,10 +433,12 @@ class TestMainSentinelFallback:
         subagent_bootup.write_text("# SUBAGENT BOOTUP\n")
         return dispatcher_bootup, subagent_bootup
 
-    def test_sentinel_fallback_injects_dispatcher_bootup(self, tmp_path, capsys):
-        """Startup flag with live PID injects dispatcher bootup.
+    def test_sentinel_fallback_routes_to_dispatcher_path(self, tmp_path, capsys):
+        """Startup flag with live PID routes to dispatcher path (no bootup body injected).
 
         Previously tested with compact-pending sentinel; now tests startup flag.
+        After issue #1994 (Fix C), the dispatcher does not get its bootup body injected.
+        The startup-cause banner IS still injected.
         """
         workspace = tmp_path / "workspace"
         (workspace / "data").mkdir(parents=True, exist_ok=True)
@@ -459,7 +471,14 @@ class TestMainSentinelFallback:
                     mod.main()
 
         captured = capsys.readouterr()
-        assert "DISPATCHER BOOTUP" in captured.out
+        # Dispatcher bootup body is NOT injected after Fix C (#1994).
+        assert "DISPATCHER BOOTUP" not in captured.out, (
+            "sys.dispatcher.bootup.md body must NOT be injected after Fix C (#1994)"
+        )
+        # startup-cause banner IS still injected.
+        assert "startup-cause:" in captured.out, (
+            "startup-cause banner must still be injected for dispatcher sessions"
+        )
         assert "SUBAGENT BOOTUP" not in captured.out
 
     def test_no_sentinel_normal_subagent_gets_subagent_bootup(self, tmp_path, capsys):
@@ -539,9 +558,11 @@ class TestMainSentinelFallback:
         assert "DISPATCHER BOOTUP" not in captured.out
 
     def test_primary_file_match_still_works_without_sentinel(self, tmp_path, capsys):
-        """Startup flag with live PID injects dispatcher bootup regardless of UUID files.
+        """Startup flag with live PID routes to dispatcher path regardless of UUID files.
 
         Previously tested UUID file match; now tests startup flag is the sole signal.
+        After Fix C (#1994), dispatcher bootup body is NOT injected. startup-cause
+        banner IS injected.
         """
         workspace = tmp_path / "workspace"
         (workspace / "data").mkdir(parents=True, exist_ok=True)
@@ -579,5 +600,12 @@ class TestMainSentinelFallback:
                     mod.main()
 
         captured = capsys.readouterr()
-        assert "DISPATCHER BOOTUP" in captured.out
+        # Dispatcher bootup body is NOT injected after Fix C (#1994).
+        assert "DISPATCHER BOOTUP" not in captured.out, (
+            "sys.dispatcher.bootup.md body must NOT be injected after Fix C (#1994)"
+        )
+        # startup-cause banner IS still injected.
+        assert "startup-cause:" in captured.out, (
+            "startup-cause banner must be injected when startup flag has a live PID"
+        )
         assert "SUBAGENT BOOTUP" not in captured.out

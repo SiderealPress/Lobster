@@ -274,8 +274,13 @@ class TestParseAdminChatId:
 class TestAdminChatIdInjectionInMain:
     """main() injects ADMIN_CHAT_ID preamble for dispatcher sessions only."""
 
-    def test_dispatcher_gets_preamble_before_bootup_content(self, tmp_path):
-        """Dispatcher session: preamble line appears before bootup content."""
+    def test_dispatcher_gets_preamble_before_startup_cause_banner(self, tmp_path):
+        """Dispatcher session: ADMIN_CHAT_ID preamble appears before startup-cause banner.
+
+        After issue #1994, sys.dispatcher.bootup.md body is NOT injected (it's
+        84KB and useless in the truncated preview). The preamble and startup-cause
+        banner are still injected — they fit within the 2KB preview window.
+        """
         config_file = _write_config_env(
             tmp_path / "lobster-config",
             f"{LOBSTER_ADMIN_CHAT_ID_VAR}={SAMPLE_CHAT_ID}\n",
@@ -290,13 +295,19 @@ class TestAdminChatIdInjectionInMain:
         assert preamble_line in output, (
             f"Dispatcher output must contain '{preamble_line}'"
         )
-        assert "DISPATCHER BOOTUP" in output, "Dispatcher bootup content must still be injected"
-
-        # Preamble must appear before the bootup content
+        # Dispatcher bootup body must NOT be injected (issue #1994).
+        assert "DISPATCHER BOOTUP" not in output, (
+            "sys.dispatcher.bootup.md body must NOT be injected after Fix C (#1994)"
+        )
+        # startup-cause banner must still appear.
+        assert "startup-cause:" in output, (
+            "startup-cause banner must still be injected for dispatcher sessions"
+        )
+        # Preamble must appear before the startup-cause banner.
         preamble_pos = output.index(preamble_line)
-        bootup_pos = output.index("DISPATCHER BOOTUP")
-        assert preamble_pos < bootup_pos, (
-            "ADMIN_CHAT_ID preamble must appear before the dispatcher bootup content"
+        banner_pos = output.index("startup-cause:")
+        assert preamble_pos < banner_pos, (
+            "ADMIN_CHAT_ID preamble must appear before the startup-cause banner"
         )
 
     def test_subagent_does_not_get_preamble(self, tmp_path):
@@ -316,23 +327,36 @@ class TestAdminChatIdInjectionInMain:
         )
         assert "SUBAGENT BOOTUP" in output, "Subagent bootup content must still be injected"
 
-    def test_dispatcher_without_config_env_still_injects_bootup(self, tmp_path):
-        """Missing config.env: graceful degradation — bootup still injected, no preamble."""
+    def test_dispatcher_without_config_env_still_runs_cleanly(self, tmp_path):
+        """Missing config.env: graceful degradation — hook exits cleanly, no preamble.
+
+        After issue #1994, sys.dispatcher.bootup.md is NOT injected. The startup-cause
+        banner and user bootup files are still injected. Missing config.env must not crash.
+        """
         output = _run_hook(
             tmp_path=tmp_path,
             config_env_path=None,  # config.env absent
             is_dispatcher=True,
         )
 
-        assert "DISPATCHER BOOTUP" in output, (
-            "Dispatcher bootup must still be injected even when config.env is absent"
+        # Dispatcher bootup body must NOT be injected (issue #1994).
+        assert "DISPATCHER BOOTUP" not in output, (
+            "sys.dispatcher.bootup.md body must NOT be injected after Fix C (#1994)"
+        )
+        # startup-cause banner must still appear even without config.env.
+        assert "startup-cause:" in output, (
+            "startup-cause banner must still be injected even when config.env is absent"
         )
         assert PREAMBLE_PREFIX not in output, (
             "No ADMIN_CHAT_ID preamble when config.env is absent"
         )
 
-    def test_dispatcher_without_key_in_config_env_still_injects_bootup(self, tmp_path):
-        """config.env exists but lacks LOBSTER_ADMIN_CHAT_ID: no preamble, bootup still runs."""
+    def test_dispatcher_without_key_in_config_env_still_runs_cleanly(self, tmp_path):
+        """config.env exists but lacks LOBSTER_ADMIN_CHAT_ID: no preamble, hook still runs.
+
+        After issue #1994, sys.dispatcher.bootup.md is NOT injected. The startup-cause
+        banner is still injected. Missing key must not crash.
+        """
         config_file = _write_config_env(
             tmp_path / "lobster-config",
             "TELEGRAM_BOT_TOKEN=fake-token\n",  # no LOBSTER_ADMIN_CHAT_ID
@@ -343,7 +367,14 @@ class TestAdminChatIdInjectionInMain:
             is_dispatcher=True,
         )
 
-        assert "DISPATCHER BOOTUP" in output
+        # Dispatcher bootup body must NOT be injected (issue #1994).
+        assert "DISPATCHER BOOTUP" not in output, (
+            "sys.dispatcher.bootup.md body must NOT be injected after Fix C (#1994)"
+        )
+        # startup-cause banner must still appear.
+        assert "startup-cause:" in output, (
+            "startup-cause banner must still be injected even when LOBSTER_ADMIN_CHAT_ID is absent"
+        )
         assert PREAMBLE_PREFIX not in output, (
             "No preamble when LOBSTER_ADMIN_CHAT_ID is absent from config.env"
         )
