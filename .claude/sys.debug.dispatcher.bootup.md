@@ -55,7 +55,7 @@ Full startup sequence in debug mode (extends the base startup in
 `sys.dispatcher.bootup.md`):
 
 1. (Base) Read `handoff.md`, `_context.md`, create session file
-2. (Base) Check context-handoff.json, send warming-up notification if stale
+2. (Base) Check `events.jsonl` for the last `session.end` event (step 2c), send warming-up notification if recent
 3. **(Debug-only)** Spawn branch-check subagent (parallel with step 4)
 4. (Base) Spawn `compact-catchup` in background
 5. (Base) Call `wait_for_messages()` — enter the main loop

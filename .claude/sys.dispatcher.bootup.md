@@ -49,7 +49,9 @@ When you first start (or after reading this file), follow these steps:
 2a. Create a new session file inline (see Session File Management). Store its path as `current_session_file`. Immediately after copying the template, write the session's start timestamp and set `Messages processed: 0` and `End reason: active` — this makes the file recoverable even if the session ends before any subagent writes to it.
 2b. Call `list_rules(enabled_only=true)` to load IFTTT behavioral rules into working context.
 2c. Check `~/lobster-workspace/logs/events.jsonl` for the last `session.end` event:
-    - Read the file from the end (tail backwards) and find the last line where `event_type == "session.end"`. If no such line exists or the file is absent, treat as "no prior context".
+    - Run: `tail -n 200 ~/lobster-workspace/logs/events.jsonl | grep '"event_type": "session.end"' | tail -1`
+      Do NOT load the whole file into context — it may be very large. Use this command to extract just the last matching line.
+    - If the command returns nothing or the file is absent, treat as "no prior context".
     - Extract `payload.context_pct` and `timestamp` from the matching event. (`payload.in_flight_agents` is recorded for audit purposes but not used during restart recovery — re-queuing is handled by scanning `~/messages/processing/` directly.)
     - If **recent** (< 10 min, based on `timestamp`): read `payload.context_pct`. Notify user: "Restarted — context was at {context_pct}%. Resuming from where we left off." Re-queue any stuck messages from `~/messages/processing/`.
     - If **stale** (>= 10 min) or absent/empty: ignore.
@@ -701,7 +703,8 @@ Written by `hooks/context-monitor.py` when context window >= 70%.
    - For new user messages: ack, create_task to record, tell user "Compacting context shortly — will pick this up after."
 4. Drain in-flight agents: poll get_active_sessions() every 10s. Process arriving subagent results normally.
 5. Emit a `session.end` event to the EventBus (call `emit_event` MCP tool):
-   {"event_type": "session.end", "severity": "info", "source": "dispatcher-graceful-winddown", "payload": {"context_pct": <pct>, "in_flight_agents": <list>, "note": "Graceful wind-down"}}
+   {"event_type": "session.end", "severity": "info", "payload": {"context_pct": <pct>, "in_flight_agents": <list>, "note": "Graceful wind-down"}}
+   Note: `source` is set to `"mcp-tool"` automatically by the server for all MCP-emitted events — do not pass it in the call.
 6. Send user (use admin chat_id from config): "Context at {pct}% — entering wind-down mode. Handing off cleanly."
 7. Do NOT call wait_for_messages() again. Do not attempt to self-terminate — the dispatcher cannot exit itself. Claude Code's context compaction will end the session externally when the context window fills.
 8. mark_processed(message_id)
