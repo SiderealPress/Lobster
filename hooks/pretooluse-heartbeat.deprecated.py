@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
+# DEPRECATED: This hook was deregistered by migration 90 (PR #1988).
+# If this fires, it means settings.json was corrupted or a migration re-registered it.
+
 """
 DEPRECATED — do not register or use this hook.
 
 This file is retained for audit purposes only. It should never be registered
 in settings.json. If this hook fires, it means a settings.json entry for
-pretooluse-heartbeat was re-added incorrectly (e.g., by migration 91 running
-on an install that did not yet have migration 90 or 95 applied).
+pretooluse-heartbeat was re-added incorrectly.
 
 Superseded by: hooks/pre-tool-heartbeat.py (issue #1786, PR #1817)
   - pre-tool-heartbeat.py adds a dispatcher-only guard so subagent tool calls
@@ -16,8 +18,8 @@ Deregistered by: migration 90 (upgrade.sh), which removes this hook from
   settings.json on any install that still has it registered.
 
 If this file fires: log the event and exit 0 so tool execution is not blocked.
-Report the incident — it means migration 95 has not run or settings.json was
-manually edited to re-add this hook.
+Report the incident — it means settings.json was manually edited or a migration
+re-registered this hook after migration 90 removed it.
 """
 
 import json
@@ -39,12 +41,22 @@ def log_unexpected_firing() -> None:
         "hook": "pretooluse-heartbeat.deprecated.py",
         "message": (
             "DEPRECATED hook fired — pretooluse-heartbeat.deprecated.py should not "
-            "be registered in settings.json. Check that migration 95 has run and "
+            "be registered in settings.json. Check that migration 90 has run and "
             "that no settings.json entry points to pretooluse-heartbeat."
         ),
     }
     with open(LOG_FILE, "a") as f:
         f.write(json.dumps(entry) + "\n")
+    # Secondary /tmp marker for quick observability.  Wrapped in its own
+    # try/except so a read-only or missing /tmp cannot propagate an exception
+    # out of this function — tool execution must never be blocked.
+    try:
+        Path("/tmp/pretooluse-heartbeat-deprecated-fired.log").write_text(
+            f"FIRED at {datetime.now(timezone.utc).isoformat()}Z\n",
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
 
 
 def main() -> None:
