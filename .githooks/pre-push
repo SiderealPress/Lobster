@@ -59,6 +59,7 @@ ISSUES_FOUND=0
 # Temp file used to communicate SCAN_TIMED_OUT across the subshell boundary
 # created by DIFF_TEXT="$(get_push_diff)".
 TIMEOUT_FLAG_FILE=$(mktemp)
+trap 'rm -f "$TIMEOUT_FLAG_FILE"' EXIT
 
 # Detect CI / non-interactive mode: if stdin is not a tty, don't block
 IS_TTY=1
@@ -180,7 +181,14 @@ get_push_diff() {
         fi
         # If the diff-based fallback also returned empty, try full log as last resort
         if [ -z "$diff_output" ]; then
-            diff_output="$(git log --diff-filter=ACM -p HEAD 2>/dev/null || true)"
+            diff_output="$(timeout "${SCAN_TIMEOUT_SECONDS}s" \
+                git log --diff-filter=ACM -p HEAD 2>/dev/null)"
+            local lastresort_status=$?
+            if [ $lastresort_status -eq 124 ]; then
+                echo 1 > "$TIMEOUT_FLAG_FILE"
+                echo ""
+                return 0
+            fi
         fi
     fi
 
