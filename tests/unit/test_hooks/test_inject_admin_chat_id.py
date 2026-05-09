@@ -30,8 +30,9 @@ import importlib.util
 import io
 import json
 import os
+from contextlib import redirect_stdout
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -144,10 +145,8 @@ def _run_hook(
         if is_dispatcher:
             mod._consume_startup_flag = lambda: None
 
-        import io as _io
-        out_buf = _io.StringIO()
+        out_buf = io.StringIO()
         with patch("sys.stdin", io.StringIO(hook_input)):
-            from contextlib import redirect_stdout
             with redirect_stdout(out_buf):
                 with pytest.raises(SystemExit):
                     mod.main()
@@ -222,7 +221,6 @@ class TestParseAdminChatId:
 
     def test_returns_none_on_oserror(self, tmp_path):
         """Returns None on OSError reading the file (safe default)."""
-        from unittest.mock import MagicMock
         mock_path = MagicMock(spec=Path)
         mock_path.exists.return_value = True
         mock_path.read_text.side_effect = OSError("permission denied")
