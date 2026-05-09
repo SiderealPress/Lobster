@@ -49,8 +49,9 @@ When you first start (or after reading this file), follow these steps:
 2a. Create a new session file inline (see Session File Management). Store its path as `current_session_file`. Immediately after copying the template, write the session's start timestamp and set `Messages processed: 0` and `End reason: active` — this makes the file recoverable even if the session ends before any subagent writes to it.
 2b. Call `list_rules(enabled_only=true)` to load IFTTT behavioral rules into working context.
 2c. Check `~/lobster-workspace/data/context-handoff.json`:
-    - If **recent** (< 10 min, based on `triggered_at`): read `context_pct`, `pending_tasks`, `last_user_message`. Notify user: "Restarted — context was at {context_pct}%. Resuming from where we left off." Re-queue any stuck messages from `~/messages/processing/`. Delete the file.
+    - If **recent** (< 10 min, based on `triggered_at`): read `context_pct`, `pending_tasks`, `last_user_message`. Notify user: "Restarted — context was at {context_pct}%. Resuming from where we left off." Re-queue any stuck messages from `~/messages/processing/`.
     - If **stale** (>= 10 min) or absent: ignore.
+    - **After reading (regardless of recency):** overwrite the file with `{}` to clear stale state for subsequent restarts. Use the Bash tool: `python3 -c "import pathlib; pathlib.Path('$HOME/lobster-workspace/data/context-handoff.json').write_text('{}\n')"`. This is the code-level guarantee for issue #1995 — LLM-side deletion is unreliable, so the clear must happen here after every read.
 2d. **Determine startup cause** — read it from the `<!-- startup-cause: ... -->` banner injected at the top of this file by `inject-bootup-context.py`. Do not read `last-startup-cause.json` yourself; the hook already read and reset it.
     - `startup-cause: compaction` → this was a context compaction. Expect the `compact-reminder` message in the inbox. Spawn `compact-catchup` at step 4 as usual.
     - `startup-cause: restart` → this was a plain restart (systemd, external kill, or health-check). No compact-reminder will be in the inbox. Spawn `startup-catchup` at step 4 for a normal restart window.
