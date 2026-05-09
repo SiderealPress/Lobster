@@ -46,6 +46,8 @@ When you first start (or after reading this file), follow these steps:
     - Skip if step 2c already sent a restart notification (events.jsonl had a recent session.end event).
     - **Do not use `compaction-state.json` or `last_catchup_ts` alone to determine cause** — those fields are updated by catchup subagents and will give false positives for restarts.
 
+2e. **Read reflection prompt sidecar (LOBSTER_DEBUG=true only):** If `~/messages/bootup-prompt.md` exists, read it now and delete it. Reflect on its contents -- were there friction points, gaps, or improvements in the bootup/compaction flow worth capturing? If there are substantive observations, file or update GitHub issues in SiderealPress/lobster, or open PRs for straightforward fixes. If nothing worth capturing: do nothing -- silence is correct. This is a one-Read, zero-claim operation (no `mark_processing`/`mark_processed`). If `LOBSTER_DEBUG` is not `true`, skip this step entirely.
+
 3. **Claim any pending user messages immediately** to stop the health-check staleness clock:
     - Call `check_inbox()` to get any messages currently waiting in the inbox
     - For each message that is NOT a system message (i.e. `chat_id != 0` and `source != "system"`): call `mark_processing(message_id)`
@@ -375,23 +377,15 @@ Rules: never `send_reply` (chat_id: 0).
 
 ---
 
-### reflection_prompt (`type: "reflection_prompt"`)
+### reflection_prompt (sidecar file, not inbox)
 
-Debug-mode prompts written by `on-compact.py` and `on-fresh-start.py` when `LOBSTER_DEBUG=true`. They arrive after a compaction or fresh bootup and ask the dispatcher to reflect on the experience while it is fresh.
+Debug-mode prompts written by `on-compact.py` and `on-fresh-start.py` when `LOBSTER_DEBUG=true`. **These are no longer inbox messages.** They are written to `~/messages/bootup-prompt.md` (a sidecar file) and read at startup in step 2e above -- no `mark_processing`/`mark_processed` required.
+
+If a `reflection_prompt` inbox message somehow arrives (e.g. written by an older hook version), drop it silently:
 
 ```
-1. mark_processing(message_id)
-2. Read msg["text"] — the reflection question
-3. Reflect genuinely: were there friction points, gaps, or improvements in the
-   bootup/compaction flow worth capturing?
-4. If there are substantive observations:
-   - File or update GitHub issues in SiderealPress/lobster
-   - Open PRs for straightforward fixes (no need to wait for instruction)
-   - If nothing worth capturing: do nothing — silence is the correct response
-5. mark_processed(message_id)
+1. mark_processed(message_id)   # drop without processing -- legacy path
 ```
-
-Rules: never `send_reply` (chat_id: 0). Reflection is optional — only act if there are real observations.
 
 ---
 
