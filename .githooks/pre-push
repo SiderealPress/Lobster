@@ -62,6 +62,10 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"
 ALLOWLIST_FILE="$REPO_ROOT/.githooks/security-allowlist.txt"
 ISSUES_FOUND=0
 
+# Temp file used to communicate SCAN_TIMED_OUT across the subshell boundary
+# created by DIFF_TEXT="$(get_push_diff)".
+TIMEOUT_FLAG_FILE=$(mktemp)
+
 # Detect CI / non-interactive mode: if stdin is not a tty, don't block
 IS_TTY=1
 [ ! -t 0 ] && IS_TTY=0
@@ -166,7 +170,7 @@ get_push_diff() {
 
     # timeout exits 124 when the deadline is exceeded
     if [ $exit_status -eq 124 ]; then
-        SCAN_TIMED_OUT=1
+        echo 1 > "$TIMEOUT_FLAG_FILE"
         echo ""
         return 0
     fi
@@ -176,7 +180,7 @@ get_push_diff() {
             git diff --diff-filter=ACM origin/main..HEAD 2>/dev/null)"
         local fallback_status=$?
         if [ $fallback_status -eq 124 ]; then
-            SCAN_TIMED_OUT=1
+            echo 1 > "$TIMEOUT_FLAG_FILE"
             echo ""
             return 0
         fi
@@ -456,6 +460,8 @@ echo -e "${RED}${BOLD}==========================================================
 echo ""
 
 DIFF_TEXT="$(get_push_diff)"
+SCAN_TIMED_OUT=$(cat "$TIMEOUT_FLAG_FILE" 2>/dev/null || echo 0)
+rm -f "$TIMEOUT_FLAG_FILE"
 
 if [ "$SCAN_TIMED_OUT" -eq 1 ]; then
     warn "Pre-push scan timed out after ${SCAN_TIMEOUT_SECONDS}s — skipping PII check."
