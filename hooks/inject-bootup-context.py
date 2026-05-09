@@ -46,11 +46,6 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Allow imports from the hooks directory (session_role).
-sys.path.insert(0, str(Path(__file__).parent))
-
-import session_role  # noqa: E402 — path insert must precede this
-
 CLAUDE_DIR = Path(os.path.expanduser("~/lobster/.claude"))
 USER_CONFIG_DIR = Path(os.path.expanduser("~/lobster-user-config/agents"))
 
