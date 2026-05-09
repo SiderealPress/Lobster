@@ -243,6 +243,49 @@ class TestCompactInflightEntries:
             "Running entry with no timestamp and no done must be treated as stale"
         )
 
+    def test_drops_stale_running_entry_with_started_at_field(self) -> None:
+        """A running entry using 'started_at' (current field) older than threshold is dropped."""
+        mod = _load_hook()
+        now = datetime.now(timezone.utc)
+        entries = [
+            {"task_id": "stale-started-at", "status": "running",
+             "started_at": _ts(INFLIGHT_STALE_THRESHOLD_HOURS + 1)},
+        ]
+        result = mod._compact_inflight_entries(entries, now)
+        assert not any(e["task_id"] == "stale-started-at" for e in result), (
+            "Stale running entry using 'started_at' field with no done must be dropped"
+        )
+
+    def test_preserves_fresh_running_entry_with_started_at_field(self) -> None:
+        """A running entry using 'started_at' younger than threshold is preserved."""
+        mod = _load_hook()
+        now = datetime.now(timezone.utc)
+        entries = [
+            {"task_id": "fresh-started-at", "status": "running", "started_at": _ts(1)},
+        ]
+        result = mod._compact_inflight_entries(entries, now)
+        assert any(e["task_id"] == "fresh-started-at" for e in result), (
+            "Fresh running entry using 'started_at' field must be preserved"
+        )
+
+    def test_started_at_preferred_when_ts_absent(self) -> None:
+        """'started_at' is used as timestamp when 'ts' is absent."""
+        mod = _load_hook()
+        now = datetime.now(timezone.utc)
+        # If only started_at is present and it's fresh, the entry must be kept.
+        # If only started_at is present and it's stale, the entry must be dropped.
+        fresh_entry = {"task_id": "only-started-at-fresh", "status": "running", "started_at": _ts(1)}
+        stale_entry = {"task_id": "only-started-at-stale", "status": "running",
+                       "started_at": _ts(INFLIGHT_STALE_THRESHOLD_HOURS + 2)}
+        result = mod._compact_inflight_entries([fresh_entry, stale_entry], now)
+        task_ids = {e["task_id"] for e in result}
+        assert "only-started-at-fresh" in task_ids, (
+            "Fresh entry with only 'started_at' must be preserved"
+        )
+        assert "only-started-at-stale" not in task_ids, (
+            "Stale entry with only 'started_at' must be dropped"
+        )
+
     def test_multiple_running_entries_same_task_id_all_dropped_when_no_done(self) -> None:
         """All running entries for the same task_id are dropped when there's no done."""
         mod = _load_hook()
