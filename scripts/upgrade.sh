@@ -322,45 +322,45 @@ git_pull() {
         fi
     fi
 
-    # Ensure we're on main before pulling.
+    # Ensure we're on local-dev before pulling.
     # If ~/lobster/ is on a feature branch or detached HEAD (e.g. after local
-    # testing), git merge --ff-only would fail. Switch to main first so the
+    # testing), git merge --ff-only would fail. Switch to local-dev first so the
     # update always lands correctly.
     local current_branch
     current_branch=$(git symbolic-ref --short HEAD 2>/dev/null || echo "DETACHED")
-    if [ "$current_branch" != "main" ]; then
+    if [ "$current_branch" != "local-dev" ]; then
         if $DRY_RUN; then
-            info "[dry-run] Not on main branch (currently: $current_branch). Would switch to main before updating."
+            info "[dry-run] Not on local-dev branch (currently: $current_branch). Would switch to local-dev before updating."
         else
-            warn "Not on main branch (currently: $current_branch). Switching to main before updating..."
-            git checkout main --quiet || die "Could not checkout main. Resolve manually and re-run." 3
-            success "Switched to main"
+            warn "Not on local-dev branch (currently: $current_branch). Switching to local-dev before updating..."
+            git checkout local-dev --quiet || die "Could not checkout local-dev. Resolve manually and re-run." 3
+            success "Switched to local-dev"
         fi
     fi
 
     # Fetch
     info "Fetching from origin..."
     if $DRY_RUN; then
-        git fetch origin main --quiet 2>/dev/null || die "Failed to fetch from origin" 3
+        git fetch origin local-dev --quiet 2>/dev/null || die "Failed to fetch from origin" 3
         local behind
-        behind=$(git rev-list HEAD..origin/main --count 2>/dev/null || echo "0")
+        behind=$(git rev-list HEAD..origin/local-dev --count 2>/dev/null || echo "0")
         info "[dry-run] $behind commit(s) available"
-        CURRENT_COMMIT=$(git rev-parse --short origin/main)
+        CURRENT_COMMIT=$(git rev-parse --short origin/local-dev)
         info "[dry-run] Would update to: $CURRENT_COMMIT"
         return 0
     fi
 
-    git fetch origin main --quiet 2>/dev/null || die "Failed to fetch from origin" 3
+    git fetch origin local-dev --quiet 2>/dev/null || die "Failed to fetch from origin" 3
 
     local behind
-    behind=$(git rev-list HEAD..origin/main --count 2>/dev/null || echo "0")
+    behind=$(git rev-list HEAD..origin/local-dev --count 2>/dev/null || echo "0")
 
     if [ "$behind" = "0" ]; then
         success "Already up to date"
         CURRENT_COMMIT="$PREVIOUS_COMMIT"
     else
         info "$behind commit(s) to pull"
-        if git merge origin/main --ff-only --quiet 2>/dev/null; then
+        if git merge origin/local-dev --ff-only --quiet 2>/dev/null; then
             CURRENT_COMMIT=$(git rev-parse --short HEAD)
             success "Updated: $PREVIOUS_COMMIT -> $CURRENT_COMMIT"
 
@@ -371,7 +371,7 @@ git_pull() {
             done
         else
             warn "Fast-forward merge failed. Attempting rebase..."
-            if git rebase origin/main --quiet 2>/dev/null; then
+            if git rebase origin/local-dev --quiet 2>/dev/null; then
                 CURRENT_COMMIT=$(git rev-parse --short HEAD)
                 success "Rebased to: $CURRENT_COMMIT"
             else
@@ -3202,11 +3202,11 @@ health_check() {
     if [ "$INSTALL_MODE" = "git" ]; then
         local branch
         branch=$(git branch --show-current 2>/dev/null || echo "unknown")
-        if [ "$branch" = "main" ]; then
-            success "On branch: main"
+        if [ "$branch" = "local-dev" ]; then
+            success "On branch: local-dev"
             checks_passed=$((checks_passed + 1))
         else
-            warn "Not on main branch (on: $branch)"
+            warn "Warning: lobster is running from '${branch}' branch, not local-dev"
             checks_failed=$((checks_failed + 1))
         fi
     else
