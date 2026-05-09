@@ -2965,6 +2965,129 @@ M86_PYEOF
         info "Migration 86: settings.json not found or python3 unavailable — skipping"
     fi
 
+    # Migration 88: Fix on-compact.py hook matcher + add source-field self-gate (issue #1947/#1984).
+    # matcher="compact" is unreliable in CC 2.1.119 (~37% fire rate since April 17).
+    # The correct pattern is matcher="" + self-gate inside the script.
+    # The self-gate now checks data["source"] == "compact" (CC-documented primary field)
+    # with data["hook_name"] == "compact" as a fallback for older CC versions.
+    # This migration:
+    #   1. Changes the on-compact.py SessionStart entry from matcher="compact" to matcher=""
+    #   2. Removes the redundant inject-bootup-context.py compact-matcher entry
+    #      (already covered by the empty-matcher entry that fires on all session types)
+    if [ -f "$CLAUDE_SETTINGS" ] && command -v python3 &>/dev/null; then
+        local _m88_needs_fix=0
+        if python3 -c "
+import json, sys
+with open('$CLAUDE_SETTINGS') as f:
+    d = json.load(f)
+hooks = d.get('hooks', {}).get('SessionStart', [])
+for h in hooks:
+    cmd = h.get('hooks', [{}])[0].get('command', '')
+    if 'on-compact' in cmd and h.get('matcher') == 'compact':
+        sys.exit(0)  # needs fix
+sys.exit(1)  # already correct
+" 2>/dev/null; then
+            _m88_needs_fix=1
+        fi
+        if [ "$_m88_needs_fix" -eq 1 ]; then
+            substep "Fixing on-compact.py hook matcher (Migration 88)..."
+            TMP_SETTINGS=$(mktemp)
+            python3 - "$CLAUDE_SETTINGS" "$TMP_SETTINGS" << 'M88_PYEOF'
+import json, sys
+src, dst = sys.argv[1], sys.argv[2]
+with open(src) as f:
+    data = json.load(f)
+session_start = data.get('hooks', {}).get('SessionStart', [])
+updated = []
+for entry in session_start:
+    cmd = entry.get('hooks', [{}])[0].get('command', '')
+    # Change on-compact.py from matcher="compact" to matcher=""
+    if 'on-compact' in cmd and entry.get('matcher') == 'compact':
+        entry = dict(entry, matcher='')
+    # Remove the redundant inject-bootup-context.py compact-matcher entry
+    # (the empty-matcher entry already fires on all session types including compact)
+    elif 'inject-bootup-context' in cmd and entry.get('matcher') == 'compact':
+        continue
+    updated.append(entry)
+data['hooks']['SessionStart'] = updated
+with open(dst, 'w') as f:
+    json.dump(data, f, indent=2)
+    f.write('\n')
+M88_PYEOF
+            if [ $? -eq 0 ] && [ -s "$TMP_SETTINGS" ]; then
+                mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+                success "Fixed on-compact.py hook matcher (matcher='' + removed redundant compact inject-bootup-context entry)"
+                migrated=$((migrated + 1))
+            else
+                rm -f "$TMP_SETTINGS"
+                warn "Migration 88: failed to update $CLAUDE_SETTINGS"
+            fi
+        else
+            info "Migration 88: on-compact.py hook already uses matcher='' — no change needed"
+        fi
+    else
+        info "Migration 88: settings.json not found or python3 unavailable — skipping"
+    fi
+
+    # Migration 89: Fix context-monitor PostToolUse matcher (issue #1985).
+    # The matcher "Bash|mcp__lobster-inbox__|Agent" treats the middle segment as
+    # an exact tool name — no tool is named exactly "mcp__lobster-inbox__", so the
+    # hook never fired on any MCP call. The fix adds .* to match all mcp__lobster-inbox__*
+    # tools: "Bash|mcp__lobster-inbox__.*|Agent".
+    if [ -f "$CLAUDE_SETTINGS" ] && command -v jq &>/dev/null; then
+        if jq -e '.hooks.PostToolUse[]? | select(.matcher == "Bash|mcp__lobster-inbox__|Agent")' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+            TMP_SETTINGS=$(mktemp)
+            jq '(.hooks.PostToolUse[]? | select(.matcher == "Bash|mcp__lobster-inbox__|Agent") | .matcher) = "Bash|mcp__lobster-inbox__.*|Agent"' \
+                "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+            substep "Fixed context-monitor matcher: mcp__lobster-inbox__ → mcp__lobster-inbox__.* (Migration 89)"
+            migrated=$((migrated + 1))
+        else
+            substep "context-monitor matcher already correct or hook absent — skipping Migration 89"
+        fi
+    else
+        substep "settings.json not found or jq unavailable — skipping Migration 89"
+    fi
+
+    # Migration 90: Remove pretooluse-heartbeat.py PreToolUse hook from settings.json.
+    # hooks/pretooluse-heartbeat.py was the original PreToolUse heartbeat (issue #1439,
+    # PR #1562). It was superseded by hooks/pre-tool-heartbeat.py (issue #1786, PR #1817)
+    # which adds a dispatcher-only guard so subagent tool calls cannot falsely keep the
+    # heartbeat fresh. The old hook was never deleted from some local-dev installs where
+    # it was registered via earlier migrations; this migration removes it from settings.json
+    # on any install that still has it.
+    if [ -f "$CLAUDE_SETTINGS" ] && command -v jq &>/dev/null; then
+        local _m90_present
+        _m90_present=$(jq -r '
+            [.hooks.PreToolUse[]?.hooks[]? |
+             select((.command // "") | test("pretooluse-heartbeat\\.py"))]
+            | length' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
+
+        if [[ "${_m90_present:-0}" -gt 0 ]]; then
+            local _m90_tmp
+            _m90_tmp=$(mktemp)
+            if jq '
+                .hooks.PreToolUse = (
+                    .hooks.PreToolUse // [] |
+                    map(select(
+                        (.hooks // [] | any(.command // "" | test("pretooluse-heartbeat\\.py")))
+                        | not
+                    ))
+                )
+            ' "$CLAUDE_SETTINGS" > "$_m90_tmp" \
+                && mv "$_m90_tmp" "$CLAUDE_SETTINGS" 2>/dev/null; then
+                substep "Migration 90: removed pretooluse-heartbeat.py PreToolUse hook from settings.json"
+                migrated=$((migrated + 1))
+            else
+                rm -f "$_m90_tmp" 2>/dev/null || true
+                warn "Migration 90: could not update settings.json — jq transform failed"
+            fi
+        else
+            substep "Migration 90: pretooluse-heartbeat.py hook not present in settings.json — skipping"
+        fi
+    else
+        substep "Migration 90: settings.json or jq not found — skipping"
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
