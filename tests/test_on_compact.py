@@ -44,11 +44,18 @@ def _load_hook(
     compaction_state_file: str | None = None,
     state_file: str | None = None,
     last_compact_ts_file: str | None = None,
+    heartbeat_file: str | None = None,
 ):
     """Load hooks/on-compact.py as a module without executing main().
 
     Accepts optional override paths for files written by the hook so tests
     can redirect output to temporary locations.
+
+    heartbeat_file: override LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE so that
+    _wfm_was_active() reads a controlled file instead of the live dispatcher
+    heartbeat.  Pass a path to a non-existent file to force _wfm_was_active()
+    to return False (needed for tests that assert _is_compact_event returns
+    False when both source and hook_name are absent).
     """
     import os
 
@@ -63,6 +70,8 @@ def _load_hook(
         env_overrides["LOBSTER_STATE_FILE_OVERRIDE"] = state_file
     if last_compact_ts_file:
         env_overrides["LOBSTER_LAST_COMPACT_TS_FILE_OVERRIDE"] = last_compact_ts_file
+    if heartbeat_file is not None:
+        env_overrides["LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE"] = heartbeat_file
 
     with patch.dict(os.environ, env_overrides):
         spec = importlib.util.spec_from_file_location(
@@ -88,9 +97,14 @@ class TestIsCompactEvent:
         mod = _load_hook()
         assert mod._is_compact_event({"hook_name": "compact", "session_id": "abc"}) is True
 
-    def test_returns_false_when_hook_name_absent(self):
-        """Absent hook_name means not a compact event (fresh start or subagent)."""
-        mod = _load_hook()
+    def test_returns_false_when_hook_name_absent(self, tmp_path):
+        """Absent hook_name means not a compact event (fresh start or subagent).
+
+        Uses a non-existent heartbeat override so _wfm_was_active() returns
+        False (avoids test isolation issue when the live dispatcher is running).
+        """
+        absent_heartbeat = str(tmp_path / "no-heartbeat-file")
+        mod = _load_hook(heartbeat_file=absent_heartbeat)
         assert mod._is_compact_event({"session_id": "abc"}) is False
 
     def test_returns_false_when_hook_name_is_startup(self):
@@ -103,9 +117,14 @@ class TestIsCompactEvent:
         mod = _load_hook()
         assert mod._is_compact_event({"hook_name": "", "session_id": "abc"}) is False
 
-    def test_returns_false_on_empty_dict(self):
-        """Empty input (failed JSON parse fallback) is not a compact event."""
-        mod = _load_hook()
+    def test_returns_false_on_empty_dict(self, tmp_path):
+        """Empty input (failed JSON parse fallback) is not a compact event.
+
+        Uses a non-existent heartbeat override so _wfm_was_active() returns
+        False (avoids test isolation issue when the live dispatcher is running).
+        """
+        absent_heartbeat = str(tmp_path / "no-heartbeat-file")
+        mod = _load_hook(heartbeat_file=absent_heartbeat)
         assert mod._is_compact_event({}) is False
 
 
@@ -227,6 +246,11 @@ class TestMainSkipsNonCompactEvents:
         state_file = tmp_path / "lobster-state.json"
         compaction_file = tmp_path / "compaction-state.json"
         compact_ts_file = tmp_path / "last-compact.ts"
+        # Non-existent heartbeat file: forces _wfm_was_active() to return False
+        # so tests that expect non-compact behavior are isolated from the live
+        # dispatcher heartbeat (which would otherwise make _is_compact_event
+        # return True via the tier-3 filesystem fallback).
+        absent_heartbeat = str(tmp_path / "no-heartbeat")
 
         mod = _load_hook(
             compact_log_file=str(log_file),
@@ -234,10 +258,14 @@ class TestMainSkipsNonCompactEvents:
             state_file=str(state_file),
             compaction_state_file=str(compaction_file),
             last_compact_ts_file=str(compact_ts_file),
+            heartbeat_file=absent_heartbeat,
         )
 
         with patch("sys.stdin", io.StringIO(json.dumps(data))):
-            mod.main()
+            try:
+                mod.main()
+            except SystemExit:
+                pass
 
         return {
             "log_file": log_file,
@@ -272,10 +300,10 @@ class TestMainSkipsNonCompactEvents:
 
 
 class TestMainOnCompactEvent:
-    """main() must write restart-reason and trigger Telegram notify on compact events."""
+    """main() must write restart-reason and state files on compact events."""
 
-    def _run_main_compact(self, tmp_path: Path, telegram_ok: bool = True):
-        """Run main() with a compact event, mock Telegram, return results."""
+    def _run_main_compact(self, tmp_path: Path):
+        """Run main() with a compact event, return results."""
         import io
         log_file = tmp_path / "on-compact.log"
         reason_file = tmp_path / "reason.json"
@@ -283,6 +311,7 @@ class TestMainOnCompactEvent:
         compaction_file = tmp_path / "compaction-state.json"
         compact_ts_file = tmp_path / "last-compact.ts"
         sentinel_file = tmp_path / "compact-pending"
+        outbox_dir = tmp_path / "outbox"
 
         mod = _load_hook(
             compact_log_file=str(log_file),
@@ -291,27 +320,23 @@ class TestMainOnCompactEvent:
             compaction_state_file=str(compaction_file),
             last_compact_ts_file=str(compact_ts_file),
         )
-        # Override SENTINEL_FILE path
+        # Override SENTINEL_FILE and OUTBOX_DIR paths to temp locations
         mod.SENTINEL_FILE = sentinel_file
-
-        # Mock _send_telegram_notify to avoid real HTTP calls
-        mock_send = MagicMock(return_value=telegram_ok)
+        mod.OUTBOX_DIR = outbox_dir
 
         with patch("sys.stdin", io.StringIO(json.dumps(COMPACT_EVENT))), \
-             patch.object(mod, "_send_telegram_notify", mock_send), \
              patch.object(mod, "_parse_config_env", return_value={
-                 "TELEGRAM_BOT_TOKEN": "fake-token",
                  "TELEGRAM_ALLOWED_USERS": "12345",
              }), \
              patch.object(mod, "_is_dispatcher_compact", return_value=False):
             mod.main()
 
         return {
-            "mock_send": mock_send,
             "log_file": log_file,
             "reason_file": reason_file,
             "state_file": state_file,
             "compaction_file": compaction_file,
+            "outbox_dir": outbox_dir,
         }
 
     def test_writes_compaction_reason_to_restart_reason_file(self, tmp_path):
@@ -326,22 +351,14 @@ class TestMainOnCompactEvent:
         log_content = result["log_file"].read_text()
         assert "compact_detected" in log_content
 
-    def test_sends_telegram_notification(self, tmp_path):
-        """Compact event calls _send_telegram_notify once."""
+    def test_sends_telegram_notification_via_outbox(self, tmp_path):
+        """Compact event writes a Telegram notification file to the outbox."""
         result = self._run_main_compact(tmp_path)
-        result["mock_send"].assert_called_once()
-
-    def test_logs_telegram_ok_on_success(self, tmp_path):
-        """Successful Telegram send is logged as telegram_ok."""
-        result = self._run_main_compact(tmp_path, telegram_ok=True)
-        log_content = result["log_file"].read_text()
-        assert "telegram_ok" in log_content
-
-    def test_logs_telegram_failed_on_failure(self, tmp_path):
-        """Failed Telegram send is logged as telegram_failed."""
-        result = self._run_main_compact(tmp_path, telegram_ok=False)
-        log_content = result["log_file"].read_text()
-        assert "telegram_failed" in log_content
+        outbox_files = list(result["outbox_dir"].glob("*.json"))
+        assert len(outbox_files) == 1
+        payload = json.loads(outbox_files[0].read_text())
+        assert payload["source"] == "telegram"
+        assert payload["chat_id"] == "12345"
 
     def test_writes_compaction_state_files(self, tmp_path):
         """Compact event writes compaction-state.json and lobster-state.json."""
@@ -356,39 +373,27 @@ class TestMainOnCompactEvent:
 
 class TestSendCompactionNotifyCredentials:
     def _make_mod(self, tmp_path):
-        log_file = tmp_path / "on-compact.log"
-        return _load_hook(compact_log_file=str(log_file)), log_file
+        outbox_dir = tmp_path / "outbox"
+        mod = _load_hook()
+        mod.OUTBOX_DIR = outbox_dir
+        return mod, outbox_dir
 
-    def test_logs_telegram_skipped_when_bot_token_missing(self, tmp_path):
-        """Missing bot_token causes telegram_skipped log entry."""
-        mod, log_file = self._make_mod(tmp_path)
-        with patch.object(mod, "_parse_config_env", return_value={"TELEGRAM_ALLOWED_USERS": "123"}):
+    def test_skips_notify_when_allowed_users_missing(self, tmp_path):
+        """Missing TELEGRAM_ALLOWED_USERS: no outbox file written."""
+        mod, outbox_dir = self._make_mod(tmp_path)
+        with patch.object(mod, "_parse_config_env", return_value={}):
             mod.send_compaction_notify()
-        assert "telegram_skipped" in log_file.read_text()
+        assert not outbox_dir.exists() or len(list(outbox_dir.glob("*.json"))) == 0
 
-    def test_logs_telegram_skipped_when_allowed_users_missing(self, tmp_path):
-        """Missing allowed_users causes telegram_skipped log entry."""
-        mod, log_file = self._make_mod(tmp_path)
-        with patch.object(mod, "_parse_config_env", return_value={"TELEGRAM_BOT_TOKEN": "token"}):
-            mod.send_compaction_notify()
-        assert "telegram_skipped" in log_file.read_text()
-
-    def test_logs_telegram_ok_when_send_succeeds(self, tmp_path):
-        """Successful send produces telegram_ok in log."""
-        mod, log_file = self._make_mod(tmp_path)
+    def test_writes_outbox_file_when_credentials_present(self, tmp_path):
+        """TELEGRAM_ALLOWED_USERS present: outbox file written with correct fields."""
+        mod, outbox_dir = self._make_mod(tmp_path)
         with patch.object(mod, "_parse_config_env", return_value={
-            "TELEGRAM_BOT_TOKEN": "token",
             "TELEGRAM_ALLOWED_USERS": "12345",
-        }), patch.object(mod, "_send_telegram_notify", return_value=True):
+        }):
             mod.send_compaction_notify()
-        assert "telegram_ok" in log_file.read_text()
-
-    def test_logs_telegram_failed_when_send_fails(self, tmp_path):
-        """Failed send produces telegram_failed in log."""
-        mod, log_file = self._make_mod(tmp_path)
-        with patch.object(mod, "_parse_config_env", return_value={
-            "TELEGRAM_BOT_TOKEN": "token",
-            "TELEGRAM_ALLOWED_USERS": "12345",
-        }), patch.object(mod, "_send_telegram_notify", return_value=False):
-            mod.send_compaction_notify()
-        assert "telegram_failed" in log_file.read_text()
+        outbox_files = list(outbox_dir.glob("*.json"))
+        assert len(outbox_files) == 1
+        payload = json.loads(outbox_files[0].read_text())
+        assert payload["source"] == "telegram"
+        assert payload["chat_id"] == "12345"
