@@ -60,6 +60,7 @@ _HOOKS_DIR = Path(__file__).parent
 sys.path.insert(0, str(_HOOKS_DIR))
 
 import session_role  # noqa: E402 — path insert must precede this
+from session_role import write_dispatcher_session_id  # noqa: E402
 
 # Import state_machine for writing STARTING state on dispatcher sessions.
 _LOBSTER_SRC_DIR = _HOOKS_DIR.parent / "src"
@@ -349,15 +350,22 @@ def main() -> None:
         # reliable state file to read during Stop and PostToolUse hooks.
         # The startup flag is deleted above; without this write, is_dispatcher_session()
         # would fall back to the process-tree walk for the entire session lifetime.
-        real_session_id = hook_input.get("session_id", "")
-        if real_session_id:
-            session_role.write_dispatcher_session_id(real_session_id)
+        # Also used by on-compact.py to confirm session identity on compact events.
+        # CC preserves the session UUID across compactions, so this stored value
+        # remains valid for all subsequent compact events in this dispatcher run.
+        # Silent on failure — must never crash the hook.
+        if session_id and session_id != "unknown":
+            write_dispatcher_session_id(session_id)
+            print(
+                f"[{HOOK_NAME}] wrote dispatcher session ID: {session_id[:8]}...",
+                file=sys.stderr,
+            )
         # Write STARTING state so the health check knows the dispatcher is
         # initializing. State transitions to WAITING when wait_for_messages
         # fires (handled by dispatcher-state-pretool.py).
         state_machine.write_state(
             state_machine.STARTING,
-            session_id=real_session_id,
+            session_id=session_id,
         )
 
     # Read and reset last-startup-cause.json (issue #1972).
