@@ -39,7 +39,7 @@ The hook-side emit_to_bus() is fire-and-forget — never raises.
 ## Socket path
 
 Default: $LOBSTER_WORKSPACE/run/event-bus.sock
-The run/ directory is created by migration 98 (upgrade.sh).
+The run/ directory is created by migration 91 (upgrade.sh).
 
 ## Integration
 
@@ -62,6 +62,7 @@ import asyncio
 import json
 import logging
 import os
+import socket
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -343,7 +344,6 @@ def emit_to_bus(
                     $LOBSTER_WORKSPACE/run/event-bus.sock.
     """
     try:
-        import socket
         resolved_path = sock_path or _default_sock_path()
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
             s.settimeout(_HOOK_CONNECT_TIMEOUT_SECONDS)
