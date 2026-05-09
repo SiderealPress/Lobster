@@ -296,7 +296,7 @@ class TestPostCompactDispatcherFallback:
             "must be updated to the new session ID"
         )
 
-    def test_catchup_subagent_with_source_compact_returns_false(self, tmp_path):
+    def test_catchup_subagent_without_main_session_env_returns_false(self, tmp_path):
         """Even with source='compact', a different session AND LOBSTER_MAIN_SESSION != '1' → False.
 
         If LOBSTER_MAIN_SESSION is not set to '1', the post-compact fallback doesn't apply.
