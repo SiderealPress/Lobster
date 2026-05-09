@@ -183,7 +183,7 @@ class TestWfmExit:
 
     def test_wfm_exit_written_for_dispatcher(self, monkeypatch, workspace):
         mod = _load_module(monkeypatch, workspace, "post")
-        monkeypatch.setattr(mod, "is_dispatcher_session", lambda _: True)
+        monkeypatch.setattr(mod, "is_dispatcher", lambda _: True)
 
         self._write_enter_ts(workspace, time.time() - 10.0)
         exit_code = _run_hook(mod, _make_hook_input())
@@ -199,7 +199,7 @@ class TestWfmExit:
 
     def test_wfm_exit_duration_is_accurate(self, monkeypatch, workspace):
         mod = _load_module(monkeypatch, workspace, "post")
-        monkeypatch.setattr(mod, "is_dispatcher_session", lambda _: True)
+        monkeypatch.setattr(mod, "is_dispatcher", lambda _: True)
 
         # Simulate ~5 second WFM block
         enter_time = time.time() - 5.0
@@ -213,7 +213,7 @@ class TestWfmExit:
 
     def test_wfm_exit_no_duration_when_enter_ts_absent(self, monkeypatch, workspace):
         mod = _load_module(monkeypatch, workspace, "post")
-        monkeypatch.setattr(mod, "is_dispatcher_session", lambda _: True)
+        monkeypatch.setattr(mod, "is_dispatcher", lambda _: True)
 
         # No enter-ts file written — duration should be omitted, not crash
         exit_code = _run_hook(mod, _make_hook_input())
@@ -227,7 +227,7 @@ class TestWfmExit:
 
     def test_wfm_exit_includes_message_count_from_json_list(self, monkeypatch, workspace):
         mod = _load_module(monkeypatch, workspace, "post")
-        monkeypatch.setattr(mod, "is_dispatcher_session", lambda _: True)
+        monkeypatch.setattr(mod, "is_dispatcher", lambda _: True)
 
         self._write_enter_ts(workspace, time.time() - 1.0)
         tool_response = json.dumps([{"id": "msg1"}, {"id": "msg2"}])
@@ -239,7 +239,7 @@ class TestWfmExit:
 
     def test_wfm_exit_omits_message_count_on_unparseable_response(self, monkeypatch, workspace):
         mod = _load_module(monkeypatch, workspace, "post")
-        monkeypatch.setattr(mod, "is_dispatcher_session", lambda _: True)
+        monkeypatch.setattr(mod, "is_dispatcher", lambda _: True)
 
         self._write_enter_ts(workspace, time.time() - 1.0)
         exit_code = _run_hook(mod, _make_hook_input(tool_response="not json at all"))
@@ -250,7 +250,7 @@ class TestWfmExit:
 
     def test_wfm_exit_cleans_up_enter_ts_file(self, monkeypatch, workspace):
         mod = _load_module(monkeypatch, workspace, "post")
-        monkeypatch.setattr(mod, "is_dispatcher_session", lambda _: True)
+        monkeypatch.setattr(mod, "is_dispatcher", lambda _: True)
 
         self._write_enter_ts(workspace, time.time() - 1.0)
         _run_hook(mod, _make_hook_input())
@@ -260,7 +260,7 @@ class TestWfmExit:
 
     def test_wfm_exit_not_written_for_subagent(self, monkeypatch, workspace):
         mod = _load_module(monkeypatch, workspace, "post")
-        monkeypatch.setattr(mod, "is_dispatcher_session", lambda _: False)
+        monkeypatch.setattr(mod, "is_dispatcher", lambda _: False)
 
         self._write_enter_ts(workspace, time.time() - 1.0)
         _run_hook(mod, _make_hook_input())
@@ -270,7 +270,7 @@ class TestWfmExit:
 
     def test_wfm_exit_includes_session_id(self, monkeypatch, workspace):
         mod = _load_module(monkeypatch, workspace, "post")
-        monkeypatch.setattr(mod, "is_dispatcher_session", lambda _: True)
+        monkeypatch.setattr(mod, "is_dispatcher", lambda _: True)
 
         self._write_enter_ts(workspace, time.time() - 1.0)
         _run_hook(mod, _make_hook_input(session_id="abc-def-123"))
@@ -316,7 +316,7 @@ class TestResilience:
 
     def test_post_hook_does_not_raise_on_write_error(self, monkeypatch, workspace):
         mod = _load_module(monkeypatch, workspace, "post")
-        monkeypatch.setattr(mod, "is_dispatcher_session", lambda _: True)
+        monkeypatch.setattr(mod, "is_dispatcher", lambda _: True)
 
         log_file = workspace / "logs" / SESSION_LIFECYCLE_LOG_NAME
         log_file.write_text("")
