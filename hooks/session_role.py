@@ -39,7 +39,8 @@ from pathlib import Path
 # Tmux session name for the process-tree fallback used by is_dispatcher_session().
 _LOBSTER_TMUX_SESSION = os.environ.get("LOBSTER_TMUX_SESSION", "lobster")
 
-# Tertiary: hook marker file (kept for on-compact.py compatibility).
+# Hook marker file: written by inject-bootup-context.py at dispatcher startup.
+# Read by is_dispatcher_session() (PreToolUse hooks) as a fast-path state file.
 DISPATCHER_SESSION_FILE = Path(
     os.path.expanduser("~/messages/config/dispatcher-session-id")
 )
@@ -64,21 +65,13 @@ def _get_startup_flag_file() -> Path:
 STARTUP_FLAG_FILE = _get_startup_flag_file()
 
 
-def _get_mcp_session_state_file() -> Path:
-    """Return the MCP HTTP session state file path (kept for compatibility)."""
-    workspace = Path(os.environ.get("LOBSTER_WORKSPACE", Path.home() / "lobster-workspace"))
-    return workspace / "data" / "dispatcher-session-id"
-
-
 def _get_mcp_claude_session_file() -> Path:
-    """Return the MCP Claude UUID state file path (kept for on-compact.py compat)."""
+    """Return the MCP Claude UUID state file path.
+
+    Used by is_dispatcher_session() to check the Claude UUID written by the MCP server.
+    """
     workspace = Path(os.environ.get("LOBSTER_WORKSPACE", Path.home() / "lobster-workspace"))
     return workspace / "data" / "dispatcher-claude-session-id"
-
-
-# Module-level aliases for test patching convenience.
-MCP_SESSION_STATE_FILE = _get_mcp_session_state_file()
-MCP_CLAUDE_SESSION_FILE = _get_mcp_claude_session_file()
 
 
 # ---------------------------------------------------------------------------
@@ -122,7 +115,9 @@ def is_dispatcher(hook_input: dict) -> bool:  # noqa: ARG001
 def write_dispatcher_session_id(session_id: str) -> None:
     """Write session_id to the hook dispatcher marker file.
 
-    Kept for on-compact.py compatibility. No longer used by is_dispatcher().
+    Called by inject-bootup-context.py at dispatcher startup so that
+    is_dispatcher_session() (PreToolUse hooks) has a reliable state file
+    to read during the session without falling back to the process-tree walk.
     Atomic write via a .tmp rename. Silent on any failure.
     """
     try:
@@ -134,24 +129,8 @@ def write_dispatcher_session_id(session_id: str) -> None:
         pass
 
 
-def write_dispatcher_claude_session_id(session_id: str) -> None:
-    """Write session_id to the primary MCP Claude UUID state file.
-
-    Kept for on-compact.py compatibility. No longer read by is_dispatcher().
-    Atomic write via a .tmp rename.  Silent on any failure.
-    """
-    try:
-        path = _get_mcp_claude_session_file()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = path.with_suffix(".tmp")
-        tmp_path.write_text(session_id.strip())
-        tmp_path.replace(path)  # atomic on Linux
-    except Exception:  # noqa: BLE001
-        pass
-
-
 # ---------------------------------------------------------------------------
-# Internal helpers (kept for on-compact.py compatibility)
+# Internal helpers for is_dispatcher_session()
 # ---------------------------------------------------------------------------
 
 
@@ -180,14 +159,6 @@ def _check_state_file(path: Path, session_id: "str | None") -> "bool | None":
     if session_id is None:
         return None
     return session_id == stored
-
-
-def _read_dispatcher_session_id() -> "str | None":
-    """Return the stored dispatcher session ID from the hook marker file, or None."""
-    result = _read_session_id_from_file(DISPATCHER_SESSION_FILE)
-    if isinstance(result, OSError):
-        return None
-    return result
 
 
 # ---------------------------------------------------------------------------
