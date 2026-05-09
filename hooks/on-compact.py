@@ -50,20 +50,14 @@ Restart-reason tracking: writes
 {"reason": "compaction", "ts": "<ISO UTC>"} when a compact event is detected.
 
 Dispatcher-only: exits immediately for subagent sessions (detected via
-_is_dispatcher_compact(), which uses a layered strategy: startup flag, then
-exact session ID match, then LOBSTER_MAIN_SESSION + explicit compact signal
-as a post-compact fallback).  Subagent compactions must not write
-compact-reminders or the sentinel — those signals are only meaningful to
-the dispatcher.
+_is_dispatcher_compact()).  Subagent compactions must not write compact-reminders
+or the sentinel — those signals are only meaningful to the dispatcher.
 
-Compaction session_id change: CC assigns a NEW session_id to the post-compact
-session, so the hook input's session_id won't match the stored
-dispatcher-session-id marker even for the dispatcher's own compaction.
-_is_dispatcher_compact() handles this via an explicit compact signal check:
-if source='compact' or hook_name='compact' is present (authoritative signal)
-AND LOBSTER_MAIN_SESSION=1, it is a real dispatcher compaction.  Catchup
-subagents do NOT have this signal — they are plain SessionStart events
-detected only via the heartbeat fallback — so they are correctly rejected.
+Dispatcher detection: CC sets source='compact' on post-compact SessionStart
+hooks.  Catchup subagents are plain SessionStart events without this signal —
+they never carry source='compact'.  So source='compact' (combined with the
+startup flag check for fresh starts) is sufficient to gate all dispatcher-only
+writes.
 """
 
 import json
@@ -74,12 +68,7 @@ from pathlib import Path
 
 # Import shared session role utility.
 sys.path.insert(0, str(Path(__file__).parent))
-from session_role import (
-    DISPATCHER_SESSION_FILE,
-    is_dispatcher,
-    write_dispatcher_session_id,
-    _read_dispatcher_session_id,
-)
+from session_role import is_dispatcher
 
 
 INBOX_DIR = Path(os.path.expanduser("~/messages/inbox"))
@@ -552,85 +541,22 @@ def send_compaction_notify() -> None:
 
 
 def _is_dispatcher_compact(data: dict) -> bool:
-    """Return True if this compaction event belongs to the dispatcher session.
+    """Return True only if this SessionStart is a real dispatcher compaction.
 
-    Layered strategy (most-to-least reliable):
+    CC sets source='compact' on post-compact SessionStart hooks.
+    Catchup subagents and other subagents have plain SessionStart events
+    without this signal, so they are correctly rejected.
 
-    1. Startup flag: session_role.is_dispatcher() — works for fresh (non-compact)
-       dispatcher starts where the launcher-written flag is still present.
-
-    2. Exact session ID match: compare hook_input['session_id'] against the stored
-       dispatcher session ID in DISPATCHER_SESSION_FILE
-       (~/messages/config/dispatcher-session-id).  This file is written by
-       on-compact.py on the first confirmed dispatcher compaction (tier 3 path) and
-       updated on each subsequent compaction.
-       Exact match → this IS the dispatcher session.
-
-    3. LOBSTER_MAIN_SESSION fallback: handles two sub-cases that share the same
-       LOBSTER_MAIN_SESSION=1 check.  When the stored session ID file exists but the
-       IDs don't match, we only reach this tier if the hook payload contains an
-       explicit compact signal (source='compact' or hook_name='compact') — this
-       distinguishes a real post-compact dispatcher (which always carries the signal)
-       from a catchup subagent (a plain SessionStart with no source/hook_name field).
-       If the stored file is absent (fresh install or pre-fix system), we fall through
-       directly and use LOBSTER_MAIN_SESSION=1 as a backward-compatible guard.
-       On confirmation, update the stored session ID to the new post-compact ID so
-       that catchup subagents spawned later won't match.
-
-    Fix for issue #2046: the previous logic used LOBSTER_MAIN_SESSION=1 as an
-    unconditional fallback. Catchup subagents inherit LOBSTER_MAIN_SESSION=1 from the
-    dispatcher process.  When _is_compact_event() returned True via the heartbeat
-    fallback (dispatcher was recently active), _is_dispatcher_compact() also returned
-    True — causing a cascade of false compact-reminders.  The exact session ID match
-    (tier 2) and explicit-signal gating (tier 3) prevent this.
+    The startup flag check (is_dispatcher) handles fresh non-compact dispatcher
+    starts where source='compact' would not be present.
     """
-    # Tier 1: startup flag (fresh dispatcher start, not post-compact).
+    # Fresh dispatcher start (non-compact): startup flag is still present.
     if is_dispatcher(data):
         return True
 
-    new_session_id = data.get("session_id", "").strip()
-
-    # Tier 2: exact session ID match against stored dispatcher session ID.
-    stored_session_id = _read_dispatcher_session_id()
-    if stored_session_id is not None:
-        if new_session_id and new_session_id == stored_session_id:
-            # Exact match: this is the known dispatcher session.
-            return True
-
-        # Session ID mismatch: check for an explicit compact signal in the payload.
-        # Only fall through to LOBSTER_MAIN_SESSION=1 if the compact event is
-        # authoritative (source/hook_name field present, not just heartbeat fallback).
-        # Catchup subagents started by the post-compact dispatcher will NOT have
-        # source='compact' or hook_name='compact' — they are plain SessionStart events.
-        source = data.get("source")
-        hook_name = data.get("hook_name")
-        has_explicit_compact_signal = (source == "compact") or (
-            source is None and hook_name == "compact"
-        )
-        if not has_explicit_compact_signal:
-            # No explicit compact source: this is a subagent, not the dispatcher.
-            return False
-
-        # Tier 3: explicit compact signal but new session ID (post-compact dispatcher).
-        # Fall through to LOBSTER_MAIN_SESSION check below (tier 3 path).
-
-    # Tier 3 (LOBSTER_MAIN_SESSION fallback): post-compact path OR no stored session
-    # ID file (backward compat for fresh install / pre-fix system).
-    # Use LOBSTER_MAIN_SESSION=1 as the final backward-compatible guard.
-    if os.environ.get("LOBSTER_MAIN_SESSION", "") != "1":
-        return False
-
-    # Confirmed as dispatcher compaction.  Update the stored session ID to the new
-    # post-compact session ID so that catchup subagents spawned later won't match.
-    if new_session_id:
-        write_dispatcher_session_id(new_session_id)
-        print(
-            f"[on-compact] compaction confirmed: updated dispatcher-session-id "
-            f"to post-compact session {new_session_id!r}",
-            file=sys.stderr,
-        )
-
-    return True
+    # Post-compact dispatcher: CC sets source='compact' on the new session.
+    # Catchup subagents do NOT carry this field — they are plain SessionStart events.
+    return data.get("source") == "compact"
 
 
 def _reflection_already_exists(msg_id: str) -> bool:
@@ -757,14 +683,12 @@ def main() -> None:
 
     # Guard the inbox reminder and sentinel writes to the dispatcher only.
     # Subagent compactions must not inject compact-reminders into the shared
-    # inbox or write the compact-pending sentinel, because those signals are
-    # only meaningful to the dispatcher.
+    # inbox or write the compact-pending sentinel — those signals are only
+    # meaningful to the dispatcher.
     #
-    # Uses _is_dispatcher_compact() instead of is_dispatcher() directly because
-    # CC assigns a NEW session_id after compaction — the hook input's session_id
-    # won't match the stored marker file even for a dispatcher compaction.
-    # _is_dispatcher_compact() adds a LOBSTER_MAIN_SESSION + stored-JSONL fallback
-    # to handle this case and updates the marker file for subsequent calls.
+    # _is_dispatcher_compact() checks: startup flag for fresh starts, then
+    # source='compact' for post-compact sessions.  Catchup subagents are plain
+    # SessionStart events and never carry source='compact', so they are rejected.
     if not _is_dispatcher_compact(data):
         return
 
