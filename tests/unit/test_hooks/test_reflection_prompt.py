@@ -1,16 +1,17 @@
 """
 Unit tests for _schedule_reflection_prompt() in on-compact.py and on-fresh-start.py.
 
-Verifies:
-- In debug mode, writes a well-formed reflection_prompt message to the inbox
-- In non-debug mode, writes nothing
-- Written message has expected fields and content
-- Atomic write (no .tmp file left behind)
-- Silent on filesystem errors (never crashes the hook)
+Verifies (Fix B, issue #1998):
+- In debug mode, writes a well-formed reflection prompt to the sidecar file
+  (~/messages/bootup-prompt.md) -- NOT to the inbox.
+- In non-debug mode, writes nothing.
+- Written content contains expected key phrases and the trigger name.
+- Atomic write (no .tmp file left behind).
+- Silent on filesystem errors (never crashes the hook).
+- Second call overwrites the sidecar file (not appends / accumulates).
 """
 
 import importlib.util
-import json
 import os
 import sys
 import types
@@ -55,41 +56,72 @@ def _make_session_role_stub(is_dispatcher: bool = True):
     return stub
 
 
-def _load_on_compact(inbox_dir: str = None, compaction_state_override: str = None):
+def _load_on_compact(
+    bootup_prompt_file: str = None,
+    compaction_state_override: str = None,
+):
     """Load hooks/on-compact.py as a module, with isolated file paths."""
     env_patch = {}
     if compaction_state_override:
         env_patch["LOBSTER_COMPACTION_STATE_FILE_OVERRIDE"] = compaction_state_override
+    if bootup_prompt_file:
+        env_patch["LOBSTER_BOOTUP_PROMPT_FILE_OVERRIDE"] = bootup_prompt_file
 
     hook_path = _HOOKS_DIR / "on-compact.py"
-    with _PatchEnv(env_patch):
-        spec = importlib.util.spec_from_file_location("on_compact", hook_path)
-        mod = importlib.util.module_from_spec(spec)
-        sys.modules.setdefault("session_role", _make_session_role_stub())
-        spec.loader.exec_module(mod)
+    # Save and restore session_role to avoid polluting other tests that rely on the
+    # real session_role module.
+    saved_session_role = sys.modules.get("session_role")
+    try:
+        with _PatchEnv(env_patch):
+            spec = importlib.util.spec_from_file_location(
+                f"on_compact_{os.getpid()}_{id(bootup_prompt_file)}", hook_path
+            )
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules["session_role"] = _make_session_role_stub()
+            spec.loader.exec_module(mod)
+    finally:
+        # Restore the previous session_role (or remove if it was not there)
+        if saved_session_role is None:
+            sys.modules.pop("session_role", None)
+        else:
+            sys.modules["session_role"] = saved_session_role
 
-    if inbox_dir:
-        mod.INBOX_DIR = Path(inbox_dir)
+    if bootup_prompt_file:
+        mod.BOOTUP_PROMPT_FILE = Path(bootup_prompt_file)
     if compaction_state_override:
         mod.COMPACTION_STATE_FILE = Path(compaction_state_override)
     return mod
 
 
-def _load_on_fresh_start(inbox_dir: str = None, compaction_state_override: str = None):
+def _load_on_fresh_start(
+    bootup_prompt_file: str = None,
+    compaction_state_override: str = None,
+):
     """Load hooks/on-fresh-start.py as a module, with isolated file paths."""
     env_patch = {}
     if compaction_state_override:
         env_patch["LOBSTER_COMPACTION_STATE_FILE_OVERRIDE"] = compaction_state_override
+    if bootup_prompt_file:
+        env_patch["LOBSTER_BOOTUP_PROMPT_FILE_OVERRIDE"] = bootup_prompt_file
 
     hook_path = _HOOKS_DIR / "on-fresh-start.py"
-    with _PatchEnv(env_patch):
-        spec = importlib.util.spec_from_file_location("on_fresh_start", hook_path)
-        mod = importlib.util.module_from_spec(spec)
-        sys.modules.setdefault("session_role", _make_session_role_stub())
-        spec.loader.exec_module(mod)
+    saved_session_role = sys.modules.get("session_role")
+    try:
+        with _PatchEnv(env_patch):
+            spec = importlib.util.spec_from_file_location(
+                f"on_fresh_start_{os.getpid()}_{id(bootup_prompt_file)}", hook_path
+            )
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules["session_role"] = _make_session_role_stub()
+            spec.loader.exec_module(mod)
+    finally:
+        if saved_session_role is None:
+            sys.modules.pop("session_role", None)
+        else:
+            sys.modules["session_role"] = saved_session_role
 
-    if inbox_dir:
-        mod.INBOX_DIR = Path(inbox_dir)
+    if bootup_prompt_file:
+        mod.BOOTUP_PROMPT_FILE = Path(bootup_prompt_file)
     if compaction_state_override:
         mod.COMPACTION_STATE_FILE = Path(compaction_state_override)
     return mod
@@ -100,96 +132,98 @@ def _load_on_fresh_start(inbox_dir: str = None, compaction_state_override: str =
 # ---------------------------------------------------------------------------
 
 class TestScheduleReflectionPromptCompact:
-    """Tests for _schedule_reflection_prompt() in on-compact.py."""
+    """Tests for _schedule_reflection_prompt() in on-compact.py (sidecar, Fix B)."""
 
-    def test_writes_inbox_file_in_debug_mode(self, tmp_path):
-        inbox = tmp_path / "inbox"
-        inbox.mkdir()
-        mod = _load_on_compact(inbox_dir=str(inbox))
+    def test_writes_sidecar_file_in_debug_mode(self, tmp_path):
+        sidecar = tmp_path / "bootup-prompt.md"
+        mod = _load_on_compact(bootup_prompt_file=str(sidecar))
 
         with _PatchEnv({"LOBSTER_DEBUG": "true"}):
             mod._schedule_reflection_prompt("compaction")
 
-        files = [f for f in inbox.iterdir() if f.suffix == ".json"]
-        assert len(files) == 1, f"expected 1 file, got {[f.name for f in files]}"
+        assert sidecar.exists(), "sidecar file was not written in debug mode"
 
-    def test_does_not_write_in_non_debug_mode(self, tmp_path):
+    def test_does_not_write_to_inbox(self, tmp_path):
+        """No inbox file should be written -- sidecar only."""
         inbox = tmp_path / "inbox"
         inbox.mkdir()
-        mod = _load_on_compact(inbox_dir=str(inbox))
+        sidecar = tmp_path / "bootup-prompt.md"
+        mod = _load_on_compact(bootup_prompt_file=str(sidecar))
+        mod.INBOX_DIR = inbox
+
+        with _PatchEnv({"LOBSTER_DEBUG": "true"}):
+            mod._schedule_reflection_prompt("compaction")
+
+        inbox_files = list(inbox.iterdir())
+        assert len(inbox_files) == 0, f"unexpected inbox files: {[f.name for f in inbox_files]}"
+
+    def test_does_not_write_in_non_debug_mode(self, tmp_path):
+        sidecar = tmp_path / "bootup-prompt.md"
+        mod = _load_on_compact(bootup_prompt_file=str(sidecar))
 
         with _PatchEnv({"LOBSTER_DEBUG": "false"}):
             mod._schedule_reflection_prompt("compaction")
 
-        files = list(inbox.iterdir())
-        assert len(files) == 0
+        assert not sidecar.exists()
 
     def test_does_not_write_when_debug_env_absent(self, tmp_path):
-        inbox = tmp_path / "inbox"
-        inbox.mkdir()
-        mod = _load_on_compact(inbox_dir=str(inbox))
+        sidecar = tmp_path / "bootup-prompt.md"
+        mod = _load_on_compact(bootup_prompt_file=str(sidecar))
 
-        env_without_debug = {k: v for k, v in os.environ.items() if k != "LOBSTER_DEBUG"}
         with _PatchEnv({"LOBSTER_DEBUG": ""}):
             mod._schedule_reflection_prompt("compaction")
 
-        files = list(inbox.iterdir())
-        assert len(files) == 0
+        assert not sidecar.exists()
 
-    def test_written_message_has_correct_type_and_trigger(self, tmp_path):
-        inbox = tmp_path / "inbox"
-        inbox.mkdir()
-        mod = _load_on_compact(inbox_dir=str(inbox))
+    def test_written_content_contains_trigger_and_key_phrases(self, tmp_path):
+        sidecar = tmp_path / "bootup-prompt.md"
+        mod = _load_on_compact(bootup_prompt_file=str(sidecar))
 
         with _PatchEnv({"LOBSTER_DEBUG": "true"}):
             mod._schedule_reflection_prompt("compaction")
 
-        files = [f for f in inbox.iterdir() if f.suffix == ".json"]
-        data = json.loads(files[0].read_text())
-        assert data["type"] == "reflection_prompt"
-        assert data["trigger"] == "compaction"
-        assert data["source"] == "system"
-        assert data["chat_id"] == 0
-
-    def test_written_message_content_contains_key_phrases(self, tmp_path):
-        inbox = tmp_path / "inbox"
-        inbox.mkdir()
-        mod = _load_on_compact(inbox_dir=str(inbox))
-
-        with _PatchEnv({"LOBSTER_DEBUG": "true"}):
-            mod._schedule_reflection_prompt("compaction")
-
-        files = [f for f in inbox.iterdir() if f.suffix == ".json"]
-        data = json.loads(files[0].read_text())
-        text = data["text"]
+        text = sidecar.read_text()
+        assert "compaction" in text.lower()
         assert "friction" in text.lower() or "observations" in text.lower()
         assert "SiderealPress/lobster" in text
 
     def test_no_tmp_file_left_behind(self, tmp_path):
-        inbox = tmp_path / "inbox"
-        inbox.mkdir()
-        mod = _load_on_compact(inbox_dir=str(inbox))
+        sidecar = tmp_path / "bootup-prompt.md"
+        mod = _load_on_compact(bootup_prompt_file=str(sidecar))
 
         with _PatchEnv({"LOBSTER_DEBUG": "true"}):
             mod._schedule_reflection_prompt("compaction")
 
-        tmp_files = [f for f in inbox.iterdir() if f.suffix == ".tmp"]
+        tmp_files = list(tmp_path.glob("*.tmp"))
         assert len(tmp_files) == 0, f"tmp files left behind: {tmp_files}"
 
-    def test_creates_inbox_dir_if_absent(self, tmp_path):
-        inbox = tmp_path / "inbox_not_created_yet"
-        mod = _load_on_compact(inbox_dir=str(inbox))
+    def test_creates_parent_dir_if_absent(self, tmp_path):
+        sidecar = tmp_path / "subdir_not_created_yet" / "bootup-prompt.md"
+        mod = _load_on_compact(bootup_prompt_file=str(sidecar))
 
         with _PatchEnv({"LOBSTER_DEBUG": "true"}):
             mod._schedule_reflection_prompt("compaction")
 
-        assert inbox.exists()
-        files = [f for f in inbox.iterdir() if f.suffix == ".json"]
-        assert len(files) == 1
+        assert sidecar.exists()
 
-    def test_silent_on_write_failure(self, tmp_path):
-        """Must not raise when the inbox path is not writable."""
-        mod = _load_on_compact(inbox_dir="/proc/lobster_test_nonexistent/inbox")
+    def test_overwrites_on_second_call(self, tmp_path):
+        """Second call must overwrite, not append."""
+        sidecar = tmp_path / "bootup-prompt.md"
+        mod = _load_on_compact(bootup_prompt_file=str(sidecar))
+
+        with _PatchEnv({"LOBSTER_DEBUG": "true"}):
+            mod._schedule_reflection_prompt("compaction")
+            first_content = sidecar.read_text()
+            mod._schedule_reflection_prompt("compaction")
+            second_content = sidecar.read_text()
+
+        assert second_content == first_content  # same content, not doubled
+
+    def test_silent_on_write_failure(self):
+        """Must not raise when the sidecar path is not writable."""
+        mod = _load_on_compact(
+            bootup_prompt_file="/proc/lobster_test_nonexistent/bootup-prompt.md"
+        )
 
         with _PatchEnv({"LOBSTER_DEBUG": "true"}):
             # Must not raise
@@ -201,60 +235,79 @@ class TestScheduleReflectionPromptCompact:
 # ---------------------------------------------------------------------------
 
 class TestScheduleReflectionPromptFreshStart:
-    """Tests for _schedule_reflection_prompt() in on-fresh-start.py."""
+    """Tests for _schedule_reflection_prompt() in on-fresh-start.py (sidecar, Fix B)."""
 
-    def test_writes_inbox_file_in_debug_mode(self, tmp_path):
-        inbox = tmp_path / "inbox"
-        inbox.mkdir()
+    def test_writes_sidecar_file_in_debug_mode(self, tmp_path):
+        sidecar = tmp_path / "bootup-prompt.md"
         state_file = tmp_path / "compaction-state.json"
         mod = _load_on_fresh_start(
-            inbox_dir=str(inbox),
+            bootup_prompt_file=str(sidecar),
             compaction_state_override=str(state_file),
         )
 
         with _PatchEnv({"LOBSTER_DEBUG": "true"}):
             mod._schedule_reflection_prompt("bootup")
 
-        files = [f for f in inbox.iterdir() if f.suffix == ".json"]
-        assert len(files) == 1
+        assert sidecar.exists(), "sidecar file was not written in debug mode"
 
-    def test_does_not_write_in_non_debug_mode(self, tmp_path):
+    def test_does_not_write_to_inbox(self, tmp_path):
+        """No inbox file should be written -- sidecar only."""
         inbox = tmp_path / "inbox"
         inbox.mkdir()
-        mod = _load_on_fresh_start(inbox_dir=str(inbox))
+        sidecar = tmp_path / "bootup-prompt.md"
+        mod = _load_on_fresh_start(bootup_prompt_file=str(sidecar))
+        mod.INBOX_DIR = inbox
+
+        with _PatchEnv({"LOBSTER_DEBUG": "true"}):
+            mod._schedule_reflection_prompt("bootup")
+
+        inbox_files = list(inbox.iterdir())
+        assert len(inbox_files) == 0, f"unexpected inbox files: {[f.name for f in inbox_files]}"
+
+    def test_does_not_write_in_non_debug_mode(self, tmp_path):
+        sidecar = tmp_path / "bootup-prompt.md"
+        mod = _load_on_fresh_start(bootup_prompt_file=str(sidecar))
 
         with _PatchEnv({"LOBSTER_DEBUG": "false"}):
             mod._schedule_reflection_prompt("bootup")
 
-        files = list(inbox.iterdir())
-        assert len(files) == 0
+        assert not sidecar.exists()
 
-    def test_bootup_trigger_in_message(self, tmp_path):
-        inbox = tmp_path / "inbox"
-        inbox.mkdir()
-        mod = _load_on_fresh_start(inbox_dir=str(inbox))
+    def test_bootup_trigger_appears_in_content(self, tmp_path):
+        sidecar = tmp_path / "bootup-prompt.md"
+        mod = _load_on_fresh_start(bootup_prompt_file=str(sidecar))
 
         with _PatchEnv({"LOBSTER_DEBUG": "true"}):
             mod._schedule_reflection_prompt("bootup")
 
-        files = [f for f in inbox.iterdir() if f.suffix == ".json"]
-        data = json.loads(files[0].read_text())
-        assert data["trigger"] == "bootup"
-        assert data["type"] == "reflection_prompt"
+        text = sidecar.read_text()
+        assert "bootup" in text.lower()
+
+    def test_written_content_contains_key_phrases(self, tmp_path):
+        sidecar = tmp_path / "bootup-prompt.md"
+        mod = _load_on_fresh_start(bootup_prompt_file=str(sidecar))
+
+        with _PatchEnv({"LOBSTER_DEBUG": "true"}):
+            mod._schedule_reflection_prompt("bootup")
+
+        text = sidecar.read_text()
+        assert "friction" in text.lower() or "observations" in text.lower()
+        assert "SiderealPress/lobster" in text
 
     def test_no_tmp_file_left_behind(self, tmp_path):
-        inbox = tmp_path / "inbox"
-        inbox.mkdir()
-        mod = _load_on_fresh_start(inbox_dir=str(inbox))
+        sidecar = tmp_path / "bootup-prompt.md"
+        mod = _load_on_fresh_start(bootup_prompt_file=str(sidecar))
 
         with _PatchEnv({"LOBSTER_DEBUG": "true"}):
             mod._schedule_reflection_prompt("bootup")
 
-        tmp_files = [f for f in inbox.iterdir() if f.suffix == ".tmp"]
+        tmp_files = list(tmp_path.glob("*.tmp"))
         assert len(tmp_files) == 0
 
     def test_silent_on_write_failure(self):
-        mod = _load_on_fresh_start(inbox_dir="/proc/lobster_test_nonexistent/inbox")
+        mod = _load_on_fresh_start(
+            bootup_prompt_file="/proc/lobster_test_nonexistent/bootup-prompt.md"
+        )
 
         with _PatchEnv({"LOBSTER_DEBUG": "true"}):
             # Must not raise
