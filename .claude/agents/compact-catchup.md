@@ -229,7 +229,7 @@ After Phase 4, if `LOBSTER_DEBUG=true`, send a recovery status notification dire
 22. Check `os.environ.get("LOBSTER_DEBUG", "false").lower() == "true"`. If False, skip this entire phase.
 
 23. Determine ADMIN_CHAT_ID. Check in order:
-    a. `os.environ.get("LOBSTER_ADMIN_CHAT_ID")` — set by the dispatcher launcher.
+    a. `os.environ.get("LOBSTER_ADMIN_CHAT_ID")` — available via config.env loaded by the systemd service's EnvironmentFile directive.
     b. Parse `~/lobster-config/config.env` for `TELEGRAM_ALLOWED_USERS` — take the first user ID (same approach as `on-compact.py`).
     If neither source yields a usable chat_id, skip the notification silently (do not crash).
 
@@ -253,6 +253,8 @@ mcp__lobster-inbox__send_reply(
 ```
 
     Silent on any failure — this notification must never crash the catchup or prevent `write_result` from being called.
+
+27. After the `send_reply` call succeeds, call `write_result` with `sent_reply_to_user=True` so the dispatcher's relay path does not forward this internal message to the user. Pass this flag only when the Phase 5 send succeeded — if `send_reply` raised an exception, omit the flag (defaults to False) so the dispatcher is not misled.
 
 ## Session notes reading
 
@@ -377,6 +379,7 @@ mcp__lobster-inbox__write_result(
     text=<structured summary above>,
     source="system",
     status="success",
-    # sent_reply_to_user omitted (defaults to False) -- dispatcher reads this inline
+    # sent_reply_to_user: set to True if Phase 5 send_reply succeeded (LOBSTER_DEBUG=true path)
+    # omit (defaults to False) if Phase 5 was skipped or send_reply raised an exception
 )
 ```
