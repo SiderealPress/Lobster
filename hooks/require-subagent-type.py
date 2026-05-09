@@ -18,7 +18,9 @@ if not subagent_type:
     print(
         "BLOCKED: Agent called without subagent_type. "
         "Use subagent_type='lobster-generalist' for general background tasks, "
-        "or a named agent type (functional-engineer, lobster-ops, brain-dumps, etc.).",
+        "or a named agent type (brain-dumps, compact-catchup, functional-engineer, "
+        "lobster-auditor, lobster-ops, nightly-consolidation, review, "
+        "session-note-appender, session-note-polish).",
         file=sys.stderr,
     )
     sys.exit(2)
@@ -27,7 +29,9 @@ if subagent_type == "general-purpose":
     print(
         "BLOCKED: subagent_type='general-purpose' is not used in Lobster. "
         "Use subagent_type='lobster-generalist' for open-ended background tasks instead. "
-        "For specialised work, use: functional-engineer, lobster-ops, or brain-dumps.",
+        "For specialised work, use: brain-dumps, compact-catchup, functional-engineer, "
+        "lobster-auditor, lobster-ops, nightly-consolidation, review, "
+        "session-note-appender, or session-note-polish.",
         file=sys.stderr,
     )
     sys.exit(2)
