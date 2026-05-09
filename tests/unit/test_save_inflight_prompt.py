@@ -374,6 +374,29 @@ class TestSaveInflightPromptEdgeCases:
         entries = _read_jsonl(work_file)
         assert len(entries) == 2, "Two JSONL entries are appended (append-only semantics)"
 
+    def test_path_traversal_task_id_raises(self, tmp_path: Path) -> None:
+        """A task_id containing path traversal characters must raise ValueError (non-zero exit)."""
+        work_file = tmp_path / INFLIGHT_WORK_FILENAME
+        prompts_dir = tmp_path / INFLIGHT_PROMPTS_DIR_NAME
+        payload = {
+            "task_id": "../evil",
+            "type": "engineer",
+            "description": "Traversal attempt",
+            "started_at": "2026-05-09T12:00:00Z",
+            "chat_id": 0,
+            "subagent_type": "lobster-engineer",
+            "status": "running",
+            "prompt": "evil content",
+        }
+        result = _run_script(payload, work_file, prompts_dir)
+        assert result.returncode != 0, (
+            "Must exit non-zero when task_id contains path traversal characters"
+        )
+        # No files should have been written outside the prompts_dir
+        assert not (tmp_path / "evil.txt").exists(), (
+            "Path traversal must not write outside the prompts directory"
+        )
+
     def test_exits_nonzero_on_invalid_json_stdin(self, tmp_path: Path) -> None:
         """Invalid JSON on stdin causes non-zero exit."""
         work_file = tmp_path / INFLIGHT_WORK_FILENAME
