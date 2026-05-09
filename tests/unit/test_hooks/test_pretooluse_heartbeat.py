@@ -3,7 +3,8 @@ Unit tests for hooks/pretooluse-heartbeat.deprecated.py
 
 This hook is deprecated (superseded by hooks/pre-tool-heartbeat.py, issue #1786).
 The deprecated file is retained for audit purposes only — it should never be
-registered in settings.json. If it fires, it writes a warning to a JSONL log.
+registered in settings.json. If it fires, it writes a warning to a JSONL log
+and also writes to /tmp/pretooluse-heartbeat-deprecated-fired.log.
 
 Tests cover:
 - Hook exits 0 even though it is deprecated (must not block tool execution)
@@ -36,15 +37,6 @@ DEPRECATED_EVENT_TYPE = "deprecated_hook_fired"
 # ---------------------------------------------------------------------------
 # Module loader
 # ---------------------------------------------------------------------------
-
-def _load_module(messages_dir: Path):
-    """Load the deprecated hook as a fresh module with LOBSTER_MESSAGES override."""
-    os.environ["LOBSTER_MESSAGES"] = str(messages_dir)
-    spec = importlib.util.spec_from_file_location("pretooluse_heartbeat_deprecated", HOOK_PATH)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
 
 def _run_hook(monkeypatch, messages_dir: Path) -> tuple[int, str, str]:
     """Execute the hook's main() capturing exit code and stdio."""
@@ -177,3 +169,63 @@ class TestDeprecatedHookLogsWarning:
 
         log_file = messages_dir / "logs" / DEPRECATED_LOG_FILENAME
         assert log_file.exists()
+
+
+class TestTmpWriteFailureDegradesgracefully:
+    def test_exits_zero_when_tmp_write_raises(self, monkeypatch, tmp_path):
+        """/tmp write failure must not propagate — hook must still exit 0."""
+        messages_dir = tmp_path / "messages"
+        messages_dir.mkdir(exist_ok=True)
+        monkeypatch.setenv("LOBSTER_MESSAGES", str(messages_dir))
+
+        spec = importlib.util.spec_from_file_location(
+            "pretooluse_heartbeat_deprecated_tmpfail", HOOK_PATH
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        original_write_text = Path.write_text
+
+        def _raise_on_tmp(self, *args, **kwargs):
+            if str(self).startswith("/tmp"):
+                raise OSError("Simulated /tmp write failure")
+            return original_write_text(self, *args, **kwargs)
+
+        exit_code = None
+        with patch.object(Path, "write_text", _raise_on_tmp):
+            try:
+                mod.main()
+            except SystemExit as e:
+                exit_code = e.code
+
+        assert exit_code == 0, "/tmp write failure must not block tool execution"
+
+    def test_jsonl_log_still_written_when_tmp_write_raises(self, monkeypatch, tmp_path):
+        """JSONL log must still be written even if /tmp write raises."""
+        messages_dir = tmp_path / "messages"
+        messages_dir.mkdir(exist_ok=True)
+        monkeypatch.setenv("LOBSTER_MESSAGES", str(messages_dir))
+
+        spec = importlib.util.spec_from_file_location(
+            "pretooluse_heartbeat_deprecated_tmpfail2", HOOK_PATH
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        original_write_text = Path.write_text
+
+        def _raise_on_tmp(self, *args, **kwargs):
+            if str(self).startswith("/tmp"):
+                raise OSError("Simulated /tmp write failure")
+            return original_write_text(self, *args, **kwargs)
+
+        with patch.object(Path, "write_text", _raise_on_tmp):
+            try:
+                mod.main()
+            except SystemExit:
+                pass
+
+        log_file = messages_dir / "logs" / DEPRECATED_LOG_FILENAME
+        assert log_file.exists(), "JSONL log must be written even when /tmp write fails"
+        lines = log_file.read_text().strip().splitlines()
+        assert len(lines) == 1, "Exactly one JSONL entry must be present"
