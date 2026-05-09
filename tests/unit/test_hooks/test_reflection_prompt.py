@@ -50,6 +50,10 @@ class _PatchEnv:
 def _make_session_role_stub(is_dispatcher: bool = True):
     stub = types.ModuleType("session_role")
     stub.is_dispatcher = lambda data: is_dispatcher
+    # Provide attributes imported by on-compact.py's _is_dispatcher_compact()
+    stub.DISPATCHER_SESSION_FILE = Path(os.path.expanduser("~/messages/config/dispatcher-session-id"))
+    stub.write_dispatcher_session_id = lambda sid: None
+    stub._read_dispatcher_session_id = lambda: None
     return stub
 
 
