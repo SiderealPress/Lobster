@@ -21,7 +21,7 @@ Covers the three-layer detection strategy used by is_dispatcher_session():
    (mismatch), absent file falls through.
 
 3. Hook marker file (tertiary): ~/messages/config/dispatcher-session-id
-   Written by on-compact.py (formerly write-dispatcher-session-id.py).
+   Written by inject-bootup-context.py at dispatcher startup.
 
 4. Default: False (conservative/subagent)
 
@@ -29,7 +29,6 @@ Also covers:
 - Fail-open: OSError on file read → True (dispatcher)
 - _read_session_id_from_file() contract
 - _check_state_file() contract
-- _read_dispatcher_session_id() backwards-compat shim
 - write_dispatcher_session_id() atomic write
 - The core bug fix: Claude UUID (hook_input) vs HTTP session ID mismatch
 """
@@ -59,7 +58,7 @@ import session_role as _sr_module  # noqa: E402 — path insert must precede
 def _reload_session_role(monkeypatch, workspace: Path) -> object:
     """Reload session_role with LOBSTER_WORKSPACE pointing to workspace."""
     monkeypatch.setenv("LOBSTER_WORKSPACE", str(workspace))
-    # Force reimport so _get_mcp_session_state_file() picks up the new env.
+    # Force reimport so _get_mcp_claude_session_file() picks up the new env.
     return importlib.reload(_sr_module)
 
 
@@ -592,30 +591,6 @@ class TestWriteDispatcherSessionId:
             sr.write_dispatcher_session_id("sess-x")
         finally:
             unwritable.chmod(0o755)
-
-
-# ---------------------------------------------------------------------------
-# _read_dispatcher_session_id (backwards-compat shim)
-# ---------------------------------------------------------------------------
-
-
-class TestReadDispatcherSessionIdShim:
-    def test_returns_none_when_file_absent(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("HOME", str(tmp_path))
-        sr = importlib.reload(_sr_module)
-        assert sr._read_dispatcher_session_id() is None
-
-    def test_returns_session_id_when_file_present(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("HOME", str(tmp_path))
-        sr = importlib.reload(_sr_module)
-
-        config_dir = tmp_path / "messages" / "config"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "dispatcher-session-id").write_text("stored-sess-001")
-
-        # Reload again to pick up new DISPATCHER_SESSION_FILE path.
-        sr = importlib.reload(sr)
-        assert sr._read_dispatcher_session_id() == "stored-sess-001"
 
 
 # ---------------------------------------------------------------------------

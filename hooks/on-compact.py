@@ -51,15 +51,15 @@ Restart-reason tracking: writes
 
 Dispatcher-only: exits immediately for subagent sessions (detected via
 _is_dispatcher_compact(), which extends session_role.is_dispatcher() with a
-LOBSTER_MAIN_SESSION + stored-JSONL fallback).  Subagent compactions must not
-write compact-reminders or the sentinel — those signals are only meaningful to
+LOBSTER_MAIN_SESSION fallback).  Subagent compactions must not write
+compact-reminders or the sentinel — those signals are only meaningful to
 the dispatcher.
 
 Compaction session_id change: CC assigns a NEW session_id to the post-compact
-session, so the hook input's session_id won't match the stored
-dispatcher-session-id marker even for the dispatcher's own compaction.
-_is_dispatcher_compact() handles this by checking LOBSTER_MAIN_SESSION=1 +
-whether the previous dispatcher session JSONL still exists on disk.
+session, so the startup flag (consumed by inject-bootup-context.py in the
+previous session) is no longer present. _is_dispatcher_compact() falls back to
+checking LOBSTER_MAIN_SESSION=1, which the dispatcher launcher sets before
+exec-ing claude.
 """
 
 import json
@@ -71,10 +71,7 @@ from pathlib import Path
 # Import shared session role utility.
 sys.path.insert(0, str(Path(__file__).parent))
 from session_role import (
-    DISPATCHER_SESSION_FILE,
     is_dispatcher,
-    write_dispatcher_session_id,
-    _read_dispatcher_session_id,
 )
 
 
@@ -536,87 +533,34 @@ def send_compaction_notify() -> None:
         )
 
 
-def _stored_dispatcher_session_alive() -> bool:
-    """Return True if the stored dispatcher session's JSONL file still exists on disk.
-
-    Used as a compaction fallback: if the stored session JSONL is present, the
-    session hasn't ended cleanly.  For a compaction event this means the dispatcher's
-    context was just compacted — the old JSONL is retained by CC on disk.
-
-    Returns False if the marker file is absent, or the JSONL glob finds nothing.
-    Fails open (returns True) on unexpected errors so we don't skip a real
-    dispatcher compaction due to filesystem issues.
-    """
-    stored = _read_dispatcher_session_id()
-    if not stored:
-        return False
-    try:
-        projects_dir = Path(os.path.expanduser("~/.claude/projects"))
-        if not projects_dir.is_dir():
-            return True  # can't determine — assume alive (conservative)
-        for _ in projects_dir.glob(f"*/{stored}.jsonl"):
-            return True
-        return False
-    except Exception:  # noqa: BLE001
-        return True  # conservative fallback
-
-
 def _is_dispatcher_compact(data: dict) -> bool:
     """Return True if this compaction event belongs to the dispatcher session.
 
     Layered strategy:
 
-    1. Primary: session_role.is_dispatcher() — works when the session_id in the
-       hook input matches the stored marker file (fresh compaction of a session
-       whose ID hasn't changed yet, or when the MCP state file is current).
+    1. Primary: session_role.is_dispatcher() — works when the startup flag is
+       present with a live PID. This is the normal path for fresh (non-compaction)
+       restarts where inject-bootup-context.py hasn't yet consumed the flag.
 
-    2. Fallback: LOBSTER_MAIN_SESSION=1 + stored session JSONL alive.
+    2. Fallback: LOBSTER_MAIN_SESSION=1.
        Context compaction assigns a NEW session_id to the post-compact session,
-       so the hook input's session_id won't match the stored dispatcher ID even
-       though this is the dispatcher's own compaction.  In that case:
-       - If LOBSTER_MAIN_SESSION=1 (set by claude-persistent.sh for the
-         dispatcher and inherited by its subagents), AND
-       - The stored dispatcher session's JSONL still exists on disk (meaning the
-         previous session hasn't ended — it was just compacted),
-       then this is very likely the dispatcher's compaction.
+       and the startup flag has already been consumed by inject-bootup-context.py
+       in the previous session. In that case, LOBSTER_MAIN_SESSION=1 (set by
+       claude-persistent.sh for the dispatcher and inherited by its subagents)
+       is the remaining signal.
 
        Edge case: a subagent that compacts will also have LOBSTER_MAIN_SESSION=1
-       and the dispatcher's JSONL will also still be alive.  In that rare case a
-       false-positive compact-reminder would be written.  This is low-cost: the
-       dispatcher will receive an extra compact-reminder in its inbox, which is
-       harmless (it will re-orient and spawn catchup, then resume normally).
-       Subagent compactions are rare enough that this trade-off is acceptable.
-
-    When the fallback fires, this function also updates the dispatcher marker
-    file (~/messages/config/dispatcher-session-id) to the new session_id so
-    that subsequent is_dispatcher() calls within the same session return True.
+       and may trigger this path.  In that rare case a false-positive
+       compact-reminder would be written.  This is low-cost: the dispatcher will
+       receive an extra compact-reminder in its inbox, which is harmless (it will
+       re-orient and spawn catchup, then resume normally).  Subagent compactions
+       are rare enough that this trade-off is acceptable.
     """
     if is_dispatcher(data):
         return True
 
-    # Fallback: LOBSTER_MAIN_SESSION + stored session alive
-    if os.environ.get("LOBSTER_MAIN_SESSION", "") != "1":
-        return False
-
-    if not _stored_dispatcher_session_alive():
-        return False
-
-    # This looks like a dispatcher compaction.  Update the hook marker file
-    # (tertiary) so subsequent is_dispatcher_session() calls in PreToolUse
-    # hooks can still identify this session correctly.
-    # Note: inject-bootup-context.py now uses the startup flag (not UUID),
-    # so writing the primary Claude UUID file (dispatcher-claude-session-id)
-    # is no longer needed here (issue #1908).
-    new_session_id = data.get("session_id", "").strip()
-    if new_session_id:
-        write_dispatcher_session_id(new_session_id)
-        print(
-            f"[on-compact] compaction fallback: updated dispatcher-session-id "
-            f"to {new_session_id}",
-            file=sys.stderr,
-        )
-
-    return True
+    # Fallback: env var set by the dispatcher launcher (claude-persistent.sh).
+    return os.environ.get("LOBSTER_MAIN_SESSION", "") == "1"
 
 
 def _schedule_reflection_prompt(trigger: str) -> None:

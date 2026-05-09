@@ -49,9 +49,6 @@ class _PatchEnv:
 def _make_session_role_stub(is_dispatcher: bool = True):
     stub = types.ModuleType("session_role")
     stub.is_dispatcher = lambda data: is_dispatcher
-    stub.DISPATCHER_SESSION_FILE = Path("/tmp/lobster-test-dispatcher-session")
-    stub.write_dispatcher_session_id = lambda sid: None
-    stub._read_dispatcher_session_id = lambda: None
     return stub
 
 
