@@ -3091,6 +3091,23 @@ M88_PYEOF
         substep "Migration 90: settings.json or jq not found — skipping"
     fi
 
+    # Migration 93: Clear stale context-handoff.json (issue #1995).
+    # context-handoff.json is a single-use artifact that was never cleared after
+    # being read. Existing installs may have months-old data in this file.
+    # Overwrite with {} so the next dispatcher start sees "no prior context".
+    local handoff_file="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}/data/context-handoff.json"
+    if [ -f "$handoff_file" ]; then
+        if ! $DRY_RUN; then
+            echo '{}' > "$handoff_file"
+            substep "Migration 93: cleared stale context-handoff.json at $handoff_file"
+        else
+            substep "Migration 93 (dry-run): would clear stale context-handoff.json at $handoff_file"
+        fi
+        ((migrated++)) || true
+    else
+        substep "Migration 93: context-handoff.json absent — skipping"
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
