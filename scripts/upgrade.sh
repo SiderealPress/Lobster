@@ -3122,7 +3122,7 @@ M88_PYEOF
         if [[ "${_m94_present:-0}" -eq 0 ]]; then
             local _m94_tmp
             _m94_tmp=$(mktemp)
-            if jq --arg install_dir "${INSTALL_DIR:-$HOME/lobster}" '
+            if jq --arg install_dir "$LOBSTER_DIR" '
                 .hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
                     "matcher": "mcp__lobster-inbox__send_reply",
                     "hooks": [{
