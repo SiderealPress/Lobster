@@ -109,8 +109,10 @@ def _load_hook(
 
     # Patch sys.stdin so main()'s json.load(sys.stdin) gets a valid compact event
     # rather than hitting pytest's captured stdin which raises OSError.
+    # Use source="compact" (CC-documented primary field) so _is_compact_event()
+    # returns True and main() processes the event rather than exiting early.
     hook_input = json.dumps(
-        {"session_id": session_id, "hook_event_name": "SessionStart", "is_compact": True}
+        {"session_id": session_id, "hook_event_name": "SessionStart", "source": "compact"}
     )
     mod._test_stdin_data = hook_input  # store for reference
 
