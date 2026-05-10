@@ -86,7 +86,9 @@ import os
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Allow imports from the hooks directory (session_role).
@@ -106,6 +108,16 @@ COMPACTION_STATE_FILE = Path(
 
 INBOX_DIR = Path(os.path.expanduser("~/messages/inbox"))
 PROCESSING_DIR = Path(os.path.expanduser("~/messages/processing"))
+
+# inflight-work.jsonl path — append-only log of subagent spawns and completions.
+# On startup, stale "running" entries with no corresponding "done" are compacted out.
+# Override via env var for testability.
+INFLIGHT_WORK_FILE = Path(
+    os.environ.get(
+        "LOBSTER_INFLIGHT_WORK_FILE_OVERRIDE",
+        os.path.expanduser("~/lobster-workspace/data/inflight-work.jsonl"),
+    )
+)
 
 # Pointer to the current session file (written by compact-catchup / session management).
 # If this file exists and was modified recently, there is a prior session worth catching up.
@@ -138,6 +150,10 @@ STALE_CATCHUP_THRESHOLD_SECONDS = 30 * 60  # 30 minutes
 # ran successfully at the start of the previous session.
 SESSION_FILE_RECENCY_SECONDS = 4 * 60 * 60  # 4 hours
 
+# "running" entries in inflight-work.jsonl older than this with no matching
+# "done" entry are dropped on startup compaction (issue #1997).
+INFLIGHT_STALE_THRESHOLD_HOURS = 6
+
 STARTUP_COMPACT_REMINDER_TEXT = (
     "COMPACT REMINDER \u2014 RE-ORIENT NOW (injected by on-fresh-start.py)\n\n"
     "A previous session ended without completing compact-catchup. "
@@ -156,6 +172,162 @@ STARTUP_COMPACT_REMINDER_TEXT = (
     "last session (see sys.dispatcher.bootup.md \u2192 'Handling compact-reminder').\n"
     "Then resume your main loop by calling wait_for_messages()."
 )
+
+
+def _compact_inflight_entries(
+    entries: list[dict],
+    now: datetime,
+) -> list[dict]:
+    """Return entries with stale orphaned 'running' entries removed.
+
+    An entry is dropped when ALL of the following hold:
+    - status == "running"
+    - No entry with the same task_id has status == "done"
+    - The entry's timestamp ("ts" field) is older than INFLIGHT_STALE_THRESHOLD_HOURS,
+      or the "ts" field is absent/unparseable (treated conservatively as stale)
+
+    All other entries (done entries, fresh running entries, running entries that
+    have a matching done entry) are preserved unchanged.
+
+    Pure function — no I/O, no side effects. Input is not mutated.
+    """
+    threshold_seconds = INFLIGHT_STALE_THRESHOLD_HOURS * 3600
+
+    # Build the set of task_ids that have at least one 'done' entry.
+    done_task_ids: set[str] = {
+        e["task_id"]
+        for e in entries
+        if e.get("status") == "done" and "task_id" in e
+    }
+
+    result: list[dict] = []
+    for entry in entries:
+        # Non-running entries (done, etc.) are always preserved.
+        if entry.get("status") != "running":
+            result.append(dict(entry))
+            continue
+
+        task_id = entry.get("task_id")
+
+        # Running entries with a matching done are preserved regardless of age.
+        if task_id in done_task_ids:
+            result.append(dict(entry))
+            continue
+
+        # Running entry with no matching done: check age.
+        # Prefer "ts" (legacy field) but fall back to "started_at" (current field).
+        ts_str = entry.get("ts") or entry.get("started_at")
+        if not ts_str:
+            # No timestamp → cannot determine age → treat as stale, drop.
+            print(
+                f"[on-fresh-start] dropping stale inflight entry (no ts): task_id={task_id!r}",
+                file=sys.stderr,
+            )
+            continue
+
+        try:
+            ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+            age_seconds = (now - ts).total_seconds()
+        except (ValueError, AttributeError):
+            # Unparseable timestamp → treat as stale, drop.
+            print(
+                f"[on-fresh-start] dropping stale inflight entry (unparseable ts {ts_str!r}): "
+                f"task_id={task_id!r}",
+                file=sys.stderr,
+            )
+            continue
+
+        if age_seconds > threshold_seconds:
+            print(
+                f"[on-fresh-start] dropping stale inflight entry "
+                f"({age_seconds / 3600:.1f}h old, threshold {INFLIGHT_STALE_THRESHOLD_HOURS}h): "
+                f"task_id={task_id!r}",
+                file=sys.stderr,
+            )
+            continue
+
+        # Running entry within threshold — preserve.
+        result.append(dict(entry))
+
+    return result
+
+
+def _compact_inflight_work() -> None:
+    """Compact inflight-work.jsonl on startup, dropping stale orphaned 'running' entries.
+
+    Reads the JSONL file, removes 'running' entries older than
+    INFLIGHT_STALE_THRESHOLD_HOURS (6h) that have no corresponding 'done' entry,
+    then rewrites the file atomically.
+
+    This prevents months-old 'running' entries from causing false-positive
+    "lost subagent" alerts on every startup (issue #1997).
+
+    Silent on all errors — must not crash the hook or block dispatcher start.
+    """
+    if not INFLIGHT_WORK_FILE.exists():
+        return
+
+    try:
+        now = datetime.now(timezone.utc)
+
+        # Parse all entries, skipping malformed lines.
+        entries: list[dict] = []
+        malformed_count = 0
+        for line in INFLIGHT_WORK_FILE.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                malformed_count += 1
+                print(
+                    f"[on-fresh-start] skipping malformed inflight-work line: {line[:80]}",
+                    file=sys.stderr,
+                )
+
+        compacted = _compact_inflight_entries(entries, now)
+        dropped = len(entries) - len(compacted)
+
+        if dropped == 0 and malformed_count == 0:
+            # Nothing to do — avoid touching the file unnecessarily.
+            return
+
+        # Rewrite the file when there are dropped entries or malformed lines.
+        # Malformed lines are intentionally excluded from the rewrite: they cannot
+        # be parsed, so they carry no meaningful state — keeping them would
+        # silently corrupt the JSONL and trigger spurious errors on future reads.
+
+        # Atomic rewrite: write to a temp file in the same directory, then rename.
+        dir_ = str(INFLIGHT_WORK_FILE.parent)
+        content = "\n".join(json.dumps(e, ensure_ascii=False) for e in compacted)
+        if content:
+            content += "\n"
+
+        fd, tmp_path = tempfile.mkstemp(dir=dir_, prefix=".inflight-compact-", suffix=".jsonl")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(content)
+            os.replace(tmp_path, str(INFLIGHT_WORK_FILE))
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
+        print(
+            f"[on-fresh-start] compacted inflight-work.jsonl: "
+            f"dropped {dropped} stale orphaned running entr{'y' if dropped == 1 else 'ies'}, "
+            f"{len(compacted)} entries remain",
+            file=sys.stderr,
+        )
+
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"[on-fresh-start] failed to compact inflight-work.jsonl: {exc}",
+            file=sys.stderr,
+        )
 
 
 def _is_compact_event(data: dict) -> bool:  # noqa: ARG001 — data unused; kept for API compat
@@ -494,6 +666,11 @@ def main() -> None:
             file=sys.stderr,
         )
         sys.exit(0)
+
+    # Compact inflight-work.jsonl: drop stale orphaned 'running' entries so
+    # compact-catchup does not report false-positive "lost subagent" alerts for
+    # sessions that crashed months ago (issue #1997).
+    _compact_inflight_work()
 
     _mark_all_running_failed()
 
