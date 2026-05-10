@@ -44,6 +44,12 @@ USER_CONFIG_DIR = Path(os.path.expanduser("~/lobster-user-config/agents"))
 DISPATCHER_BOOTUP = CLAUDE_DIR / "sys.dispatcher.bootup.md"
 SUBAGENT_BOOTUP = CLAUDE_DIR / "sys.subagent.bootup.md"
 
+# Minimal bootup stub injected on compaction starts (issue #1954).
+# Saves ~25-35k tokens by skipping the full dispatcher bootup when the
+# compact-catchup subagent is about to restore context anyway.
+# Falls back to DISPATCHER_BOOTUP if this file is absent.
+COMPACT_DISPATCHER_BOOTUP = CLAUDE_DIR / "sys.compact-dispatcher.bootup.md"
+
 USER_BASE_BOOTUP = USER_CONFIG_DIR / "user.base.bootup.md"
 USER_DISPATCHER_BOOTUP = USER_CONFIG_DIR / "user.dispatcher.bootup.md"
 USER_SUBAGENT_BOOTUP = USER_CONFIG_DIR / "user.subagent.bootup.md"
@@ -290,12 +296,38 @@ def main() -> None:
     injected: list[str] = []
 
     # 1. Inject system bootup file based on role.
+    #
+    # For dispatcher + compaction start (issue #1954): use the compact stub instead
+    # of the full bootup to save ~25-35k tokens.  compact-catchup will restore full
+    # situational awareness, so the full bootup is redundant here.  Fall back to the
+    # full bootup if the compact stub file is absent (graceful degradation).
     if is_dispatcher:
-        content = _read_file_safe(DISPATCHER_BOOTUP, "sys.dispatcher.bootup.md")
-        system_file = DISPATCHER_BOOTUP
+        is_compact_start = startup_cause == "compaction"
+        if is_compact_start and COMPACT_DISPATCHER_BOOTUP.exists():
+            content = _read_file_safe(
+                COMPACT_DISPATCHER_BOOTUP, "sys.compact-dispatcher.bootup.md"
+            )
+            system_file = COMPACT_DISPATCHER_BOOTUP
+            print(
+                f"[{HOOK_NAME}] compact start detected — injecting compact stub"
+                f" ({COMPACT_DISPATCHER_BOOTUP.name})",
+                file=sys.stderr,
+            )
+        else:
+            if is_compact_start:
+                # Compact stub missing — log and fall back to full bootup.
+                print(
+                    f"[{HOOK_NAME}] compact start but stub absent"
+                    f" ({COMPACT_DISPATCHER_BOOTUP}) — falling back to full bootup",
+                    file=sys.stderr,
+                )
+            content = _read_file_safe(DISPATCHER_BOOTUP, "sys.dispatcher.bootup.md")
+            system_file = DISPATCHER_BOOTUP
+            is_compact_start = False  # treat as non-compact for user config injection
     else:
         content = _read_file_safe(SUBAGENT_BOOTUP, "sys.subagent.bootup.md")
         system_file = SUBAGENT_BOOTUP
+        is_compact_start = False
 
     if content is None:
         _append_injection_log(session_id, role, injected)
@@ -317,13 +349,18 @@ def main() -> None:
     injected.append(system_file.name)
 
     # 2. Inject user base bootup (both roles).
-    if _inject_if_exists(USER_BASE_BOOTUP, "user.base.bootup.md"):
-        injected.append(USER_BASE_BOOTUP.name)
+    # Skipped on compact starts — compact-catchup restores context; the full user
+    # config would add tokens without meaningful benefit at this point.
+    if not is_compact_start:
+        if _inject_if_exists(USER_BASE_BOOTUP, "user.base.bootup.md"):
+            injected.append(USER_BASE_BOOTUP.name)
 
     # 3. Inject role-specific user bootup.
+    # Also skipped on compact starts for the same reason.
     if is_dispatcher:
-        if _inject_if_exists(USER_DISPATCHER_BOOTUP, "user.dispatcher.bootup.md"):
-            injected.append(USER_DISPATCHER_BOOTUP.name)
+        if not is_compact_start:
+            if _inject_if_exists(USER_DISPATCHER_BOOTUP, "user.dispatcher.bootup.md"):
+                injected.append(USER_DISPATCHER_BOOTUP.name)
     else:
         if _inject_if_exists(USER_SUBAGENT_BOOTUP, "user.subagent.bootup.md"):
             injected.append(USER_SUBAGENT_BOOTUP.name)
