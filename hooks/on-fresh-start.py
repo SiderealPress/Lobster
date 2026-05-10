@@ -108,6 +108,7 @@ COMPACTION_STATE_FILE = Path(
 
 INBOX_DIR = Path(os.path.expanduser("~/messages/inbox"))
 PROCESSING_DIR = Path(os.path.expanduser("~/messages/processing"))
+PROCESSED_DIR = Path(os.path.expanduser("~/messages/processed"))
 
 # inflight-work.jsonl path — append-only log of subagent spawns and completions.
 # On startup, stale "running" entries with no corresponding "done" are compacted out.
@@ -538,6 +539,31 @@ def _inject_compact_reminder() -> None:
         )
 
 
+def _reflection_already_exists(msg_id: str) -> bool:
+    """Return True if a reflection message with the given ID already exists.
+
+    Scans inbox/, processing/, and processed/ to prevent concurrent hook
+    invocations from writing duplicate reflection files with the same ID.
+    Multiple subagent SessionStart events may fire within the same second,
+    producing the same msg_id (1-second precision) but different filenames
+    (millisecond-precision).  This check short-circuits all but the first
+    invocation.
+
+    Silent on all errors — must never crash the hook.
+    """
+    for directory in (INBOX_DIR, PROCESSING_DIR, PROCESSED_DIR):
+        if not directory.exists():
+            continue
+        for f in directory.glob("*.json"):
+            try:
+                data = json.loads(f.read_text())
+                if data.get("id") == msg_id:
+                    return True
+            except Exception:  # noqa: BLE001
+                continue
+    return False
+
+
 def _schedule_reflection_prompt(trigger: str) -> None:
     """In debug mode, write a reflection-prompt message to the inbox.
 
@@ -545,6 +571,12 @@ def _schedule_reflection_prompt(trigger: str) -> None:
     on the bootup/compaction experience and file GitHub issues with observations.
     Written immediately — the dispatcher processes inbox messages in order so it
     will reach this after the compact-reminder and catchup handling.
+
+    Dedup: computes the msg_id first and checks inbox/, processing/, and
+    processed/ for an existing file with the same ID.  Concurrent hook
+    invocations within the same second will share the same ID (1-second
+    precision) but write different filenames (millisecond-precision).  The
+    first invocation wins; subsequent ones skip silently.
 
     Silent on any failure — must never crash the hook.
     """
@@ -556,6 +588,15 @@ def _schedule_reflection_prompt(trigger: str) -> None:
 
         ts = time.time()
         msg_id = f"reflection_{trigger}_{int(ts)}"
+
+        # Dedup: skip if a reflection with this ID already exists.
+        if _reflection_already_exists(msg_id):
+            print(
+                f"[on-fresh-start] debug: reflection prompt {msg_id!r} already exists — skipping",
+                file=sys.stderr,
+            )
+            return
+
         timestamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + ".000000"
 
         content = (

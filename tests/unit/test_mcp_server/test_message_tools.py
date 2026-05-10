@@ -940,6 +940,139 @@ class TestMarkProcessed:
         outbox_after = set(outbox.iterdir())
         assert outbox_after - outbox_before == set()
 
+    # -----------------------------------------------------------------------
+    # Issue #2039 — Fix B: archive all duplicate files on mark_processed
+    # -----------------------------------------------------------------------
+
+    def test_archives_all_inbox_duplicates_with_same_id(self, temp_messages_dir, message_generator):
+        """mark_processed archives ALL files sharing the same message ID.
+
+        Issue #2039: concurrent hook invocations can write N files with the
+        same 'id' field but different filenames.  Only the first was archived;
+        the rest re-surfaced on the next wait_for_messages call.  After the
+        fix, all N files must be moved to processed/.
+        """
+        inbox = temp_messages_dir / "inbox"
+        processing = temp_messages_dir / "processing"
+        processed = temp_messages_dir / "processed"
+
+        # Write three files with the same logical ID but different filenames
+        # (simulating concurrent hook invocations within the same second).
+        shared_id = "reflection_bootup_1700000000"
+        base_msg = {
+            "id": shared_id,
+            "source": "system",
+            "chat_id": 0,
+            "type": "reflection_prompt",
+            "trigger": "bootup",
+            "text": "Debug reflection prompt",
+            "timestamp": "2026-01-01T00:00:00.000000",
+        }
+        (inbox / "1700000000001_reflection_bootup.json").write_text(json.dumps(base_msg))
+        (inbox / "1700000000002_reflection_bootup.json").write_text(json.dumps(base_msg))
+        (inbox / "1700000000003_reflection_bootup.json").write_text(json.dumps(base_msg))
+
+        assert len(list(inbox.glob("*.json"))) == 3
+
+        with patch.multiple(
+            "src.mcp.inbox_server",
+            INBOX_DIR=inbox,
+            PROCESSING_DIR=processing,
+            PROCESSED_DIR=processed,
+        ):
+            import asyncio
+            from src.mcp.inbox_server import handle_mark_processed
+
+            result = asyncio.run(handle_mark_processed({"message_id": shared_id, "force": True}))
+
+        assert "processed" in result[0].text.lower()
+        # All 3 files must be gone from inbox/
+        remaining_inbox = list(inbox.glob("*.json"))
+        assert remaining_inbox == [], (
+            f"expected inbox empty after archiving duplicates, got: {[f.name for f in remaining_inbox]}"
+        )
+        # All 3 must be in processed/
+        archived = list(processed.glob("*.json"))
+        assert len(archived) == 3, (
+            f"expected 3 archived files, got {len(archived)}: {[f.name for f in archived]}"
+        )
+
+    def test_archives_duplicates_from_both_inbox_and_processing(
+        self, temp_messages_dir, message_generator
+    ):
+        """Duplicates in processing/ are also archived on mark_processed.
+
+        A file may land in processing/ if mark_processing was called on one of
+        the duplicates.  The fix must scan both inbox/ and processing/ for
+        additional duplicates.
+        """
+        inbox = temp_messages_dir / "inbox"
+        processing = temp_messages_dir / "processing"
+        processed = temp_messages_dir / "processed"
+
+        shared_id = "reflection_bootup_1700000001"
+        base_msg = {
+            "id": shared_id,
+            "source": "system",
+            "chat_id": 0,
+            "type": "reflection_prompt",
+            "trigger": "bootup",
+            "text": "Debug reflection prompt",
+            "timestamp": "2026-01-01T00:00:00.000000",
+        }
+        # One file in processing (the one being processed), two extras in inbox
+        (processing / "1700000001001_reflection_bootup.json").write_text(json.dumps(base_msg))
+        (inbox / "1700000001002_reflection_bootup.json").write_text(json.dumps(base_msg))
+        (inbox / "1700000001003_reflection_bootup.json").write_text(json.dumps(base_msg))
+
+        with patch.multiple(
+            "src.mcp.inbox_server",
+            INBOX_DIR=inbox,
+            PROCESSING_DIR=processing,
+            PROCESSED_DIR=processed,
+        ):
+            import asyncio
+            from src.mcp.inbox_server import handle_mark_processed
+
+            result = asyncio.run(handle_mark_processed({"message_id": shared_id, "force": True}))
+
+        assert "processed" in result[0].text.lower()
+        assert list(inbox.glob("*.json")) == [], "inbox must be empty"
+        assert list(processing.glob("*.json")) == [], "processing must be empty"
+        assert len(list(processed.glob("*.json"))) == 3, "all 3 files must be archived"
+
+    def test_normal_mark_processed_unaffected_when_no_duplicates(
+        self, setup_dirs, message_generator
+    ):
+        """mark_processed still works correctly when there are no duplicates.
+
+        The duplicate-archiving code must not break the happy path where
+        exactly one file exists for the given ID.
+        """
+        inbox, processed = setup_dirs
+        processing = inbox.parent / "processing"
+        processing.mkdir(exist_ok=True)
+
+        msg = message_generator.generate_text_message()
+        msg_id = msg["id"]
+        (inbox / f"{msg_id}.json").write_text(json.dumps(msg))
+
+        with patch.multiple(
+            "src.mcp.inbox_server",
+            INBOX_DIR=inbox,
+            PROCESSING_DIR=processing,
+            PROCESSED_DIR=processed,
+        ):
+            import asyncio
+            from src.mcp.inbox_server import handle_mark_processed
+
+            result = asyncio.run(handle_mark_processed({"message_id": msg_id, "force": True}))
+
+        assert "processed" in result[0].text.lower()
+        assert not (inbox / f"{msg_id}.json").exists()
+        archived = list(processed.glob("*.json"))
+        assert len(archived) == 1, "expected exactly one archived file"
+
 
 class TestListSources:
     """Tests for list_sources tool."""
