@@ -15,9 +15,11 @@ The script is idempotent: if a compact-reminder message already exists in
 inbox/ or processing/ it skips writing a duplicate.
 
 Compaction detection (self-gate):
-  Primary:  data["source"] == "compact"  (CC-documented field)
-  Fallback: data["hook_name"] == "compact"  (observed in some CC versions)
-  If neither matches, the script exits immediately (sys.exit(0)).
+  Tier 1:  data["source"] == "compact"  (CC-documented field)
+  Tier 2:  data["hook_name"] == "compact"  (observed in some CC versions)
+  Tier 3:  dispatcher-wfm-active file contains a digit-only timestamp
+           (filesystem fallback for CC versions that omit both fields)
+  If none of the tiers match, the script exits immediately (sys.exit(0)).
 
 Notification: always writes a compaction notification to ~/messages/outbox/
 (the Lobster outbox pipeline) so the user is notified via Telegram.  The
@@ -117,6 +119,27 @@ REMINDER_TEXT = (
 )
 
 SENTINEL_FILE = Path(os.path.expanduser("~/messages/config/compact-pending"))
+
+# Dispatcher heartbeat file: written with a Unix epoch timestamp by the WFM
+# heartbeat thread in inbox_server.py while wait_for_messages() is blocking,
+# refreshed every 60 s.  A recent digit-only value means the dispatcher was
+# actively running immediately before this session started — a strong signal
+# that this SessionStart was triggered by a compaction rather than a fresh start.
+# Override: LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE env var (test isolation,
+# matching the existing override used by thinking-heartbeat.py and health-check).
+DISPATCHER_HEARTBEAT_FILE = Path(
+    os.environ.get(
+        "LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE",
+        os.path.expanduser("~/lobster-workspace/logs/dispatcher-heartbeat"),
+    )
+)
+
+# Maximum age (seconds) for the dispatcher heartbeat to be treated as "recently
+# active" in the tier-3 compaction fallback.  15 minutes is conservative: it
+# covers the longest normal idle period (WFM blocking with no messages), while
+# being short enough to avoid false-positives after a genuine long-idle restart
+# (e.g. Lobster was stopped for an hour and then restarted cleanly).
+DISPATCHER_WFM_RECENCY_SECONDS = 900  # 15 minutes
 
 COMPACTION_TELEGRAM_MESSAGE = "\u267b\ufe0f Context compacted. Re-orienting..."
 
@@ -370,23 +393,63 @@ def send_compaction_notify() -> None:
         )
 
 
+def _wfm_was_active() -> bool:
+    """Return True if the dispatcher was recently active before this session started.
+
+    Reads DISPATCHER_HEARTBEAT_FILE (dispatcher-heartbeat).  The file contains
+    a single Unix epoch integer written by thinking-heartbeat.py (PostToolUse)
+    and the WFM heartbeat thread in inbox_server.py.  If the file exists and
+    the recorded timestamp is within DISPATCHER_WFM_RECENCY_SECONDS (15 min),
+    the dispatcher was actively running immediately before this session — a
+    strong signal that this is a compaction rather than a fresh start.
+
+    A missing file, non-integer content, or a stale timestamp all return False
+    (conservative: prefer false-negatives over false-positives for tier-3).
+
+    Used as the third-tier fallback in _is_compact_event() when CC omits both
+    source and hook_name from the SessionStart payload.
+    """
+    try:
+        raw = DISPATCHER_HEARTBEAT_FILE.read_text().strip()
+        if not raw.isdigit():
+            return False
+        last_ts = int(raw)
+        age_seconds = int(time.time()) - last_ts
+        return 0 <= age_seconds < DISPATCHER_WFM_RECENCY_SECONDS
+    except OSError:
+        return False
+
+
 def _is_compact_event(data: dict) -> bool:
     """Return True if the hook input indicates a context compaction event.
 
-    Primary check: the ``source`` field in the CC SessionStart payload.
+    Tier 1 (primary): the ``source`` field in the CC SessionStart payload.
     Claude Code sets source="compact" for compaction-triggered sessions
     (other values: "startup", "resume", "clear").
 
-    Fallback: hook_name == "compact" is undocumented but observed in some
-    CC versions.  The fallback is only used when ``source`` is absent from
-    the payload — if ``source`` is present but non-compact, the event is
-    not a compaction regardless of hook_name.
+    Tier 2 (fallback): hook_name == "compact" is undocumented but observed
+    in some CC versions.  Only used when ``source`` is absent — if ``source``
+    is present but non-compact, the event is not a compaction regardless of
+    hook_name.
+
+    Tier 3 (filesystem fallback): when BOTH ``source`` and ``hook_name`` are
+    absent from the payload, check whether the dispatcher was recently active
+    (DISPATCHER_HEARTBEAT_FILE contains a recent digit-only Unix timestamp).
+    A live heartbeat signal with no payload fields strongly implies CC fired
+    a compaction SessionStart without populating the usual identification fields.
+
+    Returns False conservatively when neither field is present and the
+    filesystem fallback is unavailable or inconclusive.
     """
     source = data.get("source")
     if source is not None:
         return source == "compact"
-    # source field absent — fall back to hook_name
-    return data.get("hook_name") == "compact"
+    # Tier 2: source field absent — fall back to hook_name
+    hook_name = data.get("hook_name")
+    if hook_name is not None:
+        return hook_name == "compact"
+    # Tier 3: both source and hook_name absent — use filesystem fallback
+    return _wfm_was_active()
 
 
 def _stored_dispatcher_session_alive() -> bool:
@@ -539,8 +602,10 @@ def main() -> None:
 
     # Self-gate: this hook is registered with matcher="" so it fires on every
     # SessionStart event.  Exit immediately for non-compact sessions.
-    # Primary check: source="compact" (CC-documented).
-    # Fallback: hook_name="compact" (observed in some CC versions).
+    # Tier 1: source="compact" (CC-documented).
+    # Tier 2: hook_name="compact" (observed in some CC versions).
+    # Tier 3: dispatcher-wfm-active contains a digit-only timestamp (both
+    #         fields absent -- CC sometimes omits them entirely).
     if not _is_compact_event(data):
         sys.exit(0)
 
