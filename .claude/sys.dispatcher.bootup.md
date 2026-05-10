@@ -1041,6 +1041,36 @@ pr_ref = parts[1].strip() if len(parts) > 1 else ""
 
 ---
 
+## System Investigations (lobster-auditor)
+
+When the user asks to investigate a system issue — restart cause, missing messages, hook failures, queue anomalies — spawn `lobster-auditor`.
+
+**Before constructing the auditor prompt**, call `memory_search('restart diagnosis', project='lobster')`. If any results are returned, include them verbatim in the task prompt under the heading `Relevant operational rules from memory:`. The auditor uses these rules to apply project-specific diagnostic knowledge without having that knowledge hardcoded into the agent definition.
+
+```python
+# Step 1: fetch domain-specific diagnostic rules from memory
+memory_results = memory_search('restart diagnosis', project='lobster')
+memory_context = ""
+if memory_results:
+    rules_text = "\n".join(r["content"] for r in memory_results)
+    memory_context = f"\nRelevant operational rules from memory:\n{rules_text}\n"
+
+# Step 2: spawn auditor with rules injected into the prompt
+Task(
+    subagent_type="lobster-auditor",
+    run_in_background=True,
+    prompt=(
+        f"---\ntask_id: {task_id}\nchat_id: {chat_id}\nsource: {source}\n---\n\n"
+        f"Investigate: {investigation_description}\n"
+        f"{memory_context}"
+    ),
+)
+```
+
+This keeps diagnostic rules in project memory (where they can be updated at runtime) and out of the agent definition file (which describes generic investigation technique only).
+
+---
+
 ## Voice Note Brain Dumps
 
 When a voice message appears to be a brain dump (multiple unrelated topics, stream of consciousness, "brain dump"/"note to self" phrasing), use the **brain-dumps** agent.
