@@ -212,21 +212,36 @@ Use `get_active_sessions` to answer "what agents are running?" at any time — a
 
 ## In-Flight Work Tracking
 
-Before calling the Agent tool to spawn any background subagent, append a JSON line to `~/lobster-workspace/data/inflight-work.jsonl` (create the file if it doesn't exist):
+Before calling the Agent tool to spawn any background subagent, persist the entry **and the full prompt** by piping JSON to the helper script:
 
-```json
-{"task_id": "<task_id>", "type": "<task type>", "description": "<brief description>", "started_at": "<ISO UTC timestamp>", "chat_id": <chat_id>, "status": "running"}
+```python
+Bash(
+    'echo \'' + json.dumps({
+        "task_id": task_id,
+        "type": "<task type>",
+        "description": "<brief description>",
+        "started_at": datetime.utcnow().isoformat() + "Z",
+        "chat_id": chat_id,
+        "subagent_type": subagent_type,  # the value passed to the Agent tool
+        "status": "running",
+        "prompt": prompt,  # full prompt text — will be written to a separate file
+    }).replace("'", "'\\''") + '\' | uv run ~/lobster/scripts/save-inflight-prompt.py'
+)
 ```
 
-This is a **synchronous write on the main thread** — it must complete before the Agent call. Use a Bash append: `echo '<json>' >> ~/lobster-workspace/data/inflight-work.jsonl`. Do not spawn a subagent for this write.
+**Why a script instead of `echo '...' >> file`:** Prompts contain newlines and special characters that make shell escaping unreliable. `save-inflight-prompt.py` writes the prompt to `~/lobster-workspace/data/inflight-prompts/<task_id>.txt` and appends a JSONL entry to `inflight-work.jsonl` with a `prompt_file` path — never inline. The raw prompt must NOT appear in the JSONL file.
 
-**On SUBAGENT_RESULT**: immediately after `mark_processing` (before any branching), append a completion line. This fires for ALL result paths -- sent_reply_to_user, silent-drop, engineer→reviewer routing, and relay. "done" means the result arrived at the dispatcher -- not that the user has received the relay:
+This is a **synchronous write on the main thread** — it must complete before the Agent call. Do not spawn a subagent for this write.
 
-```json
-{"task_id": "<task_id>", "completed_at": "<ISO UTC timestamp>", "status": "done"}
+**Idempotency requirement:** Prompts passed to the Agent tool must be written to be stateless and idempotent. If the same prompt is launched 10 hours later, it should produce similar or better results — not worse. Prompts must not assume any ambient state (open editor windows, in-progress filesystem writes, specific partial outputs) that may have changed. This is the prerequisite for reliable auto-restart after session death.
+
+**On SUBAGENT_RESULT**: immediately after `mark_processing` (before any branching), append a completion line. This fires for ALL result paths -- sent_reply_to_user, silent-drop, engineer→reviewer routing, and relay. "done" means the result arrived at the dispatcher -- not that the user has received the relay. Use a Bash append for "done" entries (no prompt involved):
+
+```python
+Bash(f'echo \'{{"task_id": "{task_id}", "completed_at": "{completed_at}", "status": "done"}}\' >> ~/lobster-workspace/data/inflight-work.jsonl')
 ```
 
-The log is append-only. A task is "done" if any entry with the same `task_id` has `"status": "done"`. Entries with `"status": "running"` and no corresponding `"status": "done"` entry are in-flight.
+The log is append-only. A task is "done" if any entry with the same `task_id` has `"status": "done"`. Entries with `"status": "running"` and no corresponding `"status": "done"` entry are in-flight. The full prompt for any in-flight entry is readable from its `prompt_file` path.
 
 ---
 
