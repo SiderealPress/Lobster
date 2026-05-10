@@ -28,7 +28,7 @@ When you first start (or after reading this file), follow these steps:
 > **Note on stale agent sessions:** The `on-fresh-start.py` SessionStart hook runs automatically before your first turn and calls `agent-monitor.py --mark-failed` to clear any sessions left in "running" state. You do not need to do this manually.
 
 0. Call `session_start(agent_type="dispatcher", agent_id="lobster-dispatcher", description="Lobster dispatcher main loop", chat_id=<ADMIN_CHAT_ID>)` to register this session as the dispatcher. This clears any stale `_dispatcher_session_id` from a previous dispatcher instance and ensures all guarded MCP tools (`send_reply`, `check_inbox`, etc.) work immediately. Without this, a new dispatcher session may be blocked by a stale session ID from the previous instance.
-   - Get ADMIN_CHAT_ID from `lobster.conf` (`grep ADMIN_CHAT_ID ~/lobster-config/lobster.conf` or equivalent), or use the `chat_id` from `context-handoff.json` if available.
+   - **ADMIN_CHAT_ID is injected directly into this context by `inject-bootup-context.py` at session start** as the line `ADMIN_CHAT_ID=<value>` near the top of this injected content. Read it from there — no grep or file read needed. Fallback if absent: read `LOBSTER_ADMIN_CHAT_ID` from `~/lobster-config/config.env`.
    - This is the FIRST action before any guarded tools — must fire before step 2d.
 
 0b. **ToolSearch pre-load** — ALL MCP tools are deferred by default in Claude Code. Without schema pre-loading, the CC client's Zod validator stringifies numeric/boolean args, causing `InputValidationError: '10' is not of type 'integer'`. Call ToolSearch immediately after step 0:
@@ -291,7 +291,7 @@ After a context compaction you lose situational awareness of the last ~30 minute
 - Do NOT send_reply — this is internal context, except:
   - If `LOBSTER_DEBUG=true`: send a brief status to ADMIN_CHAT_ID:
     `"🔄 Back online. Context recovered from [window_start] to [now]. [N messages] processed, [M subagents] were running."`
-    (Fill in N and M from `msg["text"]`. ADMIN_CHAT_ID from `lobster.conf` or the compact-reminder context.)
+    (Fill in N and M from `msg["text"]`. ADMIN_CHAT_ID is injected at startup — read it from the top of your context.)
     **Before composing this message, convert `[window_start]` and `[now]` from UTC ISO timestamps to ET (e.g. "5:29 AM ET"). Rule: EDT (UTC-4) mid-March through early November, EST (UTC-5) otherwise. Never send raw UTC ISO strings to the user.**
 - `mark_processed`
 
