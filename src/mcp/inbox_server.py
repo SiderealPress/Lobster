@@ -2119,7 +2119,7 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "status": {
                         "type": "string",
-                        "description": "Filter by status: pending, in_progress, completed, or all (default).",
+                        "description": "Filter by status: pending, in_progress, completed, blocked, or all (default). Use 'blocked' to find tasks Lobster committed to but is waiting on the user to answer before proceeding.",
                         "default": "all",
                     },
                     "chat_id": {
@@ -2141,7 +2141,12 @@ async def list_tools() -> list[Tool]:
                     },
                     "description": {
                         "type": "string",
-                        "description": "Detailed description of what needs to be done.",
+                        "description": "Detailed description of what needs to be done. For blocked tasks, start with 'BLOCKED: <reason>' so the surfacing logic can show context at a glance.",
+                    },
+                    "status": {
+                        "type": "string",
+                        "description": "Initial status: pending (default), in_progress, completed, or blocked. Use 'blocked' when Lobster has made a commitment and asked clarifying questions, but cannot proceed until the user responds.",
+                        "default": "pending",
                     },
                     "chat_id": {
                         "type": "string",
@@ -2163,7 +2168,7 @@ async def list_tools() -> list[Tool]:
                     },
                     "status": {
                         "type": "string",
-                        "description": "New status: pending, in_progress, or completed.",
+                        "description": "New status: pending, in_progress, completed, or blocked. Set to 'blocked' when waiting on user input; set to 'in_progress' when the user has answered and work can resume.",
                     },
                     "subject": {
                         "type": "string",
@@ -6119,6 +6124,22 @@ def save_tasks(data: dict) -> None:
     atomic_write_json(TASKS_FILE, data)
 
 
+
+# Valid task statuses. 'blocked' marks a task where Lobster made an explicit
+# commitment to the user, asked clarifying questions, and is now waiting on the
+# user's answers before it can proceed. These are surfaced proactively at session
+# start so committed work is never silently dropped after a crash/restart cycle.
+VALID_TASK_STATUSES = {"pending", "in_progress", "completed", "blocked"}
+
+# Status display metadata: (emoji, display label, sort priority — lower = shown first)
+_TASK_STATUS_META = {
+    "blocked":     ("🚧", "Blocked (Waiting on You)", 0),
+    "in_progress": ("🔄", "In Progress",              1),
+    "pending":     ("⏳", "Pending",                   2),
+    "completed":   ("✅", "Completed",                 3),
+}
+
+
 async def handle_list_tasks(args: dict) -> list[TextContent]:
     """List all tasks."""
     status_filter = args.get("status", "all").lower()
@@ -6136,29 +6157,37 @@ async def handle_list_tasks(args: dict) -> list[TextContent]:
     if not tasks:
         return [TextContent(type="text", text="📋 No tasks found.")]
 
-    # Group by status
-    pending = [t for t in tasks if t.get("status") == "pending"]
-    in_progress = [t for t in tasks if t.get("status") == "in_progress"]
-    completed = [t for t in tasks if t.get("status") == "completed"]
+    # Group by status in priority order so blocked commitments appear first
+    groups: dict[str, list] = {s: [] for s in _TASK_STATUS_META}
+    for t in tasks:
+        s = t.get("status", "pending")
+        groups.setdefault(s, []).append(t)
 
     output = "📋 **Tasks:**\n\n"
 
-    if in_progress:
-        output += "**🔄 In Progress:**\n"
-        for t in in_progress:
-            output += f"  #{t['id']} {t['subject']}\n"
+    for status in sorted(_TASK_STATUS_META, key=lambda s: _TASK_STATUS_META[s][2]):
+        group = groups.get(status, [])
+        if not group:
+            continue
+        emoji, label, _ = _TASK_STATUS_META[status]
+        output += f"**{emoji} {label}:**\n"
+        for t in group:
+            desc_preview = ""
+            if status == "blocked" and t.get("description"):
+                # Show first line of description for blocked tasks — it contains
+                # the blocking reason (e.g. "BLOCKED: waiting on user's answer about X")
+                first_line = t["description"].split("\n")[0][:80]
+                desc_preview = f" — {first_line}"
+            output += f"  #{t['id']} {t['subject']}{desc_preview}\n"
         output += "\n"
 
-    if pending:
-        output += "**⏳ Pending:**\n"
-        for t in pending:
-            output += f"  #{t['id']} {t['subject']}\n"
-        output += "\n"
-
-    if completed:
-        output += "**✅ Completed:**\n"
-        for t in completed:
-            output += f"  #{t['id']} {t['subject']}\n"
+    # Show tasks with unrecognized statuses (e.g. legacy "done") in a fallback group
+    # rather than silently dropping them from the display.
+    other_tasks = [t for s, lst in groups.items() if s not in _TASK_STATUS_META for t in lst]
+    if other_tasks:
+        output += "**❓ Other (unrecognized status):**\n"
+        for t in other_tasks:
+            output += f"  #{t['id']} {t['subject']} [{t.get('status', 'unknown')}]\n"
         output += "\n"
 
     output += f"---\nTotal: {len(tasks)} task(s)"
@@ -6171,9 +6200,13 @@ async def handle_create_task(args: dict) -> list[TextContent]:
     subject = args.get("subject", "").strip()
     description = args.get("description", "").strip()
     chat_id = args.get("chat_id")
+    initial_status = args.get("status", "pending")
 
     if not subject:
         return [TextContent(type="text", text="Error: subject is required.")]
+
+    if initial_status not in VALID_TASK_STATUSES:
+        return [TextContent(type="text", text=f"Error: Invalid status '{initial_status}'. Use: {', '.join(sorted(VALID_TASK_STATUSES))}")]
 
     data = load_tasks()
     task_id = data.get("next_id", 1)
@@ -6182,7 +6215,7 @@ async def handle_create_task(args: dict) -> list[TextContent]:
         "id": task_id,
         "subject": subject,
         "description": description,
-        "status": "pending",
+        "status": initial_status,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -6215,10 +6248,10 @@ async def handle_update_task(args: dict) -> list[TextContent]:
     # Update fields
     if "status" in args:
         status = args["status"].lower()
-        if status in ["pending", "in_progress", "completed"]:
+        if status in VALID_TASK_STATUSES:
             task["status"] = status
         else:
-            return [TextContent(type="text", text=f"Error: Invalid status '{status}'. Use: pending, in_progress, completed")]
+            return [TextContent(type="text", text=f"Error: Invalid status '{status}'. Use: {', '.join(sorted(VALID_TASK_STATUSES))}")]
 
     if "subject" in args:
         task["subject"] = args["subject"]
@@ -6229,8 +6262,8 @@ async def handle_update_task(args: dict) -> list[TextContent]:
     task["updated_at"] = datetime.now(timezone.utc).isoformat()
     save_tasks(data)
 
-    status_emoji = {"pending": "⏳", "in_progress": "🔄", "completed": "✅"}.get(task["status"], "")
-    return [TextContent(type="text", text=f"{status_emoji} Task #{task_id} updated: {task['subject']} [{task['status']}]")]
+    emoji = _TASK_STATUS_META.get(task["status"], ("", "", 9))[0]
+    return [TextContent(type="text", text=f"{emoji} Task #{task_id} updated: {task['subject']} [{task['status']}]")]
 
 
 async def handle_get_task(args: dict) -> list[TextContent]:
@@ -6249,11 +6282,11 @@ async def handle_get_task(args: dict) -> list[TextContent]:
     if not task:
         return [TextContent(type="text", text=f"Error: Task #{task_id} not found.")]
 
-    status_emoji = {"pending": "⏳", "in_progress": "🔄", "completed": "✅"}.get(task["status"], "")
+    emoji = _TASK_STATUS_META.get(task["status"], ("", "", 9))[0]
 
     output = f"📋 **Task #{task['id']}**\n\n"
     output += f"**Subject:** {task['subject']}\n"
-    output += f"**Status:** {status_emoji} {task['status']}\n"
+    output += f"**Status:** {emoji} {task['status']}\n"
     if task.get("description"):
         output += f"\n**Description:**\n{task['description']}\n"
     output += f"\n**Created:** {task.get('created_at', 'N/A')}\n"

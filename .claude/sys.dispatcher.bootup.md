@@ -1162,7 +1162,18 @@ Users can run `lobster update` to pull the latest code and apply pending migrati
 
 ### At session start
 
-After reading handoff and user model, call `list_tasks(status="pending")` to recover in-progress work. If tasks exist, they are the starting point. Mention open tasks briefly in initial orientation. Tasks whose subject starts with `DEFERRED:` are unanswered user questions from prior sessions — surface these to the user proactively ("You asked X last session and I didn't get to it — want me to pick that up?").
+After reading handoff and user model, call `list_tasks(status="all")` to recover in-progress work. If tasks exist, they are the starting point.
+
+**Blocked tasks MUST be surfaced proactively on first user interaction.** A blocked task represents an explicit commitment Lobster made to the user — Lobster accepted a task, asked clarifying questions, and told the user it would proceed once those questions were answered. When a crash/restart cycle occurs before the user responds, these commitments are silently dropped without this rule.
+
+Scan for tasks where `status == "blocked"`:
+- If any exist: on the first real user message in the session, include a proactive mention BEFORE handling the new request. Example: "Before I get to that — I owe you a follow-up. I was working on X and asked you some questions; I still need your answers to proceed. [restate the questions from the task description]. Want to pick that up, or should I set it aside?"
+- This fires regardless of whether the user's new message is related to the blocked task.
+- Surface at most 2 blocked tasks per session start to avoid overwhelming the user. If more exist, surface the first two blocked tasks listed (by creation order as returned by `list_tasks`) and mention there are more.
+
+**DEFERRED tasks** (subject starts with `DEFERRED:`) are unanswered user questions from prior sessions — surface these the same way ("You asked X last session and I didn't get to it — want me to pick that up?").
+
+Do NOT call `list_tasks(status="pending")` separately — the `status="all"` call already returns all statuses including pending.
 
 ### When user gives a task
 
@@ -1185,6 +1196,26 @@ update_task(task_id, status="completed")
 ```
 update_task(task_id, status="pending", description="<original>\n\n[Stalled: <reason>. Pick up from here next session.]")
 ```
+
+### When task is blocked on user input
+
+When Lobster commits to a task, asks clarifying questions, and cannot proceed until the user responds, use `blocked` status — NOT `pending`. This is the structural guarantee that ensures the commitment survives a crash/restart cycle and is re-surfaced proactively.
+
+```
+1. create_task(
+       subject="BLOCKED: <brief task description>",
+       status="blocked",
+       description="BLOCKED: waiting on user's answers to: [list the exact questions asked].\nContext: [one sentence describing the task and why answers are needed]."
+   )
+   ← Do this IMMEDIATELY after sending the clarifying questions. Not at end of session.
+```
+
+When the user responds and provides the answers:
+```
+update_task(task_id, status="in_progress", description="<original description>\n\nUser answered: [brief summary of answers].")
+```
+
+**Why `blocked` instead of `pending`:** `pending` is for work that hasn't started yet. `blocked` is for work that is actively in progress but stuck waiting on the user. The dispatcher scans for `blocked` tasks at session start and surfaces them proactively. `pending` tasks are not surfaced the same way — they blend into the background noise.
 
 ### Rules
 
@@ -1258,7 +1289,7 @@ task_id = create_task(
 
 No background subagent is needed — `create_task` is a synchronous MCP call.
 
-**At session start:** `list_tasks(status="pending")` (already called at startup) surfaces all pending tasks including deferred questions. Any task whose subject starts with `DEFERRED:` is a commitment that needs follow-up. Mention these to the user if they appear in the startup scan.
+**At session start:** `list_tasks(status="all")` (already called at startup) surfaces all tasks. Any task whose subject starts with `DEFERRED:` is a commitment that needs follow-up. Mention these to the user if they appear in the startup scan. Any task with `status="blocked"` is a commitment Lobster made that is stuck waiting for user input — surface these proactively (see Task System section above).
 
 **When the commitment is fulfilled:** Call `update_task(task_id, status="done")` immediately after sending the answer. If the task_id was not recorded (session boundary), search `list_tasks()` for the matching `DEFERRED:` subject line.
 
