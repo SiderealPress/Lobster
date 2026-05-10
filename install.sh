@@ -68,6 +68,8 @@ INSTALL_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
 WORKSPACE_DIR="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
 PROJECTS_DIR="${LOBSTER_PROJECTS:-$WORKSPACE_DIR/projects}"
 MESSAGES_DIR="${LOBSTER_MESSAGES:-$HOME/messages}"
+CLAUDE_SETTINGS_DIR="$HOME/.claude"
+CLAUDE_SETTINGS="$CLAUDE_SETTINGS_DIR/settings.json"
 GITHUB_REPO="SiderealPress/lobster"
 GITHUB_API="https://api.github.com/repos/$GITHUB_REPO"
 
@@ -277,8 +279,13 @@ apply_private_overlay() {
 #===============================================================================
 
 setup_claude_hooks() {
-    local _settings_dir="$HOME/.claude"
-    local _settings="$_settings_dir/settings.json"
+    # Prefer the global CLAUDE_SETTINGS / CLAUDE_SETTINGS_DIR (defined near
+    # the top of this script) so the ~25 references to $CLAUDE_SETTINGS in
+    # later code resolve correctly under `set -u`. The local aliases below
+    # preserve the original variable names used inside this function so
+    # downstream readers don't have to re-grok the function logic.
+    local _settings_dir="$CLAUDE_SETTINGS_DIR"
+    local _settings="$CLAUDE_SETTINGS"
     mkdir -p "$_settings_dir"
 
     if [ ! -f "$_settings" ]; then
@@ -1160,25 +1167,13 @@ setup_swap() {
     step "Setting up ${swap_size_mb}MB swap file at $swapfile..."
 
     # Create the file.
-    # fallocate is instant but fails on BTRFS (BTRFS doesn't support preallocation
-    # for swap files). Detect BTRFS on the target filesystem and fall back to dd.
-    # Also fall back to dd if fallocate is not installed.
-    # dd status=progress requires GNU coreutils >= 8.24 and is omitted for
-    # portability across older Ubuntu LTS and Amazon Linux releases.
-    local use_dd=0
-    if ! command -v fallocate &>/dev/null; then
-        use_dd=1
-        info "fallocate not available — using dd (this may take a moment)..."
-    elif stat -f -c %T "$(dirname "$swapfile")" 2>/dev/null | grep -qi btrfs; then
-        use_dd=1
-        info "BTRFS filesystem detected — fallocate unsupported for swap, using dd (this may take a moment)..."
-    fi
-
-    if [ "$use_dd" -eq 0 ]; then
-        sudo fallocate -l "${swap_size_mb}M" "$swapfile"
-    else
-        sudo dd if=/dev/zero of="$swapfile" bs=1M count="$swap_size_mb"
-    fi
+    # Use dd unconditionally — fallocate on ext4 reserves extents in a way
+    # that `swapon` rejects with "skipping - it appears to have holes", and
+    # BTRFS doesn't support preallocation for swap files at all. dd is slower
+    # (~30s for 4GB on SSD) but produces a swap-compatible file on every FS.
+    # status=progress requires GNU coreutils >= 8.24; omitted for portability.
+    info "Allocating ${swap_size_mb}MB swap file at $swapfile (using dd; this may take a moment)..."
+    sudo dd if=/dev/zero of="$swapfile" bs=1M count="$swap_size_mb" status=none
 
     # Secure permissions (world-readable swap is a security risk)
     sudo chmod 600 "$swapfile"
