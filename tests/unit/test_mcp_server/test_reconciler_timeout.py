@@ -15,6 +15,9 @@ The reconciler loop itself is an async function with side effects (DB writes,
 wire-server notifications); testing it end-to-end would require mocking the
 entire inbox_server module. These tests exercise the threshold logic in
 isolation, which is the changed code.
+
+Note: DEFAULT_DEAD_THRESHOLD_SECONDS was raised from 30 to 90 minutes in
+issue #1922 to prevent premature kills of long-running tasks (Docker builds, etc.).
 """
 
 import pytest
@@ -24,7 +27,7 @@ import pytest
 # Pure helper — mirrors the threshold computation in reconcile_agent_sessions()
 # ---------------------------------------------------------------------------
 
-DEFAULT_DEAD_THRESHOLD_SECONDS = 30 * 60        # 30 minutes
+DEFAULT_DEAD_THRESHOLD_SECONDS = 90 * 60        # 90 minutes (raised from 30 in issue #1922)
 DEFAULT_DEAD_THRESHOLD_RUNNING_SECONDS = 120 * 60  # 120 minutes
 GRACE_PERIOD_SECONDS = 30
 
@@ -78,12 +81,12 @@ class TestDefaultThresholds:
         assert not is_dead_running(elapsed=120 * 60, timeout_minutes=None)
 
     def test_missing_alive_under_default(self):
-        # 20 minutes elapsed — below 30-minute default, not dead
-        assert not is_dead_missing(elapsed=20 * 60, timeout_minutes=None)
+        # 60 minutes elapsed — below 90-minute default, not dead
+        assert not is_dead_missing(elapsed=60 * 60, timeout_minutes=None)
 
     def test_missing_dead_over_default(self):
-        # 31 minutes elapsed — above 30-minute default, dead
-        assert is_dead_missing(elapsed=31 * 60, timeout_minutes=None)
+        # 91 minutes elapsed — above 90-minute default, dead
+        assert is_dead_missing(elapsed=91 * 60, timeout_minutes=None)
 
     def test_missing_within_grace_period_is_alive(self):
         # 10 seconds elapsed — inside grace period, never dead
@@ -112,24 +115,24 @@ class TestRegisteredTimeoutRespected:
 
     def test_short_timeout_respected_for_missing(self):
         # Agent registered for 10 minutes; elapsed = 11 minutes, but floor
-        # means missing threshold = max(10*60, 30*60) = 30 minutes.
+        # means missing threshold = max(10*60, 90*60) = 90 minutes.
         # At 11 min: NOT dead (below floor).
         assert not is_dead_missing(elapsed=11 * 60, timeout_minutes=10)
 
     def test_floor_prevents_premature_kill_for_missing(self):
-        # timeout_minutes=5 is very short; missing threshold is floored at 30 min.
+        # timeout_minutes=5 is very short; missing threshold is floored at 90 min.
         # At 6 minutes elapsed: not dead.
         assert not is_dead_missing(elapsed=6 * 60, timeout_minutes=5)
 
     def test_missing_threshold_floored_at_default(self):
         running_thresh, missing_thresh = compute_thresholds(timeout_minutes=5)
         assert running_thresh == 5 * 60       # running uses raw timeout
-        assert missing_thresh == DEFAULT_DEAD_THRESHOLD_SECONDS  # floor kicks in
+        assert missing_thresh == DEFAULT_DEAD_THRESHOLD_SECONDS  # floor kicks in at 90 min
 
     def test_missing_threshold_not_floored_when_large(self):
-        running_thresh, missing_thresh = compute_thresholds(timeout_minutes=60)
-        assert running_thresh == 60 * 60
-        assert missing_thresh == 60 * 60  # 60 min >= 30 min floor, no floor needed
+        running_thresh, missing_thresh = compute_thresholds(timeout_minutes=120)
+        assert running_thresh == 120 * 60
+        assert missing_thresh == 120 * 60  # 120 min >= 90 min floor, no floor needed
 
     def test_old_hard_cap_no_longer_applies(self):
         # The old bug: 61 minutes would kill even a 240-minute agent.
