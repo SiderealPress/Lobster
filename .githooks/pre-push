@@ -41,6 +41,14 @@
 # CI mode: if stdin is not a tty, findings are printed but the push is allowed.
 #   Non-interactive CI environments cannot respond to prompts.
 #
+# Timeouts:
+#   SCAN_DIFF_TIMEOUT_SECONDS (default 45) — wall-clock cap on the scan_diff
+#   loop. The loop is O(lines × patterns) with a subprocess per check; on large
+#   diffs (hundreds of added lines × 20+ patterns) this can run for minutes
+#   without a bound. When the deadline is hit the scan is abandoned and the
+#   push is allowed with a warning (same policy as a timed-out diff fetch).
+#   Automated pushes (IS_TTY=0) must never block indefinitely.
+#
 # Emergency bypass: git push --no-verify
 #===============================================================================
 
@@ -61,6 +69,17 @@ fi
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 ALLOWLIST_FILE="$REPO_ROOT/.githooks/security-allowlist.txt"
 ISSUES_FOUND=0
+
+# Wall-clock timeout for the scan_diff loop (seconds).
+# The loop is O(lines × patterns) with a subprocess per grep/awk call; on a
+# large diff (500+ added lines × 20+ patterns) this can run for several minutes
+# with no escape hatch. If the deadline is exceeded the scan is abandoned and
+# the push is allowed with a warning — identical policy to a timed-out diff
+# fetch. Automated (IS_TTY=0) pushes must never block indefinitely.
+SCAN_DIFF_TIMEOUT_SECONDS=45
+
+# Set to 1 inside scan_diff when the per-loop deadline is exceeded.
+SCAN_LOOP_TIMED_OUT=0
 
 # Detect CI / non-interactive mode: if stdin is not a tty, don't block
 IS_TTY=1
@@ -254,6 +273,10 @@ scan_diff() {
     local current_file=""
     local line_num=0
 
+    # Record wall-clock start using the $SECONDS shell builtin (seconds since
+    # shell started). Checked on every added line so the overhead is minimal.
+    local _scan_start=$SECONDS
+
     while IFS= read -r raw_line; do
         # Track which file we're in from diff headers
         if [[ "$raw_line" =~ ^diff\ --git ]]; then
@@ -281,6 +304,15 @@ scan_diff() {
         # Only scan added lines ('+' prefix, not '+++')
         if [[ "$raw_line" =~ ^\+[^+] || "$raw_line" == "+" ]]; then
             line_num=$((line_num + 1))
+
+            # Check overall scan deadline before spawning any subprocesses.
+            # This is the only guard against O(lines × patterns) hangs on large
+            # diffs — the loop has no other exit condition.
+            if (( SECONDS - _scan_start >= SCAN_DIFF_TIMEOUT_SECONDS )); then
+                SCAN_LOOP_TIMED_OUT=1
+                break
+            fi
+
             local content="${raw_line:1}"  # strip leading '+'
 
             # Skip if file should not be scanned
@@ -428,6 +460,14 @@ if [ -n "$DIFF_TEXT" ]; then
     echo ""
 else
     info "No outgoing commits to scan."
+    echo ""
+fi
+
+# scan_diff loop timed out — warn and allow push rather than blocking
+if [ "$SCAN_LOOP_TIMED_OUT" -eq 1 ]; then
+    warn "scan_diff timed out after ${SCAN_DIFF_TIMEOUT_SECONDS}s — scan incomplete."
+    warn "Large diff detected. Run 'git diff origin/main..HEAD | grep -P ...' manually to verify."
+    warn "Push proceeding with partial scan results only."
     echo ""
 fi
 
