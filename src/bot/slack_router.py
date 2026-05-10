@@ -624,6 +624,24 @@ _POLL_CHANNELS = [
 ]
 _POLL_INTERVAL = int(os.environ.get("LOBSTER_SLACK_POLL_INTERVAL", "10"))  # seconds
 
+# ---------------------------------------------------------------------------
+# Outbox fallback scanner: periodic re-scan to catch files missed by watchdog.
+#
+# The watchdog inotify Observer can stop delivering events silently when:
+#   - The kernel inotify queue overflows (IN_Q_OVERFLOW)
+#   - An unhandled exception kills the observer thread
+# In both cases the service stays alive but queued outbox files are not sent.
+#
+# This scanner runs in a separate thread and calls drain_outbox() on every
+# tick so that any files the watchdog missed are caught within one interval.
+# It also checks observer.is_alive() on every tick and logs a WARNING when
+# the observer thread has died, making the failure visible in logs rather than
+# silently accumulating queued messages.
+# ---------------------------------------------------------------------------
+OUTBOX_SCAN_INTERVAL: int = int(
+    os.environ.get("LOBSTER_SLACK_OUTBOX_SCAN_INTERVAL", "30")
+)
+
 # Warn at startup if the user token is configured but no poll channels are set.
 # Without poll channels, DMs sent to the user identity will not be received.
 if SLACK_USER_TOKEN and not _POLL_CHANNELS:
@@ -794,6 +812,38 @@ def _poll_user_dm_channels(stop_event: Event) -> None:
     log.info("User DM poller stopped")
 
 
+def _scan_outbox_periodically(stop_event: Event, observer: object) -> None:
+    """Periodically drain the outbox directory as a watchdog fallback.
+
+    The watchdog inotify Observer can silently stop delivering ``on_created``
+    events when the kernel inotify queue overflows or the observer thread
+    dies.  This function runs in a dedicated daemon thread and calls
+    ``drain_outbox`` on every ``OUTBOX_SCAN_INTERVAL``-second tick so that
+    any files the watchdog missed are delivered within one scan period.
+
+    On each tick it also calls ``observer.is_alive()`` and logs a WARNING
+    when the observer thread has died, surfacing the failure in the service
+    log rather than silently accumulating undelivered outbox files.
+
+    Args:
+        stop_event: Threading Event that signals the loop to exit.
+        observer:   The watchdog Observer instance whose liveness is checked.
+    """
+    log.info(
+        "Outbox fallback scanner started (interval=%ds)", OUTBOX_SCAN_INTERVAL
+    )
+    while not stop_event.is_set():
+        if not observer.is_alive():
+            log.warning(
+                "Outbox watcher (watchdog Observer) thread is no longer alive — "
+                "inotify events are not being delivered. "
+                "Fallback scanner is compensating; consider restarting the service."
+            )
+        drain_outbox(OUTBOX_DIR, source="slack", send_fn=_send_slack_reply, log=log)
+        stop_event.wait(timeout=OUTBOX_SCAN_INTERVAL)
+    log.info("Outbox fallback scanner stopped")
+
+
 def process_existing_outbox() -> None:
     """Process any Slack outbox files that exist on startup."""
     drain_outbox(OUTBOX_DIR, source="slack", send_fn=_send_slack_reply, log=log)
@@ -837,6 +887,19 @@ def main():
     )
     _poll_thread.start()
 
+    # Start outbox fallback scanner thread.
+    # This periodically re-scans the outbox directory to catch files missed by
+    # the watchdog Observer (e.g. after an inotify queue overflow or observer
+    # thread crash).  The shared stop event keeps shutdown clean.
+    _scan_stop = Event()
+    _scan_thread = Thread(
+        target=_scan_outbox_periodically,
+        args=(_scan_stop, observer),
+        daemon=True,
+        name="outbox-scan-fallback",
+    )
+    _scan_thread.start()
+
     # Start Socket Mode handler
     handler = SocketModeHandler(app, SLACK_APP_TOKEN)
 
@@ -847,7 +910,9 @@ def main():
         log.info("Shutting down...")
     finally:
         _poll_stop.set()
+        _scan_stop.set()
         _poll_thread.join(timeout=5)
+        _scan_thread.join(timeout=5)
         observer.stop()
         observer.join()
 
