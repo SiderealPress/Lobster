@@ -2758,7 +2758,7 @@ async def list_tools() -> list[Tool]:
                         "type": "integer",
                         "description": (
                             "Expected maximum runtime in minutes. Agents older than this without "
-                            "recent output file activity can be presumed dead. Default: 30."
+                            "recent output file activity can be presumed dead. Default: 90."
                         ),
                     },
                     "idempotency": {
@@ -9805,7 +9805,7 @@ async def reconcile_agent_sessions() -> None:
       - Session in DB with status='running', scanner says 'done'
         → call session_end(..., status='completed'), enqueue Telegram notification
       - Session in DB with status='running', output file missing AND session
-        is older than its registered timeout_minutes (default 30 min) →
+        is older than its registered timeout_minutes (default 90 min) →
         call session_end(..., status='dead'), enqueue Telegram notification
       - Session in DB with status='running', file shows stop_reason=tool_use AND
         session is older than its registered timeout_minutes (default 120 min) →
@@ -9834,14 +9834,14 @@ async def reconcile_agent_sessions() -> None:
     """
     from agents.session_store import check_output_file_status, get_output_file_mtime
 
-    DEFAULT_DEAD_THRESHOLD_SECONDS = 30 * 60   # 30 minutes — fallback for missing output files
+    DEFAULT_DEAD_THRESHOLD_SECONDS = 90 * 60   # 90 minutes — fallback for missing output files (raised from 30 in issue #1922)
     DEFAULT_DEAD_THRESHOLD_RUNNING_SECONDS = 120 * 60  # 120 minutes — fallback for stuck tool_use files
     GRACE_PERIOD_SECONDS = 30          # Newly spawned agents get grace before DEAD
     # Mtime staleness gate (issue #868): if output file hasn't been written to in
     # this many seconds, treat the agent as interrupted rather than actively running.
     # An active agent updates its JSONL output continuously; an interrupted one stops
     # immediately. 15 minutes gives ample margin to avoid false positives during slow
-    # tool calls, while cutting the misclassification window from 120 min → 30 min.
+    # tool calls, while cutting the misclassification window from 120 min → 90 min.
     MTIME_STALE_THRESHOLD_SECONDS = 15 * 60    # 15 minutes
 
     # Startup sweep: re-send notifications for sessions that completed while down

@@ -5,8 +5,8 @@ When a Claude Code agent is interrupted mid-turn, it writes no ``stop_reason``
 to its output JSONL file, so ``check_output_file_status()`` returns "running"
 — indistinguishable from a legitimately active agent.  The mtime gate closes
 this gap: if the output file has been idle for MTIME_STALE_THRESHOLD_SECONDS,
-the reconciler uses the shorter "missing file" threshold (30 min) instead of
-the generous "running" threshold (120 min).
+the reconciler uses the shorter "missing file" threshold (90 min, raised from
+30 in issue #1922) instead of the generous "running" threshold (120 min).
 
 Strategy: extract the pure threshold-selection logic into standalone functions
 and test all branching cases without instantiating the async reconciler or the
@@ -20,7 +20,7 @@ import pytest
 # Constants — mirror reconcile_agent_sessions() in inbox_server.py
 # ---------------------------------------------------------------------------
 
-DEFAULT_DEAD_THRESHOLD_SECONDS = 30 * 60          # 30 minutes
+DEFAULT_DEAD_THRESHOLD_SECONDS = 90 * 60          # 90 minutes (raised from 30 in issue #1922)
 DEFAULT_DEAD_THRESHOLD_RUNNING_SECONDS = 120 * 60  # 120 minutes
 MTIME_STALE_THRESHOLD_SECONDS = 15 * 60           # 15 minutes
 
@@ -119,21 +119,21 @@ class TestEffectiveRunningThreshold:
 
     def test_stale_file_uses_short_threshold_default(self):
         threshold = effective_running_threshold(file_is_stale=True, timeout_minutes=None)
-        assert threshold == DEFAULT_DEAD_THRESHOLD_SECONDS  # 30 min
+        assert threshold == DEFAULT_DEAD_THRESHOLD_SECONDS  # 90 min
 
     def test_fresh_file_uses_registered_timeout(self):
         threshold = effective_running_threshold(file_is_stale=False, timeout_minutes=240)
         assert threshold == 240 * 60
 
     def test_stale_file_with_registered_timeout_uses_missing_threshold(self):
-        # For a 240-minute agent, the "missing" threshold is max(240*60, 30*60) = 240*60
+        # For a 240-minute agent, the "missing" threshold is max(240*60, 90*60) = 240*60
         threshold = effective_running_threshold(file_is_stale=True, timeout_minutes=240)
         assert threshold == 240 * 60
 
-    def test_stale_file_with_short_timeout_floored_at_30_min(self):
-        # For a 5-minute agent, missing threshold is floored at 30 min
+    def test_stale_file_with_short_timeout_floored_at_90_min(self):
+        # For a 5-minute agent, missing threshold is floored at 90 min (raised from 30 in issue #1922)
         threshold = effective_running_threshold(file_is_stale=True, timeout_minutes=5)
-        assert threshold == DEFAULT_DEAD_THRESHOLD_SECONDS  # 30 min floor
+        assert threshold == DEFAULT_DEAD_THRESHOLD_SECONDS  # 90 min floor
 
 
 # ---------------------------------------------------------------------------
@@ -142,18 +142,31 @@ class TestEffectiveRunningThreshold:
 
 
 class TestMtimeGateBugFix:
-    """Verify the exact bug described in issue #868 is fixed."""
+    """Verify the exact bug described in issue #868 is fixed.
+
+    Note: the stale-file fallback threshold was raised from 30 to 90 minutes in
+    issue #1922. Tests updated to reflect the new boundary.
+    """
 
     NOW = 1_000_000.0
 
-    def test_interrupted_agent_at_35min_is_now_dead(self):
+    def test_interrupted_agent_at_91min_is_dead(self):
         """
-        Before the fix: interrupted agent at 35 min → alive (120-min threshold).
-        After the fix: stale mtime → use 30-min threshold → 35 min > 30 min → dead.
+        Before issue #1922: 30-min threshold. After: 90-min threshold.
+        Stale mtime → use 90-min threshold → 91 min > 90 min → dead.
+        """
+        elapsed = 91 * 60
+        stale_mtime = self.NOW - 20 * 60  # file idle 20 minutes
+        assert should_kill_running_session(elapsed, stale_mtime, self.NOW, None)
+
+    def test_interrupted_agent_at_35min_is_alive(self):
+        """
+        After issue #1922: stale-file threshold raised to 90 min.
+        Interrupted agent at 35 min with stale file → alive (35 < 90).
         """
         elapsed = 35 * 60
         stale_mtime = self.NOW - 20 * 60  # file idle 20 minutes
-        assert should_kill_running_session(elapsed, stale_mtime, self.NOW, None)
+        assert not should_kill_running_session(elapsed, stale_mtime, self.NOW, None)
 
     def test_live_agent_at_35min_is_still_alive(self):
         """
@@ -163,15 +176,15 @@ class TestMtimeGateBugFix:
         fresh_mtime = self.NOW - 2 * 60  # file updated 2 minutes ago
         assert not should_kill_running_session(elapsed, fresh_mtime, self.NOW, None)
 
-    def test_interrupted_agent_just_crossed_30min_is_dead(self):
-        """31 minutes elapsed, file idle 20 minutes → dead (just past short threshold)."""
-        elapsed = 31 * 60
+    def test_interrupted_agent_just_crossed_90min_is_dead(self):
+        """91 minutes elapsed, file idle 20 minutes → dead (just past new 90-min threshold)."""
+        elapsed = 91 * 60
         stale_mtime = self.NOW - 20 * 60
         assert should_kill_running_session(elapsed, stale_mtime, self.NOW, None)
 
-    def test_interrupted_agent_at_29min_is_still_alive(self):
-        """29 minutes elapsed, file idle 20 minutes → alive (below 30-min threshold)."""
-        elapsed = 29 * 60
+    def test_interrupted_agent_at_89min_is_still_alive(self):
+        """89 minutes elapsed, file idle 20 minutes → alive (below 90-min threshold)."""
+        elapsed = 89 * 60
         stale_mtime = self.NOW - 20 * 60
         assert not should_kill_running_session(elapsed, stale_mtime, self.NOW, None)
 
@@ -193,9 +206,9 @@ class TestMtimeGateBugFix:
     def test_interrupted_agent_with_registered_timeout_at_35min_dead(self):
         """
         Agent registered for 240-minute timeout, interrupted at 35 min.
-        Stale file collapses threshold to max(240*60, 30*60) = 240*60 … wait.
+        Stale file collapses threshold to max(240*60, 90*60) = 240*60.
 
-        For a 240-minute timeout, the "missing file" threshold = 240 min, not 30 min.
+        For a 240-minute timeout, the "missing file" threshold = 240 min.
         So 35 min is still alive — the floor only applies to *short* timeouts.
         (This is correct: a long-registered agent gets its full window even when stale.)
         """
@@ -204,13 +217,13 @@ class TestMtimeGateBugFix:
         # 240-minute agent: even stale, threshold is 240*60; 35 min < 240 min → alive
         assert not should_kill_running_session(elapsed, stale_mtime, self.NOW, 240)
 
-    def test_interrupted_agent_with_short_timeout_stale_uses_30min_floor(self):
+    def test_interrupted_agent_with_short_timeout_stale_uses_90min_floor(self):
         """
-        Agent registered for 5 minutes, interrupted at 35 min.
-        Stale file triggers missing threshold = max(5*60, 30*60) = 30 min.
-        35 min > 30 min → dead.
+        Agent registered for 5 minutes, interrupted at 95 min.
+        Stale file triggers missing threshold = max(5*60, 90*60) = 90 min.
+        95 min > 90 min → dead.
         """
-        elapsed = 35 * 60
+        elapsed = 95 * 60
         stale_mtime = self.NOW - 20 * 60
         assert should_kill_running_session(elapsed, stale_mtime, self.NOW, 5)
 
