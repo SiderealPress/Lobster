@@ -39,7 +39,10 @@ from pathlib import Path
 # Tmux session name for the process-tree fallback used by is_dispatcher_session().
 _LOBSTER_TMUX_SESSION = os.environ.get("LOBSTER_TMUX_SESSION", "lobster")
 
-# Tertiary: hook marker file (kept for on-compact.py compatibility).
+# Hook marker file used by on-compact.py and is_dispatcher_session().
+# TODO(#2011): remove DISPATCHER_SESSION_FILE, write_dispatcher_session_id, and
+# _read_dispatcher_session_id once on-compact.py's _is_dispatcher_compact fallback
+# is rewritten to not depend on this marker file (tracked in PR #2011).
 DISPATCHER_SESSION_FILE = Path(
     os.path.expanduser("~/messages/config/dispatcher-session-id")
 )
@@ -64,21 +67,15 @@ def _get_startup_flag_file() -> Path:
 STARTUP_FLAG_FILE = _get_startup_flag_file()
 
 
-def _get_mcp_session_state_file() -> Path:
-    """Return the MCP HTTP session state file path (kept for compatibility)."""
-    workspace = Path(os.environ.get("LOBSTER_WORKSPACE", Path.home() / "lobster-workspace"))
-    return workspace / "data" / "dispatcher-session-id"
-
-
 def _get_mcp_claude_session_file() -> Path:
-    """Return the MCP Claude UUID state file path (kept for on-compact.py compat)."""
+    """Return the MCP Claude UUID state file path.
+
+    Used by is_dispatcher_session() (PreToolUse hooks) and post-compact-gate.py
+    to compare the current session UUID against the stored dispatcher UUID.
+    Reads LOBSTER_WORKSPACE on every call so tests can override the env var.
+    """
     workspace = Path(os.environ.get("LOBSTER_WORKSPACE", Path.home() / "lobster-workspace"))
     return workspace / "data" / "dispatcher-claude-session-id"
-
-
-# Module-level aliases for test patching convenience.
-MCP_SESSION_STATE_FILE = _get_mcp_session_state_file()
-MCP_CLAUDE_SESSION_FILE = _get_mcp_claude_session_file()
 
 
 # ---------------------------------------------------------------------------
@@ -122,7 +119,11 @@ def is_dispatcher(hook_input: dict) -> bool:  # noqa: ARG001
 def write_dispatcher_session_id(session_id: str) -> None:
     """Write session_id to the hook dispatcher marker file.
 
-    Kept for on-compact.py compatibility. No longer used by is_dispatcher().
+    Called by inject-bootup-context.py (to seed the marker file for the session)
+    and on-compact.py (to update it after compaction).  The marker file is read
+    by is_dispatcher_session() (PreToolUse hooks) and _read_dispatcher_session_id().
+
+    TODO(#2011): remove once on-compact.py's compaction fallback is rewritten.
     Atomic write via a .tmp rename. Silent on any failure.
     """
     try:
@@ -134,24 +135,8 @@ def write_dispatcher_session_id(session_id: str) -> None:
         pass
 
 
-def write_dispatcher_claude_session_id(session_id: str) -> None:
-    """Write session_id to the primary MCP Claude UUID state file.
-
-    Kept for on-compact.py compatibility. No longer read by is_dispatcher().
-    Atomic write via a .tmp rename.  Silent on any failure.
-    """
-    try:
-        path = _get_mcp_claude_session_file()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = path.with_suffix(".tmp")
-        tmp_path.write_text(session_id.strip())
-        tmp_path.replace(path)  # atomic on Linux
-    except Exception:  # noqa: BLE001
-        pass
-
-
 # ---------------------------------------------------------------------------
-# Internal helpers (kept for on-compact.py compatibility)
+# Internal helpers
 # ---------------------------------------------------------------------------
 
 
@@ -169,7 +154,10 @@ def _read_session_id_from_file(path: Path) -> "str | None | OSError":
 def _check_state_file(path: Path, session_id: "str | None") -> "bool | None":
     """Compare session_id against a plain-text state file.
 
-    Kept for on-compact.py and is_dispatcher_session() compatibility.
+    Used by is_dispatcher_session() and post-compact-gate.py to probe the
+    dispatcher-claude-session-id and dispatcher-session-id marker files.
+    Returns True on match, False on mismatch, None when file is absent or
+    session_id is None.  Returns True on OSError (fail-open).
     """
     result = _read_session_id_from_file(path)
     if isinstance(result, OSError):
@@ -183,7 +171,10 @@ def _check_state_file(path: Path, session_id: "str | None") -> "bool | None":
 
 
 def _read_dispatcher_session_id() -> "str | None":
-    """Return the stored dispatcher session ID from the hook marker file, or None."""
+    """Return the stored dispatcher session ID from the hook marker file, or None.
+
+    TODO(#2011): remove once on-compact.py's compaction fallback is rewritten.
+    """
     result = _read_session_id_from_file(DISPATCHER_SESSION_FILE)
     if isinstance(result, OSError):
         return None

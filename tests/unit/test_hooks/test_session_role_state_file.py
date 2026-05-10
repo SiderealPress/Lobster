@@ -59,7 +59,7 @@ import session_role as _sr_module  # noqa: E402 — path insert must precede
 def _reload_session_role(monkeypatch, workspace: Path) -> object:
     """Reload session_role with LOBSTER_WORKSPACE pointing to workspace."""
     monkeypatch.setenv("LOBSTER_WORKSPACE", str(workspace))
-    # Force reimport so _get_mcp_session_state_file() picks up the new env.
+    # Force reimport so _get_mcp_claude_session_file() picks up the new env.
     return importlib.reload(_sr_module)
 
 
