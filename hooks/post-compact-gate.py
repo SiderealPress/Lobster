@@ -9,7 +9,14 @@ on-compact.py when a compaction occurs. This hook passes when:
   1. No sentinel file exists (normal operation), OR
   2. Not the dispatcher session (see session_role.is_dispatcher()), OR
   3. The sentinel is older than SENTINEL_TTL_SECONDS (stale / post-hibernation), OR
-  4. The tool being called IS wait_for_messages (let it through, delete sentinel).
+  4. The tool being called IS wait_for_messages (let it through, delete sentinel), OR
+  5. The tool being called IS ToolSearch (read-only schema fetch, needed to load
+     deferred MCP tool schemas — the dispatcher must be able to call ToolSearch to
+     fetch the wait_for_messages schema before it can call wait_for_messages), OR
+  6. The tool being called IS Read (read-only file access — non-destructive and
+     needed to break the circular dependency in issue #1950: Read is required to
+     learn the confirmation token from the bootup file, but the gate was blocking
+     Read before the token was known).
 
 The TTL (10 minutes) eliminates the stuck-sentinel failure mode: if the
 dispatcher hibernates or crashes while the sentinel is active, the next boot
@@ -90,18 +97,28 @@ WAIT_FOR_MESSAGES_TOOL = "mcp__lobster-inbox__wait_for_messages"
 # ToolSearch first.  See issue #1914 staging infinite-compaction-loop bug.
 TOOL_SEARCH_TOOL = "ToolSearch"
 
+# Read is a read-only file access tool.  It is always allowed through the gate
+# because reads are non-destructive: they cannot send messages, spawn agents, or
+# mutate state.  The gate's purpose is to prevent state mutation before
+# re-orientation, not to block information access.  Blocking Read created a
+# circular dependency (issue #1950): the gate blocked reads, but the dispatcher
+# needed to read the bootup file to learn the confirmation token.  Whitelisting
+# Read eliminates this deadlock — the token lives only in sys.dispatcher.bootup.md,
+# which is now readable through the gate without a two-step WFM dance.
+READ_TOOL = "Read"
+
 CONFIRMATION_TOKEN = "LOBSTER_COMPACTED_REORIENTED"  # noqa: S105 — not a secret, intentional safe word
 
 DENY_REASON_NEEDS_TOKEN = (
     "GATE BLOCKED: Context compaction was just detected. "
-    "If you need the wait_for_messages schema, call ToolSearch first (it is allowed). "
+    "You may Read files or call ToolSearch (both are allowed). "
     "Then call `mcp__lobster-inbox__wait_for_messages(confirmation='LOBSTER_COMPACTED_REORIENTED')` directly. "
     "Confirmation token: LOBSTER_COMPACTED_REORIENTED"
 )
 
 DENY_REASON = (
     "GATE BLOCKED: Context compaction was just detected. Your only permitted "
-    "actions right now are: (1) ToolSearch to load the wait_for_messages schema if needed, "
+    "actions right now are: (1) Read files or call ToolSearch as needed, "
     "then (2) call `mcp__lobster-inbox__wait_for_messages(confirmation='LOBSTER_COMPACTED_REORIENTED')` directly. "
     "When it returns, you will receive a compact-reminder system message — read it to re-orient "
     "as the Lobster dispatcher, then resume your main loop normally. "
@@ -159,6 +176,16 @@ def main() -> None:
     # effects and no risk of bypassing the intent of the gate.
     if tool_name == TOOL_SEARCH_TOOL:
         log_gate_event(tool_name, "allowed-schema-fetch")
+        sys.exit(0)
+
+    # Read is always allowed through even when the sentinel is active.
+    # Reads are non-destructive — they cannot send messages, spawn agents, or
+    # mutate state.  The gate's purpose is to prevent state mutation before
+    # re-orientation, not to block information access.  Blocking Read created
+    # a circular dependency (issue #1950): the dispatcher needed to read the
+    # bootup file to learn the confirmation token, but the gate blocked reads.
+    if tool_name == READ_TOOL:
+        log_gate_event(tool_name, "allowed-read")
         sys.exit(0)
 
     # If the tool IS wait_for_messages, handle based on sentinel state.
