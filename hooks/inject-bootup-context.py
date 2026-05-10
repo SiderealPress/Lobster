@@ -106,6 +106,18 @@ STARTUP_CAUSE_FILE = Path(
 # compaction that was followed by an unrelated external restart.
 COMPACTION_CAUSE_WINDOW_SECONDS = 300  # 5 minutes
 
+# Dispatcher session start timestamp file (issue #2059).
+# Written by this hook on every dispatcher SessionStart as a plain Unix epoch
+# integer (seconds). Read by health-check-v3.sh to compute session age and
+# trigger a proactive restart before the hard 7440s CC session lifetime limit.
+# Override via env var for test isolation.
+DISPATCHER_SESSION_START_FILE = Path(
+    os.environ.get(
+        "LOBSTER_DISPATCHER_SESSION_START_FILE_OVERRIDE",
+        str(_LOBSTER_WORKSPACE / "data" / "dispatcher-session-start.ts"),
+    )
+)
+
 
 def _parse_admin_chat_id(config_env_path: Path) -> str | None:
     """Parse LOBSTER_ADMIN_CHAT_ID from a config.env file.
@@ -180,6 +192,27 @@ def _consume_startup_flag() -> None:
     try:
         STARTUP_FLAG_FILE.unlink(missing_ok=True)
     except OSError:
+        pass
+
+
+def _write_dispatcher_session_start() -> None:
+    """Write the current Unix epoch to DISPATCHER_SESSION_START_FILE.
+
+    Called once per dispatcher SessionStart. The health check reads this file
+    to compute session age and trigger a proactive restart before the hard
+    7440s CC session lifetime limit (issue #2059).
+
+    Uses an atomic rename so the reader never sees a partial write.
+    Silent on any error — must never crash the hook.
+    """
+    try:
+        now_epoch = int(time.time())
+        path = DISPATCHER_SESSION_START_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_suffix(".tmp")
+        tmp_path.write_text(str(now_epoch) + "\n")
+        tmp_path.replace(path)  # atomic on Linux
+    except Exception:  # noqa: BLE001
         pass
 
 
@@ -334,6 +367,14 @@ def main() -> None:
         _consume_startup_flag()
         print(
             f"[{HOOK_NAME}] startup-flag detected live PID — injecting dispatcher bootup",
+            file=sys.stderr,
+        )
+        # Record session start time for health-check proactive restart (issue #2059).
+        # Plain Unix epoch written atomically; health-check-v3.sh reads it to detect
+        # sessions approaching the 7440s CC hard limit and send SIGTERM early.
+        _write_dispatcher_session_start()
+        print(
+            f"[{HOOK_NAME}] wrote dispatcher session start timestamp",
             file=sys.stderr,
         )
 

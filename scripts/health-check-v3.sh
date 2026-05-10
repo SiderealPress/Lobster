@@ -100,6 +100,14 @@ HEARTBEAT_FILE="$WORKSPACE_DIR/logs/claude-heartbeat"   # legacy WFM-touch signa
 DISPATCHER_HEARTBEAT_FILE="${LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE:-$WORKSPACE_DIR/logs/dispatcher-heartbeat}"
 DISPATCHER_HEARTBEAT_STALE_SECONDS=1200   # 20 min — covers compaction (~5m) + catchup (~12m) + margin
 
+# Session age limit: CC enforces a hard 7440s session lifetime (issue #2059).
+# At this limit, CC kills the process without firing the Stop hook — no tombstone,
+# no compaction alert. We trigger a graceful SIGTERM at SESSION_AGE_LIMIT_SECONDS
+# (7200s = 2 min before hard limit) so the Stop hook fires cleanly.
+# Written by inject-bootup-context.py as a plain Unix epoch integer.
+SESSION_AGE_LIMIT_SECONDS="${LOBSTER_SESSION_AGE_LIMIT_SECONDS:-7200}"
+DISPATCHER_SESSION_START_FILE="${LOBSTER_DISPATCHER_SESSION_START_FILE_OVERRIDE:-$WORKSPACE_DIR/data/dispatcher-session-start.ts}"
+
 # WFM-active signal (issue #1713 / #949): inbox_server.py writes this file with
 # a Unix epoch timestamp when wait_for_messages begins blocking and refreshes it
 # every WAIT_HEARTBEAT_INTERVAL (60s). When this file is fresh, the dispatcher is
@@ -1260,6 +1268,95 @@ except Exception as e:
 }
 
 #===============================================================================
+# Session Age Check — proactive restart before the 7440s CC hard limit
+# (issue #2059)
+#
+# CC enforces a hard 7440-second (124-minute) session lifetime. When this limit
+# is hit, CC exits without firing the Stop hook — no tombstone, no compact-
+# catchup. To avoid this, we send SIGTERM to the dispatcher process at
+# SESSION_AGE_LIMIT_SECONDS (7200s = 2 min before the limit), which fires the
+# Stop hook cleanly.
+#
+# Unlike do_restart() (which uses systemctl), this sends SIGTERM directly to the
+# claude process so the Stop hook fires. The claude-persistent.sh wrapper detects
+# the exit and restarts Claude automatically.
+#
+# Suppressed when:
+#   - DISPATCHER_SESSION_START_FILE is missing (old install, no session tracking)
+#   - Maintenance mode is active (flag is present — handled in main before this call)
+#   - Boot grace period is active (avoid killing a session that just started)
+#
+# Returns:
+#   0 — session age is within limit (or no data)
+#   1 — SIGTERM sent (graceful proactive restart initiated)
+#===============================================================================
+check_session_age() {
+    if [[ ! -f "$DISPATCHER_SESSION_START_FILE" ]]; then
+        log_info "Session age: no start timestamp file — skipping (old install or first run)"
+        return 0
+    fi
+
+    local session_start
+    session_start=$(< "$DISPATCHER_SESSION_START_FILE") 2>/dev/null || true
+    # Validate: must be a plain positive integer.
+    if [[ ! "$session_start" =~ ^[0-9]+$ ]]; then
+        log_warn "Session age: malformed start timestamp '${session_start}' — skipping"
+        return 0
+    fi
+
+    local now
+    now=$(date +%s)
+    local session_age=$(( now - session_start ))
+
+    log_info "Session age: ${session_age}s (limit: ${SESSION_AGE_LIMIT_SECONDS}s)"
+
+    if [[ $session_age -lt $SESSION_AGE_LIMIT_SECONDS ]]; then
+        return 0
+    fi
+
+    # Session is at or past the proactive restart threshold.
+    log_warn "SESSION AGE LIMIT: session is ${session_age}s old (>= ${SESSION_AGE_LIMIT_SECONDS}s) — sending SIGTERM for graceful restart"
+
+    # Read the dispatcher PID from the PID file (same source do_restart() uses).
+    local dispatcher_pid=""
+    if [[ -f "$DISPATCHER_PID_FILE" ]]; then
+        dispatcher_pid=$(< "$DISPATCHER_PID_FILE")
+        if [[ ! "$dispatcher_pid" =~ ^[0-9]+$ ]]; then
+            log_warn "Session age: dispatcher.pid contains non-numeric value '${dispatcher_pid}' — cannot send SIGTERM"
+            dispatcher_pid=""
+        fi
+    fi
+
+    if [[ -z "$dispatcher_pid" ]]; then
+        log_warn "Session age: no dispatcher.pid — cannot send SIGTERM (systemctl restart fallback not used for this path)"
+        return 0
+    fi
+
+    # Verify the PID is still alive before sending SIGTERM.
+    if ! kill -0 "$dispatcher_pid" 2>/dev/null; then
+        log_warn "Session age: dispatcher PID $dispatcher_pid is no longer alive — skipping SIGTERM"
+        return 0
+    fi
+
+    # Send SIGTERM. The Stop hook fires, writes the tombstone, and claude-persistent.sh
+    # restarts Claude. This is a graceful exit, not a crash.
+    if kill -TERM "$dispatcher_pid" 2>/dev/null; then
+        log_warn "Session age: SIGTERM sent to dispatcher PID $dispatcher_pid"
+        send_telegram_alert_deduped "proactive-session-restart" "Lobster: proactive restart at ${session_age}s (before the 7440s CC hard limit).
+
+Dispatcher PID $dispatcher_pid sent SIGTERM. Stop hook will fire, session will restart cleanly.
+Next session will start fresh — no context lost from hard limit."
+        # Delete the start timestamp so a subsequent health check run (within the
+        # next 4 minutes) does not send a second SIGTERM before the restart completes.
+        rm -f "$DISPATCHER_SESSION_START_FILE" 2>/dev/null || true
+        return 1
+    else
+        log_warn "Session age: SIGTERM to PID $dispatcher_pid failed (process may have exited already)"
+        return 0
+    fi
+}
+
+#===============================================================================
 # Recovery - always via systemd, never manual tmux
 #===============================================================================
 # DANGER: do_restart() must ONLY be called when the system is confirmed
@@ -1617,6 +1714,22 @@ main() {
     local boot_grace=false
     if is_boot_grace_period; then
         boot_grace=true
+    fi
+
+    # --- Session age check: proactive restart before 7440s CC hard limit ---
+    # Suppressed during boot grace: a session that just started cannot be near
+    # the limit, and a stale timestamp from a crashed previous session could
+    # cause a false SIGTERM during the new session's first minutes.
+    if [[ "$boot_grace" == "true" ]]; then
+        log_info "Session age check suppressed (boot grace period)"
+    else
+        check_session_age
+        # Return value 1 means SIGTERM was sent — exit now so we don't pile
+        # additional restart actions on top of the in-flight graceful exit.
+        if [[ $? -eq 1 ]]; then
+            log_info "=== Health check v3 complete (session age restart initiated) ==="
+            exit 0
+        fi
     fi
 
     # --- Always check systemd services (includes router/bot) ---
