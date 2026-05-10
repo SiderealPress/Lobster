@@ -28,16 +28,18 @@ if [ -d "$LOBSTER_DIR/.git" ]; then
     if [ "$LOCAL" != "$REMOTE" ]; then
         BEHIND=$(git rev-list --count "$LOCAL..$REMOTE")
         TIMESTAMP=$(date +%s%3N)
-        cat > "$INBOX/${TIMESTAMP}_update_available.json" << EOF
-{
-  "id": "${TIMESTAMP}_update_available",
-  "source": "system",
-  "chat_id": 0,
-  "type": "update_notification",
-  "text": "UPDATE AVAILABLE: Lobster is ${BEHIND} commits behind origin/main. Use check_updates for details.",
-  "timestamp": "$(date -Iseconds)"
-}
-EOF
+        jq -n \
+            --arg id "${TIMESTAMP}_update_available" \
+            --arg text "UPDATE AVAILABLE: Lobster is ${BEHIND} commits behind origin/main. Use check_updates for details." \
+            --arg timestamp "$(date -Iseconds)" \
+            '{
+                "id": $id,
+                "source": "system",
+                "chat_id": 0,
+                "type": "update_notification",
+                "text": $text,
+                "timestamp": $timestamp
+            }' > "$INBOX/${TIMESTAMP}_update_available.json"
     fi
 else
     # Tarball mode: check GitHub Releases API
@@ -47,15 +49,17 @@ else
 
     if [ -n "$LATEST_VERSION" ] && [ "$LATEST_VERSION" != "$CURRENT_VERSION" ]; then
         TIMESTAMP=$(date +%s%3N)
-        cat > "$INBOX/${TIMESTAMP}_update_available.json" << EOF
-{
-  "id": "${TIMESTAMP}_update_available",
-  "source": "system",
-  "chat_id": 0,
-  "type": "update_notification",
-  "text": "UPDATE AVAILABLE: Lobster v${CURRENT_VERSION} -> v${LATEST_VERSION}. Use check_updates for details.",
-  "timestamp": "$(date -Iseconds)"
-}
-EOF
+        jq -n \
+            --arg id "${TIMESTAMP}_update_available" \
+            --arg text "UPDATE AVAILABLE: Lobster v${CURRENT_VERSION} -> v${LATEST_VERSION}. Use check_updates for details." \
+            --arg timestamp "$(date -Iseconds)" \
+            '{
+                "id": $id,
+                "source": "system",
+                "chat_id": 0,
+                "type": "update_notification",
+                "text": $text,
+                "timestamp": $timestamp
+            }' > "$INBOX/${TIMESTAMP}_update_available.json"
     fi
 fi

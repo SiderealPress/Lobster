@@ -29,13 +29,19 @@ echo "[$timestamp] ALERT: $message" >> "$ALERT_LOG"
 # Try to send via Telegram if admin chat ID is configured
 if [[ -n "$ADMIN_CHAT_ID" ]]; then
     alert_file="$OUTBOX_DIR/alert_$(date +%s%N).json"
-    cat > "$alert_file" << EOF
-{
-    "chat_id": $ADMIN_CHAT_ID,
-    "text": "🚨 **Lobster Alert**\n\n$message\n\n_$(date)_",
-    "source": "telegram"
-}
-EOF
+    alert_text="🚨 **Lobster Alert**
+
+$message
+
+_$(date)_"
+    jq -n \
+        --argjson chat_id "$ADMIN_CHAT_ID" \
+        --arg text "$alert_text" \
+        '{
+            "chat_id": $chat_id,
+            "text": $text,
+            "source": "telegram"
+        }' > "$alert_file"
     echo "[$timestamp] Alert sent to Telegram chat $ADMIN_CHAT_ID" >> "$ALERT_LOG"
 fi
 
