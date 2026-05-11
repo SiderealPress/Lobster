@@ -1734,8 +1734,9 @@ step "Setting up health monitoring..."
 chmod +x "$INSTALL_DIR/scripts/health-check-v3.sh" || true
 
 # Add health check to crontab (runs every 4 minutes)
+# Offset 1 (vs the */3 anchor) to avoid lcm-aligned overlap at :00.
 "$INSTALL_DIR/scripts/cron-manage.sh" add "# LOBSTER-HEALTH" \
-    "*/4 * * * * $INSTALL_DIR/scripts/health-check-v3.sh # LOBSTER-HEALTH"
+    "1-59/4 * * * * $INSTALL_DIR/scripts/health-check-v3.sh # LOBSTER-HEALTH"
 
 success "Health monitoring configured (checks every 4 minutes)"
 
@@ -1786,8 +1787,9 @@ step "Setting up ghost detector cron..."
 # agent-monitor.py runs every 5 minutes, checks for stale/dead agent sessions,
 # sends a Telegram alert if GHOST_CONFIRMED or UNREGISTERED agents are found,
 # and marks ghost sessions as failed in agent_sessions.db. No LLM involved.
+# Offset 2 (vs the */3 anchor) to avoid lcm-aligned overlap at :00.
 "$INSTALL_DIR/scripts/cron-manage.sh" add "# LOBSTER-GHOST-DETECTOR" \
-    "*/5 * * * * cd $HOME && uv run $INSTALL_DIR/scripts/agent-monitor.py --alert --mark-failed >> $HOME/lobster-workspace/logs/agent-monitor.log 2>&1 # LOBSTER-GHOST-DETECTOR"
+    "2-59/5 * * * * cd $HOME && uv run $INSTALL_DIR/scripts/agent-monitor.py --alert --mark-failed >> $HOME/lobster-workspace/logs/agent-monitor.log 2>&1 # LOBSTER-GHOST-DETECTOR"
 
 success "Ghost detector configured (runs every 5 minutes)"
 
@@ -1801,8 +1803,11 @@ step "Setting up OOM monitor cron..."
 # affecting Lobster/Claude processes, and writes an inbox message for the
 # dispatcher when new OOM kill events are detected. No LLM involved.
 # Only active when LOBSTER_DEBUG=true (the script is a no-op otherwise).
+# Offset 8 (vs the */3 anchor) to avoid lcm-aligned overlap at :00.
+# Even offset is deliberate: it makes the */4+*/10 offset parities disagree
+# on the gcd(4,10)=2 sub-lattice, so */3+*/4+*/10 never triple-fires.
 "$INSTALL_DIR/scripts/cron-manage.sh" add "# LOBSTER-OOM-CHECK" \
-    "*/10 * * * * cd $HOME && uv run $INSTALL_DIR/scripts/oom-monitor.py --since-minutes 10 >> $HOME/lobster-workspace/logs/oom-monitor.log 2>&1 # LOBSTER-OOM-CHECK"
+    "8-59/10 * * * * cd $HOME && uv run $INSTALL_DIR/scripts/oom-monitor.py --since-minutes 10 >> $HOME/lobster-workspace/logs/oom-monitor.log 2>&1 # LOBSTER-OOM-CHECK"
 
 success "OOM monitor configured (runs every 10 minutes, active only when LOBSTER_DEBUG=true)"
 
