@@ -3108,6 +3108,44 @@ M88_PYEOF
         substep "Migration 93: context-handoff.json absent — skipping"
     fi
 
+    # Migration 94: Register require-reply-to-message-id.py PreToolUse hook (issue #2067).
+    # This hook was originally implemented in PR #1541 but never merged to main.
+    # It blocks Telegram send_reply calls that omit reply_to_message_id, ensuring
+    # replies are threaded under the user's originating message.
+    if [ -f "$CLAUDE_SETTINGS" ] && command -v jq &>/dev/null; then
+        local _m94_present
+        _m94_present=$(jq -r '
+            [.hooks.PreToolUse[]?.hooks[]? |
+             select((.command // "") | test("require-reply-to-message-id"))]
+            | length' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
+
+        if [[ "${_m94_present:-0}" -eq 0 ]]; then
+            local _m94_tmp
+            _m94_tmp=$(mktemp)
+            if jq --arg install_dir "$LOBSTER_DIR" '
+                .hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+                    "matcher": "mcp__lobster-inbox__send_reply",
+                    "hooks": [{
+                        "type": "command",
+                        "command": ("python3 " + $install_dir + "/hooks/require-reply-to-message-id.py"),
+                        "timeout": 5
+                    }]
+                }]
+            ' "$CLAUDE_SETTINGS" > "$_m94_tmp" \
+                && mv "$_m94_tmp" "$CLAUDE_SETTINGS" 2>/dev/null; then
+                substep "Migration 94: registered require-reply-to-message-id.py PreToolUse hook"
+                migrated=$((migrated + 1))
+            else
+                rm -f "$_m94_tmp" 2>/dev/null || true
+                warn "Migration 94: could not update settings.json — jq transform failed"
+            fi
+        else
+            substep "Migration 94: require-reply-to-message-id.py hook already registered — skipping"
+        fi
+    else
+        substep "Migration 94: settings.json or jq not found — skipping"
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
