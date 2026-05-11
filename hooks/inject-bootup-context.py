@@ -19,16 +19,31 @@ File injection order (subagent):
 2. ~/lobster-user-config/agents/user.base.bootup.md (if exists)
 3. ~/lobster-user-config/agents/user.subagent.bootup.md (if exists)
 
-Dispatcher detection (simplified, issue #1908):
+Dispatcher detection — two-signal approach (issues #1908, #2071):
+
+Signal 1 — PID startup flag (issue #1908):
 The launcher (claude-persistent.sh) writes the subshell PID to
 ~/lobster-workspace/data/dispatcher-startup-flag immediately before exec-ing
 claude. This hook reads that flag:
   - Flag present AND PID alive (kill -0) → dispatcher session. Delete the flag.
-  - Flag absent OR PID dead → subagent session.
+  - Flag absent OR PID dead → not detected by this signal.
 
-This eliminates the chicken-and-egg problem of UUID-based detection: the flag
-is written *before* CC starts, not after session_start() is called. Stale
-flags (dead PID) are safe because the check is purely process-existence-based.
+Signal 2 — UUID file match (issue #2071):
+session_start(agent_type='dispatcher', claude_session_id=<uuid>) writes the
+dispatcher's Claude session UUID to
+~/lobster-workspace/data/dispatcher-claude-session-id. On each SessionStart,
+this hook compares hook_input["session_id"] to the UUID in that file:
+  - Match → dispatcher session (post-compact or resumed session).
+  - No match / file absent → not detected by this signal.
+
+Either signal firing → inject dispatcher bootup. Safe default (neither fires)
+→ subagent path. The UUID file is NOT deleted after detection — it is written
+once by session_start() and must persist across turns.
+
+This two-signal approach handles:
+  - Fresh starts (PID flag only, UUID file not yet written)
+  - Post-compact sessions (PID flag consumed on first start, UUID file exists)
+  - Both signals active simultaneously (no double-injection)
 
 ADMIN_CHAT_ID injection (issue #1976):
 For dispatcher sessions, this hook reads LOBSTER_ADMIN_CHAT_ID from
@@ -83,6 +98,18 @@ CONTEXT_INJECTION_LOG = _LOBSTER_WORKSPACE / "logs" / "context-injection.log"
 # Startup flag written by claude-persistent.sh before exec-ing claude.
 # Contains the launcher subshell PID. Deleted after the dispatcher is detected.
 STARTUP_FLAG_FILE = _LOBSTER_WORKSPACE / "data" / "dispatcher-startup-flag"
+
+# Dispatcher Claude session UUID file (issue #2071).
+# Written atomically by session_start(agent_type='dispatcher', claude_session_id=<uuid>)
+# in inbox_server.py. This hook compares hook_input["session_id"] to the UUID in this
+# file to detect post-compact dispatcher sessions where the PID flag is already consumed.
+# Unlike STARTUP_FLAG_FILE, this file is NOT deleted after detection — it persists across
+# turns and is only overwritten when a new dispatcher session calls session_start().
+DISPATCHER_CLAUDE_SESSION_FILE = _LOBSTER_WORKSPACE / "data" / "dispatcher-claude-session-id"
+
+# Sentinel value used when hook_input["session_id"] is missing. Must never match
+# a real UUID — prevents false-positive dispatcher detection on malformed input.
+_UNKNOWN_SESSION_ID = "unknown"
 
 # Config file that contains LOBSTER_ADMIN_CHAT_ID (issue #1976).
 # The old dispatcher bootup doc referenced ~/lobster-config/lobster.conf which
@@ -193,6 +220,37 @@ def _consume_startup_flag() -> None:
         STARTUP_FLAG_FILE.unlink(missing_ok=True)
     except OSError:
         pass
+
+
+def _is_uuid_match_dispatcher(session_id: str, uuid_file: Path) -> bool:
+    """Return True if session_id matches the UUID in the dispatcher session file.
+
+    This is the secondary dispatcher detection signal (issue #2071), used when
+    the PID startup flag is absent (e.g. post-compact sessions where the flag
+    was consumed on the first start).
+
+    Returns True only when:
+      - session_id is non-empty and not the _UNKNOWN_SESSION_ID sentinel
+      - uuid_file exists and contains a non-empty UUID
+      - session_id matches the file's UUID (after stripping whitespace)
+
+    Returns False on any error (OSError, empty values, mismatches) — conservative
+    default. Does NOT delete the UUID file — it must persist across turns.
+
+    This is a pure function: reads one file, returns a bool, no side effects.
+    """
+    # Guard: empty or sentinel session_id can never be a real dispatcher UUID.
+    if not session_id or session_id == _UNKNOWN_SESSION_ID:
+        return False
+    try:
+        if not uuid_file.exists():
+            return False
+        stored = uuid_file.read_text().strip()
+        if not stored:
+            return False
+        return session_id == stored
+    except OSError:
+        return False
 
 
 def _write_dispatcher_session_start() -> None:
@@ -358,12 +416,22 @@ def main() -> None:
 
     session_id = hook_input.get("session_id", "unknown")
 
-    # Simplified dispatcher detection (issue #1908):
-    # Check the launcher-written startup flag file. Live PID = dispatcher.
-    is_dispatcher = _is_startup_flag_dispatcher()
+    # Two-signal dispatcher detection (issues #1908, #2071):
+    #
+    # Signal 1 — PID startup flag: written by the launcher before exec-ing claude.
+    # Fires for fresh dispatcher starts. Consumed (deleted) after detection so
+    # subsequent sessions (subagents) do not see it.
+    pid_flag_dispatcher = _is_startup_flag_dispatcher()
 
-    if is_dispatcher:
-        # Consume the flag so subsequent sessions (subagents) do not see it.
+    # Signal 2 — UUID file match: written by session_start(agent_type='dispatcher').
+    # Fires for post-compact sessions where Signal 1 was already consumed.
+    # NOT consumed after detection — the file must persist for subsequent turns.
+    uuid_dispatcher = _is_uuid_match_dispatcher(session_id, DISPATCHER_CLAUDE_SESSION_FILE)
+
+    is_dispatcher = pid_flag_dispatcher or uuid_dispatcher
+
+    if pid_flag_dispatcher:
+        # Consume the PID flag so subsequent sessions (subagents) do not see it.
         _consume_startup_flag()
         print(
             f"[{HOOK_NAME}] startup-flag detected live PID — injecting dispatcher bootup",
@@ -375,6 +443,12 @@ def main() -> None:
         _write_dispatcher_session_start()
         print(
             f"[{HOOK_NAME}] wrote dispatcher session start timestamp",
+            file=sys.stderr,
+        )
+    elif uuid_dispatcher:
+        print(
+            f"[{HOOK_NAME}] UUID match detected — injecting dispatcher bootup"
+            f" (post-compact session, PID flag already consumed)",
             file=sys.stderr,
         )
 
