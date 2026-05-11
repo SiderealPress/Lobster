@@ -224,18 +224,24 @@ log "=== Health check complete: ${#FAILURES[@]} failure(s) ==="
 # On failure, write a message to the Lobster inbox so it gets picked up
 #-------------------------------------------------------------------------------
 if [ ${#FAILURES[@]} -gt 0 ]; then
-    FAIL_LIST=$(printf '%s\n' "${FAILURES[@]}" | sed 's/^/  - /')
-    MSG_FILE="$INBOX_DIR/daily-health-$(date +%Y%m%d-%H%M%S).json"
-    cat > "$MSG_FILE" << MSGEOF
-{
-  "type": "health_check",
-  "source": "system",
-  "timestamp": "$TIMESTAMP",
-  "subject": "Daily health check: ${#FAILURES[@]} failure(s)",
-  "body": "The daily dependency health check found problems:\n\n$FAIL_LIST\n\nCheck the log for details: $LOG_FILE",
-  "severity": "warning"
-}
-MSGEOF
+    # Build the inbox message using jq so that embedded newlines in $FAIL_LIST are
+    # properly escaped as \n in the JSON string.  A heredoc with bare variable
+    # expansion produces literal newlines inside a JSON string value, which makes
+    # json.load() throw "Invalid control character" — causing WFM to tight-loop
+    # and exhaust --max-turns (the 2026-04-24 / 2026-04-25 restart storm bug).
+    BODY="The daily dependency health check found problems:"$'\n\n'"$(printf '%s\n' "${FAILURES[@]}" | sed 's/^/  - /')"$'\n\n'"Check the log for details: $LOG_FILE"
+    MSG_ID="daily-health-$(date +%Y%m%d-%H%M%S)"
+    MSG_FILE="$INBOX_DIR/${MSG_ID}.json"
+    jq -n \
+        --arg id        "$MSG_ID" \
+        --arg type      "health_check" \
+        --arg source    "system" \
+        --arg timestamp "$TIMESTAMP" \
+        --arg subject   "Daily health check: ${#FAILURES[@]} failure(s)" \
+        --arg body      "$BODY" \
+        --arg severity  "warning" \
+        '{id: $id, type: $type, source: $source, timestamp: $timestamp, subject: $subject, body: $body, severity: $severity}' \
+        > "$MSG_FILE"
     log "Failure alert written to inbox: $MSG_FILE"
     exit 1
 fi
