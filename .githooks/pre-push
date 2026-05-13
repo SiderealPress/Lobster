@@ -524,18 +524,23 @@ else
     echo ""
 fi
 
-# Always require explicit opt-in confirmation before pushing to the public repo.
-# Default: abort (N). User must type 'y' or 'yes' to proceed.
-read -r -p "This is a PUBLIC OSS repo. Confirm you have checked for PII. [y/N]: " confirm_response </dev/tty
-confirm_response="${confirm_response:-N}"
-if [[ "$confirm_response" =~ ^[Yy]([Ee][Ss])?$ ]]; then
-    echo ""
-    echo -e "${GREEN}Confirmed. Proceeding with push.${NC}"
-    echo ""
-    exit 0
+# Interactive mode only: require explicit opt-in confirmation before pushing to the public repo.
+if [ "$IS_TTY" -eq 1 ]; then
+    # Default: abort (N). User must type 'y' or 'yes' to proceed.
+    read -r -p "This is a PUBLIC OSS repo. Confirm you have checked for PII. [y/N]: " confirm_response </dev/tty
+    confirm_response="${confirm_response:-N}"
+    if [[ "$confirm_response" =~ ^[Yy]([Ee][Ss])?$ ]]; then
+        echo ""
+        echo -e "${GREEN}Confirmed. Proceeding with push.${NC}"
+        echo ""
+        exit 0
+    else
+        echo ""
+        echo -e "${RED}Push aborted.${NC} Re-run when you are ready to confirm."
+        echo ""
+        exit 1
+    fi
 else
-    echo ""
-    echo -e "${RED}Push aborted.${NC} Re-run when you are ready to confirm."
-    echo ""
-    exit 1
+    # Non-interactive mode: should have exited earlier, but exit cleanly just in case
+    exit 0
 fi
