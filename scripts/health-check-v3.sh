@@ -1341,7 +1341,7 @@ check_session_age() {
     # Notify BEFORE sending SIGTERM so the message reaches the user even if the
     # session exits immediately after kill -TERM. This is a planned restart —
     # the user should see a plain-language explanation, not internal state detail.
-    send_telegram_alert_deduped "proactive-session-restart" "Restarting now — this is the planned 2-hour graceful restart. Back in ~30 seconds."
+    send_telegram_alert_deduped "proactive-session-restart" "Restarting now — this is the planned graceful restart. Back in ~30 seconds."
 
     # Send SIGTERM. The Stop hook fires, writes the tombstone, and claude-persistent.sh
     # restarts Claude. This is a graceful exit, not a crash.
