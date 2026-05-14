@@ -1338,14 +1338,15 @@ check_session_age() {
         return 0
     fi
 
+    # Notify BEFORE sending SIGTERM so the message reaches the user even if the
+    # session exits immediately after kill -TERM. This is a planned restart —
+    # the user should see a plain-language explanation, not internal state detail.
+    send_telegram_alert_deduped "proactive-session-restart" "Restarting now — this is the planned 2-hour graceful restart. Back in ~30 seconds."
+
     # Send SIGTERM. The Stop hook fires, writes the tombstone, and claude-persistent.sh
     # restarts Claude. This is a graceful exit, not a crash.
     if kill -TERM "$dispatcher_pid" 2>/dev/null; then
         log_warn "Session age: SIGTERM sent to dispatcher PID $dispatcher_pid"
-        send_telegram_alert_deduped "proactive-session-restart" "Lobster: proactive restart at ${session_age}s (before the 7440s CC hard limit).
-
-Dispatcher PID $dispatcher_pid sent SIGTERM. Stop hook will fire, session will restart cleanly.
-Next session will start fresh — no context lost from hard limit."
         # Delete the start timestamp so a subsequent health check run (within the
         # next 4 minutes) does not send a second SIGTERM before the restart completes.
         rm -f "$DISPATCHER_SESSION_START_FILE" 2>/dev/null || true
