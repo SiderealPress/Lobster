@@ -190,8 +190,8 @@ class TestRequireReplyToMessageId:
         })
         assert rc == 0
 
-    def test_proactive_true_still_blocked_when_reply_id_is_wrong_type(self):
-        """If both proactive=true AND reply_to_message_id are supplied, proactive wins — allowed."""
+    def test_proactive_true_overrides_wrong_type_reply_id(self):
+        """If both proactive=true AND a non-integer reply_to_message_id are supplied, proactive wins — allowed."""
         # Providing proactive=true overrides even a bad reply_to_message_id value
         rc, _, _ = _run({
             "source": "telegram",
