@@ -231,6 +231,53 @@ else
     fail "no Telegram alert with key 'proactive-session-restart' found after SIGTERM"
 fi
 
+# 12. Notification text is user-friendly (not raw PID / session age implementation details)
+# The message should say "planned" or "graceful" in plain language, not "Dispatcher PID N
+# sent SIGTERM" or "before the 7440s CC hard limit".
+begin_test "notification_text_is_user_friendly"
+reset_state
+sleep 600 &
+target_pid=$!
+echo "$target_pid" > "$DISPATCHER_PID_FILE"
+past_start=$(( $(date +%s) - SESSION_AGE_LIMIT_SECONDS - 60 ))
+echo "$past_start" > "$DISPATCHER_SESSION_START_FILE"
+check_session_age
+kill "$target_pid" 2>/dev/null || true
+if [[ -f "$TELEGRAM_ALERTS_FILE" ]]; then
+    alert_text=$(cat "$TELEGRAM_ALERTS_FILE")
+    # Must contain plain-language description of a planned restart
+    if echo "$alert_text" | grep -qiE "planned|graceful restart|back in"; then
+        pass
+    else
+        fail "notification text does not contain plain-language restart description: $alert_text"
+    fi
+else
+    fail "no Telegram alert file found"
+fi
+
+# 13. Notification fires BEFORE SIGTERM: verify the source ordering structurally.
+#     bash is single-threaded within a function body; if send_telegram_alert_deduped
+#     appears before kill -TERM in check_session_age(), the alert is guaranteed to
+#     fire before SIGTERM delivery. This test extracts just the function body and
+#     checks line ordering.
+#
+#     We match only executable kill -TERM lines (not comments) by requiring the
+#     line to begin with whitespace followed by 'kill -TERM'.
+begin_test "notification_fires_before_sigterm"
+# Extract only the lines between 'check_session_age()' and the closing '}' at
+# the start of the line (same level as the function definition).
+fn_body=$(sed -n '/^check_session_age()/,/^}/p' "$HEALTH_SCRIPT")
+alert_line=$(echo "$fn_body" | grep -n "send_telegram_alert_deduped" | head -1 | cut -d: -f1)
+# Match the 'if kill -TERM' statement (the executable SIGTERM call, not a comment).
+kill_line=$(echo "$fn_body" | grep -n 'if kill -TERM' | head -1 | cut -d: -f1)
+if [[ -z "$alert_line" || -z "$kill_line" ]]; then
+    fail "could not locate send_telegram_alert_deduped or executable 'kill -TERM' in check_session_age() — alert_line='$alert_line' kill_line='$kill_line'"
+elif [[ "$alert_line" -lt "$kill_line" ]]; then
+    pass
+else
+    fail "send_telegram_alert_deduped (line $alert_line) is NOT before kill -TERM (line $kill_line) in check_session_age()"
+fi
+
 #===============================================================================
 # Summary
 #===============================================================================

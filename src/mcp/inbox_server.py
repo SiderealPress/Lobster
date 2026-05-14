@@ -1858,6 +1858,16 @@ async def list_tools() -> list[Tool]:
                             "even if the subagent forgets to pass sent_reply_to_user=True."
                         ),
                     },
+                    "proactive": {
+                        "type": "boolean",
+                        "description": (
+                            "If true, marks this as a proactive send (not a reply to a user message). "
+                            "Proactive sends are exempt from the require-reply-to-message-id hook enforcement — "
+                            "they do not need a reply_to_message_id. Use for startup status messages, "
+                            "scheduled notifications, and other sends that are not in response to a specific "
+                            "incoming message."
+                        ),
+                    },
                 },
                 "required": ["chat_id", "text"],
             },
