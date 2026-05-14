@@ -141,3 +141,63 @@ class TestRequireReplyToMessageId:
         })
         assert rc == 2
         assert "chat_id=0" in stderr
+
+    # -------------------------------------------------------------------------
+    # proactive=true exemption (issue #2075 / fix for #2070)
+    # -------------------------------------------------------------------------
+
+    def test_proactive_true_exempts_telegram_send_without_reply_id(self):
+        """proactive=true allows a Telegram send_reply with no reply_to_message_id.
+
+        This is the correct way to mark startup status messages, graceful restart
+        notifications, and other dispatcher-initiated sends that have no originating
+        user message to thread against.
+        """
+        rc, _, _ = _run({
+            "source": "telegram",
+            "chat_id": 8305714125,
+            "text": "Restarting now — planned 2-hour graceful restart. Back in ~30s.",
+            "proactive": True,
+        })
+        assert rc == 0
+
+    def test_proactive_false_does_not_exempt(self):
+        """proactive=False is treated the same as proactive absent — still blocked."""
+        rc, _, _ = _run({
+            "source": "telegram",
+            "chat_id": 123456,
+            "text": "Hello!",
+            "proactive": False,
+        })
+        assert rc == 2
+
+    def test_proactive_string_true_exempts(self):
+        """proactive='true' (string) also exempts — JSON serialisation may vary."""
+        rc, _, _ = _run({
+            "source": "telegram",
+            "chat_id": 123456,
+            "text": "Startup complete.",
+            "proactive": "true",
+        })
+        assert rc == 0
+
+    def test_proactive_true_with_explicit_source_absent_exempts(self):
+        """proactive=true with no source (defaults to telegram) is exempt."""
+        rc, _, _ = _run({
+            "chat_id": 123456,
+            "text": "Graceful restart in 5 seconds.",
+            "proactive": True,
+        })
+        assert rc == 0
+
+    def test_proactive_true_overrides_wrong_type_reply_id(self):
+        """If both proactive=true AND a non-integer reply_to_message_id are supplied, proactive wins — allowed."""
+        # Providing proactive=true overrides even a bad reply_to_message_id value
+        rc, _, _ = _run({
+            "source": "telegram",
+            "chat_id": 123456,
+            "text": "Hello!",
+            "proactive": True,
+            "reply_to_message_id": "not-an-int",
+        })
+        assert rc == 0
