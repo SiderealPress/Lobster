@@ -857,13 +857,7 @@ def _poll_user_dm_channels(stop_event: Event) -> None:
                 if oldest:
                     # Use exclusive lower bound: oldest + epsilon so the
                     # already-processed message is not re-delivered on restart.
-                    # Format to exactly 6 decimal places — Slack ts format is
-                    # XXXXXXXXXX.YYYYYY. Using str() on a Python float can
-                    # produce 7+ decimal places (e.g. 1778907601.4552999)
-                    # which Slack misparses: it absorbs the extra digit into
-                    # the integer part, making the query jump far into the
-                    # future and return zero messages.
-                    kwargs["oldest"] = f"{float(oldest) + 0.000001:.6f}"
+                    kwargs["oldest"] = str(float(oldest) + 0.000001)
 
                 resp = poll_client.conversations_history(**kwargs)
                 messages = resp.get("messages", [])
@@ -1053,21 +1047,12 @@ def _poll_channel_conversations(stop_event: Event) -> None:
         skip_ids.add(POLL_SELF_USER_ID)
 
     # Initialise last_ts for any channel not already in state.
-    # Look back LOBSTER_SLACK_CHANNEL_POLL_LOOKBACK seconds (default 300 = 5
-    # minutes) so that messages sent while the router was restarting are not
-    # silently dropped.  Once the channel's state is in the file it persists
-    # across restarts, so the lookback only applies to first-ever startup for
-    # a given channel.
-    _LOOKBACK_SECS = int(os.environ.get("LOBSTER_SLACK_CHANNEL_POLL_LOOKBACK", "300"))
-    lookback_ts = str(time.time() - _LOOKBACK_SECS)
+    # Use current time so we only pick up messages from now onward — not history.
+    now_ts = str(time.time())
     for ch in CHANNEL_CONVERSATIONS:
         key = _CHANNEL_POLL_STATE_KEY_PREFIX + ch
         if key not in state:
-            state[key] = lookback_ts
-            log.info(
-                "Channel poller: initialising %s with lookback %ds (ts=%s)",
-                ch, _LOOKBACK_SECS, lookback_ts,
-            )
+            state[key] = now_ts
     _save_poll_state(state)
 
     log.info(
@@ -1092,7 +1077,7 @@ def _poll_channel_conversations(stop_event: Event) -> None:
         try:
             kwargs: dict = {"channel": channel_id, "limit": 20}
             if oldest:
-                kwargs["oldest"] = f"{float(oldest) + 0.000001:.6f}"
+                kwargs["oldest"] = str(float(oldest) + 0.000001)
 
             resp = poll_client.conversations_history(**kwargs)
             messages = resp.get("messages", [])
@@ -1111,18 +1096,8 @@ def _poll_channel_conversations(stop_event: Event) -> None:
                 # permanently ignore a message we should have processed.
                 msg_user = msg.get("user", "")
 
-                # Skip noise subtypes but allow file_share through so that
-                # file uploads posted in channel-conversations are not silently
-                # discarded.  file_share is the subtype Slack attaches to
-                # messages that contain uploaded files.
-                _SKIP_SUBTYPES = {
-                    "bot_message",
-                    "message_deleted",
-                    "message_changed",
-                    "channel_join",
-                    "channel_leave",
-                }
-                if msg.get("subtype") in _SKIP_SUBTYPES:
+                # Skip subtypes (bot_message, channel_join, etc.)
+                if msg.get("subtype"):
                     _seen_ts.add(ts)
                     _trim_seen_ts()
                     if not oldest or float(ts) > float(oldest):
