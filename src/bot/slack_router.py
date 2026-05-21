@@ -1177,6 +1177,30 @@ def _poll_channel_conversations(stop_event: Event) -> None:
                 if thread_ts:
                     msg_data["thread_ts"] = thread_ts
 
+                # Handle file attachments — mirrors the Socket Mode handler
+                # (lines ~506-525).  file_share messages carry a "files" list
+                # on the message dict just like Socket Mode events do.
+                poll_files = msg.get("files", [])
+                if poll_files:
+                    msg_data["files"] = []
+                    for f in poll_files:
+                        file_info = {
+                            "id": f.get("id"),
+                            "name": f.get("name"),
+                            "mimetype": f.get("mimetype"),
+                            "size": f.get("size"),
+                            "url": f.get("url_private"),
+                        }
+                        msg_data["files"].append(file_info)
+
+                        # Download images to ~/messages/images/
+                        mimetype = f.get("mimetype", "")
+                        if mimetype.startswith("image/"):
+                            try:
+                                download_slack_file(f, msg_id, msg_data)
+                            except Exception as e:
+                                log.error(f"Channel poll: error downloading file: {e}")
+
                 # Post "..." typing indicator immediately (same as Socket Mode path)
                 placeholder_ts = _post_typing_placeholder(channel_id, thread_ts, ts)
                 if placeholder_ts:
