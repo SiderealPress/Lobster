@@ -524,6 +524,13 @@ def handle_message_events(body, say, logger):
                 except Exception as e:
                     log.error(f"Error downloading file: {e}")
 
+    # File-only messages have no caption text, which leaves msg_data["text"]
+    # empty.  An empty text field confuses the dispatcher, so inject a
+    # human-readable fallback so there is always something meaningful to route.
+    if not msg_data.get("text") and msg_data.get("files"):
+        first_file = msg_data["files"][0]
+        msg_data["text"] = f"[File: {first_file.get('name', 'unknown')}]"
+
     # Post "..." typing indicator immediately so the user sees a response
     # appear right away, before Lobster has had a chance to process the message.
     # Store placeholder_ts in msg_data so the outbox watcher can update it
@@ -1200,6 +1207,12 @@ def _poll_channel_conversations(stop_event: Event) -> None:
                                 download_slack_file(f, msg_id, msg_data)
                             except Exception as e:
                                 log.error(f"Channel poll: error downloading file: {e}")
+
+                # File-only messages have no caption text — inject a fallback
+                # so the dispatcher always sees meaningful text to route.
+                if not msg_data.get("text") and msg_data.get("files"):
+                    first_file = msg_data["files"][0]
+                    msg_data["text"] = f"[File: {first_file.get('name', 'unknown')}]"
 
                 # Post "..." typing indicator immediately (same as Socket Mode path)
                 placeholder_ts = _post_typing_placeholder(channel_id, thread_ts, ts)
