@@ -48,6 +48,12 @@ from dedup_crm_contacts import dedup_crm_contacts
 # Imported lazily inside the function to keep startup fast when Clay is unavailable
 _CLAY_AVAILABLE: bool | None = None  # None = unchecked, True/False = checked
 
+# Crustdata integration — person-level enrichment (work_history goal)
+# Replaces Clay as the primary available work_history source.
+# Unlike Clay, Crustdata's key is a direct REST credential — no plan limitation.
+# Imported lazily inside the function to keep startup fast when unavailable.
+_CRUSTDATA_AVAILABLE: bool | None = None  # None = unchecked, True/False = checked
+
 # GraphQL mutations for writing enriched meta back to Kissinger entities
 _UPDATE_ENTITY_META_MUTATION = """
 mutation UpdateEntityMeta($id: String!, $meta: [MetaInput!]!) {
@@ -65,6 +71,7 @@ KISSINGER_API_TOKEN = os.environ.get("KISSINGER_API_TOKEN", "")
 
 _MANIFEST_PATH = Path(__file__).parent.parent / "sources" / "manifest.json"
 _CLAY_SOURCE_URL = "https://api.clay.com/v3/sources/people"
+_CRUSTDATA_SOURCE_URL = "https://api.crustdata.com/person/enrich"
 
 
 def _build_clay_provenance_meta(
@@ -101,6 +108,302 @@ def _build_clay_provenance_meta(
         "provenance.goal": goal,
         "provenance.raw_response_hash": raw_hash,
     }
+
+def _build_crustdata_provenance_meta(
+    run_id: str,
+    goal: str,
+    raw_response: str,
+    goal_score: float,
+) -> dict[str, str]:
+    """
+    Build the standard provenance meta dict for a Crustdata enrichment write.
+
+    Uses the multi-source suffix scheme from provenance/ontology.md so
+    Crustdata's provenance keys don't collide with those from Apollo or other
+    sources on the same entity.  The unsuffixed keys reflect the most recent
+    enrichment overall.
+    """
+    confidence = confidence_from_score(goal_score)
+    raw_hash = hash_response(raw_response)
+    ts = now_iso()
+    return {
+        # Source-specific (multi-source suffix scheme)
+        "provenance.source.crustdata": "crustdata",
+        "provenance.enriched_at.crustdata": ts,
+        "provenance.goal.crustdata": goal,
+        "provenance.confidence.crustdata": confidence,
+        "provenance.raw_response_hash.crustdata": raw_hash,
+        # Generic keys — always reflect most-recent enrichment
+        "provenance.source": "crustdata",
+        "provenance.source_url": _CRUSTDATA_SOURCE_URL,
+        "provenance.enriched_at": ts,
+        "provenance.enriched_by": "wallace",
+        "provenance.pipeline_run_id": run_id,
+        "provenance.confidence": confidence,
+        "provenance.goal": goal,
+        "provenance.raw_response_hash": raw_hash,
+    }
+
+
+def _enrich_person_via_crustdata(
+    *,
+    entity: dict[str, Any],
+    entity_meta: dict[str, str],
+    entity_name: str,
+    run_id: str,
+    source: dict[str, Any],
+    dry_run: bool,
+    endpoint: str,
+    token: str,
+    errors: list[str],
+) -> None:
+    """
+    Enrich an existing Kissinger person entity using Crustdata's REST API.
+
+    Crustdata replaces Clay as the primary available work_history source.
+    Unlike Clay (which requires Enterprise for direct REST access), Crustdata's
+    API key is a standard Bearer credential that works on self-serve plans.
+
+    Crustdata goal score: 0.82 (above Clay's 0.75 — direct REST, 1B+ profiles).
+    Confidence: high (score >= 0.75).
+
+    Lookup strategy (in priority order):
+      1. By LinkedIn URL — if the entity has a LinkedIn URL (most precise)
+      2. By email        — if the entity has an email, reverse-lookup LinkedIn+profile
+      3. By name + org   — fallback for contacts with neither
+
+    Epistemic rules:
+      - Crustdata data NEVER overwrites existing fields from higher-confidence sources.
+      - Conflicts with existing fields are logged and the existing value is kept.
+      - Tags the entity with 'crustdata-enriched'.
+      - Provenance follows the multi-source suffix scheme from ontology.md.
+    """
+    # Lazy import — only load Crustdata when the key is present
+    try:
+        _src_dir = Path(__file__).parent.parent.parent.parent / "src"
+        sys.path.insert(0, str(_src_dir))
+        from integrations.crustdata.client import (
+            CrustdataClient,
+            CrustdataError,
+            CrustdataAuthError,
+            CrustdataPlanError,
+            CRUSTDATA_TAG,
+        )
+    except ImportError as exc:
+        errors.append(f"Crustdata import failed: {exc}")
+        print(f"[enrich_contact] Crustdata import failed: {exc}", file=sys.stderr)
+        return
+
+    try:
+        crustdata_client = CrustdataClient()
+    except CrustdataAuthError as exc:
+        # Key present but invalid — log clearly, do not silently skip
+        errors.append(f"Crustdata auth error: {exc}")
+        print(
+            f"[enrich_contact] Crustdata auth error — CRUSTDATA_API_KEY is invalid "
+            f"or expired. Update it in ~/lobster-config/config.env. Error: {exc}",
+            file=sys.stderr,
+        )
+        return
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"Crustdata client init failed: {exc}")
+        print(f"[enrich_contact] Crustdata client init failed: {exc}", file=sys.stderr)
+        return
+
+    entity_id = entity["id"]
+    existing_email    = entity_meta.get("email", "").strip()
+    existing_linkedin = entity_meta.get("linkedin_url", "").strip()
+    existing_org      = (
+        entity_meta.get("org")
+        or entity_meta.get("company")
+        or entity_meta.get("employer", "")
+    ).strip()
+
+    # Idempotency: skip if Crustdata enriched this entity within its freshness window
+    entity_meta_list = [{"key": k, "value": v} for k, v in entity_meta.items()]
+    _pipeline_dir = Path(__file__).parent.parent / "pipeline"
+    sys.path.insert(0, str(_pipeline_dir.parent))
+    try:
+        from pipeline.idempotency_check import is_fresh
+        freshness = is_fresh(
+            entity_meta=entity_meta_list,
+            source_id="crustdata",
+            data_freshness_days=source.get("data_freshness_days", 30),
+        )
+        if freshness.skip:
+            print(
+                f"[enrich_contact] Crustdata: skipping {entity_name} — "
+                f"already enriched {freshness.reason}",
+                file=sys.stderr,
+            )
+            return
+    except ImportError:
+        pass  # idempotency_check unavailable — proceed without freshness guard
+
+    # Attempt Crustdata lookup using the best available identifier
+    crustdata_person = None
+    lookup_method = "none"
+
+    try:
+        if existing_linkedin:
+            print(
+                f"[enrich_contact] Crustdata: looking up '{entity_name}' "
+                "by LinkedIn URL...",
+                file=sys.stderr,
+            )
+            crustdata_person = crustdata_client.enrich_by_linkedin(
+                existing_linkedin, include_email=True
+            )
+            lookup_method = "linkedin"
+
+        if crustdata_person is None and existing_email:
+            print(
+                f"[enrich_contact] Crustdata: looking up '{entity_name}' "
+                f"by email ({existing_email})...",
+                file=sys.stderr,
+            )
+            crustdata_person = crustdata_client.enrich_by_email(existing_email)
+            lookup_method = f"email:{existing_email}"
+
+        if crustdata_person is None and entity_name and existing_org:
+            print(
+                f"[enrich_contact] Crustdata: looking up '{entity_name}' "
+                f"by name+org ({existing_org})...",
+                file=sys.stderr,
+            )
+            crustdata_person = crustdata_client.enrich_by_name_and_company(
+                entity_name, company=existing_org
+            )
+            lookup_method = f"name:{entity_name}+org:{existing_org}"
+
+    except CrustdataAuthError as exc:
+        # Genuine key failure — not a plan limitation, log as error
+        errors.append(f"Crustdata auth error for '{entity_name}': {exc}")
+        print(
+            f"[enrich_contact] Crustdata auth error for '{entity_name}': {exc}",
+            file=sys.stderr,
+        )
+        return
+    except CrustdataPlanError as exc:
+        # Live endpoints require enterprise — log clearly and skip
+        print(
+            f"[enrich_contact] Crustdata: skipping '{entity_name}' — "
+            f"endpoint requires higher plan tier (HTTP {exc.status_code}). "
+            "Use self-serve /person/enrich endpoint instead.",
+            file=sys.stderr,
+        )
+        return
+    except CrustdataError as exc:
+        errors.append(f"Crustdata lookup failed for '{entity_name}': {exc}")
+        print(f"[enrich_contact] Crustdata error: {exc}", file=sys.stderr)
+        return
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"Crustdata lookup error for '{entity_name}': {exc}")
+        print(
+            f"[enrich_contact] Crustdata unexpected error: {exc}", file=sys.stderr
+        )
+        return
+
+    if crustdata_person is None:
+        print(
+            f"[enrich_contact] Crustdata: no data found for '{entity_name}' "
+            f"(method={lookup_method})",
+            file=sys.stderr,
+        )
+        return
+
+    # Extract fields Crustdata returned
+    crustdata_fields = crustdata_person.to_meta_fields()
+    if not crustdata_fields:
+        print(
+            f"[enrich_contact] Crustdata: returned person but no useful fields "
+            f"for '{entity_name}'",
+            file=sys.stderr,
+        )
+        return
+
+    # Conflict detection: never overwrite fields from higher-confidence sources.
+    # Rule: if the entity already has a field, keep it regardless of source.
+    fields_to_write: dict[str, str] = {}
+    conflicts: list[str] = []
+    for field_key, crustdata_val in crustdata_fields.items():
+        if not crustdata_val:
+            continue
+        existing_val = entity_meta.get(field_key, "").strip()
+        if not existing_val:
+            fields_to_write[field_key] = crustdata_val  # gap fill — accept Crustdata
+        elif existing_val.lower() != crustdata_val.lower():
+            conflicts.append(
+                f"  {entity_name}.{field_key}: existing={repr(existing_val)} "
+                f"vs Crustdata={repr(crustdata_val)} — keeping existing"
+            )
+
+    if conflicts:
+        for c in conflicts:
+            print(
+                f"[enrich_contact] Crustdata conflict (kept existing): {c}",
+                file=sys.stderr,
+            )
+
+    if not fields_to_write:
+        print(
+            f"[enrich_contact] Crustdata: no new fields for '{entity_name}' "
+            f"(all already populated)",
+            file=sys.stderr,
+        )
+        return
+
+    # Build provenance meta using the multi-source suffix scheme
+    goal_score = source.get("goal_scores", {}).get("work_history", 0.82)
+    raw_response_str = (
+        json.dumps(crustdata_person.raw) if crustdata_person.raw else "{}"
+    )
+    provenance_meta = _build_crustdata_provenance_meta(
+        run_id=run_id,
+        goal="work_history",
+        raw_response=raw_response_str,
+        goal_score=goal_score,
+    )
+
+    # Merge: existing meta + Crustdata gap-fills + provenance + tag
+    new_meta = dict(entity_meta)
+    new_meta.update(fields_to_write)
+    new_meta.update(provenance_meta)
+
+    existing_tags: list[str] = entity.get("tags", [])
+    new_tags = list(existing_tags)
+    if CRUSTDATA_TAG not in new_tags:
+        new_tags.append(CRUSTDATA_TAG)
+
+    if dry_run:
+        print(
+            f"[enrich_contact] Crustdata [dry-run]: would write "
+            f"{len(fields_to_write)} field(s) for '{entity_name}': "
+            f"{list(fields_to_write.keys())}",
+            file=sys.stderr,
+        )
+        return
+
+    meta_input = [{"key": k, "value": v} for k, v in new_meta.items()]
+    try:
+        _gql(
+            _UPDATE_ENTITY_META_MUTATION,
+            {"id": entity_id, "meta": meta_input},
+            endpoint,
+            token,
+        )
+        print(
+            f"[enrich_contact] Crustdata: wrote {len(fields_to_write)} field(s) "
+            f"for '{entity_name}': {list(fields_to_write.keys())}",
+            file=sys.stderr,
+        )
+    except Exception as exc:  # noqa: BLE001
+        err = (
+            f"Crustdata: updateEntityMeta failed for '{entity_name}': {exc}"
+        )
+        errors.append(err)
+        print(f"[enrich_contact] {err}", file=sys.stderr)
+
 
 _ENTITY_QUERY = """
 query GetEntity($id: String!) {
@@ -483,11 +786,10 @@ def enrich_contact(
         search_org_id = org_id
 
     # --- Work history enrichment for a person (enriches the entity itself) ---
-    # Clay fits here: it enriches an *existing* contact by filling gap fields
-    # (email, LinkedIn URL, title, phone, etc.) by running a waterfall across 100+
-    # sub-sources.  Waterfall position: after Apollo/ZoomInfo/PDL (when those are
-    # available) — Clay's confidence (0.75) is intentionally one step below Apollo
-    # (0.80).  When Clay IS the best available source, it runs first.
+    # Crustdata is the primary available work_history source (replaces Clay).
+    # Clay is kept as fallback — still in the manifest, still skipped when no key.
+    # Waterfall position: after Apollo/ZoomInfo/PDL (when those are available).
+    # Crustdata confidence (0.82) > Clay (0.75) > google_serp_free (0.50).
     if kind == "person" and "work_history" in goals:
         wh_sources = available_sources_for_goal(source_manifest, "work_history")
         for source in wh_sources:
@@ -496,6 +798,21 @@ def enrich_contact(
             if sid == "kissinger_graph":
                 # Kissinger graph describes existing connections, not new contact data
                 continue
+
+            if sid == "crustdata":
+                sources_attempted.append(sid)
+                _enrich_person_via_crustdata(
+                    entity=entity,
+                    entity_meta=entity_meta,
+                    entity_name=entity_name,
+                    run_id=run_id,
+                    source=source,
+                    dry_run=dry_run,
+                    endpoint=endpoint,
+                    token=token,
+                    errors=errors,
+                )
+                break  # Crustdata is the top available work_history source — stop here
 
             if sid == "clay":
                 sources_attempted.append(sid)
@@ -510,7 +827,7 @@ def enrich_contact(
                     token=token,
                     errors=errors,
                 )
-                break  # Clay is the top available work_history source — stop here
+                break  # Clay is the fallback work_history source — stop here
 
             # Other paid sources (Apollo, PDL, LinkedIn SERP, etc.) — not yet
             # implemented.  Log the attempt so ops knows they're key-gated.
@@ -542,14 +859,22 @@ def enrich_contact(
             # to the next available source (google_serp_free, company_website, etc.).
             oc_source = None
             for s in oc_sources:
-                if s["source_id"] in ("kissinger_graph", "clay"):
+                if s["source_id"] in ("kissinger_graph", "clay", "crustdata"):
                     # kissinger_graph: reads existing graph, no new discovery
                     # clay: person-level enrichment only — no company employee list API
+                    # crustdata: person-level enrichment only — no company employee list API
                     if s["source_id"] == "clay":
                         print(
                             "[enrich_contact] Skipping Clay for org_chart — Clay enriches "
                             "individual contacts (work_history goal), not company employee lists. "
                             "Clay will run in the work_history pass for person entities.",
+                            file=sys.stderr,
+                        )
+                    elif s["source_id"] == "crustdata":
+                        print(
+                            "[enrich_contact] Skipping Crustdata for org_chart — Crustdata "
+                            "enriches individual contacts (work_history goal), not company "
+                            "employee lists. Crustdata will run in the work_history pass.",
                             file=sys.stderr,
                         )
                     continue
