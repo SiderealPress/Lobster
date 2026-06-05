@@ -1,12 +1,12 @@
 """
-Contact scoring engine for Eloso CRM.
+Contact scoring engine for Lobster CRM.
 
 Produces a 0–100 score for each contact, indicating fit as a potential
-customer or design partner for Eloso's AI-driven supply chain optimization
+customer or design partner for an AI-driven supply chain optimization
 platform. Higher = better fit.
 
 Scoring factors (six total, each 0–1 before weighting):
-  1. title_relevance   — How well the title/role maps to Eloso's buyer/champion profiles
+  1. title_relevance   — How well the title/role maps to the buyer/champion profiles
   2. seniority         — Seniority level within their organization
   3. org_type          — Whether their organization is a prospect, VC, etc.
   4. interaction_recency — How recently we've interacted (stale = penalized)
@@ -45,7 +45,7 @@ assert abs(sum(WEIGHTS.values()) - 1.0) < 1e-9, "Weights must sum to 1.0"
 # Title relevance
 # ---------------------------------------------------------------------------
 
-# High-value roles: Eloso's primary champions and economic buyers
+# High-value roles: primary champions and economic buyers
 _TITLE_HIGH = [
     r"\bcsco\b",
     r"\bchief supply chain\b",
@@ -87,7 +87,7 @@ _RE_MEDIUM = [re.compile(p, re.IGNORECASE) for p in _TITLE_MEDIUM]
 
 
 def _score_title_relevance(contact: dict[str, Any]) -> float:
-    """Return 0–1 based on title/role match to Eloso's ICP."""
+    """Return 0–1 based on title/role match to the ICP."""
     title = _get_meta(contact, "title") or ""
     notes = contact.get("notes") or ""
     tags = [t.lower() for t in (contact.get("tags") or [])]
@@ -161,7 +161,7 @@ def _score_seniority(contact: dict[str, Any]) -> float:
 # ---------------------------------------------------------------------------
 
 # Tags that mark prospect orgs — our highest-priority relationship type
-_PROSPECT_TAGS = {"prospect", "eloso", "prospect-contact"}
+_PROSPECT_TAGS = {"prospect", "prospect-contact"}
 _VC_TAGS = {"vc", "investor", "seed", "series-a", "series-b", "pre-seed"}
 _ALLY_TAGS = {"ally", "advisor", "board", "partner"}
 
@@ -337,7 +337,7 @@ def _score_record_completeness(contact: dict[str, Any]) -> float:
 
 def score_contact(contact: dict[str, Any]) -> dict[str, Any]:
     """
-    Compute a 0–100 contact score for Eloso CRM.
+    Compute a 0–100 contact score for Lobster CRM.
 
     Args:
         contact: A dict with fields from Kissinger (EntityGql) plus optional
