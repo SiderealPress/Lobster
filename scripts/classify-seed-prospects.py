@@ -497,9 +497,9 @@ def compute_meta_to_add(entity: dict, classification: dict) -> list[dict]:
         "pipeline_stage": "research",
         "icp_score": classification.get("icp_score", ""),
         "last_enriched_at": now_iso,
-        "source": "eloso-prospects-v2",
+        "source": "prospects-v2",
         "_prov_imported_by": "classify-seed-prospects.py",
-        "_prov_source": "eloso-ontology-v1",
+        "_prov_source": "ontology-v1",
         "_prov_imported_at": now_iso,
         "_prov_source_file": SCRIPT_NAME,
         "_prov_script_version": SCRIPT_VERSION,
@@ -565,7 +565,7 @@ def main():
     args = parser.parse_args()
 
     print("=" * 70)
-    print("Eloso Seed Prospect Classification — BIS-335")
+    print("Seed Prospect Classification — BIS-335")
     print(f"Mode: {'DRY RUN' if args.dry_run else 'LIVE WRITE'}")
     print("=" * 70)
     print()
