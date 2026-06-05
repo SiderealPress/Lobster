@@ -13,8 +13,8 @@ Unavailable sources are logged and skipped — the pipeline degrades gracefully 
 | Goal | Description | Best Sources (in order) |
 |------|-------------|------------------------|
 | `org_chart` | Officers, supply chain leaders at a company | Apollo → ZoomInfo → Clay → LinkedIn SERP → Crunchbase → Company Website → DuckDuckGo |
-| `work_history` | Current + past roles for a contact | Apollo → LinkedIn SERP → Clay → ZoomInfo → Hunter → Kissinger Graph |
-| `connections` | First/second-degree relationships | Kissinger Graph → Apollo → LinkedIn SERP → Clay → Crunchbase |
+| `work_history` | Current + past roles for a contact | Apollo → LinkedIn SERP → **Crustdata** → Clay → ZoomInfo → Hunter → Kissinger Graph |
+| `connections` | First/second-degree relationships | Kissinger Graph → Apollo → LinkedIn SERP → **Crustdata** → Clay → Crunchbase |
 
 ## Currently Available Sources (no API key required)
 
@@ -30,7 +30,8 @@ Unavailable sources are logged and skipped — the pipeline degrades gracefully 
 | LinkedIn via SerpAPI | `SERP_API_KEY` | Work history (structured) |
 | Crunchbase | `CRUNCHBASE_API_KEY` | Executive org charts |
 | Hunter.io | `HUNTER_API_KEY` | Email + basic work info |
-| Clay | `CLAY_API_KEY` | Waterfall enrichment |
+| **Crustdata** | `CRUSTDATA_API_KEY` | **Work history — direct REST API, 1B+ profiles. Active key already configured.** |
+| Clay | `CLAY_API_KEY` | Waterfall enrichment (Enterprise only for direct API) |
 | ZoomInfo | `ZOOMINFO_API_KEY` | Highest-quality org charts |
 
 To activate a source: add its API key to `~/lobster-config/config.env` and the pipeline will pick it up on next run — no code changes needed.

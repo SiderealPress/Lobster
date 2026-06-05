@@ -556,6 +556,15 @@ launch_claude() {
 
     (
         echo "$BASHPID" > "$dispatcher_pid_file"
+        # Write the dispatcher startup flag so inject-bootup-context.py can
+        # identify this as the dispatcher session on SessionStart.
+        # The flag contains $BASHPID — the same PID that becomes the claude
+        # process PID after exec. We write before exec so the flag is always
+        # present when SessionStart fires. inject-bootup-context.py reads the
+        # flag, verifies the PID is alive via kill -0, consumes the flag, and
+        # injects dispatcher bootup context. Stale flags (dead PID) are ignored.
+        mkdir -p "$WORKSPACE_DIR/data"
+        echo "$BASHPID" > "$WORKSPACE_DIR/data/dispatcher-startup-flag"
         exec claude --dangerously-skip-permissions \
             --model sonnet \
             --max-turns 150 \

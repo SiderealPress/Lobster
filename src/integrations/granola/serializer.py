@@ -228,6 +228,7 @@ calendar_title: {calendar_title_str}
 scheduled_start: {scheduled_start_str}
 scheduled_end: {scheduled_end_str}
 source: granola
+granola_account: {note.granola_account}
 ---"""
 
     # --- Body ---

@@ -55,7 +55,12 @@ def _make_session_role_stub(is_dispatcher: bool = True):
     return stub
 
 
-def _load_on_compact(inbox_dir: str = None, compaction_state_override: str = None):
+def _load_on_compact(
+    inbox_dir: str = None,
+    compaction_state_override: str = None,
+    processing_dir: str = None,
+    processed_dir: str = None,
+):
     """Load hooks/on-compact.py as a module, with isolated file paths."""
     env_patch = {}
     if compaction_state_override:
@@ -72,10 +77,19 @@ def _load_on_compact(inbox_dir: str = None, compaction_state_override: str = Non
         mod.INBOX_DIR = Path(inbox_dir)
     if compaction_state_override:
         mod.COMPACTION_STATE_FILE = Path(compaction_state_override)
+    if processing_dir:
+        mod.PROCESSING_DIR = Path(processing_dir)
+    if processed_dir:
+        mod.PROCESSED_DIR = Path(processed_dir)
     return mod
 
 
-def _load_on_fresh_start(inbox_dir: str = None, compaction_state_override: str = None):
+def _load_on_fresh_start(
+    inbox_dir: str = None,
+    compaction_state_override: str = None,
+    processing_dir: str = None,
+    processed_dir: str = None,
+):
     """Load hooks/on-fresh-start.py as a module, with isolated file paths."""
     env_patch = {}
     if compaction_state_override:
@@ -92,6 +106,10 @@ def _load_on_fresh_start(inbox_dir: str = None, compaction_state_override: str =
         mod.INBOX_DIR = Path(inbox_dir)
     if compaction_state_override:
         mod.COMPACTION_STATE_FILE = Path(compaction_state_override)
+    if processing_dir:
+        mod.PROCESSING_DIR = Path(processing_dir)
+    if processed_dir:
+        mod.PROCESSED_DIR = Path(processed_dir)
     return mod
 
 
@@ -259,3 +277,229 @@ class TestScheduleReflectionPromptFreshStart:
         with _PatchEnv({"LOBSTER_DEBUG": "true"}):
             # Must not raise
             mod._schedule_reflection_prompt("bootup")
+
+
+# ---------------------------------------------------------------------------
+# Fix #2039 — dedup tests for concurrent hook invocations
+# ---------------------------------------------------------------------------
+
+class TestReflectionDedup:
+    """Tests for _reflection_already_exists() and the dedup path in
+    _schedule_reflection_prompt() — both hooks.
+
+    Issue #2039: concurrent hook invocations within the same second share the
+    same msg_id (1-second precision) but write different filenames.  The first
+    invocation must win; subsequent ones must skip silently, leaving exactly
+    one file in the inbox.
+    """
+
+    # -- on-compact.py --
+
+    def test_compact_dedup_skips_when_id_already_in_inbox(self, tmp_path):
+        """Second call with same timestamp skips writing when first file is in inbox/."""
+        inbox = tmp_path / "inbox"
+        inbox.mkdir()
+        processing = tmp_path / "processing"
+        processing.mkdir()
+        processed = tmp_path / "processed"
+        processed.mkdir()
+
+        mod = _load_on_compact(
+            inbox_dir=str(inbox),
+            processing_dir=str(processing),
+            processed_dir=str(processed),
+        )
+
+        with _PatchEnv({"LOBSTER_DEBUG": "true"}):
+            # First call — writes the file.
+            mod._schedule_reflection_prompt("compaction")
+            first_files = [f for f in inbox.iterdir() if f.suffix == ".json"]
+            assert len(first_files) == 1, "first call must write exactly one file"
+
+            existing = json.loads(first_files[0].read_text())
+            existing_id = existing["id"]
+
+            # Call again with the same second → same msg_id → should skip.
+            mod._schedule_reflection_prompt("compaction")
+
+        all_files = [f for f in inbox.iterdir() if f.suffix == ".json"]
+        ids = [json.loads(f.read_text()).get("id") for f in all_files]
+        assert ids.count(existing_id) == 1, (
+            f"expected exactly 1 file with id={existing_id!r}, got ids={ids}"
+        )
+
+    def test_compact_dedup_skips_when_id_in_processing(self, tmp_path):
+        """Dedup check finds an existing file in processing/ and skips."""
+        inbox = tmp_path / "inbox"
+        inbox.mkdir()
+        processing = tmp_path / "processing"
+        processing.mkdir()
+        processed = tmp_path / "processed"
+        processed.mkdir()
+
+        import time as _time
+        ts = _time.time()
+        msg_id = f"reflection_compaction_{int(ts)}"
+        existing_msg = {
+            "id": msg_id,
+            "type": "reflection_prompt",
+            "trigger": "compaction",
+            "source": "system",
+            "text": "already here",
+        }
+        (processing / f"{int(ts * 1000)}_reflection_compaction.json").write_text(
+            json.dumps(existing_msg)
+        )
+
+        mod = _load_on_compact(
+            inbox_dir=str(inbox),
+            processing_dir=str(processing),
+            processed_dir=str(processed),
+        )
+
+        with _PatchEnv({"LOBSTER_DEBUG": "true"}):
+            with _PatchTime(int(ts)):
+                mod._schedule_reflection_prompt("compaction")
+
+        new_files = [f for f in inbox.iterdir() if f.suffix == ".json"]
+        assert len(new_files) == 0, (
+            "expected no new inbox file when existing file is in processing/"
+        )
+
+    def test_compact_dedup_skips_when_id_in_processed(self, tmp_path):
+        """Dedup check finds an already-processed file and skips re-writing."""
+        inbox = tmp_path / "inbox"
+        inbox.mkdir()
+        processing = tmp_path / "processing"
+        processing.mkdir()
+        processed = tmp_path / "processed"
+        processed.mkdir()
+
+        import time as _time
+        ts = _time.time()
+        msg_id = f"reflection_compaction_{int(ts)}"
+        existing_msg = {
+            "id": msg_id,
+            "type": "reflection_prompt",
+            "trigger": "compaction",
+            "source": "system",
+            "text": "already processed",
+        }
+        (processed / f"{int(ts * 1000)}_reflection_compaction.json").write_text(
+            json.dumps(existing_msg)
+        )
+
+        mod = _load_on_compact(
+            inbox_dir=str(inbox),
+            processing_dir=str(processing),
+            processed_dir=str(processed),
+        )
+
+        with _PatchEnv({"LOBSTER_DEBUG": "true"}):
+            with _PatchTime(int(ts)):
+                mod._schedule_reflection_prompt("compaction")
+
+        new_files = [f for f in inbox.iterdir() if f.suffix == ".json"]
+        assert len(new_files) == 0, (
+            "expected no new inbox file when reflection was already processed"
+        )
+
+    # -- on-fresh-start.py --
+
+    def test_freshstart_dedup_skips_when_id_already_in_inbox(self, tmp_path):
+        """Second call with same timestamp skips writing when first file is in inbox/."""
+        inbox = tmp_path / "inbox"
+        inbox.mkdir()
+        processing = tmp_path / "processing"
+        processing.mkdir()
+        processed = tmp_path / "processed"
+        processed.mkdir()
+
+        mod = _load_on_fresh_start(
+            inbox_dir=str(inbox),
+            processing_dir=str(processing),
+            processed_dir=str(processed),
+        )
+
+        with _PatchEnv({"LOBSTER_DEBUG": "true"}):
+            mod._schedule_reflection_prompt("bootup")
+            first_files = [f for f in inbox.iterdir() if f.suffix == ".json"]
+            assert len(first_files) == 1, "first call must write exactly one file"
+
+            existing = json.loads(first_files[0].read_text())
+            existing_id = existing["id"]
+
+            mod._schedule_reflection_prompt("bootup")
+
+        all_files = [f for f in inbox.iterdir() if f.suffix == ".json"]
+        ids = [json.loads(f.read_text()).get("id") for f in all_files]
+        assert ids.count(existing_id) == 1, (
+            f"expected exactly 1 file with id={existing_id!r}, got ids={ids}"
+        )
+
+    def test_reflection_already_exists_returns_true_for_id_in_inbox(self, tmp_path):
+        """_reflection_already_exists returns True when the ID exists in inbox/."""
+        inbox = tmp_path / "inbox"
+        inbox.mkdir()
+        processing = tmp_path / "processing"
+        processing.mkdir()
+        processed = tmp_path / "processed"
+        processed.mkdir()
+
+        msg_id = "reflection_bootup_9999999"
+        (inbox / "9999999_reflection_bootup.json").write_text(
+            json.dumps({"id": msg_id, "type": "reflection_prompt"})
+        )
+
+        mod = _load_on_fresh_start(
+            inbox_dir=str(inbox),
+            processing_dir=str(processing),
+            processed_dir=str(processed),
+        )
+
+        assert mod._reflection_already_exists(msg_id) is True
+
+    def test_reflection_already_exists_returns_false_for_absent_id(self, tmp_path):
+        """_reflection_already_exists returns False when no file has that ID."""
+        inbox = tmp_path / "inbox"
+        inbox.mkdir()
+        processing = tmp_path / "processing"
+        processing.mkdir()
+        processed = tmp_path / "processed"
+        processed.mkdir()
+
+        mod = _load_on_fresh_start(
+            inbox_dir=str(inbox),
+            processing_dir=str(processing),
+            processed_dir=str(processed),
+        )
+
+        assert mod._reflection_already_exists("reflection_bootup_totally_absent") is False
+
+
+# ---------------------------------------------------------------------------
+# Helpers for time patching
+# ---------------------------------------------------------------------------
+
+class _PatchTime:
+    """Context manager that patches time.time() to return a fixed integer.
+
+    Usage::
+
+        with _PatchTime(1700000000):
+            result = module_under_test._schedule_reflection_prompt("compaction")
+    """
+
+    def __init__(self, fixed_ts: int | float):
+        self._fixed_ts = float(fixed_ts)
+        self._orig = None
+
+    def __enter__(self):
+        import time as _t
+        self._orig = _t.time
+        _t.time = lambda: self._fixed_ts
+        return self
+
+    def __exit__(self, *_):
+        import time as _t
+        _t.time = self._orig

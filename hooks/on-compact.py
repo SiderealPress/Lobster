@@ -2,17 +2,30 @@
 """
 Context-compaction hook for Lobster.
 
-Fires on SessionStart with a 'compact' event. Injects a system message into
-the Lobster inbox so that the next call to wait_for_messages() surfaces a
-reminder to re-read CLAUDE.md and re-orient from handoff/memory context.
+Fires on SessionStart — registered with matcher="" so it fires on every
+session start.  The script self-gates using _is_compact_event(): it checks the
+``source`` field in the CC SessionStart payload (primary) and ``hook_name`` as
+a fallback, then exits immediately for non-compact events.
+
+Injects a system message into the Lobster inbox so that the next call to
+wait_for_messages() surfaces a reminder to re-read CLAUDE.md and re-orient
+from handoff/memory context.
 
 The script is idempotent: if a compact-reminder message already exists in
 inbox/ or processing/ it skips writing a duplicate.
 
-Notification: always sends a Telegram message directly to the owner's chat ID
-so the user is immediately notified that a compaction occurred.  The health
-check suppresses its own alerts during the compaction window so exactly one
-notification reaches the user per compaction event.
+Compaction detection (self-gate):
+  Tier 1:  data["source"] == "compact"  (CC-documented field)
+  Tier 2:  data["hook_name"] == "compact"  (observed in some CC versions)
+  Tier 3:  dispatcher-wfm-active file contains a digit-only timestamp
+           (filesystem fallback for CC versions that omit both fields)
+  If none of the tiers match, the script exits immediately (sys.exit(0)).
+
+Notification: always writes a compaction notification to ~/messages/outbox/
+(the Lobster outbox pipeline) so the user is notified via Telegram.  The
+outbox watcher picks up the file and delivers it to the correct transport.
+This matches the architectural pattern used by all other Lobster notifications
+and avoids direct Telegram API calls from the hook.
 
 State: always writes compacted_at to lobster-state.json so that the health
 check can suppress stale-inbox false-positives during the compaction pause.
@@ -36,7 +49,6 @@ import json
 import os
 import sys
 import time
-import urllib.request
 from pathlib import Path
 
 # Import shared session role utility.
@@ -45,13 +57,19 @@ from session_role import (
     DISPATCHER_SESSION_FILE,
     is_dispatcher,
     write_dispatcher_session_id,
-    write_dispatcher_claude_session_id,
     _read_dispatcher_session_id,
 )
 
 
 INBOX_DIR = Path(os.path.expanduser("~/messages/inbox"))
 PROCESSING_DIR = Path(os.path.expanduser("~/messages/processing"))
+PROCESSED_DIR = Path(os.path.expanduser("~/messages/processed"))
+OUTBOX_DIR = Path(
+    os.environ.get(
+        "LOBSTER_OUTBOX_DIR_OVERRIDE",
+        os.path.expanduser("~/messages/outbox"),
+    )
+)
 CONFIG_ENV = Path(os.path.expanduser("~/lobster-config/config.env"))
 STATE_FILE = Path(
     os.environ.get(
@@ -74,6 +92,15 @@ LAST_COMPACT_TS_FILE = Path(
         os.path.expanduser("~/lobster-workspace/data/last-compact.ts"),
     )
 )
+# Single source of truth for startup cause detection.
+# Written here (cause=compaction) before process exit.
+# inject-bootup-context.py reads and resets it (cause=restart) on every startup.
+STARTUP_CAUSE_FILE = Path(
+    os.environ.get(
+        "LOBSTER_STARTUP_CAUSE_FILE_OVERRIDE",
+        os.path.expanduser("~/lobster-workspace/data/last-startup-cause.json"),
+    )
+)
 
 REMINDER_TEXT = (
     "COMPACT REMINDER \u2014 RE-ORIENT NOW\n\n"
@@ -93,6 +120,27 @@ REMINDER_TEXT = (
 )
 
 SENTINEL_FILE = Path(os.path.expanduser("~/messages/config/compact-pending"))
+
+# Dispatcher heartbeat file: written with a Unix epoch timestamp by the WFM
+# heartbeat thread in inbox_server.py while wait_for_messages() is blocking,
+# refreshed every 60 s.  A recent digit-only value means the dispatcher was
+# actively running immediately before this session started — a strong signal
+# that this SessionStart was triggered by a compaction rather than a fresh start.
+# Override: LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE env var (test isolation,
+# matching the existing override used by thinking-heartbeat.py and health-check).
+DISPATCHER_HEARTBEAT_FILE = Path(
+    os.environ.get(
+        "LOBSTER_DISPATCHER_HEARTBEAT_OVERRIDE",
+        os.path.expanduser("~/lobster-workspace/logs/dispatcher-heartbeat"),
+    )
+)
+
+# Maximum age (seconds) for the dispatcher heartbeat to be treated as "recently
+# active" in the tier-3 compaction fallback.  15 minutes is conservative: it
+# covers the longest normal idle period (WFM blocking with no messages), while
+# being short enough to avoid false-positives after a genuine long-idle restart
+# (e.g. Lobster was stopped for an hour and then restarted cleanly).
+DISPATCHER_WFM_RECENCY_SECONDS = 900  # 15 minutes
 
 COMPACTION_TELEGRAM_MESSAGE = "\u267b\ufe0f Context compacted. Re-orienting..."
 
@@ -214,6 +262,33 @@ def write_last_compact_ts() -> None:
         pass
 
 
+def write_startup_cause() -> None:
+    """
+    Write {"cause": "compaction", "ts": "<iso_utc>"} to last-startup-cause.json.
+
+    Called just before the process exits after a compaction.  inject-bootup-context.py
+    reads this file on the next startup:
+      - If cause == "compaction" and ts is within 5 minutes: startup was a compaction.
+      - Otherwise: startup was a plain restart.
+    After reading, inject-bootup-context.py resets the file to cause="restart" so
+    subsequent startups default to restart unless this hook fires again.
+
+    Uses an atomic rename so the file is never half-written.
+    Silent on any failure — must never crash the hook.
+    """
+    try:
+        STARTUP_CAUSE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "cause": "compaction",
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        tmp_path = STARTUP_CAUSE_FILE.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(payload, indent=2) + "\n")
+        tmp_path.replace(STARTUP_CAUSE_FILE)  # atomic on Linux (same filesystem)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def write_compacted_at() -> None:
     """
     Record the current UTC timestamp as compacted_at in lobster-state.json.
@@ -261,63 +336,121 @@ def _parse_config_env() -> dict:
     return config
 
 
-def _send_telegram_notify(bot_token: str, chat_id: str, text: str) -> None:
+def send_compaction_notify() -> None:
     """
-    Send text to chat_id via the Telegram Bot API.
-    Logs to stderr on failure so the cause is visible in Claude hook output.
-    Never raises — must not crash the hook.
+    Notify the owner that a context compaction occurred by writing to the outbox.
+
+    Writes a JSON file to ~/messages/outbox/ using the standard Lobster outbox
+    format.  The outbox watcher (lobster_bot.py / outbox.py) picks up the file
+    and delivers it via Telegram — identical to how all other Lobster system
+    notifications are sent.
+
+    This avoids calling the Telegram Bot API directly from the hook, keeping all
+    outbound messages routed through the shared pipeline.
+
+    Always fires when TELEGRAM_ALLOWED_USERS is configured — not gated on
+    LOBSTER_DEBUG.  The health-check suppresses its own alerts during the
+    compaction window so exactly one notification reaches the user per compaction.
+
+    Silent on any failure — must never crash the hook.
     """
     try:
-        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-        payload = json.dumps({"chat_id": chat_id, "text": text}).encode()
-        req = urllib.request.Request(
-            url,
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=25) as resp:
-            status = resp.status
-            if status != 200:
-                body = resp.read(500).decode("utf-8", errors="replace")
-                print(
-                    f"[on-compact] Telegram notify returned HTTP {status}: {body}",
-                    file=sys.stderr,
-                )
-    except urllib.request.HTTPError as e:  # noqa: BLE001
-        try:
-            body = e.read(500).decode("utf-8", errors="replace")
-        except Exception:
-            body = "(could not read body)"
+        config = _parse_config_env()
+        allowed_users = config.get("TELEGRAM_ALLOWED_USERS", "").strip()
+        if not allowed_users:
+            return
+
+        # Take the first user ID from a comma- or space-separated list.
+        first_chat_id = allowed_users.replace(",", " ").split()[0]
+
+        ts_ms = int(time.time() * 1000)
+        reply_id = f"{ts_ms}_compact_notify_telegram"
+        timestamp = time.strftime("%Y-%m-%dT%H:%M:%S.%f", time.localtime()) + "+00:00"
+
+        reply = {
+            "id": reply_id,
+            "source": "telegram",
+            "chat_id": first_chat_id,
+            "text": COMPACTION_TELEGRAM_MESSAGE,
+            "timestamp": timestamp,
+        }
+
+        OUTBOX_DIR.mkdir(parents=True, exist_ok=True)
+        dest = OUTBOX_DIR / f"{reply_id}.json"
+        # Atomic write: write to .tmp then rename so the watcher never sees a
+        # partial file (mirrors the pattern in src/utils/fs.py:atomic_write_json).
+        tmp_dest = dest.with_suffix(".tmp")
+        tmp_dest.write_text(json.dumps(reply, indent=2) + "\n")
+        tmp_dest.replace(dest)
+
         print(
-            f"[on-compact] Telegram notify HTTP error {e.code}: {body}",
+            f"[on-compact] compaction notify queued to outbox: {dest}",
             file=sys.stderr,
         )
     except Exception as exc:  # noqa: BLE001
-        print(f"[on-compact] Telegram notify failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        print(
+            f"[on-compact] compaction notify failed: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
 
 
-def send_compaction_notify() -> None:
+def _wfm_was_active() -> bool:
+    """Return True if the dispatcher was recently active before this session started.
+
+    Reads DISPATCHER_HEARTBEAT_FILE (dispatcher-heartbeat).  The file contains
+    a single Unix epoch integer written by thinking-heartbeat.py (PostToolUse)
+    and the WFM heartbeat thread in inbox_server.py.  If the file exists and
+    the recorded timestamp is within DISPATCHER_WFM_RECENCY_SECONDS (15 min),
+    the dispatcher was actively running immediately before this session — a
+    strong signal that this is a compaction rather than a fresh start.
+
+    A missing file, non-integer content, or a stale timestamp all return False
+    (conservative: prefer false-negatives over false-positives for tier-3).
+
+    Used as the third-tier fallback in _is_compact_event() when CC omits both
+    source and hook_name from the SessionStart payload.
     """
-    Send a Telegram notification to the owner that a context compaction occurred.
+    try:
+        raw = DISPATCHER_HEARTBEAT_FILE.read_text().strip()
+        if not raw.isdigit():
+            return False
+        last_ts = int(raw)
+        age_seconds = int(time.time()) - last_ts
+        return 0 <= age_seconds < DISPATCHER_WFM_RECENCY_SECONDS
+    except OSError:
+        return False
 
-    Always fires when credentials are available — not gated on LOBSTER_DEBUG.
-    This is the single canonical notification for a compaction event; the
-    health-check suppresses its own alerts during the compaction window so
-    exactly one notification reaches the user per compaction.
+
+def _is_compact_event(data: dict) -> bool:
+    """Return True if the hook input indicates a context compaction event.
+
+    Tier 1 (primary): the ``source`` field in the CC SessionStart payload.
+    Claude Code sets source="compact" for compaction-triggered sessions
+    (other values: "startup", "resume", "clear").
+
+    Tier 2 (fallback): hook_name == "compact" is undocumented but observed
+    in some CC versions.  Only used when ``source`` is absent — if ``source``
+    is present but non-compact, the event is not a compaction regardless of
+    hook_name.
+
+    Tier 3 (filesystem fallback): when BOTH ``source`` and ``hook_name`` are
+    absent from the payload, check whether the dispatcher was recently active
+    (DISPATCHER_HEARTBEAT_FILE contains a recent digit-only Unix timestamp).
+    A live heartbeat signal with no payload fields strongly implies CC fired
+    a compaction SessionStart without populating the usual identification fields.
+
+    Returns False conservatively when neither field is present and the
+    filesystem fallback is unavailable or inconclusive.
     """
-    config = _parse_config_env()
-
-    bot_token = config.get("TELEGRAM_BOT_TOKEN", "").strip()
-    allowed_users = config.get("TELEGRAM_ALLOWED_USERS", "").strip()
-
-    if not bot_token or not allowed_users:
-        return
-
-    # Take the first user ID from a comma- or space-separated list.
-    first_chat_id = allowed_users.replace(",", " ").split()[0]
-
-    _send_telegram_notify(bot_token, first_chat_id, COMPACTION_TELEGRAM_MESSAGE)
+    source = data.get("source")
+    if source is not None:
+        return source == "compact"
+    # Tier 2: source field absent — fall back to hook_name
+    hook_name = data.get("hook_name")
+    if hook_name is not None:
+        return hook_name == "compact"
+    # Tier 3: both source and hook_name absent — use filesystem fallback
+    return _wfm_was_active()
 
 
 def _stored_dispatcher_session_alive() -> bool:
@@ -388,24 +521,44 @@ def _is_dispatcher_compact(data: dict) -> bool:
     # This looks like a dispatcher compaction.  Update both the hook marker
     # file (tertiary) and the primary MCP Claude UUID state file so all
     # subsequent hook calls in this session recognise the new session_id.
-    #
-    # Writing the primary file (dispatcher-claude-session-id) is the Option 1
-    # fix for issue #1375: inject-bootup-context.py fires before session_start()
-    # is called, so the MCP server hasn't had a chance to update the primary
-    # file yet.  By writing it here — in on-compact.py, which runs before
-    # inject-bootup-context.py in the SessionStart hook chain — the primary
-    # check in is_dispatcher() passes and dispatcher bootup is injected correctly.
+    # Note: inject-bootup-context.py now uses the startup flag (not UUID),
+    # so writing the primary Claude UUID file (dispatcher-claude-session-id)
+    # is no longer needed here (issue #1908).
     new_session_id = data.get("session_id", "").strip()
     if new_session_id:
         write_dispatcher_session_id(new_session_id)
-        write_dispatcher_claude_session_id(new_session_id)
         print(
             f"[on-compact] compaction fallback: updated dispatcher-session-id "
-            f"and dispatcher-claude-session-id to {new_session_id}",
+            f"to {new_session_id}",
             file=sys.stderr,
         )
 
     return True
+
+
+def _reflection_already_exists(msg_id: str) -> bool:
+    """Return True if a reflection message with the given ID already exists.
+
+    Scans inbox/, processing/, and processed/ to prevent concurrent hook
+    invocations from writing duplicate reflection files with the same ID.
+    Multiple subagent SessionStart events may fire within the same second,
+    producing the same msg_id (1-second precision) but different filenames
+    (millisecond-precision).  This check short-circuits all but the first
+    invocation.
+
+    Silent on all errors — must never crash the hook.
+    """
+    for directory in (INBOX_DIR, PROCESSING_DIR, PROCESSED_DIR):
+        if not directory.exists():
+            continue
+        for f in directory.glob("*.json"):
+            try:
+                data = json.loads(f.read_text())
+                if data.get("id") == msg_id:
+                    return True
+            except Exception:  # noqa: BLE001
+                continue
+    return False
 
 
 def _schedule_reflection_prompt(trigger: str) -> None:
@@ -415,6 +568,12 @@ def _schedule_reflection_prompt(trigger: str) -> None:
     on the bootup/compaction experience and file GitHub issues with observations.
     Written immediately — the dispatcher processes inbox messages in order so it
     will reach this after handling the compact-reminder and catching up.
+
+    Dedup: computes the msg_id first and checks inbox/, processing/, and
+    processed/ for an existing file with the same ID.  Concurrent hook
+    invocations within the same second will share the same ID (1-second
+    precision) but write different filenames (millisecond-precision).  The
+    first invocation wins; subsequent ones skip silently.
 
     Silent on any failure — must never crash the hook.
     """
@@ -426,6 +585,15 @@ def _schedule_reflection_prompt(trigger: str) -> None:
 
         ts = time.time()
         msg_id = f"reflection_{trigger}_{int(ts)}"
+
+        # Dedup: skip if a reflection with this ID already exists.
+        if _reflection_already_exists(msg_id):
+            print(
+                f"[on-compact] debug: reflection prompt {msg_id!r} already exists — skipping",
+                file=sys.stderr,
+            )
+            return
+
         timestamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + ".000000"
 
         content = (
@@ -472,6 +640,24 @@ def main() -> None:
         data = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError):
         data = {}
+
+    # Self-gate: this hook is registered with matcher="" so it fires on every
+    # SessionStart event.  Exit immediately for non-compact sessions.
+    # Tier 1: source="compact" (CC-documented).
+    # Tier 2: hook_name="compact" (observed in some CC versions).
+    # Tier 3: dispatcher-wfm-active contains a digit-only timestamp (both
+    #         fields absent -- CC sometimes omits them entirely).
+    if not _is_compact_event(data):
+        sys.exit(0)
+
+    # Write cause=compaction BEFORE anything else.  inject-bootup-context.py reads
+    # this file on the next startup: if cause==compaction and ts is within 5 minutes,
+    # the startup is classified as a compaction-triggered restart rather than a plain
+    # restart.  After reading, inject-bootup-context.py resets the file to
+    # cause=restart, so subsequent startups default to restart unless this hook fires.
+    # Runs for both dispatcher and subagent compactions (the classification only matters
+    # for the dispatcher, but writing it early for all compactions is harmless).
+    write_startup_cause()
 
     # Always record compaction timestamp — runs for both dispatcher and subagent
     # compactions.  The health check reads this to suppress false-positive

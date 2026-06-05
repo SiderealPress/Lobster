@@ -1,4 +1,9 @@
-# Global Environment Store
+# Credential Store (config.env)
+
+> **Note:** `global.env` was deprecated in issue #1785 (config consolidation, Option A).
+> All credentials and API tokens now belong in `~/lobster-config/config.env`.
+> Existing `global.env` files are merged into `config.env` automatically by upgrade.sh migration 79
+> and archived as `global.env.bak`. The `lobster env set` command writes to `config.env`.
 
 Lobster provides a standardized location for API tokens and credentials that need
 to be shared across multiple services, scripts, and CLI tools on the same machine.
@@ -6,7 +11,7 @@ to be shared across multiple services, scripts, and CLI tools on the same machin
 ## Location
 
 ```
-~/lobster-config/global.env
+~/lobster-config/config.env
 ```
 
 This file lives in your private Lobster config directory (`$LOBSTER_CONFIG_DIR`,
@@ -16,12 +21,11 @@ and should have restricted file permissions (`600`).
 > **Directory layout note:** Lobster uses two separate directories with distinct purposes:
 >
 > - `~/lobster-config/` (`$LOBSTER_CONFIG_DIR`) — Private credentials and config overlay.
->   Contains `global.env` (API tokens), `config.env` (Lobster service config), and any
->   private overrides applied during install.
+>   Contains `config.env` (Lobster service config and all API tokens) and private
+>   overrides applied during install. Also contains `owner.toml` (identity, preferences,
+>   consolidation schedule) and `sync-repos.json` (repos to monitor).
 > - `~/lobster-user-config/` (`$LOBSTER_USER_CONFIG`) — User-visible behavioral config.
 >   Contains agent bootup files, memory, and context files that shape how Lobster behaves.
->
-> `global.env` belongs in `~/lobster-config/`, not `~/lobster-user-config/`.
 
 ## Format
 
@@ -29,8 +33,13 @@ Standard shell `KEY=VALUE` pairs, one per line. No `export` keyword is needed �
 the file is sourced by Lobster's shell integration automatically.
 
 ```bash
-# ~/lobster-config/global.env
+# ~/lobster-config/config.env
 
+# Lobster service configuration
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_ALLOWED_USERS=...
+
+# API tokens and credentials
 HETZNER_API_TOKEN=your-token-here
 GITHUB_TOKEN=ghp_yourtoken
 ANTHROPIC_API_KEY=sk-ant-...
@@ -40,13 +49,10 @@ Comments (lines starting with `#`) and blank lines are ignored.
 
 ## Purpose
 
-`config.env` holds Lobster-specific configuration (Telegram tokens, feature flags,
-etc.). `global.env` holds machine-wide API credentials that multiple services or
-scripts might need — Hetzner, GitHub, Anthropic, Twilio, etc.
-
-The separation keeps concerns distinct:
-- `config.env` — Lobster service configuration
-- `global.env` — API keys and credentials for any tool on this machine
+`config.env` is the **single canonical file** for both Lobster service configuration
+and machine-wide API credentials. This consolidation (issue #1785) replaced the previous
+two-file arrangement (`config.env` + `global.env`) to reduce confusion about which file
+is authoritative.
 
 ## Usage
 
@@ -71,16 +77,16 @@ lobster env list
 ### Editing directly
 
 ```bash
-$EDITOR ~/lobster-config/global.env
+$EDITOR ~/lobster-config/config.env
 ```
 
 ## Shell Integration
 
 The installer adds a snippet to `~/.bashrc` (and `~/.zshrc` if present) that
-sources `global.env` on every login. This makes all stored tokens available as
+sources `config.env` on every login. This makes all stored tokens available as
 environment variables to any script or CLI tool running in your shell session.
 
-Lobster's systemd services also load `global.env` via `EnvironmentFile=` so tokens
+Lobster's systemd services also load `config.env` via `EnvironmentFile=` so tokens
 are available to background services without any extra steps.
 
 ## Security
@@ -123,17 +129,3 @@ This is the default and recommended setting. With this setting active:
 **Why this matters:** CLIs handle authentication automatically using pre-configured credentials,
 produce human-readable error messages, and provide stable interfaces designed for scripting.
 Raw API calls require manual credential management, request construction, and pagination handling.
-
-**Future:** On startup, Lobster will scan `$PATH` for known CLIs and log which ones are available.
-This allows subagents to know at boot time which CLIs they can rely on.
-
-## Migration
-
-If you have tokens currently in `config.env` that are not Lobster-specific (e.g.,
-`HCLOUD_TOKEN`, `GITHUB_TOKEN`), you can move them to `global.env`:
-
-```bash
-# Move a token from config.env to global.env
-lobster env set HETZNER_API_TOKEN "$(grep HCLOUD_TOKEN ~/lobster-config/config.env | cut -d= -f2)"
-# Then remove it from config.env manually
-```
