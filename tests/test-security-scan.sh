@@ -105,7 +105,7 @@ echo ""
 echo "=== should_skip_file: documentation file exclusion ==="
 
 assert_skipped "root .md file" "README.md"
-assert_skipped "agents .md file" "agents/eloso-deployer.md"
+assert_skipped "agents .md file" "agents/iva-deployer.md"
 assert_skipped "docs .md file" "docs/google-calendar-setup.md"
 assert_skipped "nested .md file" ".claude/agents/functional-engineer.md"
 assert_skipped ".mdx file" "docs/guide.mdx"

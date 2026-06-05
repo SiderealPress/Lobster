@@ -456,7 +456,7 @@ def _is_authorized_internal_secret(request: Request) -> bool:
 async def enrich_contact_endpoint(scope, receive, send):
     """POST /enrich_contact — spawn single-contact enrichment pipeline.
 
-    Called by eloso-bisque's /api/contacts/[id]/enrich route (production path).
+    Called by the bisque /api/contacts/[id]/enrich route (production path).
     Spawns single_contact_enrichment.py as a detached subprocess, returns
     immediately with the run_id.
 
@@ -578,7 +578,7 @@ async def enrich_contact_endpoint(scope, receive, send):
 async def enrichment_status_endpoint(scope, receive, send):
     """GET /enrichment_status?run_id=xxx — read run manifest.
 
-    Called by eloso-bisque's /api/contacts/[id]/enrich/status route.
+    Called by the bisque /api/contacts/[id]/enrich/status route.
     Reads ~/lobster-workspace/enrichment-runs/{run_id}.json and returns it.
 
     Auth: X-Lobster-Secret header.

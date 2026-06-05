@@ -1,7 +1,7 @@
 """
 Enrich a single Kissinger contact.
 
-Called by the eloso-bisque API route POST /api/contacts/[id]/enrich.
+Called by the bisque API route POST /api/contacts/[id]/enrich.
 Fetches the contact's entity from Kissinger, discovers new data from
 available sources, and writes enriched fields back with full provenance.
 

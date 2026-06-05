@@ -1,6 +1,6 @@
 # Prospecting Ontology
 
-This directory contains the canonical classification system for Eloso prospect
+This directory contains the canonical classification system for prospect
 entities in Kissinger.
 
 ## Files
@@ -23,7 +23,7 @@ entities in Kissinger.
 
 ### ICP Verticals
 
-Eloso targets: `aerospace`, `defense`, `heavy_equipment`, `contract_manufacturing`,
+Target verticals: `aerospace`, `defense`, `heavy_equipment`, `contract_manufacturing`,
 `capital_goods`, `rail`, `chemicals`, `ev`, `building_products`
 
 ### Size Bands

@@ -1,1 +1,1 @@
-"""Contact scoring package for Eloso CRM."""
+"""Contact scoring package for Lobster CRM."""
