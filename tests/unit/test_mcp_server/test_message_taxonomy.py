@@ -93,7 +93,7 @@ class TestTaxonomyConstants:
     def test_required_sources_present(self):
         """All known message sources must be in INBOX_MESSAGE_SOURCES."""
         from message_types import INBOX_MESSAGE_SOURCES
-        required = {"telegram", "slack", "sms", "signal", "whatsapp", "bisque", "system"}
+        required = {"telegram", "slack", "sms", "signal", "whatsapp", "bisque", "system", "gmail"}
         missing = required - INBOX_MESSAGE_SOURCES
         assert not missing, f"Required sources missing: {missing}"
 

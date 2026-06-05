@@ -920,9 +920,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--threshold-minutes",
         type=float,
-        default=30.0,
+        default=90.0,
         metavar="N",
-        help="Age in minutes before a running agent is considered stale (default: 30)",
+        help="Age in minutes before a running agent is considered stale (default: 90)",
     )
     parser.add_argument(
         "--output-file-threshold-minutes",

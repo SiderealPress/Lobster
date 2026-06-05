@@ -199,6 +199,35 @@
       "api_docs_url": "https://hunter.io/api-documentation"
     },
     {
+      "source_id": "crustdata",
+      "display_name": "Crustdata",
+      "api_key_env": "CRUSTDATA_API_KEY",
+      "available": false,
+      "goals": ["work_history", "connections"],
+      "goal_scores": {
+        "org_chart": 0.60,
+        "work_history": 0.82,
+        "connections": 0.55
+      },
+      "rate_limits": {
+        "requests_per_minute": 15,
+        "requests_per_day": 900
+      },
+      "cost_per_call": 0.01,
+      "cost_tier": "paid",
+      "data_freshness_days": 30,
+      "requires_company": false,
+      "requires_person": true,
+      "output_fields": [
+        "name", "title", "org", "headline", "email",
+        "linkedin_url", "phone", "city", "country",
+        "past_companies", "education", "skills",
+        "personal_email", "crustdata_id"
+      ],
+      "notes": "Direct REST API (no webhook model needed — unlike Clay). Auth: Bearer token. Self-serve endpoints: /person/enrich (1–7 credits/record), /person/search (0.03/result), /company/identify (free). Live endpoints require enterprise. 1B+ person profiles. Replaces Clay for work_history person enrichment. Lookup strategy: LinkedIn URL (best) → business email → name+company. Rate limit: 15 req/min default. Docs: https://docs.crustdata.com",
+      "api_docs_url": "https://docs.crustdata.com/general/introduction"
+    },
+    {
       "source_id": "clay",
       "display_name": "Clay",
       "api_key_env": "CLAY_API_KEY",
@@ -451,7 +480,7 @@
   },
   "source_selection_strategy": {
     "org_chart": ["zoominfo", "apollo", "diffbot", "clay", "cognism", "linkedin_serp", "rocketreach", "lusha", "crunchbase", "clearbit", "hunter", "company_website", "google_serp_free"],
-    "work_history": ["people_data_labs", "apollo", "linkedin_serp", "clay", "rocketreach", "surfe", "diffbot", "cognism", "lusha", "hunter", "kissinger_graph"],
-    "connections": ["kissinger_graph", "apollo", "surfe", "people_data_labs", "diffbot", "linkedin_serp", "clay", "crunchbase"]
+    "work_history": ["people_data_labs", "apollo", "linkedin_serp", "crustdata", "clay", "rocketreach", "surfe", "diffbot", "cognism", "lusha", "hunter", "kissinger_graph"],
+    "connections": ["kissinger_graph", "apollo", "surfe", "people_data_labs", "diffbot", "linkedin_serp", "crustdata", "clay", "crunchbase"]
   }
 }

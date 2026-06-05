@@ -68,6 +68,8 @@ INSTALL_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
 WORKSPACE_DIR="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
 PROJECTS_DIR="${LOBSTER_PROJECTS:-$WORKSPACE_DIR/projects}"
 MESSAGES_DIR="${LOBSTER_MESSAGES:-$HOME/messages}"
+CLAUDE_SETTINGS_DIR="$HOME/.claude"
+CLAUDE_SETTINGS="$CLAUDE_SETTINGS_DIR/settings.json"
 GITHUB_REPO="SiderealPress/lobster"
 GITHUB_API="https://api.github.com/repos/$GITHUB_REPO"
 
@@ -148,33 +150,13 @@ USER_CONFIG_DIR="${LOBSTER_USER_CONFIG:-$HOME/lobster-user-config}"
 
 #===============================================================================
 # Template Processing
+#
+# generate_from_template() is sourced from scripts/lib/template.sh, which is
+# the single canonical implementation shared by install.sh, update-lobster.sh,
+# and upgrade.sh.  The source call is deferred to the "Generate Service Files"
+# step (after the repo is cloned) where the function is first needed.
+# See: scripts/lib/template.sh
 #===============================================================================
-
-# Generate a file from a template by substituting {{VARIABLE}} placeholders
-# Arguments:
-#   $1 - template file path
-#   $2 - output file path
-generate_from_template() {
-    local template="$1"
-    local output="$2"
-
-    if [ ! -f "$template" ]; then
-        error "Template not found: $template"
-        return 1
-    fi
-
-    sed -e "s|{{USER}}|${LOBSTER_USER}|g" \
-        -e "s|{{GROUP}}|${LOBSTER_GROUP}|g" \
-        -e "s|{{HOME}}|${LOBSTER_HOME}|g" \
-        -e "s|{{INSTALL_DIR}}|${INSTALL_DIR}|g" \
-        -e "s|{{WORKSPACE_DIR}}|${WORKSPACE_DIR}|g" \
-        -e "s|{{MESSAGES_DIR}}|${MESSAGES_DIR}|g" \
-        -e "s|{{CONFIG_DIR}}|${CONFIG_DIR}|g" \
-        -e "s|{{USER_CONFIG_DIR}}|${USER_CONFIG_DIR}|g" \
-        "$template" > "$output"
-
-    success "Generated: $output"
-}
 
 #===============================================================================
 # Config File Helpers
@@ -242,7 +224,7 @@ apply_private_overlay() {
     step "Applying private configuration overlay from: $config_dir"
 
     # Copy config.env if exists
-    if [ -f "$config_dir/config.env" ]; then
+    if [ -f "$config_dir/config.env" ] && [ "$(realpath "$config_dir/config.env")" != "$(realpath "$CONFIG_DIR/config.env" 2>/dev/null)" ]; then
         cp "$config_dir/config.env" "$CONFIG_DIR/config.env"
         success "Applied: config.env"
     fi
@@ -289,7 +271,427 @@ apply_private_overlay() {
 }
 
 #===============================================================================
-# Hooks
+# Claude Code Settings / Hooks Setup
+#
+# setup_claude_hooks() writes settings.json with all hooks and permissions.
+# Called from both the full install path and --container-setup so the image
+# is self-contained (no host .claude bind-mount needed).
+#===============================================================================
+
+setup_claude_hooks() {
+    # Prefer the global CLAUDE_SETTINGS / CLAUDE_SETTINGS_DIR (defined near
+    # the top of this script) so the ~25 references to $CLAUDE_SETTINGS in
+    # later code resolve correctly under `set -u`. The local aliases below
+    # preserve the original variable names used inside this function so
+    # downstream readers don't have to re-grok the function logic.
+    local _settings_dir="$CLAUDE_SETTINGS_DIR"
+    local _settings="$CLAUDE_SETTINGS"
+    mkdir -p "$_settings_dir"
+
+    if [ ! -f "$_settings" ]; then
+        # Create a minimal settings.json scaffold; all hooks are added idempotently below.
+        cat > "$_settings" << 'HOOKEOF'
+{
+  "hooks": {}
+}
+HOOKEOF
+        success "Claude Code settings.json created"
+    fi
+
+    # Permissions bypass — ensures --dangerously-skip-permissions stays effective after updates.
+    if jq -e '.permissions.defaultMode != "bypassPermissions"' "$_settings" > /dev/null 2>&1; then
+        jq '. + {"skipDangerousModePermissionPrompt": true, "permissions": {"defaultMode": "bypassPermissions"}}' \
+            "$_settings" > "$_settings.tmp" && mv "$_settings.tmp" "$_settings"
+        success "Claude Code permissions bypass configured"
+    else
+        info "Claude Code permissions bypass already configured"
+    fi
+
+    local _tmp
+
+    # ── PreToolUse ──────────────────────────────────────────────────────────────
+
+    # Block writes to .claude/memory/ (no-auto-memory)
+    chmod +x "$INSTALL_DIR/hooks/no-auto-memory.py" 2>/dev/null || true
+    if ! jq -e '.hooks.PreToolUse[]? | select(.matcher == "Write|Edit")' "$_settings" > /dev/null 2>&1; then
+        _tmp=$(mktemp)
+        jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+            "matcher": "Write|Edit",
+            "hooks": [{"type": "command", "command": "python3 '"$INSTALL_DIR"'/hooks/no-auto-memory.py", "timeout": 5}]
+        }]' "$_settings" > "$_tmp" && mv "$_tmp" "$_settings"
+        success "no-auto-memory hook installed"
+    else
+        info "no-auto-memory hook already configured"
+    fi
+
+    # Enforce clickable links (link-checker)
+    chmod +x "$INSTALL_DIR/hooks/link-checker.py" 2>/dev/null || true
+    if ! jq -e '.hooks.PreToolUse[]? | select(.matcher == "mcp__lobster-inbox__send_reply")' "$_settings" > /dev/null 2>&1; then
+        _tmp=$(mktemp)
+        jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+            "matcher": "mcp__lobster-inbox__send_reply",
+            "hooks": [{"type": "command", "command": "python3 '"$INSTALL_DIR"'/hooks/link-checker.py", "timeout": 5}]
+        }]' "$_settings" > "$_tmp" && mv "$_tmp" "$_settings"
+        success "link-checker hook installed"
+    else
+        info "link-checker hook already configured"
+    fi
+
+    # Require subagent_type on Agent calls
+    chmod +x "$INSTALL_DIR/hooks/require-subagent-type.py" 2>/dev/null || true
+    if ! jq -e '.hooks.PreToolUse[]? | select(.matcher == "Agent")' "$_settings" > /dev/null 2>&1; then
+        _tmp=$(mktemp)
+        jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+            "matcher": "Agent",
+            "hooks": [{"type": "command", "command": "python3 '"$INSTALL_DIR"'/hooks/require-subagent-type.py", "timeout": 5}]
+        }]' "$_settings" > "$_tmp" && mv "$_tmp" "$_settings"
+        success "require-subagent-type hook installed"
+    else
+        info "require-subagent-type hook already configured"
+    fi
+
+    # Require run_in_background on Agent calls
+    chmod +x "$INSTALL_DIR/hooks/require-background-agent.py" 2>/dev/null || true
+    if ! jq -e '.hooks.PreToolUse[]? | select(.hooks[]?.command | test("require-background-agent"))' "$_settings" > /dev/null 2>&1; then
+        _tmp=$(mktemp)
+        jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+            "matcher": "Agent",
+            "hooks": [{"type": "command", "command": "python3 '"$INSTALL_DIR"'/hooks/require-background-agent.py", "timeout": 5}]
+        }]' "$_settings" > "$_tmp" && mv "$_tmp" "$_settings"
+        success "require-background-agent hook installed"
+    else
+        info "require-background-agent hook already configured"
+    fi
+
+    # Require task_id in Agent prompt
+    chmod +x "$INSTALL_DIR/hooks/require-task-id-in-prompt.py" 2>/dev/null || true
+    if ! jq -e '.hooks.PreToolUse[]? | select(.hooks[]?.command | test("require-task-id-in-prompt"))' "$_settings" > /dev/null 2>&1; then
+        _tmp=$(mktemp)
+        jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+            "matcher": "Agent",
+            "hooks": [{"type": "command", "command": "python3 '"$INSTALL_DIR"'/hooks/require-task-id-in-prompt.py", "timeout": 5}]
+        }]' "$_settings" > "$_tmp" && mv "$_tmp" "$_settings"
+        success "require-task-id-in-prompt hook installed"
+    else
+        info "require-task-id-in-prompt hook already configured"
+    fi
+
+    # Warn on inline WebFetch/WebSearch (dispatcher-inline-tool-guard)
+    chmod +x "$INSTALL_DIR/hooks/dispatcher-inline-tool-guard.py" 2>/dev/null || true
+    if ! jq -e '.hooks.PreToolUse[]? | select(.hooks[]?.command | test("dispatcher-inline-tool-guard"))' "$_settings" > /dev/null 2>&1; then
+        _tmp=$(mktemp)
+        jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+            "matcher": "WebFetch|WebSearch",
+            "hooks": [{"type": "command", "command": "python3 '"$INSTALL_DIR"'/hooks/dispatcher-inline-tool-guard.py", "timeout": 5}]
+        }]' "$_settings" > "$_tmp" && mv "$_tmp" "$_settings"
+        success "dispatcher-inline-tool-guard hook installed"
+    else
+        info "dispatcher-inline-tool-guard hook already configured"
+    fi
+
+    # Protect system files from writes (system-file-protect)
+    chmod +x "$INSTALL_DIR/hooks/system-file-protect.py" 2>/dev/null || true
+    if ! jq -e '.hooks.PreToolUse[]? | select(.hooks[]?.command | contains("system-file-protect"))' "$_settings" > /dev/null 2>&1; then
+        _tmp=$(mktemp)
+        jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+            "matcher": "Edit|Write|NotebookEdit",
+            "hooks": [{"type": "command", "command": "python3 '"$INSTALL_DIR"'/hooks/system-file-protect.py", "timeout": 5}]
+        }]' "$_settings" > "$_tmp" && mv "$_tmp" "$_settings"
+        success "system-file-protect hook installed"
+    else
+        info "system-file-protect hook already configured"
+    fi
+
+    # Scan outgoing messages/Bash calls for secrets
+    chmod +x "$INSTALL_DIR/hooks/secret-scanner.py" 2>/dev/null || true
+    if ! jq -e '.hooks.PreToolUse[]? | select(.hooks[]?.command | test("secret-scanner"))' "$_settings" > /dev/null 2>&1; then
+        _tmp=$(mktemp)
+        jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+            "matcher": "mcp__lobster-inbox__send_reply|Bash",
+            "hooks": [{"type": "command", "command": "python3 '"$INSTALL_DIR"'/hooks/secret-scanner.py", "timeout": 5}]
+        }]' "$_settings" > "$_tmp" && mv "$_tmp" "$_settings"
+        success "secret-scanner hook installed"
+    else
+        info "secret-scanner hook already configured"
+    fi
+
+    # Block `claude -p` inline spawns
+    chmod +x "$INSTALL_DIR/hooks/block-claude-p.py" 2>/dev/null || true
+    if ! jq -e '.hooks.PreToolUse[]? | select(.hooks[]?.command | contains("block-claude-p"))' "$_settings" > /dev/null 2>&1; then
+        _tmp=$(mktemp)
+        jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+            "matcher": "Bash",
+            "hooks": [{"type": "command", "command": "python3 '"$INSTALL_DIR"'/hooks/block-claude-p.py", "timeout": 5}]
+        }]' "$_settings" > "$_tmp" && mv "$_tmp" "$_settings"
+        success "block-claude-p hook installed"
+    else
+        info "block-claude-p hook already configured"
+    fi
+
+    # Enforce task_id on register_agent calls
+    chmod +x "$INSTALL_DIR/hooks/require-register-agent-task-id.py" 2>/dev/null || true
+    if ! jq -e '.hooks.PreToolUse[]? | select(.hooks[]?.command | contains("require-register-agent-task-id"))' "$_settings" > /dev/null 2>&1; then
+        _tmp=$(mktemp)
+        jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+            "matcher": "mcp__lobster-inbox__register_agent",
+            "hooks": [{"type": "command", "command": "python3 '"$INSTALL_DIR"'/hooks/require-register-agent-task-id.py", "timeout": 5}]
+        }]' "$_settings" > "$_tmp" && mv "$_tmp" "$_settings"
+        success "require-register-agent-task-id hook installed"
+    else
+        info "require-register-agent-task-id hook already configured"
+    fi
+
+    # Pre-tool heartbeat (narrows inference-gap detection window)
+    chmod +x "$INSTALL_DIR/hooks/pre-tool-heartbeat.py" 2>/dev/null || true
+    if ! jq -e '.hooks.PreToolUse[]? | select(.hooks[]?.command | contains("pre-tool-heartbeat"))' "$_settings" > /dev/null 2>&1; then
+        _tmp=$(mktemp)
+        jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+            "matcher": "",
+            "hooks": [{"type": "command", "command": "python3 '"$INSTALL_DIR"'/hooks/pre-tool-heartbeat.py", "timeout": 5}]
+        }]' "$_settings" > "$_tmp" && mv "$_tmp" "$_settings"
+        success "pre-tool-heartbeat hook installed"
+    else
+        info "pre-tool-heartbeat hook already configured"
+    fi
+
+    # Record dispatcher state before wait_for_messages / mark_processing
+    chmod +x "$INSTALL_DIR/hooks/dispatcher-state-pretool.py" 2>/dev/null || true
+    if ! jq -e '.hooks.PreToolUse[]? | select(.hooks[]?.command | contains("dispatcher-state-pretool"))' "$_settings" > /dev/null 2>&1; then
+        _tmp=$(mktemp)
+        jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+            "matcher": "mcp__lobster-inbox__wait_for_messages|mcp__lobster-inbox__mark_processing",
+            "hooks": [{"type": "command", "command": "python3 '"$INSTALL_DIR"'/hooks/dispatcher-state-pretool.py", "timeout": 5}]
+        }]' "$_settings" > "$_tmp" && mv "$_tmp" "$_settings"
+        success "dispatcher-state-pretool hook installed"
+    else
+        info "dispatcher-state-pretool hook already configured"
+    fi
+
+    # Block tool use after compaction without context reload (post-compact-gate)
+    chmod +x "$INSTALL_DIR/hooks/post-compact-gate.py" 2>/dev/null || true
+    if ! jq -e '.hooks.PreToolUse[]? | select(.hooks[]?.command | test("post-compact-gate"))' "$_settings" > /dev/null 2>&1; then
+        _tmp=$(mktemp)
+        jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+            "matcher": "",
+            "hooks": [{"type": "command", "command": "test ! -f '"$MESSAGES_DIR"'/config/compact-pending || python3 '"$INSTALL_DIR"'/hooks/post-compact-gate.py", "timeout": 5}]
+        }]' "$_settings" > "$_tmp" && mv "$_tmp" "$_settings"
+        success "post-compact-gate hook installed (shell wrapper)"
+    else
+        info "post-compact-gate hook already configured"
+    fi
+
+    # Gate tool calls while compact-catchup is in-flight
+    chmod +x "$INSTALL_DIR/hooks/catchup-gate.py" 2>/dev/null || true
+    if ! jq -e '.hooks.PreToolUse[]? | select(.hooks[]?.command | test("catchup-gate"))' "$_settings" > /dev/null 2>&1; then
+        _tmp=$(mktemp)
+        jq --arg cmd "python3 $INSTALL_DIR/hooks/catchup-gate.py" \
+           '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+            "matcher": "",
+            "hooks": [{"type": "command", "command": $cmd, "timeout": 5}]
+        }]' "$_settings" > "$_tmp" && mv "$_tmp" "$_settings"
+        success "catchup-gate hook installed"
+    else
+        info "catchup-gate hook already configured"
+    fi
+
+    # ── PostToolUse ─────────────────────────────────────────────────────────────
+
+    # Restore execute bit after Edit/Write
+    chmod +x "$INSTALL_DIR/hooks/restore-exec-bit.py" 2>/dev/null || true
+    if ! jq -e '.hooks.PostToolUse[]? | select(.matcher == "Edit|Write")' "$_settings" > /dev/null 2>&1; then
+        _tmp=$(mktemp)
+        jq '.hooks.PostToolUse = (.hooks.PostToolUse // []) + [{
+            "matcher": "Edit|Write",
+            "hooks": [{"type": "command", "command": "python3 '"$INSTALL_DIR"'/hooks/restore-exec-bit.py", "timeout": 5}]
+        }]' "$_settings" > "$_tmp" && mv "$_tmp" "$_settings"
+        success "restore-exec-bit hook installed"
+    else
+        info "restore-exec-bit hook already configured"
+    fi
+
+    # Auto-register Agent spawns in agent_sessions.db
+    chmod +x "$INSTALL_DIR/hooks/auto-register-agent.py" 2>/dev/null || true
+    if ! jq -e '.hooks.PostToolUse[]? | select(.hooks[]?.command | test("auto-register-agent"))' "$_settings" > /dev/null 2>&1; then
+        _tmp=$(mktemp)
+        jq '.hooks.PostToolUse = (.hooks.PostToolUse // []) + [{
+            "matcher": "Agent",
+            "hooks": [{"type": "command", "command": "python3 '"$INSTALL_DIR"'/hooks/auto-register-agent.py", "timeout": 10}]
+        }]' "$_settings" > "$_tmp" && mv "$_tmp" "$_settings"
+        success "auto-register-agent hook installed"
+    else
+        info "auto-register-agent hook already configured"
+    fi
+
+    # Monitor context window usage (context-monitor)
+    # matcher includes Bash so token-heavy shell output is also tracked.
+    chmod +x "$INSTALL_DIR/hooks/context-monitor.py" 2>/dev/null || true
+    if ! jq -e '.hooks.PostToolUse[]? | select(.hooks[]?.command | contains("context-monitor"))' "$_settings" > /dev/null 2>&1; then
+        _tmp=$(mktemp)
+        jq '.hooks.PostToolUse = (.hooks.PostToolUse // []) + [{
+            "matcher": "Bash|mcp__lobster-inbox__.*|Agent",
+            "hooks": [{"type": "command", "command": "python3 '"$INSTALL_DIR"'/hooks/context-monitor.py", "timeout": 5}]
+        }]' "$_settings" > "$_tmp" && mv "$_tmp" "$_settings"
+        success "context-monitor hook installed (Bash|mcp__lobster-inbox__.*|Agent)"
+    else
+        info "context-monitor hook already configured"
+    fi
+
+    # Record dispatcher state after mark_processed
+    chmod +x "$INSTALL_DIR/hooks/dispatcher-state-posttool.py" 2>/dev/null || true
+    if ! jq -e '.hooks.PostToolUse[]? | select(.hooks[]?.command | contains("dispatcher-state-posttool"))' "$_settings" > /dev/null 2>&1; then
+        _tmp=$(mktemp)
+        jq '.hooks.PostToolUse = (.hooks.PostToolUse // []) + [{
+            "matcher": "mcp__lobster-inbox__mark_processed",
+            "hooks": [{"type": "command", "command": "python3 '"$INSTALL_DIR"'/hooks/dispatcher-state-posttool.py", "timeout": 5}]
+        }]' "$_settings" > "$_tmp" && mv "$_tmp" "$_settings"
+        success "dispatcher-state-posttool hook installed"
+    else
+        info "dispatcher-state-posttool hook already configured"
+    fi
+
+    # Thinking heartbeat — proves the dispatcher is alive during long reasoning
+    chmod +x "$INSTALL_DIR/hooks/thinking-heartbeat.py" 2>/dev/null || true
+    if ! jq -e '.hooks.PostToolUse[]? | select(.hooks[]?.command | contains("thinking-heartbeat"))' "$_settings" > /dev/null 2>&1; then
+        _tmp=$(mktemp)
+        jq '.hooks.PostToolUse = (.hooks.PostToolUse // []) + [{
+            "matcher": "",
+            "hooks": [{"type": "command", "command": "python3 '"$INSTALL_DIR"'/hooks/thinking-heartbeat.py", "timeout": 5}]
+        }]' "$_settings" > "$_tmp" && mv "$_tmp" "$_settings"
+        success "thinking-heartbeat hook installed"
+    else
+        info "thinking-heartbeat hook already configured"
+    fi
+
+    # ── SessionStart ────────────────────────────────────────────────────────────
+
+    # Dispatcher detection uses the startup flag written by claude-persistent.sh (issue #1908);
+    # write-dispatcher-session-id.py hook is no longer needed and has been removed.
+
+    # Inject bootup context on all fresh sessions
+    chmod +x "$INSTALL_DIR/hooks/inject-bootup-context.py" 2>/dev/null || true
+    if ! jq -e '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("inject-bootup-context")) | select(.matcher == "")' "$_settings" > /dev/null 2>&1; then
+        _tmp=$(mktemp)
+        jq '.hooks.SessionStart = (.hooks.SessionStart // []) + [{
+            "matcher": "",
+            "hooks": [{"type": "command", "command": "python3 '"$INSTALL_DIR"'/hooks/inject-bootup-context.py", "timeout": 10}]
+        }]' "$_settings" > "$_tmp" && mv "$_tmp" "$_settings"
+        success "inject-bootup-context hook installed (all sessions)"
+    else
+        info "inject-bootup-context hook already configured (all sessions)"
+    fi
+
+    # Set compact flag on context compaction (on-compact)
+    chmod +x "$INSTALL_DIR/hooks/on-compact.py" 2>/dev/null || true
+    if ! jq -e '.hooks.SessionStart[]? | select(.matcher == "compact")' "$_settings" > /dev/null 2>&1; then
+        _tmp=$(mktemp)
+        jq '.hooks.SessionStart = (.hooks.SessionStart // []) + [{
+            "matcher": "compact",
+            "hooks": [{"type": "command", "command": "python3 '"$INSTALL_DIR"'/hooks/on-compact.py", "timeout": 30}]
+        }]' "$_settings" > "$_tmp" && mv "$_tmp" "$_settings"
+        success "on-compact hook installed"
+    else
+        info "on-compact hook already configured"
+    fi
+
+    # Re-inject bootup context after compaction
+    if ! jq -e '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("inject-bootup-context")) | select(.matcher == "compact")' "$_settings" > /dev/null 2>&1; then
+        _tmp=$(mktemp)
+        jq '.hooks.SessionStart = (.hooks.SessionStart // []) + [{
+            "matcher": "compact",
+            "hooks": [{"type": "command", "command": "python3 '"$INSTALL_DIR"'/hooks/inject-bootup-context.py", "timeout": 10}]
+        }]' "$_settings" > "$_tmp" && mv "$_tmp" "$_settings"
+        success "inject-bootup-context hook installed (compact sessions)"
+    else
+        info "inject-bootup-context hook already configured (compact sessions)"
+    fi
+
+    # Inject sys.debug.bootup.md when LOBSTER_DEBUG=true
+    chmod +x "$INSTALL_DIR/hooks/inject-debug-bootup.py" 2>/dev/null || true
+    if ! jq -e '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("inject-debug-bootup"))' "$_settings" > /dev/null 2>&1; then
+        _tmp=$(mktemp)
+        jq '.hooks.SessionStart = (.hooks.SessionStart // []) + [{
+            "matcher": "",
+            "hooks": [{"type": "command", "command": "python3 '"$INSTALL_DIR"'/hooks/inject-debug-bootup.py", "timeout": 5}]
+        }]' "$_settings" > "$_tmp" && mv "$_tmp" "$_settings"
+        success "inject-debug-bootup hook installed"
+    else
+        info "inject-debug-bootup hook already configured"
+    fi
+
+    # Mark stale agent sessions as failed on fresh restart
+    chmod +x "$INSTALL_DIR/hooks/on-fresh-start.py" 2>/dev/null || true
+    if ! jq -e '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("on-fresh-start"))' "$_settings" > /dev/null 2>&1; then
+        _tmp=$(mktemp)
+        jq '.hooks.SessionStart = (.hooks.SessionStart // []) + [{
+            "matcher": "",
+            "hooks": [{"type": "command", "command": "python3 '"$INSTALL_DIR"'/hooks/on-fresh-start.py", "timeout": 30}]
+        }]' "$_settings" > "$_tmp" && mv "$_tmp" "$_settings"
+        success "on-fresh-start hook installed"
+    else
+        info "on-fresh-start hook already configured"
+    fi
+
+    # ── Stop ────────────────────────────────────────────────────────────────────
+
+    # Enforce wait_for_messages in dispatcher sessions (require-wait-for-messages)
+    chmod +x "$INSTALL_DIR/hooks/require-wait-for-messages.py" 2>/dev/null || true
+    if ! jq -e '.hooks.Stop[]? | select(.hooks[]?.command | contains("require-wait-for-messages"))' "$_settings" > /dev/null 2>&1; then
+        _tmp=$(mktemp)
+        jq '.hooks.Stop = (.hooks.Stop // []) + [{
+            "matcher": "",
+            "hooks": [{"type": "command", "command": "python3 '"$INSTALL_DIR"'/hooks/require-wait-for-messages.py", "timeout": 10}]
+        }]' "$_settings" > "$_tmp" && mv "$_tmp" "$_settings"
+        success "require-wait-for-messages Stop hook installed"
+    else
+        info "require-wait-for-messages Stop hook already configured"
+    fi
+
+    # Record dispatcher state on Stop
+    chmod +x "$INSTALL_DIR/hooks/dispatcher-state-stop.py" 2>/dev/null || true
+    if ! jq -e '.hooks.Stop[]? | select(.hooks[]?.command | contains("dispatcher-state-stop"))' "$_settings" > /dev/null 2>&1; then
+        _tmp=$(mktemp)
+        jq '.hooks.Stop = (.hooks.Stop // []) + [{
+            "matcher": "",
+            "hooks": [{"type": "command", "command": "python3 '"$INSTALL_DIR"'/hooks/dispatcher-state-stop.py", "timeout": 5}]
+        }]' "$_settings" > "$_tmp" && mv "$_tmp" "$_settings"
+        success "dispatcher-state-stop hook installed"
+    else
+        info "dispatcher-state-stop hook already configured"
+    fi
+
+    # ── SubagentStop ────────────────────────────────────────────────────────────
+
+    # Enforce write_result in subagent sessions
+    chmod +x "$INSTALL_DIR/hooks/require-write-result.py" 2>/dev/null || true
+    if ! jq -e '.hooks.SubagentStop[]? | select(.hooks[]?.command | contains("require-write-result"))' "$_settings" > /dev/null 2>&1; then
+        _tmp=$(mktemp)
+        jq '.hooks.SubagentStop = (.hooks.SubagentStop // []) + [{
+            "matcher": "",
+            "hooks": [{"type": "command", "command": "python3 '"$INSTALL_DIR"'/hooks/require-write-result.py", "timeout": 10}]
+        }]' "$_settings" > "$_tmp" && mv "$_tmp" "$_settings"
+        success "require-write-result SubagentStop hook installed"
+    else
+        info "require-write-result SubagentStop hook already configured"
+    fi
+
+    # Enforce auditor context updates in lobster-auditor sessions
+    chmod +x "$INSTALL_DIR/hooks/require-auditor-context-update.py" 2>/dev/null || true
+    if ! jq -e '.hooks.SubagentStop[]? | select(.hooks[]?.command | contains("require-auditor-context-update"))' "$_settings" > /dev/null 2>&1; then
+        _tmp=$(mktemp)
+        jq '.hooks.SubagentStop = (.hooks.SubagentStop // []) + [{
+            "matcher": "",
+            "hooks": [{"type": "command", "command": "python3 '"$INSTALL_DIR"'/hooks/require-auditor-context-update.py", "timeout": 10}]
+        }]' "$_settings" > "$_tmp" && mv "$_tmp" "$_settings"
+        success "require-auditor-context-update SubagentStop hook installed"
+    else
+        info "require-auditor-context-update SubagentStop hook already configured"
+    fi
+
+    success "Claude Code hooks configuration complete"
+}
+
+#===============================================================================
+# Hooks (private config overlay runner)
 #===============================================================================
 
 # Run a hook script from the private config directory
@@ -502,6 +904,12 @@ if [ "$CONTAINER_SETUP" = true ]; then
     make_symlink "$INSTALL_DIR/CLAUDE.md" "$WORKSPACE_DIR/CLAUDE.md"
     make_symlink "$INSTALL_DIR/.claude"   "$WORKSPACE_DIR/.claude"
     success "Claude Code discovery symlinks configured"
+
+    # Write settings.json with all hooks so the container is self-contained.
+    # This means no host .claude bind-mount is required — the image bakes in the
+    # full hook set, identical to a fresh install.
+    step "Writing Claude Code settings.json with all hooks..."
+    setup_claude_hooks
 
     success "Container setup complete."
     exit 0
@@ -759,25 +1167,13 @@ setup_swap() {
     step "Setting up ${swap_size_mb}MB swap file at $swapfile..."
 
     # Create the file.
-    # fallocate is instant but fails on BTRFS (BTRFS doesn't support preallocation
-    # for swap files). Detect BTRFS on the target filesystem and fall back to dd.
-    # Also fall back to dd if fallocate is not installed.
-    # dd status=progress requires GNU coreutils >= 8.24 and is omitted for
-    # portability across older Ubuntu LTS and Amazon Linux releases.
-    local use_dd=0
-    if ! command -v fallocate &>/dev/null; then
-        use_dd=1
-        info "fallocate not available — using dd (this may take a moment)..."
-    elif stat -f -c %T "$(dirname "$swapfile")" 2>/dev/null | grep -qi btrfs; then
-        use_dd=1
-        info "BTRFS filesystem detected — fallocate unsupported for swap, using dd (this may take a moment)..."
-    fi
-
-    if [ "$use_dd" -eq 0 ]; then
-        sudo fallocate -l "${swap_size_mb}M" "$swapfile"
-    else
-        sudo dd if=/dev/zero of="$swapfile" bs=1M count="$swap_size_mb"
-    fi
+    # Use dd unconditionally — fallocate on ext4 reserves extents in a way
+    # that `swapon` rejects with "skipping - it appears to have holes", and
+    # BTRFS doesn't support preallocation for swap files at all. dd is slower
+    # (~30s for 4GB on SSD) but produces a swap-compatible file on every FS.
+    # status=progress requires GNU coreutils >= 8.24; omitted for portability.
+    info "Allocating ${swap_size_mb}MB swap file at $swapfile (using dd; this may take a moment)..."
+    sudo dd if=/dev/zero of="$swapfile" bs=1M count="$swap_size_mb" status=none
 
     # Secure permissions (world-readable swap is a security risk)
     sudo chmod 600 "$swapfile"
@@ -1271,59 +1667,38 @@ info "  $PROJECTS_DIR - All Lobster-managed projects"
 # Global Environment Store
 #===============================================================================
 
-step "Setting up global environment store..."
+step "Setting up credential store..."
 
+# global.env was deprecated in issue #1785 (config consolidation, Option A).
+# config.env is now the single canonical file for both Lobster service config and
+# all API tokens. On new installs global.env is not created. On upgrades, migration 79
+# merges any existing global.env content into config.env and archives it.
+#
+# For backward compatibility, the variable is kept so the GITHUB_TOKEN section below
+# can source it when upgrading from a pre-#1785 install.
 GLOBAL_ENV_FILE="$CONFIG_DIR/global.env"
 
-if [ ! -f "$GLOBAL_ENV_FILE" ]; then
-    cat > "$GLOBAL_ENV_FILE" << 'GLOBALENV'
-# Lobster Global Environment Store
-# Machine-wide API tokens and credentials shared across services and tools.
-# Format: KEY=value  (no export keyword needed)
-# Use: lobster env set KEY VALUE   to add or update entries
-# Use: lobster env list             to see all stored keys
-
-# === Cloud Providers ===
-# HETZNER_API_TOKEN=
-# DO_TOKEN=
-# CLOUDFLARE_API_TOKEN=
-
-# === AI / LLM Services ===
-# ANTHROPIC_API_KEY=
-# OPENAI_API_KEY=
-
-# === Code / DevOps ===
-# GITHUB_TOKEN=
-# VERCEL_TOKEN=
-
-# === Communication Services ===
-# TWILIO_ACCOUNT_SID=
-# TWILIO_AUTH_TOKEN=
-
-# === Add your own below ===
-GLOBALENV
-    chmod 600 "$GLOBAL_ENV_FILE" || true
-    success "Global env store created: $GLOBAL_ENV_FILE"
-else
-    info "Global env store already exists: $GLOBAL_ENV_FILE"
-fi
-
-# Add shell integration: source global.env on login so tokens are available
-# to any script or CLI tool in the user's shell sessions.
+# Shell integration: source config.env (canonical) and legacy global.env (compat).
+# The config.env entry is authoritative; global.env entry is kept for installs that
+# haven't run upgrade.sh migration 79 yet.
 for _rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
-    if [ -f "$_rc" ] && ! grep -q "Lobster global env store" "$_rc"; then
-        {
-            echo ""
-            echo "# Lobster global env store"
-            echo "[ -f \"$GLOBAL_ENV_FILE\" ] && set -a && . \"$GLOBAL_ENV_FILE\" && set +a"
-        } >> "$_rc"
-        info "  Shell integration added to $_rc"
+    if [ -f "$_rc" ]; then
+        # Add config.env sourcing if not already present
+        if ! grep -q "Lobster credential store" "$_rc"; then
+            {
+                echo ""
+                echo "# Lobster credential store"
+                echo "# global.env is deprecated (issue #1785); source it first so config.env always wins"
+                echo "[ -f \"$GLOBAL_ENV_FILE\" ] && set -a && . \"$GLOBAL_ENV_FILE\" && set +a"
+                echo "[ -f \"$CONFIG_FILE\" ] && set -a && . \"$CONFIG_FILE\" && set +a"
+            } >> "$_rc"
+            info "  Shell integration added to $_rc"
+        fi
     fi
 done
 
-success "Global env store configured"
-info "  File: $GLOBAL_ENV_FILE"
-info "  Edit directly: $GLOBAL_ENV_FILE"
+success "Credential store configured"
+info "  Canonical file: $CONFIG_FILE"
 info "  (Use 'lobster env set KEY VALUE' after install to update tokens)"
 info "  See docs/GLOBAL-ENV.md for full documentation"
 
@@ -1359,8 +1734,9 @@ step "Setting up health monitoring..."
 chmod +x "$INSTALL_DIR/scripts/health-check-v3.sh" || true
 
 # Add health check to crontab (runs every 4 minutes)
+# Offset 1 (vs the */3 anchor) to avoid lcm-aligned overlap at :00.
 "$INSTALL_DIR/scripts/cron-manage.sh" add "# LOBSTER-HEALTH" \
-    "*/4 * * * * $INSTALL_DIR/scripts/health-check-v3.sh # LOBSTER-HEALTH"
+    "1-59/4 * * * * $INSTALL_DIR/scripts/health-check-v3.sh # LOBSTER-HEALTH"
 
 success "Health monitoring configured (checks every 4 minutes)"
 
@@ -1411,8 +1787,9 @@ step "Setting up ghost detector cron..."
 # agent-monitor.py runs every 5 minutes, checks for stale/dead agent sessions,
 # sends a Telegram alert if GHOST_CONFIRMED or UNREGISTERED agents are found,
 # and marks ghost sessions as failed in agent_sessions.db. No LLM involved.
+# Offset 2 (vs the */3 anchor) to avoid lcm-aligned overlap at :00.
 "$INSTALL_DIR/scripts/cron-manage.sh" add "# LOBSTER-GHOST-DETECTOR" \
-    "*/5 * * * * cd $HOME && uv run $INSTALL_DIR/scripts/agent-monitor.py --alert --mark-failed >> $HOME/lobster-workspace/logs/agent-monitor.log 2>&1 # LOBSTER-GHOST-DETECTOR"
+    "2-59/5 * * * * cd $HOME && uv run $INSTALL_DIR/scripts/agent-monitor.py --alert --mark-failed >> $HOME/lobster-workspace/logs/agent-monitor.log 2>&1 # LOBSTER-GHOST-DETECTOR"
 
 success "Ghost detector configured (runs every 5 minutes)"
 
@@ -1426,8 +1803,11 @@ step "Setting up OOM monitor cron..."
 # affecting Lobster/Claude processes, and writes an inbox message for the
 # dispatcher when new OOM kill events are detected. No LLM involved.
 # Only active when LOBSTER_DEBUG=true (the script is a no-op otherwise).
+# Offset 8 (vs the */3 anchor) to avoid lcm-aligned overlap at :00.
+# Even offset is deliberate: it makes the */4+*/10 offset parities disagree
+# on the gcd(4,10)=2 sub-lattice, so */3+*/4+*/10 never triple-fires.
 "$INSTALL_DIR/scripts/cron-manage.sh" add "# LOBSTER-OOM-CHECK" \
-    "*/10 * * * * cd $HOME && uv run $INSTALL_DIR/scripts/oom-monitor.py --since-minutes 10 >> $HOME/lobster-workspace/logs/oom-monitor.log 2>&1 # LOBSTER-OOM-CHECK"
+    "8-59/10 * * * * cd $HOME && uv run $INSTALL_DIR/scripts/oom-monitor.py --since-minutes 10 >> $HOME/lobster-workspace/logs/oom-monitor.log 2>&1 # LOBSTER-OOM-CHECK"
 
 success "OOM monitor configured (runs every 10 minutes, active only when LOBSTER_DEBUG=true)"
 
@@ -1445,79 +1825,78 @@ chmod +x "$INSTALL_DIR/scripts/cleanup-worktrees-audio.sh" || true
 
 success "Worktree + audio cleanup configured (runs daily at 04:00)"
 
+#===============================================================================
+# Prune PR Worktrees (MCP Scheduled Job)
+#===============================================================================
+
+step "Registering prune-pr-worktrees MCP scheduled job..."
+
+# prune-pr-worktrees runs daily at 03:00 UTC via a systemd timer managed by the
+# MCP create_scheduled_job infrastructure. It removes git worktrees for merged or
+# closed PRs that are at least 7 days old, logging results to prune-worktrees.log.
+_PRUNE_CMD="uv run $INSTALL_DIR/scripts/prune-pr-worktrees.py --age-days 7"
+if command -v uv &>/dev/null && [ -f "$INSTALL_DIR/scripts/prune-pr-worktrees.py" ]; then
+    if systemctl is-enabled "lobster-prune-pr-worktrees.timer" &>/dev/null; then
+        substep "prune-pr-worktrees systemd timer already enabled — skipping"
+    else
+        uv run --project "$INSTALL_DIR" python -c "
+import asyncio, sys
+sys.path.insert(0, '$INSTALL_DIR/src')
+from mcp.systemd_jobs import create_job
+result = asyncio.run(create_job(
+    name='prune-pr-worktrees',
+    schedule='*-*-* 03:00:00',
+    command='$_PRUNE_CMD',
+    description='Daily removal of stale PR git worktrees (merged/closed, age >= 7d)',
+))
+print(f'prune-pr-worktrees: {result.status}')
+" 2>/dev/null && success "prune-pr-worktrees scheduled job registered (daily at 03:00 UTC)" \
+          || warn "Could not register prune-pr-worktrees — run Migration 82 manually after install"
+    fi
+else
+    warn "prune-pr-worktrees.py not found or uv unavailable — skipping job registration"
+fi
+
+#===============================================================================
+# Inflight Reminders
+#===============================================================================
+
+step "Setting up inflight reminders cron..."
+
+# check-inflight-reminders.py runs every 3 minutes to detect stale subagent work
+# and drop reminder messages into the dispatcher inbox. No LLM involved.
+"$INSTALL_DIR/scripts/cron-manage.sh" add "# LOBSTER-INFLIGHT-REMINDERS" \
+    "*/3 * * * * uv run $INSTALL_DIR/scripts/check-inflight-reminders.py >> $HOME/lobster-workspace/logs/inflight-reminders.log 2>&1 # LOBSTER-INFLIGHT-REMINDERS"
+
+success "Inflight reminders configured (runs every 3 minutes)"
+
 # Ensure any lingering self-check cron entry is removed on fresh installs
 { crontab -l 2>/dev/null | grep -v "# LOBSTER-SELF-CHECK" | grep -v "periodic-self-check" || true; } | crontab -
 
-CLAUDE_SETTINGS_DIR="$HOME/.claude"
-CLAUDE_SETTINGS="$CLAUDE_SETTINGS_DIR/settings.json"
-mkdir -p "$CLAUDE_SETTINGS_DIR"
-
-if [ ! -f "$CLAUDE_SETTINGS" ]; then
-    # Create settings.json with PreToolUse and PostToolUse hooks
-    cat > "$CLAUDE_SETTINGS" << HOOKEOF
-{
-  "hooks": {
-    "PostToolUse": [
-      {
-        "matcher": "Edit|Write",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 $INSTALL_DIR/hooks/restore-exec-bit.py",
-            "timeout": 5
-          }
-        ]
-      }
-    ],
-    "PreToolUse": [
-      {
-        "matcher": "Write|Edit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 $INSTALL_DIR/hooks/no-auto-memory.py",
-            "timeout": 5
-          }
-        ]
-      }
-    ]
-  }
-}
-HOOKEOF
-    success "Claude Code settings created with hooks"
-fi
-
-# Add permissions bypass settings to settings.json (idempotent)
-# Ensures --dangerously-skip-permissions stays effective after Claude Code auto-updates.
-if [ -f "$CLAUDE_SETTINGS" ]; then
-    if jq -e '.permissions.defaultMode != "bypassPermissions"' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
-        jq '. + {"skipDangerousModePermissionPrompt": true, "permissions": {"defaultMode": "bypassPermissions"}}' "$CLAUDE_SETTINGS" > "$CLAUDE_SETTINGS.tmp" && mv "$CLAUDE_SETTINGS.tmp" "$CLAUDE_SETTINGS"
-        success "Claude Code permissions bypass configured"
-    else
-        info "Claude Code permissions bypass already configured"
-    fi
-fi
-
+step "Configuring Claude Code settings and hooks..."
+setup_claude_hooks
 success "Self-check cron configured (every 3min)"
 
-# Set up Claude Code PreToolUse hook to block writes to .claude/memory/
+
+# Set up Claude Code PreToolUse hook to enforce reply_to_message_id on Telegram send_reply (#1168)
+chmod +x "$INSTALL_DIR/hooks/require-reply-to-message-id.py" || true
 if [ -f "$CLAUDE_SETTINGS" ]; then
-    if ! jq -e '.hooks.PreToolUse[]? | select(.matcher == "Write|Edit")' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+    if ! jq -e '.hooks.PreToolUse[]? | select(.hooks[]?.command | test("require-reply-to-message-id"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
         TMP_SETTINGS=$(mktemp)
         jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
-            "matcher": "Write|Edit",
+            "matcher": "mcp__lobster-inbox__send_reply",
             "hooks": [{
                 "type": "command",
-                "command": "python3 '"$INSTALL_DIR"'/hooks/no-auto-memory.py",
+                "command": "python3 '"$INSTALL_DIR"'/hooks/require-reply-to-message-id.py",
                 "timeout": 5
             }]
         }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
-        success "No-auto-memory hook added to Claude Code settings"
+        success "Telegram reply_to_message_id enforcement hook installed"
     else
-        info "No-auto-memory hook already configured in Claude Code settings"
+        info "reply_to_message_id enforcement hook already configured in Claude Code settings"
     fi
 else
-    info "Skipping no-auto-memory hook (settings.json not yet created)"
+    info "Skipping reply_to_message_id enforcement hook (settings.json not yet created)"
 fi
 
 # Set up Claude Code PreToolUse hook to enforce clickable links for completed work
@@ -1737,6 +2116,29 @@ else
     info "Skipping thinking-heartbeat hook (settings.json not yet created)"
 fi
 
+# Set up Claude Code PreToolUse hook to write a pre-tool heartbeat timestamp (issue #1786).
+# Complements thinking-heartbeat.py (PostToolUse) and narrows the inference-gap detection
+# window (#1695), allowing the PostToolUse threshold to be lowered without false positives.
+chmod +x "$INSTALL_DIR/hooks/pre-tool-heartbeat.py" || true
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '.hooks.PreToolUse[]? | select(.hooks[]?.command | contains("pre-tool-heartbeat"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+            "matcher": "",
+            "hooks": [{
+                "type": "command",
+                "command": "python3 '"$INSTALL_DIR"'/hooks/pre-tool-heartbeat.py",
+                "timeout": 5
+            }]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "pre-tool-heartbeat hook installed"
+    else
+        info "pre-tool-heartbeat hook already configured in Claude Code settings"
+    fi
+else
+    info "Skipping pre-tool-heartbeat hook (settings.json not yet created)"
+fi
+
 # Set up Claude Code PreToolUse hook to block tool use after compaction without context reload.
 # Uses a shell wrapper so Python is only spawned when the sentinel file exists (~1% of calls).
 # On the 99%+ of calls where the sentinel is absent, `test ! -f ...` exits in ~1ms with no
@@ -1759,6 +2161,29 @@ if [ -f "$CLAUDE_SETTINGS" ]; then
     fi
 else
     info "Skipping post-compact-gate hook (settings.json not yet created)"
+fi
+
+# Set up Claude Code PreToolUse hook to gate tool calls while compact-catchup is in-flight.
+# Option B: queries agent_sessions.db directly — no flag file needed.
+chmod +x "$INSTALL_DIR/hooks/catchup-gate.py" || true
+if [ -f "$CLAUDE_SETTINGS" ]; then
+    if ! jq -e '.hooks.PreToolUse[]? | select(.hooks[]?.command | test("catchup-gate"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+        TMP_SETTINGS=$(mktemp)
+        jq --arg cmd "python3 $INSTALL_DIR/hooks/catchup-gate.py" \
+           '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+            "matcher": "",
+            "hooks": [{
+                "type": "command",
+                "command": $cmd,
+                "timeout": 5
+            }]
+        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+        success "catchup-gate hook installed"
+    else
+        info "catchup-gate hook already configured in Claude Code settings"
+    fi
+else
+    info "Skipping catchup-gate hook (settings.json not yet created)"
 fi
 
 # Set up Claude Code PreToolUse hook to warn when outgoing messages contain secrets
@@ -1828,13 +2253,17 @@ else
     info "Skipping inject-bootup-context hook (settings.json not yet created)"
 fi
 
-# Set up Claude Code SessionStart hook to set compact flag on context compaction
+# Set up Claude Code SessionStart hook to handle context compaction.
+# Uses matcher="" (fires on all SessionStart events) with a self-gate inside the script
+# that exits early unless the event is a compact. matcher="compact" is unreliable in
+# CC 2.1.119 (fires in ~37% of compaction events); matcher="" + self-gate is the
+# correct pattern. See issue #1947.
 chmod +x "$INSTALL_DIR/hooks/on-compact.py" || true
 if [ -f "$CLAUDE_SETTINGS" ]; then
-    if ! jq -e '.hooks.SessionStart[]? | select(.matcher == "compact")' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+    if ! jq -e '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("on-compact"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
         TMP_SETTINGS=$(mktemp)
         jq '.hooks.SessionStart = (.hooks.SessionStart // []) + [{
-            "matcher": "compact",
+            "matcher": "",
             "hooks": [{
                 "type": "command",
                 "command": "python3 '"$INSTALL_DIR"'/hooks/on-compact.py",
@@ -1848,28 +2277,10 @@ if [ -f "$CLAUDE_SETTINGS" ]; then
 else
     info "Skipping on-compact hook (settings.json not yet created)"
 fi
-
-# Set up Claude Code SessionStart hook to re-inject bootup context after compaction.
-# The compact-matcher entry ensures bootup files are injected into the fresh context
-# that follows a compaction event, just as they are on a fresh session start.
-if [ -f "$CLAUDE_SETTINGS" ]; then
-    if ! jq -e '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("inject-bootup-context")) | select(.matcher == "compact")' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
-        TMP_SETTINGS=$(mktemp)
-        jq '.hooks.SessionStart = (.hooks.SessionStart // []) + [{
-            "matcher": "compact",
-            "hooks": [{
-                "type": "command",
-                "command": "python3 '"$INSTALL_DIR"'/hooks/inject-bootup-context.py",
-                "timeout": 10
-            }]
-        }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
-        success "inject-bootup-context hook installed (compact sessions)"
-    else
-        info "inject-bootup-context hook already configured in Claude Code settings (compact sessions)"
-    fi
-else
-    info "Skipping inject-bootup-context compact hook (settings.json not yet created)"
-fi
+# Note: a separate compact-matcher inject-bootup-context entry is NOT added here.
+# The empty-matcher inject-bootup-context entry above already fires on all
+# SessionStart events including compact, so a second compact-specific entry would
+# cause double-injection on every session type.
 
 # Set up Claude Code SessionStart hook to inject sys.debug.bootup.md when LOBSTER_DEBUG=true
 chmod +x "$INSTALL_DIR/hooks/inject-debug-bootup.py" || true
@@ -2249,7 +2660,7 @@ fi
 
 step "Checking GitHub Personal Access Token..."
 
-# Load global.env if not already done so we can check for an existing token
+# Load legacy global.env if present (pre-#1785 installs store GITHUB_TOKEN there)
 if [ -f "$GLOBAL_ENV_FILE" ]; then
     set -a
     # shellcheck disable=SC1090
@@ -2269,24 +2680,28 @@ if [ -z "${GITHUB_TOKEN:-}" ] || [ "$GITHUB_TOKEN" = "your_github_pat_here" ]; t
         echo ""
         read -p "Enter your GitHub PAT (or press Enter to skip): " GH_TOKEN
         if [ -n "$GH_TOKEN" ]; then
-            # Write to global.env, replacing any existing GITHUB_TOKEN line (commented or not)
-            if grep -q "^#\{0,1\} *GITHUB_TOKEN=" "$GLOBAL_ENV_FILE" 2>/dev/null; then
-                # Use ENVIRON to avoid backslash mangling that -v causes with tokens
-                # containing backslash sequences (e.g. \n, \t in a PAT value).
+            # Write to config.env (canonical credential file after issue #1785).
+            # Also update global.env if it exists (backward compat for pre-migration installs).
+            if grep -q "^#\{0,1\} *GITHUB_TOKEN=" "$CONFIG_FILE" 2>/dev/null; then
+                GH_TOKEN="$GH_TOKEN" awk \
+                    '/^#? *GITHUB_TOKEN=/ { print "GITHUB_TOKEN=" ENVIRON["GH_TOKEN"]; next } { print }' \
+                    "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+            else
+                printf '\nGITHUB_TOKEN=%s\n' "$GH_TOKEN" >> "$CONFIG_FILE"
+            fi
+            if [ -f "$GLOBAL_ENV_FILE" ] && grep -q "^#\{0,1\} *GITHUB_TOKEN=" "$GLOBAL_ENV_FILE" 2>/dev/null; then
                 GH_TOKEN="$GH_TOKEN" awk \
                     '/^#? *GITHUB_TOKEN=/ { print "GITHUB_TOKEN=" ENVIRON["GH_TOKEN"]; next } { print }' \
                     "$GLOBAL_ENV_FILE" > "$GLOBAL_ENV_FILE.tmp" && mv "$GLOBAL_ENV_FILE.tmp" "$GLOBAL_ENV_FILE"
-            else
-                printf '\nGITHUB_TOKEN=%s\n' "$GH_TOKEN" >> "$GLOBAL_ENV_FILE"
             fi
             GITHUB_TOKEN_SET=true
-            success "GitHub token saved to $GLOBAL_ENV_FILE"
+            success "GitHub token saved to $CONFIG_FILE"
         else
-            warn "Skipped — set GITHUB_TOKEN in $GLOBAL_ENV_FILE later"
+            warn "Skipped — set GITHUB_TOKEN in $CONFIG_FILE later"
         fi
     else
         info "Skipping GitHub token prompt (non-interactive mode)"
-        info "Set GITHUB_TOKEN in $GLOBAL_ENV_FILE when ready"
+        info "Set GITHUB_TOKEN in $CONFIG_FILE when ready"
     fi
 else
     GITHUB_TOKEN_SET=true
@@ -2761,6 +3176,24 @@ success "Claude launchers ready (start-claude.sh, claude-persistent.sh, claude-w
 
 step "Generating systemd service files from templates..."
 
+# Load the shared template library (repo is now present at $INSTALL_DIR).
+# Normalize LOBSTER_* vars for the library's canonical naming convention.
+LOBSTER_INSTALL_DIR="${LOBSTER_INSTALL_DIR:-$INSTALL_DIR}"
+LOBSTER_WORKSPACE="${LOBSTER_WORKSPACE:-$WORKSPACE_DIR}"
+LOBSTER_MESSAGES="${LOBSTER_MESSAGES:-$MESSAGES_DIR}"
+LOBSTER_CONFIG_DIR="$CONFIG_DIR"
+LOBSTER_USER_CONFIG="$USER_CONFIG_DIR"
+# shellcheck source=scripts/lib/template.sh
+source "${INSTALL_DIR}/scripts/lib/template.sh"
+# Thin wrapper: delegates to _tmpl_generate_from_template and adds the
+# success() log line that install.sh uses for progress output.
+generate_from_template() {
+    local template="$1"
+    local output="$2"
+    _tmpl_generate_from_template "$template" "$output" || return 1
+    success "Generated: $output"
+}
+
 # Check that templates exist
 ROUTER_TEMPLATE="$INSTALL_DIR/services/lobster-router.service.template"
 CLAUDE_TEMPLATE="$INSTALL_DIR/services/lobster-claude.service.template"
@@ -2816,6 +3249,14 @@ if [ -f "$OBSERVABILITY_TEMPLATE" ]; then
     generate_from_template \
         "$OBSERVABILITY_TEMPLATE" \
         "$INSTALL_DIR/services/lobster-observability.service"
+fi
+
+# Generate transcription worker service if template exists
+TRANSCRIPTION_TEMPLATE="$INSTALL_DIR/services/lobster-transcription.service.template"
+if [ -f "$TRANSCRIPTION_TEMPLATE" ]; then
+    generate_from_template \
+        "$TRANSCRIPTION_TEMPLATE" \
+        "$INSTALL_DIR/services/lobster-transcription.service"
 fi
 
 #===============================================================================
@@ -3117,7 +3558,7 @@ echo ""
 echo -e "${BOLD}Directories:${NC}"
 echo "  $INSTALL_DIR        Lobster code"
 echo "  $CONFIG_DIR          Configuration"
-echo "  $CONFIG_DIR/global.env  Global API token store"
+echo "  $CONFIG_DIR/config.env  Credentials and API tokens (canonical)"
 echo "  $USER_CONFIG_DIR    User config and memory"
 echo "  $WORKSPACE_DIR      Claude workspace"
 echo "  $PROJECTS_DIR  Projects"

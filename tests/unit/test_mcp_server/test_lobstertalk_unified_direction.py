@@ -335,11 +335,11 @@ class TestSelfMessageFilter:
 
     The email-autoresponder skill logs both sides of conversations to bot-talk with
     prefixes like "[INBOUND from TELEGRAM]" or "[OUTBOUND →]". These have
-    sender == "SaharLobster" (or whatever the local identity is) and must be
+    sender == "OwnerLobster" (or whatever the local identity is) and must be
     skipped during the GET /messages receive step.
     """
 
-    LOCAL_IDENTITY = "SaharLobster"
+    LOCAL_IDENTITY = "OwnerLobster"
 
     def _make_msg(self, sender: str, content: str = "hello") -> dict:
         return {
@@ -351,7 +351,7 @@ class TestSelfMessageFilter:
 
     def test_self_messages_are_filtered_out(self):
         msgs = [
-            self._make_msg("SaharLobster", "[INBOUND from TELEGRAM] user: hello"),
+            self._make_msg("OwnerLobster", "[INBOUND from TELEGRAM] user: hello"),
             self._make_msg("AlbertLobster", "hi there"),
         ]
         result = filter_self_messages(msgs, self.LOCAL_IDENTITY)
@@ -360,8 +360,8 @@ class TestSelfMessageFilter:
 
     def test_all_self_messages_filtered(self):
         msgs = [
-            self._make_msg("SaharLobster", "[OUTBOUND →] hi"),
-            self._make_msg("SaharLobster", "[INBOUND from TELEGRAM] user: test"),
+            self._make_msg("OwnerLobster", "[OUTBOUND →] hi"),
+            self._make_msg("OwnerLobster", "[INBOUND from TELEGRAM] user: test"),
         ]
         result = filter_self_messages(msgs, self.LOCAL_IDENTITY)
         assert result == []
@@ -380,12 +380,12 @@ class TestSelfMessageFilter:
     def test_filter_is_identity_specific(self):
         """Filter only removes messages matching the exact local identity."""
         msgs = [
-            self._make_msg("SaharLobster2"),  # different identity, should pass through
-            self._make_msg("SaharLobster"),   # exact match, should be filtered
+            self._make_msg("OwnerLobster2"),  # different identity, should pass through
+            self._make_msg("OwnerLobster"),   # exact match, should be filtered
         ]
         result = filter_self_messages(msgs, self.LOCAL_IDENTITY)
         assert len(result) == 1
-        assert result[0]["sender"] == "SaharLobster2"
+        assert result[0]["sender"] == "OwnerLobster2"
 
 
 class TestLogRotation:

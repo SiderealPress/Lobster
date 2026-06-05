@@ -1750,14 +1750,29 @@ EOF
         local mcp_local_service="$LOBSTER_DIR/services/lobster-mcp-local.service"
 
         if [ -f "$mcp_local_template" ]; then
-            # Render template (reuse generate_from_template if available, else sed directly)
-            if declare -f generate_from_template >/dev/null 2>&1; then
-                generate_from_template "$mcp_local_template" "$mcp_local_service"
+            # Use the shared template library when available (it is, since we
+            # run from an existing install with the repo already cloned).
+            # Falls back to inline sed only if the lib file is somehow missing.
+            local _lib="${LOBSTER_DIR}/scripts/lib/template.sh"
+            if [ -f "$_lib" ]; then
+                # Set canonical LOBSTER_* vars the library expects
+                LOBSTER_USER="${LOBSTER_USER:-$(whoami)}"
+                LOBSTER_GROUP="${LOBSTER_GROUP:-$(id -gn)}"
+                LOBSTER_HOME="${LOBSTER_HOME:-$HOME}"
+                LOBSTER_INSTALL_DIR="$LOBSTER_DIR"
+                LOBSTER_WORKSPACE="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
+                LOBSTER_MESSAGES="${LOBSTER_MESSAGES:-$HOME/messages}"
+                LOBSTER_CONFIG_DIR="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}"
+                LOBSTER_USER_CONFIG="${LOBSTER_USER_CONFIG:-$HOME/lobster-user-config}"
+                # shellcheck source=lib/template.sh
+                source "$_lib"
+                _tmpl_generate_from_template "$mcp_local_template" "$mcp_local_service"
             else
-                # Minimal inline rendering matching install.sh variable names
-                local _user _group _config_dir _messages_dir _workspace_dir _user_config_dir
+                # Fallback: inline rendering (all 8 placeholders — keep in sync with lib)
+                local _user _group _home _config_dir _messages_dir _workspace_dir _user_config_dir
                 _user=$(whoami)
                 _group=$(id -gn)
+                _home="$HOME"
                 _config_dir="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}"
                 _messages_dir="${LOBSTER_MESSAGES:-$HOME/messages}"
                 _workspace_dir="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
@@ -1765,6 +1780,7 @@ EOF
                 sed \
                     -e "s|{{USER}}|$_user|g" \
                     -e "s|{{GROUP}}|$_group|g" \
+                    -e "s|{{HOME}}|$_home|g" \
                     -e "s|{{INSTALL_DIR}}|$LOBSTER_DIR|g" \
                     -e "s|{{CONFIG_DIR}}|$_config_dir|g" \
                     -e "s|{{MESSAGES_DIR}}|$_messages_dir|g" \
@@ -2056,7 +2072,7 @@ PYEOF
 
     # Migration 60: Register inject-bootup-context.py SessionStart hooks in settings.json
     # Adds two SessionStart entries: one empty-matcher entry for all fresh sessions
-    # (must run after write-dispatcher-session-id so role detection works), and one
+    # (must run after the launcher writes the startup flag — see issue #1908), and one
     # compact-matcher entry so bootup content is re-injected after context compaction.
     if [ -f "$CLAUDE_SETTINGS" ]; then
         chmod +x "$LOBSTER_DIR/hooks/inject-bootup-context.py" 2>/dev/null || true
@@ -2666,6 +2682,468 @@ CREATE TABLE IF NOT EXISTS dispatcher_lock (
         fi
     else
         warn "Claude settings not found at $CLAUDE_SETTINGS — skipping Migration 77"
+    fi
+
+    # Migration 78: Remove stale dispatch-job.sh LOBSTER-SCHEDULED cron entries.
+    # These three entries were already superseded by systemd timers but Migration 71
+    # left them in place on installs where the timer check was inconclusive.
+    # Two entries use invalid systemd-style cron syntax (*-*-* ...) that standard
+    # cron ignores entirely; the third (lobstertalk-ssh-watcher) fires every 6h
+    # and causes duplicate invocations alongside the timer. Remove all three
+    # unconditionally — the systemd timers are the canonical trigger.
+    _m78_jobs="lobstertalk-unified lobstertalk-ssh-watcher lobstertalk-kanban-watcher"
+    _m78_removed=""
+    for _m78_job in $_m78_jobs; do
+        if crontab -l 2>/dev/null | grep -q "dispatch-job\.sh ${_m78_job}"; then
+            { crontab -l 2>/dev/null | grep -v "dispatch-job\.sh ${_m78_job}" || true; } | crontab -
+            _m78_removed="${_m78_removed}${_m78_job} "
+            substep "Removed stale LOBSTER-SCHEDULED cron entry for ${_m78_job}"
+        fi
+    done
+    if [ -n "$_m78_removed" ]; then
+        success "Migration 78: removed cron entries for: ${_m78_removed% }"
+        migrated=$((migrated + 1))
+    fi
+
+    # Migration 79: Config consolidation (issue #1785, Option A).
+    # Two steps:
+    #   a) Merge non-comment, non-duplicate keys from global.env into config.env,
+    #      then archive global.env as global.env.bak (safe rollback).
+    #   b) Remove stale duplicate lobster/config/consolidation.conf and
+    #      lobster/config/sync-repos.json left by the original migration 0.
+    local _m79_config_env="$LOBSTER_CONFIG_DIR/config.env"
+    local _m79_global_env="$LOBSTER_CONFIG_DIR/global.env"
+
+    # Step a: merge global.env → config.env
+    if [ -f "$_m79_global_env" ] && [ ! -f "${_m79_global_env}.bak" ]; then
+        local _m79_merged=0
+        while IFS= read -r _m79_line; do
+            # Skip comments and blank lines
+            [[ "$_m79_line" =~ ^[[:space:]]*# ]] && continue
+            [[ -z "${_m79_line// }" ]] && continue
+
+            # Extract key (everything before first '=')
+            local _m79_key
+            _m79_key="${_m79_line%%=*}"
+            [ -z "$_m79_key" ] && continue
+
+            # Skip if key already exists in config.env
+            if grep -qE "^${_m79_key}=" "$_m79_config_env" 2>/dev/null; then
+                substep "  global.env: ${_m79_key} already in config.env — skipping"
+                continue
+            fi
+
+            # Append to config.env
+            echo "$_m79_line" >> "$_m79_config_env"
+            substep "  global.env: merged ${_m79_key} into config.env"
+            _m79_merged=$((_m79_merged + 1))
+        done < "$_m79_global_env"
+
+        # Archive global.env (keep as .bak for safety — delete after next stable release)
+        mv "$_m79_global_env" "${_m79_global_env}.bak"
+        substep "Archived global.env to global.env.bak ($_m79_merged keys merged into config.env)"
+        migrated=$((migrated + 1))
+    else
+        substep "global.env already migrated or absent — skipping step a"
+    fi
+
+    # Step b: remove stale duplicate files in the repo's config/ directory
+    local _m79_repo_conf="$LOBSTER_DIR/config/consolidation.conf"
+    local _m79_repo_repos="$LOBSTER_DIR/config/sync-repos.json"
+    if [ -f "$_m79_repo_conf" ]; then
+        rm -f "$_m79_repo_conf"
+        substep "Removed stale $LOBSTER_DIR/config/consolidation.conf"
+        migrated=$((migrated + 1))
+    fi
+    if [ -f "$_m79_repo_repos" ]; then
+        rm -f "$_m79_repo_repos"
+        substep "Removed stale $LOBSTER_DIR/config/sync-repos.json"
+        migrated=$((migrated + 1))
+    fi
+
+
+    # Migration 80: Disable Gmail Pub/Sub systemd timers (issue #1807).
+    # The Pub/Sub-based email pipeline (gmail-watch-renewal + awp-gmail-token-refresh)
+    # is replaced by the deterministic gmail-poll.py History API poller, which runs
+    # every 10 seconds with zero token spend on empty polls. No GCP setup required.
+    for _m80_unit in lobster-gmail-watch-renewal lobster-awp-gmail-token-refresh; do
+        if systemctl is-enabled "${_m80_unit}.timer" &>/dev/null; then
+            substep "Disabling ${_m80_unit}.timer (Pub/Sub pipeline, superseded by gmail-poll.py)..."
+            sudo systemctl disable --now "${_m80_unit}.timer" 2>/dev/null && {
+                substep "Disabled ${_m80_unit}.timer"
+                migrated=$((migrated + 1))
+            } || warn "Could not disable ${_m80_unit}.timer -- disable manually"
+        else
+            substep "${_m80_unit}.timer already disabled -- nothing to do"
+        fi
+    done
+
+    # Migration 81: Install PreToolUse heartbeat hook (issue #1786).
+    # pre-tool-heartbeat.py writes a timestamp before each tool call, complementing
+    # thinking-heartbeat.py (PostToolUse). Together they allow the health check to
+    # distinguish "tool is running (long)" from "dispatcher is frozen" without
+    # false positives, enabling the PostToolUse threshold to be lowered safely.
+    if [ -f "$CLAUDE_SETTINGS" ] && command -v jq >/dev/null 2>&1; then
+        local _m81_hook_path="$LOBSTER_DIR/hooks/pre-tool-heartbeat.py"
+        if [ -f "$_m81_hook_path" ]; then
+            chmod +x "$_m81_hook_path" 2>/dev/null || true
+            local _m81_present
+            _m81_present=$(jq -r '
+                [.hooks.PreToolUse[]?.hooks[]?.command // empty]
+                | map(select(contains("pre-tool-heartbeat")))
+                | length
+            ' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
+            if [ "${_m81_present:-0}" = "0" ] || [ "${_m81_present:-0}" = "" ]; then
+                TMP_SETTINGS=$(mktemp)
+                jq --arg cmd "python3 $LOBSTER_DIR/hooks/pre-tool-heartbeat.py" \
+                   '.hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+                    "matcher": "",
+                    "hooks": [{
+                        "type": "command",
+                        "command": $cmd,
+                        "timeout": 5
+                    }]
+                }]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+                substep "Registered pre-tool-heartbeat hook in Claude Code settings"
+                migrated=$((migrated + 1))
+            else
+                substep "pre-tool-heartbeat hook already present — skipping Migration 81"
+            fi
+        else
+            warn "pre-tool-heartbeat.py not found at $_m81_hook_path — skipping Migration 81"
+        fi
+    else
+        warn "Claude settings not found at $CLAUDE_SETTINGS or jq missing — skipping Migration 81"
+    fi
+
+    # Migration 82: Update catchup-gate.py PreToolUse hook to direct Python invocation.
+    # The old entry used a flag-file guard: `test ! -f .../catchup-pending || python3 ...`
+    # Option B (issue #1751) queries agent_sessions.db directly — no flag file needed.
+    # This migration replaces the old flag-file-guarded command with a direct call so the
+    # hook runs on every tool invocation and performs the DB check itself (fast, fail-open).
+    if [ -f "$CLAUDE_SETTINGS" ] && command -v jq >/dev/null 2>&1; then
+        local _m82_hook_path="$LOBSTER_DIR/hooks/catchup-gate.py"
+        if [ -f "$_m82_hook_path" ]; then
+            chmod +x "$_m82_hook_path" 2>/dev/null || true
+            local _m82_new_cmd="python3 $LOBSTER_DIR/hooks/catchup-gate.py"
+            # Check whether the old flag-file-guarded entry is still present
+            local _m82_old_present
+            _m82_old_present=$(jq -r '
+                [.hooks.PreToolUse[]?.hooks[]?.command // empty]
+                | map(select(contains("catchup-pending")))
+                | length
+            ' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
+            if [ "${_m82_old_present:-0}" != "0" ] && [ "${_m82_old_present:-0}" != "" ]; then
+                TMP_SETTINGS=$(mktemp)
+                # Replace the flag-file-guarded command with direct Python invocation.
+                jq --arg old_pattern "catchup-pending" \
+                   --arg new_cmd "$_m82_new_cmd" \
+                   '.hooks.PreToolUse = [
+                       .hooks.PreToolUse[]
+                       | .hooks = [
+                           .hooks[]
+                           | if (.command // "") | contains($old_pattern)
+                             then .command = $new_cmd
+                             else .
+                             end
+                         ]
+                   ]' "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+                substep "Updated catchup-gate.py hook: removed flag-file guard, now calls Python directly"
+                migrated=$((migrated + 1))
+            else
+                substep "catchup-gate.py hook already uses direct invocation — skipping Migration 82"
+            fi
+        else
+            warn "catchup-gate.py not found at $_m82_hook_path — skipping Migration 82"
+        fi
+    else
+        warn "Claude settings not found at $CLAUDE_SETTINGS or jq missing — skipping Migration 82"
+    fi
+
+    # Migration 83: Register prune-pr-worktrees MCP scheduled job (issue #1626).
+    # prune-pr-worktrees.py checks each git worktree under ~/lobster-workspace/projects/
+    # for a merged or closed PR and removes worktrees that are at least 7 days old.
+    # Runs daily at 03:00 UTC via a systemd timer managed by the MCP job infrastructure.
+    local _m83_script="$LOBSTER_DIR/scripts/prune-pr-worktrees.py"
+    local _m83_timer="lobster-prune-pr-worktrees.timer"
+    local _m83_cmd="$VENV_DIR/bin/python $LOBSTER_DIR/scripts/prune-pr-worktrees.py --age-days 7"
+    if [ -f "$_m83_script" ] && command -v uv &>/dev/null; then
+        if systemctl is-enabled "$_m83_timer" &>/dev/null; then
+            substep "prune-pr-worktrees systemd timer already enabled — skipping Migration 83"
+        else
+            uv run --project "$LOBSTER_DIR" python -c "
+import asyncio, sys
+sys.path.insert(0, '$LOBSTER_DIR/src')
+from mcp.systemd_jobs import create_job
+result = asyncio.run(create_job(
+    name='prune-pr-worktrees',
+    schedule='*-*-* 03:00:00',
+    command='$_m83_cmd',
+    description='Daily removal of stale PR git worktrees (merged/closed, age >= 7d)',
+))
+print(f'prune-pr-worktrees: {result.status}')
+" 2>/dev/null && {
+                substep "Registered prune-pr-worktrees systemd timer (daily at 03:00 UTC)"
+                migrated=$((migrated + 1))
+            } || warn "Could not register prune-pr-worktrees — try: uv run python -c \"import asyncio; from src.mcp.systemd_jobs import create_job; ...\""
+        fi
+    else
+        warn "prune-pr-worktrees.py not found at $_m83_script or uv unavailable — skipping Migration 83"
+    fi
+
+    # Migration 84: Fix User=lobster in AWP email service files (issue #1925).
+    # Applied live on the running system; this migration ensures fresh installs
+    # also get the corrected unit files.
+    # NOTE: Migration 84 was applied live by PR #1925. The actual unit-file
+    # corrections are already in place on the running host. This placeholder
+    # ensures the migration number is reserved in the sequence.
+    # (No-op: the file edits were done directly via systemctl/sed on the host.)
+
+    # Migration 85: Remove defunct Pub/Sub and AWP-pipeline systemd units.
+    # The Pub/Sub pipeline (gmail-watch-renewal, awp-gmail-token-refresh) was
+    # superseded by the deterministic gmail-poll.py poller in Migration 80.
+    # The awp-gmail-pipeline service ran awp_gmail_pipeline.py (a workspace
+    # script), doing inline classification now handled by the awp-email skill +
+    # dispatcher. All three timers are disabled; this migration stops and removes
+    # their unit files so they don't clutter the system on upgrades.
+    local _m85_units=(
+        "lobster-awp-gmail-pipeline"
+        "lobster-gmail-watch-renewal"
+        "lobster-awp-gmail-token-refresh"
+    )
+    local _m85_applied=0
+    for _m85_unit in "${_m85_units[@]}"; do
+        local _m85_service="/etc/systemd/system/${_m85_unit}.service"
+        local _m85_timer="/etc/systemd/system/${_m85_unit}.timer"
+        if [ -f "$_m85_service" ] || [ -f "$_m85_timer" ]; then
+            substep "Removing defunct unit ${_m85_unit} (Migration 85)..."
+            sudo systemctl stop "${_m85_unit}.timer" 2>/dev/null || true
+            sudo systemctl stop "${_m85_unit}.service" 2>/dev/null || true
+            sudo systemctl disable "${_m85_unit}.timer" 2>/dev/null || true
+            sudo systemctl disable "${_m85_unit}.service" 2>/dev/null || true
+            sudo rm -f "$_m85_service" "$_m85_timer" 2>/dev/null || true
+            _m85_applied=1
+        fi
+    done
+    if [ "$_m85_applied" -eq 1 ]; then
+        sudo systemctl daemon-reload 2>/dev/null || true
+        substep "Removed defunct AWP email pipeline and Pub/Sub units"
+        migrated=$((migrated + 1))
+    fi
+
+    # Migration 86: Remove write-dispatcher-session-id SessionStart hook from settings.json
+    # (issue #1908). Dispatcher detection now uses the launcher-written startup flag file
+    # instead of a UUID written by this hook. The hook file is deleted; the settings.json
+    # entry must be removed from existing installs.
+    if [ -f "$CLAUDE_SETTINGS" ] && command -v jq &>/dev/null; then
+        if jq -e '.hooks.SessionStart[]? | select(.hooks[]?.command | contains("write-dispatcher-session-id"))' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+            TMP_SETTINGS=$(mktemp)
+            jq 'del(.hooks.SessionStart[] | select(.hooks[]?.command | contains("write-dispatcher-session-id")))' \
+                "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+            substep "Removed write-dispatcher-session-id hook from settings.json (Migration 86)"
+            migrated=$((migrated + 1))
+        else
+            substep "write-dispatcher-session-id hook not found in settings.json — skipping Migration 86"
+        fi
+    else
+        substep "settings.json not found or jq unavailable — skipping Migration 86"
+    fi
+
+
+    # Migration 87: Install LOBSTER-INFLIGHT-REMINDERS cron entry (issue #1686).
+    # check-inflight-reminders.py runs every 3 minutes to detect stale subagent work
+    # and drop reminder messages into the dispatcher inbox.
+    local INFLIGHT_MARKER="# LOBSTER-INFLIGHT-REMINDERS"
+    local INFLIGHT_SCRIPT="$LOBSTER_DIR/scripts/check-inflight-reminders.py"
+    if [ -f "$INFLIGHT_SCRIPT" ]; then
+        chmod +x "$INFLIGHT_SCRIPT" 2>/dev/null || true
+        if ! crontab -l 2>/dev/null | grep -qF "$INFLIGHT_MARKER"; then
+            "$LOBSTER_DIR/scripts/cron-manage.sh" add "$INFLIGHT_MARKER" \
+                "*/3 * * * * uv run $INFLIGHT_SCRIPT >> $HOME/lobster-workspace/logs/inflight-reminders.log 2>&1 $INFLIGHT_MARKER" 2>/dev/null && {
+                substep "Added LOBSTER-INFLIGHT-REMINDERS cron entry (check-inflight-reminders.py, every 3 min)"
+                migrated=$((migrated + 1))
+            } || warn "Could not add LOBSTER-INFLIGHT-REMINDERS cron entry — check cron-manage.sh"
+        fi
+    else
+        warn "check-inflight-reminders.py not found at $INFLIGHT_SCRIPT — skipping Migration 87"
+    fi
+
+    # Migration 88: Fix on-compact.py hook matcher + add source-field self-gate (issue #1947/#1984).
+    # matcher="compact" is unreliable in CC 2.1.119 (~37% fire rate since April 17).
+    # The correct pattern is matcher="" + self-gate inside the script.
+    # The self-gate now checks data["source"] == "compact" (CC-documented primary field)
+    # with data["hook_name"] == "compact" as a fallback for older CC versions.
+    # This migration:
+    #   1. Changes the on-compact.py SessionStart entry from matcher="compact" to matcher=""
+    #   2. Removes the redundant inject-bootup-context.py compact-matcher entry
+    #      (already covered by the empty-matcher entry that fires on all session types)
+    if [ -f "$CLAUDE_SETTINGS" ] && command -v python3 &>/dev/null; then
+        local _m88_needs_fix=0
+        if python3 -c "
+import json, sys
+with open('$CLAUDE_SETTINGS') as f:
+    d = json.load(f)
+hooks = d.get('hooks', {}).get('SessionStart', [])
+for h in hooks:
+    cmd = h.get('hooks', [{}])[0].get('command', '')
+    if 'on-compact' in cmd and h.get('matcher') == 'compact':
+        sys.exit(0)  # needs fix
+sys.exit(1)  # already correct
+" 2>/dev/null; then
+            _m88_needs_fix=1
+        fi
+        if [ "$_m88_needs_fix" -eq 1 ]; then
+            substep "Fixing on-compact.py hook matcher (Migration 88)..."
+            TMP_SETTINGS=$(mktemp)
+            python3 - "$CLAUDE_SETTINGS" "$TMP_SETTINGS" << 'M88_PYEOF'
+import json, sys
+src, dst = sys.argv[1], sys.argv[2]
+with open(src) as f:
+    data = json.load(f)
+session_start = data.get('hooks', {}).get('SessionStart', [])
+updated = []
+for entry in session_start:
+    cmd = entry.get('hooks', [{}])[0].get('command', '')
+    # Change on-compact.py from matcher="compact" to matcher=""
+    if 'on-compact' in cmd and entry.get('matcher') == 'compact':
+        entry = dict(entry, matcher='')
+    # Remove the redundant inject-bootup-context.py compact-matcher entry
+    # (the empty-matcher entry already fires on all session types including compact)
+    elif 'inject-bootup-context' in cmd and entry.get('matcher') == 'compact':
+        continue
+    updated.append(entry)
+data['hooks']['SessionStart'] = updated
+with open(dst, 'w') as f:
+    json.dump(data, f, indent=2)
+    f.write('\n')
+M88_PYEOF
+            if [ $? -eq 0 ] && [ -s "$TMP_SETTINGS" ]; then
+                mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+                success "Fixed on-compact.py hook matcher (matcher='' + removed redundant compact inject-bootup-context entry)"
+                migrated=$((migrated + 1))
+            else
+                rm -f "$TMP_SETTINGS"
+                warn "Migration 88: failed to update $CLAUDE_SETTINGS"
+            fi
+        else
+            info "Migration 88: on-compact.py hook already uses matcher='' — no change needed"
+        fi
+    else
+        info "Migration 88: settings.json not found or python3 unavailable — skipping"
+    fi
+
+    # Migration 89: Fix context-monitor PostToolUse matcher (issue #1985).
+    # The matcher "Bash|mcp__lobster-inbox__|Agent" treats the middle segment as
+    # an exact tool name — no tool is named exactly "mcp__lobster-inbox__", so the
+    # hook never fired on any MCP call. The fix adds .* to match all mcp__lobster-inbox__*
+    # tools: "Bash|mcp__lobster-inbox__.*|Agent".
+    if [ -f "$CLAUDE_SETTINGS" ] && command -v jq &>/dev/null; then
+        if jq -e '.hooks.PostToolUse[]? | select(.matcher == "Bash|mcp__lobster-inbox__|Agent")' "$CLAUDE_SETTINGS" > /dev/null 2>&1; then
+            TMP_SETTINGS=$(mktemp)
+            jq '(.hooks.PostToolUse[]? | select(.matcher == "Bash|mcp__lobster-inbox__|Agent") | .matcher) = "Bash|mcp__lobster-inbox__.*|Agent"' \
+                "$CLAUDE_SETTINGS" > "$TMP_SETTINGS" && mv "$TMP_SETTINGS" "$CLAUDE_SETTINGS"
+            substep "Fixed context-monitor matcher: mcp__lobster-inbox__ → mcp__lobster-inbox__.* (Migration 89)"
+            migrated=$((migrated + 1))
+        else
+            substep "context-monitor matcher already correct or hook absent — skipping Migration 89"
+        fi
+    else
+        substep "settings.json not found or jq unavailable — skipping Migration 89"
+    fi
+
+    # Migration 90: Remove pretooluse-heartbeat.py PreToolUse hook from settings.json.
+    # hooks/pretooluse-heartbeat.py was the original PreToolUse heartbeat (issue #1439,
+    # PR #1562). It was superseded by hooks/pre-tool-heartbeat.py (issue #1786, PR #1817)
+    # which adds a dispatcher-only guard so subagent tool calls cannot falsely keep the
+    # heartbeat fresh. The old hook was never deleted from some local-dev installs where
+    # it was registered via earlier migrations; this migration removes it from settings.json
+    # on any install that still has it.
+    if [ -f "$CLAUDE_SETTINGS" ] && command -v jq &>/dev/null; then
+        local _m90_present
+        _m90_present=$(jq -r '
+            [.hooks.PreToolUse[]?.hooks[]? |
+             select((.command // "") | test("pretooluse-heartbeat\\.py"))]
+            | length' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
+
+        if [[ "${_m90_present:-0}" -gt 0 ]]; then
+            local _m90_tmp
+            _m90_tmp=$(mktemp)
+            if jq '
+                .hooks.PreToolUse = (
+                    .hooks.PreToolUse // [] |
+                    map(select(
+                        (.hooks // [] | any(.command // "" | test("pretooluse-heartbeat\\.py")))
+                        | not
+                    ))
+                )
+            ' "$CLAUDE_SETTINGS" > "$_m90_tmp" \
+                && mv "$_m90_tmp" "$CLAUDE_SETTINGS" 2>/dev/null; then
+                substep "Migration 90: removed pretooluse-heartbeat.py PreToolUse hook from settings.json"
+                migrated=$((migrated + 1))
+            else
+                rm -f "$_m90_tmp" 2>/dev/null || true
+                warn "Migration 90: could not update settings.json — jq transform failed"
+            fi
+        else
+            substep "Migration 90: pretooluse-heartbeat.py hook not present in settings.json — skipping"
+        fi
+    else
+        substep "Migration 90: settings.json or jq not found — skipping"
+    fi
+
+    # Migration 93: Clear stale context-handoff.json (issue #1995).
+    # context-handoff.json is a single-use artifact that was never cleared after
+    # being read. Existing installs may have months-old data in this file.
+    # Overwrite with {} so the next dispatcher start sees "no prior context".
+    local handoff_file="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}/data/context-handoff.json"
+    if [ -f "$handoff_file" ]; then
+        if ! $DRY_RUN; then
+            echo '{}' > "$handoff_file"
+            substep "Migration 93: cleared stale context-handoff.json at $handoff_file"
+        else
+            substep "Migration 93 (dry-run): would clear stale context-handoff.json at $handoff_file"
+        fi
+        ((migrated++)) || true
+    else
+        substep "Migration 93: context-handoff.json absent — skipping"
+    fi
+
+    # Migration 94: Register require-reply-to-message-id.py PreToolUse hook (issue #2067).
+    # This hook was originally implemented in PR #1541 but never merged to main.
+    # It blocks Telegram send_reply calls that omit reply_to_message_id, ensuring
+    # replies are threaded under the user's originating message.
+    if [ -f "$CLAUDE_SETTINGS" ] && command -v jq &>/dev/null; then
+        local _m94_present
+        _m94_present=$(jq -r '
+            [.hooks.PreToolUse[]?.hooks[]? |
+             select((.command // "") | test("require-reply-to-message-id"))]
+            | length' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
+
+        if [[ "${_m94_present:-0}" -eq 0 ]]; then
+            local _m94_tmp
+            _m94_tmp=$(mktemp)
+            if jq --arg install_dir "$LOBSTER_DIR" '
+                .hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+                    "matcher": "mcp__lobster-inbox__send_reply",
+                    "hooks": [{
+                        "type": "command",
+                        "command": ("python3 " + $install_dir + "/hooks/require-reply-to-message-id.py"),
+                        "timeout": 5
+                    }]
+                }]
+            ' "$CLAUDE_SETTINGS" > "$_m94_tmp" \
+                && mv "$_m94_tmp" "$CLAUDE_SETTINGS" 2>/dev/null; then
+                substep "Migration 94: registered require-reply-to-message-id.py PreToolUse hook"
+                migrated=$((migrated + 1))
+            else
+                rm -f "$_m94_tmp" 2>/dev/null || true
+                warn "Migration 94: could not update settings.json — jq transform failed"
+            fi
+        else
+            substep "Migration 94: require-reply-to-message-id.py hook already registered — skipping"
+        fi
+    else
+        substep "Migration 94: settings.json or jq not found — skipping"
     fi
 
     if [ "$migrated" -eq 0 ]; then

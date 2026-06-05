@@ -74,6 +74,7 @@ INBOX_MESSAGE_SOURCES: frozenset[str] = frozenset({
     "bisque",
     "system",
     "bot-talk",  # cross-Lobster bot-to-bot messages (issue #1350)
+    "gmail",     # email poller injects messages with source="gmail"
 })
 
 # ---------------------------------------------------------------------------

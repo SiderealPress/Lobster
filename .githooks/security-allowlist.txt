@@ -17,6 +17,8 @@ tests/unit/test_memory.py:test_data
 
 # Example config files (contain placeholder values)
 config/config.env.example:Hardcoded token
+# LOBSTER_SECONDARY_EMAIL example uses a placeholder address (partner@yourcompany.com) — not real
+config/config.env.example:Email address
 
 # Install script uses variable references that look like secrets
 install.sh:Hardcoded token
@@ -41,20 +43,18 @@ tests/unit/test_integrations/test_google_calendar_phase4.py:Hardcoded token
 tests/unit/test_integrations/test_google_calendar_token_store.py:Hardcoded token
 uv.lock:Phone number
 
-# iva-deployer documents env var names (HCLOUD_TOKEN, SECRET_KEY) as configuration
+# eloso-deployer documents env var names (HCLOUD_TOKEN, SECRET_KEY) as configuration
 # references — not actual credential values
-agents/iva-deployer.md:Hardcoded token
-agents/iva-deployer.md:Hardcoded secret
+agents/eloso-deployer.md:Hardcoded token
+agents/eloso-deployer.md:Hardcoded secret
 
 # kissinger bins contain a pre-existing email address used as a contact reference
 lobster-shop/kissinger/bin/kissinger:Email address
 lobster-shop/kissinger/bin/kissinger-mcp:Email address
 
 # WhatsApp connector config examples use example JID format strings (digits@c.us) in comments/docs
-# and index.js uses a personal name in documentation comments — these are placeholder examples
 connectors/whatsapp/config.example.env:Email address
 connectors/whatsapp/setup.sh:Email address
-connectors/whatsapp/index.js:Personal name (drew)
 scripts/lobster-whatsapp-qr:Email address
 
 # google calendar callback and client test files use fake/mock tokens for unit tests
@@ -95,10 +95,6 @@ lobster-shop/slack-connector/src/onboarding.py:Email address
 # step-name identifier strings (wizard state machine steps), not hardcoded credential values
 lobster-shop/slack-connector/src/onboarding.py:Hardcoded token
 
-# periodic-self-check.sh contains a pre-existing comment referencing a name as a role
-# description — this is a code comment, not a secret or PII in the data sense
-scripts/periodic-self-check.sh:Personal name (drew)
-
 # find_supply_chain_contacts uses a Chrome User-Agent string containing a fake version
 # number "122.0.0.0" that looks like an IP address — it is not an IP, it is a browser
 # version string used to avoid bot detection in DuckDuckGo HTML requests
@@ -116,6 +112,3 @@ scheduled-tasks/lobstertalk-incoming-handler.py:Email address
 # API connectivity, not a secret or private PII
 src/integrations/clay/client.py:Email address
 
-# buy-things skill has a default_shipping_name config value that references a personal name
-# as a placeholder — this is user-facing configuration, not a secret or credential
-lobster-shop/buy-things/preferences/defaults.toml:Personal name (drew)

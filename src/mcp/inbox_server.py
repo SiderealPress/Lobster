@@ -1482,6 +1482,25 @@ def _write_wfm_active_signal() -> None:
         pass  # Never block wait_for_messages on a heartbeat write failure
 
 
+def _wfm_heartbeat_thread_fn(stop_event: threading.Event, interval: int) -> None:
+    """Daemon thread that refreshes the WFM-active heartbeat on wall-clock time.
+
+    Runs independently of the asyncio event loop so that heartbeat writes
+    continue even when the loop is stalled (e.g. during Claude API streaming).
+    Fires every `interval` seconds until stop_event is set.
+
+    Exceptions are swallowed so the thread never crashes the process.
+    daemon=True on the spawning site guarantees this thread dies with the
+    process — no fake heartbeats survive a crash or unexpected exit.
+    """
+    while not stop_event.wait(timeout=interval):
+        try:
+            touch_heartbeat()
+            _write_wfm_active_signal()
+        except Exception:
+            pass  # Never crash the heartbeat thread
+
+
 # Tombstone value written to WFM_ACTIVE_FILE when WFM exits (Fix 2, issue #1730).
 # Using a non-integer string means:
 #   - The file is NEVER absent between the health check's -f gate and its cat read
@@ -2100,7 +2119,7 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "status": {
                         "type": "string",
-                        "description": "Filter by status: pending, in_progress, completed, or all (default).",
+                        "description": "Filter by status: pending, in_progress, completed, blocked, or all (default). Use 'blocked' to find tasks Lobster committed to but is waiting on the user to answer before proceeding.",
                         "default": "all",
                     },
                     "chat_id": {
@@ -2122,7 +2141,12 @@ async def list_tools() -> list[Tool]:
                     },
                     "description": {
                         "type": "string",
-                        "description": "Detailed description of what needs to be done.",
+                        "description": "Detailed description of what needs to be done. For blocked tasks, start with 'BLOCKED: <reason>' so the surfacing logic can show context at a glance.",
+                    },
+                    "status": {
+                        "type": "string",
+                        "description": "Initial status: pending (default), in_progress, completed, or blocked. Use 'blocked' when Lobster has made a commitment and asked clarifying questions, but cannot proceed until the user responds.",
+                        "default": "pending",
                     },
                     "chat_id": {
                         "type": "string",
@@ -2144,7 +2168,7 @@ async def list_tools() -> list[Tool]:
                     },
                     "status": {
                         "type": "string",
-                        "description": "New status: pending, in_progress, or completed.",
+                        "description": "New status: pending, in_progress, completed, or blocked. Set to 'blocked' when waiting on user input; set to 'in_progress' when the user has answered and work can resume.",
                     },
                     "subject": {
                         "type": "string",
@@ -2739,7 +2763,7 @@ async def list_tools() -> list[Tool]:
                         "type": "integer",
                         "description": (
                             "Expected maximum runtime in minutes. Agents older than this without "
-                            "recent output file activity can be presumed dead. Default: 30."
+                            "recent output file activity can be presumed dead. Default: 90."
                         ),
                     },
                     "idempotency": {
@@ -3996,6 +4020,46 @@ def _find_message_file(directory: Path, message_id: str) -> Path | None:
     return None
 
 
+def _find_all_message_files(directories: list[Path], message_id: str) -> list[Path]:
+    """Find ALL message files across directories whose 'id' field matches message_id.
+
+    Unlike _find_message_file (which returns the first match), this function
+    returns every file whose JSON 'id' field equals message_id, across all
+    provided directories.  Used by handle_mark_processed to archive duplicate
+    files that share the same logical ID — a condition that arises when
+    concurrent hook invocations write multiple files with identical IDs but
+    different millisecond-precision filenames (issue #2039).
+
+    Files that match by filename substring (message_id in f.name) are also
+    included to catch the common case where the filename embeds the message ID.
+    """
+    matches: list[Path] = []
+    seen: set[Path] = set()  # deduplicate if matched by both name and content
+
+    for directory in directories:
+        if not directory.exists():
+            continue
+        for f in directory.glob("*.json"):
+            if f in seen:
+                continue
+            # Fast path: filename contains the message_id
+            if message_id in f.name:
+                matches.append(f)
+                seen.add(f)
+                continue
+            # Slow path: read JSON and check the 'id' field
+            try:
+                with open(f) as fp:
+                    msg = json.load(fp)
+                if msg.get("id") == message_id:
+                    matches.append(f)
+                    seen.add(f)
+            except Exception:
+                continue
+
+    return matches
+
+
 def _stale_timeout_for_message(msg: dict) -> int:
     """Return the stale processing timeout in seconds based on message type.
 
@@ -4185,6 +4249,22 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
     observer.schedule(InboxHandler(), str(INBOX_DIR), recursive=False)
     observer.start()
 
+    # Start a daemon thread to refresh the WFM-active heartbeat on wall-clock
+    # time, independent of the asyncio event loop (issue #1823).  The event
+    # loop can stall for minutes during Claude API streaming; the daemon thread
+    # keeps writing so the health check never sees a false-stale signal.
+    # daemon=True means the thread dies with the process — no heartbeats
+    # survive a crash.  The stop_event lets the finally block terminate the
+    # thread cleanly on normal exit.
+    _hb_stop = threading.Event()
+    _hb_thread = threading.Thread(
+        target=_wfm_heartbeat_thread_fn,
+        args=(_hb_stop, WAIT_HEARTBEAT_INTERVAL),
+        daemon=True,
+        name="wfm-heartbeat",
+    )
+    _hb_thread.start()
+
     try:
         # Now that the observer is running, check for messages that already
         # existed before we started watching.  Any message that arrives from
@@ -4196,9 +4276,9 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
             touch_heartbeat()
             inbox_results = await handle_check_inbox({"limit": 10})
             return _prepend_sessions_prefix(sessions_prefix, inbox_results)
-        # Wait with periodic heartbeats (every WAIT_HEARTBEAT_INTERVAL seconds).
-        # Refresh WFM-active on every iteration so the health check sees a
-        # fresh signal even during long quiet periods (issue #1713 / #949).
+        # Wait loop: block until a message arrives or timeout expires.
+        # Heartbeat and WFM-active refresh are handled by the daemon thread
+        # started above — they no longer depend on this event-loop coroutine.
         heartbeat_interval = WAIT_HEARTBEAT_INTERVAL
         elapsed = 0
 
@@ -4213,9 +4293,6 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
             if arrived:
                 break
 
-            # Touch heartbeat and refresh WFM-active to show we're still alive.
-            touch_heartbeat()
-            _write_wfm_active_signal()
             elapsed += wait_time
 
         if message_arrived.is_set():
@@ -4258,6 +4335,13 @@ async def handle_wait_for_messages(args: dict) -> list[TextContent]:
                 timeout_text = sessions_prefix + "\n\n" + timeout_text
             return [TextContent(type="text", text=timeout_text)]
     finally:
+        # Stop the heartbeat daemon thread before writing the tombstone.
+        # Setting the event wakes the thread's stop_event.wait() immediately
+        # so it exits without waiting for the next interval tick.
+        # join() ensures the thread has fully exited before we write the tombstone,
+        # so no stale heartbeat can overwrite the tombstone after _clear_wfm_active_signal().
+        _hb_stop.set()
+        _hb_thread.join(timeout=1)
         observer.stop()
         observer.join(timeout=1)
         # Write tombstone to WFM_ACTIVE_FILE instead of deleting it (issue #1730).
@@ -5158,7 +5242,7 @@ async def handle_mark_processed(args: dict) -> list[TextContent]:
         except (json.JSONDecodeError, OSError):
             pass  # If we can't read the message, skip the guard
 
-    # Move to processed
+    # Move the primary file to processed.
     dest = PROCESSED_DIR / found.name
     found.rename(dest)
 
@@ -5172,6 +5256,28 @@ async def handle_mark_processed(args: dict) -> list[TextContent]:
             _db_persist_inbound(json.loads(dest.read_text()))
         except Exception as _db_exc:
             log.warning(f"[DB] inbound persist failed for {message_id}: {_db_exc}")
+
+    # Fix #2039: archive any duplicate files sharing the same message ID.
+    #
+    # Concurrent hook invocations (e.g. multiple subagent SessionStart events
+    # within the same second) can write multiple files with identical 'id'
+    # fields but different millisecond-precision filenames.  _find_message_file
+    # returns only the first match, so the remaining N-1 files would stay in
+    # inbox/ and re-surface on the next wait_for_messages call — causing the
+    # dispatcher to see the same message 4–6 times even after marking it
+    # processed.
+    #
+    # Scan inbox/ and processing/ for additional files with the same ID and
+    # archive them silently.  The primary file has already been moved above,
+    # so it will no longer appear in these directories.
+    duplicates = _find_all_message_files([INBOX_DIR, PROCESSING_DIR], message_id)
+    for dup in duplicates:
+        try:
+            dup_dest = PROCESSED_DIR / dup.name
+            dup.rename(dup_dest)
+            log.info(f"Archived duplicate message file {dup.name} for id={message_id!r}")
+        except Exception as dup_exc:
+            log.warning(f"Failed to archive duplicate {dup.name} for id={message_id!r}: {dup_exc}")
 
     # Write a per-message heartbeat so the health check can distinguish a
     # dispatcher that is actively draining a long message batch from one that
@@ -6018,6 +6124,22 @@ def save_tasks(data: dict) -> None:
     atomic_write_json(TASKS_FILE, data)
 
 
+
+# Valid task statuses. 'blocked' marks a task where Lobster made an explicit
+# commitment to the user, asked clarifying questions, and is now waiting on the
+# user's answers before it can proceed. These are surfaced proactively at session
+# start so committed work is never silently dropped after a crash/restart cycle.
+VALID_TASK_STATUSES = {"pending", "in_progress", "completed", "blocked"}
+
+# Status display metadata: (emoji, display label, sort priority — lower = shown first)
+_TASK_STATUS_META = {
+    "blocked":     ("🚧", "Blocked (Waiting on You)", 0),
+    "in_progress": ("🔄", "In Progress",              1),
+    "pending":     ("⏳", "Pending",                   2),
+    "completed":   ("✅", "Completed",                 3),
+}
+
+
 async def handle_list_tasks(args: dict) -> list[TextContent]:
     """List all tasks."""
     status_filter = args.get("status", "all").lower()
@@ -6035,29 +6157,37 @@ async def handle_list_tasks(args: dict) -> list[TextContent]:
     if not tasks:
         return [TextContent(type="text", text="📋 No tasks found.")]
 
-    # Group by status
-    pending = [t for t in tasks if t.get("status") == "pending"]
-    in_progress = [t for t in tasks if t.get("status") == "in_progress"]
-    completed = [t for t in tasks if t.get("status") == "completed"]
+    # Group by status in priority order so blocked commitments appear first
+    groups: dict[str, list] = {s: [] for s in _TASK_STATUS_META}
+    for t in tasks:
+        s = t.get("status", "pending")
+        groups.setdefault(s, []).append(t)
 
     output = "📋 **Tasks:**\n\n"
 
-    if in_progress:
-        output += "**🔄 In Progress:**\n"
-        for t in in_progress:
-            output += f"  #{t['id']} {t['subject']}\n"
+    for status in sorted(_TASK_STATUS_META, key=lambda s: _TASK_STATUS_META[s][2]):
+        group = groups.get(status, [])
+        if not group:
+            continue
+        emoji, label, _ = _TASK_STATUS_META[status]
+        output += f"**{emoji} {label}:**\n"
+        for t in group:
+            desc_preview = ""
+            if status == "blocked" and t.get("description"):
+                # Show first line of description for blocked tasks — it contains
+                # the blocking reason (e.g. "BLOCKED: waiting on user's answer about X")
+                first_line = t["description"].split("\n")[0][:80]
+                desc_preview = f" — {first_line}"
+            output += f"  #{t['id']} {t['subject']}{desc_preview}\n"
         output += "\n"
 
-    if pending:
-        output += "**⏳ Pending:**\n"
-        for t in pending:
-            output += f"  #{t['id']} {t['subject']}\n"
-        output += "\n"
-
-    if completed:
-        output += "**✅ Completed:**\n"
-        for t in completed:
-            output += f"  #{t['id']} {t['subject']}\n"
+    # Show tasks with unrecognized statuses (e.g. legacy "done") in a fallback group
+    # rather than silently dropping them from the display.
+    other_tasks = [t for s, lst in groups.items() if s not in _TASK_STATUS_META for t in lst]
+    if other_tasks:
+        output += "**❓ Other (unrecognized status):**\n"
+        for t in other_tasks:
+            output += f"  #{t['id']} {t['subject']} [{t.get('status', 'unknown')}]\n"
         output += "\n"
 
     output += f"---\nTotal: {len(tasks)} task(s)"
@@ -6070,9 +6200,13 @@ async def handle_create_task(args: dict) -> list[TextContent]:
     subject = args.get("subject", "").strip()
     description = args.get("description", "").strip()
     chat_id = args.get("chat_id")
+    initial_status = args.get("status", "pending")
 
     if not subject:
         return [TextContent(type="text", text="Error: subject is required.")]
+
+    if initial_status not in VALID_TASK_STATUSES:
+        return [TextContent(type="text", text=f"Error: Invalid status '{initial_status}'. Use: {', '.join(sorted(VALID_TASK_STATUSES))}")]
 
     data = load_tasks()
     task_id = data.get("next_id", 1)
@@ -6081,7 +6215,7 @@ async def handle_create_task(args: dict) -> list[TextContent]:
         "id": task_id,
         "subject": subject,
         "description": description,
-        "status": "pending",
+        "status": initial_status,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -6114,10 +6248,10 @@ async def handle_update_task(args: dict) -> list[TextContent]:
     # Update fields
     if "status" in args:
         status = args["status"].lower()
-        if status in ["pending", "in_progress", "completed"]:
+        if status in VALID_TASK_STATUSES:
             task["status"] = status
         else:
-            return [TextContent(type="text", text=f"Error: Invalid status '{status}'. Use: pending, in_progress, completed")]
+            return [TextContent(type="text", text=f"Error: Invalid status '{status}'. Use: {', '.join(sorted(VALID_TASK_STATUSES))}")]
 
     if "subject" in args:
         task["subject"] = args["subject"]
@@ -6128,8 +6262,8 @@ async def handle_update_task(args: dict) -> list[TextContent]:
     task["updated_at"] = datetime.now(timezone.utc).isoformat()
     save_tasks(data)
 
-    status_emoji = {"pending": "⏳", "in_progress": "🔄", "completed": "✅"}.get(task["status"], "")
-    return [TextContent(type="text", text=f"{status_emoji} Task #{task_id} updated: {task['subject']} [{task['status']}]")]
+    emoji = _TASK_STATUS_META.get(task["status"], ("", "", 9))[0]
+    return [TextContent(type="text", text=f"{emoji} Task #{task_id} updated: {task['subject']} [{task['status']}]")]
 
 
 async def handle_get_task(args: dict) -> list[TextContent]:
@@ -6148,11 +6282,11 @@ async def handle_get_task(args: dict) -> list[TextContent]:
     if not task:
         return [TextContent(type="text", text=f"Error: Task #{task_id} not found.")]
 
-    status_emoji = {"pending": "⏳", "in_progress": "🔄", "completed": "✅"}.get(task["status"], "")
+    emoji = _TASK_STATUS_META.get(task["status"], ("", "", 9))[0]
 
     output = f"📋 **Task #{task['id']}**\n\n"
     output += f"**Subject:** {task['subject']}\n"
-    output += f"**Status:** {status_emoji} {task['status']}\n"
+    output += f"**Status:** {emoji} {task['status']}\n"
     if task.get("description"):
         output += f"\n**Description:**\n{task['description']}\n"
     output += f"\n**Created:** {task.get('created_at', 'N/A')}\n"
@@ -9704,7 +9838,7 @@ async def reconcile_agent_sessions() -> None:
       - Session in DB with status='running', scanner says 'done'
         → call session_end(..., status='completed'), enqueue Telegram notification
       - Session in DB with status='running', output file missing AND session
-        is older than its registered timeout_minutes (default 30 min) →
+        is older than its registered timeout_minutes (default 90 min) →
         call session_end(..., status='dead'), enqueue Telegram notification
       - Session in DB with status='running', file shows stop_reason=tool_use AND
         session is older than its registered timeout_minutes (default 120 min) →
@@ -9733,14 +9867,14 @@ async def reconcile_agent_sessions() -> None:
     """
     from agents.session_store import check_output_file_status, get_output_file_mtime
 
-    DEFAULT_DEAD_THRESHOLD_SECONDS = 30 * 60   # 30 minutes — fallback for missing output files
+    DEFAULT_DEAD_THRESHOLD_SECONDS = 90 * 60   # 90 minutes — fallback for missing output files (raised from 30 in issue #1922)
     DEFAULT_DEAD_THRESHOLD_RUNNING_SECONDS = 120 * 60  # 120 minutes — fallback for stuck tool_use files
     GRACE_PERIOD_SECONDS = 30          # Newly spawned agents get grace before DEAD
     # Mtime staleness gate (issue #868): if output file hasn't been written to in
     # this many seconds, treat the agent as interrupted rather than actively running.
     # An active agent updates its JSONL output continuously; an interrupted one stops
     # immediately. 15 minutes gives ample margin to avoid false positives during slow
-    # tool calls, while cutting the misclassification window from 120 min → 30 min.
+    # tool calls, while cutting the misclassification window from 120 min → 90 min.
     MTIME_STALE_THRESHOLD_SECONDS = 15 * 60    # 15 minutes
 
     # Startup sweep: re-send notifications for sessions that completed while down
