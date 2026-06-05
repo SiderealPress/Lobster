@@ -1,9 +1,9 @@
-# Eloso Prospecting Ontology
+# Lobster Prospecting Ontology
 
 **Version:** 1.0.0
 **Status:** Canonical
 **Last updated:** 2026-04-09
-**Owner:** Eloso / Lobster pipeline
+**Owner:** Lobster pipeline
 
 ---
 
@@ -40,7 +40,7 @@ adding a tag that already exists is a no-op (handled at the write layer).
 
 ### 2.1 Pipeline Role Tags
 
-These tags classify the entity's role in the Eloso pipeline.
+These tags classify the entity's role in the pipeline.
 
 | Tag | Meaning |
 |-----|---------|
@@ -53,7 +53,7 @@ These tags classify the entity's role in the Eloso pipeline.
 | `family_office` | Family office investor |
 | `angel` | Angel investor |
 | `icp_match` | Confirmed ICP match after scoring (icp_score >= 70) |
-| `eloso` | Entity is part of the Eloso prospecting universe |
+| `prospect` | Entity is part of the prospecting universe |
 
 ### 2.2 Industry Vertical Tags
 
@@ -89,14 +89,14 @@ Mutually exclusive — assign exactly one.
 | `size:mid_market` | $100M – $1B | Mid-market |
 | `size:smb` | < $100M | Small/medium business |
 
-**ICP targeting note:** Eloso's target ICP is `size:mid_market` and `size:enterprise`.
+**ICP targeting note:** Target ICP is `size:mid_market` and `size:enterprise`.
 Companies tagged `size:smb` are out-of-ICP unless flagged as strategic exceptions.
 
 ### 2.4 Pipeline Stage Tags
 
 Prefix: `stage:`
 
-Tracks progression through the Eloso sales pipeline.
+Tracks progression through the sales pipeline.
 
 | Tag | Meaning |
 |-----|---------|
@@ -167,7 +167,7 @@ JSON-encoded structures where noted.
 | `key_challenge` | string | Known supply chain pain point | `"Multi-country sourcing with traceability gaps"` |
 | `economic_buyer_title` | string | Title of likely economic buyer | `"VP Supply Chain"` |
 | `warm_intro_path` | string | Path to a warm introduction | `"Via Moog → Parker Hannifin"` |
-| `source` | string | How the company was discovered | `"eloso-prospects-v2"` |
+| `source` | string | How the company was discovered | `"prospects-v2"` |
 | `icp_score` | string | ICP score 0-100 | `"82"` |
 | `last_enriched_at` | string | ISO 8601 timestamp of last enrichment | `"2026-04-09T00:00:00Z"` |
 | `pipeline_stage` | string | Current pipeline stage (mirrors stage: tag) | `"research"` |

@@ -166,8 +166,8 @@ def test_org_type_prospect_tag():
     assert _score_org_type(c) >= 0.9
 
 
-def test_org_type_eloso_tag():
-    c = make_contact(tags=["eloso"])
+def test_org_type_prospect_contact_tag():
+    c = make_contact(tags=["prospect-contact"])
     assert _score_org_type(c) >= 0.9
 
 
@@ -327,7 +327,7 @@ def test_high_value_csco_at_prospect():
         "id": "csco-001",
         "name": "Alice Chen",
         "kind": "person",
-        "tags": ["eloso", "prospect-contact"],
+        "tags": ["prospect", "prospect-contact"],
         "notes": "Spoke at SCC conference. Very interested in backlog mgmt.",
         "meta": [
             {"key": "email", "value": "alice@heavymfg.com"},

@@ -2,7 +2,7 @@
 """
 bootstrap-supply-chain-graph.py — BIS-338
 
-Bootstraps supply chain relationships for Eloso seed prospects by:
+Bootstraps supply chain relationships for seed prospects by:
 1. Creating supplier/customer entities in Kissinger if they don't exist
 2. Writing known_suppliers / known_customers structured meta to seed entities
 3. Writing known_customers / known_suppliers back-refs to supplier entities
@@ -106,7 +106,7 @@ SUPPLY_CHAIN_RELATIONSHIPS = {
                 "relationship_type": "railcar_leasing_customer",
                 "confidence": "high",
                 "source": "Industry knowledge — GATX is a major railcar lessor and purchaser from Greenbrier",
-                "tags": ["customer", "vertical:rail", "prospect", "eloso"],
+                "tags": ["customer", "vertical:rail", "prospect"],
                 "notes": "Railcar leasing company and fleet manager. Also a seed prospect. Purchases railcars from Greenbrier for its leasing fleet.",
             },
         ],
@@ -410,7 +410,7 @@ mutation CreateEntity($input: CreateEntityInput!) {
         "input": {
             "kind": "org",
             "name": name,
-            "tags": tags + ["eloso"],
+            "tags": tags + ["prospect"],
             "notes": notes,
             "meta": [
                 {"key": "_prov_imported_by", "value": SCRIPT_NAME},
@@ -504,7 +504,7 @@ def get_all_prospects() -> list[dict]:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Bootstrap supply chain graph relationships for Eloso seed prospects"
+        description="Bootstrap supply chain graph relationships for seed prospects"
     )
     parser.add_argument(
         "--dry-run",
@@ -520,7 +520,7 @@ def main():
     args = parser.parse_args()
 
     print("=" * 70)
-    print("Eloso Supply Chain Graph Bootstrap — BIS-338")
+    print("Supply Chain Graph Bootstrap — BIS-338")
     print(f"Mode: {'DRY RUN' if args.dry_run else 'LIVE WRITE'}")
     print("=" * 70)
     print()
