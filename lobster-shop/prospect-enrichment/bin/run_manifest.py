@@ -6,7 +6,7 @@ Writes and reads the per-run JSON summary at:
 
 Used by:
   - The enrichment pipeline (writes status + counters on completion)
-  - The eloso-bisque API route (polls status for the UI spinner)
+  - The bisque API route (polls status for the UI spinner)
 
 Schema matches provenance/ontology.md.
 """

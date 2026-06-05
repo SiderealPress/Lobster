@@ -7,7 +7,7 @@ ARCHITECTURAL DECISION (BIS-325):
   - 'investor_firm' and 'investor_person' do NOT exist as native kinds.
   - updateEntity does NOT expose a kind field (kind is immutable via GraphQL).
   - Decision: use kind=org + tag=vc for investor firms, kind=person + tag=vc for investor people.
-  - This is consistent with the existing classifyOrg() pattern in eloso-bisque.
+  - This is consistent with the existing classifyOrg() pattern in bisque.
   - No Kissinger recompile required; zero data loss; idempotent.
 
 What this script does:

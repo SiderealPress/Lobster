@@ -1,13 +1,13 @@
 """
 Single-Contact Enrichment Flow
 
-Triggered when the "Enrich Contact" button is pressed in eloso-bisque.
+Triggered when the "Enrich Contact" button is pressed in bisque.
 Runs work_history and connections goals for one Kissinger person entity,
 writes results with full provenance, and writes the run manifest.
 
 Entry points:
     enrich_contact(contact_id, dry_run=False) -> RunResult
-    (called by POST /api/contacts/[id]/enrich in eloso-bisque)
+    (called by POST /api/contacts/[id]/enrich in bisque)
 
 Pipeline:
     1. Fetch the contact entity from Kissinger

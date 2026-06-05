@@ -43,10 +43,10 @@ tests/unit/test_integrations/test_google_calendar_phase4.py:Hardcoded token
 tests/unit/test_integrations/test_google_calendar_token_store.py:Hardcoded token
 uv.lock:Phone number
 
-# eloso-deployer documents env var names (HCLOUD_TOKEN, SECRET_KEY) as configuration
+# iva-deployer documents env var names (HCLOUD_TOKEN, SECRET_KEY) as configuration
 # references — not actual credential values
-agents/eloso-deployer.md:Hardcoded token
-agents/eloso-deployer.md:Hardcoded secret
+agents/iva-deployer.md:Hardcoded token
+agents/iva-deployer.md:Hardcoded secret
 
 # kissinger bins contain a pre-existing email address used as a contact reference
 lobster-shop/kissinger/bin/kissinger:Email address
