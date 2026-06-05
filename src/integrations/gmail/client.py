@@ -406,3 +406,148 @@ def search_emails(
         len(messages), user_id, query,
     )
     return messages
+
+
+def get_emails_from_domains(
+    user_id: str,
+    domains: list[str],
+    since_days: int = 365,
+    max_results: int = 200,
+    token_dir=None,
+) -> list[EmailMessage]:
+    """Fetch emails from specific domains (e.g. "@zebra.com", "@boeing.com").
+
+    Builds a Gmail search query using 'from:' filters joined with OR.
+    Returns emails received from any of the listed domains within since_days.
+
+    Args:
+        user_id:     Lobster user identifier.
+        domains:     List of domain strings (with or without '@', e.g. ["zebra.com"]).
+        since_days:  How far back to search (default: 365 days).
+        max_results: Maximum number of messages to return.
+        token_dir:   Optional token directory for testing.
+
+    Returns:
+        List of EmailMessage objects.  Empty list on any failure.
+    """
+    if not domains:
+        return []
+
+    # Normalize domains: strip leading @
+    norm_domains = [d.lstrip("@").lower() for d in domains if d.strip()]
+    from_clauses = " OR ".join(f"from:@{d}" for d in norm_domains)
+    after_date = _days_ago_gmail(since_days)
+    query = f"({from_clauses}) after:{after_date}"
+
+    return search_emails(user_id, query, max_results=max_results, token_dir=token_dir)
+
+
+def get_all_external_contacts(
+    user_id: str,
+    since_days: int = 365,
+    max_results: int = 1000,
+    token_dir=None,
+) -> list[dict]:
+    """Extract all unique external email addresses the user has emailed.
+
+    Searches SENT mail to find outgoing messages to non-Google addresses,
+    plus INBOX to find messages from external senders.  Returns deduplicated
+    contact records: {"name": str, "email": str, "last_seen": datetime}.
+
+    Args:
+        user_id:     Lobster user identifier.
+        since_days:  How far back to search (default: 365 days).
+        max_results: Maximum messages to scan.
+        token_dir:   Optional token directory for testing.
+
+    Returns:
+        List of contact dicts {"name", "email", "last_seen"}.
+        Empty list on any failure.
+    """
+    import re as _re
+
+    kwargs = {}
+    if token_dir is not None:
+        kwargs["token_dir"] = token_dir
+    token = get_valid_token(user_id, **kwargs)
+    if token is None:
+        log.info("get_all_external_contacts: no valid token for user_id=%r", user_id)
+        return []
+
+    after_date = _days_ago_gmail(since_days)
+    # Search both sent + inbox for external addresses
+    queries = [
+        f"in:sent after:{after_date} -to:gmail.com -to:googlemail.com",
+        f"in:inbox after:{after_date} -from:noreply -from:no-reply -from:notifications",
+    ]
+
+    # Re-use the email_address_pattern across messages
+    addr_pattern = _re.compile(r"[\w.+%-]+@[\w.-]+\.[a-zA-Z]{2,}")
+
+    seen: dict[str, dict] = {}  # email_lower -> contact dict
+
+    for query in queries:
+        list_url = f"{_GMAIL_API_BASE}/users/{_USER_ID}/messages"
+        params = {"q": query, "maxResults": max_results // 2}
+
+        try:
+            list_data = _call_gmail_api("GET", list_url, token.access_token, params=params)
+        except (GmailAPIError, requests.exceptions.RequestException) as exc:
+            log.warning("get_all_external_contacts: list call failed: %s", type(exc).__name__)
+            continue
+
+        for ref in list_data.get("messages", []):
+            msg_id = ref.get("id", "")
+            if not msg_id:
+                continue
+            msg_url = f"{_GMAIL_API_BASE}/users/{_USER_ID}/messages/{msg_id}"
+            try:
+                raw_msg = _call_gmail_api(
+                    "GET", msg_url, token.access_token,
+                    params={"format": "metadata", "metadataHeaders": ["From", "To", "Cc"]},
+                )
+            except (GmailAPIError, requests.exceptions.RequestException):
+                continue
+
+            payload = raw_msg.get("payload", {})
+            headers = payload.get("headers", [])
+
+            for h in headers:
+                if h.get("name", "").lower() in ("from", "to", "cc"):
+                    raw_val = h.get("value", "")
+                    # Parse "Name <email>" or bare emails
+                    matches = addr_pattern.findall(raw_val)
+                    for email_addr in matches:
+                        el = email_addr.lower()
+                        # Skip known non-person domains
+                        if any(x in el for x in ("noreply", "no-reply", "notifications",
+                                                   "support", "bounces", "mailer-daemon")):
+                            continue
+                        if el not in seen:
+                            # Extract display name if present
+                            name_match = _re.match(r'^"?([^"<]+)"?\s*<', raw_val)
+                            display_name = name_match.group(1).strip() if name_match else ""
+                            msg_date_str = _parse_header(headers, "Date")
+                            seen[el] = {
+                                "name": display_name,
+                                "email": el,
+                                "last_seen": _parse_date_header(msg_date_str),
+                            }
+
+    contacts = list(seen.values())
+    log.info(
+        "get_all_external_contacts: found %d unique contacts for user_id=%r",
+        len(contacts), user_id,
+    )
+    return contacts
+
+
+# ---------------------------------------------------------------------------
+# Private date helper
+# ---------------------------------------------------------------------------
+
+def _days_ago_gmail(days: int) -> str:
+    """Return a Gmail 'after:' date string for N days ago (YYYY/MM/DD format)."""
+    from datetime import date, timedelta
+    d = date.today() - timedelta(days=days)
+    return d.strftime("%Y/%m/%d")

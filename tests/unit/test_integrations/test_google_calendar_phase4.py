@@ -196,8 +196,8 @@ class TestAuthStatusDetection:
         assert (token is not None) is False
 
         # Authenticated
-        save_token("drew", valid_token, token_dir=temp_token_dir)
-        token = load_token("drew", token_dir=temp_token_dir)
+        save_token("testuser", valid_token, token_dir=temp_token_dir)
+        token = load_token("testuser", token_dir=temp_token_dir)
         assert (token is not None) is True
 
     def test_user_id_as_string(self, temp_token_dir: Path, valid_token: TokenData):

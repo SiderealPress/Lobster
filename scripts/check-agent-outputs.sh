@@ -115,19 +115,21 @@ while IFS= read -r agent_id; do
     # Safely escape agent_id for JSON (alphanumeric + hyphens only expected)
     SAFE_ID=$(echo "$agent_id" | tr -cd 'a-zA-Z0-9_-')
 
-    cat > "${INBOX_DIR}/${MSG_ID}.json" << EOF
-{
-  "id": "${MSG_ID}",
-  "source": "system",
-  "type": "health_check",
-  "chat_id": 0,
-  "user_id": 0,
-  "username": "lobster-system",
-  "user_name": "Agent Relay",
-  "text": "Agent relay check: ${SAFE_ID} output file appears complete. Check task-notifications and relay results to the user.",
-  "timestamp": "${TIMESTAMP}"
-}
-EOF
+    jq -n \
+        --arg id "${MSG_ID}" \
+        --arg text "Agent relay check: ${SAFE_ID} output file appears complete. Check task-notifications and relay results to the user." \
+        --arg timestamp "${TIMESTAMP}" \
+        '{
+            "id": $id,
+            "source": "system",
+            "type": "health_check",
+            "chat_id": 0,
+            "user_id": 0,
+            "username": "lobster-system",
+            "user_name": "Agent Relay",
+            "text": $text,
+            "timestamp": $timestamp
+        }' > "${INBOX_DIR}/${MSG_ID}.json"
 
     # Mark this agent as notified to prevent re-injection
     echo "$agent_id" >> "$NOTIFIED_FILE"

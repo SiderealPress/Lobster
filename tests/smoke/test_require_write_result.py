@@ -18,6 +18,7 @@ Failure modes:
 """
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -192,26 +193,24 @@ def test_reminder_emitted_when_transcript_is_empty():
 def test_dispatcher_skips_enforcement(tmp_path):
     """C3: Hook emits nothing when the session is identified as the dispatcher.
 
-    The dispatcher is identified via state files: the hook reads the Claude
-    session UUID from the dispatcher-claude-session-id state file and compares
-    it against hook_input["session_id"].  The hook must never tell the
-    dispatcher to call write_result — the dispatcher never does.
+    The dispatcher is identified via the startup flag file (issue #1908): the
+    launcher writes its PID to ~/lobster-workspace/data/dispatcher-startup-flag
+    before exec-ing claude. The hook reads this file and checks the PID is alive.
 
     Failure mode caught: if the hook fires for the dispatcher, every post-
     compact cycle would inject a spurious STOP message into the main loop,
     breaking the dispatcher's ability to resume normal message processing.
     """
-    import uuid
+    # Simulate the dispatcher launcher by writing the current process PID to the
+    # startup flag file at LOBSTER_WORKSPACE/data/dispatcher-startup-flag.
+    # The test process is alive throughout the subprocess run, so kill(pid, 0)
+    # always succeeds.
+    startup_flag_dir = tmp_path / "data"
+    startup_flag_dir.mkdir(parents=True, exist_ok=True)
+    (startup_flag_dir / "dispatcher-startup-flag").write_text(str(os.getpid()))
 
-    # Create a fake dispatcher session ID and write it to a temp state file.
-    dispatcher_session_id = str(uuid.uuid4())
-    claude_session_file = tmp_path / "data" / "dispatcher-claude-session-id"
-    claude_session_file.parent.mkdir(parents=True, exist_ok=True)
-    claude_session_file.write_text(dispatcher_session_id)
-
-    # Build hook input with the matching session_id so is_dispatcher() returns True.
     hook_input = {
-        "session_id": dispatcher_session_id,
+        "session_id": "dispatcher-sess-001",
         "transcript": [
             {
                 "role": "assistant",
@@ -223,7 +222,6 @@ def test_dispatcher_skips_enforcement(tmp_path):
         ],
     }
 
-    import os
     env = {**os.environ, "LOBSTER_WORKSPACE": str(tmp_path)}
     result = subprocess.run(
         [sys.executable, str(HOOK)],

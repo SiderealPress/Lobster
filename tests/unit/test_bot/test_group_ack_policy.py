@@ -217,7 +217,7 @@ class TestGroupAckPolicy:
         user = update.effective_user
         user.id = 111
         user.first_name = "TestAdmin"
-        user.username = "drewtest"
+        user.username = "testuser"
 
         msg = update.message
         msg.message_id = message_id
@@ -263,7 +263,7 @@ class TestGroupAckPolicy:
         user = update.effective_user
         user.id = user_id
         user.first_name = "TestAdmin"
-        user.username = "drewtest"
+        user.username = "testuser"
 
         msg = update.message
         msg.message_id = 1
