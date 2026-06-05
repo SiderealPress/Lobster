@@ -1,0 +1,31 @@
+[skill]
+name = "print-this"
+version = "1.0.0"
+description = "Fetch any URL and render it as a beautiful 8.5x11 LaTeX PDF, sent as a Telegram file attachment"
+author = "Lobster contributors"
+category = "workflow"
+
+[activation]
+mode = "triggered"
+triggers = ["print this", "print that"]
+
+[layering]
+priority = 50
+merge_strategy = "append"
+
+[provides]
+mcp_tools = []
+bot_commands = []
+
+[compatibility]
+enhances = ["camofox-browser"]
+conflicts = []
+
+[dependencies]
+pip = []
+npm = []
+system = ["pdflatex", "texlive"]
+api_keys = []
+
+[dependencies.runtime]
+python = ">=3.11"
