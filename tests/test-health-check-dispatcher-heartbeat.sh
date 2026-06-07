@@ -1,10 +1,10 @@
 #!/bin/bash
 #===============================================================================
-# Test Suite: Health Check v3 - Dispatcher Heartbeat Sentinel (issue #1483)
+# Test Suite: Health Check v3 - Dispatcher Heartbeat Sentinel (issues #1483, #2074)
 #
 # Tests for check_dispatcher_heartbeat() — the simplified single-file liveness check.
 #
-# Tests:
+# Basic heartbeat tests (issue #1483):
 #   1. Heartbeat file absent → GREEN (skipped, no false alarm on fresh install)
 #   2. Heartbeat file recent (< DISPATCHER_HEARTBEAT_STALE_SECONDS) → GREEN
 #   3. Heartbeat file stale (> DISPATCHER_HEARTBEAT_STALE_SECONDS) → RED (exit 2)
@@ -14,10 +14,20 @@
 #   7. Stale by 1 second past threshold → RED (boundary condition)
 #   8. Fresh by 1 second before threshold → GREEN (boundary condition)
 #
-# Key behavioral assertion: the check uses a single dispatcher-heartbeat file with
-# a single epoch timestamp. No lobster-state.json reads. The WFM-active file is
-# also consulted by check_dispatcher_heartbeat() but is bypassed safely here via
-# DISPATCHER_WFM_ACTIVE_FILE pointing to an absent file (defaulting to GREEN).
+# WFM-active suppression tests (issue #2074):
+#   9.  Stale heartbeat + WFM-active fresh + heartbeat age inside cap → GREEN (suppressed)
+#   10. Stale heartbeat + WFM-active fresh + heartbeat age AT cap → RED (cap expired, not suppressed)
+#   11. Stale heartbeat + WFM-active fresh + heartbeat age beyond cap → RED (frozen dispatcher suspected)
+#   12. Stale heartbeat + WFM-active stale → RED (daemon thread also stale)
+#   13. Stale heartbeat + WFM-active absent → RED (no suppression)
+#   14. Stale heartbeat + WFM-active tombstone ("exited") → RED (WFM returned normally)
+#   15. Stale heartbeat + WFM-active fresh + heartbeat well inside cap → GREEN
+#
+# Key behavioral assertion (issue #2074): WFM-active suppression is time-bounded.
+# A frozen dispatcher's WFM daemon thread continues refreshing the WFM-active file
+# every 60s independently of the main asyncio loop. File freshness alone does NOT
+# prove the dispatcher is responsive. After WFM_SUPPRESSION_MAX_SECONDS (2700s)
+# of heartbeat staleness, RED fires regardless of WFM-active freshness.
 #
 # Usage: bash tests/test-health-check-dispatcher-heartbeat.sh
 #===============================================================================
@@ -56,10 +66,12 @@ assert_exit() {
 # Source check_dispatcher_heartbeat() from the health check script once.
 LOG_FILE="$TEST_LOG_DIR/health-check.log"
 DISPATCHER_HEARTBEAT_STALE_SECONDS=1200
-# WFM-active variables (issue #1713): must match the values in health-check-v3.sh.
-# Default to an absent file so existing heartbeat tests are unaffected.
+# WFM-active variables (issues #1713, #2074): must match the values in health-check-v3.sh.
+# Default to an absent file so existing basic heartbeat tests (1-8) are unaffected.
+# Tests 9-15 override WFM_ACTIVE_FILE_FOR_TEST to exercise the suppression logic.
 DISPATCHER_WFM_ACTIVE_FILE="$TEST_LOG_DIR/dispatcher-wfm-active-ABSENT"
 WFM_ACTIVE_STALE_SECONDS=180
+WFM_SUPPRESSION_MAX_SECONDS=2700
 
 log()       { echo "[$1] $2" >> "$LOG_FILE" 2>/dev/null; }
 log_info()  { log INFO "$1"; }
@@ -144,6 +156,118 @@ assert_exit "$rc" 2
 begin_test "1s before threshold (1199s ago) → GREEN"
 echo "$(( $(date +%s) - 1199 ))" > "$DISPATCHER_HEARTBEAT_FILE"
 run_heartbeat_check "$DISPATCHER_HEARTBEAT_FILE" && rc=$? || rc=$?
+assert_exit "$rc" 0
+
+# ===================================================================
+# WFM-active suppression + time-cap tests (issue #2074)
+#
+# These tests verify that the time-bounded suppression correctly handles
+# the frozen-dispatcher false-negative from the May 2026 outage.
+#
+# Setup: use a separate WFM-active file; override DISPATCHER_WFM_ACTIVE_FILE.
+# ===================================================================
+
+echo ""
+echo "--- WFM-active suppression + time-cap tests (issue #2074) ---"
+WFM_ACTIVE_TEST_FILE="$TEST_LOG_DIR/dispatcher-wfm-active"
+
+# Helper: write a fresh WFM-active file (timestamp = now - $1 seconds ago)
+write_wfm_active() {
+    local age_seconds="$1"
+    echo "$(( $(date +%s) - age_seconds ))" > "$WFM_ACTIVE_TEST_FILE"
+}
+
+remove_wfm_active() {
+    rm -f "$WFM_ACTIVE_TEST_FILE"
+}
+
+# Run with WFM-active file active and a heartbeat stale for $1 seconds.
+# DISPATCHER_WFM_ACTIVE_FILE is set to WFM_ACTIVE_TEST_FILE.
+run_check_with_wfm() {
+    local hb_stale_age="$1"
+    echo "$(( $(date +%s) - hb_stale_age ))" > "$DISPATCHER_HEARTBEAT_FILE"
+    DISPATCHER_WFM_ACTIVE_FILE="$WFM_ACTIVE_TEST_FILE"
+    check_dispatcher_heartbeat
+    local rc=$?
+    DISPATCHER_WFM_ACTIVE_FILE="$TEST_LOG_DIR/dispatcher-wfm-active-ABSENT"
+    return $rc
+}
+
+# -------------------------------------------------------------------
+# Test 9: Stale heartbeat + WFM-active fresh + heartbeat inside cap → GREEN
+# Healthy idle dispatcher: WFM is fresh, heartbeat has been stale for 1500s
+# (well within the 2700s suppression cap). Should be GREEN.
+# -------------------------------------------------------------------
+begin_test "Stale hb (1500s) + WFM-active fresh (5s) + inside cap → GREEN"
+write_wfm_active 5
+run_check_with_wfm 1500 && rc=$? || rc=$?
+remove_wfm_active
+assert_exit "$rc" 0
+
+# -------------------------------------------------------------------
+# Test 10: Stale heartbeat + WFM-active fresh + heartbeat AT cap → RED
+# Heartbeat stale for exactly WFM_SUPPRESSION_MAX_SECONDS: cap is hit.
+# Even though WFM-active is fresh, suppression must not apply.
+# -------------------------------------------------------------------
+begin_test "Stale hb (at cap=${WFM_SUPPRESSION_MAX_SECONDS}s) + WFM-active fresh → RED"
+write_wfm_active 5
+run_check_with_wfm "$WFM_SUPPRESSION_MAX_SECONDS" && rc=$? || rc=$?
+remove_wfm_active
+assert_exit "$rc" 2
+
+# -------------------------------------------------------------------
+# Test 11: Stale heartbeat + WFM-active fresh + heartbeat beyond cap → RED
+# This is the May 2026 frozen-dispatcher scenario: the daemon thread keeps
+# WFM-active fresh, but the dispatcher has been unresponsive for 3600s.
+# The suppression cap (2700s) has expired → RED must fire.
+# -------------------------------------------------------------------
+begin_test "Stale hb (3600s, beyond cap) + WFM-active fresh → RED (frozen dispatcher)"
+write_wfm_active 5
+run_check_with_wfm 3600 && rc=$? || rc=$?
+remove_wfm_active
+assert_exit "$rc" 2
+
+# -------------------------------------------------------------------
+# Test 12: Stale heartbeat + WFM-active also stale → RED
+# Both heartbeat and WFM-active are stale: the daemon thread stopped
+# updating, which means either the process died or WFM exited abnormally.
+# -------------------------------------------------------------------
+begin_test "Stale hb (1500s) + WFM-active stale (200s > 180s threshold) → RED"
+write_wfm_active 200   # > WFM_ACTIVE_STALE_SECONDS (180s)
+run_check_with_wfm 1500 && rc=$? || rc=$?
+remove_wfm_active
+assert_exit "$rc" 2
+
+# -------------------------------------------------------------------
+# Test 13: Stale heartbeat + WFM-active absent → RED
+# No WFM-active file: WFM is not running (or returned normally).
+# A stale heartbeat in this state is a genuine problem.
+# -------------------------------------------------------------------
+begin_test "Stale hb (1500s) + WFM-active absent → RED"
+remove_wfm_active
+run_check_with_wfm 1500 && rc=$? || rc=$?
+assert_exit "$rc" 2
+
+# -------------------------------------------------------------------
+# Test 14: Stale heartbeat + WFM-active tombstone ("exited") → RED
+# The tombstone is written when WFM returns normally (issue #1730).
+# The integer guard rejects it, so the check falls through to RED.
+# -------------------------------------------------------------------
+begin_test "Stale hb (1500s) + WFM-active tombstone ('exited') → RED"
+echo "exited" > "$WFM_ACTIVE_TEST_FILE"
+run_check_with_wfm 1500 && rc=$? || rc=$?
+remove_wfm_active
+assert_exit "$rc" 2
+
+# -------------------------------------------------------------------
+# Test 15: Stale heartbeat + WFM-active fresh + heartbeat well inside cap → GREEN
+# Additional positive case: heartbeat stale for 2500s (60s below the 2700s cap
+# with 60s margin to avoid timing flakiness). Should be GREEN.
+# -------------------------------------------------------------------
+begin_test "Stale hb (2500s) + WFM-active fresh + well inside cap → GREEN"
+write_wfm_active 5
+run_check_with_wfm $(( WFM_SUPPRESSION_MAX_SECONDS - 200 )) && rc=$? || rc=$?
+remove_wfm_active
 assert_exit "$rc" 0
 
 # -------------------------------------------------------------------
