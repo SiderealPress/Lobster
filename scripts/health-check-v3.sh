@@ -105,6 +105,8 @@ DISPATCHER_HEARTBEAT_STALE_SECONDS=1200   # 20 min — covers compaction (~5m) +
 # no compaction alert. We trigger a graceful SIGTERM at SESSION_AGE_LIMIT_SECONDS
 # (7200s = 2 min before hard limit) so the Stop hook fires cleanly.
 # Written by inject-bootup-context.py as a plain Unix epoch integer.
+# Set LOBSTER_SESSION_AGE_LIMIT_SECONDS=0 in config.env to disable this check
+# (safe if CC no longer enforces the 7440s hard limit in the installed version).
 SESSION_AGE_LIMIT_SECONDS="${LOBSTER_SESSION_AGE_LIMIT_SECONDS:-7200}"
 DISPATCHER_SESSION_START_FILE="${LOBSTER_DISPATCHER_SESSION_START_FILE_OVERRIDE:-$WORKSPACE_DIR/data/dispatcher-session-start.ts}"
 
@@ -165,6 +167,19 @@ if [[ -z "${LOBSTER_ENV:-}" && -f "$CONFIG_ENV" ]]; then
 fi
 LOBSTER_ENV="${LOBSTER_ENV:-production}"
 
+# Read LOBSTER_SESSION_AGE_LIMIT_SECONDS from config.env (if not already in environment).
+# Set to 0 in config.env to disable the proactive session-age restart check.
+if [[ -z "${LOBSTER_SESSION_AGE_LIMIT_SECONDS:-}" && -f "$CONFIG_ENV" ]]; then
+    _cfg_sal=$(grep '^LOBSTER_SESSION_AGE_LIMIT_SECONDS=' "$CONFIG_ENV" 2>/dev/null | cut -d'=' -f2- | tr -d '[:space:]"' || true)
+    if [[ -n "$_cfg_sal" ]]; then
+        LOBSTER_SESSION_AGE_LIMIT_SECONDS="$_cfg_sal"
+    fi
+    unset _cfg_sal
+fi
+# Re-apply SESSION_AGE_LIMIT_SECONDS now that config.env may have updated the env var.
+# The initial assignment at top of file used the env var before config.env was read.
+SESSION_AGE_LIMIT_SECONDS="${LOBSTER_SESSION_AGE_LIMIT_SECONDS:-7200}"
+
 # Ensure log directory exists
 mkdir -p "$(dirname "$LOG_FILE")"
 mkdir -p "$(dirname "$RESTART_STATE_FILE")"
@@ -212,40 +227,14 @@ acquire_lock() {
 
 #===============================================================================
 # Direct Telegram Alert (no LLM, no outbox, no MCP)
+# DISABLED: Telegram health alerts have been turned off per user request (2026-06-15).
+# All call sites are preserved; this function is now a no-op that logs only.
+# To re-enable, restore the original curl-based implementation from git history.
 #===============================================================================
 send_telegram_alert() {
     local message="$1"
-
-    # Source config.env for bot token and user ID
-    local bot_token=""
-    local chat_id=""
-
-    if [[ -f "$CONFIG_ENV" ]]; then
-        bot_token=$(grep '^TELEGRAM_BOT_TOKEN=' "$CONFIG_ENV" | cut -d'=' -f2-)
-        chat_id=$(grep '^TELEGRAM_ALLOWED_USERS=' "$CONFIG_ENV" | cut -d'=' -f2- | cut -d',' -f1)
-    fi
-
-    if [[ -z "$bot_token" || -z "$chat_id" ]]; then
-        log_error "Cannot send Telegram alert: missing bot token or chat ID"
-        return 1
-    fi
-
-    local full_message=$'🚨 *Lobster Health Alert*\n\n'"${message}"$'\n\n_'"$(date '+%Y-%m-%d %H:%M:%S %Z')"$'_'
-
-    curl -s -X POST \
-        "https://api.telegram.org/bot${bot_token}/sendMessage" \
-        --data-urlencode "chat_id=${chat_id}" \
-        --data-urlencode "text=${full_message}" \
-        --data-urlencode "parse_mode=Markdown" \
-        --max-time 10 \
-        > /dev/null 2>&1
-
-    local rc=$?
-    if [[ $rc -eq 0 ]]; then
-        log_info "Telegram alert sent to $chat_id"
-    else
-        log_error "Telegram alert failed (curl exit $rc)"
-    fi
+    log_info "Telegram alert suppressed (alerts disabled): ${message:0:120}"
+    return 0
 }
 
 # send_telegram_alert_deduped — like send_telegram_alert but suppresses repeat
@@ -1291,6 +1280,14 @@ except Exception as e:
 #   1 — SIGTERM sent (graceful proactive restart initiated)
 #===============================================================================
 check_session_age() {
+    # Support SESSION_AGE_LIMIT_SECONDS=0 as an explicit disable signal.
+    # Use this when CC no longer enforces the 7440s hard session limit and
+    # the proactive restarts are causing unnecessary disruption.
+    if [[ "$SESSION_AGE_LIMIT_SECONDS" -eq 0 ]]; then
+        log_info "Session age: check disabled (SESSION_AGE_LIMIT_SECONDS=0)"
+        return 0
+    fi
+
     if [[ ! -f "$DISPATCHER_SESSION_START_FILE" ]]; then
         log_info "Session age: no start timestamp file — skipping (old install or first run)"
         return 0
@@ -1999,7 +1996,7 @@ main() {
         send_telegram_alert_deduped "auth-expired" "Lobster: Claude auth expired (loggedIn=false confirmed after consecutive checks).
 
 Restarting will NOT fix this. Manual action required:
-ssh into the server and run: claude auth login"
+Update CLAUDE_CODE_OAUTH_TOKEN in ~/lobster-config/config.env, then restart lobster-claude."
         if [[ "$level" != "RED" ]]; then
             level="YELLOW"
         fi
