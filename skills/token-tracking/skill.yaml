@@ -1,0 +1,10 @@
+name: token-tracking
+display_name: Token Usage Tracking
+description: >
+  Tracks token usage across all sessions (dispatcher + subagents) without
+  requiring an API key. Uses local CC session JSONL files as the data source.
+  Fires a PostToolUse hook after every Agent call to log per-subagent token
+  counts. Nightly rollup computes daily and weekly totals.
+activation: always
+version: 1.0.0
+default: true
