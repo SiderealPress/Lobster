@@ -1619,11 +1619,15 @@ Status: Restarted, but new stale messages detected post-restart"
         log_info "Restart successful"
         write_boot_timestamp
         if [[ "$suppress_alert" != "true" ]]; then
-            # "Recovered" alert: use raw send (important positive signal, not spammy)
-            send_telegram_alert "System recovered automatically.
+            if [[ "${LOBSTER_DEBUG:-false}" == "true" ]]; then
+                # "Recovered" alert: use raw send (important positive signal, not spammy)
+                send_telegram_alert "System recovered automatically.
 
 Reason: $reason
 Status: Restarted successfully"
+            else
+                log_info "Post-restart recovery Telegram alert suppressed (LOBSTER_DEBUG not set)"
+            fi
         else
             log_info "Post-restart Telegram alert suppressed (compaction window active)"
         fi
