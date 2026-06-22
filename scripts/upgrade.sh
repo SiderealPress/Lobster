@@ -3146,6 +3146,39 @@ M88_PYEOF
         substep "Migration 94: settings.json or jq not found — skipping"
     fi
 
+    # Migration 95: Stagger nightly-consolidation cron from 03:00 to 03:02 (issue #2074).
+    # The health check and nightly-consolidation were both scheduled at 03:00:00 UTC.
+    # When consolidation fired first, the dispatcher's wait_for_messages loop woke up,
+    # wrote an "exited" tombstone to the wfm_active state file, and the health check
+    # (also firing at 03:00) read: heartbeat stale + wfm_active = exited → concluded
+    # the dispatcher was dead → triggered a false restart. This caused 9 false-positive
+    # restarts between June 13–21 2026. Moving consolidation to 03:02 gives the health
+    # check a clean 03:00 read (dispatcher solidly in WFM, wfm_active fresh → GREEN)
+    # and consolidation fires when the health check is not watching.
+    local NIGHTLY_CONSOLIDATION_MARKER="# LOBSTER-NIGHTLY-CONSOLIDATION"
+    local NIGHTLY_LOG="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}/logs/nightly-consolidation.log"
+    local _m95_old_entry _m95_new_entry
+    _m95_new_entry="2 3 * * * $LOBSTER_DIR/scripts/nightly-consolidation.sh >> $NIGHTLY_LOG 2>&1 $NIGHTLY_CONSOLIDATION_MARKER"
+    if crontab -l 2>/dev/null | grep -qF "$NIGHTLY_CONSOLIDATION_MARKER"; then
+        _m95_old_entry=$(crontab -l 2>/dev/null | grep -F "$NIGHTLY_CONSOLIDATION_MARKER")
+        if echo "$_m95_old_entry" | grep -q "^0 3 "; then
+            # Still on the old 03:00 schedule — update to 03:02.
+            mkdir -p "$(dirname "$NIGHTLY_LOG")"
+            "$LOBSTER_DIR/scripts/cron-manage.sh" add "$NIGHTLY_CONSOLIDATION_MARKER" "$_m95_new_entry"
+            substep "Migration 95: moved nightly-consolidation cron from 03:00 to 03:02 (issue #2074)"
+            migrated=$((migrated + 1))
+        else
+            substep "Migration 95: nightly-consolidation cron already staggered — skipping"
+        fi
+    else
+        # Entry is missing entirely — add it with the correct 03:02 schedule.
+        mkdir -p "$(dirname "$NIGHTLY_LOG")"
+        chmod +x "$LOBSTER_DIR/scripts/nightly-consolidation.sh" 2>/dev/null || true
+        "$LOBSTER_DIR/scripts/cron-manage.sh" add "$NIGHTLY_CONSOLIDATION_MARKER" "$_m95_new_entry"
+        substep "Migration 95: added missing nightly-consolidation cron entry at 03:02"
+        migrated=$((migrated + 1))
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
