@@ -8,7 +8,14 @@
 # No direct API calls are made here. Everything goes through Claude Code.
 #
 # Crontab entry:
-#   0 3 * * * $HOME/lobster/scripts/nightly-consolidation.sh >> $HOME/lobster-workspace/logs/nightly-consolidation.log 2>&1
+#   2 3 * * * $HOME/lobster/scripts/nightly-consolidation.sh >> $HOME/lobster-workspace/logs/nightly-consolidation.log 2>&1
+#
+# Runs at 03:02 (not 03:00) to avoid a race with the health check that fires at
+# 03:00. If consolidation fires at 03:00, the dispatcher's WFM loop wakes, writes
+# an "exited" tombstone to wfm_active, and the health check (also at 03:00)
+# catches it in that WAKING_UP gap — seeing stale heartbeat + exited tombstone
+# and concluding the dispatcher is dead. Staggering to 03:02 ensures the health
+# check always reads the dispatcher solidly in WFM (GREEN). See issue #2074.
 #
 # Dedup guard: if a consolidation message is already pending in the inbox,
 # this script exits without writing a duplicate.
