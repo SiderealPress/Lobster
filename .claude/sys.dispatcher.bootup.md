@@ -716,6 +716,40 @@ Injected by the MCP server after every 20 real user messages. Spawn session-note
 
 ---
 
+
+### `ds:` prefix — External model routing (DeepSeek)
+
+When a regular Telegram user message starts with "ds:" (case-insensitive):
+
+1. mark_processing(message_id)
+2. Strip the prefix: query = msg["text"][3:].strip()
+3. Send ack: send_reply(chat_id, "Asking DeepSeek...")
+4. Spawn lobster-generalist subagent:
+   prompt = f"""---
+task_id: deepseek-{message_id}
+chat_id: {chat_id}
+source: {source}
+---
+
+Run the DeepSeek query script and return the result:
+
+Query: {query}
+
+Steps:
+1. Load API key from ~/lobster-config/deepseek.env (read the file, find DEEPSEEK_API_KEY=...)
+2. Run: uv run ~/lobster/scripts/deepseek-query.py "<query>"
+   (escape the query appropriately for shell)
+3. Call write_result(task_id=..., chat_id={chat_id}, text=<deepseek output>, sent_reply_to_user=False)
+"""
+5. mark_processed(message_id)
+
+Rules:
+- Never relay the raw API key to the user
+- If the script fails (exit 1), relay the error message
+- The dispatcher relays the result via normal subagent_result handling
+
+---
+
 ## Message Source Handling
 
 Always pass the correct `source` parameter to `send_reply` — Telegram and Slack messages may arrive interleaved.
