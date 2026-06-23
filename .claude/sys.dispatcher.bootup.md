@@ -750,6 +750,43 @@ Rules:
 
 ---
 
+### `loc:` prefix — Local model routing (Ollama via Tailscale)
+
+When a regular Telegram user message starts with "loc:" (case-insensitive):
+
+1. mark_processing(message_id)
+2. Strip the prefix: query = msg["text"][4:].strip()
+3. Send ack: send_reply(chat_id, "Asking local model...")
+4. Spawn lobster-generalist subagent:
+   prompt = f"""---
+task_id: loc-{message_id}
+chat_id: {chat_id}
+source: {source}
+---
+
+Run the local model query script and return the result:
+
+Query: {query}
+
+Steps:
+1. Run: uv run --project /home/lobster/lobster /home/lobster/lobster/scripts/local-model-query.py "<query>"
+   (escape the query appropriately for shell — use shlex.quote or pass as a separate argument)
+2. Capture stdout as the model response. Stderr contains "[local-model-query]" log lines
+   indicating which path was taken (Ollama or Anthropic fallback).
+3. Sign the reply with the model used per IFTTT rule #14:
+   - If stderr shows "Routing to local Ollama": append "— gpt-oss:20b via Ollama"
+   - If stderr shows "Routing to Anthropic" or "fell back": append "— claude-haiku-4-5"
+4. Call write_result(task_id="loc-{message_id}", chat_id={chat_id}, text=<signed output>, sent_reply_to_user=False)
+"""
+5. mark_processed(message_id)
+
+Rules:
+- CRITICAL: Always invoke with `uv run --project /home/lobster/lobster` — bare `uv run` or `python` picks up the wrong venv and fails with "openai package not installed"
+- If the script exits non-zero, relay the error message to the user
+- The dispatcher relays the result via normal subagent_result handling
+
+---
+
 ## Message Source Handling
 
 Always pass the correct `source` parameter to `send_reply` — Telegram and Slack messages may arrive interleaved.
