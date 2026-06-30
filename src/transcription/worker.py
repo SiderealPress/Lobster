@@ -353,8 +353,11 @@ async def transcribe_pending_file(pending_file: Path) -> None:
         log.error(f"Cannot read {pending_file}: {e}")
         return  # leave file in place — it may still be mid-write
 
-    # Validate it's a voice message ("audio" normalized to "voice" at ingest; issue #635)
-    if msg_data.get("type") != "voice":
+    # Accept both "voice" (in-app recording) and "audio" (file attachment).
+    # Earlier versions normalized "audio" to "voice" at ingest (issue #635) but
+    # that normalization was never implemented; the bot writes the real Telegram
+    # type so we must handle both here.
+    if msg_data.get("type") not in ("voice", "audio"):
         move_to_dead_letter(
             pending_file, msg_data,
             f"Unexpected type in pending-transcription: {msg_data.get('type')!r}"
