@@ -1762,11 +1762,14 @@ step "Setting up nightly consolidation..."
 
 chmod +x "$INSTALL_DIR/scripts/nightly-consolidation.sh" || true
 
-# Add nightly consolidation to crontab (runs at 03:00 every night)
+# Add nightly consolidation to crontab (runs at 03:02 every night).
+# Staggered 2 minutes after the health check (03:00) to avoid a race condition
+# where the health check catches the dispatcher in its WAKING_UP state and
+# triggers a false restart. See issue #2074.
 "$INSTALL_DIR/scripts/cron-manage.sh" add "# LOBSTER-NIGHTLY-CONSOLIDATION" \
-    "0 3 * * * $INSTALL_DIR/scripts/nightly-consolidation.sh # LOBSTER-NIGHTLY-CONSOLIDATION"
+    "2 3 * * * $INSTALL_DIR/scripts/nightly-consolidation.sh # LOBSTER-NIGHTLY-CONSOLIDATION"
 
-success "Nightly consolidation configured (runs at 03:00 nightly)"
+success "Nightly consolidation configured (runs at 03:02 nightly)"
 
 # Add daily log-export to crontab (runs at 03:00 UTC)
 # export-logs.py archives observations.log, lobster.log, and audit.jsonl to a
