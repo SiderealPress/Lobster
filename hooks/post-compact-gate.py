@@ -9,11 +9,14 @@ on-compact.py when a compaction occurs. This hook passes when:
   1. No sentinel file exists (normal operation), OR
   2. Not the dispatcher session (see session_role.is_dispatcher()), OR
   3. The sentinel is older than SENTINEL_TTL_SECONDS (stale / post-hibernation), OR
-  4. The tool being called IS wait_for_messages (let it through, delete sentinel), OR
-  5. The tool being called IS ToolSearch (read-only schema fetch, needed to load
+  4. The tool being called IS wait_for_messages with the correct confirmation token
+     (let it through, delete sentinel and failure counter), OR
+  5. The tool being called IS wait_for_messages WITHOUT the token but consecutive
+     failures have reached MAX_FAILED_ATTEMPTS (bail-out path — see below), OR
+  6. The tool being called IS ToolSearch (read-only schema fetch, needed to load
      deferred MCP tool schemas — the dispatcher must be able to call ToolSearch to
      fetch the wait_for_messages schema before it can call wait_for_messages), OR
-  6. The tool being called IS Read (read-only file access — non-destructive and
+  7. The tool being called IS Read (read-only file access — non-destructive and
      needed to break the circular dependency in issue #1950: Read is required to
      learn the confirmation token from the bootup file, but the gate was blocking
      Read before the token was known).
@@ -21,6 +24,19 @@ on-compact.py when a compaction occurs. This hook passes when:
 The TTL (10 minutes) eliminates the stuck-sentinel failure mode: if the
 dispatcher hibernates or crashes while the sentinel is active, the next boot
 finds a stale sentinel and the gate passes immediately. No deadlock.
+
+## Consecutive-failure bail-out (issue #2061)
+
+After MAX_FAILED_ATTEMPTS consecutive blocked-needs-token WFM calls within the
+same sentinel window, the gate deletes the sentinel and its companion counter
+file (~/messages/config/compact-pending-failures) and allows WFM through without
+the token. This prevents the model from going silent after exhausting viable
+actions in its context window — the failure mode observed in session 018 where
+the dispatcher froze 49 seconds after compaction and never processed the queued
+user message.
+
+The counter is reset whenever the sentinel is cleared (correct token, TTL expiry,
+or bail-out), so it does not accumulate across sentinel windows.
 
 ## Dispatcher vs subagent detection
 
@@ -86,6 +102,20 @@ SENTINEL_FILE = Path(os.path.expanduser("~/messages/config/compact-pending"))
 SENTINEL_TTL_SECONDS = 600  # 10 minutes — treats stale sentinel as harmless
 LOG_FILE = Path(os.path.expanduser("~/lobster-workspace/logs/compact-gate.log"))
 
+# Consecutive-failure bail-out (issue #2061).
+#
+# After MAX_FAILED_ATTEMPTS consecutive blocked-needs-token WFM calls within
+# the same sentinel window, the gate deletes the sentinel (and this counter
+# file) and allows through rather than continuing to block.  This prevents the
+# model from going silent after exhausting viable actions in its context window.
+#
+# The counter file records the number of consecutive blocked-needs-token events
+# since the current sentinel was written.  It lives in the same directory as
+# the sentinel and is always removed together with it (correct token, TTL
+# expiry, or bail-out).
+FAILURE_COUNTER_FILE = Path(os.path.expanduser("~/messages/config/compact-pending-failures"))
+MAX_FAILED_ATTEMPTS = 3  # Bail out after this many consecutive blocked-needs-token failures
+
 WAIT_FOR_MESSAGES_TOOL = "mcp__lobster-inbox__wait_for_messages"
 
 # ToolSearch is a read-only schema fetch.  It is always allowed through the gate
@@ -134,6 +164,54 @@ def log_gate_event(tool_name: str, action: str) -> None:
         with LOG_FILE.open("a") as f:
             f.write(line)
     except Exception:  # noqa: BLE001
+        pass
+
+
+def _read_failure_count() -> int:
+    """Return the current consecutive-failure count from FAILURE_COUNTER_FILE.
+
+    Returns 0 if the file is absent or cannot be parsed — conservative: we
+    prefer to give the dispatcher one more chance rather than bail out early.
+    Pure read — no side effects.
+    """
+    try:
+        raw = FAILURE_COUNTER_FILE.read_text().strip()
+        return int(raw) if raw.isdigit() else 0
+    except OSError:
+        return 0
+
+
+def _increment_failure_count() -> int:
+    """Increment the consecutive-failure counter and return the new value.
+
+    Creates the counter file if it does not exist.  Uses an atomic rename so
+    the file is never half-written.  Silent on any failure — returns the
+    pre-increment value on error (conservative: avoids premature bail-out due
+    to a filesystem hiccup).
+    """
+    try:
+        current = _read_failure_count()
+        new_count = current + 1
+        FAILURE_COUNTER_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = FAILURE_COUNTER_FILE.with_suffix(".tmp")
+        tmp.write_text(str(new_count))
+        tmp.replace(FAILURE_COUNTER_FILE)
+        return new_count
+    except Exception:  # noqa: BLE001
+        return _read_failure_count()
+
+
+def _reset_failure_count() -> None:
+    """Delete the failure counter file.
+
+    Called when the sentinel is cleared (correct token, TTL expiry, or
+    bail-out).  Silent on any failure — a leftover counter file is harmless
+    because the sentinel gate checks for an *active* sentinel before reading
+    the counter.
+    """
+    try:
+        FAILURE_COUNTER_FILE.unlink(missing_ok=True)
+    except OSError:
         pass
 
 
@@ -194,24 +272,45 @@ def main() -> None:
             # Sentinel is active — require the confirmation token.
             confirmation = tool_input.get("confirmation", "")
             if confirmation == CONFIRMATION_TOKEN:
-                # Correct token: clear the sentinel and allow through.
+                # Correct token: clear the sentinel + failure counter and allow through.
                 try:
                     SENTINEL_FILE.unlink(missing_ok=True)
                 except OSError:
                     pass
+                _reset_failure_count()
                 log_gate_event(tool_name, "cleared")
                 sys.exit(0)
             else:
-                # No or wrong token: deny with instructions.
-                log_gate_event(tool_name, "blocked-needs-token")
-                print(json.dumps({
-                    "hookSpecificOutput": {
-                        "hookEventName": "PreToolUse",
-                        "permissionDecision": "deny",
-                        "permissionDecisionReason": DENY_REASON_NEEDS_TOKEN,
-                    }
-                }))
-                sys.exit(0)
+                # No or wrong token: increment the consecutive-failure counter.
+                # If the counter reaches MAX_FAILED_ATTEMPTS, bail out by clearing the
+                # sentinel rather than blocking indefinitely.  This prevents the model
+                # from going silent after exhausting viable actions in its context window
+                # (issue #2061: post-compaction WFM freeze after repeated denied calls).
+                new_count = _increment_failure_count()
+                if new_count >= MAX_FAILED_ATTEMPTS:
+                    # Bail-out: delete sentinel and counter, allow through.
+                    # The gate has been blocking long enough that the model is at risk
+                    # of freezing.  Clearing the sentinel lets the dispatcher resume
+                    # its main loop even without the correct token.  This is a
+                    # last-resort safety valve — normal operation uses the token path.
+                    try:
+                        SENTINEL_FILE.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    _reset_failure_count()
+                    log_gate_event(tool_name, f"bail-out-after-{new_count}-failures")
+                    sys.exit(0)
+                else:
+                    # Below threshold: deny with instructions.
+                    log_gate_event(tool_name, "blocked-needs-token")
+                    print(json.dumps({
+                        "hookSpecificOutput": {
+                            "hookEventName": "PreToolUse",
+                            "permissionDecision": "deny",
+                            "permissionDecisionReason": DENY_REASON_NEEDS_TOKEN,
+                        }
+                    }))
+                    sys.exit(0)
         else:
             # No active sentinel: wait_for_messages passes through normally
             # regardless of confirmation param.
@@ -219,7 +318,7 @@ def main() -> None:
             sys.exit(0)
 
     # If sentinel is absent or stale, allow everything through.
-    # Delete a stale sentinel so it doesn't linger as an orphan file.
+    # Delete a stale sentinel (and its failure counter) so they don't linger.
     if not sentinel_is_fresh():
         if SENTINEL_FILE.exists():
             try:
@@ -227,6 +326,7 @@ def main() -> None:
                 log_gate_event(tool_name, "stale-sentinel-deleted")
             except OSError:
                 pass
+            _reset_failure_count()
         sys.exit(0)
 
     # Sentinel is fresh and tool is not wait_for_messages — deny.
