@@ -6779,7 +6779,11 @@ async def run_whisper_cpp(audio_path: Path) -> tuple[bool, str]:
         "-m", str(WHISPER_MODEL_PATH),
         "-f", str(audio_path),
         "-l", "en",      # English language
-        "-nt",           # No timestamps in output
+        # NOTE: do NOT pass -nt / --no-timestamps here.
+        # With that flag, whisper.cpp collapses all segments and only emits the
+        # last one, silently truncating long audio.  We let whisper output the
+        # default "[HH:MM:SS.mmm --> HH:MM:SS.mmm]  text" format and strip
+        # the timestamp brackets in post-processing (see worker.py PR #300).
         "--no-prints",   # Suppress progress output
     ]
 
@@ -6794,12 +6798,21 @@ async def run_whisper_cpp(audio_path: Path) -> tuple[bool, str]:
         error_msg = stderr.decode().strip() if stderr else "Unknown error"
         return False, f"whisper.cpp failed: {error_msg}"
 
-    # Parse output - whisper.cpp outputs the transcription to stdout
-    transcription = stdout.decode().strip()
-
-    # Remove any remaining timing info if present (lines starting with [)
-    lines = [line for line in transcription.split('\n') if not line.strip().startswith('[')]
-    transcription = ' '.join(lines).strip()
+    # Parse output: whisper-cli emits lines in the form:
+    #   [HH:MM:SS.mmm --> HH:MM:SS.mmm]   transcription text here
+    # The text lives on the same line as the timestamp bracket, so we must
+    # extract the text after "]" rather than discard the whole line.
+    raw = stdout.decode().strip()
+    _TIMESTAMP_RE = re.compile(r"^\[[\d:.,\s\-–>]+\]\s*")
+    lines = []
+    for ln in raw.split("\n"):
+        stripped = ln.strip()
+        if not stripped:
+            continue
+        text = _TIMESTAMP_RE.sub("", stripped).strip()
+        if text:
+            lines.append(text)
+    transcription = " ".join(lines).strip()
 
     return True, transcription
 
