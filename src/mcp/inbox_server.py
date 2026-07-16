@@ -9826,6 +9826,11 @@ async def _startup_sweep() -> None:
             )
         for session in unnotified:
             agent_id = session.get("id", "")
+            # #781 Fix 2 (extended): the dispatcher is never a dead subagent (its
+            # output_file is legitimately NULL) — mirror reconcile_agent_sessions();
+            # never re-notify it as agent_failed.
+            if (session.get("agent_type") or "") == "dispatcher":
+                continue
             if _inbox_already_has_agent(agent_id):
                 log.debug(
                     "[reconciler] Startup sweep: inbox file already exists for "
