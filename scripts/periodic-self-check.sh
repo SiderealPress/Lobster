@@ -100,13 +100,23 @@ if [ -n "$COMPLETED_TASKS" ]; then
 else
     # Query SQLite agent_sessions DB for pending (running/starting) agents.
     # pending-agents.json was migrated to SQLite and is no longer authoritative.
+    # Exclude agent_type='dispatcher' — the dispatcher's own session is always
+    # registered as running/starting and would otherwise be counted as a
+    # "pending agent" on every firing, producing a permanent false positive.
+    # Mirrors the fix applied in session_store.py's cleanup_stale_running_sessions()
+    # and get_unnotified_completed() (see #781 / PR #2099); this script queries
+    # the DB directly via sqlite3 rather than through session_store.py, so it
+    # was not covered by that PR and needs the same filter applied here.
     PENDING_COUNT=$(sqlite3 "$MESSAGES_DIR/config/agent_sessions.db" \
-        "SELECT COUNT(*) FROM agent_sessions WHERE status IN ('running','starting')" \
+        "SELECT COUNT(*) FROM agent_sessions WHERE status IN ('running','starting') AND COALESCE(agent_type, '') != 'dispatcher'" \
         2>/dev/null || echo "0")
 
     # No completed tasks — only inject status check if subagents are still
-    # running OR there are pending agents in the tracker.
-    if [ "$CLAUDE_COUNT" -le 1 ] && [ "$PENDING_COUNT" -eq 0 ] 2>/dev/null; then
+    # running. The DB session count is authoritative: if there are zero pending
+    # (non-dispatcher) sessions, do nothing. CLAUDE_COUNT is not reliable here
+    # because the dispatcher itself is always running (count >= 1 even with no
+    # subagents).
+    if [ "$PENDING_COUNT" -eq 0 ] 2>/dev/null; then
         exit 0
     fi
 
