@@ -22,9 +22,19 @@ Design principles:
 import logging
 import os
 import sqlite3
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+# Ensure the parent src/ directory is on sys.path so the sibling `utils`
+# package is importable regardless of how this module is loaded (as part of
+# the `agents` package, or directly via sys.path manipulation in tests).
+_SRC_DIR = str(Path(__file__).resolve().parents[1])
+if _SRC_DIR not in sys.path:
+    sys.path.insert(0, _SRC_DIR)
+
+from utils.agent_types import DISPATCHER_EXCLUSION_SQL  # noqa: E402
 
 log = logging.getLogger(__name__)
 
@@ -518,11 +528,11 @@ def cleanup_stale_running_sessions(
     conn = _get_connection(resolved)
 
     cursor = conn.execute(
-        """
+        f"""
         SELECT id, output_file, spawned_at, timeout_minutes
         FROM agent_sessions
         WHERE status IN ('running', 'starting')
-          AND COALESCE(agent_type, '') != 'dispatcher'  -- #781: never reconcile the dispatcher (output_file is legitimately NULL) as a dead subagent
+          AND {DISPATCHER_EXCLUSION_SQL}  -- #781: never reconcile the dispatcher (output_file is legitimately NULL) as a dead subagent
         """
     )
     rows = cursor.fetchall()
@@ -704,12 +714,12 @@ def get_unnotified_completed(
     cutoff_str = cutoff_dt.isoformat()
 
     cursor = conn.execute(
-        """
+        f"""
         SELECT * FROM agent_sessions
         WHERE status IN ('completed', 'dead')
           AND notified_at IS NULL
           AND completed_at >= ?
-          AND COALESCE(agent_type, '') != 'dispatcher'  -- #781: belt-and-suspenders, never re-notify the dispatcher as a failed agent
+          AND {DISPATCHER_EXCLUSION_SQL}  -- #781: belt-and-suspenders, never re-notify the dispatcher as a failed agent
         ORDER BY completed_at ASC
         """,
         (cutoff_str,),

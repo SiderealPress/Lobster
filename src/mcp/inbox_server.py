@@ -71,6 +71,9 @@ from utils.ifttt_rules import (
     find_rule as _ifttt_find_rule,
     get_enabled_rules as _ifttt_get_enabled_rules,
 )
+
+# Dispatcher-exclusion: shared single source of truth (BIS-723)
+from utils.agent_types import is_dispatcher_row
 import uuid as _uuid_mod
 
 # Reliability utilities (atomic writes, validation, audit logging)
@@ -9828,8 +9831,9 @@ async def _startup_sweep() -> None:
             agent_id = session.get("id", "")
             # #781 Fix 2 (extended): the dispatcher is never a dead subagent (its
             # output_file is legitimately NULL) — mirror reconcile_agent_sessions();
-            # never re-notify it as agent_failed.
-            if (session.get("agent_type") or "") == "dispatcher":
+            # never re-notify it as agent_failed. See utils/agent_types.py (BIS-723)
+            # for the shared single source of truth for this check.
+            if is_dispatcher_row(session):
                 continue
             if _inbox_already_has_agent(agent_id):
                 log.debug(
@@ -9911,8 +9915,10 @@ async def reconcile_agent_sessions() -> None:
                 # The SessionStart hook may register the dispatcher itself in
                 # agent_sessions.db with agent_type='dispatcher' (on crash-restart
                 # before the marker file is cleared).  The dispatcher is never a
-                # "dead agent" — never emit agent_failed for it.
-                if (session.get("agent_type") or "") == "dispatcher":
+                # "dead agent" — never emit agent_failed for it. See
+                # utils/agent_types.py (BIS-723) for the shared single source of
+                # truth for this check.
+                if is_dispatcher_row(session):
                     log.debug(
                         f"[reconciler] Skipping dispatcher session {agent_id!r} "
                         "(agent_type='dispatcher' — not a subagent)"
