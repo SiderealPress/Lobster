@@ -45,6 +45,8 @@ for _p in [str(_ROOT / "src" / "mcp"), str(_ROOT / "src" / "agents"),
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from utils.agent_types import is_dispatcher_row  # noqa: E402
+
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -167,18 +169,13 @@ class TestNoShouldDropFieldInMessages:
 # Bug 2 fix tests: reconciler skips dispatcher-type sessions
 # ---------------------------------------------------------------------------
 
-def _should_reconciler_skip(session: dict) -> bool:
-    """Pure function mirroring the skip guard added to reconcile_agent_sessions().
-
-    Sessions with agent_type='dispatcher' represent the Lobster dispatcher's
-    own process — they are never real subagents and should never be marked dead
-    or have agent_failed messages emitted for them.
-
-    This function is extracted here for unit testing in isolation. The same
-    check must appear at the top of the reconciler loop in inbox_server.py.
-    """
-    agent_type = session.get("agent_type") or ""
-    return agent_type == "dispatcher"
+# BIS-723: this used to be a locally-defined function mirroring the skip guard
+# in reconcile_agent_sessions() — a duplicate reimplementation for test
+# purposes, not a check of the real production code. It now delegates to the
+# shared predicate (src/utils/agent_types.py) that reconcile_agent_sessions()
+# itself calls, so this test exercises the actual implementation rather than a
+# hand-maintained copy of its logic.
+_should_reconciler_skip = is_dispatcher_row
 
 
 class TestReconcilerSkipsDispatcherSessions:
