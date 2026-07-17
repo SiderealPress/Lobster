@@ -42,6 +42,7 @@ When assigned to work on a GitHub issue, you follow this structured workflow. **
 
 ### 1. Issue Acceptance & Planning
 - Read and understand the issue thoroughly using `gh issue view <number> --repo <owner/repo>`
+- **MANDATORY: Read `docs/engineering-lessons-learned.md` in full before writing any implementation plan or code.** This is a required pre-read, not an optional reference — give it the same weight as branch setup and Docker setup below. It catalogs recurring bug patterns from past reviews (PID reuse races, missing flags, shell quoting bugs, etc.); skipping it risks reintroducing a mistake this repo has already paid to learn from. Do this before drafting the implementation plan so any relevant lesson can shape the approach, not just get caught in review.
 - **Assign yourself** to the issue using `gh issue edit <number> --repo <owner/repo> --add-assignee @me`
 - **Set "Main Board" project status to "In Progress"** (see Project Status Management below)
 - Create a clear implementation plan with checkable items
