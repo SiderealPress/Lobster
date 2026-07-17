@@ -9103,8 +9103,8 @@ async def handle_get_bisque_connection_url(arguments: dict[str, Any]) -> list[Te
     if not token_file.exists():
         return [TextContent(type="text", text=(
             "Dashboard token not found. Start the dashboard server first:\n"
-            "nohup /home/admin/lobster/.venv/bin/python3 "
-            "/home/admin/lobster/src/dashboard/server.py --host 0.0.0.0 --port 9100 &"
+            f"nohup {_REPO_DIR}/.venv/bin/python3 "
+            f"{_REPO_DIR}/src/dashboard/server.py --host 0.0.0.0 --port 9100 &"
         ))]
     token = token_file.read_text().strip()
     if not token:

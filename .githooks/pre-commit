@@ -5,14 +5,12 @@
 # Structural backstop — even if .gitignore is wrong, the commit is blocked
 # when staged files match patterns that belong in the workspace, not the repo.
 #
-# Also scans staged file content for personal names (case-insensitive):
-#   - "sahar" (as a standalone name)
-#   - "drew" (as a standalone name, not part of "andrew" or "withdrew" etc.)
+# Also scans staged file content for personal names (case-insensitive), as
+# configured in ~/lobster-user-config/blocked-names.txt (gitignored, private).
+# If no config file exists, falls back to generic placeholder names below.
 #
 # Allowlisted non-name occurrences:
-#   - "sayhar" (GitHub username) — allowed
-#   - "andrew" — allowed
-#   - "withdrew", "outdrewn", etc. — allowed (drew embedded in longer words)
+#   - Per-name allowlist regex configured alongside each name in blocked-names.txt
 #   - Comments with # noname on the same line — allowed
 #
 # Bypass: git commit --no-verify
@@ -128,6 +126,48 @@ if [ "$BLOCKED" -gt 0 ]; then
 fi
 
 #===============================================================================
+# Template Hygiene Tripwire: {{USER_CONFIG_DIR}}/ must stay placeholder-only
+#
+# install.sh copies real user data OUT to $HOME/lobster-user-config (or
+# $LOBSTER_USER_CONFIG) — never back into this in-repo literal directory.
+# This tripwire is a structural backstop in case that ever regresses: any
+# staged file under the literal "{{USER_CONFIG_DIR}}/" path must still look
+# like an unpopulated seed template (i.e. retain at least one
+# "Populated automatically" / "<!--" placeholder marker). If a staged file
+# has lost every placeholder marker, real content was likely written back
+# into the tracked template instead of the private runtime location.
+#===============================================================================
+
+TEMPLATE_VIOLATIONS=0
+
+while IFS= read -r file; do
+    [ -z "$file" ] && continue
+    case "$file" in
+        '{{USER_CONFIG_DIR}}/'*) ;;
+        *) continue ;;
+    esac
+
+    staged_content="$(git show ":$file" 2>/dev/null || true)"
+    [ -z "$staged_content" ] && continue
+
+    if ! echo "$staged_content" | grep -qE '(Populated automatically|<!--|Auto-generated)'; then
+        echo -e "${RED}${BOLD}BLOCKED${NC} $file"
+        echo "         This file lives under the in-repo {{USER_CONFIG_DIR}}/ seed-template"
+        echo "         directory but no longer contains any placeholder marker — it may"
+        echo "         have been overwritten with real user data instead of staying a template."
+        echo "         Real memory/handoff data belongs in \$HOME/lobster-user-config/, not here."
+        TEMPLATE_VIOLATIONS=$((TEMPLATE_VIOLATIONS + 1))
+    fi
+done <<< "$STAGED_FILES"
+
+if [ "$TEMPLATE_VIOLATIONS" -gt 0 ]; then
+    echo ""
+    echo -e "${RED}${BOLD}Commit blocked: $TEMPLATE_VIOLATIONS templated file(s) under {{USER_CONFIG_DIR}}/ look populated.${NC}"
+    echo "To bypass:   git commit --no-verify  (use with caution)"
+    exit 1
+fi
+
+#===============================================================================
 # Name Check: scan staged diff for personal names
 #===============================================================================
 
@@ -154,11 +194,14 @@ if [ -f "$_NAMES_CONFIG" ]; then
         _BLOCKED_NAMES+=("$_nc_line")
     done < "$_NAMES_CONFIG"
 fi
-# Fallback built-in defaults when no config file exists or it is empty
+# Fallback built-in defaults when no config file exists or it is empty.
+# These are placeholder names, not real ones — real names belong only in
+# the gitignored ~/lobster-user-config/blocked-names.txt (see format above).
 if [ "${#_BLOCKED_NAMES[@]}" -eq 0 ]; then
     _BLOCKED_NAMES=(
-        'sahar@@sayhar'
-        'drew@@andrew|withdrew|outdrewn'
+        'alice@@'
+        'bob@@'
+        'carol@@'
     )
 fi
 

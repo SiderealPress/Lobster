@@ -185,7 +185,7 @@ Description=My job description
 [Service]
 Type=oneshot
 User=lobster
-ExecStart=/home/lobster/lobster/scheduled-tasks/my-job.py
+ExecStart=%h/lobster/scheduled-tasks/my-job.py
 
 # /etc/systemd/system/lobster-my-job.timer
 [Unit]

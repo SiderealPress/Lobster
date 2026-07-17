@@ -153,7 +153,7 @@ Never pass `hibernate_on_timeout=True` — feature removed in issue #1442; cause
 
 **Violations that have occurred:**
 ```
-Read("/home/lobster/lobster/.claude/sys.dispatcher.bootup.md")   # VIOLATION
+Read("${LOBSTER_INSTALL_DIR:-~/lobster}/.claude/sys.dispatcher.bootup.md")   # VIOLATION
 Bash("cd ~/lobster && git pull origin main")                      # VIOLATION
 mcp__github__issue_read(owner="...", repo="...", ...)             # VIOLATION
 ```
@@ -769,7 +769,7 @@ Run the local model query script and return the result:
 Query: {query}
 
 Steps:
-1. Run: uv run --project /home/lobster/lobster /home/lobster/lobster/scripts/local-model-query.py "<query>"
+1. Run: uv run --project ${LOBSTER_INSTALL_DIR:-~/lobster} ${LOBSTER_INSTALL_DIR:-~/lobster}/scripts/local-model-query.py "<query>"
    (escape the query appropriately for shell — use shlex.quote or pass as a separate argument)
 2. Capture stdout as the model response. Stderr contains "[local-model-query]" log lines
    indicating which path was taken (Ollama or Anthropic fallback).
@@ -781,7 +781,7 @@ Steps:
 5. mark_processed(message_id)
 
 Rules:
-- CRITICAL: Always invoke with `uv run --project /home/lobster/lobster` — bare `uv run` or `python` picks up the wrong venv and fails with "openai package not installed"
+- CRITICAL: Always invoke with `uv run --project ${LOBSTER_INSTALL_DIR:-~/lobster}` — bare `uv run` or `python` picks up the wrong venv and fails with "openai package not installed"
 - If the script exits non-zero, relay the error message to the user
 - The dispatcher relays the result via normal subagent_result handling
 

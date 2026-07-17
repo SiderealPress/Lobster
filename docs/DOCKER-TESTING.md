@@ -86,18 +86,18 @@ Available types: `unit`, `integration`, `stress`, `install`, `mcp`, `bot`, `daem
 
 ## Test Telegram bot token
 
-For Docker tests that need a real bot token (smoke tests, end-to-end flows), use the dedicated test bot:
+For Docker tests that need a real bot token (smoke tests, end-to-end flows), create a dedicated test bot via @BotFather and use its token:
 
 ```
-***REMOVED-TELEGRAM-BOT-TOKEN***
+<YOUR_BOT_TOKEN>
 ```
 
-**Never use a production bot token in Docker tests.** This token is for isolated testing only.
+**Never use a production bot token in Docker tests.** Use a bot created solely for testing, and never commit its token to the repo.
 
-Pass it via environment variable:
+Pass it via environment variable (e.g. set `TEST_TELEGRAM_BOT_TOKEN` in `~/lobster-config/test.env`, gitignored):
 
 ```bash
-TELEGRAM_BOT_TOKEN=***REMOVED-TELEGRAM-BOT-TOKEN*** \
+TELEGRAM_BOT_TOKEN=${TEST_TELEGRAM_BOT_TOKEN:?set this in your local test.env} \
   docker compose -f tests/docker/docker-compose.test.yml run --rm integration-tests
 ```
 

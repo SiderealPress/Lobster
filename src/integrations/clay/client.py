@@ -516,7 +516,7 @@ class ClayClient:
           error (str|None)
           webhook_model_available (bool) — True if CLAY_WEBHOOK_URL is set
         """
-        test_email = "satya.nadella@microsoft.com"
+        test_email = "test-smoke@example.com"
         webhook_url = os.environ.get("CLAY_WEBHOOK_URL", "").strip()
         try:
             person = self.lookup_by_email(test_email)

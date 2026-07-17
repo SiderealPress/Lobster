@@ -1,9 +1,9 @@
-# BIS-49: Session Management and Auto-Reconnect
+# Session Management and Auto-Reconnect
 
 ## Overview
 
 This document describes the session management additions made to the WhatsApp bridge
-(`/home/admin/lobster-workspace/projects/whatsapp-bridge/index.js`) as part of BIS-49.
+(`$HOME/lobster-workspace/projects/whatsapp-bridge/index.js`).
 
 ## Changes
 
@@ -53,7 +53,7 @@ Location: `whatsapp-bridge/lobster-qr.sh`
 
 ## Health Check Integration
 
-`/home/admin/lobster/scripts/health-check.sh` was updated to check the heartbeat file.
+`$LOBSTER_INSTALL_DIR/scripts/health-check.sh` was updated to check the heartbeat file.
 If the file is older than a configurable threshold, the bridge is considered stale and
 a warning is logged. See the health check script for details.
 

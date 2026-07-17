@@ -1745,9 +1745,12 @@ EOF
     local mcp_http_already_registered
     mcp_http_already_registered=$(claude mcp list 2>/dev/null | grep -c "localhost:8766" || echo "0")
     if [ "${mcp_http_already_registered:-0}" = "0" ]; then
-        # Install / refresh the lobster-mcp-local service
+        # Install / refresh the lobster-mcp-local service. Render to a runtime
+        # workspace dir, never back into the tracked repo services/ dir.
         local mcp_local_template="$LOBSTER_DIR/services/lobster-mcp-local.service.template"
-        local mcp_local_service="$LOBSTER_DIR/services/lobster-mcp-local.service"
+        local _rendered_services_dir="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}/services"
+        mkdir -p "$_rendered_services_dir"
+        local mcp_local_service="$_rendered_services_dir/lobster-mcp-local.service"
 
         if [ -f "$mcp_local_template" ]; then
             # Use the shared template library when available (it is, since we
