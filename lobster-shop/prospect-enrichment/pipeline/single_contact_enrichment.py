@@ -37,12 +37,14 @@ import requests
 # Allow running as script
 _HERE = Path(__file__).parent
 sys.path.insert(0, str(_HERE.parent / "bin"))
+sys.path.insert(0, str(_HERE.parent / "provenance"))
 
 from manifest_loader import load_manifest, available_sources_for_goal, confidence_from_score, hash_response, now_iso
 from pipeline.idempotency_check import is_fresh
 from pipeline.validator import validate_contact, validate_provenance
 from pipeline.audit_log import AuditLog
 from pipeline.dry_run import DryRunContext
+from constants import ASSISTANT_NAME
 
 KISSINGER_ENDPOINT = os.environ.get("KISSINGER_ENDPOINT", "http://localhost:8080/graphql")
 KISSINGER_API_TOKEN = os.environ.get("KISSINGER_API_TOKEN", "")
@@ -523,7 +525,7 @@ def _build_provenance_meta(
         "provenance.source": source_id,
         "provenance.source_url": source_url,
         "provenance.enriched_at": ts,
-        "provenance.enriched_by": "wallace",
+        "provenance.enriched_by": ASSISTANT_NAME,
         "provenance.pipeline_run_id": run_id,
         "provenance.confidence": confidence,
         "provenance.goal": goal,

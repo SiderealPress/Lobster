@@ -50,7 +50,7 @@ class OutboxFileHandler(_FSEHandler):
     Can be used in two modes:
 
     **Writer mode** (original BIS-159 interface):
-        handler = OutboxFileHandler(outbox_dir=Path("/home/lobster/messages/outbox"))
+        handler = OutboxFileHandler(outbox_dir=Path("~/messages/outbox").expanduser())
         handler.write({"id": "12345_telegram", "chat_id": 1234567890, "text": "Hi"})
 
     **Watchdog mode** (BIS-166 router interface):

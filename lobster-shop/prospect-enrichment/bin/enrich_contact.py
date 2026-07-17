@@ -37,12 +37,14 @@ import requests
 # Sibling imports
 _BIN = Path(__file__).parent
 sys.path.insert(0, str(_BIN))
+sys.path.insert(0, str(_BIN.parent / "provenance"))
 
 from manifest_loader import load_manifest, available_sources_for_goal, confidence_from_score, hash_response, now_iso
 from pipeline_hygiene import HygieneLayer
 from run_manifest import create_run, complete_run, update_run
 from find_supply_chain_contacts import find_supply_chain_contacts
 from dedup_crm_contacts import dedup_crm_contacts
+from constants import ASSISTANT_NAME
 
 # Clay integration — person-level enrichment (work_history goal)
 # Imported lazily inside the function to keep startup fast when Clay is unavailable
@@ -102,7 +104,7 @@ def _build_clay_provenance_meta(
         "provenance.source": "clay",
         "provenance.source_url": _CLAY_SOURCE_URL,
         "provenance.enriched_at": ts,
-        "provenance.enriched_by": "wallace",
+        "provenance.enriched_by": ASSISTANT_NAME,
         "provenance.pipeline_run_id": run_id,
         "provenance.confidence": confidence,
         "provenance.goal": goal,
@@ -137,7 +139,7 @@ def _build_crustdata_provenance_meta(
         "provenance.source": "crustdata",
         "provenance.source_url": _CRUSTDATA_SOURCE_URL,
         "provenance.enriched_at": ts,
-        "provenance.enriched_by": "wallace",
+        "provenance.enriched_by": ASSISTANT_NAME,
         "provenance.pipeline_run_id": run_id,
         "provenance.confidence": confidence,
         "provenance.goal": goal,

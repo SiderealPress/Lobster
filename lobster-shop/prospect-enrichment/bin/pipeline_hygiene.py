@@ -43,6 +43,7 @@ import requests
 # Add bin dir to sys.path so sibling imports work when run as script
 _BIN = Path(__file__).parent
 sys.path.insert(0, str(_BIN))
+sys.path.insert(0, str(_BIN.parent / "provenance"))
 
 from manifest_loader import (
     ManifestError,
@@ -51,6 +52,7 @@ from manifest_loader import (
     load_manifest,
     now_iso,
 )
+from constants import ASSISTANT_NAME
 
 _RUNS_DIR = Path.home() / "lobster-workspace" / "enrichment-runs"
 
@@ -233,7 +235,7 @@ class HygieneLayer:
             {"key": "provenance.source_url", "value": source_url},
             {"key": "provenance.enriched_at", "value": ts},
             {"key": f"provenance.enriched_at.{source_id}", "value": ts},
-            {"key": "provenance.enriched_by", "value": "wallace"},
+            {"key": "provenance.enriched_by", "value": ASSISTANT_NAME},
             {"key": "provenance.pipeline_run_id", "value": self._run_id},
             {"key": "provenance.confidence", "value": self._confidence},
             {"key": "provenance.goal", "value": self._goal},
@@ -250,7 +252,7 @@ class HygieneLayer:
             contact_meta.append({"key": "company", "value": contact["company"].strip()})
 
         # Legacy provenance field (backwards compat with existing pipeline)
-        contact_meta.append({"key": "provenance", "value": "wallace"})
+        contact_meta.append({"key": "provenance", "value": ASSISTANT_NAME})
 
         all_meta = contact_meta + provenance_meta
 
@@ -425,7 +427,7 @@ class HygieneLayer:
             {"key": f"provenance.source.{source_id}", "value": source_id},
             {"key": "provenance.enriched_at", "value": ts},
             {"key": f"provenance.enriched_at.{source_id}", "value": ts},
-            {"key": "provenance.enriched_by", "value": "wallace"},
+            {"key": "provenance.enriched_by", "value": ASSISTANT_NAME},
             {"key": "provenance.pipeline_run_id", "value": self._run_id},
             {"key": "provenance.confidence", "value": self._confidence},
             {"key": "provenance.goal", "value": self._goal},

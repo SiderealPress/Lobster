@@ -21,8 +21,13 @@ Usage:
 from __future__ import annotations
 
 import re
+import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).parent.parent / "provenance"))
+from constants import ASSISTANT_NAME  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -176,9 +181,9 @@ def validate_provenance(meta: list[dict[str, Any]]) -> ValidationResult:
         )
 
     enriched_by = meta_dict.get("provenance.enriched_by")
-    if enriched_by and enriched_by != "wallace":
+    if enriched_by and enriched_by != ASSISTANT_NAME:
         result.add_warning(
-            f"provenance.enriched_by is '{enriched_by}', expected 'wallace' for automated runs"
+            f"provenance.enriched_by is '{enriched_by}', expected '{ASSISTANT_NAME}' for automated runs"
         )
 
     run_id = meta_dict.get("provenance.pipeline_run_id")

@@ -2,7 +2,7 @@
 """
 migrate-vc-to-investor.py
 
-ARCHITECTURAL DECISION (BIS-325):
+ARCHITECTURAL DECISION:
   Kissinger's EntityKind is a closed Rust enum: person, place, property, project, org, skill.
   - 'investor_firm' and 'investor_person' do NOT exist as native kinds.
   - updateEntity does NOT expose a kind field (kind is immutable via GraphQL).
@@ -39,8 +39,9 @@ import urllib.error
 # ---------------------------------------------------------------------------
 
 KISSINGER_URL = os.environ.get("KISSINGER_API_URL", "http://localhost:8080/graphql")
-VC_FIRMS_PATH = os.path.expanduser(
-    "~/lobster-workspace/lobsterdrop/kissinger_vc_firms.json"
+VC_FIRMS_PATH = os.environ.get(
+    "KISSINGER_DATA_PATH",
+    os.path.expanduser("~/lobster-workspace/lobsterdrop/kissinger_vc_firms.json"),
 )
 PIPELINE_RUN_ID = str(uuid.uuid4())[:8]
 MIGRATED_AT = datetime.now(timezone.utc).isoformat()

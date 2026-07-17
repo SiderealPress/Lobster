@@ -20,6 +20,7 @@ import pytest
 
 # Add pipeline to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent / "provenance"))
 
 from pipeline.idempotency_check import is_fresh, check_all_sources, FreshnessResult
 from pipeline.validator import (
@@ -30,6 +31,7 @@ from pipeline.validator import (
 )
 from pipeline.audit_log import AuditLog, read_run_summary, list_recent_runs
 from pipeline.dry_run import DryRunContext
+from constants import ASSISTANT_NAME
 
 
 # ---------------------------------------------------------------------------
@@ -187,7 +189,7 @@ class TestValidateProvenance:
             {"key": "provenance.source", "value": "apollo"},
             {"key": "provenance.source_url", "value": "https://api.apollo.io/v1/people"},
             {"key": "provenance.enriched_at", "value": "2026-04-09T18:00:00Z"},
-            {"key": "provenance.enriched_by", "value": "wallace"},
+            {"key": "provenance.enriched_by", "value": ASSISTANT_NAME},
             {"key": "provenance.pipeline_run_id", "value": "a3f8c1d2-1234-4567-89ab-abcdef012345"},
             {"key": "provenance.confidence", "value": "high"},
             {"key": "provenance.goal", "value": "org_chart"},
@@ -244,7 +246,7 @@ class TestValidateProvenance:
         result = validate_provenance(meta)
         assert result.valid is False
 
-    def test_non_wallace_enriched_by_is_warning(self):
+    def test_non_default_enriched_by_is_warning(self):
         meta = self._valid_provenance()
         for m in meta:
             if m["key"] == "provenance.enriched_by":
