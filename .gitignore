@@ -25,11 +25,12 @@ node_modules/
 # Logs
 *.log
 
-# Generated service files (created from templates during install)
-services/lobster-router.service
-services/lobster-claude.service
-services/lobster-mcp.service
-services/lobster-slack-router.service
+# Generated service files (rendered from services/*.service.template at
+# install/update time into $LOBSTER_WORKSPACE/services/ — a runtime dir
+# outside the repo, never committed). This rule is a defensive backstop only;
+# rendering should never target this in-repo services/ dir going forward.
+services/*.service
+!services/*.service.template
 
 # Local configuration (use lobster.conf.example as template)
 config/lobster.conf
@@ -70,3 +71,22 @@ PLAN-*.md
 # Listed here as a safety net in case someone clones into the wrong place
 .claude/user.md
 .claude/user/
+
+# Instance-specific / business-data files that currently exist untracked in
+# some deployments (never committed, zero git history). Listed here as a
+# defensive backstop so a future `git add -A` can't accidentally sweep them
+# into the public repo. These belong in ~/lobster-user-config/ instead —
+# see the PII remediation plan for the move-out plan for each.
+hello-world.js
+agents/eloso-test-manager.md
+scripts/apollo_enrich.py
+scripts/validate-temporal-token.py
+scheduled-tasks/ism-workshop-reminder.sh
+scheduled-tasks/outreach-queue-topup.sh
+lobster-shop/buy-things/README.md
+lobster-shop/paperclip/behavior/system.md
+lobster-shop/paperclip/context/eloso-reference.md
+lobster-shop/kissinger/context/reference.md
+
+# Stray backup files (should never be committed)
+*.bak

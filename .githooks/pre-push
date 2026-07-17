@@ -9,15 +9,16 @@
 #   4. Always requires explicit confirmation that PII has been checked
 #
 # Scans for:
-#   - Instance-specific URLs (awp-two.vercel.app, alternativewealthpartners.com,
-#     myownlobster.com) and emails on those domains
+#   - Instance-specific URLs and bot username prefixes, configured via
+#     ~/lobster-user-config/instance-domains.txt (falls back to inert
+#     placeholders if no config file exists)
 #   - Hardcoded home paths (/home/admin, /home/lobster)
-#   - Bot usernames with Awp_ prefix
 #   - Database URLs (postgresql://, mongodb://)
 #   - Numeric IDs in env-var form (BOT_USER_ID=NNNNNNNN, chat_id=NNNNNNNN, etc.)
 #   - PII: email addresses, phone numbers, SSNs, credit cards, IP addresses
 #   - Security: API keys, tokens, credentials, private keys
-#   - Personal names: Sahar, Drew, Kelly, Addie (as standalone words)
+#   - Personal names: configured via ~/lobster-user-config/blocked-names.txt
+#     (falls back to generic placeholder names if no config file exists)
 #
 # IMPORTANT: This hook NEVER modifies files. It only reports violations and
 # lets the developer decide. Silent file rewriting is dangerous: it corrupts
@@ -180,11 +181,53 @@ get_push_diff() {
 # Using @@ as delimiter to avoid conflicts with regex pipe characters.
 #===============================================================================
 
+# Instance-specific domain/bot-prefix patterns — loaded from user config,
+# falling back to inert generic placeholders when no config file exists.
+#
+# Config file: ${LOBSTER_USER_CONFIG_DIR:-~/lobster-user-config}/instance-domains.txt
+# Format (one entry per line):
+#   domain@@<domain-regex-fragment>        e.g. domain@@example-corp\.com
+#   bot_prefix@@<bot-username-regex-fragment>   e.g. bot_prefix@@Acme_
+#   Lines starting with # are comments; empty lines are ignored.
+_PP_DOMAINS_CONFIG="${LOBSTER_USER_CONFIG_DIR:-$HOME/lobster-user-config}/instance-domains.txt"
+_PP_DOMAIN_FRAGMENTS=()
+_PP_BOT_PREFIX_FRAGMENTS=()
+if [ -f "$_PP_DOMAINS_CONFIG" ]; then
+    while IFS= read -r _pp_dline; do
+        [[ "$_pp_dline" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "${_pp_dline// }" ]] && continue
+        _pp_dkey="${_pp_dline%%@@*}"
+        _pp_dval="${_pp_dline#*@@}"
+        case "$_pp_dkey" in
+            domain) _PP_DOMAIN_FRAGMENTS+=("$_pp_dval") ;;
+            bot_prefix) _PP_BOT_PREFIX_FRAGMENTS+=("$_pp_dval") ;;
+        esac
+    done < "$_PP_DOMAINS_CONFIG"
+fi
+
+_pp_join_by_pipe() {
+    local IFS='|'
+    echo "$*"
+}
+
+if [ "${#_PP_DOMAIN_FRAGMENTS[@]}" -gt 0 ]; then
+    _PP_INSTANCE_URL_REGEX="(?i)($(_pp_join_by_pipe "${_PP_DOMAIN_FRAGMENTS[@]}"))"
+else
+    # Placeholder only — matches nothing on a fresh checkout with no config file.
+    _PP_INSTANCE_URL_REGEX='(?i)(your-instance-domain\.example)'
+fi
+
+if [ "${#_PP_BOT_PREFIX_FRAGMENTS[@]}" -gt 0 ]; then
+    _PP_BOT_PREFIX_REGEX="\\b($(_pp_join_by_pipe "${_PP_BOT_PREFIX_FRAGMENTS[@]}"))\\w+_bot\\b"
+else
+    _PP_BOT_PREFIX_REGEX='\bYourPrefix_\w+_bot\b'
+fi
+
 # Instance-specific patterns — things that identify this private deployment
 INSTANCE_PATTERNS=(
-    'instance_url@@(?i)(awp-two\.vercel\.app|alternativewealthpartners\.com|myownlobster\.com)@@Instance-specific URL'
+    "instance_url@@${_PP_INSTANCE_URL_REGEX}@@Instance-specific URL"
     'home_path@@/home/(?:admin|lobster)\b@@Hardcoded home path (/home/admin or /home/lobster)'
-    'awp_bot@@\bAwp_\w+_bot\b@@Awp_ prefixed bot username'
+    "awp_bot@@${_PP_BOT_PREFIX_REGEX}@@Instance-specific bot username prefix"
     'db_url@@(?i)(?:postgresql|mongodb)://@@Database connection URL'
     'numeric_id@@(?i)(?:BOT_USER_ID|chat_id|ADMIN_CHAT_ID)\s*=\s*\d{8,}@@Hardcoded numeric bot/user ID (8+ digits)'
 )
@@ -232,13 +275,14 @@ if [ -f "$_PP_NAMES_CONFIG" ]; then
         NAME_PATTERNS+=("${_pp_name}@@(?<![a-z])${_pp_name}(?![a-z])@@Personal name (${_pp_name})@@${_pp_allow}")
     done < "$_PP_NAMES_CONFIG"
 fi
-# Fallback built-in defaults when no config file exists or it is empty
+# Fallback built-in defaults when no config file exists or it is empty.
+# These are placeholder names, not real ones — real names belong only in
+# the gitignored ~/lobster-user-config/blocked-names.txt (see format above).
 if [ "${#NAME_PATTERNS[@]}" -eq 0 ]; then
     NAME_PATTERNS=(
-        'sahar@@(?<![a-z])sahar(?![a-z])@@Personal name (sahar)@@sayhar'
-        'drew@@(?<![a-z])drew(?![a-z])@@Personal name (drew)@@andrew|withdrew|outdrewn'
-        'kelly@@(?<![a-z])kelly(?![a-z])@@Personal name (kelly)@@'
-        'addie@@(?<![a-z])addie(?![a-z])@@Personal name (addie)@@'
+        'alice@@(?<![a-z])alice(?![a-z])@@Personal name (alice)@@'
+        'bob@@(?<![a-z])bob(?![a-z])@@Personal name (bob)@@'
+        'carol@@(?<![a-z])carol(?![a-z])@@Personal name (carol)@@'
     )
 fi
 

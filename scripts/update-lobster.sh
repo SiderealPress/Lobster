@@ -422,8 +422,9 @@ update_claude_cli() {
 # Always regenerates service files from their repo templates and reinstalls
 # them to /etc/systemd/system/. This corrects any divergence between the
 # installed service files and the repo templates — including manual edits
-# that are invisible to git (lobster-claude.service is gitignored because
-# it is generated at install time from lobster-claude.service.template).
+# that are invisible to git (lobster-claude.service is not tracked in git —
+# it is generated at install/update time from lobster-claude.service.template
+# into a runtime directory, never back into the repo's services/ dir).
 #
 # Uses the same {{PLACEHOLDER}} substitution logic as install.sh.
 #-------------------------------------------------------------------------------
@@ -458,6 +459,11 @@ update_systemd() {
         log OK "Generated: $output"
     }
 
+    # Rendered service files are instance-specific and must never land back
+    # in the tracked repo services/ dir. Render to a runtime workspace dir.
+    local rendered_services_dir="$LOBSTER_WORKSPACE/services"
+    mkdir -p "$rendered_services_dir"
+
     if $DRY_RUN; then
         log INFO "Would regenerate service files from templates and reinstall to /etc/systemd/system/"
         for tmpl in services/*.service.template; do
@@ -474,7 +480,7 @@ update_systemd() {
         [ -f "$tmpl" ] || continue
         local svc_name
         svc_name=$(basename "$tmpl" .template)
-        local generated="services/$svc_name"
+        local generated="$rendered_services_dir/$svc_name"
 
         # Generate the service file from the template
         generate_from_template "$tmpl" "$generated"

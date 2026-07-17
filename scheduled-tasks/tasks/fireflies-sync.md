@@ -49,8 +49,8 @@ Example success output:
   "transcripts_errored": 0,
   "committed": true,
   "last_sync_at": "2026-06-01T15:00:00.000Z",
-  "vault_path": "/home/lobster/lobster-workspace/obsidian-vault",
-  "accounts_polled": ["primary", "jake", "ben", "priya"],
+  "vault_path": "~/lobster-workspace/obsidian-vault",
+  "accounts_polled": ["primary", "alice", "bob", "carol"],
   "message": "Synced 3 new/updated transcripts, skipped 0 unchanged"
 }
 ```

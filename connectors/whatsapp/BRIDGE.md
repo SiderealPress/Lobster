@@ -6,7 +6,7 @@ The WhatsApp bridge is implemented as a standalone Node.js service located at:
 $LOBSTER_PROJECTS/whatsapp-bridge/
 ```
 
-Full path (default): `/home/admin/lobster-workspace/projects/whatsapp-bridge/`
+Full path (default): `$HOME/lobster-workspace/projects/whatsapp-bridge/`
 
 ## Architecture
 

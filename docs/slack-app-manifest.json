@@ -4,7 +4,7 @@
     "minor_version": 1
   },
   "display_information": {
-    "name": "Wallace",
+    "name": "YourAssistantName",
     "description": "Lobster AI assistant",
     "background_color": "#2c3e50"
   },
@@ -15,7 +15,7 @@
       "messages_tab_read_only_enabled": false
     },
     "bot_user": {
-      "display_name": "Wallace",
+      "display_name": "YourAssistantName",
       "always_online": true
     }
   },

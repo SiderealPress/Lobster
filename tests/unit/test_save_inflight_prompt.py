@@ -212,7 +212,7 @@ class TestSaveInflightPromptHappyPath:
             "type": "reviewer",
             "description": "Review the PR",
             "started_at": "2026-05-09T14:30:00Z",
-            "chat_id": 8305714125,
+            "chat_id": 1234567890,
             "subagent_type": "review",
             "status": "running",
             "prompt": "Review PR #55.",
@@ -225,7 +225,7 @@ class TestSaveInflightPromptHappyPath:
         assert entry["type"] == "reviewer"
         assert entry["description"] == "Review the PR"
         assert entry["started_at"] == "2026-05-09T14:30:00Z"
-        assert entry["chat_id"] == 8305714125
+        assert entry["chat_id"] == 1234567890
         assert entry["subagent_type"] == "review"
         assert entry["status"] == "running"
 

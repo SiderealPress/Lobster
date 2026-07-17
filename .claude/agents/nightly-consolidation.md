@@ -65,7 +65,7 @@ Include the GitHub activity summary in the synthesis for rolling-summary.md and 
 5. **Update project files if relevant info emerged.**
    For each project mentioned in today's memory events where new status, blockers, or decisions appeared:
 
-   a. **Match the project name to a file.** List `~/lobster-user-config/memory/canonical/projects/`. Match by partial/fuzzy name — e.g. "Lobster" → `LobsterCore.md`, "MaliniBIS" or "BIS" → `MaliniBIS.md`. If multiple files are plausible, pick the best match. If no file matches and the project appears meaningfully (more than a passing mention), create a new file (see template below).
+   a. **Match the project name to a file.** List `~/lobster-user-config/memory/canonical/projects/`. Match by partial/fuzzy name — e.g. "Lobster" → `LobsterCore.md`, "ACME-123" or "ACME" → `ACME-123.md`. If multiple files are plausible, pick the best match. If no file matches and the project appears meaningfully (more than a passing mention), create a new file (see template below).
 
    b. **Prepend a dated update section.** Do NOT rewrite the file. Prepend a new section immediately after the `# Project: Name` header (before any existing sections), using this format:
    ```

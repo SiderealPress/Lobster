@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-bootstrap-supply-chain-graph.py — BIS-338
+bootstrap-supply-chain-graph.py
 
 Bootstraps supply chain relationships for seed prospects by:
 1. Creating supplier/customer entities in Kissinger if they don't exist
@@ -19,6 +19,7 @@ Usage:
   python3 scripts/bootstrap-supply-chain-graph.py --seed "Greenbrier"
 """
 
+import os
 import argparse
 import json
 import sys
@@ -30,7 +31,13 @@ SCRIPT_VERSION = "1.0.0"
 SCRIPT_NAME = "bootstrap-supply-chain-graph.py"
 
 # ---------------------------------------------------------------------------
-# Known supply chain relationships
+# Known supply chain relationships.
+#
+# Externalized to a private JSON file — this is proprietary business data,
+# not appropriate for the public repo. Configure the path via
+# BOOTSTRAP_SUPPLY_CHAIN_DATA_PATH; defaults to the standard user-config
+# data location.
+#
 # Format:
 #   seed_name: {
 #       "suppliers": [
@@ -48,305 +55,28 @@ SCRIPT_NAME = "bootstrap-supply-chain-graph.py"
 #       ]
 #   }
 # ---------------------------------------------------------------------------
-SUPPLY_CHAIN_RELATIONSHIPS = {
-    "The Greenbrier Companies": {
-        "suppliers": [
-            {
-                "name": "Nucor Corporation",
-                "relationship_type": "steel_supplier",
-                "confidence": "high",
-                "source": "Public industry knowledge — Nucor is largest US steel supplier to railcar manufacturers; Greenbrier 10-K cites steel as primary input cost",
-                "tags": ["supplier", "vertical:capital_goods"],
-                "notes": "Largest domestic steel producer; primary supplier of hot-rolled coil and plate steel to North American railcar manufacturers including Greenbrier. ~$37B revenue.",
-            },
-            {
-                "name": "Steel Technologies (METALS USA)",
-                "relationship_type": "steel_service_center",
-                "confidence": "medium",
-                "source": "Industry knowledge — steel service centers are standard intermediate in railcar manufacturing supply chain",
-                "tags": ["supplier", "vertical:capital_goods"],
-                "notes": "Steel service center and processor; supplies processed steel to railcar manufacturers. Part of Metals USA group.",
-            },
-            {
-                "name": "Wabtec Corporation",
-                "relationship_type": "railcar_component_supplier",
-                "confidence": "high",
-                "source": "Public industry knowledge — Wabtec is dominant supplier of braking systems, couplers, and other railcar components to all major railcar OEMs",
-                "tags": ["supplier", "vertical:rail", "vertical:capital_goods"],
-                "notes": "Leading supplier of freight car components: brakes, couplers, draft gear, trucks. ~$9B revenue. Supplies all major railcar manufacturers.",
-            },
-            {
-                "name": "Amsted Rail",
-                "relationship_type": "railcar_components_supplier",
-                "confidence": "high",
-                "source": "Industry knowledge — Amsted Rail (private) supplies wheels, axles, bearings to railcar manufacturers",
-                "tags": ["supplier", "vertical:rail"],
-                "notes": "Private supplier of railcar wheels, axles, and roller bearings. Major supplier to North American railcar builders.",
-            },
-        ],
-        "customers": [
-            {
-                "name": "BNSF Railway",
-                "relationship_type": "railcar_customer",
-                "confidence": "high",
-                "source": "Public — BNSF is one of the largest purchasers of new railcars in North America; Greenbrier 10-K references Class I railroad customers",
-                "tags": ["customer", "vertical:rail"],
-                "notes": "Class I railroad, one of Greenbrier's major fleet purchaser customers. ~$23B revenue.",
-            },
-            {
-                "name": "Union Pacific Railroad",
-                "relationship_type": "railcar_customer",
-                "confidence": "high",
-                "source": "Public — Union Pacific regularly orders new railcars; Greenbrier is a major supplier to Class I railroads",
-                "tags": ["customer", "vertical:rail"],
-                "notes": "Class I railroad and major railcar fleet purchaser. ~$24B revenue.",
-            },
-            {
-                "name": "GATX Corporation",
-                "relationship_type": "railcar_leasing_customer",
-                "confidence": "high",
-                "source": "Industry knowledge — GATX is a major railcar lessor and purchaser from Greenbrier",
-                "tags": ["customer", "vertical:rail", "prospect"],
-                "notes": "Railcar leasing company and fleet manager. Also a seed prospect. Purchases railcars from Greenbrier for its leasing fleet.",
-            },
-        ],
-    },
+_SUPPLY_CHAIN_DATA_PATH = os.environ.get(
+    "BOOTSTRAP_SUPPLY_CHAIN_DATA_PATH",
+    os.path.expanduser(
+        "~/lobster-user-config/data/bootstrap-supply-chain-relationships.json"
+    ),
+)
 
-    "FreightCar America": {
-        "suppliers": [
-            {
-                "name": "Nucor Corporation",
-                "relationship_type": "steel_supplier",
-                "confidence": "high",
-                "source": "Public — FreightCar America 10-K cites steel as primary input material; Nucor largest domestic supplier",
-                "tags": ["supplier", "vertical:capital_goods"],
-                "notes": "Primary steel supplier to FreightCar America for railcar plate and structural steel. Nucor is largest domestic EAF steelmaker.",
-            },
-            {
-                "name": "Wabtec Corporation",
-                "relationship_type": "railcar_component_supplier",
-                "confidence": "high",
-                "source": "Industry standard — Wabtec supplies braking and coupling systems to all NA railcar OEMs",
-                "tags": ["supplier", "vertical:rail", "vertical:capital_goods"],
-                "notes": "Supplies braking systems, couplers, draft gear to FreightCar America railcar production.",
-            },
-            {
-                "name": "Amsted Rail",
-                "relationship_type": "wheels_axles_supplier",
-                "confidence": "high",
-                "source": "Industry knowledge — Amsted Rail is dominant supplier of wheels/axles to NA railcar manufacturers",
-                "tags": ["supplier", "vertical:rail"],
-                "notes": "Supplies wheels, axles, and bearings to FreightCar America.",
-            },
-        ],
-        "customers": [
-            {
-                "name": "BNSF Railway",
-                "relationship_type": "railcar_customer",
-                "confidence": "medium",
-                "source": "Industry knowledge — Class I railroads are primary customers for gondola and open-top hoppers that FreightCar America specializes in",
-                "tags": ["customer", "vertical:rail"],
-                "notes": "Major Class I railroad customer for coal gondolas and bulk commodity railcars.",
-            },
-            {
-                "name": "Norfolk Southern Railway",
-                "relationship_type": "railcar_customer",
-                "confidence": "medium",
-                "source": "Industry knowledge — FreightCar America primarily serves eastern coal-producing region railroads",
-                "tags": ["customer", "vertical:rail"],
-                "notes": "Class I railroad; customer for open-top hoppers and gondola cars.",
-            },
-        ],
-    },
 
-    "Textron Systems": {
-        "suppliers": [
-            {
-                "name": "Moog Inc.",
-                "relationship_type": "precision_actuation_supplier",
-                "confidence": "high",
-                "source": "Industry knowledge — Moog is a leading supplier of precision actuation and flight control systems to defense drone manufacturers including Textron Bell",
-                "tags": ["supplier", "vertical:defense", "vertical:aerospace"],
-                "notes": "Supplies precision actuation, flight control, and electromechanical systems to Textron drone and aircraft programs. Also a seed prospect in Kissinger.",
-            },
-            {
-                "name": "Parker Hannifin",
-                "relationship_type": "fluid_power_motion_supplier",
-                "confidence": "high",
-                "source": "Industry knowledge — Parker Hannifin is a dominant supplier of motion control and fluid power systems to defense aerospace manufacturers",
-                "tags": ["supplier", "vertical:defense", "vertical:aerospace", "vertical:capital_goods"],
-                "notes": "Supplies hydraulic, pneumatic, and motion control systems for Textron's drone and armored vehicle programs. ~$20B revenue.",
-            },
-            {
-                "name": "TransDigm Group",
-                "relationship_type": "aerospace_components_supplier",
-                "confidence": "medium",
-                "source": "Industry knowledge — TransDigm is a major supplier of highly engineered aerospace components to defense manufacturers",
-                "tags": ["supplier", "vertical:defense", "vertical:aerospace"],
-                "notes": "Supplies highly engineered aerospace/defense components (actuators, sensors, ignition systems) to Textron defense programs. ~$7B revenue.",
-            },
-            {
-                "name": "L3Harris Technologies",
-                "relationship_type": "sensors_electronics_supplier",
-                "confidence": "medium",
-                "source": "Industry knowledge — L3Harris is a leading supplier of sensors, EO/IR systems, and communications to drone/UAS manufacturers",
-                "tags": ["supplier", "vertical:defense"],
-                "notes": "Supplies EO/IR sensors, communications systems, and electronic warfare components to Textron drone programs.",
-            },
-        ],
-        "customers": [
-            {
-                "name": "U.S. Army (DoD)",
-                "relationship_type": "primary_government_customer",
-                "confidence": "high",
-                "source": "Public — Textron Systems' Shadow and Aerosonde drones are US Army programs of record",
-                "tags": ["customer"],
-                "notes": "Primary customer for Shadow TUAS and Aerosonde drone systems under US Army contracts.",
-            },
-        ],
-    },
+def _load_supply_chain_relationships() -> dict:
+    if not os.path.isfile(_SUPPLY_CHAIN_DATA_PATH):
+        print(
+            f"[ERROR] Supply chain data file not found: {_SUPPLY_CHAIN_DATA_PATH}\n"
+            "        Set BOOTSTRAP_SUPPLY_CHAIN_DATA_PATH to point at your "
+            "private relationship dataset.",
+            file=sys.stderr,
+        )
+        return {}
+    with open(_SUPPLY_CHAIN_DATA_PATH) as _f:
+        return json.load(_f)
 
-    "Moog Inc.": {
-        "suppliers": [
-            {
-                "name": "Parker Hannifin",
-                "relationship_type": "components_competitor_supplier",
-                "confidence": "medium",
-                "source": "Industry knowledge — Parker and Moog compete but Parker also supplies some components to Moog's non-competing segments",
-                "tags": ["supplier", "vertical:defense", "vertical:aerospace", "vertical:capital_goods"],
-                "notes": "Complex relationship — competitor in motion control but also potential supplier of sub-components to Moog's industrial segment.",
-            },
-            {
-                "name": "TE Connectivity",
-                "relationship_type": "connectors_sensors_supplier",
-                "confidence": "high",
-                "source": "Industry knowledge — TE Connectivity is a dominant supplier of connectors and sensors to aerospace/defense manufacturers",
-                "tags": ["supplier", "vertical:capital_goods"],
-                "notes": "Supplies precision connectors, sensors, and data connectivity components to Moog's aerospace and defense product lines.",
-            },
-            {
-                "name": "Curtiss-Wright Corporation",
-                "relationship_type": "defense_components_supplier",
-                "confidence": "medium",
-                "source": "Industry knowledge — Curtiss-Wright supplies defense-grade electronics and components to precision motion control manufacturers",
-                "tags": ["supplier", "vertical:defense"],
-                "notes": "Supplies defense-hardened electronics and actuation components used in Moog's defense programs.",
-            },
-        ],
-        "customers": [
-            {
-                "name": "Boeing",
-                "relationship_type": "aerospace_oem_customer",
-                "confidence": "high",
-                "source": "Public — Moog supplies flight control actuation systems to Boeing commercial and defense programs",
-                "tags": ["customer", "vertical:aerospace"],
-                "notes": "Major customer for Moog's flight control actuation systems across commercial (737, 787) and defense (F/A-18) platforms.",
-            },
-            {
-                "name": "Lockheed Martin",
-                "relationship_type": "defense_oem_customer",
-                "confidence": "high",
-                "source": "Public — Moog supplies to F-35 and other Lockheed programs",
-                "tags": ["customer", "vertical:defense", "vertical:aerospace"],
-                "notes": "Key defense customer for Moog's precision actuation, flight control, and missile systems components.",
-            },
-            {
-                "name": "Raytheon Technologies (RTX)",
-                "relationship_type": "defense_oem_customer",
-                "confidence": "high",
-                "source": "Public — Moog supplies to multiple Raytheon/RTX missile and aircraft programs",
-                "tags": ["customer", "vertical:defense", "vertical:aerospace"],
-                "notes": "Customer for Moog's missile actuation and precision motion control systems across Raytheon/Collins programs.",
-            },
-        ],
-    },
 
-    "AeroVironment": {
-        "suppliers": [
-            {
-                "name": "Vicor Corporation",
-                "relationship_type": "power_electronics_supplier",
-                "confidence": "medium",
-                "source": "Industry knowledge — Vicor is a leading supplier of power modules for small UAS and defense electronics",
-                "tags": ["supplier", "vertical:capital_goods"],
-                "notes": "Supplies high-density power conversion modules for AeroVironment's small UAS platforms.",
-            },
-            {
-                "name": "Teledyne FLIR",
-                "relationship_type": "eo_ir_sensor_supplier",
-                "confidence": "high",
-                "source": "Industry knowledge — Teledyne FLIR is the dominant supplier of small EO/IR sensors used in tactical small UAS like Raven and Puma",
-                "tags": ["supplier", "vertical:defense"],
-                "notes": "Supplies lightweight EO/IR sensors for AeroVironment's small UAS payload systems (Raven, Puma, Shrike).",
-            },
-            {
-                "name": "Maxon Group",
-                "relationship_type": "precision_motor_supplier",
-                "confidence": "medium",
-                "source": "Industry knowledge — Maxon precision motors are widely used in small UAS propulsion and control systems",
-                "tags": ["supplier", "vertical:capital_goods"],
-                "notes": "Swiss manufacturer of precision DC and BLDC motors used in AeroVironment's small drone propulsion and gimbal systems.",
-            },
-        ],
-        "customers": [
-            {
-                "name": "U.S. Army (DoD)",
-                "relationship_type": "primary_government_customer",
-                "confidence": "high",
-                "source": "Public — AeroVironment is the sole-source supplier for Raven, Puma, and Wasp small UAS programs",
-                "tags": ["customer"],
-                "notes": "Primary customer. AeroVironment holds the Army's small UAS programs of record (Raven B, Puma AE, Wasp III).",
-            },
-        ],
-    },
-
-    "Anduril Industries": {
-        "suppliers": [
-            {
-                "name": "NVIDIA Corporation",
-                "relationship_type": "ai_compute_supplier",
-                "confidence": "high",
-                "source": "Public — Anduril's Lattice AI platform uses GPU-based compute; NVIDIA is the dominant supplier",
-                "tags": ["supplier", "vertical:capital_goods"],
-                "notes": "Supplies GPU compute (Jetson, A100/H100 class) for Anduril's Lattice AI platform and autonomous systems processing.",
-            },
-            {
-                "name": "Teledyne FLIR",
-                "relationship_type": "sensor_supplier",
-                "confidence": "high",
-                "source": "Industry knowledge — FLIR sensors are used in Anduril's Sentry tower and drone detection systems",
-                "tags": ["supplier", "vertical:defense"],
-                "notes": "Supplies thermal and EO/IR sensors for Anduril's Sentry autonomous surveillance towers and Ghost drone systems.",
-            },
-            {
-                "name": "General Dynamics Mission Systems",
-                "relationship_type": "secure_comms_supplier",
-                "confidence": "medium",
-                "source": "Industry knowledge — GDMS supplies Type 1 encryption and secure communications hardware to defense contractors",
-                "tags": ["supplier", "vertical:defense"],
-                "notes": "Potential supplier of NSA-certified cryptographic and secure communications modules for Anduril's defense platforms.",
-            },
-        ],
-        "customers": [
-            {
-                "name": "U.S. Customs and Border Protection (CBP)",
-                "relationship_type": "government_customer",
-                "confidence": "high",
-                "source": "Public — Anduril won the CBP Autonomous Surveillance Tower contract",
-                "tags": ["customer"],
-                "notes": "Customer for Anduril's Sentry autonomous surveillance towers deployed at US-Mexico border.",
-            },
-            {
-                "name": "U.S. Special Operations Command (SOCOM)",
-                "relationship_type": "government_customer",
-                "confidence": "high",
-                "source": "Public — Anduril has multiple SOCOM contracts for Ghost drone and Altius loitering munitions",
-                "tags": ["customer"],
-                "notes": "Key customer for Anduril's Ghost UAS and Altius loitering munition systems.",
-            },
-        ],
-    },
-}
+SUPPLY_CHAIN_RELATIONSHIPS = _load_supply_chain_relationships()
 
 
 def gql(query: str, variables: dict | None = None) -> dict:
@@ -520,7 +250,7 @@ def main():
     args = parser.parse_args()
 
     print("=" * 70)
-    print("Supply Chain Graph Bootstrap — BIS-338")
+    print("Supply Chain Graph Bootstrap")
     print(f"Mode: {'DRY RUN' if args.dry_run else 'LIVE WRITE'}")
     print("=" * 70)
     print()

@@ -24,7 +24,7 @@ Fireflies public API docs:
 Environment variables:
     FIREFLIES_API_KEY            — primary account's API key (required)
     FIREFLIES_API_KEY_<NAME>     — additional team members' keys, e.g.
-                                    FIREFLIES_API_KEY_JAKE, FIREFLIES_API_KEY_BEN.
+                                    FIREFLIES_API_KEY_ALICE, FIREFLIES_API_KEY_BOB.
                                     Any suffix is picked up automatically —
                                     no code change needed to add a new
                                     teammate's account. See
@@ -115,7 +115,7 @@ class FirefliesTranscript:
 
     The ``fireflies_account`` field identifies which configured Fireflies
     account this transcript came from ('primary', or a teammate's account
-    name such as 'jake'). Defaults to 'primary'.
+    name such as 'alice'). Defaults to 'primary'.
     """
 
     id: str
@@ -524,7 +524,7 @@ class FirefliesAccountConfig:
     Immutable descriptor for a single Fireflies account used in multi-account polling.
 
     Attributes:
-        name:    Account identifier ('primary', or a teammate's name e.g. 'jake').
+        name:    Account identifier ('primary', or a teammate's name e.g. 'alice').
         api_key: Bearer token for this account.
     """
 
@@ -543,7 +543,7 @@ def build_account_configs_from_env(env: Optional[dict[str, str]] = None) -> list
     Rules:
     - FIREFLIES_API_KEY is required (primary account). Returns empty list if absent.
     - Any FIREFLIES_API_KEY_<NAME> variable is treated as an additional account,
-      named after the lowercased suffix (e.g. FIREFLIES_API_KEY_JAKE → 'jake').
+      named after the lowercased suffix (e.g. FIREFLIES_API_KEY_ALICE → 'alice').
       This is discovered dynamically by scanning env — unlike Granola's
       build_account_configs_from_env(), which only recognises a single
       hardcoded '_2' suffix and silently ignores any other named key. Adding a

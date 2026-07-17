@@ -251,7 +251,7 @@ _UPLOAD_RATE_LIMITER = _RateLimiter(rate=2.0, capacity=5.0)
 _ADMIN_SECRET: str = os.environ.get("BISQUE_ADMIN_SECRET", "") or os.environ.get("ADMIN_SECRET", "")
 
 # Public relay URL embedded in login tokens so the browser knows where to connect.
-# Example: wss://178.104.15.109.nip.io/bisque-relay
+# Example: wss://203.0.113.10.nip.io/bisque-relay
 _RELAY_URL: str = os.environ.get("BISQUE_RELAY_URL", "")
 
 

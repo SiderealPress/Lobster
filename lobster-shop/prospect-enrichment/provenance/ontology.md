@@ -15,7 +15,7 @@ entity or edge being written.
 | `provenance.source` | string — `source_id` from manifest | `"apollo"` | Yes |
 | `provenance.source_url` | URI or API endpoint string | `"https://api.apollo.io/v1/people/search"` | Yes |
 | `provenance.enriched_at` | ISO 8601 UTC timestamp | `"2026-04-09T18:00:00Z"` | Yes |
-| `provenance.enriched_by` | string — always `"wallace"` for automated runs | `"wallace"` | Yes |
+| `provenance.enriched_by` | string — the configured assistant name (`LOBSTER_ASSISTANT_NAME`, default `"wallace"`) for automated runs | `"wallace"` | Yes |
 | `provenance.pipeline_run_id` | UUID v4 | `"a3f8c1d2-..."` | Yes |
 | `provenance.confidence` | `"high"` / `"medium"` / `"low"` | `"high"` | Yes |
 | `provenance.goal` | `"org_chart"` / `"work_history"` / `"connections"` | `"org_chart"` | Yes |
@@ -95,7 +95,7 @@ Each line is one write event:
   "meta_written": {
     "provenance.source": "google_serp_free",
     "provenance.enriched_at": "2026-04-09T18:00:05Z",
-    "provenance.enriched_by": "wallace",
+    "provenance.enriched_by": "wallace",  // or whatever LOBSTER_ASSISTANT_NAME resolves to
     "provenance.pipeline_run_id": "a3f8c1d2-...",
     "provenance.confidence": "low",
     "provenance.goal": "org_chart",
@@ -176,7 +176,7 @@ Every pipeline run writes a result manifest at:
 
 ## Audit Queries
 
-To find all Wallace-enriched contacts in Kissinger:
+To find all assistant-enriched contacts in Kissinger:
 
 ```graphql
 query {
@@ -191,6 +191,6 @@ query {
 }
 ```
 
-Then filter client-side for `meta` entries where `key = "provenance.enriched_by"` and `value = "wallace"`.
+Then filter client-side for `meta` entries where `key = "provenance.enriched_by"` and `value` matches your configured assistant name (default `"wallace"`).
 
 To check enrichment age for a specific entity, look for `provenance.enriched_at` in its meta.
