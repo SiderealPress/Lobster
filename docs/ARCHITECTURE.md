@@ -306,10 +306,10 @@ family of `gsd-*` agents (`gsd-executor`, `gsd-planner`, `gsd-phase-researcher`,
 `gsd-codebase-mapper`, `gsd-research-synthesizer`, `gsd-roadmapper`, `gsd-project-researcher`,
 `gsd-verifier`, `gsd-plan-checker`, `gsd-integration-checker`) plus `gsd-debugger`. **None of
 these files exist under `.claude/agents/` in the repository today** (verified: `.claude/agents/`
-contains only `brain-dumps.md`, `compact-catchup.md`, `functional-engineer.md`,
+contains `brain-dumps.md`, `compact-catchup.md`, `functional-engineer.md`,
 `lobster-auditor.md`, `lobster-generalist.md`, `lobster-ops.md`, `nightly-consolidation.md`,
-`review.md`, `session-note-appender.md`, `session-note-polish.md`). Actual `model:` frontmatter
-found in those files:
+`review.md`, `session-note-appender.md`, `session-note-polish.md`, and `voicenote-triage.md`).
+Actual `model:` frontmatter found in those files:
 
 | Agent | `model:` frontmatter |
 |---|---|
@@ -320,6 +320,7 @@ found in those files:
 | `compact-catchup.md` | `sonnet` |
 | `nightly-consolidation.md` | `sonnet` |
 | `session-note-polish.md` | `sonnet` |
+| `voicenote-triage.md` | `sonnet` |
 | `lobster-auditor.md` | `claude-sonnet-4-6` (full model ID) |
 | `lobster-ops.md` | `haiku` |
 | `session-note-appender.md` | `haiku` |
