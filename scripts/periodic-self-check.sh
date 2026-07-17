@@ -138,20 +138,19 @@ TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%S.%6N)
 EPOCH_MS=$(date +%s%3N)
 MSG_ID="${EPOCH_MS}_self"
 
-jq -n \
+# Shared jq --arg JSON builder (BIS-724, scripts/lib/json_message.sh) — single
+# source of truth for jq-arg-safe JSON construction, see PR history for #2004.
+source "${LOBSTER_INSTALL_DIR:-$HOME/lobster}/scripts/lib/json_message.sh"
+_json_build_message \
     --arg id "${MSG_ID}" \
+    --arg source "system" \
+    --argjson chat_id 0 \
+    --argjson user_id 0 \
+    --arg username "lobster-system" \
+    --arg user_name "Self-Check" \
     --arg text "${SELF_CHECK_TEXT}" \
     --arg timestamp "${TIMESTAMP}" \
-    '{
-        "id": $id,
-        "source": "system",
-        "chat_id": 0,
-        "user_id": 0,
-        "username": "lobster-system",
-        "user_name": "Self-Check",
-        "text": $text,
-        "timestamp": $timestamp
-    }' > "${INBOX_DIR}/${MSG_ID}.json"
+    > "${INBOX_DIR}/${MSG_ID}.json"
 
 # Record timestamp
 date +%s > "$LAST_CHECK_FILE"

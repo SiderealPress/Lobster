@@ -16,6 +16,10 @@ unset _LOBSTER_CONFIG _DEV_MODE
 LOBSTER_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
 INBOX="${LOBSTER_MESSAGES:-$HOME/messages}/inbox"
 
+# Shared jq --arg JSON builder (BIS-724, scripts/lib/json_message.sh) — single
+# source of truth for jq-arg-safe JSON construction, see PR history for #2004.
+source "$LOBSTER_DIR/scripts/lib/json_message.sh"
+
 cd "$LOBSTER_DIR"
 
 # Support both git and tarball installs
@@ -28,18 +32,14 @@ if [ -d "$LOBSTER_DIR/.git" ]; then
     if [ "$LOCAL" != "$REMOTE" ]; then
         BEHIND=$(git rev-list --count "$LOCAL..$REMOTE")
         TIMESTAMP=$(date +%s%3N)
-        jq -n \
+        _json_build_message \
             --arg id "${TIMESTAMP}_update_available" \
+            --arg source "system" \
+            --argjson chat_id 0 \
+            --arg type "update_notification" \
             --arg text "UPDATE AVAILABLE: Lobster is ${BEHIND} commits behind origin/main. Use check_updates for details." \
             --arg timestamp "$(date -Iseconds)" \
-            '{
-                "id": $id,
-                "source": "system",
-                "chat_id": 0,
-                "type": "update_notification",
-                "text": $text,
-                "timestamp": $timestamp
-            }' > "$INBOX/${TIMESTAMP}_update_available.json"
+            > "$INBOX/${TIMESTAMP}_update_available.json"
     fi
 else
     # Tarball mode: check GitHub Releases API
@@ -49,17 +49,13 @@ else
 
     if [ -n "$LATEST_VERSION" ] && [ "$LATEST_VERSION" != "$CURRENT_VERSION" ]; then
         TIMESTAMP=$(date +%s%3N)
-        jq -n \
+        _json_build_message \
             --arg id "${TIMESTAMP}_update_available" \
+            --arg source "system" \
+            --argjson chat_id 0 \
+            --arg type "update_notification" \
             --arg text "UPDATE AVAILABLE: Lobster v${CURRENT_VERSION} -> v${LATEST_VERSION}. Use check_updates for details." \
             --arg timestamp "$(date -Iseconds)" \
-            '{
-                "id": $id,
-                "source": "system",
-                "chat_id": 0,
-                "type": "update_notification",
-                "text": $text,
-                "timestamp": $timestamp
-            }' > "$INBOX/${TIMESTAMP}_update_available.json"
+            > "$INBOX/${TIMESTAMP}_update_available.json"
     fi
 fi
