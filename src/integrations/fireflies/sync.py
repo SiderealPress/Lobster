@@ -36,7 +36,7 @@ import os
 import sys
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -66,6 +66,23 @@ _WORKSPACE = Path(os.environ.get("LOBSTER_WORKSPACE", Path.home() / "lobster-wor
 _STATE_FILE = _WORKSPACE / "data" / "fireflies-sync-state.json"
 _VAULT_PATH = Path(os.environ.get("FIREFLIES_VAULT_PATH", _WORKSPACE / "obsidian-vault"))
 _JOB_NAME = "fireflies-sync"
+
+# Fireflies' `fromDate` filter is applied against the transcript's *meeting*
+# date, not the time it was ingested/finalised by Fireflies' processing
+# pipeline. A transcript can therefore be created/finalised well after its
+# meeting date (e.g. a delayed upload, or Fireflies' own summarisation
+# pipeline taking time to complete). If we queried using the raw
+# `last_sync_at` watermark, any such late-arriving transcript whose meeting
+# date falls before that watermark would never be returned by a subsequent
+# sync and would be silently skipped forever.
+#
+# Mitigation: subtract a lookback buffer from the watermark before using it
+# as the query filter, so each sync re-requests a trailing window of
+# already-synced meeting dates. This is safe because the vault writer is
+# idempotent (content-hash comparison) — re-fetched transcripts that are
+# unchanged are skipped, not duplicated. The buffer trades a small amount of
+# redundant fetching for correctness.
+_LATE_ARRIVAL_LOOKBACK = timedelta(days=3)
 
 
 # ---------------------------------------------------------------------------
@@ -235,10 +252,15 @@ def run_sync(dry_run: bool = False) -> dict[str, Any]:
 
     last_sync_str: Optional[str] = state.get("last_sync_at")
     since: Optional[datetime] = None
+    query_since: Optional[datetime] = None
     if last_sync_str:
         try:
             since = datetime.fromisoformat(last_sync_str.replace("Z", "+00:00"))
-            log.info("Incremental sync since: %s", since.isoformat())
+            query_since = since - _LATE_ARRIVAL_LOOKBACK
+            log.info(
+                "Incremental sync since: %s (querying from %s to catch late-arriving transcripts)",
+                since.isoformat(), query_since.isoformat(),
+            )
         except ValueError:
             log.warning("Could not parse last_sync_at %r — doing full sync", last_sync_str)
     else:
@@ -254,22 +276,30 @@ def run_sync(dry_run: bool = False) -> dict[str, Any]:
     account_names = [a.name for a in accounts]
     log.info("Polling %d Fireflies account(s): %s", len(accounts), ", ".join(account_names))
 
+    # Isolate per-account failures: one account's auth/API failure should not
+    # abort the whole multi-account run. We only fail the entire sync if
+    # *every* configured account failed (nothing usable was fetched at all).
     transcripts_by_account: dict[str, list[FirefliesTranscript]] = {}
+    account_errors: dict[str, str] = {}
     for account in accounts:
         try:
-            account_transcripts = iter_all_transcripts_for_account(account, since=since)
+            account_transcripts = iter_all_transcripts_for_account(account, since=query_since)
             transcripts_by_account[account.name] = account_transcripts
             log.info("Account '%s': %d transcripts fetched", account.name, len(account_transcripts))
         except FirefliesAuthError:
-            msg = f"Fireflies authentication failed for account '{account.name}' — check API key in config.env"
+            msg = f"Fireflies authentication failed for account '{account.name}' — check its API key in config.env"
             log.error(msg)
-            _write_task_output(msg, status="failed")
-            return {"status": "failed", "message": msg}
+            account_errors[account.name] = msg
         except FirefliesAPIError as exc:
             msg = f"Fireflies API error for account '{account.name}': {exc}"
             log.error(msg)
-            _write_task_output(msg, status="failed")
-            return {"status": "failed", "message": msg}
+            account_errors[account.name] = msg
+
+    if not transcripts_by_account:
+        msg = "All Fireflies accounts failed: " + "; ".join(account_errors.values())
+        log.error(msg)
+        _write_task_output(msg, status="failed")
+        return {"status": "failed", "message": msg, "account_errors": account_errors}
 
     transcripts_summary = _merge_transcripts_deduplicated(transcripts_by_account)
     n_fetched = len(transcripts_summary)
@@ -297,6 +327,8 @@ def run_sync(dry_run: bool = False) -> dict[str, Any]:
             "accounts_polled": account_names,
             "message": msg,
         }
+        if account_errors:
+            result["account_errors"] = account_errors
         _write_task_output(json.dumps(result), status="success")
         return result
 
@@ -356,6 +388,10 @@ def run_sync(dry_run: bool = False) -> dict[str, Any]:
 
     if write_result.errors:
         result["errors"] = [{"id": eid, "error": emsg} for eid, emsg in write_result.errors]
+
+    if account_errors:
+        result["account_errors"] = account_errors
+        result["status"] = "partial" if status == "success" else status
 
     output_str = json.dumps(result, indent=2)
     log.info("Sync complete: %s", message)
