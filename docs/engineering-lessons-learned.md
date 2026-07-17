@@ -174,3 +174,39 @@ The correct two-step sequence is unavoidable:
 **Fix:** Preserve the two-step model. Use `is_dispatcher()` for SessionStart hooks (reads the startup flag only — the startup flag is still present at SessionStart time). Use `is_dispatcher_session()` for Stop and PreToolUse hooks (reads session-id-marker, with process-tree fallback for the early-boot window before any file is written).
 
 **History:** Startup-flag model introduced in PR #1914 to replace fragile process-tree walking. Session-id-marker-at-Stop bug fixed in PR #1960 — DEAD state was never written because the startup flag was already consumed when Stop fired.
+
+---
+
+## Dispatcher-Exclusion Bug: The Dispatcher's Own Session Row Miscounted as a Dead/Pending Subagent
+
+**Pattern:** The dispatcher registers itself as a row in `agent_sessions.db` (`agent_type='dispatcher'`) so hooks and reconciliation logic can identify the live dispatcher process. Unlike a real subagent, this row legitimately has `output_file=NULL`, no real task, and stays `status='running'` for the entire lifetime of the dispatcher process. Any code that scans `agent_sessions` — directly via SQL or indirectly via a `session_store.py` helper — to find dead, stale, completed, or pending *subagents* must explicitly exclude `agent_type='dispatcher'` rows. If it doesn't, the dispatcher's own row gets misclassified as a hung/dead/pending subagent.
+
+**Why it matters:** This exact bug has been found and fixed **four separate times**, by different people, in different files, because nothing documented it as one recurring pattern:
+
+1. **Issue #781** — first discovered: the dispatcher's `SessionStart` hook could mis-register it as a subagent, and the periodic reconciler loop would later mark it dead and enqueue a false `agent_failed` message. Fix applied only to the periodic loop (`reconcile_agent_sessions()` in `inbox_server.py`).
+2. **PR #2099** — found the *same* missing exclusion in two more code paths that run at **restart time**, before the periodic loop's skip ever gets a chance to apply: `cleanup_stale_running_sessions()` (marks the dispatcher's always-`running`/`output_file=NULL` row dead on every proactive restart) and `get_unnotified_completed()` / `_startup_sweep()` (re-notifies unnotified dead/completed sessions, re-surfacing the dispatcher as a false `agent_failed: lobster-dispatcher` on every restart, roughly every 2 hours).
+3. **PR #2103** — found a **fourth** occurrence: `scripts/periodic-self-check.sh` (cron, every 3 minutes) queries `agent_sessions.db` directly via raw `sqlite3`, bypassing `session_store.py` — and therefore bypassing every fix above. It counted `status IN ('running','starting')` rows as "pending agents" with no dispatcher exclusion, producing a permanent false-positive `[1 agents pending]` self-check firing every 3 minutes with zero real subagents active.
+
+Each fix independently rediscovered the same root cause because there was no single place documenting "any code that lists/counts/reconciles agent-session rows needs this filter" — so nobody searching before writing new reconciliation code would have found it.
+
+**What to look for:** Any new or modified code that:
+- Queries `agent_sessions` (via `session_store.py` or a raw `sqlite3`/SQL call) with `WHERE status IN (...)` intended to find live, dead, completed, or stale *subagents*
+- Iterates over `get_active_sessions()` / `get_unnotified_completed()` / any similar session list and reasons about "is this agent dead / stuck / pending"
+- Counts or reconciles session rows for a health check, self-check, or notification path
+
+...without filtering out `agent_type='dispatcher'` rows.
+
+**Fix pattern:** Add the exclusion at the query or iteration boundary itself — not in some downstream consumer that might not be the only caller:
+- SQL: `AND COALESCE(agent_type, '') != 'dispatcher'`
+- Python iteration: `if (session.get("agent_type") or "") == "dispatcher": continue`
+
+**All known affected call sites (as of this writing):**
+1. `src/agents/session_store.py` — `cleanup_stale_running_sessions()` (SQL filter)
+2. `src/agents/session_store.py` — `get_unnotified_completed()` (SQL filter)
+3. `src/mcp/inbox_server.py` — `reconcile_agent_sessions()` periodic loop (Python skip)
+4. `src/mcp/inbox_server.py` — `_startup_sweep()` (Python skip, mirrors #3)
+5. `scripts/periodic-self-check.sh` — the `PENDING_COUNT` raw `sqlite3` query (bypasses `session_store.py` entirely — SQL filter)
+
+**Forward pointer:** A structural fix is planned so this cannot recur a fifth time: `docs/INVARIANTS.md` will record "the dispatcher session is never a subagent" as a named system invariant, and a shared, consolidated helper (single source of truth for the exclusion, usable from both Python and shell call sites) is planned to replace the five hand-copied filters above. Until those land, any new agent-session query must apply the filter/skip pattern manually and should reference this entry.
+
+**History:** Issue #781 (initial partial fix — periodic loop only) → PR #2099 (extended to `cleanup_stale_running_sessions()`, `get_unnotified_completed()`, and `_startup_sweep()`) → PR #2103 (extended to `periodic-self-check.sh`'s raw SQL query, which bypasses `session_store.py` entirely).
