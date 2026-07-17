@@ -945,3 +945,70 @@ def test_cleanup_stale_marks_end_turn_as_completed_not_dead(isolated_db, tmp_pat
     assert result["status"] == "completed", (
         f"Expected 'completed' for end_turn agent but got {result['status']!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test: dispatcher-exclusion (Linear BIS-723)
+#
+# The dispatcher's own row (agent_type='dispatcher') has output_file legitimately
+# NULL and no natural completion — it must never be swept up by the startup
+# cleanup or re-notified as a failed/completed agent. Regression coverage for
+# the shared predicate in src/utils/agent_types.py (issue #781 / PR #2099 /
+# PR #2103 — fixed independently at each call site before consolidation).
+# ---------------------------------------------------------------------------
+
+
+def test_cleanup_stale_running_excludes_dispatcher_row(isolated_db):
+    """cleanup_stale_running_sessions must never mark the dispatcher's own row dead.
+
+    A dispatcher row has no output_file and no natural completion signal, so
+    without the exclusion it would be treated like an orphaned subagent and
+    marked dead purely due to elapsed time.
+    """
+    db = isolated_db
+
+    old_spawned_at = (datetime.now(timezone.utc) - timedelta(minutes=200)).isoformat()
+    session_store._get_connection(db).execute(
+        """
+        INSERT INTO agent_sessions
+            (id, agent_type, description, chat_id, source, status, spawned_at)
+        VALUES ('dispatcher-main-loop', 'dispatcher', 'main dispatcher loop',
+                '0', 'telegram', 'running', ?)
+        """,
+        (old_spawned_at,),
+    )
+    session_store._get_connection(db).commit()
+
+    server_start = datetime.now(timezone.utc)
+    changed = session_store.cleanup_stale_running_sessions(server_start, path=db)
+
+    assert "dispatcher-main-loop" not in changed
+    result = session_store.find_session("dispatcher-main-loop", path=db)
+    assert result["status"] == "running"
+
+
+def test_get_unnotified_completed_excludes_dispatcher_row(isolated_db):
+    """get_unnotified_completed must never surface the dispatcher's own row.
+
+    Belt-and-suspenders guard: even if the dispatcher's row were ever marked
+    completed/dead with notified_at NULL, the startup sweep must not re-notify
+    it as a failed agent.
+    """
+    db = isolated_db
+
+    completed_at = datetime.now(timezone.utc).isoformat()
+    spawned_at = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    session_store._get_connection(db).execute(
+        """
+        INSERT INTO agent_sessions
+            (id, agent_type, description, chat_id, source, status, spawned_at, completed_at)
+        VALUES ('dispatcher-main-loop', 'dispatcher', 'main dispatcher loop',
+                '0', 'telegram', 'dead', ?, ?)
+        """,
+        (spawned_at, completed_at),
+    )
+    session_store._get_connection(db).commit()
+
+    unnotified = session_store.get_unnotified_completed(since_hours=24, path=db)
+
+    assert all(row["id"] != "dispatcher-main-loop" for row in unnotified)
