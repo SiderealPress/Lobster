@@ -10,8 +10,9 @@ Covers:
 
 from __future__ import annotations
 
+import json
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -220,3 +221,95 @@ class TestRunSync:
         assert state_file.exists()
         written_file = vault_path / "fireflies" / "2026" / "06" / "2026-06-01-real-call.md"
         assert written_file.exists()
+
+    def test_one_account_auth_failure_does_not_abort_others(self, tmp_path, monkeypatch):
+        """
+        Design-gap fix: a single account's auth failure must not abort the
+        entire multi-account sync. The healthy account's transcripts should
+        still be fetched and written; the failing account should be reported
+        in `account_errors`, not swallow the whole run.
+        """
+        state_file = tmp_path / "state.json"
+        vault_path = tmp_path / "vault"
+        good_t = _make_transcript("a", title="Good Call", account="jake")
+
+        monkeypatch.setattr(
+            "integrations.fireflies.sync.build_account_configs_from_env",
+            lambda: [
+                FirefliesAccountConfig(name=ACCOUNT_PRIMARY, api_key="bad"),
+                FirefliesAccountConfig(name="jake", api_key="good"),
+            ],
+        )
+        monkeypatch.setattr("integrations.fireflies.sync._STATE_FILE", state_file)
+        monkeypatch.setattr("integrations.fireflies.sync._VAULT_PATH", vault_path)
+
+        def fake_iter(account, since=None):
+            if account.name == ACCOUNT_PRIMARY:
+                raise FirefliesAuthError()
+            return [good_t]
+
+        monkeypatch.setattr("integrations.fireflies.sync.iter_all_transcripts_for_account", fake_iter)
+        monkeypatch.setattr("integrations.fireflies.sync.get_transcript", MagicMock(return_value=good_t))
+
+        result = run_sync()
+
+        assert result["status"] == "partial"
+        assert result["transcripts_written"] == 1
+        assert ACCOUNT_PRIMARY in result["account_errors"]
+        assert "jake" not in result["account_errors"]
+
+    def test_all_accounts_failing_still_returns_failed(self, tmp_path, monkeypatch):
+        """Unlike the partial-failure case, if every account fails, the run fails."""
+        monkeypatch.setattr(
+            "integrations.fireflies.sync.build_account_configs_from_env",
+            lambda: [
+                FirefliesAccountConfig(name=ACCOUNT_PRIMARY, api_key="bad"),
+                FirefliesAccountConfig(name="jake", api_key="also-bad"),
+            ],
+        )
+        monkeypatch.setattr("integrations.fireflies.sync._STATE_FILE", tmp_path / "state.json")
+        monkeypatch.setattr(
+            "integrations.fireflies.sync.iter_all_transcripts_for_account",
+            MagicMock(side_effect=FirefliesAuthError()),
+        )
+
+        result = run_sync()
+
+        assert result["status"] == "failed"
+        assert set(result["account_errors"]) == {ACCOUNT_PRIMARY, "jake"}
+
+    def test_query_since_applies_lookback_buffer_before_watermark(self, tmp_path, monkeypatch):
+        """
+        Design-gap fix: Fireflies' `fromDate` filter is meeting-date based,
+        not ingestion-time based, so late-finalised transcripts with an older
+        meeting date could be silently missed if we queried using the raw
+        watermark. The sync must query a buffer window *before* the stored
+        watermark, not the watermark itself.
+        """
+        from datetime import datetime as dt
+        from datetime import timezone as tz
+
+        state_file = tmp_path / "state.json"
+        watermark = "2026-07-10T00:00:00.000Z"
+        state_file.write_text(json.dumps({"last_sync_at": watermark, "total_synced": 0, "last_run_at": None}))
+
+        monkeypatch.setattr(
+            "integrations.fireflies.sync.build_account_configs_from_env",
+            lambda: [FirefliesAccountConfig(name=ACCOUNT_PRIMARY, api_key="k")],
+        )
+        monkeypatch.setattr("integrations.fireflies.sync._STATE_FILE", state_file)
+
+        captured_since = {}
+
+        def fake_iter(account, since=None):
+            captured_since["value"] = since
+            return []
+
+        monkeypatch.setattr("integrations.fireflies.sync.iter_all_transcripts_for_account", fake_iter)
+
+        run_sync()
+
+        raw_watermark = dt.fromisoformat(watermark.replace("Z", "+00:00"))
+        assert captured_since["value"] is not None
+        assert captured_since["value"] < raw_watermark
+        assert (raw_watermark - captured_since["value"]) == timedelta(days=3)
