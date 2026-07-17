@@ -48,6 +48,10 @@ COMPLETION_THRESHOLD_SECONDS=120
 mkdir -p "$STATE_DIR" "$INBOX_DIR"
 touch "$NOTIFIED_FILE" 2>/dev/null || true
 
+# Shared jq --arg JSON builder (BIS-724, scripts/lib/json_message.sh) — single
+# source of truth for jq-arg-safe JSON construction, see PR history for #2004.
+source "${LOBSTER_INSTALL_DIR:-$HOME/lobster}/scripts/lib/json_message.sh"
+
 # Bail early if pending-agents.json doesn't exist or has no agents
 if [ ! -f "$PENDING_AGENTS_FILE" ]; then
     exit 0
@@ -115,21 +119,17 @@ while IFS= read -r agent_id; do
     # Safely escape agent_id for JSON (alphanumeric + hyphens only expected)
     SAFE_ID=$(echo "$agent_id" | tr -cd 'a-zA-Z0-9_-')
 
-    jq -n \
+    _json_build_message \
         --arg id "${MSG_ID}" \
+        --arg source "system" \
+        --arg type "health_check" \
+        --argjson chat_id 0 \
+        --argjson user_id 0 \
+        --arg username "lobster-system" \
+        --arg user_name "Agent Relay" \
         --arg text "Agent relay check: ${SAFE_ID} output file appears complete. Check task-notifications and relay results to the user." \
         --arg timestamp "${TIMESTAMP}" \
-        '{
-            "id": $id,
-            "source": "system",
-            "type": "health_check",
-            "chat_id": 0,
-            "user_id": 0,
-            "username": "lobster-system",
-            "user_name": "Agent Relay",
-            "text": $text,
-            "timestamp": $timestamp
-        }' > "${INBOX_DIR}/${MSG_ID}.json"
+        > "${INBOX_DIR}/${MSG_ID}.json"
 
     # Mark this agent as notified to prevent re-injection
     echo "$agent_id" >> "$NOTIFIED_FILE"
