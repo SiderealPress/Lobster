@@ -51,7 +51,7 @@ def _entry(
     completed: bool = False,
     reminded: bool = False,
     description: str = "test task",
-    chat_id: int = 8305714125,
+    chat_id: int = 1234567890,
 ) -> dict:
     started_at = datetime.fromtimestamp(
         NOW.timestamp() - started_minutes_ago * 60, tz=timezone.utc
@@ -157,7 +157,7 @@ class TestBuildReminderMessage:
     def test_message_routed_to_dispatcher_not_user(self) -> None:
         # Reminders go to chat_id=0 (dispatcher) regardless of entry's chat_id
         entry = _entry("t1", started_minutes_ago=25, expected_done_in_minutes=10,
-                        chat_id=8305714125)
+                        chat_id=1234567890)
         msg = ir.build_reminder_message(entry, NOW)
         assert msg["chat_id"] == 0
 

@@ -6,7 +6,7 @@ and writes them into Kissinger CRM:
 
   1. createEntity — kind=person, tags=["supply-chain","prospect-enrichment"],
      meta=[
-       {key:"provenance", value:"wallace"},
+       {key:"provenance", value:<assistant name, see provenance/constants.py>},
        {key:"title",      value:<title>},
        {key:"source_url", value:<source_url>},
        {key:"enriched_at", value:<ISO-8601 timestamp>},
@@ -31,9 +31,13 @@ import json
 import os
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import requests
+
+sys.path.insert(0, str(Path(__file__).parent.parent / "provenance"))
+from constants import ASSISTANT_NAME  # noqa: E402
 
 KISSINGER_ENDPOINT = os.environ.get(
     "KISSINGER_ENDPOINT", "http://localhost:8080/graphql"
@@ -145,7 +149,7 @@ def add_contacts_provenance(
             continue
 
         meta = [
-            {"key": "provenance", "value": "wallace"},
+            {"key": "provenance", "value": ASSISTANT_NAME},
             {"key": "enriched_at", "value": enriched_at},
         ]
         if title:

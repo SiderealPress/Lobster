@@ -17,9 +17,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "bin"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "provenance"))
 
 from manifest_loader import load_manifest, now_iso
 from pipeline_hygiene import HygieneLayer
+from constants import ASSISTANT_NAME
 from run_manifest import (
     complete_run,
     create_run,
@@ -213,7 +215,7 @@ def test_provenance_fields_written(tmp_path):
     for k in required_keys:
         assert k in meta, f"Missing provenance field: {k}"
 
-    assert meta["provenance.enriched_by"] == "wallace"
+    assert meta["provenance.enriched_by"] == ASSISTANT_NAME
     assert meta["provenance.goal"] == "org_chart"
     assert meta["provenance.raw_response_hash"].startswith("sha256:")
     assert meta["provenance.confidence"] in {"high", "medium", "low"}
@@ -362,7 +364,7 @@ def test_rollback_log_written_on_success(tmp_path):
     assert e["entity_id"] == "ent_001"
     assert e["dry_run"] is False
     assert "provenance.enriched_by" in e["meta_written"]
-    assert e["meta_written"]["provenance.enriched_by"] == "wallace"
+    assert e["meta_written"]["provenance.enriched_by"] == ASSISTANT_NAME
 
 
 def test_rollback_log_skipped_event(tmp_path):

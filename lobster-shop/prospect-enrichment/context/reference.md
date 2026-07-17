@@ -67,7 +67,7 @@ org_chart_enrichment.py      (BIS-300)  ← orchestrates all four
   kind: "person"
   tags: ["supply-chain", "prospect-enrichment"]
   meta:
-    provenance = "wallace"
+    provenance = <LOBSTER_ASSISTANT_NAME, default "wallace"; see provenance/constants.py>
     enriched_at = <ISO-8601 UTC>
     title = <title if present>
     source_url = <LinkedIn URL if present>
@@ -94,8 +94,9 @@ org_chart_enrichment.py      (BIS-300)  ← orchestrates all four
   - `fuzzy_flagged`
   - `errors`
 
-## Provenance Tag: "wallace"
+## Provenance Tag: Assistant Name
 
-All contacts written by this pipeline carry `provenance="wallace"` in their
-meta. This allows filtering/auditing pipeline-sourced contacts vs. manually
-added ones.
+All contacts written by this pipeline carry `provenance=<assistant name>` in
+their meta, where the value comes from `LOBSTER_ASSISTANT_NAME`
+(default `"wallace"`, see `provenance/constants.py`). This allows
+filtering/auditing pipeline-sourced contacts vs. manually added ones.

@@ -27,4 +27,4 @@ Token usage is logged automatically for every subagent task and dispatcher sessi
 - `total` in daily: sum of all of the above for both dispatcher and subagents
 
 **Nightly rollup:** Runs at 3:05 AM UTC (5 minutes after nightly-consolidation).
-To run manually: `uv run /home/lobster/lobster/scripts/nightly-token-rollup.py`
+To run manually: `uv run ${LOBSTER_SRC:-~/lobster}/scripts/nightly-token-rollup.py`

@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
-BRIDGE_DIR="/home/admin/lobster-workspace/projects/whatsapp-bridge"
-SERVICE_FILE="$(dirname "$0")/lobster-whatsapp-bridge.service"
+BRIDGE_DIR="$(cd "$(dirname "$0")" && pwd)"
+SERVICE_FILE="$BRIDGE_DIR/lobster-whatsapp-bridge.service"
 
 echo "=== Installing Lobster WhatsApp Bridge ==="
 

@@ -80,7 +80,7 @@ Register a git repository for continuous sync.
 
 ```bash
 lobster-sync add ~/lobster-workspace/projects/my-app
-lobster-sync add ~/lobster-workspace/projects/govscan
+lobster-sync add ~/lobster-workspace/projects/side-project
 ```
 
 The repo is added to `~/.lobster/sync-config.json`. If the repo was previously removed, it is re-enabled.
@@ -106,7 +106,7 @@ $ lobster-sync status
 
 --- Repos ---
   my-app               ~/lobster-workspace/projects/my-app      last sync: 2m ago     ok
-  govscan              ~/lobster-workspace/projects/govscan      last sync: 2m ago     ok
+  side-project         ~/lobster-workspace/projects/side-project last sync: 2m ago     ok
   old-project          ~/lobster-workspace/projects/old-project  last sync: 15m ago    stale
 ```
 

@@ -1,11 +1,11 @@
-/home/admin/lobster-workspace/logs/whatsapp-bridge.log
-/home/admin/lobster-workspace/logs/whatsapp-adapter.log {
+{{WORKSPACE_DIR}}/logs/whatsapp-bridge.log
+{{WORKSPACE_DIR}}/logs/whatsapp-adapter.log {
     daily
     rotate 7
     compress
     missingok
     notifempty
-    create 0640 admin admin
+    create 0640 {{USER}} {{GROUP}}
     postrotate
         systemctl kill -s HUP lobster-whatsapp-bridge 2>/dev/null || true
     endscript

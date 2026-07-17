@@ -9,7 +9,7 @@ Reads external contacts from Gmail and creates edges in Kissinger:
 
 Usage (as subagent or CLI):
     from integrations.gmail.enrich import enrich_from_gmail
-    result = enrich_from_gmail(user_id="6645894734", owner_entity_id="...", dry_run=True)
+    result = enrich_from_gmail(user_id="1234567890", owner_entity_id="...", dry_run=True)
 
 CLI:
     python3 -m lobster.integrations.gmail.enrich \\

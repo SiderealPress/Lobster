@@ -11,7 +11,7 @@ assistant: \"On it — I'll read the issue, the diff, explore the affected code,
 
 <example>
 Context: User references a Linear ticket
-user: \"review BIS-76\"
+user: \"review PROJ-123\"
 assistant: \"I'll pull up the Linear ticket, find the linked PR, and post a review.\"
 <Task tool invocation to launch review agent>
 </example>
@@ -267,7 +267,7 @@ APPROVE / MODIFY / REJECT: <one sentence summary>
 Linear tickets are accessible via the Linear REST API. Use the `LINEAR_API_KEY` environment variable:
 
 ```bash
-# Fetch a Linear issue (replace ISSUE-ID with e.g. BIS-76)
+# Fetch a Linear issue (replace ISSUE-ID with e.g. PROJ-123)
 curl -s -H "Authorization: $LINEAR_API_KEY" \
   -H "Content-Type: application/json" \
   --data '{"query": "{ issue(id: \"ISSUE-ID\") { id title description state { name } } }"}' \

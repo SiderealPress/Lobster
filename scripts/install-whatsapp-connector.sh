@@ -9,9 +9,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
 BRIDGE_DIR="$REPO_DIR/connectors/whatsapp"
-CONFIG_DIR="$HOME/lobster-workspace/config"
-LOG_DIR="$HOME/lobster-workspace/logs"
+WORKSPACE_DIR="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
+CONFIG_DIR="$WORKSPACE_DIR/config"
+LOG_DIR="$WORKSPACE_DIR/logs"
 MESSAGES_DIR="${LOBSTER_MESSAGES:-$HOME/messages}"
+# Rendered, instance-specific service/logrotate files must never land back in
+# the tracked repo dirs — render them to a runtime location instead.
+RENDERED_DIR="$WORKSPACE_DIR/services"
+mkdir -p "$RENDERED_DIR"
 
 echo "=== Lobster WhatsApp Connector Install ==="
 echo "Repo:    $REPO_DIR"
@@ -54,8 +59,28 @@ fi
 
 # 4. Install systemd services
 echo "[4/5] Installing systemd services..."
-sudo cp "$REPO_DIR/services/lobster-whatsapp-bridge.service" /etc/systemd/system/
-sudo cp "$REPO_DIR/services/lobster-whatsapp-adapter.service" /etc/systemd/system/
+
+# The bridge unit is already portable (uses systemd's %h specifier, no
+# rendering needed) — install it straight from the repo.
+sudo cp "$BRIDGE_DIR/lobster-whatsapp-bridge.service" /etc/systemd/system/
+
+# The adapter unit bakes in real paths/user, so render it from its template
+# to a runtime location first (never write instance-specific files back into
+# the tracked repo services/ dir).
+source "$REPO_DIR/scripts/lib/template.sh"
+LOBSTER_USER="${LOBSTER_USER:-${USER:-$(whoami)}}"
+LOBSTER_GROUP="${LOBSTER_GROUP:-$LOBSTER_USER}"
+LOBSTER_HOME="${LOBSTER_HOME:-$HOME}"
+LOBSTER_INSTALL_DIR="$REPO_DIR"
+LOBSTER_WORKSPACE="$WORKSPACE_DIR"
+LOBSTER_MESSAGES="$MESSAGES_DIR"
+LOBSTER_CONFIG_DIR="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}"
+LOBSTER_USER_CONFIG="${LOBSTER_USER_CONFIG:-$HOME/lobster-user-config}"
+_tmpl_generate_from_template \
+    "$REPO_DIR/services/lobster-whatsapp-adapter.service.template" \
+    "$RENDERED_DIR/lobster-whatsapp-adapter.service"
+sudo cp "$RENDERED_DIR/lobster-whatsapp-adapter.service" /etc/systemd/system/
+
 sudo systemctl daemon-reload
 sudo systemctl enable lobster-whatsapp-bridge
 sudo systemctl enable lobster-whatsapp-adapter
@@ -63,11 +88,14 @@ echo "  Services installed and enabled"
 
 # 5. Install logrotate config
 echo "[5/5] Installing logrotate config..."
-if [ -f "$REPO_DIR/logrotate/lobster-whatsapp" ]; then
-    sudo cp "$REPO_DIR/logrotate/lobster-whatsapp" /etc/logrotate.d/lobster-whatsapp
+if [ -f "$REPO_DIR/logrotate/lobster-whatsapp.template" ]; then
+    _tmpl_generate_from_template \
+        "$REPO_DIR/logrotate/lobster-whatsapp.template" \
+        "$RENDERED_DIR/lobster-whatsapp.logrotate"
+    sudo cp "$RENDERED_DIR/lobster-whatsapp.logrotate" /etc/logrotate.d/lobster-whatsapp
     echo "  Logrotate config installed"
 else
-    echo "  Logrotate config not found — skipping"
+    echo "  Logrotate template not found — skipping"
 fi
 
 echo ""

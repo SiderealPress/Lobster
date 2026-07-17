@@ -2,11 +2,15 @@
 
 Connect any Obsidian client to the self-hosted CouchDB sync server.
 
+> Every `203.0.113.10` below is a placeholder (RFC 5737 documentation address)
+> — replace it with your own CouchDB server's actual IP or hostname throughout
+> this guide.
+
 ## Prerequisites
 
 Before connecting a client, ensure:
 
-1. **CouchDB server is running** on `178.104.15.109:6984`
+1. **CouchDB server is running** on `203.0.113.10:6984`
 2. **Credentials are configured** in `~/lobster-config/obsidian.env`
 3. **Database `obsidian` exists** on the server
 
@@ -14,13 +18,13 @@ Before connecting a client, ensure:
 
 ```bash
 # Check CouchDB is responding (from any machine with network access)
-curl -k https://178.104.15.109:6984/
+curl -k https://203.0.113.10:6984/
 
 # Expected response:
 # {"couchdb":"Welcome","version":"3.x.x",...}
 
 # Verify database exists
-curl -k -u "${COUCHDB_USER}:${COUCHDB_PASSWORD}" https://178.104.15.109:6984/obsidian
+curl -k -u "${COUCHDB_USER}:${COUCHDB_PASSWORD}" https://203.0.113.10:6984/obsidian
 
 # Expected response:
 # {"db_name":"obsidian","doc_count":...}
@@ -73,7 +77,7 @@ After enabling the plugin, configure the connection:
 
 | Setting | Value |
 |---------|-------|
-| **Remote Database URI** | `https://178.104.15.109:6984` |
+| **Remote Database URI** | `https://203.0.113.10:6984` |
 | **Database name** | `obsidian` |
 | **Username** | Value of `${COUCHDB_USER}` from `~/lobster-config/obsidian.env` |
 | **Password** | Value of `${COUCHDB_PASSWORD}` from `~/lobster-config/obsidian.env` |
@@ -81,7 +85,7 @@ After enabling the plugin, configure the connection:
 ### Retrieve Credentials
 
 ```bash
-# On the server (178.104.15.109), source the env file
+# On the server (203.0.113.10), source the env file
 source ~/lobster-config/obsidian.env
 echo "Username: $COUCHDB_USER"
 echo "Password: $COUCHDB_PASSWORD"
@@ -110,7 +114,7 @@ echo "Password: $COUCHDB_PASSWORD"
    - Browse → Search "Self-hosted LiveSync" → Install → Enable
 4. **Configure connection:**
    - Settings → Self-hosted LiveSync → Remote Database
-   - Enter: `https://178.104.15.109:6984`
+   - Enter: `https://203.0.113.10:6984`
    - Database: `obsidian`
    - Enter username and password
 5. **Test connection:** Click "Test" or "Check database configuration"
@@ -129,7 +133,7 @@ echo "Password: $COUCHDB_PASSWORD"
    - Browse → Search "Self-hosted LiveSync" → Install → Enable
 4. **Configure connection:**
    - Settings → Self-hosted LiveSync → Remote Database
-   - Enter: `https://178.104.15.109:6984`
+   - Enter: `https://203.0.113.10:6984`
    - Database: `obsidian`
    - Enter username and password
 5. **Test connection:** Click "Test"
@@ -148,7 +152,7 @@ echo "Password: $COUCHDB_PASSWORD"
    - Browse → Search "Self-hosted LiveSync" → Install → Enable
 4. **Configure connection:**
    - Settings → Self-hosted LiveSync → Remote Database
-   - Enter: `https://178.104.15.109:6984`
+   - Enter: `https://203.0.113.10:6984`
    - Database: `obsidian`
    - Enter username and password
 5. **Test connection:** Click "Test"
@@ -157,7 +161,7 @@ echo "Password: $COUCHDB_PASSWORD"
 **macOS Verification:**
 ```bash
 # Test connectivity from terminal
-curl -k -u "USERNAME:PASSWORD" https://178.104.15.109:6984/obsidian
+curl -k -u "USERNAME:PASSWORD" https://203.0.113.10:6984/obsidian
 
 # Check if vault is syncing (look for _local databases)
 ls -la ~/path/to/vault/.obsidian/plugins/obsidian-livesync/
@@ -172,7 +176,7 @@ ls -la ~/path/to/vault/.obsidian/plugins/obsidian-livesync/
    - Browse → Search "Self-hosted LiveSync" → Install → Enable
 4. **Configure connection:**
    - Settings → Self-hosted LiveSync → Remote Database
-   - Enter: `https://178.104.15.109:6984`
+   - Enter: `https://203.0.113.10:6984`
    - Database: `obsidian`
    - Enter username and password
 5. **Test connection:** Click "Test"
@@ -181,11 +185,11 @@ ls -la ~/path/to/vault/.obsidian/plugins/obsidian-livesync/
 **Windows Verification (PowerShell):**
 ```powershell
 # Test connectivity
-Invoke-WebRequest -Uri "https://178.104.15.109:6984/" -SkipCertificateCheck
+Invoke-WebRequest -Uri "https://203.0.113.10:6984/" -SkipCertificateCheck
 
 # Test with auth
 $cred = Get-Credential
-Invoke-WebRequest -Uri "https://178.104.15.109:6984/obsidian" -Credential $cred -SkipCertificateCheck
+Invoke-WebRequest -Uri "https://203.0.113.10:6984/obsidian" -Credential $cred -SkipCertificateCheck
 ```
 
 ---
@@ -198,17 +202,17 @@ Run these commands to verify each step of the setup process.
 
 ```bash
 # Check port is reachable
-nc -zv 178.104.15.109 6984
+nc -zv 203.0.113.10 6984
 
 # Or with timeout
-timeout 5 bash -c 'cat < /dev/tcp/178.104.15.109/6984' && echo "Port open" || echo "Port closed"
+timeout 5 bash -c 'cat < /dev/tcp/203.0.113.10/6984' && echo "Port open" || echo "Port closed"
 ```
 
 ### 2. Verify CouchDB is Responding
 
 ```bash
 # Basic health check (ignore self-signed cert warning)
-curl -k https://178.104.15.109:6984/
+curl -k https://203.0.113.10:6984/
 
 # Expected: {"couchdb":"Welcome",...}
 ```
@@ -217,7 +221,7 @@ curl -k https://178.104.15.109:6984/
 
 ```bash
 # Replace with actual credentials
-curl -k -u "YOUR_USER:YOUR_PASSWORD" https://178.104.15.109:6984/_session
+curl -k -u "YOUR_USER:YOUR_PASSWORD" https://203.0.113.10:6984/_session
 
 # Expected: {"ok":true,"userCtx":{"name":"YOUR_USER",...}}
 ```
@@ -226,7 +230,7 @@ curl -k -u "YOUR_USER:YOUR_PASSWORD" https://178.104.15.109:6984/_session
 
 ```bash
 # Check database exists and is accessible
-curl -k -u "YOUR_USER:YOUR_PASSWORD" https://178.104.15.109:6984/obsidian
+curl -k -u "YOUR_USER:YOUR_PASSWORD" https://203.0.113.10:6984/obsidian
 
 # Expected: {"db_name":"obsidian","doc_count":...}
 ```
@@ -239,14 +243,14 @@ curl -k -X POST \
   -u "YOUR_USER:YOUR_PASSWORD" \
   -H "Content-Type: application/json" \
   -d '{"_id":"test-doc","test":true}' \
-  https://178.104.15.109:6984/obsidian
+  https://203.0.113.10:6984/obsidian
 
 # Expected: {"ok":true,"id":"test-doc","rev":"1-..."}
 
 # Clean up test document
 curl -k -X DELETE \
   -u "YOUR_USER:YOUR_PASSWORD" \
-  "https://178.104.15.109:6984/obsidian/test-doc?rev=REV_FROM_ABOVE"
+  "https://203.0.113.10:6984/obsidian/test-doc?rev=REV_FROM_ABOVE"
 ```
 
 ### 6. Verify CORS Configuration
@@ -256,7 +260,7 @@ curl -k -X DELETE \
 curl -k -I -X OPTIONS \
   -H "Origin: app://obsidian.md" \
   -H "Access-Control-Request-Method: GET" \
-  https://178.104.15.109:6984/obsidian
+  https://203.0.113.10:6984/obsidian
 
 # Should include:
 # Access-Control-Allow-Origin: *
@@ -285,7 +289,7 @@ curl -k -I -X OPTIONS \
 2. **Add certificate to system trust store (macOS):**
    ```bash
    # Download the certificate
-   openssl s_client -connect 178.104.15.109:6984 -showcerts </dev/null 2>/dev/null | \
+   openssl s_client -connect 203.0.113.10:6984 -showcerts </dev/null 2>/dev/null | \
      openssl x509 -outform PEM > /tmp/couchdb-cert.pem
 
    # Add to Keychain (will prompt for password)
@@ -295,7 +299,7 @@ curl -k -I -X OPTIONS \
 3. **Add certificate to system trust store (Linux):**
    ```bash
    # Download and install
-   openssl s_client -connect 178.104.15.109:6984 -showcerts </dev/null 2>/dev/null | \
+   openssl s_client -connect 203.0.113.10:6984 -showcerts </dev/null 2>/dev/null | \
      openssl x509 -outform PEM | sudo tee /usr/local/share/ca-certificates/couchdb.crt
    sudo update-ca-certificates
    ```
@@ -315,13 +319,13 @@ curl -k -I -X OPTIONS \
 
 1. **Verify CORS is enabled on server:**
    ```bash
-   curl -k -u "admin:password" https://178.104.15.109:6984/_node/_local/_config/httpd/enable_cors
+   curl -k -u "admin:password" https://203.0.113.10:6984/_node/_local/_config/httpd/enable_cors
    # Should return: "true"
    ```
 
 2. **Check allowed origins:**
    ```bash
-   curl -k -u "admin:password" https://178.104.15.109:6984/_node/_local/_config/cors/origins
+   curl -k -u "admin:password" https://203.0.113.10:6984/_node/_local/_config/cors/origins
    # Should return: "*" or include "app://obsidian.md"
    ```
 
@@ -329,17 +333,17 @@ curl -k -I -X OPTIONS \
    ```bash
    # Enable CORS
    curl -k -X PUT -u "admin:password" \
-     https://178.104.15.109:6984/_node/_local/_config/httpd/enable_cors \
+     https://203.0.113.10:6984/_node/_local/_config/httpd/enable_cors \
      -d '"true"'
 
    # Allow all origins
    curl -k -X PUT -u "admin:password" \
-     https://178.104.15.109:6984/_node/_local/_config/cors/origins \
+     https://203.0.113.10:6984/_node/_local/_config/cors/origins \
      -d '"*"'
 
    # Allow credentials
    curl -k -X PUT -u "admin:password" \
-     https://178.104.15.109:6984/_node/_local/_config/cors/credentials \
+     https://203.0.113.10:6984/_node/_local/_config/cors/credentials \
      -d '"true"'
    ```
 
@@ -358,14 +362,14 @@ curl -k -I -X OPTIONS \
    ```bash
    # Source the env file and test
    source ~/lobster-config/obsidian.env
-   curl -k -u "${COUCHDB_USER}:${COUCHDB_PASSWORD}" https://178.104.15.109:6984/_session
+   curl -k -u "${COUCHDB_USER}:${COUCHDB_PASSWORD}" https://203.0.113.10:6984/_session
    ```
 
 2. **Check for typos:** Copy-paste credentials directly from the env file
 
 3. **Verify user exists on server:**
    ```bash
-   curl -k -u "admin:admin_password" https://178.104.15.109:6984/_users/org.couchdb.user:YOUR_USER
+   curl -k -u "admin:admin_password" https://203.0.113.10:6984/_users/org.couchdb.user:YOUR_USER
    ```
 
 4. **Reset password if needed (server admin):**
@@ -373,7 +377,7 @@ curl -k -I -X OPTIONS \
    # Create or update user
    curl -k -X PUT -u "admin:admin_password" \
      -H "Content-Type: application/json" \
-     https://178.104.15.109:6984/_users/org.couchdb.user:obsidian_user \
+     https://203.0.113.10:6984/_users/org.couchdb.user:obsidian_user \
      -d '{"name":"obsidian_user","password":"new_password","roles":[],"type":"user"}'
    ```
 
@@ -390,13 +394,13 @@ curl -k -I -X OPTIONS \
 
 1. **Check if database exists:**
    ```bash
-   curl -k -u "YOUR_USER:YOUR_PASSWORD" https://178.104.15.109:6984/_all_dbs
+   curl -k -u "YOUR_USER:YOUR_PASSWORD" https://203.0.113.10:6984/_all_dbs
    # Should include "obsidian" in the list
    ```
 
 2. **Create the database (if missing):**
    ```bash
-   curl -k -X PUT -u "admin:admin_password" https://178.104.15.109:6984/obsidian
+   curl -k -X PUT -u "admin:admin_password" https://203.0.113.10:6984/obsidian
    # Expected: {"ok":true}
    ```
 
@@ -404,7 +408,7 @@ curl -k -I -X OPTIONS \
    ```bash
    curl -k -X PUT -u "admin:admin_password" \
      -H "Content-Type: application/json" \
-     https://178.104.15.109:6984/obsidian/_security \
+     https://203.0.113.10:6984/obsidian/_security \
      -d '{"admins":{"names":[],"roles":[]},"members":{"names":["obsidian_user"],"roles":[]}}'
    ```
 
@@ -432,7 +436,7 @@ curl -k -I -X OPTIONS \
    ```bash
    # List conflicted documents
    curl -k -u "YOUR_USER:YOUR_PASSWORD" \
-     'https://178.104.15.109:6984/obsidian/_all_docs?conflicts=true' | \
+     'https://203.0.113.10:6984/obsidian/_all_docs?conflicts=true' | \
      jq '.rows[] | select(.doc._conflicts)'
    ```
 
@@ -447,11 +451,11 @@ curl -k -I -X OPTIONS \
 6. **Check server health:**
    ```bash
    # Verify CouchDB is healthy
-   curl -k https://178.104.15.109:6984/_up
+   curl -k https://203.0.113.10:6984/_up
    # Expected: {"status":"ok",...}
 
    # Check compaction status
-   curl -k -u "admin:password" https://178.104.15.109:6984/obsidian
+   curl -k -u "admin:password" https://203.0.113.10:6984/obsidian
    # Look at "compact_running" field
    ```
 
@@ -495,9 +499,9 @@ When connecting **subsequent devices**:
 
 | Item | Value |
 |------|-------|
-| Server URL | `https://178.104.15.109:6984` |
+| Server URL | `https://203.0.113.10:6984` |
 | Database | `obsidian` |
 | Plugin | Self-hosted LiveSync (`obsidian-livesync`) |
 | Credentials | See `~/lobster-config/obsidian.env` |
-| Test command | `curl -k https://178.104.15.109:6984/` |
-| Auth test | `curl -k -u "USER:PASS" https://178.104.15.109:6984/_session` |
+| Test command | `curl -k https://203.0.113.10:6984/` |
+| Auth test | `curl -k -u "USER:PASS" https://203.0.113.10:6984/_session` |

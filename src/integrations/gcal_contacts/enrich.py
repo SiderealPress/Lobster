@@ -19,7 +19,7 @@ API but edge creation is stubbed out pending:
 Usage:
     from integrations.gcal_contacts.enrich import enrich_from_calendar
     result = enrich_from_calendar(
-        user_id="6645894734",
+        user_id="1234567890",
         owner_entity_id="abc123...",
         since_days=90,
         dry_run=True,
