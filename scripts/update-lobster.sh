@@ -444,6 +444,16 @@ update_systemd() {
     LOBSTER_WORKSPACE="$WORKSPACE_DIR"
     LOBSTER_MESSAGES="$MESSAGES_DIR"
     # LOBSTER_CONFIG_DIR is already set at the top of this script
+    # NOTE: "${LOBSTER_USER_CONFIG:-default}" only falls back when the var is
+    # UNSET/EMPTY. This script runs as a child of lobster-claude.service (or is
+    # invoked from a shell that inherited its environment); if that unit's
+    # Environment=LOBSTER_USER_CONFIG=... line still has the raw
+    # {{USER_CONFIG_DIR}} placeholder, the bad value is "set" and defeats the
+    # fallback, silently re-poisoning every service file update_systemd()
+    # regenerates. Sanitize before applying the default.
+    case "${LOBSTER_USER_CONFIG:-}" in
+        *'{{'*) unset LOBSTER_USER_CONFIG ;;
+    esac
     LOBSTER_USER_CONFIG="${LOBSTER_USER_CONFIG:-${LOBSTER_HOME}/lobster-user-config}"
 
     # Source the shared template library (repo is present — we just pulled it).
