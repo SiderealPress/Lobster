@@ -346,6 +346,83 @@ else
     fail "Format mismatch: '$RESULT'"
 fi
 
+# Test 19: _get_stop_reason handles unquoted JSON null as the true last line
+# Regression test for issue #56: a turn that ends by calling a tool (e.g.
+# write_result) is written as the JSON literal "stop_reason":null (unquoted).
+# The old regex only matched quoted string values, so this line was skipped
+# and a stale earlier quoted match (e.g. "tool_use") was returned instead,
+# causing completed agents to be reported as perpetually running.
+begin_test "_get_stop_reason returns empty (not stale tool_use) when true last line is unquoted null"
+reset_tasks
+NULL_REAL="$TEST_TMPDIR/real_null_last.output"
+cat > "$NULL_REAL" <<'EOF'
+{"type":"assistant","stop_reason":"tool_use"}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result"}]}}
+{"type":"assistant","stop_reason":null}
+EOF
+source_agent_status
+RESULT=$(_get_stop_reason "$NULL_REAL")
+if [ -z "$RESULT" ]; then
+    pass
+else
+    fail "Expected empty string (null == not terminal), got: '$RESULT'"
+fi
+
+# Test 20: _get_stop_reason still finds tool_use when null comes before it
+begin_test "_get_stop_reason returns tool_use when it is chronologically last (after a null)"
+reset_tasks
+TOOLUSE_REAL="$TEST_TMPDIR/real_tooluse_last.output"
+cat > "$TOOLUSE_REAL" <<'EOF'
+{"type":"assistant","stop_reason":null}
+{"type":"assistant","stop_reason":"tool_use"}
+EOF
+source_agent_status
+RESULT=$(_get_stop_reason "$TOOLUSE_REAL")
+if [ "$RESULT" = "tool_use" ]; then
+    pass
+else
+    fail "Expected 'tool_use', got: '$RESULT'"
+fi
+
+# Test 21: _get_stop_reason still detects end_turn correctly (no regression)
+begin_test "_get_stop_reason returns end_turn when it is the last quoted value"
+reset_tasks
+ENDTURN_REAL="$TEST_TMPDIR/real_endturn_last.output"
+cat > "$ENDTURN_REAL" <<'EOF'
+{"type":"assistant","stop_reason":"tool_use"}
+{"type":"assistant","stop_reason":"end_turn"}
+EOF
+source_agent_status
+RESULT=$(_get_stop_reason "$ENDTURN_REAL")
+if [ "$RESULT" = "end_turn" ]; then
+    pass
+else
+    fail "Expected 'end_turn', got: '$RESULT'"
+fi
+
+# Test 22: An agent whose final turn ends in unquoted null (e.g. finished via
+# write_result) is not misreported using a stale earlier "tool_use" match.
+# It should be treated by age (starting/stale), not silently locked at
+# whatever the earlier quoted value was.
+begin_test "scan_agent_status does not use stale tool_use when true last stop_reason is null"
+reset_tasks
+NULL_SYMLINK_REAL="$TEST_TMPDIR/real_nulltask.output"
+cat > "$NULL_SYMLINK_REAL" <<'EOF'
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"turn 1"}]},"stop_reason":"tool_use"}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"turn 2"}]},"stop_reason":null}
+EOF
+touch -d "5 seconds ago" "$NULL_SYMLINK_REAL"
+ln -sf "$NULL_SYMLINK_REAL" "$TEST_TASKS_DIR/nulltask.output"
+touch -h -d "5 seconds ago" "$TEST_TASKS_DIR/nulltask.output" 2>/dev/null || true
+source_agent_status
+RESULT=$(scan_agent_status)
+if [[ "$RESULT" == *"nulltask"* ]]; then
+    pass
+else
+    fail "Expected 'nulltask' present (treated as starting/running by age, not skipped): '$RESULT'"
+fi
+
 #===============================================================================
 # Summary
 #===============================================================================
