@@ -44,6 +44,33 @@ _tmpl_generate_from_template() {
         return 1
     fi
 
+    # Guard: reject poisoned inputs before substitution.
+    #
+    # LOBSTER_* vars are frequently defaulted with "${LOBSTER_FOO:-default}"
+    # by callers. That pattern only applies the default when the variable is
+    # UNSET or EMPTY — if a parent process (e.g. a systemd unit whose
+    # Environment= line itself still has a raw {{PLACEHOLDER}}) exports the
+    # variable with a bad value, the default is silently skipped and the bad
+    # value flows straight through sed, re-poisoning every freshly generated
+    # service file forever. Catch that here, at the one place all callers
+    # funnel through, instead of relying on every caller to remember to
+    # validate its own inputs.
+    local _var _val
+    for _var in LOBSTER_USER LOBSTER_GROUP LOBSTER_HOME LOBSTER_INSTALL_DIR \
+                LOBSTER_WORKSPACE LOBSTER_MESSAGES LOBSTER_CONFIG_DIR LOBSTER_USER_CONFIG; do
+        _val="${!_var:-}"
+        case "$_val" in
+            *'{{'*)
+                echo "[ERROR] $_var is set to an unrendered template placeholder: '$_val'" >&2
+                echo "[ERROR] Refusing to render $template — this would re-poison $output." >&2
+                echo "[ERROR] Check what exported $_var (e.g. 'env | grep $_var', or the" >&2
+                echo "[ERROR] Environment= lines of the systemd unit this process inherited" >&2
+                echo "[ERROR] its environment from) and fix or unset it before retrying." >&2
+                return 1
+                ;;
+        esac
+    done
+
     sed -e "s|{{USER}}|${LOBSTER_USER}|g" \
         -e "s|{{GROUP}}|${LOBSTER_GROUP}|g" \
         -e "s|{{HOME}}|${LOBSTER_HOME}|g" \
