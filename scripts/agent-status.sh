@@ -58,8 +58,13 @@ _format_duration() {
     fi
 }
 
-# Extract the stop_reason from the last 4KB of a JSONL file.
-# Prints "end_turn", "tool_use", or "" (if not yet written / file empty).
+# Extract the stop_reason from the last 64KB of a JSONL file.
+# Prints "end_turn", "tool_use", "" (JSON null or not yet written), or ""
+# (file empty). A turn that ends by calling a tool (e.g. write_result) is
+# written by Claude Code as the JSON literal "stop_reason":null (unquoted) —
+# this must be treated the same as "not yet terminal" (empty string), NOT
+# skipped/ignored, otherwise the true last line is missed and a stale
+# quoted value from earlier in the file is returned instead.
 _get_stop_reason() {
     local filepath="$1"
 
@@ -76,12 +81,28 @@ _get_stop_reason() {
         return
     fi
 
-    # Read last 4KB and find the last stop_reason value
-    tail -c 4096 "$real_path" 2>/dev/null \
-        | grep -o '"stop_reason":"[^"]*"' \
-        | tail -1 \
-        | grep -o '"[^"]*"$' \
-        | tr -d '"'
+    # Read last 64KB — large enough for long-running agents with big tool payloads
+    local last_match
+    last_match=$(tail -c 65536 "$real_path" 2>/dev/null \
+        | grep -o '"stop_reason":\("[^"]*"\|null\)' \
+        | tail -1)
+
+    if [ -z "$last_match" ]; then
+        echo ""
+        return
+    fi
+
+    # Strip the "stop_reason": prefix, then strip quotes if present.
+    # "null" (unquoted JSON literal) becomes empty string — same as "not
+    # yet terminal", which is the correct semantics: a tool-call-ending
+    # turn is not itself a terminal state, but it must not be silently
+    # skipped in favor of a stale earlier quoted match.
+    local value="${last_match#\"stop_reason\":}"
+    value="${value//\"/}"
+    if [ "$value" = "null" ]; then
+        value=""
+    fi
+    echo "$value"
 }
 
 # Scan agent output files and return a summary string.
