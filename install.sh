@@ -146,6 +146,15 @@ LOBSTER_USER="${LOBSTER_USER:-${USER:-$(whoami)}}"
 LOBSTER_GROUP="${LOBSTER_GROUP:-${USER:-$(whoami)}}"
 LOBSTER_HOME="${LOBSTER_HOME:-$HOME}"
 CONFIG_DIR="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}"
+# NOTE: "${LOBSTER_USER_CONFIG:-default}" only falls back when the var is
+# UNSET/EMPTY. If this process inherited LOBSTER_USER_CONFIG from a parent
+# environment (e.g. a systemd unit) that itself still has the raw
+# {{USER_CONFIG_DIR}} placeholder, that bad value is "set" and defeats the
+# fallback, silently re-poisoning every service file this script generates.
+# Sanitize it before applying the default.
+case "${LOBSTER_USER_CONFIG:-}" in
+    *'{{'*) unset LOBSTER_USER_CONFIG ;;
+esac
 USER_CONFIG_DIR="${LOBSTER_USER_CONFIG:-$HOME/lobster-user-config}"
 
 #===============================================================================

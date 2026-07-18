@@ -182,6 +182,33 @@ _tmpl_generate_from_template "$ALL_PLACEHOLDERS_TEMPLATE" "$OUTPUT"
 _tmpl_generate_from_template "$ALL_PLACEHOLDERS_TEMPLATE" "$OUTPUT"
 assert_file_not_contains "idempotent: still no {{ after second run" "$OUTPUT" '{{'
 
+echo ""
+echo "Poisoned input variable (shadowlobster#55 regression):"
+
+# Regression test for shadowlobster#55: a caller's own default fallback
+# (e.g. "${LOBSTER_USER_CONFIG:-default}") is defeated when the variable is
+# already *set* to a literal unrendered placeholder — inherited from a
+# parent process such as a systemd unit whose own Environment= line still
+# has {{USER_CONFIG_DIR}}. Validate every input variable up front so this
+# is diagnosed at its actual source with a clear message, not just detected
+# incidentally downstream by the unresolved-placeholder-in-output check.
+POISON_OUTPUT="$TEST_TMPDIR/poisoned.service"
+ORIG_USER_CONFIG="$LOBSTER_USER_CONFIG"
+export LOBSTER_USER_CONFIG='{{USER_CONFIG_DIR}}'
+POISON_STDERR="$TEST_TMPDIR/poison-stderr.txt"
+if _tmpl_generate_from_template "$ALL_PLACEHOLDERS_TEMPLATE" "$POISON_OUTPUT" 2>"$POISON_STDERR"; then
+    fail "poisoned LOBSTER_USER_CONFIG input returns error" "expected non-zero exit"
+else
+    pass "poisoned LOBSTER_USER_CONFIG input returns error"
+fi
+assert_file_not_exists "no output file when input variable is poisoned" "$POISON_OUTPUT"
+if grep -q "LOBSTER_USER_CONFIG is set to an unrendered template placeholder" "$POISON_STDERR"; then
+    pass "error message identifies the poisoned variable by name"
+else
+    fail "error message identifies the poisoned variable by name" "stderr: $(cat "$POISON_STDERR")"
+fi
+export LOBSTER_USER_CONFIG="$ORIG_USER_CONFIG"
+
 # --- Summary -----------------------------------------------------------------
 
 echo ""

@@ -40,6 +40,15 @@ LOBSTER_DIR="${LOBSTER_INSTALL_DIR:-$HOME/lobster}"
 WORKSPACE_DIR="${LOBSTER_WORKSPACE:-$HOME/lobster-workspace}"
 MESSAGES_DIR="${LOBSTER_MESSAGES:-$HOME/messages}"
 LOBSTER_CONFIG_DIR="${LOBSTER_CONFIG_DIR:-$HOME/lobster-config}"
+# NOTE: "${LOBSTER_USER_CONFIG:-default}" only falls back when the var is
+# UNSET/EMPTY. This script commonly runs as a child of lobster-claude.service;
+# if that unit's Environment=LOBSTER_USER_CONFIG=... line still has the raw
+# {{USER_CONFIG_DIR}} placeholder, the bad value is "set" and defeats the
+# fallback, silently re-poisoning every service file this script regenerates.
+# Sanitize before applying the default.
+case "${LOBSTER_USER_CONFIG:-}" in
+    *'{{'*) unset LOBSTER_USER_CONFIG ;;
+esac
 USER_CONFIG_DIR="${LOBSTER_USER_CONFIG:-$HOME/lobster-user-config}"
 BACKUP_BASE="$HOME/lobster-backups"
 CONFIG_FILE="$LOBSTER_CONFIG_DIR/config.env"
