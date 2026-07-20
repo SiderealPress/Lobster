@@ -983,14 +983,28 @@ _RATE_LIMIT_MAX_CALLS = 40      # calls allowed per minute
 _RATE_LIMIT_WINDOW = 60.0       # window in seconds
 _rate_limit_timestamps: collections.deque = collections.deque()
 
+# Upper bound on how long _rate_limit_acquire() will block before giving up.
+# See #2125: this call used to block unconditionally with no timeout, sitting
+# outside _poll_one_channel's try/except — a stall or bookkeeping bug here
+# could hang a channel's poll tick (and therefore every channel after it in
+# the per-tick loop) forever with no error logged.
+_RATE_LIMIT_ACQUIRE_TIMEOUT = float(
+    os.environ.get("LOBSTER_SLACK_RATE_LIMIT_ACQUIRE_TIMEOUT", "30")
+)
 
-def _rate_limit_acquire() -> None:
+
+def _rate_limit_acquire(timeout: float = _RATE_LIMIT_ACQUIRE_TIMEOUT) -> bool:
     """Block until a conversations.history call token is available.
 
     Implements a sliding-window counter: keeps a deque of call timestamps and
     discards entries older than ``_RATE_LIMIT_WINDOW`` seconds.  If the window
     is full, sleeps until the oldest entry expires and a slot opens up.
+
+    Bounded by ``timeout`` seconds so this can never block a caller
+    indefinitely. Returns True once a token has been acquired, or False if
+    ``timeout`` elapsed first without acquiring one.
     """
+    deadline = time.monotonic() + timeout
     while True:
         now = time.monotonic()
         # Drop timestamps outside the window
@@ -998,15 +1012,283 @@ def _rate_limit_acquire() -> None:
             _rate_limit_timestamps.popleft()
         if len(_rate_limit_timestamps) < _RATE_LIMIT_MAX_CALLS:
             _rate_limit_timestamps.append(now)
-            return
-        # Window is full — sleep until the oldest slot expires
+            return True
+        if now >= deadline:
+            return False
+        # Window is full — sleep until the oldest slot expires, but never past deadline
         sleep_for = _RATE_LIMIT_WINDOW - (now - _rate_limit_timestamps[0]) + 0.1
+        sleep_for = min(max(sleep_for, 0.1), max(deadline - now, 0.0))
+        if sleep_for <= 0:
+            return False
         log.debug("Rate limiter: sleeping %.2fs before next conversations.history call", sleep_for)
-        time.sleep(max(sleep_for, 0.1))
+        time.sleep(sleep_for)
 
 
 # State file key prefix for channel-conversation poller (separate from DM poller)
 _CHANNEL_POLL_STATE_KEY_PREFIX = "conv_"
+
+# Explicit request timeout (seconds) for the channel-conversation poll client.
+# Defensive: slack_sdk's WebClient already defaults to a 30s socket timeout,
+# but pinning it explicitly here removes any ambiguity about how long a
+# single conversations.history call can hang before raising.
+_CHANNEL_POLL_REQUEST_TIMEOUT = int(
+    os.environ.get("LOBSTER_SLACK_CHANNEL_POLL_REQUEST_TIMEOUT", "15")
+)
+
+# ---------------------------------------------------------------------------
+# Per-channel heartbeat + staleness detection (#2125).
+#
+# `state["conv_<channel_id>"]` (see _poll_one_channel below) only advances
+# when conversations.history actually returns a message for that channel, so
+# a channel that is legitimately quiet is indistinguishable from a dead
+# poller by that timestamp alone. `_channel_last_attempt` instead records the
+# wall-clock time of the most recent poll *attempt* for a channel —
+# unconditionally, regardless of whether any messages were found or an error
+# occurred — so staleness can be detected even when the channel has no
+# traffic at all.
+# ---------------------------------------------------------------------------
+_channel_last_attempt: dict[str, float] = {}
+_channel_last_stale_warning: dict[str, float] = {}
+
+# How long a channel can go without a poll attempt before it's considered
+# stale. Default is well under the ~15 minute minimum delivery delay observed
+# in the #2125 incident, so operators are warned long before a user notices.
+_CHANNEL_STALENESS_THRESHOLD = float(
+    os.environ.get("LOBSTER_SLACK_CHANNEL_STALENESS_THRESHOLD", "300")
+)
+# Minimum time between repeated staleness warnings for the same channel, so a
+# channel stuck stale doesn't spam the log once per poll interval.
+_STALE_WARNING_COOLDOWN = 300.0
+
+# Heartbeat file: last poll-attempt time per channel, refreshed every tick.
+# Kept separate from slack-poll-state.json (which only tracks message
+# checkpoints) so external health-check tooling can distinguish "poller is
+# stuck" from "channel is just quiet" without needing to parse log files.
+_HEARTBEAT_FILE = _WORKSPACE / "data" / "slack-poll-heartbeat.json"
+
+
+def _save_channel_heartbeats() -> None:
+    """Persist per-channel last-poll-attempt timestamps for health checks."""
+    try:
+        _HEARTBEAT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _HEARTBEAT_FILE.write_text(json.dumps(_channel_last_attempt))
+    except Exception as exc:
+        log.warning("Could not save channel poll heartbeat: %s", exc)
+
+
+def _check_channel_staleness(channel_id: str, *, now: float | None = None) -> None:
+    """Log a warning if ``channel_id`` hasn't been polled within the threshold."""
+    now = time.time() if now is None else now
+    last_attempt = _channel_last_attempt.get(channel_id)
+    if last_attempt is None:
+        return
+    age = now - last_attempt
+    if age <= _CHANNEL_STALENESS_THRESHOLD:
+        return
+    last_warned = _channel_last_stale_warning.get(channel_id, 0.0)
+    if now - last_warned < _STALE_WARNING_COOLDOWN:
+        return
+    log.warning(
+        "Channel poll stale for %s: no poll attempt in %.0fs (threshold %.0fs) — "
+        "the poller thread may be stuck",
+        channel_id, age, _CHANNEL_STALENESS_THRESHOLD,
+    )
+    _channel_last_stale_warning[channel_id] = now
+
+
+# Module-level poller context, populated by _poll_channel_conversations() at
+# startup and read by the module-level _poll_one_channel() below. Pulled out
+# of a nested closure (as it was previously) so the per-channel poll logic is
+# independently callable and testable without starting the poller thread.
+_channel_poll_client: "WebClient | None" = None
+_channel_poll_state: dict = {}
+_channel_skip_ids: set[str] = set()
+
+
+def _poll_one_channel(channel_id: str) -> None:
+    """Poll a single channel; updates `_channel_poll_state` in-place.
+
+    The entire body — including the backoff check, the state lookup, and the
+    rate-limit wait — is wrapped in one try/except so nothing here can
+    propagate out. Prior to #2125, the backoff check, state lookup, and
+    `_rate_limit_acquire()` call sat outside this try/except: any exception
+    or indefinite stall there would escape through the calling per-tick `for`
+    loop and the outer polling `while` loop, silently ending all future
+    polling for every channel in this bare, unsupervised daemon thread.
+    """
+    key = _CHANNEL_POLL_STATE_KEY_PREFIX + channel_id
+    _channel_last_attempt[channel_id] = time.time()
+
+    try:
+        # Honour per-channel backoff
+        backoff_until = _channel_backoff.get(channel_id, 0.0)
+        if time.monotonic() < backoff_until:
+            return
+
+        oldest = _channel_poll_state.get(key)
+
+        # Acquire a rate-limit token before making the API call. Bounded so a
+        # bug in the limiter's bookkeeping cannot block this channel's tick —
+        # and therefore every channel after it in the loop — forever.
+        if not _rate_limit_acquire():
+            log.warning(
+                "Rate limiter wait timed out for channel %s — skipping this tick",
+                channel_id,
+            )
+            return
+
+        kwargs: dict = {"channel": channel_id, "limit": 20}
+        if oldest:
+            kwargs["oldest"] = str(float(oldest) + 0.000001)
+
+        resp = _channel_poll_client.conversations_history(**kwargs)
+        messages = resp.get("messages", [])
+
+        # API returns newest-first; reverse to process chronologically
+        for msg in reversed(messages):
+            ts = msg.get("ts", "")
+            if not ts:
+                continue
+
+            # Skip already-seen timestamps
+            if ts in _seen_ts:
+                continue
+
+            # Only add to seen after all skip checks so we don't
+            # permanently ignore a message we should have processed.
+            msg_user = msg.get("user", "")
+
+            # Skip subtypes (bot_message, channel_join, etc.)
+            if msg.get("subtype"):
+                _seen_ts.add(ts)
+                _trim_seen_ts()
+                if not oldest or float(ts) > float(oldest):
+                    _channel_poll_state[key] = ts
+                continue
+
+            # Skip bot_id messages (bots that lack a subtype)
+            if msg.get("bot_id"):
+                _seen_ts.add(ts)
+                _trim_seen_ts()
+                if not oldest or float(ts) > float(oldest):
+                    _channel_poll_state[key] = ts
+                continue
+
+            # Skip messages from Lobster's own user identity or extra skip IDs
+            if msg_user and msg_user in _channel_skip_ids:
+                _seen_ts.add(ts)
+                _trim_seen_ts()
+                if not oldest or float(ts) > float(oldest):
+                    _channel_poll_state[key] = ts
+                continue
+
+            # Mark as seen
+            _seen_ts.add(ts)
+            _trim_seen_ts()
+
+            # Resolve display name
+            user_info = get_user_info(msg_user) if msg_user else {}
+            username = user_info.get("name", msg_user)
+            display_name = (
+                user_info.get("profile", {}).get("display_name")
+                or user_info.get("real_name", username)
+            )
+
+            # Resolve channel name
+            ch_info = get_channel_info(channel_id)
+            channel_name = ch_info.get("name", channel_id)
+
+            text = clean_slack_text(msg.get("text", ""), BOT_USER_ID)
+            msg_id = f"{int(time.time() * 1000)}_{ts.replace('.', '')}"
+
+            msg_data = {
+                "id": msg_id,
+                "source": "slack",
+                "type": "text",
+                "chat_id": channel_id,
+                "user_id": msg_user,
+                "username": username,
+                "user_name": display_name,
+                "text": text,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "slack_ts": ts,
+                "channel_name": channel_name,
+                "is_dm": False,
+                "via_channel_poll": True,
+            }
+
+            thread_ts = msg.get("thread_ts")
+            if thread_ts:
+                msg_data["thread_ts"] = thread_ts
+
+            # Handle file attachments — mirrors the Socket Mode handler
+            # (lines ~506-525).  file_share messages carry a "files" list
+            # on the message dict just like Socket Mode events do.
+            poll_files = msg.get("files", [])
+            if poll_files:
+                msg_data["files"] = []
+                for f in poll_files:
+                    file_info = {
+                        "id": f.get("id"),
+                        "name": f.get("name"),
+                        "mimetype": f.get("mimetype"),
+                        "size": f.get("size"),
+                        "url": f.get("url_private"),
+                    }
+                    msg_data["files"].append(file_info)
+
+                    # Download images to ~/messages/images/
+                    mimetype = f.get("mimetype", "")
+                    if mimetype.startswith("image/"):
+                        try:
+                            download_slack_file(f, msg_id, msg_data)
+                        except Exception as e:
+                            log.error(f"Channel poll: error downloading file: {e}")
+
+            # File-only messages have no caption text — inject a fallback
+            # so the dispatcher always sees meaningful text to route.
+            if not msg_data.get("text") and msg_data.get("files"):
+                first_file = msg_data["files"][0]
+                msg_data["text"] = f"[File: {first_file.get('name', 'unknown')}]"
+
+            # Post "..." typing indicator immediately (same as Socket Mode path)
+            placeholder_ts = _post_typing_placeholder(channel_id, thread_ts, ts)
+            if placeholder_ts:
+                msg_data["placeholder_ts"] = placeholder_ts
+
+            write_message_to_inbox(msg_data)
+            log.info(
+                "Channel poll: new message from %s in %s: %s",
+                username, channel_name, repr(text[:60]),
+            )
+
+            # Advance the oldest pointer past this message
+            if not oldest or float(ts) > float(oldest):
+                _channel_poll_state[key] = ts
+                oldest = ts
+
+        if messages:
+            _save_poll_state(_channel_poll_state)
+
+    except SlackApiError as exc:
+        resp_data = getattr(exc, "response", {}) or {}
+        if resp_data.get("error") == "ratelimited":
+            retry_after = int(
+                getattr(exc.response, "headers", {}).get("Retry-After", 8)
+                if hasattr(exc, "response") and exc.response is not None
+                else 8
+            )
+            # Double the Retry-After header for safety
+            backoff = max(retry_after * 2, 8)
+            _channel_backoff[channel_id] = time.monotonic() + backoff
+            log.warning(
+                "Rate limited on channel %s — backing off %ds (Retry-After=%ds)",
+                channel_id, backoff, retry_after,
+            )
+        else:
+            log.warning("Channel poll error for %s: %s", channel_id, exc)
+    except Exception as exc:
+        log.exception("Unexpected channel poll error for %s: %s", channel_id, exc)
 
 
 def _poll_channel_conversations(stop_event: Event) -> None:
@@ -1027,7 +1309,17 @@ def _poll_channel_conversations(stop_event: Event) -> None:
       LOBSTER_SLACK_SKIP_USER_IDS — prevents Lobster's own outbound messages
       from being routed back as inbound
     - Skip already-seen timestamps via ``_seen_ts``
+
+    Resilience (#2125): each channel's poll (``_poll_one_channel``) is fully
+    self-contained — its own internal try/except cannot let anything escape,
+    and this loop wraps each call in an additional try/except as defense in
+    depth, so one channel stalling or raising can never stop polling for the
+    other channels or for subsequent ticks. Per-channel staleness is checked
+    every tick and a heartbeat file is written so external tooling can detect
+    a stuck poller without needing to notice a user going unanswered.
     """
+    global _channel_poll_client, _channel_poll_state, _channel_skip_ids
+
     if not SLACK_USER_TOKEN:
         log.info("No LOBSTER_SLACK_USER_TOKEN — channel-conversation polling disabled")
         return
@@ -1036,204 +1328,52 @@ def _poll_channel_conversations(stop_event: Event) -> None:
         log.info("No LOBSTER_SLACK_CHANNEL_CONVERSATIONS — channel-conversation polling disabled")
         return
 
-    poll_client = WebClient(token=SLACK_USER_TOKEN)
+    _channel_poll_client = WebClient(token=SLACK_USER_TOKEN, timeout=_CHANNEL_POLL_REQUEST_TIMEOUT)
 
     # Load persisted state; use a namespaced key to avoid collision with DM poller
-    state = _load_poll_state()
+    _channel_poll_state = _load_poll_state()
 
     # Build the set of user IDs to skip (own identity + any configured extras)
-    skip_ids: set[str] = set(_SKIP_USER_IDS_RAW)
+    _channel_skip_ids = set(_SKIP_USER_IDS_RAW)
     if POLL_SELF_USER_ID:
-        skip_ids.add(POLL_SELF_USER_ID)
+        _channel_skip_ids.add(POLL_SELF_USER_ID)
 
     # Initialise last_ts for any channel not already in state.
     # Use current time so we only pick up messages from now onward — not history.
     now_ts = str(time.time())
     for ch in CHANNEL_CONVERSATIONS:
         key = _CHANNEL_POLL_STATE_KEY_PREFIX + ch
-        if key not in state:
-            state[key] = now_ts
-    _save_poll_state(state)
+        if key not in _channel_poll_state:
+            _channel_poll_state[key] = now_ts
+        # Seed the heartbeat so a freshly-started channel isn't immediately
+        # flagged stale before its first poll attempt.
+        _channel_last_attempt.setdefault(ch, time.time())
+    _save_poll_state(_channel_poll_state)
 
     log.info(
         "Channel-conversation poller started: channels=%s interval=%ds skip_ids=%s",
-        CHANNEL_CONVERSATIONS, _CHANNEL_POLL_INTERVAL, skip_ids,
+        CHANNEL_CONVERSATIONS, _CHANNEL_POLL_INTERVAL, _channel_skip_ids,
     )
-
-    def _poll_one_channel(channel_id: str) -> None:
-        """Poll a single channel; updates state in-place."""
-        key = _CHANNEL_POLL_STATE_KEY_PREFIX + channel_id
-
-        # Honour per-channel backoff
-        backoff_until = _channel_backoff.get(channel_id, 0.0)
-        if time.monotonic() < backoff_until:
-            return
-
-        oldest = state.get(key)
-
-        # Acquire a rate-limit token before making the API call
-        _rate_limit_acquire()
-
-        try:
-            kwargs: dict = {"channel": channel_id, "limit": 20}
-            if oldest:
-                kwargs["oldest"] = str(float(oldest) + 0.000001)
-
-            resp = poll_client.conversations_history(**kwargs)
-            messages = resp.get("messages", [])
-
-            # API returns newest-first; reverse to process chronologically
-            for msg in reversed(messages):
-                ts = msg.get("ts", "")
-                if not ts:
-                    continue
-
-                # Skip already-seen timestamps
-                if ts in _seen_ts:
-                    continue
-
-                # Only add to seen after all skip checks so we don't
-                # permanently ignore a message we should have processed.
-                msg_user = msg.get("user", "")
-
-                # Skip subtypes (bot_message, channel_join, etc.)
-                if msg.get("subtype"):
-                    _seen_ts.add(ts)
-                    _trim_seen_ts()
-                    if not oldest or float(ts) > float(oldest):
-                        state[key] = ts
-                    continue
-
-                # Skip bot_id messages (bots that lack a subtype)
-                if msg.get("bot_id"):
-                    _seen_ts.add(ts)
-                    _trim_seen_ts()
-                    if not oldest or float(ts) > float(oldest):
-                        state[key] = ts
-                    continue
-
-                # Skip messages from Lobster's own user identity or extra skip IDs
-                if msg_user and msg_user in skip_ids:
-                    _seen_ts.add(ts)
-                    _trim_seen_ts()
-                    if not oldest or float(ts) > float(oldest):
-                        state[key] = ts
-                    continue
-
-                # Mark as seen
-                _seen_ts.add(ts)
-                _trim_seen_ts()
-
-                # Resolve display name
-                user_info = get_user_info(msg_user) if msg_user else {}
-                username = user_info.get("name", msg_user)
-                display_name = (
-                    user_info.get("profile", {}).get("display_name")
-                    or user_info.get("real_name", username)
-                )
-
-                # Resolve channel name
-                ch_info = get_channel_info(channel_id)
-                channel_name = ch_info.get("name", channel_id)
-
-                text = clean_slack_text(msg.get("text", ""), BOT_USER_ID)
-                msg_id = f"{int(time.time() * 1000)}_{ts.replace('.', '')}"
-
-                msg_data = {
-                    "id": msg_id,
-                    "source": "slack",
-                    "type": "text",
-                    "chat_id": channel_id,
-                    "user_id": msg_user,
-                    "username": username,
-                    "user_name": display_name,
-                    "text": text,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "slack_ts": ts,
-                    "channel_name": channel_name,
-                    "is_dm": False,
-                    "via_channel_poll": True,
-                }
-
-                thread_ts = msg.get("thread_ts")
-                if thread_ts:
-                    msg_data["thread_ts"] = thread_ts
-
-                # Handle file attachments — mirrors the Socket Mode handler
-                # (lines ~506-525).  file_share messages carry a "files" list
-                # on the message dict just like Socket Mode events do.
-                poll_files = msg.get("files", [])
-                if poll_files:
-                    msg_data["files"] = []
-                    for f in poll_files:
-                        file_info = {
-                            "id": f.get("id"),
-                            "name": f.get("name"),
-                            "mimetype": f.get("mimetype"),
-                            "size": f.get("size"),
-                            "url": f.get("url_private"),
-                        }
-                        msg_data["files"].append(file_info)
-
-                        # Download images to ~/messages/images/
-                        mimetype = f.get("mimetype", "")
-                        if mimetype.startswith("image/"):
-                            try:
-                                download_slack_file(f, msg_id, msg_data)
-                            except Exception as e:
-                                log.error(f"Channel poll: error downloading file: {e}")
-
-                # File-only messages have no caption text — inject a fallback
-                # so the dispatcher always sees meaningful text to route.
-                if not msg_data.get("text") and msg_data.get("files"):
-                    first_file = msg_data["files"][0]
-                    msg_data["text"] = f"[File: {first_file.get('name', 'unknown')}]"
-
-                # Post "..." typing indicator immediately (same as Socket Mode path)
-                placeholder_ts = _post_typing_placeholder(channel_id, thread_ts, ts)
-                if placeholder_ts:
-                    msg_data["placeholder_ts"] = placeholder_ts
-
-                write_message_to_inbox(msg_data)
-                log.info(
-                    "Channel poll: new message from %s in %s: %s",
-                    username, channel_name, repr(text[:60]),
-                )
-
-                # Advance the oldest pointer past this message
-                if not oldest or float(ts) > float(oldest):
-                    state[key] = ts
-                    oldest = ts
-
-            if messages:
-                _save_poll_state(state)
-
-        except SlackApiError as exc:
-            resp_data = getattr(exc, "response", {}) or {}
-            if resp_data.get("error") == "ratelimited":
-                retry_after = int(
-                    getattr(exc.response, "headers", {}).get("Retry-After", 8)
-                    if hasattr(exc, "response") and exc.response is not None
-                    else 8
-                )
-                # Double the Retry-After header for safety
-                backoff = max(retry_after * 2, 8)
-                _channel_backoff[channel_id] = time.monotonic() + backoff
-                log.warning(
-                    "Rate limited on channel %s — backing off %ds (Retry-After=%ds)",
-                    channel_id, backoff, retry_after,
-                )
-            else:
-                log.warning("Channel poll error for %s: %s", channel_id, exc)
-        except Exception as exc:
-            log.exception("Unexpected channel poll error for %s: %s", channel_id, exc)
 
     while not stop_event.is_set():
         # Poll all channels; run sequentially to keep rate-limiter straightforward.
         # The token-bucket handles throttling across all calls.
         for channel_id in CHANNEL_CONVERSATIONS:
-            _poll_one_channel(channel_id)
+            try:
+                _poll_one_channel(channel_id)
+            except Exception:
+                # Defense in depth: _poll_one_channel already guards its own
+                # body against escaping exceptions, but this outer guard
+                # ensures that even a future regression reintroducing an
+                # unguarded exception cannot kill polling for the remaining
+                # channels in this tick or for any future tick.
+                log.exception(
+                    "Unhandled exception escaped _poll_one_channel for %s — continuing",
+                    channel_id,
+                )
+            _check_channel_staleness(channel_id)
 
+        _save_channel_heartbeats()
         stop_event.wait(timeout=_CHANNEL_POLL_INTERVAL)
 
     log.info("Channel-conversation poller stopped")
