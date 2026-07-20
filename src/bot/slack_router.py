@@ -803,6 +803,32 @@ def _trim_seen_ts() -> None:
         _seen_ts.update(keep)
 
 
+def _next_oldest_bound(ts_str: str) -> str:
+    """Compute the exclusive-lower-bound ``oldest`` value for the next poll.
+
+    Slack timestamps are always formatted as ``<seconds>.<6-digit-microseconds>``
+    (e.g. ``"1784568407.379109"``). Naively doing ``str(float(ts_str) + 0.000001)``
+    silently corrupts this for large (~10-digit-second, ~2020s+) timestamps: a
+    64-bit float only carries ~15-17 significant decimal digits, and a 10-digit
+    second count plus a 6-digit microsecond count is already 16 digits — right at
+    that limit. Adding a small epsilon can push the result to 7 (or more) decimal
+    places once ``str()``/``repr()`` renders it, e.g. ``"1784568407.3791099"``.
+
+    That extra digit isn't just cosmetic: passing a 7-decimal-place ``oldest`` to
+    Slack's ``conversations.history`` gets misparsed — observed in production as
+    Slack echoing back an ``oldest`` an order of magnitude too large (decimal
+    point shifted), which is far in the future and excludes every message. The
+    API call still returns ``ok: true`` with an empty ``messages`` list — no
+    error, no rate-limit signal, nothing to log — so the channel's checkpoint
+    can never advance again and every future message on that channel is
+    silently dropped forever, with a perfectly healthy-looking heartbeat.
+
+    Formatting with a fixed 6 decimal places guarantees the wire format Slack
+    expects regardless of the input's exact bit pattern.
+    """
+    return f"{float(ts_str) + 0.000001:.6f}"
+
+
 def _load_poll_state() -> dict:
     """Load last-seen timestamps from disk."""
     if _POLL_STATE_FILE.exists():
@@ -857,7 +883,7 @@ def _poll_user_dm_channels(stop_event: Event) -> None:
                 if oldest:
                     # Use exclusive lower bound: oldest + epsilon so the
                     # already-processed message is not re-delivered on restart.
-                    kwargs["oldest"] = str(float(oldest) + 0.000001)
+                    kwargs["oldest"] = _next_oldest_bound(oldest)
 
                 resp = poll_client.conversations_history(**kwargs)
                 messages = resp.get("messages", [])
@@ -1139,7 +1165,7 @@ def _poll_one_channel(channel_id: str) -> None:
 
         kwargs: dict = {"channel": channel_id, "limit": 20}
         if oldest:
-            kwargs["oldest"] = str(float(oldest) + 0.000001)
+            kwargs["oldest"] = _next_oldest_bound(oldest)
 
         resp = _channel_poll_client.conversations_history(**kwargs)
         messages = resp.get("messages", [])
