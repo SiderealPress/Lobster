@@ -533,6 +533,118 @@ class TestGetValidToken:
 
 
 # ---------------------------------------------------------------------------
+# get_valid_token — workspace-token fallback (BIS-731 / Slice 3)
+#
+# A user who ran the `workspace` consent flow already holds a token whose
+# scope bundle includes the full-access calendar scope "for unified-token
+# support" (google_workspace/config.py WORKSPACE_SCOPES). If this module's
+# own gcal-tokens/<chat_id>.json file doesn't exist, get_valid_token should
+# fall back to that workspace token — but only when the workspace token's
+# granted scope actually contains the calendar scope. If the scope-specific
+# file DOES exist, the workspace store must never even be consulted.
+# ---------------------------------------------------------------------------
+
+from integrations.google_workspace.token_store import save_token as _save_workspace_token
+
+_WORKSPACE_SCOPE_WITH_CALENDAR = (
+    "https://www.googleapis.com/auth/documents "
+    "https://www.googleapis.com/auth/drive "
+    "https://www.googleapis.com/auth/drive.file "
+    "https://www.googleapis.com/auth/spreadsheets "
+    "https://www.googleapis.com/auth/gmail.modify "
+    "https://www.googleapis.com/auth/calendar"
+)
+
+_WORKSPACE_SCOPE_WITHOUT_CALENDAR = (
+    "https://www.googleapis.com/auth/documents "
+    "https://www.googleapis.com/auth/spreadsheets"
+)
+
+
+def _make_workspace_token(
+    scope: str, refresh_token: str | None = "workspace-refresh-token"
+) -> TokenData:
+    return TokenData(
+        access_token="workspace-access-token",
+        expires_at=_FUTURE_EXPIRES,
+        scope=scope,
+        refresh_token=refresh_token,
+    )
+
+
+class TestGetValidTokenWorkspaceFallback:
+    def test_falls_back_to_workspace_token_when_own_file_absent(
+        self, tmp_path: Path
+    ) -> None:
+        own_dir = tmp_path / "gcal-tokens"
+        workspace_dir = tmp_path / "workspace-tokens"
+        _save_workspace_token(
+            "user1",
+            _make_workspace_token(_WORKSPACE_SCOPE_WITH_CALENDAR),
+            token_dir=workspace_dir,
+        )
+
+        result = get_valid_token(
+            "user1", token_dir=own_dir, workspace_token_dir=workspace_dir
+        )
+
+        assert result is not None
+        assert result.access_token == "workspace-access-token"
+
+    def test_workspace_fallback_rejected_when_scope_lacks_calendar(
+        self, tmp_path: Path
+    ) -> None:
+        own_dir = tmp_path / "gcal-tokens"
+        workspace_dir = tmp_path / "workspace-tokens"
+        _save_workspace_token(
+            "user1",
+            _make_workspace_token(_WORKSPACE_SCOPE_WITHOUT_CALENDAR),
+            token_dir=workspace_dir,
+        )
+
+        result = get_valid_token(
+            "user1", token_dir=own_dir, workspace_token_dir=workspace_dir
+        )
+
+        assert result is None
+
+    def test_own_token_wins_and_workspace_is_never_consulted(
+        self, tmp_path: Path
+    ) -> None:
+        own_dir = tmp_path / "gcal-tokens"
+        workspace_dir = tmp_path / "workspace-tokens"
+        own_token = _make_valid_token()
+        save_token("user1", own_token, token_dir=own_dir)
+
+        # A deliberately different/invalid workspace token sits alongside a
+        # valid own token — if the own token weren't checked first, this
+        # would either win or blow up on the corrupt JSON.
+        workspace_dir.mkdir(parents=True)
+        (workspace_dir / "user1.json").write_text("{ not valid json }")
+
+        with patch(f"{ts.__name__}._get_workspace_fallback_token") as mock_fallback:
+            result = get_valid_token(
+                "user1", token_dir=own_dir, workspace_token_dir=workspace_dir
+            )
+
+        mock_fallback.assert_not_called()
+        assert result is not None
+        assert result.access_token == own_token.access_token
+
+    def test_returns_none_when_neither_own_nor_workspace_token_exists(
+        self, tmp_path: Path
+    ) -> None:
+        own_dir = tmp_path / "gcal-tokens"
+        workspace_dir = tmp_path / "workspace-tokens"
+
+        result = get_valid_token(
+            "user1", token_dir=own_dir, workspace_token_dir=workspace_dir
+        )
+
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
 # _internal_auth_header (BIS-728 / Slice 0 characterization)
 #
 # Today this is the ONLY authentication the refresh proxy call carries: a
