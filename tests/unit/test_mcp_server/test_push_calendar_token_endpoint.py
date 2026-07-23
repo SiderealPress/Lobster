@@ -18,26 +18,28 @@ Covers:
 - Validation: invalid JSON body -> 400
 - Path traversal: chat_id with "../" components is sanitised, not written outside token dir
 - Token values never appear in log output
-- KNOWN-BAD (pinned intentionally): an unsigned request bearing only the
-  static LOBSTER_INTERNAL_SECRET bearer token, with an arbitrary/attacker-
-  suppliable chat_id, IS ACCEPTED today and writes a real token file for that
-  chat_id. There is no per-transaction binding (no nonce, no consent-token
-  check) — any caller who knows the static secret can push a token for ANY
-  chat_id. See connectors-oauth-plan-v2.md Slice 1, which closes this for the
-  calendar path specifically. When Slice 1 lands, the test named
-  ``test_forged_push_with_arbitrary_chat_id_is_currently_accepted_KNOWN_VULNERABLE``
-  below must flip to assert rejection (401/403) — that is the intended,
-  expected diff.
+- BIS-727 Slice 1 (per-transaction HMAC signing, calendar path only):
+  a forged push carrying only the static bearer secret (no valid signed
+  session) is now REJECTED (401) once enforcement is on — see
+  ``test_forged_push_with_arbitrary_chat_id_is_now_rejected``, the Slice 1
+  flip of this file's original KNOWN_VULNERABLE characterization test.
+  Also covers: valid signed session accepted under enforcement; warn-mode
+  (default) still accepts a missing/invalid session but logs a warning;
+  tampered signature / wrong secret / expired / chat_id-scope mismatch /
+  nonce replay are all rejected under enforcement.
 
 All file I/O uses a tmp_path fixture — no real disk writes outside the test sandbox.
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import logging
 import os
 import stat
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -55,6 +57,7 @@ _MODULE = "src.mcp.inbox_server_http"
 # ---------------------------------------------------------------------------
 
 _VALID_SECRET = "test-calendar-secret-abc123"
+_SESSION_HMAC_SECRET = "test-session-hmac-secret-xyz789"  # BIS-727 Slice 1
 
 _VALID_BODY = {
     "chat_id": "123456",
@@ -65,14 +68,53 @@ _VALID_BODY = {
 }
 
 
+def _build_signed_session(
+    chat_id: str,
+    scope: str,
+    *,
+    instance_id: str = "http://test-vps:8741",
+    nonce: str = "test-nonce-abc123",
+    exp: float | None = None,
+    secret: str = _SESSION_HMAC_SECRET,
+    sig_override: str | None = None,
+) -> dict:
+    """Build a session_token dict matching the wire format signed by
+    myownlobster.ai's callback route (BIS-727 Slice 1): HMAC-SHA256 over
+    instance_id|chat_id|scope|nonce|exp.
+    """
+    if exp is None:
+        exp = int(time.time()) + 1_800  # 30 min, matches SESSION_TOKEN_TTL
+    exp = int(exp)
+    message = f"{instance_id}|{chat_id}|{scope}|{nonce}|{exp}"
+    sig = sig_override
+    if sig is None:
+        sig = hmac.new(secret.encode("utf-8"), message.encode("utf-8"), hashlib.sha256).hexdigest()
+    return {
+        "instance_id": instance_id,
+        "chat_id": chat_id,
+        "scope": scope,
+        "nonce": nonce,
+        "exp": exp,
+        "sig": sig,
+    }
+
+
 @pytest.fixture()
 def client_and_token_dir(tmp_path):
-    """Yield (TestClient, gcal_token_dir) with patched dirs and secret."""
+    """Yield (TestClient, gcal_token_dir) with patched dirs and secrets.
+
+    Enforcement defaults to False (warn mode) here, matching the module's
+    real-world default — individual tests patch ``_ENFORCE_SIGNED_SESSION``
+    to True to exercise the enforced path.
+    """
     gcal_token_dir = tmp_path / "config" / "gcal-tokens"
 
     with (
         patch(f"{_MODULE}._GCAL_TOKEN_DIR", gcal_token_dir),
         patch(f"{_MODULE}._INTERNAL_SECRET", _VALID_SECRET),
+        patch(f"{_MODULE}._SESSION_HMAC_SECRET", _SESSION_HMAC_SECRET),
+        patch(f"{_MODULE}._ENFORCE_SIGNED_SESSION", False),
+        patch(f"{_MODULE}._seen_calendar_session_nonces", {}),
     ):
         from src.mcp.inbox_server_http import app
 
@@ -282,60 +324,198 @@ def test_token_values_not_in_log_output(client_and_token_dir, caplog):
 
 
 # ---------------------------------------------------------------------------
-# KNOWN-BAD characterization (BIS-727 Slice 0 -> Slice 1 regression net)
+# BIS-727 Slice 1 — the flip of the Slice 0 KNOWN_VULNERABLE characterization
 #
-# Today, `_is_authorized_internal` (inbox_server_http.py) only checks the
-# static LOBSTER_INTERNAL_SECRET bearer token. It does NOT verify that the
-# request corresponds to a specific consent transaction the user actually
-# initiated (no nonce, no per-transaction signature, no expiry binding).
-# Anyone holding the static secret can push a token for ANY chat_id.
+# Previously, `_is_authorized_internal` only checked the static
+# LOBSTER_INTERNAL_SECRET bearer token — it did NOT verify that the request
+# corresponded to a specific consent transaction the user actually initiated
+# (no nonce, no per-transaction signature, no expiry binding), so anyone
+# holding the static secret could push a token for ANY chat_id.
 #
-# Slice 1 (per-transaction HMAC signing, calendar-scope-only) is expected to
-# flip this exact test to assert rejection. Do not "fix" this test in Slice 0
-# — it must describe today's real, vulnerable behavior.
+# This is the intended, expected diff for Slice 1: with signed-session
+# enforcement on, the exact same forged request from Slice 0's
+# `test_forged_push_with_arbitrary_chat_id_is_currently_accepted_KNOWN_VULNERABLE`
+# is now rejected.
 # ---------------------------------------------------------------------------
 
 
-def test_forged_push_with_arbitrary_chat_id_is_currently_accepted_KNOWN_VULNERABLE(
-    client_and_token_dir,
-):
-    """KNOWN VULNERABLE (pinned intentionally, see module docstring).
+def test_forged_push_with_arbitrary_chat_id_is_now_rejected(client_and_token_dir):
+    """Slice 1 flip of the Slice 0 KNOWN_VULNERABLE characterization.
 
     A request carrying only the static-secret bearer token, with an
-    attacker-chosen chat_id that never went through any consent flow, is
-    accepted (200) and a real token file is written for that chat_id.
-    There is no nonce / per-transaction binding today.
-
-    Slice 1 must flip this assertion to expect rejection (401/403) once
-    per-transaction signing is enforced for the calendar push path.
+    attacker-chosen chat_id that never went through any consent flow (no
+    signed session attached at all), is now rejected once enforcement is on.
     """
     client, token_dir = client_and_token_dir
 
-    forged_chat_id = "999999999"  # attacker-supplied; never initiated any OAuth consent
-    forged_body = {
-        **_VALID_BODY,
-        "chat_id": forged_chat_id,
-    }
+    with patch(f"{_MODULE}._ENFORCE_SIGNED_SESSION", True):
+        forged_chat_id = "999999999"  # attacker-supplied; never initiated any OAuth consent
+        forged_body = {
+            **_VALID_BODY,
+            "chat_id": forged_chat_id,
+        }
 
-    resp = client.post(
-        "/api/push-calendar-token",
-        json=forged_body,
-        headers={"Authorization": f"Bearer {_VALID_SECRET}"},  # only the static secret, no nonce
-    )
+        resp = client.post(
+            "/api/push-calendar-token",
+            json=forged_body,
+            headers={"Authorization": f"Bearer {_VALID_SECRET}"},  # only the static secret, no session
+        )
 
-    # --- Pinning today's (vulnerable) behavior ---
-    assert resp.status_code == 200, (
-        "Expected today's known-vulnerable behavior: static-secret-only request "
-        "is accepted regardless of chat_id. If this now fails, Slice 1's fix "
-        "has landed — replace this test with an equivalent 'KNOWN_GOOD' "
-        "rejection test rather than deleting the coverage."
-    )
-    assert resp.json() == {"ok": True}
+        assert resp.status_code == 401, (
+            "BIS-727 Slice 1: a static-secret-only push with no valid signed "
+            "session must be rejected once enforcement is on."
+        )
+        forged_token_path = token_dir / f"{forged_chat_id}.json"
+        assert not forged_token_path.exists(), "No token file should be written for a rejected push"
 
-    forged_token_path = token_dir / f"{forged_chat_id}.json"
-    assert forged_token_path.exists(), (
-        "Expected today's known-vulnerable behavior: a real token file is "
-        "written for the attacker-supplied chat_id with no additional binding."
-    )
-    written = json.loads(forged_token_path.read_text())
-    assert written["access_token"] == forged_body["access_token"]
+
+# ---------------------------------------------------------------------------
+# BIS-727 Slice 1 — signed session verification (calendar path only)
+# ---------------------------------------------------------------------------
+
+
+def test_valid_signed_session_is_accepted_under_enforcement(client_and_token_dir):
+    """The legitimate-push counterpart to the forged-push-rejected test above:
+    a valid signed session still succeeds even with enforcement on."""
+    client, token_dir = client_and_token_dir
+
+    with patch(f"{_MODULE}._ENFORCE_SIGNED_SESSION", True):
+        session = _build_signed_session(_VALID_BODY["chat_id"], _VALID_BODY["scope"])
+        body = {**_VALID_BODY, "session_token": session}
+
+        resp = client.post(
+            "/api/push-calendar-token",
+            json=body,
+            headers={"Authorization": f"Bearer {_VALID_SECRET}"},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json() == {"ok": True}
+        assert (token_dir / f"{_VALID_BODY['chat_id']}.json").exists()
+
+
+def test_missing_signed_session_accepted_but_warns_in_default_warn_mode(client_and_token_dir, caplog):
+    """Default (enforce=False) behavior: a push with no signed session at all
+    is still accepted, but a warning is logged — this is the 48h grace window."""
+    client, token_dir = client_and_token_dir
+
+    with caplog.at_level(logging.WARNING):
+        resp = client.post(
+            "/api/push-calendar-token",
+            json=_VALID_BODY,
+            headers={"Authorization": f"Bearer {_VALID_SECRET}"},
+        )
+
+    assert resp.status_code == 200
+    assert (token_dir / f"{_VALID_BODY['chat_id']}.json").exists()
+    assert any("signed session" in r.getMessage().lower() for r in caplog.records)
+
+
+def test_tampered_signature_rejected_under_enforcement(client_and_token_dir):
+    client, _ = client_and_token_dir
+
+    with patch(f"{_MODULE}._ENFORCE_SIGNED_SESSION", True):
+        session = _build_signed_session(_VALID_BODY["chat_id"], _VALID_BODY["scope"])
+        session["sig"] = "0" * len(session["sig"])  # tamper: replace with a bogus signature
+        body = {**_VALID_BODY, "session_token": session}
+
+        resp = client.post(
+            "/api/push-calendar-token",
+            json=body,
+            headers={"Authorization": f"Bearer {_VALID_SECRET}"},
+        )
+
+        assert resp.status_code == 401
+
+
+def test_wrong_hmac_secret_rejected_under_enforcement(client_and_token_dir):
+    client, _ = client_and_token_dir
+
+    with patch(f"{_MODULE}._ENFORCE_SIGNED_SESSION", True):
+        session = _build_signed_session(
+            _VALID_BODY["chat_id"], _VALID_BODY["scope"], secret="a-completely-different-secret"
+        )
+        body = {**_VALID_BODY, "session_token": session}
+
+        resp = client.post(
+            "/api/push-calendar-token",
+            json=body,
+            headers={"Authorization": f"Bearer {_VALID_SECRET}"},
+        )
+
+        assert resp.status_code == 401
+
+
+def test_expired_session_rejected_under_enforcement(client_and_token_dir):
+    client, _ = client_and_token_dir
+
+    with patch(f"{_MODULE}._ENFORCE_SIGNED_SESSION", True):
+        expired_exp = int(time.time()) - 10  # already expired
+        session = _build_signed_session(_VALID_BODY["chat_id"], _VALID_BODY["scope"], exp=expired_exp)
+        body = {**_VALID_BODY, "session_token": session}
+
+        resp = client.post(
+            "/api/push-calendar-token",
+            json=body,
+            headers={"Authorization": f"Bearer {_VALID_SECRET}"},
+        )
+
+        assert resp.status_code == 401
+
+
+def test_chat_id_mismatch_rejected_under_enforcement(client_and_token_dir):
+    """A session signed for one chat_id cannot be replayed against another."""
+    client, _ = client_and_token_dir
+
+    with patch(f"{_MODULE}._ENFORCE_SIGNED_SESSION", True):
+        session = _build_signed_session("111111111", _VALID_BODY["scope"])  # different chat_id
+        body = {**_VALID_BODY, "session_token": session}  # body's chat_id is still "123456"
+
+        resp = client.post(
+            "/api/push-calendar-token",
+            json=body,
+            headers={"Authorization": f"Bearer {_VALID_SECRET}"},
+        )
+
+        assert resp.status_code == 401
+
+
+def test_scope_mismatch_rejected_under_enforcement(client_and_token_dir):
+    client, _ = client_and_token_dir
+
+    with patch(f"{_MODULE}._ENFORCE_SIGNED_SESSION", True):
+        session = _build_signed_session(_VALID_BODY["chat_id"], "some-other-scope")
+        body = {**_VALID_BODY, "session_token": session}
+
+        resp = client.post(
+            "/api/push-calendar-token",
+            json=body,
+            headers={"Authorization": f"Bearer {_VALID_SECRET}"},
+        )
+
+        assert resp.status_code == 401
+
+
+def test_nonce_reuse_rejected_under_enforcement(client_and_token_dir):
+    """Single-use: replaying the exact same signed session twice succeeds
+    once and is rejected the second time."""
+    client, token_dir = client_and_token_dir
+
+    with patch(f"{_MODULE}._ENFORCE_SIGNED_SESSION", True):
+        session = _build_signed_session(_VALID_BODY["chat_id"], _VALID_BODY["scope"], nonce="reused-nonce-1")
+        body = {**_VALID_BODY, "session_token": session}
+
+        first = client.post(
+            "/api/push-calendar-token",
+            json=body,
+            headers={"Authorization": f"Bearer {_VALID_SECRET}"},
+        )
+        second = client.post(
+            "/api/push-calendar-token",
+            json=body,
+            headers={"Authorization": f"Bearer {_VALID_SECRET}"},
+        )
+
+        assert first.status_code == 200
+        assert second.status_code == 401
+        assert (token_dir / f"{_VALID_BODY['chat_id']}.json").exists()
