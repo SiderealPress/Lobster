@@ -501,6 +501,99 @@ async def push_calendar_token_endpoint(scope, receive, send):
     await response(scope, receive, send)
 
 
+# ---------------------------------------------------------------------------
+# BIS-727 Slice 2 — per-transaction HMAC signing, gmail push path
+# ---------------------------------------------------------------------------
+# Identical treatment to push_calendar_token_endpoint (BIS-727 Slice 1) above
+# — deliberately copy-pasted rather than shared (per the BIS-730 plan:
+# premature abstraction here is what Slice 4 is for). Verifies a signed,
+# single-use, 30-minute-TTL session token (HMAC-SHA256 over
+# instance_id|chat_id|scope|nonce|exp) bound to the specific consent
+# transaction, alongside the existing static-secret bearer check. Reuses the
+# SAME _SESSION_HMAC_SECRET / _INSTANCE_URL module-level config as calendar
+# (one shared secret across scopes, matching myownlobster.ai's single
+# CONSENT_SESSION_HMAC_SECRET env var), but has its OWN enforce flag and
+# nonce-replay set, so gmail's warn-then-enforce rollout can be flipped
+# independently of calendar's and workspace's.
+_ENFORCE_GMAIL_SIGNED_SESSION: bool = os.environ.get(
+    "GMAIL_PUSH_SIGNED_SESSION_ENFORCE", "false"
+).strip().lower() in ("1", "true", "yes")
+
+_seen_gmail_session_nonces: dict[str, float] = {}
+
+
+def _consume_gmail_session_nonce(nonce: str, exp: float) -> bool:
+    """Atomically-within-this-process claim a nonce. False if already seen."""
+    now = time.time()
+    expired = [n for n, e in _seen_gmail_session_nonces.items() if e < now]
+    for n in expired:
+        del _seen_gmail_session_nonces[n]
+    if nonce in _seen_gmail_session_nonces:
+        return False
+    _seen_gmail_session_nonces[nonce] = exp
+    return True
+
+
+def _verify_gmail_session_token(body: dict, chat_id: str, scope_str: str) -> tuple[bool, str]:
+    """Verify the gmail push's signed, single-use, 30-min-TTL session token.
+
+    Copy-pasted from ``_verify_calendar_session_token`` (BIS-730: deliberately
+    not shared code yet). Returns ``(ok, reason)``; ``reason`` is a short
+    machine-readable string for logging only — never secret material.
+    """
+    session = body.get("session_token")
+    if not isinstance(session, dict):
+        return False, "missing_session_token"
+
+    if not _SESSION_HMAC_SECRET:
+        return False, "hmac_secret_not_configured"
+
+    instance_id = session.get("instance_id")
+    session_chat_id = session.get("chat_id")
+    session_scope = session.get("scope")
+    nonce = session.get("nonce")
+    sig = session.get("sig")
+    exp = session.get("exp")
+
+    if not (
+        isinstance(instance_id, str)
+        and instance_id
+        and isinstance(session_chat_id, str)
+        and session_chat_id
+        and isinstance(session_scope, str)
+        and session_scope
+        and isinstance(nonce, str)
+        and nonce
+        and isinstance(sig, str)
+        and sig
+        and isinstance(exp, (int, float))
+        and not isinstance(exp, bool)
+    ):
+        return False, "malformed_session_token"
+
+    if session_chat_id != chat_id:
+        return False, "chat_id_mismatch"
+    if session_scope != scope_str:
+        return False, "scope_mismatch"
+    if _INSTANCE_URL and instance_id != _INSTANCE_URL:
+        return False, "instance_id_mismatch"
+
+    message = f"{instance_id}|{session_chat_id}|{session_scope}|{nonce}|{int(exp)}"
+    expected_sig = hmac.new(
+        _SESSION_HMAC_SECRET.encode("utf-8"), message.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+    if not hmac.compare_digest(expected_sig, sig):
+        return False, "bad_signature"
+
+    if exp < time.time():
+        return False, "expired"
+
+    if not _consume_gmail_session_nonce(nonce, float(exp)):
+        return False, "nonce_already_used"
+
+    return True, "ok"
+
+
 async def push_gmail_token_endpoint(scope, receive, send):
     """POST /api/push-gmail-token — receive a Gmail token pushed by myownlobster.ai.
 
@@ -514,7 +607,13 @@ async def push_gmail_token_endpoint(scope, receive, send):
           "scope":         "<space-separated scopes>"
         }
 
-    Authentication: ``Authorization: Bearer <LOBSTER_INTERNAL_SECRET>``
+    Authentication: ``Authorization: Bearer <LOBSTER_INTERNAL_SECRET>``, PLUS
+    (BIS-727 Slice 2) a signed, single-use, 30-minute-TTL ``session_token``
+    object bound to the specific consent transaction — see
+    ``_verify_gmail_session_token`` and the warn-then-enforce rollout comment
+    near ``_ENFORCE_GMAIL_SIGNED_SESSION`` above. During the warn window
+    (default), a missing/invalid session_token is logged but still accepted;
+    once ``GMAIL_PUSH_SIGNED_SESSION_ENFORCE=true``, it is hard-rejected.
 
     Writes the token to ``~/messages/config/gmail-tokens/{chat_id}.json``
     with mode 0o600.
@@ -546,6 +645,33 @@ async def push_gmail_token_endpoint(scope, receive, send):
         )
         await response(scope, receive, send)
         return
+
+    # --- BIS-727 Slice 2: per-transaction signed session, gmail path ---
+    session_ok, session_reason = _verify_gmail_session_token(body, chat_id, scope_str)
+    if not session_ok:
+        if _ENFORCE_GMAIL_SIGNED_SESSION:
+            logger.warning(
+                "Rejecting gmail push: invalid/missing signed session "
+                "(reason=%s) chat_id=%r",
+                session_reason,
+                chat_id,
+            )
+            response = JSONResponse(
+                {"error": "Unauthorized: missing or invalid signed session"},
+                status_code=401,
+            )
+            await response(scope, receive, send)
+            return
+        logger.warning(
+            "Gmail push missing/invalid signed session (reason=%s) chat_id=%r "
+            "— accepting during BIS-729 warn-then-enforce window. Set "
+            "GMAIL_PUSH_SIGNED_SESSION_ENFORCE=true once myownlobster.ai is "
+            "confirmed emitting valid sessions for all gmail consent flows.",
+            session_reason,
+            chat_id,
+        )
+    else:
+        logger.info("Gmail push signed session verified for chat_id=%r", chat_id)
 
     # Sanitise chat_id to prevent path traversal
     safe_chat_id = "".join(c for c in chat_id if c.isalnum() or c in ("-", "_"))
@@ -848,6 +974,98 @@ async def awp_intake_endpoint(scope, receive, send):
     await response(scope, receive, send)
 
 
+# ---------------------------------------------------------------------------
+# BIS-727 Slice 2 — per-transaction HMAC signing, workspace push path
+# ---------------------------------------------------------------------------
+# Identical treatment to push_calendar_token_endpoint (BIS-727 Slice 1) and
+# push_gmail_token_endpoint (BIS-727 Slice 2, above) — deliberately
+# copy-pasted rather than shared (per the BIS-730 plan: premature
+# abstraction here is what Slice 4 is for). Verifies a signed, single-use,
+# 30-minute-TTL session token (HMAC-SHA256 over
+# instance_id|chat_id|scope|nonce|exp) bound to the specific consent
+# transaction, alongside the existing static-secret bearer check. Reuses the
+# SAME _SESSION_HMAC_SECRET / _INSTANCE_URL module-level config as calendar
+# and gmail, but has its OWN enforce flag and nonce-replay set, so
+# workspace's warn-then-enforce rollout can be flipped independently.
+_ENFORCE_WORKSPACE_SIGNED_SESSION: bool = os.environ.get(
+    "WORKSPACE_PUSH_SIGNED_SESSION_ENFORCE", "false"
+).strip().lower() in ("1", "true", "yes")
+
+_seen_workspace_session_nonces: dict[str, float] = {}
+
+
+def _consume_workspace_session_nonce(nonce: str, exp: float) -> bool:
+    """Atomically-within-this-process claim a nonce. False if already seen."""
+    now = time.time()
+    expired = [n for n, e in _seen_workspace_session_nonces.items() if e < now]
+    for n in expired:
+        del _seen_workspace_session_nonces[n]
+    if nonce in _seen_workspace_session_nonces:
+        return False
+    _seen_workspace_session_nonces[nonce] = exp
+    return True
+
+
+def _verify_workspace_session_token(body: dict, chat_id: str, scope_str: str) -> tuple[bool, str]:
+    """Verify the workspace push's signed, single-use, 30-min-TTL session token.
+
+    Copy-pasted from ``_verify_calendar_session_token`` (BIS-730: deliberately
+    not shared code yet). Returns ``(ok, reason)``; ``reason`` is a short
+    machine-readable string for logging only — never secret material.
+    """
+    session = body.get("session_token")
+    if not isinstance(session, dict):
+        return False, "missing_session_token"
+
+    if not _SESSION_HMAC_SECRET:
+        return False, "hmac_secret_not_configured"
+
+    instance_id = session.get("instance_id")
+    session_chat_id = session.get("chat_id")
+    session_scope = session.get("scope")
+    nonce = session.get("nonce")
+    sig = session.get("sig")
+    exp = session.get("exp")
+
+    if not (
+        isinstance(instance_id, str)
+        and instance_id
+        and isinstance(session_chat_id, str)
+        and session_chat_id
+        and isinstance(session_scope, str)
+        and session_scope
+        and isinstance(nonce, str)
+        and nonce
+        and isinstance(sig, str)
+        and sig
+        and isinstance(exp, (int, float))
+        and not isinstance(exp, bool)
+    ):
+        return False, "malformed_session_token"
+
+    if session_chat_id != chat_id:
+        return False, "chat_id_mismatch"
+    if session_scope != scope_str:
+        return False, "scope_mismatch"
+    if _INSTANCE_URL and instance_id != _INSTANCE_URL:
+        return False, "instance_id_mismatch"
+
+    message = f"{instance_id}|{session_chat_id}|{session_scope}|{nonce}|{int(exp)}"
+    expected_sig = hmac.new(
+        _SESSION_HMAC_SECRET.encode("utf-8"), message.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+    if not hmac.compare_digest(expected_sig, sig):
+        return False, "bad_signature"
+
+    if exp < time.time():
+        return False, "expired"
+
+    if not _consume_workspace_session_nonce(nonce, float(exp)):
+        return False, "nonce_already_used"
+
+    return True, "ok"
+
+
 async def push_workspace_token_endpoint(scope, receive, send):
     """POST /api/push-workspace-token — receive a Workspace token pushed by myownlobster.ai.
 
@@ -861,7 +1079,14 @@ async def push_workspace_token_endpoint(scope, receive, send):
           "scope":         "<space-separated scopes>"
         }
 
-    Authentication: ``Authorization: Bearer <LOBSTER_INTERNAL_SECRET>``
+    Authentication: ``Authorization: Bearer <LOBSTER_INTERNAL_SECRET>``, PLUS
+    (BIS-727 Slice 2) a signed, single-use, 30-minute-TTL ``session_token``
+    object bound to the specific consent transaction — see
+    ``_verify_workspace_session_token`` and the warn-then-enforce rollout
+    comment near ``_ENFORCE_WORKSPACE_SIGNED_SESSION`` above. During the warn
+    window (default), a missing/invalid session_token is logged but still
+    accepted; once ``WORKSPACE_PUSH_SIGNED_SESSION_ENFORCE=true``, it is
+    hard-rejected.
 
     Writes the token to ``~/messages/config/workspace-tokens/{chat_id}.json``
     with mode 0o600.
@@ -893,6 +1118,33 @@ async def push_workspace_token_endpoint(scope, receive, send):
         )
         await response(scope, receive, send)
         return
+
+    # --- BIS-727 Slice 2: per-transaction signed session, workspace path ---
+    session_ok, session_reason = _verify_workspace_session_token(body, chat_id, scope_str)
+    if not session_ok:
+        if _ENFORCE_WORKSPACE_SIGNED_SESSION:
+            logger.warning(
+                "Rejecting workspace push: invalid/missing signed session "
+                "(reason=%s) chat_id=%r",
+                session_reason,
+                chat_id,
+            )
+            response = JSONResponse(
+                {"error": "Unauthorized: missing or invalid signed session"},
+                status_code=401,
+            )
+            await response(scope, receive, send)
+            return
+        logger.warning(
+            "Workspace push missing/invalid signed session (reason=%s) chat_id=%r "
+            "— accepting during BIS-729 warn-then-enforce window. Set "
+            "WORKSPACE_PUSH_SIGNED_SESSION_ENFORCE=true once myownlobster.ai is "
+            "confirmed emitting valid sessions for all workspace consent flows.",
+            session_reason,
+            chat_id,
+        )
+    else:
+        logger.info("Workspace push signed session verified for chat_id=%r", chat_id)
 
     # Sanitise chat_id to prevent path traversal
     safe_chat_id = "".join(c for c in chat_id if c.isalnum() or c in ("-", "_"))
