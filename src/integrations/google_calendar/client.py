@@ -35,13 +35,34 @@ from typing import Any, Optional
 import requests
 
 from integrations.google_calendar.config import GoogleOAuthCredentials
-from integrations.google_calendar.token_store import get_valid_token
+from integrations.oauth_vault import client as _oauth_vault_client
 
 # Re-export so callers can do:
 #   from integrations.google_calendar.client import gcal_add_link
 from utils.calendar import gcal_add_link  # noqa: F401 — intentional re-export
 
 log = logging.getLogger(__name__)
+
+# BIS-732 / Slice 4: Calendar's own token store/refresh logic has moved to
+# integrations.oauth_vault, proven here first before Gmail and Workspace
+# follow in later slices. This thin wrapper preserves the exact
+# get_valid_token(user_id, credentials=...) call signature (and the
+# `integrations.google_calendar.client.get_valid_token` patch target) that
+# existing callers and tests depend on — only the implementation moved.
+# integrations.google_calendar.token_store.py itself is untouched and stays
+# in the tree, unimported here, as a one-release rollback path.
+#
+# Note: the oauth_vault module is imported and called via module-attribute
+# access (_oauth_vault_client.get_valid_token(...)), not via a bound
+# `from ... import get_valid_token` alias — the latter would capture the
+# function object at import time and become unpatchable via
+# `patch("integrations.oauth_vault.client.get_valid_token")` in tests.
+
+
+def get_valid_token(user_id: str, credentials=None):
+    """Return a valid Calendar access token for user_id (delegates to oauth_vault)."""
+    return _oauth_vault_client.get_valid_token("calendar", user_id, credentials=credentials)
+
 
 # ---------------------------------------------------------------------------
 # Google Calendar REST API constants
