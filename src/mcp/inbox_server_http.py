@@ -423,6 +423,57 @@ _CONFIRM_DEDUPE_TTL_SECONDS: float = 300.0  # 5 minutes
 # uvicorn worker and the window is short.
 _seen_push_confirmations: dict[str, float] = {}
 
+# ---------------------------------------------------------------------------
+# Issue #2133 -- channel parity for push-token confirmations
+# ---------------------------------------------------------------------------
+# BIS-743/BIS-744 gave the three token-push endpoints confirmation parity
+# with EACH OTHER (calendar/gmail/workspace all confirm the same way), but
+# every confirmation was hardcoded to "source": "telegram". A Slack-initiated
+# "connect Calendar/Gmail/Workspace" completes the OAuth grant correctly (the
+# token write is channel-agnostic) but the confirmation message silently
+# vanishes: lobster_bot.py only drains outbox files tagged
+# source in ("telegram", "lobster-group", ""), and slack_router.py only
+# drains source == "slack" -- a file tagged "telegram" that was meant for
+# Slack is picked up by neither.
+#
+# _extract_confirmation_channel reads an optional (source, thread_ts) routing
+# hint out of the push body's session_token, so a caller of
+# generate_consent_link (consent.py) that threads chat_id/source/thread_ts
+# through can eventually get its confirmation routed back correctly, once
+# myownlobster.ai's broker is updated to echo these fields back in the signed
+# session it issues. Deliberately NOT part of the HMAC-signed digest (see
+# _verify_calendar_session_token et al.): the authenticated identity for this
+# transaction is chat_id+scope+instance_id+nonce+exp -- source/thread_ts are
+# routing hints for a human-readable "Connected!" message, not a trust
+# boundary. Worst case if tampered: a confirmation is misrouted to the wrong
+# channel; no token or secret is exposed.
+_DEFAULT_CONFIRMATION_SOURCE: str = "telegram"
+
+
+def _extract_confirmation_channel(body: dict) -> tuple[str, Optional[str]]:
+    """Return the ``(source, thread_ts)`` to route a push confirmation to.
+
+    Reads ``body["session_token"]["source"]`` / ``["thread_ts"]``. Falls back
+    to ``(_DEFAULT_CONFIRMATION_SOURCE, None)`` when the session_token is
+    missing, malformed, or simply doesn't carry these (optional) fields --
+    covering both backward compatibility (consent links generated before
+    this fix) and forward compatibility (until myownlobster.ai's broker
+    starts sending them).
+    """
+    session = body.get("session_token")
+    if not isinstance(session, dict):
+        return _DEFAULT_CONFIRMATION_SOURCE, None
+
+    source = session.get("source")
+    if not isinstance(source, str) or not source:
+        source = _DEFAULT_CONFIRMATION_SOURCE
+
+    thread_ts = session.get("thread_ts")
+    if not isinstance(thread_ts, str) or not thread_ts:
+        thread_ts = None
+
+    return source, thread_ts
+
 
 def _purge_expired_confirmations(now: float) -> None:
     expired = [k for k, exp in _seen_push_confirmations.items() if exp < now]
@@ -554,11 +605,14 @@ def _queue_push_confirmation(
     scope: str,
     connected_text: str,
     fetch_preview: Callable[[], Optional[str]],
+    source: str = _DEFAULT_CONFIRMATION_SOURCE,
+    thread_ts: Optional[str] = None,
 ) -> None:
     """Queue a post-push confirmation to the outbox. Never raises.
 
     Args:
-        chat_id:        Telegram chat_id (already sanitised by the caller).
+        chat_id:        Chat/channel id (already sanitised by the caller) --
+                         a Telegram numeric chat_id or a Slack channel/DM id.
         scope:           One of "calendar", "gmail", "workspace" -- used for
                          the de-dupe key and the outbox filename suffix.
         connected_text:  Static "X connected" lead-in text for this scope.
@@ -566,6 +620,13 @@ def _queue_push_confirmation(
                          preview line (or None/"" for "nothing to show"), or
                          raising on failure. Called synchronously; any
                          exception is caught here, never propagated.
+        source:          Which channel router should pick up this outbox
+                         file -- "telegram" or "slack" (issue #2133). Defaults
+                         to "telegram" to preserve pre-existing behavior for
+                         callers that don't pass it.
+        thread_ts:       Slack thread timestamp, if this confirmation should
+                         be threaded to a specific Slack thread. Omitted from
+                         the outbox payload entirely when not provided.
     """
     if _confirmation_already_sent(chat_id, scope):
         logger.info(
@@ -605,11 +666,13 @@ def _queue_push_confirmation(
         reply_id = f"{int(time.time() * 1000)}_{scope}_{chat_id}_auth"
         reply_data = {
             "id": reply_id,
-            "source": "telegram",
+            "source": source,
             "chat_id": chat_id,
             "text": text,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
+        if thread_ts:
+            reply_data["thread_ts"] = thread_ts
         reply_file = outbox_dir / f"{reply_id}.json"
         tmp_reply = reply_file.with_suffix(".json.tmp")
         tmp_fd = os.open(str(tmp_reply), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -803,6 +866,9 @@ async def push_calendar_token_endpoint(scope, receive, send):
     # visibility, de-dupe) -- see _queue_push_confirmation above. Best-effort:
     # the token is already saved, so a confirmation failure here must never
     # turn a successful push into an error response for the caller.
+    # Issue #2133: route the confirmation to the channel that actually
+    # initiated the connect flow, not hardcoded to Telegram.
+    confirm_source, confirm_thread_ts = _extract_confirmation_channel(body)
     _queue_push_confirmation(
         chat_id=safe_chat_id,
         scope="calendar",
@@ -811,6 +877,8 @@ async def push_calendar_token_endpoint(scope, receive, send):
             "I can now read and create events on your calendar."
         ),
         fetch_preview=lambda: _fetch_calendar_preview(safe_chat_id),
+        source=confirm_source,
+        thread_ts=confirm_thread_ts,
     )
 
     response = JSONResponse({"ok": True})
@@ -1035,9 +1103,14 @@ async def push_gmail_token_endpoint(scope, receive, send):
     # visibility, de-dupe) -- see _queue_push_confirmation above. Best-effort:
     # the token is already saved, so a confirmation failure here must never
     # turn a successful push into an error response for the caller.
+    # Issue #2133: route the confirmation to the channel that actually
+    # initiated the connect flow, not hardcoded to Telegram.
+    confirm_source, confirm_thread_ts = _extract_confirmation_channel(body)
     _queue_push_confirmation(
         chat_id=safe_chat_id,
         scope="gmail",
+        source=confirm_source,
+        thread_ts=confirm_thread_ts,
         connected_text=(
             "Gmail connected. "
             "I can now read and search your emails."
@@ -1524,9 +1597,14 @@ async def push_workspace_token_endpoint(scope, receive, send):
     # (zero user-visible fallback on failure) with the hardened shared
     # helper. Best-effort: the token is already saved, so a confirmation
     # failure here must never turn a successful push into an error response.
+    # Issue #2133: route the confirmation to the channel that actually
+    # initiated the connect flow, not hardcoded to Telegram.
+    confirm_source, confirm_thread_ts = _extract_confirmation_channel(body)
     _queue_push_confirmation(
         chat_id=safe_chat_id,
         scope="workspace",
+        source=confirm_source,
+        thread_ts=confirm_thread_ts,
         connected_text=(
             "Google Workspace connected. "
             "You can now use /gdocs, /gdrive, and /gsheets."

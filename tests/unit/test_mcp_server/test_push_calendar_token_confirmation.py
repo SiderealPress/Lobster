@@ -235,3 +235,63 @@ class TestPostAuthConfirmation:
         assert len(outbox_files) == 1, (
             f"Expected exactly one confirmation across two pushes, found {len(outbox_files)}"
         )
+
+
+class TestChannelParity:
+    """Issue #2133: a Slack-initiated "connect Calendar" flow must get its
+    confirmation routed back to Slack, not silently dropped as "telegram".
+
+    These reproduce the actual reported bug end-to-end through the real
+    ASGI endpoint: a push whose session_token carries source="slack" (as
+    myownlobster.ai's broker will eventually send once updated) must produce
+    an outbox confirmation with source="slack" and the given thread_ts --
+    the exact fields slack_router.py's outbox drain requires to pick the
+    file up and thread it correctly. Reverting the source/thread_ts
+    threading in inbox_server_http.py (the _extract_confirmation_channel /
+    _queue_push_confirmation changes) makes these fail because the
+    confirmation reverts to the hardcoded "telegram" tag.
+    """
+
+    def test_slack_originated_push_routes_confirmation_to_slack(self, client_and_dirs):
+        client, _, outbox_dir = client_and_dirs
+        slack_body = {
+            **_VALID_BODY,
+            "session_token": {
+                "instance_id": "https://vps.example.com",
+                "chat_id": _VALID_BODY["chat_id"],
+                "scope": _VALID_BODY["scope"],
+                "nonce": "test-nonce-slack",
+                "sig": "unused-in-warn-mode",
+                "exp": (datetime.now(tz=timezone.utc) + timedelta(minutes=30)).timestamp(),
+                "source": "slack",
+                "thread_ts": "1700000000.000100",
+            },
+        }
+        with patch(f"{_MODULE}._fetch_calendar_preview", return_value="preview"):
+            resp = client.post(
+                "/api/push-calendar-token",
+                json=slack_body,
+                headers={"Authorization": f"Bearer {_VALID_SECRET}"},
+            )
+
+        assert resp.status_code == 200
+        reply = _read_only_outbox_file(outbox_dir)
+        assert reply["source"] == "slack"
+        assert reply["thread_ts"] == "1700000000.000100"
+        assert reply["chat_id"] == _VALID_BODY["chat_id"]
+
+    def test_telegram_originated_push_still_routes_to_telegram(self, client_and_dirs):
+        """Companion case: an ordinary Telegram push (no session_token, the
+        pre-existing shape) must still default to source="telegram"."""
+        client, _, outbox_dir = client_and_dirs
+        with patch(f"{_MODULE}._fetch_calendar_preview", return_value="preview"):
+            resp = client.post(
+                "/api/push-calendar-token",
+                json=_VALID_BODY,
+                headers={"Authorization": f"Bearer {_VALID_SECRET}"},
+            )
+
+        assert resp.status_code == 200
+        reply = _read_only_outbox_file(outbox_dir)
+        assert reply["source"] == "telegram"
+        assert "thread_ts" not in reply
