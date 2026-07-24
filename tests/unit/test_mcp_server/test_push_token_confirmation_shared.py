@@ -362,3 +362,107 @@ class TestDedupeGuard:
 
         files = list(outbox_dir.glob("*.json"))
         assert len(files) == 1, "Retry after a failed delivery must succeed, not be deduped away"
+
+
+class TestChannelParity:
+    """Issue #2133: the confirmation must be routed to the channel that
+    actually initiated the connect flow, not hardcoded to Telegram."""
+
+    def test_default_source_is_telegram_for_backward_compatibility(self, isolated_dirs):
+        """Existing call sites (and in-flight consent links generated before
+        this fix) that don't pass `source` must keep behaving exactly as
+        before."""
+        outbox_dir, _ = isolated_dirs
+        m = _import_target()
+
+        m._queue_push_confirmation(
+            chat_id="200", scope="calendar", connected_text="connected",
+            fetch_preview=lambda: "preview",
+        )
+
+        reply = json.loads(list(outbox_dir.glob("*.json"))[0].read_text())
+        assert reply["source"] == m._DEFAULT_CONFIRMATION_SOURCE
+        assert reply["source"] == "telegram"
+
+    def test_slack_source_is_used_when_provided(self, isolated_dirs):
+        outbox_dir, _ = isolated_dirs
+        m = _import_target()
+
+        m._queue_push_confirmation(
+            chat_id="C0SLACKCHAN", scope="calendar", connected_text="connected",
+            fetch_preview=lambda: "preview",
+            source="slack",
+        )
+
+        reply = json.loads(list(outbox_dir.glob("*.json"))[0].read_text())
+        assert reply["source"] == "slack"
+
+    def test_thread_ts_is_included_when_provided(self, isolated_dirs):
+        outbox_dir, _ = isolated_dirs
+        m = _import_target()
+
+        m._queue_push_confirmation(
+            chat_id="C0SLACKCHAN", scope="gmail", connected_text="connected",
+            fetch_preview=lambda: "preview",
+            source="slack",
+            thread_ts="1700000000.000100",
+        )
+
+        reply = json.loads(list(outbox_dir.glob("*.json"))[0].read_text())
+        assert reply["thread_ts"] == "1700000000.000100"
+
+    def test_thread_ts_omitted_when_not_provided(self, isolated_dirs):
+        """A Telegram (or non-threaded Slack) confirmation must not carry a
+        stray null/empty thread_ts key."""
+        outbox_dir, _ = isolated_dirs
+        m = _import_target()
+
+        m._queue_push_confirmation(
+            chat_id="201", scope="workspace", connected_text="connected",
+            fetch_preview=lambda: "preview",
+        )
+
+        reply = json.loads(list(outbox_dir.glob("*.json"))[0].read_text())
+        assert "thread_ts" not in reply
+
+
+class TestExtractConfirmationChannel:
+    """_extract_confirmation_channel reads the (source, thread_ts) routing
+    hint out of the push body's session_token, defaulting to telegram/None
+    when absent (issue #2133)."""
+
+    def test_no_session_token_defaults_to_telegram(self):
+        m = _import_target()
+        source, thread_ts = m._extract_confirmation_channel({})
+        assert source == "telegram"
+        assert thread_ts is None
+
+    def test_session_token_without_source_defaults_to_telegram(self):
+        """Backward compat with tokens issued before myownlobster.ai's
+        broker starts echoing source/thread_ts back."""
+        m = _import_target()
+        body = {"session_token": {"instance_id": "x", "chat_id": "1", "scope": "calendar", "nonce": "n", "sig": "s", "exp": 1}}
+        source, thread_ts = m._extract_confirmation_channel(body)
+        assert source == "telegram"
+        assert thread_ts is None
+
+    def test_session_token_with_slack_source_and_thread_ts(self):
+        m = _import_target()
+        body = {
+            "session_token": {
+                "instance_id": "x", "chat_id": "1", "scope": "calendar",
+                "nonce": "n", "sig": "s", "exp": 1,
+                "source": "slack", "thread_ts": "1700000000.000100",
+            }
+        }
+        source, thread_ts = m._extract_confirmation_channel(body)
+        assert source == "slack"
+        assert thread_ts == "1700000000.000100"
+
+    def test_malformed_source_falls_back_to_telegram(self):
+        """A non-string source (bad broker data, or an attempted injection)
+        must never propagate -- fall back to the safe default."""
+        m = _import_target()
+        body = {"session_token": {"source": 12345}}
+        source, _ = m._extract_confirmation_channel(body)
+        assert source == "telegram"
