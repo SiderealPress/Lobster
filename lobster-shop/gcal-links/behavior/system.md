@@ -131,7 +131,10 @@ try:
     reply = (
         "To connect your Google Calendar, tap this link (expires in 30 minutes):\n"
         f"[Connect Google Calendar]({url})\n\n"
-        "After connecting, I'll be able to read and create calendar events for you."
+        "After connecting, I'll be able to read and create calendar events for you.\n\n"
+        "Note: Google may show an \"unverified app\" warning screen first — that's "
+        "expected for this app right now, not a sign anything is wrong. Tap "
+        "**Advanced**, then tap the \"Go to ... (unsafe)\" link near the bottom to continue."
     )
 except Exception as exc:
     # Graceful fallback: generate_consent_link raises if env vars are missing

@@ -54,7 +54,10 @@ try:
     reply = (
         "To connect your Gmail, tap this link (expires in 30 minutes):\n"
         f"[Connect Gmail]({url})\n\n"
-        "After connecting, I'll be able to read and search your emails."
+        "After connecting, I'll be able to read and search your emails.\n\n"
+        "Note: Google may show an \"unverified app\" warning screen first — that's "
+        "expected for this app right now, not a sign anything is wrong. Tap "
+        "**Advanced**, then tap the \"Go to ... (unsafe)\" link near the bottom to continue."
     )
 except Exception as exc:
     log.warning("generate_consent_link('gmail') failed: %s", exc)
@@ -163,7 +166,10 @@ try:
     reply = (
         "To connect your Gmail, tap this link (expires in 30 minutes):\n"
         f"[Connect Gmail]({url})\n\n"
-        "After connecting, I'll be able to read and search your emails."
+        "After connecting, I'll be able to read and search your emails.\n\n"
+        "Note: Google may show an \"unverified app\" warning screen first — that's "
+        "expected for this app right now, not a sign anything is wrong. Tap "
+        "**Advanced**, then tap the \"Go to ... (unsafe)\" link near the bottom to continue."
     )
 except Exception as exc:
     log.warning("generate_consent_link('gmail') failed — degrading gracefully: %s", exc)
