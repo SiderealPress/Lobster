@@ -497,6 +497,44 @@ async def push_calendar_token_endpoint(scope, receive, send):
         await response(scope, receive, send)
         return
 
+    # BIS-743: post-push confirmation, extending the pattern already shipped
+    # for Workspace (push_workspace_token_endpoint, below) to Calendar.
+    # Best-effort: the token is already saved, so a confirmation failure here
+    # must never turn a successful push into an error response for the caller.
+    try:
+        import time as _time
+
+        _MESSAGES_BASE = Path(os.path.expanduser("~/messages"))
+        _OUTBOX_DIR = _MESSAGES_BASE / "outbox"
+        _OUTBOX_DIR.mkdir(parents=True, exist_ok=True)
+
+        reply_id = f"{int(_time.time() * 1000)}_calendar_auth"
+        reply_data = {
+            "id": reply_id,
+            "source": "telegram",
+            "chat_id": safe_chat_id,
+            "text": (
+                "Google Calendar connected. "
+                "I can now read and create events on your calendar."
+            ),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        reply_file = _OUTBOX_DIR / f"{reply_id}.json"
+        tmp_reply = reply_file.with_suffix(".json.tmp")
+        tmp_fd = os.open(str(tmp_reply), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(tmp_fd, "w") as rf:
+            rf.write(json.dumps(reply_data, indent=2))
+        os.rename(str(tmp_reply), str(reply_file))
+        logger.info(
+            "Calendar-connected confirmation queued for chat_id=%r", safe_chat_id
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "push_calendar_token: failed to queue confirmation for chat_id=%r: %s",
+            safe_chat_id,
+            exc,
+        )
+
     response = JSONResponse({"ok": True})
     await response(scope, receive, send)
 
@@ -714,6 +752,44 @@ async def push_gmail_token_endpoint(scope, receive, send):
         response = JSONResponse({"error": "Failed to write token"}, status_code=500)
         await response(scope, receive, send)
         return
+
+    # BIS-743: post-push confirmation, extending the pattern already shipped
+    # for Workspace (push_workspace_token_endpoint, below) to Gmail.
+    # Best-effort: the token is already saved, so a confirmation failure here
+    # must never turn a successful push into an error response for the caller.
+    try:
+        import time as _time
+
+        _MESSAGES_BASE = Path(os.path.expanduser("~/messages"))
+        _OUTBOX_DIR = _MESSAGES_BASE / "outbox"
+        _OUTBOX_DIR.mkdir(parents=True, exist_ok=True)
+
+        reply_id = f"{int(_time.time() * 1000)}_gmail_auth"
+        reply_data = {
+            "id": reply_id,
+            "source": "telegram",
+            "chat_id": safe_chat_id,
+            "text": (
+                "Gmail connected. "
+                "I can now read and search your emails."
+            ),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        reply_file = _OUTBOX_DIR / f"{reply_id}.json"
+        tmp_reply = reply_file.with_suffix(".json.tmp")
+        tmp_fd = os.open(str(tmp_reply), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(tmp_fd, "w") as rf:
+            rf.write(json.dumps(reply_data, indent=2))
+        os.rename(str(tmp_reply), str(reply_file))
+        logger.info(
+            "Gmail-connected confirmation queued for chat_id=%r", safe_chat_id
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "push_gmail_token: failed to queue confirmation for chat_id=%r: %s",
+            safe_chat_id,
+            exc,
+        )
 
     response = JSONResponse({"ok": True})
     await response(scope, receive, send)
