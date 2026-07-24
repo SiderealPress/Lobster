@@ -206,6 +206,80 @@ def isolate_inbox_server_paths(tmp_path: Path):
         yield dirs_result
 
 
+# =============================================================================
+# Production Path Isolation for inbox_server_http.py (BIS-744)
+# =============================================================================
+# Sibling of isolate_inbox_server_paths above, for the separate
+# src/mcp/inbox_server_http.py module (the HTTP bridge that hosts the
+# push-calendar/gmail/workspace-token endpoints). This module resolves its
+# outbox/token/inbox directories via its own ``_MESSAGES_DIR`` global, which
+# defaults to the ``LOBSTER_MESSAGES`` env var (or ``~/messages`` if unset)
+# -- NOT the tmp_path-redirected globals patched above, since it is a
+# different module object entirely.
+#
+# Root cause this fixes: on any machine where LOBSTER_MESSAGES is set in the
+# real process environment (true of this VPS, where the live dispatcher/MCP
+# services export it), running this repo's push-token endpoint tests without
+# this fixture silently writes real confirmation files (and, for tests that
+# don't patch the token-dir globals, real token files) into the production
+# ``~/messages`` tree. This was caught during BIS-743/744 development: ~200
+# stray confirmation files with fake test chat_ids were found sitting in this
+# machine's real dead-letter queue, produced by ordinary `pytest` runs of the
+# pre-existing (BIS-728/730) push-endpoint characterization tests, which
+# never needed outbox isolation before BIS-743 added a confirmation step.
+_INBOX_SERVER_HTTP_MODULE = "src.mcp.inbox_server_http"
+
+
+@pytest.fixture(autouse=True)
+def isolate_inbox_server_http_paths(tmp_path: Path):
+    """Redirect inbox_server_http.py's path globals to tmp_path for every test.
+
+    Like ``isolate_inbox_server_paths``, this is autouse and requires no
+    per-test opt-in. Tests that need finer control (e.g. asserting file
+    contents) may still add their own narrower ``patch(...)`` on top of these
+    globals within a test body -- that composes safely, since the inner patch
+    simply overrides for the duration of its own ``with`` block and reverts
+    to this fixture's tmp_path afterward, never to the real production path.
+    """
+    http_messages = tmp_path / "http_messages"
+    gcal_dir = http_messages / "config" / "gcal-tokens"
+    gmail_dir = http_messages / "config" / "gmail-tokens"
+    workspace_dir = http_messages / "config" / "workspace-tokens"
+    inbox_dir = http_messages / "inbox"
+    outbox_dir = http_messages / "outbox"
+    for d in (gcal_dir, gmail_dir, workspace_dir, inbox_dir, outbox_dir):
+        d.mkdir(parents=True, exist_ok=True)
+
+    # inbox_server_http.py calls sys.exit(1) at import time if MCP_HTTP_TOKEN
+    # is unset. setdefault never overrides a real value already present in
+    # the environment (e.g. the live service's actual token) -- it only fills
+    # in a harmless placeholder when nothing is set, so import doesn't abort.
+    os.environ.setdefault("MCP_HTTP_TOKEN", "test-placeholder-conftest-isolation")
+
+    try:
+        import importlib
+        importlib.import_module(_INBOX_SERVER_HTTP_MODULE)
+    except BaseException:
+        # Catches SystemExit (the module's own sys.exit(1) guard) as well as
+        # ordinary import errors. Either way, degrade gracefully instead of
+        # aborting the entire test run for tests that never touch this module.
+        yield http_messages
+        return
+
+    try:
+        with patch.multiple(
+            _INBOX_SERVER_HTTP_MODULE,
+            _MESSAGES_DIR=http_messages,
+            _GCAL_TOKEN_DIR=gcal_dir,
+            _GMAIL_TOKEN_DIR=gmail_dir,
+            _WORKSPACE_TOKEN_DIR=workspace_dir,
+            _INBOX_DIR=inbox_dir,
+        ):
+            yield http_messages
+    except Exception:
+        yield http_messages
+
+
 @pytest.fixture
 def inbox_server_dirs(isolate_inbox_server_paths):
     """Expose the redirected inbox_server paths for tests that need to verify them.

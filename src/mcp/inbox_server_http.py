@@ -43,7 +43,7 @@ import time
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Optional
 
 import uvicorn
 from starlette.applications import Starlette
@@ -376,6 +376,308 @@ def _is_authorized_intake(request: Request) -> bool:
     return auth_header[7:].strip() == _IMPORT_TOKEN
 
 
+# ---------------------------------------------------------------------------
+# BIS-744 — shared post-push confirmation helper (calendar, gmail, workspace)
+# ---------------------------------------------------------------------------
+# BIS-743 copy-pasted an identical confirmation-on-push block into all three
+# endpoints (deliberately, per this file's established "prove it 3x before
+# abstracting" convention — see the HMAC-signing blocks above). Now that the
+# shape has been hand-written three times, this extracts the shared logic,
+# and upgrades it with three things none of the three copies had:
+#
+#   1. A live-data preview point (next calendar event / latest email subject
+#      / most recent Drive file) instead of static "token saved" text, via
+#      the ``fetch_preview`` callable each call site supplies.
+#   2. Failure visibility: the pre-existing workspace confirmation block had
+#      a bare ``except Exception: log.warning(...)`` with ZERO user-visible
+#      fallback -- if the confirmation failed, the user was left in total
+#      silence with no way to know anything went wrong. This version (a)
+#      logs at ERROR (not WARNING) with exc_info, so it can't be missed in
+#      logs/alerting, and (b) if the live-data fetch fails, still queues an
+#      honest degraded confirmation ("connected, but couldn't fetch a
+#      preview") rather than skipping the confirmation entirely. If the
+#      notify step itself (the outbox write) fails, per-user delivery is
+#      genuinely impossible via that channel -- but this is never silently
+#      swallowed: a system-level alert is written to the inbox (chat_id=0)
+#      as a fallback so a human (or the dispatcher) still finds out.
+#   3. A de-dupe guard so a double-clicked consent link or a duplicate
+#      webhook delivery from myownlobster.ai doesn't send the user two
+#      confirmations for one grant.
+#
+# Uses ``_MESSAGES_DIR`` (module-level, already configurable via the
+# LOBSTER_MESSAGES env var and already used for the token directories above)
+# instead of a fresh ``Path(os.path.expanduser("~/messages"))`` call. The
+# three BIS-743 copies each independently re-resolved "~/messages" via
+# os.path.expanduser, which is NOT overridden by LOBSTER_MESSAGES and is not
+# patched by any test fixture other than the ones that explicitly mock
+# ``os.path.expanduser`` -- this caused every pre-existing push-endpoint
+# characterization test (which never needed to touch the outbox before
+# BIS-743 added a confirmation step) to silently write real files into this
+# machine's real ``~/messages/outbox`` on every test run. Referencing
+# ``_MESSAGES_DIR`` here instead means the existing, single, already-tested
+# patch point works for the confirmation path too.
+_CONFIRM_DEDUPE_TTL_SECONDS: float = 300.0  # 5 minutes
+
+# Process-lifetime only (not persisted across restarts), same tradeoff as the
+# nonce-replay sets above -- acceptable given this bridge runs as a single
+# uvicorn worker and the window is short.
+_seen_push_confirmations: dict[str, float] = {}
+
+
+def _purge_expired_confirmations(now: float) -> None:
+    expired = [k for k, exp in _seen_push_confirmations.items() if exp < now]
+    for k in expired:
+        del _seen_push_confirmations[k]
+
+
+def _confirmation_already_sent(chat_id: str, scope: str) -> bool:
+    """De-dupe guard (read-only check): True if a confirmation was already
+    *successfully delivered* for this chat_id+scope within the last
+    ``_CONFIRM_DEDUPE_TTL_SECONDS``.
+
+    Deliberately does NOT claim the slot as a side effect -- claiming happens
+    only in ``_mark_confirmation_sent``, and only after the outbox write has
+    actually succeeded. Claiming eagerly (before knowing whether delivery
+    succeeded) would mean a transient failure -- exactly the case this
+    module tries hardest to make visible and recoverable -- permanently
+    blocks any legitimate retry (e.g. myownlobster.ai retrying a webhook
+    delivery) for the rest of the TTL window, silently defeating the whole
+    point of the failure-visibility work in this file.
+    """
+    now = time.time()
+    _purge_expired_confirmations(now)
+    return f"{scope}:{chat_id}" in _seen_push_confirmations
+
+
+def _mark_confirmation_sent(chat_id: str, scope: str) -> None:
+    """Claim the (chat_id, scope) de-dupe slot for the TTL window.
+
+    Call this ONLY after the confirmation has been successfully written to
+    the outbox -- see the docstring on ``_confirmation_already_sent``.
+    """
+    now = time.time()
+    _purge_expired_confirmations(now)
+    key = f"{scope}:{chat_id}"
+    _seen_push_confirmations[key] = now + _CONFIRM_DEDUPE_TTL_SECONDS
+
+
+def _write_system_alert(text: str) -> None:
+    """Best-effort system-level alert for when a per-user confirmation
+    cannot be delivered at all (the outbox write itself failed).
+
+    An earlier version of this fallback wrote a ``chat_id=0`` /
+    ``type="system_alert"`` message to the inbox. An independent (Fable)
+    review pass before merge pointed out that nothing in this codebase
+    actually consumes that combination -- ``inbox_server.py`` explicitly
+    excludes ``chat_id == 0`` from ``USER_FACING_TYPES`` handling, so that
+    message would have sat in the inbox, unread by anyone, making the
+    "fallback" cosmetic rather than real.
+
+    Fixed: route the alert through the SAME outbox mechanism already proven
+    to deliver real Telegram messages (the one this whole file's
+    confirmations use), targeted at ``LOBSTER_ADMIN_CHAT_ID`` -- the
+    established env var already used by other alerting code in this repo
+    (e.g. ``src/transcription/worker.py::notify_dispatcher_dead_letter``).
+    A secondary copy is still written to the inbox for the audit trail, but
+    the outbox message is what actually reaches a human.
+
+    Never raises further: if even this fails, the ERROR log call at the
+    call site (in ``_queue_push_confirmation``) is the final line of
+    defense.
+    """
+    admin_chat_id = os.environ.get("LOBSTER_ADMIN_CHAT_ID", "").strip()
+
+    if admin_chat_id:
+        try:
+            outbox_dir = _MESSAGES_DIR / "outbox"
+            outbox_dir.mkdir(parents=True, exist_ok=True)
+            alert_id = f"{int(time.time() * 1000)}_confirm_failure_admin_alert"
+            alert_reply = {
+                "id": alert_id,
+                "source": "telegram",
+                "chat_id": admin_chat_id,
+                "text": f"[system alert] {text}",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+            alert_path = outbox_dir / f"{alert_id}.json"
+            tmp_path = alert_path.with_suffix(".json.tmp")
+            fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(json.dumps(alert_reply, indent=2))
+            os.rename(str(tmp_path), str(alert_path))
+        except Exception:  # noqa: BLE001
+            logger.error(
+                "push-token confirmation: admin-outbox alert ALSO failed "
+                "-- this failure is now visible only in this log line: %s",
+                text,
+                exc_info=True,
+            )
+    else:
+        logger.error(
+            "push-token confirmation: LOBSTER_ADMIN_CHAT_ID not configured "
+            "-- cannot deliver system alert to any human. Failure is only "
+            "visible in this log line: %s",
+            text,
+        )
+
+    # Secondary record in the inbox (chat_id=0, type="system_alert") for
+    # audit/history purposes. Not relied upon for actual human notification
+    # (see docstring above) -- best-effort, failure here is non-fatal.
+    try:
+        _INBOX_DIR.mkdir(parents=True, exist_ok=True)
+        alert_id = f"{int(time.time() * 1000)}_confirm_failure_alert"
+        alert_data = {
+            "id": alert_id,
+            "type": "system_alert",
+            "source": "system",
+            "chat_id": 0,
+            "text": text,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        alert_path = _INBOX_DIR / f"{alert_id}.json"
+        tmp_path = alert_path.with_suffix(".json.tmp")
+        fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _TOKEN_FILE_MODE)
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(alert_data, indent=2))
+        os.rename(str(tmp_path), str(alert_path))
+    except Exception:  # noqa: BLE001
+        logger.error(
+            "push-token confirmation: inbox audit-record write ALSO failed: %s",
+            text,
+            exc_info=True,
+        )
+
+
+def _queue_push_confirmation(
+    *,
+    chat_id: str,
+    scope: str,
+    connected_text: str,
+    fetch_preview: Callable[[], Optional[str]],
+) -> None:
+    """Queue a post-push confirmation to the outbox. Never raises.
+
+    Args:
+        chat_id:        Telegram chat_id (already sanitised by the caller).
+        scope:           One of "calendar", "gmail", "workspace" -- used for
+                         the de-dupe key and the outbox filename suffix.
+        connected_text:  Static "X connected" lead-in text for this scope.
+        fetch_preview:   Zero-arg callable returning a short live-data
+                         preview line (or None/"" for "nothing to show"), or
+                         raising on failure. Called synchronously; any
+                         exception is caught here, never propagated.
+    """
+    if _confirmation_already_sent(chat_id, scope):
+        logger.info(
+            "Skipping duplicate push confirmation for scope=%r chat_id=%r "
+            "(one was already queued within the last %.0fs)",
+            scope, chat_id, _CONFIRM_DEDUPE_TTL_SECONDS,
+        )
+        return
+
+    try:
+        preview_line = fetch_preview()
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "push-token confirmation: live-data preview fetch failed for "
+            "scope=%r chat_id=%r: %s",
+            scope, chat_id, exc, exc_info=True,
+        )
+        preview_line = None
+
+    if preview_line:
+        text = f"{connected_text}\n\n{preview_line}"
+    else:
+        text = (
+            f"{connected_text}\n\n"
+            "(Connected, but I couldn't fetch a live preview just now -- "
+            "try asking me directly.)"
+        )
+
+    try:
+        outbox_dir = _MESSAGES_DIR / "outbox"
+        outbox_dir.mkdir(parents=True, exist_ok=True)
+
+        # Include chat_id in the filename, not just scope+timestamp: two
+        # rapid confirmations for the same scope but different chat_ids can
+        # otherwise land on the same millisecond and silently overwrite each
+        # other's outbox file (caught by BIS-744's own test suite).
+        reply_id = f"{int(time.time() * 1000)}_{scope}_{chat_id}_auth"
+        reply_data = {
+            "id": reply_id,
+            "source": "telegram",
+            "chat_id": chat_id,
+            "text": text,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        reply_file = outbox_dir / f"{reply_id}.json"
+        tmp_reply = reply_file.with_suffix(".json.tmp")
+        tmp_fd = os.open(str(tmp_reply), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(tmp_fd, "w") as rf:
+            rf.write(json.dumps(reply_data, indent=2))
+        os.rename(str(tmp_reply), str(reply_file))
+        logger.info(
+            "%s-connected confirmation queued for chat_id=%r", scope.capitalize(), chat_id
+        )
+        # Only claim the de-dupe slot now that delivery has actually
+        # succeeded -- see _confirmation_already_sent's docstring for why
+        # claiming any earlier would silence legitimate retries after a
+        # transient failure.
+        _mark_confirmation_sent(chat_id, scope)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "push-token confirmation: FAILED to queue outbox confirmation for "
+            "scope=%r chat_id=%r -- user will NOT be notified via Telegram: %s",
+            scope, chat_id, exc, exc_info=True,
+        )
+        _write_system_alert(
+            f"Push-token confirmation failed to deliver for scope={scope!r} "
+            f"chat_id={chat_id!r}: {exc}. The token itself was saved "
+            f"successfully -- only the user-facing confirmation failed."
+        )
+
+
+def _fetch_calendar_preview(chat_id: str) -> Optional[str]:
+    """Best-effort: return a one-line preview of the user's next event."""
+    from integrations.google_calendar.client import get_upcoming_events
+
+    events = get_upcoming_events(user_id=chat_id, days=7)
+    if not events:
+        return "No upcoming events in the next 7 days."
+    next_event = events[0]
+    time_str = next_event.start.strftime("%a %b %-d, %-I:%M %p UTC")
+    return f"Next up: {next_event.title} — {time_str}"
+
+
+def _fetch_gmail_preview(chat_id: str) -> Optional[str]:
+    """Best-effort: return a one-line preview of the user's latest email."""
+    from integrations.gmail.client import get_recent_emails
+
+    emails = get_recent_emails(user_id=chat_id, max_results=1)
+    if not emails:
+        return "Your inbox has no recent messages (or none I could read yet)."
+    latest = emails[0]
+    subject = latest.subject or "(no subject)"
+    return f"Latest email: \"{subject}\" from {latest.sender}"
+
+
+def _fetch_workspace_preview(chat_id: str) -> Optional[str]:
+    """Best-effort: return a one-line preview of a recent Drive file.
+
+    ``gdrive_list`` only queries the root ("My Drive") folder, non-recursively
+    -- it does not search subfolders. The wording below is deliberately
+    scoped to match ("in My Drive"), not a blanket "most recent file in your
+    Drive" claim that would overstate what was actually checked.
+    """
+    from integrations.google_workspace.drive_client import gdrive_list
+
+    files = gdrive_list(user_id=chat_id, max_results=1)
+    if not files:
+        return "No files found in your My Drive root folder yet."
+    latest = files[0]
+    return f"Recently modified in My Drive: {latest.name}"
+
+
 async def push_calendar_token_endpoint(scope, receive, send):
     """POST /api/push-calendar-token — receive a token pushed by myownlobster.ai.
 
@@ -497,43 +799,19 @@ async def push_calendar_token_endpoint(scope, receive, send):
         await response(scope, receive, send)
         return
 
-    # BIS-743: post-push confirmation, extending the pattern already shipped
-    # for Workspace (push_workspace_token_endpoint, below) to Calendar.
-    # Best-effort: the token is already saved, so a confirmation failure here
-    # must never turn a successful push into an error response for the caller.
-    try:
-        import time as _time
-
-        _MESSAGES_BASE = Path(os.path.expanduser("~/messages"))
-        _OUTBOX_DIR = _MESSAGES_BASE / "outbox"
-        _OUTBOX_DIR.mkdir(parents=True, exist_ok=True)
-
-        reply_id = f"{int(_time.time() * 1000)}_calendar_auth"
-        reply_data = {
-            "id": reply_id,
-            "source": "telegram",
-            "chat_id": safe_chat_id,
-            "text": (
-                "Google Calendar connected. "
-                "I can now read and create events on your calendar."
-            ),
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-        reply_file = _OUTBOX_DIR / f"{reply_id}.json"
-        tmp_reply = reply_file.with_suffix(".json.tmp")
-        tmp_fd = os.open(str(tmp_reply), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(tmp_fd, "w") as rf:
-            rf.write(json.dumps(reply_data, indent=2))
-        os.rename(str(tmp_reply), str(reply_file))
-        logger.info(
-            "Calendar-connected confirmation queued for chat_id=%r", safe_chat_id
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "push_calendar_token: failed to queue confirmation for chat_id=%r: %s",
-            safe_chat_id,
-            exc,
-        )
+    # BIS-744: shared post-push confirmation (live-data preview, failure
+    # visibility, de-dupe) -- see _queue_push_confirmation above. Best-effort:
+    # the token is already saved, so a confirmation failure here must never
+    # turn a successful push into an error response for the caller.
+    _queue_push_confirmation(
+        chat_id=safe_chat_id,
+        scope="calendar",
+        connected_text=(
+            "Google Calendar connected. "
+            "I can now read and create events on your calendar."
+        ),
+        fetch_preview=lambda: _fetch_calendar_preview(safe_chat_id),
+    )
 
     response = JSONResponse({"ok": True})
     await response(scope, receive, send)
@@ -753,43 +1031,19 @@ async def push_gmail_token_endpoint(scope, receive, send):
         await response(scope, receive, send)
         return
 
-    # BIS-743: post-push confirmation, extending the pattern already shipped
-    # for Workspace (push_workspace_token_endpoint, below) to Gmail.
-    # Best-effort: the token is already saved, so a confirmation failure here
-    # must never turn a successful push into an error response for the caller.
-    try:
-        import time as _time
-
-        _MESSAGES_BASE = Path(os.path.expanduser("~/messages"))
-        _OUTBOX_DIR = _MESSAGES_BASE / "outbox"
-        _OUTBOX_DIR.mkdir(parents=True, exist_ok=True)
-
-        reply_id = f"{int(_time.time() * 1000)}_gmail_auth"
-        reply_data = {
-            "id": reply_id,
-            "source": "telegram",
-            "chat_id": safe_chat_id,
-            "text": (
-                "Gmail connected. "
-                "I can now read and search your emails."
-            ),
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-        reply_file = _OUTBOX_DIR / f"{reply_id}.json"
-        tmp_reply = reply_file.with_suffix(".json.tmp")
-        tmp_fd = os.open(str(tmp_reply), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(tmp_fd, "w") as rf:
-            rf.write(json.dumps(reply_data, indent=2))
-        os.rename(str(tmp_reply), str(reply_file))
-        logger.info(
-            "Gmail-connected confirmation queued for chat_id=%r", safe_chat_id
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "push_gmail_token: failed to queue confirmation for chat_id=%r: %s",
-            safe_chat_id,
-            exc,
-        )
+    # BIS-744: shared post-push confirmation (live-data preview, failure
+    # visibility, de-dupe) -- see _queue_push_confirmation above. Best-effort:
+    # the token is already saved, so a confirmation failure here must never
+    # turn a successful push into an error response for the caller.
+    _queue_push_confirmation(
+        chat_id=safe_chat_id,
+        scope="gmail",
+        connected_text=(
+            "Gmail connected. "
+            "I can now read and search your emails."
+        ),
+        fetch_preview=lambda: _fetch_gmail_preview(safe_chat_id),
+    )
 
     response = JSONResponse({"ok": True})
     await response(scope, receive, send)
@@ -1264,41 +1518,21 @@ async def push_workspace_token_endpoint(scope, receive, send):
         await response(scope, receive, send)
         return
 
-    # Send a confirmation reply to the user via the outbox so the bot process
-    # delivers it over Telegram.  Best-effort: the token is already saved.
-    try:
-        import time as _time
-
-        _MESSAGES_BASE = Path(os.path.expanduser("~/messages"))
-        _OUTBOX_DIR = _MESSAGES_BASE / "outbox"
-        _OUTBOX_DIR.mkdir(parents=True, exist_ok=True)
-
-        reply_id = f"{int(_time.time() * 1000)}_workspace_auth"
-        reply_data = {
-            "id": reply_id,
-            "source": "telegram",
-            "chat_id": safe_chat_id,
-            "text": (
-                "Google Workspace connected. "
-                "You can now use /gdocs, /gdrive, and /gsheets."
-            ),
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-        reply_file = _OUTBOX_DIR / f"{reply_id}.json"
-        tmp_reply = reply_file.with_suffix(".json.tmp")
-        tmp_fd = os.open(str(tmp_reply), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(tmp_fd, "w") as rf:
-            rf.write(json.dumps(reply_data, indent=2))
-        os.rename(str(tmp_reply), str(reply_file))
-        logger.info(
-            "Workspace-connected confirmation queued for chat_id=%r", safe_chat_id
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "push_workspace_token: failed to queue confirmation for chat_id=%r: %s",
-            safe_chat_id,
-            exc,
-        )
+    # BIS-744: shared post-push confirmation (live-data preview, failure
+    # visibility, de-dupe) -- see _queue_push_confirmation above. This
+    # replaces the original bare `except Exception: log.warning(...)` block
+    # (zero user-visible fallback on failure) with the hardened shared
+    # helper. Best-effort: the token is already saved, so a confirmation
+    # failure here must never turn a successful push into an error response.
+    _queue_push_confirmation(
+        chat_id=safe_chat_id,
+        scope="workspace",
+        connected_text=(
+            "Google Workspace connected. "
+            "You can now use /gdocs, /gdrive, and /gsheets."
+        ),
+        fetch_preview=lambda: _fetch_workspace_preview(safe_chat_id),
+    )
 
     response = JSONResponse({"ok": True})
     await response(scope, receive, send)
