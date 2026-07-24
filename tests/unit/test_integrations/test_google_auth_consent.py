@@ -117,6 +117,57 @@ class TestGenerateConsentLinkHappyPath:
 
 
 # ---------------------------------------------------------------------------
+# generate_consent_link — channel parity (BIS: issue #2133)
+# ---------------------------------------------------------------------------
+#
+# Slack-initiated "connect Calendar/Gmail/Workspace" requests need the
+# eventual push-token confirmation to be routed back to Slack, not Telegram.
+# The VPS can't control myownlobster.ai's broker directly, but it CAN make
+# sure the channel that initiated the request is threaded through to the
+# broker call, so the broker has what it needs to eventually echo it back in
+# the signed session_token (see inbox_server_http.py's
+# _extract_confirmation_channel for the receiving end of this contract).
+
+
+class TestGenerateConsentLinkChannelParity:
+    def test_defaults_to_telegram_when_source_omitted(self):
+        """Backward compatibility: existing call sites that only pass `scope`
+        must keep working exactly as before, defaulting to telegram."""
+        with patch.dict("os.environ", _env()), patch(
+            "integrations.google_auth.consent.requests.post",
+            return_value=_mock_response(_FAKE_CALENDAR_URL),
+        ) as mock_post:
+            generate_consent_link("calendar")
+
+        payload = mock_post.call_args.kwargs["json"]
+        assert payload["source"] == "telegram"
+
+    def test_slack_source_is_forwarded_in_payload(self):
+        with patch.dict("os.environ", _env()), patch(
+            "integrations.google_auth.consent.requests.post",
+            return_value=_mock_response(_FAKE_CALENDAR_URL),
+        ) as mock_post:
+            generate_consent_link("calendar", chat_id="C0123SLACK", source="slack", thread_ts="1700000000.000100")
+
+        payload = mock_post.call_args.kwargs["json"]
+        assert payload["source"] == "slack"
+        assert payload["chat_id"] == "C0123SLACK"
+        assert payload["thread_ts"] == "1700000000.000100"
+
+    def test_thread_ts_omitted_from_payload_when_not_provided(self):
+        """thread_ts is Slack-thread-specific; a Telegram (or non-threaded
+        Slack) request must not send a stray null/empty thread_ts."""
+        with patch.dict("os.environ", _env()), patch(
+            "integrations.google_auth.consent.requests.post",
+            return_value=_mock_response(_FAKE_CALENDAR_URL),
+        ) as mock_post:
+            generate_consent_link("calendar", chat_id="12345", source="telegram")
+
+        payload = mock_post.call_args.kwargs["json"]
+        assert "thread_ts" not in payload
+
+
+# ---------------------------------------------------------------------------
 # generate_consent_link — scope validation
 # ---------------------------------------------------------------------------
 

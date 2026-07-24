@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import Optional
 
 import requests
 
@@ -54,26 +55,55 @@ _HTTP_TIMEOUT: int = 10
 
 _VALID_SCOPES: frozenset[str] = frozenset({"calendar", "gmail", "workspace"})
 
+# Default channel when the caller doesn't specify one -- preserves behavior
+# for every pre-existing call site that only passes `scope` (see issue #2133:
+# before this change, every consent link (and the confirmation that follows
+# it) was implicitly Telegram-only).
+_DEFAULT_SOURCE: str = "telegram"
+
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
 
-def generate_consent_link(scope: str) -> str:
+def generate_consent_link(
+    scope: str,
+    *,
+    chat_id: Optional[str] = None,
+    source: str = _DEFAULT_SOURCE,
+    thread_ts: Optional[str] = None,
+) -> str:
     """Call myownlobster.ai to generate a one-time consent URL.
 
     Args:
-        scope: ``"calendar"`` or ``"gmail"``.  The myownlobster.ai endpoint
-               uses this to select the correct Google OAuth scopes and to
-               build the per-scope redirect path
+        scope: ``"calendar"``, ``"gmail"``, or ``"workspace"``.  The
+               myownlobster.ai endpoint uses this to select the correct
+               Google OAuth scopes and to build the per-scope redirect path
                (``/connect/calendar?token=…`` or ``/connect/gmail?token=…``).
+        chat_id: The chat/channel identifier the request originated from
+               (Telegram numeric chat_id, or a Slack channel/DM id). Forwarded
+               to myownlobster.ai so it can correlate the eventual token push
+               back to this exact conversation. Optional for backward
+               compatibility with callers that don't yet supply it.
+        source: Which channel initiated this consent request -- ``"telegram"``
+               or ``"slack"``. Threaded through to myownlobster.ai so the
+               push-token confirmation (see ``_queue_push_confirmation`` in
+               ``inbox_server_http.py``) can be routed back to the channel
+               that actually asked for it, instead of assuming Telegram
+               (issue #2133). Defaults to ``"telegram"`` for callers that
+               don't pass it, matching this function's pre-existing behavior.
+        thread_ts: Slack thread timestamp, if the request was made inside a
+               Slack thread, so the eventual confirmation can be threaded
+               back to the same place. Not applicable to Telegram; omitted
+               entirely from the request payload when absent.
 
     Returns:
         The full one-time consent URL to send to the user.
 
     Raises:
-        ValueError: If ``scope`` is not ``"calendar"`` or ``"gmail"``.
+        ValueError: If ``scope`` is not ``"calendar"``, ``"gmail"``, or
+            ``"workspace"``.
         RuntimeError: If ``LOBSTER_INSTANCE_URL`` or
             ``LOBSTER_INTERNAL_SECRET`` are not set in the environment.
         RuntimeError: If the myownlobster.ai endpoint returns a non-2xx
@@ -87,15 +117,19 @@ def generate_consent_link(scope: str) -> str:
     instance_url, instance_secret = _read_env()
 
     log.info(
-        "Requesting consent link from myownlobster.ai: scope=%r instance_url=%r",
+        "Requesting consent link from myownlobster.ai: scope=%r instance_url=%r source=%r",
         scope,
         instance_url,
+        source,
     )
 
     url = _post_generate_consent_link(
         scope=scope,
         instance_url=instance_url,
         instance_secret=instance_secret,
+        chat_id=chat_id,
+        source=source,
+        thread_ts=thread_ts,
     )
 
     log.info(
@@ -147,6 +181,9 @@ def _post_generate_consent_link(
     instance_secret: str,
     endpoint: str = _CONSENT_ENDPOINT,
     timeout: int = _HTTP_TIMEOUT,
+    chat_id: Optional[str] = None,
+    source: str = _DEFAULT_SOURCE,
+    thread_ts: Optional[str] = None,
 ) -> str:
     """POST to myownlobster.ai and extract the consent URL.
 
@@ -154,7 +191,7 @@ def _post_generate_consent_link(
     in tests without patching the entire function.
 
     Args:
-        scope:           ``"calendar"`` or ``"gmail"``.
+        scope:           ``"calendar"``, ``"gmail"``, or ``"workspace"``.
         instance_url:    Public base URL of this Lobster instance.
         instance_secret: Shared secret (sent in the JSON body, not a header,
                          so that the myownlobster.ai route handler can validate
@@ -162,6 +199,12 @@ def _post_generate_consent_link(
         endpoint:        Full URL of the myownlobster.ai endpoint
                          (injectable for testing).
         timeout:         HTTP request timeout in seconds.
+        chat_id:         Originating chat/channel id, if known. Omitted from
+                         the payload entirely when not provided.
+        source:          Originating channel (``"telegram"`` or ``"slack"``).
+                         Always sent -- defaults to ``"telegram"``.
+        thread_ts:       Slack thread timestamp, if applicable. Omitted from
+                         the payload entirely when not provided.
 
     Returns:
         The consent URL string from the ``"url"`` key of the JSON response.
@@ -169,14 +212,21 @@ def _post_generate_consent_link(
     Raises:
         RuntimeError: On HTTP error or unexpected response schema.
     """
+    payload = {
+        "scope": scope,
+        "instance_url": instance_url,
+        "instance_secret": instance_secret,
+        "source": source,
+    }
+    if chat_id:
+        payload["chat_id"] = chat_id
+    if thread_ts:
+        payload["thread_ts"] = thread_ts
+
     try:
         resp = requests.post(
             endpoint,
-            json={
-                "scope": scope,
-                "instance_url": instance_url,
-                "instance_secret": instance_secret,
-            },
+            json=payload,
             timeout=timeout,
         )
     except requests.exceptions.RequestException as exc:
