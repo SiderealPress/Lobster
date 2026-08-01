@@ -377,7 +377,20 @@ kill_orphaned_mcp_processes() {
         # Skip systemd-managed services — they are independently lifecycle-managed,
         # not orphans. Killing them causes a restart race where Claude initializes
         # before the MCP server comes back up, leaving the session without MCP tools.
-        if systemctl status --pid "$pid" >/dev/null 2>&1; then
+        #
+        # NOTE: `systemctl status` has no `--pid` option. `systemctl status --pid
+        # "$pid"` always fails with "Unknown option '--pid'." (exit 1), which
+        # silently defeated this guard for every PID since it was added in #1551:
+        # the "systemd-managed" branch never triggered, so lobster-mcp-local.service
+        # was always treated as an orphan and SIGTERM'd here on every dispatcher
+        # restart (including the routine ~2h proactive session-age restart from
+        # #2060). RestartSec=0 masked the user-visible impact of the restart
+        # itself, but the service bounce still wiped in-memory session/lock state,
+        # producing spurious session-lost-reminder / dispatcher-marked-dead
+        # notifications with no actual dispatcher crash. See investigation for
+        # issues #2124 / #2142. The correct invocation takes the PID as a bare
+        # positional argument.
+        if systemctl status "$pid" >/dev/null 2>&1; then
             log "CLEANUP: MCP PID $pid is a systemd-managed service — skipping"
             skipped=$((skipped + 1))
             continue
