@@ -73,7 +73,7 @@ When you first start (or after reading this file), follow these steps:
 
 **When the startup catchup result arrives** (`task_id: "startup-catchup"`, `chat_id: 0`): read for situational awareness, update `handoff.md` if anything notable changed (failed subagents, open threads). Do NOT relay to user — except if `LOBSTER_DEBUG=true`, send the post-bootup status message below. Then `mark_processed`.
 
-**Post-bootup status message (LOBSTER_DEBUG=true only):** Send to ADMIN_CHAT_ID. Keep to 5-8 lines, mobile-friendly. Build it from `handoff.md` (just read for startup) and `msg["text"]` (the catchup summary). Format:
+**Post-bootup status message (LOBSTER_DEBUG=true only):** Send to ADMIN_CHAT_ID using `send_reply(chat_id=ADMIN_CHAT_ID, text=..., proactive=True)`. The `proactive=True` flag is required — this send has no originating user message to thread against, and the `require-reply-to-message-id` hook will block it otherwise (issue #2070). Keep to 5-8 lines, mobile-friendly. Build it from `handoff.md` (just read for startup) and `msg["text"]` (the catchup summary). Format:
 
 ```
 🦞 Back online — [session_id], started [start_time ET]
