@@ -109,6 +109,10 @@ COMPACTION_STATE_FILE = Path(
 INBOX_DIR = Path(os.path.expanduser("~/messages/inbox"))
 PROCESSING_DIR = Path(os.path.expanduser("~/messages/processing"))
 PROCESSED_DIR = Path(os.path.expanduser("~/messages/processed"))
+# Sidecar file for debug-mode reflection prompts (issue #1998). Read-and-deleted
+# by the dispatcher directly at startup instead of flowing through the inbox --
+# avoids 2 MCP round-trips (mark_processing + mark_processed) per restart.
+BOOTUP_PROMPT_FILE = Path(os.path.expanduser("~/messages/bootup-prompt.md"))
 
 # inflight-work.jsonl path — append-only log of subagent spawns and completions.
 # On startup, stale "running" entries with no corresponding "done" are compacted out.
@@ -539,44 +543,22 @@ def _inject_compact_reminder() -> None:
         )
 
 
-def _reflection_already_exists(msg_id: str) -> bool:
-    """Return True if a reflection message with the given ID already exists.
-
-    Scans inbox/, processing/, and processed/ to prevent concurrent hook
-    invocations from writing duplicate reflection files with the same ID.
-    Multiple subagent SessionStart events may fire within the same second,
-    producing the same msg_id (1-second precision) but different filenames
-    (millisecond-precision).  This check short-circuits all but the first
-    invocation.
-
-    Silent on all errors — must never crash the hook.
-    """
-    for directory in (INBOX_DIR, PROCESSING_DIR, PROCESSED_DIR):
-        if not directory.exists():
-            continue
-        for f in directory.glob("*.json"):
-            try:
-                data = json.loads(f.read_text())
-                if data.get("id") == msg_id:
-                    return True
-            except Exception:  # noqa: BLE001
-                continue
-    return False
-
-
 def _schedule_reflection_prompt(trigger: str) -> None:
-    """In debug mode, write a reflection-prompt message to the inbox.
+    """In debug mode, write a reflection prompt to the bootup-prompt sidecar file.
 
-    When LOBSTER_DEBUG=true, drops a message asking the dispatcher to reflect
-    on the bootup/compaction experience and file GitHub issues with observations.
-    Written immediately — the dispatcher processes inbox messages in order so it
-    will reach this after the compact-reminder and catchup handling.
+    When LOBSTER_DEBUG=true, writes a plain-text prompt asking the dispatcher
+    to reflect on the bootup/compaction experience and file GitHub issues with
+    observations. The dispatcher reads and deletes this file directly at
+    startup (one `Read` call -- see sys.dispatcher.bootup.md step 2e) instead
+    of the prompt flowing through the inbox as a regular message. This
+    eliminates the 2 MCP round-trips per restart (`mark_processing` +
+    `mark_processed`) the inbox path required (issue #1998).
 
-    Dedup: computes the msg_id first and checks inbox/, processing/, and
-    processed/ for an existing file with the same ID.  Concurrent hook
-    invocations within the same second will share the same ID (1-second
-    precision) but write different filenames (millisecond-precision).  The
-    first invocation wins; subsequent ones skip silently.
+    Overwrites any previous sidecar file unconditionally: at most one bootup
+    prompt is ever meaningful at a time (the dispatcher consumes and deletes it
+    on every startup before the next one could be written), so last-writer-wins
+    is correct here -- no ID-based dedup bookkeeping is needed, unlike the old
+    inbox-message path.
 
     Silent on any failure — must never crash the hook.
     """
@@ -584,51 +566,21 @@ def _schedule_reflection_prompt(trigger: str) -> None:
         return
 
     try:
-        INBOX_DIR.mkdir(parents=True, exist_ok=True)
-
-        ts = time.time()
-        msg_id = f"reflection_{trigger}_{int(ts)}"
-
-        # Dedup: skip if a reflection with this ID already exists.
-        if _reflection_already_exists(msg_id):
-            print(
-                f"[on-fresh-start] debug: reflection prompt {msg_id!r} already exists — skipping",
-                file=sys.stderr,
-            )
-            return
-
-        timestamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + ".000000"
+        BOOTUP_PROMPT_FILE.parent.mkdir(parents=True, exist_ok=True)
 
         content = (
             f"[Debug] {trigger.capitalize()} reflection prompt:\n\n"
             "How was the experience? Were there friction points, gaps, or improvements "
             "worth capturing?\n\n"
             "If you have observations: file or update GitHub issues in SiderealPress/lobster, "
-            "or open PRs for straightforward fixes. Capture it while it's fresh."
+            "or open PRs for straightforward fixes. Capture it while it's fresh.\n"
         )
 
-        msg = {
-            "id": msg_id,
-            "source": "system",
-            "chat_id": 0,
-            "user_id": 0,
-            "username": "lobster-system",
-            "user_name": "System",
-            "type": "reflection_prompt",
-            "trigger": trigger,
-            "text": content,
-            "timestamp": timestamp,
-        }
-
-        # Use current epoch_ms so this sorts after the startup compact-reminder
-        # (ts_ms=0/1) and after any queued user messages.
-        ts_ms = int(ts * 1000)
-        msg_path = INBOX_DIR / f"{ts_ms}_reflection_{trigger}.json"
-        tmp_path = msg_path.with_suffix(".tmp")
-        tmp_path.write_text(json.dumps(msg, indent=2) + "\n")
-        tmp_path.rename(msg_path)
+        tmp_path = BOOTUP_PROMPT_FILE.with_suffix(".tmp")
+        tmp_path.write_text(content)
+        tmp_path.rename(BOOTUP_PROMPT_FILE)
         print(
-            f"[on-fresh-start] debug: wrote reflection prompt to {msg_path}",
+            f"[on-fresh-start] debug: wrote reflection prompt to {BOOTUP_PROMPT_FILE}",
             file=sys.stderr,
         )
     except Exception as exc:  # noqa: BLE001
