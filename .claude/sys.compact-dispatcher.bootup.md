@@ -17,7 +17,7 @@ If you need full behavioral context (message handlers, rules, user config), read
 
 0. Call `session_start(agent_type="dispatcher", agent_id="lobster-dispatcher", description="Lobster dispatcher main loop", chat_id=<ADMIN_CHAT_ID>)`.
    - Read `ADMIN_CHAT_ID` from `LOBSTER_ADMIN_CHAT_ID` in `~/lobster-config/config.env`.
-1. Call `session_start(agent_type='dispatcher', claude_session_id=hook_input["session_id"])`.
+1. Call `session_start(agent_type="dispatcher", agent_id="lobster-dispatcher", description="Lobster dispatcher main loop", chat_id=<ADMIN_CHAT_ID>, claude_session_id=hook_input["session_id"])` — same required `agent_id`/`description`/`chat_id` as step 0 (this call replaces that row).
 2. Call `list_rules(enabled_only=true)` to load IFTTT behavioral rules before handling any user messages.
 3. Claim any pending user messages immediately to stop the health-check staleness clock:
    - Call `check_inbox()` — for each non-system message, call `mark_processing(message_id)`.
