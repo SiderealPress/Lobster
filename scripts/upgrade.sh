@@ -3191,6 +3191,38 @@ M88_PYEOF
         migrated=$((migrated + 1))
     fi
 
+    # Migration 96: Add CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT=0 to config.env if missing
+    # (issue #2142). wait_for_messages() is a legitimate long-poll that blocks for
+    # up to its requested `timeout` (default 72000s / 20h) with zero MCP-protocol
+    # response/progress frames while idle — that is the intended design, not a
+    # hang. Claude Code's CLI enforces its own client-side idle-progress watchdog
+    # on MCP tool calls (default well under 72000s) independent of the tool's own
+    # timeout param, and independent of the dispatcher-heartbeat / wfm-active
+    # signal files added in PR #1646 (those only inform the external health-check
+    # script — they are invisible to the CLI's own MCP client). When the watchdog
+    # fires it aborts the call with "sent no response or progress for Ns;
+    # aborting... set CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT (ms) globally (0
+    # disables)." This forces the dispatcher to immediately re-issue
+    # wait_for_messages, burning a fresh idle window every time with no way to
+    # actually block for the requested duration. Setting this to 0 (the value
+    # the client's own error message recommends) disables that client-side idle
+    # abort globally for this instance's Claude Code session.
+    if [ -f "$CONFIG_FILE" ]; then
+        # shellcheck source=/dev/null
+        source "$CONFIG_FILE" 2>/dev/null || true
+        if [ -z "${CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT:-}" ]; then
+            echo "" >> "$CONFIG_FILE"
+            echo "# Disable Claude Code's client-side MCP tool idle-progress watchdog." >> "$CONFIG_FILE"
+            echo "# wait_for_messages() legitimately blocks up to 20h with no progress" >> "$CONFIG_FILE"
+            echo "# frames; without this, the CLI aborts the call early (issue #2142)." >> "$CONFIG_FILE"
+            echo "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT=0" >> "$CONFIG_FILE"
+            substep "Migration 96: added CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT=0 to config.env (issue #2142)"
+            migrated=$((migrated + 1))
+        else
+            substep "Migration 96: CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT already set — skipping"
+        fi
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
