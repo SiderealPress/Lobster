@@ -1371,18 +1371,26 @@ check_session_age() {
         return 0
     fi
 
+    # Notify BEFORE sending SIGTERM (issue #2075) so the message reaches the user
+    # even if the session exits immediately once SIGTERM is delivered — if the
+    # alert were sent after kill -TERM, a fast process death could drop it
+    # entirely. Text is plain-language (a planned restart, not a crash), not
+    # internal state (PID, session age, hard-limit seconds) — the previous
+    # wording gave the user no way to distinguish a graceful restart from a
+    # health-check kill or OOM crash. Still gated on LOBSTER_DEBUG (2026-06-14
+    # noise-reduction change) — this fix only corrects ordering and wording for
+    # instances that have debug alerts enabled; it does not re-enable the alert
+    # for non-debug instances.
+    if [[ "${LOBSTER_DEBUG:-false}" == "true" ]]; then
+        send_telegram_alert_deduped "proactive-session-restart" "Restarting now — this is the planned graceful restart. Back in ~30 seconds."
+    else
+        log_info "Proactive-restart Telegram alert suppressed (LOBSTER_DEBUG not set)"
+    fi
+
     # Send SIGTERM. The Stop hook fires, writes the tombstone, and claude-persistent.sh
     # restarts Claude. This is a graceful exit, not a crash.
     if kill -TERM "$dispatcher_pid" 2>/dev/null; then
         log_warn "Session age: SIGTERM sent to dispatcher PID $dispatcher_pid"
-        if [[ "${LOBSTER_DEBUG:-false}" == "true" ]]; then
-            send_telegram_alert_deduped "proactive-session-restart" "Lobster: proactive restart at ${session_age}s (before the 7440s CC hard limit).
-
-Dispatcher PID $dispatcher_pid sent SIGTERM. Stop hook will fire, session will restart cleanly.
-Next session will start fresh — no context lost from hard limit."
-        else
-            log_info "Proactive-restart Telegram alert suppressed (LOBSTER_DEBUG not set)"
-        fi
         # Delete the start timestamp so a subsequent health check run (within the
         # next 4 minutes) does not send a second SIGTERM before the restart completes.
         rm -f "$DISPATCHER_SESSION_START_FILE" 2>/dev/null || true

@@ -9,17 +9,37 @@ but omit or set reply_to_message_id=0.
 Exemptions (always allowed):
   - Non-Telegram sources (slack, sms, whatsapp, bot-talk, system, ...)
   - System/proactive sends where chat_id == 0 (no incoming message context)
+  - Proactive dispatcher sends where proactive=true is explicitly set
   - Calls where reply_to_message_id is already set to a positive integer
+
+The proactive=true exemption is for dispatcher-initiated sends that have no
+originating user message to thread against: startup status, graceful restart
+notifications, scheduled job summaries, health alerts routed through MCP.
+Unlike chat_id=0, these sends target a real chat_id — pass proactive=True
+explicitly to signal intent. The hook trusts the caller.
 
 Exit codes:
   0 - Allow the call
   2 - Block the call (Claude Code shows stderr message to Claude)
 
-Issue: #1168
+Issue: #1168, #2075
 """
 
 import json
 import sys
+
+
+def _is_truthy(value: object) -> bool:
+    """Return True if value represents a truthy proactive flag.
+
+    Accepts Python bool True, or the strings 'true'/'1' (case-insensitive).
+    Everything else (False, 'false', 0, None, absent) is falsy.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1")
+    return False
 
 
 def main() -> None:
@@ -40,6 +60,11 @@ def main() -> None:
 
     # Only enforce on Telegram (source absent defaults to telegram per API contract)
     if source != "telegram":
+        sys.exit(0)
+
+    # Exempt explicitly proactive sends: dispatcher-initiated messages with no
+    # originating user message (startup status, graceful restart notifications, etc.)
+    if _is_truthy(tool_input.get("proactive")):
         sys.exit(0)
 
     # Exempt proactive/system sends: chat_id == 0 means no originating user message
@@ -66,7 +91,7 @@ def main() -> None:
         "Telegram message ID shown in wait_for_messages output as\n"
         "'pass as reply_to_message_id') to thread the reply correctly.\n\n"
         "If this is a proactive/system send with no originating message,\n"
-        "pass chat_id=0 to exempt this check.",
+        "pass proactive=True (preferred) or chat_id=0 to exempt this check.",
         file=sys.stderr,
     )
     sys.exit(2)
