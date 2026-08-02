@@ -54,6 +54,10 @@ When you first start (or after reading this file), follow these steps:
     - `startup-cause: restart` → this was a plain restart (systemd, external kill, or health-check). No compact-reminder will be in the inbox. Spawn `startup-catchup` at step 4 for a normal restart window.
     - Skip if step 2c already sent a restart notification (context-handoff.json was recent).
     - **Do not use `compaction-state.json` or `last_catchup_ts` alone to determine cause** — those fields are updated by catchup subagents and will give false positives for restarts.
+2e. **Check for a debug-mode reflection prompt sidecar** (issue #1998): read `~/messages/bootup-prompt.md`.
+    - If the file does not exist: skip, nothing to do.
+    - If it exists: read its content, then delete it (`rm -f ~/messages/bootup-prompt.md`) — this is a one-shot prompt, not a persistent message. Reflect genuinely on the bootup/compaction experience it asks about: were there friction points, gaps, or improvements worth capturing? If there are substantive observations, file or update GitHub issues in SiderealPress/lobster, or open PRs for straightforward fixes. If nothing is worth capturing, do nothing further — silence is the correct response.
+    - This replaces the old flow where `on-compact.py`/`on-fresh-start.py` wrote a `reflection_prompt` inbox message that the dispatcher had to `mark_processing` + `mark_processed` (2 extra MCP round-trips per restart, only to be read once and discarded). One `Read` call here does the same job with zero claim/process overhead.
 
 3. **Claim any pending user messages immediately** to stop the health-check staleness clock:
     - Call `check_inbox()` to get any messages currently waiting in the inbox
@@ -379,23 +383,11 @@ Rules: never `send_reply` (chat_id: 0).
 
 ---
 
-### reflection_prompt (`type: "reflection_prompt"`)
+### reflection_prompt (`type: "reflection_prompt"`) — legacy, inbox path
 
-Debug-mode prompts written by `on-compact.py` and `on-fresh-start.py` when `LOBSTER_DEBUG=true`. They arrive after a compaction or fresh bootup and ask the dispatcher to reflect on the experience while it is fresh.
+**Superseded by step 2e (issue #1998).** Debug-mode reflection prompts are now written to the `~/messages/bootup-prompt.md` sidecar file and read-and-deleted directly at startup — see step 2e above. `on-compact.py` and `on-fresh-start.py` no longer write `reflection_prompt` messages to the inbox.
 
-```
-1. mark_processing(message_id)
-2. Read msg["text"] — the reflection question
-3. Reflect genuinely: were there friction points, gaps, or improvements in the
-   bootup/compaction flow worth capturing?
-4. If there are substantive observations:
-   - File or update GitHub issues in SiderealPress/lobster
-   - Open PRs for straightforward fixes (no need to wait for instruction)
-   - If nothing worth capturing: do nothing — silence is the correct response
-5. mark_processed(message_id)
-```
-
-Rules: never `send_reply` (chat_id: 0). Reflection is optional — only act if there are real observations.
+If a message of this type is nonetheless encountered (e.g. a pre-#1998 hook version, or one queued before an upgrade landed): `mark_processing(message_id)` then `mark_processed(message_id)` without reflecting — do not act on it. Step 2e already covers reflection for the current startup; re-reflecting on a stale queued copy risks duplicate or contradictory GitHub activity.
 
 ---
 
