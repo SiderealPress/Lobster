@@ -141,3 +141,52 @@ class TestRequireReplyToMessageId:
         })
         assert rc == 2
         assert "chat_id=0" in stderr
+
+    # -------------------------------------------------------------------------
+    # proactive=true exemption (issue #2075 / fix for #2070)
+    #
+    # Dispatcher-initiated sends with no originating user message (startup
+    # status, graceful restart notifications, scheduled summaries) have a real
+    # chat_id (not 0) but nothing to thread against. Without this exemption the
+    # hook blocks them, silently dropping the message (issue #2070).
+    # -------------------------------------------------------------------------
+
+    def test_proactive_true_exempts_telegram_send_without_reply_id(self):
+        """proactive=True allows a Telegram send_reply with no reply_to_message_id."""
+        rc, _, _ = _run({
+            "source": "telegram",
+            "chat_id": 123456,
+            "text": "Back online.",
+            "proactive": True,
+        })
+        assert rc == 0
+
+    def test_proactive_string_true_is_accepted(self):
+        """proactive='true' (string, as some callers may pass it) is also honored."""
+        rc, _, _ = _run({
+            "source": "telegram",
+            "chat_id": 123456,
+            "text": "Back online.",
+            "proactive": "true",
+        })
+        assert rc == 0
+
+    def test_proactive_false_does_not_exempt(self):
+        """proactive=False must not bypass enforcement — still blocked without reply id."""
+        rc, _, stderr = _run({
+            "source": "telegram",
+            "chat_id": 123456,
+            "text": "Hello!",
+            "proactive": False,
+        })
+        assert rc == 2
+        assert "reply_to_message_id" in stderr
+
+    def test_proactive_absent_is_unaffected(self):
+        """Omitting proactive entirely preserves existing behavior — still blocked."""
+        rc, _, _ = _run({
+            "source": "telegram",
+            "chat_id": 123456,
+            "text": "Hello!",
+        })
+        assert rc == 2
