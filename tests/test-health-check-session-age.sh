@@ -215,7 +215,7 @@ echo "$past_start" > "$DISPATCHER_SESSION_START_FILE"
 check_session_age
 assert_exit $? 0
 
-# 11. Telegram alert is sent when SIGTERM fires
+# 11. Telegram alert is sent when SIGTERM fires (LOBSTER_DEBUG=true)
 begin_test "telegram_alert_sent_on_sigterm"
 reset_state
 sleep 600 &
@@ -223,12 +223,71 @@ target_pid=$!
 echo "$target_pid" > "$DISPATCHER_PID_FILE"
 past_start=$(( $(date +%s) - SESSION_AGE_LIMIT_SECONDS - 60 ))
 echo "$past_start" > "$DISPATCHER_SESSION_START_FILE"
-check_session_age
+LOBSTER_DEBUG=true check_session_age
 kill "$target_pid" 2>/dev/null || true
 if [[ -f "$TELEGRAM_ALERTS_FILE" ]] && grep -q "proactive-session-restart" "$TELEGRAM_ALERTS_FILE"; then
     pass
 else
     fail "no Telegram alert with key 'proactive-session-restart' found after SIGTERM"
+fi
+
+# 12. Notification text is user-friendly (issue #2075): plain language, not raw
+# PID / session-age implementation detail ("Dispatcher PID N sent SIGTERM" /
+# "before the 7440s CC hard limit").
+begin_test "notification_text_is_user_friendly"
+reset_state
+sleep 600 &
+target_pid=$!
+echo "$target_pid" > "$DISPATCHER_PID_FILE"
+past_start=$(( $(date +%s) - SESSION_AGE_LIMIT_SECONDS - 60 ))
+echo "$past_start" > "$DISPATCHER_SESSION_START_FILE"
+LOBSTER_DEBUG=true check_session_age
+kill "$target_pid" 2>/dev/null || true
+if [[ -f "$TELEGRAM_ALERTS_FILE" ]]; then
+    alert_text=$(cat "$TELEGRAM_ALERTS_FILE")
+    if echo "$alert_text" | grep -qiE "planned|graceful restart|back in" \
+        && ! echo "$alert_text" | grep -qE "Dispatcher PID|7440s"; then
+        pass
+    else
+        fail "notification text is not plain-language (or still leaks implementation detail): $alert_text"
+    fi
+else
+    fail "no Telegram alert file found"
+fi
+
+# 13. Notification fires BEFORE SIGTERM (issue #2075): verify the source ordering
+# structurally. bash is single-threaded within a function body; if
+# send_telegram_alert_deduped appears before the executable 'kill -TERM' line in
+# check_session_age(), the alert is guaranteed to fire before SIGTERM delivery —
+# so a session that dies immediately on SIGTERM still got the message out.
+begin_test "notification_fires_before_sigterm"
+fn_body=$(sed -n '/^check_session_age()/,/^}/p' "$HEALTH_SCRIPT")
+alert_line=$(echo "$fn_body" | grep -n "send_telegram_alert_deduped" | head -1 | cut -d: -f1)
+kill_line=$(echo "$fn_body" | grep -n 'if kill -TERM' | head -1 | cut -d: -f1)
+if [[ -z "$alert_line" || -z "$kill_line" ]]; then
+    fail "could not locate send_telegram_alert_deduped or executable 'kill -TERM' in check_session_age() — alert_line='$alert_line' kill_line='$kill_line'"
+elif [[ "$alert_line" -lt "$kill_line" ]]; then
+    pass
+else
+    fail "send_telegram_alert_deduped (line $alert_line) is NOT before kill -TERM (line $kill_line) in check_session_age()"
+fi
+
+# 14. LOBSTER_DEBUG not set (or false) → alert still suppressed entirely (existing
+# noise-reduction behavior from 2026-06-14 must be preserved by this fix — the
+# ordering/wording fix must not turn this back on for non-debug instances).
+begin_test "telegram_alert_suppressed_when_debug_false"
+reset_state
+sleep 600 &
+target_pid=$!
+echo "$target_pid" > "$DISPATCHER_PID_FILE"
+past_start=$(( $(date +%s) - SESSION_AGE_LIMIT_SECONDS - 60 ))
+echo "$past_start" > "$DISPATCHER_SESSION_START_FILE"
+LOBSTER_DEBUG=false check_session_age
+kill "$target_pid" 2>/dev/null || true
+if [[ ! -f "$TELEGRAM_ALERTS_FILE" ]]; then
+    pass
+else
+    fail "Telegram alert was sent even though LOBSTER_DEBUG=false: $(cat "$TELEGRAM_ALERTS_FILE")"
 fi
 
 #===============================================================================
