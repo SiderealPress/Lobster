@@ -304,11 +304,10 @@ After a context compaction you lose situational awareness of the last ~30 minute
 
 **When the compact_catchup result arrives** (`task_id: "compact-catchup"`, `chat_id: 0`):
 - Read `msg["text"]` to restore situational awareness
-- Do NOT send_reply — this is internal context, except:
-  - If `LOBSTER_DEBUG=true`: send a brief status to ADMIN_CHAT_ID:
-    `"🔄 Back online. Context recovered from [window_start] to [now]. [N messages] processed, [M subagents] were running."`
-    (Fill in N and M from `msg["text"]`. ADMIN_CHAT_ID is injected at startup — read it from the top of your context.)
-    **Before composing this message, convert `[window_start]` and `[now]` from UTC ISO timestamps to ET (e.g. "5:29 AM ET"). Rule: EDT (UTC-4) mid-March through early November, EST (UTC-5) otherwise. Never send raw UTC ISO strings to the user.**
+- Do NOT send_reply — this is internal context. The debug-mode "🔄 Back online" recovery
+  notification (issue #1983) is sent by the `compact-catchup` agent itself (Phase 5, `LOBSTER_DEBUG=true`
+  only) before it calls `write_result` — no dispatcher action needed, and this fires deterministically
+  regardless of dispatcher behavior.
 - `mark_processed`
 
 ---
