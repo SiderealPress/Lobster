@@ -216,6 +216,41 @@ After Phase 3, verify that open commitments in the session notes are also captur
     ```
     If `rolling-summary.md` could not be read or written during Phase 4, note the failure but do not abort catchup.
 
+### Phase 5: Debug recovery notification
+
+The "🔄 Back online" recovery notification used to be sent by the dispatcher
+manually after receiving this agent's `write_result` (only when
+`LOBSTER_DEBUG=true`). That made the signal contingent on dispatcher
+behavior: if the dispatcher skipped the step, crashed before reaching it, or
+mishandled the result, the notification silently never fired — while looking,
+when it did fire, like confirmation that recovery succeeded. A signal that
+fires "most of the time" is worse than no signal: it creates false confidence
+on success and ambiguous silence on failure (issue #1983).
+
+22. After Phase 4 completes (and before calling `write_result`), check
+    `LOBSTER_DEBUG`. If it is not `true`, skip this phase entirely — proceed
+    directly to `write_result`.
+
+23. If `LOBSTER_DEBUG=true`, determine ADMIN_CHAT_ID:
+    - Primary: `LOBSTER_ADMIN_CHAT_ID` environment variable.
+    - Fallback: the first entry in `TELEGRAM_ALLOWED_USERS` from `config.env`.
+    - If neither is available, skip this phase silently (never block
+      `write_result` on a missing admin chat id).
+
+24. Convert `window_start` and `now` (from Phase 1) from UTC ISO to ET
+    (EDT UTC-4 mid-March through early November, EST UTC-5 otherwise) and
+    send, via `send_reply`, to ADMIN_CHAT_ID:
+    `"🔄 Back online. Context recovered from [window_start] to [now]. [N messages] processed, [M subagents] were running."`
+    (N and M come from the same counts used in the Phase 1 output.) Pass
+    `proactive=True` — this send has no originating user message to thread
+    against (see `hooks/require-reply-to-message-id.py`).
+
+25. This phase never blocks or fails catchup: if the send errors for any
+    reason (missing admin chat id, tool failure), swallow the error and
+    continue to `write_result` as normal. The notification is best-effort;
+    the rest of catchup's work (session file, rolling summary) must not be
+    lost because of it.
+
 ## Session notes reading
 
 Read session notes from `~/lobster-user-config/memory/canonical/sessions/` in tiers:
@@ -301,7 +336,7 @@ Keep each line to one sentence. The dispatcher is on mobile -- brevity matters.
 
 ## Rules
 
-- Do NOT call `send_reply` -- this is internal context recovery, not a user message.
+- Do NOT call `send_reply` -- this is internal context recovery, not a user message -- **except** the Phase 5 debug recovery notification (`LOBSTER_DEBUG=true` only), which this agent sends directly so it fires deterministically regardless of dispatcher behavior.
 - Do NOT relay catch-up content to the user unless an event is urgent (e.g. a failed subagent that the user has not been notified about).
 - If `check_inbox` returns no messages in the window, that is valid -- report "Nothing to report" in the inbox section but still populate the session file.
 - If `compaction-state.json` is missing or corrupt, default to scanning the last 6 hours.
