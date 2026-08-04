@@ -35,6 +35,7 @@ if _SRC_DIR not in sys.path:
     sys.path.insert(0, _SRC_DIR)
 
 from utils.agent_types import DISPATCHER_EXCLUSION_SQL  # noqa: E402
+from agents.pid_liveness import is_pid_alive  # noqa: E402
 
 log = logging.getLogger(__name__)
 
@@ -81,7 +82,10 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
     reply_message_ids   TEXT,
     stop_reason         TEXT,
     idempotency         TEXT DEFAULT 'unknown',
-    task_origin         TEXT DEFAULT 'user'
+    task_origin         TEXT DEFAULT 'user',
+    pid                 INTEGER,
+    dispatcher_pid      INTEGER,
+    pid_captured_at     TEXT
 );
 """
 
@@ -127,6 +131,10 @@ _MIGRATION_STMTS = [
     "ALTER TABLE agent_sessions ADD COLUMN stop_reason TEXT",
     "ALTER TABLE agent_sessions ADD COLUMN idempotency TEXT DEFAULT 'unknown'",
     "ALTER TABLE agent_sessions ADD COLUMN task_origin TEXT DEFAULT 'user'",
+    # issue #2148 (Phase 1: PID ground truth) — additive, NULL on pre-migration rows.
+    "ALTER TABLE agent_sessions ADD COLUMN pid INTEGER",
+    "ALTER TABLE agent_sessions ADD COLUMN dispatcher_pid INTEGER",
+    "ALTER TABLE agent_sessions ADD COLUMN pid_captured_at TEXT",
 ]
 
 # Additive migrations for the reports table (BIS-85 multi-instance prep).
@@ -253,6 +261,8 @@ def session_start(
     trigger_snippet: str | None = None,
     idempotency: str | None = None,
     task_origin: str | None = None,
+    pid: int | None = None,
+    dispatcher_pid: int | None = None,
     path: Path | None = None,
 ) -> None:
     """Record a newly-spawned agent session.
@@ -285,6 +295,18 @@ def session_start(
                             'internal'  — system-initiated, no user involved (reconciler,
                                           health check, session management, etc.).
                             Defaults to 'user' when not specified.
+        pid:                Real OS PID, when one exists for this session (docker-worker
+                            subprocess, or dispatcher self-registration). NULL when no
+                            real process boundary exists (e.g. an in-process Agent-tool
+                            subagent — see dispatcher_pid instead). Callers are
+                            responsible for capturing a real PID (e.g. via
+                            agents.pid_liveness.find_dispatcher_ancestor_pid()) —
+                            this function only persists whatever it is given.
+        dispatcher_pid:     PID of the parent dispatcher process this session is running
+                            under, for sessions with no real PID of their own (in-process
+                            Agent-tool subagents). Used as a weaker-but-real ground truth:
+                            if the dispatcher process is confirmed dead, every subagent
+                            registered under it is necessarily dead too.
         path:               DB path override (for tests).
     """
     resolved = path if path is not None else _DEFAULT_DB_PATH
@@ -293,6 +315,7 @@ def session_start(
     snippet = trigger_snippet[:200] if trigger_snippet else None
     idempotency_val = idempotency if idempotency in ("safe", "unsafe", "unknown") else "unknown"
     task_origin_val = task_origin if task_origin in ("user", "scheduled", "internal") else "user"
+    pid_captured_at = now if (pid is not None or dispatcher_pid is not None) else None
 
     conn.execute(
         """
@@ -301,10 +324,10 @@ def session_start(
              output_file, timeout_minutes, input_summary, result_summary,
              parent_id, spawned_at, completed_at, last_seen_at,
              notified_at, trigger_message_id, trigger_snippet, reply_message_ids,
-             idempotency, task_origin)
+             idempotency, task_origin, pid, dispatcher_pid, pid_captured_at)
         VALUES
             (?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, NULL, ?, ?, NULL, NULL,
-             NULL, ?, ?, NULL, ?, ?)
+             NULL, ?, ?, NULL, ?, ?, ?, ?, ?)
         """,
         (
             id,
@@ -322,6 +345,9 @@ def session_start(
             snippet,
             idempotency_val,
             task_origin_val,
+            pid,
+            dispatcher_pid,
+            pid_captured_at,
         ),
     )
     conn.commit()
@@ -529,7 +555,7 @@ def cleanup_stale_running_sessions(
 
     cursor = conn.execute(
         f"""
-        SELECT id, output_file, spawned_at, timeout_minutes
+        SELECT id, output_file, spawned_at, timeout_minutes, pid, dispatcher_pid
         FROM agent_sessions
         WHERE status IN ('running', 'starting')
           AND {DISPATCHER_EXCLUSION_SQL}  -- #781: never reconcile the dispatcher (output_file is legitimately NULL) as a dead subagent
@@ -545,14 +571,86 @@ def cleanup_stale_running_sessions(
         output_file: str | None = row["output_file"]
         spawned_at_raw: str | None = row["spawned_at"]
         timeout_minutes: int | None = row["timeout_minutes"]
+        pid: int | None = row["pid"]
+        dispatcher_pid: int | None = row["dispatcher_pid"]
+
+        # Pre-compute file_status once (needed both by the PID precedence
+        # check below and by the legacy heuristics further down).
+        file_status: str | None = (
+            _read_stop_reason_from_path(Path(output_file)) if output_file else None
+        )
+
+        # -----------------------------------------------------------------
+        # PID ground truth (issue #2148, Phase 1) — PRIMARY signal whenever a
+        # real PID was captured for this session. Overrides the output_file/
+        # elapsed-time heuristics below, *except* when the output file
+        # explicitly reports the agent finished (stop_reason=end_turn) — that
+        # self-reported completion signal outranks a process-existence check.
+        # Rows with no pid/dispatcher_pid (pre-migration, or no real process
+        # boundary — e.g. Agent-tool subagents never registered a dispatcher_pid)
+        # fall through entirely unchanged to the legacy heuristics below.
+        # -----------------------------------------------------------------
+        if file_status != "done" and pid is not None:
+            if not is_pid_alive(pid):
+                conn.execute(
+                    """
+                    UPDATE agent_sessions
+                    SET status = 'dead', completed_at = ?, result_summary = ?
+                    WHERE id = ? AND status = 'running'
+                    """,
+                    (
+                        completed_at,
+                        f"Marked dead at startup: pid {pid} is not alive",
+                        agent_id,
+                    ),
+                )
+                changed_ids.append(agent_id)
+                log.warning(
+                    "[startup-cleanup] session %r marked dead: pid %d is not alive "
+                    "(PID ground truth override)",
+                    agent_id,
+                    pid,
+                )
+            else:
+                log.debug(
+                    "[startup-cleanup] session %r left running: pid %d is alive "
+                    "(PID ground truth override)",
+                    agent_id,
+                    pid,
+                )
+            continue
+
+        if file_status != "done" and pid is None and dispatcher_pid is not None:
+            if not is_pid_alive(dispatcher_pid):
+                conn.execute(
+                    """
+                    UPDATE agent_sessions
+                    SET status = 'dead', completed_at = ?, result_summary = ?
+                    WHERE id = ? AND status = 'running'
+                    """,
+                    (
+                        completed_at,
+                        (
+                            f"Marked dead at startup: dispatcher_pid {dispatcher_pid} "
+                            "is not alive (dispatcher confirmed dead)"
+                        ),
+                        agent_id,
+                    ),
+                )
+                changed_ids.append(agent_id)
+                log.warning(
+                    "[startup-cleanup] session %r marked dead: dispatcher_pid %d is "
+                    "not alive — dispatcher confirmed dead, subagent necessarily dead too",
+                    agent_id,
+                    dispatcher_pid,
+                )
+                continue
+            # dispatcher_pid alive does NOT prove this subagent itself is still
+            # alive (the dispatcher process being up says nothing about any one
+            # in-process conversation thread) — fall through to the legacy
+            # output_file/elapsed-time heuristics below, unchanged.
 
         if output_file:
-            # Read the stop_reason from the output file to determine liveness.
-            # "missing" → file gone, safe to mark dead.
-            # "done"    → agent finished, mark completed.
-            # "running" → agent may still be alive, leave it running.
-            file_status = _read_stop_reason_from_path(Path(output_file))
-
             if file_status == "missing":
                 # Apply a 2-minute grace period before marking dead for a missing
                 # output file.  The file may not yet exist if the agent was just
