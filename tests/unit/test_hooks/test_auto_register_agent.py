@@ -424,6 +424,76 @@ class TestHookAgentWithAgentId:
         assert row["input_summary"] is None
 
 
+class TestDispatcherPidCapture:
+    """issue #2148 (Phase 1: PID ground truth) — dispatcher_pid capture.
+
+    This hook fires as a direct child of the dispatcher's `claude` OS process
+    for every Agent-tool call (verified via live process-tree inspection —
+    see PR description). It has no PID of its own to record for the spawned
+    subagent (Agent-tool subagents run in-process, as threads of the
+    dispatcher — see pid_liveness.py docstring), so it instead records the
+    dispatcher's own PID as `dispatcher_pid`, found via a process-tree walk
+    (agents.pid_liveness.find_dispatcher_ancestor_pid), NOT a flat os.getppid()
+    or os.getpid() call.
+    """
+
+    def test_dispatcher_pid_captured_via_process_tree_walk(self, tmp_path):
+        """A successful ancestor-walk result is persisted as dispatcher_pid."""
+        prompt = "---\ntask_id: t-dpid\n---"
+        hook_input = _make_hook_input(
+            prompt=prompt,
+            tool_response={"agentId": "agent-dpid"},
+        )
+        with patch(
+            "agents.pid_liveness.find_dispatcher_ancestor_pid",
+            return_value=424242,
+        ):
+            exit_code, _, _ = _run_hook(hook_input, tmp_path)
+        assert exit_code == 0
+
+        row = _get_row(tmp_path, "agent-dpid")
+        assert row is not None
+        assert row["dispatcher_pid"] == 424242
+        assert row["pid_captured_at"] is not None
+
+    def test_dispatcher_pid_null_when_walk_finds_no_ancestor(self, tmp_path):
+        """No 'claude' ancestor found (e.g. non-standard process tree) → NULL, not a crash."""
+        prompt = "---\ntask_id: t-dpid-none\n---"
+        hook_input = _make_hook_input(
+            prompt=prompt,
+            tool_response={"agentId": "agent-dpid-none"},
+        )
+        with patch(
+            "agents.pid_liveness.find_dispatcher_ancestor_pid",
+            return_value=None,
+        ):
+            exit_code, _, _ = _run_hook(hook_input, tmp_path)
+        assert exit_code == 0
+
+        row = _get_row(tmp_path, "agent-dpid-none")
+        assert row is not None
+        assert row["dispatcher_pid"] is None
+        assert row["pid_captured_at"] is None
+
+    def test_dispatcher_pid_capture_failure_does_not_block_hook(self, tmp_path):
+        """If the ancestor walk raises, the hook still registers the agent (dispatcher_pid=NULL)."""
+        prompt = "---\ntask_id: t-dpid-err\n---"
+        hook_input = _make_hook_input(
+            prompt=prompt,
+            tool_response={"agentId": "agent-dpid-err"},
+        )
+        with patch(
+            "agents.pid_liveness.find_dispatcher_ancestor_pid",
+            side_effect=OSError("simulated /proc read failure"),
+        ):
+            exit_code, _, _ = _run_hook(hook_input, tmp_path)
+        assert exit_code == 0
+
+        row = _get_row(tmp_path, "agent-dpid-err")
+        assert row is not None, "Agent must still be registered even if PID capture fails"
+        assert row["dispatcher_pid"] is None
+
+
 class TestHookNoAgentId:
     def test_missing_agent_id_exits_0_no_write(self, tmp_path):
         """If tool response has no agentId, exit 0 without writing agent_sessions rows."""

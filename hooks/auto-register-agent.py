@@ -62,6 +62,40 @@ _LOG_PATH = (
     / "hook-failures.log"
 )
 
+# ---------------------------------------------------------------------------
+# PID ground truth (issue #2148, Phase 1)
+# ---------------------------------------------------------------------------
+#
+# This hook is exec'd fresh, as a direct child of the dispatcher's `claude` OS
+# process, on every Agent-tool call (PostToolUse). Verified live via
+# process-tree inspection (pstree -p) on 2026-08-03: Agent/Task-tool-spawned
+# subagents run in-process as threads of the single dispatcher `claude`
+# process — they have no OS PID of their own to record. What we CAN and do
+# record is the real PID of the dispatcher process this hook is a child of,
+# via a process-tree walk (not a flat os.getppid(), which would only be
+# correct for exactly one hop — the walk handles any intermediate wrapper
+# processes robustly, mirroring hooks/session_role.py's established
+# is_dispatcher_session() process-tree technique).
+_SRC_DIR = str(Path(__file__).resolve().parent.parent / "src")
+if _SRC_DIR not in sys.path:
+    sys.path.insert(0, _SRC_DIR)
+
+import agents.pid_liveness as _pid_liveness  # noqa: E402
+
+
+def _capture_dispatcher_pid() -> int | None:
+    """Best-effort: find the real dispatcher PID via a process-tree walk.
+
+    Never raises — any failure (missing /proc, unexpected process tree
+    shape, etc.) is swallowed and treated as "no dispatcher PID available",
+    exactly like a pre-migration row. Registration must never be blocked by
+    a PID-capture failure.
+    """
+    try:
+        return _pid_liveness.find_dispatcher_ancestor_pid()
+    except Exception:  # noqa: BLE001
+        return None
+
 
 # ---------------------------------------------------------------------------
 # Logging (failures only -- never to stdout, never exit non-zero)
@@ -197,6 +231,7 @@ def insert_agent_session(
     session_id: str,
     output_file: str | None,
     input_summary: str | None,
+    dispatcher_pid: int | None = None,
 ) -> None:
     """Insert a 'running' row into agent_sessions.db.
 
@@ -236,18 +271,37 @@ def insert_agent_session(
                 notified_at         TEXT,
                 trigger_message_id  TEXT,
                 trigger_snippet     TEXT,
-                reply_message_ids   TEXT
+                reply_message_ids   TEXT,
+                pid                 INTEGER,
+                dispatcher_pid      INTEGER,
+                pid_captured_at     TEXT
             )
         """)
+        # Additive migration for DBs created before this hook wrote the
+        # pid/dispatcher_pid/pid_captured_at columns (mirrors session_store.py's
+        # _MIGRATION_STMTS pattern). Each ALTER is a no-op on a fresh table that
+        # already has the column from the CREATE TABLE above.
+        for stmt in (
+            "ALTER TABLE agent_sessions ADD COLUMN pid INTEGER",
+            "ALTER TABLE agent_sessions ADD COLUMN dispatcher_pid INTEGER",
+            "ALTER TABLE agent_sessions ADD COLUMN pid_captured_at TEXT",
+        ):
+            try:
+                conn.execute(stmt)
+            except Exception:  # noqa: BLE001
+                pass  # Column already exists — no-op
+
         now = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+        pid_captured_at = now if dispatcher_pid is not None else None
         conn.execute(
             """
             INSERT OR IGNORE INTO agent_sessions
                 (id, task_id, agent_type, description, chat_id, source,
-                 status, output_file, input_summary, spawned_at)
+                 status, output_file, input_summary, spawned_at,
+                 dispatcher_pid, pid_captured_at)
             VALUES
                 (?, ?, 'subagent', 'auto-registered by PostToolUse hook', ?, ?,
-                 'running', ?, ?, ?)
+                 'running', ?, ?, ?, ?, ?)
             """,
             (
                 agent_id,
@@ -257,6 +311,8 @@ def insert_agent_session(
                 output_file,
                 input_summary,
                 now,
+                dispatcher_pid,
+                pid_captured_at,
             ),
         )
         conn.commit()
@@ -298,6 +354,8 @@ def main() -> None:
         # and the dispatcher can reconstruct context if the agent fails.
         input_summary = prompt[:500] if prompt else None
 
+        dispatcher_pid = _capture_dispatcher_pid()
+
         insert_agent_session(
             agent_id=agent_id,
             task_id=metadata["task_id"],
@@ -306,6 +364,7 @@ def main() -> None:
             session_id=session_id,
             output_file=output_file,
             input_summary=input_summary,
+            dispatcher_pid=dispatcher_pid,
         )
 
     except Exception as exc:  # noqa: BLE001
