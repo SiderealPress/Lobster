@@ -1,0 +1,640 @@
+"""
+Unit tests for hooks/pin-dependencies-guard.py
+
+Tests cover:
+- Manifest detection: package.json, pyproject.toml, requirements*.txt, Pipfile
+  detected; non-manifest files ignored (find_unpinned_range / is_dependency_manifest)
+- Every range operator (^, ~, ~=, >=, <=, !=, >, <, *, "latest") is blocked,
+  both as a pure-function check and via full hook invocation for Edit
+  (new_string) and Write (content)
+- Exact pins (==, @1.2.3) are NOT blocked
+- The package.json "engines" regression (commit 10a1ee95): "engines":
+  {"node": ">=18.0.0"} must NOT be flagged, for both a full-file Write and an
+  Edit fragment
+- Bash command detection: npm/pip/uv unpinned installs and upgrade flags are
+  blocked; lockfile-respecting / already-pinned commands are not
+- LOBSTER_ALLOW_DEPENDENCY_CHANGE=true bypasses both Edit/Write and Bash checks
+- Non-Edit/Write/Bash tool calls and malformed/missing stdin are handled
+  gracefully (exit 0, no crash, no deny)
+
+Convention: pure functions are imported directly via importlib.util (as in
+test_auto_register_agent.py); full hook behavior (stdin -> stdout JSON / exit
+code) is exercised via subprocess, matching the sibling
+test_require_reply_to_message_id.py convention for stdin/stdout-driven hooks.
+"""
+
+import importlib.util
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+_HOOKS_DIR = Path(__file__).parents[3] / "hooks"
+HOOK_PATH = _HOOKS_DIR / "pin-dependencies-guard.py"
+
+_ENV_OVERRIDE = "LOBSTER_ALLOW_DEPENDENCY_CHANGE"
+
+
+def _load_module():
+    spec = importlib.util.spec_from_file_location("pin_dependencies_guard", HOOK_PATH)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_mod = _load_module()
+is_dependency_manifest = _mod.is_dependency_manifest
+_is_package_json = _mod._is_package_json
+find_unpinned_range = _mod.find_unpinned_range
+bash_introduces_unpinned_dependency = _mod.bash_introduces_unpinned_dependency
+_is_override_set = _mod._is_override_set
+
+
+# ---------------------------------------------------------------------------
+# Subprocess helper for full hook invocation
+# ---------------------------------------------------------------------------
+
+
+def _clean_env(overrides: dict | None = None) -> dict:
+    """os.environ copy with LOBSTER_ALLOW_DEPENDENCY_CHANGE explicitly unset
+    unless the caller opts in via overrides, so tests are isolated from
+    whatever the host process happens to have set."""
+    env = os.environ.copy()
+    env.pop(_ENV_OVERRIDE, None)
+    if overrides:
+        env.update(overrides)
+    return env
+
+
+def _run_hook(payload: dict, env: dict | None = None) -> tuple[int, str, str]:
+    result = subprocess.run(
+        [sys.executable, str(HOOK_PATH)],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        env=_clean_env(env),
+    )
+    return result.returncode, result.stdout, result.stderr
+
+
+def _run_hook_raw_stdin(stdin_text: str, env: dict | None = None) -> tuple[int, str, str]:
+    result = subprocess.run(
+        [sys.executable, str(HOOK_PATH)],
+        input=stdin_text,
+        capture_output=True,
+        text=True,
+        env=_clean_env(env),
+    )
+    return result.returncode, result.stdout, result.stderr
+
+
+def _is_denied(stdout: str) -> bool:
+    """True if the hook's stdout JSON represents a permissionDecision=deny."""
+    if not stdout.strip():
+        return False
+    data = json.loads(stdout)
+    return (
+        data.get("hookSpecificOutput", {}).get("permissionDecision") == "deny"
+    )
+
+
+def _edit_payload(file_path: str, new_string: str) -> dict:
+    return {
+        "tool_name": "Edit",
+        "tool_input": {"file_path": file_path, "new_string": new_string},
+    }
+
+
+def _write_payload(file_path: str, content: str) -> dict:
+    return {
+        "tool_name": "Write",
+        "tool_input": {"file_path": file_path, "content": content},
+    }
+
+
+def _bash_payload(command: str) -> dict:
+    return {"tool_name": "Bash", "tool_input": {"command": command}}
+
+
+# ---------------------------------------------------------------------------
+# (a) Manifest detection
+# ---------------------------------------------------------------------------
+
+
+class TestManifestDetection:
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "package.json",
+            "connectors/whatsapp/package.json",
+            "pyproject.toml",
+            "lobster-shop/multiplayer-telegram-bot/pyproject.toml",
+            "requirements.txt",
+            "tests/requirements-test.txt",
+            "requirements-dev.txt",
+            "Pipfile",
+            "some/nested/dir/Pipfile",
+        ],
+    )
+    def test_manifest_files_detected(self, path):
+        assert is_dependency_manifest(path) is True
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "",
+            "README.md",
+            "src/main.py",
+            "package.json.bak",
+            "requirements.txt.orig",
+            "package-lock.json",
+            "uv.lock",
+            "notpyproject.toml.txt",
+            "Pipfile.lock",
+        ],
+    )
+    def test_non_manifest_files_ignored(self, path):
+        assert is_dependency_manifest(path) is False
+
+    def test_none_like_empty_string_is_not_a_manifest(self):
+        assert is_dependency_manifest("") is False
+
+
+class TestIsPackageJson:
+    def test_package_json_true(self):
+        assert _is_package_json("package.json") is True
+        assert _is_package_json("connectors/whatsapp/package.json") is True
+
+    @pytest.mark.parametrize(
+        "path", ["pyproject.toml", "requirements.txt", "Pipfile", ""]
+    )
+    def test_non_package_json_false(self, path):
+        assert _is_package_json(path) is False
+
+
+# ---------------------------------------------------------------------------
+# (b) + (c) Range operator detection: pure-function level, python-style manifests
+# ---------------------------------------------------------------------------
+
+
+class TestFindUnpinnedRangePython:
+    """pyproject.toml / requirements.txt / Pipfile-style detection
+    (find_unpinned_range with is_package_json=False)."""
+
+    @pytest.mark.parametrize(
+        "text,operator",
+        [
+            ("requests>=2.0.0", ">="),
+            ("requests<=2.0.0", "<="),
+            ("requests~=2.0.0", "~="),
+            ("requests!=2.0.0", "!="),
+            ("requests>2.0.0", ">"),
+            ("requests<2.0.0", "<"),
+            ("requests^2.0.0", "^"),
+        ],
+    )
+    def test_operator_blocked(self, text, operator):
+        match = find_unpinned_range(text, is_package_json=False)
+        assert match is not None, f"expected {operator!r} range to be flagged in {text!r}"
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            'requests = "*"',
+            'requests = "latest"',
+            'requests = "LATEST"',
+        ],
+    )
+    def test_star_and_latest_blocked_pipfile_style(self, text):
+        match = find_unpinned_range(text, is_package_json=False)
+        assert match is not None
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "requests==2.0.0",
+            'mcp==1.26.0',
+            "package[extra]==1.0.0",
+            "hatchling==1.31.0",
+        ],
+    )
+    def test_exact_pin_not_blocked(self, text):
+        assert find_unpinned_range(text, is_package_json=False) is None
+
+    def test_realistic_pyproject_dependency_line_blocked(self):
+        text = 'dependencies = [\n    "mcp>=1.0.0",\n]\n'
+        assert find_unpinned_range(text, is_package_json=False) is not None
+
+    def test_realistic_pyproject_dependency_line_pinned_not_blocked(self):
+        text = 'dependencies = [\n    "mcp==1.26.0",\n]\n'
+        assert find_unpinned_range(text, is_package_json=False) is None
+
+
+# ---------------------------------------------------------------------------
+# (b) + (c) + (d) Range operator detection: package.json
+# ---------------------------------------------------------------------------
+
+
+class TestFindUnpinnedRangePackageJson:
+    @pytest.mark.parametrize(
+        "operator,value",
+        [
+            ("^", "^3.6.0"),
+            ("~", "~3.6.0"),
+            (">=", ">=3.6.0"),
+            ("<=", "<=3.6.0"),
+            ("!=", "!=3.6.0"),
+            (">", ">3.6.0"),
+            ("<", "<3.6.0"),
+            ("*", "*"),
+            ("latest", "latest"),
+        ],
+    )
+    def test_operator_blocked_as_edit_fragment(self, operator, value):
+        """Edit fragments are rarely valid standalone JSON, so this exercises
+        the regex-fallback path in _find_unpinned_range_in_package_json."""
+        fragment = f'  "chokidar": "{value}",\n'
+        match = find_unpinned_range(fragment, is_package_json=True)
+        assert match is not None, f"expected {operator!r} to be flagged in fragment {fragment!r}"
+
+    @pytest.mark.parametrize(
+        "operator,value",
+        [
+            ("^", "^3.6.0"),
+            ("~", "~3.6.0"),
+            (">=", ">=3.6.0"),
+            ("<=", "<=3.6.0"),
+            ("!=", "!=3.6.0"),
+            (">", ">3.6.0"),
+            ("<", "<3.6.0"),
+            ("*", "*"),
+            ("latest", "latest"),
+        ],
+    )
+    def test_operator_blocked_as_full_write_content(self, operator, value):
+        """Full-file Write content is valid JSON, exercising the json.loads
+        parse path (restricted to real dependency-block keys)."""
+        content = json.dumps({"dependencies": {"chokidar": value}})
+        match = find_unpinned_range(content, is_package_json=True)
+        assert match is not None, f"expected {operator!r} to be flagged in {content!r}"
+
+    @pytest.mark.parametrize(
+        "value", ["3.6.0", "1.5.4"],
+    )
+    def test_exact_pin_not_blocked_fragment(self, value):
+        fragment = f'  "chokidar": "{value}",\n'
+        assert find_unpinned_range(fragment, is_package_json=True) is None
+
+    def test_exact_pin_not_blocked_full_write(self):
+        content = json.dumps({"dependencies": {"chokidar": "3.6.0"}})
+        assert find_unpinned_range(content, is_package_json=True) is None
+
+    @pytest.mark.parametrize(
+        "block_key",
+        [
+            "dependencies",
+            "devDependencies",
+            "peerDependencies",
+            "optionalDependencies",
+            "resolutions",
+            "overrides",
+        ],
+    )
+    def test_all_dependency_blocks_covered_full_write(self, block_key):
+        content = json.dumps({block_key: {"lodash": "^4.17.21"}})
+        assert find_unpinned_range(content, is_package_json=True) is not None
+
+    # -- The "engines" regression (commit 10a1ee95) --------------------------
+
+    def test_engines_range_not_blocked_full_write(self):
+        """A full package.json Write with only an engines block containing
+        a range must NOT be flagged — this was the bug fixed in 10a1ee95."""
+        content = json.dumps({"engines": {"node": ">=18.0.0"}})
+        assert find_unpinned_range(content, is_package_json=True) is None
+
+    def test_engines_range_not_blocked_edit_fragment(self):
+        """Same check for the Edit-fragment (regex fallback) path."""
+        fragment = '  "engines": {\n    "node": ">=18.0.0"\n  },\n'
+        assert find_unpinned_range(fragment, is_package_json=True) is None
+
+    def test_engines_alongside_real_dependency_range_full_write(self):
+        """engines must be ignored, but a real dependency range in the same
+        file must still be caught."""
+        content = json.dumps(
+            {
+                "engines": {"node": ">=18.0.0"},
+                "dependencies": {"chokidar": "^3.6.0"},
+            }
+        )
+        match = find_unpinned_range(content, is_package_json=True)
+        assert match is not None
+        assert "chokidar" in match
+
+    def test_engines_alongside_real_dependency_range_fragment(self):
+        fragment = (
+            '  "engines": {\n    "node": ">=18.0.0"\n  },\n'
+            '  "dependencies": {\n    "chokidar": "^3.6.0"\n  }\n'
+        )
+        match = find_unpinned_range(fragment, is_package_json=True)
+        assert match is not None
+
+
+# ---------------------------------------------------------------------------
+# (b)/(c)/(d) Full hook integration for Edit and Write
+# ---------------------------------------------------------------------------
+
+
+class TestHookEditWriteIntegration:
+    def test_edit_package_json_range_blocked(self):
+        rc, stdout, _ = _run_hook(
+            _edit_payload("connectors/whatsapp/package.json", '"chokidar": "^3.6.0"')
+        )
+        assert rc == 0
+        assert _is_denied(stdout)
+
+    def test_write_package_json_range_blocked(self):
+        content = json.dumps({"dependencies": {"chokidar": "^3.6.0"}})
+        rc, stdout, _ = _run_hook(_write_payload("package.json", content))
+        assert rc == 0
+        assert _is_denied(stdout)
+
+    def test_edit_pyproject_range_blocked(self):
+        rc, stdout, _ = _run_hook(
+            _edit_payload("pyproject.toml", 'dependencies = ["mcp>=1.0.0"]')
+        )
+        assert rc == 0
+        assert _is_denied(stdout)
+
+    def test_write_pyproject_range_blocked(self):
+        rc, stdout, _ = _run_hook(
+            _write_payload("pyproject.toml", 'dependencies = ["mcp>=1.0.0"]\n')
+        )
+        assert rc == 0
+        assert _is_denied(stdout)
+
+    def test_edit_pyproject_exact_pin_allowed(self):
+        rc, stdout, _ = _run_hook(
+            _edit_payload("pyproject.toml", 'dependencies = ["mcp==1.26.0"]')
+        )
+        assert rc == 0
+        assert not _is_denied(stdout)
+
+    def test_write_package_json_exact_pin_allowed(self):
+        content = json.dumps({"dependencies": {"chokidar": "3.6.0"}})
+        rc, stdout, _ = _run_hook(_write_payload("package.json", content))
+        assert rc == 0
+        assert not _is_denied(stdout)
+
+    def test_write_package_json_engines_only_allowed(self):
+        """Full hook run of the exact 10a1ee95 regression scenario."""
+        content = json.dumps({"engines": {"node": ">=18.0.0"}})
+        rc, stdout, _ = _run_hook(_write_payload("package.json", content))
+        assert rc == 0
+        assert not _is_denied(stdout)
+
+    def test_edit_package_json_engines_only_allowed(self):
+        rc, stdout, _ = _run_hook(
+            _edit_payload(
+                "connectors/whatsapp/package.json",
+                '  "engines": {\n    "node": ">=18.0.0"\n  },\n',
+            )
+        )
+        assert rc == 0
+        assert not _is_denied(stdout)
+
+    def test_edit_non_manifest_file_allowed_even_with_range_looking_text(self):
+        rc, stdout, _ = _run_hook(
+            _edit_payload("src/main.py", 'VERSION_CONSTRAINT = "requests>=2.0.0"')
+        )
+        assert rc == 0
+        assert not _is_denied(stdout)
+
+    def test_edit_requirements_test_range_blocked(self):
+        rc, stdout, _ = _run_hook(
+            _edit_payload("tests/requirements-test.txt", "pytest>=8.0.0\n")
+        )
+        assert rc == 0
+        assert _is_denied(stdout)
+
+    def test_edit_empty_new_string_allowed(self):
+        rc, stdout, _ = _run_hook(_edit_payload("pyproject.toml", ""))
+        assert rc == 0
+        assert not _is_denied(stdout)
+
+
+# ---------------------------------------------------------------------------
+# (e) Bash detection
+# ---------------------------------------------------------------------------
+
+
+class TestBashDetectionPureFunction:
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "npm install lodash",
+            "npm i lodash",
+            "npm add lodash",
+            "npm update",
+            "npm upgrade",
+            "npm up lodash",
+            "pip install requests",
+            "pip3 install requests",
+            "pip install --upgrade requests",
+            "pip install -U requests",
+            "uv add requests",
+            "uv sync --upgrade",
+            "uv sync -U",
+            "uv lock --upgrade-package requests",
+        ],
+    )
+    def test_blocked_commands(self, command):
+        assert bash_introduces_unpinned_dependency(command) is not None
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "npm ci",
+            "npm install",
+            "npm install --save-dev",
+            "uv sync",
+            "uv lock",
+            "pip install -r requirements.txt",
+            "uv pip install -r requirements.txt",
+            "npm install lodash@4.17.21",
+            "pip install requests==2.31.0",
+            "uv add requests==2.31.0",
+            "pip install -e .",
+            "pip install git+https://github.com/org/repo.git",
+        ],
+    )
+    def test_allowed_commands(self, command):
+        assert bash_introduces_unpinned_dependency(command) is None
+
+    def test_compound_command_with_blocked_segment(self):
+        assert (
+            bash_introduces_unpinned_dependency("echo hi && npm install lodash")
+            is not None
+        )
+
+    def test_compound_command_all_segments_allowed(self):
+        assert (
+            bash_introduces_unpinned_dependency("echo hi && npm ci && echo done")
+            is None
+        )
+
+
+class TestHookBashIntegration:
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "npm install lodash",
+            "npm update",
+            "pip install requests",
+            "pip install --upgrade requests",
+            "uv add requests",
+            "uv sync --upgrade",
+        ],
+    )
+    def test_bash_blocked(self, command):
+        rc, stdout, _ = _run_hook(_bash_payload(command))
+        assert rc == 0
+        assert _is_denied(stdout)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "npm ci",
+            "npm install",
+            "uv sync",
+            "pip install -r requirements.txt",
+        ],
+    )
+    def test_bash_allowed(self, command):
+        rc, stdout, _ = _run_hook(_bash_payload(command))
+        assert rc == 0
+        assert not _is_denied(stdout)
+
+
+# ---------------------------------------------------------------------------
+# (f) LOBSTER_ALLOW_DEPENDENCY_CHANGE bypass
+# ---------------------------------------------------------------------------
+
+
+class TestOverrideEnvVar:
+    def test_is_override_set_true(self, monkeypatch):
+        monkeypatch.setenv(_ENV_OVERRIDE, "true")
+        assert _is_override_set() is True
+
+    def test_is_override_set_case_insensitive(self, monkeypatch):
+        monkeypatch.setenv(_ENV_OVERRIDE, "True")
+        assert _is_override_set() is True
+        monkeypatch.setenv(_ENV_OVERRIDE, "TRUE")
+        assert _is_override_set() is True
+
+    def test_is_override_set_false_when_absent(self, monkeypatch):
+        monkeypatch.delenv(_ENV_OVERRIDE, raising=False)
+        assert _is_override_set() is False
+
+    def test_is_override_not_set_for_other_values(self, monkeypatch):
+        monkeypatch.setenv(_ENV_OVERRIDE, "1")
+        assert _is_override_set() is False
+
+    def test_override_does_not_bypass_via_lobster_debug(self, monkeypatch):
+        """LOBSTER_DEBUG is a separate, unrelated variable and must not
+        trigger the bypass (this is the whole point of using a dedicated
+        env var per the module docstring)."""
+        monkeypatch.delenv(_ENV_OVERRIDE, raising=False)
+        monkeypatch.setenv("LOBSTER_DEBUG", "true")
+        assert _is_override_set() is False
+
+
+class TestHookOverrideBypass:
+    def test_override_bypasses_edit_block(self):
+        rc, stdout, _ = _run_hook(
+            _edit_payload("pyproject.toml", 'dependencies = ["mcp>=1.0.0"]'),
+            env={_ENV_OVERRIDE: "true"},
+        )
+        assert rc == 0
+        assert not _is_denied(stdout)
+
+    def test_override_bypasses_write_block(self):
+        content = json.dumps({"dependencies": {"chokidar": "^3.6.0"}})
+        rc, stdout, _ = _run_hook(
+            _write_payload("package.json", content), env={_ENV_OVERRIDE: "true"}
+        )
+        assert rc == 0
+        assert not _is_denied(stdout)
+
+    def test_override_bypasses_bash_block(self):
+        rc, stdout, _ = _run_hook(
+            _bash_payload("npm install lodash"), env={_ENV_OVERRIDE: "true"}
+        )
+        assert rc == 0
+        assert not _is_denied(stdout)
+
+    def test_override_false_value_does_not_bypass(self):
+        rc, stdout, _ = _run_hook(
+            _bash_payload("npm install lodash"), env={_ENV_OVERRIDE: "false"}
+        )
+        assert rc == 0
+        assert _is_denied(stdout)
+
+    def test_override_absent_does_not_bypass(self):
+        rc, stdout, _ = _run_hook(_bash_payload("npm install lodash"), env=None)
+        assert rc == 0
+        assert _is_denied(stdout)
+
+
+# ---------------------------------------------------------------------------
+# (g) Non-covered tools, malformed / missing stdin
+# ---------------------------------------------------------------------------
+
+
+class TestHookGracefulHandling:
+    @pytest.mark.parametrize("tool_name", ["Read", "Glob", "Grep", "Task", "TodoWrite"])
+    def test_non_covered_tool_exits_0_no_deny(self, tool_name):
+        rc, stdout, _ = _run_hook(
+            {"tool_name": tool_name, "tool_input": {"file_path": "package.json"}}
+        )
+        assert rc == 0
+        assert not _is_denied(stdout)
+
+    def test_malformed_json_stdin_exits_0(self):
+        rc, stdout, stderr = _run_hook_raw_stdin("not-valid-json{{{")
+        assert rc == 0
+        assert not _is_denied(stdout)
+
+    def test_empty_stdin_exits_0(self):
+        rc, stdout, _ = _run_hook_raw_stdin("")
+        assert rc == 0
+        assert not _is_denied(stdout)
+
+    def test_missing_tool_input_exits_0(self):
+        rc, stdout, _ = _run_hook({"tool_name": "Edit"})
+        assert rc == 0
+        assert not _is_denied(stdout)
+
+    def test_edit_missing_file_path_exits_0(self):
+        rc, stdout, _ = _run_hook(
+            {"tool_name": "Edit", "tool_input": {"new_string": "foo>=1.0.0"}}
+        )
+        assert rc == 0
+        assert not _is_denied(stdout)
+
+    def test_bash_missing_command_exits_0(self):
+        rc, stdout, _ = _run_hook({"tool_name": "Bash", "tool_input": {}})
+        assert rc == 0
+        assert not _is_denied(stdout)
+
+    def test_notebook_edit_non_manifest_allowed(self):
+        rc, stdout, _ = _run_hook(
+            {
+                "tool_name": "NotebookEdit",
+                "tool_input": {"file_path": "notebook.ipynb", "new_source": "x = 1"},
+            }
+        )
+        assert rc == 0
+        assert not _is_denied(stdout)
