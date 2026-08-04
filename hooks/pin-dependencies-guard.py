@@ -119,12 +119,37 @@ def _is_package_json(file_path: str) -> bool:
 # Range-operator detection in manifest text
 # ---------------------------------------------------------------------------
 
-# package.json: a quoted dependency value starting with a range operator,
-# e.g. "chokidar": "^3.6.0" or "qrcode": "~1.5.4" or "foo": "latest"
+# package.json dependency-block keys that actually get resolved/installed by
+# npm/yarn/pnpm. Deliberately EXCLUDES "engines" (and similar environment-
+# constraint blocks like "engines-strict", "volta", "packageManager") — those
+# specify a compatible runtime range for humans/tooling to check against, not
+# a package version npm/yarn/pnpm resolves and installs, so a range there
+# (e.g. "node": ">=18.0.0") is normal and is not the silent-upgrade risk this
+# hook exists to catch.
+_JSON_DEPENDENCY_KEYS = {
+    "dependencies",
+    "devDependencies",
+    "peerDependencies",
+    "optionalDependencies",
+    "resolutions",
+    "overrides",
+}
+
+# package.json: a quoted "<key>": "<range-value>" pair, e.g.
+# "chokidar": "^3.6.0" or "qrcode": "~1.5.4" or "foo": "latest". Captures the
+# key so callers can exclude known non-dependency keys (see
+# _JSON_DEPENDENCY_KEYS above) when the surrounding block can't be
+# determined (i.e. for Edit fragments, where a full JSON parse of the
+# surrounding object usually isn't possible).
 _JSON_RANGE_RE = re.compile(
-    r'"\s*:\s*"\s*(\^|~(?!=)|>=|<=|!=|>|<|\*|latest)',
+    r'"([A-Za-z0-9_@/.\-]+)"\s*:\s*"\s*(\^|~(?!=)|>=|<=|!=|>|<|\*|latest)',
     re.IGNORECASE,
 )
+
+# Keys that are never themselves a dependency name, even though their value
+# looks like a version range — these are the environment-constraint blocks
+# called out above. Matches on these keys are ignored.
+_JSON_NON_DEPENDENCY_KEYS = {"node", "npm", "yarn", "pnpm", "vscode"}
 
 # pyproject.toml / requirements.txt / Pipfile: a package token immediately
 # followed by a range operator, e.g. "mcp>=1.0.0" or mcp>=1.0.0 or
@@ -138,17 +163,50 @@ _PY_RANGE_RE = re.compile(
 _STAR_LATEST_RE = re.compile(r'=\s*"(\*|latest)"', re.IGNORECASE)
 
 
+def _find_unpinned_range_in_package_json(text: str) -> str | None:
+    """package.json-specific check. Prefers a real JSON parse (possible when
+    `text` is a whole-file Write) restricted to actual dependency-block keys
+    — this is exact, with no risk of flagging "engines" or similar
+    environment-constraint blocks. Falls back to a key-aware regex scan
+    (needed for Edit fragments, which are partial and rarely valid JSON on
+    their own), which still excludes the known non-dependency key names in
+    _JSON_NON_DEPENDENCY_KEYS (e.g. "engines": {"node": ">=18.0.0"})."""
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        parsed = None
+
+    if isinstance(parsed, dict):
+        for block_key in _JSON_DEPENDENCY_KEYS:
+            block = parsed.get(block_key)
+            if not isinstance(block, dict):
+                continue
+            for pkg, version in block.items():
+                if not isinstance(version, str):
+                    continue
+                if re.match(
+                    r"^\s*(\^|~(?!=)|>=|<=|!=|>|<|\*|latest)",
+                    version,
+                    re.IGNORECASE,
+                ):
+                    return f'"{pkg}": "{version}"'
+        return None
+
+    # Fragment fallback: regex scan, excluding known non-dependency keys.
+    for m in _JSON_RANGE_RE.finditer(text):
+        key = m.group(1)
+        if key in _JSON_NON_DEPENDENCY_KEYS:
+            continue
+        start = max(0, m.start() - 5)
+        return text[start : m.end() + 10].strip()
+    return None
+
+
 def find_unpinned_range(text: str, is_package_json: bool) -> str | None:
     """Return the offending match text if `text` contains an unpinned
     dependency range, else None."""
     if is_package_json:
-        m = _JSON_RANGE_RE.search(text)
-        if m:
-            # Return a small window of context around the match for the
-            # error message.
-            start = max(0, m.start() - 20)
-            return text[start : m.end() + 10].strip()
-        return None
+        return _find_unpinned_range_in_package_json(text)
 
     m = _PY_RANGE_RE.search(text)
     if m:
