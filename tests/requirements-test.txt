@@ -1,31 +1,42 @@
 # Lobster Test Dependencies
+#
+# Pinned to exact versions per the dependency-pinning policy (see
+# DEPENDENCY_NOTES.md at repo root). Where a package is also a root
+# project dependency, pinned to the SAME version as pyproject.toml/uv.lock
+# to avoid the test env silently drifting from the main env (verified via
+# `uv pip install --dry-run` against an unpinned copy of this file, which
+# resolved mcp to 2.0.0 and python-telegram-bot to 22.8 -- both newer than
+# the pins in the main project -- confirming the drift this policy exists
+# to prevent). Test-only packages (no root anchor) are pinned to the
+# version actually installed locally where one exists, else to the version
+# a fresh resolve returns today. Audit date: 2026-08-04.
 
-# Core testing
-pytest>=8.0.0
-pytest-asyncio>=0.23.0
-pytest-timeout>=2.2.0
-pytest-cov>=4.1.0
+# Core testing (pinned to match root pyproject.toml / uv.lock)
+pytest==9.0.2
+pytest-asyncio==1.3.0
+pytest-timeout==2.4.0
+pytest-cov==7.0.0
 
 # Async HTTP for mocks
-aiohttp>=3.9.0
-aiofiles>=23.2.0
+aiohttp==3.13.3
+aiofiles==25.1.0
 
 # Docker integration
-docker>=7.0.0
+docker==7.2.0
 
 # HTTP mocking
-aioresponses>=0.7.6
-responses>=0.24.0
+aioresponses==0.7.9
+responses==0.26.0
 
 # System utilities (required by test_memory.py)
-psutil>=5.9.0
+psutil==7.2.2
 
 # General utilities
-faker>=22.0.0
-freezegun>=1.2.0
+faker==40.36.0
+freezegun==1.5.5
 
-# Already in main project but ensure available
-python-telegram-bot>=20.7
-watchdog>=3.0.0
-mcp>=1.0.0
-httpx>=0.27.0
+# Already in main project but ensure available (pinned to match root)
+python-telegram-bot==22.6
+watchdog==6.0.0
+mcp==1.26.0
+httpx==0.28.1
