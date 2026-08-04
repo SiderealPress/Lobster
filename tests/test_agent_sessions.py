@@ -9,6 +9,7 @@ Tests:
 
 import os
 import pathlib
+import subprocess
 import sys
 import tempfile
 import time as _time
@@ -821,6 +822,8 @@ def test_cleanup_stale_running_null_spawned_at_no_output_file_skips_with_warning
         "output_file": None,
         "spawned_at": None,
         "timeout_minutes": None,
+        "pid": None,
+        "dispatcher_pid": None,
     }
 
     # Patch _get_connection to return a mock whose .execute().fetchall() returns our row
@@ -1012,3 +1015,244 @@ def test_get_unnotified_completed_excludes_dispatcher_row(isolated_db):
     unnotified = session_store.get_unnotified_completed(since_hours=24, path=db)
 
     assert all(row["id"] != "dispatcher-main-loop" for row in unnotified)
+
+
+# ---------------------------------------------------------------------------
+# PID ground truth (issue #2148 — Phase 1)
+# ---------------------------------------------------------------------------
+
+
+def _spawn_and_kill_pid() -> int:
+    """Spawn a real subprocess, kill and reap it, return its now-dead PID.
+
+    Used to build the 'dead-PID simulation' required by the issue's
+    acceptance criteria — a PID that is guaranteed not to be alive, without
+    relying on any live Lobster process.
+    """
+    proc = subprocess.Popen(["sleep", "30"])
+    pid = proc.pid
+    proc.kill()
+    proc.wait()
+    return pid
+
+
+def test_session_start_persists_pid_and_dispatcher_pid(isolated_db):
+    """session_start() persists pid/dispatcher_pid and stamps pid_captured_at."""
+    db = isolated_db
+
+    session_store.session_start(
+        id="pid-test-1",
+        description="Docker-worker style agent with a real PID",
+        chat_id="123",
+        pid=54321,
+        dispatcher_pid=99999,
+        path=db,
+    )
+
+    result = session_store.find_session("pid-test-1", path=db)
+    assert result["pid"] == 54321
+    assert result["dispatcher_pid"] == 99999
+    assert result["pid_captured_at"] is not None
+
+
+def test_session_start_pid_fields_default_to_null(isolated_db):
+    """Callers that don't pass pid/dispatcher_pid get NULL — fully backward compatible."""
+    db = isolated_db
+
+    session_store.session_start(
+        id="pid-test-2",
+        description="Agent-tool subagent with no real PID of its own",
+        chat_id="123",
+        path=db,
+    )
+
+    result = session_store.find_session("pid-test-2", path=db)
+    assert result["pid"] is None
+    assert result["dispatcher_pid"] is None
+    assert result["pid_captured_at"] is None
+
+
+def test_cleanup_stale_running_dead_pid_overrides_tool_use_file(isolated_db, tmp_path):
+    """A confirmed-dead pid marks the session dead even with a 'still running' output file.
+
+    Required acceptance criterion: simulate a dead PID (spawn subprocess, kill
+    it) and confirm the classifier now correctly reports dead even when the
+    output_file's stop_reason (tool_use) would previously have left it
+    running, and even with an artificially fresh mtime.
+    """
+    db = isolated_db
+    dead_pid = _spawn_and_kill_pid()
+
+    output_file = tmp_path / "docker_worker.output"
+    output_file.write_text('{"stop_reason": "tool_use"}\n')
+    # Artificially fresh mtime — under the old mtime-only heuristic this would
+    # have looked alive. The current code already ignores mtime in favor of
+    # stop_reason parsing, so we additionally verify the *stop_reason* signal
+    # (tool_use == "may still be alive") is overridden by the dead pid.
+    now_ts = _time.time()
+    os.utime(str(output_file), (now_ts, now_ts))
+
+    session_store.session_start(
+        id="dead-pid-agent",
+        description="docker-worker job whose process has actually exited",
+        chat_id="123",
+        output_file=str(output_file),
+        pid=dead_pid,
+        path=db,
+    )
+
+    server_start = datetime.now(timezone.utc)
+    changed = session_store.cleanup_stale_running_sessions(server_start, path=db)
+
+    assert "dead-pid-agent" in changed, (
+        "A dead pid must override the tool_use/fresh-mtime heuristic and mark "
+        "the session dead"
+    )
+    result = session_store.find_session("dead-pid-agent", path=db)
+    assert result["status"] == "dead"
+    assert str(dead_pid) in result["result_summary"]
+
+
+def test_cleanup_stale_running_live_pid_overrides_stale_missing_file(isolated_db, tmp_path):
+    """A confirmed-live pid leaves the session running even with a missing/stale output file.
+
+    Required acceptance criterion: a live, long-running subprocess with a
+    deliberately stale/absent output_file — which would previously cause a
+    false dead/'ghost' classification via the elapsed-time fallback — must be
+    correctly reported alive because the pid check overrides that heuristic.
+    """
+    db = isolated_db
+    live_proc = subprocess.Popen(["sleep", "30"])
+    try:
+        missing_path = str(tmp_path / "never_created.output")
+
+        # Spawned long enough ago, with no output_file, that the old
+        # elapsed-time fallback (timeout_minutes default 120) would have
+        # marked this dead.
+        old_spawned_at = (datetime.now(timezone.utc) - timedelta(minutes=200)).isoformat()
+        session_store._get_connection(db).execute(
+            """
+            INSERT INTO agent_sessions
+                (id, description, chat_id, source, status, spawned_at,
+                 output_file, timeout_minutes, pid)
+            VALUES ('live-pid-agent', 'Long-running docker-worker job', '123',
+                    'telegram', 'running', ?, ?, 60, ?)
+            """,
+            (old_spawned_at, missing_path, live_proc.pid),
+        )
+        session_store._get_connection(db).commit()
+
+        server_start = datetime.now(timezone.utc)
+        changed = session_store.cleanup_stale_running_sessions(server_start, path=db)
+
+        assert "live-pid-agent" not in changed, (
+            "A live pid must override the missing-output-file/elapsed-time "
+            "heuristic and leave the session running"
+        )
+        result = session_store.find_session("live-pid-agent", path=db)
+        assert result["status"] == "running"
+    finally:
+        live_proc.kill()
+        live_proc.wait()
+
+
+def test_cleanup_stale_running_dead_dispatcher_pid_marks_subagent_dead(isolated_db, tmp_path):
+    """A confirmed-dead dispatcher_pid marks an in-process subagent row dead.
+
+    If the dispatcher process itself is confirmed dead, every Agent-tool
+    subagent registered under it (dispatcher_pid, no pid of its own) is
+    necessarily dead too — regardless of what its output_file suggests.
+    """
+    db = isolated_db
+    dead_dispatcher_pid = _spawn_and_kill_pid()
+
+    output_file = tmp_path / "subagent.output"
+    output_file.write_text('{"stop_reason": "tool_use"}\n')
+
+    session_store.session_start(
+        id="orphaned-subagent",
+        description="Agent-tool subagent whose dispatcher has died",
+        chat_id="123",
+        output_file=str(output_file),
+        dispatcher_pid=dead_dispatcher_pid,
+        path=db,
+    )
+
+    server_start = datetime.now(timezone.utc)
+    changed = session_store.cleanup_stale_running_sessions(server_start, path=db)
+
+    assert "orphaned-subagent" in changed
+    result = session_store.find_session("orphaned-subagent", path=db)
+    assert result["status"] == "dead"
+    assert "dispatcher" in result["result_summary"].lower()
+
+
+def test_cleanup_stale_running_live_dispatcher_pid_falls_back_to_existing_heuristics(
+    isolated_db, tmp_path
+):
+    """A live dispatcher_pid does not itself prove the subagent is alive.
+
+    dispatcher_pid alive only rules out the 'dispatcher is dead' shortcut —
+    it must fall back to the existing output_file heuristics for the
+    subagent's own liveness, unchanged from pre-PID behavior.
+    """
+    db = isolated_db
+    live_dispatcher_proc = subprocess.Popen(["sleep", "30"])
+    try:
+        missing_path = str(tmp_path / "missing.output")
+        old_spawned_at = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        session_store._get_connection(db).execute(
+            """
+            INSERT INTO agent_sessions
+                (id, description, chat_id, source, status, spawned_at,
+                 output_file, dispatcher_pid)
+            VALUES ('subagent-under-live-dispatcher', 'Subagent', '123',
+                    'telegram', 'running', ?, ?, ?)
+            """,
+            (old_spawned_at, missing_path, live_dispatcher_proc.pid),
+        )
+        session_store._get_connection(db).commit()
+
+        server_start = datetime.now(timezone.utc)
+        changed = session_store.cleanup_stale_running_sessions(server_start, path=db)
+
+        # Same outcome as the pre-existing missing-file-past-grace-period
+        # heuristic (test_cleanup_stale_running_output_missing): dead.
+        assert "subagent-under-live-dispatcher" in changed
+        result = session_store.find_session("subagent-under-live-dispatcher", path=db)
+        assert result["status"] == "dead"
+        assert "missing" in result["result_summary"]
+    finally:
+        live_dispatcher_proc.kill()
+        live_dispatcher_proc.wait()
+
+
+def test_cleanup_stale_running_zero_pid_rows_unaffected(isolated_db):
+    """Rows with no pid/dispatcher_pid (pre-migration rows) behave exactly as before.
+
+    Regression guard required by the acceptance criteria: identical scenario
+    and assertions to test_cleanup_stale_running_no_output_file, which
+    predates the pid columns entirely.
+    """
+    db = isolated_db
+
+    old_spawned_at = (datetime.now(timezone.utc) - timedelta(minutes=120)).isoformat()
+    session_store._get_connection(db).execute(
+        """
+        INSERT INTO agent_sessions
+            (id, description, chat_id, source, status, spawned_at, timeout_minutes)
+        VALUES ('zero-pid-stale', 'Old agent, no pid columns', '123', 'telegram',
+                'running', ?, 60)
+        """,
+        (old_spawned_at,),
+    )
+    session_store._get_connection(db).commit()
+
+    server_start = datetime.now(timezone.utc)
+    dead = session_store.cleanup_stale_running_sessions(server_start, path=db)
+
+    assert "zero-pid-stale" in dead
+    result = session_store.find_session("zero-pid-stale", path=db)
+    assert result["status"] == "dead"
+    assert result["pid"] is None
+    assert result["dispatcher_pid"] is None
