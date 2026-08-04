@@ -5,12 +5,21 @@
 # inside scripts/ and hooks/ directories.  Install by copying to
 # .git/hooks/pre-commit (install.sh does this automatically).
 #
+# Also enforces exact dependency pinning on staged manifest files
+# (package.json, pyproject.toml, requirements*.txt, Pipfile) as a
+# defense-in-depth backstop to the Claude Code PreToolUse hook
+# (hooks/pin-dependencies-guard.py) — this catches manifest edits made
+# outside Claude Code's Edit/Write tools (a plain editor, `git apply`,
+# a script, etc.) that the PreToolUse hook never saw.
+#
 # Only Added (A) and Modified (M) files are checked — deletions and renames
 # are skipped.
 
 set -euo pipefail
 
 failed=0
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo ".")
+PIN_GUARD="$REPO_ROOT/hooks/pin-dependencies-guard.py"
 
 # git ls-files --stage output format: "<mode> <blob> <stage>\t<path>"
 # The tab separates the metadata from the path; fields within metadata
@@ -48,9 +57,29 @@ while IFS= read -r line; do
     fi
 done < <(git ls-files --stage -- 'scripts/*.sh' 'scripts/*.exp' 'hooks/*')
 
+# --- Dependency pinning check on staged manifest files ---------------------
+if [ -f "$PIN_GUARD" ] && command -v python3 &>/dev/null; then
+    while IFS= read -r line; do
+        meta="${line%%$'\t'*}"
+        path="${line#*$'\t'}"
+
+        status=$(git diff --cached --name-status -- "$path" | awk '{print $1}' | head -1) || true
+        case "$status" in
+            A|M) ;;
+            D*|R*) continue ;;
+            *) continue ;;
+        esac
+
+        read -r _mode blob _stage <<< "$meta"
+        if ! git cat-file blob "$blob" 2>/dev/null | python3 "$PIN_GUARD" --scan-file "$path"; then
+            failed=1
+        fi
+    done < <(git ls-files --stage -- '*package.json' '*pyproject.toml' '*requirements*.txt' '*Pipfile')
+fi
+
 if [ "$failed" -ne 0 ]; then
     echo "" >&2
-    echo "Commit aborted: fix execute bits on the files listed above, then retry." >&2
+    echo "Commit aborted: fix the execute-bit and/or dependency-pinning issues listed above, then retry." >&2
     exit 1
 fi
 

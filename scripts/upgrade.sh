@@ -3223,6 +3223,50 @@ M88_PYEOF
         fi
     fi
 
+    # Migration 97: Register pin-dependencies-guard.py PreToolUse hook.
+    # Enforces the dependency-pinning policy: blocks Edit/Write/NotebookEdit
+    # calls that introduce an unpinned (^, ~, >=, <=, >, <, *, "latest")
+    # dependency version into package.json/pyproject.toml/requirements*.txt/
+    # Pipfile, and blocks Bash package-manager invocations that could
+    # silently resolve to a newer-than-pinned version (bare `npm install
+    # <pkg>`, `npm update`, `pip install <pkg>` without `==`, `pip install
+    # --upgrade`, `uv add <pkg>` without `==`, `uv sync/lock --upgrade`).
+    # See hooks/pin-dependencies-guard.py docstring for full scope and the
+    # LOBSTER_ALLOW_DEPENDENCY_CHANGE=true escape hatch for deliberate bumps.
+    if [ -f "$CLAUDE_SETTINGS" ] && command -v jq &>/dev/null; then
+        local _m97_present
+        _m97_present=$(jq -r '
+            [.hooks.PreToolUse[]?.hooks[]? |
+             select((.command // "") | test("pin-dependencies-guard"))]
+            | length' "$CLAUDE_SETTINGS" 2>/dev/null || echo "0")
+
+        if [[ "${_m97_present:-0}" -eq 0 ]]; then
+            local _m97_tmp
+            _m97_tmp=$(mktemp)
+            if jq --arg install_dir "$LOBSTER_DIR" '
+                .hooks.PreToolUse = (.hooks.PreToolUse // []) + [{
+                    "matcher": "Edit|Write|NotebookEdit|Bash",
+                    "hooks": [{
+                        "type": "command",
+                        "command": ("python3 " + $install_dir + "/hooks/pin-dependencies-guard.py"),
+                        "timeout": 5
+                    }]
+                }]
+            ' "$CLAUDE_SETTINGS" > "$_m97_tmp" \
+                && mv "$_m97_tmp" "$CLAUDE_SETTINGS" 2>/dev/null; then
+                substep "Migration 97: registered pin-dependencies-guard.py PreToolUse hook"
+                migrated=$((migrated + 1))
+            else
+                rm -f "$_m97_tmp" 2>/dev/null || true
+                warn "Migration 97: could not update settings.json — jq transform failed"
+            fi
+        else
+            substep "Migration 97: pin-dependencies-guard.py hook already registered — skipping"
+        fi
+    else
+        substep "Migration 97: settings.json or jq not found — skipping"
+    fi
+
     if [ "$migrated" -eq 0 ]; then
         success "No migrations needed"
     else
